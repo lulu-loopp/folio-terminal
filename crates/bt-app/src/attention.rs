@@ -39,10 +39,13 @@
 //! Neither can mint an episode, because neither can see the other. **The coordinator can**, which
 //! is the whole reason it is a third thing and not a field on one of them.
 //!
-//! A third tier, `Announced` — a bare bell, `RequestAttention=once`, `OSC 9`/`777`/`99`, the end of
-//! a turn — appears in this file **only** in [`AttentionLedger::announce_turn_end`], and even there
-//! it mints nothing and takes no ticket. That is the plan's red line 14, and the reason it is a red
-//! line is that every regression this block is about began with an event being promoted to a state.
+//! A third tier, [`Credential::Announced`] — a bare bell, `RequestAttention=once`,
+//! `OSC 9`/`777`/`99`, the end of a turn — reaches this file through two doors and **neither of
+//! them opens onto the machine above**: [`AttentionLedger::announce_turn_end`], which mints nothing
+//! and takes no ticket, and [`AttentionLedger::announce`], which does not even write a line — all
+//! it may do is lend a request the words the program itself wrote. That is the plan's red line 14,
+//! and the reason it is a red line is that every regression this block is about began with an event
+//! being promoted to a state.
 //!
 //! # What is deliberately not here
 //!
@@ -52,11 +55,16 @@
 //! are handed in. That is what lets the arrival grid of §11.1.4 be tested cell by cell instead of
 //! by driving a terminal.
 
-// **This whole module has no caller in the running build yet, and says so.**
-// A-core is the ledger; the slice that reads it is A2, which cannot land until
-// the two rulings it depends on and the producer slice A3 are in. The ordering is the plan's and
-// the reason is written there: taking the false queue apart before a real producer exists leaves
-// an empty queue and a worse build than the one being fixed.
+// **Both producers now reach this ledger, and nothing yet reads what it decides.**
+// A3 gave it the pipe and A1 gave it the OSC lane, so on this build a real request from a real
+// agent writes `mint` and `admit` into the trace — but no dot is drawn from any of it and no toast
+// is raised. The slice that reads it is A2, which cannot land until the two rulings it depends on
+// are in. The ordering is the plan's and the reason is written there: taking the false queue apart
+// before a real producer exists leaves an empty queue and a worse build than the one being fixed.
+//
+// So what the allowance still covers is the vocabulary this file names ahead of its readers — the
+// strong level nothing on the wire may ever be, the `Via` of a sequence whose line C3 will write —
+// and the ledger's own accessors that only a drawn dot will call.
 //
 // The attribute names the slice that will take it away, which is this repository's own rule for
 // one of these: an excuse that outlives its slice has to be visible rather than merely tolerated.
@@ -150,6 +158,29 @@ impl fmt::Display for Grounds {
             Self::AwaitingInput => "awaiting",
         })
     }
+}
+
+/// **Which of the three credential levels an arrival is worth** (`attention` plan §11.6).
+///
+/// The level A7 added to the plan, made a type. Before it, an event had no name in this vocabulary
+/// and had to be argued out of the ledger one reading at a time; a level whose *mints an episode*
+/// and *takes a place* columns both read **no** says that once, and says it somewhere a mapping row
+/// can declare rather than somewhere a parser has to remember.
+///
+/// **Having a name in the table is not the same as having power in it.** That sentence is the whole
+/// of red line 14, and [`Self::Announced`] is the level it is about.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Credential {
+    /// A bare bell, `RequestAttention=once`, `OSC 9`/`777`/`99`, the end of a turn.
+    ///
+    /// One-shot, and the consequence is not a policy: a sentence with no "off" cannot be withdrawn,
+    /// so nothing built on it could ever be taken back — which is the defect this whole block is
+    /// the correction of, and the reason this level mints nothing and holds nothing.
+    Announced,
+    /// `OSC 1337;RequestAttention=yes`, taken back by `=no`. A program **wants** you.
+    Weak,
+    /// `folio attention wait`. A program is **blocked on** you.
+    Strong,
 }
 
 /// The four states of `attention` plan §11.1.2, which are a **pure function** of the fields of
@@ -612,7 +643,7 @@ pub(crate) enum Event {
 }
 
 /// A desktop interruption the ledger has decided to allow, exactly once.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Raised {
     pub why: Why,
     pub reach: Reach,
@@ -620,6 +651,17 @@ pub(crate) struct Raised {
     pub ticket: Option<u64>,
     /// The request. `None` for a turn end, which is not one.
     pub episode: Option<u64>,
+    /// **The program's own words, when it wrote any** (`attention` plan §11.6 rule 2).
+    ///
+    /// An event-level announcement carries text and the ledger does not; when one arrives while a
+    /// request of this pane is standing un-interrupted-about, its sentence is the one this
+    /// interruption should say, because *a program's own words beat words we composed*. `None` is
+    /// the ordinary case and means the caller says it in its own voice.
+    ///
+    /// **Borrowed, never promoted.** Lending a sentence is the only thing the announcement did: it
+    /// minted no episode, took no place and moved no grounds, and if it had been allowed to do any
+    /// of those this field would be the seam an event crawled through to become a state.
+    pub body: Option<String>,
 }
 
 /// Which of the two doors a desktop interruption came through.
@@ -693,6 +735,14 @@ pub(crate) struct AttentionLedger {
     /// write a `refuse` line on every one of those frames — the flood the "one line per decision"
     /// rule exists to prevent. A refusal is a decision; **being still refused is not**.
     refused: bool,
+    /// **A sentence an event-level announcement left for this episode's one interruption**
+    /// (`attention` plan §11.6 rule 2), or `None` when no program has written one.
+    ///
+    /// Lives and dies with the episode, and there is one place an episode begins — [`Self::mint`] —
+    /// so there is one place this is cleared. Words left over from a request that is finished with
+    /// would otherwise be spoken about the next one, which is a toast quoting a program about
+    /// something it did not say that about.
+    lent: Option<String>,
     /// Whether this **turn**'s ending has already been decided about. Belongs to no episode,
     /// because a turn ending mints none (`attention` plan §13.3).
     announced_turn_end: bool,
@@ -712,6 +762,7 @@ impl Default for AttentionLedger {
             acked_strong: 0,
             toasted: false,
             refused: false,
+            lent: None,
             announced_turn_end: false,
         }
     }
@@ -1148,6 +1199,9 @@ impl AttentionLedger {
         self.episode = Some(episode);
         self.toasted = false;
         self.refused = false;
+        // A new request borrows nothing. Words a program wrote about the last one would otherwise
+        // be spoken about this one, which is this terminal quoting a program out of context.
+        self.lent = None;
         out.lines.push(format!(
             "mint {at} episode={episode} src={source} gen={generation} grounds={} prev={}",
             self.grounds(),
@@ -1187,7 +1241,39 @@ impl AttentionLedger {
             reach,
             ticket: Some(ticket),
             episode: Some(episode),
+            // Taken rather than copied: the sentence was lent for *this* interruption, and this
+            // request gets one. Leaving it behind would be leaving something for a second delivery
+            // that is never going to be allowed to happen.
+            body: self.lent.take(),
         });
+    }
+
+    /// **One event-level announcement arrived** (`attention` plan §11.6) — and this is all of what
+    /// it is allowed to do.
+    ///
+    /// `OSC 9;<text>`, `OSC 777;notify`, `OSC 99`, `RequestAttention=once`, a bare bell: every one
+    /// of them is a sentence with no *off*, so none of them mints an episode, takes a place, or
+    /// moves the grounds of one that exists. **Rule 1 is therefore a method that returns nothing and
+    /// writes no line** — a decision was not made here, and a file that recorded one would be
+    /// recording a thing the ledger did not do.
+    ///
+    /// What it may do is **lend its words** (rule 2). A program that wrote "Allow Bash to run
+    /// `rm -rf`?" has said the sentence this pane's standing request deserves far better than
+    /// anything composed from a pane name, so if a request of this pane is live and has not spent
+    /// its one interruption yet, that sentence is kept for it. Two conditions and both are the
+    /// gate's own: **no live episode** means there is nothing for the words to be about, and
+    /// **already interrupted about** means the sentence would have to be delivered a second time,
+    /// which is the replay red line 5 forbids.
+    ///
+    /// The last words win. A program that says two things before anyone is interrupted has changed
+    /// what it is saying, and the older sentence is the one that is out of date.
+    pub(crate) fn announce(&mut self, words: Option<&str>) {
+        if self.episode.is_none() || self.toasted {
+            return;
+        }
+        if let Some(words) = words.filter(|words| !words.is_empty()) {
+            self.lent = Some(words.to_owned());
+        }
     }
 
     /// **A turn ended** (`attention` plan §11.7 and §13.3) — the event door, which mints nothing.
@@ -1228,6 +1314,13 @@ impl AttentionLedger {
             reach,
             ticket: None,
             episode: None,
+            // **Not the lent sentence, and the reason is that there is no episode to lend it to.**
+            // The words an announcement leaves belong to one request (§11.6 rule 2), and a turn
+            // ending is not one — red line 14. The turn-end lane's own wording, and the case where
+            // the arrival that announced it carried text of its own, are the notification slice's:
+            // this lane raises nothing on this build, so composing a sentence here would be
+            // composing one nobody reads.
+            body: None,
         });
         out
     }

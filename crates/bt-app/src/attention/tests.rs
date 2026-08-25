@@ -543,6 +543,7 @@ fn a_late_strong_credential_interrupts_once_without_moving_the_place() {
             reach: Reach::Flash,
             ticket: Some(0),
             episode: Some(1),
+            body: None,
         })
     );
     assert_eq!(
@@ -583,6 +584,248 @@ fn a_watched_request_is_not_interrupted_about_and_nothing_is_owed() {
         ],
         "one interruption, taken when the door was actually open"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The event level (§11.6): it may lend its words and may do nothing else
+// ---------------------------------------------------------------------------
+
+/// PIN (A7 pin ①, `attention` plan §11.6 rule 1; red line 14) — **an announcement moves nothing.**
+///
+/// An `OSC 777;notify` still raises the desktop notification it always did; what it must not do is
+/// put this pane in the queue, mint a request, or make the wording say "waiting for you". Every one
+/// of those would be an event promoted to a state, which is the single mistake this block exists to
+/// undo — first found in the bell, and this is the pin that keeps it from being made again through
+/// a sequence that merely looks more official.
+///
+/// Asserted from all four states, because the failure would not look the same from each: from
+/// `Idle` a promotion would mint, from `Acknowledged` it would re-arm a request the user has
+/// already dealt with.
+///
+/// Red gate: route an announcement through [`AttentionLedger::apply`] as a `StrongWait` — the
+/// shortest spelling of the promotion this forbids — and every one of the four fails.
+#[test]
+fn an_announcement_moves_nothing_in_the_ledger() {
+    for mut pane in [Pane::new(), requested(), queued(), acknowledged()] {
+        let before = pane.state();
+        let grounds = pane.ledger.grounds();
+        let ticket = pane.ledger.ticket();
+        pane.ledger.announce(Some("a build finished"));
+        assert_eq!(pane.state(), before);
+        assert_eq!(pane.ledger.grounds(), grounds);
+        assert_eq!(pane.ledger.ticket(), ticket);
+        // And the frame after: nothing new is owed, nothing is admitted that was not already.
+        let out = pane.outcome(Event::Settle {
+            active: true,
+            focused: true,
+        });
+        assert_eq!(out.raised, None);
+    }
+}
+
+/// PIN (A7 pin ②, `attention` plan §11.6 rule 2) — **the program's own words are the ones spoken,
+/// and they are spoken once.**
+///
+/// "Allow Bash to run `rm -rf /tmp/x`?" is a sentence no composition from a pane name and a profile
+/// title could reach. When a program writes one while a request of its own is standing, that is the
+/// sentence the one interruption about that request should carry.
+///
+/// The second half is the half with teeth: once the interruption has been made, a later
+/// announcement lends nothing and raises nothing. Otherwise a chatty program would be a pane that
+/// interrupts you on every message it prints, which is red line 5 read from the other side.
+#[test]
+fn a_program_with_words_lends_them_to_the_one_interruption_about_its_request() {
+    let mut pane = Pane::new();
+    pane.at(strong_wait(WaitKind::Permission));
+    pane.ledger.announce(Some("stale words"));
+    pane.ledger
+        .announce(Some("Allow Bash to run rm -rf /tmp/x?"));
+    let out = pane.outcome(Event::Settle {
+        active: false,
+        focused: false,
+    });
+    assert_eq!(
+        out.raised,
+        Some(Raised {
+            why: Why::Awaiting,
+            reach: Reach::Flash,
+            ticket: Some(0),
+            episode: Some(1),
+            body: Some("Allow Bash to run rm -rf /tmp/x?".to_owned()),
+        }),
+        "the later sentence is the one the program is still saying"
+    );
+    pane.ledger.announce(Some("and another thing"));
+    let after = pane.outcome(Event::Settle {
+        active: false,
+        focused: false,
+    });
+    assert_eq!(after.raised, None, "one request, one interruption");
+}
+
+/// PIN — **words with nothing to be about are dropped, and are not kept for the next request.**
+///
+/// A build script that prints `OSC 9;done` in a pane where nothing is asking has said something
+/// about a finished build. Holding that sentence until the next permission prompt and speaking it
+/// there would be this terminal quoting a program about something it never said that about.
+#[test]
+fn words_spoken_over_no_request_are_not_saved_for_the_next_one() {
+    let mut pane = Pane::new();
+    pane.ledger.announce(Some("the build is done"));
+    pane.at(strong_wait(WaitKind::Permission));
+    let out = pane.outcome(Event::Settle {
+        active: false,
+        focused: false,
+    });
+    assert_eq!(
+        out.raised.and_then(|raised| raised.body),
+        None,
+        "a new request begins with nothing borrowed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The wire itself: bytes a program wrote, and the lines they decided
+// ---------------------------------------------------------------------------
+
+/// One session fed real bytes, the way a pane's child writes them.
+fn wired() -> bt_term::DualPlaneSession {
+    bt_term::DualPlaneSession::new(
+        std::num::NonZeroU32::new(80).expect("a width"),
+        std::num::NonZeroU32::new(8).expect("a height"),
+    )
+}
+
+/// PIN — **`OSC 1337;RequestAttention=` on the wire becomes an episode accounted to `src=osc`.**
+///
+/// The two halves of this block meet here and nowhere else: `bt-term` mints a *generation* from the
+/// bytes, and the ledger mints an *episode* from the generation. Pinning them separately leaves the
+/// join untested, and the join is where a level would be read as an edge — a program restating its
+/// request once a second would then mint an episode once a second, and the badge would re-arm
+/// forever.
+///
+/// The withdrawal is the other half of what makes this sequence the one the plan chose over four
+/// alternatives: the program can take its own sentence back, and the ledger writes that down as the
+/// program's doing rather than as anybody's answer.
+#[test]
+fn the_bytes_of_a_standing_request_become_one_episode_charged_to_the_osc_lane() {
+    fn wrote(session: &mut bt_term::DualPlaneSession, bytes: &[u8]) -> Option<u64> {
+        session.feed(bytes).expect("the session accepts bytes");
+        session.status().attention_request
+    }
+
+    let mut session = wired();
+    let mut pane = Pane::new();
+    let level = wrote(&mut session, b"\x1b]1337;RequestAttention=yes\x07");
+    let rose = pane.ledger.weak_edge(level).expect("a rising edge");
+    assert_eq!(
+        pane.at(rose),
+        ["mint tab=1 seat=SeatId(2) episode=1 src=osc gen=1 grounds=requested prev=-"]
+    );
+    let level = wrote(&mut session, b"\x1b]1337;RequestAttention=yes\x07");
+    assert_eq!(
+        pane.ledger.weak_edge(level),
+        None,
+        "a restatement is one program saying one thing twice"
+    );
+    assert_eq!(
+        pane.away(),
+        ["admit tab=1 seat=SeatId(2) ticket=0 episode=1 grounds=requested active=0 focused=0"],
+        "a program that wants you is not a program that is blocked on you: no interruption"
+    );
+    let level = wrote(&mut session, b"\x1b]1337;RequestAttention=no\x07");
+    let fell = pane.ledger.weak_edge(level).expect("a falling edge");
+    assert_eq!(
+        pane.at(fell),
+        ["withdraw tab=1 seat=SeatId(2) ticket=0 episode=1 reason=program src=osc"]
+    );
+    assert_eq!(pane.state(), State::Idle);
+}
+
+/// PIN — **the two lanes meet on one account: one pane, two producers, one request.**
+///
+/// The wire says "this pane wants you" and, six seconds later, a hook says "and it is blocked on
+/// your input". Those are **one** request with two pieces of evidence, not two requests: the place
+/// in the queue is not re-stamped, no second episode is minted, and the wording rises — and falls
+/// again the moment the stronger evidence is withdrawn, because a pane that says "waiting for you"
+/// on the strength of a credential that no longer exists is a pane telling you something untrue.
+///
+/// It ends on the wire because that is the half this slice added: the program takes its own
+/// sentence back, the place goes, and the line says the withdrawal came in over `src=osc`. A trace
+/// that could not tell the two producers apart would be a trace that could not answer the one
+/// question anybody asks it — *did the adapter actually install, or is this the generic path?*
+#[test]
+fn one_pane_two_producers_and_one_episode_between_them() {
+    let mut session = wired();
+    let mut pane = Pane::new();
+    session
+        .feed(b"\x1b]1337;RequestAttention=yes\x07")
+        .expect("the session accepts bytes");
+    let rose = pane
+        .ledger
+        .weak_edge(session.status().attention_request)
+        .expect("a rising edge");
+    assert_eq!(
+        pane.at(rose),
+        ["mint tab=1 seat=SeatId(2) episode=1 src=osc gen=1 grounds=requested prev=-"]
+    );
+    assert_eq!(
+        pane.at(strong_wait(WaitKind::Permission)),
+        ["upgrade tab=1 seat=SeatId(2) episode=1 grounds=awaiting src=pipe gen=1"],
+        "the same request, confirmed by the other producer"
+    );
+    assert_eq!(
+        pane.away(),
+        [
+            "admit tab=1 seat=SeatId(2) ticket=0 episode=1 grounds=awaiting active=0 focused=0",
+            "toast tab=1 seat=SeatId(2) why=awaiting ticket=0 episode=1 reach=flash",
+        ]
+    );
+    assert_eq!(
+        pane.at(clear_all(ClearReason::Hook)),
+        [
+            "clear tab=1 seat=SeatId(2) episode=1 src=pipe gen=1 reason=hook",
+            "downgrade tab=1 seat=SeatId(2) ticket=0 episode=1 grounds=requested src=pipe \
+             reason=clear",
+        ],
+        "the strong layer withdrew; the weak one is still up, so the place stays and the wording \
+         falls back"
+    );
+    session
+        .feed(b"\x1b]1337;RequestAttention=no\x07")
+        .expect("the session accepts bytes");
+    let fell = pane
+        .ledger
+        .weak_edge(session.status().attention_request)
+        .expect("a falling edge");
+    assert_eq!(
+        pane.at(fell),
+        ["withdraw tab=1 seat=SeatId(2) ticket=0 episode=1 reason=program src=osc"]
+    );
+    assert_eq!(pane.state(), State::Idle);
+}
+
+/// PIN — **`once` and `fireworks` reach the ledger as nothing at all.**
+///
+/// Both are on iTerm2's own list beside `yes` and `no`, which is what makes them worth a pin: the
+/// tempting reading is "four values of one sequence, so four values of one state". `once` is a
+/// one-shot and takes the bell's path inside the session; `fireworks` is a gesture this terminal
+/// does not have. Neither is a level, so neither can produce an edge.
+#[test]
+fn the_one_shot_and_the_unimplemented_never_reach_the_ledger() {
+    for payload in [
+        &b"\x1b]1337;RequestAttention=once\x07"[..],
+        &b"\x1b]1337;RequestAttention=fireworks\x07"[..],
+    ] {
+        let mut session = wired();
+        let ledger = AttentionLedger::default();
+        session.feed(payload).expect("the session accepts bytes");
+        assert_eq!(
+            ledger.weak_edge(session.status().attention_request),
+            None,
+            "{payload:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
