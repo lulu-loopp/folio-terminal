@@ -24127,7 +24127,23 @@ mod tests {
         const ROWS: u32 = 40;
         const CYCLES: usize = 24;
 
-        let measure = |inline_formulas: bool, alternate: bool| {
+        // **Each configuration is measured three times and the fastest kept**
+        // (2026-08-25). Both numbers are sums of sub-millisecond windows taken
+        // while twenty other tests run on the other cores of this machine, and a
+        // ratio of two disturbed numbers is a coin toss: one memory-hungry
+        // neighbour landing inside `off` and not inside `on` inverts it. What
+        // exposed that was the picture lane learning to spread a resample over
+        // every core — a burst of memory traffic in a sibling test, which no
+        // priority band can hide because the cost is bandwidth and not CPU
+        // time — and this test then failed one run in four against twenty clean
+        // runs before it.
+        //
+        // The least-disturbed run is the one that measures this screen rather
+        // than the machine, so the minimum is the honest sample. **The claim is
+        // not weakened**: a prefilter that really cost fifty percent would cost
+        // it in every run, minimum included. The counts are deterministic, so
+        // they come from whichever run was fastest.
+        let measure_once = |inline_formulas: bool, alternate: bool| {
             let started = Instant::now();
             let mut session = DualPlaneSession::new(nz(120), nz(ROWS));
             seat_inline_metrics(&mut session);
@@ -24158,6 +24174,12 @@ mod tests {
                 }
             }
             (elapsed, armed, resolved)
+        };
+        let measure = |inline_formulas: bool, alternate: bool| {
+            (0..3)
+                .map(|_| measure_once(inline_formulas, alternate))
+                .min_by_key(|(elapsed, _, _)| *elapsed)
+                .expect("three samples")
         };
 
         let (off, off_armed, _) = measure(false, false);

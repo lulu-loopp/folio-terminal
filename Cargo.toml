@@ -69,6 +69,13 @@ portable-pty = "=0.9.0"
 # search needs no backreferences, and what it does need is the linear-time guarantee a backtracking
 # engine cannot give — `(a+)+b` typed into the find bar must not be able to hang the window.
 regex = "1"
+# The picture lane's Lanczos3 resample, and nothing else in this workspace (see
+# `bt_term::inline_image`). Already in the lock file transitively through
+# `typst-library` and `typst-utils`, so naming it here costs no new package.
+# The lane builds a pool of its own rather than using rayon's global one,
+# because the pool it runs on has to stand in the background band and the global
+# one belongs to the whole process — typst's layout included.
+rayon = "1"
 thiserror = "2"
 resvg = { version = "=0.47.0", default-features = false, features = ["text"] }
 serde = { version = "1", features = ["derive"] }

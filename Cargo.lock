@@ -383,10 +383,12 @@ dependencies = [
  "bt-detect",
  "bt-doc",
  "bt-math",
+ "bt-platform",
  "bt-transcript",
  "bt-viewport",
  "image",
  "proptest",
+ "rayon",
  "unicode-width",
 ]
 
