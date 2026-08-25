@@ -130,7 +130,14 @@ use serde::{Deserialize, Serialize};
 /// What is being defaulted on is an **offer** — a surface that appears only when a hand has
 /// deliberately stopped, and that goes away the instant it is touched — and the row that ends the
 /// offering is one press away on the General page.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 22;
+///
+/// **v23 carries `turn_end_notification`**, whether the end of an agent's turn is allowed to reach
+/// the desktop at all — a taskbar flash on a window that has not got the keyboard, a toast on one
+/// that is minimised (`docs/plans/attention/plan.md` §11.7, user ruling 2026-08-25). It lands the
+/// way v17–v20 and v22 did rather than the way v13–v16, v19 and v21 did: no build before this one
+/// had a turn-end lane at all, so `true` is the product's default for a feature shipping new and
+/// not a habit being carried forward.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 23;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -290,7 +297,8 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "powershell_integration_offer": true | false
 ///   "focus_card_height": 160 | 240 | 320,
 ///   "line_wrapping": true | false,
-///   "key_hints": true | false
+///   "key_hints": true | false,
+///   "turn_end_notification": true | false
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -712,6 +720,26 @@ pub struct SettingsV1 {
     /// so*. That is why it is a settings key and not a member of any layout's identity.
     #[serde(default = "default_key_hints")]
     pub key_hints: bool,
+    /// **Whether the end of a turn is allowed to reach the desktop** — the Terminal page's
+    /// `Turn finished` row (`docs/plans/attention/plan.md` §11.7, user ruling 2026-08-25).
+    ///
+    /// One key and not two, though the ruling names two arms — a taskbar flash on a window that
+    /// has not got the keyboard, and a toast on one that is minimised. "May the end of a turn
+    /// reach the desktop" is one sentence, and two switches would make legal two combinations
+    /// nobody asked for: flashing without toasting, and toasting without flashing. If the two are
+    /// ever wanted apart that is a second row, not a changed judgement.
+    ///
+    /// **It governs how far, never what the pane says.** Off leaves the bell dot, the unread dot
+    /// and the attention queue's own badge exactly as they were: this key is about the desktop
+    /// outside the window, which is the division `terminal_notifications` is filed under and the
+    /// one the ledger's own predicate is kept clear of.
+    ///
+    /// `true` is the default and it is the ruling's own. The arm that runs most of the time costs
+    /// the reader a flash on a taskbar button they are not currently looking at, and a feature
+    /// that has to be found in Settings before it works once is a feature most of its users never
+    /// learn they have.
+    #[serde(default = "default_turn_end_notification")]
+    pub turn_end_notification: bool,
 }
 
 /// `serde`'s door for a v14 key that is missing from a file this build is reading.
@@ -766,6 +794,15 @@ fn default_key_hints() -> bool {
     true
 }
 
+/// `serde`'s door for a v23 key missing from a file this build is reading.
+///
+/// [`default_terminal_notifications`]'s reason exactly: a `bool`'s own default is `false`, and a
+/// file that had lost this key would come back as a reader who had switched the turn-end lane off
+/// — an answer they never gave, arrived at from an absent line.
+fn default_turn_end_notification() -> bool {
+    true
+}
+
 impl Default for SettingsV1 {
     fn default() -> Self {
         Self {
@@ -813,6 +850,7 @@ impl Default for SettingsV1 {
             // A hand that has stopped on its modifiers is offered the list, once it has really
             // stopped.
             key_hints: true,
+            turn_end_notification: true,
         }
     }
 }

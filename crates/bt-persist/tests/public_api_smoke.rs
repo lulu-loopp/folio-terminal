@@ -62,6 +62,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         focus_card_height: 240,
         line_wrapping: false,
         key_hints: false,
+        turn_end_notification: false,
     };
     write_settings_atomic(&path, &settings).unwrap();
 

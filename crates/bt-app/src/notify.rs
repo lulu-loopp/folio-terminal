@@ -88,24 +88,61 @@ impl NotificationRoute {
     }
 }
 
-/// Whether one request reaches the desktop.
+/// **How far a request about this pane gets** (`attention` plan §10.7's eight-row table).
 ///
-/// **The gate is the attention ledger's own predicate, read the other way round.**
-/// `attention_is_consumed(tab_is_active, window_is_focused)` is what already decides that a bell
-/// which rings on the tab you are looking at, in the window that has the keyboard, has been
-/// answered by the looking. A notification is the same sentence from the other side: exactly when
-/// the ledger would say "they have seen it", the desktop hears nothing.
+/// Three answers and not two, and the third row of the table is the reason the two-answer version
+/// had to go. **What used to stand here** was `reaches_the_desktop`, argued as "the attention
+/// ledger's own predicate, read the other way round": exactly when `attention_is_consumed` would
+/// say the reader has seen it, the desktop heard nothing. That argument is *correct in a two-tier
+/// model and false in a three-tier one* — the middle answer, "on this screen but not in front of
+/// your eyes", is neither "they have seen it" nor "the desktop is all that is left". It is a third
+/// answer, and a predicate has room for two.
 ///
-/// Written as one call rather than as a copy of the condition, because a second spelling of it is
-/// the way the two drift — and if they drifted, the failure would be a toast for a pane the user
-/// is staring at, which is the single most annoying thing a terminal can do.
+/// So the ledger's predicate keeps the job it always had — retiring a latch a look has spent — and
+/// this owns the desktop's. `attention_is_consumed` is forbidden a third parameter for the same
+/// reason (red line 4): one of them is about the account and the other is about how far away the
+/// reader is, and `44f9f2d`'s lesson is that tangling those two says the causality backwards.
 ///
-/// The setting is the outer half and it is a *silence*, not a concealment: with it off nothing is
-/// raised and everything else — the unread dot, the bell latch, the pane's own account of itself
-/// — goes on exactly as before. A notification adds no state, so there is none to suppress.
+/// **It answers how far, never whether.** Whether one particular request is entitled to interrupt
+/// at all is the ledger's single gate ([`crate::attention::AttentionLedger`], red line 12); this
+/// says only how much of the desktop is reachable from here, and it says it identically for both
+/// lanes.
+///
+/// ```text
+/// if window_is_hidden        { Toast }    // out of reach; the desktop is what is left
+/// else if focused && active  { Nothing }  // you are looking at it
+/// else                       { Flash }    // on this screen, but not in front of you
+/// ```
+///
+/// **`window_is_hidden` outranks the focus bits, and the two unreachable rows are the reason it is
+/// written outermost.** A three-`bool` function owes all eight inputs an answer, and rows 5 and 6 —
+/// a minimised window that holds the keyboard — cannot happen. Answering them from the hidden bit
+/// is not defensive: it is what covers the frame after a minimise, before the focus bits have
+/// caught up.
+///
+/// **The second row is honest rather than literal, and the doc has to say so or the branch reads
+/// as a mistake.** `FlashWindowEx` on the *foreground* window is a documented no-op, so the
+/// visible product of `Flash` for a background tab of the window you are in is the in-window
+/// marks — the dot on that tab and the badge in the title bar. It is written `Flash` and not
+/// `Nothing` because the sentence it answers is "on this screen, but not in front of you", which
+/// is word for word rows three and four; the instant you look away the same arm becomes a real
+/// flash and **not one character of the predicate changes**. Writing it `Nothing` would make "a
+/// background tab of the focused window" and "the pane you are staring at" indistinguishable here,
+/// which is the one distinction the row exists to draw.
 #[must_use]
-pub fn reaches_the_desktop(enabled: bool, tab_is_active: bool, window_is_focused: bool) -> bool {
-    enabled && !crate::attention_is_consumed(tab_is_active, window_is_focused)
+pub fn desktop_reach(
+    tab_is_active: bool,
+    window_is_focused: bool,
+    window_is_hidden: bool,
+) -> crate::attention::Reach {
+    use crate::attention::Reach;
+    if window_is_hidden {
+        Reach::Toast
+    } else if window_is_focused && tab_is_active {
+        Reach::Nothing
+    } else {
+        Reach::Flash
+    }
 }
 
 /// The name one toast wears.
@@ -132,7 +169,8 @@ pub fn toast_title(carried: Option<&str>, pane_name: Option<&str>, profile_name:
 
 #[cfg(test)]
 mod tests {
-    use super::{NotificationRoute, reaches_the_desktop, toast_title};
+    use super::{NotificationRoute, desktop_reach, toast_title};
+    use crate::attention::Reach;
 
     /// PIN (§7.6) — **a route survives the round trip and nothing else is read as one.**
     ///
@@ -182,39 +220,67 @@ mod tests {
         }
     }
 
-    /// PIN (§7.6) — **nothing reaches the desktop that the ledger would call already seen.**
+    /// PIN (§7.6, `attention` plan §10.7) — **all eight inputs, and the three answers they fall
+    /// into.**
     ///
-    /// The whole behavioural claim of the block, as a truth table. The two middle rows are the
-    /// ones that matter: a pane in a background window and a background tab in the focused
-    /// window are both cases where the person cannot see what was printed, and both notify.
+    /// The table is written out row by row rather than folded, because it *is* the specification:
+    /// eight rows of three booleans, and the whole behavioural claim of the desktop half of this
+    /// block is which of the three each one lands in.
     ///
-    /// MUTATIONS: gate on `tab_is_active` alone and row two goes red — which is the bug where
-    /// every notification that arrives while the user is in another application is swallowed,
-    /// the one moment the feature exists for. Gate on `window_is_focused` alone and row three
-    /// goes red. Drop the setting and row one goes red in all four positions.
+    /// The two rows nobody can reach are here for the reason a total function has them at all: a
+    /// minimised window does not hold the keyboard, so rows five and six describe no moment a
+    /// reader can be in — except the frame *just after* a minimise, when the focus bits have not
+    /// caught up yet, and that frame is precisely why the hidden bit is tested outermost.
+    ///
+    /// MUTATIONS: test the focus pair before the hidden bit and rows five and six answer
+    /// `Nothing`/`Flash` — a window that is not on any screen reported as one the reader can see.
+    /// Answer `Nothing` for row two and the background tab of a focused window becomes
+    /// indistinguishable from the pane under the reader's eyes. Answer `Toast` for rows three and
+    /// four and every notification arriving while the reader is in another application becomes a
+    /// desktop interruption about a window they can see.
     #[test]
-    fn only_a_pane_nobody_is_looking_at_reaches_the_desktop() {
-        for tab_is_active in [false, true] {
-            for window_is_focused in [false, true] {
-                assert!(
-                    !reaches_the_desktop(false, tab_is_active, window_is_focused),
-                    "off is silent at {tab_is_active}/{window_is_focused}"
-                );
-            }
+    fn every_one_of_the_eight_positions_a_reader_can_be_in_has_an_answer() {
+        // (window_is_focused, tab_is_active, window_is_hidden) → Reach, in the plan's own order.
+        let table = [
+            ((true, true, false), Reach::Nothing),
+            ((true, false, false), Reach::Flash),
+            ((false, true, false), Reach::Flash),
+            ((false, false, false), Reach::Flash),
+            ((true, true, true), Reach::Toast),
+            ((true, false, true), Reach::Toast),
+            ((false, true, true), Reach::Toast),
+            ((false, false, true), Reach::Toast),
+        ];
+        for ((focused, active, hidden), expected) in table {
+            assert_eq!(
+                desktop_reach(active, focused, hidden),
+                expected,
+                "focused={focused} active={active} hidden={hidden}"
+            );
         }
+        assert_eq!(table.len(), 8, "a three-bool function owes eight answers");
+    }
+
+    /// PIN (`attention` plan §10.7, red line 4) — **the ledger's predicate and the desktop's
+    /// answer are two questions, and the second row is where they part.**
+    ///
+    /// `attention_is_consumed` says the reader has seen it; `desktop_reach` says how far away the
+    /// reader is. In the two-tier model the second was written as the negation of the first, and
+    /// this is the row that made that false: a background tab of the focused window is *not*
+    /// consumed — the ledger admits it to the queue — and it is *not* reachable by a toast either.
+    /// The old predicate had one answer for those two facts.
+    #[test]
+    fn a_background_tab_of_the_focused_window_is_neither_seen_nor_worth_a_toast() {
         assert!(
-            !reaches_the_desktop(true, true, true),
-            "the pane in front of the reader interrupts nobody"
+            !crate::attention_is_consumed(false, true),
+            "the ledger admits it: nobody is looking at that tab"
         );
-        assert!(
-            reaches_the_desktop(true, true, false),
-            "the window is behind another application"
+        assert_eq!(desktop_reach(false, true, false), Reach::Flash);
+        assert_eq!(
+            desktop_reach(true, true, false),
+            Reach::Nothing,
+            "and the pane that *is* consumed is the one that adds nothing"
         );
-        assert!(
-            reaches_the_desktop(true, false, true),
-            "the tab is not the one on screen"
-        );
-        assert!(reaches_the_desktop(true, false, false));
     }
 
     /// PIN (§7.6) — **the title falls through the three layers in protocol order.**

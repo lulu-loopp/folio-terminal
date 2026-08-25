@@ -837,6 +837,7 @@ mod tests {
                     true,
                     attention_map::PIPE_TRANSPORT,
                     stop.turn_end.expect("an announcement"),
+                    None,
                 )
                 .lines,
         );

@@ -1001,6 +1001,40 @@ impl ChromeSprite {
     }
 }
 
+/// **The sprite one status dot is**, filled or hollow (§7.1.5b, `attention` plan red line 3).
+///
+/// One function for the four surfaces that draw the badge — the horizontal strip, the rail's rows,
+/// a focus card's mark slot and the peek's schematic — because a fill that four call sites each
+/// decided for themselves is a fill three of them would eventually stop agreeing about, and the
+/// whole value of the distinction is that a reader meets the same shape wherever they meet the
+/// claim.
+///
+/// `border-radius: 50%` on a square is a circle, and [`ChromeMark::ControlPill`] clamps its round
+/// to half the short side — so the filled dot is the pill the chrome already has rather than a
+/// second circle to keep in step, and the hollow one is that pill's own ring.
+///
+/// **The stroke can never close the hole.** It is held one device pixel short of the radius, which
+/// matters at the bottom of the scale range and nowhere else: a two-pixel stroke on a
+/// three-pixel-radius dot leaves a hole, and a three-pixel one would quietly draw a filled disc —
+/// the exact pixels this distinction exists to avoid, arrived at by rounding.
+#[must_use]
+pub fn status_dot_sprite(dot: crate::StatusDot, rect: [f32; 4], scale: f32) -> ChromeSprite {
+    let side = (rect[2] - rect[0]).min(rect[3] - rect[1]);
+    let radius_px = (side / 2.0).round().max(1.0) as u32;
+    let mark = if dot.hollow {
+        let wanted = (bt_render::WINDOW_TAB_STATUS_DOT_RING_STROKE_LOGICAL_PX * scale)
+            .round()
+            .max(1.0) as u32;
+        ChromeMark::ControlPillRing {
+            radius_px,
+            stroke_px: wanted.clamp(1, radius_px.saturating_sub(1).max(1)),
+        }
+    } else {
+        ChromeMark::ControlPill { radius_px }
+    };
+    ChromeSprite::new(mark, rect, dot.ink)
+}
+
 /// One stacking layer of the modal overlay as a builder leaves it: its fills, its
 /// captions, and its marks still named rather than rasterized.
 ///
@@ -2345,6 +2379,59 @@ mod tests {
 
     fn sprite(mark: ChromeMark, width: f32, height: f32, color: [u8; 3]) -> ChromeSprite {
         ChromeSprite::new(mark, [0.0, 0.0, width, height], color)
+    }
+
+    /// PIN (`attention` plan red line 3) — **the hollow badge has a hole at every scale this
+    /// window is drawn at, and the filled one has none.**
+    ///
+    /// The whole value of the second axis is that it survives conditions the first did not: no
+    /// animation, no second colour, and — the one this pins — no scale factor at which rounding
+    /// quietly closes the ring back into a disc. A 6px dot at 100% is a radius of 3, and a stroke
+    /// of 3 would be a filled circle wearing a ring's name.
+    ///
+    /// MUTATIONS: drop the clamp and the 100% row draws a solid dot for the bell; drop the
+    /// `hollow` branch and every row draws the filled pill, which is exactly the state red line 3
+    /// was opened against.
+    #[test]
+    fn a_hollow_status_dot_keeps_a_hole_at_every_scale_and_a_filled_one_has_none() {
+        for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0, 3.0] {
+            let side = (bt_render::WINDOW_TAB_STATUS_DOT_LOGICAL_PX * scale)
+                .round()
+                .max(1.0);
+            let rect = [0.0, 0.0, side, side];
+            let filled = status_dot_sprite(
+                crate::StatusDot {
+                    ink: [1, 2, 3],
+                    hollow: false,
+                },
+                rect,
+                scale,
+            );
+            assert!(
+                matches!(filled.mark, ChromeMark::ControlPill { .. }),
+                "a filled claim is the pill the chrome already has, at {scale}"
+            );
+            let hollow = status_dot_sprite(
+                crate::StatusDot {
+                    ink: [1, 2, 3],
+                    hollow: true,
+                },
+                rect,
+                scale,
+            );
+            let ChromeMark::ControlPillRing {
+                radius_px,
+                stroke_px,
+            } = hollow.mark
+            else {
+                panic!("a hollow claim is drawn as a ring, at {scale}");
+            };
+            assert!(
+                stroke_px >= 1 && stroke_px < radius_px,
+                "at {scale} the ring is {stroke_px}px inside a {radius_px}px radius, which leaves \
+                 no hole — the two warn claims are back to being the same pixels"
+            );
+        }
     }
 
     fn alpha_at(icon: &ChromeIcon, x: u32, y: u32) -> u8 {

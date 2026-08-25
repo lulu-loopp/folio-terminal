@@ -57,7 +57,7 @@
 //! nothing else changes — which is the claim [`a_family_is_rows_and_nothing_else`] exists to keep
 //! honest.
 
-use bt_term::{AttentionRequest, NotificationSource, TerminalNotification};
+use bt_term::{AttentionRequest, BellSource, NotificationSource, TerminalNotification};
 
 use crate::attention::{
     ClearClass, ClearReason, ClearScope, ClearSelector, Credential, Event, IdSource, MappedAction,
@@ -554,6 +554,44 @@ pub(crate) const OSC_ROWS: &[OscRow] = &[
     },
 ];
 
+/// **Which sequence said it** (`attention` plan §13.2.2).
+///
+/// A function of the parser's own answer rather than a column on [`OSC_ROWS`], because it is not a
+/// decision: `Via` is the *name* of the sequence and `NotificationSource` is the parser's name for
+/// the same sequence. What §13.2.2 buys with it is that a turn end reported over `OSC 777` stops
+/// being recorded as a bare bell — and "did the adapter actually install?" becomes a question the
+/// trace answers, which is the whole reason the survey wanted the field.
+#[must_use]
+pub(crate) fn osc_via(source: NotificationSource) -> Via {
+    match source {
+        NotificationSource::Osc9 => Via::Osc9,
+        NotificationSource::Osc777 => Via::Osc777,
+        NotificationSource::Osc99 => Via::Osc99,
+    }
+}
+
+/// **How a latched bell got here** (`attention` plan §13.2.2).
+///
+/// One latch, two producers, and this is the row that keeps them apart in the trace. A literal
+/// `0x07` is the only thing that may be recorded as `bel` — `RequestAttention=once` takes the
+/// bell's *path* by an explicit ruling (§10.8.4: one sentence, one implementation), and taking a
+/// path is not the same as being the thing that made it.
+#[must_use]
+pub(crate) fn bell_provenance(rang: BellSource) -> (Transport, Via) {
+    match rang {
+        BellSource::Bel => (Transport::Bel, Via::Bel),
+        BellSource::AttentionOnce => (OSC_TRANSPORT, Via::Osc1337),
+    }
+}
+
+/// The transport every row of [`OSC_ROWS`] arrives over — the pipe lane's [`PIPE_TRANSPORT`], for
+/// its reason exactly.
+///
+/// **`bel` is deliberately not reachable from here.** Only a literal `0x07` is a bell (§13.2.2),
+/// and a sequence recorded as one would make the one fact the survey needs — whether a family is
+/// reaching us over OSC or has been downgraded to a bare bell — unanswerable.
+pub(crate) const OSC_TRANSPORT: Transport = Transport::Osc;
+
 /// What one arrival on the OSC lane is worth, or `None` for one this build has no level for.
 #[must_use]
 pub(crate) fn osc_credential(arrival: OscArrival) -> Option<Credential> {
@@ -585,6 +623,62 @@ mod tests {
 
     fn claude_installed(primary: bool) -> Vec<MappingRow> {
         installed_rows(ROWS, CLAUDE_CODE, |_| primary)
+    }
+
+    /// PIN (`attention` plan §13.2.2, gate ⑱②) — **only a literal `0x07` is recorded as a bell,
+    /// and every sequence names itself.**
+    ///
+    /// The whole reason `src=` and `via=` were split into two fields. The survey's second ask
+    /// upstream is "stop letting codex fall back to a bare bell", and the way anybody finds out
+    /// whether that landed on a given machine is by reading this pair out of the trace. A build
+    /// that wrote `src=bel` for a fact that arrived as `OSC 777` would make the answer say the
+    /// opposite of the truth on exactly the machines where the adapter *is* working.
+    ///
+    /// MUTATIONS: answer `Transport::Bel` for the `once` arm and gate ⑱② goes red on the one
+    /// sequence that shares the bell's *path*; answer one `Via` for all three notification
+    /// sequences and four upstream families become indistinguishable in the file whose job is
+    /// telling them apart.
+    #[test]
+    fn every_arrival_names_its_own_transport_and_only_a_bare_bell_is_a_bell() {
+        assert_eq!(
+            bell_provenance(BellSource::Bel),
+            (Transport::Bel, Via::Bel),
+            "the one thing that is a bell"
+        );
+        assert_eq!(
+            bell_provenance(BellSource::AttentionOnce),
+            (Transport::Osc, Via::Osc1337),
+            "it takes the bell's path by a ruling about implementations, and that is not the \
+             same as being one"
+        );
+        let named = [
+            (NotificationSource::Osc9, Via::Osc9),
+            (NotificationSource::Osc777, Via::Osc777),
+            (NotificationSource::Osc99, Via::Osc99),
+        ];
+        for (source, via) in named {
+            assert_eq!(osc_via(source), via);
+            assert_eq!(
+                OSC_TRANSPORT,
+                Transport::Osc,
+                "no sequence on this lane may be recorded as a bell"
+            );
+        }
+        // Four values, four names: `via=` is what tells one upstream family from another when they
+        // all say the same sentence.
+        let mut spelled: Vec<String> = named
+            .iter()
+            .map(|(_, via)| via.to_string())
+            .chain([Via::Osc1337.to_string(), Via::Bel.to_string()])
+            .collect();
+        spelled.sort_unstable();
+        let count = spelled.len();
+        spelled.dedup();
+        assert_eq!(
+            spelled.len(),
+            count,
+            "two arrivals spelled the same: {spelled:?}"
+        );
     }
 
     /// **R2's red form.** Installing both layers of one kind is the defect, and the catalogue is

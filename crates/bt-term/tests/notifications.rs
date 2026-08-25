@@ -187,7 +187,7 @@ fn osc_7_and_osc_777_do_not_take_each_others_bytes() {
 fn a_bell_latches_attention_and_asks_for_no_notification() {
     let mut session = session();
     session.feed(b"\x07").unwrap();
-    assert!(session.status().bell_latched);
+    assert!(session.status().bell_latched());
     assert!(session.take_notifications().is_empty());
 }
 

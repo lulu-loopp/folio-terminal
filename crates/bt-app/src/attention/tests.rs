@@ -1120,9 +1120,14 @@ fn a_named_receipt_removes_what_it_names_and_an_unnamed_one_waits_its_turn() {
 #[test]
 fn a_turn_end_is_decided_once_even_when_the_decision_was_to_say_nothing() {
     let mut pane = Pane::new();
-    let first =
-        pane.ledger
-            .announce_turn_end(site(), Reach::Nothing, true, Transport::Pipe, Via::Stop);
+    let first = pane.ledger.announce_turn_end(
+        site(),
+        Reach::Nothing,
+        true,
+        Transport::Pipe,
+        Via::Stop,
+        None,
+    );
     assert_eq!(
         first.lines,
         ["toast tab=1 seat=SeatId(2) why=turn-end episode=- reach=nothing src=pipe via=stop"],
@@ -1131,7 +1136,7 @@ fn a_turn_end_is_decided_once_even_when_the_decision_was_to_say_nothing() {
 
     let second =
         pane.ledger
-            .announce_turn_end(site(), Reach::Flash, true, Transport::Bel, Via::Bel);
+            .announce_turn_end(site(), Reach::Flash, true, Transport::Bel, Via::Bel, None);
     assert_eq!(second.lines, Vec::<String>::new());
     assert_eq!(
         second.raised, None,
@@ -1140,9 +1145,14 @@ fn a_turn_end_is_decided_once_even_when_the_decision_was_to_say_nothing() {
 
     // Your next turn re-arms it.
     pane.at(Event::Answer(AnswerKind::Keyboard));
-    let next =
-        pane.ledger
-            .announce_turn_end(site(), Reach::Toast, true, Transport::Osc, Via::Osc777);
+    let next = pane.ledger.announce_turn_end(
+        site(),
+        Reach::Toast,
+        true,
+        Transport::Osc,
+        Via::Osc777,
+        None,
+    );
     assert_eq!(
         next.lines,
         ["toast tab=1 seat=SeatId(2) why=turn-end episode=- reach=toast src=osc via=osc-777"]
@@ -1156,17 +1166,153 @@ fn a_turn_end_is_decided_once_even_when_the_decision_was_to_say_nothing() {
 #[test]
 fn a_disabled_turn_end_door_records_nothing_at_all() {
     let mut pane = Pane::new();
-    let off =
-        pane.ledger
-            .announce_turn_end(site(), Reach::Toast, false, Transport::Pipe, Via::Stop);
+    let off = pane.ledger.announce_turn_end(
+        site(),
+        Reach::Toast,
+        false,
+        Transport::Pipe,
+        Via::Stop,
+        None,
+    );
     assert_eq!(off, Outcome::default());
-    let on = pane
-        .ledger
-        .announce_turn_end(site(), Reach::Toast, true, Transport::Pipe, Via::Stop);
+    let on =
+        pane.ledger
+            .announce_turn_end(site(), Reach::Toast, true, Transport::Pipe, Via::Stop, None);
     assert_eq!(
         on.lines.len(),
         1,
         "the bit was not left set by the closed door"
+    );
+}
+
+/// PIN (`attention` plan §11.7, the deduplication rule read exactly) — **the bit swallows a
+/// second report of the same turn ending, and never a second thing a program said.**
+///
+/// The rule the bit exists for is "two sources will say the same sentence" — a hook `Stop` and the
+/// bare bell that follows it, neither of which carries a word. Those are one fact arriving twice
+/// and the second is silent, which is the whole of §13.3.
+///
+/// **Applying that to a program's own sentences would take a delivery away.** `OSC 9;<text>` and
+/// `OSC 777;notify` are messages, and a build that swallowed the second of two different ones
+/// because nobody had pressed a key in between would be deciding that a build finishing and a
+/// deploy finishing are the same event. That is a regression against a delivery this product has
+/// always made, and §11.6 rule 2 is explicit that a program's own words are the thing this
+/// terminal must not throw away.
+///
+/// MUTATIONS: gate on the bit alone and the second sentence goes silent; compare nothing and a
+/// program repeating one sentence interrupts twice; clear the remembered sentence without clearing
+/// the bit and a repeat in the *next* turn is swallowed by the last turn's words.
+#[test]
+fn a_second_report_of_one_turn_is_silent_and_a_second_sentence_is_not() {
+    let mut pane = Pane::new();
+    let first = pane.ledger.announce_turn_end(
+        site(),
+        Reach::Toast,
+        true,
+        Transport::Osc,
+        Via::Osc9,
+        Some("build finished"),
+    );
+    assert_eq!(first.lines.len(), 1);
+    assert_eq!(
+        first.raised.expect("a delivery").body.as_deref(),
+        Some("build finished"),
+        "the program's own words ride out with the decision"
+    );
+
+    // The same sentence again is the same fact, whatever carried it.
+    for words in [Some("build finished"), Some("  build finished  "), None] {
+        let repeat = pane.ledger.announce_turn_end(
+            site(),
+            Reach::Toast,
+            true,
+            Transport::Bel,
+            Via::Bel,
+            words,
+        );
+        assert_eq!(
+            repeat,
+            Outcome::default(),
+            "a restatement of one sentence changed no decision: {words:?}"
+        );
+    }
+
+    // A different sentence is a different thing to have said.
+    let second = pane.ledger.announce_turn_end(
+        site(),
+        Reach::Toast,
+        true,
+        Transport::Osc,
+        Via::Osc777,
+        Some("deploy finished"),
+    );
+    assert_eq!(
+        second.lines,
+        ["toast tab=1 seat=SeatId(2) why=turn-end episode=- reach=toast src=osc via=osc-777"]
+    );
+    assert_eq!(
+        second.raised.expect("a delivery").body.as_deref(),
+        Some("deploy finished")
+    );
+
+    // And with the door shut nothing gets through, sentence or no sentence.
+    let mut shut = Pane::new();
+    assert_eq!(
+        shut.ledger.announce_turn_end(
+            site(),
+            Reach::Toast,
+            false,
+            Transport::Osc,
+            Via::Osc9,
+            Some("build finished"),
+        ),
+        Outcome::default()
+    );
+}
+
+/// PIN (`attention` plan §11.6 rule 2 and its pin ②) — **one arrival, one interruption, and the
+/// request gets it.**
+///
+/// A message landing on a pane that is already asking is that request's business: its words are
+/// kept for the one interruption the request is allowed, and the event lane must not raise a
+/// second one about the same arrival. A message landing on a pane with nothing standing has no
+/// request to be folded into and is an event of its own.
+///
+/// MUTATIONS: answer `false` unconditionally and every message on a waiting pane interrupts twice
+/// — once as the request and once as an event. Answer `true` unconditionally and a message on an
+/// idle pane never reaches the desktop at all.
+#[test]
+fn a_message_is_folded_into_a_standing_request_or_is_an_event_of_its_own() {
+    let mut idle = Pane::new();
+    assert!(
+        !idle.ledger.announce(Some("nothing is standing here")),
+        "no request to fold it into"
+    );
+
+    let mut asking = Pane::new();
+    asking.at(strong_wait(WaitKind::Permission));
+    assert!(
+        asking.ledger.announce(Some("Allow Bash to run `rm -rf`?")),
+        "a live request takes responsibility for the sentence"
+    );
+    let admitted = asking.outcome(Event::Settle {
+        active: false,
+        focused: false,
+    });
+    assert_eq!(
+        admitted
+            .raised
+            .expect("the queue's one interruption")
+            .body
+            .as_deref(),
+        Some("Allow Bash to run `rm -rf`?"),
+        "and speaks it"
+    );
+
+    // Its one interruption is spent, so a later message is nobody's business but the event lane's.
+    assert!(
+        !asking.ledger.announce(Some("and another thing")),
+        "a request that has already interrupted cannot take a second sentence"
     );
 }
 
@@ -1188,7 +1334,7 @@ fn the_event_door_never_mints_an_episode_or_takes_a_place() {
         (Transport::Osc, Via::Osc1337),
     ] {
         pane.ledger
-            .announce_turn_end(site(), Reach::Toast, true, source, via);
+            .announce_turn_end(site(), Reach::Toast, true, source, via, None);
         pane.at(Event::Answer(AnswerKind::Keyboard));
     }
     assert_eq!(pane.state(), State::Idle);
@@ -1218,7 +1364,7 @@ fn a_long_run() -> Vec<String> {
     lines.extend(pane.at(Event::WeakNo));
     lines.extend(
         pane.ledger
-            .announce_turn_end(site(), Reach::Flash, true, Transport::Osc, Via::Osc9)
+            .announce_turn_end(site(), Reach::Flash, true, Transport::Osc, Via::Osc9, None)
             .lines,
     );
     lines.extend(pane.at(keyed_wait(WaitKind::Elicitation, "e-1")));
@@ -1324,7 +1470,7 @@ fn a_turn_end_reported_over_an_osc_is_never_written_as_a_bell() {
         let mut pane = Pane::new();
         let out = pane
             .ledger
-            .announce_turn_end(site(), Reach::Flash, true, source, via);
+            .announce_turn_end(site(), Reach::Flash, true, source, via, None);
         assert!(
             out.lines[0].ends_with(expected),
             "{:?}/{:?}: {}",

@@ -324,13 +324,13 @@ pub struct PeekLeaf {
     pub mark_opacity: f32,
     /// This leaf's status dot, or `None` when it has nothing to claim.
     ///
-    /// Already resolved to a colour by `StatusClaim::dot_color`, so the loudness
-    /// order — failed over bell over unread — is settled by the same `Ord` the
-    /// tab strip's own aggregate is settled by, one ladder for both. What the
-    /// peek adds is only that it asks the question *per leaf*: the tab wears the
-    /// loudest of its fleet, and the whole point of a schematic is to say which
-    /// room the noise is coming from.
-    pub dot: Option<[u8; 3]>,
+    /// Already resolved by `StatusClaim::dot`, so the loudness order — failed
+    /// over bell over unread — is settled by the same `Ord` the tab strip's own
+    /// aggregate is settled by, one ladder for both. What the peek adds is only
+    /// that it asks the question *per leaf*: the tab wears the loudest of its
+    /// fleet, and the whole point of a schematic is to say which room the noise
+    /// is coming from.
+    pub dot: Option<crate::StatusDot>,
     /// The progress this leaf's session is reporting. Like the tab's, it
     /// *replaces* the mark rather than surrounding it.
     pub ring: Option<crate::seats::TabRing>,
@@ -815,7 +815,7 @@ pub fn build(
         // all, rather than drawn across the neighbour's border. The dot goes
         // with it — a badge on a mark that was not drawn is a badge on nothing.
         if cell.mark[2] <= cell.rect[2] {
-            push_mark_slot(&mut sprites, leaf, cell.mark, cell.dot, palette);
+            push_mark_slot(&mut sprites, leaf, cell.mark, cell.dot, palette, scale);
         }
         labels.push(label(
             &leaf.title,
@@ -826,7 +826,7 @@ pub fn build(
     }
 
     for (row, leaf) in layout.rows.iter().zip(leaves) {
-        push_mark_slot(&mut sprites, leaf, row.mark, row.dot, palette);
+        push_mark_slot(&mut sprites, leaf, row.mark, row.dot, palette, scale);
         // `--ink2` over `--menu` — the ink the tip is written in, because this
         // is the same kind of writing on the same surface.
         labels.push(label(
@@ -870,6 +870,7 @@ fn push_mark_slot(
     mark_rect: [f32; 4],
     dot_rect: [f32; 4],
     palette: &ChromePalette,
+    scale: f32,
 ) {
     match leaf.ring {
         Some(ring) => {
@@ -910,18 +911,10 @@ fn push_mark_slot(
             });
         }
     }
-    if let Some(dot_color) = leaf.dot {
-        let side = dot_rect[2] - dot_rect[0];
-        sprites.push(ChromeSprite::new(
-            // `border-radius: 50%` on a square is a circle, and `ControlPill`
-            // clamps its round to half the short side — the same pill the strip's
-            // dot is, so the two can never round differently.
-            ChromeMark::ControlPill {
-                radius_px: (side / 2.0).round().max(1.0) as u32,
-            },
-            dot_rect,
-            dot_color,
-        ));
+    if let Some(dot) = leaf.dot {
+        // The strip's own function, so the schematic's badge and the tab's can never round
+        // differently or disagree about which claim is drawn hollow.
+        sprites.push(crate::marks::status_dot_sprite(dot, dot_rect, scale));
     }
 }
 
@@ -1879,8 +1872,14 @@ mod tests {
             .collect()
     }
 
+    /// Either shape the badge is drawn as — the ring is the bell's, and a test
+    /// that looked only for the filled pill would stop finding a claim the
+    /// moment the two warns were told apart.
     fn is_dot(sprite: &crate::marks::ChromeSprite) -> bool {
-        matches!(sprite.mark, ChromeMark::ControlPill { .. })
+        matches!(
+            sprite.mark,
+            ChromeMark::ControlPill { .. } | ChromeMark::ControlPillRing { .. }
+        )
     }
 
     fn is_ring(sprite: &crate::marks::ChromeSprite) -> bool {
@@ -1894,14 +1893,14 @@ mod tests {
     fn each_mini_leaf_wears_its_own_claim_and_the_quiet_ones_wear_none() {
         let palette = bt_render::chrome_palette();
         let mut cast = leaves(3);
-        cast[0].dot = crate::StatusClaim::Failed.dot_color(&palette);
-        cast[2].dot = crate::StatusClaim::Unread.dot_color(&palette);
+        cast[0].dot = crate::StatusClaim::Failed.dot(&palette);
+        cast[2].dot = crate::StatusClaim::Unread.dot(&palette);
         let (laid, layer, _) = painted(&cast);
 
         for (index, expected) in [
-            (0, crate::StatusClaim::Failed.dot_color(&palette)),
+            (0, crate::StatusClaim::Failed.dot(&palette)),
             (1, None),
-            (2, crate::StatusClaim::Unread.dot_color(&palette)),
+            (2, crate::StatusClaim::Unread.dot(&palette)),
         ] {
             for slot in [laid.cells[index].mark, laid.rows[index].mark] {
                 let dots: Vec<_> = sprites_over(&layer, slot)
@@ -1909,9 +1908,9 @@ mod tests {
                     .filter(|sprite| is_dot(sprite))
                     .collect();
                 match expected {
-                    Some(color) => {
+                    Some(dot) => {
                         assert_eq!(dots.len(), 1, "leaf {index} draws exactly one dot");
-                        assert_eq!(dots[0].color, color, "leaf {index} wears the wrong claim");
+                        assert_eq!(dots[0].color, dot.ink, "leaf {index} wears the wrong claim");
                     }
                     None => assert!(
                         dots.is_empty(),
@@ -1941,7 +1940,7 @@ mod tests {
             crate::StatusClaim::Failed,
         ] {
             let mut cast = leaves(2);
-            cast[0].dot = claim.dot_color(&palette);
+            cast[0].dot = claim.dot(&palette);
             let (laid, layer, _) = painted(&cast);
             let dot = sprites_over(&layer, laid.cells[0].mark)
                 .into_iter()
@@ -1949,7 +1948,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{claim:?} drew no dot"));
             assert_eq!(
                 Some(dot.color),
-                claim.dot_color(&palette),
+                claim.dot(&palette).map(|it| it.ink),
                 "{claim:?} was drawn in a colour it did not choose"
             );
             drawn.push(dot.color);
@@ -1966,7 +1965,7 @@ mod tests {
     fn the_dot_hangs_off_its_marks_top_right_corner_in_both_halves() {
         let palette = bt_render::chrome_palette();
         let mut cast = leaves(2);
-        cast[0].dot = crate::StatusClaim::Bell.dot_color(&palette);
+        cast[0].dot = crate::StatusClaim::Bell.dot(&palette);
         let (laid, layer, _) = painted(&cast);
 
         for slot in [laid.cells[0].mark, laid.rows[0].mark] {
@@ -2004,7 +2003,7 @@ mod tests {
             start_milliturns: 0,
             sweep_milliturns: 400,
         });
-        cast[0].dot = crate::StatusClaim::Bell.dot_color(&palette);
+        cast[0].dot = crate::StatusClaim::Bell.dot(&palette);
         let (laid, layer, _) = painted(&cast);
 
         let slot = laid.cells[0].mark;
@@ -2062,7 +2061,7 @@ mod tests {
         let palette = bt_render::chrome_palette();
         let mut cast = leaves(2);
         cast[0].mark_opacity = 0.42;
-        cast[0].dot = crate::StatusClaim::Failed.dot_color(&palette);
+        cast[0].dot = crate::StatusClaim::Failed.dot(&palette);
         let (laid, layer, _) = painted(&cast);
 
         for slot in [laid.cells[0].mark, laid.rows[0].mark] {

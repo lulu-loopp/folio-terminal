@@ -96,7 +96,7 @@ impl fmt::Display for Site {
 ///
 /// Named here because it is the ledger's own vocabulary — every `toast` line carries one, and both
 /// doors evaluate the same three-way answer. The *function* that computes it from the window's
-/// facts is slice C2's (`desktop_reach`); this is the answer's shape, and the shape is what the
+/// facts is [`crate::notify::desktop_reach`]; this is the answer's shape, and the shape is what the
 /// ledger and its trace need to agree on first.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Reach {
@@ -105,14 +105,15 @@ pub(crate) enum Reach {
     /// On this screen but not in front of your eyes: the in-window marks, and a taskbar flash
     /// where Windows will honour one.
     Flash,
-    /// Out of reach of the window entirely — minimised or cloaked. The desktop is what is left.
+    /// Out of reach of the window entirely — minimised or on a virtual desktop the reader has
+    /// switched away from. The desktop is what is left.
     ///
-    /// **Nothing constructs this yet**, and the gap is named rather than filled: telling
-    /// "minimised or on another virtual desktop" from "on this screen behind something" is
-    /// `IsIconic` and `DWMWA_CLOAKED`, which is slice C1's. Until those exist `ledger_reach`
-    /// answers the weaker of the two, which under-states how much of the user's attention is being
-    /// asked for rather than over-stating it.
-    #[allow(dead_code, reason = "C1 lands the fact that tells this from `Flash`")]
+    /// The two facts behind it are `IsIconic` and `DWMWA_CLOAKED`, and "completely covered by
+    /// another window" is deliberately **not** one of them: winit's `Occluded` is never delivered
+    /// by the Windows backend, and computing it here would mean walking the z-order and
+    /// differencing regions every frame — a heuristic, priced per frame. The cost of leaving it
+    /// out is that a window buried under a full-screen editor flashes its taskbar button instead
+    /// of raising a toast, and a taskbar button is visible in exactly that situation.
     Toast,
 }
 
@@ -249,34 +250,22 @@ pub(crate) enum Via {
     Stop,
     /// Claude Code's `StopFailure` hook: the turn ended on an API error.
     StopFailure,
-    /// A bare bell at the end of a turn.
+    /// A bare bell at the end of a turn — a literal `0x07` and nothing else.
     Bel,
-    // **The four OSC names have no producer on this lane yet**, and that is a fact about the lane
-    // rather than about the parsers. `attention` plan §11.7 lists exactly four sources for the end
-    // of a turn — the `Stop` pair, a bare bell, codex's `notify` and pi's `agent_settled` — and an
-    // `OSC 9;<text>` is a *message*, not one of them. They are named here because §13.2.2 fixes the
-    // vocabulary in one place, so that a family arriving over one of them later adds a row rather
-    // than a value.
-    #[allow(
-        dead_code,
-        reason = "§11.7 has no turn-end source on this sequence yet"
-    )]
+    // **The four sequences, and why each is here rather than folded into `Bel`.** §13.2.2 exists
+    // because a survey found codex reaching Folio as a bare bell only *because* codex does not
+    // recognise this terminal, and pi reaching it over `OSC 777` only when somebody configures the
+    // example extension by hand. Recording either of those as "a bell" makes "did the adapter
+    // install?" a question with no answer in the file that is supposed to answer it.
+    /// `OSC 1337;RequestAttention=once` — iTerm2's one-shot arm, which latches the bell.
     Osc1337,
-    #[allow(
-        dead_code,
-        reason = "§11.7 has no turn-end source on this sequence yet"
-    )]
+    /// iTerm2's free-text arm of `OSC 9`. codex's `notification_method = osc9`.
     Osc9,
-    #[allow(
-        dead_code,
-        reason = "§11.7 has no turn-end source on this sequence yet"
-    )]
+    /// urxvt's `OSC 777;notify`. What pi's example extension can be pointed at.
     Osc777,
-    /// kitty's `OSC 99`. **No producer yet** — named because the vocabulary is fixed here.
-    #[allow(
-        dead_code,
-        reason = "§11.7 has no turn-end source on this sequence yet"
-    )]
+    /// kitty's `OSC 99`. **No producer in the parser yet** — named because the vocabulary is fixed
+    /// here, so the day one arrives it is a row and not a value.
+    #[allow(dead_code, reason = "`bt-term` has no `OSC 99` parser yet")]
     Osc99,
     /// codex's `notify` program, whose only `type` today is `agent-turn-complete`.
     Notify,
@@ -794,6 +783,13 @@ pub(crate) struct AttentionLedger {
     /// Whether this **turn**'s ending has already been decided about. Belongs to no episode,
     /// because a turn ending mints none (`attention` plan §13.3).
     announced_turn_end: bool,
+    /// **The sentence the last accepted turn-end decision carried**, or `None` when it carried
+    /// none.
+    ///
+    /// Lives and dies with [`Self::announced_turn_end`], and it is what keeps that bit from
+    /// swallowing something it was never about — see [`Self::announce_turn_end`] for the whole of
+    /// why a wordless second source is the same fact and a second *sentence* is not.
+    announced_words: Option<String>,
 }
 
 impl Default for AttentionLedger {
@@ -812,6 +808,7 @@ impl Default for AttentionLedger {
             refused: false,
             lent: None,
             announced_turn_end: false,
+            announced_words: None,
         }
     }
 }
@@ -1070,7 +1067,7 @@ impl AttentionLedger {
         out: &mut Outcome,
     ) {
         if begins_turn {
-            self.announced_turn_end = false;
+            self.rearm_turn_end();
         }
         let acked = self.acked_strong;
         let removes = |slot: &WaitSlot, generation: u64| -> bool {
@@ -1208,7 +1205,7 @@ impl AttentionLedger {
     /// a watermark is enough and a set of answered ids is not needed.
     fn answer(&mut self, at: Site, by: AnswerKind, out: &mut Outcome) {
         // A reply is the start of your next turn, whatever else it is.
-        self.announced_turn_end = false;
+        self.rearm_turn_end();
         let Some(episode) = self.episode else {
             return;
         };
@@ -1342,13 +1339,31 @@ impl AttentionLedger {
     ///
     /// The last words win. A program that says two things before anyone is interrupted has changed
     /// what it is saying, and the older sentence is the one that is out of date.
-    pub(crate) fn announce(&mut self, words: Option<&str>) {
+    ///
+    /// # What the answer is for
+    ///
+    /// `true` means **this pane's live request has taken responsibility for this announcement**,
+    /// and the caller's event door is therefore not to raise a second interruption about it. §11.6
+    /// pin ② is explicit that a message arriving on a pane with a live, un-interrupted-about
+    /// request produces the program's words **once** — so the words go to exactly one place, and
+    /// the place they go to is the request, because a standing request is the stronger claim and
+    /// the one a reader can still act on.
+    ///
+    /// `false` is a pane with nothing standing, or one whose request has already spent its single
+    /// interruption. Either way there is no request for the announcement to be folded into, and it
+    /// is an event of its own — which is precisely what the event lane is.
+    ///
+    /// **The answer does not depend on whether there were words.** A message with an empty body on
+    /// a pane that is already asking is still that request's business; taking the branch on the
+    /// text would make an empty `OSC 9` raise a second interruption that a non-empty one does not.
+    pub(crate) fn announce(&mut self, words: Option<&str>) -> bool {
         if self.episode.is_none() || self.toasted {
-            return;
+            return false;
         }
-        if let Some(words) = words.filter(|words| !words.is_empty()) {
+        if let Some(words) = words.map(str::trim).filter(|words| !words.is_empty()) {
             self.lent = Some(words.to_owned());
         }
+        true
     }
 
     /// **A turn ended** (`attention` plan §11.7 and §13.3) — the event door, which mints nothing.
@@ -1368,6 +1383,26 @@ impl AttentionLedger {
     ///
     /// With the setting off the whole door is shut: no evaluation, no line, and **no bit set**, so
     /// that turning it off and on again cannot leave half a state behind.
+    ///
+    /// # What the bit is allowed to swallow, and what it is not
+    ///
+    /// §13.3 sets the bit on the first *accepted decision* so that a second source cannot deliver
+    /// a late flash about a turn that ended while you were watching. The sources it was written
+    /// about say nothing but "the turn ended" — a hook `Stop`, a bare bell, an `OSC 1337;…=once`
+    /// — and two of those in one turn are **the same fact arriving twice**, which is precisely
+    /// what deduplication is for.
+    ///
+    /// **An arrival carrying the program's own sentence is not that.** `OSC 9;<text>`,
+    /// `OSC 777;notify` and `OSC 99` are messages: they have words, and §11.6 rule 2 already
+    /// establishes that a program's own words are the one thing this terminal must not throw away.
+    /// A bit that swallowed the second of two *different* sentences would be this terminal deciding
+    /// that a build finishing and a deploy finishing are one event because nobody pressed a key in
+    /// between — and it would silently take away a delivery this product has always made. So the
+    /// rule is stated on the decision rather than on the arrival: **a later arrival for the same
+    /// turn is silent unless it says something the last accepted decision did not.** A restatement
+    /// of the same sentence is still the same fact and is still swallowed.
+    ///
+    /// `words` is the program's own sentence, or `None` for the sources that have none.
     pub(crate) fn announce_turn_end(
         &mut self,
         at: Site,
@@ -1375,12 +1410,23 @@ impl AttentionLedger {
         enabled: bool,
         source: Transport,
         via: Via,
+        words: Option<&str>,
     ) -> Outcome {
         let mut out = Outcome::default();
-        if !enabled || self.announced_turn_end {
+        // Trimmed before anything reads it, and once: the same sentence with a stray space is the
+        // same sentence, and a comparison made against the untrimmed spelling would let a program
+        // interrupt twice by printing its message a second time with a newline in front of it.
+        // It is also the form the reader sees — a toast body that begins with three spaces is a
+        // toast that looks broken.
+        let words = words.map(str::trim).filter(|words| !words.is_empty());
+        if !enabled {
+            return out;
+        }
+        if self.announced_turn_end && words.is_none_or(|new| Some(new) == self.announced_words()) {
             return out;
         }
         self.announced_turn_end = true;
+        self.announced_words = words.map(str::to_owned);
         out.lines.push(format!(
             "toast {at} why=turn-end episode=- reach={reach} src={source} via={via}"
         ));
@@ -1389,15 +1435,29 @@ impl AttentionLedger {
             reach,
             ticket: None,
             episode: None,
-            // **Not the lent sentence, and the reason is that there is no episode to lend it to.**
-            // The words an announcement leaves belong to one request (§11.6 rule 2), and a turn
-            // ending is not one — red line 14. The turn-end lane's own wording, and the case where
-            // the arrival that announced it carried text of its own, are the notification slice's:
-            // this lane raises nothing on this build, so composing a sentence here would be
-            // composing one nobody reads.
-            body: None,
+            // **The arrival's own words, and never the lent ones.** What [`Self::lent`] holds
+            // belongs to one request (§11.6 rule 2) and a turn ending is not one — red line 14, and
+            // borrowing across that line is how an event would crawl into being a state. What is
+            // carried here is the sentence *this* arrival brought, which is the case §11.7's
+            // wording clause is about: a program that wrote a sentence has said this better than
+            // anything composed from a pane name. `None` means the caller says it in its own voice.
+            body: words.map(str::to_owned),
         });
         out
+    }
+
+    fn announced_words(&self) -> Option<&str> {
+        self.announced_words.as_deref()
+    }
+
+    /// **Your next turn has begun**, so the one before it may be announced again.
+    ///
+    /// The two together and never one of them: a bit saying "already decided" beside the sentence
+    /// that decision carried is one fact in two fields, and clearing half of it would leave a
+    /// sentence from a finished turn able to silence an identical one in the next.
+    fn rearm_turn_end(&mut self) {
+        self.announced_turn_end = false;
+        self.announced_words = None;
     }
 }
 
