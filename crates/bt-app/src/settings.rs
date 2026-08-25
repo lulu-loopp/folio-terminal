@@ -16391,6 +16391,7 @@ mod tests {
             vec![
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
+                SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::Notifications
@@ -16477,6 +16478,7 @@ mod tests {
             vec![
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
+                SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::Notifications
@@ -17439,6 +17441,7 @@ mod tests {
                 SettingsRow::ContextMenu,
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
+                SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::Notifications
@@ -17477,6 +17480,7 @@ mod tests {
                 SettingsRow::ContextMenu,
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
+                SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::Notifications

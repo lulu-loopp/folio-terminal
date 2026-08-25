@@ -2887,7 +2887,7 @@ impl Text {
                 "A PowerShell pane whose $PROFILE does not load folio.ps1 shows one line offering to add it. Off stops the offer; a $PROFILE that already loads it is never asked about",
                 "PowerShell 窗格的 $PROFILE 没有加载 folio.ps1 时,在那个窗格里显示一行,提供加入的动作。关闭后不再提示;已经加载的 $PROFILE 本来就不会被问",
             ),
-            Self::RowClaudeHooks => pick(lang, "Claude Code hooks", "Claude Code hooks"),
+            Self::RowClaudeHooks => pick(lang, "Claude Code hooks", "Claude Code 钩子"),
             Self::DescClaudeHooks => pick(
                 lang,
                 "Adds hooks to your own ~/.claude/settings.json so Claude Code tells this window when it is waiting for you. Nothing is written into a folder or a repository",
