@@ -25,7 +25,7 @@ pub const SPIKE_DEFAULT_FROZEN_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).
 /// **The number is the published ladder times a margin, not a taste.** §7.1.6g
 /// costed one 80-column frozen line and read the ladder off it — 25,000 through
 /// 200,000 lines is "about 14 MB to 112 MB a pane". This build measures that same
-/// line at 632 bytes (`the_shape_of_a_frozen_line_is_measured_not_remembered`), so
+/// line at 636 bytes (`the_shape_of_a_frozen_line_is_measured_not_remembered`), so
 /// 2,048 is **3.2x** the shape the ladder was costed on, and the whole ladder sits
 /// under the ceiling it derives: what a pane may hold runs 48 MiB to 391 MiB while
 /// what §7.1.6g promises runs 15 MB to 126 MB.
@@ -1734,7 +1734,11 @@ mod tests {
         // Asserted, not described: twenty style spans are most of the ceiling, so
         // a `StyleSpan` that gains a field has to re-open `FROZEN_BYTES_PER_LINE`
         // rather than quietly shorten a rainbow pane's history.
-        assert_eq!(rainbow_80, 2_000, "the heaviest 80-column line there is");
+        //
+        // Re-derived 2026-08-24 when `captured_columns` joined every fragment
+        // (horizontal step one): four bytes a line, 2,000 → 2,004, and the
+        // ceiling still clears it with 2.1% to spare — so the ceiling stands.
+        assert_eq!(rainbow_80, 2_004, "the heaviest 80-column line there is");
         assert!(
             rainbow_80 < FROZEN_BYTES_PER_LINE,
             "the heaviest 80-column line costs {rainbow_80}, which the ceiling would take \
@@ -1742,8 +1746,8 @@ mod tests {
         );
 
         // The ladder §7.1.6g published, re-derived rather than remembered.
-        assert_eq!(plain_80, 632, "one 80-column frozen line");
-        for (lines, megabytes) in [(25_000, 15), (100_000, 63), (200_000, 126)] {
+        assert_eq!(plain_80, 636, "one 80-column frozen line");
+        for (lines, megabytes) in [(25_000, 15), (100_000, 63), (200_000, 127)] {
             assert_eq!((lines * plain_80) / 1_000_000, megabytes, "{lines} lines");
         }
 
