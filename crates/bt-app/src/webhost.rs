@@ -1256,6 +1256,19 @@ pub(crate) struct WebSeat {
     wanted_size: Option<(u32, u32)>,
     /// And what the engine has actually been told about it.
     sized: Option<(u32, u32)>,
+    /// **The rectangle the compositor was last given for this page's pair** —
+    /// its floor and, once there is one, its visual.
+    ///
+    /// The third cache of exactly the kind the two above are, and it exists for
+    /// the same reason: since the first-open ruling of 2026-08-25 the placement
+    /// is made on the pane's clock rather than on presence transitions, so it is
+    /// asked every frame and must cost one comparison when nothing moved.
+    ///
+    /// Cleared in the one place the pair itself changes — the page's visual
+    /// joining the tree in [`WebSeat::step`]'s `InstallEvents` arm — because a
+    /// visual that has just arrived has been placed nowhere, however well
+    /// placed the floor beneath it already is.
+    placed: Option<WebBounds>,
     /// Which buttons the page believes are down.
     ///
     /// Kept here and nowhere else because it is derived from the very events
@@ -1395,6 +1408,7 @@ impl WebSeat {
             presence: None,
             wanted_size: None,
             sized: None,
+            placed: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             last_left_press: None,
             minted,
@@ -1818,12 +1832,17 @@ impl WebSeat {
                 // before it is told to do anything at all.
                 compositor.attach_web_visual(self.address.page)?;
                 self.host.install(compositor, self.address.page)?;
+                // **A visual that has just joined the tree has not been placed**
+                // — whatever the floor under it was told. The cache speaks for
+                // the pair, so the pair changing is what clears it, and this is
+                // the one line in the program where the pair changes.
+                self.placed = None;
                 // **Before the navigation, never after.** The next line's
                 // acknowledgement produces the first `Navigate`, and a page that
                 // begins loading against the controller's default zero-by-zero
                 // bounds rasters its text for a viewport it will never be shown
                 // in. See [`WebSeat::wanted`].
-                self.apply_presence(compositor)?;
+                self.stand_on_the_floor(compositor)?;
                 let generation = self.machine.generation();
                 Ok(Some(self.machine.on_events_installed(generation)))
             }
@@ -1957,18 +1976,22 @@ impl WebSeat {
         claim_for(&self.claims, chord).map(|claim| claim.action)
     }
 
-    /// Put the page where the seat is, or take it off the glass.
+    /// Put the page where the seat is, or take it off the glass — and say
+    /// whether a **floor** now stands at that rectangle.
     ///
     /// One call sets the engine's bounds, the visual's offset and its clip; the
     /// frame that follows publishes all three in the same `Commit`, which is the
     /// whole reason the visual path exists — the WebView2 spike measured zero
     /// seam here against 4–10 px of tearing on the child-window path.
+    ///
+    /// The answer is what the caller cuts the hole on: `true` means this seat's
+    /// rectangle has ground under it right now. See [`Self::stand_on_the_floor`].
     pub(crate) fn place(
         &mut self,
         compositor: &bt_platform::Compositor,
         presence: WebPresence,
         size: Option<(u32, u32)>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         self.wanted = presence;
         // **The size is not the presence** (W2 slice ③). A seat's rectangle
         // exists whenever its pane does; whether the page is *on the glass* is a
@@ -1978,12 +2001,60 @@ impl WebSeat {
         if let Some(size) = size {
             self.wanted_size = Some(size);
         }
-        self.apply_presence(compositor)
+        self.stand_on_the_floor(compositor)
     }
 
-    /// Tell the engine where it is, if there is an engine and it does not know
-    /// already.
-    fn apply_presence(&mut self, compositor: &bt_platform::Compositor) -> Result<(), String> {
+    /// **The floor, then the page, then the visibility — in that order, on
+    /// every path that puts this seat on the glass** (user ruling, 2026-08-25).
+    ///
+    /// The placement used to live inside [`Self::apply_presence`], behind that
+    /// method's first line: `if !self.host.has_controller() { return Ok(()) }`.
+    /// So a page that had been asked for but whose engine had not arrived was
+    /// placed nowhere at all — while `bt_app::Runtime::sync_web_page` was
+    /// already cutting the hole for it every frame, because a seat's rectangle
+    /// is a fact about the layout and owes the browser nothing. Measured on the
+    /// machine (release, cold profile): twelve presented frames of hole with no
+    /// engine, 403 ms, and a magenta board behind the window photographed
+    /// filling the whole pane body for 426 ms.
+    ///
+    /// So placing is taken out from behind the engine's gate and made this
+    /// method, which every door goes through. It returns whether the floor
+    /// stands, and the hole is cut on that answer and on nothing else.
+    ///
+    /// [`Self::placed`] is why this is cheap enough to run every frame: a
+    /// rectangle that has not moved is not placed again, exactly as a size that
+    /// has not changed is not re-sent.
+    fn stand_on_the_floor(&mut self, compositor: &bt_platform::Compositor) -> Result<bool, String> {
+        let floored = match self.wanted {
+            // A hidden page has no rectangle to stand anything on, and the
+            // caller cuts no hole for it either.
+            WebPresence::Hidden => false,
+            WebPresence::Shown(bounds) => {
+                if self.placed != Some(bounds) {
+                    compositor.place_web_visual(
+                        self.address.page,
+                        (bounds.x, bounds.y),
+                        (0.0, 0.0, bounds.width as f32, bounds.height as f32),
+                    )?;
+                    // Only once the call has returned: the cache says "the
+                    // compositor was told this", and a refusal told it nothing.
+                    self.placed = Some(bounds);
+                }
+                true
+            }
+        };
+        self.apply_presence()?;
+        Ok(floored)
+    }
+
+    /// Tell the engine how big it is and whether it is on the glass, if there is
+    /// an engine and it does not know already.
+    ///
+    /// **No compositor**, since 2026-08-25: where the page *is* belongs to
+    /// [`WebSeat::stand_on_the_floor`], which runs whether or not this method
+    /// has anything to say. Taking the argument away is what keeps that true —
+    /// a placement cannot be added back in here without someone noticing.
+    fn apply_presence(&mut self) -> Result<(), String> {
         if !self.host.has_controller() {
             return Ok(());
         }
@@ -2005,16 +2076,13 @@ impl WebSeat {
             return Ok(());
         }
         self.presence = Some(self.wanted);
+        // Visibility only. **Where** the page is was settled by
+        // [`Self::stand_on_the_floor`] before this was called, on every path,
+        // so that a page is never made visible at a rectangle it has not been
+        // given — and so that a page with no engine is still given one.
         match self.wanted {
             WebPresence::Hidden => self.host.set_visible(false),
-            WebPresence::Shown(bounds) => {
-                compositor.place_web_visual(
-                    self.address.page,
-                    (bounds.x, bounds.y),
-                    (0.0, 0.0, bounds.width as f32, bounds.height as f32),
-                )?;
-                self.host.set_visible(true)
-            }
+            WebPresence::Shown(_) => self.host.set_visible(true),
         }
     }
 
@@ -2149,14 +2217,16 @@ impl WebSeat {
     /// **This seat is now that seat, in that window** — the whole of the model
     /// commit, and the half that needs no compositor.
     ///
-    /// The two presence caches go with the address, because they record what *an
-    /// engine in the old window* had already been told. Left standing, the next
-    /// frame would decide it had nothing to say and the page would sit at the
-    /// old window's rectangle inside the new one.
+    /// The three caches go with the address, because they record what *the old
+    /// window* had already been told. Left standing, the next frame would decide
+    /// it had nothing to say and the page would sit at the old window's
+    /// rectangle inside the new one — and, since 2026-08-25, its floor would be
+    /// a floor in a window it has left.
     fn take_address(&mut self, address: SeatAddress) {
         self.address = address;
         self.presence = None;
         self.sized = None;
+        self.placed = None;
     }
 
     /// Give the window being left a page that believes nothing is pressed and
@@ -3232,6 +3302,7 @@ mod rehost_address_tests {
             presence: None,
             wanted_size: None,
             sized: None,
+            placed: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             last_left_press: None,
             minted: Mint::Nothing,

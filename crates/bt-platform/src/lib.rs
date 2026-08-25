@@ -566,14 +566,21 @@ mod visual_layer_tests {
         let call = &source[source
             .find(opens_with)
             .expect("the call this test just counted")..];
+        // `floor` is what the one door that mints one hands back — the ground's
+        // `holder`, and the only visual a page is ever allowed to name here.
         assert!(
             call.starts_with(concat!(
                 "AddVisual",
-                "(&web,INSERT_ABOVE_REFERENCE,Some(&ground.holder))"
+                "(&web,INSERT_ABOVE_REFERENCE,Some(&floor))"
             )),
             "the web visual's insertion must name the sibling it is claiming a \
              slot above rather than a bare boolean and a NULL: {}",
             &call[..call.len().min(120)]
+        );
+        assert!(
+            source.contains(concat!("letfloor=self.ensure_page", "_ground(page)?;")),
+            "the sibling the page names must be the floor the one minting door \
+             handed back, or it is some other visual wearing that name"
         );
         assert!(
             !source.contains(concat!("AddVisual", "(&web,VisualLayer::Top")),
@@ -639,6 +646,86 @@ mod visual_layer_tests {
         assert!(
             teardown_body.contains(concat!("web_ground", ".borrow_mut().remove(&page)")),
             "a page's floor leaves with the page"
+        );
+    }
+
+    /// **A page's floor is minted by the pane's clock, not the browser's**
+    /// (§7.14 amended; user ruling 2026-08-25).
+    ///
+    /// The floor used to be built inside `attach_web_visual`, which runs on
+    /// `WebEffect::InstallEvents` — i.e. once WebView2 has handed back a
+    /// controller. The *hole* over it is cut by the app on the first frame the
+    /// seat has a rectangle, which is hundreds of milliseconds earlier and does
+    /// not depend on the engine arriving at all. So a page's **first** open cut
+    /// a hole over nothing, and a `topmost = true` target on a per-pixel-alpha
+    /// HWND shows the desktop through nothing. **Measured before the fix**
+    /// (release, cold profile): twelve presented frames of hole with no engine,
+    /// 403 ms; a magenta board behind the window photographed filling the entire
+    /// pane body from 88.5 ms to 514.6 ms after the page was asked for.
+    ///
+    /// The cure is that `place_web_visual` — which is called on the pane's own
+    /// clock, every frame the seat has a rectangle — *mints* the floor if this
+    /// page has none, before anything in it may return early. Returning at all
+    /// is that call's promise that a floor stands at `clip`; the app cuts no
+    /// hole without it (`bt_app::hole_for`).
+    ///
+    /// A source pin, for this module's standing reason: DirectComposition
+    /// cannot be asked what is in a tree, so what a machine can hold is the
+    /// shape of the calls — and the shape *is* the fix.
+    ///
+    /// Red gate: move `ensure_page_ground` below the `let Some(web)` early
+    /// return in `place_web_visual` and the first assertion goes red — that is
+    /// the shipped behaviour, engine-gated and photographed. Give
+    /// `attach_web_visual` its own `create_page_ground` call back and the last
+    /// one does: two doors that mint a floor, and the second one builds a
+    /// duplicate under a page that already had one.
+    #[test]
+    fn a_pages_floor_is_minted_by_whoever_first_places_it_and_not_by_the_engine() {
+        let source: String = include_str!("lib.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let placement = source
+            .find(concat!("pubfnplace_web", "_visual("))
+            .expect("the one door that places a page");
+        let next_door = source[placement..]
+            .find(concat!("fnplace_", "clip("))
+            .expect("the helper that follows it");
+        let body = &source[placement..placement + next_door];
+
+        let mints = body
+            .find(concat!("self.ensure_page", "_ground(page)?"))
+            .expect(
+                "the call that places a page must mint its floor: without it a \
+                 page's first open is a hole with nothing under it",
+            );
+        let gives_up = body
+            .find(concat!("letSome(web)=", "borrowed.get(&page)else"))
+            .expect("the early return for a page whose engine has not arrived");
+        assert!(
+            mints < gives_up,
+            "the floor is minted behind the engine's absence, so the frames \
+             before a controller arrives are a hole over the desktop: {body}"
+        );
+
+        // And exactly one door mints one, so the floor a placement made and the
+        // floor an attachment expects can never be two different floors.
+        assert_eq!(
+            source
+                .matches(concat!("self.create_page", "_ground()?"))
+                .count(),
+            1,
+            "a page's floor is built in more than one place"
+        );
+        let attach = source
+            .find(concat!("pubfnattach_web", "_visual("))
+            .expect("the one door that puts a page in the tree");
+        let attach_body = &source[attach..attach + 900];
+        assert!(
+            attach_body.contains(concat!("self.ensure_page", "_ground(page)?")),
+            "attaching a page does not go through the one door that mints a \
+             floor, so a page placed before its engine arrived gets a second \
+             one: {attach_body}"
         );
     }
 
@@ -2130,20 +2217,57 @@ mod windows_impl {
             if self.web.borrow().contains_key(&page) {
                 return Ok(());
             }
-            // **The floor goes down before the page does** (§7.14). It is a
-            // sibling at the very bottom and the page is inserted *above it by
-            // name* rather than at the beginning of the list again, so the two
-            // cannot be ordered by the accident of which call ran last.
-            let ground = self.create_page_ground()?;
+            // **The floor goes down before the page does** (§7.14), and by the
+            // time this runs it is usually already down: since the first-open
+            // ruling of 2026-08-25 the floor is minted by whoever first *places*
+            // this page, which is frames or seconds before the engine exists.
+            // Either way there is exactly one door that mints one
+            // ([`Self::ensure_page_ground`]) and the page is inserted *above it
+            // by name* rather than at the beginning of the list again, so the
+            // two cannot be ordered by the accident of which call ran last.
+            let floor = self.ensure_page_ground(page)?;
             let web = Self::create_visual(&self.device, "web")?;
             unsafe {
                 self.root
-                    .AddVisual(&web, INSERT_ABOVE_REFERENCE, Some(&ground.holder))
+                    .AddVisual(&web, INSERT_ABOVE_REFERENCE, Some(&floor))
             }
             .map_err(|error| compositor_failure("IDCompositionVisual::AddVisual(web)", &error))?;
-            self.web_ground.borrow_mut().insert(page, ground);
             self.web.borrow_mut().insert(page, web);
             Ok(())
+        }
+
+        /// **This page has a floor, whether or not it has an engine yet.**
+        /// Idempotent.
+        ///
+        /// # The defect this exists for (user ruling, 2026-08-25)
+        ///
+        /// A page's floor used to be minted by [`Self::attach_web_visual`],
+        /// which runs on `WebEffect::InstallEvents` — i.e. only once WebView2
+        /// has handed back a controller. The *hole*, meanwhile, is cut by
+        /// `bt_app::Runtime::sync_web_page` on the first frame the seat has a
+        /// rectangle at all. So a page's first open opened a hole over a floor
+        /// that did not exist, and a window bound `topmost = true` over a
+        /// per-pixel-alpha HWND shows the desktop through it. **Measured on the
+        /// machine, release, cold profile: twelve presented frames carried the
+        /// hole with no engine and no floor — 403 ms of them — and a magenta
+        /// board placed behind the window was photographed filling the whole
+        /// pane body for 426 ms.**
+        ///
+        /// So the floor's birth is moved to the first thing that happens *by the
+        /// pane's own clock* rather than the browser's: being placed. The app
+        /// keeps the other half of the bargain by cutting no hole until a
+        /// placement has returned (`bt_app::Runtime::hole_for`).
+        /// Hands back the floor's `holder`, which is the visual a page is
+        /// inserted directly above — so the caller that needs it never has to
+        /// ask the map a second time for something it has just been given.
+        fn ensure_page_ground(&self, page: PageVisual) -> Result<IDCompositionVisual, String> {
+            if let Some(ground) = self.web_ground.borrow().get(&page) {
+                return Ok(ground.holder.clone());
+            }
+            let ground = self.create_page_ground()?;
+            let holder = ground.holder.clone();
+            self.web_ground.borrow_mut().insert(page, ground);
+            Ok(holder)
         }
 
         /// **A page's floor: one texel of the window's own ground, stretched.**
@@ -2410,21 +2534,17 @@ mod windows_impl {
             offset: (i32, i32),
             clip: (f32, f32, f32, f32),
         ) -> Result<(), String> {
-            let borrowed = self.web.borrow();
-            let Some(web) = borrowed.get(&page) else {
-                return Ok(());
-            };
+            // **The floor first, and the floor unconditionally.** It is minted
+            // here if this is the first time this page has been put anywhere,
+            // because the engine is not what a pane's rectangle waits on — see
+            // [`Self::ensure_page_ground`] for the first-open defect that is.
+            // Returning at all is this call's promise that a floor stands at
+            // `clip`, and the app cuts no hole without that promise.
+            self.ensure_page_ground(page)?;
             let (x, y) = composition_visual_offset(offset.0, offset.1);
-            unsafe { web.SetOffsetX2(x) }.map_err(|error| {
-                compositor_failure("IDCompositionVisual::SetOffsetX(web)", &error)
-            })?;
-            unsafe { web.SetOffsetY2(y) }.map_err(|error| {
-                compositor_failure("IDCompositionVisual::SetOffsetY(web)", &error)
-            })?;
-            self.place_clip(web, clip, "web")?;
             // **The floor is placed by the same call, at the same rectangle.**
             // Not by a second call the caller has to remember, and not on a
-            // clock of its own: the whole defect this fixes is two rectangles
+            // clock of its own: the whole defect §7.14 fixes is two rectangles
             // disagreeing for a few frames, and a floor that could be placed
             // separately from the pane it is under would be a third one.
             let grounds = self.web_ground.borrow();
@@ -2462,7 +2582,23 @@ mod windows_impl {
                     "IDCompositionMatrixTransform::SetMatrixElement(ground)",
                     &error,
                 )
-            })
+            })?;
+            // **And the page on top of it, if there is one yet.** The engine
+            // arrives on its own clock and this call is made on the pane's, so
+            // the ordinary case for the first few hundred milliseconds of a
+            // page's life is a floor with nothing standing on it — which is the
+            // whole point, and not a reason to have refused the floor.
+            let borrowed = self.web.borrow();
+            let Some(web) = borrowed.get(&page) else {
+                return Ok(());
+            };
+            unsafe { web.SetOffsetX2(x) }.map_err(|error| {
+                compositor_failure("IDCompositionVisual::SetOffsetX(web)", &error)
+            })?;
+            unsafe { web.SetOffsetY2(y) }.map_err(|error| {
+                compositor_failure("IDCompositionVisual::SetOffsetY(web)", &error)
+            })?;
+            self.place_clip(web, clip, "web")
         }
 
         /// Crop one visual to `clip`, in that visual's own coordinates.

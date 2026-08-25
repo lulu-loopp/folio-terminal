@@ -2281,7 +2281,6 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **真正的病在离开那扇门。** `ChromePointer` 有两个频道——`hover`(指针压在哪枚控件上)与 `pane_hover`(指针站在哪个 pane 里),而**每一张 pane 头的悬停行都挂在后者**:终端头的 `⌄`/🗀/`×`,网页头的分隔线、`</>`、pop-out、锁。`pointer_left` 只清了前者,于是**手离开窗口之后整行还亮着**;而**拖窗口边框调宽窄时,那条边是非客户区,整个手势里手都算「已经离开」**——这就是为什么它看起来像是随宽度来去。实机复证(1920×1200,debug,`APPDATA`/`LOCALAPPDATA`/UDF 全隔离):指针停在头上 → 十一簇墨;指针移到桌面 (5,5) → **十一簇一个不少地留着**。落地是把两个频道合进一扇门 `ChromePointer::left_the_window()`,两个字段一起取(先取后合,`||` 会短路掉第二个),这样它们再也漂不开。红测 `a_pointer_that_has_left_the_window_is_standing_in_no_pane`。
 
-<<<<<<< HEAD
 ### 7.14 一块预览由它的 pane 叫出名字（预览块按叶寻址，2026-08-24，已落地；`crates/bt-app/src/{main,seats,profiles,toast,tooltip}.rs`）
 
 **§7.12 ⓑ 的结清片,而且只做一件事:`PreviewSurface::Seat` 从裸 `SeatId` 换成 `LeafId{tab,seat}`。** §7.12 ④ 当日只把网页这条道上的三处按 `leaf.tab` 定位了,理由写在那一段末尾:表面本身还是一个座位号,所以剩下的读者仍然要去猜。这一片把名字补齐,和 §7.12 ② 是同一句话——**座位号只在它自己那张 tab 内唯一**,每一个被抽出来成 tab 的 pane 都从 `SeatId(1)` 重新起号(`seats::Seats::lone_seat`),而解析这个名字的门跨整扇窗。
@@ -2323,7 +2322,6 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 ![切到 TAB-ONE:同一个文件、同一个座位号,它停在自己的 LINE 028,LINE 050 一个字没有,头上没有脏点](plans/web-preview/preview-leaf-evidence/two-tabs-one-file-the-other-tab-is-untouched.png)
 
 **⑥ 欠账一笔。** 一张开着的切换器现在**跟着 tab 走**:换到别的 tab 它不画也不吞键,换回来它还在。这是按叶寻址落下来的直接后果,不是裁决——「换 tab 要不要顺手关掉浮层」是一条独立的规矩,本片不替它做决定;真要关,该关在换 tab 那一处,而不是让切换器把自己的身份丢掉。
-=======
 ### 7.14 网页 pane 站在一块自己窗口的地面上（Web 预览块 地面单，2026-08-24，已落地；`crates/bt-platform/src/lib.rs`、`crates/bt-render/src/lib.rs`、`crates/bt-app/src/main.rs`）
 
 **一个 pane 是一个洞，而洞的两条边不在同一台钟上（用户裁决 2026-08-24）。** §7.8 ② 写着这个洞是怎么来的：`set_web_holes` 在 pane 的矩形上写 `(0,0,0,0)`，压在底下的网页才看得见。**洞是 Folio 在 pane 挪动的那一帧按自己的矩形挖的，而底下那张页是一个浏览器，它按自己的钟长到新尺寸里去。** 中间那几帧里，「Folio 已经不画的那块」减去「浏览器还没长到的那块」是一片**树里没有任何东西落笔的区域**——而这扇窗是 `CreateTargetForHwnd(hwnd, topmost = true)` 绑在一个开了逐像素 alpha 的 HWND 上的（§2.3 A2 + `.with_transparent(true)`），所以那里透出来的是桌面。**修前留证（2026-08-24，1920×1200 → 2600×1420 实机拉宽，逐帧抓拍）**：Folio 自己的窗框里出现了它背后那两个应用，一个白底文档窗和一条深青色终端，连同它们的文字。
@@ -2335,7 +2333,21 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 - **颜色是「预乘之后再编码」，不是「在 sRGB 里相乘」。** swapchain 是 `Bgra8UnormSrgb`，wgpu 把线性的清屏色在入口处编码一次，所以玻璃上那个字节是 `srgb(linear(c)·a)`；地板是一张 `_UNORM` 的 surface，写进去什么就是什么。两条路里只有一条的转换是恒等的，弄反了不会失败——它画出一块比周围窗户浅一点点的 pane，正是那种能通过评审、由真机报回来的毛病。`bt_render::window_ground_premultiplied_srgb` 是唯一的算处（alpha **不编码**：sRGB 是给光的传递曲线，alpha 存的是线性量，和 `premultiplied_clear` 乘三个数抄第四个是同一条理由）。红测 `a_web_panes_floor_carries_the_windows_own_ground_encoded_the_way_the_swapchain_encodes_it`，红门是「在 sRGB 里乘」——60% 压在 `#1E1E1E` 上落在另一个字节上。
 - **热切跟着既有那一扇门走，不新开。** `install_page_ground_color` 就贴在 `install_theme_class_background` 旁边，两个调用点一模一样（开窗、`adopt_new_palette`）：类背景刷回答「resize 张开的那条带露出什么」，这块地板回答「网页 pane 上浏览器还没铺到的地方露出什么」，**两个答案是同一块地面**，分开写就是主题一翻有一个被落下。一次重画一个纹素，窗里每一张页都跟着变，因为它们看的是同一张 surface——所以热切换不需要在任何地方存一张页的名单。
 - **挂账。** ⓐ **窗口整体 resize 张开的那条带仍然是透明的**，并且这一单没有碰它：那一条是 swapchain 落后于窗口，不是浏览器落后于 pane，Folio 还没画第一帧的时候地板也还在旧矩形上。§7.1.6c-4b 的「代价明写」说的就是它，那一段今天仍然成立，只是「不透明时仍然装刷子」这半句已经不再兑现——`.with_transparent(true)` 变成无条件之后类背景刷不再挡得住桌面，实拍为证。**这是下一单**。**——ⓐ 已还清（2026-08-24，见 §7.1.6c-4b「resize 张开的那条带」那一条）**：合成树根上两块常驻地面色 visual，尺寸由纯函数「窗口减 swapchain」给，`Resized` 第一句话摆好并自己 commit；这一片铸的那张 1×1 预乘纹素现在由**窗口**铸出而不是由第一张页铸出，裙边与网页地板共用同一张——两块地面永远是同一块地面，主题一翻一次重画全跟着走。ⓑ **`place_web_visual` 每帧新建一个 `IDCompositionRectangleClip`** 的旧账原样留着，地板只是走了同一条路（`place_clip`）而没有加重它——两个 visual 一帧两次，账上记的是同一件事。ⓒ **浏览器真正落后的那几帧没有拍到照片**：这台探针每注入一步就要 50-100ms 存一张位图，而 WebView2 在一张 example.com 或一页维基上早就跟上了；钉住这一片的是上面两条红测和树的形状，实拍到的是同一个机理更长命的那一面。
->>>>>>> opaque-flight-and-web-ground
+
+#### 7.14a 洞不许比地板先出生（首开露桌面，2026-08-25，已落地；`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/{main,webhost}.rs`）
+
+**上面那一片修的是「地板落后于 pane 几帧」，这一片修的是「地板整整几百毫秒根本不存在」——同一个洞，另一段窗口期，用户实机截图整块右 pane 是桌面壁纸。**
+
+- **两条边仍然不在同一台钟上，而这一次差的不是几帧。** 洞由 `Runtime::sync_web_page` 在**座位有矩形的第一帧**挖：`web_presence` 只问 body 有没有矩形、有没有东西压着，一个字都不问浏览器。地板却由 `Compositor::attach_web_visual` 铸，而它挂在 `WebEffect::InstallEvents` 上——**WebView2 把 controller 交回来那一刻**。首开时那是几百毫秒；引擎起不来时那是永远。中间每一帧，pane 是一个树里没有任何东西落笔的矩形，压在 `topmost = true` 的目标上、绑在开了逐像素 alpha 的 HWND 上：**那就是桌面，整块，不是一条缝**。
+- **修前实测（release，冷 profile，`APPDATA`/`LOCALAPPDATA` 全隔离，副屏，窗口背后贴一块品红底板窗）**。① 代码侧计数：**12 个已呈现帧带着洞而 `engine_up=false`，跨度 403 ms**。② 相机侧：品红从按下 `Ctrl+Shift+L` 后 **88.5 ms 起、514.6 ms 止，窗口期 426 ms**，峰值 120 056 个采样像素（每轴隔一取一），包围盒 `702,90..1398,776` **正是页 body 的那一块**；第二轮 109.5→413.2 ms，同样的包围盒。**两轮两中**。修后同一条探针、同样的冷 profile **两轮零中**——窗框里一个品红像素都没有，峰值 0。
+  - 底板不用改桌面：桌面被别的窗盖满时量到的是别人的窗。所以是一扇无边框品红窗贴在 Folio 正后方、外扩 40 px，那一圈外扩就是探针自己的自证（读不到品红就拒绝出数）。**颜色不能按定值比对**：同一块底板在裸桌面上读到 `211,0,211`、透过窗口自己的 alpha 读到 `255,0,255`，所以判据是「明确是品红」而不是一个键值——Folio 的配色里没有品红。
+- **修法是一条顺序，不是一层兜底：洞的前置条件改成地板的存在，而地板改由「谁第一次摆这张页」铸。**
+  - `Compositor::ensure_page_ground` 是**唯一**铸地板的门（幂等）。`place_web_visual` 第一句就走它，而且**在任何一处可能提前 return 的语句之前**——「这次调用返回了」就是「`clip` 上站着一块地板」的承诺。页自己的 visual 反过来变成可选的那一半：引擎还没来就摆地板、不摆页，这正是要的。`attach_web_visual` 也走同一扇门，所以先摆后挂不会挂出第二块地板。
+  - `WebSeat::place` 返回**地板站住了没有**，而摆放本身从 `apply_presence` 里搬出来、放进 `stand_on_the_floor`：旧的摆放藏在 `apply_presence` 第一句 `if !self.host.has_controller() { return }` 的后面，那一句就是这个缺陷。`apply_presence` 现在**连 compositor 参数都收走了**——它只管尺寸和可见性，摆放再也写不回去。顺序在每一条路上都是**地板 → 页 → 可见**。
+  - `Runtime::hole_for(presence, floored)` 是那句裁决本身，纯函数：`Shown` 且 `floored` 才有洞。摆放失败只打 stderr 而洞照挖，正是修前的形状。
+  - **每帧摆放的代价用第三个缓存抵掉**：`WebSeat::placed` 记住上次给 compositor 的矩形，没动就一次比较——和 `sized`、`presence` 是同一类东西，也和它们一起在 `take_address` 里跟着地址走。它在**唯一改变「地板+页」这一对**的地方被清掉：`InstallEvents` 里 visual 刚进树的那一句。
+- **红测三扇门**。`a_hole_is_only_cut_where_a_floor_already_stands`（bt-app，纯值）——让 `hole_for` 不看 `floored` 就红，而那正是用户拍到的那个 build。`a_pages_floor_is_minted_by_whoever_first_places_it_and_not_by_the_engine`（bt-platform，源钉）——把 `let Some(web) … else { return }` 挪到 `ensure_page_ground` 之前第一句红，给 `attach_web_visual` 塞回一次自己的 `create_page_ground` 最后一句红。上一片的 `a_pages_floor_is_placed_and_removed_with_the_page_and_never_alone` 原样仍绿：一次调用摆两个、一次调用撤两个，这一片只是把「摆」提前到了引擎之前。
+- **挂账**。ⓐ `place_web_visual` 每帧新建 `IDCompositionRectangleClip` 的旧账（上一片的 ⓑ）**没有加重也没有清**：摆放现在按帧问，但 `placed` 让没动的帧一次都不进去，所以真正建 clip 的次数仍然是「矩形变了几次」。要清得把 clip 对象存下来原地改，那是另一张单。ⓑ **引擎一直起不来的窗口**现在显示的是一块纯地面色的 pane，而不是桌面——这是裁决要的，但「页起不来该显示什么」（卡片？文案？）是 §7.7 ④ 那条道上的产品问题，本片不替它作答。ⓒ 本片顺手清掉了 `docs/DESIGN.md` 里 §7.14 那一段**遗留在仓库里的合并冲突标记**（`<<<<<<< HEAD` / `=======` / `>>>>>>> opaque-flight-and-web-ground`），因为要改的正是这一段；**第 84 行附近还有一组同样的标记没有动**，那不在本单范围里。
 
 ## 8. 依赖策略
 
