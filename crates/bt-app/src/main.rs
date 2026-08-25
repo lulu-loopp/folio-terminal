@@ -10358,6 +10358,49 @@ fn keyboard_owner_is_a_shell(owner: KeyboardOwner) -> bool {
     matches!(ime_owner(owner), ImeOwner::Shell)
 }
 
+/// **Whether one seat's shell is, right now, the true owner of the keyboard** —
+/// the thing DEC 1004's `CSI I`/`CSI O` means, and the whole of what slice A0.5
+/// reports (attention plan §3.0, §10.10; Q8 ruled 2026-08-25).
+///
+/// Four bits and a conjunction, and every one of them is a way for the answer to
+/// be no:
+///
+/// - `window_focused` — this window has the desktop's keyboard at all.
+/// - `tab_is_active` — this tab is the one on screen. A pane in a background tab
+///   is not being typed into however the window stands.
+/// - `seat_is_focused_leaf` — of the panes this tab holds, this is the one. A
+///   three-seat tab has one keyboard and two agents who ought to know they are
+///   not holding it (§3.0's D10: that is why the report is per pane and not per
+///   window).
+/// - `owner_is_a_shell` — the keyboard is in a *terminal* and not in a preview,
+///   a page, a files tree, a search capsule, a rename field or a menu.
+///
+/// **The fourth bit is the one the first draft was missing** (evidence in
+/// §10.10). [`TabState::focused_leaf`] names *the shell the keyboard falls back
+/// to* — it is written for seats that are in `sessions`, which is to say for
+/// terminals — so it goes on naming a pane while a page beside it is being typed
+/// into. Click a files tree and the window's focus has not moved a bit; a
+/// predicate written on three bits would say the shell still has the keyboard,
+/// and the agent inside it would go on believing you were reading it.
+///
+/// **Visibility is not one of the bits, deliberately.** A tab becoming visible
+/// while something else holds the keyboard sends nothing: the protocol reports
+/// input focus, not eyes (§10.10, and the v1 leaning it supplies the reason
+/// for). Focus mode adds no bit either — it does not mint a keyboard owner of
+/// its own, and a card taking the stage still resolves to `focused_leaf`.
+///
+/// `sessions.contains_key(seat)` is an address guard rather than a fifth fact
+/// about the product, and stays out of here for that reason: a seat with no
+/// session has no PTY to be told anything.
+fn seat_holds_the_keyboard(
+    window_focused: bool,
+    tab_is_active: bool,
+    seat_is_focused_leaf: bool,
+    owner_is_a_shell: bool,
+) -> bool {
+    window_focused && tab_is_active && seat_is_focused_leaf && owner_is_a_shell
+}
+
 /// A foot that is confirming a reveal.
 ///
 /// Two chassis wear the same strip — `.float-win .fly-foot` and
@@ -22640,7 +22683,11 @@ fn terminal_palette(
 /// It was invisible while `window_title` was the layer that named things, and
 /// every profile has it: a PowerShell tab is folder-named too. What made it
 /// surface now is Command Prompt, whose only report *is* the folder.
-fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
+///
+/// `holds_the_keyboard` is [`seat_holds_the_keyboard`] already answered for this
+/// pane — the four bits are the window's and the tab's, and a leaf can supply
+/// none of them about itself.
+fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<DrainOutcome> {
     if leaf.pty.is_none() {
         return Ok(DrainOutcome::default());
     }
@@ -22710,9 +22757,22 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
         .ring_stats()
         .current_bytes
         > 0;
-    // A canvas notification, and any colour answer queued behind it, is owed to
-    // a child that has said nothing — so the reply channel is drained once more
-    // outside the read above, which only feeds when the child speaks.
+    // **Where the keyboard is, told to whoever subscribed to hear it** (DEC
+    // 1004; attention plan slice A0.5). Told on every turn for the palette's
+    // reason one screen up — the answer is four facts a window can move in a
+    // dozen places — and the call is a comparison that queues bytes only when
+    // the answer actually changed and only for a pane that asked.
+    //
+    // **After the feed and not beside the palette**, because the bit it consults
+    // is written by the bytes just fed: ConPTY sends `\e[?1004h` ahead of the
+    // first program, so a pane subscribes on the very turn it is born, and a
+    // reconciliation that ran before the feed would owe that pane its opening
+    // report until something else happened to wake the loop.
+    leaf.session.set_keyboard_focus(holds_the_keyboard);
+    // A canvas notification, a focus report, and any colour answer queued behind
+    // them, are owed to a child that has said nothing — so the reply channel is
+    // drained once more outside the read above, which only feeds when the child
+    // speaks.
     for reply in leaf.session.take_pty_writes() {
         write_pty_input(
             leaf.pty.as_ref(),
@@ -23009,14 +23069,29 @@ fn git_document_question(
 /// tab" has always meant *all of it*: a background pane that stops being read
 /// fills its pipe and blocks the shell writing into it. The tab's answer is the
 /// union of its leaves' — anything arrived anywhere, any title moved anywhere.
-fn drain_tab_pty(tab: &mut TabState) -> Result<DrainOutcome> {
+///
+/// The three bools are the bits of [`seat_holds_the_keyboard`] a leaf cannot
+/// answer about itself; this loop supplies the fourth from the seat it is on,
+/// and that predicate — not this signature — is where the four are joined.
+fn drain_tab_pty(
+    tab: &mut TabState,
+    window_focused: bool,
+    tab_is_active: bool,
+    owner_is_a_shell: bool,
+) -> Result<DrainOutcome> {
     // Copied before the loop, which then holds the tab mutably. It is the one
     // fact this loop needs that a leaf cannot supply about itself: whether the
     // pane it just heard is the pane the frame path is going to compose.
     let focused = tab.focused_leaf;
     let mut outcome = DrainOutcome::default();
     for (seat, leaf) in tab.leaves_mut() {
-        let mut leaf_outcome = drain_leaf_pty(leaf)?;
+        let holds_the_keyboard = seat_holds_the_keyboard(
+            window_focused,
+            tab_is_active,
+            *seat == focused,
+            owner_is_a_shell,
+        );
+        let mut leaf_outcome = drain_leaf_pty(leaf, holds_the_keyboard)?;
         outcome.arrived_off_focus |= leaf_outcome.arrived && *seat != focused;
         // The address a leaf cannot write on its own request, stamped by the
         // level that holds the key it is filed under.
@@ -54104,8 +54179,44 @@ impl Runtime<'_> {
         let mut command_ends: Vec<PathBuf> = Vec::new();
         let mut notifications: Vec<NotificationRequest> = Vec::new();
         let mut pending = false;
+        // **The two window-wide bits of [`seat_holds_the_keyboard`], read once**
+        // — this window has the desktop's keyboard, and what has it here is a
+        // shell rather than a page, a files tree, a search capsule or a menu.
+        // Read before the loop because the loop holds the tabs mutably, and
+        // read *here*, on every turn, because that is what spares this from
+        // being hung off a list of events: `Focused`, a tab switch, a seat
+        // switch, a click into a preview and a menu opening are five different
+        // messages and one question, and the question is asked again every turn
+        // whatever woke it.
+        //
+        // Handed down as the separate facts they are rather than as a product,
+        // so that the conjunction itself is written exactly once — in
+        // [`seat_holds_the_keyboard`], where it can be read and pinned.
+        //
+        // **Asked of the window and not of `window_focused`, and the difference
+        // is a measured defect** (2026-08-25, this machine). That field is the
+        // strip's and the caret's copy: it is written on *transitions* and
+        // seeded, in so many words, on the assumption that "a window is focused
+        // when it opens". A window that opens without the keyboard — because the
+        // desktop's foreground lock declined to hand it over, which is the
+        // ordinary case for a window launched by a script — receives no
+        // transition, because nothing transitioned; the assumption then stands
+        // uncorrected for the window's whole life. Measured here: `folio.exe`
+        // launched while another app held the foreground reported
+        // `holds=true subscribed=true` once and never again, so its agent was
+        // told `CSI I` and was never told otherwise — the exact belief this whole
+        // report exists to correct, arrived at from the other side.
+        //
+        // The seed is not changed from here: it is the caret's and the strip's
+        // and belongs to whoever is answering for those. What this reads instead
+        // is winit's own answer, which is kept from `WM_SETFOCUS`/`WM_KILLFOCUS`
+        // and starts out false rather than hopeful.
+        let window_focused = self.window.window.has_focus();
+        let owner_is_a_shell = self.keyboard_owner_is_a_shell();
+        let active_tab = self.window.active_tab;
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
-            let outcome = drain_tab_pty(tab)?;
+            let outcome =
+                drain_tab_pty(tab, window_focused, index == active_tab, owner_is_a_shell)?;
             pending |= outcome.pending;
             // Resolved here and spent below: the pane's name and its profile's are
             // facts of this tab, and raising reaches a field of `App` that this
@@ -68049,6 +68160,91 @@ mod pty_drain_budget_tests {
         assert!(
             all.pending,
             "and a quiet pane drained after it does not cancel it"
+        );
+    }
+
+    /// RED GATE (attention block, slice A0.5; Q8 ruled 2026-08-25) — **four bits,
+    /// and any one of them down means the keyboard is somewhere else.**
+    ///
+    /// The whole table rather than the interesting rows, because the defect this
+    /// answers was a *missing conjunct*: the first draft had three bits and would
+    /// have gone on telling an agent it was being read while the keyboard sat in a
+    /// preview, a files tree or a search capsule in the same window — a `CSI O`
+    /// never sent, from a window whose focus had not moved a bit.
+    ///
+    /// Mutation: drop any conjunct, or turn one of the four into an `||`.
+    #[test]
+    fn a_seat_holds_the_keyboard_only_when_all_four_facts_stand() {
+        for bits in 0u8..16 {
+            let window_focused = bits & 1 != 0;
+            let tab_is_active = bits & 2 != 0;
+            let seat_is_focused_leaf = bits & 4 != 0;
+            let owner_is_a_shell = bits & 8 != 0;
+            let held = super::seat_holds_the_keyboard(
+                window_focused,
+                tab_is_active,
+                seat_is_focused_leaf,
+                owner_is_a_shell,
+            );
+            assert_eq!(
+                held,
+                bits == 15,
+                "window_focused={window_focused} tab_is_active={tab_is_active} \
+                 seat_is_focused_leaf={seat_is_focused_leaf} \
+                 owner_is_a_shell={owner_is_a_shell}"
+            );
+        }
+    }
+
+    /// RED GATE (attention block, red line 10) — **a focus report is a protocol
+    /// reply, and this window has no way to send one as if it were typed.**
+    ///
+    /// `CSI I`/`CSI O` are minted in `bt-term` and leave through
+    /// `take_pty_writes`, the same channel DSR, DA and the colour answers use.
+    /// The guarantee wanted here is structural rather than remembered: if this
+    /// file cannot even spell the two sequences, no future edit can hand them to
+    /// `send_user_input`, and slice A2's exit gate can never read a `CSI O` this
+    /// window sent while you walked away as *you* answering the question.
+    ///
+    /// The ordering half is the other defect: the subscription bit the report
+    /// consults is written by the bytes fed above it (ConPTY sends `?1004h`
+    /// ahead of the first program), and the bytes it queues are collected by the
+    /// drain below it. Reconciling outside that sandwich costs a pane born in the
+    /// background its opening report.
+    ///
+    /// Mutation: build the sequence here, or move the reconciliation before the
+    /// feed or after the last reply drain.
+    #[test]
+    fn a_focus_report_is_never_spelled_where_a_keystroke_could_reach_it() {
+        // Assembled rather than written out, so that this assertion is not the
+        // hit it is looking for.
+        let escape = char::from(0x5c);
+        for direction in ['I', 'O'] {
+            let spelling = format!("{escape}x1b[{direction}");
+            assert!(
+                !SOURCE.contains(&spelling),
+                "`{spelling}` is `bt-term`'s to write; spelling it here is the \
+                 first half of sending it as user input"
+            );
+        }
+        let drain = free_fn_body("drain_leaf_pty");
+        let fed = drain
+            .find("feed_at(")
+            .expect("`drain_leaf_pty` feeds what the child said");
+        let told = drain
+            .find("set_keyboard_focus(")
+            .expect("`drain_leaf_pty` tells its pane where the keyboard is");
+        let collected = drain
+            .rfind("take_pty_writes()")
+            .expect("`drain_leaf_pty` collects the replies its session owes");
+        assert!(
+            fed < told,
+            "the mode the report is gated on arrives with the child's own bytes"
+        );
+        assert!(
+            told < collected,
+            "and what it queues is collected on the same turn, or a background \
+             pane waits for an unrelated wake to be told it is in the background"
         );
     }
 

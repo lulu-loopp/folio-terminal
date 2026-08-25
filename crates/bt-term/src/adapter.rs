@@ -349,6 +349,56 @@ pub struct TerminalAdapter {
     /// immediately told about a switch that happened before it was listening -
     /// its own `OSC 11;?` is how it learns where it started.
     announced_canvas: Option<TerminalCanvas>,
+    /// Where a DEC 1004 subscriber was last told the keyboard is.
+    ///
+    /// Held for [`Self::announced_canvas`]'s reason — a report of transitions
+    /// needs to remember what it last reported — but reset rather than kept
+    /// across an unsubscribe, and that asymmetry is the whole of
+    /// [`AnnouncedFocus::Unknown`].
+    announced_focus: AnnouncedFocus,
+}
+
+/// What a DEC 1004 subscriber has been told about where the keyboard is.
+///
+/// **Three states and not a `bool`**, because "nobody has been told anything
+/// yet" is the state every pane is born in and the one the *initial* report is
+/// owed to. A pane that opens in a background tab, or in a window that is not
+/// the foreground one, is already without the keyboard when its child
+/// subscribes; an implementation that only ever answered a `focused → not
+/// focused` change would leave that child believing it had the keyboard for as
+/// long as it lived, which is the one belief this whole report exists to
+/// correct.
+///
+/// It goes back to `Unknown` on two occasions, and the second one is the whole
+/// of whether this works on Windows at all:
+///
+/// 1. **The mode goes off.** What was said was said to a subscriber that has
+///    gone.
+/// 2. **Anybody asks for it** — every `CSI ? 1004 h`, not only the one that
+///    changes the level. On this platform ConPTY subscribes on the transport's
+///    behalf before any program runs (`docs/DESIGN.md` §7.1.5i), so a child's own
+///    `?1004h` sets a bit that is already set. **Measured, 2026-08-25**: a real
+///    `claude.exe` in a real pane, born in a window without the keyboard, was
+///    duly sent `CSI O` — and heard nothing, because the console host only
+///    re-encodes a focus event into `CSI I`/`CSI O` for a client that has asked
+///    for focus events, and at the moment of the opening report the client had
+///    not yet started. Treating the ask as the subscription edge is what puts the
+///    opening report *after* the child is listening. The cost of the reading is
+///    one repeated report per ask; the cost of the other reading is that the
+///    opening report is never heard by anyone.
+///
+/// This is deliberately the opposite of [`TerminalAdapter::announced_canvas`],
+/// which is kept up to date whether or not anybody is listening: a program can
+/// ask where the canvas started with its own `OSC 11;?`, and there is **no query
+/// for focus** — the terminal telling it is the only road there is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnnouncedFocus {
+    /// Nothing has been said to whoever is subscribed now.
+    Unknown,
+    /// It was last told the keyboard is here.
+    Focused,
+    /// It was last told the keyboard is elsewhere.
+    Unfocused,
 }
 
 struct ResizeCanonical {
@@ -366,6 +416,17 @@ struct BoundaryPerformer {
     dcs_hook: bool,
     dcs_put: bool,
     bell: bool,
+    /// **Somebody asked for focus reports in this slice** — `CSI ? 1004 h`,
+    /// alone or among other modes.
+    ///
+    /// Watched here rather than read off [`TerminalModes::focus_reporting`]
+    /// because what matters is the *asking*, and by the time the child asks the
+    /// mode is already on: on this platform ConPTY turns 1004 on for the
+    /// transport before any program runs (`docs/DESIGN.md` §7.1.5i), so the
+    /// child's own `?1004h` sets a bit that is already set and changes no level
+    /// anybody could compare. See [`AnnouncedFocus`] for what that costs and why
+    /// this bit is the fix.
+    focus_reports_requested: bool,
     cursor_row_positioned_explicitly: Option<bool>,
 }
 
@@ -410,6 +471,14 @@ impl Perform for BoundaryPerformer {
                 .is_some_and(|parameter| parameter == [2026]);
         self.sync_start = sync_mode && action == 'h';
         self.sync_end = sync_mode && action == 'l';
+        // **Every parameter, not just the first** — `CSI ? 1004 ; 1006 h` is one
+        // program asking for two things, and a reader that looked only at the
+        // head of the list would hear half of it.
+        self.focus_reports_requested = intermediates == b"?"
+            && action == 'h'
+            && params
+                .iter()
+                .any(|parameter| parameter.first() == Some(&1004));
         if intermediates.is_empty() {
             self.cursor_row_positioned_explicitly = match action {
                 // CUP and HVP are the absolute row-placement family used by line editors.
@@ -479,6 +548,7 @@ impl TerminalAdapter {
             captured_rows: RefCell::new(Vec::new()),
             color_palette: None,
             announced_canvas: None,
+            announced_focus: AnnouncedFocus::Unknown,
         }
     }
 
@@ -505,6 +575,60 @@ impl TerminalAdapter {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(PendingReply::Bytes(palette.canvas_notification()));
         }
+    }
+
+    /// Tell this terminal whether the keyboard is in the pane it draws, so a
+    /// program inside it can know whether anybody is looking (DEC private mode
+    /// 1004).
+    ///
+    /// Idempotent and cheap for [`Self::set_color_palette`]'s reason, and the
+    /// owning app is meant to call it the same way: on every turn of its drain,
+    /// rather than from each of the dozen places a window can hand the keyboard
+    /// around. The comparison here is what makes calling it repeatedly free.
+    ///
+    /// **Only a change is reported.** DEC 1004 is a report of transitions —
+    /// `CSI I` when the keyboard arrives, `CSI O` when it leaves — so a level
+    /// re-sent every turn would be this terminal typing at its child sixty times
+    /// a second. The first call after a subscription is a change by definition
+    /// ([`AnnouncedFocus::Unknown`]), which is how a pane born in the background
+    /// learns it is in the background.
+    ///
+    /// A program that did not subscribe is told nothing, for the reason 2031's
+    /// notification is withheld from one: the sequence would be read as ordinary
+    /// input by anything that never asked for it.
+    pub fn set_keyboard_focus(&mut self, focused: bool) {
+        if !self.focus_reporting() {
+            self.announced_focus = AnnouncedFocus::Unknown;
+            return;
+        }
+        let standing = if focused {
+            AnnouncedFocus::Focused
+        } else {
+            AnnouncedFocus::Unfocused
+        };
+        if self.announced_focus == standing {
+            return;
+        }
+        self.announced_focus = standing;
+        let report: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+        self.listener
+            .pty_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(PendingReply::Bytes(report.to_vec()));
+    }
+
+    /// Whether the child asked to be told when the keyboard enters and leaves
+    /// this pane (DEC private mode 1004).
+    ///
+    /// On this platform ConPTY subscribes on every session's behalf before any
+    /// program runs, and consumes `CSI I`/`CSI O` into a console `FOCUS_EVENT`
+    /// — see `docs/DESIGN.md` §7.1.5i for the A/B that measured it. So this is
+    /// nearly always true, and the pane that is *not* subscribed is the
+    /// interesting one: a headless [`TerminalAdapter`] in a test, or a child
+    /// that turned the mode off itself.
+    pub fn focus_reporting(&self) -> bool {
+        self.term.mode().contains(TermMode::FOCUS_IN_OUT)
     }
 
     /// Whether the child asked to be told when the window changes canvas
@@ -1146,6 +1270,14 @@ impl TerminalAdapter {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .push(AdapterEvent::Bell);
+            }
+            if performer.focus_reports_requested {
+                // A new subscriber has nothing to inherit: whatever was last
+                // said was said to whoever asked before it. See
+                // [`AnnouncedFocus`] — this is the "re-enabled" half of the
+                // subscription edge, and on this platform it is the *only* half
+                // a child ever gets.
+                self.announced_focus = AnnouncedFocus::Unknown;
             }
             if performer.complete {
                 self.parser_sequence_open = byte == 0x1b;
@@ -2095,6 +2227,123 @@ mod tests {
 
         terminal.set_color_palette(dark_palette());
         assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[?997;1n".to_vec()]);
+    }
+
+    /// RED GATE (attention block, slice A0.5) — **a pane that subscribed to
+    /// focus reporting is told when the keyboard arrives and when it leaves.**
+    ///
+    /// This is the byte Folio has never sent. Every agent that gates a bell on
+    /// "is anybody looking" — Claude Code, codex and opencode all do — reads
+    /// `CSI I`/`CSI O`, and a terminal that sends neither is a terminal that
+    /// says you are present forever, so it never interrupts you.
+    ///
+    /// Mutation: report a level instead of an edge, or send to a pane that never
+    /// subscribed, or drop either direction.
+    #[test]
+    fn a_subscribed_pane_is_told_when_the_keyboard_arrives_and_when_it_leaves() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.feed(b"\x1b[?1004h");
+        assert!(terminal.focus_reporting());
+        // The first answer after a subscription is owed whichever way it falls:
+        // this pane has the keyboard, and nobody had told it so.
+        terminal.set_keyboard_focus(true);
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[I".to_vec()]);
+
+        // A level repeated is not a transition and says nothing.
+        terminal.set_keyboard_focus(true);
+        terminal.set_keyboard_focus(true);
+        assert!(terminal.take_pty_writes().is_empty());
+
+        terminal.set_keyboard_focus(false);
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[O".to_vec()]);
+        terminal.set_keyboard_focus(false);
+        assert!(terminal.take_pty_writes().is_empty());
+
+        terminal.set_keyboard_focus(true);
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[I".to_vec()]);
+    }
+
+    /// RED GATE (attention block, slice A0.5) — **the initial state is owed to
+    /// the subscription, not to a change in the window.**
+    ///
+    /// A pane born in a background tab, or in a window that is not the
+    /// foreground one, never sees a `focused → unfocused` edge: it was never
+    /// focused. Waiting for one leaves its child believing it has the keyboard
+    /// for as long as it lives. So the subscription itself is an edge, and a
+    /// program that turns 1004 off and on again is answered afresh rather than
+    /// left holding what the previous subscriber was told.
+    ///
+    /// Mutation: keep the last answer across an unsubscribe, or make the first
+    /// call after `?1004h` say nothing.
+    #[test]
+    fn a_pane_born_without_the_keyboard_is_told_so_the_moment_it_subscribes() {
+        let mut background = TerminalAdapter::new(nz(8), nz(3));
+        // Before the subscription there is nobody to tell, and the sequence
+        // would be read as input by a program that never asked for it.
+        background.set_keyboard_focus(false);
+        assert!(background.take_pty_writes().is_empty());
+
+        background.feed(b"\x1b[?1004h");
+        background.set_keyboard_focus(false);
+        assert_eq!(background.take_pty_writes(), vec![b"\x1b[O".to_vec()]);
+
+        // Off, and the standing goes with it: what was said was said to a
+        // subscriber that has gone.
+        background.feed(b"\x1b[?1004l");
+        background.set_keyboard_focus(false);
+        background.set_keyboard_focus(false);
+        assert!(background.take_pty_writes().is_empty());
+
+        background.feed(b"\x1b[?1004h");
+        background.set_keyboard_focus(false);
+        assert_eq!(background.take_pty_writes(), vec![b"\x1b[O".to_vec()]);
+    }
+
+    /// RED GATE (attention block, slice A0.5) — **asking is the subscription
+    /// edge, even when the mode was already on.**
+    ///
+    /// ConPTY enables 1004 for the transport before any program runs, so the
+    /// child's own `?1004h` never changes a level. Measured on 2026-08-25: a
+    /// real `claude.exe` born without the keyboard was sent its `CSI O` before it
+    /// started, the console host dropped it because no client had asked for focus
+    /// events yet, and the agent went on believing it was being read — the very
+    /// belief this report exists to correct. So every ask restates the standing.
+    ///
+    /// Every parameter of the sequence is read, not just the first: `?1004;1006h`
+    /// is one program asking for two things.
+    ///
+    /// Mutation: reset only on a level change, or look at the head of the
+    /// parameter list alone.
+    #[test]
+    fn a_second_subscriber_is_told_where_it_stands_although_the_mode_was_already_on() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        // The transport's own subscription, before any program runs.
+        terminal.feed(b"\x1b[?1004h");
+        terminal.set_keyboard_focus(false);
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[O".to_vec()]);
+
+        // The program starts and asks for the same mode. Nothing about the
+        // terminal's state changed; everything about who is listening did.
+        terminal.feed(b"\x1b[?1004h");
+        terminal.set_keyboard_focus(false);
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[O".to_vec()]);
+
+        // And it is still an edge report: the standing is not restated again
+        // until somebody asks again or it changes.
+        terminal.set_keyboard_focus(false);
+        assert!(terminal.take_pty_writes().is_empty());
+
+        // Asked for among other modes, and split across two feeds — the ask is
+        // read off a parser, not off a byte pattern.
+        terminal.feed(b"\x1b[?1000;10");
+        terminal.feed(b"04;1006h");
+        terminal.set_keyboard_focus(false);
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[O".to_vec()]);
+
+        // A mode list without 1004 in it is not an ask.
+        terminal.feed(b"\x1b[?1000;1006h");
+        terminal.set_keyboard_focus(false);
+        assert!(terminal.take_pty_writes().is_empty());
     }
 
     #[test]

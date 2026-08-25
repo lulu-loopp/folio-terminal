@@ -1372,6 +1372,22 @@ impl DualPlaneSession {
         self.terminal.set_color_palette(palette);
     }
 
+    /// Tell this session's terminal whether the keyboard is in the pane it is
+    /// drawn in, so a program inside it can know whether anybody is looking.
+    ///
+    /// Called on every turn of the owning app's drain, like
+    /// [`Self::set_color_palette`] and for the same reason: the answer is made
+    /// of four facts a window can change in a dozen places, and a list of those
+    /// places is a list somebody has to remember to extend.
+    ///
+    /// **What goes out is a protocol reply, not input.** It leaves through
+    /// [`Self::take_pty_writes`] with the DSR and DA answers, which is the one
+    /// road out of this crate that does not run through anything a user typed —
+    /// see [`TerminalAdapter::set_keyboard_focus`] for what is sent and when.
+    pub fn set_keyboard_focus(&mut self, focused: bool) {
+        self.terminal.set_keyboard_focus(focused);
+    }
+
     pub fn document(&self) -> &HistoryDocument {
         &self.document
     }
