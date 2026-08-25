@@ -1255,6 +1255,23 @@ pub enum Text {
     /// cannot infer: the number is spent once for every terminal on screen,
     /// and a window with four of them is holding four of these.
     DescScrollback,
+    /// The row directly under it: how a pane sets a line too long to fit it.
+    RowLineWrapping,
+    /// Its sentence when wrapping is on, and one of the two halves of the only
+    /// description on this page that reads its own value.
+    DescLineWrappingOn,
+    /// And its sentence when wrapping is off, which **names the gesture**.
+    ///
+    /// The one line in this product that talks about reading sideways. A pane
+    /// that has stopped folding is a pane whose right-hand text is off the edge
+    /// with nothing on screen saying how to reach it, and there is no other
+    /// surface where that would be said: the horizontal bar appears only once
+    /// there is something to scroll to, which is exactly when a reader has
+    /// already concluded the text is gone. So the row pays the debt in a clause
+    /// on a sentence that was going to be written anyway — the same trade
+    /// §7.1.6b′ made on [`Self::DescFocusCardHeight`] rather than growing a
+    /// second UI surface to explain the first.
+    DescLineWrappingOff,
     // ── multiwindow slice C ───────────────────────────────────────────────
     //
     // One contiguous block at the end, per this table's standing rule.
@@ -2631,6 +2648,28 @@ impl Text {
                 "Each pane keeps this many lines; the oldest go first",
                 "每个窗格保留这么多行,最旧的先走",
             ),
+            // 「自动折行」and not 「换行」: 「换行」is what a newline in the
+            // output is, and this row is about what the pane does to a line the
+            // program never broke. One product does not use one word for both.
+            Self::RowLineWrapping => pick(lang, "Line wrapping", "自动折行"),
+            // The two ends of this row's picker, said in two sentences rather
+            // than one — `DescScrollback`'s constraint lifted, because
+            // `SettingsRow::description` takes the values and a boolean row has
+            // only two states to write out. The mock-up varied this line first
+            // (2561, 7897) and this is that.
+            Self::DescLineWrappingOn => pick(
+                lang,
+                "Long lines fold at the pane's edge.",
+                "长行在窗格边缘折行。",
+            ),
+            // Two clauses: what happens to the line, and how to follow it. The
+            // second is the row's whole reason for varying — see the variant.
+            // It states the two ways and stops (copy ruling, 2026-08-17).
+            Self::DescLineWrappingOff => pick(
+                lang,
+                "Long lines run on and the pane scrolls sideways: Shift+wheel, or the bar along the pane's foot.",
+                "长行一直延伸,窗格横向滚动:Shift+滚轮,或窗格底边那条横条。",
+            ),
             // 「窗口」and not 「窗」: the settings page already says 「窗口」in
             // `CloseWindow`, and one product does not have two words for the
             // thing every one of its chords is scoped to.
@@ -2826,7 +2865,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 459] = [
+    pub const ALL: [Self; 462] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3233,6 +3272,9 @@ impl Text {
         Self::DragRootTreeHere,
         Self::RowScrollback,
         Self::DescScrollback,
+        Self::RowLineWrapping,
+        Self::DescLineWrappingOn,
+        Self::DescLineWrappingOff,
         Self::ShortcutNewWindow,
         Self::GateTitleGitDetach,
         Self::GateTitleGitDirtyCheckout,

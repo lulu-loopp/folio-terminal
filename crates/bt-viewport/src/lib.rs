@@ -1802,12 +1802,35 @@ impl ViewportProjection {
 
     /// Ask for a horizontal origin. What is granted is [`Self::horizontal`]'s clamp of it.
     ///
-    /// There is no gesture behind this yet — the active gestures, the bar and the switch that shows
-    /// them are plan §1c and belong to the level after this one. It is here because the axis has to
-    /// be reachable to be tested and measured, in the same way `scroll_by_rows` existed before
-    /// anything dragged a scrollbar.
+    /// **A moved window is a new view**, and that is why the generation moves here as well as in
+    /// `scroll_by_subpixels`: the two are the same kind of act on two axes — neither changes a
+    /// character of the document, both change which characters are on the glass — and a frame
+    /// carrying the same cells at a different origin still answers hit tests differently, so it
+    /// must not be mistaken for the frame before it.
     pub fn set_horizontal_origin(&mut self, origin: ContentColumn) {
+        if self.requested_x_origin == origin {
+            return;
+        }
         self.requested_x_origin = origin;
+        self.view_generation.0 = self.view_generation.0.saturating_add(1);
+    }
+
+    /// Move the window `columns` to the right (negative moves left), from **where it actually is**.
+    ///
+    /// The request is deliberately kept unclamped ([`Self::requested_x_origin`]) so that a window
+    /// brought home by a shrinking extent can go back out when the wide line returns. A *gesture*
+    /// is the other thing: it speaks about what the reader can see, so it starts from the granted
+    /// origin and not from a request that may be pointing a thousand columns past the end. Without
+    /// this the first flick back from a hard stop would spend the whole overshoot before the view
+    /// moved a column.
+    pub fn scroll_horizontal_by(&mut self, columns: i32) {
+        let from = self.horizontal().x_origin().0;
+        let wanted = if columns >= 0 {
+            from.saturating_add(columns.unsigned_abs())
+        } else {
+            from.saturating_sub(columns.unsigned_abs())
+        };
+        self.set_horizontal_origin(ContentColumn(wanted));
     }
 
     /// What the widest addressable logical line in this pane presents.
@@ -10660,6 +10683,75 @@ mod tests {
         assert_eq!(before.cursor, after.cursor);
     }
 
+    /// **A gesture speaks about what the reader can see** (`scroll_horizontal_by`).
+    ///
+    /// The stored origin is deliberately a *request* rather than the granted answer, so that a
+    /// window brought home by a shrinking extent can go back out when the wide line returns. That
+    /// is right for the state and wrong for a gesture: a reader who flicks the wheel right at a
+    /// hard stop parks a request hundreds of columns past the end, and if the next flick left
+    /// subtracted from *that* the view would sit still through the whole overshoot before it
+    /// finally moved. So a gesture starts from the origin that is actually on the glass.
+    ///
+    /// MUTATION: add the delta to `requested_x_origin` instead of to `horizontal().x_origin()`,
+    /// and the four-column step back after an overshoot moves nothing at all.
+    #[test]
+    fn a_gesture_moves_the_window_from_where_it_is_and_not_from_what_was_asked_for() {
+        const COLUMNS: u32 = 8;
+        let (mut projection, document) =
+            axis_pane(flattened_key(COLUMNS), 2, &["0123456789abcdefghij"]);
+        let live = || vec![grid_row("LIVEROW1", COLUMNS as usize); 2];
+        let _ = axis_frame_from_top(&mut projection, &document, &[], live(), cursor_at(0));
+
+        let furthest = projection.horizontal().max_x_origin();
+        assert_eq!(
+            furthest,
+            ContentColumn(12),
+            "twenty columns of line behind eight columns of pane"
+        );
+
+        // A flick that runs off the end: the request overshoots, the grant does not.
+        projection.set_horizontal_origin(ContentColumn(9_999));
+        assert_eq!(projection.horizontal().x_origin(), furthest);
+
+        projection.scroll_horizontal_by(-4);
+        assert_eq!(
+            projection.horizontal().x_origin(),
+            ContentColumn(8),
+            "the step back is four columns of what is on the glass, not four of the overshoot"
+        );
+        projection.scroll_horizontal_by(-99);
+        assert_eq!(
+            projection.horizontal().x_origin(),
+            ContentColumn(0),
+            "and running off the other end stops at the line's head"
+        );
+    }
+
+    /// **A moved window is a new view** (`set_horizontal_origin`).
+    ///
+    /// The generation is what tells everything downstream that the same document is being looked at
+    /// from somewhere else — it is what `scroll_by_subpixels` bumps, and moving the window sideways
+    /// is the same kind of act on the other axis. A no-op set moves nothing, because a request that
+    /// did not change is not a gesture.
+    ///
+    /// MUTATION: drop the bump and a frame whose cells happen to be identical — a window slid over
+    /// a run of blanks — is mistaken for the frame before it, and every hit test after it answers
+    /// with the origin the reader has already left.
+    #[test]
+    fn an_origin_the_reader_moved_is_a_new_view_and_one_they_did_not_is_not() {
+        let (mut projection, _document) = axis_pane(flattened_key(8), 2, &["0123456789abcdefghij"]);
+        let first = projection.view_generation();
+        projection.set_horizontal_origin(ContentColumn(4));
+        let moved = projection.view_generation();
+        assert!(moved.0 > first.0, "{moved:?} must be later than {first:?}");
+        projection.set_horizontal_origin(ContentColumn(4));
+        assert_eq!(
+            projection.view_generation(),
+            moved,
+            "asking again for the column the window is already at is not a gesture"
+        );
+    }
+
     /// Plan §5.1 clause 4 — **no plane is quietly pinned at zero**.
     ///
     /// One pointer position has to mean one column. If the frozen plane moved with the origin and
@@ -10921,6 +11013,144 @@ mod tests {
             projection.horizontal().x_origin(),
             ContentColumn(0),
             "and the origin came home in the step that learned it"
+        );
+    }
+
+    /// **Plan §5.1 clause 3, the live-band seam — as the behaviour this build can actually show.**
+    ///
+    /// The clause asks for a soft-wrapped logical line that is part flattened and part folded, and
+    /// for the switch between the two to be atomic: within one frame no fragment repeated and none
+    /// missing. What this build does with that request is worth writing down, because it is not
+    /// what the clause pictured and it is *better* than what the clause pictured.
+    ///
+    /// A logical line here is never half of anything. While it is being written it is physical rows
+    /// — some already scrolled out into staging, the last still in the live grid — and every one of
+    /// them is a captured row exactly one grid wide, drawn through the same window as everything
+    /// else (`every_plane_moves_with_the_origin_and_none_is_pinned_at_zero`). The moment it ends,
+    /// `TranscriptStore` seals **the whole of it at once** into one `FrozenLine`, and from that
+    /// frame on it is one flattened row. There is no intermediate state in which half its fragments
+    /// are flattened and half are folded, so the "no fragment repeated, none missing" property is
+    /// structural rather than remembered — and this test is what keeps it that way.
+    ///
+    /// MUTATION: leave the staged rows in the frame after the seal (drop the store's own hand-off)
+    /// and the second half below finds `89abcdef` twice — once folded, once inside the flattened
+    /// line — which is exactly the duplication the clause forbids.
+    #[test]
+    fn a_soft_wrapped_line_is_folded_whole_or_flattened_whole_and_never_half_of_each() {
+        const COLUMNS: u32 = 8;
+        let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
+        let mut document = HistoryDocument::default();
+        let mut projection = ViewportProjection::new(
+            flattened_key(COLUMNS),
+            DetectionRevision(1),
+            nz32(3),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let live = |head: &str| {
+            let mut rows = vec![grid_row(head, COLUMNS as usize)];
+            rows.resize(3, grid_row("", COLUMNS as usize));
+            rows
+        };
+
+        // Two thirds of one logical line have scrolled out of the grid; the last third is still
+        // being written. This is the clause's own configuration.
+        for fragment in ["01234567", "89abcdef"] {
+            assert!(
+                store
+                    .capture(CapturedRow::plain(fragment, true))
+                    .finalized
+                    .is_empty(),
+                "a line that continues is not finished, so nothing is sealed yet"
+            );
+        }
+        let staged: Vec<StagedRow> = store
+            .staged_rows()
+            .map(|row| StagedRow {
+                id: row.id,
+                row: row.row.clone(),
+            })
+            .collect();
+        assert_eq!(
+            staged.len(),
+            2,
+            "both scrolled-out fragments are in staging"
+        );
+
+        let read = |frame: &ViewportFrame| -> Vec<String> {
+            (0..frame.rows.get() as usize)
+                .map(|row| {
+                    frame.cells[row * COLUMNS as usize..(row + 1) * COLUMNS as usize]
+                        .iter()
+                        .map(|cell| cell.text.as_str())
+                        .collect::<String>()
+                })
+                .collect()
+        };
+
+        projection.project(&document);
+        let folded = axis_frame_from_top(
+            &mut projection,
+            &document,
+            &staged,
+            live("ghij"),
+            cursor_at(4),
+        );
+        let folded_rows = read(&folded);
+        assert!(
+            folded_rows.contains(&"01234567".to_owned())
+                && folded_rows.contains(&"89abcdef".to_owned()),
+            "while the line is unfinished its fragments are folded rows: {folded_rows:?}"
+        );
+        assert_eq!(
+            folded.horizontal.content_extent(),
+            ContentColumn(COLUMNS),
+            "nothing addressable is wider than the pane yet, so there is no axis to travel"
+        );
+
+        // The line ends. The seal takes all three fragments in one act.
+        for finalized in store.capture(CapturedRow::plain("ghij", false)).finalized {
+            document.finalize_transaction(finalized);
+        }
+        assert_eq!(
+            store.staged_rows().count(),
+            0,
+            "the store hands the fragments over rather than keeping a second copy"
+        );
+        projection.project(&document);
+        assert_eq!(
+            projection.horizontal().content_extent(),
+            ContentColumn(20),
+            "and the flattened line is twenty columns long, all at once"
+        );
+
+        let home = read(&axis_frame_from_top(
+            &mut projection,
+            &document,
+            &[],
+            live(""),
+            cursor_at(0),
+        ));
+        assert_eq!(
+            home.iter().filter(|row| row.as_str() == "01234567").count(),
+            1,
+            "the line's first eight columns are on the glass once, not once folded and once \
+             flattened: {home:?}"
+        );
+
+        // And the whole of it is reachable by travelling, which is what "flattened whole" buys.
+        projection.set_horizontal_origin(ContentColumn(8));
+        let travelled = read(&axis_frame_from_top(
+            &mut projection,
+            &document,
+            &[],
+            live(""),
+            cursor_at(0),
+        ));
+        assert!(
+            travelled.contains(&"89abcdef".to_owned()),
+            "the window at column eight shows the middle of that one line: {travelled:?}"
         );
     }
 

@@ -116,6 +116,7 @@ use bt_term::{
 use bt_transcript::{DEFAULT_STAGING_QUOTA, SourceGeneration, TranscriptId};
 use bt_viewport::{
     HyperlinkHit, MathBlockAnchor, ViewSelection, ViewportFrame, ViewportProjection,
+    horizontal::ContentColumn,
 };
 use winit::{
     application::ApplicationHandler,
@@ -4337,6 +4338,16 @@ struct LeafSession {
     /// Set to the leaf's own birth, which costs nothing: a pane with no
     /// scrollback yet draws no bar whatever this says.
     thumb_awake: Instant,
+    /// **The same, for the mark along this pane's foot** (horizontal scroll,
+    /// level three).
+    ///
+    /// A second clock and not a shared one, and that is the whole of the bottom
+    /// row's ruling in one field: a vertical wheel is not a reason for the
+    /// horizontal bar to appear. Sharing [`Self::thumb_awake`] would put a
+    /// grabbable mark across the reader's prompt every time they scrolled back
+    /// through their build log, which is the exact thing `column_visibility`
+    /// declines to do on the hover path.
+    column_awake: Instant,
     /// **Where this pane's focus card aims its window**, in rows above the tail
     /// (user ruling 2026-08-21, §7.1.6b′ 「卡片窗口瞄准」).
     ///
@@ -4659,6 +4670,19 @@ struct TabState {
     /// rebuild the overlay, which is the difference between a bar that goes away
     /// and a bar that goes away when you next touch something.
     terminal_thumb_owed_frame: bool,
+    /// **A terminal pane's foot bar in hand** — the two above once more, for the
+    /// instrument that lies along the bottom edge (horizontal scroll, level
+    /// three).
+    ///
+    /// A second pair and not a widened first pair, because a hand can only be on
+    /// one of them and the two answer different questions: this one moves a
+    /// **column**, and the seat it holds is the seat whose flattened lines it is
+    /// travelling along.
+    terminal_column_drag: Option<TerminalColumnDrag>,
+    /// Which pane's foot mark the pointer is on. Unlike
+    /// [`Self::terminal_thumb_hover`] this **lights and never summons** — see
+    /// `termscroll::column_visibility` for why the bottom row is not a lane.
+    terminal_column_hover: Option<SeatId>,
     /// The surface and link under the pointer, the link held **by its box**
     /// rather than by an index into that surface's list — so a rebuild that moves
     /// or removes it simply stops matching, and there is no stale subscript to
@@ -5824,6 +5848,15 @@ struct WindowRuntime {
     /// routes keep their own line-quantized accumulators above; the two never pour into each
     /// other, so switching routes cannot dump parked residue as a sudden jump.
     local_wheel_subpixel_remainder: f64,
+    /// Fractional **columns** awaiting consumption by the horizontal local route,
+    /// on the same discipline and for the same reason as the subpixels above:
+    /// a fifth of a column is not a column, and six fifths of one thrown away
+    /// separately is a detent the reader turned and did not get.
+    ///
+    /// A fourth accumulator rather than a reuse of the third, because the two
+    /// hold different currencies — a subpixel and a terminal column — and this
+    /// file's standing rule is that two currencies never pour into each other.
+    local_wheel_column_remainder: f64,
     /// One private PSReadLine anchor repair owed by the current resize transaction. ConPTY cursor
     /// reads are a terminal round trip (`CSI 6 n` -> CPR), so writing the chord beside
     /// `PtySession::resize` can make the handler sample a cursor the child has not settled yet.
@@ -9600,6 +9633,19 @@ struct PreviewBodyDrag {
 struct TerminalThumbDrag {
     seat: SeatId,
     /// How far below the thumb's own top edge the hand took hold.
+    grab: f32,
+}
+
+/// **A terminal pane's foot bar in hand** (horizontal scroll, level three).
+///
+/// The one above with the axis turned. Kept as its own type rather than a field
+/// on that one, because the two can never be in hand at the same time and a
+/// single `Option` holding "which axis" would be a state that has to be checked
+/// everywhere instead of two that cannot both be `Some`.
+#[derive(Clone, Copy, Debug)]
+struct TerminalColumnDrag {
+    seat: SeatId,
+    /// How far right of the mark's own left edge the hand took hold.
     grab: f32,
 }
 
@@ -20901,6 +20947,7 @@ fn create_leaf_session(
         card_skip: seed.card_skip,
         projection,
         thumb_awake: Instant::now(),
+        column_awake: Instant::now(),
         grid,
         conpty_grid: grid,
         pending_pty_resize: None,
@@ -21252,6 +21299,8 @@ fn assemble_tab_state(
         terminal_thumb_drag: None,
         terminal_thumb_hover: None,
         terminal_thumb_owed_frame: false,
+        terminal_column_drag: None,
+        terminal_column_hover: None,
         preview_link_hover: None,
     };
     debug_assert!(
@@ -22727,6 +22776,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         pixel_wheel_remainder: 0.0,
         notch_wheel_remainder: 0.0,
         local_wheel_subpixel_remainder: 0.0,
+        local_wheel_column_remainder: 0.0,
         hyperlink_hover: HyperlinkHover::default(),
         hover_pane: None,
         underlined_image_reference: None,
@@ -28912,6 +28962,7 @@ impl Runtime<'_> {
             block_max_height: self.app.settings_store.loaded().block_max_height,
             focus_card_height: self.app.settings_store.loaded().focus_card_height,
             scrollback_lines: self.app.settings_store.loaded().scrollback_lines,
+            line_wrapping: self.app.settings_store.loaded().line_wrapping,
             terminal_notifications: self.app.settings_store.loaded().terminal_notifications,
             powershell_integration_offer: self
                 .app
@@ -30272,6 +30323,9 @@ impl Runtime<'_> {
         if let Some(lines) = settings::scrollback_lines_requested(target) {
             self.apply_scrollback_lines(lines)?;
         }
+        if let Some(wrapping) = settings::line_wrapping_requested(target) {
+            self.apply_line_wrapping(wrapping)?;
+        }
         if let Some(height) = settings::focus_card_height_requested(target) {
             self.apply_focus_card_height(height)?;
         }
@@ -30535,6 +30589,7 @@ impl Runtime<'_> {
             | Row::ContextMenu
             | Row::PsReadLine
             | Row::Scrollback
+            | Row::LineWrapping
             | Row::Notifications
             | Row::PowerShellOffer
             // The editor's own advanced rows are put back by the page's own foot
@@ -31967,6 +32022,65 @@ impl Runtime<'_> {
         // The scroll offset is clamped against a projection whose extent has just
         // shrunk, so a reader parked deep in the history they no longer have is
         // carried to the oldest line they still do rather than left over nothing.
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(true)
+    }
+
+    /// Point the "Line wrapping" row at `wrapping`.
+    ///
+    /// **[`Self::adopt_new_language`]'s shape and not the row above's**, which is
+    /// the whole of what is interesting here. `line_wrapping` is a member of
+    /// [`bt_doc::LayoutKey`] — see `window_layout_key` — so it is not a setting
+    /// anything has to be told about one object at a time. It is part of the
+    /// identity of a laid-out document, and the road it travels is the one every
+    /// other member of that key travels: move the stored answer, rebuild the key,
+    /// and let `DualPlaneSession::set_layout_key` decide for itself whether what
+    /// it is holding was laid out under the old one. A loop over every leaf
+    /// calling a setter would be inventing a second channel beside the one the
+    /// theme, the font, the language and the DPI all already use.
+    ///
+    /// **Every pane in every tab, and it has to be**, which is where this parts
+    /// company with [`Self::adopt_new_language`]. That function reaches the
+    /// focused shell through [`Self::sync_math_layout_key`] and lets the rest of
+    /// the window catch up in [`Self::activate_tab`], which works for a fact that
+    /// only becomes visible when a tab comes up. It does not work here: a split
+    /// is two panes of one tab, both on screen, and `activate_tab` never fires
+    /// for the sibling. The reader would press `Off`, watch one half of their
+    /// window stop folding, and have no gesture at all that would persuade the
+    /// other half. The road is therefore [`Self::apply_scale_factor`]'s — "no
+    /// screen anywhere in the window is exempt from it" — for the same reason it
+    /// is that function's: this is a fact about the product and not about the
+    /// pane the keyboard happens to be in.
+    ///
+    /// **The key is amended rather than rebuilt.** `window_layout_key` measures
+    /// the width in the *focused* pane's columns, and no two panes share a
+    /// width — building a fresh key for a pane from here would hand it somebody
+    /// else's geometry. Each session already holds a key that is right about
+    /// everything except the one member that moved, so the one member is what
+    /// changes; `DualPlaneSession::set_layout_key` compares and invalidates only
+    /// where it actually differs, which is why a pane that was already reading
+    /// this answer costs nothing.
+    ///
+    /// The publish is what puts the new answer on screen, in the frame the
+    /// reader is watching.
+    fn apply_line_wrapping(&mut self, wrapping: bool) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.line_wrapping = wrapping;
+        if !self.app.settings_store.store(settings) {
+            return Ok(false);
+        }
+        for tab in &mut self.window.tabs {
+            for (_, leaf) in tab.leaves_mut() {
+                let amended = bt_doc::LayoutKey {
+                    line_wrapping: wrapping,
+                    ..leaf.session.layout_key()
+                };
+                leaf.session.set_layout_key(amended);
+            }
+        }
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
@@ -36829,6 +36943,196 @@ impl Runtime<'_> {
         )
     }
 
+    /// One pane's foot bar, from that pane's own axis.
+    ///
+    /// The three numbers come off [`bt_viewport::horizontal::HorizontalProjection`]
+    /// and nowhere else, which is [`Self::terminal_scroll_bar`]'s rule on the
+    /// other axis: the extent it clamps by, the window it measures that against,
+    /// and where the window stands. **A wrapping pane returns `None` here for
+    /// free** — its projection floors the extent at its own width, so the shared
+    /// derivation finds no overflow and declines. There is no `line_wrapping`
+    /// branch in this function, and there must not be one: two places deciding
+    /// whether a pane has a horizontal axis is two places that can disagree.
+    fn terminal_column_bar(&self, seat: SeatId) -> Option<termscroll::TerminalColumnBar> {
+        let body = self.terminal_scroll_body(seat)?;
+        let leaf = self.sessions.get(&seat)?;
+        let axis = leaf.projection.horizontal();
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        termscroll::column_bar(
+            body,
+            axis.content_extent().0,
+            axis.viewport_columns(),
+            axis.x_origin().0,
+            scale,
+        )
+    }
+
+    /// What the foot bar of `seat` is owed on the glass right now.
+    ///
+    /// **One derivation, three consumers** — the painter, the hover, and the
+    /// press. A press that could take a mark the painter had not drawn is the
+    /// same defect [`preview::ScrollBar`] exists to prevent, read in time rather
+    /// than in space: you cannot grab what is not there. So the visibility rule
+    /// is asked once and everything that cares reads the answer.
+    fn terminal_column_thumb(&self, seat: SeatId, now: Instant) -> termscroll::Thumb {
+        let Some(leaf) = self.sessions.get(&seat) else {
+            return termscroll::Thumb::Hidden;
+        };
+        let situation = termscroll::ThumbSituation {
+            // "Has a horizontal axis" is what `has_history` means down here: a
+            // pane whose widest line fits across it has nothing to be a picture
+            // of, exactly as a pane with no scrollback has nothing above it.
+            has_history: leaf.projection.horizontal().max_x_origin().0 > 0,
+            alternate_screen: leaf.session.terminal_modes().alternate_screen,
+            scrolled: leaf.projection.horizontal().is_scrolled(),
+            near: self.terminal_column_hover == Some(seat),
+            held: self
+                .terminal_column_drag
+                .is_some_and(|drag| drag.seat == seat),
+            since_rest: now.saturating_duration_since(leaf.column_awake),
+        };
+        termscroll::column_visibility(situation, self.app.motion, |x| cubic_bezier(x, EASE))
+    }
+
+    /// The pane whose foot mark the pointer is **on**, and that pane's bar.
+    ///
+    /// Two gates, not one. The geometric one is the mark itself — there is no
+    /// lane down here, so a press beside the mark is the terminal's (see
+    /// `termscroll::TerminalColumnBar::thumb_holds`). The other is that the mark
+    /// is actually drawn: a bar resting invisibly over somebody's prompt must not
+    /// answer for a press aimed at the prompt.
+    fn terminal_column_bar_under(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(SeatId, termscroll::TerminalColumnBar)> {
+        let at = [position.x as f32, position.y as f32];
+        let seat = seats::pane_at(&self.seat_layout, position.x, position.y)?;
+        let bar = self.terminal_column_bar(seat)?;
+        if !bar.thumb_holds(at) {
+            return None;
+        }
+        matches!(
+            self.terminal_column_thumb(seat, Instant::now()),
+            termscroll::Thumb::Shown { .. }
+        )
+        .then_some((seat, bar))
+    }
+
+    /// Note that this pane's foot mark has a reason to be up **now**.
+    fn wake_terminal_column(&mut self, seat: SeatId) {
+        let active = self.window.active_tab;
+        if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) {
+            leaf.column_awake = Instant::now();
+        }
+    }
+
+    /// Put one pane's window at content column `wanted`.
+    ///
+    /// Expressed through the projection's own mutator so the clamp stays in the
+    /// one place that owns it — `HorizontalProjection::new` — and the drag and
+    /// the wheel arrive at the same column by the same arithmetic.
+    fn scroll_seat_to_column(&mut self, seat: SeatId, wanted: ContentColumn) -> Result<()> {
+        let active = self.window.active_tab;
+        let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        if leaf.projection.horizontal().x_origin() == wanted {
+            return Ok(());
+        }
+        leaf.projection.set_horizontal_origin(wanted);
+        self.wake_terminal_column(seat);
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        self.repaint_pane_change(seat)
+    }
+
+    /// Move one pane's window `columns` to the right, negative for left.
+    fn scroll_seat_by_columns(&mut self, seat: SeatId, columns: i32) -> Result<()> {
+        let active = self.window.active_tab;
+        let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        let before = leaf.projection.horizontal().x_origin();
+        leaf.projection.scroll_horizontal_by(columns);
+        // The wake is unconditional even when the window was already against the
+        // end: a reader flicking at a hard stop is still reading sideways, and a
+        // mark that went out under their hand would say they had stopped.
+        self.wake_terminal_column(seat);
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        if self.leaf(seat).projection.horizontal().x_origin() == before {
+            return Ok(());
+        }
+        self.repaint_pane_change(seat)
+    }
+
+    /// A press on a terminal pane's foot mark.
+    ///
+    /// Returns whether the press was the bar's. **One gesture and not two**: the
+    /// vertical bar's press has a second arm because a click in its reserved lane
+    /// pages the view, and there is no reserved lane here to pay for that. Every
+    /// press this declines goes on to the pane, which is the ruling.
+    fn press_terminal_column_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some((seat, bar)) = self.terminal_column_bar_under(position) else {
+            return Ok(false);
+        };
+        let at = [position.x as f32, position.y as f32];
+        self.terminal_column_hover = Some(seat);
+        self.terminal_column_drag = Some(TerminalColumnDrag {
+            seat,
+            grab: bar.grip(at[0]),
+        });
+        self.wake_terminal_column(seat);
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// The pointer travelling with a foot mark in hand.
+    fn drag_terminal_column_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(drag) = self.terminal_column_drag else {
+            return Ok(false);
+        };
+        // The gesture's own pane, not the one under the pointer, and re-derived
+        // every move: history evicted under the hand shortens the axis, and a
+        // gesture holding the geometry it started with would drift off the text.
+        let Some(bar) = self.terminal_column_bar(drag.seat) else {
+            // The widest line was evicted, or the program went full screen under
+            // the hand. The gesture owns the pointer until the button comes up;
+            // there is simply nothing left for it to move.
+            return Ok(true);
+        };
+        let wanted = ContentColumn(bar.dragged_to(position.x as f32, drag.grab));
+        self.scroll_seat_to_column(drag.seat, wanted)?;
+        Ok(true)
+    }
+
+    /// Light the foot mark the pointer is on, and put the last one out.
+    ///
+    /// **No wake.** The vertical bar's hover bumps its clock, because a pointer
+    /// in its lane is a standing reason for it to be up; a pointer on the last
+    /// row is not, and bumping the clock here would keep an already-fading mark
+    /// alive under a hand that had come for the prompt.
+    fn note_terminal_column_hover(
+        &mut self,
+        position: Option<PhysicalPosition<f64>>,
+    ) -> Result<()> {
+        let over = position
+            .and_then(|position| self.terminal_column_bar_under(position))
+            .map(|(seat, _)| seat);
+        if over == self.terminal_column_hover {
+            return Ok(());
+        }
+        self.terminal_column_hover = over;
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// The pane whose lane the pointer is in, and that pane's bar.
     fn terminal_bar_under(
         &self,
@@ -36993,6 +37297,15 @@ impl Runtime<'_> {
                 let bar = self.terminal_scroll_bar(*seat)?;
                 termscroll::layer(&bar, thumb, &palette)
             })
+            .chain(self.sessions.keys().filter_map(|seat| {
+                // The foot's mark, on the same layer and out of the same ink.
+                // Its rule is its own (`termscroll::column_visibility`), so it is
+                // asked through `terminal_column_thumb` — the one derivation the
+                // press reads too, which is what stops the two from disagreeing
+                // about whether there is anything on the glass to take.
+                let bar = self.terminal_column_bar(*seat)?;
+                termscroll::column_layer(&bar, self.terminal_column_thumb(*seat, now), &palette)
+            }))
             .collect()
     }
 
@@ -37035,6 +37348,26 @@ impl Runtime<'_> {
                         .is_none_or(|drag| drag.seat != **seat)
             })
             .filter_map(|(_, leaf)| termscroll::fade_deadline(leaf.thumb_awake, now, motion))
+            .chain(
+                // The foot's marks, on the same clock and through the same
+                // latch. Their standing reasons are their own — a hover is not
+                // one of them — so the filter reads the horizontal axis rather
+                // than the vertical one, and a pane whose widest line fits has
+                // nothing down there to take off the glass.
+                self.sessions
+                    .iter()
+                    .filter(|(seat, leaf)| {
+                        leaf.projection.horizontal().max_x_origin().0 > 0
+                            && !leaf.session.terminal_modes().alternate_screen
+                            && !leaf.projection.horizontal().is_scrolled()
+                            && self
+                                .terminal_column_drag
+                                .is_none_or(|drag| drag.seat != **seat)
+                    })
+                    .filter_map(|(_, leaf)| {
+                        termscroll::fade_deadline(leaf.column_awake, now, motion)
+                    }),
+            )
             .min()
     }
 
@@ -54592,6 +54925,11 @@ impl Runtime<'_> {
         if self.drag_terminal_thumb(position)? {
             return Ok(());
         }
+        // And the foot's mark, on the same terms: a hand that has left the eleven
+        // pixels it took hold in is still holding what it took.
+        if self.drag_terminal_column_thumb(position)? {
+            return Ok(());
+        }
         if self.drag_preview_block_thumb(position)? {
             return Ok(());
         }
@@ -54608,6 +54946,9 @@ impl Runtime<'_> {
         // holds it on the glass. Answered `None` behind an overlay for the
         // reason the bars above it are: a scrim never leaves a bar lit under it.
         self.note_terminal_thumb_hover(free.then_some(position))?;
+        // The foot's mark lights the same way and summons nothing: what is
+        // recorded here only changes the ink of a mark that is already drawn.
+        self.note_terminal_column_hover(free.then_some(position))?;
         self.note_preview_block_hover(free.then_some(position))?;
         self.note_preview_link_hover(free.then_some(position))?;
         self.note_preview_hex_hover(free.then_some(position));
@@ -57747,6 +58088,14 @@ impl Runtime<'_> {
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-terminal-thumb state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
+            // And the foot's, on those same terms.
+            if let Some(drag) = self.terminal_column_drag.take() {
+                self.wake_terminal_column(drag.seat);
+                self.note_terminal_column_hover(Some(position))?;
+                self.repaint_pane_change(drag.seat)?;
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-terminal-column-thumb state={state:?} button={button:?} target={traced_target:?}"));
+                return Ok(true);
+            }
             if self.preview_block_drag.take().is_some() {
                 self.note_preview_block_hover(Some(position))?;
                 self.repaint_preview()?;
@@ -57959,6 +58308,18 @@ impl Runtime<'_> {
             // window recognises comes before the program's tracking).
             if self.press_terminal_thumb(position)? {
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-terminal-thumb state={state:?} button={button:?} target={traced_target:?}"));
+                return Ok(true);
+            }
+            // **And the foot's mark, on the same terms with one clause more.**
+            // Standing here buys the same two things it buys the lane above: no
+            // selection begins under a drag of it, and a mouse-reporting program
+            // does not swallow it. What it must not buy is the rest of the last
+            // row, and it does not: the mark answers for the pixels it is drawn
+            // on and only while it is drawn on them, so every press this declines
+            // — every press on the reader's own prompt — falls through to the
+            // grid exactly as it did before there was a bar down here.
+            if self.press_terminal_column_thumb(position)? {
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-terminal-column-thumb state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             // A link is a control standing in the prose and answers before the
@@ -60877,7 +61238,10 @@ impl Runtime<'_> {
                     "forward alternate-screen wheel to PTY",
                 )
             }
-            WheelRoute::Local => self.scroll_view_exact_in(target_seat, event_subpixels),
+            WheelRoute::Local => match self.wheel_columns(target_seat, delta) {
+                Some(columns) => self.scroll_seat_by_columns(target_seat, columns),
+                None => self.scroll_view_exact_in(target_seat, event_subpixels),
+            },
             WheelRoute::Nothing => Ok(()),
         }
     }
@@ -60923,6 +61287,79 @@ impl Runtime<'_> {
                 drain_whole_units(&mut self.window.pixel_wheel_remainder, cell_px) as i32
             }
         }
+    }
+
+    /// How many **columns** a local notch moves this pane's window, or `None` when
+    /// this notch is not the horizontal axis's at all.
+    ///
+    /// `None` is the answer for every pane that has been drawn by this product
+    /// until now, and that is the point: the question [`wheel_axis`] settles is
+    /// asked only where there are two axes to settle it between.
+    ///
+    /// **A notch travels the same distance whichever way it is turned.** The
+    /// vertical notch moves the system's lines-per-notch times the cell's
+    /// *height*; the same physical distance sideways is that many pixels divided
+    /// by the cell's *width*, which on this product's default face is about twice
+    /// as many columns as rows. That is `scroll_tab_strip`'s rule quoted where it
+    /// belongs — *"a notch that changed length depending on what it was over is a
+    /// distance the hand has to relearn at every surface"* — and it is why the
+    /// number here is derived from the metrics rather than picked. The "one
+    /// screen at a time" setting means one screenful on this axis too, which is
+    /// the window's own width in columns.
+    ///
+    /// The remainder is kept across events for [`WheelBurst`]'s reason: a
+    /// high-resolution wheel and a precision touchpad send a detent as a run of
+    /// small reports, and rounding each of them alone throws the whole detent
+    /// away a sixth at a time.
+    fn wheel_columns(&mut self, seat: SeatId, delta: MouseScrollDelta) -> Option<i32> {
+        let axis = self.leaf(seat).projection.horizontal();
+        // A report the platform put on the x axis says what it means. On a
+        // trackpad both arrive at once, so the larger one is the gesture and the
+        // smaller one is the hand not being straight.
+        let sideways = match delta {
+            MouseScrollDelta::LineDelta(x, _) => x != 0.0,
+            MouseScrollDelta::PixelDelta(position) => position.x.abs() > position.y.abs(),
+        };
+        if wheel_axis(
+            self.window.modifiers.shift_key(),
+            sideways,
+            axis.max_x_origin().0 > 0,
+        ) != WheelAxis::Columns
+        {
+            return None;
+        }
+        let metrics = self.window.renderer.metrics();
+        let cell_width = f64::from(metrics.cell_width_px).max(1.0);
+        let travel = match delta {
+            MouseScrollDelta::LineDelta(x, y) => {
+                // Turning the wheel away from the hand goes *back* — up a
+                // document, and left along a line. A horizontal report already
+                // points the way it means and is taken as it stands.
+                let notches = if sideways {
+                    f64::from(x)
+                } else {
+                    -f64::from(y)
+                };
+                let per_notch =
+                    match recoverable_wheel_scroll_amount(bt_platform::wheel_scroll_amount()) {
+                        bt_platform::WheelScrollAmount::Lines(lines) => {
+                            (f64::from(lines) * f64::from(metrics.cell_height_px) / cell_width)
+                                .max(1.0)
+                        }
+                        bt_platform::WheelScrollAmount::Page => f64::from(axis.viewport_columns()),
+                    };
+                notches * per_notch
+            }
+            MouseScrollDelta::PixelDelta(position) => {
+                let pixels = if sideways { position.x } else { -position.y };
+                pixels / cell_width
+            }
+        };
+        self.window.local_wheel_column_remainder += travel;
+        let take = drain_whole_units(&mut self.window.local_wheel_column_remainder, 1.0);
+        // `Some(0)` and not `None`: a report too small to move a column is still
+        // this axis's report, and handing it back would spend it on the other one.
+        Some(i32::try_from(take).unwrap_or(0))
     }
 
     /// Local pixel-exact wheel consumption: accumulate the event's fractional subpixels and
@@ -64827,7 +65264,7 @@ mod mouse_trace_station_tests {
     fn every_chrome_exit_that_takes_the_event_writes_a_line() {
         // 20 → 21 on 2026-08-24: §7.1.6l gave the pane head's double click a verb
         // and therefore an exit of its own (`at=release-pane-head-zoom`).
-        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 21);
+        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 23);
     }
 
     /// Both `None`s here are silent by construction — the callers turn them into
@@ -68352,6 +68789,81 @@ fn wheel_route(shift: bool, modes: bt_term::TerminalModes, target_is_scrolled: b
     WheelRoute::Local
 }
 
+/// Which of a pane's axes a notch that has already been ruled [`WheelRoute::Local`]
+/// moves.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WheelAxis {
+    /// Down the document, which is what every notch did before there was a
+    /// second axis to choose from.
+    Rows,
+    /// Along the line — the flattened window moving sideways.
+    Columns,
+}
+
+/// **`Shift` names the axis, and it is not a third meaning for the key** — the
+/// horizontal-scroll plan's §1c entry gesture, decided as a function of the three
+/// facts it turns on.
+///
+/// A function beside [`wheel_route`] and for its stated reason: this is a claim
+/// about a decision, and a decision that cannot be named cannot be pinned.
+///
+/// # Why `Shift`, given §7.1.6b′ says it is spent twice already
+///
+/// That paragraph's survey is right and its conclusion is about the **card
+/// column**, which is chrome. On a *pane* the other two keys are not free at all,
+/// and it is the same paragraph that says so:
+///
+/// * `Alt` is the one modifier that reaches the child — it is a bit in the SGR
+///   mouse report. Taking `Alt`+wheel here would take a gesture out of `tmux`'s
+///   and `vim`'s hands, and this window does not do that.
+/// * `Ctrl` is the chord every desktop reserves for scale. §7.1.6b′ spends it on
+///   nothing precisely so that door stays shut, and the web preview has since
+///   opened it as a *zoom* — the meaning it was being kept for.
+/// * `Shift` is already the key that means **"this notch is this window's view
+///   and not the program's"** (§7.1.5f on the wheel), which is what
+///   [`wheel_route`] above has just finished deciding. It is also already the key
+///   that means "the other axis" on the one surface in this window that has two
+///   (`scroll_preview_body`). Here those are the same sentence: the notch is this
+///   window's view, and the view is being moved along the axis it has.
+///
+/// So `Shift`+wheel over a terminal pane still never sends a byte, exactly as
+/// before. The only thing that changes is *which way the view moves*, and it
+/// changes only where there is a second way for it to move.
+///
+/// # What decides that there is one
+///
+/// `has_column_axis` is `max_x_origin > 0` — the very predicate the foot bar is
+/// drawn by. **One predicate, so the gesture and the picture can never disagree**:
+/// if `Shift`+wheel moves this pane sideways then this pane has a bar to show for
+/// it, and if it does not then there is nothing down there either.
+///
+/// Read the other way round, which is how it should be explained: with wrapping
+/// on — the default, and every pane this product has ever drawn — a pane's
+/// content is exactly as wide as the pane, so there is no second axis and nothing
+/// about the wheel changes at all.
+///
+/// # And a wheel that already points sideways
+///
+/// A tilt wheel and a trackpad's second axis have been reported to this window
+/// all along and dropped on the floor by every terminal path. They need no
+/// modifier: a report on the x axis is a reader saying "sideways" in the
+/// platform's own words, and the only reason to ask for `Shift` as well would be
+/// that we had not listened.
+fn wheel_axis(shift: bool, sideways: bool, has_column_axis: bool) -> WheelAxis {
+    if !has_column_axis {
+        // A pane with one axis has one answer, and it is the one it has always
+        // given. This arm is what keeps `Shift`'s old meaning intact everywhere
+        // it used to matter — including the alternate screen, whose flattened
+        // domain is empty, so a full-screen program's local review is reached by
+        // exactly the gesture that reached it before.
+        return WheelAxis::Rows;
+    }
+    if shift || sideways {
+        return WheelAxis::Columns;
+    }
+    WheelAxis::Rows
+}
+
 /// **Cut a pane across its longer side.** The whole of what "auto" means, as a
 /// function of the only two numbers it turns on.
 ///
@@ -69838,6 +70350,13 @@ fn presentation_equivalent(previous: &ViewportFrame, next: &ViewportFrame) -> bo
         && previous.viewport_origin == next.viewport_origin
         && previous.scroll_offset_rows == next.scroll_offset_rows
         && previous.layout_key == next.layout_key
+        // Without this, a window slid sideways over a run of blanks is dropped as
+        // "the same picture" — and it *is* the same picture, which is exactly the
+        // trap. The frame is also the answer to every question about where a
+        // pointer is: `live_point_at`, the selection, the links and the caret all
+        // read `horizontal` off it. Keeping the old frame keeps the old origin,
+        // and the next click lands on the column the reader has already left.
+        && previous.horizontal == next.horizontal
 }
 
 fn pty_frame_is_unchanged(
@@ -73938,6 +74457,82 @@ mod tests {
             ),
             "a tracked main screen and a tracked alternate screen answer alike"
         );
+    }
+
+    /// **`Shift` does not gain a third meaning; a pane gains a second axis**
+    /// (horizontal scroll plan §1c, the entry gesture).
+    ///
+    /// The whole sweep, as a table rather than as the chain under test — and the
+    /// half of it that matters is the first eight rows. **With no column axis,
+    /// every combination answers exactly what it answered before this existed**,
+    /// which is the executable form of "nothing about the wheel changes for a
+    /// wrapping pane". §7.1.6b′'s objection to a third meaning for `Shift` is
+    /// answered here and not in prose: the key's meaning is a function of what
+    /// the pane has, and where the pane has nothing it means what it always did.
+    ///
+    /// MUTATION: drop the `has_column_axis` guard — make `shift` alone decide —
+    /// and the first eight rows go red at once: a full-screen program's local
+    /// review, which is `Shift`'s standing job, starts scrolling an axis that is
+    /// not there instead of the rows the reader was reviewing.
+    #[test]
+    fn shift_names_the_axis_only_where_the_pane_has_two() {
+        let mut situations = 0;
+        for has_column_axis in [false, true] {
+            for shift in [false, true] {
+                for sideways in [false, true] {
+                    situations += 1;
+                    let expected = match (has_column_axis, shift, sideways) {
+                        // One axis, one answer — the answer it has always given.
+                        (false, _, _) => WheelAxis::Rows,
+                        // Two axes: the key that already means "this window's own
+                        // view" says which of its axes, and a report that already
+                        // points sideways needs no key at all.
+                        (true, true, _) | (true, _, true) => WheelAxis::Columns,
+                        (true, false, false) => WheelAxis::Rows,
+                    };
+                    assert_eq!(
+                        wheel_axis(shift, sideways, has_column_axis),
+                        expected,
+                        "shift={shift} sideways={sideways} axis={has_column_axis}"
+                    );
+                }
+            }
+        }
+        assert_eq!(situations, 8, "the sweep covered every situation");
+    }
+
+    /// **The predicate the gesture turns on is the predicate the bar is drawn
+    /// by** — said as an equality, because two predicates is how a window ends up
+    /// scrolling sideways with nothing on screen to say that it did.
+    ///
+    /// `column_bar` declines exactly when the axis has nowhere to go, and
+    /// [`wheel_axis`] is told the same fact by the same expression. This walks a
+    /// pane from "everything fits" to "one column over" and asserts the two flip
+    /// together.
+    #[test]
+    fn the_gesture_and_the_foot_bar_agree_about_whether_there_is_an_axis() {
+        const BODY: [f32; 4] = [0.0, 0.0, 800.0, 600.0];
+        const VIEWPORT: u32 = 80;
+        for extent in [0, 1, VIEWPORT - 1, VIEWPORT, VIEWPORT + 1, 400] {
+            let axis = bt_viewport::horizontal::HorizontalProjection::new(
+                ContentColumn(extent),
+                VIEWPORT,
+                ContentColumn(0),
+            );
+            let gesture = wheel_axis(true, false, axis.max_x_origin().0 > 0);
+            let bar = termscroll::column_bar(
+                BODY,
+                axis.content_extent().0,
+                axis.viewport_columns(),
+                0,
+                1.0,
+            );
+            assert_eq!(
+                gesture == WheelAxis::Columns,
+                bar.is_some(),
+                "an extent of {extent} columns behind a {VIEWPORT}-column pane"
+            );
+        }
     }
 
     /// PIN (user ruling, 2026-08-15): **the pane head's `⊞` cuts the pane along
@@ -82940,6 +83535,53 @@ mod tests {
         session.refresh_projection(&mut projection);
         let text = session.viewport_frame(&mut projection).unwrap();
         assert!(!presentation_equivalent(&mode_only, &text));
+    }
+
+    /// **A frame that says the same thing from somewhere else is not the same
+    /// frame.**
+    ///
+    /// The dedupe above exists because a frame drawing the same picture need not
+    /// be published again, and that holds right up until the picture stops being
+    /// the only thing the frame says. It is also the answer to every question
+    /// about where the pointer is: `live_point_at`, the word and line selections,
+    /// the links and the caret all read `horizontal` off the *published* frame.
+    /// Drop a frame whose cells happen to match and the reader is left holding an
+    /// origin they have moved off, and their next click lands on a column they
+    /// have left.
+    ///
+    /// The two frames here differ in the axis and in nothing else, on purpose:
+    /// building a live fixture whose cells genuinely coincide across a move is
+    /// hard *in this build* — a physical row past its own last column is empty
+    /// rather than blank (plan §5.1 clause 4), so the live plane usually gives
+    /// the move away. "Usually" is not "always", and it is not a property this
+    /// dedupe should be resting on.
+    ///
+    /// MUTATION: drop `previous.horizontal == next.horizontal` from
+    /// `presentation_equivalent` and this passes the moved frame off as
+    /// unchanged.
+    #[test]
+    fn a_frame_that_says_the_same_thing_from_a_new_origin_is_not_the_old_frame() {
+        use bt_viewport::horizontal::HorizontalProjection;
+
+        let session =
+            DualPlaneSession::new(NonZeroU32::new(8).unwrap(), NonZeroU32::new(2).unwrap());
+        let mut projection = session.new_projection(session.layout_key());
+        let before = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            presentation_equivalent(&before, &before.clone()),
+            "a frame is equivalent to itself, or this test proves nothing"
+        );
+
+        let mut moved = before.clone();
+        moved.horizontal = HorizontalProjection::new(ContentColumn(40), 8, ContentColumn(4));
+        assert_eq!(
+            before.cells, moved.cells,
+            "the two differ in the axis and nowhere else"
+        );
+        assert!(
+            !presentation_equivalent(&before, &moved),
+            "same cells, different origin — a different frame, not the same one"
+        );
     }
 
     #[test]
@@ -93580,6 +94222,7 @@ mod tests {
             attention_ticket: None,
             projection,
             thumb_awake: Instant::now(),
+            column_awake: Instant::now(),
             grid,
             conpty_grid: grid,
             last_finished_command: None,
