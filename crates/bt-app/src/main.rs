@@ -30951,6 +30951,33 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// **The hand answered, so the question is spent** (§7.1.5e′, user ruling
+    /// 2026-08-25).
+    ///
+    /// One function and three doors — a key that is not a modifier, a notch of
+    /// the wheel, a button going down — because "what spends a hold" is one
+    /// sentence and three copies of it are three chances for the next gesture to
+    /// be added to two of them. The card was born knowing only about the
+    /// keyboard, and the report that ended that is `Ctrl`+wheel zooming a page:
+    /// a hold being answered over and over while the card hangs there insisting
+    /// the hand has forgotten something.
+    ///
+    /// **The bare-modifier exemption is not here**, and that is deliberate: it
+    /// belongs to the keyboard, which is the only door at which a modifier can
+    /// *be* the gesture. A wheel notch and a mouse button are never one, so a
+    /// guard repeated at those two doors would be a guard that can never fire
+    /// and a reader would have to work out why.
+    ///
+    /// It answers nothing and consumes nothing — there is no path from here that
+    /// can stop an event — which is how "the hint never takes a gesture" stays
+    /// structural rather than remembered.
+    fn spend_key_hint(&mut self) -> Result<()> {
+        if self.window.key_hint.spend(self.window.modifiers) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// Take the card down without closing the offer — the window losing focus, a
     /// menu opening. See [`keyhint::KeyHintHost::hide`].
     fn hide_key_hint(&mut self) -> Result<()> {
@@ -60760,6 +60787,13 @@ impl Runtime<'_> {
         // you saying you already know. The mock-up's listener is the document's
         // for the same reason.
         if state == ElementState::Pressed {
+            // **And a press spends a raised hint card** (§7.1.5e′, user ruling
+            // 2026-08-25) — the same sentence one line further out: the card
+            // asks whether the hand has forgotten something, and a hand that is
+            // pressing a button has answered. The press only: a button coming
+            // back up is the end of an answer already given, and the modifiers
+            // are very often still down under it.
+            self.spend_key_hint()?;
             self.hide_tooltip()?;
             // L135 sends the peek the same way and for the same reason: it is a
             // glance, and pressing is you saying you are done glancing.
@@ -62845,6 +62879,18 @@ impl Runtime<'_> {
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
+        // **A notch spends a raised hint card** (§7.1.5e′, user ruling
+        // 2026-08-25), and at the very top for `keyboard_input`'s reason: every
+        // branch below this line is a surface taking the gesture home, and a
+        // card left standing over the thing a notch just did is the failure this
+        // surface exists to avoid. The report that settled it is `Ctrl`+wheel
+        // zooming a page — a hold that is answered over and over while the card
+        // hangs there insisting the hand has forgotten something.
+        //
+        // It answers nothing and consumes nothing: there is no path from `spend`
+        // that can stop a notch, so "the hint never takes a gesture" is
+        // structural here exactly as it is on the keyboard.
+        self.spend_key_hint()?;
         // **A notch over the card is the card's** (user ruling, 2026-08-14), and
         // it is asked before the dismissal below for the obvious reason: the card
         // is the topmost thing on the glass, and a scroller under the pointer
@@ -63371,17 +63417,14 @@ impl Runtime<'_> {
         // (§7.1.5e′), and this is the top of the function for the one reason
         // that matters: every branch below it can return, and a card left
         // standing over the thing a chord just did is the failure this surface
-        // exists to avoid. It answers nothing and consumes nothing — there is no
-        // path from `spend` that can stop an event, which is how "the hint never
-        // eats a key" is kept structurally rather than remembered.
+        // exists to avoid. See [`Self::spend_key_hint`], which the wheel and the
+        // mouse button read too; the exemption is here because this is the one
+        // door at which a modifier can be the gesture.
         //
         // Repeats included: a held `j` in `vim` is a hand that is very much not
         // waiting to be told anything.
-        if !shortcuts::is_a_bare_modifier(&event.logical_key)
-            && self.window.key_hint.spend(self.window.modifiers)
-            && self.refresh_overlay()
-        {
-            self.present_chrome_change()?;
+        if !shortcuts::is_a_bare_modifier(&event.logical_key) {
+            self.spend_key_hint()?;
         }
         if self.reset_cursor_blink(now) {
             self.publish_frame(FrameTrigger {
@@ -67324,6 +67367,59 @@ impl<K: Copy + Eq + std::hash::Hash, W> Windows<K, W> {
     fn clear(&mut self) {
         self.open.clear();
         self.order.clear();
+    }
+}
+
+/// **Every answer the hand gives spends a raised hint card** (§7.1.5e′, user
+/// ruling 2026-08-25).
+///
+/// The card asks one question — "your hand has stopped on these modifiers; did
+/// you forget something?" — and *any* answer spends it. A key that is not a
+/// modifier said so from the day the card was born; a notch of the wheel and a
+/// button going down did not, and the report that settled it is `Ctrl`+wheel
+/// zooming a page with the card hanging over the glass through every notch.
+///
+/// A source pin, and for [`mouse_trace_station_tests`]' reason: both doors take
+/// the whole window and answer by presenting a frame, so what a machine can hold
+/// is that the call is *there* and that it stands in front of the first `return`
+/// — every one of which is a surface that took the gesture and went home.
+///
+/// RED GATE: it was red the day it was written. Neither door mentioned
+/// `key_hint` at all.
+#[cfg(test)]
+mod key_hint_spend_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    #[test]
+    fn the_wheel_and_the_button_spend_a_raised_hold_the_way_a_key_does() {
+        for signature in [
+            "fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {",
+            "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+        ] {
+            let text = body(signature);
+            let spend = text
+                .find("self.spend_key_hint()?;")
+                .unwrap_or_else(|| panic!("{signature} spends the hold"));
+            // Every `return` in these two functions is a surface saying "this
+            // gesture was mine"; a spend behind one of them is a card that
+            // survives whichever surface answered first.
+            let first_return = text.find("return ").unwrap_or(text.len());
+            assert!(
+                spend < first_return,
+                "{signature} spends the hold before the first surface can take the gesture home"
+            );
+        }
     }
 }
 

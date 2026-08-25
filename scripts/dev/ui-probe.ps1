@@ -44,6 +44,17 @@
 #                                                                around the run, which is the only
 #                                                                way to reach a horizontal scroller
 #                                                                from a mouse with no tilt wheel
+#   .\ui-probe.ps1 wheel -Pid <pid> -X 1400 -Y 600 -Delta 1 -Mods c -PreHoldMs 1100 -Out z.png
+#                                                              → rest with the modifiers down before
+#                                                                the first notch, photographing what
+#                                                                the rest raised and what the notch
+#                                                                did to it WHILE THEY ARE STILL
+#                                                                DOWN (`-held`, `-notched`,
+#                                                                `-released`). The only way to reach
+#                                                                7.1.5e′'s hint card with a wheel: a
+#                                                                run that let the modifiers up first
+#                                                                could not tell the notch's answer
+#                                                                from the release's
 #   .\ui-probe.ps1 click -Pid <pid> -X 100 -Y 20 [-Mods c]     → left click at window+(X,Y) physical px;
 #                                                                -Mods holds ctrl/shift/alt down around
 #                                                                the press, which is how Ctrl+click —
@@ -162,6 +173,16 @@ param(
   # is sending no events at all, and a drag that arrives and releases in the same
   # breath never reaches it. Zero (the default) is the old behaviour exactly.
   [int]$HoldMs = 0,
+  # wheel: how long to REST with the modifiers down before the first notch, and
+  # — when -Out is given — photograph what that rest raised. A clock that only
+  # matures under a hand that has stopped (DESIGN 7.1.5e′'s 800ms hint card) is
+  # unreachable by a run that presses the modifiers and wheels in the same
+  # breath, and the claim about the notch is a claim about what happens while
+  # they are still down: with -Out the run photographs `-held` after the rest and
+  # `-notched` after the notches but BEFORE the modifiers come up, so the card
+  # going down can be attributed to the notch rather than to the release. Zero
+  # (the default) is the old behaviour exactly.
+  [int]$PreHoldMs = 0,
   # dblclick: the gap between the two releases. Must stay under the app's own
   # multi-click interval; the OS default is 500ms and bt-app follows it.
   [int]$GapMs = 90,
@@ -457,15 +478,26 @@ public class Probe {
       SendInput((uint)hold.Count, hold.ToArray(), Marshal.SizeOf(typeof(INPUT)));
       System.Threading.Thread.Sleep(40);
     }
-    int dir = notches < 0 ? -step : step;
-    for (int i = 0; i < System.Math.Abs(notches); i++) {
-      mouse_event(0x0800, 0, 0, dir, UIntPtr.Zero);
-      System.Threading.Thread.Sleep(60);
-    }
+    Notches(notches, step);
     if (drop.Count > 0) {
       System.Threading.Thread.Sleep(40);
       drop.Reverse();
       SendInput((uint)drop.Count, drop.ToArray(), Marshal.SizeOf(typeof(INPUT)));
+    }
+  }
+  /* The notches alone, with whatever is already held staying held.
+
+     Split out of WheelWithMods so that a caller who has to *photograph* a
+     moment inside one held run can drive the three parts itself — the wheel's
+     -PreHoldMs is exactly that caller: DESIGN 7.1.5e′'s card is raised by
+     modifiers that have been down 800ms, and the claim under test is what one
+     notch does to it while they are STILL down. A run that released them first
+     could never tell the notch's answer from the release's. */
+  public static void Notches(int notches, int step) {
+    int dir = notches < 0 ? -step : step;
+    for (int i = 0; i < System.Math.Abs(notches); i++) {
+      mouse_event(0x0800, 0, 0, dir, UIntPtr.Zero);
+      System.Threading.Thread.Sleep(60);
     }
   }
   /* Buttons travel the same road the wheel does, and reach winit for the same
@@ -792,11 +824,47 @@ switch ($Cmd) {
     }
     [Probe]::SetCursorPos($px, $py) | Out-Null
     Start-Sleep -Milliseconds 150
+    $ctrl = $Mods -match "c"; $shift = $Mods -match "s"; $alt = $Mods -match "a"
     # positive = scroll up (into history), negative = down. -Mods holds
     # ctrl/shift/alt down around the run, which is how a horizontal scroller is
     # reached from a mouse that has no tilt wheel.
-    [Probe]::WheelWithMods($Delta, ($Mods -match "c"), ($Mods -match "s"), ($Mods -match "a"), $Step)
-    "wheeled $Delta reports of $Step mods=$Mods at ($px, $py) on pid=$ProcId (foreground verified)"
+    if ($PreHoldMs -le 0) {
+      [Probe]::WheelWithMods($Delta, $ctrl, $shift, $alt, $Step)
+      "wheeled $Delta reports of $Step mods=$Mods at ($px, $py) on pid=$ProcId (foreground verified)"
+    } else {
+      # The three parts driven by hand, so that the rest and the notches can be
+      # photographed with the modifiers still down. `hold`'s scriptblock, its
+      # naming, and its `finally` — a modifier this probe leaves down outlives
+      # the probe and breaks every other window on the desktop.
+      Add-Type -AssemblyName System.Drawing
+      $stem = [IO.Path]::Combine([IO.Path]::GetDirectoryName($Out), [IO.Path]::GetFileNameWithoutExtension($Out))
+      $ext = [IO.Path]::GetExtension($Out); if (-not $ext) { $ext = ".png" }
+      $shot = {
+        param($tag)
+        [Probe]::GetWindowRect($h, [ref]$r) | Out-Null
+        $bmp = New-Object System.Drawing.Bitmap(($r.R - $r.L), ($r.B - $r.T))
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
+        $path = "$stem-$tag$ext"
+        $bmp.Save($path); $g.Dispose(); $bmp.Dispose()
+        $path
+      }
+      $said = @()
+      try {
+        $sent = [Probe]::ModsDown($ctrl, $shift, $alt)
+        if ($sent -eq 0 -and $Mods) { throw "SendInput accepted 0 events — the hold was not sent" }
+        Start-Sleep -Milliseconds $PreHoldMs
+        $said += "held mods=$Mods for ${PreHoldMs}ms -> $(& $shot '00-held')"
+        [Probe]::Notches($Delta, $Step)
+        Start-Sleep -Milliseconds 250
+        $said += "wheeled $Delta reports of $Step at ($px, $py), hold still down -> $(& $shot '01-notched')"
+      } finally {
+        [Probe]::ModsUp($ctrl, $shift, $alt) | Out-Null
+      }
+      Start-Sleep -Milliseconds 250
+      $said += "released -> $(& $shot '02-released')"
+      $said -join "`n"
+    }
   }
   "click" {
     # **Ownership of the pixel, which is the law this file already argues for a
