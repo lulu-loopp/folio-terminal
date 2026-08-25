@@ -5279,6 +5279,18 @@ pub enum FileMenuRow {
     Fold,
     /// A tab of the default profile, standing in this folder.
     NewTerminal,
+    /// **Change the name this row has on the disk** (B5, user ruling
+    /// 2026-08-25).
+    ///
+    /// A tree row only — a file's or a folder's. The `Document` face's name is
+    /// changed by double-clicking the last segment of the breadcrumb the pill
+    /// stands on, which is the same editor one surface over, and the
+    /// `FoldedPath` face carries no verb about any one of the folders it hides.
+    ///
+    /// It is a *door* rather than a path question, so it stands above the rule:
+    /// [`Self::hands_out_the_path`] is about handing the text of a path
+    /// somewhere, and this changes the thing the path points at.
+    Rename,
     // `ShowInFiles` is **retired** (user ruling 2026-08-25). It was the
     // breadcrumb face's answer to "where does this live", and the breadcrumb it
     // was hung under grew the same answer four times over: every segment of the
@@ -5367,6 +5379,7 @@ impl FileMenuRow {
                 }
             }
             Self::NewTerminal => crate::i18n::Text::FolderMenuNewTerminal.text(),
+            Self::Rename => crate::i18n::Text::FileMenuRename.text(),
             Self::CopyPath => copy_path_text(),
             Self::InsertPath => insert_path_text(),
             Self::Reveal => reveal_in_explorer_text(),
@@ -5435,6 +5448,13 @@ impl FileMenuRow {
             // wears everywhere else this window draws one — the default profile's
             // own, the same glyph its tab and its pane head carry.
             Self::NewTerminal => look.terminal,
+            // The pencil, which is this window's one glyph for *you are about to
+            // write this yourself* — the shortcut page already spends it on the
+            // row a chord is being recorded into. Not the row's own kind: a
+            // folder row and a file row take this verb identically, and a mark
+            // that changed with the subject would be saying which kind of thing
+            // is being renamed, which the row above it already said.
+            Self::Rename => ChromeMark::Pencil,
             Self::CopyPath => ChromeMark::Copy,
             Self::InsertPath => ChromeMark::Paste,
             // The Git row's `Reveal in Explorer` wears this one, for the reason
@@ -5497,10 +5517,12 @@ pub fn file_menu(subject: FileMenuSubject) -> FileMenu {
         FileMenuSubject::File => {
             rows.push(FileMenuRow::Open);
             rows.push(FileMenuRow::OpenWith);
+            rows.push(FileMenuRow::Rename);
         }
         FileMenuSubject::Folder { .. } => {
             rows.push(FileMenuRow::Fold);
             rows.push(FileMenuRow::NewTerminal);
+            rows.push(FileMenuRow::Rename);
         }
         // **`Reveal in Explorer` and not `Show in files column`** (user ruling
         // 2026-08-25). Two rulings of the same day met on this row. The
@@ -7175,6 +7197,17 @@ impl TermMenuLayout {
             .map(|submenu| submenu.items.as_slice())
     }
 
+    /// **Which profile the child's `at`th row is** —
+    /// [`PaneMenuLayout::submenu_row`] on this menu's own child, and for that
+    /// method's reason: a hit counts rows on the glass, and only the table
+    /// lookups want the identity.
+    #[must_use]
+    pub fn submenu_row(&self, at: usize) -> Option<usize> {
+        self.submenu
+            .as_ref()
+            .and_then(|submenu| submenu.rows.get(at).copied())
+    }
+
     /// **Whether this point is on the child at all** — its rows, its padding,
     /// its border. [`PaneMenuLayout::on_submenu`]'s reason verbatim: the hit
     /// answers `Surface` for both menus' padding, so the safety triangle cannot
@@ -7327,9 +7360,16 @@ pub fn term_menu_layout(
     // rows it holds are one derivation. Only the parent it is measured against
     // differs, which is the argument that function already takes.
     let submenu = heading.filter(|_| look.submenu_open).map(|heading| {
+        // **The terminal menu carries one submenu, and it is the profile list**
+        // (B9). Its lone-pane segment is a hand-picked four rows and
+        // `Move to window` is not among them, so the kind is stated rather than
+        // derived — and the empty window list beside it is the honest way of
+        // saying this menu has no such row to draw one for.
         pane_submenu_layout(
             frame,
             heading,
+            PaneMenuRow::SplitWith,
+            &[],
             surface,
             scale,
             border,
@@ -7366,7 +7406,7 @@ pub fn term_menu_hit(layout: &TermMenuLayout, x: f64, y: f64) -> Option<TermMenu
     {
         for (row, rect) in submenu.items.iter().enumerate() {
             if contains(*rect, x, y) {
-                return Some(TermMenuHit::Submenu(submenu.profiles[row]));
+                return Some(TermMenuHit::Submenu(row));
             }
         }
         return Some(TermMenuHit::Surface);
@@ -7482,6 +7522,7 @@ pub fn term_menu_build(
             hover,
             current_profile,
             programs,
+            &[],
             measure,
         ));
     }
@@ -7852,6 +7893,15 @@ pub enum PaneMenuRow {
     /// that came next. This is that row: a lone pane has nowhere to go inside
     /// this window and a window of its own to go to.
     MoveToNewWindow,
+    /// **Move this pane into a window that is already open** (B9, user ruling
+    /// 2026-08-25) — the third and last length of one journey.
+    ///
+    /// It is a submenu and the two rows above it are not, and the difference is
+    /// not a matter of degree: a new tab and a new window are places this verb
+    /// *makes*, so there is nothing to choose between; an open window is a place
+    /// that already exists, and which one is the whole of what the row is
+    /// asking.
+    MoveToWindow,
     /// The same verb the `×` in the head has.
     ClosePane,
 }
@@ -7875,7 +7925,7 @@ impl PaneMenuRow {
     /// was not. The mode is a posture of the window and rearranges the tab
     /// strip; a zoom is one pane's own share of one tab's stage, and every other
     /// line here is about that pane's share of that stage too.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Picker,
         Self::ZoomPane,
         Self::SplitWith,
@@ -7883,18 +7933,20 @@ impl PaneMenuRow {
         Self::Duplicate,
         Self::MoveToNewTab,
         Self::MoveToNewWindow,
+        Self::MoveToWindow,
         Self::ClosePane,
     ];
 
     /// The seven that are rows of text with a mark, in order — [`Self::ALL`]
     /// without the picker.
-    pub const TEXT_ROWS: [Self; 7] = [
+    pub const TEXT_ROWS: [Self; 8] = [
         Self::ZoomPane,
         Self::SplitWith,
         Self::NewInFolder,
         Self::Duplicate,
         Self::MoveToNewTab,
         Self::MoveToNewWindow,
+        Self::MoveToWindow,
         Self::ClosePane,
     ];
 
@@ -7924,6 +7976,12 @@ impl PaneMenuRow {
             // framed arrows in adjacent rows would be one drawing asked to mean
             // both — the argument `ChromeMark::External` was drawn for.
             Self::MoveToNewWindow => Some(ChromeMark::External),
+            // **The same bare arrow as the row above it**, because it is the
+            // same sentence — this content leaves the window — and what differs
+            // is only where it lands, which is what the submenu is for. Giving
+            // this row a glyph of its own would be the drawing claiming a
+            // difference the words are already carrying.
+            Self::MoveToWindow => Some(ChromeMark::External),
             Self::ClosePane => Some(ChromeMark::TabClose),
         }
     }
@@ -7947,6 +8005,7 @@ impl PaneMenuRow {
             Self::Duplicate => duplicate_pane_text(),
             Self::MoveToNewTab => move_to_new_tab_text(),
             Self::MoveToNewWindow => move_to_new_window_text(),
+            Self::MoveToWindow => move_to_window_text(),
             Self::ClosePane => close_pane_text(),
         }
     }
@@ -7987,7 +8046,7 @@ impl PaneMenuRow {
     /// Whether this row hangs a submenu off itself.
     #[must_use]
     pub fn has_submenu(self) -> bool {
-        self == Self::SplitWith
+        matches!(self, Self::SplitWith | Self::MoveToWindow)
     }
 }
 
@@ -8023,6 +8082,10 @@ pub fn move_to_new_tab_text() -> &'static str {
     crate::i18n::Text::PaneMenuMoveToNewTab.text()
 }
 /// One word apart from the row above it, and the word is the container.
+#[must_use]
+pub fn move_to_window_text() -> &'static str {
+    crate::i18n::Text::PaneMenuMoveToWindow.text()
+}
 #[must_use]
 pub fn move_to_new_window_text() -> &'static str {
     crate::i18n::Text::PaneMenuMoveToNewWindow.text()
@@ -8268,15 +8331,27 @@ pub struct PaneMenuLayout {
     submenu: Option<PaneSubmenuLayout>,
 }
 
-/// The `Split with` submenu's own boxes — the house's first.
+/// A submenu's own boxes, and **which of its parent's rows opened it** (B9).
+///
+/// The kind is carried rather than inferred, on `PaneMenuLayout::zoomed`'s own
+/// reasoning: the frame was measured against the words of one particular list,
+/// so a painter or a press handler that had to work out which list that was
+/// would be a second opinion about a thing the layout already knows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneSubmenuLayout {
     frame: [f32; 4],
-    /// One row per **offered** profile, top to bottom.
+    /// One row per offered item, top to bottom.
     items: Vec<[f32; 4]>,
-    /// Which table row each of [`Self::items`] draws — `ProfileMenuLayout`'s
-    /// mapping, for its reason.
-    profiles: Vec<usize>,
+    /// Which entry of the **kind's own list** each of [`Self::items`] draws —
+    /// the offered profile's index into `PROFILES` for `SplitWith`, and the
+    /// window's place in the list it was handed for `MoveToWindow`.
+    ///
+    /// `ProfileMenuLayout`'s mapping, for its reason: a list that hides
+    /// something must hand back the identity of what it drew rather than the
+    /// place on the glass.
+    rows: Vec<usize>,
+    /// The parent row this hangs off.
+    kind: PaneMenuRow,
 }
 
 impl PaneMenuLayout {
@@ -8327,6 +8402,32 @@ impl PaneMenuLayout {
         self.submenu
             .as_ref()
             .map(|submenu| submenu.items.as_slice())
+    }
+
+    /// **Which row's list is up** (B9), or `None` when no child is.
+    ///
+    /// The press handler's question and the painter's: two rows hang lists off
+    /// themselves now, and a `Submenu(index)` hit means an index into whichever
+    /// of the two this is.
+    #[must_use]
+    pub fn submenu_kind(&self) -> Option<PaneMenuRow> {
+        self.submenu.as_ref().map(|submenu| submenu.kind)
+    }
+
+    /// **What the child's `at`th row is about** — a `PROFILES` index under
+    /// `Split with`, a place in the window list under `Move to window`.
+    ///
+    /// [`PaneMenuHit::Submenu`] and [`PaneMenuHover::Submenu`] both count *rows
+    /// on the glass*, and this is the one door from that number to the thing it
+    /// stands for. They used to disagree — the hit answered with the profile's
+    /// table index while the keyboard walk counted rows — which was harmless
+    /// only for as long as every profile in the table was offered, and would
+    /// have lit the wrong row on the first machine missing one.
+    #[must_use]
+    pub fn submenu_row(&self, at: usize) -> Option<usize> {
+        self.submenu
+            .as_ref()
+            .and_then(|submenu| submenu.rows.get(at).copied())
     }
 
     /// Whether this point is on either surface. Two rectangles, because a menu
@@ -8428,8 +8529,9 @@ pub fn pane_menu_layout(
     point: [f32; 2],
     surface: (f32, f32),
     scale: f32,
-    submenu_open: bool,
+    submenu: Option<PaneMenuRow>,
     zoomed: bool,
+    windows: &[String],
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> PaneMenuLayout {
     let px = |value: f32| value * scale;
@@ -8573,18 +8675,35 @@ pub fn pane_menu_layout(
         (caption_top + px(SECTION_LABEL_LINE_LOGICAL_PX)).round(),
     ];
 
-    let submenu = submenu_open.then(|| {
-        pane_submenu_layout(
-            frame,
-            items[1],
-            surface,
-            scale,
-            border,
-            padding,
-            item_height,
-            measure,
-        )
-    });
+    // **The child hangs off the row that opened it**, which is the whole of
+    // what the second submenu cost this function: `items[1]` was the right
+    // heading while `Split with` was the only row with a list, and it was the
+    // right *number* for the wrong reason — the heading is a fact about which
+    // row is open, not about which position happens to be a submenu.
+    let submenu = submenu
+        .filter(|row| row.has_submenu())
+        .map(|kind| {
+            let heading = items[PaneMenuRow::ALL
+                .iter()
+                .position(|row| *row == kind)
+                .expect("every row is in ALL")];
+            pane_submenu_layout(
+                frame,
+                heading,
+                kind,
+                windows,
+                surface,
+                scale,
+                border,
+                padding,
+                item_height,
+                measure,
+            )
+        })
+        // A list with nothing in it is not a list: one window has nowhere to
+        // send a pane, and a child frame drawn around no rows is an empty box
+        // the pointer can get lost in.
+        .filter(|child| !child.items.is_empty());
 
     PaneMenuLayout {
         scale,
@@ -8659,6 +8778,8 @@ pub fn pane_menu_layout(
 fn pane_submenu_layout(
     parent: [f32; 4],
     heading: [f32; 4],
+    kind: PaneMenuRow,
+    windows: &[String],
     surface: (f32, f32),
     scale: f32,
     border: f32,
@@ -8669,15 +8790,29 @@ fn pane_submenu_layout(
     let px = |value: f32| value * scale;
     let hint = measure(current_profile_hint_text(), px(HINT_FONT_LOGICAL_PX));
     let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
-    let offered = table().offered();
+    // **The window list has no hint column and no icon column** (B9): every row
+    // of it says the same kind of thing, so there is no default to mark and no
+    // two kinds of destination to tell apart with a glyph. The profile list has
+    // both, which is why the two widths are measured apart rather than one being
+    // made to fit the other's furniture.
+    let offered: Vec<usize> = match kind {
+        PaneMenuRow::MoveToWindow => (0..windows.len()).collect(),
+        _ => table().offered(),
+    };
     let content = offered
         .iter()
-        .map(|index| {
-            px(ITEM_ICON_COLUMN_LOGICAL_PX)
-                + px(ITEM_GAP_LOGICAL_PX)
-                + measure(title(*index), px(ITEM_FONT_LOGICAL_PX))
-                + px(ITEM_GAP_LOGICAL_PX)
-                + hint
+        .map(|index| match kind {
+            PaneMenuRow::MoveToWindow => measure(
+                windows.get(*index).map_or("", String::as_str),
+                px(ITEM_FONT_LOGICAL_PX),
+            ),
+            _ => {
+                px(ITEM_ICON_COLUMN_LOGICAL_PX)
+                    + px(ITEM_GAP_LOGICAL_PX)
+                    + measure(title(*index), px(ITEM_FONT_LOGICAL_PX))
+                    + px(ITEM_GAP_LOGICAL_PX)
+                    + hint
+            }
         })
         .fold(0.0_f32, f32::max);
     let width = (chrome + content)
@@ -8725,7 +8860,8 @@ fn pane_submenu_layout(
     PaneSubmenuLayout {
         frame,
         items,
-        profiles: offered,
+        rows: offered,
+        kind,
     }
 }
 
@@ -8743,7 +8879,7 @@ pub fn pane_menu_hit(layout: &PaneMenuLayout, x: f64, y: f64) -> Option<PaneMenu
     {
         for (row, rect) in submenu.items.iter().enumerate() {
             if contains(*rect, x, y) {
-                return Some(PaneMenuHit::Submenu(submenu.profiles[row]));
+                return Some(PaneMenuHit::Submenu(row));
             }
         }
         return Some(PaneMenuHit::Surface);
@@ -8788,6 +8924,7 @@ pub fn pane_menu_build(
     hover: Option<PaneMenuHover>,
     current_profile: Option<usize>,
     programs: &ProfilePrograms,
+    windows: &[String],
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
@@ -8850,7 +8987,7 @@ pub fn pane_menu_build(
             &mut labels,
             &mut sprites,
         );
-        if *row == PaneMenuRow::SplitWith {
+        if row.has_submenu() {
             // The `▸`, which is `#i-tri` **at rest**: the file tree's disclosure
             // triangle points right until something opens it, and pointing right
             // is the whole of what a submenu indicator says. No new glyph, no new
@@ -8871,7 +9008,7 @@ pub fn pane_menu_build(
                 },
             ));
         }
-        if *row == PaneMenuRow::MoveToNewWindow {
+        if *row == PaneMenuRow::MoveToWindow {
             quads.push(OverlayQuad {
                 rect: layout.separator,
                 color: palette.menu_border,
@@ -8893,6 +9030,7 @@ pub fn pane_menu_build(
             hover,
             current_profile,
             programs,
+            windows,
             measure,
         ));
     }
@@ -8995,6 +9133,7 @@ fn push_submenu(
     hover: Option<PaneMenuHover>,
     current_profile: Option<usize>,
     programs: &ProfilePrograms,
+    windows: &[String],
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
@@ -9018,34 +9157,65 @@ fn push_submenu(
         palette.menu_border,
         alpha(palette.menu_border_alpha),
     );
-    for (index, rect) in layout.items.iter().enumerate() {
-        let hint = (current_profile == Some(index)).then(|| {
-            (
-                current_profile_hint_text().to_owned(),
-                measure(current_profile_hint_text(), px(HINT_FONT_LOGICAL_PX)),
-            )
-        });
-        push_row(
-            &Row {
-                rect: *rect,
-                mark: Some(mark(index)),
-                name: title(index),
-                hint,
-                hint_ink: None,
-                hovered: hover == Some(PaneMenuHover::Submenu(index)),
-                // The picker's own rule, and the same fact: a profile whose
-                // program this machine does not have cannot start a shell, and a
-                // row that lights under the pointer and then does nothing is
-                // worse than one that says so.
-                available: programs.is_available(index),
-                pin: None,
-            },
-            scale,
-            palette,
-            &mut quads,
-            &mut labels,
-            &mut sprites,
-        );
+    // **`at` is the row on the glass and `of` is what it is about**, which is
+    // the distinction `PaneMenuLayout::submenu_row` exists to keep: the hover
+    // and the hit both count rows, and only the lookups below want the identity.
+    for (at, rect) in layout.items.iter().enumerate() {
+        let of = layout.rows.get(at).copied().unwrap_or(at);
+        let hovered = hover == Some(PaneMenuHover::Submenu(at));
+        match layout.kind {
+            // **A window row is words and nothing else** (B9). There is no
+            // default window to mark and no second kind of window to tell apart
+            // with a glyph, so a mark column here would be a column of one
+            // repeated drawing — and every row is offered, because a window that
+            // is open is a window a pane can be put in.
+            PaneMenuRow::MoveToWindow => push_row(
+                &Row {
+                    rect: *rect,
+                    mark: None,
+                    name: windows.get(of).map_or("", String::as_str),
+                    hint: None,
+                    hint_ink: None,
+                    hovered,
+                    available: true,
+                    pin: None,
+                },
+                scale,
+                palette,
+                &mut quads,
+                &mut labels,
+                &mut sprites,
+            ),
+            _ => {
+                let hint = (current_profile == Some(of)).then(|| {
+                    (
+                        current_profile_hint_text().to_owned(),
+                        measure(current_profile_hint_text(), px(HINT_FONT_LOGICAL_PX)),
+                    )
+                });
+                push_row(
+                    &Row {
+                        rect: *rect,
+                        mark: Some(mark(of)),
+                        name: title(of),
+                        hint,
+                        hint_ink: None,
+                        hovered,
+                        // The picker's own rule, and the same fact: a profile
+                        // whose program this machine does not have cannot start
+                        // a shell, and a row that lights under the pointer and
+                        // then does nothing is worse than one that says so.
+                        available: programs.is_available(of),
+                        pin: None,
+                    },
+                    scale,
+                    palette,
+                    &mut quads,
+                    &mut labels,
+                    &mut sprites,
+                );
+            }
+        }
     }
     vec![OverlayLayer {
         quads,
@@ -13258,11 +13428,12 @@ mod tests {
             vec![
                 crate::i18n::Text::FileMenuOpenPreview.text(),
                 crate::i18n::Text::FileMenuOpenWith.text(),
+                crate::i18n::Text::FileMenuRename.text(),
                 copy_path_text(),
                 insert_path_text(),
                 reveal_in_explorer_text(),
             ],
-            "five rows, top to bottom, and no heading over them"
+            "six rows since B5, top to bottom, and no heading over them"
         );
         let ways_in = layout
             .items
@@ -13284,6 +13455,7 @@ mod tests {
             vec![
                 ChromeMark::File,
                 ChromeMark::External,
+                ChromeMark::Pencil,
                 ChromeMark::Copy,
                 ChromeMark::Paste,
                 ChromeMark::FolderOpen,
@@ -13310,9 +13482,9 @@ mod tests {
     #[test]
     fn a_menus_length_is_a_fact_about_its_subject_and_nothing_else() {
         for (subject, rows) in [
-            (FileMenuSubject::File, 5),
-            (FileMenuSubject::Folder { expanded: false }, 5),
-            (FileMenuSubject::Folder { expanded: true }, 5),
+            (FileMenuSubject::File, 6),
+            (FileMenuSubject::Folder { expanded: false }, 6),
+            (FileMenuSubject::Folder { expanded: true }, 6),
             (FileMenuSubject::Document, 4),
             (FileMenuSubject::FoldedPath { levels: 3 }, 3),
         ] {
@@ -13329,6 +13501,51 @@ mod tests {
                 .chain(file_menu(FileMenuSubject::Document).rows.iter())
                 .any(|row| matches!(row, FileMenuRow::Crumb(_))),
             "a folded level is a row of the chip's list and of nothing else"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-25, B5) — **`Rename` is a row of the two faces
+    /// that stand on a name of their own, and of neither of the other two.**
+    ///
+    /// A file row and a folder row each *are* something on the disk, and renaming
+    /// one is the ordinary verb every file manager puts on that menu. The other
+    /// two faces are not: the `Document` face is the preview's own pill, and the
+    /// document it names is renamed by double-clicking the last crumb — the same
+    /// editor, one surface over, which is why a row here would be a second door
+    /// onto a gesture already within reach; the `FoldedPath` face carries *no*
+    /// verbs about any one of the folders it hides, which is a ruling of the day
+    /// before this one and is not reopened by this one.
+    ///
+    /// It sits with the doors rather than with the path verbs, because
+    /// [`FileMenuRow::hands_out_the_path`] is about handing the *text* of a path
+    /// somewhere and this changes the thing the path points at.
+    ///
+    /// Red gate: put the row on `Document` or `FoldedPath` and the second half
+    /// names the face that took it.
+    #[test]
+    fn the_two_faces_that_are_a_name_on_disk_can_rename_it() {
+        for subject in [
+            FileMenuSubject::File,
+            FileMenuSubject::Folder { expanded: false },
+            FileMenuSubject::Folder { expanded: true },
+        ] {
+            assert!(
+                file_menu(subject).rows.contains(&FileMenuRow::Rename),
+                "{subject:?} names something on the disk, so it may rename it"
+            );
+        }
+        for subject in [
+            FileMenuSubject::Document,
+            FileMenuSubject::FoldedPath { levels: 3 },
+        ] {
+            assert!(
+                !file_menu(subject).rows.contains(&FileMenuRow::Rename),
+                "{subject:?} has no row of its own to rename"
+            );
+        }
+        assert!(
+            !FileMenuRow::Rename.hands_out_the_path(FileMenuSubject::File),
+            "it changes the thing a path points at rather than handing the path out"
         );
     }
 
@@ -13395,10 +13612,8 @@ mod tests {
         );
         // And the two verbs about the path are the same two the tree's rows
         // offer, in the same order, so a rename in one menu cannot drift.
-        assert_eq!(
-            rows[rows.len() - 2..],
-            file_menu(FileMenuSubject::File).rows[2..4],
-        );
+        let tree_rows = file_menu(FileMenuSubject::File).rows;
+        assert_eq!(rows[rows.len() - 2..], tree_rows[3..5]);
         // The rule falls under Explorer here and over it on a tree row: two
         // rows above the line on this face, one on that one.
         let rule = layout.separator.expect("a menu with both kinds of row");
@@ -13416,8 +13631,8 @@ mod tests {
         );
         let tree_rule = tree_layout.separator.expect("both kinds of row");
         assert!(
-            tree_rule[1] >= tree_layout.items[1].rect[3]
-                && tree_rule[3] <= tree_layout.items[2].rect[1],
+            tree_rule[1] >= tree_layout.items[2].rect[3]
+                && tree_rule[3] <= tree_layout.items[3].rect[1],
             "and on a tree row it is one of the three path verbs under the rule"
         );
         assert_eq!(
@@ -13570,14 +13785,15 @@ mod tests {
             vec![
                 crate::i18n::Text::FolderMenuExpand.text(),
                 crate::i18n::Text::FolderMenuNewTerminal.text(),
+                crate::i18n::Text::FileMenuRename.text(),
                 copy_path_text(),
                 insert_path_text(),
                 reveal_in_explorer_text(),
             ],
-            "a folder has no preview seat, so its ways in are its own two"
+            "a folder has no preview seat, so its ways in are its own two — and              since B5 the name it has on the disk is a third"
         );
         let separator = layout.separator.expect("a menu with both kinds of row");
-        assert!(separator[1] >= layout.items[1].rect[3] && separator[3] <= layout.items[2].rect[1]);
+        assert!(separator[1] >= layout.items[2].rect[3] && separator[3] <= layout.items[3].rect[1]);
         // The path half is one list shared with the file row's menu, so the two
         // cannot drift apart by a rename in one of them.
         assert_eq!(
@@ -13854,10 +14070,13 @@ mod tests {
             [300.0, 120.0],
             (960.0, 600.0),
             1.0,
-            submenu_open,
+            // The house's first child, which is the one every pin below was
+            // written about — `Move to window` has its own.
+            submenu_open.then_some(PaneMenuRow::SplitWith),
             // The ordinary posture: these pins are about the menu's shape, and
             // the zoom row's second face has a pin of its own.
             false,
+            &[],
             &mut fake_measure,
         )
     }
@@ -13893,7 +14112,7 @@ mod tests {
     /// test's last paragraph turns away — a zoom is one pane's share of one
     /// tab's stage, which is what every other line here is about too.
     #[test]
-    fn the_pane_menu_is_a_picker_and_seven_verbs_with_a_rule_above_the_close() {
+    fn the_pane_menu_is_a_picker_and_eight_verbs_with_a_rule_above_the_close() {
         assert_eq!(
             PaneMenuRow::ALL,
             [
@@ -13904,6 +14123,10 @@ mod tests {
                 PaneMenuRow::Duplicate,
                 PaneMenuRow::MoveToNewTab,
                 PaneMenuRow::MoveToNewWindow,
+                // **The third exit** (B9, 2026-08-25), and it belongs to this
+                // list for the reason the two above it do: it is a verb about
+                // *this pane*, and it is the same journey at its third length.
+                PaneMenuRow::MoveToWindow,
                 PaneMenuRow::ClosePane,
             ]
         );
@@ -13913,6 +14136,7 @@ mod tests {
             None,
             None,
             &equipped(),
+            &[],
             &mut fake_measure,
         ));
         let names: Vec<&str> = layer
@@ -13930,9 +14154,10 @@ mod tests {
                 duplicate_pane_text(),
                 move_to_new_tab_text(),
                 move_to_new_window_text(),
+                move_to_window_text(),
                 close_pane_text(),
             ],
-            "the caption under the diagram, then seven rows, and no heading over them"
+            "the caption under the diagram, then eight rows, and no heading over them"
         );
         assert_ne!(
             move_to_new_tab_text(),
@@ -13941,7 +14166,7 @@ mod tests {
              — including by not being the same string"
         );
         let close = layout.item(PaneMenuRow::ClosePane);
-        let above = layout.item(PaneMenuRow::MoveToNewWindow);
+        let above = layout.item(PaneMenuRow::MoveToWindow);
         assert!(
             layout.separator[1] >= above[3] && layout.separator[3] <= close[1],
             "the rule lies between the last constructive verb and `Close pane`"
@@ -13957,6 +14182,97 @@ mod tests {
             layout.item(PaneMenuRow::Picker)[1],
             layout.frame[1] + (FLOAT_WINDOW_BORDER_LOGICAL_PX).max(1.0) + MENU_PADDING_LOGICAL_PX,
             "the diagram sits directly under the menu's own padding"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-25, B9) — **`Move to window ▸` stands beside the
+    /// two exits it completes, and it is the second row of this menu to hang a
+    /// list off itself.**
+    ///
+    /// The three exits are one sentence read at three lengths: out of this tree
+    /// into a tab, out of this window into a new one, out of this window into
+    /// one that already exists. The third has to be a submenu because it is the
+    /// only one whose destination is a *choice* — and a window is not something
+    /// a menu row can name, so the submenu names them the way a reader can pick
+    /// between them: by their place in the run and by how much is in them.
+    ///
+    /// Red gate: leave `has_submenu` keyed on `SplitWith` alone and the row
+    /// draws no `▸`, opens nothing, and answers a press by running a verb that
+    /// does not exist.
+    #[test]
+    fn the_third_exit_names_a_window_that_is_already_open() {
+        assert_eq!(
+            PaneMenuRow::ALL,
+            [
+                PaneMenuRow::Picker,
+                PaneMenuRow::ZoomPane,
+                PaneMenuRow::SplitWith,
+                PaneMenuRow::NewInFolder,
+                PaneMenuRow::Duplicate,
+                PaneMenuRow::MoveToNewTab,
+                PaneMenuRow::MoveToNewWindow,
+                PaneMenuRow::MoveToWindow,
+                PaneMenuRow::ClosePane,
+            ],
+            "the third exit stands directly under the second"
+        );
+        assert!(PaneMenuRow::MoveToWindow.has_submenu());
+        assert!(PaneMenuRow::SplitWith.has_submenu());
+        for row in PaneMenuRow::ALL {
+            assert_eq!(
+                row.has_submenu(),
+                matches!(row, PaneMenuRow::SplitWith | PaneMenuRow::MoveToWindow),
+                "{row:?}: exactly two rows hang a list off themselves"
+            );
+        }
+
+        // The child hangs off the row that opened it, and says which list it is.
+        let windows = [
+            "Window 2 · 3 tabs".to_owned(),
+            "Window 3 · 1 tab".to_owned(),
+        ];
+        let layout = pane_menu_layout(
+            [300.0, 120.0],
+            (960.0, 600.0),
+            1.0,
+            Some(PaneMenuRow::MoveToWindow),
+            false,
+            &windows,
+            &mut fake_measure,
+        );
+        assert_eq!(layout.submenu_kind(), Some(PaneMenuRow::MoveToWindow));
+        let rows = layout.submenu_rows().expect("the child is up");
+        assert_eq!(rows.len(), windows.len(), "one row per other window");
+        let heading = layout.item(PaneMenuRow::MoveToWindow);
+        assert!(
+            rows[0][1] <= heading[3],
+            "and it hangs off its own heading rather than off the first submenu's"
+        );
+        assert_eq!(
+            pane_menu_hit(
+                &layout,
+                f64::from((rows[1][0] + rows[1][2]) / 2.0),
+                f64::from((rows[1][1] + rows[1][3]) / 2.0),
+            ),
+            Some(PaneMenuHit::Submenu(1)),
+            "a press on a row answers with its place in the list it is drawn from"
+        );
+
+        // **One window is no choice at all**, so the row is drawn and not
+        // offered — the same face `a_submenu_row_this_machine_cannot_start_is_
+        // drawn_and_not_offered` gives a profile that will not run.
+        let alone = pane_menu_layout(
+            [300.0, 120.0],
+            (960.0, 600.0),
+            1.0,
+            Some(PaneMenuRow::MoveToWindow),
+            false,
+            &[],
+            &mut fake_measure,
+        );
+        assert!(
+            alone.submenu_rows().is_none_or(<[[f32; 4]]>::is_empty),
+            "a list of nowhere to go is not a list"
         );
     }
 
@@ -14009,8 +14325,9 @@ mod tests {
                 [300.0, 120.0],
                 (960.0, 600.0),
                 1.0,
-                false,
+                None,
                 zoomed,
+                &[],
                 &mut fake_measure,
             );
             let layer = one_layer(pane_menu_build(
@@ -14018,6 +14335,7 @@ mod tests {
                 None,
                 None,
                 &equipped(),
+                &[],
                 &mut fake_measure,
             ));
             assert_eq!(
@@ -14281,8 +14599,9 @@ mod tests {
             [950.0, 596.0],
             surface,
             1.0,
+            None,
             false,
-            false,
+            &[],
             &mut fake_measure,
         );
         assert!(
@@ -14343,6 +14662,7 @@ mod tests {
             Some(PaneMenuHover::Zone(SplitZone::Down)),
             None,
             &equipped(),
+            &[],
             &mut fake_measure,
         ));
         let zone = layout.zone(SplitZone::Down);
@@ -14374,6 +14694,7 @@ mod tests {
             None,
             None,
             &equipped(),
+            &[],
             &mut fake_measure,
         ));
         assert!(
@@ -14447,8 +14768,9 @@ mod tests {
             [300.0, 120.0],
             (1600.0, 900.0),
             1.0,
-            true,
+            Some(PaneMenuRow::SplitWith),
             false,
+            &[],
             &mut fake_measure,
         );
         let parent = roomy.frame;
@@ -14474,8 +14796,9 @@ mod tests {
             [1500.0, 120.0],
             (1600.0, 900.0),
             1.0,
-            true,
+            Some(PaneMenuRow::SplitWith),
             false,
+            &[],
             &mut fake_measure,
         );
         let parent = cramped.frame;
@@ -14512,8 +14835,9 @@ mod tests {
                 [300.0 * scale, 120.0 * scale],
                 (1600.0 * scale, 900.0 * scale),
                 scale,
-                true,
+                Some(PaneMenuRow::SplitWith),
                 false,
+                &[],
                 &mut fake_measure,
             );
             let parent = layout.frame;
@@ -14565,8 +14889,9 @@ mod tests {
             [300.0, 120.0],
             (1600.0, 900.0),
             1.0,
-            true,
+            Some(PaneMenuRow::SplitWith),
             false,
+            &[],
             &mut fake_measure,
         );
         let child = layout.submenu_frame().expect("an open submenu has a frame");
@@ -14608,8 +14933,9 @@ mod tests {
             [300.0, 120.0],
             (1600.0, 900.0),
             1.0,
+            None,
             false,
-            false,
+            &[],
             &mut fake_measure,
         );
         assert!(!alone.on_submenu(child[0] + 4.0, inside_y));
@@ -14635,8 +14961,9 @@ mod tests {
             [300.0, 120.0],
             (1600.0, 900.0),
             1.0,
-            true,
+            Some(PaneMenuRow::SplitWith),
             false,
+            &[],
             &mut fake_measure,
         );
         let parent = layout.frame;
@@ -14689,7 +15016,7 @@ mod tests {
         );
         assert!(frame[1] <= heading[1] && frame[3] > heading[1]);
 
-        let layers = pane_menu_build(&layout, None, Some(1), &equipped(), &mut fake_measure);
+        let layers = pane_menu_build(&layout, None, Some(1), &equipped(), &[], &mut fake_measure);
         let [_parent, child]: [OverlayLayer; 2] = layers
             .try_into()
             .expect("a menu with a child draws two layers");
@@ -14746,7 +15073,7 @@ mod tests {
     #[test]
     fn a_submenu_row_this_machine_cannot_start_is_drawn_and_not_offered() {
         let layout = pane_menu(true);
-        let layers = pane_menu_build(&layout, None, Some(0), &bare(), &mut fake_measure);
+        let layers = pane_menu_build(&layout, None, Some(0), &bare(), &[], &mut fake_measure);
         let child = layers.last().expect("the child layer");
         assert_eq!(
             child
@@ -14874,6 +15201,7 @@ mod tests {
             None,
             None,
             &equipped(),
+            &[],
             &mut fake_measure,
         ));
         let sprite_of = |glyph: ChromeMark| {
@@ -15186,7 +15514,8 @@ mod tests {
         );
         assert_eq!(
             step(file, Some(FileMenuRow::CopyPath), false),
-            FileMenuRow::OpenWith
+            FileMenuRow::Rename,
+            "B5 put a row between the doors and the path verbs"
         );
 
         let folder = FileMenuSubject::Folder { expanded: false };
@@ -15198,6 +15527,10 @@ mod tests {
         );
         assert_eq!(
             step(folder, Some(FileMenuRow::CopyPath), false),
+            FileMenuRow::Rename
+        );
+        assert_eq!(
+            step(folder, Some(FileMenuRow::Rename), false),
             FileMenuRow::NewTerminal,
             "and it steps over a row this subject does not have"
         );

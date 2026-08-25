@@ -80,6 +80,13 @@ pub(crate) enum Action {
     SplitHorizontal,
     SplitVertical,
     DuplicatePaneSplit,
+    /// **Put this pane on the stage alone, or put the tiling back** (§7.1.6l,
+    /// user ruling 2026-08-25, B7).
+    ///
+    /// A toggle for [`Self::ToggleFocusMode`]'s reason, one surface down: the
+    /// zoom is one field on one tab, the pane head draws which way it is set, and
+    /// a separate "restore" key would be a second truth about the same field.
+    ZoomPane,
     /// Open this tab's files column, or close the one it already has.
     FilesPane,
     /// Turn a files column's page over: tree to repository, repository to tree.
@@ -790,6 +797,32 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutDuplicatePaneSplit,
         Action::DuplicatePaneSplit,
         Chord::new(CTRL_SHIFT, character("d")),
+    ),
+    // **`Ctrl+Shift+Enter`, ruled by the user 2026-08-25** — the keyboard door
+    // §7.1.6l shipped without. The verb had two pointer doors (a double-click on
+    // the pane head, the `⌄` menu's row) and no key, which made it the one pane
+    // verb in this build a hand on the keyboard could not reach.
+    //
+    // The key was free: no row in this table is keyed on `Enter` in any
+    // combination, and `Ctrl+Shift+Enter` is not a sequence a shell claims — a
+    // bare `Enter` is `\r` and stays with the terminal, exactly as `^M` stays
+    // with it. It is also the chord Windows Terminal spends on maximising a
+    // pane, so it arrives already meaning this to the hands that have met it.
+    //
+    // **The `new-window` row's 2026-08-19 note is above, and it is kept.** That
+    // note measured a modified `Enter` failing to arrive and, on that evidence,
+    // declined to key a row on it. The note is a record of one machine on one
+    // day, not a rule; this row is the ruling. Both stay written down, so that a
+    // reader who finds this chord dead on their machine finds the earlier
+    // measurement beside it rather than having to make it again.
+    //
+    // Titled with the menu row's action face on `focus-mode`'s precedent: the
+    // chord and the row turn one field, so they are one name.
+    Binding::window(
+        "zoom-pane",
+        Text::PaneMenuZoom,
+        Action::ZoomPane,
+        Chord::new(CTRL_SHIFT, ChordKey::Named(NamedKey::Enter)),
     ),
     // **`Ctrl+Shift+B`, and pointedly not the mock-up's `Ctrl+B`.**
     //
@@ -2881,7 +2914,9 @@ mod tests {
         // `Ctrl+Shift+L` — 23 single actions, and the second row in the table
         // that puts a caret in an address. See [`Action::WindowAddress`] for why
         // it is a row rather than a second chord on the first one.
-        assert_eq!(BINDINGS.len(), 39);
+        // **One more on 2026-08-25** (B7): `zoom-pane` on `Ctrl+Shift+Enter` —
+        // 24 single actions, and the first row in the table keyed on `Enter`.
+        assert_eq!(BINDINGS.len(), 40);
         assert_eq!(
             BINDINGS
                 .iter()
@@ -2919,6 +2954,50 @@ mod tests {
         }
     }
 
+    /// PIN (user ruling 2026-08-25, B7) — **the pane zoom has a chord, and it is
+    /// `Ctrl+Shift+Enter`.**
+    ///
+    /// §7.1.6l shipped the verb with two pointer doors and no keyboard one: a
+    /// double-click on the pane head and the `⌄` menu's row. The ruling gives it
+    /// the third, and the row is titled with the menu row's own action face on
+    /// `focus-mode`'s precedent — the chord and the row turn one bit, so they are
+    /// one name. The state face (`Restore pane`) is not this table's business:
+    /// a shortcut row says what a key *does*, and this key does the same thing
+    /// both ways round, which is what makes it a toggle.
+    ///
+    /// **The 2026-08-19 note on `new-window` is not a refutation of this row.**
+    /// That note recorded a modified `Enter` failing to arrive on one machine on
+    /// one day and, on that evidence, declined to key a row on it. What this test
+    /// pins is the half this file owns: the chord is claimed, it is claimed by
+    /// nothing else, and the table answers it. Whether Windows delivers it is a
+    /// fact about Windows, and the note stays where it is so that the next reader
+    /// meets both halves.
+    ///
+    /// Red gate: leave the row out and the lookup falls through to the PTY
+    /// encoder, where `Ctrl+Shift+Enter` is a `\r` the shell already had.
+    #[test]
+    fn the_zoom_verb_has_a_chord_of_its_own() {
+        let row = BINDINGS
+            .iter()
+            .find(|binding| binding.id == "zoom-pane")
+            .expect("the zoom row is a row of the table");
+        assert_eq!(row.action, Action::ZoomPane);
+        assert_eq!(
+            row.chord,
+            Some(Chord::new(CTRL_SHIFT, ChordKey::Named(NamedKey::Enter))),
+            "the chord the ruling names"
+        );
+        assert!(
+            press_on_primary_screen(Key::Named(NamedKey::Enter), CTRL_SHIFT).is_some(),
+            "and a press on a terminal is answered by the table, not the encoder"
+        );
+        assert_eq!(
+            press_on_primary_screen(Key::Named(NamedKey::Enter), ModifiersState::empty()),
+            None,
+            "a bare Enter is still the shell's"
+        );
+    }
+
     /// Every id the table names must be its own, because the file names rows by
     /// id and two rows answering to one name is a file with an ambiguous line.
     #[test]
@@ -2953,6 +3032,7 @@ mod tests {
             Action::SplitHorizontal,
             Action::SplitVertical,
             Action::DuplicatePaneSplit,
+            Action::ZoomPane,
             Action::FilesPane,
             Action::GitPage,
             Action::OpenSettings,

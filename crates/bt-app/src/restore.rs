@@ -1218,6 +1218,13 @@ fn brightened(color: [u8; 3], factor: f32) -> [u8; 3] {
 /// What a press on the gate answers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GateAnswer {
+    /// **Write every buffer the card named back, and carry on only if all of it
+    /// reached the disk** (B1, user ruling 2026-08-25).
+    ///
+    /// Offered by one request — the shut — because that is the one this gate
+    /// asks that is an *exit*. See [`GateRequest::offers_save`], which is where
+    /// that is decided and why.
+    Save,
     /// Throw the unsaved edits away and carry on with what was asked.
     Discard,
     /// Change nothing. **The default**, and Esc's answer: a gate that took
@@ -1228,8 +1235,9 @@ pub enum GateAnswer {
 /// Something on the gate the pointer can be over.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GateTarget {
-    /// The dialog itself, away from either button. A press here does nothing.
+    /// The dialog itself, away from every button. A press here does nothing.
     Panel,
+    Save,
     Cancel,
     Discard,
 }
@@ -1239,9 +1247,33 @@ pub enum GateTarget {
 pub fn gate_discard_text() -> &'static str {
     crate::i18n::Text::GateDiscard.text()
 }
+/// `Discard all` — the exit card's destructive answer, which is about a list
+/// (B1, user ruling 2026-08-25).
+#[must_use]
+pub fn gate_discard_all_text() -> &'static str {
+    crate::i18n::Text::GateDiscardAll.text()
+}
 #[must_use]
 pub fn gate_cancel_text() -> &'static str {
     crate::i18n::Text::GateCancel.text()
+}
+
+/// **One line per unsaved file** (B1, user ruling 2026-08-25).
+///
+/// The exit cards' list, made where both of them can reach it: a run-on sentence
+/// wrapped to the dialog's width is the shape a `confirm()` string has, and what
+/// a reader deciding between `Save all` and `Discard all` is reading is a list.
+/// Each entry arrives already saying which tab it is in — that is the collecting
+/// side's business, because only it can see a tab — and this function's whole
+/// contribution is that it does not join them.
+///
+/// An empty list answers with no lines rather than with one that says so: a card
+/// with nothing to list is a card that is never raised (`raise_dirty_gate` and
+/// [`crate::quit::Quit::begin`] both refuse an empty one), so a "nothing here"
+/// line would be a sentence no reader can ever meet.
+#[must_use]
+pub fn unsaved_lines(names: &[String]) -> Vec<String> {
+    names.to_vec()
 }
 /// The button Enter answers, which is the one that changes nothing.
 pub const GATE_FOCUSED_ANSWER: GateAnswer = GateAnswer::Cancel;
@@ -1575,6 +1607,35 @@ impl GateRequest {
         }
     }
 
+    /// **Whether this question offers `Save all`** (B1, user ruling
+    /// 2026-08-25).
+    ///
+    /// The shut and no other, and the line between them is *exit*. Closing a
+    /// window is the reader leaving, and a reader leaving is entitled to the
+    /// third answer the ruling names — keep the work and go anyway. The rest of
+    /// this list is not an exit: a pane, a tab and a scrollback are things being
+    /// closed inside a window that stays, and the two git requests are not about
+    /// a buffer at all, so `Save all` on any of them would be a button offering
+    /// to write files the question was never about.
+    #[must_use]
+    pub fn offers_save(&self) -> bool {
+        matches!(self, Self::Shut)
+    }
+
+    /// **The lines under the title — one per unsaved file** (B1, user ruling
+    /// 2026-08-25), or the request's own sentence when its subject is not a
+    /// list of files.
+    ///
+    /// The three buffer questions list; everything else on this table asks about
+    /// one thing and says so in a sentence, which is what a sentence is for.
+    #[must_use]
+    pub fn lines(&self, names: &[String]) -> Vec<String> {
+        match self {
+            Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut => unsaved_lines(names),
+            other => vec![other.message(names)],
+        }
+    }
+
     /// The sentence under it — **by name, always** (§7.1.3).
     ///
     /// `names` is what the caller collected: the dirty buffers for the three
@@ -1668,6 +1729,7 @@ impl DirtyGate {
 #[must_use]
 pub fn gate_answer(target: GateTarget) -> Option<GateAnswer> {
     match target {
+        GateTarget::Save => Some(GateAnswer::Save),
         GateTarget::Discard => Some(GateAnswer::Discard),
         GateTarget::Cancel => Some(GateAnswer::Cancel),
         GateTarget::Panel => None,
@@ -1694,6 +1756,10 @@ pub struct GateContent {
     pub discard_text: &'static str,
     pub cancel_text_width: f32,
     pub discard_text_width: f32,
+    /// The width of `Save all`'s box, when this request offers that answer at
+    /// all (B1). `None` is the two-button gate every other request draws — see
+    /// [`GateRequest::offers_save`].
+    pub save_text_width: Option<f32>,
 }
 
 /// Every rectangle the gate draws and hit-tests.
@@ -1705,6 +1771,8 @@ pub struct GateLayout {
     /// The words in [`Self::title`]'s box, carried from the request.
     title_text: &'static str,
     message: Vec<(String, [f32; 4])>,
+    /// **`Save all`'s box, when this gate has one** (B1).
+    save: Option<[f32; 4]>,
     cancel: [f32; 4],
     discard: [f32; 4],
     /// The words in [`Self::discard`]'s box, carried for [`Self::title_text`]'s
@@ -1768,31 +1836,42 @@ pub fn gate_layout(
     cursor += content.message_lines.len() as f32 * px(SUB_LINE_LOGICAL_PX)
         + px(SUB_MARGIN_BOTTOM_LOGICAL_PX);
 
-    // `justify-content: flex-end`, and **the destructive answer is the one on
-    // the right without being the primary one**: it is where the eye goes last,
-    // it is not the button Enter presses, and it is not painted in the accent —
-    // an accent-filled `Discard` would be the window recommending the one action
-    // it cannot undo.
+    // `justify-content: flex-end`, and **the affirmative answers stand to the
+    // left of `Cancel`** (B1, user ruling 2026-08-25: Windows order, the
+    // affirmative on the left). The arrangement it replaces put `Discard` hard
+    // right and argued that this kept the destructive answer out of the default
+    // seat — and that argument is not lost, because it was never this seat that
+    // bought it: `Discard` is still not the button Enter presses and still not
+    // painted in the accent, and those are the two rules that decide it.
     let button_width =
         |text_width: f32| 2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + text_width;
-    let discard = [
-        content_right - button_width(content.discard_text_width),
+    let cancel = [
+        content_right - button_width(content.cancel_text_width),
         cursor,
         content_right,
         cursor + button_height,
     ];
-    let cancel = [
-        discard[0] - px(ACTIONS_GAP_LOGICAL_PX) - button_width(content.cancel_text_width),
+    let discard = [
+        cancel[0] - px(ACTIONS_GAP_LOGICAL_PX) - button_width(content.discard_text_width),
         cursor,
-        discard[0] - px(ACTIONS_GAP_LOGICAL_PX),
+        cancel[0] - px(ACTIONS_GAP_LOGICAL_PX),
         cursor + button_height,
     ];
+    let save = content.save_text_width.map(|width| {
+        [
+            discard[0] - px(ACTIONS_GAP_LOGICAL_PX) - button_width(width),
+            cursor,
+            discard[0] - px(ACTIONS_GAP_LOGICAL_PX),
+            cursor + button_height,
+        ]
+    });
     GateLayout {
         scale,
         frame,
         title,
         title_text: content.title,
         message,
+        save,
         cancel,
         discard,
         discard_text: content.discard_text,
@@ -1804,6 +1883,9 @@ pub fn gate_layout(
 #[must_use]
 pub fn gate_hit(layout: &GateLayout, x: f64, y: f64) -> GateTarget {
     let (x, y) = (x as f32, y as f32);
+    if layout.save.is_some_and(|rect| contains(rect, x, y)) {
+        return GateTarget::Save;
+    }
     if contains(layout.cancel, x, y) {
         return GateTarget::Cancel;
     }
@@ -1811,6 +1893,16 @@ pub fn gate_hit(layout: &GateLayout, x: f64, y: f64) -> GateTarget {
         return GateTarget::Discard;
     }
     GateTarget::Panel
+}
+
+/// The gate's buttons, left to right, for the test that pins their order.
+///
+/// Test-only, on [`quit_button_rects`]'s own terms: the window draws them out of
+/// the layout it was handed and hit-tests them through [`gate_hit`].
+#[cfg(test)]
+#[must_use]
+pub fn gate_button_rects(layout: &GateLayout) -> (Option<[f32; 4]>, [f32; 4], [f32; 4]) {
+    (layout.save, layout.discard, layout.cancel)
 }
 
 /// The gate as one overlay layer, **scrim and all**.
@@ -1878,17 +1970,19 @@ pub fn gate_build(
             clip: None,
         });
     }
-    push_button(
-        &mut quads,
-        &mut labels,
-        layout.cancel,
-        gate_cancel_text(),
-        false,
-        hover == Some(GateTarget::Cancel),
-        scale,
-        border,
-        palette,
-    );
+    if let Some(save) = layout.save {
+        push_button(
+            &mut quads,
+            &mut labels,
+            save,
+            quit_save_text(),
+            false,
+            hover == Some(GateTarget::Save),
+            scale,
+            border,
+            palette,
+        );
+    }
     push_button(
         &mut quads,
         &mut labels,
@@ -1896,6 +1990,17 @@ pub fn gate_build(
         layout.discard_text,
         false,
         hover == Some(GateTarget::Discard),
+        scale,
+        border,
+        palette,
+    );
+    push_button(
+        &mut quads,
+        &mut labels,
+        layout.cancel,
+        gate_cancel_text(),
+        false,
+        hover == Some(GateTarget::Cancel),
         scale,
         border,
         palette,
@@ -2021,24 +2126,28 @@ pub fn quit_layout(
     cursor += content.message_lines.len() as f32 * px(SUB_LINE_LOGICAL_PX)
         + px(SUB_MARGIN_BOTTOM_LOGICAL_PX);
 
+    // **`Save all`, `Discard all`, `Cancel`** (B1, user ruling 2026-08-25) —
+    // the order this operating system puts them in, affirmative first. Laid out
+    // from the right because the row is `flex-end`, which is why the code reads
+    // backwards from the sentence.
     let button_width =
         |text_width: f32| 2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + text_width;
-    let discard = [
-        content_right - button_width(content.discard_text_width),
+    let cancel = [
+        content_right - button_width(content.cancel_text_width),
         cursor,
         content_right,
         cursor + button_height,
     ];
-    let cancel = [
-        discard[0] - px(ACTIONS_GAP_LOGICAL_PX) - button_width(content.cancel_text_width),
+    let discard = [
+        cancel[0] - px(ACTIONS_GAP_LOGICAL_PX) - button_width(content.discard_text_width),
         cursor,
-        discard[0] - px(ACTIONS_GAP_LOGICAL_PX),
+        cancel[0] - px(ACTIONS_GAP_LOGICAL_PX),
         cursor + button_height,
     ];
     let save = [
-        cancel[0] - px(ACTIONS_GAP_LOGICAL_PX) - button_width(content.save_text_width),
+        discard[0] - px(ACTIONS_GAP_LOGICAL_PX) - button_width(content.save_text_width),
         cursor,
-        cancel[0] - px(ACTIONS_GAP_LOGICAL_PX),
+        discard[0] - px(ACTIONS_GAP_LOGICAL_PX),
         cursor + button_height,
     ];
     QuitLayout {
@@ -2061,7 +2170,7 @@ pub fn quit_layout(
 #[cfg(test)]
 #[must_use]
 pub fn quit_button_rects(layout: &QuitLayout) -> ([f32; 4], [f32; 4], [f32; 4]) {
-    (layout.save, layout.cancel, layout.discard)
+    (layout.save, layout.discard, layout.cancel)
 }
 
 /// What a point is over. **Always an answer**, on [`gate_hit`]'s own rule: this
@@ -2163,8 +2272,8 @@ pub fn quit_build(
     }
     for (rect, text, target) in [
         (layout.save, quit_save_text(), QuitTarget::Save),
+        (layout.discard, gate_discard_all_text(), QuitTarget::Discard),
         (layout.cancel, gate_cancel_text(), QuitTarget::Cancel),
-        (layout.discard, gate_discard_text(), QuitTarget::Discard),
     ] {
         push_button(
             &mut quads,
@@ -2510,6 +2619,31 @@ mod tests {
         assert_eq!(GATE_FOCUSED_ANSWER, GateAnswer::Cancel);
         assert_eq!(gate_answer(GateTarget::Cancel), Some(GateAnswer::Cancel));
         assert_eq!(gate_answer(GateTarget::Discard), Some(GateAnswer::Discard));
+        assert_eq!(gate_answer(GateTarget::Save), Some(GateAnswer::Save));
+        // **B1 — the shut is the one question that is an exit, and the only one
+        // that offers to save.** Red gate: answer `true` from `offers_save` for
+        // a tab or a scrollback and a button appears offering to write files
+        // that question was never about.
+        assert!(GateRequest::Shut.offers_save());
+        for request in [
+            GateRequest::CloseTab(0),
+            GateRequest::ClosePane(bt_layout::SeatId(1)),
+            GateRequest::ClearScrollback(bt_layout::SeatId(1)),
+        ] {
+            assert!(!request.offers_save(), "{request:?} is not an exit");
+        }
+        // And the exit's list is one line per file, while a question about one
+        // thing is still one sentence.
+        assert_eq!(
+            GateRequest::Shut.lines(&["a.txt — build".to_owned(), "b.md — notes".to_owned()]),
+            vec!["a.txt — build".to_owned(), "b.md — notes".to_owned()]
+        );
+        assert_eq!(
+            GateRequest::ClearScrollback(bt_layout::SeatId(1))
+                .lines(&["3000".to_owned()])
+                .len(),
+            1
+        );
         assert_eq!(
             gate_answer(GateTarget::Panel),
             None,
@@ -2522,6 +2656,7 @@ mod tests {
             discard_text: gate_discard_text(),
             cancel_text_width: 40.0,
             discard_text_width: 48.0,
+            save_text_width: None,
         };
         let layout = gate_layout(&content, SURFACE.0, SURFACE.1, 1.0);
         let centre = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
@@ -2537,9 +2672,14 @@ mod tests {
         );
         // **Modal**: a press anywhere else is still the gate's.
         assert_eq!(gate_hit(&layout, 1.0, 1.0), GateTarget::Panel);
-        // `Discard` sits to the right of `Cancel` and is not the primary button —
-        // it is where the eye goes last, and it wears no accent.
-        assert!(layout.cancel[2] <= layout.discard[0]);
+        // **The affirmative answer stands to the LEFT of `Cancel`** (B1, user
+        // ruling 2026-08-25: Windows order). It is not the primary button and
+        // wears no accent — the two rules that keep a destructive answer out of
+        // the default seat — and the seat itself is now the one this operating
+        // system puts it in.
+        let (save, discard, cancel) = gate_button_rects(&layout);
+        assert_eq!(save, None, "a close-tab question offers no `Save all`");
+        assert!(discard[2] <= cancel[0]);
         let palette = chrome_palette();
         let layers = gate_build(&layout, SURFACE, None);
         assert!(
@@ -3820,6 +3960,7 @@ in the folders you left them, as new shells."
             discard_text: branch.answer_text(),
             cancel_text_width: 40.0,
             discard_text_width: 44.0,
+            save_text_width: None,
         };
         let layout = gate_layout(&content, SURFACE.0, SURFACE.1, 1.0);
         let layer = gate_build(&layout, SURFACE, None)
