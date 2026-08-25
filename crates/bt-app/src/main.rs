@@ -3831,6 +3831,44 @@ fn page_foot_lead(_page_url: &str, hover: &str) -> String {
     lead
 }
 
+/// The word a **page**'s foot is flashing instead of its hover line, if any
+/// (user ruling 2026-08-25).
+///
+/// **A zoom says its own number, on the band's one flash clock.** `Ctrl`+wheel
+/// moved the engine's `ZoomFactor` and said nothing at all, which made it the
+/// only gesture in this window that changes what a reader is looking at without
+/// telling them what it changed it to. The picture beside it has said its
+/// percentage since the day it could be zoomed, so the words are the picture's
+/// exactly — [`i18n::zoom_percent`], one spelling for both — and the *place* is
+/// the one band this pane owns. A page has no meta line to hang it under: its
+/// body is the engine's glass and this window draws nothing on it.
+///
+/// **The same clock, not a second one** ([`FOOT_REVEAL_FEEDBACK`]): this band
+/// already flashes "Opened" for a duration and then goes back to being the hover
+/// line, and a percentage that faded on its own schedule would be a second
+/// rhythm on one strip. `100%` is said like every other rung — the way back to
+/// unzoomed is a detent (`webhost::zoom_step`), and a detent nobody confirms is
+/// the one rung a reader cannot tell they have reached.
+///
+/// **The later gesture owns the strip**, because both of these are answers to
+/// something that was just done and the older one is answering a question the
+/// hand has already moved on from.
+fn page_foot_flash(
+    zoomed: Option<(f64, Instant)>,
+    opened: Option<Instant>,
+    now: Instant,
+) -> Option<String> {
+    let fresh = |at: Instant| now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK;
+    let zoomed = zoomed.filter(|(_, said)| fresh(*said));
+    let opened = opened.filter(|at| fresh(*at));
+    match (zoomed, opened) {
+        (Some((_, said)), Some(at)) if said < at => Some(preview_opened_label().to_owned()),
+        (Some((factor, _)), _) => Some(i18n::zoom_percent(factor)),
+        (None, Some(_)) => Some(preview_opened_label().to_owned()),
+        (None, None) => None,
+    }
+}
+
 fn files_row_activation(root: &str, key: &str) -> RowActivation {
     if !files::root_is_addressable(root) {
         return RowActivation::Nowhere;
@@ -13509,8 +13547,11 @@ fn image_zoom_caption(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> St
     if zoom.is_fit() {
         return "Fit".to_owned();
     }
-    let percent = (image_zoom_scale(body, image_px, zoom) * 100.0).round();
-    format!("{percent}%")
+    // **One spelling of a magnification for the whole window** (user ruling
+    // 2026-08-25): a page's foot says its zoom in these words too, and a percent
+    // written out at both ends is a build in which one of them grows a decimal
+    // place and the other does not.
+    i18n::zoom_percent(f64::from(image_zoom_scale(body, image_px, zoom)))
 }
 
 /// How much of the shared GPU texture budget one preview picture may hold.
@@ -37553,7 +37594,17 @@ impl Runtime<'_> {
         let page = self.web_on(seat).map(|web| web.page().clone());
         if let Some(page) = page {
             let lead = page_foot_lead(&page.url, &page.hover);
-            let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
+            // **And the magnification, when the wheel has just moved it** (user
+            // ruling 2026-08-25). The same word the picture beside it says, on
+            // this band's own one flash clock — see [`page_foot_flash`], which
+            // owns which of the two confirmations this strip is carrying.
+            let opened = self
+                .window
+                .revealed_foot
+                .filter(|(shown, _)| *shown == RevealedFoot::Preview(seat))
+                .map(|(_, at)| at);
+            let zoomed = self.web_on(seat).and_then(webhost::WebSeat::zoom_said);
+            let flash = page_foot_flash(zoomed, opened, now);
             let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
             let run =
                 seats::pane_foot_geometry(rect, bt_layout::SeatKind::Preview, scale).foot_path;
@@ -37564,10 +37615,10 @@ impl Runtime<'_> {
                 seats::FootDress {
                     run,
                     lead: &lead,
-                    // The same word the `Open in default app` card flashes,
-                    // because it is the same sentence: this window handed the
-                    // thing to the machine and the machine has it now.
-                    flash: revealed.then(preview_opened_label),
+                    // "Opened" is the same word the `Open in default app` card
+                    // flashes, because it is the same sentence: this window
+                    // handed the thing to the machine and the machine has it now.
+                    flash: flash.as_deref(),
                     // A page has no standing fact to hang on the right: the two
                     // this strip carries — a truncated read and a refused save —
                     // are both about a *buffer*, and a page holds none.
@@ -50848,6 +50899,42 @@ impl Runtime<'_> {
             RevealedFoot::Column(_) | RevealedFoot::Preview(_) => self.refresh_chrome(),
         };
         if changed {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// A page's magnification has been said long enough: the foot goes back to
+    /// being the hover line (user ruling 2026-08-25).
+    ///
+    /// [`Self::advance_foot_reveal`]'s twin, and it is a twin rather than a line
+    /// inside it for the same reason that one is not a line inside
+    /// `advance_float`: **the slot is cleared here and not merely ignored by the
+    /// reader**, because a slot that stayed full would hand
+    /// [`Self::next_deadline`] a wake-up that is already in the past on every
+    /// turn for the rest of the session — the `WaitUntil` pin's own definition
+    /// of a loop that never sleeps.
+    fn advance_page_zoom_said(&mut self, now: Instant) -> Result<()> {
+        let expired: Vec<LeafId> = self
+            .window
+            .web
+            .iter()
+            .filter(|(_, web)| {
+                web.zoom_said().is_some_and(|(_, at)| {
+                    now.saturating_duration_since(at) >= FOOT_REVEAL_FEEDBACK
+                })
+            })
+            .map(|(leaf, _)| *leaf)
+            .collect();
+        if expired.is_empty() {
+            return Ok(());
+        }
+        for leaf in expired {
+            if let Some(web) = self.window.web.get_mut(&leaf) {
+                web.forget_the_zoom_it_said();
+            }
+        }
+        if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -66179,9 +66266,25 @@ impl Runtime<'_> {
             // at — the same question every other wheel event on this path asks.
             if let Some(leaf) = self.web_page_at(position)
                 && let Some(web) = self.window.web.get_mut(&leaf)
-                && let Err(error) = web.zoom_by(y > 0.0)
             {
-                eprintln!("BT_WEB {error}");
+                match web.zoom_by(y > 0.0) {
+                    // **The page moved, so the foot says where to** (user ruling
+                    // 2026-08-25): the seat recorded the factor the engine
+                    // settled on, and this is the frame that has to show it.
+                    // `Ok(None)` is a notch at the end of the ladder — nothing
+                    // moved, so there is nothing to confirm, which is also what
+                    // keeps a wall of `300%` off the glass under a held wheel.
+                    Ok(Some(_)) => {
+                        if self.refresh_chrome() {
+                            // The wheel is not on a `?` path, and a failure to
+                            // present a confirmation is not worth taking the
+                            // gesture down over.
+                            let _ = self.present_chrome_change();
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => eprintln!("BT_WEB {error}"),
+                }
             }
             return;
         }
@@ -66826,6 +66929,9 @@ impl Runtime<'_> {
         // because the two feet are drawn into two different surfaces — see
         // `advance_foot_reveal`.
         self.advance_foot_reveal(now)?;
+        // And a page's magnification, on the same clock and for the same reason
+        // it is its own step: what has to be rebuilt is the pane the page is in.
+        self.advance_page_zoom_said(now)?;
         // And the preview's own acknowledgement, on the same 1300ms clock.
         self.advance_preview_notice(now)?;
         // Service the PTY gate after every other due task that can mutate session state, then carry
@@ -66954,6 +67060,14 @@ impl Runtime<'_> {
             self.window
                 .revealed_foot
                 .map(|(_, at)| at + FOOT_REVEAL_FEEDBACK),
+            // And a page's magnification, on that same clock. One entry for
+            // however many pages are on screen — the earliest is the only one
+            // that needs a wake-up, and the pass it wakes finds the rest.
+            self.window
+                .web
+                .values()
+                .filter_map(|web| web.zoom_said().map(|(_, at)| at + FOOT_REVEAL_FEEDBACK))
+                .min(),
             // The preview's "Saved", on the same clock and owing the same single
             // wake-up: the instant it is due to go away.
             self.preview_notice_deadline(),
@@ -93992,6 +94106,54 @@ mod tests {
             local.starts_with(r"D:\Developer\notes and more.html"),
             "a path, not a URI: {local}"
         );
+    }
+
+    /// RED GATE (user report 2026-08-25) — **a page that just changed size says
+    /// what size it changed to, in the picture's own words and on the band's own
+    /// clock.**
+    ///
+    /// `Ctrl`+wheel moved the engine's `ZoomFactor` and reported nothing, which
+    /// made it the one gesture in this window that changes what a reader is
+    /// looking at without saying what it changed it to.
+    ///
+    /// It was red the day it was written against a
+    /// [`page_foot_flash`] that answered `None` to everything.
+    #[test]
+    fn a_page_says_the_zoom_it_moved_to_and_then_goes_back_to_being_a_hover_line() {
+        let now = Instant::now();
+        let just_now = now - Duration::from_millis(40);
+        let stale = now - FOOT_REVEAL_FEEDBACK - Duration::from_millis(1);
+
+        assert_eq!(
+            page_foot_flash(Some((1.2, just_now)), None, now).as_deref(),
+            Some("120%"),
+            "the picture's own words, from the picture's own function"
+        );
+        // The way back to unzoomed is a rung like any other, and a rung nobody
+        // confirms is the one a reader cannot tell they have reached.
+        assert_eq!(
+            page_foot_flash(Some((1.0, just_now)), None, now).as_deref(),
+            Some("100%")
+        );
+        // Whole percents: `0.67` is a rung of the ladder, not a number to read.
+        assert_eq!(
+            page_foot_flash(Some((0.67, just_now)), None, now).as_deref(),
+            Some("67%")
+        );
+        // One clock, and it is the band's own. After it, the hover line again.
+        assert_eq!(page_foot_flash(Some((1.2, stale)), None, now), None);
+
+        // The later gesture owns the strip — both of these answer something that
+        // was just done, and the older one answers a question the hand has left.
+        assert_eq!(
+            page_foot_flash(Some((1.2, just_now)), Some(stale), now).as_deref(),
+            Some("120%")
+        );
+        assert_eq!(
+            page_foot_flash(Some((1.2, stale)), Some(just_now), now).as_deref(),
+            Some(preview_opened_label()),
+        );
+        assert_eq!(page_foot_flash(None, None, now), None);
     }
 
     /// PIN (user ruling, 2026-08-15) — **when the path and the phrase meet, the

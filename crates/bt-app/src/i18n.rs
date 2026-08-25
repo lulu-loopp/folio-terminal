@@ -3745,6 +3745,23 @@ pub fn progress_percent(percent: u32) -> String {
     format!("{percent}%")
 }
 
+/// **A magnification, as a whole percent** — a picture's and a page's, one
+/// spelling (user ruling 2026-08-25).
+///
+/// Here rather than left as a `format!` beside each of the two things that zoom,
+/// for [`image_preview_title`]'s reason and with its ruling: there is nothing in
+/// it to translate — a number and a `%` — but the one place it is written should
+/// be the place a translator would look, and the day a language wants `120％` or
+/// a space before the sign, this is the one arm that grows a second column.
+///
+/// **Whole percents**, because the ladder's rungs are two decimal places
+/// (`0.67`) and a reader asked to tell `67%` from `66.7%` is being handed the
+/// engine's arithmetic instead of an answer.
+#[must_use]
+pub fn zoom_percent(factor: f64) -> String {
+    format!("{}%", (factor * 100.0).round())
+}
+
 /// …and the two that qualify it.
 #[must_use]
 pub fn progress_error(percent: u32) -> String {

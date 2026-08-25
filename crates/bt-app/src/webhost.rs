@@ -1512,12 +1512,14 @@ pub(crate) struct WebSeat {
     /// icon, so any number of changes during one flight collapse into one more
     /// ask when it lands.
     favicon_changed_again: bool,
-    /// The page's zoom as this window last set it.
+    /// The magnification this seat last **moved** to, and when.
     ///
-    /// Kept here as well as in the controller because `Ctrl`+wheel steps from
-    /// the rung it is on, and a rung read back through COM on every notch would
-    /// be a syscall inside a wheel gesture.
-    zoom: f64,
+    /// A page's foot flashes it and then goes back to being the hover line
+    /// ([`crate::page_foot_flash`]). It lives on the seat rather than on the
+    /// window because a zoom is a fact about one page: two panes side by side
+    /// hold two engines at two magnifications, and one slot on the window would
+    /// have the second one's notch confirming itself on the first one's foot.
+    zoom_said: Option<(f64, Instant)>,
 }
 
 impl WebSeat {
@@ -1601,7 +1603,7 @@ impl WebSeat {
             capturing: false,
             fetching_favicon: None,
             favicon_changed_again: false,
-            zoom: 1.0,
+            zoom_said: None,
         };
         let effect = web.machine.request(url);
         debug_assert_eq!(effect, WebEffect::Ignore, "an engine that is not up yet");
@@ -2754,13 +2756,52 @@ impl WebSeat {
     /// **`Ctrl`+wheel is empty everywhere else in this window** — there is no
     /// type-size zoom in this product and a picture zooms on the bare wheel — so
     /// nothing is being taken from anything by claiming it over a page.
-    pub(crate) fn zoom_by(&mut self, up: bool) -> Result<(), String> {
-        let next = zoom_step(self.zoom, up);
-        if (next - self.zoom).abs() < f64::EPSILON {
-            return Ok(());
+    ///
+    /// **The engine is the authority on where the page is, in both directions**
+    /// (user ruling 2026-08-25). The ladder is walked from `ZoomFactor` rather
+    /// than from this seat's memory of what it last asked for, because the two
+    /// come apart in three ordinary ways: the controller clamps, the page's own
+    /// `Ctrl`+`=` moves it without this window hearing a thing, and a seat whose
+    /// controller is not up yet takes `SetZoomFactor` and does nothing at all.
+    /// What comes back is what the engine settled on, read again afterwards —
+    /// and `None` means the page did not move, which is the honest answer at
+    /// both ends of the ladder and for a seat with no engine behind it.
+    /// **And this seat no longer keeps a `zoom` of its own.** It kept one so
+    /// that a notch would not cost a COM read; now that the read is the answer,
+    /// a second copy would be a number nothing reads and everything has to
+    /// remember to update — the "只写字段 = 死规格" of `CONVENTIONS.md` §3, one
+    /// field wide.
+    pub(crate) fn zoom_by(&mut self, up: bool) -> Result<Option<f64>, String> {
+        let current = self.host.zoom();
+        let next = zoom_step(current, up);
+        if (next - current).abs() < f64::EPSILON {
+            return Ok(None);
         }
-        self.zoom = next;
-        self.host.set_zoom(next)
+        self.host.set_zoom(next)?;
+        let settled = self.host.zoom();
+        if (settled - current).abs() < f64::EPSILON {
+            return Ok(None);
+        }
+        self.zoom_said = Some((settled, Instant::now()));
+        Ok(Some(settled))
+    }
+
+    /// The magnification this seat last moved to, and when it said so.
+    ///
+    /// Read by the page's foot, which flashes it for [`crate::FOOT_REVEAL_FEEDBACK`]
+    /// and then goes back to being the hover line.
+    pub(crate) fn zoom_said(&self) -> Option<(f64, Instant)> {
+        self.zoom_said
+    }
+
+    /// The flash has stood its duration: the foot goes back to being the hover
+    /// line, and the slot is emptied rather than left for the reader to ignore.
+    ///
+    /// See `Runtime::advance_page_zoom_said` for why emptying it is the point: a
+    /// slot that stayed full would hand the event loop a wake-up already in the
+    /// past, on every turn, forever.
+    pub(crate) fn forget_the_zoom_it_said(&mut self) {
+        self.zoom_said = None;
     }
 
     /// Search this page for `term`. The counts come back as
@@ -3605,7 +3646,7 @@ mod rehost_address_tests {
             capturing: false,
             fetching_favicon: None,
             favicon_changed_again: false,
-            zoom: 1.0,
+            zoom_said: None,
         }
     }
 
@@ -4179,6 +4220,53 @@ mod fault_tests {
             factor = zoom_step(factor, false);
         }
         assert!((factor - 1.0).abs() < 1e-9);
+    }
+
+    /// PIN (user ruling 2026-08-25) — **the factor a notch reports is the
+    /// engine's, read back after the step and not the number this window asked
+    /// for.**
+    ///
+    /// A `ZoomFactor` is the controller's property and `SetZoomFactor` is a
+    /// request: the engine clamps it, a page's own `Ctrl`+`=` moves it without
+    /// this window hearing, and a seat whose controller is not up yet takes the
+    /// call and does nothing at all. A percentage composed from what was *asked*
+    /// would be a number this window made up about somebody else's page — and it
+    /// would be wrong in exactly the three cases a reader would notice.
+    ///
+    /// A source pin, and for [`the_host_asks_its_own_gate_before_it_issues_its_own_navigation`]'s
+    /// reason: reaching `ZoomFactor` needs a live controller, and what a machine
+    /// can hold is the shape of the four lines — ask the engine first, step from
+    /// *that*, and store what the engine says afterwards.
+    ///
+    /// RED GATE: it was red the day it was written. `zoom_by` stepped from a
+    /// `self.zoom` field and assigned the asked-for rung to it, so that field was
+    /// this window's memory of its own request and the engine was never asked at
+    /// all. The field is gone with this change — a second copy of a number the
+    /// engine now answers is `CONVENTIONS.md` §3's write-only field.
+    #[test]
+    fn a_zoom_notch_reports_the_factor_the_engine_ended_up_at() {
+        let source: String = include_str!("webhost.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let step = concat!(
+            "letcurrent=self.host.z",
+            "oom();letnext=zoom_step(current,up);"
+        );
+        assert_eq!(
+            source.matches(step).count(),
+            1,
+            "the ladder is walked from the engine's own factor"
+        );
+        let after = &source[source.find(step).expect("the step just counted")..];
+        assert!(
+            after.contains(concat!("self.host.set_z", "oom(next)?;")),
+            "the step is requested"
+        );
+        assert!(
+            after.contains(concat!("letsettled=self.host.z", "oom();")),
+            "and what the engine settled on is read back rather than assumed"
+        );
     }
 
     /// PIN — **every refusal the door can give has a card that can say it.**

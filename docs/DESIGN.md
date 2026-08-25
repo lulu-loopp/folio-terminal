@@ -2093,6 +2093,18 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 
 **⑩″ 头上的名字不再无故被截：一个盒只在它量对了的时候才是盒（用户报告 2026-08-25；`crates/bt-app/src/{seats,main}.rs`）。** 报告是一张截图：页头写着 `folio-pdf-test.pd|`，最后一个 `f` 从中间切开，而整个头右边空着三分之二。**查实：这个名字从来没有百分比夹持**——`preview_head_geometry` 给它的就是`min(它想要的, 右边钮群之前剩下的)`，钮群又是按**实际存在的那几枚**从 `×` 往回排的（`a_pages_head_hangs_its_whole_run_off_its_right_edge_at_every_width` 一直钉着这一条）。错的是**「它想要的」那一个数**：头把这个 label 画成 `Medium`（`.pv-name { font-weight: 600 }`），而调用方用 `measure_chrome_text` 量它——那个函数按定义就是**字体的 regular 档**。Medium 宽约 2%（实测：该文件名在 200% 下 regular 189.76px / medium 193.57px，差 3.8px），而 label 被 clip 到自己的盒里，于是差额全落在最后一个字形上。旁边那枚计数徽章得的是同一病的另一个属性：画的是 tabular figures，量的是比例数字。**这是同一条错的第三例**（前两例：浮窗的 `DOCK` 档位+字距、Git 页 meta 列的 tabular figures），所以修法不是再改一个调用点，而是把面孔声明成常量：`PREVIEW_NAME_FACE` / `PREVIEW_COUNT_FACE` 同时被 `preview_head_measurements`（量）与 `push_preview_head`（画）读，**两边不可能再分开改**；改名框的草稿、插入点与选区带一并改用同一面孔（它们是同一个 run 里的偏移）。截断时的行为一字未改：这个 label 从来就是 `clip` 而不是省略号，地址行仍是 `Regular`、仍用 `measure_chrome_text`（它画的就是 regular）。红测：`a_preview_head_name_box_is_cut_from_the_face_it_is_drawn_in`（按旧调用点转写时：盒 112.5px / 墨 114.75px，变红）。
 
+**⑪ `Ctrl`+滚轮改了页面的大小,页面的脚就说改到了多少(用户裁决 2026-08-25;`crates/bt-app/src/{webhost,main,i18n}.rs`)。** 由头:引擎的 `ZoomFactor` 被一格一格地推着走,而窗口一个字也不说——这是本产品里唯一一个**改变了读者正在看的东西却不告诉他改成了什么**的手势。旁边那张图片自打能缩放起就一直说着自己的倍率。
+
+**词是图片那边的词,一处实现。** `i18n::zoom_percent(factor)` 出 `120%`,图片的 `image_zoom_caption` 与页面的脚同读这一个函数;两头各写一遍 `format!("{}%", …)`,就是一个build里其中一头长出小数位而另一头没有。它是**纯数字函数**,与 `progress_percent`、`image_preview_title` 同族——住在 `i18n.rs` 里(译者会去那里找),但没有第二列可言,所以 **`Text::ALL` 一条没加,仍是 473 条**。整数百分比:梯子的档位是两位小数(`0.67`),让读者去分辨 `67%` 和 `66.7%` 是把引擎的算术当成答案递过去。
+
+**地方是这块 pane 自己那条带子,节奏是它已有的那一口钟。** 图片的倍率挂在图底下的 meta 行上,而一张页没有 meta 行可挂——它的正文是引擎的玻璃,本窗在上面一个像素也不画。页面的脚本来就留着(§7.7 ③:它同时是悬停行),而它已经有一个闪字通道与一口钟:`FOOT_REVEAL_FEEDBACK`(1300ms),`Opened` 走的就是它。倍率借同一口钟、同一个槽,**不新造第二种淡出节奏**;闪完回到悬停行。`page_foot_flash` 是这条判据的纯函数:两条确认同时新鲜时**晚的那条占住带子**(两条都在回答刚发生的事,旧的那条回答的是手已经走过去的问题)。**`100%` 照说**——回到未缩放是梯子上的一个档位(`zoom_step` 里 `1.0` 是一格,当初就是为了让它是个 detent),一个没人确认的 detent 正是读者分辨不出自己已经到了的那一格。
+
+**读的是引擎,不是本窗对自己的记忆(裁决原话:读 `ZoomFactor`)。** `zoom_by` 现在先问 `ICoreWebView2Controller::ZoomFactor`、从**那个**数走梯子、`SetZoomFactor` 之后**再读回来**,存下引擎最终落在的值。三种寻常情形会让「问」和「记」分家:控制器自己夹住、页面用它自己的 `Ctrl`+`=` 挪了而本窗没听见、以及控制器还没起来时那次调用被静静吃掉。一个由「本窗要求的数」拼出来的百分比,是本窗替别人的页面编了一个数——而且恰好在这三种读者看得出来的情形里编错。没动就是 `Ok(None)`:梯子两端的那一格什么也不确认,这也顺带把「按住滚轮时一墙的 `300%`」挡在玻璃外面。
+
+**倍率记在座位上,不记在窗上,而且到点了要清空。** 两块 pane 并排就是两台引擎两个倍率,窗上一个槽会让第二块的滚轮把确认闪在第一块的脚上。清空(`advance_page_zoom_said` / `WebSeat::forget_the_zoom_it_said`)是 `advance_foot_reveal` 的孪生,理由也逐字相同:一个留着不清的槽会在此后每一轮都递给 `WaitUntil` 一个**已经过去**的时刻,那正是钉子里写的「永不睡觉的循环」。红测 `a_page_says_the_zoom_it_moved_to_and_then_goes_back_to_being_a_hover_line`(先落一个恒答 `None` 的假实现,看着它红)与源码钉 `a_zoom_notch_reports_the_factor_the_engine_ended_up_at`。
+
+**欠账:撕出去的浮窗预览没有这条带子**(与 ⑩ 那条欠账同因:float 有自己的一套头脚),所以在浮窗里缩放网页仍然无声。
+
 **Claude 定,用户可否决的只有一处:** 面包屑行上那句常驻事实与闪字**共用右手一个槽位、一次只说一句**(闪字盖住事实,因为闪字只活一秒而事实不是)。其余每一件都直接出自 2026-08-24 的两轮裁决与 2026-08-25 这一条。
 
 #### W2 片② 落地:导航策略是一个纯模块(2026-08-22;`crates/bt-app/src/webnav.rs`,**只有模块与它的合同测试,一根接线也没有**)
