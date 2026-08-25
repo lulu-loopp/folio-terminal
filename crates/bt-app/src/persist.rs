@@ -293,6 +293,7 @@ impl SessionStore {
     /// second one's bookkeeping depends on the first: a receipt is what says the store is clean,
     /// and it has to be read before this turn decides whether anything is still owed.
     pub fn flush_if_due(&mut self, now: Instant) {
+        crate::hang_watch::at(crate::hang_watch::Station::Autosave);
         self.take_receipts(now);
         if self.debouncer.should_flush(now, SESSION_DEBOUNCE) {
             self.hand_over(now);

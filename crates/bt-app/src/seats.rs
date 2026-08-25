@@ -342,6 +342,19 @@ pub struct Seats {
     /// reason `focus` is: it is bt-app's answer about bt-app's panes, and L1
     /// keeps the *tree* ignorant of what runs inside a seat, not this struct.
     notices: std::collections::BTreeSet<SeatId>,
+    /// **Which preview seats wear a rail, and which of the two it is** (user
+    /// ruling 2026-08-24) — [`Self::notices`]'s exact sibling, kept here for
+    /// that field's stated reason and answering the same kind of question.
+    ///
+    /// A projection too: what decides the row is a fact about the *content* — a
+    /// page has an address, a file has a path, a composed document has neither —
+    /// and it is recomputed from the panes by `Runtime::settle_preview_rails`.
+    ///
+    /// The two rows are not interchangeable in this map's one job, which is why
+    /// it is a map and not a set: a breadcrumb row *replaces* the foot beneath
+    /// it and an address row stands *above* one, so the body a seat is left with
+    /// depends on which it wears.
+    rails: BTreeMap<SeatId, PreviewRailKind>,
     /// **Which seat is on the stage alone** (§7.1.6l, single-pane zoom), or
     /// `None` for the ordinary tiled posture.
     ///
@@ -418,6 +431,7 @@ impl Seats {
                 // laid out for; a tree that has just been stood up has no leaf
                 // that has spoken yet.
                 notices: std::collections::BTreeSet::new(),
+                rails: BTreeMap::new(),
                 // A tree of one seat has nothing to put away: the pane is the
                 // stage already (§7.1.6l).
                 zoom: None,
@@ -754,6 +768,31 @@ impl Seats {
     pub fn set_notices(&mut self, notices: std::collections::BTreeSet<SeatId>) -> bool {
         let changed = self.notices != notices;
         self.notices = notices;
+        changed
+    }
+
+    /// Which row this preview seat wears under its head, if any (user ruling
+    /// 2026-08-24).
+    ///
+    /// Asked of `seats` rather than passed in for [`Self::seat_wears_notice`]'s
+    /// reason, one surface over: the row changes what a pane's body is, forty
+    /// callers ask what a pane's body is, and several of them are free functions
+    /// with no window in scope.
+    #[must_use]
+    pub fn seat_rail(&self, seat: SeatId) -> Option<PreviewRailKind> {
+        self.rails.get(&seat).copied()
+    }
+
+    /// Record which seats wear one, and answer whether that changed.
+    ///
+    /// The whole map at once, and the `bool` is the caller's gate on a re-solve —
+    /// [`Self::set_notices`]'s contract exactly, for its reason: an address row
+    /// arriving where a breadcrumb row stood changes the pane's height (the
+    /// breadcrumb takes the foot's twenty-eight and the address adds its own),
+    /// so a change here is a layout change.
+    pub fn set_rails(&mut self, rails: BTreeMap<SeatId, PreviewRailKind>) -> bool {
+        let changed = self.rails != rails;
+        self.rails = rails;
         changed
     }
 
@@ -2293,6 +2332,23 @@ pub fn pane_notice_strip(
 /// would be fitted over the strip, the wheel would scroll a taller body than
 /// exists, and a click at the bottom would land on a document the foot is
 /// covering. There is one derivation of the leftover and everything asks it here.
+/// **And less its rail, since the 2026-08-24 ruling.** Which of the three
+/// subtractions apply is [`Seats::seat_rail`]'s answer, and the two rows are not
+/// symmetrical:
+///
+/// * a **breadcrumb** row takes the foot's place rather than standing on top of
+///   it — the ruling retires the path along the bottom and the row above is what
+///   takes the question over, so a file's pane keeps exactly the body it had;
+/// * an **address** row is added, because a page's foot has a second job the row
+///   cannot do for it (§7.7 ③: while the pointer is over a link the band says
+///   the resolved target, and a hover line has nowhere else in this pane to
+///   stand).
+///
+/// The rail comes off the *top* and the foot off the bottom, and the rail is
+/// subtracted after the notice strip for the reason the strip is subtracted at
+/// all: they cannot both be there. A notice belongs to a shell (it is recomputed
+/// from `sessions`), and a rail belongs to a preview, so no seat has ever worn
+/// both — the order below says which would win if one ever did.
 pub fn preview_body_viewport(
     seats: &Seats,
     layout: &SeatLayout,
@@ -2300,13 +2356,22 @@ pub fn preview_body_viewport(
     scale: f32,
 ) -> Option<SeatViewport> {
     let mut viewport = pane_body_viewport(seats, layout, seat, scale)?;
-    let bar = (FILES_FOOT_BAR_LOGICAL_PX * scale).round().max(1.0) as u32;
-    // The foot keeps its whole height and the body is what gives way, down to a
-    // single row — the rule a files column already follows, and for its reason: a
-    // pane squeezed to a sliver is more use with a path in it than with two lines
-    // of a document and no way to reach the file.
-    let consumed = bar.min(viewport.height.saturating_sub(1));
-    viewport.height = viewport.height.saturating_sub(consumed).max(1);
+    let rail = seats.seat_rail(seat);
+    if rail.is_some() {
+        let bar = (PREVIEW_RAIL_BAR_LOGICAL_PX * scale).round().max(1.0) as u32;
+        let consumed = bar.min(viewport.height.saturating_sub(1));
+        viewport.y = viewport.y.saturating_add(consumed);
+        viewport.height = viewport.height.saturating_sub(consumed).max(1);
+    }
+    if rail != Some(PreviewRailKind::Crumbs) {
+        let bar = (FILES_FOOT_BAR_LOGICAL_PX * scale).round().max(1.0) as u32;
+        // The foot keeps its whole height and the body is what gives way, down to
+        // a single row — the rule a files column already follows, and for its
+        // reason: a pane squeezed to a sliver is more use with a path in it than
+        // with two lines of a document and no way to reach the file.
+        let consumed = bar.min(viewport.height.saturating_sub(1));
+        viewport.height = viewport.height.saturating_sub(consumed).max(1);
+    }
     Some(viewport)
 }
 
@@ -2494,6 +2559,49 @@ pub enum ChromeTarget {
     /// `.preview-pane .files-foot` — the full path along the bottom of a preview
     /// pane, whose whole strip reveals the file in Explorer (P32-P35).
     PreviewFoot(SeatId),
+    // ── the rail, one row under the head (user ruling 2026-08-24) ───────────
+    //
+    // The three the rail did not have to mint are above: `PreviewBack`,
+    // `PreviewForward` and `PreviewReload` moved down off the head with the
+    // buttons they name, and `PreviewBrowser` and `PreviewFlip` did the same.
+    // A press that means one thing gets one target however many rows the
+    // button has stood in — renaming them would have made the dispatch below
+    // read as five new verbs rather than as five buttons that moved house.
+    /// `.pv-addr` — the page's address, and the press that opens it for editing.
+    ///
+    /// **The second door onto the field `Ctrl+L` opens**, which is the whole of
+    /// what the 2026-08-24 ruling moved: the double click that used to open it
+    /// on the *name* is gone, because a page's name is its title again and a
+    /// title is not an address.
+    PreviewAddress(SeatId),
+    /// `⧉` on the address row — the address to the clipboard.
+    PreviewAddressCopy(SeatId),
+    /// One segment of a file's path — the press that points the files column at
+    /// that folder.
+    ///
+    /// `depth` indexes the *whole* path and not the drawn run, because a folded
+    /// path draws fewer boxes than it has segments and the press has to say
+    /// which folder it meant.
+    PreviewCrumb {
+        seat: SeatId,
+        depth: usize,
+    },
+    /// The `…` a folded middle is drawn as, and the menu of what is behind it.
+    PreviewCrumbFold(SeatId),
+    /// `⧉` on the breadcrumb row — the file's whole path to the clipboard.
+    PreviewPathCopy(SeatId),
+    /// The `Open ⌄` pill: the default program, an editor if the machine has one,
+    /// and the files column.
+    PreviewOpenWith(SeatId),
+    /// The rail everywhere its own controls are not.
+    ///
+    /// A target of its own for [`PreviewFoot`]'s reason and one more: the row
+    /// stands between the head's drag handle and the document, so a press that
+    /// fell through it would either drag the pane by a row that is not its head
+    /// or land in a document a row below where it was aimed.
+    ///
+    /// [`PreviewFoot`]: Self::PreviewFoot
+    PreviewRail(SeatId),
     Settings,
     Minimize,
     Maximize,
@@ -6293,6 +6401,7 @@ pub fn build_chrome_with_preview(
             preview_messages: &preview_messages,
             preview_feet: &[],
             preview_heads: &[],
+            preview_rails: &[],
             preview_cards: &[],
             fit_overflow: None,
             profile_menu_open: false,
@@ -6739,6 +6848,15 @@ pub struct ChromeContent<'a> {
     /// than no header — and the plural content plane means the head has to be
     /// asked the same question the body already is: *whose*.
     pub preview_heads: &'a [(SeatId, PreviewHeadContent<'a>)],
+    /// Each preview pane's rail — the row under its head (user ruling
+    /// 2026-08-24), **by seat**.
+    ///
+    /// Keyed for [`Self::preview_heads`]'s reason and with one more of its own:
+    /// a seat with no entry here wears no rail at all, which is the third
+    /// answer — a document with neither an address nor a path — and it is
+    /// carried as an absent row rather than as a flag, so that the row cannot be
+    /// laid out for a seat the paint has nothing to put in it.
+    pub preview_rails: &'a [(SeatId, PreviewRailContent<'a>)],
     /// The "no preview" card, when the preview seat is showing one.
     ///
     /// Beside [`Self::preview_message`] rather than instead of it, because the
@@ -6979,6 +7097,7 @@ pub fn build_chrome_for_tabs(
         preview_messages,
         preview_feet,
         preview_heads,
+        preview_rails,
         preview_cards,
         fit_overflow,
         profile_menu_open,
@@ -7010,6 +7129,12 @@ pub fn build_chrome_for_tabs(
             .iter()
             .find(|(seat, _)| *seat == id)
             .map(|(_, strip)| *strip)
+    };
+    let preview_rail = |id: SeatId| {
+        preview_rails
+            .iter()
+            .find(|(seat, _)| *seat == id)
+            .map(|(_, content)| *content)
     };
     let preview_title = |id: SeatId| {
         preview_titles
@@ -7365,6 +7490,29 @@ pub fn build_chrome_for_tabs(
                         (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
                     );
                 }
+                // The row under it (user ruling 2026-08-24), looked up the same
+                // way and for the same reason: a rail is a property of the
+                // *content* on a seat, so a second preview pane's address must
+                // not be drawn under the first one's title.
+                //
+                // Off `head_box` and not `rect`, which is the sentence the foot
+                // below already makes: a pane mid-resize rides its card, and a
+                // row pinned to the solved rectangle would stand outside the
+                // card its own pane had moved into.
+                let preview_rail = (placement.kind == SeatKind::Preview)
+                    .then(|| preview_rail(placement.id))
+                    .flatten();
+                if let Some(content) = preview_rail {
+                    push_preview_rail(
+                        head_box,
+                        content,
+                        placement.id,
+                        pointer,
+                        scale,
+                        &palette,
+                        (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
+                    );
+                }
                 if preview_head.is_none() {
                     pane_labels.push(ChromeLabel {
                         mono: false,
@@ -7595,11 +7743,24 @@ pub fn build_chrome_for_tabs(
                 let files_view = (placement.kind == SeatKind::Files)
                     .then(|| files_views.get(&placement.id).copied())
                     .flatten();
-                let files_pane = matches!(placement.kind, SeatKind::Files | SeatKind::Preview)
-                    .then(|| match files_view {
+                //
+                // **And a preview's chassis is asked of its own function since
+                // 2026-08-24**, because a rail changes where the body starts and
+                // a breadcrumb row retires the foot beneath it. One derivation
+                // with `preview_body_viewport`'s, which is what keeps the card,
+                // the graph and the wheel off the row.
+                let files_pane = match placement.kind {
+                    SeatKind::Preview => Some(preview_pane_geometry(
+                        head_box,
+                        scale,
+                        preview_rail.map(|rail| rail.measure.kind),
+                    )),
+                    SeatKind::Files => Some(match files_view {
                         Some(_) => files_pane_geometry(head_box, scale, true),
                         None => pane_foot_geometry(head_box, placement.kind, scale),
-                    });
+                    }),
+                    SeatKind::Terminal | SeatKind::Placeholder => None,
+                };
                 if let (Some(content), Some(geometry)) = (files_view, files_pane)
                     && let Some(strip) = geometry.seg
                 {
@@ -7726,7 +7887,17 @@ pub fn build_chrome_for_tabs(
                 // identical strips stacked at the bottom of one pane was the
                 // report that retired it. Bottom to top there are now two things
                 // and not three: the path strip, then the document.
-                if let Some(geometry) = files_pane {
+                //
+                // **Except where the breadcrumb row retired it** (user ruling
+                // 2026-08-24). `preview_pane_geometry` has already collapsed the
+                // strip to the pane's floor for such a seat, so this is the
+                // paint agreeing with the geometry rather than a second opinion
+                // about which seats have a foot: a hairline drawn across a
+                // rectangle with no height is a line on the pane's bottom edge,
+                // and the pane already has one of those.
+                if let Some(geometry) = files_pane
+                    && geometry.foot[3] > geometry.foot[1]
+                {
                     let strip = match placement.kind {
                         // This placement's own path, by the head's rule and for
                         // the head's reason: a foot printing the file a *sibling*
@@ -12005,19 +12176,13 @@ pub const PREVIEW_NAV_REST: f32 = 0.7;
 /// **Dimmed and inert, never hidden**: 「a button that vanishes when the history
 /// runs out moves the two beside it under the pointer」.
 pub const PREVIEW_NAV_SPENT: f32 = 0.22;
-/// `.preview-head .pv-sep { width: 1px; height: 14px; margin: 0 1px }`.
-pub const PREVIEW_SEPARATOR_WIDTH_LOGICAL_PX: f32 = 1.0;
-/// Its height.
-pub const PREVIEW_SEPARATOR_HEIGHT_LOGICAL_PX: f32 = 14.0;
-/// Its margin, on each side.
-pub const PREVIEW_SEPARATOR_MARGIN_LOGICAL_PX: f32 = 1.0;
-/// `.pane:hover .preview-head .pv-sep { opacity: .7 }` — **and nothing at
-/// rest**.
-///
-/// The rule belongs to the group *after* it: written any other way it hangs at
-/// the head's right edge introducing nothing for as long as the pointer is
-/// elsewhere. The switcher's own `PINNED` section is built on the same sentence.
-pub const PREVIEW_SEPARATOR_REVEAL: f32 = 0.7;
+// `.preview-head .pv-sep` and its four numbers are **retired** (user ruling
+// 2026-08-24, second round). The hairline introduced a page's developer tools to
+// the three navigation buttons standing before them; the three moved down to the
+// address row, and a rule whose left-hand group has left the head is a line
+// telling the reader that something precedes when nothing does. Its own comment
+// said as much — "the rule belongs to the group *after* it" — and the group
+// before it is what decided whether it belonged at all.
 /// `.pv-name.switch { padding: 2px 5px; margin: -2px -5px }` — the pill is the
 /// name's box grown five each way, and the negative margin is what keeps it from
 /// pushing the row wider (P18, the `.files-root` trick).
@@ -12082,14 +12247,6 @@ pub struct PreviewHeadContent<'a> {
     pub locked: bool,
     /// Whether this pane's switcher is open, which turns the chevron over.
     pub menu_open: bool,
-    /// **The page on this seat, when there is one** (§7.7 ②, W2 slice ④).
-    ///
-    /// Whether the three buttons *exist* is [`PreviewHeadTools::web`], which the
-    /// geometry needs; what they say is here, which only the paint needs. Split
-    /// for this struct's own stated reason — a head with a control its geometry
-    /// did not reserve is the bug D4 exists to make impossible — and because a
-    /// page whose history moves is a repaint and not a re-layout.
-    pub web: Option<WebHeadState>,
     /// **The open name editor, when this head is the one holding it** (user
     /// ruling 2026-08-19).
     ///
@@ -12168,21 +12325,28 @@ pub struct PreviewNameEdit<'a> {
 pub struct PreviewHeadTools {
     /// `editable` (P27) — the buffer is on a surface that actually edits.
     pub save: bool,
-    /// `flippable` (P28) — the buffer is markdown.
+    /// `flippable` (P28) — the buffer is markdown **and this seat has no rail to
+    /// carry the verb instead**.
+    ///
+    /// The 2026-08-24 ruling moved `</>` down onto the breadcrumb row, where it
+    /// stands with the other verbs that are about the *file* rather than about
+    /// the pane. It is still offered here for the one markdown that grows no
+    /// breadcrumb — a document composed rather than read, which has no path to
+    /// draw — because a verb with no row to stand in would otherwise vanish with
+    /// the row.
     pub flip: bool,
-    /// The buffer is a **page** with a file behind it (user ruling 2026-08-20;
-    /// the class it means is the one of 2026-08-23, `.html` / `.htm` / `.pdf`) —
-    /// `crate::preview_page_hand_off`, the one predicate that also decides which
-    /// path the press hands over. A head drawn with an arrow its geometry did not
-    /// reserve, or lit over a file it will not open, is the same class of bug the
-    /// note on this struct exists to make impossible.
-    pub browser: bool,
     /// **A page is on this seat** (§7.7 ②, W2 slice ④), so the head carries the
-    /// three navigation buttons and the developer-tools verb.
+    /// developer-tools verb.
     ///
     /// A field of the tools rather than a [`SeatKind`], for this struct's own
-    /// stated reason: a head with three more controls is a different *layout*,
-    /// and it is a property of the buffer on the seat and not of the seat.
+    /// stated reason: a head with one more control is a different *layout*, and
+    /// it is a property of the buffer on the seat and not of the seat.
+    ///
+    /// **It used to mean four buttons and now it means one** (user ruling
+    /// 2026-08-24, second round): `‹ › ⟳` moved down to the address row and the
+    /// hairline that introduced the developer tools went with them, because a
+    /// rule whose left-hand side has left is a line telling the reader something
+    /// precedes when nothing does.
     pub web: bool,
     /// The pool holds more than one buffer, so the name is a control (P18/P23).
     pub switcher: bool,
@@ -12206,20 +12370,15 @@ pub struct PreviewHeadGeometry {
     pub dirty: [f32; 4],
     pub save: Option<[f32; 4]>,
     pub flip: Option<[f32; 4]>,
-    /// `.pv-tool.pv-browser` — the hand-off arrow, last of the per-type verbs.
-    pub browser: Option<[f32; 4]>,
-    /// `.pv-nav.pv-back` — the first of a page's three, and the first control in
-    /// this head that is drawn whether or not the pane is pointed at.
-    pub back: Option<[f32; 4]>,
-    /// `.pv-nav.pv-fwd`.
-    pub forward: Option<[f32; 4]>,
-    /// `.pv-nav.pv-reload` — reload, or stop while a navigation is in flight.
-    pub reload: Option<[f32; 4]>,
-    /// `.pv-sep` — the hairline that introduces the hover tools after it, and
-    /// fades in with them.
-    pub separator: Option<[f32; 4]>,
     /// `.pv-tool.pv-devtools` — a hover tool, because a verb pressed twice a
     /// week does not get permanent pixels beside three pressed every minute.
+    ///
+    /// **The last thing left of a page's four** (user ruling 2026-08-24, second
+    /// round). The three that moved down are [`PreviewRailGeometry::back`],
+    /// `forward` and `reload`; the hand-off arrow that stood ahead of them is
+    /// [`PreviewRailGeometry::external`]; and the hairline that used to
+    /// introduce this button is gone with them, because a rule belongs to the
+    /// group *before* it as much as to the one after, and that group has left.
     pub devtools: Option<[f32; 4]>,
     /// `.pv-tool.pv-popout` (P29) — the slice-5 arrival the note below reserved.
     pub popout: Option<[f32; 4]>,
@@ -12239,11 +12398,13 @@ pub struct PreviewHeadGeometry {
 /// The pop-out arrived in slice 5 and took the box this note had reserved for it,
 /// between the flip and the pin, and nothing else moved.
 ///
-/// The hand-off arrow (user ruling 2026-08-20) went in **ahead of the pop-out**
-/// and not beside it, because the mock-up puts every content class's own verbs
-/// in one slot — first in the tool run, before the three every pane has — and
-/// that is where `Save`, `Edit source` and W1's `[back][forward][reload]` all
-/// sit. A page's one verb is a per-type verb like theirs.
+/// **The run is four buttons shorter since 2026-08-24** (user ruling, second
+/// round). The hand-off arrow, the three navigation buttons and the hairline
+/// between them left this head for the row underneath it, where an address and a
+/// path live; `Save`, the source flip and the developer tools are what is left
+/// of the per-type slot, and the three every pane has never moved. Nothing about
+/// the order changed — the departed controls were the left of the run, so the
+/// ones that stayed are where they always were.
 #[must_use]
 pub fn preview_head_geometry(
     head: &PaneHeadGeometry,
@@ -12281,44 +12442,21 @@ pub fn preview_head_geometry(
     // is how it leaves the tree altogether. Neither is a property of the
     // content, so neither can be earned or lost by it.
     let popout = take_wide(true, box_, box_);
-    // Last of the per-type verbs, so it is the first of them off the right — see
-    // the note above for why a page's verb sits with `Save` and the flip rather
-    // than with the pop-out it would otherwise be read as a second spelling of.
-    // **A page's four, in the mock-up's own DOM order** — `[back][forward]
-    // [reload] │ [devtools]` — taken off the right, so they come off the left of
-    // the run first exactly as every other control here does. The developer
-    // tools are outermost of the four because they are the one that fades: a
-    // hover tool that sat *between* the three resident buttons and the lock
-    // would pull them sideways every time the pointer arrived.
+    // The last of a page's own verbs still standing here, and it is outermost of
+    // the per-type slot because it is the one a reader presses least: it used to
+    // be outermost of four for the mirror of that reason, so that a hover tool
+    // did not sit *between* three resident buttons and pull them sideways every
+    // time the pointer arrived. The three are downstairs now and the reason
+    // survives them.
     let devtools = take_wide(tools.web, box_, box_);
-    // The rule is not a 22px box. `.pv-sep` is one physical pixel wide with a
-    // pixel of margin on each side and fourteen of height, which is why it needs
-    // the wider door and not the tool-sized one.
-    let separator_width = (PREVIEW_SEPARATOR_WIDTH_LOGICAL_PX * scale)
-        .round()
-        .max(1.0)
-        + (PREVIEW_SEPARATOR_MARGIN_LOGICAL_PX * scale)
-            .round()
-            .max(1.0)
-            * 2.0;
-    let separator_height = (PREVIEW_SEPARATOR_HEIGHT_LOGICAL_PX * scale)
-        .round()
-        .max(1.0);
-    let separator = take_wide(tools.web, separator_width, separator_height);
-    let reload = take_wide(tools.web, box_, box_);
-    let forward = take_wide(tools.web, box_, box_);
-    let back = take_wide(tools.web, box_, box_);
-    let browser = take_wide(tools.browser, box_, box_);
     let flip = take_wide(tools.flip, box_, box_);
     let save = take_wide(tools.save, box_, box_);
 
-    let run_left = [
-        save, flip, browser, back, forward, reload, separator, devtools, popout, lock,
-    ]
-    .into_iter()
-    .flatten()
-    .map(|box_| box_[0])
-    .fold(head.title[2], f32::min);
+    let run_left = [save, flip, devtools, popout, lock]
+        .into_iter()
+        .flatten()
+        .map(|box_| box_[0])
+        .fold(head.title[2], f32::min);
     let dirty_slot = (PREVIEW_DIRTY_SLOT_LOGICAL_PX * scale).round().max(1.0);
     // What is left for the flexible half of the row: the name bits and the dot,
     // with the spacer taking whatever neither of them wants.
@@ -12393,15 +12531,515 @@ pub fn preview_head_geometry(
         ],
         save,
         flip,
-        browser,
-        back,
-        forward,
-        reload,
-        separator,
         devtools,
         popout,
         lock,
     }
+}
+
+// ── the rail: the row under the preview head (user ruling 2026-08-24) ───────
+//
+// **A preview head is two rows now, and the second one belongs to the content's
+// own address.** The 2026-08-24 ruling retires W2 ①「名字即地址」: a page's name
+// cell goes back to being a *name* — the document's title, and nothing else —
+// and the address it used to double as moves one row down, where it has room to
+// be an address. A file gets the same row and puts a **breadcrumb** in it,
+// because a file's address is a path and a path has parts you can point at.
+//
+// One band, two fillings, and the reason they are one band rather than two
+// surfaces is the reason the head's own run is one function: the row's height,
+// its hairline and the pane geometry that has to give way for it are identical,
+// and a second copy of "the seat less its head less twenty-eight" is the
+// off-by-a-hairline `preview_body_viewport`'s own note is about.
+//
+// What each filling carries is the ruling's, verbatim:
+//
+// * **address** — `‹ › ⟳` on the left, *resident*, moved off the head where
+//   they used to stand; the address itself centred and pressable (the press
+//   opens the very editor `Ctrl+L` opens); `⧉` copy and `↗` hand-over on the
+//   right, the second of them moved off the head as well.
+// * **crumbs** — the path segment by segment, each one a button that points the
+//   files column at that folder, the last one bold because it is this file;
+//   `</>` the source flip (moved off the head, where it has no room to say what
+//   it is about), `⧉` copy the whole path, and `Open ⌄`.
+//
+// **Every control on this row is resident.** The head above it is a run of
+// offers that appear when the pointer arrives, and that ladder is right for
+// verbs a reader presses twice a week; a row whose whole subject is "where is
+// this and how do I get there" is furniture, and furniture that appears when
+// you approach it cannot be aimed at — the same sentence `PREVIEW_NAV_REST`
+// already makes about the three buttons that used to be upstairs.
+
+/// The rail's height, border included — **the foot's own twenty-eight** (P33).
+///
+/// One number and not a new one: this row and the path strip along the bottom
+/// are the same piece of furniture answering the same question from the two ends
+/// of a pane, and the day one of them changes height a pane wearing both would
+/// be visibly lopsided.
+pub const PREVIEW_RAIL_BAR_LOGICAL_PX: f32 = FILES_FOOT_BAR_LOGICAL_PX;
+/// `border-bottom: 1px solid var(--border-soft)` — the head's hairline, read one
+/// row lower. Written as the head's constant for [`FILES_FOOT_EDGE_LOGICAL_PX`]'s
+/// reason.
+pub const PREVIEW_RAIL_EDGE_LOGICAL_PX: f32 = SEAT_TITLE_EDGE_LOGICAL_PX;
+/// `.pv-rail { padding: 0 10px }` — the head's eleven less the pixel its own
+/// name box spends on the tree row above it, which this row has nothing to line
+/// up with.
+pub const PREVIEW_RAIL_PADDING_X_LOGICAL_PX: f32 = 10.0;
+/// The gap between two neighbouring controls on the rail.
+pub const PREVIEW_RAIL_GAP_LOGICAL_PX: f32 = 2.0;
+/// `.pv-rail .pv-tool { width: 22px; height: 22px }` — the head's box, because
+/// they are the same family of button and a reader's hand does not learn two
+/// sizes for one window.
+pub const PREVIEW_RAIL_TOOL_BOX_LOGICAL_PX: f32 = PREVIEW_TOOL_BOX_LOGICAL_PX;
+/// Its corner.
+pub const PREVIEW_RAIL_TOOL_RADIUS_LOGICAL_PX: f32 = PREVIEW_TOOL_RADIUS_LOGICAL_PX;
+/// The glyph a rail tool draws — the head's thirteen.
+pub const PREVIEW_RAIL_GLYPH_LOGICAL_PX: f32 = PREVIEW_TOOL_GLYPH_LOGICAL_PX;
+/// The glyph the three navigation buttons draw — the head's eleven, kept when
+/// they moved down here (§7.7 ②: 「导航三枚比工具小一号」).
+pub const PREVIEW_RAIL_NAV_GLYPH_LOGICAL_PX: f32 = PREVIEW_NAV_GLYPH_LOGICAL_PX;
+/// `.pv-rail { font-size: 12px }` — under the name's 12.5 and over the foot's
+/// 11, which is the row's place in the pane's hierarchy said in one number.
+pub const PREVIEW_RAIL_FONT_LOGICAL_PX: f32 = 12.0;
+/// `.pv-addr { padding: 0 10px }` — the address's own inset inside its field.
+pub const PREVIEW_ADDRESS_PAD_X_LOGICAL_PX: f32 = 10.0;
+/// `.pv-addr { height: 20px }` — the field's box, which is the row's twenty-eight
+/// less four of breathing room on each side.
+pub const PREVIEW_ADDRESS_HEIGHT_LOGICAL_PX: f32 = 20.0;
+/// `.pv-addr { border-radius: 5px }`.
+pub const PREVIEW_ADDRESS_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// `.crumb { padding: 2px 5px }` — the horizontal half; the vertical half is
+/// spent by [`PREVIEW_CRUMB_HEIGHT_LOGICAL_PX`].
+pub const PREVIEW_CRUMB_PAD_X_LOGICAL_PX: f32 = 5.0;
+/// `.crumb`'s own box: a 12px line plus two of padding each way.
+pub const PREVIEW_CRUMB_HEIGHT_LOGICAL_PX: f32 = 20.0;
+/// `.crumb { border-radius: 4px }`.
+pub const PREVIEW_CRUMB_RADIUS_LOGICAL_PX: f32 = 4.0;
+/// The cell the `›` between two segments is drawn in, centred.
+///
+/// A fixed cell and not a measured one, deliberately: the separator is one
+/// character this window chose and never changes, so measuring it would put a
+/// font on the path of a layout that has one possible answer.
+pub const PREVIEW_CRUMB_SEPARATOR_CELL_LOGICAL_PX: f32 = 11.0;
+/// And the cell the folded middle's `…` is drawn in.
+pub const PREVIEW_CRUMB_FOLD_CELL_LOGICAL_PX: f32 = 18.0;
+/// `›` — the separator between two segments.
+pub const PREVIEW_CRUMB_SEPARATOR: &str = "\u{203a}";
+/// `…` — what the folded middle of a long path is drawn as.
+pub const PREVIEW_CRUMB_FOLD: &str = "\u{2026}";
+/// The `Open ⌄` pill's inset, each side of its caption.
+pub const PREVIEW_OPEN_PAD_X_LOGICAL_PX: f32 = 8.0;
+/// The gap between that caption and its chevron.
+pub const PREVIEW_OPEN_GAP_LOGICAL_PX: f32 = 5.0;
+/// The pill's own height and corner — the crumb's, because the two stand in one
+/// row and a taller button beside a shorter one is a row with two floors.
+pub const PREVIEW_OPEN_HEIGHT_LOGICAL_PX: f32 = PREVIEW_CRUMB_HEIGHT_LOGICAL_PX;
+/// Its corner.
+pub const PREVIEW_OPEN_RADIUS_LOGICAL_PX: f32 = PREVIEW_CRUMB_RADIUS_LOGICAL_PX;
+
+/// Which of the two rows a preview seat wears under its head.
+///
+/// **`None` is the third answer and it is the ordinary one for a document with
+/// nothing to point at** — a commit graph, a diff, a buffer that has never been
+/// on a disk. The ruling is explicit that the breadcrumb 「只长在有磁盘路径的预
+/// 览上」, and a rail drawn over a document with no address would be this row
+/// asking a question the content cannot answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PreviewRailKind {
+    /// A page: the three navigation buttons, the address, and the two verbs that
+    /// are about the address rather than about the pane.
+    #[default]
+    Address,
+    /// A file: its path,段段可点, and the three verbs that are about the file.
+    Crumbs,
+}
+
+/// What the rail has to lay out this frame — the facts, not the pixels.
+///
+/// [`PreviewHeadTools`]'s exact opposite number, one row down, and it is a
+/// separate type for that type's own stated reason: a rail with a source flip is
+/// a different *layout* from one without, the widths are measured where a font
+/// was available, and the hit test must be handed the very numbers the paint
+/// used.
+///
+/// **Owned rather than `Copy`**, which is the one place it differs from the
+/// head's: a path has as many segments as it has, so this carries a `Vec` where
+/// the head carries two floats. The list is the visible segments of one path —
+/// tens of small values, rebuilt per frame beside the head's own.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PreviewRailMeasure {
+    pub kind: PreviewRailKind,
+    /// The address's drawn width, or the width the open editor is asking for.
+    pub address_width: f32,
+    /// Each path segment's drawn width, root first and the file last.
+    pub segments: Vec<f32>,
+    /// `flippable` (P28) — the buffer is markdown, so the rail carries `</>`.
+    /// The head carried it until this ruling moved it here.
+    pub flip: bool,
+    /// The `Open` caption's drawn width.
+    pub open_width: f32,
+    /// **The standing fact that used to hang on the foot's right hand** — "Read-
+    /// only · 64 KB", "Not saved · changed on disk · edits kept" — measured
+    /// beside the renderer (user ruling 2026-08-15, moved here 2026-08-24).
+    ///
+    /// It moved because the row it hung on did: the breadcrumb retires a file's
+    /// foot, and the 2026-08-24 ruling is explicit that the foot's *other*
+    /// duties are kept rather than dropped. So it hangs on this row's right hand
+    /// instead, and the path is what yields to it — which is
+    /// [`foot_notice_split`]'s own judgement, unchanged, one row higher: the
+    /// path was always going to be cut, and shortening a complete standing fact
+    /// to buy a few characters of something already abbreviated is the trade
+    /// that ruling refused.
+    ///
+    /// Zero on the address row, always: a page has no ledger to speak from.
+    pub notice_width: f32,
+}
+
+/// One drawn breadcrumb.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewCrumbBox {
+    /// Which segment of the whole path this is — **the index into
+    /// [`PreviewRailMeasure::segments`] and not into the drawn run**, because a
+    /// folded path draws fewer boxes than it has segments and a press has to say
+    /// which *folder* it meant.
+    pub depth: usize,
+    pub rect: [f32; 4],
+    /// The last segment: this file, drawn in the pane's own ink at semi-bold.
+    pub tail: bool,
+}
+
+/// Where every part of one preview rail stands, in physical pixels.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PreviewRailGeometry {
+    /// The whole row, hairline included.
+    pub band: [f32; 4],
+    /// That hairline, along the bottom — the head's own, read one row lower.
+    pub edge: [f32; 4],
+    pub back: Option<[f32; 4]>,
+    pub forward: Option<[f32; 4]>,
+    pub reload: Option<[f32; 4]>,
+    /// The address field: what the label is laid into, what answers a press, and
+    /// what the editor is drawn inside when it is open.
+    pub address: Option<[f32; 4]>,
+    /// `⧉` — copy the address, or copy the path.
+    pub copy: Option<[f32; 4]>,
+    /// `↗` — hand this page to the machine's own browser. The head's own arrow,
+    /// moved (user ruling 2026-08-24, second round).
+    pub external: Option<[f32; 4]>,
+    /// The segments actually drawn, left to right.
+    pub crumbs: Vec<PreviewCrumbBox>,
+    /// The `›` cells between them.
+    pub separators: Vec<[f32; 4]>,
+    /// The `…` the folded middle is drawn as, and what opens the menu of what is
+    /// behind it.
+    pub fold: Option<[f32; 4]>,
+    /// Which segments that `…` is standing in for, root first.
+    pub folded: Vec<usize>,
+    /// `</>` — the source flip, moved down off the head.
+    pub flip: Option<[f32; 4]>,
+    /// The `Open ⌄` pill.
+    pub open: Option<[f32; 4]>,
+    /// Where the standing fact hangs, between the crumbs and the verbs.
+    pub notice: Option<[f32; 4]>,
+}
+
+/// The row itself: the band directly under one preview seat's head.
+///
+/// Its own function because three things need it and only one of them lays the
+/// row out — the body has to give way for it, the hit test has to reject a
+/// pointer that is not in it, and the paint has to draw its hairline.
+#[must_use]
+pub fn preview_rail_band(rect: [f32; 4], scale: f32) -> [f32; 4] {
+    let head = pane_head_geometry(rect, SeatKind::Preview, scale);
+    let bar = (PREVIEW_RAIL_BAR_LOGICAL_PX * scale).round().max(1.0);
+    let top = head.head[3];
+    // The rail keeps its whole height and the body is what gives way, which is
+    // the rule the foot and the notice strip already follow — and never past the
+    // pane's own floor.
+    let bottom = (top + bar).min(rect[3]).max(top);
+    [rect[0], top, rect[2], bottom]
+}
+
+/// Lay one preview rail's contents out inside the band it rides on.
+///
+/// **Both runs are taken off their own end and the address is centred between
+/// them**, which is the ruling's own arrangement: 「左 `‹ › ⟳` 常驻,中地址居中,
+/// 右 `⧉` `↗`」. Centred on the *band* rather than on the gap the two runs left,
+/// because the reader's eye centres a browser's address on the window and not on
+/// the leftovers — and clamped into that gap afterwards, so a narrow pane slides
+/// the field along rather than drawing it under the buttons.
+///
+/// A control that will not fit is not drawn, on the head's own rule: half a
+/// button is worse than none.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn preview_rail_geometry(
+    rect: [f32; 4],
+    scale: f32,
+    measure: &PreviewRailMeasure,
+) -> PreviewRailGeometry {
+    let band = preview_rail_band(rect, scale);
+    let edge_px = (PREVIEW_RAIL_EDGE_LOGICAL_PX * scale).max(1.0);
+    let edge = [band[0], (band[3] - edge_px).max(band[1]), band[2], band[3]];
+    // Centred in the row *above its hairline*, which is the flex row's own
+    // content box — the same reading the head's controls and the foot's mark are
+    // centred by.
+    let middle = (band[1] + edge[1]) / 2.0;
+    let pad = (PREVIEW_RAIL_PADDING_X_LOGICAL_PX * scale).round();
+    let gap = PREVIEW_RAIL_GAP_LOGICAL_PX * scale;
+    let box_ = (PREVIEW_RAIL_TOOL_BOX_LOGICAL_PX * scale).round().max(1.0);
+    let floor = band[0] + pad;
+    let ceiling = band[2] - pad;
+    let mut geometry = PreviewRailGeometry {
+        band,
+        edge,
+        ..PreviewRailGeometry::default()
+    };
+    if ceiling <= floor {
+        return geometry;
+    }
+    let boxed = |left: f32, width: f32, height: f32| {
+        let top = (middle - height / 2.0).round();
+        pixel_snapped([left, top, left + width, top + height])
+    };
+    // Two cursors, walking towards each other. What is between them when they
+    // stop is what the address or the crumbs have to live in.
+    let mut left = floor;
+    let mut right = ceiling;
+
+    match measure.kind {
+        PreviewRailKind::Address => {
+            let mut take_left = |width: f32| -> Option<[f32; 4]> {
+                (left + width <= right).then(|| {
+                    let box_ = boxed(left, width, width);
+                    left += width + gap;
+                    box_
+                })
+            };
+            geometry.back = take_left(box_);
+            geometry.forward = take_left(box_);
+            geometry.reload = take_left(box_);
+            let mut take_right = |width: f32| -> Option<[f32; 4]> {
+                (right - width >= left).then(|| {
+                    let box_ = boxed(right - width, width, width);
+                    right -= width + gap;
+                    box_
+                })
+            };
+            // **The arrow is outermost.** `⧉` copies the address and `↗` leaves
+            // with it, so the one that leaves the window stands at the edge of
+            // the window's own row — the same reading the head's `×` is placed
+            // by.
+            geometry.external = take_right(box_);
+            geometry.copy = take_right(box_);
+            let room = (right - left).max(0.0);
+            if room <= 0.0 {
+                return geometry;
+            }
+            let field_pad = (PREVIEW_ADDRESS_PAD_X_LOGICAL_PX * scale).round();
+            let height = (PREVIEW_ADDRESS_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+            let wanted = (measure.address_width + field_pad * 2.0).clamp(0.0, room);
+            let centre = (band[0] + band[2]) / 2.0;
+            let placed = (centre - wanted / 2.0)
+                .round()
+                .max(left)
+                .min(right - wanted);
+            geometry.address = Some(boxed(placed, wanted, height));
+        }
+        PreviewRailKind::Crumbs => {
+            let pill = (PREVIEW_OPEN_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+            let open_pad = (PREVIEW_OPEN_PAD_X_LOGICAL_PX * scale).round();
+            let open_gap = PREVIEW_OPEN_GAP_LOGICAL_PX * scale;
+            let chevron = (PREVIEW_SWITCH_CHEVRON_WIDTH_LOGICAL_PX * scale)
+                .round()
+                .max(1.0);
+            let open_width = (measure.open_width + open_pad * 2.0 + open_gap + chevron).round();
+            let mut take_right = |width: f32, height: f32| -> Option<[f32; 4]> {
+                (right - width >= left).then(|| {
+                    let box_ = boxed(right - width, width, height);
+                    right -= width + gap;
+                    box_
+                })
+            };
+            geometry.open = take_right(open_width, pill);
+            geometry.copy = take_right(box_, box_);
+            geometry.flip = measure.flip.then(|| take_right(box_, box_)).flatten();
+            // The standing fact, inside the verbs rather than outside them: it
+            // is a sentence about the file and they are buttons, and a phrase
+            // that stood at the row's edge with the buttons inboard of it would
+            // read as their label.
+            if measure.notice_width > 0.0 {
+                let notice = (measure.notice_width + gap).round();
+                geometry.notice = take_right(notice, pill);
+            }
+            let room = (right - left).max(0.0);
+            let crumb_pad = (PREVIEW_CRUMB_PAD_X_LOGICAL_PX * scale).round();
+            let crumb_height = (PREVIEW_CRUMB_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+            let separator = (PREVIEW_CRUMB_SEPARATOR_CELL_LOGICAL_PX * scale)
+                .round()
+                .max(1.0);
+            let fold_cell = (PREVIEW_CRUMB_FOLD_CELL_LOGICAL_PX * scale)
+                .round()
+                .max(1.0);
+            let width_of =
+                |depth: usize| (measure.segments[depth] + crumb_pad * 2.0).round().max(1.0);
+            let run_width = |shown: &[usize], folded: bool| -> f32 {
+                let boxes: f32 = shown.iter().map(|depth| width_of(*depth)).sum();
+                let seams = separator * (shown.len().saturating_sub(1)) as f32;
+                boxes + seams + if folded { fold_cell + separator } else { 0.0 }
+            };
+            let mut shown: Vec<usize> = (0..measure.segments.len()).collect();
+            let mut folded: Vec<usize> = Vec::new();
+            // **The middle is what folds** (the ruling's ③). The root says which
+            // tree this is and the tail says which file, and neither of those is
+            // ever the part a reader can spare — so the segments between them
+            // leave one at a time, nearest the root first, exactly as a
+            // breadcrumb everywhere else does.
+            while shown.len() > 2 && run_width(&shown, !folded.is_empty()) > room {
+                folded.push(shown.remove(1));
+            }
+            // And when even the root and the file will not stand together, the
+            // root goes into the fold behind them: a `… › name.md` is still an
+            // answer, and a half-drawn root is not.
+            if shown.len() == 2 && run_width(&shown, !folded.is_empty()) > room {
+                folded.insert(0, shown.remove(0));
+            }
+            // **The chip stands where the segments it replaced stood** — after
+            // the root when the root survived, and first when it did not. Found
+            // on a real window (2026-08-24): laying the chip down before the run
+            // drew `… › D: › docs › name.md`, which reads as a folder above the
+            // drive rather than as the folders between the drive and the file.
+            let mut run: Vec<Option<usize>> = Vec::with_capacity(shown.len() + 1);
+            let root_survived = shown.first() == Some(&0);
+            if folded.is_empty() {
+                run.extend(shown.iter().map(|depth| Some(*depth)));
+            } else if root_survived {
+                run.push(Some(0));
+                run.push(None);
+                run.extend(shown[1..].iter().map(|depth| Some(*depth)));
+            } else {
+                run.push(None);
+                run.extend(shown.iter().map(|depth| Some(*depth)));
+            }
+            geometry.folded = folded;
+            let mut x = left;
+            let mut first = true;
+            for item in run {
+                if !first {
+                    if x + separator > right {
+                        break;
+                    }
+                    geometry.separators.push(boxed(x, separator, crumb_height));
+                    x += separator;
+                }
+                first = false;
+                let Some(depth) = item else {
+                    if x + fold_cell > right {
+                        break;
+                    }
+                    geometry.fold = Some(boxed(x, fold_cell, crumb_height));
+                    x += fold_cell;
+                    continue;
+                };
+                let width = width_of(depth).min((right - x).max(0.0));
+                if width <= 0.0 {
+                    break;
+                }
+                geometry.crumbs.push(PreviewCrumbBox {
+                    depth,
+                    rect: boxed(x, width, crumb_height),
+                    tail: depth + 1 == measure.segments.len(),
+                });
+                x += width;
+            }
+        }
+    }
+    geometry
+}
+
+/// Which of one preview rail's controls the pointer is on.
+///
+/// [`hit_preview_head`]'s exact sibling, one row down, and its own entry for
+/// that function's reason: it needs what [`hit_chrome`] is not given — how wide
+/// this seat's address and this seat's segments were *drawn* — and the answer
+/// must come from the same derivation the paint used.
+#[must_use]
+pub fn hit_preview_rail(
+    layout: &SeatLayout,
+    scale: f32,
+    rails: &[(SeatId, PreviewRailMeasure)],
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    for placement in &layout.rects {
+        if placement.kind != SeatKind::Preview {
+            continue;
+        }
+        let Some(measure) = rails
+            .iter()
+            .find(|(seat, _)| *seat == placement.id)
+            .map(|(_, measure)| measure)
+        else {
+            continue;
+        };
+        let Some(rect) = full_pane_rect(layout, placement.id) else {
+            continue;
+        };
+        let geometry = preview_rail_geometry(rect, scale, measure);
+        if !contains(geometry.band, x, y) {
+            continue;
+        }
+        let hit = |box_: Option<[f32; 4]>| box_.is_some_and(|box_| contains(box_, x, y));
+        let seat = placement.id;
+        if hit(geometry.back) {
+            return Some(ChromeTarget::PreviewBack(seat));
+        }
+        if hit(geometry.forward) {
+            return Some(ChromeTarget::PreviewForward(seat));
+        }
+        if hit(geometry.reload) {
+            return Some(ChromeTarget::PreviewReload(seat));
+        }
+        if hit(geometry.external) {
+            return Some(ChromeTarget::PreviewBrowser(seat));
+        }
+        if hit(geometry.flip) {
+            return Some(ChromeTarget::PreviewFlip(seat));
+        }
+        if hit(geometry.open) {
+            return Some(ChromeTarget::PreviewOpenWith(seat));
+        }
+        if hit(geometry.copy) {
+            return Some(match measure.kind {
+                PreviewRailKind::Address => ChromeTarget::PreviewAddressCopy(seat),
+                PreviewRailKind::Crumbs => ChromeTarget::PreviewPathCopy(seat),
+            });
+        }
+        if hit(geometry.address) {
+            return Some(ChromeTarget::PreviewAddress(seat));
+        }
+        if hit(geometry.fold) {
+            return Some(ChromeTarget::PreviewCrumbFold(seat));
+        }
+        if let Some(crumb) = geometry
+            .crumbs
+            .iter()
+            .find(|crumb| contains(crumb.rect, x, y))
+        {
+            return Some(ChromeTarget::PreviewCrumb {
+                seat,
+                depth: crumb.depth,
+            });
+        }
+        // **The band swallows what its controls left over**, and it has to: the
+        // row stands between the head's drag handle and the document, and a
+        // press falling through it would either drag the pane by a row that is
+        // not its head or land in a document twenty-eight pixels below where it
+        // was aimed.
+        return Some(ChromeTarget::PreviewRail(seat));
+    }
+    None
 }
 
 /// Which files column's root button the pointer is on.
@@ -12915,6 +13553,45 @@ pub fn pane_foot_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> FilesPa
     }
 }
 
+/// One preview pane's chassis: its rail, its body and its foot, from the one
+/// derivation [`preview_body_viewport`] makes in the other units.
+///
+/// [`pane_foot_geometry`] with the 2026-08-24 ruling applied on top, and it is a
+/// wrapper rather than a fourth argument to that function because the rail is a
+/// preview's alone — a files column wears the same foot and will never wear this
+/// row. The two subtractions are the same two the viewport makes, in the same
+/// order, and the fact that this returns rectangles while that returns a
+/// viewport is the whole of the difference: two derivations of one number are
+/// two numbers that drift, and this pair would drift by a hairline the day the
+/// bar's height stops being a whole number of physical pixels.
+#[must_use]
+pub fn preview_pane_geometry(
+    rect: [f32; 4],
+    scale: f32,
+    rail: Option<PreviewRailKind>,
+) -> FilesPaneGeometry {
+    let mut geometry = pane_foot_geometry(rect, SeatKind::Preview, scale);
+    let Some(kind) = rail else {
+        return geometry;
+    };
+    let band = preview_rail_band(rect, scale);
+    geometry.body[1] = geometry.body[1].max(band[3]);
+    if kind == PreviewRailKind::Crumbs {
+        // **The foot is retired and the body takes its pixels back** — the
+        // ruling's own sentence, said in rectangles: 「脚上那行路径退役,面包屑接
+        // 任」. Collapsed to the pane's floor rather than removed from the type,
+        // because every reader of a foot already asks `contains` of it and a
+        // rectangle with no height contains nothing.
+        geometry.foot = [rect[0], rect[3], rect[2], rect[3]];
+        geometry.foot_edge = geometry.foot;
+        geometry.foot_mark = geometry.foot;
+        geometry.foot_path = geometry.foot;
+        geometry.body[3] = rect[3];
+    }
+    geometry.body[3] = geometry.body[3].max(geometry.body[1]);
+    geometry
+}
+
 /// The border box of one named files column, or `None` when it is not a full
 /// column.
 #[must_use]
@@ -13034,8 +13711,19 @@ pub fn files_body_rect(
 /// `.pane-close` is its own inside a head: the tree is a list of rows and this is
 /// one control beside it, and it answers even for a column whose tree is a single
 /// sentence about itself.
+/// **`seats` is here for the rail** (user ruling 2026-08-24): a preview wearing
+/// a breadcrumb row has no foot at all — the row took the path over — and its
+/// bottom twenty-eight pixels are document. Asking `pane_foot_geometry` here
+/// while the paint asks [`preview_pane_geometry`] would be exactly the invisible
+/// button this module's standing law is about, one strip lower.
 #[must_use]
-pub fn hit_files_foot(layout: &SeatLayout, scale: f32, x: f64, y: f64) -> Option<ChromeTarget> {
+pub fn hit_files_foot(
+    seats: &Seats,
+    layout: &SeatLayout,
+    scale: f32,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
     for placement in &layout.rects {
         // Both kinds that wear one (P33). Answered from the same geometry the
@@ -13048,7 +13736,12 @@ pub fn hit_files_foot(layout: &SeatLayout, scale: f32, x: f64, y: f64) -> Option
         let Some(rect) = full_pane_rect(layout, placement.id) else {
             continue;
         };
-        let foot = pane_foot_geometry(rect, placement.kind, scale).foot;
+        let foot = match placement.kind {
+            SeatKind::Preview => {
+                preview_pane_geometry(rect, scale, seats.seat_rail(placement.id)).foot
+            }
+            _ => pane_foot_geometry(rect, placement.kind, scale).foot,
+        };
         if contains(foot, x, y) {
             return Some(target);
         }
@@ -13312,22 +14005,10 @@ pub fn hit_preview_head(
         if hit(geometry.flip) {
             return Some(ChromeTarget::PreviewFlip(placement.id));
         }
-        if hit(geometry.browser) {
-            return Some(ChromeTarget::PreviewBrowser(placement.id));
-        }
-        // A page's four, in the order they are laid out. The separator between
-        // them answers nothing: it is a rule and not a control, and a hairline
-        // that swallowed a press would be three pixels of dead head between two
-        // buttons.
-        if hit(geometry.back) {
-            return Some(ChromeTarget::PreviewBack(placement.id));
-        }
-        if hit(geometry.forward) {
-            return Some(ChromeTarget::PreviewForward(placement.id));
-        }
-        if hit(geometry.reload) {
-            return Some(ChromeTarget::PreviewReload(placement.id));
-        }
+        // The hand-off arrow and a page's three navigation buttons used to be
+        // asked here, between the flip and the developer tools. They are on the
+        // rail since 2026-08-24 and [`hit_preview_rail`] answers for them — the
+        // targets did not change, only the row they are drawn in.
         if hit(geometry.devtools) {
             return Some(ChromeTarget::PreviewDevTools(placement.id));
         }
@@ -13972,136 +14653,12 @@ fn push_preview_head(
         },
         false,
     );
-    tool(
-        sprites,
-        pointer,
-        pane_hovered,
-        scale,
-        palette,
-        geometry.browser,
-        ChromeTarget::PreviewBrowser(seat),
-        // `#i-external` — the bare arrow, and the reason it is bare is that the
-        // framed one is drawn immediately to its right: see `ChromeMark::External`.
-        ChromeMark::External,
-        false,
-    );
-    // ── a page's four (§7.7 ②, W2 slice ④) ─────────────────────────────────
-    //
-    // **The three navigation buttons are resident and every other tool in this
-    // head is not.** Each of the others is an *offer*; these three are the only
-    // way to move inside a page, and a browser whose back button appears when
-    // you approach it is a browser you cannot aim at. So they have a painter of
-    // their own rather than an argument to the one above: `tool` begins by
-    // returning when the pane is not hovered, which is exactly the sentence
-    // these three do not make.
-    fn nav(
-        sprites: &mut Vec<ChromeSprite>,
-        pointer: ChromePointer,
-        scale: f32,
-        palette: &bt_render::ChromePalette,
-        box_: Option<[f32; 4]>,
-        target: ChromeTarget,
-        mark: ChromeMark,
-        live: bool,
-    ) {
-        let Some(box_) = box_ else {
-            return;
-        };
-        // `.pv-nav.off { pointer-events: none }` — a spent button is not
-        // hovered, so the pill under the pointer does not appear over it either.
-        let lit = live && pointer.hover == Some(target);
-        if lit {
-            sprites.push(ChromeSprite::new(
-                ChromeMark::ControlPill {
-                    radius_px: (PREVIEW_TOOL_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32,
-                },
-                box_,
-                palette.pane_close_pill,
-            ));
-        }
-        let glyph = (PREVIEW_NAV_GLYPH_LOGICAL_PX * scale).round().max(1.0);
-        let left = ((box_[0] + box_[2] - glyph) / 2.0).round();
-        let top = ((box_[1] + box_[3] - glyph) / 2.0).round();
-        let mut sprite = ChromeSprite::new(
-            mark,
-            [left, top, left + glyph, top + glyph],
-            if lit {
-                palette.pane_close_glyph_on_pill
-            } else {
-                palette.pane_close_glyph
-            },
-        );
-        sprite.opacity = if !live {
-            PREVIEW_NAV_SPENT
-        } else if lit {
-            1.0
-        } else {
-            PREVIEW_NAV_REST
-        };
-        sprites.push(sprite);
-    }
-    let web = content.web.unwrap_or_default();
-    nav(
-        sprites,
-        pointer,
-        scale,
-        palette,
-        geometry.back,
-        ChromeTarget::PreviewBack(seat),
-        // `#i-chev` turned a quarter, which is the same sentence the submenu's
-        // `▸` is drawn with: this window has one directional glyph, and a second
-        // arrow family for two buttons would make it two.
-        ChromeMark::Chevron { turned_degrees: 90 },
-        web.can_go_back,
-    );
-    nav(
-        sprites,
-        pointer,
-        scale,
-        palette,
-        geometry.forward,
-        ChromeTarget::PreviewForward(seat),
-        ChromeMark::Chevron {
-            turned_degrees: 270,
-        },
-        web.can_go_forward,
-    );
-    nav(
-        sprites,
-        pointer,
-        scale,
-        palette,
-        geometry.reload,
-        ChromeTarget::PreviewReload(seat),
-        // **One button, two glyphs**: while a navigation is in flight the reload
-        // is a stop, and the seat grows no chrome for a state that lasts a
-        // second.
-        if web.loading {
-            ChromeMark::PaneClose
-        } else {
-            ChromeMark::Refresh
-        },
-        true,
-    );
-    // **The rule belongs to what is after it.** Drawn only while the pane is
-    // hovered, because what it introduces — the developer tools — is only there
-    // then: a divider with an empty side is a line telling the reader something
-    // follows when nothing does.
-    if let Some(separator) = geometry.separator
-        && pane_hovered
-    {
-        let width = (PREVIEW_SEPARATOR_WIDTH_LOGICAL_PX * scale)
-            .round()
-            .max(1.0);
-        let left = ((separator[0] + separator[2] - width) / 2.0).round();
-        let mut rule = ChromeSprite::new(
-            ChromeMark::Fill,
-            [left, separator[1], left + width, separator[3]],
-            palette.menu_border,
-        );
-        rule.opacity = PREVIEW_SEPARATOR_REVEAL;
-        sprites.push(rule);
-    }
+    // **A page's four have left this head** (user ruling 2026-08-24, second
+    // round). `[back][forward][reload]` and the hand-off arrow are drawn by
+    // `push_preview_rail` one row down, on the resident ladder they always had;
+    // the hairline that stood between them and the developer tools went with
+    // them, because a rule with nothing on its left is a line introducing a
+    // group that has moved out.
     tool(
         sprites,
         pointer,
@@ -14149,6 +14706,504 @@ fn push_preview_head(
         },
         content.locked,
     );
+}
+
+/// What one preview rail is showing this frame.
+///
+/// [`PreviewHeadContent`]'s opposite number, and split from
+/// [`PreviewRailMeasure`] for that pair's own reason: what the row has to be
+/// *laid out* to is measured where a font was, and what is written in it only
+/// the paint needs. A rail drawn with a control its geometry did not reserve is
+/// the class of bug D4 exists to make impossible.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewRailContent<'a> {
+    /// The very measurement the hit test will be handed.
+    pub measure: &'a PreviewRailMeasure,
+    /// The address, already cut to the room its field has.
+    pub address: &'a str,
+    /// Each path segment's drawn text, root first and the file last — the same
+    /// list, in the same order, that [`PreviewRailMeasure::segments`] holds the
+    /// widths of.
+    pub segments: &'a [String],
+    /// The `Open` pill's caption, in the window's language.
+    pub open: &'a str,
+    /// The standing fact hung on the right hand, or the word the row is flashing
+    /// instead — "Saved", "Revealed…". Empty when there is neither.
+    pub notice: &'a str,
+    /// Whether that phrase is a confirmation rather than a fact, which takes the
+    /// ink as well as the words.
+    ///
+    /// **One slot and one line at a time**, which is the foot's own arrangement
+    /// arriving here with the duty: a flash lasts a second and a standing fact
+    /// does not, so the transient one takes the slot while it is fresh rather
+    /// than the row growing a second phrase nobody has room to read.
+    pub notice_flashing: bool,
+    /// Whether the flip would take you to the source rather than back to the
+    /// render — the glyph names the *destination*, which is the head's own rule
+    /// travelling down with the button.
+    pub flip_to_source: bool,
+    /// What the page's three buttons say — which of them have anywhere to go,
+    /// and whether the third is a stop.
+    pub web: WebHeadState,
+    /// The open address editor, when this rail is the one holding it.
+    pub edit: Option<PreviewNameEdit<'a>>,
+}
+
+/// Draw one preview rail.
+///
+/// **Everything here is resident**, which is the one place this row departs from
+/// the head above it — see the section note: a row whose whole subject is "where
+/// is this" is furniture, and furniture that appears when you approach it cannot
+/// be aimed at. So there is no `pane_hovered` gate anywhere below; the ladder is
+/// [`PREVIEW_NAV_REST`] at rest and full under the pointer, which is the ladder
+/// the three navigation buttons already climbed while they were upstairs.
+#[allow(clippy::too_many_lines)]
+fn push_preview_rail(
+    rect: [f32; 4],
+    content: PreviewRailContent<'_>,
+    seat: SeatId,
+    pointer: ChromePointer,
+    scale: f32,
+    palette: &bt_render::ChromePalette,
+    out: (
+        &mut Vec<ChromeQuad>,
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+    ),
+) {
+    let (quads, labels, sprites) = out;
+    let geometry = preview_rail_geometry(rect, scale, content.measure);
+    if geometry.band[3] <= geometry.band[1] {
+        return;
+    }
+    // The hairline, and nothing else: the row's ground is the pane's own, which
+    // is the foot's arrangement one row lower and the same reason — a band with
+    // a fill of its own would be a third floor in a pane that has two.
+    quads.push(ChromeQuad::ink(geometry.edge, palette.pane_head_edge));
+
+    /// One resident button on the rail.
+    ///
+    /// `live` is what the three navigation buttons need and nothing else does:
+    /// a button with nowhere to go is dimmed and inert rather than hidden, so
+    /// that the two beside it do not move under the pointer.
+    #[allow(clippy::too_many_arguments)]
+    fn button(
+        sprites: &mut Vec<ChromeSprite>,
+        pointer: ChromePointer,
+        scale: f32,
+        palette: &bt_render::ChromePalette,
+        box_: Option<[f32; 4]>,
+        target: ChromeTarget,
+        mark: ChromeMark,
+        glyph_px: f32,
+        live: bool,
+    ) {
+        let Some(box_) = box_ else {
+            return;
+        };
+        let lit = live && pointer.hover == Some(target);
+        if lit {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPill {
+                    radius_px: (PREVIEW_RAIL_TOOL_RADIUS_LOGICAL_PX * scale)
+                        .round()
+                        .max(1.0) as u32,
+                },
+                box_,
+                palette.pane_close_pill,
+            ));
+        }
+        let glyph = (glyph_px * scale).round().max(1.0);
+        let left = ((box_[0] + box_[2] - glyph) / 2.0).round();
+        let top = ((box_[1] + box_[3] - glyph) / 2.0).round();
+        let mut sprite = ChromeSprite::new(
+            mark,
+            [left, top, left + glyph, top + glyph],
+            if lit {
+                palette.pane_close_glyph_on_pill
+            } else {
+                palette.pane_close_glyph
+            },
+        );
+        sprite.opacity = if !live {
+            PREVIEW_NAV_SPENT
+        } else if lit {
+            1.0
+        } else {
+            PREVIEW_NAV_REST
+        };
+        sprites.push(sprite);
+    }
+
+    match content.measure.kind {
+        PreviewRailKind::Address => {
+            button(
+                sprites,
+                pointer,
+                scale,
+                palette,
+                geometry.back,
+                ChromeTarget::PreviewBack(seat),
+                // `#i-chev` turned a quarter — this window has one directional
+                // glyph, and the sentence travelled down here with the buttons.
+                ChromeMark::Chevron { turned_degrees: 90 },
+                PREVIEW_RAIL_NAV_GLYPH_LOGICAL_PX,
+                content.web.can_go_back,
+            );
+            button(
+                sprites,
+                pointer,
+                scale,
+                palette,
+                geometry.forward,
+                ChromeTarget::PreviewForward(seat),
+                ChromeMark::Chevron {
+                    turned_degrees: 270,
+                },
+                PREVIEW_RAIL_NAV_GLYPH_LOGICAL_PX,
+                content.web.can_go_forward,
+            );
+            button(
+                sprites,
+                pointer,
+                scale,
+                palette,
+                geometry.reload,
+                ChromeTarget::PreviewReload(seat),
+                // One button, two glyphs: while a navigation is in flight the
+                // reload is a stop.
+                if content.web.loading {
+                    ChromeMark::PaneClose
+                } else {
+                    ChromeMark::Refresh
+                },
+                PREVIEW_RAIL_NAV_GLYPH_LOGICAL_PX,
+                true,
+            );
+            button(
+                sprites,
+                pointer,
+                scale,
+                palette,
+                geometry.copy,
+                ChromeTarget::PreviewAddressCopy(seat),
+                ChromeMark::Copy,
+                PREVIEW_RAIL_GLYPH_LOGICAL_PX,
+                true,
+            );
+            button(
+                sprites,
+                pointer,
+                scale,
+                palette,
+                geometry.external,
+                ChromeTarget::PreviewBrowser(seat),
+                // `#i-external` — the head's own arrow, moved (user ruling
+                // 2026-08-24, second round): 「在浏览器打开」 is a verb about the
+                // address, so it stands on the address's row.
+                ChromeMark::External,
+                PREVIEW_RAIL_GLYPH_LOGICAL_PX,
+                true,
+            );
+            let Some(field) = geometry.address else {
+                return;
+            };
+            let editing = content.edit.is_some();
+            let lit = pointer.hover == Some(ChromeTarget::PreviewAddress(seat));
+            if lit && !editing {
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::ControlPill {
+                        radius_px: (PREVIEW_ADDRESS_RADIUS_LOGICAL_PX * scale).round().max(1.0)
+                            as u32,
+                    },
+                    field,
+                    palette.pane_close_pill,
+                ));
+            }
+            let inset = (PREVIEW_ADDRESS_PAD_X_LOGICAL_PX * scale).round();
+            let text_box = [
+                field[0] + inset,
+                geometry.band[1],
+                (field[2] - inset).max(field[0] + inset),
+                geometry.edge[1],
+            ];
+            // The editor's own furniture, from the same call the tab strip and
+            // the preview head make: one field, one selection band, one caret,
+            // centred on the line rather than filling the row.
+            let marks = content.edit.map(|edit| {
+                inline_rename_marks(
+                    text_box,
+                    &TabEdit {
+                        text: edit.text.to_owned(),
+                        placeholder: String::new(),
+                        caret_px: edit.caret_px,
+                        selection_px: edit.selection_px,
+                        caret_lit: edit.caret_lit,
+                    },
+                    scale,
+                )
+            });
+            if editing {
+                // The whole field takes the ground while it is being typed in,
+                // and not merely the run of letters: this box is a *field* the
+                // rest of the time too, so the mark that says "you are in it"
+                // has to be the box.
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::ControlPill {
+                        radius_px: (PREVIEW_ADDRESS_RADIUS_LOGICAL_PX * scale).round().max(1.0)
+                            as u32,
+                    },
+                    field,
+                    palette.pane_close_pill,
+                ));
+            }
+            if let Some(band) = marks.and_then(|marks| marks.selection) {
+                sprites.push(
+                    ChromeSprite::new(ChromeMark::Fill, band, palette.accent)
+                        .with_opacity(INLINE_RENAME_SELECTION_ALPHA),
+                );
+            }
+            labels.push(ChromeLabel {
+                mono: false,
+                text: content
+                    .edit
+                    .map_or_else(|| content.address.to_owned(), |edit| edit.text.to_owned()),
+                rect: text_box,
+                font_size_px: PREVIEW_RAIL_FONT_LOGICAL_PX * scale,
+                color: if content.edit.is_some_and(|edit| edit.refused) {
+                    palette.status_err
+                } else if editing || lit {
+                    palette.pane_title_focus
+                } else {
+                    palette.files_row_muted
+                },
+                align_right: false,
+                // **Centred at rest and laid from the left while it is typed
+                // in.** The ruling says 地址居中, and a caret has one origin it
+                // can be measured from — the box's left edge, which is where
+                // `dress_preview_address` measures it. A field that kept its
+                // text centred while a draft grew would be a caret sliding
+                // sideways at half the speed of the letters it follows.
+                align_center: !editing,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: Some(text_box),
+            });
+            if let Some(caret) = marks.and_then(|marks| marks.caret) {
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::Fill,
+                    caret,
+                    palette.pane_title_focus,
+                ));
+            }
+        }
+        PreviewRailKind::Crumbs => {
+            let font = PREVIEW_RAIL_FONT_LOGICAL_PX * scale;
+            if let Some(fold) = geometry.fold {
+                let lit = pointer.hover == Some(ChromeTarget::PreviewCrumbFold(seat));
+                if lit {
+                    sprites.push(ChromeSprite::new(
+                        ChromeMark::ControlPill {
+                            radius_px: (PREVIEW_CRUMB_RADIUS_LOGICAL_PX * scale).round().max(1.0)
+                                as u32,
+                        },
+                        fold,
+                        palette.pane_close_pill,
+                    ));
+                }
+                labels.push(ChromeLabel {
+                    mono: false,
+                    text: PREVIEW_CRUMB_FOLD.to_owned(),
+                    rect: fold,
+                    font_size_px: font,
+                    color: if lit {
+                        palette.pane_title_focus
+                    } else {
+                        palette.files_row_muted
+                    },
+                    align_right: false,
+                    align_center: true,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: Some(fold),
+                });
+            }
+            for seam in &geometry.separators {
+                labels.push(ChromeLabel {
+                    mono: false,
+                    text: PREVIEW_CRUMB_SEPARATOR.to_owned(),
+                    rect: *seam,
+                    font_size_px: font,
+                    // The palest ink the row has: a separator is punctuation and
+                    // not a segment, and one drawn in the segments' own ink
+                    // reads as a folder called `›`.
+                    color: palette.files_row_muted,
+                    align_right: false,
+                    align_center: true,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: Some(*seam),
+                });
+            }
+            for crumb in &geometry.crumbs {
+                let Some(text) = content.segments.get(crumb.depth) else {
+                    continue;
+                };
+                let lit = pointer.hover
+                    == Some(ChromeTarget::PreviewCrumb {
+                        seat,
+                        depth: crumb.depth,
+                    });
+                if lit {
+                    sprites.push(ChromeSprite::new(
+                        ChromeMark::ControlPill {
+                            radius_px: (PREVIEW_CRUMB_RADIUS_LOGICAL_PX * scale).round().max(1.0)
+                                as u32,
+                        },
+                        crumb.rect,
+                        palette.pane_close_pill,
+                    ));
+                }
+                labels.push(ChromeLabel {
+                    mono: false,
+                    text: text.clone(),
+                    rect: crumb.rect,
+                    font_size_px: font,
+                    // **The last segment is this file** (the ruling's ②), so it
+                    // is the one thing in the row drawn in the pane's own ink at
+                    // semi-bold; every folder above it is a way out, and ways
+                    // out are quieter than where you are.
+                    color: if lit || crumb.tail {
+                        palette.pane_title_focus
+                    } else {
+                        palette.files_row_muted
+                    },
+                    align_right: false,
+                    align_center: true,
+                    letter_spacing_em: 0.0,
+                    weight: if crumb.tail {
+                        ChromeLabelWeight::SemiBold
+                    } else {
+                        ChromeLabelWeight::Regular
+                    },
+                    tabular_numerals: false,
+                    clip: Some(crumb.rect),
+                });
+            }
+            if let (Some(box_), false) = (geometry.notice, content.notice.is_empty()) {
+                labels.push(ChromeLabel {
+                    mono: false,
+                    text: content.notice.to_owned(),
+                    rect: box_,
+                    font_size_px: FILES_FOOT_FONT_LOGICAL_PX * scale,
+                    // The foot's own two inks, kept: the accent for a
+                    // confirmation, because a tick-coloured phrase beside an
+                    // unchanged path would read as a property of the file rather
+                    // than as an answer to a press; and the paler of the row's
+                    // inks for a fact, which is not part of any button's label.
+                    color: if content.notice_flashing {
+                        palette.accent
+                    } else {
+                        palette.files_row_muted
+                    },
+                    align_right: true,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: Some(box_),
+                });
+            }
+            button(
+                sprites,
+                pointer,
+                scale,
+                palette,
+                geometry.flip,
+                ChromeTarget::PreviewFlip(seat),
+                if content.flip_to_source {
+                    ChromeMark::Code
+                } else {
+                    ChromeMark::Eye
+                },
+                PREVIEW_RAIL_GLYPH_LOGICAL_PX,
+                true,
+            );
+            button(
+                sprites,
+                pointer,
+                scale,
+                palette,
+                geometry.copy,
+                ChromeTarget::PreviewPathCopy(seat),
+                ChromeMark::Copy,
+                PREVIEW_RAIL_GLYPH_LOGICAL_PX,
+                true,
+            );
+            let Some(open) = geometry.open else {
+                return;
+            };
+            let lit = pointer.hover == Some(ChromeTarget::PreviewOpenWith(seat));
+            if lit {
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::ControlPill {
+                        radius_px: (PREVIEW_OPEN_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32,
+                    },
+                    open,
+                    palette.pane_close_pill,
+                ));
+            }
+            let pad = (PREVIEW_OPEN_PAD_X_LOGICAL_PX * scale).round();
+            let chevron_width = (PREVIEW_SWITCH_CHEVRON_WIDTH_LOGICAL_PX * scale)
+                .round()
+                .max(1.0);
+            let chevron_height = (PREVIEW_SWITCH_CHEVRON_HEIGHT_LOGICAL_PX * scale)
+                .round()
+                .max(1.0);
+            let caption = [
+                open[0] + pad,
+                open[1],
+                (open[2] - pad - chevron_width).max(open[0] + pad),
+                open[3],
+            ];
+            labels.push(ChromeLabel {
+                mono: false,
+                text: content.open.to_owned(),
+                rect: caption,
+                font_size_px: font,
+                color: if lit {
+                    palette.pane_title_focus
+                } else {
+                    palette.files_row_muted
+                },
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: Some(caption),
+            });
+            let middle = (open[1] + open[3]) / 2.0;
+            sprites.push(
+                ChromeSprite::new(
+                    // The same rotating glyph the files root, the `+` and the
+                    // preview head's own switcher use — not a second arrow.
+                    ChromeMark::chevron(0.0),
+                    pixel_snapped([
+                        open[2] - pad - chevron_width,
+                        middle - chevron_height / 2.0,
+                        open[2] - pad,
+                        middle + chevron_height / 2.0,
+                    ]),
+                    palette.pane_title,
+                )
+                .with_opacity(FILES_ROOT_CHEVRON_OPACITY),
+            );
+        }
+    }
 }
 
 /// What a pane's path strip says this frame.
@@ -15906,6 +16961,7 @@ impl Seats {
             next_split,
             structure_revision: 0,
             notices: std::collections::BTreeSet::new(),
+            rails: BTreeMap::new(),
             // §7.1.6l: the posture is not on disk, so a restored tab is tiled.
             zoom: None,
         }
@@ -17034,6 +18090,7 @@ mod tests {
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &heads,
+                preview_rails: &[],
                 preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -17108,6 +18165,7 @@ mod tests {
                     preview_messages: messages,
                     preview_feet: &[],
                     preview_heads: &[],
+                    preview_rails: &[],
                     preview_cards: cards,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -17644,6 +18702,7 @@ mod tests {
         );
         assert_eq!(
             hit_files_foot(
+                &seats,
                 &layout,
                 1.0,
                 f64::from((geometry.foot[0] + geometry.foot[2]) / 2.0),
@@ -17651,6 +18710,84 @@ mod tests {
             ),
             Some(ChromeTarget::PreviewFoot(seat)),
             "the whole strip is one button (P32)"
+        );
+    }
+
+    /// RAIL (user ruling 2026-08-24) — **the row under the head, and what each
+    /// of the two costs the document under it.**
+    ///
+    /// The ruling is not symmetrical and this is where that asymmetry is
+    /// asserted, because it is the one thing about the row a reader can measure:
+    ///
+    /// * a **breadcrumb** takes the *foot's* place — the ruling retires the path
+    ///   along the bottom and the row above takes the question over — so a
+    ///   file's pane keeps exactly the body it had;
+    /// * an **address** is added, because a page's foot has a second job the row
+    ///   cannot do for it (§7.7 ③: while the pointer is over a link the band
+    ///   says the resolved target).
+    ///
+    /// And the foot really is gone in the first case, not merely undrawn: the
+    /// bottom twenty-eight pixels of such a pane are document, and a hit test
+    /// still answering `PreviewFoot` there is the invisible button this module's
+    /// standing law is about.
+    ///
+    /// MUTATIONS:
+    /// ① subtract the rail without retiring the foot for a breadcrumb — the
+    ///    document loses fifty-six pixels to chrome and the first equality goes
+    ///    red;
+    /// ② retire the foot for an address row too — the page keeps its body and
+    ///    loses its hover line, and the second equality goes red;
+    /// ③ leave `seats` out of `hit_files_foot` and answer from
+    ///    `pane_foot_geometry` — the last assertion goes red, which is a press
+    ///    in a document landing on a strip that is not there.
+    #[test]
+    fn a_breadcrumb_row_takes_the_foot_s_place_and_an_address_row_stands_above_one() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.add_preview(&metrics).expect("the preview seat lands");
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let seat = seats.preview().expect("the preview seat");
+        let footed = preview_body_viewport(&seats, &layout, seat, 1.0).expect("a body");
+
+        seats.set_rails(BTreeMap::from([(seat, PreviewRailKind::Crumbs)]));
+        let crumbed = preview_body_viewport(&seats, &layout, seat, 1.0).expect("a body");
+        assert_eq!(
+            crumbed.height, footed.height,
+            "the breadcrumb takes the foot's twenty-eight and gives none of the \
+             document away"
+        );
+        assert_eq!(
+            crumbed.y,
+            footed.y + PREVIEW_RAIL_BAR_LOGICAL_PX as u32,
+            "and it takes them off the top, where the row is drawn"
+        );
+
+        seats.set_rails(BTreeMap::from([(seat, PreviewRailKind::Address)]));
+        let addressed = preview_body_viewport(&seats, &layout, seat, 1.0).expect("a body");
+        assert_eq!(
+            footed.height - addressed.height,
+            PREVIEW_RAIL_BAR_LOGICAL_PX as u32,
+            "a page keeps its foot — it is a hover line as well as a band — so \
+             the address row is added rather than swapped in"
+        );
+
+        // ③ The retired foot is retired for the pointer too.
+        let rect = full_pane_rect(&layout, seat).expect("a full pane");
+        let foot = pane_foot_geometry(rect, SeatKind::Preview, 1.0).foot;
+        let (x, y) = (
+            f64::from((foot[0] + foot[2]) / 2.0),
+            f64::from((foot[1] + foot[3]) / 2.0),
+        );
+        assert_eq!(
+            hit_files_foot(&seats, &layout, 1.0, x, y),
+            Some(ChromeTarget::PreviewFoot(seat)),
+            "a page's foot is still a button"
+        );
+        seats.set_rails(BTreeMap::from([(seat, PreviewRailKind::Crumbs)]));
+        assert_eq!(
+            hit_files_foot(&seats, &layout, 1.0, x, y),
+            None,
+            "and a breadcrumbed pane has no foot there to press"
         );
     }
 
@@ -17677,7 +18814,6 @@ mod tests {
         let tools = PreviewHeadTools {
             save: true,
             flip: true,
-            browser: false,
             web: false,
             switcher: true,
             name_width: 60.0,
@@ -17737,26 +18873,33 @@ mod tests {
         );
     }
 
-    /// PAGE (user ruling 2026-08-20) — **a page in a preview seat wears one more
-    /// tool, and it stands in the per-type verb slot.**
+    /// PAGE, RE-JUDGED (user ruling 2026-08-20, moved 2026-08-24) — **the
+    /// hand-off arrow and a page's three navigation buttons have left the
+    /// head.**
     ///
-    /// The mock-up puts every content class's own verbs in exactly one place:
-    /// first in the tool run, before the three every pane has (pop out, pin,
-    /// close). `Save` sits there for a text file, `Edit source` for a markdown,
-    /// and W1's `[back][forward][reload]` for a web seat — so a page's one verb
-    /// sits there too, rather than beside the pop-out it would then be read as a
-    /// second spelling of.
+    /// This test and its neighbour below replace
+    /// `a_page_wears_the_hand_off_arrow_in_the_slot_save_and_edit_source_sit_in`
+    /// and `the_hand_off_arrow_answers_for_its_own_rectangle_and_reveals_with_
+    /// the_pane`, which asserted at length that `↗` stood in the head's per-type
+    /// slot ahead of the pop-out and that `[back][forward][reload] │ [devtools]`
+    /// stood after it. Every one of those sentences was true and is now about a
+    /// different row: the ruling moved the four controls down to the address
+    /// row, so the old nails are not deleted but **re-driven** — the same
+    /// properties, asserted where the buttons actually are.
+    ///
+    /// What survives unchanged is the head's own reason for its order: `Save`
+    /// and the source flip are still the per-type slot, the pop-out and the lock
+    /// are still the three every pane has, and the developer tools are still
+    /// outermost of what a page contributes.
     ///
     /// MUTATIONS:
-    /// ① take the arrow's box before the pop-out's rather than after it — the
-    ///    arrow lands outside the per-type slot and the pop-out and pin shift by
-    ///    one box on every page;
-    /// ② leave `browser` out of `run_left`'s fold — the name's box overlaps the
-    ///    arrow, and a long file name is drawn under it;
-    /// ③ offer the box unconditionally — every preview head in the window grows
-    ///    an arrow, including the markdown the ruling explicitly leaves alone.
+    /// ① give the head back a `browser` box — a page grows two arrows, one of
+    ///    them in a row that has no room reserved for it;
+    /// ② keep the separator — a hairline hangs in the head introducing nothing;
+    /// ③ let `tools.web` reserve the three navigation boxes again — the head
+    ///    reserves four boxes it never draws and the name is cut short of them.
     #[test]
-    fn a_page_wears_the_hand_off_arrow_in_the_slot_save_and_edit_source_sit_in() {
+    fn the_head_kept_the_developer_tools_and_gave_the_other_three_to_the_rail() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
         seats.add_preview(&metrics).expect("the preview seat lands");
@@ -17765,177 +18908,273 @@ mod tests {
         let rect = full_pane_rect(&layout, seat).expect("a full pane");
         let head = pane_head_geometry(rect, SeatKind::Preview, 1.0);
         let page = PreviewHeadTools {
-            browser: true,
+            web: true,
             name_width: 60.0,
             ..PreviewHeadTools::default()
         };
         let geometry = preview_head_geometry(&head, 1.0, page);
-        let browser = geometry
-            .browser
-            .expect("a page's head seats the hand-off arrow");
+        let devtools = geometry
+            .devtools
+            .expect("a page's head keeps its way in to the page's own source");
         let popout = geometry.popout.expect("a pop-out box");
         let lock = geometry.lock.expect("a lock box");
         assert!(
-            browser[2] <= popout[0] && popout[2] <= lock[0],
-            "the arrow stands ahead of the three every pane has"
+            devtools[2] <= popout[0] && popout[2] <= lock[0],
+            "what a page contributes still stands ahead of the three every pane \
+             has"
         );
         assert_eq!(
-            [browser[2] - browser[0], browser[3] - browser[1]],
+            [devtools[2] - devtools[0], devtools[3] - devtools[1]],
             [popout[2] - popout[0], popout[3] - popout[1]],
             "one family, one box"
         );
         assert!(
-            geometry.name[2] <= browser[0],
+            geometry.name[2] <= devtools[0],
             "and the name is cut short of it, not drawn under it"
         );
-        // ② The slot really is the per-type one: with `Save` and the flip in the
-        // head too, the arrow stands between them and the pop-out — the mock-up's
-        // own DOM order `.pv-save, .pv-md-flip, <this class's verbs>, .pv-popout`.
-        let dressed = PreviewHeadTools {
-            save: true,
-            flip: true,
-            ..page
-        };
-        let dressed = preview_head_geometry(&head, 1.0, dressed);
-        let (save, flip, browser) = (
+        // The per-type slot is still the per-type slot, and the developer tools
+        // are still its outermost member — the mock-up's own DOM order with four
+        // fewer controls in it.
+        let dressed = preview_head_geometry(
+            &head,
+            1.0,
+            PreviewHeadTools {
+                save: true,
+                flip: true,
+                ..page
+            },
+        );
+        let (save, flip) = (
             dressed.save.expect("a save box"),
             dressed.flip.expect("a flip box"),
-            dressed.browser.expect("a browser box"),
         );
         assert!(
-            save[2] <= flip[0] && flip[2] <= browser[0],
-            "the arrow is the last of the per-type verbs, not the first"
+            save[2] <= flip[0] && flip[2] <= dressed.devtools.expect("a devtools box")[0],
+            "`Save`, the flip and then the developer tools"
         );
-        assert!(browser[2] <= dressed.popout.expect("a pop-out box")[0]);
-        // ③ And nothing that is not a page has one — the boxes of the four tools
-        // that were always there do not move when the arrow is not asked for.
-        let plain = PreviewHeadTools {
-            browser: false,
-            ..page
-        };
-        let plain = preview_head_geometry(&head, 1.0, plain);
-        assert_eq!(plain.browser, None, "no page, no arrow");
+        // ③ A page reserves exactly one box more than a plain head, and it is
+        // that one: the boxes of the controls that were always there do not move
+        // when a page arrives.
+        let plain = preview_head_geometry(&head, 1.0, PreviewHeadTools { web: false, ..page });
+        assert_eq!(plain.devtools, None, "no page, no developer tools");
         assert_eq!(
             (plain.popout, plain.lock),
             (geometry.popout, geometry.lock),
             "and the run's other boxes are where they always were"
         );
-        // ④ **A seat that is *rendering* a local page wears both ways out**
-        // (user ruling 2026-08-23). The seat used to show a page's source with
-        // this arrow lit; it draws the page now, and the two doors the ruling
-        // says a reader keeps — `</>` for the source and `↗` for the machine's
-        // own browser — have to be able to stand in one head at one time. They
-        // are separate slots, so this is a fact about the layout and not about a
-        // policy, which is exactly why it is asserted here.
-        let rendering = PreviewHeadTools {
-            browser: true,
-            web: true,
-            name_width: 60.0,
-            ..PreviewHeadTools::default()
-        };
-        let rendering = preview_head_geometry(&head, 1.0, rendering);
-        let arrow = rendering
-            .browser
-            .expect("a rendered local page keeps its way out to a browser");
-        let devtools = rendering
-            .devtools
-            .expect("and its way in to the page's own source");
-        assert!(
-            arrow[2] <= rendering.back.expect("a page's back button")[0],
-            "the arrow is still the last of the per-type verbs, ahead of the \
-             three a page always carries"
-        );
-        assert!(
-            rendering.reload.expect("a reload box")[2] <= devtools[0],
-            "and the developer tools are outermost of a page's four"
-        );
-        assert!(
-            arrow[2] <= devtools[0],
-            "the two ways out of a page never overlap"
-        );
     }
 
-    /// PAGE — **the arrow answers the pointer for its own rectangle, and it is
-    /// drawn on the same reveal ladder as the tools beside it.**
+    /// RAIL (user ruling 2026-08-24) — **the address row's controls answer for
+    /// their own rectangles, and the four that moved kept their targets.**
     ///
-    /// Mutation: leave `browser` out of `hit_preview_head`'s ladder and the box
-    /// falls through to `PaneHeader`, which arms the head as a drag handle — a
-    /// press on a `.pv-tool` never does (mock-up 5874).
+    /// The second half of the re-judgement above. `PreviewBack`, `PreviewForward`,
+    /// `PreviewReload` and `PreviewBrowser` are the very targets the head used to
+    /// answer with, because a press that means one thing gets one target however
+    /// many rows the button has stood in — the dispatch did not change, only the
+    /// geometry that produces it.
+    ///
+    /// MUTATIONS:
+    /// ① mint new targets for the moved buttons — the dispatch in `main.rs` no
+    ///    longer routes them and every one of these goes red;
+    /// ② let the band answer before its controls — every assertion here becomes
+    ///    `PreviewRail`, which is the picture of a row you cannot press anything
+    ///    on;
+    /// ③ drop the band's own catch-all — the last assertion goes red, and a
+    ///    press between two buttons drags the pane by a row that is not its head.
     #[test]
-    fn the_hand_off_arrow_answers_for_its_own_rectangle_and_reveals_with_the_pane() {
+    fn the_address_row_answers_for_every_control_the_head_handed_it() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
         seats.add_preview(&metrics).expect("the preview seat lands");
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let seat = seats.preview().expect("the preview seat");
         let rect = full_pane_rect(&layout, seat).expect("a full pane");
-        let tools = PreviewHeadTools {
-            browser: true,
-            name_width: 60.0,
-            ..PreviewHeadTools::default()
+        let measure = PreviewRailMeasure {
+            kind: PreviewRailKind::Address,
+            address_width: 180.0,
+            ..PreviewRailMeasure::default()
         };
-        let head = pane_head_geometry(rect, SeatKind::Preview, 1.0);
-        let box_ = preview_head_geometry(&head, 1.0, tools)
-            .browser
-            .expect("a page's head seats the arrow");
-        let (x, y) = (
-            f64::from((box_[0] + box_[2]) / 2.0),
-            f64::from((box_[1] + box_[3]) / 2.0),
+        let geometry = preview_rail_geometry(rect, 1.0, &measure);
+        let rails = [(seat, measure.clone())];
+        let centre = |box_: [f32; 4]| {
+            (
+                f64::from((box_[0] + box_[2]) / 2.0),
+                f64::from((box_[1] + box_[3]) / 2.0),
+            )
+        };
+        for (box_, expected) in [
+            (geometry.back, ChromeTarget::PreviewBack(seat)),
+            (geometry.forward, ChromeTarget::PreviewForward(seat)),
+            (geometry.reload, ChromeTarget::PreviewReload(seat)),
+            (geometry.copy, ChromeTarget::PreviewAddressCopy(seat)),
+            (geometry.external, ChromeTarget::PreviewBrowser(seat)),
+            (geometry.address, ChromeTarget::PreviewAddress(seat)),
+        ] {
+            let (x, y) = centre(box_.expect("a row this wide seats every control"));
+            assert_eq!(
+                hit_preview_rail(&layout, 1.0, &rails, x, y),
+                Some(expected),
+                "{expected:?} answers for its own rectangle"
+            );
+        }
+        // The arrangement the ruling asked for: navigation on the left, the two
+        // address verbs on the right, the address between them — and the arrow
+        // outermost of the pair, because it is the one that leaves the window.
+        let (back, forward, reload) = (
+            geometry.back.expect("a back box"),
+            geometry.forward.expect("a forward box"),
+            geometry.reload.expect("a reload box"),
+        );
+        let (copy, external) = (
+            geometry.copy.expect("a copy box"),
+            geometry.external.expect("an external box"),
+        );
+        let field = geometry.address.expect("an address field");
+        assert!(back[2] <= forward[0] && forward[2] <= reload[0]);
+        assert!(reload[2] <= field[0] && field[2] <= copy[0]);
+        assert!(copy[2] <= external[0]);
+        assert!(
+            external[2] <= geometry.band[2],
+            "and nothing hangs off the row's own edge"
+        );
+        // **地址居中** — centred on the band, not on the gap the two runs left.
+        let band_middle = (geometry.band[0] + geometry.band[2]) / 2.0;
+        let field_middle = (field[0] + field[2]) / 2.0;
+        assert!(
+            (field_middle - band_middle).abs() <= 1.0,
+            "the address is centred in the row, not in the leftovers"
+        );
+        // ③ The band swallows what its controls left over.
+        let gap = (reload[2] + field[0]) / 2.0;
+        assert_eq!(
+            hit_preview_rail(
+                &layout,
+                1.0,
+                &rails,
+                f64::from(gap),
+                f64::from((geometry.band[1] + geometry.band[3]) / 2.0),
+            ),
+            Some(ChromeTarget::PreviewRail(seat)),
+            "a press between two controls is still a press on the row"
+        );
+    }
+
+    /// RAIL (user ruling 2026-08-24) — **the breadcrumb row: every segment is a
+    /// button, the last one is this file, and a path too long folds in the
+    /// middle.**
+    ///
+    /// The three sentences of the ruling's ② and ③ that a reader can measure.
+    /// What the fold keeps is the part a reader cannot spare — the root says
+    /// which tree this is and the tail says which file — so the segments between
+    /// them are what leave, nearest the root first.
+    ///
+    /// MUTATIONS:
+    /// ① fold from the tail rather than from the middle — the file's own name
+    ///    disappears from the row that is about it and the tail assertion goes
+    ///    red;
+    /// ② index the press by the drawn run rather than by the whole path — every
+    ///    segment after the `…` points at the wrong folder, which the depth
+    ///    assertion catches;
+    /// ③ let the crumbs run under the verbs — the last assertion goes red, and
+    ///    `Open ⌄` is drawn over a folder name.
+    #[test]
+    fn a_breadcrumb_folds_its_middle_and_every_segment_answers_for_its_own_depth() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.add_preview(&metrics).expect("the preview seat lands");
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let seat = seats.preview().expect("the preview seat");
+        let rect = full_pane_rect(&layout, seat).expect("a full pane");
+        let measure = PreviewRailMeasure {
+            kind: PreviewRailKind::Crumbs,
+            segments: vec![26.0, 70.0, 90.0, 48.0, 120.0],
+            flip: true,
+            open_width: 32.0,
+            ..PreviewRailMeasure::default()
+        };
+        let geometry = preview_rail_geometry(rect, 1.0, &measure);
+        assert_eq!(geometry.fold, None, "a path that fits is drawn entire");
+        assert_eq!(geometry.crumbs.len(), 5);
+        assert!(
+            geometry.crumbs.last().expect("a tail").tail,
+            "the last segment is this file"
+        );
+        assert!(
+            geometry.crumbs[..4].iter().all(|crumb| !crumb.tail),
+            "and nothing above it is"
+        );
+        let rails = [(seat, measure.clone())];
+        for crumb in &geometry.crumbs {
+            assert_eq!(
+                hit_preview_rail(
+                    &layout,
+                    1.0,
+                    &rails,
+                    f64::from((crumb.rect[0] + crumb.rect[2]) / 2.0),
+                    f64::from((crumb.rect[1] + crumb.rect[3]) / 2.0),
+                ),
+                Some(ChromeTarget::PreviewCrumb {
+                    seat,
+                    depth: crumb.depth
+                }),
+                "every segment answers for its own depth"
+            );
+        }
+        // ③ The verbs own the right end, and the crumbs stop before them.
+        let flip = geometry.flip.expect("a flip box");
+        let copy = geometry.copy.expect("a copy box");
+        let open = geometry.open.expect("an Open pill");
+        assert!(flip[2] <= copy[0] && copy[2] <= open[0]);
+        assert!(
+            geometry.crumbs.last().expect("a tail").rect[2] <= flip[0],
+            "the path yields to the verbs rather than running under them"
+        );
+
+        // ① A path with no room folds its middle: the root, the `…`, and as much
+        // of the tail end as fits.
+        let narrow = PreviewRailMeasure {
+            segments: vec![26.0, 300.0, 300.0, 300.0, 120.0],
+            ..measure
+        };
+        let folded = preview_rail_geometry(rect, 1.0, &narrow);
+        let chip = folded.fold.expect("a path this long folds");
+        assert!(
+            !folded.folded.is_empty(),
+            "and the `…` stands for the segments it hid"
+        );
+        assert!(
+            folded.folded.iter().all(|depth| *depth > 0 && *depth < 4),
+            "what folds is the middle: never the root, never the file"
+        );
+        assert!(
+            folded.crumbs.last().expect("a tail").tail,
+            "the file survives the fold"
+        );
+        // **Where the chip stands is the whole of what it means** (found on a
+        // real window, 2026-08-24): the root it did not swallow is drawn to its
+        // *left*, and the segments it stands for are the ones between them. A
+        // chip laid down before the run reads `… › D: › docs › name.md`, which
+        // says there is a folder above the drive.
+        let root = folded.crumbs.first().expect("the root survived this fold");
+        assert_eq!(root.depth, 0, "the root is the first thing drawn");
+        assert!(
+            root.rect[2] <= chip[0],
+            "and the `…` stands after it, where the folders it replaced stood"
+        );
+        assert!(
+            chip[2] <= folded.crumbs.last().expect("a tail").rect[0],
+            "and before the file it did not swallow"
         );
         assert_eq!(
-            hit_preview_head(&layout, 1.0, &[(seat, tools)], x, y),
-            Some(ChromeTarget::PreviewBrowser(seat)),
-            "the arrow answers for its own rectangle"
-        );
-        // The paint: nothing at rest, and the mark itself once the pointer is in
-        // the pane — `.pv-tool`'s own ladder, which this button joins rather than
-        // being an exception to.
-        let content = PreviewHeadContent {
-            name: "ui-mockup.html",
-            tools,
-            ..PreviewHeadContent::default()
-        };
-        let (_, _, resting) = preview_chrome(content, ChromePointer::default());
-        assert!(
-            !resting
-                .iter()
-                .any(|sprite| sprite.mark == ChromeMark::External),
-            "no tool is drawn on a head nobody is pointing at"
-        );
-        let (_, _, hovered) = preview_chrome(
-            content,
-            ChromePointer {
-                pane_hover: Some(seat),
-                ..ChromePointer::default()
-            },
-        );
-        let drawn = hovered
-            .iter()
-            .find(|sprite| sprite.mark == ChromeMark::External)
-            .expect("the arrow is revealed with the pane");
-        assert!((drawn.opacity - PREVIEW_TOOL_REVEAL).abs() < f32::EPSILON);
-        // And a head with no page has no arrow however hard it is hovered.
-        let markdown = PreviewHeadContent {
-            name: "README.md",
-            tools: PreviewHeadTools {
-                browser: false,
-                flip: true,
-                ..tools
-            },
-            ..PreviewHeadContent::default()
-        };
-        let (_, _, hovered) = preview_chrome(
-            markdown,
-            ChromePointer {
-                pane_hover: Some(seat),
-                ..ChromePointer::default()
-            },
-        );
-        assert!(
-            !hovered
-                .iter()
-                .any(|sprite| sprite.mark == ChromeMark::External),
-            "a markdown is not a page, and the ruling leaves it alone"
+            hit_preview_rail(
+                &layout,
+                1.0,
+                &[(seat, narrow)],
+                f64::from((chip[0] + chip[2]) / 2.0),
+                f64::from((chip[1] + chip[3]) / 2.0),
+            ),
+            Some(ChromeTarget::PreviewCrumbFold(seat)),
+            "the `…` is a button onto what is behind it"
         );
     }
 
@@ -18100,8 +19339,9 @@ mod tests {",
             .expect("a split always yields a first piece");
         assert_eq!(
             source.matches("inline_rename_marks(").count(),
-            4,
-            "one definition and three callers — the strip, the rail and the              preview head"
+            5,
+            "one definition and four callers — the strip, the rail, the preview \
+             head, and the address row that took the head's field on 2026-08-24"
         );
         // The hairline's width and the line it stands on are named in exactly
         // one place each, and that place is the shared function.
@@ -18244,7 +19484,6 @@ mod tests {",
                     tools: PreviewHeadTools {
                         save: true,
                         flip: true,
-                        browser: false,
                         web: false,
                         switcher: true,
                         name_width: 120.0,
@@ -18257,7 +19496,6 @@ mod tests {",
                     flip_to_source: true,
                     locked: false,
                     menu_open: false,
-                    web: None,
                     edit,
                 },
                 ChromePointer::default(),
@@ -19669,6 +20907,7 @@ mod tests {",
                     preview_messages: &[],
                     preview_feet: &[],
                     preview_heads: &[],
+                    preview_rails: &[],
                     preview_cards: &[],
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -19891,6 +21130,7 @@ mod tests {",
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
+                preview_rails: &[],
                 preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open,
@@ -19995,6 +21235,7 @@ mod tests {",
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
+                preview_rails: &[],
                 preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -20747,7 +21988,7 @@ mod tests {",
     #[test]
     fn the_body_every_reader_gets_stops_at_the_foots_hairline() {
         let content = footed_tree(r"C:\Users\Weiyi");
-        let (_, layout, column, _) = files_chrome(content.clone(), None);
+        let (seats, layout, column, _) = files_chrome(content.clone(), None);
         let rect = files_pane_rect(&layout, column).expect("the column is placed");
         let geometry = files_pane_geometry(rect, 1.0, false);
 
@@ -20786,12 +22027,13 @@ mod tests {",
             "no row lives under the foot"
         );
         assert_eq!(
-            hit_files_foot(&layout, 1.0, inside_foot.0, inside_foot.1),
+            hit_files_foot(&seats, &layout, 1.0, inside_foot.0, inside_foot.1),
             Some(ChromeTarget::FilesFoot(column)),
             "and the strip claims its own rectangle"
         );
         assert_eq!(
             hit_files_foot(
+                &seats,
                 &layout,
                 1.0,
                 inside_foot.0,
@@ -21702,6 +22944,7 @@ mod tests {",
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
+                preview_rails: &[],
                 preview_cards: &[],
                 fit_overflow: None,
                 search_seat: None,
@@ -24003,6 +25246,7 @@ mod tests {",
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
+                preview_rails: &[],
                 preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -24207,6 +25451,7 @@ mod tests {",
                     preview_messages: &[],
                     preview_feet: &[],
                     preview_heads: &[],
+                    preview_rails: &[],
                     preview_cards: &[],
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -24319,6 +25564,7 @@ mod tests {",
                     preview_messages: &[],
                     preview_feet: &[],
                     preview_heads: &[],
+                    preview_rails: &[],
                     preview_cards: &[],
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -24555,6 +25801,7 @@ mod tests {",
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
+                preview_rails: &[],
                 preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -26840,6 +28087,7 @@ mod tests {",
             next_split: count,
             structure_revision: 0,
             notices: std::collections::BTreeSet::new(),
+            rails: BTreeMap::new(),
             zoom: None,
         }
     }
@@ -26950,6 +28198,7 @@ mod tests {",
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
+                preview_rails: &[],
                 preview_cards: &[],
                 fit_overflow,
                 profile_menu_open: false,
@@ -27016,6 +28265,7 @@ mod tests {",
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
+                preview_rails: &[],
                 preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -27549,6 +28799,7 @@ mod tests {",
             next_split: 1,
             structure_revision: 0,
             notices: std::collections::BTreeSet::new(),
+            rails: BTreeMap::new(),
             zoom: None,
         };
         let lone_layout = solved(&lone, viewport_of(1600, 900, 1_000), &metrics);
@@ -27815,6 +29066,7 @@ mod tests {",
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
+                preview_rails: &[],
                 preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -28089,6 +29341,7 @@ mod tests {",
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
+                preview_rails: &[],
                 preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -28347,6 +29600,7 @@ mod tests {",
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
+                preview_rails: &[],
                 preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -28510,6 +29764,7 @@ mod tests {",
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
+                preview_rails: &[],
                 preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -29856,6 +31111,7 @@ mod tests {",
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
+                preview_rails: &[],
                 preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -32742,6 +33998,7 @@ mod tests {",
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
+                preview_rails: &[],
                 preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -34139,25 +35396,30 @@ mod tests {",
         (seat, layout, geometry)
     }
 
-    /// PIN (§7.7 ②, user ruling 2026-08-22) — **the three buttons sit in the
-    /// slot `Save` and `Edit source` sit in, and the developer tools sit at its
-    /// far end.**
+    /// PIN (§7.7 ②, user ruling 2026-08-22), **RE-JUDGED 2026-08-24** — the
+    /// per-type verb slot is still one slot, and what a page contributes to it
+    /// is now one button.
     ///
-    /// The ruling is 「三钮(后退/前进/刷新)维持 pane 头右侧工具格」 and the
-    /// argument is 「同族优先于浏览器惯例」: every content class that has verbs
-    /// of its own puts them first in the tool run, before the three every pane
-    /// has. So a document's `Save` and a page's outermost per-type verb are the
-    /// **same box** — one slot, two contents — which is what this asserts
-    /// rather than an inequality that any ordering would satisfy.
+    /// The 2026-08-22 ruling was 「三钮(后退/前进/刷新)维持 pane 头右侧工具格」
+    /// on the argument 「同族优先于浏览器惯例」, and its nail was the *equality*
+    /// below: a document's `Save` and a page's outermost per-type verb are the
+    /// same box, one slot with two contents. The 2026-08-24 ruling moved the
+    /// three buttons and the hairline out of that slot and onto the address row,
+    /// which changes what a page puts in the slot — and changes nothing about
+    /// the slot itself. So the equality is kept exactly as it was and the run
+    /// after it is asserted where it now ends: at the developer tools.
+    ///
+    /// The three buttons' own order is not unasserted; it moved to
+    /// `the_address_row_answers_for_every_control_the_head_handed_it`, where the
+    /// buttons are.
     ///
     /// MUTATIONS:
-    /// ① take the four after the pop-out — the equality goes red and a page's
-    ///    verbs land where the pane's own three live;
-    /// ② take the developer tools innermost of the four — it lands between the
-    ///    resident buttons and the pin, and every arrival of the pointer shoves
-    ///    the three sideways.
+    /// ① take the developer tools after the pop-out — the equality goes red and
+    ///    a page's verb lands where the pane's own three live;
+    /// ② reserve boxes for the departed three — the name is cut short of four
+    ///    rectangles nothing draws into, which the last assertion names.
     #[test]
-    fn the_three_buttons_sit_where_save_and_edit_source_sit() {
+    fn the_developer_tools_sit_where_save_and_edit_source_sit() {
         let (_, _, page) = head_geometry(page_tools());
         let (_, _, document) = head_geometry(PreviewHeadTools {
             save: true,
@@ -34170,52 +35432,45 @@ mod tests {",
             document.save.expect("a text file's head seats Save"),
             "one per-type verb slot, two contents"
         );
-        // In the mock-up's own DOM order, left to right:
-        // `[back][forward][reload] │ [devtools]`, and then the three every pane
-        // has.
-        let back = page.back.expect("a back box");
-        let forward = page.forward.expect("a forward box");
-        let reload = page.reload.expect("a reload box");
-        let rule = page.separator.expect("a separator box");
         let popout = page.popout.expect("a pop-out box");
         let pin = page.lock.expect("a lock box");
-        assert!(back[2] <= forward[0], "back is left of forward");
-        assert!(forward[2] <= reload[0], "forward is left of reload");
-        assert!(reload[2] <= rule[0], "the rule stands after the three");
-        assert!(rule[2] <= devtools[0], "and introduces the tools after it");
         assert!(devtools[2] <= popout[0] && popout[2] <= pin[0]);
         assert!(
-            page.name[2] <= back[0],
-            "and the name is cut short of them, not drawn under them"
+            page.name[2] <= devtools[0],
+            "and the name is cut short of it, not drawn under it"
         );
-        // One family, one box — the rule excepted, which is a hairline and not a
-        // control.
-        for box_ in [back, forward, reload] {
-            assert_eq!(
-                [box_[2] - box_[0], box_[3] - box_[1]],
-                [popout[2] - popout[0], popout[3] - popout[1]],
-                "one family, one box"
-            );
-        }
-        assert!(
-            rule[2] - rule[0] < popout[2] - popout[0],
-            "the rule is a hairline in its margins, not a tool-sized box"
+        assert_eq!(
+            [devtools[2] - devtools[0], devtools[3] - devtools[1]],
+            [popout[2] - popout[0], popout[3] - popout[1]],
+            "one family, one box"
         );
-        // Nothing that is not a page has any of them.
+        // Nothing that is not a page has it, and a page's head is exactly one
+        // box narrower for the name than it used to be — the four that left took
+        // their reservations with them.
         let (_, _, plain) = head_geometry(PreviewHeadTools {
             name_width: 60.0,
             ..PreviewHeadTools::default()
         });
-        assert_eq!(
-            (
-                plain.back,
-                plain.forward,
-                plain.reload,
-                plain.separator,
-                plain.devtools
-            ),
-            (None, None, None, None, None),
-            "no page, no navigation"
+        assert_eq!(plain.devtools, None, "no page, no developer tools");
+        // A name long enough to be cut by the run is the only way to see how
+        // much room the run took: a short name stops where it stops on both
+        // heads. A page reserves **one** box and one gap more than a plain head
+        // — it used to reserve five, and four of those rectangles are on the
+        // rail now.
+        let long = 4_000.0;
+        let (_, _, wide_page) = head_geometry(PreviewHeadTools {
+            name_width: long,
+            ..page_tools()
+        });
+        let (_, _, wide_plain) = head_geometry(PreviewHeadTools {
+            name_width: long,
+            ..PreviewHeadTools::default()
+        });
+        let one_box = devtools[2] - devtools[0] + SEAT_TITLE_GAP_LOGICAL_PX;
+        assert!(
+            ((wide_plain.name[2] - wide_page.name[2]) - one_box).abs() <= 1.0,
+            "a page reserves one box and one gap more than a plain head — not \
+             five"
         );
     }
 
@@ -34242,9 +35497,16 @@ mod tests {",
     #[test]
     fn a_pages_head_hangs_its_whole_run_off_its_right_edge_at_every_width() {
         // A local page: the one head that carries every optional control at
-        // once — the hand-off arrow, a page's four, and the three every pane has.
+        // once — `Save`, the source flip, the developer tools, and the three
+        // every pane has. The hand-off arrow and a page's three navigation
+        // buttons were on this list until 2026-08-24 and are on the rail's now
+        // (`the_address_row_answers_for_every_control_the_head_handed_it`),
+        // which is the whole of the re-judgement: the claim is that the *run* is
+        // anchored to the right edge at every width, and it is asserted over the
+        // run this head actually has.
         let tools = PreviewHeadTools {
-            browser: true,
+            save: true,
+            flip: true,
             ..page_tools()
         };
         let mut offsets: Option<Vec<f32>> = None;
@@ -34260,11 +35522,8 @@ mod tests {",
                  not floating in the middle of it"
             );
             let run = [
-                geometry.browser,
-                geometry.back,
-                geometry.forward,
-                geometry.reload,
-                geometry.separator,
+                geometry.save,
+                geometry.flip,
                 geometry.devtools,
                 geometry.popout,
                 geometry.lock,
@@ -34290,66 +35549,120 @@ mod tests {",
             // And the name is the child that gives: it is what grows with the
             // window, which is why nothing in the run has to move.
             assert!(
-                geometry.name[2] <= geometry.browser.expect("the arrow")[0],
+                geometry.name[2] <= geometry.save.expect("the save button")[0],
                 "the name is cut short of the run, never drawn under it"
             );
         }
     }
 
-    /// PIN (§7.7 ②) — **each of the four answers for its own rectangle.**
+    /// PIN (§7.7 ②), **RE-JUDGED 2026-08-24** — the one of a page's four still
+    /// drawn in the head answers for its own rectangle.
     ///
-    /// And the rule answers for none: it is a hairline, and three pixels of dead
-    /// head between two buttons is what a rule that swallowed a press would be.
+    /// The other three answer in
+    /// `the_address_row_answers_for_every_control_the_head_handed_it`, with the
+    /// same targets: this nail was never about which row, it was about a control
+    /// claiming the rectangle it is drawn in, and that claim is now made twice
+    /// because the buttons are drawn in two rows.
+    ///
+    /// The rule that "a rule is not a control" left with the rule itself — see
+    /// the retired `PREVIEW_SEPARATOR_*` constants.
     #[test]
-    fn each_of_a_pages_four_answers_for_its_own_box() {
+    fn the_developer_tools_answer_for_their_own_box() {
         let tools = page_tools();
         let (seat, layout, geometry) = head_geometry(tools);
-        let centre = |box_: [f32; 4]| {
-            (
+        let box_ = geometry.devtools.expect("a page's head seats its tools");
+        assert_eq!(
+            hit_preview_head(
+                &layout,
+                1.0,
+                &[(seat, tools)],
                 f64::from((box_[0] + box_[2]) / 2.0),
                 f64::from((box_[1] + box_[3]) / 2.0),
-            )
-        };
-        for (box_, expected) in [
-            (geometry.back, ChromeTarget::PreviewBack(seat)),
-            (geometry.forward, ChromeTarget::PreviewForward(seat)),
-            (geometry.reload, ChromeTarget::PreviewReload(seat)),
-            (geometry.devtools, ChromeTarget::PreviewDevTools(seat)),
-        ] {
-            let (x, y) = centre(box_.expect("a head this wide seats every control"));
-            assert_eq!(
-                hit_preview_head(&layout, 1.0, &[(seat, tools)], x, y),
-                Some(expected),
-                "{expected:?} answers for its own rectangle"
-            );
-        }
-        let (x, y) = centre(geometry.separator.expect("a rule"));
-        assert_eq!(
-            hit_preview_head(&layout, 1.0, &[(seat, tools)], x, y),
-            None,
-            "a rule is not a control"
+            ),
+            Some(ChromeTarget::PreviewDevTools(seat)),
+            "the developer tools answer for their own rectangle"
         );
     }
 
-    fn page_head(
+    /// One page's **rail**, drawn — where the three navigation buttons live
+    /// since 2026-08-24.
+    ///
+    /// This helper was `page_head` and built a [`PreviewHeadContent`] carrying a
+    /// [`WebHeadState`]; the state and the buttons it describes moved one row
+    /// down together, so the helper moved with them and the nails below are
+    /// unchanged in what they claim.
+    fn page_rail(
         web: WebHeadState,
         pointer: ChromePointer,
     ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
-        preview_chrome(
-            PreviewHeadContent {
-                tools: page_tools(),
-                name: "Folio dev server",
-                dirty: false,
-                count: "",
-                others_dirty: false,
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.add_preview(&metrics).expect("the preview seat lands");
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let marks = all_powershell(&seats);
+        let tabs = [TabContent::default()];
+        let seat = seats.preview().expect("the fixture just opened one");
+        let measure = PreviewRailMeasure {
+            kind: PreviewRailKind::Address,
+            address_width: 180.0,
+            ..PreviewRailMeasure::default()
+        };
+        let rails = [(
+            seat,
+            PreviewRailContent {
+                measure: &measure,
+                address: "http://127.0.0.1:5173/",
+                segments: &[],
+                open: "Open",
+                notice: "",
+                notice_flashing: false,
                 flip_to_source: false,
-                locked: false,
-                menu_open: false,
-                web: Some(web),
+                web,
                 edit: None,
             },
+        )];
+        let chrome = build_chrome_for_tabs(
+            &seats,
+            &layout,
+            1.0,
             pointer,
-        )
+            ChromeContent {
+                tabs: &tabs,
+                active_tab: 0,
+                grabbed: None,
+                strip_preview: None,
+                float_shown: &[],
+                tab_scroll: 0.0,
+                rail: RailState::default(),
+                rail_scroll: 0.0,
+                focus_reveal: 1.0,
+                focus_thumbnails: &[],
+                preview_titles: &[],
+                terminal_names: &NO_TERMINAL_NAMES,
+                leaf_marks: &marks,
+                files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
+                files_trees: &NO_FILES_TREES,
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
+                preview_messages: &[],
+                preview_feet: &[],
+                preview_heads: &[],
+                preview_rails: &rails,
+                preview_cards: &[],
+                fit_overflow: None,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                pane_motion: PaneMotionFrame::default(),
+                search_seat: None,
+                pane_menu_seat: None,
+                resizing_cards: None,
+            },
+        );
+        let WindowChrome { seats, .. } = chrome;
+        (seats.quads, seats.labels, seats.sprites)
     }
 
     fn glyphs(sprites: &[ChromeSprite], mark: ChromeMark) -> Vec<ChromeSprite> {
@@ -34360,21 +35673,24 @@ mod tests {",
             .collect()
     }
 
-    /// PIN (§7.7 ②) — **the three navigation buttons are resident and every
-    /// other tool in this head is not.**
+    /// PIN (§7.7 ②), **RE-JUDGED 2026-08-24** — the three navigation buttons are
+    /// resident, and now every control on the row they stand in is.
     ///
-    /// Each of the others is an *offer* and fades in with the pane's hover; the
-    /// three are the only way to move inside a page, and 「一个走近才出现的后退
-    /// 钮是瞄不准的」. The developer tools stay a hover tool by the same
-    /// sentence read the other way: 「一个一周按两次的动词不该占常驻像素」.
+    /// The original claim was 「一个走近才出现的后退钮是瞄不准的」 against a head
+    /// whose every other tool was an offer. The buttons moved to the address
+    /// row, and the row generalised the claim rather than weakening it: a row
+    /// whose whole subject is "where is this and how do I get there" is
+    /// furniture, so nothing on it fades. The developer tools stayed upstairs
+    /// and stayed an offer, by the same sentence read the other way — 「一个一周
+    /// 按两次的动词不该占常驻像素」 — which is what the second half asserts.
     ///
-    /// MUTATION: paint the three through the hover-tool painter and the first
-    /// assertion goes red — which is a browser whose back button appears when
-    /// you approach it.
+    /// MUTATION: paint the three through the head's hover-tool painter and the
+    /// first assertion goes red — which is a browser whose back button appears
+    /// when you approach it.
     #[test]
     fn the_three_buttons_do_not_fade_with_the_pane_and_the_tools_do() {
         let resting = ChromePointer::default();
-        let (_, _, sprites) = page_head(
+        let (_, _, sprites) = page_rail(
             WebHeadState {
                 can_go_back: true,
                 can_go_forward: true,
@@ -34405,13 +35721,26 @@ mod tests {",
         );
         assert!(
             glyphs(&sprites, ChromeMark::Code).is_empty(),
-            "the developer tools are an offer and wait to be approached"
+            "the developer tools are an offer and wait to be approached — and \
+             they are not on this row at all"
         );
         // At rest they stand at the reveal ladder's resting rung rather than at
         // full strength: resident is not the same as loud.
         for sprite in glyphs(&sprites, ChromeMark::Refresh) {
             assert!((sprite.opacity - PREVIEW_NAV_REST).abs() < 1e-6);
         }
+        // And the two verbs that came down with them are resident too, which is
+        // the row's own rule rather than a second exception.
+        assert_eq!(
+            glyphs(&sprites, ChromeMark::Copy).len(),
+            1,
+            "the address's own copy is furniture, not an offer"
+        );
+        assert_eq!(
+            glyphs(&sprites, ChromeMark::External).len(),
+            1,
+            "and so is the arrow that leaves with it"
+        );
     }
 
     /// PIN (§7.7 ②) — **a history that has run out dims its button and keeps its
@@ -34429,15 +35758,28 @@ mod tests {",
             can_go_forward: false,
             loading: false,
         };
-        let (_, _, sprites) = page_head(spent, ChromePointer::default());
+        let (_, _, sprites) = page_rail(spent, ChromePointer::default());
         let back = glyphs(&sprites, ChromeMark::Chevron { turned_degrees: 90 });
         assert_eq!(back.len(), 1, "a spent button is dimmed, never hidden");
         assert!((back[0].opacity - PREVIEW_NAV_SPENT).abs() < 1e-6);
-        // And the boxes do not move: the geometry is a function of the tools,
-        // which is what the history cannot touch.
-        let (_, _, live) = head_geometry(page_tools());
-        let (_, _, also) = head_geometry(page_tools());
-        assert_eq!(live.back, also.back);
+        // And the box does not move: the geometry is a function of the
+        // measurement, which is what the history cannot touch. Asserted from the
+        // drawn glyph rather than from a second derivation — a spent button that
+        // kept its rectangle and lost its place in the picture would satisfy any
+        // comparison of two geometries.
+        let (_, _, live) = page_rail(
+            WebHeadState {
+                can_go_back: true,
+                can_go_forward: true,
+                loading: false,
+            },
+            ChromePointer::default(),
+        );
+        let alive = glyphs(&live, ChromeMark::Chevron { turned_degrees: 90 });
+        assert_eq!(
+            back[0].rect, alive[0].rect,
+            "a history that has run out moves nothing"
+        );
     }
 
     /// PIN (§7.7 ②) — **one button, two glyphs**: while a navigation is in
@@ -34449,14 +35791,27 @@ mod tests {",
             can_go_forward: false,
             loading: true,
         };
-        let (_, _, sprites) = page_head(flying, ChromePointer::default());
+        let (_, _, sprites) = page_rail(flying, ChromePointer::default());
         assert!(
             glyphs(&sprites, ChromeMark::Refresh).is_empty(),
             "nothing to reload while something is arriving"
         );
         // The stop has taken the reload's box, glyph and all — same control,
-        // same rectangle, one second apart.
-        let (_, _, geometry) = head_geometry(page_tools());
+        // same rectangle, one second apart. Derived from the very fixture
+        // `page_rail` draws into, so the two are one rectangle and not two that
+        // agree at one window size.
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.add_preview(&metrics).expect("the preview seat lands");
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let seat = seats.preview().expect("the preview seat");
+        let rect = full_pane_rect(&layout, seat).expect("a full pane");
+        let measure = PreviewRailMeasure {
+            kind: PreviewRailKind::Address,
+            address_width: 180.0,
+            ..PreviewRailMeasure::default()
+        };
+        let geometry = preview_rail_geometry(rect, 1.0, &measure);
         let reload = geometry.reload.expect("a reload box");
         let stop = glyphs(&sprites, ChromeMark::PaneClose)
             .into_iter()
@@ -34470,43 +35825,53 @@ mod tests {",
         assert!((stop.opacity - PREVIEW_NAV_REST).abs() < 1e-6);
     }
 
-    /// PIN (§7.7 ②) — **the rule belongs to what is after it.**
+    /// PIN (§7.7 ②), **RETIRED 2026-08-24** — `the_rule_fades_in_with_the_group_
+    /// it_introduces` stood here.
     ///
-    /// Written any other way it hangs at the head's right edge introducing
-    /// nothing for as long as the pointer is elsewhere, and the hover tools are
-    /// invisible at rest: a divider with an empty side is a line telling the
-    /// reader something follows when nothing does. The switcher's own `PINNED`
-    /// section is built on the same sentence.
+    /// Its claim was that `.pv-sep` is drawn only while the pane is pointed at,
+    /// because the group it introduced — the developer tools — is only there
+    /// then: 「a divider with an empty side is a line telling the reader
+    /// something follows when nothing does」. The ruling moved the group *before*
+    /// the rule down to the address row, which retires the rule itself: a
+    /// hairline with nothing on its left introduces the developer tools to
+    /// nobody. The constants went with it (see `PREVIEW_SEPARATOR_*`), and the
+    /// sentence it was defending survives in the note on
+    /// [`PreviewHeadGeometry::devtools`].
     ///
-    /// MUTATION: draw the rule unconditionally and the first assertion goes red.
+    /// What the test also covered — the developer tools appearing with the
+    /// pane's hover — is asserted by
+    /// `the_three_buttons_do_not_fade_with_the_pane_and_the_tools_do`, which is
+    /// where it always belonged.
+    ///
+    /// A hover on a page's head still reveals exactly one `#i-code`, and that is
+    /// worth keeping as a nail on its own.
     #[test]
-    fn the_rule_fades_in_with_the_group_it_introduces() {
-        let state = WebHeadState {
-            can_go_back: true,
-            can_go_forward: true,
-            loading: false,
-        };
-        let (_, _, resting) = page_head(state, ChromePointer::default());
-        let fills = |sprites: &[ChromeSprite]| glyphs(sprites, ChromeMark::Fill).len();
-        let at_rest = fills(&resting);
+    fn a_hovered_page_head_reveals_its_developer_tools() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
         seats.add_preview(&metrics).expect("the preview seat lands");
         let seat = seats.preview().expect("the preview seat");
-        let (_, _, hovered) = page_head(
-            state,
+        let content = PreviewHeadContent {
+            tools: page_tools(),
+            name: "Folio dev server",
+            ..PreviewHeadContent::default()
+        };
+        let (_, _, resting) = preview_chrome(content, ChromePointer::default());
+        assert!(
+            glyphs(&resting, ChromeMark::Code).is_empty(),
+            "no tool is drawn on a head nobody is pointing at"
+        );
+        let (_, _, hovered) = preview_chrome(
+            content,
             ChromePointer {
                 pane_hover: Some(seat),
                 ..ChromePointer::default()
             },
         );
-        assert!(
-            fills(&hovered) > at_rest,
-            "the rule and its group arrive together"
-        );
-        assert!(
-            glyphs(&hovered, ChromeMark::Code).len() == 1,
-            "and what it introduces is the developer tools"
+        assert_eq!(
+            glyphs(&hovered, ChromeMark::Code).len(),
+            1,
+            "and one arrives with the pointer"
         );
     }
 
@@ -34992,6 +36357,7 @@ mod drop_plan_tests {
         Seats {
             structure_revision: 0,
             notices: std::collections::BTreeSet::new(),
+            rails: BTreeMap::new(),
             zoom: None,
             identity: SeatId(1),
             focus: SeatId(1),

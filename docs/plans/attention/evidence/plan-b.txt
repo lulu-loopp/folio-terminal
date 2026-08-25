@@ -1,0 +1,10 @@
+# MS:HEX -- plan B: let the TUI settle, then one real turn, then a tool-permission block, then quit
+# 35s: "reply with only the word ok"
+35000:7265706c792077697468206f6e6c792074686520776f7264206f6b
+35400:0d
+# 95s: Ctrl-C twice to quit
+95000:03
+95800:03
+# 100s: again
+100000:03
+100800:03

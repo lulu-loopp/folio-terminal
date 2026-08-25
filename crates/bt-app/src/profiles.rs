@@ -3272,6 +3272,56 @@ pub fn find_git(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
     })
 }
 
+/// The installs `Code.exe` is looked for in when it is not on `PATH`.
+///
+/// The three defaults Visual Studio Code's own installers write — the per-user
+/// one first, because it is the one a developer machine most often has and the
+/// one that needs no administrator to have happened.
+fn vscode_fallbacks() -> [ProgramCandidate; 3] {
+    [
+        ProgramCandidate::Under {
+            variable: "LocalAppData".to_owned(),
+            tail: r"Programs\Microsoft VS Code\Code.exe".to_owned(),
+        },
+        ProgramCandidate::Under {
+            variable: "ProgramFiles".to_owned(),
+            tail: r"Microsoft VS Code\Code.exe".to_owned(),
+        },
+        ProgramCandidate::Under {
+            variable: "ProgramFiles(x86)".to_owned(),
+            tail: r"Microsoft VS Code\Code.exe".to_owned(),
+        },
+    ]
+}
+
+/// Where Visual Studio Code is on this machine, or `None` when it is nowhere
+/// (user ruling 2026-08-24: 「VS Code(存在才列)」).
+///
+/// [`find_git`]'s shape and its reasons, with one difference the installer
+/// forces. `PATH` does not name `Code.exe`: what a VS Code install puts on the
+/// path is a `bin` directory holding the shim `code.cmd`, and handing a `.cmd`
+/// to a process launcher means handing it to a command interpreter. So the shim
+/// is used as a *pointer* — the real binary is its grandparent's `Code.exe` —
+/// and the three installer defaults catch the machine where the shim was never
+/// added.
+///
+/// `None` is an answer and not a failure, exactly as it is for Git: the menu
+/// simply has one row fewer, and every other part of the product is untouched.
+#[must_use]
+pub fn find_vscode(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
+    let shimmed = search_path(environment, "code.cmd")
+        .and_then(|shim| Some(shim.parent()?.parent()?.join("Code.exe")))
+        .filter(|binary| environment.is_file(binary));
+    shimmed
+        .or_else(|| search_path(environment, "Code.exe"))
+        .or_else(|| {
+            vscode_fallbacks().iter().find_map(|candidate| {
+                ProfilePrograms::candidate_path(candidate, environment)
+                    .filter(|path| environment.is_file(path))
+            })
+        })
+}
+
 /// Which executable each profile resolves to **on this machine**, probed once.
 ///
 /// Once, and that is the whole reason this is a value rather than a function.
@@ -5193,6 +5243,19 @@ pub enum FileMenuSubject {
     File,
     /// A folder row, with the fold it was standing in when the menu came up.
     Folder { expanded: bool },
+    /// **A path a preview's breadcrumb row names** (user ruling 2026-08-24) —
+    /// the `Open ⌄` pill's document, and the deepest folder behind the `…` a
+    /// folded path is drawn as.
+    ///
+    /// The third face, and the one that is not a tree row at all. It is on this
+    /// enum rather than in a menu of its own because 「系统默认程序 / VS Code /
+    /// 在 files 列中定位」are verbs about a *path*, and a window that grew a
+    /// second list for them would be a window where the two could come to
+    /// disagree. What it does not share is the row set: there is no
+    /// `Open preview` on a surface that *is* the preview, no fold on something
+    /// that is not a row, and no `Reveal in files column` on the column itself
+    /// — see [`file_menu`].
+    Document,
 }
 
 /// One row of the menu a tree row raises under the pointer.
@@ -5208,15 +5271,42 @@ pub enum FileMenuSubject {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileMenuRow {
     /// Open the file on the preview seat — the same verb its double click has.
+    ///
+    /// A tree's file row only. The breadcrumb's menu is raised *by* a preview,
+    /// so this door leads to where the reader already is; its way in is
+    /// [`Self::OpenWith`].
     Open,
-    /// Hand the file to whatever this machine has registered for it (user ruling
-    /// 2026-08-25).
+    /// Hand the path to whatever this machine has registered for it (user
+    /// rulings 2026-08-24 and 2026-08-25).
+    ///
+    /// **One row, two wordings**, which is [`Self::Fold`]'s arrangement and its
+    /// reason: on a tree row it is the *second* door, under `Open preview`, and
+    /// says `Open with default app`; on a breadcrumb it is the *first* and only
+    /// door, so it says `Open in default app` — see [`Self::text`].
     OpenWith,
+    /// **Open it in the editor this machine has** (user ruling 2026-08-24).
+    ///
+    /// The one row here that is not offered on every machine, and the reason
+    /// [`file_menu`] takes an `editor` flag: a machine with no editor installed
+    /// must not be shown a row that would open nothing. Which editor it is, and
+    /// whether there is one, is [`find_vscode`]'s answer — asked once, where
+    /// every other availability question in this module is asked.
+    OpenWithEditor,
     /// Unfold the folder, or fold it — one row wearing the face of the state it
     /// is standing in.
     Fold,
     /// A tab of the default profile, standing in this folder.
     NewTerminal,
+    /// **Stand the files column in this file's folder** (user ruling
+    /// 2026-08-24).
+    ///
+    /// The `Reveal in files column` half of the breadcrumb row's `Open ⌄`, and
+    /// it is on **that** face alone: a right press on a tree row is a press
+    /// *inside* the files column, and a row offering to show you the column you
+    /// are already looking at is a row that does nothing. The tree's own answer
+    /// to "show me where this lives" is [`Self::Reveal`], which leaves the
+    /// window.
+    ShowInFiles,
     CopyPath,
     InsertPath,
     /// Show the row in Explorer: a file selected inside its folder, a folder
@@ -5225,19 +5315,35 @@ pub enum FileMenuRow {
 }
 
 impl FileMenuRow {
-    /// What the row says, over this subject.
+    /// What the row says, over this subject, on a machine whose editor is
+    /// `editor` (empty when it has none).
     ///
-    /// The subject is a parameter rather than the caller's string because
-    /// exactly one row's wording depends on it — the fold — and a menu that took
-    /// its words from the call site is a menu whose wording can disagree with
-    /// what the press does. It used to take `open_text` for that reason and the
-    /// reason expired: there is one door out of a file row and it is the preview
-    /// seat.
+    /// The subject is a parameter rather than the caller's string because a menu
+    /// that took its words from the call site is a menu whose wording can
+    /// disagree with what the press does. **Two rows' wording turns on it** —
+    /// the fold, which is a toggle, and the default-app door, which is a second
+    /// door on a tree row and the only one on a breadcrumb.
+    ///
+    /// The editor's name is the caller's, because it is the one word here that
+    /// is a fact about the machine rather than about the menu, and it is passed
+    /// as the same string that decides whether the row is offered at all —
+    /// see [`file_menu`].
     #[must_use]
-    pub fn text(self, subject: FileMenuSubject) -> &'static str {
+    pub fn text(self, subject: FileMenuSubject, editor: &str) -> &str {
         match self {
             Self::Open => crate::i18n::Text::FileMenuOpenPreview.text(),
-            Self::OpenWith => crate::i18n::Text::FileMenuOpenWith.text(),
+            // `with` on a tree row, where it stands under `Open preview` and the
+            // preposition is doing the contrasting; `in` on a breadcrumb, where
+            // it is the first row of the list an `Open ⌄` pill opened and has
+            // nothing above it to contrast with.
+            Self::OpenWith => {
+                if matches!(subject, FileMenuSubject::Document) {
+                    crate::i18n::Text::FileMenuOpenDefaultApp.text()
+                } else {
+                    crate::i18n::Text::FileMenuOpenWith.text()
+                }
+            }
+            Self::OpenWithEditor => editor,
             Self::Fold => {
                 if matches!(subject, FileMenuSubject::Folder { expanded: true }) {
                     crate::i18n::Text::FolderMenuCollapse.text()
@@ -5246,6 +5352,7 @@ impl FileMenuRow {
                 }
             }
             Self::NewTerminal => crate::i18n::Text::FolderMenuNewTerminal.text(),
+            Self::ShowInFiles => show_in_files_text(),
             Self::CopyPath => copy_path_text(),
             Self::InsertPath => insert_path_text(),
             Self::Reveal => reveal_in_explorer_text(),
@@ -5260,7 +5367,15 @@ impl FileMenuRow {
     /// under `Open` and named what it separates: *what this row is* above, *what
     /// its path is* below. Stated as a property, the rule survives a menu with
     /// two rows above the line instead of one, and cannot be broken by adding a
-    /// row in the wrong place.
+    /// row in the wrong place — which is exactly what happened when the menu
+    /// grew from three rows to nine across three faces.
+    ///
+    /// **[`Self::ShowInFiles`] is above the rule and [`Self::Reveal`] is below
+    /// it**, and the two are not in the same menu, so no reader ever sees them
+    /// disagree. They are also not the same act: `Reveal` hands the path to
+    /// another program, which is what this predicate names; `Show in files
+    /// column` moves *this window's own* column until the file's row is in front
+    /// of you, which is a way in.
     #[must_use]
     pub fn hands_out_the_path(self) -> bool {
         matches!(self, Self::CopyPath | Self::InsertPath | Self::Reveal)
@@ -5273,6 +5388,10 @@ impl FileMenuRow {
             // window*, which is exactly what the preview head's `↗` already uses
             // it to say about the same act.
             Self::OpenWith => ChromeMark::External,
+            // The same glyph the head's `Edit source` and a page's developer
+            // tools wear, and the same sentence: what is behind this is the
+            // thing itself rather than a rendering of it.
+            Self::OpenWithEditor => ChromeMark::Code,
             // The tree's own triangle at the angle the tree turns it to, so the
             // mark turns with the word. Not a second glyph for a second kind of
             // disclosure: a reader who has opened a folder in this window has
@@ -5287,6 +5406,8 @@ impl FileMenuRow {
             // The pane menu's `New terminal in folder…` wears this one, and the
             // two rows are the same verb told where to stand.
             Self::NewTerminal => ChromeMark::Folder,
+            // The mark the foot uses for the very same verb one surface over.
+            Self::ShowInFiles => ChromeMark::FolderOpen,
             Self::CopyPath => ChromeMark::Copy,
             Self::InsertPath => ChromeMark::Paste,
             // The Git row's `Reveal in Explorer` wears this one, for the reason
@@ -5308,29 +5429,61 @@ pub struct FileMenu {
 
 /// What this subject's menu holds.
 ///
-/// **Both menus are two verbs and then three**, and that symmetry is not a
-/// coincidence to be admired — it is the ruling: the rows above the line are
-/// what this row *is* (open it, or fold it; and then the second door each kind
-/// has), and the rows below are what its *path* is, which is the same three
-/// questions whatever the row names.
+/// **Every face is its ways in, then the rule, then what its path is**, and that
+/// shape is the ruling rather than a symmetry to be admired: the rows above the
+/// line are what this thing *is* (open it, or fold it, and then the other doors
+/// this kind has), and the rows below are what its *path* is. Which questions
+/// live below the line is the same wherever the menu is raised; which doors live
+/// above it is what the three faces disagree about, and each one's list is here
+/// rather than at its call site:
+///
+/// - **[`FileMenuSubject::File`]** — the tree's file row. Three doors: this
+///   window's preview seat, the machine's default program, and the editor. Then
+///   `Copy path / Insert path / Reveal in Explorer`. No `Show in files column`:
+///   the press that raised it *was* in the files column.
+/// - **[`FileMenuSubject::Folder`]** — the tree's folder row. Two verbs no other
+///   surface offers at the row — the fold, and a shell standing in it — and then
+///   the same three path questions. A folder has no preview seat and no editor.
+/// - **[`FileMenuSubject::Document`]** — a preview's breadcrumb. No preview door
+///   (the preview is what asked), so the default program is the first row, then
+///   the editor, then `Show in files column`, which is this face's answer to
+///   "where does this live" because the column is somewhere else from here.
+///
+/// `editor` is whether this machine has one at all — [`find_vscode`]'s answer,
+/// and the only fact outside the subject that changes the length of a list.
 #[must_use]
-pub fn file_menu(subject: FileMenuSubject) -> FileMenu {
-    let rows = match subject {
-        FileMenuSubject::File => vec![
-            FileMenuRow::Open,
-            FileMenuRow::OpenWith,
-            FileMenuRow::CopyPath,
-            FileMenuRow::InsertPath,
-            FileMenuRow::Reveal,
-        ],
-        FileMenuSubject::Folder { .. } => vec![
-            FileMenuRow::Fold,
-            FileMenuRow::NewTerminal,
-            FileMenuRow::CopyPath,
-            FileMenuRow::InsertPath,
-            FileMenuRow::Reveal,
-        ],
-    };
+pub fn file_menu(subject: FileMenuSubject, editor: bool) -> FileMenu {
+    let mut rows = Vec::with_capacity(6);
+    match subject {
+        FileMenuSubject::File => {
+            rows.push(FileMenuRow::Open);
+            rows.push(FileMenuRow::OpenWith);
+            if editor {
+                rows.push(FileMenuRow::OpenWithEditor);
+            }
+        }
+        FileMenuSubject::Folder { .. } => {
+            rows.push(FileMenuRow::Fold);
+            rows.push(FileMenuRow::NewTerminal);
+        }
+        FileMenuSubject::Document => {
+            rows.push(FileMenuRow::OpenWith);
+            if editor {
+                rows.push(FileMenuRow::OpenWithEditor);
+            }
+            rows.push(FileMenuRow::ShowInFiles);
+        }
+    }
+    rows.push(FileMenuRow::CopyPath);
+    rows.push(FileMenuRow::InsertPath);
+    // **Explorer is a tree row's third path question and not a breadcrumb's.**
+    // A preview that has a path already carries this verb in its foot
+    // (`Runtime::reveal_preview_file`), one band above where this menu is hung,
+    // and a row that repeated a button six pixels away would be the surface
+    // offering the same act twice.
+    if !matches!(subject, FileMenuSubject::Document) {
+        rows.push(FileMenuRow::Reveal);
+    }
     let separator_after = rows
         .iter()
         .position(|row| row.hands_out_the_path())
@@ -5354,22 +5507,35 @@ pub fn file_menu(subject: FileMenuSubject) -> FileMenu {
 /// is nothing here to skip: the refusals these verbs *can* meet (a program the
 /// tree will not run, a shell that has gone) happen after the press and are
 /// spoken then, which is the same answer the double click gives.
+///
+/// **The walk is over the rows this menu is actually showing**, which is what
+/// taking a subject and an `editor` flag rather than the enum's whole vocabulary
+/// buys: a keyboard that stepped over every variant would offer a fold on a file
+/// and an editor to a machine that has none.
 #[must_use]
 pub fn file_menu_step(
     subject: FileMenuSubject,
+    editor: bool,
     current: Option<FileMenuRow>,
     forwards: bool,
 ) -> FileMenuRow {
-    let rows = file_menu(subject).rows;
-    let Some(at) = current.and_then(|row| rows.iter().position(|found| *found == row)) else {
-        return if forwards {
-            rows[0]
-        } else {
-            rows[rows.len() - 1]
-        };
+    let rows = file_menu(subject, editor).rows;
+    let last = rows.len() - 1;
+    let Some(current) = current else {
+        return if forwards { rows[0] } else { rows[last] };
     };
+    // **A hover this list does not hold does not wedge the walk.** It can happen
+    // — the editor row disappears with the machine's editor, and every face has
+    // rows the others have not — and the answer is the end the step was
+    // travelling towards, which is *not* what a fresh menu answers: a hand
+    // already moving down is asking for the row after the one it thinks it is
+    // on, and the honest last-resort answer to that is the bottom.
+    let at = rows
+        .iter()
+        .position(|found| *found == current)
+        .unwrap_or(if forwards { last } else { 0 });
     let next = if forwards {
-        (at + 1).min(rows.len() - 1)
+        (at + 1).min(last)
     } else {
         at.saturating_sub(1)
     };
@@ -5377,6 +5543,10 @@ pub fn file_menu_step(
 }
 
 /// One drawn row of the file menu.
+///
+/// The row and its rectangle are **paired**, so that the paint and the hit test
+/// cannot disagree about which row is where on a machine that has one row more
+/// than another.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct FileMenuItem {
     row: FileMenuRow,
@@ -5388,6 +5558,7 @@ struct FileMenuItem {
 pub struct FileMenuLayout {
     scale: f32,
     frame: [f32; 4],
+    /// The rows this menu is showing, each with the rectangle it was placed at.
     items: Vec<FileMenuItem>,
     /// The rule under the last row that acts on the row itself — mock-up 8089,
     /// which separates *what this row is* from *what its path is*.
@@ -5407,6 +5578,9 @@ pub fn copy_path_text() -> &'static str {
 pub fn reveal_in_explorer_text() -> &'static str {
     crate::i18n::Text::MenuRevealInExplorer.text()
 }
+pub fn show_in_files_text() -> &'static str {
+    crate::i18n::Text::FileMenuShowInFiles.text()
+}
 
 /// The menu hung under the point a row was right-clicked at.
 ///
@@ -5421,6 +5595,10 @@ pub fn file_menu_layout(
     surface: (f32, f32),
     scale: f32,
     subject: FileMenuSubject,
+    // `editor` is the editor this machine has, or empty when it has none —
+    // which is also how the row is offered or withheld, so a caller cannot pass
+    // a name and a contradicting flag.
+    editor: &str,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> FileMenuLayout {
     let px = |value: f32| value * scale;
@@ -5431,7 +5609,7 @@ pub fn file_menu_layout(
     let separator_margin = px(SEPARATOR_MARGIN_Y_LOGICAL_PX).round();
     let separator_block = 2.0 * separator_margin + separator_thickness;
 
-    let menu = file_menu(subject);
+    let menu = file_menu(subject, !editor.is_empty());
     let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
     let row_width = |text: &str, measure: &mut dyn FnMut(&str, f32) -> f32| {
         px(ITEM_ICON_COLUMN_LOGICAL_PX)
@@ -5439,7 +5617,7 @@ pub fn file_menu_layout(
             + measure(text, px(ITEM_FONT_LOGICAL_PX))
     };
     let content = menu.rows.iter().fold(0.0f32, |wide, row| {
-        wide.max(row_width(row.text(subject), measure))
+        wide.max(row_width(row.text(subject, editor), measure))
     });
     let width = (chrome + content)
         .max(px(FILE_MENU_MIN_WIDTH_LOGICAL_PX))
@@ -5476,6 +5654,9 @@ pub fn file_menu_layout(
             rect: [content_left, cursor, content_right, cursor + item_height],
         });
         cursor += item_height;
+        // The rule goes under the last row that is not yet a path question,
+        // which is where it has always gone: it used to be "under `Open`"
+        // because `Open` was the only one above it.
         if menu.separator_after == Some(at) {
             separator = Some([
                 content_left,
@@ -5511,6 +5692,7 @@ pub fn file_menu_hit(layout: &FileMenuLayout, x: f64, y: f64) -> Option<Option<F
 pub fn file_menu_build(
     layout: &FileMenuLayout,
     subject: FileMenuSubject,
+    editor: &str,
     hover: Option<FileMenuRow>,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
@@ -5541,7 +5723,7 @@ pub fn file_menu_build(
             &Row {
                 rect: item.rect,
                 mark: Some(item.row.mark(subject)),
-                name: item.row.text(subject),
+                name: item.row.text(subject, editor),
                 hint: None,
                 hint_ink: None,
                 hovered: hover == Some(item.row),
@@ -5550,7 +5732,9 @@ pub fn file_menu_build(
                 // kept — the refusals these verbs *can* meet (a program the tree
                 // will not run, a shell that has gone) happen after the press
                 // and are spoken then, which is the same answer the double
-                // click gives.
+                // click gives. The editor row is not an exception: it is only
+                // *offered* on a machine that has one, which is the layout's
+                // judgement and not a state of the row.
                 available: true,
                 pin: None,
             },
@@ -12961,32 +13145,47 @@ mod tests {
 
     // ── K143-K145: the file row's context menu ─────────────────────────────
 
-    /// PIN — **a file row's menu is five verbs with the rule under the second**
-    /// (user ruling 2026-08-25).
+    /// PIN — **a file row's menu is its doors, the rule, and its three path
+    /// verbs** (user rulings 2026-08-24 and 2026-08-25).
     ///
-    /// `DESIGN.md` §7.1.3's three are still here in their order; what the ruling
-    /// added is a second door out of the row (`Open with default app`) beside
-    /// the preview, and a third thing to do with the path (`Reveal in
-    /// Explorer`). The rule still divides *what this row is* from *what its path
-    /// is*, and it has moved down one row because the first half grew.
+    /// `DESIGN.md` §7.1.3's three are still here in their order. What the two
+    /// rulings added, and what this pin holds together, is that the *ways in*
+    /// half grew twice — a second door out of the row (`Open with default app`)
+    /// beside the preview, and the editor on a machine that has one — while the
+    /// path half grew once (`Reveal in Explorer`). The rule still divides *what
+    /// this row is* from *what its path is*, and it moves down as the first half
+    /// grows, because `file_menu` puts it where `hands_out_the_path` starts
+    /// being true rather than at an index.
+    ///
+    /// **`Show in files column` is not here**, and that is the composition of
+    /// the two rulings rather than a row lost in one: the press that raises this
+    /// menu happens *inside* the files column, so the verb belongs to the
+    /// breadcrumb's face alone — see
+    /// `the_breadcrumbs_menu_is_the_document_faces_own_list`.
     ///
     /// Order is asserted from the drawn labels rather than from the enum,
     /// because the enum's order is only a promise until something reads it in
     /// that order: a painter that walked `items` backwards would still satisfy
     /// a test that only counted rows.
     ///
-    /// RED GATE: take `OpenWith` or `Reveal` out of [`file_menu`]'s `File` arm.
+    /// MUTATIONS:
+    /// ① take `OpenWith` or `Reveal` out of [`file_menu`]'s `File` arm;
+    /// ② put the separator back at a fixed index — it lands inside the ways in
+    ///    once the editor row is there, and the rule assertion goes red;
+    /// ③ offer the editor row unconditionally — the first assertion goes red on
+    ///    a machine with no editor, which is the row that would open nothing.
     #[test]
-    fn a_file_rows_menu_draws_five_verbs_with_a_rule_under_the_second() {
+    fn a_file_rows_menu_draws_its_doors_then_a_rule_then_its_path_verbs() {
         let subject = FileMenuSubject::File;
         let layout = file_menu_layout(
             [300.0, 200.0],
             (960.0, 600.0),
             1.0,
             subject,
+            "",
             &mut fake_measure,
         );
-        let layer = one_layer(file_menu_build(&layout, subject, None));
+        let layer = one_layer(file_menu_build(&layout, subject, "", None));
         let names: Vec<&str> = layer
             .labels
             .iter()
@@ -13001,12 +13200,19 @@ mod tests {
                 insert_path_text(),
                 reveal_in_explorer_text(),
             ],
-            "five rows, top to bottom, and no heading over them"
+            "five rows on a machine with no editor, top to bottom, and no \
+             heading over them"
         );
+        let ways_in = layout
+            .items
+            .iter()
+            .filter(|item| !item.row.hands_out_the_path())
+            .count();
         let separator = layout.separator.expect("a menu with both kinds of row");
         assert!(
-            separator[1] >= layout.items[1].rect[3] && separator[3] <= layout.items[2].rect[1],
-            "the rule lies between the second row and the third"
+            separator[1] >= layout.items[ways_in - 1].rect[3]
+                && separator[3] <= layout.items[ways_in].rect[1],
+            "the rule lies between the last door and the first path verb"
         );
         assert_eq!(
             layer
@@ -13021,8 +13227,124 @@ mod tests {
                 ChromeMark::Paste,
                 ChromeMark::FolderOpen,
             ],
-            "each verb wears its own glyph — no mark is drawn twice in one menu"
+            "each verb wears its own glyph — the copy and the paste are not one \
+             mark twice"
         );
+        // ③ And a machine that has an editor is offered one, in the ways-in half.
+        let with_editor = file_menu_layout(
+            [300.0, 200.0],
+            (960.0, 600.0),
+            1.0,
+            subject,
+            "VS Code",
+            &mut fake_measure,
+        );
+        let layer = one_layer(file_menu_build(&with_editor, subject, "VS Code", None));
+        let names: Vec<&str> = layer
+            .labels
+            .iter()
+            .map(|label| label.text.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                crate::i18n::Text::FileMenuOpenPreview.text(),
+                crate::i18n::Text::FileMenuOpenWith.text(),
+                "VS Code",
+                copy_path_text(),
+                insert_path_text(),
+                reveal_in_explorer_text(),
+            ],
+            "the editor stands with the other doors, above the rule"
+        );
+        assert_eq!(
+            with_editor.items.len() - layout.items.len(),
+            1,
+            "one row more, and one row's worth of height with it"
+        );
+        assert!(
+            with_editor.frame[3] - with_editor.frame[1] > layout.frame[3] - layout.frame[1],
+            "a menu with a row more is a menu taller by one row — never a row \
+             drawn outside its own frame"
+        );
+        // And the rule went down with the half that grew, rather than staying
+        // where an index would have kept it.
+        let with_editor_rule = with_editor.separator.expect("both kinds of row");
+        assert!(
+            with_editor_rule[1] > separator[1],
+            "the rule moved down by the row that joined the half above it"
+        );
+    }
+
+    /// PIN — **the breadcrumb's `Open ⌄` is the document face's own list** (user
+    /// rulings 2026-08-24 and 2026-08-25).
+    ///
+    /// Two menus, one type, two lists — which is the shape the merge of the
+    /// preview head's second row and the tree row's completed menu had to land
+    /// on. What this face does *not* have is as load-bearing as what it does:
+    /// no `Open preview`, because the preview is what raised it; no fold,
+    /// because it is not a row of any tree; no `Reveal in Explorer`, because
+    /// the pane's own foot already carries that verb one band up. What only it
+    /// has is `Show in files column`, and the first row says `Open in default
+    /// app` rather than `Open with default app` because on this face there is
+    /// nothing above it to be contrasted with.
+    ///
+    /// MUTATIONS:
+    /// ① give the `Document` arm `Open` or `Reveal` — the label list goes red;
+    /// ② let `OpenWith` wear one wording on every face — the first label goes
+    ///    red on this menu or on the file row's, whichever way it is settled.
+    #[test]
+    fn the_breadcrumbs_menu_is_the_document_faces_own_list() {
+        let subject = FileMenuSubject::Document;
+        let layout = file_menu_layout(
+            [300.0, 200.0],
+            (960.0, 600.0),
+            1.0,
+            subject,
+            "VS Code",
+            &mut fake_measure,
+        );
+        let layer = one_layer(file_menu_build(&layout, subject, "VS Code", None));
+        assert_eq!(
+            layer
+                .labels
+                .iter()
+                .map(|label| label.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                crate::i18n::Text::FileMenuOpenDefaultApp.text(),
+                "VS Code",
+                show_in_files_text(),
+                copy_path_text(),
+                insert_path_text(),
+            ],
+        );
+        let rows = file_menu(subject, true).rows;
+        assert!(
+            !rows.contains(&FileMenuRow::Open)
+                && !rows.contains(&FileMenuRow::Fold)
+                && !rows.contains(&FileMenuRow::Reveal),
+            "no preview door, no fold and no Explorer on the face that is the \
+             preview"
+        );
+        // And the two verbs about the path are the same two the tree's rows
+        // offer, in the same order, so a rename in one menu cannot drift.
+        assert_eq!(
+            rows[rows.len() - 2..],
+            file_menu(FileMenuSubject::File, true).rows[3..5],
+        );
+        // `Show in files column` belongs to this face alone: on a tree row it
+        // would offer to show you the column the press came from.
+        for tree in [
+            FileMenuSubject::File,
+            FileMenuSubject::Folder { expanded: true },
+        ] {
+            assert!(
+                !file_menu(tree, true)
+                    .rows
+                    .contains(&FileMenuRow::ShowInFiles)
+            );
+        }
     }
 
     /// PIN — **a folder row's menu is its own two verbs and then the same three**
@@ -13042,9 +13364,10 @@ mod tests {
             (960.0, 600.0),
             1.0,
             subject,
+            "VS Code",
             &mut fake_measure,
         );
-        let layer = one_layer(file_menu_build(&layout, subject, None));
+        let layer = one_layer(file_menu_build(&layout, subject, "VS Code", None));
         assert_eq!(
             layer
                 .labels
@@ -13058,14 +13381,16 @@ mod tests {
                 insert_path_text(),
                 reveal_in_explorer_text(),
             ],
+            "a folder has no preview seat and no editor, so the machine having \
+             one changes nothing here"
         );
         let separator = layout.separator.expect("a menu with both kinds of row");
         assert!(separator[1] >= layout.items[1].rect[3] && separator[3] <= layout.items[2].rect[1]);
         // The path half is one list shared with the file row's menu, so the two
         // cannot drift apart by a rename in one of them.
         assert_eq!(
-            file_menu(subject).rows[2..],
-            file_menu(FileMenuSubject::File).rows[2..],
+            file_menu(subject, true).rows[2..],
+            file_menu(FileMenuSubject::File, true).rows[3..],
         );
     }
 
@@ -13085,11 +13410,11 @@ mod tests {
         let shut = FileMenuSubject::Folder { expanded: false };
         let open = FileMenuSubject::Folder { expanded: true };
         assert_eq!(
-            FileMenuRow::Fold.text(shut),
+            FileMenuRow::Fold.text(shut, ""),
             crate::i18n::Text::FolderMenuExpand.text()
         );
         assert_eq!(
-            FileMenuRow::Fold.text(open),
+            FileMenuRow::Fold.text(open, ""),
             crate::i18n::Text::FolderMenuCollapse.text()
         );
         assert_eq!(
@@ -13108,8 +13433,41 @@ mod tests {
         // And the rows either side of it say the same thing whichever fold the
         // menu came up in: only the toggle turns.
         for row in [FileMenuRow::NewTerminal, FileMenuRow::CopyPath] {
-            assert_eq!(row.text(shut), row.text(open));
+            assert_eq!(row.text(shut, ""), row.text(open, ""));
         }
+    }
+
+    /// PIN — **the default-app door says `with` on a tree row and `in` on a
+    /// breadcrumb**, and it is one row rather than two.
+    ///
+    /// Both wordings survived the 2026-08-24/25 merge because both are used and
+    /// each says something the other cannot: on a tree row the preposition
+    /// contrasts this door with the `Open preview` above it, and on a breadcrumb
+    /// there is nothing above it to contrast with. What must not survive is two
+    /// *rows* for one act — the runtime dispatches this one variant through
+    /// `open_local_path` whichever face raised it.
+    ///
+    /// RED GATE: collapse [`FileMenuRow::text`]'s `OpenWith` arm to one string.
+    #[test]
+    fn the_default_app_door_is_one_row_wearing_each_faces_preposition() {
+        assert_eq!(
+            FileMenuRow::OpenWith.text(FileMenuSubject::File, ""),
+            crate::i18n::Text::FileMenuOpenWith.text()
+        );
+        assert_eq!(
+            FileMenuRow::OpenWith.text(FileMenuSubject::Document, ""),
+            crate::i18n::Text::FileMenuOpenDefaultApp.text()
+        );
+        assert_ne!(
+            FileMenuRow::OpenWith.text(FileMenuSubject::File, ""),
+            FileMenuRow::OpenWith.text(FileMenuSubject::Document, ""),
+        );
+        // One glyph, because it is one act: the bare arrow that means *this
+        // content leaves the window*.
+        assert_eq!(
+            FileMenuRow::OpenWith.mark(FileMenuSubject::File),
+            FileMenuRow::OpenWith.mark(FileMenuSubject::Document),
+        );
     }
 
     // ── the `⌄` open policy (user ruling, 2026-08-16) ───────────────────────
@@ -14420,6 +14778,47 @@ mod tests {
         );
     }
 
+    /// PIN — the first row says where *this* menu's press leads, so the menu
+    /// cannot promise a preview on the surface that is the preview.
+    ///
+    /// **Re-judged 2026-08-25.** The wording used to be the caller's, handed in
+    /// as `open_text`, on the argument that only the caller knew where the row
+    /// led. The subject knows, and it now carries two rulings' worth of
+    /// difference — a different first row, not only a different string — so the
+    /// question is asked of [`file_menu`] and answered by [`FileMenuRow::text`].
+    ///
+    /// RED GATE: give both faces the same first row, or the same first wording.
+    #[test]
+    fn the_first_row_says_where_this_particular_press_is_going() {
+        for (subject, first, says) in [
+            (
+                FileMenuSubject::File,
+                FileMenuRow::Open,
+                crate::i18n::Text::FileMenuOpenPreview.text(),
+            ),
+            (
+                FileMenuSubject::Document,
+                FileMenuRow::OpenWith,
+                crate::i18n::Text::FileMenuOpenDefaultApp.text(),
+            ),
+        ] {
+            let layout = file_menu_layout(
+                [300.0, 200.0],
+                (960.0, 600.0),
+                1.0,
+                subject,
+                "",
+                &mut fake_measure,
+            );
+            let layer = one_layer(file_menu_build(&layout, subject, "", None));
+            assert_eq!(file_menu(subject, false).rows[0], first);
+            assert_eq!(
+                layer.labels.first().map(|label| label.text.as_str()),
+                Some(says)
+            );
+        }
+    }
+
     /// PIN — a menu raised in the bottom-right corner is pulled whole back
     /// inside the window, on **both** axes.
     ///
@@ -14430,19 +14829,30 @@ mod tests {
     #[test]
     fn a_menu_raised_in_the_corner_is_pulled_back_inside_on_both_axes() {
         let surface = (960.0, 600.0);
+        // The tallest face this window has — a file row on a machine with an
+        // editor — because the clamp is only tested by the menu that has the
+        // most to fit.
         let subject = FileMenuSubject::File;
-        let layout = file_menu_layout([950.0, 596.0], surface, 1.0, subject, &mut fake_measure);
+        let layout = file_menu_layout(
+            [950.0, 596.0],
+            surface,
+            1.0,
+            subject,
+            "VS Code",
+            &mut fake_measure,
+        );
         assert!(layout.frame[2] <= surface.0 - MENU_EDGE_MARGIN_LOGICAL_PX);
         assert!(layout.frame[3] <= surface.1 - MENU_EDGE_MARGIN_LOGICAL_PX);
         assert!(layout.frame[0] >= MENU_EDGE_MARGIN_LOGICAL_PX);
         assert!(layout.frame[1] >= MENU_EDGE_MARGIN_LOGICAL_PX);
-        let last = layout.items.last().expect("a menu has rows").rect;
+        let last = *layout.items.last().expect("a menu has rows");
+        assert_eq!(last.row, FileMenuRow::Reveal);
         assert!(
             file_menu_hit(
                 &layout,
-                f64::from(last[0] + 1.0),
-                f64::from((last[1] + last[3]) / 2.0),
-            ) == Some(Some(FileMenuRow::Reveal)),
+                f64::from(last.rect[0] + 1.0),
+                f64::from((last.rect[1] + last.rect[3]) / 2.0),
+            ) == Some(Some(last.row)),
             "and the row that would have fallen off is still the one that answers"
         );
     }
@@ -14457,81 +14867,131 @@ mod tests {
         for subject in [
             FileMenuSubject::File,
             FileMenuSubject::Folder { expanded: true },
+            FileMenuSubject::Document,
         ] {
-            let layout = file_menu_layout(
-                [300.0, 200.0],
-                (960.0, 600.0),
-                1.0,
-                subject,
-                &mut fake_measure,
-            );
-            let middle = |rect: [f32; 4]| {
-                (
-                    f64::from((rect[0] + rect[2]) / 2.0),
-                    f64::from((rect[1] + rect[3]) / 2.0),
-                )
-            };
-            assert_eq!(layout.items.len(), file_menu(subject).rows.len());
-            for item in &layout.items {
-                let (x, y) = middle(item.rect);
-                assert_eq!(file_menu_hit(&layout, x, y), Some(Some(item.row)));
+            for editor in ["", "VS Code"] {
+                let layout = file_menu_layout(
+                    [300.0, 200.0],
+                    (960.0, 600.0),
+                    1.0,
+                    subject,
+                    editor,
+                    &mut fake_measure,
+                );
+                let middle = |rect: [f32; 4]| {
+                    (
+                        f64::from((rect[0] + rect[2]) / 2.0),
+                        f64::from((rect[1] + rect[3]) / 2.0),
+                    )
+                };
+                assert_eq!(
+                    layout.items.len(),
+                    file_menu(subject, !editor.is_empty()).rows.len()
+                );
+                for item in &layout.items {
+                    let (x, y) = middle(item.rect);
+                    assert_eq!(file_menu_hit(&layout, x, y), Some(Some(item.row)));
+                }
+                let (x, y) = middle(layout.separator.expect("both kinds of row"));
+                assert_eq!(file_menu_hit(&layout, x, y), Some(None));
+                assert_eq!(
+                    file_menu_hit(
+                        &layout,
+                        f64::from(layout.frame[0] - 4.0),
+                        f64::from(layout.frame[1] - 4.0)
+                    ),
+                    None
+                );
             }
-            let (x, y) = middle(layout.separator.expect("both kinds of row"));
-            assert_eq!(file_menu_hit(&layout, x, y), Some(None));
-            assert_eq!(
-                file_menu_hit(
-                    &layout,
-                    f64::from(layout.frame[0] - 4.0),
-                    f64::from(layout.frame[1] - 4.0)
-                ),
-                None
-            );
         }
     }
 
     /// PIN — the keyboard walk stops at both ends instead of wrapping round,
     /// which is the law the tree beside it already keeps (D45).
     ///
-    /// **And it walks the subject's own list**: a folder's menu has no `Open`,
-    /// so a walk that stepped through a fixed table would offer a row that is
-    /// not on the glass.
+    /// **And it walks the list this menu is actually showing**, which two
+    /// rulings each made true for their own reason: a folder's menu has no
+    /// `Open`, and no machine without an editor has an editor row. A walk that
+    /// stepped through a fixed table would offer a row that is not on the glass
+    /// — VS Code on a machine without it, a fold on a file.
     ///
-    /// RED GATE: hand [`file_menu_step`] one subject's rows for both.
+    /// RED GATE: hand [`file_menu_step`] one subject's rows for every subject,
+    /// or the editing machine's rows for both machines.
     #[test]
     fn the_file_menus_keyboard_walk_clamps_at_both_ends_of_the_list_it_is_on() {
         let file = FileMenuSubject::File;
-        assert_eq!(file_menu_step(file, None, true), FileMenuRow::Open);
-        assert_eq!(file_menu_step(file, None, false), FileMenuRow::Reveal);
+        assert_eq!(file_menu_step(file, false, None, true), FileMenuRow::Open);
         assert_eq!(
-            file_menu_step(file, Some(FileMenuRow::Open), false),
+            file_menu_step(file, false, None, false),
+            FileMenuRow::Reveal
+        );
+        assert_eq!(
+            file_menu_step(file, false, Some(FileMenuRow::Open), false),
             FileMenuRow::Open,
             "up from the first row stays on the first row"
         );
         assert_eq!(
-            file_menu_step(file, Some(FileMenuRow::Reveal), true),
+            file_menu_step(file, false, Some(FileMenuRow::Reveal), true),
             FileMenuRow::Reveal,
             "and down from the last stays on the last"
         );
         assert_eq!(
-            file_menu_step(file, Some(FileMenuRow::Open), true),
-            FileMenuRow::OpenWith
+            file_menu_step(file, false, Some(FileMenuRow::Open), true),
+            FileMenuRow::OpenWith,
+            "a machine with no editor steps straight past it"
         );
         assert_eq!(
-            file_menu_step(file, Some(FileMenuRow::CopyPath), false),
+            file_menu_step(file, false, Some(FileMenuRow::CopyPath), false),
             FileMenuRow::OpenWith
         );
 
-        let folder = FileMenuSubject::Folder { expanded: false };
-        assert_eq!(file_menu_step(folder, None, true), FileMenuRow::Fold);
-        assert_eq!(file_menu_step(folder, None, false), FileMenuRow::Reveal);
+        // And a machine that has one walks through it.
         assert_eq!(
-            file_menu_step(folder, Some(FileMenuRow::Fold), true),
+            file_menu_step(file, true, Some(FileMenuRow::OpenWith), true),
+            FileMenuRow::OpenWithEditor
+        );
+        assert_eq!(
+            file_menu_step(file, true, Some(FileMenuRow::CopyPath), false),
+            FileMenuRow::OpenWithEditor
+        );
+
+        let folder = FileMenuSubject::Folder { expanded: false };
+        assert_eq!(file_menu_step(folder, true, None, true), FileMenuRow::Fold);
+        assert_eq!(
+            file_menu_step(folder, true, None, false),
+            FileMenuRow::Reveal
+        );
+        assert_eq!(
+            file_menu_step(folder, true, Some(FileMenuRow::Fold), true),
             FileMenuRow::NewTerminal
         );
         assert_eq!(
-            file_menu_step(folder, Some(FileMenuRow::CopyPath), false),
+            file_menu_step(folder, true, Some(FileMenuRow::CopyPath), false),
             FileMenuRow::NewTerminal,
             "and it steps over a row this subject does not have"
+        );
+
+        let document = FileMenuSubject::Document;
+        assert_eq!(
+            file_menu_step(document, true, None, false),
+            FileMenuRow::InsertPath,
+            "the face with no Explorer row ends one row earlier"
+        );
+        assert_eq!(
+            file_menu_step(document, true, Some(FileMenuRow::OpenWithEditor), true),
+            FileMenuRow::ShowInFiles
+        );
+
+        // A hover left over from a menu that does not share this one's rows does
+        // not wedge the walk: the step lands at the end it was travelling
+        // towards, rather than at the end a fresh menu would have offered.
+        assert_eq!(
+            file_menu_step(file, false, Some(FileMenuRow::OpenWithEditor), true),
+            FileMenuRow::Reveal
+        );
+        assert_eq!(
+            file_menu_step(file, false, Some(FileMenuRow::Fold), false),
+            FileMenuRow::Open
         );
     }
 

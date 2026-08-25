@@ -42,6 +42,7 @@ mod git;
 mod git_graph;
 mod git_panel;
 mod git_watch;
+mod hang_watch;
 mod hex_peek;
 mod highlight;
 mod i18n;
@@ -3229,6 +3230,18 @@ fn preview_document_height(
 enum RowActivation {
     /// The preview seat, which is now where every file goes.
     Preview(PathBuf),
+    /// **A path with no preview door** (user ruling 2026-08-24) — the
+    /// breadcrumb row's `Open ⌄`, raised on the document the pane is already
+    /// showing, and the `…` chip, raised on a folder the fold is hiding.
+    ///
+    /// `Open preview` is not a verb on that surface — the preview is what raised
+    /// the menu — so the way *in* it names is the machine's own default program,
+    /// which is the arrow that used to stand in the head. Since the 2026-08-25
+    /// merge that row is [`profiles::FileMenuRow::OpenWith`] on every face and
+    /// the wording is [`profiles::FileMenuSubject`]'s, so what is left here is
+    /// the fact this variant was always really carrying: which door the row
+    /// named `Open` would lead to, on a face that has one.
+    DefaultApp(PathBuf),
     /// A column with no root has no path to hand anyone.
     Nowhere,
 }
@@ -3238,7 +3251,7 @@ impl RowActivation {
     /// it from.
     fn path(&self) -> Option<&Path> {
         match self {
-            Self::Preview(path) => Some(path),
+            Self::Preview(path) | Self::DefaultApp(path) => Some(path),
             Self::Nowhere => None,
         }
     }
@@ -3506,31 +3519,44 @@ struct TermMenuState {
 /// chances to swap two of them.
 #[derive(Clone, Debug)]
 struct FileMenuTarget {
-    host: RowHost,
-    key: String,
+    row: Option<FileMenuTreeRow>,
     activation: RowActivation,
     subject: profiles::FileMenuSubject,
 }
 
+/// **Which tree the row is in, and which row.**
+///
+/// Carried because two of the folder's verbs act on the row itself rather than
+/// on its path: the fold belongs to a particular tree's expansion set, and there
+/// are two trees in this window that draw the same rows.
+///
+/// A key and a host rather than an index, on [`PaneMenuState`]'s own reasoning:
+/// an index into a list is only meaningful beside the list it indexes, and a
+/// directory landing while the menu is up makes the tree longer. A key that no
+/// longer names a row simply names nothing, and every verb here asks the live
+/// tree for it before acting.
+///
+/// **`None` on a preview's breadcrumb** (user ruling 2026-08-24), which is not a
+/// row of any tree. It is an `Option` rather than a placeholder host because a
+/// placeholder would be this window claiming a row somewhere it has not got one;
+/// the face that has no host also has no verb that wants one, and
+/// `profiles::file_menu`'s `Document` arm is where that is stated.
+#[derive(Clone, Debug)]
+struct FileMenuTreeRow {
+    host: RowHost,
+    key: String,
+}
+
 /// A tree row's context menu while it is up (K143; both kinds of row since the
-/// user ruling of 2026-08-25).
+/// user ruling of 2026-08-25, and a preview's breadcrumb since the one of
+/// 2026-08-24).
 #[derive(Clone, Debug)]
 struct FileMenuState {
     /// Where it was raised, in physical pixels of the surface.
     point: [f32; 2],
-    /// **Which tree the row is in, and which row** — carried because two of the
-    /// folder's verbs act on the row itself rather than on its path: the fold
-    /// belongs to a particular tree's expansion set, and there are two trees in
-    /// this window that draw the same rows.
-    ///
-    /// A key and a host rather than an index, on [`PaneMenuState`]'s own
-    /// reasoning: an index into a list is only meaningful beside the list it
-    /// indexes, and a directory landing while the menu is up makes the tree
-    /// longer. A key that no longer names a row simply names nothing, and every
-    /// verb here asks the live tree for it before acting.
-    host: RowHost,
-    key: String,
-    /// The row it is about, already resolved to a path and a door.
+    /// The tree row it was raised on, or nothing when it was not raised on one.
+    row: Option<FileMenuTreeRow>,
+    /// The thing it is about, already resolved to a path and a door.
     activation: RowActivation,
     /// Which verbs it holds — snapshotted for [`profiles::FileMenuSubject`]'s
     /// own reason.
@@ -3693,6 +3719,69 @@ fn input_line_needs_a_space_first(session: &bt_term::DualPlaneSession) -> bool {
 /// in for what this window cannot display. The only row that goes nowhere is one
 /// in a column with no root, which is not a file that failed — it is a column
 /// that was never pointed anywhere.
+/// **One path, as the breadcrumb row reads it** (user ruling 2026-08-24): each
+/// segment's name, and the place a press on that segment leads.
+///
+/// Pure, and a free function for that reason — the walk has nothing to do with a
+/// window, and a rule about what `D:` means is a rule worth testing without one.
+///
+/// **The root is one segment and not two.** `Path::components` reports a Windows
+/// path's drive and its separator separately (`Prefix("D:")`, `RootDir`), and a
+/// row that drew both would offer the reader a folder called `\`. So the
+/// separator is folded into the drive it belongs to: `D:\a\b\c.md` reads
+/// `D: › a › b › c.md`, and pressing `D:` stands the column at `D:\`.
+///
+/// `.` and `..` are kept as they are written. They are legitimate segments of a
+/// relative path, resolving them here would be this function inventing a place
+/// the reader never named, and every path this window actually shows a rail for
+/// arrived from the filesystem already absolute.
+fn crumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
+    let mut segments: Vec<(String, PathBuf)> = Vec::new();
+    let mut built = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir => {
+                built.push(std::path::MAIN_SEPARATOR_STR);
+                // The separator belongs to the drive that just went in; on a
+                // path that begins with one there is no drive, and the root is
+                // then a segment in its own right because it is the only name
+                // the top of that tree has.
+                match segments.last_mut() {
+                    Some(last) => last.1.clone_from(&built),
+                    None => {
+                        segments.push((std::path::MAIN_SEPARATOR_STR.to_owned(), built.clone()))
+                    }
+                }
+            }
+            other => {
+                built.push(other.as_os_str());
+                segments.push((
+                    other.as_os_str().to_string_lossy().into_owned(),
+                    built.clone(),
+                ));
+            }
+        }
+    }
+    segments
+}
+
+/// **How this window spells an address it is showing you** (user ruling
+/// 2026-08-25).
+///
+/// A real address is its URL; **a local file is a path** — `D:\Developer\notes.html`
+/// and not `file:///D:/Developer/notes.html`. The ruling arrived as two
+/// screenshots of one machine: a page's band under a globe said the URI form
+/// while the preview beside it said the OS form, for two files on the same disk.
+///
+/// One function, so that the row, the field it seeds and the band underneath
+/// cannot spell one file three ways — and a *display* function only: what the
+/// engine navigates to, what a mint compares and what `session.json` keeps are
+/// all still the URI. See [`webnav::local_path_form`] for why a `file:` URL this
+/// product did not mint is left exactly as it arrived.
+fn shown_address(url: &str) -> String {
+    webnav::local_path_form(url).unwrap_or_else(|| url.to_owned())
+}
+
 fn files_row_activation(root: &str, key: &str) -> RowActivation {
     if !files::root_is_addressable(root) {
         return RowActivation::Nowhere;
@@ -5118,6 +5207,16 @@ struct App {
     /// pointer already travelling toward it — is worse than the staleness it
     /// would fix.
     profile_programs: profiles::ProfilePrograms,
+    /// **Where this machine's editor is, or `None`** (user ruling 2026-08-24) —
+    /// [`profiles::find_vscode`]'s answer, probed once beside
+    /// [`Self::profile_programs`] and held for its stated reasons.
+    ///
+    /// It decides whether the file menu draws its editor row at all, so the
+    /// staleness argument above applies to it word for word: installing an
+    /// editor while a menu is on screen is not worth a filesystem call per
+    /// frame, and a row appearing under a pointer already moving toward another
+    /// one is worse than the staleness it would fix.
+    editor: Option<PathBuf>,
     /// This user's Documents folder, asked of Windows once.
     ///
     /// Once because it cannot move under a running process, and stored rather
@@ -6492,8 +6591,17 @@ struct WindowRuntime {
     /// pane showing `README.md`. It is the same sentence `WindowRuntime::web`
     /// already carries, one table over.
     preview_head_measures: BTreeMap<LeafId, seats::PreviewHeadTools>,
+    /// The same store one row lower (user ruling 2026-08-24): what each preview
+    /// rail was **drawn** to, so the hit test can be handed the paint's own
+    /// numbers.
+    ///
+    /// Keyed by leaf for its neighbour's reason, and owned rather than `Copy`
+    /// because a path has as many segments as it has — see
+    /// [`seats::PreviewRailMeasure`].
+    preview_rail_measures: BTreeMap<LeafId, seats::PreviewRailMeasure>,
     /// The tree row's context menu, and the row it was raised on (K143; both
-    /// kinds of row since the user ruling of 2026-08-25).
+    /// kinds of row since the user ruling of 2026-08-25, and a preview's
+    /// breadcrumb since the one of 2026-08-24).
     ///
     /// It holds the row's *path* and its *stable key*, never an index into a
     /// list the tree may rebuild under it. The path is what the three verbs
@@ -7786,6 +7894,107 @@ struct {name} {{
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// PIN (user ruling 2026-08-24) — **the address field changed address, and
+    /// nothing else about the editor moved.**
+    ///
+    /// The ruling's own sentence: 「就是既有 `RenameSubject::WebAddress` 那台机器
+    /// 换了住址,Enter/Esc/blur 语义与刚修的 `RenameExit` 全保留」. That is a claim
+    /// about *code*, not about a picture, so it is pinned against the source —
+    /// the same discipline `one_function_draws_every_inline_name_editors_caret`
+    /// keeps one crate over.
+    ///
+    /// Three halves of it, and each would break differently:
+    ///
+    /// ① the head's editor no longer knows the address exists — a
+    ///    `dress_preview_name_editor` that still matched `WebAddress` would lay
+    ///    the field out in the name cell **as well**, and a caret drawn in two
+    ///    boxes is the bug the whole move was meant to end;
+    /// ② the rail's editor lays out into the rail's own field, through
+    ///    `preview_rail_geometry` — a second derivation here is the invisible
+    ///    caret;
+    /// ③ `TabRename::open_address` is still the only seeding and
+    ///    `open_web_address_on` still the only door, so `Ctrl+L`, `Ctrl+Shift+L`
+    ///    and the press on the field cannot disagree about what is in the box.
+    #[test]
+    fn the_address_editor_moved_to_the_rail_and_kept_its_machine() {
+        let head = fn_body("dress_preview_name_editor");
+        assert!(
+            !head.contains("RenameSubject::WebAddress"),
+            "① the head's editor is the rename editor and nothing else"
+        );
+        let rail = fn_body("dress_preview_address_editor");
+        assert!(
+            rail.contains("RenameSubject::WebAddress"),
+            "② and the rail's editor is the address's"
+        );
+        assert!(
+            rail.contains("seats::preview_rail_geometry(") && rail.contains(".address"),
+            "② laid out into the very field the paint and the hit test read"
+        );
+        assert!(
+            rail.contains("self.window.rename_caret_line = Some("),
+            "② and the IME's candidate list stands under what is being typed"
+        );
+        // ③ One seeding, one door. Both chords and the press on the field reach
+        // `open_web_address_on`, and it is the only place the editor is seeded:
+        // a second seeding is how two doors onto one room come to disagree about
+        // what is in the box.
+        assert!(
+            fn_body("open_web_address_on").contains("TabRename::open_address("),
+            "③ the door `Ctrl+L`, `Ctrl+Shift+L` and the press all go through"
+        );
+        assert!(
+            fn_body("open_web_address").contains("self.open_web_address_on(seat)")
+                && fn_body("open_address_here").contains("self.open_web_address_on(seat)"),
+            "③ and the two chords go through it rather than seeding for \
+             themselves"
+        );
+        let pressed = fn_body("chrome_mouse_input");
+        let address_arm = pressed
+            .split("ChromeTarget::PreviewAddress(seat) => {")
+            .nth(1)
+            .expect("the address field's own press arm");
+        assert!(
+            address_arm.contains("self.open_web_address_on(seat)?"),
+            "③ and so does the press on the field"
+        );
+        // ③ The exits are untouched: the field still leaves by the three
+        // `RenameExit` sentences and by no fourth one minted here.
+        assert!(
+            !rail.contains("finish_rename("),
+            "③ dressing a field never ends one"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-24) — **a page's title is not a door.**
+    ///
+    /// W2 ① made the name cell the address, so a double click on it opened the
+    /// address field; the ruling retired that reading — 「名字退役为纯 title …
+    /// 双击不再进地址编辑」 — and the door it opened is the rail's field now.
+    ///
+    /// MUTATION: put `open_web_address_on` back in the name's double-click arm
+    /// and this goes red, which is a window with two doors onto one field and a
+    /// title that offers to be edited.
+    #[test]
+    fn a_pages_title_no_longer_opens_the_address() {
+        let pressed = fn_body("chrome_mouse_input");
+        let name_arm = pressed
+            .split("ChromeTarget::PreviewName(seat) => {")
+            .nth(1)
+            .expect("the name's own press arm");
+        let name_arm = &name_arm[..name_arm
+            .find("ChromeTarget::FilesRoot(")
+            .expect("the arm after it")];
+        assert!(
+            !name_arm.contains("open_web_address_on"),
+            "a double click on a page's title opens nothing"
+        );
+        assert!(
+            name_arm.contains("open_preview_rename(seat)"),
+            "and a double click on a file's name still opens its rename"
+        );
     }
 
     /// PIN (F1b, `plan.md` v4 增补 ③ contract 1) — **the application mints every
@@ -9838,6 +10047,41 @@ struct PreviewHeadFrame {
     /// two has a door that can refuse what is in the box.
     refused: bool,
     content: seats::PreviewHeadContent<'static>,
+}
+
+/// One preview rail's owned strings and the measurement they were taken with
+/// (user ruling 2026-08-24).
+///
+/// [`PreviewHeadFrame`]'s opposite number one row down, and one value for its
+/// reason: a path's segments and the widths the row was laid out to cannot be
+/// allowed to disagree, because the hit test is handed the widths and the reader
+/// is shown the strings.
+struct PreviewRailFrame {
+    measure: seats::PreviewRailMeasure,
+    /// The address, as the row prints it.
+    address: String,
+    /// The path, segment by segment, root first.
+    segments: Vec<String>,
+    /// Where each of those segments leads — the folder a press on it stands the
+    /// files column in.
+    ///
+    /// Carried beside the names rather than rebuilt from them, because a name is
+    /// not a path: `..`, a drive letter and a directory that happens to be
+    /// called `D:` are three different things a re-parse would have to guess
+    /// between, and the walk that produced the names already knew the answer.
+    targets: Vec<PathBuf>,
+    /// The standing fact hung on the row's right hand, or the word it is
+    /// flashing instead.
+    notice: String,
+    notice_flashing: bool,
+    /// The open address editor's own drawn state, when this rail is holding it.
+    edit: Option<seats::TabEdit>,
+    /// **The open address will not be navigated to** (§7.7 ④), so the draft is
+    /// written in `--err` where it is being typed. It moved down here with the
+    /// field on 2026-08-24.
+    refused: bool,
+    flip_to_source: bool,
+    web: seats::WebHeadState,
 }
 
 /// Who has the keyboard, as the three facts the caret's own question turns on.
@@ -22939,6 +23183,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         window_close_requested: false,
         preview_menu: profiles::PreviewMenu::default(),
         preview_head_measures: BTreeMap::new(),
+        preview_rail_measures: BTreeMap::new(),
         file_menu: None,
         git_menu: None,
         term_menu: None,
@@ -23497,6 +23742,7 @@ impl Runtime<'_> {
             scheme_fault: None,
             scheme_source: [None, None],
             profile_programs,
+            editor: profiles::find_vscode(&bt_pty::SystemShellEnvironment),
             psreadline_documents: psreadline::documents_directory(),
             psreadline_installed: psreadline::InstalledCopy::default(),
             // Reads the registry once and, on a machine whose `folio.exe`
@@ -25359,7 +25605,16 @@ impl Runtime<'_> {
                         seat,
                         CardWords {
                             notice: fault.say(),
-                            detail: fault.detail().unwrap_or_default().to_owned(),
+                            // **Through the one spelling** (user ruling
+                            // 2026-08-25). Three of the four cards carry an
+                            // address on this line, and a card naming a local
+                            // file in the URI form while the row above it names
+                            // the same file as a path is the split the ruling
+                            // came to close — the two screenshots behind it were
+                            // exactly two surfaces disagreeing about one disk.
+                            // Everything that is not a local file this window
+                            // minted goes through untouched.
+                            detail: shown_address(fault.detail().unwrap_or_default()),
                             verb: fault.verb_text().text().to_owned(),
                             // **The class's mark and never the site's**, the
                             // same ruling `websheet` states at length: §7.7 ④
@@ -25416,6 +25671,46 @@ impl Runtime<'_> {
             .into_iter()
             .filter_map(|seat| Some((seat, self.dress_preview_foot(seat, scale, now)?)))
             .collect();
+        // The row under each head (user ruling 2026-08-24), dressed the same way
+        // and for the same reason: one per seat, each naming the content its own
+        // body is showing.
+        let mut preview_rail_frames: Vec<(SeatId, PreviewRailFrame)> = self
+            .seats
+            .preview_seats()
+            .into_iter()
+            .filter_map(|seat| Some((seat, self.dress_preview_rail(seat, scale)?)))
+            .collect();
+        // **The foot's surviving phrase, hung on the row that replaced it.** A
+        // breadcrumb retires the strip along the bottom, and the ruling is
+        // explicit that the foot's *other* duties are kept — so the standing
+        // fact and the flashed confirmation are taken off the foot this frame
+        // already dressed rather than derived a second time. One derivation, two
+        // rows, and no window in which the two could say different things about
+        // one file.
+        for (seat, frame) in &mut preview_rail_frames {
+            if frame.measure.kind != seats::PreviewRailKind::Crumbs {
+                continue;
+            }
+            let Some((_, words)) = preview_feet.iter().find(|(at, _)| at == seat) else {
+                continue;
+            };
+            let (phrase, flashing) = if words.flashing {
+                (words.lead.clone(), true)
+            } else {
+                (words.notice.clone(), false)
+            };
+            frame.notice = phrase;
+            frame.notice_flashing = flashing;
+            frame.measure.notice_width = self.window.renderer.measure_chrome_text(
+                &mut self.app.gpu,
+                &frame.notice,
+                seats::FILES_FOOT_FONT_LOGICAL_PX * scale,
+            );
+            let here = self.leaf_here(*seat);
+            self.window
+                .preview_rail_measures
+                .insert(here, frame.measure.clone());
+        }
         // **Each card's own verb, measured** (§7.7 ④). The five failure cards
         // do not share a caption with `Open in default app`, so a single stored
         // width would size every button to whichever card was drawn last — and
@@ -25517,6 +25812,33 @@ impl Runtime<'_> {
                 )
             })
             .collect();
+        // Borrowed off the owned frames above, the same two-step everything else
+        // on a preview seat takes.
+        let preview_rails: Vec<(SeatId, seats::PreviewRailContent<'_>)> = preview_rail_frames
+            .iter()
+            .map(|(seat, frame)| {
+                (
+                    *seat,
+                    seats::PreviewRailContent {
+                        measure: &frame.measure,
+                        address: &frame.address,
+                        segments: &frame.segments,
+                        open: i18n::Text::PreviewRailOpen.text(),
+                        notice: &frame.notice,
+                        notice_flashing: frame.notice_flashing,
+                        flip_to_source: frame.flip_to_source,
+                        web: frame.web,
+                        edit: frame.edit.as_ref().map(|edit| seats::PreviewNameEdit {
+                            text: &edit.text,
+                            caret_px: edit.caret_px,
+                            selection_px: edit.selection_px,
+                            caret_lit: edit.caret_lit,
+                            refused: frame.refused,
+                        }),
+                    },
+                )
+            })
+            .collect();
         let preview_feet: Vec<(SeatId, seats::FootStrip<'_>)> = preview_feet
             .iter()
             .map(|(seat, words)| {
@@ -25597,6 +25919,7 @@ impl Runtime<'_> {
                 preview_messages: &preview_messages,
                 preview_feet: &preview_feet,
                 preview_heads: &preview_heads,
+                preview_rails: &preview_rails,
                 preview_cards: &preview_cards,
                 fit_overflow: self.seat_overflow,
                 profile_menu_open: self.window.profile_menu.is_open(),
@@ -33085,13 +33408,14 @@ impl Runtime<'_> {
         scale: f32,
         tools: seats::PreviewHeadTools,
     ) -> (seats::PreviewHeadTools, Option<seats::TabEdit>) {
-        // **The address field is this editor** (§7.7 ②) — same cell, same
-        // metrics, same box. Which subject is open decides only what committing
-        // writes and what a refusal looks like.
-        let here = self.leaf_here(seat);
+        // **The address field is no longer this editor** (user ruling
+        // 2026-08-24). It was — same cell, same metrics, same box — for as long
+        // as a page's name cell *was* its address; the ruling retired that, so
+        // the field went down to the rail and took its measuring with it. See
+        // [`Self::dress_preview_address_editor`], which is this function with
+        // one box substituted for another.
         let editing = self.window.rename.as_ref().is_some_and(|editor| {
             matches!(&editor.subject, RenameSubject::PreviewName { surface: at, .. } if *at == surface)
-                || matches!(editor.subject, RenameSubject::WebAddress { leaf: at } if at == here)
         });
         if !editing {
             return (tools, None);
@@ -33103,23 +33427,17 @@ impl Runtime<'_> {
             .as_ref()
             .map(|editor| editor.text.clone())
             .unwrap_or_default();
-        // **A file's box is the width of its name; an address's box is the head's
-        // remaining room** (§7.7 ②), and the difference is what is in it: 「URL
-        // 不是标签」. `preview_head_geometry` already clamps a wanted width to
-        // what is left after the tools, so asking for more than the head has is
-        // exactly how a field takes the rest of it.
-        let editing_an_address = matches!(
-            self.window.rename.as_ref().map(|editor| &editor.subject),
-            Some(RenameSubject::WebAddress { .. })
-        );
+        // **The box is the width of the name being typed.** It used to fork
+        // here — a file's box the width of its name, an address's the head's
+        // whole remaining room, because 「URL 不是标签」 — and the fork went to
+        // the rail on 2026-08-24 with the field it was about. What is left is
+        // the half this cell always meant: a name is a label, and a label's box
+        // is its label.
         let tools = seats::PreviewHeadTools {
-            name_width: if editing_an_address {
-                ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD
-            } else {
-                self.window
-                    .renderer
-                    .measure_chrome_text(&mut self.app.gpu, &draft, font)
-            },
+            name_width: self
+                .window
+                .renderer
+                .measure_chrome_text(&mut self.app.gpu, &draft, font),
             ..tools
         };
         let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
@@ -33188,6 +33506,116 @@ impl Runtime<'_> {
         let x = (name_box[0] + caret_px).min(name_box[2] - caret_width);
         self.window.rename_caret_line = Some([x, name_box[1], x + caret_width, name_box[3]]);
         (tools, Some(edit))
+    }
+
+    /// **The open address editor, measured into the rail it is drawn in** (user
+    /// ruling 2026-08-24).
+    ///
+    /// [`Self::dress_preview_name_editor`] with one box substituted for another,
+    /// and written as a second function rather than as a branch inside that one
+    /// because the two now lay out into different *rows*: a file's name is a
+    /// label in the head that becomes a field, and an address is a field on the
+    /// rail that is always a field. What they still share is the editor itself —
+    /// one [`TabRename`], one caret, one selection, one set of exits — which is
+    /// the whole of what "the machine changed address" means here.
+    ///
+    /// **The field takes the row's whole free run while it is being typed in**
+    /// (§7.7 ②'s 「URL 不是标签」, unchanged): a width no row can grant, which
+    /// `preview_rail_geometry`'s own clamp turns into "everything the buttons
+    /// left". At rest the field is the width of the address, which is what lets
+    /// it be centred.
+    fn dress_preview_address_editor(
+        &mut self,
+        seat: SeatId,
+        scale: f32,
+        measure_in: seats::PreviewRailMeasure,
+    ) -> (seats::PreviewRailMeasure, Option<seats::TabEdit>) {
+        let here = self.leaf_here(seat);
+        let editing = self.window.rename.as_ref().is_some_and(
+            |editor| matches!(editor.subject, RenameSubject::WebAddress { leaf: at } if at == here),
+        );
+        if !editing {
+            return (measure_in, None);
+        }
+        let measure_in = seats::PreviewRailMeasure {
+            address_width: ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD,
+            ..measure_in
+        };
+        let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
+            return (measure_in, None);
+        };
+        let Some(field) = seats::preview_rail_geometry(rect, scale, &measure_in).address else {
+            return (measure_in, None);
+        };
+        let inset = (seats::PREVIEW_ADDRESS_PAD_X_LOGICAL_PX * scale).round();
+        let box_ = [
+            field[0] + inset,
+            field[1],
+            (field[2] - inset).max(field[0] + inset),
+            field[3],
+        ];
+        let box_width = box_[2] - box_[0];
+        let font = seats::PREVIEW_RAIL_FONT_LOGICAL_PX * scale;
+        let caret_width = (seats::TAB_RENAME_CARET_LOGICAL_PX * scale)
+            .round()
+            .max(1.0);
+        // Disjoint fields, split by hand, for `measure_open_rename`'s reason:
+        // the editor owns where its window starts and the renderer owns how wide
+        // a string is, and this is the one place the two have to meet.
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let Some(editor) = self.window.rename.as_mut() else {
+            return (measure_in, None);
+        };
+        let mut measure = |text: &str| {
+            if text.is_empty() {
+                0.0
+            } else {
+                renderer.measure_chrome_text(gpu, text, font)
+            }
+        };
+        editor.clamp_scroll();
+        while editor.first_visible < editor.caret
+            && measure(&editor.text[editor.first_visible..editor.caret]) > box_width - caret_width
+        {
+            editor.first_visible += 1;
+            while !editor.text.is_char_boundary(editor.first_visible) {
+                editor.first_visible += 1;
+            }
+        }
+        while editor.first_visible > 0 {
+            let mut candidate = editor.first_visible - 1;
+            while !editor.text.is_char_boundary(candidate) {
+                candidate -= 1;
+            }
+            if measure(&editor.text[candidate..]) > box_width {
+                break;
+            }
+            editor.first_visible = candidate;
+        }
+        let visible = editor.text[editor.first_visible..].to_owned();
+        let caret_px = measure(&editor.text[editor.first_visible..editor.caret]);
+        let selection_px = if editor.selected > editor.first_visible {
+            measure(&editor.text[editor.first_visible..editor.selected]).min(box_width)
+        } else {
+            0.0
+        };
+        let edit = seats::TabEdit {
+            text: visible,
+            // An address has no address under it either: the field is seeded
+            // with the committed URL and there is no second layer to reveal.
+            placeholder: String::new(),
+            caret_px,
+            selection_px,
+            caret_lit: self.window.rename_blink.visible(),
+        };
+        // **Written here because here is the only place the box exists** — the
+        // IME's candidate list has to stand under what is being typed, and this
+        // is the rectangle that says where that is. It used to be the head's
+        // name box; it is the rail's field now, which is the whole of what the
+        // ruling moved as far as an IME is concerned.
+        let x = (box_[0] + caret_px).min(box_[2] - caret_width);
+        self.window.rename_caret_line = Some([x, box_[1], x + caret_width, box_[3]]);
+        (measure_in, Some(edit))
     }
 
     /// **Commit a preview head's draft to the filesystem** (user ruling
@@ -36074,8 +36502,13 @@ impl Runtime<'_> {
                 buffer.name.clone(),
                 seats::PreviewHeadTools {
                     save: buffer.is_editable(md_source),
-                    flip: buffer.ftype == preview::PreviewFtype::Markdown,
-                    browser: preview_page_hand_off(&buffer.source).is_some(),
+                    // **Only where no rail can carry it** (user ruling
+                    // 2026-08-24). The flip moved down to the breadcrumb row
+                    // with the other verbs that are about the file; a document
+                    // with no path grows no breadcrumb, and its flip stays here
+                    // rather than vanishing with the row it would have stood in.
+                    flip: buffer.ftype == preview::PreviewFtype::Markdown
+                        && self.preview_rail_kind(seat).is_none(),
                     ..seats::PreviewHeadTools::default()
                 },
                 buffer.dirty,
@@ -36105,29 +36538,30 @@ impl Runtime<'_> {
         // address, and the head must still name what it was handed — otherwise
         // the one cell that says what this seat is about is blank while the card
         // under it names the address in full.
-        let refused_address = self
-            .web_on(seat)
-            .and_then(webhost::WebSeat::fault)
-            .and_then(webhost::WebFault::refused_address);
         let (name, tools, dirty, flip_to_source) = match &page {
             Some(page) => (
-                if page.name().is_empty() {
-                    refused_address.unwrap_or_default()
-                } else {
-                    page.name().to_owned()
-                },
+                // **The title, and only the title** (user ruling 2026-08-24).
+                // This cell used to fall back to the address, on the argument
+                // that a blank caption over a loading page would be the one
+                // moment the head said nothing at all — and while the name *was*
+                // the address that fallback was the head being honest. The
+                // address has its own row now, filled from the same two facts in
+                // the same order, so a head that fell back would be this pane
+                // printing one string twice. What is left when a document has
+                // not said what it is called is the address it was handed, which
+                // is the row below saying it; and a seat whose one navigation
+                // was refused has neither, which is the state the card in its
+                // body is already about.
+                page.title.clone(),
                 seats::PreviewHeadTools {
                     save: false,
                     flip: false,
-                    // **`browser` is not forced off here** (user ruling
-                    // 2026-08-23). It used to be, and it was right while a page
-                    // could only come from an address: an arrow marked "hand
-                    // this file over" has nothing to give for `localhost:5173`.
-                    // A local page is a file, `preview_page_hand_off` says so
-                    // off the seat's own buffer, and the seat that renders a
-                    // `.html` is now the seat that used to show its source with
-                    // that arrow lit — §7.1.5g ②″'s reason has not changed
-                    // hands, only which view it is answering for.
+                    // **The developer tools, and nothing else of a page's four**
+                    // (user ruling 2026-08-24, second round). The hand-off arrow
+                    // that this comment used to defend went down to the address
+                    // row with `‹ › ⟳`: 「在浏览器打开」 is a verb about an
+                    // address, and §7.1.5g ②″'s reason travels with it rather
+                    // than being spent twice.
                     web: true,
                     ..tools
                 },
@@ -36174,21 +36608,16 @@ impl Runtime<'_> {
         let (tools, edit) = self.dress_preview_name_editor(seat, surface, scale, tools);
         let here = self.leaf_here(seat);
         self.window.preview_head_measures.insert(here, tools);
-        // The same door the commit goes through, asked without knocking — an
-        // empty field is unfinished rather than wrong, so it does not light up.
-        let refused = matches!(
-            self.window.rename.as_ref().map(|editor| &editor.subject),
-            Some(RenameSubject::WebAddress { .. })
-        ) && !self
-            .window
-            .rename
-            .as_ref()
-            .is_some_and(|editor| webhost::WebSeat::would_go_to(&editor.text));
         Some(PreviewHeadFrame {
             name,
             count,
             edit,
-            refused,
+            // **A file's name has no refusal** and the address's moved downstairs
+            // with the field: this head's editor is the rename editor now, and a
+            // rename that will not go through says so by leaving the name as it
+            // was (`commit_preview_rename`'s own ruling) rather than by turning
+            // the draft red.
+            refused: false,
             content: seats::PreviewHeadContent {
                 tools,
                 dirty,
@@ -36196,14 +36625,185 @@ impl Runtime<'_> {
                 flip_to_source,
                 locked: self.seats.preview_is_locked(seat),
                 menu_open: self.preview_menu_seat() == Some(seat),
-                web: page.as_ref().map(|page| seats::WebHeadState {
-                    can_go_back: page.can_go_back,
-                    can_go_forward: page.can_go_forward,
-                    loading: page.loading,
-                }),
                 ..seats::PreviewHeadContent::default()
             },
         })
+    }
+
+    /// **The file one preview seat is standing on**, when it is standing on one.
+    ///
+    /// The predicate behind 「面包屑只长在有磁盘路径的预览上」 (user ruling
+    /// 2026-08-24), and it is the pair [`Self::reveal_preview_file`] already
+    /// asks: a buffer's own path, or a picture's. A composed document — a diff,
+    /// a commit's reading of a file, a graph — answers `None`, and a seat that
+    /// answers `None` grows no breadcrumb.
+    fn preview_rail_path(&self, seat: SeatId) -> Option<PathBuf> {
+        let surface = self.preview_here(seat);
+        self.preview_buffer_on(surface)
+            .and_then(|buffer| buffer.source.file_path().map(Path::to_path_buf))
+            .or_else(|| {
+                self.preview_pane(surface)
+                    .and_then(|pane| pane.image.as_ref())
+                    .map(|image| image.path.clone())
+            })
+    }
+
+    /// Which row this preview seat wears under its head, if any.
+    ///
+    /// **A page first**, and the order is the ruling's: 「网页不长面包屑」. A
+    /// local `.html` rendered as a page has a disk path *and* an address, and it
+    /// is the address that the reader is navigating with — the path is still one
+    /// press away, in the `Open ⌄` the address row does not carry, which is the
+    /// trade the ruling made when it said a page's row is its address.
+    fn preview_rail_kind(&self, seat: SeatId) -> Option<seats::PreviewRailKind> {
+        if self.seat_holds_a_page(seat) {
+            return Some(seats::PreviewRailKind::Address);
+        }
+        self.preview_rail_path(seat)
+            .map(|_| seats::PreviewRailKind::Crumbs)
+    }
+
+    /// Recompute which seats wear a rail and tell the tree, re-solving when the
+    /// answer moved a rectangle.
+    ///
+    /// [`Runtime::settle_pane_notices`]'s shape and its contract, for its
+    /// reason: the row changes what a pane's body is, so a change here is a
+    /// layout change and everything downstream of a rectangle has to follow.
+    fn settle_preview_rails(&mut self) -> Result<()> {
+        let rails: BTreeMap<SeatId, seats::PreviewRailKind> = self
+            .seats
+            .preview_seats()
+            .into_iter()
+            .filter_map(|seat| Some((seat, self.preview_rail_kind(seat)?)))
+            .collect();
+        if !self.seats.set_rails(rails) {
+            return Ok(());
+        }
+        // The same three steps a notice's arrival takes, and for its reason: the
+        // row changes the pane's height, so every rectangle downstream of it —
+        // the shell's rows, the page's bounds, the wheel's reach — has to be
+        // recomputed before anything is drawn against them.
+        self.commit_seat_geometry()?;
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// **One preview rail, dressed** (user ruling 2026-08-24) —
+    /// [`Self::dress_preview_head`]'s opposite number.
+    ///
+    /// Everything the row needs, measured where a font is: the address or the
+    /// segments, the widths the geometry has to be laid out to, and the open
+    /// editor when this rail is the one holding it. A seat with no rail answers
+    /// `None`, and the paint draws nothing rather than an empty band.
+    fn dress_preview_rail(&mut self, seat: SeatId, scale: f32) -> Option<PreviewRailFrame> {
+        let kind = self.preview_rail_kind(seat)?;
+        let font = seats::PREVIEW_RAIL_FONT_LOGICAL_PX * scale;
+        let mut frame = PreviewRailFrame {
+            measure: seats::PreviewRailMeasure {
+                kind,
+                ..seats::PreviewRailMeasure::default()
+            },
+            address: String::new(),
+            segments: Vec::new(),
+            targets: Vec::new(),
+            notice: String::new(),
+            notice_flashing: false,
+            edit: None,
+            refused: false,
+            flip_to_source: false,
+            web: seats::WebHeadState::default(),
+        };
+        match kind {
+            seats::PreviewRailKind::Address => {
+                let page = self.web_on(seat).map(|web| web.page().clone())?;
+                // **The committed address, and the refused one when a seat's one
+                // navigation was turned away** — the same pair the head's name
+                // cell used to fall back through, arriving where it belongs now
+                // that the name is a title again. A blank row over a page that
+                // was handed an address it would not go to would be this window
+                // forgetting what it was asked for.
+                let refused_address = self
+                    .web_on(seat)
+                    .and_then(webhost::WebSeat::fault)
+                    .and_then(webhost::WebFault::refused_address);
+                frame.address = shown_address(&if page.url.is_empty() {
+                    refused_address.unwrap_or_default()
+                } else {
+                    page.url.clone()
+                });
+                frame.web = seats::WebHeadState {
+                    can_go_back: page.can_go_back,
+                    can_go_forward: page.can_go_forward,
+                    loading: page.loading,
+                };
+                frame.measure.address_width = self.window.renderer.measure_chrome_text(
+                    &mut self.app.gpu,
+                    &frame.address,
+                    font,
+                );
+            }
+            seats::PreviewRailKind::Crumbs => {
+                let path = self.preview_rail_path(seat)?;
+                for (name, target) in crumb_segments(&path) {
+                    frame
+                        .measure
+                        .segments
+                        .push(self.window.renderer.measure_chrome_text(
+                            &mut self.app.gpu,
+                            &name,
+                            font,
+                        ));
+                    frame.segments.push(name);
+                    frame.targets.push(target);
+                }
+                let surface = self.preview_here(seat);
+                let md_source = self.preview_md_source(surface);
+                frame.measure.flip = self
+                    .preview_buffer_on(surface)
+                    .is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown);
+                // The glyph names the *destination*, which is the head's rule
+                // travelling down with the button it belongs to.
+                frame.flip_to_source = !md_source;
+                frame.measure.open_width = self.window.renderer.measure_chrome_text(
+                    &mut self.app.gpu,
+                    i18n::Text::PreviewRailOpen.text(),
+                    font,
+                );
+            }
+        }
+        let (tools, edit) = self.dress_preview_address_editor(seat, scale, frame.measure.clone());
+        frame.measure = tools;
+        frame.edit = edit;
+        // The same door the commit goes through, asked without knocking — an
+        // empty field is unfinished rather than wrong, so it does not light up.
+        frame.refused = matches!(
+            self.window.rename.as_ref().map(|editor| &editor.subject),
+            Some(RenameSubject::WebAddress { .. })
+        ) && !self
+            .window
+            .rename
+            .as_ref()
+            .is_some_and(|editor| webhost::WebSeat::would_go_to(&editor.text));
+        let here = self.leaf_here(seat);
+        self.window
+            .preview_rail_measures
+            .insert(here, frame.measure.clone());
+        Some(frame)
+    }
+
+    /// The measurement **this seat's** rail must be laid out with — this
+    /// frame's, off the widths the paint stored for that seat.
+    ///
+    /// [`Self::preview_head_tools`]'s twin, and it answers the same way for the
+    /// same reason: the hit test is `&self` by construction and cannot measure,
+    /// so it reads the number the picture was built from. A seat whose rail has
+    /// not been drawn yet has no entry, and a row that has never been drawn has
+    /// nothing to press.
+    fn preview_rail_measure(&self, seat: SeatId) -> Option<seats::PreviewRailMeasure> {
+        self.window
+            .preview_rail_measures
+            .get(&self.leaf_here(seat))
+            .cloned()
     }
 
     /// The tools **this seat's** head must be laid out with — this frame's, off
@@ -36235,8 +36835,11 @@ impl Runtime<'_> {
             .copied();
         seats::PreviewHeadTools {
             save: self.preview_is_editable(surface),
-            flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown),
-            browser: buffer.is_some_and(|buffer| preview_page_hand_off(&buffer.source).is_some()),
+            // The dressing's own judgement, asked the same way: a markdown with
+            // a breadcrumb row wears its flip down there, so the head does not
+            // reserve a box for it (user ruling 2026-08-24).
+            flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown)
+                && self.preview_rail_kind(seat).is_none(),
             // **A page on this seat** (§7.7 ②). The seam slice ③ moves: today a
             // window has one page and it names its own seat, and when the
             // preview pool learns about pages this becomes a question about the
@@ -36290,7 +36893,14 @@ impl Runtime<'_> {
         if let Some(page) = page {
             let hovering = !page.hover.is_empty();
             let target = if hovering { &page.hover } else { &page.url };
-            let mut lead = target.clone();
+            // **A local file is a path on this band too** (user ruling
+            // 2026-08-25). The band and the address row name the same thing, so
+            // they spell it the same way — that is the whole of the ruling, and
+            // the two screenshots behind it were this band and a preview's
+            // disagreeing about one disk. It applies to a hovered link as
+            // readily as to the page's own address: a link into a local file is
+            // a local file.
+            let mut lead = shown_address(target);
             // The stamp goes on the *hovered* target only. The seat's own URL
             // committed, so it is by definition one this window went to, and a
             // band that stamped it would be arguing with the page behind it.
@@ -36347,6 +36957,16 @@ impl Runtime<'_> {
                 .to_string_lossy()
                 .into_owned(),
         };
+        // **The strip itself has retired where a breadcrumb took the question
+        // over** (user ruling 2026-08-24) — `preview_pane_geometry` collapses it
+        // and the paint draws nothing. What this function still owes such a seat
+        // is the two phrases the ruling kept: the standing fact and the flashed
+        // confirmation, which the frame lifts off this dressing and hangs on the
+        // rail's right hand. So the words are still computed here, once, and the
+        // *path* is what stops being printed: it is the one thing the row above
+        // now says, and a band naming the file a row above it already names is
+        // the duplication the ruling retired.
+        let railed = self.preview_rail_kind(seat) == Some(seats::PreviewRailKind::Crumbs);
         let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
         let saved = self.preview_save_notice(surface, now) == Some(preview::preview_saved_notice());
         let flash = if revealed {
@@ -36368,7 +36988,7 @@ impl Runtime<'_> {
         Some(seats::dress_foot(
             seats::FootDress {
                 run,
-                lead: &lead,
+                lead: if railed { "" } else { &lead },
                 flash,
                 notice: &notice,
                 // **Left-truncated** (P35): the ellipsis goes at the head so the
@@ -36379,6 +36999,134 @@ impl Runtime<'_> {
             },
             &mut measure,
         ))
+    }
+
+    /// **Put a page's address on the clipboard** — the rail's `⧉` (user ruling
+    /// 2026-08-24).
+    ///
+    /// The same clipboard door a file row's `Copy path` goes through, which is
+    /// what makes the two rows' identical glyph an honest promise: one verb,
+    /// two kinds of address.
+    fn copy_preview_address(&mut self, seat: SeatId) -> Result<()> {
+        let Some(url) = self.web_on(seat).map(|web| web.page().url.clone()) else {
+            return Ok(());
+        };
+        if url.is_empty() {
+            return Ok(());
+        }
+        let result = write_terminal_clipboard_text(&self.window.window, &url);
+        recoverable_clipboard_write(result, "copy a page's address");
+        Ok(())
+    }
+
+    /// **Stand the files column where this segment of the path is** (user ruling
+    /// 2026-08-24) — a press on one breadcrumb.
+    ///
+    /// [`Self::show_folder_in_files_column`] and nothing else, which is the
+    /// whole of the ruling's 「查 files 列的既有跳转动词复用」: that verb already
+    /// re-roots the column a tab has, opens one for a tab that has none, and
+    /// leaves the keyboard where it was. A second implementation here would be a
+    /// second answer to "what does pointing the column somewhere mean".
+    ///
+    /// **The last segment is this file, and a column is rooted at a directory**,
+    /// so the tail hands over its parent. That is not a special case bolted on:
+    /// every segment hands over the place it *names*, and the place a file names
+    /// is the folder it is in.
+    fn press_preview_crumb(&mut self, seat: SeatId, depth: usize) -> Result<()> {
+        let Some(path) = self.preview_rail_path(seat) else {
+            return Ok(());
+        };
+        let segments = crumb_segments(&path);
+        let Some((_, target)) = segments.get(depth) else {
+            return Ok(());
+        };
+        let folder = if depth + 1 == segments.len() {
+            target.parent().map(Path::to_path_buf)
+        } else {
+            Some(target.clone())
+        };
+        let Some(folder) = folder else {
+            return Ok(());
+        };
+        self.show_folder_in_files_column(&folder)
+    }
+
+    /// **The `…` a folded path is drawn as** (the ruling's ③): the menu of the
+    /// segments standing behind it.
+    ///
+    /// The file menu, raised on the *deepest* folder the fold is hiding. One
+    /// list of verbs about one place, rather than a second popup whose only job
+    /// would be to re-offer the row a wider pane would have drawn — and the
+    /// reader gets the whole path in it, because `Copy path` is one of its rows.
+    ///
+    /// **A tooltip would not have been enough** and a menu is not overkill: the
+    /// ruling asks for 「点开弹全路径菜单或至少 tooltip」, and the menu is the
+    /// half of that which is also a way of *reaching* what it names.
+    fn open_preview_crumb_menu(&mut self, seat: SeatId) -> Result<()> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some(measure) = self.preview_rail_measure(seat) else {
+            return Ok(());
+        };
+        let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
+            return Ok(());
+        };
+        let geometry = seats::preview_rail_geometry(rect, scale, &measure);
+        let (Some(chip), Some(deepest)) = (geometry.fold, geometry.folded.last().copied()) else {
+            return Ok(());
+        };
+        let Some(path) = self.preview_rail_path(seat) else {
+            return Ok(());
+        };
+        let Some((_, folder)) = crumb_segments(&path).into_iter().nth(deepest) else {
+            return Ok(());
+        };
+        // Under the chip, where a menu belonging to a control belongs when no
+        // pointer said otherwise — the placement the root menu takes under its
+        // own button.
+        self.open_file_menu(
+            FileMenuTarget {
+                row: None,
+                activation: RowActivation::DefaultApp(folder),
+                subject: profiles::FileMenuSubject::Document,
+            },
+            [chip[0], chip[3]],
+        )
+    }
+
+    /// **`Open ⌄`** (user ruling 2026-08-24) — the breadcrumb row's one pill.
+    ///
+    /// The file menu again, raised on the document this seat is showing and hung
+    /// under the pill. **The same menu machine a right press on a file row
+    /// raises, and its own list of rows** — which is the composition the two
+    /// rulings landed on: 「系统默认程序 / VS Code / 在 files 列中定位」 are
+    /// verbs about a path, so a window that grew a second popup for them here
+    /// would be a window where the two could come to disagree; but a surface
+    /// that *is* the preview must not offer `Open preview`, and a menu hung a
+    /// band under the pane's own `Reveal in Explorer` must not offer that
+    /// either. [`profiles::FileMenuSubject::Document`] is where the difference
+    /// is written down.
+    fn open_preview_rail_menu(&mut self, seat: SeatId) -> Result<()> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some(measure) = self.preview_rail_measure(seat) else {
+            return Ok(());
+        };
+        let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
+            return Ok(());
+        };
+        let Some(pill) = seats::preview_rail_geometry(rect, scale, &measure).open else {
+            return Ok(());
+        };
+        let Some(path) = self.preview_rail_path(seat) else {
+            return Ok(());
+        };
+        self.open_file_menu(
+            FileMenuTarget {
+                row: None,
+                activation: RowActivation::DefaultApp(path),
+                subject: profiles::FileMenuSubject::Document,
+            },
+            [pill[0], pill[3]],
+        )
     }
 
     /// Show the file on the seat in File Explorer — `.preview-pane .files-foot`
@@ -40423,6 +41171,7 @@ impl Runtime<'_> {
     }
 
     fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {
+        hang_watch::at(hang_watch::Station::Present);
         // **The tripwire.** A frame is about to describe a tab whose seat set
         // may have changed; if it changed without anyone carrying the change to
         // the shells, this is the moment the two pictures diverge and the last
@@ -45440,6 +46189,7 @@ impl Runtime<'_> {
         let menu = self.window.file_menu.as_ref()?;
         let point = menu.point;
         let subject = menu.subject;
+        let editor = self.file_menu_editor();
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
@@ -45449,8 +46199,53 @@ impl Runtime<'_> {
             (width as f32, height as f32),
             scale,
             subject,
+            editor,
             &mut measure,
         ))
+    }
+
+    /// **The editor row's caption, or the empty string when this machine has no
+    /// editor** (user ruling 2026-08-24).
+    ///
+    /// One string carries both the wording and the availability, which is the
+    /// shape [`profiles::file_menu_layout`] asks for and the reason it asks:
+    /// a caller that passed a name and a separate flag could pass a name with
+    /// the flag off, and the menu would then be sized for a row it does not draw.
+    ///
+    /// The probe is the application's, done once at start-up beside every other
+    /// "is this installed" question — a menu that shelled out to look for an
+    /// editor while it was being laid out would be a filesystem walk on the
+    /// pointer's path.
+    fn file_menu_editor(&self) -> &'static str {
+        // A proper noun in both languages: this row names the program, and a
+        // translated program name is a program the reader cannot find in their
+        // Start menu.
+        if self.app.editor.is_some() {
+            "VS Code"
+        } else {
+            ""
+        }
+    }
+
+    /// Hand a file to the editor this machine has (user ruling 2026-08-24).
+    ///
+    /// **Spawned rather than handed to the shell**, which is the whole reason
+    /// [`profiles::find_vscode`] resolves `Code.exe` and not the `code.cmd` shim
+    /// beside it: `.cmd` means a command interpreter, and starting one to open
+    /// an editor would put a console window on screen and a quoting rule between
+    /// this window and a path with a space in it.
+    ///
+    /// A machine with no editor never reaches here — the row it would be reached
+    /// from is not drawn — and a spawn that fails is reported the way every
+    /// other recoverable failure in this file is.
+    fn open_in_editor(&mut self, path: &Path) -> Result<()> {
+        let Some(editor) = self.app.editor.clone() else {
+            return Ok(());
+        };
+        if let Err(error) = std::process::Command::new(&editor).arg(path).spawn() {
+            eprintln!("recoverable editor launch failure: {error}");
+        }
+        Ok(())
     }
 
     /// Raise the menu on one tree row.
@@ -45477,8 +46272,7 @@ impl Runtime<'_> {
         self.close_popups_except(Popup::File);
         self.window.file_menu = Some(FileMenuState {
             point,
-            host: target.host,
-            key: target.key,
+            row: target.row,
             activation: target.activation,
             subject: target.subject,
             hover: None,
@@ -45528,8 +46322,10 @@ impl Runtime<'_> {
             .root;
         self.open_file_menu(
             FileMenuTarget {
-                host: RowHost::Column(seat),
-                key: key.to_owned(),
+                row: Some(FileMenuTreeRow {
+                    host: RowHost::Column(seat),
+                    key: key.to_owned(),
+                }),
                 activation: files_row_activation(&root, key),
                 subject,
             },
@@ -45552,8 +46348,10 @@ impl Runtime<'_> {
             let row = rows.get(index)?;
             let subject = files_row_menu_subject(row.kind)?;
             return Some(FileMenuTarget {
-                host: RowHost::Float(id),
-                key: row.key.clone(),
+                row: Some(FileMenuTreeRow {
+                    host: RowHost::Float(id),
+                    key: row.key.clone(),
+                }),
                 activation: files_row_activation(&files.files.root, &row.key),
                 subject,
             });
@@ -45574,8 +46372,10 @@ impl Runtime<'_> {
                     .root,
                 &key,
             ),
-            host: RowHost::Column(seat),
-            key,
+            row: Some(FileMenuTreeRow {
+                host: RowHost::Column(seat),
+                key,
+            }),
             subject,
         })
     }
@@ -45620,10 +46420,11 @@ impl Runtime<'_> {
         let Some(layout) = self.file_menu_layout() else {
             return Vec::new();
         };
+        let editor = self.file_menu_editor();
         let Some(menu) = self.window.file_menu.as_ref() else {
             return Vec::new();
         };
-        profiles::file_menu_build(&layout, menu.subject, menu.hover)
+        profiles::file_menu_build(&layout, menu.subject, editor, menu.hover)
     }
 
     fn close_file_menu(&mut self) -> Result<bool> {
@@ -47413,8 +48214,10 @@ impl Runtime<'_> {
     fn preview_browser_box(&self, seat: SeatId) -> Option<[f32; 4]> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
-        let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
-        seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).browser
+        // **On the rail since 2026-08-24.** The derivation is the same one — the
+        // paint's, down to the stored measurement — and only the row changed:
+        // the arrow stands beside the address it hands over.
+        seats::preview_rail_geometry(rect, scale, &self.preview_rail_measure(seat)?).external
     }
 
     /// The padlock's box on one preview seat (§7.7 ⑧).
@@ -47439,13 +48242,23 @@ impl Runtime<'_> {
     fn preview_web_tool_box(&self, seat: SeatId, verb: WebHeadVerb) -> Option<[f32; 4]> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
-        let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
-        let geometry = seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat));
+        // **Three of the four moved down** (user ruling 2026-08-24), so the tip
+        // asks whichever row the button is drawn in — one derivation each, and
+        // the same one the paint and the hit test read.
         match verb {
-            WebHeadVerb::Back => geometry.back,
-            WebHeadVerb::Forward => geometry.forward,
-            WebHeadVerb::Reload => geometry.reload,
-            WebHeadVerb::DevTools => geometry.devtools,
+            WebHeadVerb::Back | WebHeadVerb::Forward | WebHeadVerb::Reload => {
+                let rail =
+                    seats::preview_rail_geometry(rect, scale, &self.preview_rail_measure(seat)?);
+                match verb {
+                    WebHeadVerb::Back => rail.back,
+                    WebHeadVerb::Forward => rail.forward,
+                    _ => rail.reload,
+                }
+            }
+            WebHeadVerb::DevTools => {
+                let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+                seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).devtools
+            }
         }
     }
 
@@ -48943,7 +49756,7 @@ impl Runtime<'_> {
         let Some(menu) = self.window.file_menu.take() else {
             return Ok(());
         };
-        let (activation, host, key) = (menu.activation, menu.host, menu.key);
+        let (activation, tree_row) = (menu.activation, menu.row);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -48958,15 +49771,24 @@ impl Runtime<'_> {
             // window where the menu's own wording had become a lie.
             profiles::FileMenuRow::Open => match activation {
                 RowActivation::Preview(path) => self.open_preview(path)?,
+                // The one door out of this window, and the same one the head's
+                // arrow used before the 2026-08-24 ruling moved the verb into
+                // this list — `bt_platform`'s own refusal for the executable
+                // list included, because the rule belongs to the door.
+                RowActivation::DefaultApp(path) => {
+                    self.open_local_path(&path);
+                }
                 RowActivation::Nowhere => {}
             },
             // **Through `open_local_path`, which is this window's one door out
             // to the shell for a path the user pointed at** (user ruling
             // 2026-08-25). It is the same function the preview head's `↗`
             // presses, and that is the point: "open this with whatever the
-            // machine has registered for it" is one verb, so the head's Open
-            // menu and this row must not grow two implementations of it. The
-            // door's own refusal for the executable list comes along —
+            // machine has registered for it" is one verb, so the breadcrumb's
+            // `Open ⌄` and a tree row's second door must not grow two
+            // implementations of it — which is exactly why they are one row
+            // wearing each face's preposition rather than two rows. The door's
+            // own refusal for the executable list comes along —
             // `bt_platform::open_local_path` reads `PATHEXT` and says no, which
             // is §7.1.3's "the tree is a way of looking at files, and the thing
             // next to it that runs programs is the terminal" enforced at the
@@ -48974,8 +49796,29 @@ impl Runtime<'_> {
             profiles::FileMenuRow::OpenWith => {
                 self.open_local_path(&path);
             }
-            profiles::FileMenuRow::Fold => self.fold_files_row(host, &key)?,
+            // **The editor, and it is not the default-program door.** The row
+            // above asks Windows what a `.md` is for and may well get a browser;
+            // this asks for the program a reader said they edit with, which is
+            // why it is a second row rather than a second wording.
+            profiles::FileMenuRow::OpenWithEditor => self.open_in_editor(&path)?,
+            // Only a tree row has a fold, and only a tree row carries the host
+            // and key a fold needs. A breadcrumb's menu has neither and does not
+            // offer the row — `file_menu`'s `Document` arm — so the absence is
+            // the honest answer rather than a guard against a caller.
+            profiles::FileMenuRow::Fold => {
+                if let Some(tree_row) = tree_row {
+                    self.fold_files_row(tree_row.host, &tree_row.key)?;
+                }
+            }
             profiles::FileMenuRow::NewTerminal => self.new_terminal_in_folder(&path)?,
+            profiles::FileMenuRow::ShowInFiles => {
+                // The file's folder, because a column is rooted at a directory:
+                // `show_folder_in_files_column` is the verb, unchanged, and the
+                // parent is the only thing a file can hand it.
+                if let Some(folder) = path.parent() {
+                    self.show_folder_in_files_column(folder)?;
+                }
+            }
             profiles::FileMenuRow::CopyPath => self.copy_path_to_clipboard(&path)?,
             profiles::FileMenuRow::InsertPath => self.insert_path_into_terminal(&path)?,
             // **The same audited door the three feet go through**
@@ -51934,6 +52777,14 @@ impl Runtime<'_> {
             .root;
         match files_row_activation(&root, key) {
             RowActivation::Preview(path) => self.open_preview(path),
+            // `files_row_activation` mints one of two answers and neither of
+            // them is the rail's — a tree row is always "open this here". The
+            // arm is written rather than wildcarded so that the day a third door
+            // reaches this function, it is a compiler error and not a silence.
+            RowActivation::DefaultApp(path) => {
+                self.open_local_path(&path);
+                Ok(())
+            }
             RowActivation::Nowhere => Ok(()),
         }
     }
@@ -52860,6 +53711,7 @@ impl Runtime<'_> {
     }
 
     fn drain_pty(&mut self) -> Result<()> {
+        hang_watch::at(hang_watch::Station::Drain);
         // Lowered first: see [`PtyWakeSignal::accept`].
         self.window.pty_wake.accept();
         let mut active_changed = false;
@@ -53690,6 +54542,7 @@ impl Runtime<'_> {
     /// (§7.1.6h). Answering `None` is answering "nothing is owed and nothing has to be woken
     /// for", which is exactly true.
     fn flush_pending_pty_resize(&mut self, now: Instant) -> Result<Option<Instant>> {
+        hang_watch::at(hang_watch::Station::PtyResize);
         let active = self.window.active_tab;
         let focused_seat = self.window.tabs[active].focused_leaf;
         let mut wake_deadline: Option<Instant> = None;
@@ -55935,6 +56788,21 @@ impl Runtime<'_> {
                 .collect();
             seats::hit_preview_head(&self.seat_layout, scale, &tools, position.x, position.y)
         })
+        // And the row under it (user ruling 2026-08-24), on the same terms: its
+        // controls stand inside a band the pane head's drag would otherwise
+        // claim, and the band itself answers for what its controls leave over —
+        // see [`seats::ChromeTarget::PreviewRail`]. Asked after the head only
+        // because the two never overlap; either order gives the same answers,
+        // and this one reads in the order the rows are drawn.
+        .or_else(|| {
+            let rails: Vec<(SeatId, seats::PreviewRailMeasure)> = self
+                .seats
+                .preview_seats()
+                .into_iter()
+                .filter_map(|seat| Some((seat, self.preview_rail_measure(seat)?)))
+                .collect();
+            seats::hit_preview_rail(&self.seat_layout, scale, &rails, position.x, position.y)
+        })
         // The lone pane's corner ghost (§7.1.6i), before the pane heads for the
         // same smallest-target-first reason everything above it is asked first:
         // it floats *over* the terminal's own body, and the body is not chrome,
@@ -55968,7 +56836,15 @@ impl Runtime<'_> {
         // first anyway, for the reason the root button is asked before the head
         // it lives in — a control's claim on its own rectangle should not depend
         // on a *second* rectangle happening to have been shortened correctly.
-        .or_else(|| seats::hit_files_foot(&self.seat_layout, scale, position.x, position.y))
+        .or_else(|| {
+            seats::hit_files_foot(
+                &self.seats,
+                &self.seat_layout,
+                scale,
+                position.x,
+                position.y,
+            )
+        })
         // The card's button, asked only while the card is up: a control that
         // answers a hit test it is not on screen for is an invisible button.
         .or_else(|| {
@@ -58491,13 +59367,18 @@ impl Runtime<'_> {
                 // A float's head is not chrome, so there is no target that can
                 // be inside it and every press out here is a blur.
                 RenameSubject::PreviewName { .. } => None,
-                // The address field is the same cell as the name it replaced, so
-                // it is the same target: a press inside it puts a caret, and a
-                // press anywhere else — the page below very much included — is a
-                // blur that commits.
-                RenameSubject::WebAddress { leaf } => {
-                    Some(seats::ChromeTarget::PreviewName(leaf.seat))
+                // **The address field is its own cell since 2026-08-24**, one
+                // row under the name it used to be. The sentence is unchanged
+                // and only the target moved: a press inside the field puts a
+                // caret, and a press anywhere else — the page below very much
+                // included — is a blur that commits.
+                RenameSubject::WebAddress { leaf } if leaf.tab == self.id => {
+                    Some(seats::ChromeTarget::PreviewAddress(leaf.seat))
                 }
+                // A draft left open on a pane of another tab names no target in
+                // this tab's chrome, which is the sentence the file name's own
+                // arm makes two lines up.
+                RenameSubject::WebAddress { .. } => None,
             };
             if editing.is_some() && target == editing {
                 // "编辑器内的按下/双击不触发拖拽或再次进入编辑" (J103): the press
@@ -58873,6 +59754,60 @@ impl Runtime<'_> {
                 self.window.files_row_clicks.interrupt();
                 self.reveal_preview_file(seat)?;
             }
+            // ── the rail (user ruling 2026-08-24) ───────────────────────────
+            //
+            // Each breaks a click chain for `.files-foot`'s reason — a chain of
+            // clicks on a button is a chain of button presses — and none of them
+            // arms a drag: this row is not a drag handle, so there is nothing to
+            // decline.
+            //
+            // **A press on the address is a caret in it**, and the field it
+            // opens is the very one `Ctrl+L` opens: `open_web_address_on` is the
+            // one door, so a URL typed after a click and one typed after the
+            // chord cannot be seeded differently.
+            seats::ChromeTarget::PreviewAddress(seat) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.window.preview_name_clicks.interrupt();
+                self.open_web_address_on(seat)?;
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-address state={state:?} button={button:?} target={traced_target:?}"));
+                return Ok(true);
+            }
+            seats::ChromeTarget::PreviewAddressCopy(seat) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.copy_preview_address(seat)?;
+            }
+            seats::ChromeTarget::PreviewPathCopy(seat) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                if let Some(path) = self.preview_rail_path(seat) {
+                    self.copy_path_to_clipboard(&path)?;
+                }
+            }
+            seats::ChromeTarget::PreviewCrumb { seat, depth } => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.press_preview_crumb(seat, depth)?;
+            }
+            seats::ChromeTarget::PreviewCrumbFold(seat) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.open_preview_crumb_menu(seat)?;
+            }
+            seats::ChromeTarget::PreviewOpenWith(seat) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.open_preview_rail_menu(seat)?;
+            }
+            // The band itself, everywhere its controls are not: it swallows the
+            // press and does nothing with it. See the target's own note — a row
+            // that let a press through would either drag the pane by something
+            // that is not its head or put a caret in the document below.
+            seats::ChromeTarget::PreviewRail(_) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+            }
             // The name is a button **and** part of the drag handle, which is
             // `FilesRoot`'s own arrangement and the mock-up's: `.pv-name` is not
             // on the exclusion list at 5874. Arming costs the click nothing, and
@@ -58894,14 +59829,16 @@ impl Runtime<'_> {
                     == TabClick::Double
                 {
                     self.close_preview_menu()?;
-                    // **The same double click, on the same cell** (§7.7 ②).
-                    // What opens is decided by what the cell is naming: a
-                    // file's name opens the rename editor, a page's title opens
-                    // the address. One gesture, seeded two ways, because the
-                    // gesture is inherited and not invented.
-                    if self.seat_holds_a_page(seat) {
-                        self.open_web_address_on(seat)?;
-                    } else {
+                    // **A page's title is not a door any more** (user ruling
+                    // 2026-08-24). This cell used to be seeded two ways by one
+                    // gesture — a file's name into the rename editor, a page's
+                    // title into the address — on the argument that the cell
+                    // *was* the address. The ruling retired that: the name is
+                    // the document's title and the address has a row of its
+                    // own, so there is nothing here for a second click on a page
+                    // to open. A title is not editable, and offering to edit it
+                    // would be offering to rename somebody else's document.
+                    if !self.seat_holds_a_page(seat) {
                         self.open_preview_rename(seat)?;
                     }
                     self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-name-double state={state:?} button={button:?} target={traced_target:?}"));
@@ -61110,6 +62047,7 @@ impl Runtime<'_> {
     /// `about_to_wait`. Free — one `Option` read — for the overwhelming majority
     /// of turns, in which nobody touched the wheel.
     fn flush_wheel(&mut self) -> Result<()> {
+        hang_watch::at(hang_watch::Station::Wheel);
         let Some(burst) = self.window.wheel_burst.take() else {
             return Ok(());
         };
@@ -61933,9 +62871,19 @@ impl Runtime<'_> {
                 // continuous "again".
                 Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
                     let forwards = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
+                    // **The rows this menu is actually showing** (user rulings
+                    // 2026-08-24 and 2026-08-25): a folder's menu has no `Open`
+                    // and the editor row exists only on a machine that has an
+                    // editor, so a walk over the vocabulary rather than over the
+                    // subject's own list would offer a row nobody drew.
+                    let editor = !self.file_menu_editor().is_empty();
                     if let Some(menu) = self.window.file_menu.as_mut() {
-                        menu.hover =
-                            Some(profiles::file_menu_step(menu.subject, menu.hover, forwards));
+                        menu.hover = Some(profiles::file_menu_step(
+                            menu.subject,
+                            editor,
+                            menu.hover,
+                            forwards,
+                        ));
                     }
                     if self.refresh_overlay() {
                         self.present_chrome_change()?;
@@ -63364,6 +64312,7 @@ impl Runtime<'_> {
     /// The clock the browser-exit deadline is hung on, the seat's own mortality,
     /// and the chord list the focus keeps changing.
     fn advance_web_page(&mut self, now: Instant) -> Result<()> {
+        hang_watch::at(hang_watch::Station::WebPage);
         if self.window.web.is_empty() {
             return Ok(());
         }
@@ -63708,6 +64657,26 @@ impl Runtime<'_> {
         let Some(url) = self.web_on(seat).map(|web| web.page().url.clone()) else {
             return Ok(());
         };
+        // **Seeded with what the row is showing** (found on a real window,
+        // 2026-08-24). A seat whose one navigation was refused has no committed
+        // URL, so this used to open an empty box over a row printing the address
+        // in full — the reader would have had to retype what was in front of
+        // them to correct one character of it. The two strings are now the same
+        // pair read in the same order, which is `dress_preview_rail`'s own.
+        let url = if url.is_empty() {
+            self.web_on(seat)
+                .and_then(webhost::WebSeat::fault)
+                .and_then(webhost::WebFault::refused_address)
+                .unwrap_or_default()
+        } else {
+            url
+        };
+        // **Seeded in the spelling the row is showing** (user ruling
+        // 2026-08-25): a local file is a path here too, and `WebSeat::go_to`
+        // mints it back into a `file:` URL on the way out. A field that opened
+        // on a different spelling of what is printed above the caret would be
+        // asking the reader to accept a substitution they never made.
+        let url = shown_address(&url);
         // **The field takes the keyboard back from the page, and it has to**
         // (found on the machine, 2026-08-22: `Ctrl+L` opened a field nothing
         // could be typed into). A page keeps every key this window's table does
@@ -64785,6 +65754,13 @@ impl Runtime<'_> {
         // pushed from the probe's thread for the reason the invitation below is:
         // this changes a pane's height, and the panes are this thread's.
         self.settle_pane_notices()?;
+        // **And the row under a preview head, on the same terms** (user ruling
+        // 2026-08-24). It is polled beside the notice strip because it is the
+        // same kind of fact and costs the same kind of change: a page that has
+        // just committed its first address, a buffer that has just arrived on a
+        // seat, a pane whose document was swapped — each of them can add or
+        // retire a row, and a row is twenty-eight pixels of somebody's document.
+        self.settle_preview_rails()?;
         // Polled here rather than pushed from the probe's thread: raising a
         // modal is a change to the window, and the window is this thread's.
         self.raise_psreadline_invite_if_due()?;
@@ -65514,7 +66490,10 @@ mod mouse_trace_station_tests {
     fn every_chrome_exit_that_takes_the_event_writes_a_line() {
         // 20 → 21 on 2026-08-24: §7.1.6l gave the pane head's double click a verb
         // and therefore an exit of its own (`at=release-pane-head-zoom`).
-        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 23);
+        // Twenty-four once the two 2026-08-24/25 lines met: the address row's
+        // press takes the event whole exactly as the name's double click does,
+        // and it joins the exits the other line had already counted to 23.
+        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 24);
     }
 
     /// Both `None`s here are silent by construction — the callers turn them into
@@ -68479,6 +69458,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        hang_watch::at(hang_watch::Station::Event);
         // **The one line the whole slice is about.** winit stamps the id of the
         // window the event happened to; before this, the loop compared it against
         // the only window there was and dropped anything else. Now it is a
@@ -68665,6 +69645,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // **The pulse, and it is the very first statement in the turn** (§1.5).
+        // Before the two early returns below, because a loop that is retiring or
+        // has no application yet is still a loop that came round, and a watchdog
+        // that took either of those states for a stopped pump would file a
+        // report on a program that is working.
+        hang_watch::beat();
+        hang_watch::run_selftest_if_due();
         if self.app.is_none() {
             return;
         }
@@ -71326,6 +72313,12 @@ fn main() -> Result<()> {
     // process does get goes to the frame first. See `bt_platform::ThreadPriority`
     // for why one step and not a multimedia scheduling class.
     bt_platform::set_current_thread_priority(bt_platform::ThreadPriority::AboveNormal);
+    // **And the witness to the day this thread stops answering** (§1.5).
+    // Started from here, on the window thread, before the loop exists: it needs
+    // this thread's id, and it needs `%APPDATA%` resolved by the thread that is
+    // allowed to pay for the one-time relocation `storage_dir` performs. A
+    // healthy run never writes a byte — see `hang_watch` for the whole bill.
+    hang_watch::start(persist::storage_dir().join(hang_watch::REPORTS_DIRECTORY));
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .context("create winit event loop")?;
@@ -92754,16 +93747,19 @@ mod tests {
     /// it would actually walk through, because a sentence can lie where a double
     /// click cannot; `RowActivation::open_text` carried the promise that "the
     /// day the second door closes this collapses to one word without anything
-    /// else moving". That day came, and on 2026-08-25 the wording went the rest
-    /// of the way home: it is [`profiles::FileMenuRow::text`]'s `Open` arm, one
-    /// string with no branch and no caller able to supply another. This asserts
-    /// what is left to assert — the row a file's menu opens with, and the path
-    /// its other rows act on, including for the rootless column that has none.
+    /// else moving". That day came, and the wording went the rest of the way
+    /// home: it is [`profiles::FileMenuRow::text`]'s `Open` arm, one string with
+    /// no branch and no caller able to supply another. A *second* row was then
+    /// opened beside it for the machine's own handler — and it is a second row
+    /// rather than a second wording of this one, which is what keeps this pin
+    /// true. This asserts what is left to assert: the row a file's menu opens
+    /// with, and the path its other rows act on, including for the rootless
+    /// column that has none.
     #[test]
     fn the_menus_first_row_says_one_thing_now_that_there_is_one_door() {
         let root = r"C:\work";
         assert_eq!(
-            profiles::FileMenuRow::Open.text(profiles::FileMenuSubject::File),
+            profiles::FileMenuRow::Open.text(profiles::FileMenuSubject::File, ""),
             "Open preview"
         );
         for name in ["/shot.png", "/notes.md", "/setup.exe"] {
@@ -93023,6 +94019,73 @@ mod tests {
         .expect("a folder row is a way in");
         assert!(reroot_files_state(&mut state, &entered));
         assert_eq!(state.root, r"D:\work\src\ui");
+    }
+
+    /// RAIL (user ruling 2026-08-24) — **a path reads as its segments, each one
+    /// naming the place it leads.**
+    ///
+    /// The two things about this walk a reader can see and a re-parse would get
+    /// wrong: the drive and its separator are **one** segment (a row that drew
+    /// both would offer a folder called `\`), and every segment's target is the
+    /// path built *up to and including it* rather than a prefix guessed from the
+    /// name.
+    ///
+    /// MUTATIONS:
+    /// ① give `RootDir` a segment of its own — the row grows a `\` between the
+    ///    drive and the first folder, and pressing the drive stands the column
+    ///    at `D:` (the process's current directory on that drive, which is not
+    ///    where the reader pointed);
+    /// ② rebuild each target by joining the names — a path holding `..` or a
+    ///    folder literally called `D:` lands somewhere else, which the last case
+    ///    catches;
+    /// ③ drop the last segment because it is a file — the row loses the one
+    ///    part the ruling says is bold, and the tail assertion goes red.
+    #[test]
+    fn a_path_reads_as_segments_that_each_name_where_they_lead() {
+        let walked = crumb_segments(Path::new(r"D:\Developer\Folio\docs\DESIGN.md"));
+        let names: Vec<&str> = walked.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["D:", "Developer", "Folio", "docs", "DESIGN.md"],
+            "the drive and its separator are one segment, and the file is the last"
+        );
+        let targets: Vec<PathBuf> = walked.into_iter().map(|(_, target)| target).collect();
+        assert_eq!(
+            targets,
+            vec![
+                PathBuf::from(r"D:\"),
+                PathBuf::from(r"D:\Developer"),
+                PathBuf::from(r"D:\Developer\Folio"),
+                PathBuf::from(r"D:\Developer\Folio\docs"),
+                PathBuf::from(r"D:\Developer\Folio\docs\DESIGN.md"),
+            ],
+            "pressing the drive stands the column at its root, not at the \
+             process's directory on that drive"
+        );
+        // A relative path keeps what it was written with: resolving `..` here
+        // would be this walk inventing a place the reader never named.
+        let relative = crumb_segments(Path::new(r"..\sibling\notes.md"));
+        assert_eq!(
+            relative
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["..", "sibling", "notes.md"]
+        );
+        assert_eq!(
+            relative.last().expect("a tail").1,
+            PathBuf::from(r"..\sibling\notes.md")
+        );
+        // A path that begins at a root with no drive still has a top: `\` is the
+        // only name that level of the tree has.
+        let rooted = crumb_segments(Path::new(r"\srv\share"));
+        assert_eq!(
+            rooted
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec![std::path::MAIN_SEPARATOR_STR, "srv", "share"]
+        );
     }
 
     /// PIN — the triangle is not touched by the ruling above: one press folds,

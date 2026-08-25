@@ -116,6 +116,54 @@
 
 **诚实的留白**：冷启动 `cargo build` 不是平稳负载（早期几十个小 crate、后期几个大 crate），所以载荷下的 p95/p99 在**同一个二进制的两次运行之间**的差别，比两个二进制之间的差别还大——载荷下真正稳的结论是三个：白做的排版从 ~60% 掉到 ~0%、同一次手势上屏的帧数多六成、以及**「排好的一帧几秒钟上不了屏」这个病消失了**。24 个 PowerShell 空转进程复现不出用户报告的严重程度（前台线程有系统自带的 boost，且空转不抢内存带宽），必须用真实的 `cargo` 才复现得出来。
 
+### 1.5 挂死自己留证据：常驻心跳 + 看门狗（挂死常驻自报器，2026-08-25，已落地；`crates/bt-platform/src/hang.rs`(新)、`crates/bt-app/src/hang_watch.rs`(新)、`crates/bt-app/src/{main,persist}.rs`、`crates/bt-render/src/lib.rs`）
+
+§1.3 里那两条窗口线程挂死（`drain_leaf_pty` 的循环唯一出口是「环此刻是空的」、写侧无界）都是**有人正好在机器前、手里握着 `hangprobe.ps1`** 才抓到的。修完之后用户在 `dist\folio-next5.exe`（`fa547ec`）上**仍然偶发** Not Responding 白框——间歇、难复现。结论只能是：剩下那个故障还没有名字，而它出现的时刻**没有人在看**。所以让程序自己看着自己。**不是调试开关**：一个必须先打开才生效的开关，在 bug 每一次发生时都是关着的。
+
+**机制三句话。** 窗口线程在 `about_to_wait` 每轮打一次心跳（时间戳 + **轮次计数**），并在它会做的每一段长调用门口留一个**站点标签**（一个字节、一次 relaxed store）。看门狗线程每 2s 醒一次，只问两件事：轮次动了没有；没动的话停了多久。越过阈值时它把窗口线程 suspend **恰好两次内核调用**的时间，抄走寄存器与裸栈（`bt_platform::hang`），resume，然后把**站点、静默时长、栈、本次运行的计数器**写进 `%APPDATA%\Folio\hang-reports\<UTC 时间戳>.txt`。
+
+**只报案，不干预。** 不杀、不重启、不解锁、不弹窗。一个会动手的看门狗一定会在某天对一个只是慢了的进程动手，而代价是别人的 scrollback。寄存器抄完立刻 resume；如果泵后来活了，**同一个文件**尾部补一行 `healed: the pump came back after Ns`。**一份没有 healed 行的报告就是一次再没醒过来的挂死**——那个缺席本身就是结论。
+
+**活性是轮次，不是时钟。** 停住的线程时间戳是个完全稳定的值，而自旋的循环照样在读时钟；只有「泵真的转过来了」这件事才让计数器 +1。心跳三个字用 Release/Acquire 配对写读（时间戳、站点先 relaxed 写，轮次最后 Release 写；读先 Acquire 读轮次）——否则看门狗可能看见新轮次配旧时间戳，在 2s 轮询对 5s 阈值的尺度上，那就是「安静」与「一份报告」的差别。
+
+**站点是证据的地板。** 九个站点：`about_to_wait` / `window_event` / `drain_pty` / `flush_pending_pty_resize` / `publish_frame_inner` / `flush_wheel` / `advance_web_page` / session `flush_if_due` / `BT_HANG_SELFTEST`。插桩只在函数入口一行。语义**精确地是「最后进入过的站点」而不是「此刻正在的站点」**——进了 `Drain`、返回了、然后在两个站点之间某段没打标的代码里卡住，报告仍然说 `drain_pty`。这是诚实的（那是已知的最后一件事），也正是为什么还要抓栈。项目至今真实发生过的三次挂死，**光凭这个标签就能点名**。
+
+**为什么是扫栈不是走栈**（`bt-platform/src/hang.rs`）。`RtlCaptureStackBackTrace` 只能采**调用者自己**这条线程，指不到别人身上；`StackWalk64` 能，但它在 `dbghelp.dll` 里、契约上单线程、要这份构建不发布的符号，而且是那种**最不该在本进程另一条线程被挂起时去调**的机器。剩下的就是调试器在没有 unwind 信息时干的事：取 `rip`，然后**读裸栈、留下每一个落在已加载模块里的 qword**。它会多报（已经返回的返回地址在被覆盖前一直躺在栈上），而且**故意不过滤**——聪明到能滤掉陈旧项的过滤器，也聪明到能滤掉那个唯一有用的。读者拿到精确的 `rip` 加一串按深度排序的候选，而光是模块名就回答了这件事的核心问题：*终端自己的代码、ConPTY、WebView2，还是内核？*
+
+**操作顺序就是全部设计。** 在同一个进程里采一条被自己挂起的线程，是一句写歪就死锁的事——被挂起的那条线程正握着采样方马上要用的锁。有两把要命：**① loader 锁**，`EnumProcessModulesEx` 走模块表；窗口线程完全可能正挂在 `LoadLibrary` 里（WebView2 调用就会），那样枚举会在看门狗线程上永远阻塞，而 UI 线程还是挂起状态——**一份制造永久挂死的挂死报告**。**② 堆锁**，任何一次分配都可能撞上被挂起线程持有的 CRT 堆。所以模块表和 128 KiB 栈缓冲**都在 suspend 之前**准备好；suspend 与 resume 之间只有 `GetThreadContext` 与 `ReadProcessMemory` 两次内核调用，**零分配、零格式化、零用户态锁**。符号化和排版全在 resume 之后。另：读栈用 `ReadProcessMemory`（对自己进程）而不是裸解引用——线程栈尽头是 guard page，一次走进去的解引用就是**诊断工具自己产生的 AV**；它整段失败而不是部分成功，所以长度从 128 KiB 折半重试。
+
+**空转的账。** 每个站点 = 一次 relaxed `u8` store（x86-64 上一条 `mov`，无栅栏、无分支、无时钟、无分配）；每轮循环 = 一次 `Instant::now()`（`about_to_wait` 本来就要读）加三次 store；**每 2 秒 = 一次时钟读 + 三次原子读 + 一次比较，零分配**——不碰堆、不开文件、**连 `hang-reports` 目录都不建**，一次不挂的运行在磁盘上什么都不留。只有真出报告时才有模块枚举、128 KiB 读和一次写盘，全在看门狗线程上，**窗口线程永远不写盘**。看门狗和所有 worker 一样在 `BelowNormal` 档（§1.4）：这里的挂死是一条**被阻塞**的线程，不是一台没核可用的机器，而一个优先级高过帧的诊断，是在拿它要保护的东西给自己付账。报告数封顶 16 份，写新的之前按文件名（UTC 时间戳，字典序即时序）淘汰最老的，**只删自己的 `hang-*.txt`**。
+
+**启动有它自己的宽限（实机第一次跑就撞上）。** 第一版对启动也用 5s，结果第一次真机运行就给一次**正常**的冷启动开了罚单：debug 构建花了 8 秒才第一次跑到 `about_to_wait`（建事件循环、建 GPU device、起第一个 shell），报告站点 `starting`。**一个泵从来没转过，就不能说它「停了」**——那是另一种故障、另一个时间尺度。所以：见过一次轮次之前用 30s，见过之后永远用 5s。**不是装瞎**：一个永远走不完的启动正是「我双击了它什么也没发生」的形状，照样出报告，只是要走到那条更长的线；报告里写的阈值是**实际越过的那一条**，不是常数 5s。
+
+**`handle_surface_failure` 从此有数**（`bt-render`）。四种 acquire 失败里三种是被吞掉的（跳过这一帧、重配 swapchain），完全无痕——一次「DXGI 连续十秒每帧都 `Outdated`」的运行，从外面看和什么都没发生一模一样。**每帧沉默是对的**（resize 时每次都打印一行的终端没法用），**整轮运行沉默是错的**。四个 relaxed 计数器，进报告尾部的运行计数区：「泵停了，顺带一提这个进程已经吞了四万次 `Outdated`」和「泵停了，swapchain 一整天都好好的」是两场不同的调查。致命的 `Validation` 也在判决之前先计数。
+
+**`BT_HANG_SELFTEST`——只在 debug 构建生效，release 根本不读这个变量。** 一个能被环境变量卡死十秒的 `folio.exe` 是一份带说明书的拒绝服务。它在运行开始 3 秒后的第一轮**只触发一次**，把窗口线程按住 N 秒。实机验证原文（debug、隔离 `APPDATA`、`BT_PTY_DUMP=<文件>`）：
+
+```
+written        : 2026-08-25T04:52:24.778Z (UTC)
+process        : pid 90176, ui thread 11644
+uptime         : 10.002s
+pump silent for: 5.835s (threshold 5.000s)
+last station   : BT_HANG_SELFTEST (the last one entered, not necessarily the one it is in)
+loop turns     : 1
+
+ui thread stack
+  rip    : ntdll.dll+0x160404 (0x00007ff97f140404)
+  rsp    : 0x000000fda4cfc3b8
+  read   : 8192 bytes of stack, 83 modules mapped
+  [+0x00000] KERNELBASE.dll+0x1c11f  …  [+0x00020] folio.exe+0x7d0b410  …（91 条）
+
+run counters
+  surface acquires: clean — nothing has failed in this run
+
+healed         : the pump came back after 11.679s at BT_HANG_SELFTEST
+```
+
+`ntdll+0x160404` 就是 `NtDelayExecution`——那次 sleep 本身，站点直指那一行。**对照组**：同一个 debug 二进制、不设 `BT_HANG_SELFTEST`、活 30 秒——`no hang-reports directory: clean`，30 秒 CPU 2.27s（全是 debug 构建的窗口/GPU 初始化，看门狗在其中量不出来）。
+
+**明账**：`folio.exe+0x…` 是偏移不是函数名，要读得对着同一次构建的 PDB 反查；报告不打包符号，因为模块名这一级已经回答了「是谁」。栈扫描一次只取 rsp 往上能读到的那一段（实测 8 KiB，再往上是未提交页），足以穿过消息泵。
+
 ## 2. 渲染管线
 
 同 v3（cell 宽度权威在 bt-term；延迟指标事件→present 提交，60/120/144Hz 分测，洪水注入法；M-1 做一次光子侧基线校准）。
@@ -795,7 +843,7 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 **判据是既有的那一个,不是第二张扩展名表。** `preview_page_hand_off` = `PreviewSource::file_path`(每一个「只有文件才有」的能力都从这扇门问)套上 `names_an_html_page`(§7.1.5g ②′ 自己那条读法:**真扩展名**,`index.htmlx` 与 `report.html.txt` 都不是页面,`htm` 与 `html` 是同一个对象)。**一个断言同时回答这枚钮的两半**——画不画它,以及按下去把哪条路径交出去——因为两半本来就是同一个问题:写成两处,总有一天会出现一枚亮在它开不了的文件上的钮(`PreviewHeadTools` 那段注释里 D4 反复在说的那一类),或者一枚交出去的是**当前有焦点的**座位而不是它自己站着的那个座位的钮(两个预览 pane 时它交的就是另一个)。仓库自己合成的文档(git diff / show / graph)因此天然没有这枚钮:它没有文件,所以它不是页面,哪怕它在仓库里的路径正好叫 `design/ui-mockup.html`。  **【2026-08-23 改判,见 §7.10 ⑥】「既有的那一个」换人了**:判据从 `names_an_html_page`(只认 `html`/`htm`)改成 `path_opens_as_a_page`(页面类 `html`/`htm`/`pdf`)。本段每一句话原样成立——**一个断言回答这枚钮的两半**、**不许第二张扩展名表**、**真扩展名而非子串**、**没有文件就不是页面**——改的不是这几条纪律,恰恰是照这几条纪律办:同日上午页面类多了 `.pdf`,而这枚钮还在读那张更窄的表,于是「第二张表」这件事自己发生了一次(一个类、两种头:本机 `.html` 有 ↗、本机 `.pdf` 没有)。所以它改问页面类唯一写下来的那个谓词。
 
-**位置是「本类动词槽」,与 W1 三钮同位。** 小样把话说死在头上:每一个有自己动词的内容类,动词都坐在同一格——**工具行的最前面,在每个 pane 都有的那三枚(pop out / pin / close)之前**;`Save` 坐那里、`Edit source` 坐那里、W1 的 `[后退][前进][刷新]` 坐那里(§7.7 ②)。页面只有一个动词,它也坐那里。DOM 序因此是 `.pv-save`、`.pv-md-flip`、`.pv-browser`、`.pv-popout`、`.pv-pin`、`.pane-close`,几何仍从右往左取,所以头挤窄时先掉的仍是这一格里的东西、`×` 仍是最后一个走的。**显隐照 `.pv-tool` 那把梯子**:pane 没被指着就一枚都不画,指着了淡入到静息档,指在自己身上满档——这枚钮不是例外,它没有资格是例外。
+**位置是「本类动词槽」,与 W1 三钮同位。**(**落点被 2026-08-24 用户裁决改判,见 §7.7 ⑩**:这枚 ↗ 与三钮一起搬到了头下那一行——页面的那枚站在地址右侧、就叫「在浏览器打开」,文件的那枚化进面包屑行的 `Open ⌄ → 用系统默认程序打开`,都还是 `open_local_path` / 外交那一扇门。下面这段讲的「为什么它和 `Save` 同族、不和 pop-out 同族」原样成立,只是那一族整族换了行。) 小样把话说死在头上:每一个有自己动词的内容类,动词都坐在同一格——**工具行的最前面,在每个 pane 都有的那三枚(pop out / pin / close)之前**;`Save` 坐那里、`Edit source` 坐那里、W1 的 `[后退][前进][刷新]` 坐那里(§7.7 ②)。页面只有一个动词,它也坐那里。DOM 序因此是 `.pv-save`、`.pv-md-flip`、`.pv-browser`、`.pv-popout`、`.pv-pin`、`.pane-close`,几何仍从右往左取,所以头挤窄时先掉的仍是这一格里的东西、`×` 仍是最后一个走的。**显隐照 `.pv-tool` 那把梯子**:pane 没被指着就一枚都不画,指着了淡入到静息档,指在自己身上满档——这枚钮不是例外,它没有资格是例外。
 
 **画的是一枚裸 ↗,不是 `#i-float` 那枚带框的。** 两枚就画在彼此旁边,而它们说的是两件事:**带框的说「这个 pane 离开这棵树」,裸的说「这份内容离开这扇窗」**。并排两枚带框箭头等于一张图被要求同时表示两种「离开」,在十三个像素上没有人能分开——所以裸的那枚借的正是 `#i-float` 自己那支箭(同 1.2 描边、同圆头、同四十五度),只是把框去掉、把箭放大到一个没有框的字形该有的大小。**它也是预览头上唯一一枚挂 tooltip 的工具**,理由与 `PaneChevron` 那条一字不差而不是与它相反:`×`、文件夹、图钉、软盘都是本产品在别处教过的成语,**一枚带框的离框箭头也是**——这恰恰是麻烦所在,一枚**裸**箭头站在它旁边,必须有人说出它是哪一种离开,而画面里没有东西能说。串是 `Text::PreviewOpenInBrowser`(`Open in browser` / `在浏览器中打开`),只陈述事实、不点名任何一个浏览器——哪个浏览器答话是这台机器的事,`Text::ALL` 因此从 426 变成 **427**。
 
@@ -980,6 +1028,16 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 - **(甲) 无引号空格切断的前缀仍会指错。** `At D:\Program Files\Tool\run.ps1:12 char:3` 与 `npm ERR! path D:\Program Files\...` 会在 `D:\Program` 处切开,而它在很多机器上是真目录(对抗清单 1、2)。修不了的原因是每一条能修它的**词法**规则都与本模块已有的裁决冲突:边界表第 4 行已经裁定「无引号空格终止 token,后半截自己是一条引用」,所以「候选后跟空格再跟路径形状的字就可疑」会把每一条并排打印两个真路径的 `ls` 式输出一起弄黑。真正有分辨力的事实是**语义**的——`D:\Program` 是**目录**而引用还在往里走——读它意味着把更长的候选也拿去探盘,而这一片明确不许加磁盘工作(⑥ 的预算纪律)。同组的第 3、4 行**已修**,因为开引号是一次关于边界的声明,给得出空格给不出的证据。
 - **(乙) scrollback 里的相对引用会跟着 cwd 改绑。** `PrintedPathLinks` 只带**一个**工作目录——最后一次上报的那个——整屏每一行都从它量起,所以 `cd` 之后旧行会改指(对抗清单 64、87)。按行携带 resolution base 意味着 transcript 记下每一行是在哪个目录下打印的,那是**改「一行是什么」**而不是改「一行怎么读」。
 - **(丙) 否定判决的永久性与「稍后构建出来」相冲。** 「磁盘答过不在的名字永不再问」正是 2026-08-23 那条让拥挤 alt 屏还问得动真文件的裁决(⑥ (一));对抗清单 65 要的正相反。两者不能同时为真于一张只按 `PathBuf` 记的账,调和它要给否定答案一个 generation 或有效期,那是账本的合同变更。另有一条 (丁) 记在欠账里:**点击前复核存在性/类型**(对抗清单 66、90)属于五臂路由那一层,本片没有动它;还有一条:新增的六条形状拒绝住在**链接层**(`PrintedPathLinks::candidates_in`),内联图片那条线共用词法但还没有共用它们;以及**重接只装在实时面**(`implicit_hyperlinks` 一眼看得见相邻的两条逻辑行),冻结面 `layout_frozen_line` 一次只拿到一条逻辑行,冻进 scrollback 的那一对暂时只有第①门管着——结果是**不认**而不是指错,方向安全,补齐要给冻结面一条「下一行是谁」的入口。
+
+**表后新增:应用自排版的双列组(用户实机三案 2026-08-25;`an_application_column_layout_infers_no_reference_from_its_fragments` / `a_wrapped_file_link_behind_the_applications_own_gutter_is_still_one_link`)。** 由头是同一屏上的三张截图:Claude Code 的 `[file]` 卡片把一条 135 字符的路径按 58 列拆成三行,**每一行前面有一列装订线**(`›` / `[file]` / 空)、**后面还压着一列尺寸标注**(`(58.2K` / `B)`),于是屏幕上出现了 `scratchpadB)` 这样一段路径字与标注字同格不同义的文字。此前边界表的双物理行组(24–30 行)只见过「续行从第 0 列起」与「续行同缩进」两种,**两侧同时有外来墨的形状是新的**。**实机复现取证(`BT_PROBE_INPUT` 喂同形字节 + `BT_MOUSE_TRACE`)把链接层整条走了一遍,结论是链接层没有缺陷**:声明版重接成一条,`pane_press … pressed_target=Ours link=Some(HyperlinkHit { uri: "file:///C:/…/scratchpad/folio-pdf-test.pdf" … start: row 1 column 7 … end: row 3 column 25 })`,`activate_hyperlink … path=C:\…\folio-pdf-test.pdf exists=1 dir=0`——**span 只盖路径列,URI 与打印目标逐字相同**;推断版一个字都不画。
+
+| # | 屏上的样子 | 判决 | 为什么 |
+|---|---|---|---|
+| 40 | `>      C:\…\D--Developer-Bett (58.2K` / `[file] erTerminal\…\scratchpad`,**没有 OSC 8** | **三行都不画,也不重拼** | 有空格时标注列终止了上半截的 token,它够不到末列(闸①:应用有地方写却停了,那不是切);没有空格时 `(` 开了一对没人闭的括号,标注整个进了 token,拼出来的是**两个**候选而不是一个覆盖全部(闸③,而且它站在磁盘前面,连问都不问);下半截从装订线之后才开始,不是 visual 第 0 列(闸②) |
+| 41 | 第 40 行同一张图,但应用**用 OSC 8 声明了目标** | **一条链接**,跨三行,span 只盖路径列 | 目标是应用自己声明的,§7.1.5h 按**标签**重接,几何一句话都不说;装订线与标注列都不是链接格,`run_label` 只读链接格,所以 `B)` 从来不在承诺里 |
+| 42 | `␣␣C:\…\D--Developer-Bett` / `␣␣erTerminal\…\folio-pdf-test.pdf`(同缩进,磁盘上确有拼出来的目标) | **不重拼** | 第 27 行的实机形态。这一张最容易被当成缺陷来报,所以单独记档:一片诚实的空白就是正确结果 |
+
+**同批两件事不在这一层,写在这里免得下一个人再查一遍。** 其一,同屏一条**朴素**绝对路径(`  D:\Developer\BetterTerminal\test-assets\folio-pdf-test.pdf`,缩进两格、文件确在)不亮——新开一扇窗喂同一行**立刻亮**,所以词法与几何都没有意见,**refuse 它的是上面 (丙) 那条**:几分钟前同一块屏印过这条路径,印在**正要创建这个文件的那条命令里**(`--print-to-pdf="D:\…\test-assets\folio-pdf-test.pdf"`),那一刻磁盘答「不在」,而否判是永久的。(丙) 因此从「对抗清单要的相反」升级为**实机可复现**,任何「先印出要写到哪儿、再写」的程序都会撞上它。其二,这条链接点开之后**页道**给的是 `ERR_FILE_NOT_FOUND`——与 URI 无关:同一条 `file:` URL 交给系统 Edge 正常打开,同一个预览席里同目录的 `.html` 也正常渲染,换一条短路径的 `.pdf` 同样失败,`--allow-file-access-from-files`、`--allow-file-access`、`--disable-features=PdfOopif` 三个开关经 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 实测都无效(命令行确认已进浏览器进程)。**WebView2 的内置 PDF 阅读器读不了 `file:` 文档**是这一件的实貌,归 §7.10 页道,补法是虚拟主机映射而不是浏览器参数。
 
 **7.1.6c 设置面板的分组(用户裁决 2026-08-10,已落地)。** 小样字面就是**分组平铺**:`.content` 是一列 `.group-label` 各带自己的行(`design/ui-mockup.html` 2343/2406/2421/2452),不是一张扁平表。原生实现照此升级——组标题由**走一遍行表、在 `SettingsRow::group()` 变化处生成**,而不是在行表旁边另立一张组清单:高度、堆叠偏移、命中测试、绘制**四处同出一个推导**(R4 的教训:有一处忘了教,就是一个「能点不能见」的行),没有行的组自然不出标题也不占高度。行归组:Theme/Cursor/Tab layout/Sidebar → **Appearance**;Display formulas → **Rendered blocks**(小样把「排版对块做了什么」归在这一组,与它的 Maximum height 同列)。组间距照小样:首个标题 `margin-top:10px`(基础规则),其后每个标题 `margin-top:16px`(小样逐个内联覆盖)——多出的六个像素正是「隔开两组」与「隔开两行」的区别。行序仍守旧约:Sidebar 紧贴它依赖的 Tab layout 之下,Formulas 落在末尾作第二组的全部。**左侧类目导航本期不做**(既定裁决):它归 Settings 扩展块,与快捷键自定义面板同日出生——等这里的内容多到需要导航,再升级并回写小样。**2026-08-17 兑现,见 §7.1.6c-2**:组升为类目、类目各占一页、组标题成为页标题,导航由行表推导(没有行的类目不出词),小样同日回写。
 
@@ -1876,7 +1934,7 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 
 **⑦ 小样怎么读。** 网页座位在演示窗最后一张 tab（`[files | web]`，无 shell）；`?web=ok|runtime|load|crash|blocked|download` 把它切到六态之一，`?web=blocked&scheme=javascript` 换被拒的 scheme。这道读取器与 `?lonehead=` / `?icons=` 同类，但**不是临时的、不挑胜者**——六态全都要发。
 
-**⑧ 两个「钉」的命名单结案:预览 pane 那枚不是钉,是锁(Claude 定 2026-08-23,用户可否决;`crates/bt-app/src/{marks,seats,main,i18n,tooltip}.rs`、小样同日回写)。** **由头是 W1 自己挂的那一条**,原文在 `docs/plans/web-preview/plan.md` §5:「**`.pv-pin` 与 `row-pin` 两个「钉」同框**。头上的 `pin` 是「钉住这个 pane(下一个文件另开)」,切换器行上的 `pin` 是「收藏这个文件/网页」——两枚同一个图形、同一个词、相距 200px。**这不是本片引入的**(files 小单起就并存),但网页行让它更常同时出现。**建议单独起一个命名小单**,本片未动。」用户 2026-08-22 全按推荐拍板时,这一条的裁决就是「另开小单,不挡 Web」。本段是那张小单。
+**⑧ 两个「钉」的命名单结案:预览 pane 那枚不是钉,是锁(Claude 定 2026-08-23,**用户终审 2026-08-24:保持锁**;`crates/bt-app/src/{marks,seats,main,i18n,tooltip}.rs`、小样同日回写)。** **由头是 W1 自己挂的那一条**,原文在 `docs/plans/web-preview/plan.md` §5:「**`.pv-pin` 与 `row-pin` 两个「钉」同框**。头上的 `pin` 是「钉住这个 pane(下一个文件另开)」,切换器行上的 `pin` 是「收藏这个文件/网页」——两枚同一个图形、同一个词、相距 200px。**这不是本片引入的**(files 小单起就并存),但网页行让它更常同时出现。**建议单独起一个命名小单**,本片未动。」用户 2026-08-22 全按推荐拍板时,这一条的裁决就是「另开小单,不挡 Web」。本段是那张小单。
 
 **语义确实不同,而且不同的那一枚是哪一枚有答案。** 这扇窗里其实有**三**枚钉,不是两枚:tab 的钉(`Text::Pin`/`Unpin`/`TabTipPinned`——这张 tab 下次启动会回来,而且要先取消固定才关得掉)、菜单行的钉(`pins.json`,`Text::PinnedSection`——这个文件/文件夹/网页留在列表顶上,§7.5「收藏＝钉」)、预览头的钉(`ChromeTarget::PreviewPin`——这块 pane 别被复用,下一份内容另开一块)。**前两枚是同一句话说了两遍:这一个留在列表里**;而且它们同图形是**裁过的**——§7.5 那条「控件就是 tab 已经在用的那枚钉」是有意复用,不是巧合。第三枚说的不是「留在列表里」,它根本不在任何列表里,它说的是「别拿这块 pane 当垃圾桶」。**落单的是第三枚,所以改的是第三枚。**
 
@@ -1913,6 +1971,40 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 **Claude 定,用户可否决。** 可推翻的有三样:`Ctrl+Shift+L` 这个和弦、「未导航即撤走空白座位」这条(留着一张空白页也是一个自洽的答案,Chrome 的新标签页就是这么做的)、以及「空框即关框」。推翻其中任何一样,上面那四条红测就是它要改的清单。
 
 
+**⑩ 预览头 v2:名字退役为纯 title,地址与路径各自下沉到头下那一行(用户裁决 2026-08-24,两轮;`crates/bt-app/src/{seats,main,profiles,i18n,webhost}.rs`)。** 本条**推翻 W2 ①「名字即地址/地址不独立成行」**,并把 2026-08-22「三钮维持 pane 头右侧工具格」的落点改判到新的一行——**裁的不是那台机器,是那台机器的住址**:`RenameSubject::WebAddress` 一个零件没换,Enter/Escape/blur 与 `RenameExit` 的三句判决全保留,换的是它画在哪、点哪进得去。
+
+**一条带子,两种填法,因为它们是同一件家具。** 高度、发丝线、以及必须给它让开的 pane 几何完全同形(`PREVIEW_RAIL_BAR_LOGICAL_PX` 就是脚条那个 28),另写一份「席位减头再减二十八」正是 `preview_body_viewport` 那条注释一直在防的差一像素。填法由**内容**决定,不由席位决定:页面是**地址行**,有磁盘路径的文件是**面包屑行**,两者都没有的文档(diff、commit 读出的文件、提交图)**不长这一行**——「面包屑只长在有磁盘路径的预览上」是裁决原话。
+
+**地址行**:左 `‹ › ⟳` 常驻(从头上搬下来),中**地址居中**(按整条带子的中线居中,不是按两侧按钮剩下的空隙——读者的眼睛是拿窗口对中的,再夹回那段空隙里,所以窄 pane 是把框推着走而不是画到按钮底下),右 `⧉` 复制地址 + `↗` 在浏览器打开(**`↗` 也从头上搬下来了**:「在浏览器打开」是一个关于地址的动词,就该站在地址这一行)。点地址=进入编辑、整条全选,和 `Ctrl+L`/`Ctrl+Shift+L` 是**同一扇门**(`open_web_address_on`),所以三条路进去的框里装的东西不可能不一样。编辑时文字左对齐、静止时居中:插入点只有一个可以量的原点,就是框的左缘,一个边打字边居中的框会让光标以字母一半的速度往旁边滑。空白页的地址行开成空的(既有裁决)。
+
+**面包屑行**:路径段段可点,**每段落到它自己那一层**(`show_folder_in_files_column`——既有动词原样复用,有 files 列就 reroot、没有就开一列,键盘不动;这三件事都是 2026-08-21 那条裁决已经定过的,这里不重新实现一遍)。**末段粗体=本文件**;一个文件交出去的是它的父目录,因为列是拿目录扎根的。中段放不下就折成 `…`,**折的永远是中间**——根说这是哪棵树,末段说这是哪个文件,两头都不是读者能省的;点 `…` 弹的是这个文件菜单本身(既是全路径,也是**够得着**它的一条路)。右侧动词:`</>`(源码↔渲染,从头上搬下来;**没有面包屑行的 markdown 把它留在头上**,一个动词不该跟着一行一起消失)、`⧉` 复制完整路径、**`Open ⌄`**。
+
+**`Open ⌄` 背后是文件行右键的同一张菜单**(`FileMenuRow`),而不是第二张:「用什么打开这个文件」是关于文件的问题,不是关于哪张表面在问。菜单因此长出两行——**`在 files 列中定位`**(每台机器都有)与**编辑器行(存在才列)**,后者把 `const ALL: [Self; 3]` 换成了 `rows(editor)`;那条「长度不变的菜单,键盘走不到不存在的行」的理由**保留而不是丢弃**:长度只随一个机器事实变,每个读者都从同一处取这张表,没有任何地方拿自己算的下标去索引它。编辑器怎么找:`profiles::find_vscode`,照 `find_git` 的形状,只是 `PATH` 上放的是 `code.cmd` 这个壳,所以**拿壳当指针**、真正启动的是它祖父目录里的 `Code.exe`(把 `.cmd` 交给启动器就是交给一个命令解释器,会弹控制台、会多一层引号规则)。
+
+**⑩″ 「同一张菜单」改判成「同一个菜单机器,各自一份行表」(2026-08-25 合流,见 §7.15)。** 上一段说的是本片落地时的事实:那时这张菜单只有一张脸,面包屑与文件行共用它整份。同日 §7.15 给树的文件夹行也开了菜单,两条线于是在同一个 `FileMenuRow` 上相撞,合成的判决是:**类型共用,`rows()` 不共用**——`FileMenuSubject` 从两张脸(`File` / `Folder{expanded}`)长到三张,第三张 `Document` 就是面包屑这一面。谁的集合归谁:
+
+- **`File`**(树的文件行):`Open preview` / `Open with default app` / **编辑器行(存在才列)** ─── `Copy path` / `Insert path into terminal` / `Reveal in Explorer`。**没有 `在 files 列中定位`**——右键发生在 files 列**里面**,一行提出把你已经在看的那列定位给你看,是一行什么也不做的行。
+- **`Folder`**(树的文件夹行):`Expand`/`Collapse` / `New terminal here` ─── 同样那三行。
+- **`Document`**(面包屑的 `Open ⌄` 与折叠 `…` 那枚 chip):`Open in default app` / **编辑器行(存在才列)** / `在 files 列中定位` ─── `Copy path` / `Insert path into terminal`。**没有 `Open preview`**(弹这张菜单的就是预览本身)、**没有折叠**(它不是任何一棵树的行)、**也没有 `Reveal in Explorer`**(pane 自己的脚在上面一条带子上已经带着这个动词,隔六个像素再印一遍是同一个表面把一件事说了两次)。
+
+**「用系统默认程序打开」是一行而不是两行,穿两件介词衣服。** §7.15 ⑤ 交代的接缝就在这里合上:两条线各自写了一条字符串(`FileMenuOpenDefaultApp` 「Open in default app」与 `FileMenuOpenWith` 「Open with default app」),**两条都留下并且都在用**,因为它们各自说了对方说不出的话——树的行上它站在 `Open preview` 底下,`with` 是在跟上面那行作对比;面包屑上它是 `Open ⌄` 弹出的第一行,上面没有东西可对比。措辞归 `FileMenuRow::text(subject)`(和折叠行同一套办法:**两行**的措辞随 subject 转),但**动作只有一份**:`Runtime::open_local_path`,`PATHEXT` 那道拒绝写在门上。
+
+**横线的规则合流后仍然成立。** `hands_out_the_path()` = `Copy path` / `Insert path` / `Reveal in Explorer`,横线落在第一个交出路径的行前面——三张脸六种长度(每张脸乘机器有没有编辑器)全部落在正确的位置,而且**编辑器行加进上半截时横线自己往下走了一行**,这正是「写成性质而不是下标」当初要买的东西。`在 files 列中定位` 判在**线上**、`Reveal in Explorer` 判在**线下**,两者从不同框:前者搬的是本窗自己那列,搬完你看着的就是这一行,是一条**进去**的路;后者是把路径交给另一个程序。
+
+**头上剩下什么。** 身份行照旧(favicon + title + `⌄` + 徽章),重动词收敛为 `i-code`/`i-save`/`i-float`/`i-lock`/`i-close`;**`.pv-sep` 那根发丝线随之退役**——它引荐的是它左边那组,那组搬走了,一根左边没有东西的线是在告诉读者「下面还有」而其实没有。**名字不再是地址**:`page.title` 而已,`PageFacts::name` 那个「没标题就回落到 URL」的兜底一并退役(下一行正在说地址,回落只会让一个 pane 把一句话印两遍),双击一张页面的标题**什么也不开**——标题不是可改的东西,提出要改它就是提出要替别人的文档改名。
+
+**脚:两条不对称的判决,各自有各自的理由。** 面包屑行**接任**脚上那行路径,所以那条脚整条退役、文件 pane 的正文一像素不少(28 换 28);脚上活着的另一件职责——右手那句常驻事实(`Read-only · 64 KB`、`Not saved · changed on disk`)与「Saved / Revealed…」那一闪——搬到面包屑行的右手,路径让宽,这正是 2026-08-15 `foot_notice_split` 那条裁决原样抬高一行。**地址行不这么办**:页面的脚不只是一条带子,它还是**悬停行**(§7.7 ③:指针在链接上时它说解析后的目标),悬停行在这个 pane 里没有第二个地方可站,所以页面**保留脚**、地址行是加上去的。代价是页面的地址在上下各出现一次——**记为欠账,等用户裁**;可选的了结是把页面的脚改成纯悬停行(静止时空着),但那是砍一条既有裁决,不在本单里做。
+
+**这一行归 docked 席位。** 撕出去的浮窗预览没有跟着长这一行(float 有自己的一套头脚),**记为欠账**。
+
+**⑩′ 本地文件一律显示 OS 路径形(用户裁决 2026-08-25;`crates/bt-app/src/{webnav,webhost,main}.rs`)。** 由头是两张截图并排:网页道的脚写 `file:///D:/…` 配地球,旁边普通预览的脚写 `D:\…` 配文件夹——**同一块盘,两种拼法**。裁决把这条分裂一次性抹平:①**走引擎道的本地文件**(`file:` 页,pdf/html)在**地址行**显示 `D:\Developer\…` 反斜杠形;②**真网页**(http/https)照旧显示 URL,一个字符不动;③**脚上的路径同规**——文件预览那条已由面包屑接任,`file:` 页保留的那条(它同时是悬停行)也走 OS 形,连带指向本地文件的**悬停链接**也是。
+
+**显示是显示,身份是身份。** 内部铸的 URI 一个字符没改:引擎导航的是它、`Mint::admits` 比的是它、`session.json` 存的是它。抹平的只有「给人看的那一份」,而且只有一处实现——`shown_address`,行、它种下的编辑框、和底下那条带子共用,一个文件不可能被同一个 pane 拼出三种样子。**读不回来的 `file:` URL 原样显示**:`Mint::path_and_tail_of_file_url` 只认自己写出去的那四个转义与盘符绝对路径,别人造的 `file:` URL 是别人的字符串,猜它就是从一个从没指过路的东西里变出一条路。
+
+**回车那一头是查证过的,不是假设的。** 裁决要求先查 `webnav` 门认不认盘符路径——**不认**:`D:\x` 在 `split_scheme` 里裂成一个叫 `d` 的未知 scheme,和任何未知 scheme 一样被 `classify_scheme` 拒掉。所以编辑初值仍是 OS 形,**提交前在门口铸回 `file:`**(`file_url_of_local_path`,`WebSeat::go_to` 与 `would_go_to` 各调一次同一个函数)——人手打的路径与 files 列递过来的路径,到「要不要加载」这句话面前时是同一个字符串。`would_go_to` 也必须跟着换,否则那个框会对着自己刚种下去的拼法亮红,那是这扇窗说自己拼错了。
+
+**Claude 定,用户可否决的只有一处:** 面包屑行上那句常驻事实与闪字**共用右手一个槽位、一次只说一句**(闪字盖住事实,因为闪字只活一秒而事实不是)。其余每一件都直接出自 2026-08-24 的两轮裁决与 2026-08-25 这一条。
+
 #### W2 片② 落地:导航策略是一个纯模块(2026-08-22;`crates/bt-app/src/webnav.rs`,**只有模块与它的合同测试,一根接线也没有**)
 
 **这一片交付的是一条规则,不是一个能用的网页座位。** 方案 §3 的每一句话在这里成了类型与判定函数——无 I/O、无 COM、无宿主依赖,不查 DNS、不读 `hosts`、不问磁盘——产品里除了新文件本身,只多了 `main.rs` 的一行 `mod webnav;`。接线归后面几片:片① 在 `NavigationStarting` 上装这扇门,片③ 拿 `switcher_key` 当预览池的去重键,片④ 拥有地址栏 UI 与搜索引擎的选择,片⑤ 的 files 列入口调 `Mint::file`。本节记的是规则本身,以及每一条是从哪一条既有裁决或哪一次实测推出来的。
@@ -1940,8 +2032,8 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 **① 头上的六件,和它们各自的出处。**
 
 * **记号**:`ChromeMark::Globe`(小样 4358 的 `#i-globe` 逐字),由 `seats::pane_mark` 选,选的依据是 `leaf_marks` 里那一格——原本只装 shell 的那张表现在也装内容,因为 `pane_mark` 唯一说不出的就是「这片叶子拿的是什么」。一处选择,头、strip、拖拽幽灵、折叠条同时对,这就是小样 `pvMarkId` 那句话说一次的意思。**导航在途时这一格自转**:借的是本窗已经在转的那道弧(`indeterminate_start_milliturns` + `WINDOW_TAB_RING_INDETERMINATE_TURNS`),不是第二个 spinner;`strip_animation_deadline` 多一项把帧要回来,`Motion::Reduced` 下相位钉死在十二点、一帧都不要——这是本窗对「减少动态」的一贯答法。**站点自己的 favicon 后来画上了**(§7.13):同一格、同一个盒子,`ChromeMark::Globe` 多带一个 `favicon` 号,站点有图就画图、没有就还是这枚地球。
-* **名字即地址**:`RenameSubject::WebAddress`——**继承的不是形状是那台机器**,同一格、同一次双击、同一套 `.rename` 声明、同一组 Enter/Escape/blur、同一种沉默的拒绝。差别恰好是内容决定的那两处:整条 URL 全选(去一个地方几乎总是这个意思),以及**这个框吃掉头的剩余宽度**——`ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD` 是把 `flex: 1 1 auto` 写成一个没有哪个头给得起的数,让 `preview_head_geometry` 本来就有的夹持去发钱。**第二扇门是 `Ctrl+L`**(用户裁决)。**打不进去的地址在打字的地方说**:`PreviewNameEdit::refused` 把那一行写成 `--err`,回车什么都不做,页面原地不动——这是搜索胶囊对一条编译不了的正则的同一个答法。
-* **三钮**:`[后退][前进][刷新]` 坐在 `Save` / `Edit source` 那一格,**用户裁决 2026-08-22「同族优先于浏览器惯例」**。钉这条的不是一句不等式而是一个等式:一份文本文件的 `save` 盒子与一张网页的 `devtools` 盒子**是同一个矩形**(`the_three_buttons_sit_where_save_and_edit_source_sit`)——本类动词槽只有一格,两种内容轮流坐。三钮**常驻**(`PREVIEW_NAV_REST`),其余照旧随 pane 悬停淡入;走投无路的那一钮**暗到 `PREVIEW_NAV_SPENT` 且不接受指针**,不隐藏,因为一枚消失的钮会把它旁边两枚挪到指针底下。刷新钮在途中变停止钮,一个钮两个字形。启用态**全部来自 `HistoryChanged`**,不是每帧去问引擎——W1 报告点名的「不要照抄小样的 420ms 假节拍」在这里是一条事件而不是一个时钟。
+* ~~**名字即地址**:`RenameSubject::WebAddress`——**继承的不是形状是那台机器**,同一格、同一次双击、同一套 `.rename` 声明、同一组 Enter/Escape/blur、同一种沉默的拒绝。差别恰好是内容决定的那两处:整条 URL 全选(去一个地方几乎总是这个意思),以及**这个框吃掉头的剩余宽度**~~——**被 2026-08-24 用户裁决推翻,见 §7.7 ⑩**。那台机器一个零件没换,换的是住址:名字退役为纯 title、地址下沉到自己的行、双击不再是它的门。这一条里活下来并搬了家的部分:`ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD` 仍然是把 `flex: 1 1 auto` 写成一个没有哪个行给得起的数,只是现在让 `preview_rail_geometry` 的夹持去发钱;**第二扇门仍是 `Ctrl+L`**(用户裁决),第三扇门是按地址本身;**打不进去的地址仍在打字的地方说**——`PreviewNameEdit::refused` 把那一行写成 `--err`,回车什么都不做,页面原地不动,这是搜索胶囊对一条编译不了的正则的同一个答法。
+* **三钮**:~~`[后退][前进][刷新]` 坐在 `Save` / `Edit source` 那一格~~——**2026-08-24 用户裁决把这三枚搬到了地址行,见 §7.7 ⑩**;`Save` / `Edit source` 那一格还在,网页往里放的现在是 `devtools` 一枚。**用户裁决 2026-08-22「同族优先于浏览器惯例」**留下的等式原样钉着,只是钉在改判后的位置:一份文本文件的 `save` 盒子与一张网页的 `devtools` 盒子**是同一个矩形**(`the_developer_tools_sit_where_save_and_edit_source_sit`)——本类动词槽只有一格,两种内容轮流坐。三钮**常驻**(`PREVIEW_NAV_REST`),而它们搬进的那一行**整行常驻**——一行专讲「这是哪儿、怎么去」的家具,走近才出现就瞄不准,这是同一句话推广了一次而不是放松了一次;走投无路的那一钮**暗到 `PREVIEW_NAV_SPENT` 且不接受指针**,不隐藏,因为一枚消失的钮会把它旁边两枚挪到指针底下。刷新钮在途中变停止钮,一个钮两个字形。启用态**全部来自 `HistoryChanged`**,不是每帧去问引擎——W1 报告点名的「不要照抄小样的 420ms 假节拍」在这里是一条事件而不是一个时钟。
 * **DevTools**:悬停工具,`#i-code`,与 markdown 的 `Edit source` 同一个字形同一句话——底下是那个东西本身而不是它的一张渲染。**分隔线属于它后面那一组**:只在 pane 被指着时和它一起淡入,因为一条一侧空着的竖线是在给一段空白作介绍。
 * **查找**:同一颗胶囊的**第二个 host**(`Scope::SearchHost`)。这不是整洁而是承重:本 build 的绑定里**没有** `AreBrowserAcceleratorKeysEnabled`,所以这张表不拿走的键就是引擎留着的键,而引擎留着 `Ctrl+F` 的后果是座位里开出**第二个查找框**。换的只有谁数命中——`ICoreWebView2Find` 数,`counter_text` 那四种状态一个字没改。
 * **原有的三件**(pop out / pin / close)一格没动。
@@ -2374,7 +2466,7 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 由头是用户的实机截图：文件行右键弹出 `Open preview / Copy path / Insert path into terminal`，**文件夹行右键什么也不弹**。K143 立那条规矩时的理由写在 `Runtime::open_file_menu` 的注释里，一字不虚：「这三个动词都是关于**文件**的」。但那三个里有两个从来就只关心一条**路径**，而文件夹有路径；剩下那一个是「打开」，而文件夹有它自己的「打开」。所以规矩到期的不是判断，是前提。
 
-**① 两张菜单，一个枚举，一条横线的规则。** `FileMenuSubject`（`File` / `Folder { expanded }`）说这一次右键落在什么上，`file_menu(subject)` 说它有哪几行——**文件**：`Open preview` / `Open with default app` ─── `Copy path` / `Insert path into terminal` / `Reveal in Explorer`；**文件夹**：`Expand`（或 `Collapse`）/ `New terminal here` ─── 同样那三行。行是**一个平铺的枚举**而不是每张菜单一个，理由抄 `GitMenuRow` 自己那一段：三行在两张菜单上是同一件事，运行时的分发是一个 `match`，为 `Copy path` 造两个变体就是两条迟早走岔的代码。
+**① 两张菜单，一个枚举，一条横线的规则。**（**合流后是三张**：同日的预览头 v2 线把面包屑行的 `Open ⌄` 也挂在这个枚举上，第三张脸叫 `Document`——三张脸各自的行表写在 §7.7 ⑩″，那里也是这条接缝合上的地方。下面这段是本片落地时的原文，判断一条不改。）`FileMenuSubject`（`File` / `Folder { expanded }`）说这一次右键落在什么上，`file_menu(subject)` 说它有哪几行——**文件**：`Open preview` / `Open with default app` ─── `Copy path` / `Insert path into terminal` / `Reveal in Explorer`；**文件夹**：`Expand`（或 `Collapse`）/ `New terminal here` ─── 同样那三行。行是**一个平铺的枚举**而不是每张菜单一个，理由抄 `GitMenuRow` 自己那一段：三行在两张菜单上是同一件事，运行时的分发是一个 `match`，为 `Copy path` 造两个变体就是两条迟早走岔的代码。
 
 横线的位置**不再是手写的**。原型 8089 把它画在 `Open` 底下并写明它分的是「这一行**是**什么」与「它的**路径**是什么」；这条规则现在写成 `FileMenuRow::hands_out_the_path()`，横线落在第一个交出路径的行前面（`GitMenuRow::writes` 的同一手法）。于是上半截从一行长到两行，规则一个字不用改也不会被「把新行插错地方」破坏。菜单因此从定长 `[_; 3]` 变成 `Vec` + `FileMenuItem`，命中测试、键盘走位（`file_menu_step`）与画笔全部跟着走同一份列表——**键盘走的是这次弹出的那张菜单的行**，否则在文件夹菜单上按 ↓ 会走到一个玻璃上没有的 `Open`。
 
@@ -2386,9 +2478,11 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **⑤ `Open with default app` 走 `Runtime::open_local_path`，而这正是与预览头 v2 线的接缝。** 那条线正在给面包屑行做 `Open⌄`（系统默认 / VS Code / files 列定位）。「用这台机器登记的程序打开这一条路径」是**一个**动词，所以它必须是**一个**函数——`Runtime::open_local_path`（`crates/bt-app/src/main.rs`），预览头的 `↗` 已经在按它（`open_preview_in_browser`），本行也按它。**预览头 v2 的「系统默认」一行接这里，不要新写第二份**：门自己带着 `PATHEXT` 那道拒绝（§7.1.3「树是看文件的地方，旁边那个跑程序的东西叫终端」），拒绝写在门上而不是写在每个敲门的人身上。本片落地时那条线还没有一次提交进仓（`main..worktree-agent-*` 全空），所以接缝只能这样交代，不能替它改代码。
 
+**接缝已合（2026-08-25 合流）**：预览头 v2 落进 main 之后两条线在同一个 `FileMenuRow` 上相撞，合成的判决在 §7.7 ⑩″。这一段的要求被照着执行了——**动作只有一份** `Runtime::open_local_path`，两条线各自写的那条字符串（`FileMenuOpenDefaultApp` / `FileMenuOpenWith`）**都留下并且都在用**，因为它们是同一行在两张脸上的两件介词衣服（树的行上 `with` 在跟头顶的 `Open preview` 作对比，面包屑上没有东西可对比），措辞归 `FileMenuRow::text(subject)` 而不是归调用点。
+
 **⑥ 键盘那扇门跟着开。** `files::apply_tree_command` 的 `ContextMenu` 臂从「只有 `File`」放宽到两种节点；**走不通的两种行仍然沉默**，并且和第二次按下的沉默是同一种：`Cycle` 解析到自己的祖先（它的折叠会展开你已经站着的地方），`Notice` 根本不命名任何文件。这条判断写在 `crate::files_row_menu_subject` 一处，指针那扇门（`file_row_under`）与键盘那扇门（`raise_file_menu_on_row`）问的是它。
 
-**⑦ 红门九扇，逐条对应上面的判断**：`both_kinds_of_node_answer_the_menu_key`（files）、`a_file_rows_menu_draws_five_verbs_with_a_rule_under_the_second`、`a_folder_rows_menu_is_the_fold_a_shell_and_the_same_three_path_verbs`、`the_fold_row_turns_its_word_and_its_triangle_together`、`the_file_menus_keyboard_walk_clamps_at_both_ends_of_the_list_it_is_on`、`the_file_menu_answers_a_press_on_each_of_its_rows`（两个 subject 各走一遍）、`a_file_row_and_a_folder_row_each_raise_a_menu_and_the_dead_ends_raise_none`。每一扇的 RED GATE 写在测试头上，并且都被**真的翻红过**一次再翻回来。
+**⑦ 红门九扇，逐条对应上面的判断**：`both_kinds_of_node_answer_the_menu_key`（files）、`a_file_rows_menu_draws_its_doors_then_a_rule_then_its_path_verbs`（合流时改名并吃下编辑器行那一半，两台机器各走一遍）、`a_folder_rows_menu_is_the_fold_a_shell_and_the_same_three_path_verbs`、`the_fold_row_turns_its_word_and_its_triangle_together`、`the_default_app_door_is_one_row_wearing_each_faces_preposition`（合流新增）、`the_breadcrumbs_menu_is_the_document_faces_own_list`（合流新增）、`the_first_row_says_where_this_particular_press_is_going`（v2 那扇按 subject 重判）、`the_file_menus_keyboard_walk_clamps_at_both_ends_of_the_list_it_is_on`、`the_file_menu_answers_a_press_on_each_of_its_rows`（三个 subject × 两台机器）、`a_file_row_and_a_folder_row_each_raise_a_menu_and_the_dead_ends_raise_none`。每一扇的 RED GATE 写在测试头上，并且都被**真的翻红过**一次再翻回来。
 
 **⑧ 挂账。** ⓐ **浮窗里的文件夹行现在也有 `New terminal here`**，开出来的 tab 落在浮窗所属的那扇窗上——这是 tab 容器的自然结论，但「浮窗的动词该落在哪扇窗」这个更大的问题（§7.5 里「浮窗不是列」那条）没有被本片重新打开。ⓑ **`Open with default app` 对一个可执行文件会被门拒绝并出那张 `files_program_refused_notice` 卡**，与双击同一条路；「树永不跑程序」这条规矩没有被本片放宽一寸。ⓒ 用户开单写的 `Show in Explorer` 与落地的 `Reveal in Explorer` 见 ④。
 
