@@ -493,9 +493,21 @@ pub enum Text {
 
     // ── a file row's menu ──────────────────────────────────────────────────
     FileMenuOpenPreview,
+    /// **Hand it to the machine's own default program** (user ruling
+    /// 2026-08-24) — the breadcrumb row's `Open ⌄` names the door rather than
+    /// the destination, so this row is the one that says which door.
+    FileMenuOpenDefaultApp,
+    /// Stand the files column in this file's folder.
+    FileMenuShowInFiles,
     FileMenuCopyPath,
     /// The widest row, and therefore the one that decides the menu's width.
     FileMenuInsertPath,
+    /// The `Open ⌄` pill's caption on a preview's breadcrumb row.
+    ///
+    /// One word, because the pill is a *door* and the menu behind it is where
+    /// the destinations are named — a caption that said "Open with…" would be a
+    /// button restating the list it opens.
+    PreviewRailOpen,
 
     // ── the files tree ─────────────────────────────────────────────────────
     FilesLoading,
@@ -1900,6 +1912,9 @@ impl Text {
 
             // ── a file row's menu ──────────────────────────────────────────
             Self::FileMenuOpenPreview => pick(lang, "Open preview", "打开预览"),
+            Self::FileMenuOpenDefaultApp => pick(lang, "Open in default app", "用系统默认程序打开"),
+            Self::FileMenuShowInFiles => pick(lang, "Show in files column", "在 files 列中定位"),
+            Self::PreviewRailOpen => pick(lang, "Open", "打开"),
             Self::FileMenuCopyPath => pick(lang, "Copy path", "复制路径"),
             Self::FileMenuInsertPath => pick(lang, "Insert path into terminal", "把路径插入终端"),
 
@@ -2826,7 +2841,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 459] = [
+    pub const ALL: [Self; 462] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2923,6 +2938,9 @@ impl Text {
         Self::RootNoteParent,
         Self::PinnedSection,
         Self::FileMenuOpenPreview,
+        Self::FileMenuOpenDefaultApp,
+        Self::FileMenuShowInFiles,
+        Self::PreviewRailOpen,
         Self::FileMenuCopyPath,
         Self::FileMenuInsertPath,
         Self::FilesLoading,
