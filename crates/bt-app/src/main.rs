@@ -6997,7 +6997,7 @@ struct WindowRuntime {
     ///
     /// Keyed by the seat and not by the depth because only one segment is ever
     /// armed — every folder in the run breaks the chain on its way past.
-    preview_crumb_clicks: MultiClicks<SeatId>,
+    preview_crumb_clicks: MultiClicks<PreviewSurface>,
     /// **The pane head's own click pairing** (§7.1.6l), keyed by the seat whose
     /// head is being pressed.
     ///
@@ -7060,7 +7060,7 @@ struct WindowRuntime {
     /// Keyed by leaf for its neighbour's reason, and owned rather than `Copy`
     /// because a path has as many segments as it has — see
     /// [`seats::PreviewRailMeasure`].
-    preview_rail_measures: BTreeMap<LeafId, seats::PreviewRailMeasure>,
+    preview_rail_measures: BTreeMap<PreviewSurface, seats::PreviewRailMeasure>,
     /// The tree row's context menu, and the row it was raised on (K143; both
     /// kinds of row since the user ruling of 2026-08-25, and a preview's
     /// breadcrumb since the one of 2026-08-24).
@@ -8405,11 +8405,17 @@ struct {name} {{
     ///    the field out in the name cell **as well**, and a caret drawn in two
     ///    boxes is the bug the whole move was meant to end;
     /// ② the rail's editor lays out into the rail's own field, through
-    ///    `preview_rail_geometry` — a second derivation here is the invisible
+    ///    `preview_rail_geometry_in` — a second derivation here is the invisible
     ///    caret;
     /// ③ `TabRename::open_address` is still the only seeding and
     ///    `open_web_address_on` still the only door, so `Ctrl+L`, `Ctrl+Shift+L`
     ///    and the press on the field cannot disagree about what is in the box.
+    ///
+    /// **The three survived the row's move onto a second host** (§7.7 ⑩ 欠账,
+    /// 2026-08-25) and are spelled here as they now read: the field is laid out
+    /// against a *band* rather than against a pane, and the one door is keyed by
+    /// the page's leaf rather than by a seat — which is the whole of what let a
+    /// torn-off page answer `Ctrl+L` at all.
     #[test]
     fn the_address_editor_moved_to_the_rail_and_kept_its_machine() {
         let head = fn_body("dress_preview_name_editor");
@@ -8423,8 +8429,13 @@ struct {name} {{
             "② and the rail's editor is the address's"
         );
         assert!(
-            rail.contains("seats::preview_rail_geometry(") && rail.contains(".address"),
+            rail.contains("seats::preview_rail_geometry_in(") && rail.contains(".address"),
             "② laid out into the very field the paint and the hit test read"
+        );
+        assert!(
+            rail.contains("self.rail_band(surface, scale)"),
+            "② against the band its own host cut, which is the one thing a \
+             docked pane and a torn-off window genuinely disagree about"
         );
         assert!(
             rail.contains("self.window.rename_caret_line = Some("),
@@ -8439,10 +8450,18 @@ struct {name} {{
             "③ the door `Ctrl+L`, `Ctrl+Shift+L` and the press all go through"
         );
         assert!(
-            fn_body("open_web_address").contains("self.open_web_address_on(seat)")
-                && fn_body("open_address_here").contains("self.open_web_address_on(seat)"),
+            fn_body("open_web_address").contains("self.open_web_address_on(leaf)")
+                && fn_body("open_address_here").contains("self.open_web_address_on(leaf)"),
             "③ and the two chords go through it rather than seeding for \
              themselves"
+        );
+        // ③ **And `Ctrl+L` asks which page has the keyboard rather than which
+        // seat does** (§7.7 ⑩ 欠账): `focused_web_seat` is docked-only by
+        // design, so a chord routed through it answers nothing over a torn-off
+        // page.
+        assert!(
+            fn_body("open_web_address").contains("self.page_with_the_keyboard()"),
+            "③ and the chord is in force wherever the page is"
         );
         let pressed = fn_body("chrome_mouse_input");
         let address_arm = pressed
@@ -8450,14 +8469,104 @@ struct {name} {{
             .nth(1)
             .expect("the address field's own press arm");
         assert!(
-            address_arm.contains("self.open_web_address_on(seat)?"),
-            "③ and so does the press on the field"
+            address_arm.contains("seats::PreviewRailPart::Address")
+                && fn_body("press_preview_rail").contains("self.open_web_address_on(leaf)"),
+            "③ and so does the press on the field, through the one ladder both \
+             hosts climb"
         );
         // ③ The exits are untouched: the field still leaves by the three
         // `RenameExit` sentences and by no fourth one minted here.
         assert!(
             !rail.contains("finish_rename("),
             "③ dressing a field never ends one"
+        );
+    }
+
+    /// RED (§7.7 ⑩ 欠账, 2026-08-25) — **a torn-off page's address field is not
+    /// this tab's chrome, so no press out here can be inside it.**
+    ///
+    /// The blur router turns whatever editor is open into the
+    /// [`seats::ChromeTarget`] a press would have to land on to be a caret
+    /// rather than a blur. A floated page still carries the [`LeafId`] of the
+    /// seat it was popped out of, and that seat's number can perfectly well
+    /// still exist in this tab wearing a *terminal* — so the arm that only asked
+    /// `leaf.tab == self.id` named a pane the field is not in, and a press on
+    /// that pane's head would have read as a press inside an address field in a
+    /// window three inches away.
+    ///
+    /// The name cell's own arm two lines up has said this all along — 「a
+    /// float's head is not chrome, so there is no target that can be inside it
+    /// and every press out here is a blur」 — and the address field simply had
+    /// not been asked the question yet, because until today it could not be open
+    /// on a float at all.
+    ///
+    /// MUTATION: drop the `float_holding_the_page` clause and this goes red.
+    #[test]
+    fn a_floated_pages_address_field_names_no_target_in_this_tabs_chrome() {
+        let router = fn_body("chrome_mouse_input");
+        let arm = router
+            .split("RenameSubject::WebAddress { leaf }")
+            .nth(1)
+            .expect("the address field's own blur arm");
+        let head = &arm[..arm.find("=>").unwrap_or(arm.len())];
+        assert!(
+            head.contains("self.float_holding_the_page(*leaf).is_none()"),
+            "a field open on a torn-off page must not claim a seat in the tree \
+             it left:\n{head}"
+        );
+    }
+
+    /// PIN (§7.7 ⑩ 欠账, 2026-08-25) — **a torn-off preview wears the pane's own
+    /// row, through the pane's own functions.**
+    ///
+    /// The debt was one sentence — 「撕出去的浮窗预览没有跟着长这一行(float 有自
+    /// 己的一套头脚)」 — and the way to pay it wrongly is written on its face:
+    /// a window with its own head and its own foot invites a third address row
+    /// beside the two that already exist. What this pins is that there is not
+    /// one. Four seams, each of which would break differently:
+    ///
+    /// ① the window **asks for** the row the way a pane does, so what it wears
+    ///    is a fact about its content and not about its chassis;
+    /// ② it **dresses** the row through `dress_preview_rail` — one measurement,
+    ///    one record in `preview_rail_measures`, so the tip, the menu and the
+    ///    press read what this frame drew;
+    /// ③ it **draws** it with `seats::push_preview_rail`, the pane's own paint;
+    /// ④ it **resolves** a press against the very geometry that paint read, and
+    ///    a press becomes a verb in `press_preview_rail` — the one ladder, which
+    ///    both `chrome_mouse_input` and `press_float` climb.
+    #[test]
+    fn a_torn_off_preview_wears_the_panes_row_through_the_panes_own_functions() {
+        let tools = fn_body("float_head_tools");
+        assert!(
+            tools.contains("self.preview_rail_kind(surface)")
+                && tools.contains("rail: rail.is_some()"),
+            "① a window asks for the row with the predicate a pane is asked with"
+        );
+        assert!(
+            tools.contains("&& rail.is_none()"),
+            "① and hands its flip down to that row, so no window wears two"
+        );
+        let layer = fn_body("preview_float_layer");
+        assert!(
+            layer.contains("self.dress_preview_rail(surface, scale)"),
+            "② dressed by the pane's own dressing"
+        );
+        assert!(
+            layer.contains("seats::push_preview_rail(") && layer.contains("geometry.rail"),
+            "③ and drawn by the pane's own paint, into the band the chassis \
+             reserved"
+        );
+        let hit = fn_body("float_hit_at");
+        assert!(
+            hit.contains("self.rail_geometry(PreviewSurface::Float(id), scale)")
+                && hit.contains("rail.as_ref()"),
+            "④ and a press is resolved against the very geometry that paint read"
+        );
+        assert!(
+            fn_body("press_float")
+                .contains("self.press_preview_rail(PreviewSurface::Float(id), part)")
+                && fn_body("chrome_mouse_input").contains("self.press_preview_rail(surface,"),
+            "④ and both hosts turn a part into a verb in one place"
         );
     }
 
@@ -26988,7 +27097,12 @@ impl Runtime<'_> {
             .seats
             .preview_seats()
             .into_iter()
-            .filter_map(|seat| Some((seat, self.dress_preview_rail(seat, scale)?)))
+            .filter_map(|seat| {
+                Some((
+                    seat,
+                    self.dress_preview_rail(self.preview_here(seat), scale)?,
+                ))
+            })
             .collect();
         // **The foot's surviving phrase, hung on the row that replaced it.** A
         // breadcrumb retires the strip along the bottom, and the ruling is
@@ -27016,7 +27130,7 @@ impl Runtime<'_> {
                 &frame.notice,
                 seats::FILES_FOOT_FONT_LOGICAL_PX * scale,
             );
-            let here = self.leaf_here(*seat);
+            let here = self.preview_here(*seat);
             self.window
                 .preview_rail_measures
                 .insert(here, frame.measure.clone());
@@ -27513,7 +27627,10 @@ impl Runtime<'_> {
                 };
                 let to_source = !self.preview_md_source(self.preview_here(seat));
                 anchors.push(
-                    tooltip::TooltipAnchorId::PreviewRail(seat, seats::PreviewRailTip::Flip),
+                    tooltip::TooltipAnchorId::PreviewRail(
+                        self.preview_here(seat),
+                        seats::PreviewRailTip::Flip,
+                    ),
                     box_,
                     preview_rail_tip_text(
                         seats::PreviewRailTip::Flip,
@@ -35084,13 +35201,12 @@ impl Runtime<'_> {
     /// segment from the path, and a path's last component and a buffer's name
     /// are the same string by construction — but only one of the two is the
     /// thing the commit will move.
-    fn open_preview_crumb_rename(&mut self, seat: SeatId) -> Result<()> {
+    fn open_preview_crumb_rename(&mut self, surface: PreviewSurface) -> Result<()> {
         // A page's rail is an address and has no crumbs to double-click; a rail
         // that is not showing a document has nothing to rename.
-        if self.seat_holds_a_page(seat) {
+        if self.rail_page(surface).is_some() {
             return Ok(());
         }
-        let surface = self.preview_here(seat);
         let Some(buffer) = self.preview_buffer_on(surface) else {
             return Ok(());
         };
@@ -35262,13 +35378,17 @@ impl Runtime<'_> {
     /// it be centred.
     fn dress_preview_address_editor(
         &mut self,
-        seat: SeatId,
+        surface: PreviewSurface,
         scale: f32,
         measure_in: seats::PreviewRailMeasure,
     ) -> (seats::PreviewRailMeasure, Option<seats::TabEdit>) {
-        let here = self.leaf_here(seat);
+        // **The page this surface is showing, docked or torn off** (§7.7 ⑩ 欠账,
+        // 2026-08-25). The editor was keyed by leaf on the day it was written
+        // and is keyed by leaf still — what moved is only the question of which
+        // leaf this *row* is about, which a closed seat could no longer answer.
+        let here = self.rail_page(surface);
         let editing = self.window.rename.as_ref().is_some_and(
-            |editor| matches!(editor.subject, RenameSubject::WebAddress { leaf: at } if at == here),
+            |editor| matches!(editor.subject, RenameSubject::WebAddress { leaf: at } if Some(at) == here),
         );
         if !editing {
             return (measure_in, None);
@@ -35277,10 +35397,10 @@ impl Runtime<'_> {
             address_width: ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD,
             ..measure_in
         };
-        let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
+        let Some(band) = self.rail_band(surface, scale) else {
             return (measure_in, None);
         };
-        let Some(field) = seats::preview_rail_geometry(rect, scale, &measure_in).address else {
+        let Some(field) = seats::preview_rail_geometry_in(band, scale, &measure_in).address else {
             return (measure_in, None);
         };
         let inset = (seats::PREVIEW_ADDRESS_PAD_X_LOGICAL_PX * scale).round();
@@ -35360,8 +35480,7 @@ impl Runtime<'_> {
     /// is a question about the window rather than a value carried between the
     /// two: a copy passed along would be a second place the answer lives, and
     /// the two readers run either side of a geometry pass.
-    fn open_crumb_draft(&self, seat: SeatId) -> Option<String> {
-        let surface = self.preview_here(seat);
+    fn open_crumb_draft(&self, surface: PreviewSurface) -> Option<String> {
         self.window.rename.as_ref().and_then(|editor| {
             matches!(&editor.subject, RenameSubject::PreviewCrumb { surface: at, .. } if *at == surface)
                 .then(|| editor.text.clone())
@@ -35385,13 +35504,13 @@ impl Runtime<'_> {
     /// middle of the path away before it takes room from the file.
     fn dress_preview_crumb_editor(
         &mut self,
-        seat: SeatId,
+        surface: PreviewSurface,
         scale: f32,
         measure_in: &seats::PreviewRailMeasure,
     ) -> Option<seats::TabEdit> {
-        self.open_crumb_draft(seat)?;
-        let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
-        let geometry = seats::preview_rail_geometry(rect, scale, measure_in);
+        self.open_crumb_draft(surface)?;
+        let geometry =
+            seats::preview_rail_geometry_in(self.rail_band(surface, scale)?, scale, measure_in);
         let box_ = geometry
             .crumbs
             .iter()
@@ -38003,6 +38122,19 @@ impl Runtime<'_> {
         self.window
             .preview_head_measures
             .retain(|leaf, _| alive.contains(&PreviewSurface::Seat(*leaf)));
+        // **And the row's, on both hosts** (§7.7 ⑩ 欠账, 2026-08-25). The
+        // sentence above is the whole argument and the only thing that differs
+        // is the reach: a rail is measured for a window as well as for a seat,
+        // and a float's epoch is minted from a counter exactly as a seat id is,
+        // so a width left behind for a window that has gone would come back as
+        // the next pop-out's row laid out to a path nobody is looking at. A seat
+        // on another tab is left alone for the seat entries' own reason — `alive`
+        // is the tree that is solved.
+        let here = self.id;
+        self.window.preview_rail_measures.retain(|surface, _| {
+            alive.contains(surface)
+                || matches!(surface, PreviewSurface::Seat(leaf) if leaf.tab != here)
+        });
         if self
             .preview_edit_focus
             .is_some_and(|surface| !alive.contains(&surface))
@@ -38704,7 +38836,7 @@ impl Runtime<'_> {
                     // with no path grows no breadcrumb, and its flip stays here
                     // rather than vanishing with the row it would have stood in.
                     flip: buffer.ftype == preview::PreviewFtype::Markdown
-                        && self.preview_rail_kind(seat).is_none(),
+                        && self.preview_rail_kind(self.preview_here(seat)).is_none(),
                     ..seats::PreviewHeadTools::default()
                 },
                 buffer.dirty,
@@ -38842,8 +38974,7 @@ impl Runtime<'_> {
     /// asks: a buffer's own path, or a picture's. A composed document — a diff,
     /// a commit's reading of a file, a graph — answers `None`, and a seat that
     /// answers `None` grows no breadcrumb.
-    fn preview_rail_path(&self, seat: SeatId) -> Option<PathBuf> {
-        let surface = self.preview_here(seat);
+    fn preview_rail_path(&self, surface: PreviewSurface) -> Option<PathBuf> {
         self.preview_buffer_on(surface)
             .and_then(|buffer| buffer.source.file_path().map(Path::to_path_buf))
             .or_else(|| {
@@ -38860,12 +38991,97 @@ impl Runtime<'_> {
     /// is the address that the reader is navigating with — the path is still one
     /// press away, in the `Open ⌄` the address row does not carry, which is the
     /// trade the ruling made when it said a page's row is its address.
-    fn preview_rail_kind(&self, seat: SeatId) -> Option<seats::PreviewRailKind> {
-        if self.seat_holds_a_page(seat) {
+    fn preview_rail_kind(&self, surface: PreviewSurface) -> Option<seats::PreviewRailKind> {
+        if self.rail_page(surface).is_some() {
             return Some(seats::PreviewRailKind::Address);
         }
-        self.preview_rail_path(seat)
+        self.preview_rail_path(surface)
             .map(|_| seats::PreviewRailKind::Crumbs)
+    }
+
+    /// **Which live page one preview surface is showing**, docked or torn off
+    /// (§7.7 ⑩ 欠账, 2026-08-25).
+    ///
+    /// [`Self::web_on`] asked of a surface instead of a seat, and it is the seam
+    /// the whole of this row's move across turns on: a docked page is the page
+    /// on this tab's leaf, a floated one is the page the window is *carrying*
+    /// ([`float::FloatPreview::page`]), and `pop_out_preview` closed the seat
+    /// that used to be able to answer for it. A glance card never holds a page —
+    /// a hover is a question and a browser is not something a question starts.
+    fn rail_page(&self, surface: PreviewSurface) -> Option<LeafId> {
+        match surface {
+            PreviewSurface::Seat(leaf) => self.window.web.contains_key(&leaf).then_some(leaf),
+            PreviewSurface::Float(id) => self.page_carried_by(id),
+            PreviewSurface::Peek => None,
+        }
+    }
+
+    /// [`Self::web_on`] for a surface — the pair's second half, moved across.
+    fn web_of(&self, surface: PreviewSurface) -> Option<&webhost::WebSeat> {
+        self.window.web.get(&self.rail_page(surface)?)
+    }
+
+    /// **The band one preview surface's rail rides on**, in physical pixels.
+    ///
+    /// The two hosts' one genuine disagreement, and the only thing
+    /// [`seats::preview_rail_geometry_in`] has to be told: a docked seat's row is
+    /// its pane less its head ([`seats::preview_rail_band`]), a window's is the
+    /// strip its own chassis reserved ([`float::FloatGeometry::rail`]).
+    /// Everything downstream of this rectangle — where each control stands, what
+    /// the pointer is on, where a caret goes — is one derivation for both.
+    ///
+    /// `None` is "this surface wears no row", which is a real answer for three
+    /// different reasons and none of them is a failure: a document with nothing
+    /// to point at, a pane on a tab that is not in front, and a window squeezed
+    /// past its own floor.
+    fn rail_band(&self, surface: PreviewSurface, scale: f32) -> Option<[f32; 4]> {
+        match surface {
+            PreviewSurface::Seat(leaf) => {
+                if leaf.tab != self.id {
+                    return None;
+                }
+                let rect = seats::full_pane_rect(&self.seat_layout, leaf.seat)?;
+                Some(seats::preview_rail_band(rect, scale))
+            }
+            PreviewSurface::Float(id) => {
+                let win = self.window.float.drawn().find(|win| win.epoch == id)?;
+                let fade = self.float_fade_of(win, Instant::now(), scale);
+                // `0.0` for the `DOCK` caption, exactly as `float_body_rect`
+                // passes: the row is the frame less its border, its head and its
+                // foot, and none of those turn on what the head has room for. It
+                // is what keeps this an `&self` question, which every reader of
+                // it is.
+                float::float_geometry(
+                    risen_frame(win.frame, fade),
+                    win.mode,
+                    scale,
+                    0.0,
+                    self.float_head_tools(id),
+                )
+                .rail
+            }
+            PreviewSurface::Peek => None,
+        }
+    }
+
+    /// **One preview rail, exactly as it was drawn this frame.**
+    ///
+    /// The band this surface stands on and the widths the paint stored for it,
+    /// put together in the one place — because a tip, a menu and a press that
+    /// each built their own would be three rows disagreeing about where a button
+    /// is. [`Self::preview_rail_measure`]'s own sentence, with the derivation
+    /// finished rather than left to each caller.
+    fn rail_geometry(
+        &self,
+        surface: PreviewSurface,
+        scale: f32,
+    ) -> Option<seats::PreviewRailGeometry> {
+        let measure = self.preview_rail_measure(surface)?;
+        Some(seats::preview_rail_geometry_in(
+            self.rail_band(surface, scale)?,
+            scale,
+            &measure,
+        ))
     }
 
     /// Recompute which seats wear a rail and tell the tree, re-solving when the
@@ -38879,7 +39095,7 @@ impl Runtime<'_> {
             .seats
             .preview_seats()
             .into_iter()
-            .filter_map(|seat| Some((seat, self.preview_rail_kind(seat)?)))
+            .filter_map(|seat| Some((seat, self.preview_rail_kind(self.preview_here(seat))?)))
             .collect();
         if !self.seats.set_rails(rails) {
             return Ok(());
@@ -38900,8 +39116,12 @@ impl Runtime<'_> {
     /// segments, the widths the geometry has to be laid out to, and the open
     /// editor when this rail is the one holding it. A seat with no rail answers
     /// `None`, and the paint draws nothing rather than an empty band.
-    fn dress_preview_rail(&mut self, seat: SeatId, scale: f32) -> Option<PreviewRailFrame> {
-        let kind = self.preview_rail_kind(seat)?;
+    fn dress_preview_rail(
+        &mut self,
+        surface: PreviewSurface,
+        scale: f32,
+    ) -> Option<PreviewRailFrame> {
+        let kind = self.preview_rail_kind(surface)?;
         let font = seats::PREVIEW_RAIL_FONT_LOGICAL_PX * scale;
         let mut frame = PreviewRailFrame {
             measure: seats::PreviewRailMeasure {
@@ -38920,7 +39140,7 @@ impl Runtime<'_> {
         };
         match kind {
             seats::PreviewRailKind::Address => {
-                let page = self.web_on(seat).map(|web| web.page().clone())?;
+                let page = self.web_of(surface).map(|web| web.page().clone())?;
                 // **The committed address, and the refused one when a seat's one
                 // navigation was turned away** — the same pair the head's name
                 // cell used to fall back through, arriving where it belongs now
@@ -38928,7 +39148,7 @@ impl Runtime<'_> {
                 // was handed an address it would not go to would be this window
                 // forgetting what it was asked for.
                 let refused_address = self
-                    .web_on(seat)
+                    .web_of(surface)
                     .and_then(webhost::WebSeat::fault)
                     .and_then(webhost::WebFault::refused_address);
                 frame.address = shown_address(&if page.url.is_empty() {
@@ -38948,7 +39168,7 @@ impl Runtime<'_> {
                 );
             }
             seats::PreviewRailKind::Crumbs => {
-                let path = self.preview_rail_path(seat)?;
+                let path = self.preview_rail_path(surface)?;
                 // **The draft stands in for the tail while a box is open on it**
                 // (B5, user ruling 2026-08-25). The whole row is laid out to the
                 // widths measured here, so substituting the draft *before* the
@@ -38956,7 +39176,7 @@ impl Runtime<'_> {
                 // typing instead of the letters running out of a rectangle cut
                 // for the old name. Every other segment is untouched: the
                 // folders above the file have not moved.
-                let drafted = self.open_crumb_draft(seat);
+                let drafted = self.open_crumb_draft(surface);
                 let last = crumb_segments(&path).len().saturating_sub(1);
                 for (at, (name, target)) in crumb_segments(&path).into_iter().enumerate() {
                     let name = match &drafted {
@@ -38974,7 +39194,6 @@ impl Runtime<'_> {
                     frame.segments.push(name);
                     frame.targets.push(target);
                 }
-                let surface = self.preview_here(seat);
                 let md_source = self.preview_md_source(surface);
                 frame.measure.flip = self
                     .preview_buffer_on(surface)
@@ -38989,7 +39208,8 @@ impl Runtime<'_> {
                 );
             }
         }
-        let (tools, edit) = self.dress_preview_address_editor(seat, scale, frame.measure.clone());
+        let (tools, edit) =
+            self.dress_preview_address_editor(surface, scale, frame.measure.clone());
         frame.measure = tools;
         frame.edit = edit;
         // **And the tail's box, when this rail is the one holding it** (B5). The
@@ -38998,7 +39218,7 @@ impl Runtime<'_> {
         // open address field; it is written second because the measurement it
         // reads is the one the line above settled.
         if frame.edit.is_none() {
-            frame.edit = self.dress_preview_crumb_editor(seat, scale, &frame.measure);
+            frame.edit = self.dress_preview_crumb_editor(surface, scale, &frame.measure);
         }
         // The same door the commit goes through, asked without knocking — an
         // empty field is unfinished rather than wrong, so it does not light up.
@@ -39016,10 +39236,9 @@ impl Runtime<'_> {
             .rename
             .as_ref()
             .is_some_and(|editor| webhost::WebSeat::would_go_to(&editor.text, engine));
-        let here = self.leaf_here(seat);
         self.window
             .preview_rail_measures
-            .insert(here, frame.measure.clone());
+            .insert(surface, frame.measure.clone());
         Some(frame)
     }
 
@@ -39031,11 +39250,8 @@ impl Runtime<'_> {
     /// so it reads the number the picture was built from. A seat whose rail has
     /// not been drawn yet has no entry, and a row that has never been drawn has
     /// nothing to press.
-    fn preview_rail_measure(&self, seat: SeatId) -> Option<seats::PreviewRailMeasure> {
-        self.window
-            .preview_rail_measures
-            .get(&self.leaf_here(seat))
-            .cloned()
+    fn preview_rail_measure(&self, surface: PreviewSurface) -> Option<seats::PreviewRailMeasure> {
+        self.window.preview_rail_measures.get(&surface).cloned()
     }
 
     /// **Every control of every preview rail, registered for a tip** (user
@@ -39047,22 +39263,38 @@ impl Runtime<'_> {
     /// five are a *path* rather than a phrase.
     fn preview_rail_tip_anchors(&mut self, anchors: &mut tooltip::TooltipAnchors) {
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        for seat in self.seats.preview_seats() {
-            let Some(measure) = self.preview_rail_measure(seat) else {
+        // **Every rail on the glass and not only the tree's** (§7.7 ⑩ 欠账,
+        // 2026-08-25). A `⧉` does not stop needing a word for what it copies
+        // because the pane it stood in was torn into a window, and the anchor id
+        // says so by carrying the surface — [`tooltip::TooltipAnchorId::PreviewRail`].
+        let surfaces: Vec<PreviewSurface> = self
+            .seats
+            .preview_seats()
+            .into_iter()
+            .map(|seat| self.preview_here(seat))
+            .chain(
+                self.window
+                    .float
+                    .live_windows()
+                    .filter(|win| win.preview().is_some())
+                    .map(|win| PreviewSurface::Float(win.epoch)),
+            )
+            .collect();
+        for surface in surfaces {
+            let Some(measure) = self.preview_rail_measure(surface) else {
                 continue;
             };
-            let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
+            let Some(geometry) = self.rail_geometry(surface, scale) else {
                 continue;
             };
-            let geometry = seats::preview_rail_geometry(rect, scale, &measure);
             let segments = self
-                .preview_rail_path(seat)
+                .preview_rail_path(surface)
                 .map(|path| crumb_segments(&path))
                 .unwrap_or_default();
             // The glyph names the *destination*, which is the rail's own rule
             // read back: the button turns the pane to whichever face it is not
             // showing.
-            let to_source = !self.preview_md_source(self.preview_here(seat));
+            let to_source = !self.preview_md_source(surface);
             for (tip, box_) in seats::preview_rail_tip_boxes(&geometry) {
                 let text = preview_rail_tip_text(
                     tip,
@@ -39071,7 +39303,11 @@ impl Runtime<'_> {
                     &geometry.folded,
                     to_source,
                 );
-                anchors.push(tooltip::TooltipAnchorId::PreviewRail(seat, tip), box_, text);
+                anchors.push(
+                    tooltip::TooltipAnchorId::PreviewRail(surface, tip),
+                    box_,
+                    text,
+                );
             }
         }
     }
@@ -39109,7 +39345,7 @@ impl Runtime<'_> {
             // a breadcrumb row wears its flip down there, so the head does not
             // reserve a box for it (user ruling 2026-08-24).
             flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown)
-                && self.preview_rail_kind(seat).is_none(),
+                && self.preview_rail_kind(surface).is_none(),
             // **A page on this seat** (§7.7 ②). The seam slice ③ moves: today a
             // window has one page and it names its own seat, and when the
             // preview pool learns about pages this becomes a question about the
@@ -39238,7 +39474,7 @@ impl Runtime<'_> {
         // *path* is what stops being printed: it is the one thing the row above
         // now says, and a band naming the file a row above it already names is
         // the duplication the ruling retired.
-        let railed = self.preview_rail_kind(seat) == Some(seats::PreviewRailKind::Crumbs);
+        let railed = self.preview_rail_kind(surface) == Some(seats::PreviewRailKind::Crumbs);
         let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
         let saved = self.preview_save_notice(surface, now) == Some(preview::preview_saved_notice());
         let flash = if revealed {
@@ -39279,8 +39515,12 @@ impl Runtime<'_> {
     /// The same clipboard door a file row's `Copy path` goes through, which is
     /// what makes the two rows' identical glyph an honest promise: one verb,
     /// two kinds of address.
-    fn copy_preview_address(&mut self, seat: SeatId) -> Result<()> {
-        let Some(url) = self.web_on(seat).map(|web| web.page().url.clone()) else {
+    fn copy_preview_address(&mut self, surface: PreviewSurface) -> Result<()> {
+        let Some(url) = self
+            .rail_page(surface)
+            .and_then(|leaf| self.window.web.get(&leaf))
+            .map(|web| web.page().url.clone())
+        else {
             return Ok(());
         };
         if url.is_empty() {
@@ -39317,13 +39557,13 @@ impl Runtime<'_> {
     /// run is folded: `PreviewCrumbBox::depth` is an index into the whole path
     /// and the tail is its last component whether or not the middle survived the
     /// fold.
-    fn preview_crumb_is_the_tail(&self, seat: SeatId, depth: usize) -> bool {
-        self.preview_rail_path(seat)
+    fn preview_crumb_is_the_tail(&self, surface: PreviewSurface, depth: usize) -> bool {
+        self.preview_rail_path(surface)
             .is_some_and(|path| depth + 1 == crumb_segments(&path).len())
     }
 
-    fn press_preview_crumb(&mut self, seat: SeatId, depth: usize) -> Result<()> {
-        let Some(path) = self.preview_rail_path(seat) else {
+    fn press_preview_crumb(&mut self, surface: PreviewSurface, depth: usize) -> Result<()> {
+        let Some(path) = self.preview_rail_path(surface) else {
             return Ok(());
         };
         let segments = crumb_segments(&path);
@@ -39339,6 +39579,109 @@ impl Runtime<'_> {
             return Ok(());
         };
         self.locate_folder_in_files_column(&folder)
+    }
+
+    /// **One control of a preview rail, pressed — the ladder both hosts run**
+    /// (§7.7 ⑩ 欠账, 2026-08-25).
+    ///
+    /// The row grew inside a pane and was pressed through [`seats::ChromeTarget`],
+    /// which names a seat; a torn-off window's is pressed through
+    /// [`float::FloatPart::Rail`], which names no seat and never will. Writing
+    /// the second host's answers beside the first's would have been eleven verbs
+    /// spelled twice, and the pair that matters most — the address field and the
+    /// breadcrumb's rename box — are the two this window has already had to
+    /// repair for saying one thing in two places. So the *parts* are what a
+    /// press is resolved to on both hosts ([`seats::preview_rail_part`]), and
+    /// this is where a part becomes a verb.
+    ///
+    /// Every branch breaks a click chain for `.files-foot`'s reason — a chain of
+    /// clicks on a button is a chain of button presses — and none of them arms a
+    /// drag: this row is not a drag handle on either host, so there is nothing to
+    /// decline.
+    fn press_preview_rail(
+        &mut self,
+        surface: PreviewSurface,
+        part: seats::PreviewRailPart,
+    ) -> Result<()> {
+        self.window.tab_clicks.interrupt();
+        self.window.files_row_clicks.interrupt();
+        // Which of the two fillings this row is wearing, asked once: two of the
+        // controls below are one glyph with a sentence for each row, and asking
+        // twice is two chances to disagree about one band.
+        let kind = self
+            .preview_rail_measure(surface)
+            .map(|measure| measure.kind);
+        match part {
+            seats::PreviewRailPart::Back => self.run_web_head_verb(surface, WebHeadVerb::Back),
+            seats::PreviewRailPart::Forward => {
+                self.run_web_head_verb(surface, WebHeadVerb::Forward)
+            }
+            seats::PreviewRailPart::Reload => self.run_web_head_verb(surface, WebHeadVerb::Reload),
+            seats::PreviewRailPart::Browser => self.open_preview_in_browser(surface),
+            seats::PreviewRailPart::Flip => self.flip_preview_source_on(surface),
+            seats::PreviewRailPart::OpenWith => self.open_preview_rail_menu(surface),
+            // One glyph, two verbs, and the row's kind is what tells them apart
+            // — the same fork [`seats::preview_rail_target`] makes on the docked
+            // host, made once more where the press turns into an action.
+            seats::PreviewRailPart::Copy => match kind {
+                Some(seats::PreviewRailKind::Address) => self.copy_preview_address(surface),
+                Some(seats::PreviewRailKind::Crumbs) => match self.preview_rail_path(surface) {
+                    Some(path) => self.copy_path_to_clipboard(&path),
+                    None => Ok(()),
+                },
+                None => Ok(()),
+            },
+            // **A press on the address is a caret in it**, and the field it
+            // opens is the very one `Ctrl+L` opens: `open_web_address_on` is the
+            // one door, so a URL typed after a click and one typed after the
+            // chord cannot be seeded differently — on either host.
+            seats::PreviewRailPart::Address => {
+                self.window.preview_name_clicks.interrupt();
+                match self.rail_page(surface) {
+                    Some(leaf) => self.open_web_address_on(leaf),
+                    None => Ok(()),
+                }
+            }
+            // **A single press locates, a double press on the *last* segment
+            // renames** (B5, user ruling 2026-08-25).
+            //
+            // The chain is keyed by the *surface* and not by the depth, and the
+            // tail is the one segment it is armed on: every other segment is a
+            // folder this pane is not showing, and there is nothing about a
+            // folder for a box on this row to change. Two presses on a folder
+            // are two locates — which is what they already were, and it costs
+            // the tail nothing to say so, because a folder never enters the
+            // chain at all.
+            //
+            // The single press still runs on the way past. That is the head's
+            // own arrangement (`PreviewName`): the first half of a double click
+            // is a real click, and locating the folder a file lives in is a move
+            // the box being opened over it does not undo.
+            seats::PreviewRailPart::Crumb(depth) => {
+                let tail = self.preview_crumb_is_the_tail(surface, depth);
+                if !tail {
+                    self.window.preview_crumb_clicks.interrupt();
+                }
+                self.press_preview_crumb(surface, depth)?;
+                if tail
+                    && self
+                        .window
+                        .preview_crumb_clicks
+                        .register(surface, Instant::now())
+                        == TabClick::Double
+                {
+                    self.open_preview_crumb_rename(surface)?;
+                }
+                Ok(())
+            }
+            seats::PreviewRailPart::Fold => self.open_preview_crumb_menu(surface),
+            // The band itself, everywhere its controls are not: it swallows the
+            // press and does nothing with it. See [`seats::preview_rail_part`] —
+            // a row that let a press through would either drag the pane by
+            // something that is not its head or put a caret in the document
+            // below.
+            seats::PreviewRailPart::Band => Ok(()),
+        }
     }
 
     /// **The `…` a folded path is drawn as** (the ruling's ③, re-judged by the
@@ -39363,19 +39706,15 @@ impl Runtime<'_> {
     ///
     /// The file verbs are not lost; they belong to `Open ⌄`, which is the
     /// control that is about this document.
-    fn open_preview_crumb_menu(&mut self, seat: SeatId) -> Result<()> {
+    fn open_preview_crumb_menu(&mut self, surface: PreviewSurface) -> Result<()> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        let Some(measure) = self.preview_rail_measure(seat) else {
+        let Some(geometry) = self.rail_geometry(surface, scale) else {
             return Ok(());
         };
-        let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
-            return Ok(());
-        };
-        let geometry = seats::preview_rail_geometry(rect, scale, &measure);
         let Some(chip) = geometry.fold else {
             return Ok(());
         };
-        let Some(path) = self.preview_rail_path(seat) else {
+        let Some(path) = self.preview_rail_path(surface) else {
             return Ok(());
         };
         let crumbs = folded_levels(&path, &geometry.folded);
@@ -39422,18 +39761,15 @@ impl Runtime<'_> {
     /// named, and it lists its own hidden levels now
     /// ([`Self::open_preview_crumb_menu`]). One control about this document, one
     /// control about the path behind the fold.
-    fn open_preview_rail_menu(&mut self, seat: SeatId) -> Result<()> {
+    fn open_preview_rail_menu(&mut self, surface: PreviewSurface) -> Result<()> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        let Some(measure) = self.preview_rail_measure(seat) else {
+        let Some(pill) = self
+            .rail_geometry(surface, scale)
+            .and_then(|rail| rail.open)
+        else {
             return Ok(());
         };
-        let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
-            return Ok(());
-        };
-        let Some(pill) = seats::preview_rail_geometry(rect, scale, &measure).open else {
-            return Ok(());
-        };
-        let Some(path) = self.preview_rail_path(seat) else {
+        let Some(path) = self.preview_rail_path(surface) else {
             return Ok(());
         };
         self.open_file_menu(
@@ -39513,9 +39849,9 @@ impl Runtime<'_> {
     /// `Revealed` because Explorer can open behind you; a browser handed a page
     /// comes to the front, and a window that has just lost the foreground has no
     /// reader to print a word for.
-    fn open_preview_in_browser(&mut self, seat: SeatId) -> Result<()> {
+    fn open_preview_in_browser(&mut self, surface: PreviewSurface) -> Result<()> {
         let Some(path) = self
-            .preview_buffer_on(self.preview_here(seat))
+            .preview_buffer_on(surface)
             .and_then(|buffer| preview_page_hand_off(&buffer.source))
         else {
             return Ok(());
@@ -50789,7 +51125,8 @@ impl Runtime<'_> {
         // **On the rail since 2026-08-24.** The derivation is the same one — the
         // paint's, down to the stored measurement — and only the row changed:
         // the arrow stands beside the address it hands over.
-        seats::preview_rail_geometry(rect, scale, &self.preview_rail_measure(seat)?).external
+        let _ = rect;
+        self.rail_geometry(self.preview_here(seat), scale)?.external
     }
 
     /// The padlock's box on one preview seat (§7.7 ⑧).
@@ -50819,8 +51156,7 @@ impl Runtime<'_> {
         // the same one the paint and the hit test read.
         match verb {
             WebHeadVerb::Back | WebHeadVerb::Forward | WebHeadVerb::Reload => {
-                let rail =
-                    seats::preview_rail_geometry(rect, scale, &self.preview_rail_measure(seat)?);
+                let rail = self.rail_geometry(self.preview_here(seat), scale)?;
                 match verb {
                     WebHeadVerb::Back => rail.back,
                     WebHeadVerb::Forward => rail.forward,
@@ -52839,6 +53175,10 @@ impl Runtime<'_> {
         let ids: Vec<float::FloatId> = self.window.float.hit_order().map(|win| win.epoch).collect();
         for id in ids {
             let tools = self.float_head_tools(id);
+            // The row under the head, as it was drawn: the widths were measured
+            // where a font was, and a band resolved against anything else would
+            // answer about a row nobody saw (§7.7 ⑩ 欠账).
+            let rail = self.rail_geometry(PreviewSurface::Float(id), scale);
             let Some(win) = self.window.float.drawn().find(|win| win.epoch == id) else {
                 continue;
             };
@@ -52874,7 +53214,7 @@ impl Runtime<'_> {
                 .git_graphs_shown
                 .get(&PreviewSurface::Float(id))
                 .cloned();
-            if let Some(part) = float::float_hit(&geometry, x, y, |x, y| {
+            if let Some(part) = float::float_hit(&geometry, x, y, rail.as_ref(), |x, y| {
                 let (x, y) = (x + geometry.body[0], y + geometry.body[1]);
                 if let Some(graph) = graph.as_ref() {
                     // The order — toolbar, then the open block's parts, then the
@@ -53319,6 +53659,14 @@ impl Runtime<'_> {
                 {
                     self.press_preview_body(position)?;
                 }
+            }
+            // **The row under the head, on the window that grew one** (§7.7 ⑩
+            // 欠账). Through the docked row's own ladder and the docked row's own
+            // verbs: what a press on this band does is a property of the band,
+            // and a window is not a different kind of surface for it to mean
+            // something else on.
+            float::FloatPart::Rail(part) => {
+                self.press_preview_rail(PreviewSurface::Float(id), part)?;
             }
             // The body away from any row: a press lands on the window and goes no
             // further, which is what makes a float opaque to the layout beneath.
@@ -54066,10 +54414,23 @@ impl Runtime<'_> {
         }
         let surface = PreviewSurface::Float(id);
         let buffer = self.preview_buffer_on(surface);
+        // **The row under the head** (§7.7 ⑩ 欠账, 2026-08-25), asked with the
+        // very predicate a docked seat is asked with: what a window wears is
+        // decided by what is *in* it, and a torn-off page that stopped showing
+        // its address the moment it left the tree was this rule being asked of
+        // the wrong thing.
+        let rail = self.preview_rail_kind(surface);
         float::FloatHeadTools {
             dirty: true,
             save: self.preview_is_editable(surface),
-            flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown),
+            // **And the flip goes down to that row when there is one**, which is
+            // `preview_head_tools`'s own clause travelling across unchanged
+            // (user ruling 2026-08-24): a markdown with a breadcrumb wears its
+            // `</>` down there, and one without keeps it upstairs. Two flips on
+            // one window would be the head and the row each claiming the verb.
+            flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown)
+                && rail.is_none(),
+            rail: rail.is_some(),
         }
     }
 
@@ -54695,6 +55056,26 @@ impl Runtime<'_> {
                 )
             }
         };
+        // **The row above takes the path, and the foot stops repeating it**
+        // (§7.7 ⑩ 欠账, 2026-08-25) — the docked pane's own judgement, applied
+        // to the one strip a window has that a pane no longer does.
+        //
+        // It is the *left* half of the foot that retires and not the strip, and
+        // the difference is what the strip still is: a **button** — pressing it
+        // reveals this file — and this window's only channel for a flashed
+        // confirmation (`Saved`, `Revealed…`, ⑪'s zoom). A docked page's foot
+        // was neither by the time (8) retired it, which is why that ruling could
+        // take the whole band and this one cannot.
+        //
+        // Found on the machine the hour the rail landed: the window's rail read
+        // `…/bravo.html` while its foot, six pixels below, still read
+        // `…/alpha.html` — one surface saying two things about where it is,
+        // which is the exact duplication ⑩ opened this debt to avoid.
+        let path = if geometry.rail.is_some() {
+            String::new()
+        } else {
+            path
+        };
         let revealed = self.foot_reveal_is_fresh(RevealedFoot::Float(id), now);
         // **A torn-off buffer confirms its own save** (user ruling, 2026-08-15,
         // as a consequence). "Saved" was drawn only in a docked pane's foot, and
@@ -54749,6 +55130,11 @@ impl Runtime<'_> {
             .float_hover
             .filter(|(hovered, _)| *hovered == id)
             .map(|(_, part)| part);
+        // **The row under the head, dressed exactly as a pane's is** (§7.7 ⑩
+        // 欠账, 2026-08-25) — one `dress_preview_rail`, one measurement, one
+        // record in `preview_rail_measures`, so the tip, the menu and the press
+        // all read what this frame drew.
+        let rail = self.dress_preview_rail(surface, scale);
         let palette = bt_render::chrome_palette();
         // **What fills the body, decided by what is in it** (user report,
         // 2026-08-20).
@@ -54836,6 +55222,41 @@ impl Runtime<'_> {
             &palette,
             fade,
         );
+        // **And drawn, on the window's own layer.** The chassis reserved the
+        // band ([`float::FloatGeometry::rail`]) and the tenant fills it, which is
+        // the division of labour this whole module is built on — the body's own
+        // sentence, one strip higher.
+        if let (Some(band), Some(frame)) = (geometry.rail, rail.as_ref()) {
+            let mut quads: Vec<bt_render::ChromeQuad> = Vec::new();
+            seats::push_preview_rail(
+                band,
+                seats::PreviewRailContent {
+                    measure: &frame.measure,
+                    address: &frame.address,
+                    segments: &frame.segments,
+                    open: i18n::Text::PreviewRailOpen.text(),
+                    notice: &frame.notice,
+                    notice_flashing: frame.notice_flashing,
+                    flip_to_source: frame.flip_to_source,
+                    web: frame.web,
+                    edit: frame.edit.as_ref().map(|edit| seats::PreviewNameEdit {
+                        text: &edit.text,
+                        caret_px: edit.caret_px,
+                        selection_px: edit.selection_px,
+                        caret_lit: edit.caret_lit,
+                        refused: frame.refused,
+                    }),
+                },
+                match hover {
+                    Some(float::FloatPart::Rail(part)) => Some(part),
+                    _ => None,
+                },
+                scale,
+                &palette,
+                (&mut quads, &mut layer.labels, &mut layer.sprites),
+            );
+            float::lay_rail_on(&mut layer, quads);
+        }
         layer.body = self.build_preview_body(surface);
         // **The picture, on this window's own mark channel** (user report,
         // 2026-08-17: "undock an image preview and the picture disappears").
@@ -59840,7 +60261,9 @@ impl Runtime<'_> {
                 .seats
                 .preview_seats()
                 .into_iter()
-                .filter_map(|seat| Some((seat, self.preview_rail_measure(seat)?)))
+                .filter_map(|seat| {
+                    Some((seat, self.preview_rail_measure(self.preview_here(seat))?))
+                })
                 .collect();
             seats::hit_preview_rail(&self.seat_layout, scale, &rails, position.x, position.y)
         })
@@ -62405,7 +62828,19 @@ impl Runtime<'_> {
                 // and only the target moved: a press inside the field puts a
                 // caret, and a press anywhere else — the page below very much
                 // included — is a blur that commits.
-                RenameSubject::WebAddress { leaf } if leaf.tab == self.id => {
+                //
+                // **And not while the page it is about has been torn off**
+                // (§7.7 ⑩ 欠账, 2026-08-25). A floated page keeps the `LeafId`
+                // of the seat it was popped out of, and that seat number can
+                // still exist in this tab wearing something else entirely — so
+                // an arm that asked only which tab the leaf named would hand
+                // back a rectangle in the tree for a field standing in a window
+                // over it. The name cell's arm above says the same thing about
+                // the same window: a float is not this tab's chrome, and every
+                // press out here is a blur.
+                RenameSubject::WebAddress { leaf }
+                    if leaf.tab == self.id && self.float_holding_the_page(*leaf).is_none() =>
+                {
                     Some(seats::ChromeTarget::PreviewAddress(leaf.seat))
                 }
                 // A draft left open on a pane of another tab names no target in
@@ -62422,7 +62857,7 @@ impl Runtime<'_> {
                     ..
                 } if leaf.tab == self.id => self.window.rename.as_ref().and_then(|_| {
                     let depth = self
-                        .preview_rail_path(leaf.seat)
+                        .preview_rail_path(PreviewSurface::Seat(*leaf))
                         .map(|path| crumb_segments(&path).len())?
                         .checked_sub(1)?;
                     Some(seats::ChromeTarget::PreviewCrumb {
@@ -62773,32 +63208,31 @@ impl Runtime<'_> {
                 self.flip_preview_source()?;
             }
             seats::ChromeTarget::PreviewBrowser(seat) => {
-                self.window.tab_clicks.interrupt();
-                self.window.files_row_clicks.interrupt();
-                self.open_preview_in_browser(seat)?;
+                let surface = self.preview_here(seat);
+                self.press_preview_rail(surface, seats::PreviewRailPart::Browser)?;
             }
             // A page's four, and the one verb on the card a failed page shows
             // (§7.7 ②, ④). Each goes through the verb the chord goes through, so
             // a button and a key are two doors onto one room.
             seats::ChromeTarget::PreviewBack(seat) => {
-                self.window.tab_clicks.interrupt();
-                self.window.files_row_clicks.interrupt();
-                self.run_web_head_verb(seat, WebHeadVerb::Back)?;
+                let surface = self.preview_here(seat);
+                self.press_preview_rail(surface, seats::PreviewRailPart::Back)?;
             }
             seats::ChromeTarget::PreviewForward(seat) => {
-                self.window.tab_clicks.interrupt();
-                self.window.files_row_clicks.interrupt();
-                self.run_web_head_verb(seat, WebHeadVerb::Forward)?;
+                let surface = self.preview_here(seat);
+                self.press_preview_rail(surface, seats::PreviewRailPart::Forward)?;
             }
             seats::ChromeTarget::PreviewReload(seat) => {
-                self.window.tab_clicks.interrupt();
-                self.window.files_row_clicks.interrupt();
-                self.run_web_head_verb(seat, WebHeadVerb::Reload)?;
+                let surface = self.preview_here(seat);
+                self.press_preview_rail(surface, seats::PreviewRailPart::Reload)?;
             }
+            // **Not one of the rail's**: the developer tools stayed on the head,
+            // in the one verb slot a content class gets (§7.7 ②).
             seats::ChromeTarget::PreviewDevTools(seat) => {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
-                self.run_web_head_verb(seat, WebHeadVerb::DevTools)?;
+                let surface = self.preview_here(seat);
+                self.run_web_head_verb(surface, WebHeadVerb::DevTools)?;
             }
             seats::ChromeTarget::PreviewFaultVerb(seat) => {
                 self.window.tab_clicks.interrupt();
@@ -62832,74 +63266,31 @@ impl Runtime<'_> {
             // one door, so a URL typed after a click and one typed after the
             // chord cannot be seeded differently.
             seats::ChromeTarget::PreviewAddress(seat) => {
-                self.window.tab_clicks.interrupt();
-                self.window.files_row_clicks.interrupt();
-                self.window.preview_name_clicks.interrupt();
-                self.open_web_address_on(seat)?;
+                let surface = self.preview_here(seat);
+                self.press_preview_rail(surface, seats::PreviewRailPart::Address)?;
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-address state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
-            seats::ChromeTarget::PreviewAddressCopy(seat) => {
-                self.window.tab_clicks.interrupt();
-                self.window.files_row_clicks.interrupt();
-                self.copy_preview_address(seat)?;
+            seats::ChromeTarget::PreviewAddressCopy(seat)
+            | seats::ChromeTarget::PreviewPathCopy(seat) => {
+                let surface = self.preview_here(seat);
+                self.press_preview_rail(surface, seats::PreviewRailPart::Copy)?;
             }
-            seats::ChromeTarget::PreviewPathCopy(seat) => {
-                self.window.tab_clicks.interrupt();
-                self.window.files_row_clicks.interrupt();
-                if let Some(path) = self.preview_rail_path(seat) {
-                    self.copy_path_to_clipboard(&path)?;
-                }
-            }
-            // **A single press locates, a double press on the *last* segment
-            // renames** (B5, user ruling 2026-08-25).
-            //
-            // The chain is keyed by the seat and not by the depth, and the tail
-            // is the one segment it is armed on: every other segment is a folder
-            // this pane is not showing, and there is nothing about a folder for
-            // a box on this row to change. Two presses on a folder are two
-            // locates — which is what they already were, and it costs the tail
-            // nothing to say so, because a folder never enters the chain at all.
-            //
-            // The single press still runs on the way past. That is the head's
-            // own arrangement (`PreviewName`): the first half of a double click
-            // is a real click, and locating the folder a file lives in is a move
-            // the box being opened over it does not undo.
             seats::ChromeTarget::PreviewCrumb { seat, depth } => {
-                self.window.tab_clicks.interrupt();
-                self.window.files_row_clicks.interrupt();
-                let tail = self.preview_crumb_is_the_tail(seat, depth);
-                if !tail {
-                    self.window.preview_crumb_clicks.interrupt();
-                }
-                self.press_preview_crumb(seat, depth)?;
-                if tail
-                    && self
-                        .window
-                        .preview_crumb_clicks
-                        .register(seat, Instant::now())
-                        == TabClick::Double
-                {
-                    self.open_preview_crumb_rename(seat)?;
-                }
+                let surface = self.preview_here(seat);
+                self.press_preview_rail(surface, seats::PreviewRailPart::Crumb(depth))?;
             }
             seats::ChromeTarget::PreviewCrumbFold(seat) => {
-                self.window.tab_clicks.interrupt();
-                self.window.files_row_clicks.interrupt();
-                self.open_preview_crumb_menu(seat)?;
+                let surface = self.preview_here(seat);
+                self.press_preview_rail(surface, seats::PreviewRailPart::Fold)?;
             }
             seats::ChromeTarget::PreviewOpenWith(seat) => {
-                self.window.tab_clicks.interrupt();
-                self.window.files_row_clicks.interrupt();
-                self.open_preview_rail_menu(seat)?;
+                let surface = self.preview_here(seat);
+                self.press_preview_rail(surface, seats::PreviewRailPart::OpenWith)?;
             }
-            // The band itself, everywhere its controls are not: it swallows the
-            // press and does nothing with it. See the target's own note — a row
-            // that let a press through would either drag the pane by something
-            // that is not its head or put a caret in the document below.
-            seats::ChromeTarget::PreviewRail(_) => {
-                self.window.tab_clicks.interrupt();
-                self.window.files_row_clicks.interrupt();
+            seats::ChromeTarget::PreviewRail(seat) => {
+                let surface = self.preview_here(seat);
+                self.press_preview_rail(surface, seats::PreviewRailPart::Band)?;
             }
             // The name is a button **and** part of the drag handle, which is
             // `FilesRoot`'s own arrangement and the mock-up's: `.pv-name` is not
@@ -67972,23 +68363,32 @@ impl Runtime<'_> {
     /// once, so a URL typed after a double click and one typed after the chord
     /// cannot be seeded differently.
     fn open_web_address(&mut self) -> Result<()> {
-        let Some(seat) = self.focused_web_seat() else {
+        // **The page holding the keyboard, and not the seat holding it**
+        // (§7.7 ⑩ 欠账, 2026-08-25; user report: `Ctrl+L` did nothing over a
+        // torn-off page). `focused_web_seat` is docked-only *by design* — it
+        // exists to hang chrome off a pane head, and a floated page has no head
+        // in the layout — but this chord is not asking where to hang anything.
+        // It is asking which browser the letters are about, and
+        // `page_with_the_keyboard` has answered that for both hosts since
+        // §7.14c. The field itself was already keyed by leaf and needed no
+        // change at all: what was missing was a door that could name one.
+        let Some(leaf) = self.page_with_the_keyboard() else {
             return Ok(());
         };
-        self.open_web_address_on(seat)
+        self.open_web_address_on(leaf)
     }
 
-    fn open_web_address_on(&mut self, seat: SeatId) -> Result<()> {
+    fn open_web_address_on(&mut self, leaf: LeafId) -> Result<()> {
         // **Whatever field was open leaves first, and the page is asked for
         // after it has** (§7.7 ⑨). Closing an address field is one of the two
-        // ways a blank page is taken back, so the seat this was called about can
-        // stop being a page between the call and this line — and a field opened
-        // over a seat that has just gone is a caret in a pane nobody can see.
+        // ways a blank page is taken back, so the page this was called about can
+        // stop existing between the call and this line — and a field opened over
+        // a pane that has just gone is a caret nobody can see.
         // Reading the address afterwards is also simply the more truthful of the
-        // two orders: what the box is seeded with is what the seat is showing
+        // two orders: what the box is seeded with is what the pane is showing
         // now.
         self.finish_rename(RenameExit::Blur)?;
-        let Some(url) = self.web_on(seat).map(|web| web.page().url.clone()) else {
+        let Some(url) = self.window.web.get(&leaf).map(|web| web.page().url.clone()) else {
             return Ok(());
         };
         // **Seeded with what the row is showing** (found on a real window,
@@ -67998,7 +68398,9 @@ impl Runtime<'_> {
         // them to correct one character of it. The two strings are now the same
         // pair read in the same order, which is `dress_preview_rail`'s own.
         let url = if url.is_empty() {
-            self.web_on(seat)
+            self.window
+                .web
+                .get(&leaf)
                 .and_then(webhost::WebSeat::fault)
                 .and_then(webhost::WebFault::refused_address)
                 .unwrap_or_default()
@@ -68025,7 +68427,7 @@ impl Runtime<'_> {
         if let Ok(hwnd) = window_hwnd(&self.window.window) {
             let _ = bt_platform::take_keyboard_focus(hwnd);
         }
-        self.window.rename = Some(TabRename::open_address(self.leaf_here(seat), &url));
+        self.window.rename = Some(TabRename::open_address(leaf, &url));
         self.window.rename_blink.reset(Instant::now());
         self.refresh_chrome();
         self.present_chrome_change()
@@ -68050,7 +68452,10 @@ impl Runtime<'_> {
         // press that takes back a blank page has to find the tab without one.
         self.finish_rename(RenameExit::Blur)?;
         match self.web_seat_of_tab() {
-            Some(seat) => self.open_web_address_on(seat),
+            Some(seat) => {
+                let leaf = self.leaf_here(seat);
+                self.open_web_address_on(leaf)
+            }
             None => self.mint_a_blank_page_and_open_its_address(),
         }
     }
@@ -68088,11 +68493,9 @@ impl Runtime<'_> {
         let Some(seat) = self.web_seat_of_tab() else {
             return Ok(());
         };
-        self.window.blank_page = Some(BlankPage {
-            leaf: self.leaf_here(seat),
-            back,
-        });
-        self.open_web_address_on(seat)
+        let leaf = self.leaf_here(seat);
+        self.window.blank_page = Some(BlankPage { leaf, back });
+        self.open_web_address_on(leaf)
     }
 
     /// **The blank page was never given an address, so it goes** (§7.7 ⑨,
@@ -68193,10 +68596,6 @@ impl Runtime<'_> {
         self.open_web_dev_tools_at(leaf)
     }
 
-    fn open_web_dev_tools_on(&mut self, seat: SeatId) -> Result<()> {
-        self.open_web_dev_tools_at(self.leaf_here(seat))
-    }
-
     fn open_web_dev_tools_at(&mut self, leaf: LeafId) -> Result<()> {
         if let Some(web) = self.window.web.get(&leaf)
             && let Err(error) = web.open_dev_tools()
@@ -68207,11 +68606,14 @@ impl Runtime<'_> {
     }
 
     /// One of the head's three navigation buttons, or the `</>` beside them.
-    fn run_web_head_verb(&mut self, seat: SeatId, verb: WebHeadVerb) -> Result<()> {
+    fn run_web_head_verb(&mut self, surface: PreviewSurface, verb: WebHeadVerb) -> Result<()> {
+        let Some(leaf) = self.rail_page(surface) else {
+            return Ok(());
+        };
         if verb == WebHeadVerb::DevTools {
-            return self.open_web_dev_tools_on(seat);
+            return self.open_web_dev_tools_at(leaf);
         }
-        let Some(web) = self.web_on_mut(seat) else {
+        let Some(web) = self.window.web.get_mut(&leaf) else {
             return Ok(());
         };
         let outcome = match verb {
@@ -68257,7 +68659,10 @@ impl Runtime<'_> {
                 self.refresh_chrome();
                 self.present_chrome_change()
             }
-            webhost::WebFaultVerb::Reload => self.run_web_head_verb(seat, WebHeadVerb::Reload),
+            webhost::WebFaultVerb::Reload => {
+                let surface = self.preview_here(seat);
+                self.run_web_head_verb(surface, WebHeadVerb::Reload)
+            }
             webhost::WebFaultVerb::CopyAddress(address) => {
                 self.copy_text_to_clipboard(&address);
                 Ok(())
@@ -105187,7 +105592,7 @@ mod tests {
         let door = body("    fn open_address_here(");
         assert!(
             door.contains("self.web_seat_of_tab()")
-                && door.contains("self.open_web_address_on(seat)")
+                && door.contains("self.open_web_address_on(leaf)")
                 && door.contains("self.mint_a_blank_page_and_open_its_address()"),
             "the chord does not fork on whether this tab already has a page:\n{door}"
         );
@@ -105196,7 +105601,7 @@ mod tests {
         assert!(
             mint.contains("self.open_minted_page(webnav::Mint::Blank)")
                 && mint.contains("blank_page_return(landing.is_some(), was_showing)")
-                && mint.contains("self.open_web_address_on(seat)"),
+                && mint.contains("self.open_web_address_on(leaf)"),
             "the blank page is not minted through the door every navigation \
              passes, or the way back from it is not taken before it lands:\n{mint}"
         );

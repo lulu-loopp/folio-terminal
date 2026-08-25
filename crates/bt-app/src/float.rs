@@ -156,6 +156,21 @@ pub struct FloatGeometry {
     pub flip: Option<[f32; 4]>,
     /// The `×`.
     pub close: [f32; 4],
+    /// **The preview rail's band, when this tenant wears one** (§7.7 ⑩ 欠账,
+    /// 2026-08-25) — the address row or the breadcrumb row, directly under the
+    /// head's hairline.
+    ///
+    /// Reserved by the *layout* and not merely drawn by the paint, for
+    /// [`FloatHeadTools`]'s own stated reason one strip higher: the body is what
+    /// gives way for it, so a window that drew this row without having taken its
+    /// height off the body would be a row standing on the document.
+    ///
+    /// `None` for a tenant with nothing to put in it — a tree, a commit graph, a
+    /// diff — which is the docked seat's third answer arriving unchanged
+    /// ([`crate::seats::PreviewRailKind`]'s own note: a rail drawn over a
+    /// document with no address is this row asking a question the content cannot
+    /// answer).
+    pub rail: Option<[f32; 4]>,
     /// What the tenant fills — the tree, for this slice.
     pub body: [f32; 4],
     /// The hairline over the foot.
@@ -195,6 +210,16 @@ pub struct FloatHeadTools {
     pub dirty: bool,
     pub save: bool,
     pub flip: bool,
+    /// **Reserve the row under the head** — [`FloatGeometry::rail`].
+    ///
+    /// Not a head control, and it rides here anyway because it is the same
+    /// question asked of the same tenant at the same moment: *what does this
+    /// window's content need the chassis to make room for*. A separate argument
+    /// would be a second answer to that, and D4's sentence — a control drawn
+    /// where the layout reserved nothing is a control standing on something —
+    /// is the one this field exists to keep true of a whole row rather than of
+    /// one button.
+    pub rail: bool,
 }
 
 /// Lay the chassis out inside `frame`.
@@ -222,24 +247,43 @@ pub fn float_geometry(
     let foot_height = px(FLOAT_WINDOW_FOOT_LOGICAL_PX).round();
     let head = snap([inner[0], inner[1], inner[2], inner[1] + head_height]);
     let head_edge = snap([head[0], head[3], head[2], head[3] + border]);
+    // **The row under the head, when the tenant wears one** (§7.7 ⑩ 欠账,
+    // 2026-08-25). It is the docked pane's own band read on this chassis: the
+    // *height* is `crate::seats::PREVIEW_RAIL_BAR_LOGICAL_PX` and not a second
+    // number, because this row and the pane's are the same piece of furniture
+    // answering the same question, and the day one of them changed height a
+    // reader who docked a window would watch its address jump.
+    //
+    // It stops at the window's own floor, which is the same clamp
+    // `preview_rail_band` makes against a pane's: a window squeezed to the
+    // honest strip has no room for a row, and a zero-height band is a row
+    // `preview_rail_geometry_in` draws nothing in rather than a row drawn
+    // outside its window.
+    let rail = tools.rail.then(|| {
+        let bar = px(crate::seats::PREVIEW_RAIL_BAR_LOGICAL_PX)
+            .round()
+            .max(1.0);
+        let top = head_edge[3];
+        snap([inner[0], top, inner[2], (top + bar).min(inner[3]).max(top)])
+    });
+    let under_head = rail.map_or(head_edge[3], |rail| rail[3]);
     // The head and the foot both keep their whole height even when the window
     // has been squeezed to the honest floor; what gives way is the body, which
     // is allowed to reach zero. A strip-height window is therefore all header,
     // which is exactly what §3.4 asks for — the `×` and the handle survive.
-    let foot_top = (inner[3] - foot_height).max(head_edge[3]);
+    // **The rail is furniture on those same terms** — it is the pane's answer to
+    // "where is this and how do I get there", and a row that shrank while the
+    // document beside it kept its height would be the one thing in the window a
+    // reader cannot aim at.
+    let foot_top = (inner[3] - foot_height).max(under_head);
     let foot = snap([inner[0], foot_top, inner[2], inner[3]]);
     let foot_edge = snap([
         foot[0],
-        (foot[1] - border).max(head_edge[3]),
+        (foot[1] - border).max(under_head),
         foot[2],
         foot[1],
     ]);
-    let body = snap([
-        inner[0],
-        head_edge[3],
-        inner[2],
-        foot_edge[1].max(head_edge[3]),
-    ]);
+    let body = snap([inner[0], under_head, inner[2], foot_edge[1].max(under_head)]);
 
     let mark = px(FLOAT_HEAD_MARK_LOGICAL_PX);
     let gap = px(FLOAT_HEAD_GAP_LOGICAL_PX);
@@ -365,6 +409,7 @@ pub fn float_geometry(
         save,
         flip,
         close,
+        rail,
         body,
         foot_edge,
         foot,
@@ -845,6 +890,17 @@ pub enum FloatPart {
         index: usize,
         part: crate::git_graph::GraphDetailPart,
     },
+    /// **One control of the preview rail** (§7.7 ⑩ 欠账, 2026-08-25).
+    ///
+    /// It carries [`crate::seats::PreviewRailPart`] — the docked row's own
+    /// answer with the seat taken out of it — for [`Self::GitAct`]'s stated
+    /// reason read one row higher: the controls on this band are *smaller* than
+    /// the band, so "which button" has to be decided by the hit test that
+    /// decides "which row of the chassis", or the band swallows every one of
+    /// them. And it is that type rather than a second enumeration because the
+    /// two hosts must not be able to come to disagree about what a rail has on
+    /// it.
+    Rail(crate::seats::PreviewRailPart),
     /// The body, but not on a row.
     Body,
     /// The foot, which reveals the folder in the OS file manager.
@@ -866,6 +922,7 @@ pub fn float_hit(
     geometry: &FloatGeometry,
     x: f32,
     y: f32,
+    rail: Option<&crate::seats::PreviewRailGeometry>,
     body: impl Fn(f32, f32) -> Option<FloatPart>,
 ) -> Option<FloatPart> {
     let hit = |rect: [f32; 4]| x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3];
@@ -891,6 +948,19 @@ pub fn float_hit(
     }
     if hit(geometry.head) {
         return Some(FloatPart::Head);
+    }
+    // **The band swallows what its controls left over**, which is
+    // `preview_rail_part`'s own sentence and the reason it answers
+    // [`crate::seats::PreviewRailPart::Band`] rather than `None` inside the
+    // band: a press falling through this row would land in the document a whole
+    // strip below where it was aimed. A window whose rail has never been drawn
+    // has no measurement to resolve against and swallows the press all the same
+    // — there is nothing on the row yet to have been aimed at.
+    if geometry.rail.is_some_and(hit) {
+        return Some(FloatPart::Rail(
+            rail.and_then(|rail| crate::seats::preview_rail_part(rail, x, y))
+                .unwrap_or(crate::seats::PreviewRailPart::Band),
+        ));
     }
     if hit(geometry.foot) {
         return Some(FloatPart::Foot);
@@ -1691,6 +1761,34 @@ pub struct FloatChrome<'a> {
     pub flip_to_source: bool,
 }
 
+/// **What the preview rail struck, moved onto a window's own layer** (§7.7 ⑩
+/// 欠账, 2026-08-25).
+///
+/// [`crate::seats::push_preview_rail`] draws into a pane's chrome channels,
+/// whose flat rectangles carry [`bt_render::ChromeSurface`] — "is this the
+/// window at that place, or something struck on it". An overlay layer answers
+/// the same question with two channels instead of one flag, for
+/// [`bt_render::OverlayGround`]'s stated reason: a coverage and a ground are not
+/// the same kind of number. So this is that one fact re-spelled, and it is
+/// exhaustive rather than convenient — the row happens to strike only ink today,
+/// and a `match` is what stops a ground it grew tomorrow from arriving as an
+/// opaque lid on a translucent window.
+pub fn lay_rail_on(layer: &mut OverlayLayer, quads: Vec<bt_render::ChromeQuad>) {
+    for quad in quads {
+        match quad.surface {
+            bt_render::ChromeSurface::Ink => layer.quads.push(OverlayQuad {
+                rect: quad.rect,
+                color: quad.color,
+                alpha: 1.0,
+            }),
+            bt_render::ChromeSurface::Ground => layer.grounds.push(bt_render::OverlayGround {
+                rect: quad.rect,
+                color: quad.color,
+            }),
+        }
+    }
+}
+
 /// Draw the chassis around a body someone else filled in.
 #[must_use]
 pub fn build(
@@ -2353,17 +2451,17 @@ mod tests {
         let centre = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
         let (x, y) = centre(geometry.close);
         assert_eq!(
-            float_hit(&geometry, x, y, |_, _| None),
+            float_hit(&geometry, x, y, None, |_, _| None),
             Some(FloatPart::Close)
         );
         let (x, y) = centre(geometry.dock.expect("present"));
         assert_eq!(
-            float_hit(&geometry, x, y, |_, _| None),
+            float_hit(&geometry, x, y, None, |_, _| None),
             Some(FloatPart::Dock)
         );
         let (x, y) = centre(geometry.grip.expect("present"));
         assert_eq!(
-            float_hit(&geometry, x, y, |_, _| None),
+            float_hit(&geometry, x, y, None, |_, _| None),
             Some(FloatPart::Grip)
         );
         assert_eq!(
@@ -2371,13 +2469,14 @@ mod tests {
                 &geometry,
                 geometry.head[0] + 2.0,
                 y_of(geometry.head),
+                None,
                 |_, _| None
             ),
             Some(FloatPart::Head),
             "bare header is the drag handle"
         );
         assert_eq!(
-            float_hit(&geometry, 50.0, 50.0, |_, _| None),
+            float_hit(&geometry, 50.0, 50.0, None, |_, _| None),
             None,
             "outside"
         );
@@ -2614,7 +2713,7 @@ mod tests {
             (rects.refresh[1] + rects.refresh[3]) / 2.0,
         ];
         assert_eq!(
-            float_hit(&geometry, refresh[0], refresh[1], |x, y| {
+            float_hit(&geometry, refresh[0], refresh[1], None, |x, y| {
                 let (x, y) = (x + geometry.body[0], y + geometry.body[1]);
                 crate::git_graph::graph_hit(geometry.body, &content, SCALE, x, y).map(|hit| {
                     match hit {
@@ -2642,14 +2741,14 @@ mod tests {
         );
         let inside = (geometry.body[0] + 10.0, geometry.body[1] + 10.0);
         assert_eq!(
-            float_hit(&geometry, inside.0, inside.1, |x, y| {
+            float_hit(&geometry, inside.0, inside.1, None, |x, y| {
                 assert!(x >= 0.0 && y >= 0.0, "coordinates arrive body-local");
                 Some(FloatPart::Row(3))
             }),
             Some(FloatPart::Row(3))
         );
         assert_eq!(
-            float_hit(&geometry, inside.0, inside.1, |_, _| None),
+            float_hit(&geometry, inside.0, inside.1, None, |_, _| None),
             Some(FloatPart::Body),
             "and a miss is the body itself"
         );
@@ -3568,6 +3667,7 @@ mod tests {
                 dirty: true,
                 save: true,
                 flip: true,
+                rail: false,
             },
         );
         let dirty = dressed.dirty.expect("the dot's slot is reserved");
@@ -3608,24 +3708,155 @@ mod tests {
                 dirty: true,
                 save: true,
                 flip: true,
+                rail: false,
             },
         );
         let middle = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
         let (x, y) = middle(geometry.save.expect("a save button"));
         assert_eq!(
-            float_hit(&geometry, x, y, |_, _| None),
+            float_hit(&geometry, x, y, None, |_, _| None),
             Some(FloatPart::Save)
         );
         let (x, y) = middle(geometry.flip.expect("a flip button"));
         assert_eq!(
-            float_hit(&geometry, x, y, |_, _| None),
+            float_hit(&geometry, x, y, None, |_, _| None),
             Some(FloatPart::Flip)
         );
         let (x, y) = middle(geometry.dirty.expect("a reserved dot"));
         assert_eq!(
-            float_hit(&geometry, x, y, |_, _| None),
+            float_hit(&geometry, x, y, None, |_, _| None),
             Some(FloatPart::Head),
             "the dot is a state and not a control — the head under it still drags"
+        );
+    }
+
+    /// RED (§7.7 ⑪ 欠账, 2026-08-25) — **a torn-off preview wears the same
+    /// row its pane wore**, and the body is what pays for it.
+    ///
+    /// The debt DESIGN.md wrote down was one sentence — 「性出去的浮窗预览没有
+    /// 跟着长这一行」 — and this is that sentence turned into the two facts it
+    /// stands on: the band is directly under the head's hairline and it is the
+    /// foot's own twenty-eight, and the body starts at its bottom rather than at
+    /// the head's.
+    ///
+    /// Mutation: draw the row without reserving it (`rail: None` in
+    /// [`float_geometry`], which is how this went red the first time) and the
+    /// fourth assertion reads `body[1] == head_edge[3]` — a row painted over the
+    /// first line of the document.
+    #[test]
+    fn a_torn_off_preview_reserves_the_rails_band_and_the_body_gives_way() {
+        let tools = FloatHeadTools {
+            dirty: true,
+            save: false,
+            flip: false,
+            rail: true,
+        };
+        let dressed = float_geometry(
+            frame(100.0, 100.0, 430.0, 400.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            tools,
+        );
+        let bare = float_geometry(
+            frame(100.0, 100.0, 430.0, 400.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            FloatHeadTools {
+                rail: false,
+                ..tools
+            },
+        );
+        let band = dressed.rail.expect("a preview float wears its pane's row");
+        assert_eq!(
+            [band[0], band[2]],
+            [dressed.head[0], dressed.head[2]],
+            "the row spans the window, exactly as the head above it does"
+        );
+        assert_eq!(
+            band[1], dressed.head_edge[3],
+            "and it begins where the head's hairline ends"
+        );
+        assert_eq!(
+            band[3] - band[1],
+            (crate::seats::PREVIEW_RAIL_BAR_LOGICAL_PX * SCALE).round(),
+            "the foot's own twenty-eight, which is the docked pane's number"
+        );
+        assert_eq!(
+            dressed.body[1], band[3],
+            "the body starts under the row and not under the head"
+        );
+        assert_eq!(
+            bare.body[1], bare.head_edge[3],
+            "and a tenant that asked for no row pays nothing"
+        );
+        assert_eq!(
+            dressed.body[3], bare.body[3],
+            "the foot keeps its whole height either way — the body is what gives"
+        );
+        assert!(bare.rail.is_none(), "a tree grows no row");
+    }
+
+    /// RED — **and the row answers the pointer**, control by control, through
+    /// the very derivation the paint reads.
+    ///
+    /// Mutation: hand [`float_hit`] `None` for the rail and every press on the
+    /// row comes back [`crate::seats::PreviewRailPart::Band`] — the band
+    /// swallowing its own buttons, which is the shape this went red in.
+    #[test]
+    fn the_rails_controls_answer_inside_a_torn_off_window() {
+        let geometry = float_geometry(
+            frame(100.0, 100.0, 430.0, 400.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            FloatHeadTools {
+                dirty: true,
+                save: false,
+                flip: false,
+                rail: true,
+            },
+        );
+        let band = geometry.rail.expect("a band");
+        let measure = crate::seats::PreviewRailMeasure {
+            kind: crate::seats::PreviewRailKind::Address,
+            address_width: 120.0,
+            ..crate::seats::PreviewRailMeasure::default()
+        };
+        let rail = crate::seats::preview_rail_geometry_in(band, SCALE, &measure);
+        let middle = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
+        for (box_, part) in [
+            (rail.back, crate::seats::PreviewRailPart::Back),
+            (rail.forward, crate::seats::PreviewRailPart::Forward),
+            (rail.reload, crate::seats::PreviewRailPart::Reload),
+            (rail.external, crate::seats::PreviewRailPart::Browser),
+            (rail.copy, crate::seats::PreviewRailPart::Copy),
+            (rail.address, crate::seats::PreviewRailPart::Address),
+        ] {
+            let (x, y) = middle(box_.expect("this control fits a 430px window"));
+            assert_eq!(
+                float_hit(&geometry, x, y, Some(&rail), |_, _| None),
+                Some(FloatPart::Rail(part)),
+                "{part:?} answers where it is drawn"
+            );
+        }
+        let (_, y) = middle(band);
+        assert_eq!(
+            float_hit(&geometry, band[0] + 1.0, y, Some(&rail), |_, _| None),
+            Some(FloatPart::Rail(crate::seats::PreviewRailPart::Band)),
+            "and the band swallows what its controls left over"
+        );
+        assert_eq!(
+            float_hit(
+                &geometry,
+                band[0] + 1.0,
+                geometry.body[1] + 4.0,
+                Some(&rail),
+                |_, _| None
+            ),
+            Some(FloatPart::Body),
+            "one pixel lower is the document, which the row must not have taken"
         );
     }
 
