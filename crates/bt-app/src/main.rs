@@ -13294,6 +13294,29 @@ fn image_zoom_caption(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> St
 /// slightly softer picture.
 const PREVIEW_IMAGE_TEXTURE_SHARE: f64 = 0.5;
 
+/// How far past its share a decode may sit rather than be resampled down to it
+/// (user ruling 2026-08-25).
+///
+/// **A cap that bites by a hair costs a full Lanczos3 pass and buys a worse
+/// picture.** The cap preserves the aspect ratio, so a decode `k` times its
+/// allowance comes back scaled by `1/√k` on each edge: at `k = 1.2` that is
+/// 0.913 — the picture loses under nine percent of its width to save under
+/// seventeen percent of a budget it was never close to exhausting, and pays
+/// the half-second the pass takes on a wallpaper-sized decode to do it. Below
+/// some slack the cap is all cost.
+///
+/// **1.2 is where the slack stops being free.** The number the cap exists to
+/// respect is the *whole* [`bt_viewport::MATH_TEXTURE_CACHE_BUDGET_BYTES`],
+/// because [`ByteLru`] refuses outright any single texture larger than the
+/// budget and a refused texture is a picture that vanishes at the moment it is
+/// zoomed in on. The share is a half, so the true edge is at `k = 2.0`;
+/// admitting up to `0.5 × 1.2 = 0.6` of the budget stays comfortably short of
+/// it, and leaves the other 40% for the formula bands, pane icons and glance
+/// thumbnails that live in the same cache. Past 1.2 the resample starts paying
+/// for itself — a decode twice its share is scaled by 0.707 on each edge, which
+/// is a real halving of the bytes rather than a rounding of them.
+const PREVIEW_IMAGE_TEXTURE_SLACK: f64 = 1.2;
+
 /// The largest raster this picture may keep resident, in native pixels.
 ///
 /// **Zooming to 100% asks for the decode's own pixels, and some decodes are
@@ -13311,12 +13334,17 @@ const PREVIEW_IMAGE_TEXTURE_SHARE: f64 = 0.5;
 /// do *not* see is it disappearing. The cap preserves the aspect ratio, so the
 /// box handed to [`bt_render::preview_image_extent`] is still a box that picture
 /// fits exactly.
+///
+/// **The cap is not applied the instant the share is crossed** — see
+/// [`PREVIEW_IMAGE_TEXTURE_SLACK`]. A decode inside the slack keeps every one of
+/// its pixels, which is also the only way a picture at 100% is ever the picture
+/// the file holds.
 fn image_raster_cap(image_px: [u32; 2]) -> (u32, u32) {
     let (width, height) = (f64::from(image_px[0]), f64::from(image_px[1]));
     let bytes = width * height * 4.0;
     let allowance =
         bt_viewport::MATH_TEXTURE_CACHE_BUDGET_BYTES as f64 * PREVIEW_IMAGE_TEXTURE_SHARE;
-    if bytes <= allowance || bytes <= 0.0 {
+    if bytes <= allowance * PREVIEW_IMAGE_TEXTURE_SLACK || bytes <= 0.0 {
         return (image_px[0], image_px[1]);
     }
     let scale = (allowance / bytes).sqrt();
@@ -82172,6 +82200,50 @@ mod tests {
             "and the cap is a box the picture still fits exactly"
         );
         assert_eq!(image_raster_cap([0, 0]), (0, 0), "and nothing is nothing");
+    }
+
+    /// A cap that bites by a hair is a half-second spent making the picture worse
+    /// (user ruling 2026-08-25; [`PREVIEW_IMAGE_TEXTURE_SLACK`]).
+    #[test]
+    fn a_decode_inside_the_slack_keeps_its_own_pixels_rather_than_paying_for_a_pass() {
+        let allowance =
+            bt_viewport::MATH_TEXTURE_CACHE_BUDGET_BYTES as f64 * PREVIEW_IMAGE_TEXTURE_SHARE;
+        let bytes = |image: [u32; 2]| f64::from(image[0]) * f64::from(image[1]) * 4.0;
+
+        // 33.2 MiB against a 32 MiB share: over it, and inside the slack.
+        let barely = [3000_u32, 2900];
+        assert!(bytes(barely) > allowance, "the share really is crossed");
+        assert!(
+            bytes(barely) <= allowance * PREVIEW_IMAGE_TEXTURE_SLACK,
+            "and crossed by less than the slack"
+        );
+        assert_eq!(
+            image_raster_cap(barely),
+            (barely[0], barely[1]),
+            "so 100% is the file's own pixels and no pass is run at all"
+        );
+
+        // 39.1 MiB: past the slack, so the pass is worth what it costs.
+        let past = [3200_u32, 3200];
+        assert!(
+            bytes(past) > allowance * PREVIEW_IMAGE_TEXTURE_SLACK,
+            "this one is past the slack"
+        );
+        let capped = image_raster_cap(past);
+        assert_ne!(capped, (past[0], past[1]), "and is capped");
+        assert!(
+            f64::from(capped.0) * f64::from(capped.1) * 4.0 <= allowance,
+            "down to the share itself and not merely to the slack — once the pass \
+             is paid for there is no reason to stop short of it"
+        );
+
+        // The slack admits at most 0.6 of the whole budget, which is the number
+        // `ByteLru` would refuse a texture over.
+        assert!(
+            allowance * PREVIEW_IMAGE_TEXTURE_SLACK
+                < bt_viewport::MATH_TEXTURE_CACHE_BUDGET_BYTES as f64,
+            "nothing the slack admits can be refused outright by the shared cache"
+        );
     }
 
     #[test]
