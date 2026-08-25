@@ -1935,6 +1935,18 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 
 一张图、五行、两种站位。图是本来就有的那张——`.pv-unknown`（「No preview for this file type」+ 一颗 `Open in default app`），本片把它推广成 `.pv-blank`：**一枚本类的记号、一句话、至多一行事实、唯一一个动词**。一排按钮是程序把自己的判断交还给读者；一行事实（`0x80070002`、`ERR_CONNECTION_REFUSED`、文件名）是给的是能抄进 bug 单的东西；**没有旁白**（本仓裁决「字面量只陈述事实」）。
 
+**④′ 第六张卡:引擎起不来(用户裁 2026-08-25;`WebFault::EngineDidNotStart`)。** 上面那五张之外还有一族状态,W2 片① 落地时就点了名:**运行时装着、引擎照样起不来**——`CreateCoreWebView2EnvironmentWithOptions` 回错、或环境起来了而 controller 回错、或 `on_rehost_lost` / 浏览器进程死掉之后的那次重建再失败。§7.7 ④ 当时定的是五张,这不在其中,于是那条事实只走 `stderr`,而**座位上画的是一块纯地面色的矩形**:没有记号、没有句子、没有动词,和一个空 pane 在屏幕上一模一样。§7.11 把它记了两次(「第六张卡的那句话得有人裁」与片④ 挂账 ⓑ),今天两笔一起结清。
+
+**同形制,不新开一张图。** 一枚本类的地球记号、一句 `The web engine did not start.` / 「网页引擎没有启动。」、一行事实(失败的那个调用与它的代码,SDK 自己的拼法,给的是能抄进 bug 单的东西)、一个动词 `Retry` / 「重试」。占座不覆页——它背后没有页可以留。
+
+**它为什么不是 `Runtime missing` 那一张。** 那张卡的动词是把人送到微软的下载页;把一个运行时装得好好的人送去装一遍,是本窗在怪一台没毛病的机器。分辨两者的仍然是**加载器**而不是错误字符串——gate 7 早就证明注册表会说谎而加载器不会,这条一个字没动,只是它的 `else` 分支从「什么都不画」变成了第六张卡。
+
+**动词也不是 `Reload`。** 头上那三枚钮对着一个存在的 host 说话,而这张卡在屏上的**前提**就是一个都不存在;让它去 reload 一张从来没有过的页是一枚按下去什么都不发生的钮。`WebFaultVerb::RestartTheEngine` 走的是`WebMachine::restart` → `WebEffect::RebuildFromScratch`——**浏览器崩溃走的那同一条路**,所以通往新引擎的路只有一条。它只从 `Failed` 出发(卡在屏上就等于处在那个状态),按下去**卡不撤**:一次一百毫秒后又失败的重试会让座位闪回纯地面色再闪回同一张卡。**卡在 controller 回成功那一刻才撤**,不在 environment 成功那一刻——半个引擎不是引擎,一个环境起来了而 controller 永远不回答的座位会因此把卡收掉、把那块地面色矩形放回来,那正是这条裁决要终结的东西。只有这一族被撤:一张讲**地址**的 `Blocked` 卡不因为引擎起来了就消失。
+
+红测 `an_engine_that_would_not_come_up_is_a_card_and_not_a_coloured_hole`(四条 MUTATION 写在测试头上);`Text::ALL` 由 467 加到 **469**(`WebFailEngineSay` / `WebFailEngineVerb`)。
+
+**实机验收(2026-08-25,debug,`APPDATA`/`LOCALAPPDATA` 全隔离到临时目录,`BT_PTY_DUMP`,不出外网)。** 让引擎起不来的办法是**把它的用户数据目录那条路径占成一个文件**——`%LOCALAPPDATA%\Folio\WebView2` 是一份文本文件,于是引擎创建失败而加载器照旧报得出运行时版本,正是这张卡要的那一族。照片:预览座上一枚地球、`The web engine did not start.`、`CreateCoreWebView2CompositionController failed: Server execution failed (0x80080005)`、一枚 `Retry`——**实机落的是 controller 那一臂**,也就是本裁决新补的那半边。按下 `Retry`:`stderr` 上多出**第二行**同样的 `BT_WEB ...`(引擎真的被重新要过一次),卡原地不动(这次也没起来),与「按下去卡不撤」逐字相符。**同一张照片同时是 C1 的证据**:页面的脚一片空白,而地址行在头下站着。收尾:属于本次运行的 `folio` **0 个**、`msedgewebview2` **0 个**。
+
 | 态 | 说的那句话 | 唯一动词 | 站位 |
 |---|---|---|---|
 | Runtime 缺失 | `Microsoft Edge WebView2 Runtime is not installed.` ＋ `CreateCoreWebView2Environment · 0x80070002` | `Download the runtime` | 占座 |
@@ -2134,7 +2146,7 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 * **`· blocked` 只有一种墨。** 小样给那三个字一份更淡的 `--ink3`;本窗的脚只有一条 label,所以它随整条带子的墨。
 * **加载失败那一行的事实是 `WebErrorStatus · <名字>`,不是小样写的 `ERR_CONNECTION_REFUSED`。** 后者是 **Chromium** 的词汇,这颗 API 不说它;小样那一行是演示常量而不是裁决。实机上环回口的连接被拒报的是 `Unknown`——那是引擎自己的答案,卡照抄。
 * **`Ctrl+0` 没有。** 五加项写的是「`Ctrl`+滚轮 / `Ctrl+0`」;用户 2026-08-22 的裁决点名进表的是两行,加第三行是另一次裁决。梯子上 `1.0` 是一档,所以滚轮回得去。
-* **环境创建失败而运行时装着的那一种,没有卡。** §7.7 ④ 定了五张,这不是其中之一,所以它走 `stderr`——第六张卡的那句话得有人裁。
+* ~~**环境创建失败而运行时装着的那一种,没有卡。** §7.7 ④ 定了五张,这不是其中之一,所以它走 `stderr`——第六张卡的那句话得有人裁。~~ **已结清(用户裁 2026-08-25):它就是第六张卡,见 §7.7 ④′。** 触发一族是「引擎起不来」——环境回错(而加载器说运行时在)、controller 回错、以及 `on_rehost_lost` / 浏览器进程死掉之后那次重建再失败;`WebFault::EngineDidNotStart`,动词 `Retry` 走 `WebMachine::restart` → `WebEffect::RebuildFromScratch`。那条事实**照旧**也走 `stderr`(`WebOutcome::Fault` 一行没删),卡是加上去的,不是替上去的。
 * **小样欠三笔**(都不是原生错):没有 `Ctrl`+滚轮缩放;`webNav` 那一次 `setTimeout(…, 420)` 是假节拍(W1 已点名);胶囊在网页 host 上三个开关都画成活的,而真引擎只答得出一个。
 * **strip 上那一格与切换器那一格仍是两条路,这是裁决而不是欠账。** 头、strip、拖拽幽灵、折叠条走 `seats::pane_mark(kind, content)`(**用户裁决 2026-08-22:这一格归片④**,它比片③ 留下的 `#i-file` 正确);切换器行、Recent 行、恢复提示行走 `marks::preview_row_mark(is_page)`。两个函数问的是两个问题——一个是「这片叶子拿的是什么」,另一个是「这一行代表的是文件还是页面,而问的人手里根本没有座位」——所以它们交出同一枚 `ChromeMark::Globe`,而不是共用同一扇门。
 * **崩溃卡没拍到照片**:本机上 renderer 一被杀,§4 的 `Reload` 在一次 burst 的第一帧之前就把 localhost 那一页拉回来了。这张卡由 `webhost::fault_tests` 与它和另两张共用的那一具画笔担保。**Runtime 缺失那一张造不出来**——本机装着运行时,而卸载别人的运行时不是取证。
@@ -2476,7 +2488,7 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
   - `Runtime::hole_for(presence, floored)` 是那句裁决本身，纯函数：`Shown` 且 `floored` 才有洞。摆放失败只打 stderr 而洞照挖，正是修前的形状。
   - **每帧摆放的代价用第三个缓存抵掉**：`WebSeat::placed` 记住上次给 compositor 的矩形，没动就一次比较——和 `sized`、`presence` 是同一类东西，也和它们一起在 `take_address` 里跟着地址走。它在**唯一改变「地板+页」这一对**的地方被清掉：`InstallEvents` 里 visual 刚进树的那一句。
 - **红测三扇门**。`a_hole_is_only_cut_where_a_floor_already_stands`（bt-app，纯值）——让 `hole_for` 不看 `floored` 就红，而那正是用户拍到的那个 build。`a_pages_floor_is_minted_by_whoever_first_places_it_and_not_by_the_engine`（bt-platform，源钉）——把 `let Some(web) … else { return }` 挪到 `ensure_page_ground` 之前第一句红，给 `attach_web_visual` 塞回一次自己的 `create_page_ground` 最后一句红。上一片的 `a_pages_floor_is_placed_and_removed_with_the_page_and_never_alone` 原样仍绿：一次调用摆两个、一次调用撤两个，这一片只是把「摆」提前到了引擎之前。
-- **挂账**。ⓐ `place_web_visual` 每帧新建 `IDCompositionRectangleClip` 的旧账（上一片的 ⓑ）**没有加重也没有清**：摆放现在按帧问，但 `placed` 让没动的帧一次都不进去，所以真正建 clip 的次数仍然是「矩形变了几次」。要清得把 clip 对象存下来原地改，那是另一张单。ⓑ **引擎一直起不来的窗口**现在显示的是一块纯地面色的 pane，而不是桌面——这是裁决要的，但「页起不来该显示什么」（卡片？文案？）是 §7.7 ④ 那条道上的产品问题，本片不替它作答。ⓒ 本片顺手清掉了 `docs/DESIGN.md` 里 §7.14 那一段**遗留在仓库里的合并冲突标记**（`<<<<<<< HEAD` / `=======` / `>>>>>>> opaque-flight-and-web-ground`），因为要改的正是这一段；**第 84 行附近还有一组同样的标记没有动**，那不在本单范围里。
+- **挂账**。ⓐ `place_web_visual` 每帧新建 `IDCompositionRectangleClip` 的旧账（上一片的 ⓑ）**没有加重也没有清**：摆放现在按帧问，但 `placed` 让没动的帧一次都不进去，所以真正建 clip 的次数仍然是「矩形变了几次」。要清得把 clip 对象存下来原地改，那是另一张单。ⓑ ~~**引擎一直起不来的窗口**现在显示的是一块纯地面色的 pane，而不是桌面——这是裁决要的，但「页起不来该显示什么」（卡片？文案？）是 §7.7 ④ 那条道上的产品问题，本片不替它作答。~~ **已结清（用户裁 2026-08-25）：画第六张卡，见 §7.7 ④′。** 纯地面色仍是**背景**（那条裁决没被翻），站在它上面的现在是一枚地球、一句 `The web engine did not start.`、一行 SDK 自己的错误码和一枚 `Retry`。**留下的那一半写清楚**：这张卡的触发是引擎**回了一个错**；引擎**一次都不回答**（环境或 controller 的回调永不到达）仍然是一块空地面色，因为本窗此刻手上没有任何事实可写，给它一个超时就是给它一个编出来的边界——那是另一张单。ⓒ 本片顺手清掉了 `docs/DESIGN.md` 里 §7.14 那一段**遗留在仓库里的合并冲突标记**（`<<<<<<< HEAD` / `=======` / `>>>>>>> opaque-flight-and-web-ground`），因为要改的正是这一段；**第 84 行附近还有一组同样的标记没有动**，那不在本单范围里。
 
 ## 8. 依赖策略
 

@@ -1471,6 +1471,14 @@ pub enum Text {
     WebFailRuntimeSay,
     /// Its one verb.
     WebFailRuntimeVerb,
+    /// **The sixth card's sentence** (user ruling 2026-08-25) — the runtime is
+    /// installed and the engine still did not come up. States the failure and
+    /// stops: what call failed and with what code is the line underneath, which
+    /// is a fact and not a sentence.
+    WebFailEngineSay,
+    /// Its one verb. `Retry` and not `Reload`: nothing was loaded, so there is
+    /// nothing to load again — what is being asked for again is the engine.
+    WebFailEngineVerb,
     /// The `Process stopped` card's sentence. Names the render process, because
     /// that is the fact a reader can act on: the window did not die, one page's
     /// renderer did.
@@ -2866,6 +2874,13 @@ impl Text {
                 "未安装 Microsoft Edge WebView2 Runtime。",
             ),
             Self::WebFailRuntimeVerb => pick(lang, "Download the runtime", "下载运行时"),
+            // States what happened and stops. It does not guess why — the code
+            // on the line below is the only thing this window actually knows —
+            // and it does not apologise.
+            Self::WebFailEngineSay => {
+                pick(lang, "The web engine did not start.", "网页引擎没有启动。")
+            }
+            Self::WebFailEngineVerb => pick(lang, "Retry", "重试"),
             Self::WebFailCrashSay => pick(
                 lang,
                 "This page stopped running. Its render process exited.",
@@ -2912,7 +2927,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 467] = [
+    pub const ALL: [Self; 469] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3357,6 +3372,8 @@ impl Text {
         Self::PreviewWebStop,
         Self::WebFailRuntimeSay,
         Self::WebFailRuntimeVerb,
+        Self::WebFailEngineSay,
+        Self::WebFailEngineVerb,
         Self::WebFailCrashSay,
         Self::WebFailBlockedSay,
         Self::WebFailBlockedVerb,

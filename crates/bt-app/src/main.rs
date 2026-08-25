@@ -64907,6 +64907,23 @@ impl Runtime<'_> {
             webhost::WebFaultVerb::DownloadTheRuntime => {
                 self.hand_url_to_the_browser(webhost::RUNTIME_DOWNLOAD_PAGE)
             }
+            // **Not the head's reload** (user ruling 2026-08-25): the head's
+            // three buttons talk to a host that exists, and this card is on
+            // screen precisely because none does. It goes back to
+            // `CreateCoreWebView2Environment` through the same effect a browser
+            // crash takes, so the one road to a new engine stays one road.
+            webhost::WebFaultVerb::RestartTheEngine => {
+                let leaf = self.leaf_here(seat);
+                let window = &mut *self.window;
+                let outcomes = window
+                    .web
+                    .get_mut(&leaf)
+                    .map(|web| web.restart_engine(&window.compositor))
+                    .unwrap_or_default();
+                self.apply_web_outcomes(leaf, outcomes)?;
+                self.refresh_chrome();
+                self.present_chrome_change()
+            }
             webhost::WebFaultVerb::Reload => self.run_web_head_verb(seat, WebHeadVerb::Reload),
             webhost::WebFaultVerb::CopyAddress(address) => {
                 self.copy_text_to_clipboard(&address);
