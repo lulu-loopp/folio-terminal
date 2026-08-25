@@ -1,6 +1,6 @@
 # 通知与注意力块方案 v1(2026-08-25 起草,送 Codex 评审;不写产品代码)
 
-> **读法**:正文 §0–§9 是 v1;**§10 是 v2**(评审折入);**§11 是 v3 终修**(窄复核 `codex-confirm.md` 的五处 + 用户 2026-08-25 的 A 组八条裁决);**§12 是 v4 收口**(终确认 `codex-final.md` 点名的两口子 + 它在 §11.10 折入里发现的一处新冲突)。**四者冲突时,序号大的为准。** 被改动的正文处已就地改,并留「v1 原文记作 / v2 原文记作 / v3 原文记作」记号。
+> **读法**:正文 §0–§9 是 v1;**§10 是 v2**(评审折入);**§11 是 v3 终修**(窄复核 `codex-confirm.md` 的五处 + 用户 2026-08-25 的 A 组八条裁决);**§12 是 v4 收口**(终确认 `codex-final.md` 点名的两口子 + 它在 §11.10 折入里发现的一处新冲突);**§13 是 v5 外科修**(第二轮终审 `codex-final2.md` 点名的三处:R5 的 clear 语义冲突、trace schema 的两处不齐、turn-end 去重位)。**五者冲突时,序号大的为准。** 被改动的正文处已就地改,并留「v1 原文记作 / v2 原文记作 / v3 原文记作 / v4 原文记作」记号。
 
 **由头**:用户把这一块提为当前最重要的块之一,原话「目前 claude code 的通知提示还是存在问题的」,并给了一张实机截图(竖栏 Icons 态,三枚 tab 图标,**前两枚右上角带橙点,而第一枚正是活动 tab**)。
 
@@ -1023,6 +1023,7 @@ struct AttentionLedger {
     acked_strong: u64,          // ack 水位,0 = 从未
     toasted:      bool,         // 本 episode 是否已投过 toast(§11.2),随 episode 生灭
     announced_turn_end: bool,   // v4 补:A8 的去重位(§11.7),**不属于任何 episode**
+                                // v5:**第一条被接受的 turn-end 决定**即置真,含 reach=Nothing 那次
 }
 ```
 
@@ -1104,23 +1105,49 @@ refuse    tab=<i> seat=<s> episode=<e> reason=watched active=1 focused=1
 upgrade   tab=<i> seat=<s> [ticket=<t>] episode=<e> grounds=awaiting  src=pipe gen=<g>
 downgrade tab=<i> seat=<s> [ticket=<t>] episode=<e> grounds=requested src=pipe reason=<clear|ttl|session-end|overflow>
 toast     tab=<i> seat=<s> why=awaiting ticket=<t> episode=<e>  reach=<nothing|flash|toast>
-toast     tab=<i> seat=<s> why=turn-end            episode=-    reach=<nothing|flash|toast> src=<pipe|bel>
+toast     tab=<i> seat=<s> why=turn-end            episode=-    reach=<nothing|flash|toast> src=<pipe|osc|bel> via=<name>
 look      tab=<i> seat=<s> ticket=<t> episode=<e> kept=1
 answer    tab=<i> seat=<s> [ticket=<t>] episode=<e> by=<keyboard|ime|paste|files-row|mouse-button|mouse-wheel> weak=<w> strong=<g>
-clear     tab=<i> seat=<s> episode=<e> src=<osc|pipe> gen=<g> reason=<program|hook|ttl|session-end|overflow>
+clear     tab=<i> seat=<s> episode=<e> src=<osc|pipe> gen=<g> reason=<program|hook|auto-resume|ttl|session-end|overflow>
 withdraw  tab=<i> seat=<s> ticket=<t> episode=<e> reason=program src=<osc|pipe>
 expire    tab=<i> seat=<s> ticket=<t> episode=<e> reason=leaf-gone
-drop      tab=<i> seat=<s> episode=<e> reason=<leaf-gone|program|hook|ttl|session-end|overflow>
-claim     tab=<i> was=<C> now=<C>
+drop      tab=<i> seat=<s> episode=<e> reason=<leaf-gone|program|hook|auto-resume|ttl|session-end|overflow>
+claim     tab=<i> episode=<e|-> was=<C> now=<C>
 ```
 
-三条字段合同(**它们让上面那张网格与这张 schema 逐格自洽**):
+字段合同(**它们让上面那张网格与这张 schema 逐格自洽**)。**v5 就地改**:**v4 原文记作**「三条字段合同」,而当时列出的其实已是四条;v5 补两条(`src=`/`via=` 的定义、`claim` 的 `episode=`),**共六条**:
 
 - **`ticket=` 只在真有号的时候出现。** `admit` / `look` / `withdraw` / `expire` / `toast` **必带**;`upgrade` / `downgrade` / `answer` **选带**(在 `Requested` 上发生时不带)。
 - **`withdraw` 与 `expire` 只属于 `Queued`。** 无号态的销毁写 `drop`(带 episode、不带 ticket);单个源被撤但 episode 还活着写 `clear`。`Idle` 上的任何事件**一行都不写**。
   **v4 就地补 `drop` 的 `reason=` 值域**(**v3 原文记作** `<leaf-gone|session-end>`):§11.1.4 的 `WeakNo` / `StrongClear` 两行明写「两源皆空 ⇒ → `Idle`,`clear` + `drop`」,而**那种 `drop` 的原因既不是 leaf 没了也不是会话结束** —— v3 的值域漏了它。改法是让 `drop` 与 `clear` **共用同一套 `reason` 值**再加上 `leaf-gone`:一条 `drop` 的原因,永远就是**把最后一条凭据撤掉的那件事**的原因。
-- **`episode=` 每一行都必须出现;没有 episode 的行写 `episode=-`。** 这是「带 episode 之后,每一行都要能回答『这是哪一次请求』」那条要求的执行面(§10.2.6 原话),而**事件级凭据按定义不铸 episode**(红线 14),它对这个问题的诚实答案就是「不属于任何一次请求」—— 写 `-`,与 `mint` 行的 `prev=-` 是同一套记法。`by=` 的取值是 §11.3 的七值**去掉 `mouse-motion`**:那个值**永远不会出现在 `answer` 行上**,因为它结构上到不了这扇门。
-- **`toast` 是唯一有两种形状的动词,由 `why=` 判别**(**v4 就地改;v3 原文记作**单行的 `toast … ticket=<t> episode=<e> … why=<awaiting|turn-end>`)。终确认点名的正是这一处:§11.7 写死「回合结束不铸 episode、不发 ticket」,而 v3 的 `toast` 行强制这两个字段 ⇒ **事件级 turn-end 没有合法形状**。改法是**按有没有 episode/ticket 把两种形状分开**:`why=awaiting` 那条走队列那道门(§11.2),两个字段**必带**;`why=turn-end` 那条走事件那道门(§11.7),**必不带 `ticket=`、`episode=` 写 `-`**,并用 `src=` 记它是哪一条事实源(`pipe` = hook `Stop`/`StopFailure`,`bel` = 裸 BEL)。**这两种形状永远不会互相冒充**,因为红线 14 不许事件级拿到号。
+- **`episode=` 每一行都必须出现;没有 episode 的行写 `episode=-`。**(**v5**:`claim` 是最后一条没跟上的,已在下面第六条合同里补齐 —— **这条合同至此没有例外**。)这是「带 episode 之后,每一行都要能回答『这是哪一次请求』」那条要求的执行面(§10.2.6 原话),而**事件级凭据按定义不铸 episode**(红线 14),它对这个问题的诚实答案就是「不属于任何一次请求」—— 写 `-`,与 `mint` 行的 `prev=-` 是同一套记法。`by=` 的取值是 §11.3 的七值**去掉 `mouse-motion`**:那个值**永远不会出现在 `answer` 行上**,因为它结构上到不了这扇门。
+- **`toast` 是唯一有两种形状的动词,由 `why=` 判别**(**v4 就地改;v3 原文记作**单行的 `toast … ticket=<t> episode=<e> … why=<awaiting|turn-end>`)。终确认点名的正是这一处:§11.7 写死「回合结束不铸 episode、不发 ticket」,而 v3 的 `toast` 行强制这两个字段 ⇒ **事件级 turn-end 没有合法形状**。改法是**按有没有 episode/ticket 把两种形状分开**:`why=awaiting` 那条走队列那道门(§11.2),两个字段**必带**;`why=turn-end` 那条走事件那道门(§11.7),**必不带 `ticket=`、`episode=` 写 `-`**,并用 `src=` + `via=` 记它从哪条传输进来、由哪条事实源报出(下一条合同)。**这两种形状永远不会互相冒充**,因为红线 14 不许事件级拿到号。
+  **v5 就地改**:**v4 原文记作**「用 `src=` 记它是哪一条事实源(`pipe` = hook `Stop`/`StopFailure`,`bel` = 裸 BEL)」—— 那句话让 `src=` 同时背两件事,而它的值域装不下第二件(见下)。
+
+- **`src=` 是传输类别,`via=` 才是事实源**(**v5 就地改;v4 原文记作** `src=<pipe|bel>`,并声称 `src=` 能查出「是谁报的」)。病在哪:**pi 与 codex 的回合结束是走 `OSC 9` / `OSC 777` / `OSC 99` 进来的**(§11.10.3 的 B 型),而 v4 的值域里没有 `osc`,于是它们只能被记成 `bel` —— **trace 把一条 OSC 来源写成了裸 BEL**,而这两者在收侧、在诊断上、在给上游提 issue 时都是不同的事实。改法是把两个问题**拆成两个字段**:
+
+  ```text
+  src=<pipe|osc|bel>   # 怎么进来的(传输类别,一行必带)
+        pipe = `folio attention` 端点那条命名管道(§10.6)
+        osc  = 终端字节流里的 OSC 序列(`OSC 1337;RequestAttention`、`OSC 9;<text>`、`OSC 777;notify`、`OSC 99`)
+        bel  = 裸 BEL(`0x07`),**只有它才是 `bel`**
+  via=<name>           # 谁报的(具体序列名 / 上游事件名)
+        今天的取值:stop | stop-failure | bel | osc-1337 | osc-9 | osc-777 | osc-99 | notify | agent-settled
+  ```
+
+  - **`via=` 在 `why=turn-end` 的 toast 行上必带**(A8 有四条事实源而它们说同一件事,分得清是这一行存在的理由);其余动词上**选带** —— 它们的 `src=` 已经唯一确定了生产者(强层只有管道,弱层只有 `OSC 1337`)。
+  - **`OSC 9;4` 仍然不在这里**:那是进度环通道(§11.6 第 3 条),它一行 trace 都不写。
+  - **两个字段都不管去重**:回合结束的去重归 `announced_turn_end` 那一位(§11.7),`src=`/`via=` 只是让「这一次是谁报的」可查。
+
+- **`claim` 行也带 `episode=`**(**v5 就地改;v4 原文记作** `claim tab=<i> was=<C> now=<C>`)。上一条合同说「每一行都必须出现 `episode=`」,而 `claim` 是**唯一一条没跟上的**——终审点名的正是这处**合同与 schema 自己打架**。补字段而不是给合同开例外,因为**「这一次七态变化是哪一次请求造成的」正是读 trace 的人最想问 `claim` 的那句话**。取值规则可判定:
+
+  ```text
+  now 是注意力型断言(Awaiting / …)      ⇒ 写 live episode
+  否则 was 是注意力型断言(刚刚落下)     ⇒ 写 last_episode(§12.2.1;它就是驱动那次断言的号)
+  两者都不是(Bell / Unread / Running 之间的变化) ⇒ 写 `-`
+  ```
+
+  **第三支才是常态** —— `claim` 是**投影层**的一行,它多数时候由注意力之外的事实驱动;写 `-` 是诚实答案,与 `mint` 的 `prev=-`、事件级的 `episode=-` 是同一套记法。**合同因此保持无例外。**
 
 #### 11.1.6 不变量与钉
 
@@ -1220,15 +1247,17 @@ folio attention clear [--key=<opaque> | --kind=<permission|elicitation|agent|quo
 > **v4 就地改两处**(其余各行一个字不动):
 > ① **「0 秒事件」与「~6 秒 `Notification` 兜底」是同一个 kind 的两层,一份实装配置里只装一层。** **v3 原文记作**第 2/4 行的「同上(同 key ⇒ 对上面那条是**幂等重申**,零 trace)」—— 那句话默认两层能靠 key 对上,而 **6 秒那层带不带同一个 id 从来没有取证过**;两层并存正是终确认点名的「同一次请求铸成两代」。改法是**分层单装**:上游支持 0 秒事件就只装 0 秒那层,不支持才装 6 秒那层,**装哪层由安装器问那个程序自己**(红线 7),不由我们猜版本。这样一次请求**在源头上**只会有一条 wait 进来,不需要靠关联键去合并两条。
 > ② **第一行的 `PostToolUse` 从「开工前取回的前提」改成「开工前取回的验证项」**,三种结果各自的降级写死在 **§12.1**;**不论哪一支,正确性都不依赖它** —— 它只决定卫生的精细度。
+>
+> **v5 再就地改**(**v4 原文记作**「就地改两处,**其余各行一个字不动**」—— v5 之后不再是「不动」:每一条回执型出口都补注了它落 R5 三分里的哪一支,而 quota 那一行是**改判**):最后一行 quota 的正常出口 **`quota_auto_resume_fired` / `quota_auto_resume_disabled` 从「回执型」改判为「按 kind 的权威结束边界」(`boundary-kind`)**。**v4 原文记作**「回执型」—— 而回执型要过 R5 的 ack 闸(只退已答电平),**这两个事件恰恰是在没有任何用户 Answer 的情况下到达的**(程序自己续上了、或自己不等了),于是必然 `gen > acked_strong`、必然被闸住:**quota 这一行的「正常出口」在 v4 里是死的**,它只能落到边界型或 TTL。终审点名的正是这一格。**改判之后它无条件清 quota 电平、不过 ack 闸**,判据、类的定义与它为什么只罩得住 quota,全在 **§13.1**;`clear` 行写 `reason=auto-resume`。**本节这张表在三分下的逐行对账也在 §13.1** —— 「每一种 wait 都有正常出口」这句话在那里被重新说准了一次。
 
 | `wait` 源 | key | 正常出口 | 兜底一 | 兜底二 | 最终兜底 |
 |---|---|---|---|---|---|
-| **`PermissionRequest`**(事件,0s,**primary 层**) | `kind=permission`;id 模式开了才另带 `--key=` payload 的 tool_use / request 标识(§12.1 的声明规则) | **`PostToolUse`** ——「批准了、而且那个工具已经跑完」的回执;**回执型 clear**(§12.1 R5:只退已答电平)。**它是验证项,不是前提**,三支降级见 §12.1 | **`UserPromptSubmit`** ⇒ `--all`(你已经回话了,那就什么都不在等你;**边界型**) | **`Stop` / `StopFailure`** ⇒ `--all`(回合结束 ⇒ 这个 pane 没有任何东西在等你输入;**边界型**) | **TTL 600s**(与官方 `PermissionRequest` 的同步超时同值)⇒ `clear … reason=ttl` |
+| **`PermissionRequest`**(事件,0s,**primary 层**) | `kind=permission`;id 模式开了才另带 `--key=` payload 的 tool_use / request 标识(§12.1 的声明规则) | **`PostToolUse`** ——「批准了、而且那个工具已经跑完」的回执;**回执型 clear**(§12.1 R5:今天走**第二支**,只退已答电平;V-a 取回后该 kind 进 id 模式,它升**第一支**,精确退一条且不过闸 —— **v5 就地补**,§13.1)。**它是验证项,不是前提**,三支降级见 §12.1 | **`UserPromptSubmit`** ⇒ `--all`(你已经回话了,那就什么都不在等你;**边界型**) | **`Stop` / `StopFailure`** ⇒ `--all`(回合结束 ⇒ 这个 pane 没有任何东西在等你输入;**边界型**) | **TTL 600s**(与官方 `PermissionRequest` 的同步超时同值)⇒ `clear … reason=ttl` |
 | `Notification` **`permission_prompt`**(~6s,**fallback 层**) | 同上 | 同上 | 同上 | 同上 | 同上 |
-| **`Elicitation`**(事件,0s,**primary 层**) | `kind=elicitation`;id 模式开了才另带 payload 的 elicitation id | **`ElicitationResult`**(回执型) | `elicitation_complete` / `elicitation_response`(回执型,`--kind=elicitation`) | `UserPromptSubmit` / `Stop` / `StopFailure` ⇒ `--all`(边界型) | TTL 600s |
+| **`Elicitation`**(事件,0s,**primary 层**) | `kind=elicitation`;id 模式开了才另带 payload 的 elicitation id | **`ElicitationResult`**(回执型;今天第二支,id 取证成功后升第一支) | `elicitation_complete` / `elicitation_response`(回执型**第二支**,`--kind=elicitation`) | `UserPromptSubmit` / `Stop` / `StopFailure` ⇒ `--all`(边界型) | TTL 600s |
 | `Notification` **`elicitation_dialog`** / **`elicitation_url_dialog`**(~6s,**fallback 层**) | 同上 | 同上 | 同上 | 同上 | 同上 |
-| `Notification` **`agent_needs_input`**(只有这一层) | `kind=agent`;id 模式开了才另带 payload 的 background session id | **`agent_completed`**(回执型) | `UserPromptSubmit` ⇒ `--all`(边界型) | `SessionEnd` ⇒ `--all`(边界型) | TTL 600s |
-| `Notification` **`quota_auto_resume_stale`**(只有这一层) | `kind=quota`,**天生无 id** | **`quota_auto_resume_fired`**(自动继续了)/ **`quota_auto_resume_disabled`**(结束等待);回执型 | `UserPromptSubmit` ⇒ `--all`(边界型) | `SessionEnd` ⇒ `--all`(边界型) | TTL 600s |
+| `Notification` **`agent_needs_input`**(只有这一层) | `kind=agent`;id 模式开了才另带 payload 的 background session id | **`agent_completed`**(回执型**第二支**;**它够不上 `boundary-kind`** —— 后台 session 可并发多条,§13.1.3 写明了这一格的代价与它的取证升级路) | `UserPromptSubmit` ⇒ `--all`(边界型) | `SessionEnd` ⇒ `--all`(边界型) | TTL 600s |
+| `Notification` **`quota_auto_resume_stale`**(只有这一层) | `kind=quota`,**天生无 id** | **`quota_auto_resume_fired`**(自动继续了)/ **`quota_auto_resume_disabled`**(结束等待);**`boundary-kind`(按 kind 的权威结束边界,无条件清 quota 电平,不过 ack 闸;`clear … reason=auto-resume`)**。**v4 原文记作**「回执型」,v5 改判,理由见 §13.1 | `UserPromptSubmit` ⇒ `--all`(边界型) | `SessionEnd` ⇒ `--all`(边界型) | TTL 600s |
 
 **普适出口(与 key 无关,三条)**:`SessionEnd` ⇒ `--all` + `drop`;**leaf 消失** ⇒ 端点关闭、旧 capability 永久失效(§10.6 第 4 条,与 §11.1.4 的 `LeafGone` 同一时刻);**TTL** ⇒ 逐条到期。
 
@@ -1329,7 +1358,31 @@ t6  settle{consumed=false}           admit    ticket=13 episode=8;toast 再投�
 > **v3/v4 就地补两条别家的事实源**(名单因此是四条,**都仍然归 `Announced`、一张号都不发**):**codex 的 `notify`**(只说 `agent-turn-complete`,§11.10.3)、**pi 的 `agent_settled`**(「fires only once a run fully settles」,§11.10.3 v4 就地改)。它们与上面两条**同级同权**:走 `desktop_reach` 三档,受同一个 `turn_end_notification` 开关管,受同一条去重规则管。
 
 **去重(两条证据会同时到,而它们说的是同一件事)**:**同一 leaf 上,两次回合结束通知之间必须隔着一次 `UserPromptSubmit` 或一次用户动作。** 没隔着就不投第二次。
-**v4 补它的承载**:一位 `announced_turn_end: bool`(§11.1.1 / §12.2),**投出去时置真,`UserPromptSubmit` 与任何 `Answer` 置假**。它**不属于任何 episode**,也不随 episode 生灭 —— 因为回合结束本来就不铸 episode(红线 14),把它挂到 `toasted` 上就等于让事件级借了 episode 的寿命。被它吞掉的第二次**不写 trace**(它没改变任何决定),这一条是事件那道门自己的零 trace 规则,不进 §11.1.4 那张封闭名单。
+**v4 补它的承载**:一位 `announced_turn_end: bool`(§11.1.1 / §12.2),**第一条被接受的 turn-end 决定作出时置真,`UserPromptSubmit` 与任何 `Answer` 置假**。
+
+> **v5 就地改这一位的置真时刻。** **v4 原文记作**「**投出去时**置真」。**病在哪**:`desktop_reach` 三档里 **`Nothing` 也是一个决定** —— 第 1 行(有焦 + 活动 tab)判的是「你看得见,不打扰」,那是**这个回合结束已经被处理过**的结论,不是「还没处理」。而 v4 那句话只在真投出去(`Flash` / `Toast`)时置位,于是:**有焦时第一条源到 ⇒ 判 `Nothing` ⇒ 位仍为假 ⇒ 你切走窗口 ⇒ 第二条源到 ⇒ 门重算成 `Flash` ⇒ 补出一次闪**。这正撞红线 5「不排队、不补发」,也撞本节自己那句「两次之间必须隔着一次 `UserPromptSubmit` 或用户动作」—— **中间一次都没隔着**。
+>
+> **v5 的写法(一个回合结束只被决定一次)**:
+>
+> ```text
+> 一条 turn-end 事实源到达:
+>     if !turn_end_notification { 整条道不走:不求值、不写 trace、不置位 }   // 开关 Off
+>     else if announced_turn_end { 零效果零 trace }                          // 后到的重复源
+>     else {
+>         reach = desktop_reach(…)            // 三档,含 Nothing
+>         按 reach 行动(Nothing 就是什么都不加)
+>         announced_turn_end = true           // ← **不论 reach 是哪一档**
+>         trace: toast … why=turn-end episode=- reach=<nothing|flash|toast> src=<…> via=<…>
+>     }
+> ```
+>
+> - **「被接受」的准确含义**:开关开着、且位为假 —— 也就是**这条源真的驱动了一次 `desktop_reach` 求值**。求值出 `Nothing` 也算接受;**位记的是「这个回合的结束已经被决定过」,不是「已经打扰过你」**。
+> - **`reach=nothing` 那一行 trace 照写**:它改变了决定(置了位、决定了后面的源都不再补发),按「一行 trace 对一个决定」的钉它必须留痕。schema 的 `reach=` 值域里本来就有 `nothing`(§11.1.5),不用改形状。
+> - **被吞掉的第二次仍然零 trace**(下一段原样成立)——它没改变任何决定。
+> - **开关 Off 时不置位**:那条道整个没走,没有决定可记;而位为真为假在 Off 下都观察不到。**开关一开一关不会留下半个状态。**
+> - **它不影响窗内记号**:`Bell` / `Unread` 两枚点归它们自己管(下面「设置行 Off」那一条原样),这一位只管**够不够得到桌面**这一件事被决定过没有。
+
+它**不属于任何 episode**,也不随 episode 生灭 —— 因为回合结束本来就不铸 episode(红线 14),把它挂到 `toasted` 上就等于让事件级借了 episode 的寿命。被它吞掉的第二次**不写 trace**(它没改变任何决定),这一条是事件那道门自己的零 trace 规则,不进 §11.1.4 那张封闭名单。
 **为什么不用毫秒窗口**:一个「1.5 秒内算同一次」的常数会在慢机器上漏、在快机器上误合,而**「你有没有开始下一个回合」这件事我们本来就知道** —— 用知道的事实,不用猜的阈值。这与 §3.4 拒绝「输出安静 N 秒」是同一条纪律。
 
 **设置行**:`turn_end_notification`,**默认 On**,位置在设置块通知那一节,与 A5 的「Claude Code bell」那一行并排。
@@ -1393,11 +1446,13 @@ B2 ──▶ 独立等命令面板
 - **⑬ 后到的强凭据补投一次**:弱 `yes` 先入队(**无 toast**)⇒ 六秒后 `permission_prompt` 到 ⇒ **恰好一次** toast,且 **ticket 号不变**(§11.2)。
 - **⑭ 连续两次权限请求**:批准第一次(`PostToolUse` 到)、拒绝第二次 ⇒ **两个 episode、两张号、两次 toast**;拒绝那次即使没有 `PostToolUse`,`Stop` 或下一次 `wait` 的新 generation 也能让它继续工作(§11.4.3 逐行核对)。
 - **⑮ motion 不退号**:让 pane 里的程序开 `?1003h`,把鼠标在它上面扫过一整行 ⇒ `BT_ATTENTION_TRACE` 里**没有 `answer` 行**;再点一下 ⇒ **有一行 `answer … by=mouse-button`**(§11.3)。
-- **⑯ A8 三格**:回合结束时 —— 窗口有焦 + 活动 tab ⇒ **什么都不加**;窗口在副屏无焦 ⇒ **任务栏闪、不 toast**;窗口最小化 ⇒ **toast**;把 `turn_end_notification` 关掉重跑三格 ⇒ **三格都不够到桌面,窗内记号照旧**(§11.7)。
+- **⑯ A8 三格**:回合结束时 —— 窗口有焦 + 活动 tab ⇒ **桌面上什么都不加**,**而 trace 里恰好一行 `toast … why=turn-end … reach=nothing`**(**v5 就地改**:v4 原文记作「什么都不加」,那句话读起来像「连 trace 都不写」;`Nothing` 是一个**被作出的决定**,它留痕、并且置去重位,§13.3);窗口在副屏无焦 ⇒ **任务栏闪、不 toast**;窗口最小化 ⇒ **toast**;把 `turn_end_notification` 关掉重跑三格 ⇒ **三格都不够到桌面、trace 一行不写、去重位不置**,**窗内记号照旧**(§11.7)。
 - **⑰ A7 不越权**:发一条 `OSC 777;notify` ⇒ 既有 toast 照投,而**队列长度不变、点不变成 `Awaiting`**;在一个已有 live episode 且尚未 toast 的 pane 上发一条 `OSC 9;<text>` ⇒ 那次 toast 用**它的正文**,且**只有一次**(§11.6)。
 - **⑱ trace 字段合同**:跑完整个端到端之后扫一遍 trace —— **`withdraw` / `expire` 行必带 `ticket=`;`drop` / `clear` / `mint` 行必不带**;**每一行都有 `episode=`,事件级的行(`why=turn-end`)写 `episode=-` 且必不带 `ticket=`**(**v4 就地改;v3 原文记作**「每一行都有 `episode=`」—— 那句话与 §11.7「回合结束不铸 episode」互斥,§11.1.5 的两种 `toast` 形状是它的解);**没有一行 `by=mouse-motion`**(§11.1.5)。
+  **v5 就地补三格**:①**`claim` 行也带 `episode=`**(多数是 `-`,但至少有一行在点变成 `Awaiting` 的那一刻带着真号)—— 「每一行都有 `episode=`」这句话**扫的时候不许再有例外**;②**没有一行 `src=bel` 是 OSC 报进来的**:让 pi / codex 走 `OSC 777` / `OSC 9` 报一次回合结束,那一行必须 `src=osc`;③**每一行 `why=turn-end` 都带 `via=`**,且四条事实源各跑一次时 `via=` 四个值互不相同。
 - **⑲ 第二家 agent(A 型是数据不是代码)**:真 `codex` + 真 Folio,`-a untrusted` 跑一条要批准的命令 ⇒ **队列长一位、点变 `Awaiting`**;回一句话 ⇒ 退号。**这一步的门不只是「亮了」,还有「A3 的代码一行没为 codex 改过」**(§11.10.3)。
 - **⑳㉑㉒㉓ 见 §12.4**(v4 收口新增的四格:无 id 路径的连续两次、无 id 路径的迟到重复、持久计数与 turn-end 形状、事件级不进队列)。
+- **㉔㉕㉖ 见 §13.4**(v5 外科修新增的三格:quota 的正常出口真的走得通、turn-end 在 `Nothing` 之后不补发、精确回执不被 ack 闸吞掉)。
 
 ---
 
@@ -1496,6 +1551,7 @@ B2 ──▶ 独立等命令面板
 ## 12. 2026-08-25 v4 收口(终确认折入:两口子 + 一处新冲突)
 
 **这一节是什么**:`codex-final.md` 的**总判定**说 v3「仍需修改,尚未完全闭合」,点名**三处**:①**hook 的无 id 关联/换代规则**未闭合(连带 `PostToolUse` 的关联字段还是悬空前提、codex 的无 id `permission-request` 让同一个洞在第二家适配器上重现);②**双源核心的持久计数与事件级 trace 形状**只写了半条;③**折入 §11.10 时新长出来的一处冲突** —— pi 的 `agent_settled` 被映射成强层 `wait`,而它是回合结束语义。**本节逐处闭合,不重开任何已经通过的产品裁决。** 与 §0–§11 冲突时以本节为准;被改到的旧文都已就地改并留「v3 原文记作」。
+**v5 提示**:第二轮终审判本节的**双源持久计数**(§12.2)与 **pi 映射**(§12.3)已闭合,但点名本节自己新长出三处 —— **R5 的 clear 语义冲突**(§12.1.3,已就地改成三分)、**trace schema 两处不齐**(§11.1.5 已就地补)、**turn-end 去重位**(§11.7 已就地改)。三处的完整推导在 **§13**;本节被改到的地方都留了「**v4 原文记作**」。
 
 **闭合对照(终确认那三处):**
 
@@ -1540,7 +1596,7 @@ v3 §11.4.1 那半句「**取不到就用该 `kind` 的固定兜底键**」在�
      kind=<permission|elicitation|agent|quota>
      id=<payload 里的字段路径 | none>
      tier=<primary|fallback>          # 只对 wait 行有意义
-     clear-class=<receipt|boundary>   # 只对 clear 行有意义
+     clear-class=<receipt|boundary|boundary-kind>   # 只对 clear 行有意义(v5 扩:第三个值见 R5)
 ```
 
 **`id=` 写不出字段路径就写 `none`,不许写「大概是 tool_use_id」。** 逐字取证过才准写路径(§10.4 的取证纪律,一字不改)。
@@ -1566,14 +1622,17 @@ id 模式:        key 不在表里            ⇒ 起举(铸新强 gen,写入 (k
 - **无 id 模式为什么「已答就算起举」**:没有同一性证据,**水位是我们仅有的可判定事实**。而它判得对:能在「你已经答过」之后还举起来的,只可能是一件新事。
 - **就地换代不占新槽**:无 id 模式下一个 kind 永远只有一条 outstanding,§11.4.1 的「每 pane 最多 8 条 / 超限丢最旧」在无 id 的家上**结构性地用不到**(四个 kind 顶天四条)。
 
-**R5(clear 分两类)。**
+**R5(clear 分三类)。**(**v5 就地改;v4 原文记作「分两类」** —— 那张两类表把「精确凭据」和「可能迟到的回声」塞进同一格,又把「程序自己结束了等待」也塞了进去,于是同一道闸同时拦错了两种东西。**病灶与三分的完整推导在 §13.1**,本表是它的执行面。)
 
 | 类 | 是谁 | 效力 |
 |---|---|---|
-| **`boundary`(边界型)** | `UserPromptSubmit` / `Stop` / `StopFailure` / `SessionEnd` / `--all` / TTL / leaf 消失 | **无条件退**,已答未答都退 |
-| **`receipt`(回执型)** | `PostToolUse` / `ElicitationResult` / `elicitation_complete` / `elicitation_response` / `agent_completed` / `quota_auto_resume_fired` / `quota_auto_resume_disabled` | **只退已答电平**(`gen ≤ acked_strong`);碰上**未答**的电平**一律不动、零 trace** |
+| **`boundary`(全域边界型)** | `UserPromptSubmit` / `Stop` / `StopFailure` / `SessionEnd` / `--all` / TTL / leaf 消失 | **无条件退全部**,已答未答都退 |
+| **`boundary-kind`(按 kind 的权威结束边界)** | `quota_auto_resume_fired` / `quota_auto_resume_disabled`(今天只有这一对合格,判据见 §13.1) | **无条件清该 kind 的电平,不过 ack 闸**;`clear … reason=auto-resume` |
+| **`receipt`(回执型),两支** | **① id 模式的同 key 精确回执**:`PostToolUse` / `ElicitationResult` / `agent_completed` 等**在该 kind 已开 id 模式**时按 key 到达的那一条 | **无条件退它指名的那一条**(V-a 原语义,§12.1.5),**不过 ack 闸** |
+| | **② 无 id、按 kind 的回执**:同上诸事件在无 id 电平模式下,以及 `elicitation_complete` / `elicitation_response` 这类只说得出 kind 的 | **只退已答电平**(`gen ≤ acked_strong`);碰上**未答**的电平**一律不动、零 trace** |
 
-**回执型为什么要这道闸**:无 id 模式下回执**指认不到具体哪一条**,它只能按 kind 退。若让它无条件退,一个「上一次工具跑完了」的回执就能把**这一刻真的挂着的**下一条等待抹掉 —— **假阴性,正是我们最不能要的那一类**。加上这道闸之后,回执型只做**卫生**(把已经答过的脏电平收走),**碰不到正确性**;而真正需要无条件清场的时刻(你回话了、回合结束了、会话没了)本来就有边界型盯着。
+**这道 ack 闸防的是什么,以及它为什么只该拦第二支**:无 id 模式下回执**指认不到具体哪一条**,它只能按 kind 退 —— 一个「上一次工具跑完了」的**迟到回声**就能把**这一刻真的挂着的**下一条等待抹掉,**假阴性,正是我们最不能要的那一类**。而**①拿着生产者给的同一性证据**:它只可能退掉它指名的那一代,退不到别的 wait 头上;若它是同一个 key 的迟到回声,那条 wait 早已不在表里,`clear` 一条不存在的 key 本来就是零效果零 trace(§11.4.1)。**闸是为「说不清是哪一条」准备的,不是为「说得清」准备的** —— 拿它去拦精确凭据,拦掉的是正确性本身(§12.1.5 的 V-a 会被自己的闸吞掉)。
+**加上这道闸之后,第二支只做卫生**(把已经答过的脏电平收走),**碰不到正确性**;而真正需要无条件清场的时刻(你回话了、回合结束了、会话没了)有全域边界型盯着,**程序自己结束等待**的那一刻有 `boundary-kind` 盯着。
 
 **R6(TTL 与普适出口不变)。** §11.4.2 的 TTL 600s、`SessionEnd`、leaf 消失三条普适出口**一个字不改**,它们都是边界型。
 
@@ -1596,7 +1655,8 @@ t2   你按 y/n 回答             两水位追平(weak=0 strong=1)⇒ asking↓
 t3   没有任何回执               什么都不发生(codex 这一家连回执型 clear 都没有)
 t4   stop(回合结束)            clear --all(边界型)⇒ clear episode=7 src=pipe gen=1 reason=hook
                                两源皆空 ⇒ → Idle;drop episode=7 reason=hook(§11.1.5 v4 就地补了这个值)
-                               并按 A8 投一次:toast why=turn-end episode=- src=pipe reach=flash
+                               并按 A8 投一次:toast why=turn-end episode=- src=pipe via=stop reach=flash
+                               (v5 补 via=;若这一刻窗口有焦 ⇒ reach=nothing,那一行照写、去重位照置,§13.3)
 t5   第二次 permission-request  槽空(t4 清过)⇒ 起举 ⇒ gen 2 > acked_strong 1 ⇒ asking↑
                                mint   episode=8 src=pipe gen=2 grounds=awaiting prev=7
 t6   settle{consumed=false}    admit  ticket=13 episode=8;toast 再投一次(新 episode,新 toasted)
@@ -1629,8 +1689,8 @@ t1.6 用户始终没答,第二条**真的**权限请求到  ⇒ 槽内 gen 1 未
 
 | 取回结果 | `permission` kind 的模式 | `PostToolUse` 的落点 |
 |---|---|---|
-| **V-a** 带同一命名空间的标识,**且**该 kind 实装的 wait 层也带它 | **id 模式**(按 R3 开) | `clear-class=receipt`,**按 key 精确退一条** |
-| **V-b** 带标识,但该 kind 实装的 wait 层不带 | **无 id 电平模式** | `clear-class=receipt`,`--kind=permission`,**只退已答电平**(R5) |
+| **V-a** 带同一命名空间的标识,**且**该 kind 实装的 wait 层也带它 | **id 模式**(按 R3 开) | `clear-class=receipt`,**按 key 精确退一条**(**R5 receipt 的第一支:不过 ack 闸**;v5 就地对齐 —— v4 的 R5 曾把这一支也塞进「只退已答电平」,与本行相反,§13.1) |
+| **V-b** 带标识,但该 kind 实装的 wait 层不带 | **无 id 电平模式** | `clear-class=receipt`,`--kind=permission`,**只退已答电平**(**R5 receipt 的第二支**) |
 | **V-c** 不带可对应的标识,或字段不稳定 | **无 id 电平模式** | 同 V-b;**退无可退时(连 kind 都说不出)整行从映射表删掉**,出口退回边界型 + TTL |
 
 **三支都不动正确性。** R4 的起举判据已经保证下一次真请求一定被看见 —— **`PostToolUse` 决定的只是「已答的那条脏电平多早被收走」,即卫生的精细度**。这就是把它从前提降成验证项的底气:**方案不再有任何一句话依赖它取回什么。**
@@ -1682,6 +1742,7 @@ acked_weak:         u64,
 acked_strong:       u64,
 toasted:            bool,         // 随 episode 生灭
 announced_turn_end: bool,         // v4 补:A8 去重位,**不属于任何 episode**(§11.7)
+                                  // v5:置真时刻 = 第一条被接受的 turn-end 决定(含 reach=Nothing),§13.3
 // 第五个游标是既有的 per-window `next_ticket`(§11.1.4 已写「不回退」),它一个字不改
 ```
 
@@ -1715,12 +1776,12 @@ mint():
 
 ```text
 toast  tab=<i> seat=<s> why=awaiting  ticket=<t> episode=<e> reach=<nothing|flash|toast>
-toast  tab=<i> seat=<s> why=turn-end              episode=-  reach=<nothing|flash|toast> src=<pipe|bel>
+toast  tab=<i> seat=<s> why=turn-end              episode=-  reach=<nothing|flash|toast> src=<pipe|osc|bel> via=<name>
 ```
 
 - **`why=` 是判别式**,不是附注:`awaiting` 那条走 §11.2 的队列门,`turn-end` 那条走 §11.7 的事件门。**§11.7 早就说这两条道「靠 `why=` 分辨」** —— v4 只是让字段跟上这句话。
 - **`episode=-` 而不是省掉整个字段**:⑱ 要的是「**每一行都能回答『这是哪一次请求』**」,而事件级对这个问题的**诚实答案就是「不属于任何一次」**。写 `-` 保住了逐列可扫,与 `mint` 行的 `prev=-` 是同一套记法。
-- **`src=` 记事实源**:`pipe` = hook `Stop`/`StopFailure`(装了 hook 的 Claude Code、codex 的 `stop`),`bel` = 裸 BEL 那条路(以及 pi / codex 走 `OSC 9`/`777` 进来的 `Announced`)。**A8 的事实源有四条而它们说的是同一件事**(§11.7 就地补),`src=` 让「这一次是谁报的」在 trace 上可查,而**去重仍然由 `announced_turn_end` 那一位管,不由 `src=` 管**。
+- **`src=` 记传输类别,`via=` 记事实源**(**v5 就地改;v4 原文记作**「`src=` 记事实源:`pipe` = hook `Stop`/`StopFailure`,`bel` = 裸 BEL 那条路(**以及 pi / codex 走 `OSC 9`/`777` 进来的 `Announced`**)」—— 括号里那半句就是病灶:**它让 OSC 来源在 trace 上冒充裸 BEL**,而 `src=` 的值域里当时没有 `osc` 可写)。改成两个字段:`src=<pipe|osc|bel>` 只说**怎么进来的**(`bel` 从此只指裸 `0x07`),`via=<stop|stop-failure|bel|osc-9|osc-777|osc-99|notify|agent-settled|…>` 说**谁报的**,在这一行上**必带**。**A8 的事实源有四条而它们说的是同一件事**(§11.7 就地补),分得清是这一行存在的理由;而**去重仍然由 `announced_turn_end` 那一位管,`src=`/`via=` 一个都不管**。完整定义在 §11.1.5 的第五条字段合同。
 - **被去重吞掉的第二次不写 trace**:它没改变任何决定。这条零 trace 规则属于事件那道门自己,**不进 §11.1.4 那张封闭名单**(事件级不进那台机器,红线 14)。
 
 ---
@@ -1746,7 +1807,7 @@ toast  tab=<i> seat=<s> why=turn-end              episode=-  reach=<nothing|flas
 
 - **⑳ 无 id 路径的连续两次(t4 缺席那一支)**:真 codex + 真 Folio,一个回合里连着两条要批准的命令。批准第一条 ⇒ 点灭;**中间不给任何 clear**(不回话、不等 `stop`)⇒ 第二条批准框出现 ⇒ **第二个 episode、第二张号、第二次 toast**,trace 里第二条 `mint` 的 `prev=` 指着第一个 episode。**这一格是 v3 的固定兜底键必挂的那一格**(§12.1.4 t5′)。
 - **㉑ 无 id 路径的迟到重复**:在一次**未答**的权限请求上,让同 kind 的 wait 再来一条(手工 `folio attention wait --kind=permission`,或把 fallback 层与 primary 层同时装上来复现 v3 的老配置)⇒ **零 trace、号不变、`grounds` 不变、无第二次 toast**;随后回答一次 ⇒ 恰好一行 `answer`。
-- **㉒ 持久计数与 turn-end 形状**:同一个 leaf 上走完「铸 → 答 → 撤 → 再铸」四轮(中间至少落回一次 `Idle`)⇒ trace 里四个 episode 号**严格递增且互不相同**,第二条起每条 `mint` 的 `prev=` 恰是上一条 `mint` 的 `episode`;两条 generation 同样严格递增;**`why=turn-end` 的 toast 行带 `episode=-`、不带 `ticket=`、带 `src=`**;把 `turn_end_notification` 关掉重跑 ⇒ **一行 `why=turn-end` 都没有**,而 `why=awaiting` 那条道一行不少。
+- **㉒ 持久计数与 turn-end 形状**:同一个 leaf 上走完「铸 → 答 → 撤 → 再铸」四轮(中间至少落回一次 `Idle`)⇒ trace 里四个 episode 号**严格递增且互不相同**,第二条起每条 `mint` 的 `prev=` 恰是上一条 `mint` 的 `episode`;两条 generation 同样严格递增;**`why=turn-end` 的 toast 行带 `episode=-`、不带 `ticket=`、带 `src=` 与 `via=`**(**v5 加**:让 pi / codex 走 `OSC 777` / `OSC 9` 报一次回合结束 ⇒ 那一行必须是 **`src=osc via=osc-777|osc-9`**,**不许写成 `bel`**);把 `turn_end_notification` 关掉重跑 ⇒ **一行 `why=turn-end` 都没有**,而 `why=awaiting` 那条道一行不少。
 - **㉓ 事件级不进队列(pi 那一格)**:若接了 pi 的 B 型 —— 一次 `agent_settled` 进来 ⇒ **按 A8 走三档**(有焦不打扰 / 无焦闪 / 最小化 toast),而**队列长度不变、点不变成 `Awaiting`、trace 里没有 `mint`**。**与 ⑰ 同型**,只是换了一家生产者;它同时是「适配器是数据不是代码」的反向验证 —— **接 pi 没有让 A3 的代码多一行,也没有让它多一条 `wait` 映射**。
 
 ---
@@ -1756,3 +1817,186 @@ toast  tab=<i> seat=<s> why=turn-end              episode=-  reach=<nothing|flas
 **本块的开放题仍然只有一条,还是那一条**:**B1 —— 第八记号 `Attached` 的判据罩不住 codex**(§11.10.4 的甲 / 乙两个候选,本方案不替裁)。它**不挡任何一片的工期**。
 **另有三件是「有证据才动」的挂账,不是开放题**:①`PostToolUse` 的关联事实(§12.1.5 的三支已写死,取回哪一支落哪一支);②各家各 kind 的 id 模式(§12.1.6,逐字取证成功才开,默认无 id);③copilot 的 `agent_idle` 与 gemini-cli 的标题嗅探(要收须**另起一题**)。
 **要把 `idle_prompt` 收成弱层凭据、把滚轮撤出 Answer、或把 pi 列回 A 型,同样都要新起一题**(§11.0 的封口纪律,一个字不改)。
+
+---
+
+## 13. 2026-08-25 v5 外科修(第二轮终审折入:三处点名,修完即全闭合)
+
+**这一节是什么**:`codex-final2.md` 复核 §12,判 **pi 映射冲突**与**双源持久计数**已闭合、**t0–t6 走查**与 **turn-end 的两种 trace 形状**也已闭合,并点名**三处**仍需修:①**R5 的 clear 语义冲突**(统一的 ack 闸同时撞上 §12.1.5 V-a 的精确 clear、和 `quota_auto_resume_*` 的自动结束出口);②**trace schema 两处不齐**(`claim` 行站在「每行都有 `episode=`」这条合同之外;`src=` 一个字段背两件事,而它的值域里没有 `osc`);③**turn-end 去重位的置真时刻写错了一边**。
+
+**三处都是外科修**:不重开任何产品裁决,不改任何一片的工期,不新增一个概念 —— **一处把两类拆成三类,一处补一个字段并把另一个字段拆成两个,一处把一个 bool 的置真时刻挪早一步**。与 §0–§12 冲突时以本节为准;被改到的旧文都已就地改并留「**v4 原文记作**」。
+
+**闭合对照(终审那三处):**
+
+| # | 第二轮终审的话 | 落点 | 一句话 |
+|---|---|---|---|
+| ⑨ | R5 把所有 `receipt` 统一规定为「只退已答电平」,与 §12.1.5 V-a 的「按 key 精确退一条」给出相反结果;更直接的反例是 `quota_auto_resume_fired` / `_disabled` —— 它们结束等待时可以没有任何用户 Answer,必然 `gen > acked_strong`,**按 R5 会被零 trace 吞掉** | **§13.1**(+ §12.1.3 的 R1/R5、§12.1.5 的 V-a、§11.4.2 的 quota 行就地改) | **闸是为「说不清是哪一条」准备的**:精确凭据**不过闸**,迟到回声**过闸**,而「**程序自己结束了等待**」的事件**根本不是回执 —— 它就是出口本身** |
+| ⑩ | `claim tab=<i> was=<C> now=<C>` 没有 `episode=`,而 §11.1.5 / §11.9 ⑱ / §12.2.4 都要求每一行都有;`src=<pipe\|bel>` 把裸 BEL 与 OSC 9/777/99 都记成 `bel`,却声称 `src` 能查出「是谁报的」 | **§13.2**(+ §11.1.5、§12.2.4、§12.4 ㉒、§11.9 ⑱ 就地改) | **补字段,不给合同开例外**;`src=` 降成**传输类别**并扩成 `pipe\|osc\|bel`,「谁报的」**另设 `via=`** |
+| ⑪ | §11.7 说同一回合第二个 turn-end 源无条件去重,却把 `announced_turn_end` 写成「投出去时置真」;先有焦得 `Nothing`、后失焦收到重复源时可能**补出一次 flash**,反撞「不补发」 | **§13.3**(+ §11.7、§11.1.1、§12.2.1、§11.9 ⑯ 就地改) | **`Nothing` 也是一个决定**:**第一条被接受的 turn-end 决定**即置真,这一位记的是「**已经决定过**」而不是「已经打扰过你」 |
+
+---
+
+### 13.1 【闭合⑨】R5 三分:精确凭据、迟到回声、权威结束边界
+
+#### 13.1.1 病在哪:一道闸被派去拦三种东西,其中两种它不该拦
+
+v4 的 R5 把 clear 分成两类,而**「回执型」那一格里其实躺着三种形状不同的东西**:
+
+| 躺在 `receipt` 里的 | 它到达时说的是 | ack 闸对它做的 | 对不对 |
+|---|---|---|---|
+| **精确凭据**(id 模式,V-a 的同 key 回执) | 「**你指名的那一条**结束了」 | 未答就不动它 | **错。** 它带着生产者给的同一性证据,只退得到它指名的那一代;闸拦掉的是 §12.1.5 V-a 白纸黑字的「按 key 精确退一条」—— **方案的两句话互相取消** |
+| **迟到回声**(无 id,只说得出 kind) | 「**某一条**结束了,而我说不出是哪一条」 | 未答就不动它 | **对。** 这正是闸存在的理由:一条「上一次工具跑完了」的回执不许抹掉**这一刻真的挂着**的下一条等待 —— 假阴性 |
+| **程序自己结束等待**(`quota_auto_resume_fired` / `_disabled`) | 「**这个 kind 的等待到此为止**,而且从头到尾没人回答过」 | 未答就不动它 ⇒ **必然被吞** | **错,而且是死的。** 这类事件按定义在**没有任何用户 Answer** 的情况下到达 ⇒ 必然 `gen > acked_strong` ⇒ 必然过不了闸 ⇒ **§11.4.2 给 quota 写的那条「正常出口」永远不会执行**,quota 电平只能挂到边界型或 TTL 600s |
+
+**共同的病根**:v4 拿「**它是不是一条回执**」这一个问题去决定过不过闸,而真正该问的是**另一个问题** —— **「它退错东西的风险有多大」**。三种形状在后一个问题上的答案完全不同(**退不错 / 可能退错 / 无错可退**),所以它们不该共用一个类。**三分不是把 R5 变复杂,是把它原本混在一起的三个判据分开写。**
+
+#### 13.1.2 三分的判据(每一类给可判定的条件,而不是给一张名单)
+
+**① `receipt` 第一支 —— 精确凭据:无条件退它指名的那一条。**
+
+```text
+条件:该 kind 已按 R3 开了 id 模式,且这条 clear 行声明了 id=<字段路径>(与 wait 行同一命名空间)
+效力:按 key 退那一条,**不过 ack 闸**;key 不在表里 ⇒ 零效果零 trace(§11.4.1 原样)
+```
+
+**它为什么可以不过闸,一句话**:**它退不到别的 wait 头上。** 迟到的那种情况在它身上是良性的 —— 同一个 key 的迟到回执抵达时,那条 wait 早已不在表里,而 `clear` 一条不存在的 key 本来就是零效果零 trace。**闸拦的是「指认不到具体哪一条」带来的连坐,而这一支恰好指认得到。**
+
+**② `receipt` 第二支 —— 迟到回声:只退已答电平(ack 闸原样)。**
+
+```text
+条件:该 kind 跑在无 id 电平模式(默认),这条 clear 行只说得出 --kind=
+效力:gen ≤ acked_strong ⇒ 退;gen > acked_strong ⇒ **一律不动、零 trace**
+```
+
+**v4 R5 那段「回执型为什么要这道闸」的论证一个字不改** —— 它本来就只对这一支成立,v4 的错是把它推广到了另外两支上。
+
+**③ `boundary-kind` —— 按 kind 的权威结束边界:无条件清该 kind 的电平。**
+
+```text
+效力:清掉该 kind 的槽,**无论 ack 水位**;trace 写 clear … reason=auto-resume
+```
+
+**它不是卫生回执,它是出口本身** —— 「等待结束了」是它唯一说的那句话,而我们的电平此刻表示的正是那件等待。**一条把出口挡在闸外的规则,等于宣布这条 wait 没有正常出口**,那正撞 §11.4.2 那张表的标题。
+
+**够格进 ③ 的两个必要条件(都要在 R1 的映射表上声明得出来,缺一条就退回 ②)**:
+
+1. **它自己就是出口**:上游事件的语义是「**这个 kind 的等待到此结束**」,而不是「上一件事办完了」—— 所以它到达时**不需要**、也不预期用户答过。
+2. **该 kind 在该 session 上结构性单例**:同一时刻**不可能**有两条并发的该 kind 等待。于是「按 kind 清」与「精确清那一条」**是同一件事**,**没有迟到回声可打** —— 闸对它无事可做。
+
+**这两条不是为 quota 量身定做的**:它们是「无错可退」那句话的可判定形式。条件 2 正是条件 1 之外还必须有的那一半 —— 光有条件 1,一个「某个后台 agent 结束了」的事件仍可能清掉**另一个**后台 agent 的等待。
+
+#### 13.1.3 今天五行的逐行落位(诚实,取证到哪算哪)
+
+| clear 源 | 条件 1:它自己就是出口? | 条件 2:结构性单例? | 落位 | 备注 |
+|---|---|---|---|---|
+| `PostToolUse` | 否(它说的是「上一件工具跑完了」) | 否 | **②**(id 模式取证成功后升 **①**) | §12.1.5 的三支就是这条升级路 |
+| `ElicitationResult` | 否(它是那个框被答掉的回执) | 否 | **②**(同上可升 **①**) | 正常路上它必然跟在一次本 pane 的 `Answer` 之后,水位早已追平,**闸对它是透明的** |
+| `elicitation_complete` / `elicitation_response` | 否 | 否 | **②** | 只说得出 kind |
+| `agent_completed` | **是**(后台 agent 结束了,它不再需要你) | **否** —— 后台 session **可并发多条**,一条结束不代表另一条不在等 | **②** | **写明这一格的代价**:后台 agent 自己结束、而你从未答过 ⇒ 回执被闸住 ⇒ 落到边界型 / TTL。**那是脏账,不是吞请求**(§11.4.3 已把这两类的轻重排过序)。**升级路已经写好**:`agent_needs_input` 与 `agent_completed` 的 background session id 逐字取证成功 ⇒ agent kind 进 id 模式 ⇒ 它走 **①** 精确退,**这一格自然消失**(§12.1.6 那一行的「差什么」问的就是它) |
+| `quota_auto_resume_fired` / `_disabled` | **是**(自动续上了 / 不再等了) | **是** —— 配额是**会话级**的一份,`quota_auto_resume_stale` 不可能并发两条 | **③ `boundary-kind`** | **今天唯一合格的一对**;`clear … reason=auto-resume` |
+
+**读法**:**三分之后,「谁过闸」不再是一张名单,是两个能在映射表上回答的问题。** 加一家 agent 时,它的每一条 clear 行按这两个问题落位,**不需要回来改 R5**。
+
+#### 13.1.4 §11.4.2「每一种 wait 都有正常出口」在三分下的重新对账
+
+**那句话的准确版本**:每一种 wait 都有一条正常出口,**且这条出口在那件等待真的结束的那一刻可达**。三分之后逐行核:
+
+| wait 源 | 今天的模式 | 正常出口 | 类 | 「真的结束了」的那一刻它走得通吗 |
+|---|---|---|---|---|
+| `PermissionRequest` / `permission_prompt` | 无 id 电平 | `PostToolUse` | ② | **走得通**:权限请求真的结束 = 你批了或拒了 ⇒ 本 pane 一次 `Answer` ⇒ 水位追平 ⇒ 回执过闸退。**而它未答时被闸住恰恰是对的** —— 那时那条电平**真的还挂着**,能到的只可能是上一件工具的迟到回声 |
+| `Elicitation` / `elicitation_dialog` | 无 id 电平 | `ElicitationResult` 等 | ② | **走得通**,理由同上:elicitation 被答的路径**必然**经过这个 pane 的一次输入 |
+| `agent_needs_input` | 无 id 电平 | `agent_completed` | ② | **有一格走不通**(后台自己结束而你从未答)⇒ 落边界 / TTL。**已写明、已排轻重、已给升级路**(§13.1.3) |
+| `quota_auto_resume_stale` | 无 id 电平(天生) | `quota_auto_resume_fired` / `_disabled` | **③** | **走得通,而且现在才走得通** —— v4 那条闸把它焊死了,v5 把它拆掉 |
+
+**一句话收口**:**v4 的表把「每一种 wait 都有出口」写成了一张名单,v5 把它写成了一个判据。** 名单会因为闸的加入而在某几行悄悄变成空话(quota 那一行就是),判据不会 —— **判据自己回答「这条出口在什么条件下可达」,而不可达的那一格必须被写出来**(agent 那一格就是,它现在写在纸上,并且带着一条能让它消失的取证任务)。
+
+#### 13.1.5 ③ 的残余代价与它的边界(写出来,不藏)
+
+- **它只清自己那一个 kind 的槽。** `boundary-kind` **不是** `--all`:一条 `quota_auto_resume_fired` 清不掉 permission 的电平。**所以它「无条件」也无条件不到别的 kind 头上** —— 这是条件 2 之外的第二道结构性限制。
+- **唯一的乱序风险,以及它的代价**:若 `stale` 与 `fired` 在管道上乱序(两条 hook 各是一次独立的 `folio attention` 调用),一条迟到的 `fired` 可能清掉一条**更新的** `stale` 电平。**代价是一枚点早灭一次**,而**下一条 `stale` 会把它重新举起来** —— R4「已答 / 已清的电平可以重新起举」正好承载它,**不需要为这件事再加任何规则**。这与 §12.1.7 的残余同型:**能被下一次真事件纠正的,不用时间常数去堵。**
+- **它不给「无条件」开第二个口子**:`downgrade` 行的 `reason=` **一个值都不加** —— 「因一条 clear 而降级」这件事它的 `reason=clear` 早就罩住了,**降级不关心那条 clear 属于哪一类**。加值域的只有 `clear` / `drop` 两个动词,加的是 `auto-resume` 一个值(§11.1.5 已就地改)。
+
+---
+
+### 13.2 【闭合⑩】trace schema 补齐:`claim` 的 `episode=`,以及 `src=` / `via=` 分家
+
+**两处都已在 §11.1.5 就地改,本节只写为什么这么选。**
+
+#### 13.2.1 `claim`:补字段,不给合同开例外
+
+**终审给了两条路**:补 `episode=<e|->`,或**明文把 `claim` 移出「每行都有 `episode=`」的合同并给理由**。**选补字段**,理由三条:
+
+1. **合同的价值全在「无例外」。** 一条「除了 `claim` 之外每一行都有」的合同,让读 trace 的人**每扫一次都要先想一下当前这行是不是那个例外** —— 而这条合同存在的全部理由就是**逐列可扫**(§10.2.6 原话:「每一行都要能回答『这是哪一次请求』」)。**开一个例外,省下一个字段,毁掉一条不变量。**
+2. **`claim` 恰恰是最该被问这个问题的一行。** 它是**投影层**的一行 —— 那枚点变了。而「**这次七态变化是哪一次请求造成的**」正是读 trace 的人看到 `claim` 时最想问的一句;v4 让它**唯独**答不出来。
+3. **它答得出来,而且是纯函数。** 取值规则用到的两个字段(live `episode` 与 `last_episode`)在 §12.2.1 里都已经有了,**不需要多存一个字节**:
+
+```text
+now 是注意力型断言(Awaiting / …)               ⇒ episode = live episode
+否则 was 是注意力型断言(刚刚落下)               ⇒ episode = last_episode(驱动那次断言的就是它)
+两者都不是(Bell / Unread / Running 之间的变化)  ⇒ episode = -
+```
+
+**第三支是常态**,而写 `-` 是**诚实答案**(这次变化确实不属于任何一次请求),与 `mint` 的 `prev=-`、事件级的 `episode=-` 是同一套记法 —— **v5 没有发明新记法,它只是把已有的那一套用到最后一行上。**
+
+> **顺带**:§10.2.6 那段 v2 的 schema 里也有一条无 `episode=` 的 `claim`。**它不用改** —— 那一段自己写着「整张 schema 以 §11.1.5 为准」,而 §11.1.5 的标题就是「替换 §10.2.6」。**一处权威,一处历史。**
+
+#### 13.2.2 `src=`:一个字段背两件事,而它的值域装不下第二件
+
+**病灶原文**(§12.2.4 v4):「`bel` = 裸 BEL 那条路(**以及 pi / codex 走 `OSC 9`/`777` 进来的 `Announced`**)」。**括号里那半句就是病**:
+
+- **它在 trace 上把一条 OSC 来源写成了裸 BEL。** 而这两者是**不同的事实**:收侧走的是不同的解析路径(`inline_image.rs` 的 OSC 分派 vs BEL 那条)、给上游提 issue 时说的是不同的话(§11.10.3 诉求账第 ② 条要的正是**让 codex 别降级成裸 BEL**)。**一条把「已经拿到 OSC 9」记成「只拿到裸 BEL」的 trace,会让 B 型装没装成这件事无法验证。**
+- **而 v4 又要求 `src=` 能查出「这一次是谁报的」** —— 一个值域只有 `pipe|bel` 的字段,**结构上**分不出四条事实源里的后三条。**它同时被要求回答两个问题,而它的形状只够回答一个。**
+
+**改法:拆成两个字段,各答一个问题**(定义已写进 §11.1.5 的第五条字段合同):
+
+| 字段 | 答哪个问题 | 值域 | 谁必带 |
+|---|---|---|---|
+| `src=` | **怎么进来的**(传输类别) | `pipe`(命名管道端点)/ `osc`(字节流里的 OSC 序列)/ `bel`(裸 `0x07`,**只有它才是 `bel`**) | 带 `src=` 的动词都必带 |
+| `via=` | **谁报的**(具体序列名 / 上游事件名) | `stop` / `stop-failure` / `bel` / `osc-1337` / `osc-9` / `osc-777` / `osc-99` / `notify` / `agent-settled` / …(**加一家就加一个名,不改字段**) | **`why=turn-end` 的 toast 行必带**;其余动词选带 |
+
+**三条钉**:①**`OSC 9;4` 不在这里**(它是进度环,一行 trace 都不写,§11.6 第 3 条);②**两个字段都不管去重** —— 回合结束的去重归 `announced_turn_end` 那一位(§13.3),`src=` / `via=` 只让「这一次是谁报的」可查;③**`via=` 的值域是开放的,而 `src=` 的是封闭的** —— 这正是把它们分开的收益:**新加一家 CLI 只会加一个 `via=` 的名字,永远不会逼我们再动一次传输类别的值域。**
+
+---
+
+### 13.3 【闭合⑪】turn-end 去重位:`Nothing` 也是一个决定
+
+**病在哪(终审的反例,逐步)**:
+
+```text
+s0  窗口有焦 + 活动 tab,回合结束
+s1  第一条 turn-end 源到(比如 hook `Stop`)⇒ desktop_reach ⇒ 第 1 行 ⇒ Nothing
+    v4:「投出去时置真」⇒ 什么都没投 ⇒ announced_turn_end 仍为 **假**
+s2  你切走窗口(或它被最小化)
+s3  同一回合的第二条 turn-end 源到(比如裸 BEL / OSC 777)
+    位为假 ⇒ 门重算 ⇒ 这次落在第 2/3/4 行 ⇒ **Flash** ⇒ **补出一次闪**
+```
+
+**s3 那一闪撞两条规矩**:红线 5「**toast 不排队、不补发**」;以及 §11.7 自己那句「**同一 leaf 上,两次回合结束通知之间必须隔着一次 `UserPromptSubmit` 或一次用户动作**」—— **s1 到 s3 之间一次都没隔着**。它还撞第三件事:**回合早就结束了,而你在 s2 之后收到的这一闪说的是同一件旧事** —— 这正是 §0 那句「一个回合末尾的一次性事件被投影成持久状态」的小号复发。
+
+**改法(§11.7 已就地改)**:**`announced_turn_end` 在第一条被接受的 turn-end 决定时置真,包括那次决定是 `Nothing`。**
+
+- **「被接受」= 开关开着、且位为假**,也就是**这条源真的驱动了一次 `desktop_reach` 求值**。**求值出 `Nothing` 也算接受。**
+- **这一位记的是「这个回合的结束已经被决定过」,不是「已经打扰过你」。** v4 把它读成了后者,于是「不打扰」被当成了「还没处理」。**而 `Nothing` 从来不是「没处理」—— 它是三档里被正正经经选中的那一档**,理由写在 §11.7 第 1 行:**你正看着它,你已经知道了。**
+- **`reach=nothing` 那一行 trace 照写**:它改变了决定(置了位、决定了后面的源都不再补发),按「**一行 trace 对一个决定**」那条钉必须留痕。schema 不用动 —— `reach=` 的值域里本来就有 `nothing`(§11.1.5)。
+- **被吞掉的第二次仍然零 trace**(§11.7 原样):它没改变任何决定。
+- **开关 `turn_end_notification` 为 Off 时,整条道不走** —— 不求值、不写 trace、**也不置位**。**一开一关不会留下半个状态。**
+
+**为什么不是「让门在失焦之后重算一次」**(那是另一条看着也能通的路,写出来是为了说明它为什么不选):重算意味着**同一个回合结束可以被决定两次**,而第二次的输入是**你切窗口**这个与那个回合无关的动作 —— 那等于说「**你走开这件事本身能触发一次通知**」。**它会把一个早已过去的回合结束,变成一件跟着你的注意力跑的事**,而 §11.7 拒绝毫秒窗口、§3.4 拒绝「输出安静 N 秒」用的是同一条纪律:**用我们确实知道的事实,不追着用户的注意力去补发。**
+
+**与 `toasted` 的对照(它们看着像,而分工不同)**:`toasted` 挂在 episode 上、随 episode 生灭,管的是「**这一次请求**打扰过没有」;`announced_turn_end` 不属于任何 episode,管的是「**这一个回合的结束**决定过没有」。**v5 让它们在「置真时刻」上也对齐了** —— `toasted` 在 toast 门**求值并放行**的那一刻置真,`announced_turn_end` 在事件门**求值**的那一刻置真;**两者都是「决定作出」的时刻,不是「桌面上出现动静」的时刻。**
+
+---
+
+### 13.4 验收门增补(接 §11.9 的 ⑪–⑲ 与 §12.4 的 ⑳–㉓)
+
+- **㉔ quota 的正常出口真的走得通(③ 那一类)**:构造一条 `quota_auto_resume_stale` ⇒ 点亮、`grounds=awaiting`;**全程不回答、不回话、不结束回合**;随后发 `quota_auto_resume_fired` ⇒ **点灭**,trace 里恰好一行 `clear … reason=auto-resume`(`gen > acked_strong` 时照退)。**再跑一遍 `_disabled` 那一支**,同样结果。**反向钉**:在同一条未答的 quota 电平挂着时,发一条**无 id 的 permission 回执**(②)⇒ **零 trace、电平不动** —— 两类的分界在同一次运行里被同时验证。
+- **㉕ turn-end 在 `Nothing` 之后不补发**:窗口有焦 + 活动 tab,让回合结束(第一条源)⇒ 桌面无动静,trace 恰好一行 `toast … why=turn-end reach=nothing via=<第一条源>`;**立刻切走窗口(或最小化)**⇒ 让同一回合的第二条 turn-end 源到达 ⇒ **不闪、不 toast、零 trace**。随后**回一句话**(`UserPromptSubmit`)⇒ 下一个回合结束时 ⇒ **照常闪 / toast**(位已被置假)。**这一格是 v4 必挂的那一格。**
+- **㉖ 精确回执不被 ack 闸吞掉(① 那一支)**:在一个**已开 id 模式**的 kind 上(按 §12.1.5 取回 V-a,或用手工 `folio attention wait --kind=… --key=A`)—— 举起 `key=A`、**不回答**,直接送来 `clear --key=A` ⇒ **那一条退掉、trace 有一行 `clear`**(`gen > acked_strong` 拦不住它);同一段序列换成**无 id 模式**重跑一次(只发 `--kind=`)⇒ **不动、零 trace**。**同一个 kind、同一段序列、两种模式两种结果** —— 这就是三分在验收面上的样子。
+
+---
+
+### 13.5 v5 之后的开放项
+
+**一条没多、一条没少 —— §12.5 那份清单原样成立**:开放题仍然只有 **B1**(第八记号 `Attached` 的判据,§11.10.4,本方案不替裁,不挡工期);三件「有证据才动」的挂账仍是那三件(`PostToolUse` 的关联事实、各家各 kind 的 id 模式、copilot 的 `agent_idle` 与 gemini-cli 的标题嗅探)。
+
+**v5 只给第二件挂账添了一个新的受益人,没有添新题**:`agent_completed` 那一格(§13.1.3)是今天唯一一条「正常出口在某个分支上不可达」的 wait,而**让它可达的动作已经在挂账里** —— 逐字取回 `agent_needs_input` 与 `agent_completed` 的 background session id,agent kind 进 id 模式,那条回执就走 ① 精确退。**取证成功它自己消失,取证失败它就是纸上那一行脏账**;两种结局都不需要新裁决。
