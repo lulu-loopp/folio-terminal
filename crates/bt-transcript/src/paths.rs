@@ -1734,6 +1734,117 @@ mod tests {
         );
     }
 
+    /// The three rows of the user's 2026-08-25 `[file]` chip, taken apart into the two things the
+    /// application's layout puts around the path: a left **gutter** in front of every row, and a
+    /// size **column** behind the ones that have room for it.
+    const CHIP_HEAD: &str = "C:\\Users\\Weiyi\\AppData\\Local\\Temp\\claude\\D--Developer-Bett";
+    const CHIP_TAIL: &str =
+        "erTerminal\\ccea9546-63d0-4a20-ba77-75caa4e8533c\\scratchpad\\folio-pdf-test.pdf";
+    const CHIP_TARGET: &str = "C:\\Users\\Weiyi\\AppData\\Local\\Temp\\claude\\\
+        D--Developer-BetterTerminal\\ccea9546-63d0-4a20-ba77-75caa4e8533c\\scratchpad\\\
+        folio-pdf-test.pdf";
+    const CHIP_URI: &str = "file:///C:/Users/Weiyi/AppData/Local/Temp/claude/\
+        D--Developer-BetterTerminal/ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/\
+        folio-pdf-test.pdf";
+
+    /// PIN (user report 2026-08-25, case A's inferred twin) — **an application that lays a path
+    /// into a column of its own and prints another column after it infers nothing at all.**
+    ///
+    /// The picture is Claude Code's `[file]` chip: a 58-column path column with a left gutter
+    /// (`>`, `[file]`) in front of every row and the size column's ink (`(58.2K`, `B)`) behind the
+    /// ones with room for it. When the application *declares* the target with OSC 8 this is one
+    /// link and bt-viewport rejoins it on the label; with **no** declaration the joined text is
+    /// nobody's statement of anything and the rows must stay blank.
+    ///
+    /// Three separate gates keep them blank, and the case list below is arranged so that each one
+    /// answers alone. The ledger holds **only the joined target**, so gate ④ says yes to the right
+    /// name and gate ⑤ has nothing to object to.
+    ///
+    /// * **gate ①** — with a space in front of it the size column ends the upper token, so the
+    ///   candidate stops short of the row's last cell: the application had room and chose to stop,
+    ///   which is not a cut. MUTATION: drop the `touches_line_end` filter and this one links,
+    ///   because the two fragments do spell the target exactly.
+    /// * **gate ③** — with no space the size column is *inside* the token (`(` opens a bracket
+    ///   pair and nothing closes it), and what the two rows then spell is not one candidate but
+    ///   two: `…-Bett(58.2KerTerminal…` and, opening after the bracket, `58.2KerTerminal…`. "One
+    ///   candidate covering all of it" is exactly the rule that refuses a promise laid over text
+    ///   it did not read, and it refuses **in front of the disk** — the case below proves it by
+    ///   asserting that no question was asked at all.
+    /// * **gate ②** — the lower fragment opens at the gutter's width and not at visual column 0,
+    ///   which is what a peer row looks like rather than what a wrap looks like.
+    ///
+    /// The last case is the **positive control** — strip both pieces of the application's layout
+    /// and the very same text rejoins into the very same file — without which the refusals could
+    /// equally be a lexer that never links anything.
+    #[test]
+    fn an_application_column_layout_infers_no_reference_from_its_fragments() {
+        // The gutter is written in ASCII so that one cell is one byte; what is being pinned is
+        // that ink stands in front of the fragment, not which glyph the vendor chose for it.
+        let gutter_and_size = format!(">      {CHIP_HEAD} (58.2K");
+        let gutter_only = format!("[file] {CHIP_TAIL}");
+        let spaced_size = format!("{CHIP_HEAD} (58.2K");
+        let joined_size = format!("{CHIP_HEAD}(58.2K");
+        let links = ledger("D:\\case", &[(CHIP_TARGET, true)]);
+
+        assert_eq!(
+            rejoin(&links, &gutter_and_size, &gutter_only),
+            None,
+            "the picture as printed: no gate is satisfied"
+        );
+        assert_eq!(
+            rejoin(&links, &spaced_size, CHIP_TAIL),
+            None,
+            "gate ①: the size column stands behind the upper candidate, so it never reached the \
+             row's end"
+        );
+
+        let mut asked = BTreeSet::new();
+        assert_eq!(
+            links.rejoin_across_newline(
+                &joined_size,
+                last_cell_of(&joined_size).unwrap(),
+                CHIP_TAIL,
+                &mut asked
+            ),
+            None,
+            "gate ③: an unclosed bracket keeps the size column inside the token, and the joined \
+             text then spells two candidates rather than one covering all of it"
+        );
+        assert!(
+            asked.is_empty(),
+            "and it refused in front of the disk, so no name was even asked about: {asked:?}"
+        );
+
+        assert_eq!(
+            rejoin(&links, CHIP_HEAD, &gutter_only),
+            None,
+            "gate ②: the lower fragment opens at the gutter's width, which is what a peer row \
+             looks like and not what a wrap looks like"
+        );
+        assert_eq!(
+            rejoin(&links, CHIP_HEAD, CHIP_TAIL),
+            Some((CHIP_HEAD, CHIP_TAIL, CHIP_URI.to_owned())),
+            "the positive control, and the URI this exact path folds into — a doubled hyphen in a \
+             directory name is ordinary path text and is escaped by nothing"
+        );
+    }
+
+    /// PIN (user report 2026-08-25, case C) — boundary table row 27 met in the wild: the same path,
+    /// cut by the application over two rows that share an indent, is **not** rejoined even when the
+    /// disk holds the joined target.
+    ///
+    /// Recorded separately from scenario 58's synthetic pair because this is the shape a reader
+    /// will photograph and ask about: a real, existing file, spelled correctly across two rows, and
+    /// a deliberate blank underneath it. The ledger holds the joined target, so gate ④ would say
+    /// yes and gate ② is the gate that answers — the refusal is the design's answer, not a gap.
+    #[test]
+    fn a_real_path_cut_over_two_equally_indented_rows_stays_two_rows() {
+        let upper = format!("  {CHIP_HEAD}");
+        let lower = format!("  {CHIP_TAIL}");
+        let links = ledger("D:\\case", &[(CHIP_TARGET, true)]);
+        assert_eq!(rejoin(&links, &upper, &lower), None);
+    }
+
     /// §7.1.5k ② gate ③, written as the precise assertion the ruling asks for: the two halves must
     /// spell **exactly one** candidate covering all of the joined text. Anything the lexer would
     /// quietly drop — a second reference, a tail of prose — is a refusal.
@@ -2338,6 +2449,17 @@ mod tests {
     /// should become a link when the same text is printed again. Both cannot be true of a ledger
     /// keyed by `PathBuf` alone; reconciling them needs a generation or an expiry on the negative
     /// answer, which is a change to the ledger's contract rather than to this pass.
+    ///
+    /// **This conflict is not hypothetical, and 2026-08-25 is the day it was photographed.** The
+    /// reader reported that `D:\Developer\BetterTerminal\test-assets\folio-pdf-test.pdf` — an
+    /// indented, unadorned, drive-rooted path to a file that exists — carried no underline at all.
+    /// Reproduced in a fresh pane the same line lights on the first frame, so nothing lexical or
+    /// geometric is refusing it. What refused it is this arm: minutes earlier the same screen had
+    /// printed that exact path inside the command that was about to *create* the file
+    /// (`--print-to-pdf="D:\…\test-assets\folio-pdf-test.pdf"`), the pass asked the disk about a
+    /// name that was not there yet, and the `no` outlived the file's arrival. Any application that
+    /// prints where it is about to write — a build, an installer, a `cp`, an agent's own shell line
+    /// — produces this, so the shape is common rather than exotic.
     #[test]
     #[ignore = "§7.1.5k conflict: a negative verdict is permanent by the 2026-08-23 budget ruling; \
                 giving it an expiry is a ledger change, not a lexer change"]
