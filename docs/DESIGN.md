@@ -2001,6 +2001,16 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 
 **`Open ⌄` 背后是文件行右键的同一张菜单**(`FileMenuRow`),而不是第二张:「用什么打开这个文件」是关于文件的问题,不是关于哪张表面在问。菜单因此长出两行——**`在 files 列中定位`**(每台机器都有)与**编辑器行(存在才列)**,后者把 `const ALL: [Self; 3]` 换成了 `rows(editor)`;那条「长度不变的菜单,键盘走不到不存在的行」的理由**保留而不是丢弃**:长度只随一个机器事实变,每个读者都从同一处取这张表,没有任何地方拿自己算的下标去索引它。编辑器怎么找:`profiles::find_vscode`,照 `find_git` 的形状,只是 `PATH` 上放的是 `code.cmd` 这个壳,所以**拿壳当指针**、真正启动的是它祖父目录里的 `Code.exe`(把 `.cmd` 交给启动器就是交给一个命令解释器,会弹控制台、会多一层引号规则)。
 
+**⑩″ 「同一张菜单」改判成「同一个菜单机器,各自一份行表」(2026-08-25 合流,见 §7.15)。** 上一段说的是本片落地时的事实:那时这张菜单只有一张脸,面包屑与文件行共用它整份。同日 §7.15 给树的文件夹行也开了菜单,两条线于是在同一个 `FileMenuRow` 上相撞,合成的判决是:**类型共用,`rows()` 不共用**——`FileMenuSubject` 从两张脸(`File` / `Folder{expanded}`)长到三张,第三张 `Document` 就是面包屑这一面。谁的集合归谁:
+
+- **`File`**(树的文件行):`Open preview` / `Open with default app` / **编辑器行(存在才列)** ─── `Copy path` / `Insert path into terminal` / `Reveal in Explorer`。**没有 `在 files 列中定位`**——右键发生在 files 列**里面**,一行提出把你已经在看的那列定位给你看,是一行什么也不做的行。
+- **`Folder`**(树的文件夹行):`Expand`/`Collapse` / `New terminal here` ─── 同样那三行。
+- **`Document`**(面包屑的 `Open ⌄` 与折叠 `…` 那枚 chip):`Open in default app` / **编辑器行(存在才列)** / `在 files 列中定位` ─── `Copy path` / `Insert path into terminal`。**没有 `Open preview`**(弹这张菜单的就是预览本身)、**没有折叠**(它不是任何一棵树的行)、**也没有 `Reveal in Explorer`**(pane 自己的脚在上面一条带子上已经带着这个动词,隔六个像素再印一遍是同一个表面把一件事说了两次)。
+
+**「用系统默认程序打开」是一行而不是两行,穿两件介词衣服。** §7.15 ⑤ 交代的接缝就在这里合上:两条线各自写了一条字符串(`FileMenuOpenDefaultApp` 「Open in default app」与 `FileMenuOpenWith` 「Open with default app」),**两条都留下并且都在用**,因为它们各自说了对方说不出的话——树的行上它站在 `Open preview` 底下,`with` 是在跟上面那行作对比;面包屑上它是 `Open ⌄` 弹出的第一行,上面没有东西可对比。措辞归 `FileMenuRow::text(subject)`(和折叠行同一套办法:**两行**的措辞随 subject 转),但**动作只有一份**:`Runtime::open_local_path`,`PATHEXT` 那道拒绝写在门上。
+
+**横线的规则合流后仍然成立。** `hands_out_the_path()` = `Copy path` / `Insert path` / `Reveal in Explorer`,横线落在第一个交出路径的行前面——三张脸六种长度(每张脸乘机器有没有编辑器)全部落在正确的位置,而且**编辑器行加进上半截时横线自己往下走了一行**,这正是「写成性质而不是下标」当初要买的东西。`在 files 列中定位` 判在**线上**、`Reveal in Explorer` 判在**线下**,两者从不同框:前者搬的是本窗自己那列,搬完你看着的就是这一行,是一条**进去**的路;后者是把路径交给另一个程序。
+
 **头上剩下什么。** 身份行照旧(favicon + title + `⌄` + 徽章),重动词收敛为 `i-code`/`i-save`/`i-float`/`i-lock`/`i-close`;**`.pv-sep` 那根发丝线随之退役**——它引荐的是它左边那组,那组搬走了,一根左边没有东西的线是在告诉读者「下面还有」而其实没有。**名字不再是地址**:`page.title` 而已,`PageFacts::name` 那个「没标题就回落到 URL」的兜底一并退役(下一行正在说地址,回落只会让一个 pane 把一句话印两遍),双击一张页面的标题**什么也不开**——标题不是可改的东西,提出要改它就是提出要替别人的文档改名。
 
 **脚:两条不对称的判决,各自有各自的理由。** 面包屑行**接任**脚上那行路径,所以那条脚整条退役、文件 pane 的正文一像素不少(28 换 28);脚上活着的另一件职责——右手那句常驻事实(`Read-only · 64 KB`、`Not saved · changed on disk`)与「Saved / Revealed…」那一闪——搬到面包屑行的右手,路径让宽,这正是 2026-08-15 `foot_notice_split` 那条裁决原样抬高一行。**地址行不这么办**:页面的脚不只是一条带子,它还是**悬停行**(§7.7 ③:指针在链接上时它说解析后的目标),悬停行在这个 pane 里没有第二个地方可站,所以页面**保留脚**、地址行是加上去的。代价是页面的地址在上下各出现一次——**记为欠账,等用户裁**;可选的了结是把页面的脚改成纯悬停行(静止时空着),但那是砍一条既有裁决,不在本单里做。
@@ -2469,6 +2479,54 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
   - **每帧摆放的代价用第三个缓存抵掉**：`WebSeat::placed` 记住上次给 compositor 的矩形，没动就一次比较——和 `sized`、`presence` 是同一类东西，也和它们一起在 `take_address` 里跟着地址走。它在**唯一改变「地板+页」这一对**的地方被清掉：`InstallEvents` 里 visual 刚进树的那一句。
 - **红测三扇门**。`a_hole_is_only_cut_where_a_floor_already_stands`（bt-app，纯值）——让 `hole_for` 不看 `floored` 就红，而那正是用户拍到的那个 build。`a_pages_floor_is_minted_by_whoever_first_places_it_and_not_by_the_engine`（bt-platform，源钉）——把 `let Some(web) … else { return }` 挪到 `ensure_page_ground` 之前第一句红，给 `attach_web_visual` 塞回一次自己的 `create_page_ground` 最后一句红。上一片的 `a_pages_floor_is_placed_and_removed_with_the_page_and_never_alone` 原样仍绿：一次调用摆两个、一次调用撤两个，这一片只是把「摆」提前到了引擎之前。
 - **挂账**。ⓐ `place_web_visual` 每帧新建 `IDCompositionRectangleClip` 的旧账（上一片的 ⓑ）**没有加重也没有清**：摆放现在按帧问，但 `placed` 让没动的帧一次都不进去，所以真正建 clip 的次数仍然是「矩形变了几次」。要清得把 clip 对象存下来原地改，那是另一张单。ⓑ **引擎一直起不来的窗口**现在显示的是一块纯地面色的 pane，而不是桌面——这是裁决要的，但「页起不来该显示什么」（卡片？文案？）是 §7.7 ④ 那条道上的产品问题，本片不替它作答。ⓒ 本片顺手清掉了 `docs/DESIGN.md` 里 §7.14 那一段**遗留在仓库里的合并冲突标记**（`<<<<<<< HEAD` / `=======` / `>>>>>>> opaque-flight-and-web-ground`），因为要改的正是这一段；**第 84 行附近还有一组同样的标记没有动**，那不在本单范围里。
+
+### 7.15 树里的一行有两张脸的菜单（files 列右键补全，2026-08-25，已落地；`crates/bt-app/src/{profiles,main,files,i18n}.rs`）
+
+**一句话：K143 那句「目录行不弹」到期了——文件行的菜单补齐两扇门，文件夹行第一次有了自己的菜单，而两张菜单横线以下是同一份三行。**
+
+由头是用户的实机截图：文件行右键弹出 `Open preview / Copy path / Insert path into terminal`，**文件夹行右键什么也不弹**。K143 立那条规矩时的理由写在 `Runtime::open_file_menu` 的注释里，一字不虚：「这三个动词都是关于**文件**的」。但那三个里有两个从来就只关心一条**路径**，而文件夹有路径；剩下那一个是「打开」，而文件夹有它自己的「打开」。所以规矩到期的不是判断，是前提。
+
+**① 两张菜单，一个枚举，一条横线的规则。**（**合流后是三张**：同日的预览头 v2 线把面包屑行的 `Open ⌄` 也挂在这个枚举上，第三张脸叫 `Document`——三张脸各自的行表写在 §7.7 ⑩″，那里也是这条接缝合上的地方。下面这段是本片落地时的原文，判断一条不改。）`FileMenuSubject`（`File` / `Folder { expanded }`）说这一次右键落在什么上，`file_menu(subject)` 说它有哪几行——**文件**：`Open preview` / `Open with default app` ─── `Copy path` / `Insert path into terminal` / `Reveal in Explorer`；**文件夹**：`Expand`（或 `Collapse`）/ `New terminal here` ─── 同样那三行。行是**一个平铺的枚举**而不是每张菜单一个，理由抄 `GitMenuRow` 自己那一段：三行在两张菜单上是同一件事，运行时的分发是一个 `match`，为 `Copy path` 造两个变体就是两条迟早走岔的代码。
+
+横线的位置**不再是手写的**。原型 8089 把它画在 `Open` 底下并写明它分的是「这一行**是**什么」与「它的**路径**是什么」；这条规则现在写成 `FileMenuRow::hands_out_the_path()`，横线落在第一个交出路径的行前面（`GitMenuRow::writes` 的同一手法）。于是上半截从一行长到两行，规则一个字不用改也不会被「把新行插错地方」破坏。菜单因此从定长 `[_; 3]` 变成 `Vec` + `FileMenuItem`，命中测试、键盘走位（`file_menu_step`）与画笔全部跟着走同一份列表——**键盘走的是这次弹出的那张菜单的行**，否则在文件夹菜单上按 ↓ 会走到一个玻璃上没有的 `Open`。
+
+**② 折叠行是一个开关，词与三角一起转。** `PaneMenuZoom` / `PaneMenuRestore` 的规矩往下一张菜单：一个开关在收着的文件夹上说 `Expand`、在展开的上说 `Collapse`，一份字符串就是菜单在描述这一行**一次按下之前**的样子。图标是树自己的三角（`marks::tree_disclosure(0.0/1.0)`）而不是第二种披露记号——在这扇窗里开过一次文件夹的人已经学会转过来的三角是什么意思。`expanded` 是**快照**，与 `TermMenuState::lone` 同一条理由，而且这里更硬：这张菜单的第一行**就是**那个折叠，每帧重问会让菜单在一只已经伸过去的手底下改写自己的第一行。
+
+**③ `New terminal here` 落成一个 tab，这是本片自己做的一个裁决。** 复用的动词有两个容器——`New terminal in folder…` 在 pane 的 `⌄` 上是**拆分本 pane**，在新建 tab 菜单上是**开一个 tab**（用户裁决 2026-08-20）——一张菜单必须挑一个。挑 tab，两条理由：**它是两个宿主都给得起的容器**（浮动树不是 pane，那里没有东西可拆；一行在列里与在浮窗里意思不同就是两个表面对一个词发生分歧）；**files 列往往就是它所在 tab 的全部意义**，把它劈成两半塞一个 shell 进去，比一行叫 `New terminal here` 的字所许诺的改动大。**没有选择器，所以这一行没有省略号**：拼三个点的那两行是「按下之后先问你是哪个文件夹」，而这一行已经知道了——你右键的就是它。落地即 `apply_folder_pick_result` 的 `NewTabIn` 臂去掉前面那个对话框：默认 profile，被告知站在哪里。
+
+**④ `Reveal in Explorer` 一个字都没有新写。** 动词走 `Runtime::reveal_in_explorer`——三只脚已经在走的那扇经审计的门——它自己就回答了这一行的两半：文件在它的文件夹里被选中，文件夹被当作它自己打开，由 `bt_platform::reveal_arguments` 判断而不是由调用点记住是哪种行弹的菜单。**字符串也是既有那一条**：`Text::GitMenuReveal` 改名 `Text::MenuRevealInExplorer`，git 行的菜单与树的两张菜单共用。用户开单时写的是 `Show in Explorer`；本片按房子自己的纪律用了既有的 `Reveal in Explorer`——一个动词在一扇窗里印两种词，就是在教读者它们是两件不同的事，而 `git_menu_copy_path_text()` 早就是同一个先例（它借的正是 `FileMenuCopyPath`）。**这一条请用户复核。**
+
+**⑤ `Open with default app` 走 `Runtime::open_local_path`，而这正是与预览头 v2 线的接缝。** 那条线正在给面包屑行做 `Open⌄`（系统默认 / VS Code / files 列定位）。「用这台机器登记的程序打开这一条路径」是**一个**动词，所以它必须是**一个**函数——`Runtime::open_local_path`（`crates/bt-app/src/main.rs`），预览头的 `↗` 已经在按它（`open_preview_in_browser`），本行也按它。**预览头 v2 的「系统默认」一行接这里，不要新写第二份**：门自己带着 `PATHEXT` 那道拒绝（§7.1.3「树是看文件的地方，旁边那个跑程序的东西叫终端」），拒绝写在门上而不是写在每个敲门的人身上。本片落地时那条线还没有一次提交进仓（`main..worktree-agent-*` 全空），所以接缝只能这样交代，不能替它改代码。
+
+**接缝已合（2026-08-25 合流）**：预览头 v2 落进 main 之后两条线在同一个 `FileMenuRow` 上相撞，合成的判决在 §7.7 ⑩″。这一段的要求被照着执行了——**动作只有一份** `Runtime::open_local_path`，两条线各自写的那条字符串（`FileMenuOpenDefaultApp` / `FileMenuOpenWith`）**都留下并且都在用**，因为它们是同一行在两张脸上的两件介词衣服（树的行上 `with` 在跟头顶的 `Open preview` 作对比，面包屑上没有东西可对比），措辞归 `FileMenuRow::text(subject)` 而不是归调用点。
+
+**⑥ 键盘那扇门跟着开。** `files::apply_tree_command` 的 `ContextMenu` 臂从「只有 `File`」放宽到两种节点；**走不通的两种行仍然沉默**，并且和第二次按下的沉默是同一种：`Cycle` 解析到自己的祖先（它的折叠会展开你已经站着的地方），`Notice` 根本不命名任何文件。这条判断写在 `crate::files_row_menu_subject` 一处，指针那扇门（`file_row_under`）与键盘那扇门（`raise_file_menu_on_row`）问的是它。
+
+**⑦ 红门九扇，逐条对应上面的判断**：`both_kinds_of_node_answer_the_menu_key`（files）、`a_file_rows_menu_draws_its_doors_then_a_rule_then_its_path_verbs`（合流时改名并吃下编辑器行那一半，两台机器各走一遍）、`a_folder_rows_menu_is_the_fold_a_shell_and_the_same_three_path_verbs`、`the_fold_row_turns_its_word_and_its_triangle_together`、`the_default_app_door_is_one_row_wearing_each_faces_preposition`（合流新增）、`the_breadcrumbs_menu_is_the_document_faces_own_list`（合流新增）、`the_first_row_says_where_this_particular_press_is_going`（v2 那扇按 subject 重判）、`the_file_menus_keyboard_walk_clamps_at_both_ends_of_the_list_it_is_on`、`the_file_menu_answers_a_press_on_each_of_its_rows`（三个 subject × 两台机器）、`a_file_row_and_a_folder_row_each_raise_a_menu_and_the_dead_ends_raise_none`。每一扇的 RED GATE 写在测试头上，并且都被**真的翻红过**一次再翻回来。
+
+**⑧ 挂账。** ⓐ **浮窗里的文件夹行现在也有 `New terminal here`**，开出来的 tab 落在浮窗所属的那扇窗上——这是 tab 容器的自然结论，但「浮窗的动词该落在哪扇窗」这个更大的问题（§7.5 里「浮窗不是列」那条）没有被本片重新打开。ⓑ **`Open with default app` 对一个可执行文件会被门拒绝并出那张 `files_program_refused_notice` 卡**，与双击同一条路；「树永不跑程序」这条规矩没有被本片放宽一寸。ⓒ 用户开单写的 `Show in Explorer` 与落地的 `Reveal in Explorer` 见 ④。
+
+### 7.16 视频进不了页道，而页类从此只写一遍（视频进页道单，2026-08-25，**否决半片 + 落地半片**；`crates/bt-app/src/{preview,main}.rs`）
+
+**一句话：单子的前提在实机上不成立——引擎有播放器，但它不肯把一段视频当作一张页来托管；所以视频留在「无法预览」卡上，而本片真正落地的是把页类合并成一张表，让将来那个决定变成一行。**
+
+**① 前提与它的证伪。** 单子的论证抄的是 PDF 的：这一席上的浏览器有播放器，本窗一个解码器都没有，所以 `.mp4` 该与 `.pdf` 同权。前半句是真的，后半句不是。实机（本 worktree 的 release，隔离 `APPDATA`/`LOCALAPPDATA`，files 列 root 在一个装了四段样片的文件夹上）：
+
+- **双击 `clip.mp4`**：座位开出来了、头/脚/地址栏都在，正文是 `WebErrorStatus · ConnectionAborted` 的「did not respond」卡（`shot-04-mp4-page.png`）。**双击 `screencast.webm` 一模一样**（`shot-09-webm.png`）——不是 mp4 一家的事。
+- **同一个座位里，同一份 `clip.mp4` 放在一张普通本地页里用 `<video controls>` 播得好好的**：有控件、有进度条、`0:06 / 0:06`，页上顺手打印的 `canPlayType` 是 `mp4=maybe webm=maybe m4v=maybe mov=`（`shot-07-embed.png`）。**所以编解码没有任何问题**，`.mov` 那个空串也顺手证实了它本来就该被排除。
+- **对照组**：同目录的 `aaa-control.html` 正常渲染（`shot-06-html-control.png`）；同目录的 `.pdf` 开出 Edge 自带 PDF 阅读器的整条工具条（页码/缩放/搜索，`shot-08-pdf.png`）。**页道本身是好的**。
+
+**机理**：WebView2 没有浏览器 UI，对一个顶层媒体响应它没有 viewer，于是把它变成一次**下载**；而 `bt_platform` 的 `DownloadStarting` 处理器**无条件** `SetCancel(true)`（§7.7 ④ 方案 §0 的那条纪律，一个字没改），导航因此以 `ConnectionAborted` 收场。PDF 之所以不同，是因为 WebView2 **自带** PDF 阅读器。
+
+**② 于是不进。** 单子自己的括号写着「能播的才进,**播不了的仍落卡**」，而实测的答案是「顶层导航一个都播不了」。把视频放进页道，效果是用一张浏览器报错**换掉**一张诚实的「无法预览」卡——比它替换掉的东西更糟。一条道只有在有东西从里面出来的时候才值得走进去。所以 `PAGE_EXTENSIONS` 停在 `[html, htm, pdf]`，视频照旧落文档道那张卡。
+
+**③ 这是一个钉着的「否」，不是一处空白。** `no_video_spelling_is_a_page_until_something_hosts_it_inside_one`（preview）与 `a_video_takes_the_document_lane_at_every_door`（main，四扇门各一条断言：双击、头上的 ↗、缓冲池自己那扇门、悬停卡）。两条测试的头上写着测量本身，所以下一个想「引擎能播为什么不进」的人，读到的是已经量过的答案而不是一处看起来像遗漏的空白。
+
+**④ 真正落地的那一半：页类只写一遍。** §7.10 ⑥ 的由头是「一个类两张表」——`preview_ftype` 的表与 `path_opens_as_a_page` 手写的 `html || htm || pdf`；同日第二裁只让 ↗ 改问后者，**两张表还在**，只是暂时一致。本片把它们并成一张：`preview::PAGE_EXTENSIONS` 是唯一写下来的地方，新增 `preview::path_names_a_page(&Path)` 按**路径的真扩展名**问同一张表，而 `main::path_opens_as_a_page` 就是它。`names_an_html_page` 因此退役——它回答的是「这是不是 HTML」，在只有 html/htm 上引擎道的年代那与「这是不是页」同问；今天不是了，所以窄的那个谓词**删掉**而不是留在那里当第二个可以伸手去够的东西。它的两条论据搬到了新谓词上：真扩展名而非子串（`index.htmlx` / `report.html.txt` 仍是文档），以及忽略大小写。整个名字就叫 `.html` 的那种文件两边都不是页，而且**两边都不需要为它写一句**：`Path::extension` 说它没有扩展名，`preview_ftype` 的 dotfile 臂排在页臂前面——两次阅读、一个答案、互相不知道对方存在。红门 `every_member_of_the_page_class_is_a_page_to_both_readings`：给 `path_opens_as_a_page` 重新写一张自己的表，它当场红。**这一半的价值正是被否掉的那一半留下的**：将来若要让视频进来，改的是一张表里的一行，而不是两处需要保持同步的判断。
+
+**⑤ 唯一还开着的路，以及它为什么需要裁决。** 视频**在页里**播得很好，所以能走通的形态只有一个：本窗自己铸一张托管页（`<video controls src=…>`），把文件当**子资源**交给它。这不是一行类型路由，它要动的正是 §7.10 ③ 立起来的那套身份：地址栏显示什么（托管页还是那份文件）、头上的 ↗ 把什么交给系统（必须是视频本身，不是壳）、`session.json` / `pins.json` 存哪一个、切换器那一行叫什么名字、`Mint::path_and_tail_of_file_url` 作为编码器精确反函数这条性质还成不成立、以及壳页放在盘上什么地方、谁来清。**六个问题都要用户裁**，所以本片不替它作答，把它作为下一张单交出去。
+
+**⑥ 挂账。** ⓐ 上面 ⑤ 那张单。ⓑ 音频（`.mp3` / `.m4a` / `.flac` / `.wav`）与视频同因同果，同一张单里一起裁。ⓒ 本片没有碰 `DownloadStarting` 无条件取消这条纪律，也不建议碰它：让下载放行并不会让视频渲染出来，只会让一次预览变成一次落盘。
 
 ## 8. 依赖策略
 
