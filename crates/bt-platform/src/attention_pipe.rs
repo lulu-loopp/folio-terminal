@@ -44,25 +44,26 @@
 //! The trade is one kernel object and one thread for a window instead of one per pane, and one
 //! place to audit instead of *n*.
 //!
-//! # The measured limit, written down rather than discovered later
+//! # The frame that went missing, and what it turned out to be
 //!
-//! Forty frames written back to back from one thread lost **one** of them, on a build whose pool
-//! and read loop are otherwise sound, with every refusal counter at zero — so it was not refused,
-//! it was written to an instance and never read. Eight in a row (twice the pool, and twice what a
-//! whole turn produces) is solid over repeated runs, and that is what
-//! [`a_whole_turn_of_hooks_arrives_with_none_of_them_lost`] pins.
+//! Three shapes of the listener lost frames under load, and the third made the loss *nameable*
+//! rather than merely visible. The counter that did it is [`PipeCounts::accepted`]: every client
+//! that attaches must become exactly one of delivered, oversize, throttled or silent, so a run that
+//! reports `delivered: 7, accepted: 7` for eight callers is not saying "one was refused", it is
+//! saying **one was never there** — and that pointed at the connect, not the read.
 //!
-//! So the honest contract is: **an endpoint under a flood past its pool's width can drop a frame
-//! that a client believed it had written.** Two reasons it is recorded here instead of chased:
-//! a hook fires a handful of times per turn and [`MAX_FRAMES_PER_SECOND`] would be refusing long
-//! before this, and the thing lost is one *idempotent* ring of a doorbell — the ledger's watermark
-//! is what carries "the next real request is seen", not this channel's delivery (`attention` plan
-//! §11.4.3, which sorts these two failure modes by weight and puts this one second).
+//! The cause is a Win32 detail with no forgiving reading: **an instance starts listening when
+//! `CreateNamedPipeW` returns, not when `ConnectNamedPipe` is called.** A client can therefore
+//! arrive in the window between the two — and `folio attention` connects, writes forty bytes and
+//! closes inside a millisecond, so it can arrive *and leave* in that window. `ConnectNamedPipe`
+//! then answers `ERROR_NO_DATA`, which reads like a failure and is not: the client's message is
+//! sitting in the instance's buffer, readable until somebody disconnects. Every earlier shape
+//! treated it as a failure and threw the instance away with the message still in it.
 //!
-//! What would close it, when there is a reason to: a completion port with a read posted on every
-//! instance from the moment it is armed, so that no arrival ever waits for this thread to notice
-//! it. That is a different loop, not a bigger constant, which is why it is not being written on
-//! the way past.
+//! So [`Instance::arm_connect`] has three "attached" answers rather than two, and the invariant
+//! above is asserted directly by [`every_client_that_attaches_is_accounted_for`]. It is the useful
+//! kind of pin: it does not know what the next such bug will be, only that the arithmetic has to
+//! come out.
 
 use std::{
     ffi::c_void,
@@ -77,8 +78,9 @@ use std::{
 
 use windows::Win32::{
     Foundation::{
-        CloseHandle, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
-        GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        CloseHandle, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA, ERROR_PIPE_BUSY,
+        ERROR_PIPE_CONNECTED, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+        WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Security::{
         Authorization::{
@@ -99,7 +101,7 @@ use windows::Win32::{
         },
         Threading::{
             CreateEventW, GetCurrentProcess, GetCurrentProcessId, INFINITE, OpenProcessToken,
-            SetEvent, WaitForMultipleObjects,
+            ResetEvent, SetEvent, WaitForMultipleObjects,
         },
     },
 };
@@ -163,6 +165,14 @@ pub struct PipeCounts {
     pub throttled: u64,
     /// Connections that closed without saying anything.
     pub silent: u64,
+    /// **Clients that attached**, and the conservation law of this whole file: every one of them
+    /// becomes exactly one of the four counts above.
+    ///
+    /// It exists because the three counts above could not tell "refused" from "never seen", and the
+    /// defect that mattered was the second — a caller whose bytes reached an instance that was then
+    /// discarded. `accepted` short by one says that in a single number, which is how the cause was
+    /// found after two wrong fixes aimed at the read.
+    pub accepted: u64,
 }
 
 /// A token bucket over one second, and the whole of the rate bound.
@@ -518,33 +528,49 @@ impl Drop for SecurityDescriptor {
     }
 }
 
-/// How many instances of the endpoint may exist at once.
+/// How many instances of the endpoint listen at once.
 ///
-/// Four, and none of them is for concurrency: the listener reads one client at a time. They are
-/// for the **gap**. An endpoint that closed one instance and then created the next would have a
-/// window, however short, in which the name did not exist — and a caller that arrived in that
-/// window is not told "busy", it is told *there is no such pipe*, and gives up. Two hooks firing
-/// back to back land in exactly that window, which is how the defect was found. So the successor
-/// is armed **before** the current client is read, and the name is continuously answerable.
+/// Four, and none of them is for throughput: every transaction is a connect, a write of a few dozen
+/// bytes and a close. They are there so that a caller arriving while another is being served finds
+/// a door rather than a wait — and, with the loop below, so that being *served* never means being
+/// queued behind somebody else's read.
+///
+/// **They are created once and never replaced.** Two earlier shapes of this file replaced them, and
+/// both lost frames; see [`listen`] for what replacing costs and why recycling the same handle does
+/// not.
 const MAX_INSTANCES: u32 = 4;
 
-/// One instance of the endpoint, with a connect outstanding on it.
+/// What one instance is currently waiting for.
 ///
-/// The `OVERLAPPED` is boxed because an overlapped operation owns the address it was handed until
-/// it completes, and this one outlives the call that issued it — it is armed in one place and
-/// waited on in another, which is the whole point of arming the successor early.
+/// Two states, and the transition between them is the whole fix: **a read is posted the instant a
+/// connect completes**, on the same event, before this loop does anything else. So a client's bytes
+/// are already being awaited by the kernel while the loop is still deciding what to do next, and
+/// there is no window in which an arrival depends on this thread's position in a loop.
+#[derive(Clone, Copy, Debug)]
+enum Phase {
+    /// A `ConnectNamedPipe` is outstanding: nobody is here yet.
+    Connecting,
+    /// A client is attached and a `ReadFile` is outstanding. `since` is what
+    /// [`READ_DEADLINE`] is measured from.
+    Reading { since: Instant },
+}
+
+/// One instance of the endpoint: a handle, one event, one operation at a time.
+///
+/// One event per instance rather than one per operation, because the instance is now long-lived —
+/// it is reset and reused for the connect and then for the read, and again for the next client.
+/// That is what makes "recycle" mean `DisconnectNamedPipe` + `ConnectNamedPipe` on the handle we
+/// already have, rather than a create and a close.
 struct Instance {
     pipe: OwnedHandle,
     event: Overlapped,
-    /// Held, never read. The kernel owns this address until the connect completes or is cancelled,
-    /// so the box's whole job is to still be there when that happens.
-    #[allow(
-        dead_code,
-        reason = "the kernel holds this address until the operation completes"
-    )]
+    /// The kernel owns this address for as long as an operation is outstanding, which is nearly
+    /// always — hence the box, and hence its being reset rather than rebuilt.
     overlapped: Box<OVERLAPPED>,
-    /// Set when `ConnectNamedPipe` completed on the spot — a client that was already there.
-    ready: bool,
+    /// **Per instance, because reads are now concurrent.** Four instances can each have a read
+    /// outstanding at once, and one shared buffer would be four kernel writes into the same bytes.
+    buffer: Vec<u8>,
+    phase: Phase,
 }
 
 impl Drop for Instance {
@@ -557,78 +583,225 @@ impl Drop for Instance {
     }
 }
 
-/// Create one instance and put a connect on it.
-///
-/// `first` asks for `FILE_FLAG_FIRST_PIPE_INSTANCE`, which is a **check** rather than a flag: it
-/// fails if the name already exists, so a process that squatted this name before us cannot end up
-/// being the thing our own children talk to.
-fn arm(wide_name: &[u16], attributes: &SECURITY_ATTRIBUTES, first: bool) -> io::Result<Instance> {
-    let mut mode = PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED;
-    if first {
-        mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
-    }
-    // SAFETY: `wide_name` is NUL-terminated and outlives the call; `attributes` points at a
-    // descriptor the caller keeps alive for the whole of the listener.
-    let pipe = unsafe {
-        CreateNamedPipeW(
-            PCWSTR(wide_name.as_ptr()),
-            mode,
-            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-            MAX_INSTANCES,
-            0,
-            u32::try_from(MAX_MESSAGE_BYTES).unwrap_or(0),
-            0,
-            Some(&raw const *attributes),
-        )
-    };
-    if pipe == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-    let pipe = OwnedHandle(pipe);
-    let event = Overlapped::new()?;
-    let mut overlapped = Box::new(event.overlapped());
-    // SAFETY: the boxed `OVERLAPPED` is owned by the `Instance` returned below and stays at this
-    // address until the operation is waited on or cancelled by that value's `Drop`.
-    let issued = unsafe { ConnectNamedPipe(pipe.0, Some(&raw mut *overlapped)) };
-    let ready = match issued {
-        // A client that was already waiting. That is an arrival, not a failure.
-        Ok(()) => true,
-        Err(error) if win32_of(&error) == ERROR_PIPE_CONNECTED.0 => true,
-        Err(error) if win32_of(&error) == ERROR_IO_PENDING.0 => false,
-        Err(error) => return Err(win32_io_error(error)),
-    };
-    Ok(Instance {
-        pipe,
-        event,
-        overlapped,
-        ready,
-    })
+/// What posting an operation decided, when it decided on the spot.
+enum Posted {
+    /// The kernel has it. The event will be — or already is — signalled.
+    Pending,
+    /// A message longer than this endpoint will take.
+    Oversize,
+    /// The client is not going to say anything on this connection.
+    Failed,
 }
 
-/// The listener thread: **[`MAX_INSTANCES`] listening at once, and none of them ever thrown away
-/// with a client attached.**
+/// What a completed read turned out to be.
+enum Frame {
+    /// This many bytes, at the front of the instance's own buffer.
+    Line(usize),
+    Oversize,
+    Silent,
+}
+
+impl Instance {
+    /// Create one instance and put a connect on it.
+    ///
+    /// `first` asks for `FILE_FLAG_FIRST_PIPE_INSTANCE`, which is a **check** rather than a flag: it
+    /// fails if the name already exists, so a process that squatted this name before us cannot end
+    /// up being the thing our own children talk to.
+    fn open(
+        wide_name: &[u16],
+        attributes: &SECURITY_ATTRIBUTES,
+        first: bool,
+    ) -> io::Result<(Self, bool)> {
+        let mut mode = PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED;
+        if first {
+            mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
+        }
+        // SAFETY: `wide_name` is NUL-terminated and outlives the call; `attributes` points at a
+        // descriptor the caller keeps alive for the whole of the listener.
+        let pipe = unsafe {
+            CreateNamedPipeW(
+                PCWSTR(wide_name.as_ptr()),
+                mode,
+                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                MAX_INSTANCES,
+                0,
+                u32::try_from(MAX_MESSAGE_BYTES).unwrap_or(0),
+                0,
+                Some(&raw const *attributes),
+            )
+        };
+        if pipe == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let event = Overlapped::new()?;
+        let overlapped = Box::new(event.overlapped());
+        let mut instance = Self {
+            pipe: OwnedHandle(pipe),
+            event,
+            overlapped,
+            buffer: vec![0u8; MAX_MESSAGE_BYTES],
+            phase: Phase::Connecting,
+        };
+        let attached = instance.arm_connect()?;
+        Ok((instance, attached))
+    }
+
+    /// Put a connect on this instance. `true` when a client is **already** there — or has been.
+    ///
+    /// **Three answers mean "attached", and the third is the one that cost a frame.** A named pipe
+    /// instance starts listening the moment `CreateNamedPipeW` returns, not when
+    /// `ConnectNamedPipe` is called, so a client can arrive in the window between them — and
+    /// `folio attention` connects, writes forty bytes and closes inside a millisecond, so it can
+    /// arrive **and leave** inside that window.
+    ///
+    /// * `Ok(())` — the connect completed at once.
+    /// * `ERROR_PIPE_CONNECTED` — somebody got here first and is still holding on.
+    /// * `ERROR_NO_DATA` — somebody got here first, said their piece and **has already gone**.
+    ///
+    /// None of the three signals the event, because none of them went to the kernel as an
+    /// overlapped operation; all three have to be carried back rather than waited for.
+    ///
+    /// The third was previously read as a failure, and a failed instance was discarded — **taking
+    /// the message still sitting in its buffer with it**. That is the defect this file has now been
+    /// through three shapes of, and it is exactly what `accepted` falling one short says out loud:
+    /// the frame was not refused, it was never accounted for. A pipe's buffered data survives its
+    /// client's departure and stays readable until `DisconnectNamedPipe`, so the right answer to
+    /// "the client has gone" is not to disconnect but to **read** — and if there turns out to be
+    /// nothing there, that is a silent connection and is counted as one.
+    fn arm_connect(&mut self) -> io::Result<bool> {
+        self.reset();
+        self.phase = Phase::Connecting;
+        // SAFETY: the boxed `OVERLAPPED` lives at a fixed address for as long as this instance
+        // does, and this instance outlives the operation — `Drop` cancels anything still pending.
+        let issued = unsafe { ConnectNamedPipe(self.pipe.0, Some(&raw mut *self.overlapped)) };
+        let code = |error: &windows::core::Error| win32_of(error);
+        match issued {
+            Ok(()) => Ok(true),
+            Err(error)
+                if code(&error) == ERROR_PIPE_CONNECTED.0 || code(&error) == ERROR_NO_DATA.0 =>
+            {
+                Ok(true)
+            }
+            Err(error) if code(&error) == ERROR_IO_PENDING.0 => Ok(false),
+            Err(error) => Err(win32_io_error(error)),
+        }
+    }
+
+    /// **Post the read, now.** Called the instant a connect completes and never later.
+    fn post_read(&mut self) -> Posted {
+        self.reset();
+        self.phase = Phase::Reading {
+            since: Instant::now(),
+        };
+        // SAFETY: both the buffer and the boxed `OVERLAPPED` belong to this instance and outlive
+        // the operation, which `Drop` cancels if it is still outstanding.
+        let issued = unsafe {
+            ReadFile(
+                self.pipe.0,
+                Some(&mut self.buffer),
+                None,
+                Some(&raw mut *self.overlapped),
+            )
+        };
+        match issued {
+            // Synchronous completion still signals the event, because the `OVERLAPPED` names one —
+            // so both answers are the same answer here, and the loop picks it up uniformly.
+            Ok(()) => Posted::Pending,
+            Err(error) if win32_of(&error) == ERROR_IO_PENDING.0 => Posted::Pending,
+            Err(error) if win32_of(&error) == ERROR_MORE_DATA.0 => Posted::Oversize,
+            Err(_) => Posted::Failed,
+        }
+    }
+
+    /// Collect a read the event has just reported.
+    fn complete_read(&mut self) -> Frame {
+        let mut read = 0u32;
+        // SAFETY: the instance still owns the handle and the structure the operation was issued on.
+        let done = unsafe {
+            windows::Win32::System::IO::GetOverlappedResult(
+                self.pipe.0,
+                &raw const *self.overlapped,
+                &raw mut read,
+                false,
+            )
+        };
+        match done {
+            Ok(()) => {
+                let read = (read as usize).min(self.buffer.len());
+                if read == 0 {
+                    Frame::Silent
+                } else {
+                    Frame::Line(read)
+                }
+            }
+            Err(error) if win32_of(&error) == ERROR_MORE_DATA.0 => Frame::Oversize,
+            Err(_) => Frame::Silent,
+        }
+    }
+
+    /// Hand this instance back to the listening pool, on the handle it already has.
+    ///
+    /// **This is what replaced replacing.** A create-and-close pair has a window in which the
+    /// endpoint answers with one fewer instance — or, if it was the last, with none — and a caller
+    /// landing in it is told there is no such pipe. `DisconnectNamedPipe` followed by
+    /// `ConnectNamedPipe` on a handle we never let go of has no such window: the instance exists
+    /// throughout, and the only observable moment is the one where it stops being *connected* and
+    /// starts being *listening*.
+    fn recycle(&mut self) -> io::Result<bool> {
+        cancel(self.pipe.0);
+        // SAFETY: this instance owns the handle.
+        unsafe {
+            let _ = DisconnectNamedPipe(self.pipe.0);
+        }
+        self.arm_connect()
+    }
+
+    /// Clear the event and the structure before reusing them for the next operation.
+    fn reset(&mut self) {
+        // SAFETY: the event belongs to this instance.
+        unsafe {
+            let _ = ResetEvent(self.event.handle());
+        }
+        *self.overlapped = self.event.overlapped();
+    }
+
+    /// How long until this instance's client has run out of time to say anything.
+    fn remaining(&self, now: Instant) -> Option<Duration> {
+        match self.phase {
+            Phase::Connecting => None,
+            Phase::Reading { since } => {
+                Some(READ_DEADLINE.saturating_sub(now.duration_since(since)))
+            }
+        }
+    }
+}
+
+/// The listener thread: **four instances listening, each with its read already posted, and none of
+/// them ever created or destroyed while the endpoint is up.**
 ///
-/// Two earlier shapes of this loop each lost a frame, and both losses were the same mistake in
-/// different clothes: an instance whose life was decided by *this* thread's position in a loop
-/// rather than by whether a caller had already been let in.
+/// Three shapes of this loop have now been measured, and the two that failed failed the same way:
+/// an arrival's fate depended on where *this thread* happened to be.
 ///
-/// * One instance at a time, closed and reopened — the name stopped existing between the two, and a
-///   caller arriving in that window is not told "busy", it is told **there is no such pipe**, and
-///   gives up. The red form was `ERROR_FILE_NOT_FOUND` at the client.
-/// * One instance plus a successor armed before the read — no gap in the *name*, but still a gap in
-///   the *chain*: only ever two instances exist, so a third caller arriving while one is being read
-///   and one is spoken for finds nothing free, and the retry window is where a frame went missing.
-///   The red form was `frame 1` absent from a run of five, with `delivered: 4` and every refusal
-///   counter at zero — the endpoint had not refused it, it had never seen it.
+/// * **One instance, closed and reopened.** The name stopped existing between the two, and a caller
+///   arriving in that window is not told "busy" — it is told **there is no such pipe** and gives up.
+///   Red form: `ERROR_FILE_NOT_FOUND` at the client.
+/// * **One instance plus a successor armed before the read.** No gap in the name, but the pool could
+///   only ever be two deep, and the replacement was a *create* that had to succeed while the old
+///   instance still counted against `nMaxInstances`. Red form: `frame 1` absent from a run of five —
+///   and, under a loaded machine, one absent from a run of **eight** — with `delivered` short by one
+///   and every refusal counter at zero. The endpoint had not refused it; it had never seen it.
 ///
-/// What is here instead has one invariant, and it is enough: **an instance is replaced only after
-/// its client has been read.** Four are armed at the start and the loop waits on all of them at
-/// once, so at every instant at least three are listening; the one being served is the fourth, and
-/// its slot is re-armed the moment its line has been taken. There is no ordering to get wrong,
-/// because there is no chain.
+/// The invariant that removes the class: **an instance is never replaced, and a read is outstanding
+/// from the moment a client attaches.** Recycling is `DisconnectNamedPipe` + `ConnectNamedPipe` on
+/// the handle we already hold, so the count of instances answering this name is constant from the
+/// moment the endpoint opens until it closes; and because the read is posted in the same breath as
+/// the connect completing, a caller's bytes are already awaited by the kernel while this loop is
+/// still deciding what to look at next. Four reads can be outstanding at once, which is why each
+/// instance owns its buffer.
 ///
-/// Still one reader, which is what keeps two callers' frames from interleaving; [`READ_DEADLINE`]
-/// is still what keeps one stalled caller from holding that reader.
+/// [`READ_DEADLINE`] is still the bound on a caller that attaches and says nothing — but it now
+/// costs that caller its own instance rather than the whole endpoint's attention, and the loop
+/// sweeps it on the timeout of the same wait it is already doing.
 fn listen(
     name: &str,
     descriptor: SecurityDescriptor,
@@ -640,60 +813,88 @@ fn listen(
     let attributes = descriptor.attributes();
     let wide_name = wide(name);
     let mut rate = RateLimit::new(Instant::now());
-    let mut buffer = vec![0u8; MAX_MESSAGE_BYTES];
-    // The first instance carries the check that this name is ours, and its success is the word that
-    // makes `start` mean what it says: a connect is outstanding on a pipe that exists, before
-    // anybody is told the endpoint is open.
-    let mut pool = match arm(&wide_name, &attributes, true) {
-        Ok(instance) => {
-            let _ = armed.send(Ok(()));
-            vec![instance]
-        }
-        Err(error) => {
-            let _ = armed.send(Err(error));
-            return;
-        }
-    };
-    while pool.len() < MAX_INSTANCES as usize {
-        match arm(&wide_name, &attributes, false) {
-            Ok(instance) => pool.push(instance),
-            // Fewer than the full four is a smaller endpoint, not a broken one — one is enough to
-            // work, and the rest are headroom.
-            Err(_) => break,
+    let mut pool: Vec<Instance> = Vec::new();
+    for index in 0..MAX_INSTANCES as usize {
+        match Instance::open(&wide_name, &attributes, index == 0) {
+            Ok((mut instance, attached)) => {
+                if attached {
+                    note_accepted(counts);
+                    let _ = instance.post_read();
+                }
+                pool.push(instance);
+                // The first instance's success is the word that makes `start` mean what it says: a
+                // connect is outstanding on a pipe that exists, before anybody is told the endpoint
+                // is open.
+                if index == 0 {
+                    let _ = armed.send(Ok(()));
+                }
+            }
+            Err(error) => {
+                if index == 0 {
+                    let _ = armed.send(Err(error));
+                    return;
+                }
+                // Fewer than four is a smaller endpoint, not a broken one.
+                break;
+            }
         }
     }
     loop {
-        // A slot whose client was already there when it was armed needs no wait at all.
-        let served = match pool.iter().position(|instance| instance.ready) {
-            Some(index) => index,
-            None => {
-                let mut handles = pool
-                    .iter()
-                    .map(|instance| instance.event.handle())
-                    .collect::<Vec<_>>();
-                handles.push(stop.0);
-                // SAFETY: every handle in the list is owned by this thread's pool, or is the stop
-                // event, which outlives the listener.
-                let answer = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
-                let Some(index) = answer.0.checked_sub(WAIT_OBJECT_0.0) else {
-                    return;
-                };
-                let index = index as usize;
-                if index >= pool.len() {
-                    // The stop event, or a wait that failed. Either way this thread is finished,
-                    // and every instance's `Drop` cancels and closes it.
-                    return;
-                }
-                index
+        let now = Instant::now();
+        let timeout = pool
+            .iter()
+            .filter_map(|instance| instance.remaining(now))
+            .min()
+            .map_or(INFINITE, |left| {
+                u32::try_from(left.as_millis()).unwrap_or(INFINITE).max(1)
+            });
+        let mut handles = pool
+            .iter()
+            .map(|instance| instance.event.handle())
+            .collect::<Vec<_>>();
+        handles.push(stop.0);
+        // SAFETY: every handle is owned by this thread's pool, or is the stop event, which outlives
+        // the listener.
+        let answer = unsafe { WaitForMultipleObjects(&handles, false, timeout) };
+        if answer == WAIT_TIMEOUT {
+            sweep(&mut pool, counts);
+            if pool.is_empty() {
+                return;
             }
+            continue;
+        }
+        let Some(index) = answer.0.checked_sub(WAIT_OBJECT_0.0) else {
+            return;
         };
-        match read_one(pool[served].pipe.0, stop, &mut buffer) {
-            Frame::Line(bytes) => {
+        let index = index as usize;
+        // The stop event sits one past the pool; anything further is a wait that failed. Either way
+        // this thread is finished, and every instance's `Drop` cancels and closes it.
+        if index >= pool.len() {
+            return;
+        }
+        let outcome = match pool[index].phase {
+            // A client has attached. **Post its read before anything else happens.**
+            Phase::Connecting => {
+                note_accepted(counts);
+                match pool[index].post_read() {
+                    Posted::Pending => None,
+                    Posted::Oversize => Some(Frame::Oversize),
+                    Posted::Failed => Some(Frame::Silent),
+                }
+            }
+            Phase::Reading { .. } => Some(pool[index].complete_read()),
+        };
+        let Some(frame) = outcome else {
+            continue;
+        };
+        match frame {
+            Frame::Line(read) => {
                 let mut counts = counts.lock().unwrap_or_else(PoisonError::into_inner);
                 if rate.admit(Instant::now()) {
                     counts.delivered += 1;
                     drop(counts);
-                    deliver(String::from_utf8_lossy(bytes).into_owned());
+                    let line = String::from_utf8_lossy(&pool[index].buffer[..read]).into_owned();
+                    deliver(line);
                 } else {
                     counts.throttled += 1;
                 }
@@ -707,105 +908,56 @@ fn listen(
             Frame::Silent => {
                 counts.lock().unwrap_or_else(PoisonError::into_inner).silent += 1;
             }
-            Frame::Stopped => return,
         }
-        // **Only now.** The slot is re-armed after its client has been read, and the old instance
-        // is dropped only once the new one is listening — so the number of instances answering this
-        // name never falls, and no instance is ever closed with a line still in it.
-        match arm(&wide_name, &attributes, false) {
-            Ok(replacement) => pool[served] = replacement,
-            // The kernel would not give another. Drop the spent slot rather than keep a dead one,
-            // and carry on with a smaller pool; an endpoint that has run out entirely is finished.
-            Err(_) => {
-                pool.remove(served);
-                if pool.is_empty() {
-                    return;
-                }
+        if !relist(&mut pool, index, counts) {
+            return;
+        }
+    }
+}
+
+/// One more client through the door, for the conservation law in [`PipeCounts::accepted`].
+fn note_accepted(counts: &Mutex<PipeCounts>) {
+    counts
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .accepted += 1;
+}
+
+/// Put one instance back to listening, dropping it if it will not go.
+///
+/// `false` only when the pool has emptied, which is the one condition that ends the listener.
+fn relist(pool: &mut Vec<Instance>, index: usize, counts: &Mutex<PipeCounts>) -> bool {
+    match pool[index].recycle() {
+        Ok(true) => {
+            // Somebody was already waiting for this instance. Their read starts now, not on the
+            // next turn of the loop.
+            note_accepted(counts);
+            let _ = pool[index].post_read();
+            true
+        }
+        Ok(false) => true,
+        Err(_) => {
+            pool.remove(index);
+            !pool.is_empty()
+        }
+    }
+}
+
+/// Take back the instances whose clients attached and then said nothing.
+fn sweep(pool: &mut Vec<Instance>, counts: &Mutex<PipeCounts>) {
+    let now = Instant::now();
+    let mut index = 0;
+    while index < pool.len() {
+        let expired = pool[index]
+            .remaining(now)
+            .is_some_and(|left| left.is_zero());
+        if expired {
+            counts.lock().unwrap_or_else(PoisonError::into_inner).silent += 1;
+            if !relist(pool, index, counts) {
+                return;
             }
         }
-    }
-}
-
-enum Frame<'a> {
-    Line(&'a [u8]),
-    Oversize,
-    Silent,
-    Stopped,
-}
-
-/// Read one message from a connected client, or decide it is not going to send one.
-fn read_one<'a>(pipe: HANDLE, stop: SendHandle, buffer: &'a mut [u8]) -> Frame<'a> {
-    let Ok(event) = Overlapped::new() else {
-        return Frame::Silent;
-    };
-    let mut overlapped = event.overlapped();
-    // SAFETY: `buffer` and `overlapped` both outlive the wait below.
-    let issued = unsafe { ReadFile(pipe, Some(buffer), None, Some(&raw mut overlapped)) };
-    let pending = match issued {
-        Ok(()) => false,
-        Err(error) if win32_of(&error) == ERROR_IO_PENDING.0 => true,
-        Err(error) if win32_of(&error) == ERROR_MORE_DATA.0 => {
-            return Frame::Oversize;
-        }
-        Err(_) => return Frame::Silent,
-    };
-    if pending {
-        match wait_for(event.handle(), stop, Some(READ_DEADLINE)) {
-            Waited::Signalled => {}
-            Waited::Stopped => {
-                cancel(pipe);
-                return Frame::Stopped;
-            }
-            Waited::TimedOut | Waited::Failed => {
-                cancel(pipe);
-                return Frame::Silent;
-            }
-        }
-    }
-    let mut read = 0u32;
-    // SAFETY: the overlapped structure and the pipe are both still alive.
-    let completed = unsafe {
-        windows::Win32::System::IO::GetOverlappedResult(
-            pipe,
-            &raw const overlapped,
-            &raw mut read,
-            false,
-        )
-    };
-    match completed {
-        Ok(()) => {}
-        Err(error) if win32_of(&error) == ERROR_MORE_DATA.0 => return Frame::Oversize,
-        Err(_) => return Frame::Silent,
-    }
-    let read = read as usize;
-    if read == 0 {
-        return Frame::Silent;
-    }
-    Frame::Line(&buffer[..read.min(buffer.len())])
-}
-
-enum Waited {
-    Signalled,
-    Stopped,
-    TimedOut,
-    Failed,
-}
-
-fn wait_for(event: HANDLE, stop: SendHandle, deadline: Option<Duration>) -> Waited {
-    let handles = [event, stop.0];
-    let millis = deadline.map_or(INFINITE, |deadline| {
-        u32::try_from(deadline.as_millis()).unwrap_or(INFINITE)
-    });
-    // SAFETY: both handles are alive for the duration of the wait.
-    let answer = unsafe { WaitForMultipleObjects(&handles, false, millis) };
-    if answer == WAIT_OBJECT_0 {
-        Waited::Signalled
-    } else if answer.0 == WAIT_OBJECT_0.0 + 1 {
-        Waited::Stopped
-    } else if answer == WAIT_TIMEOUT {
-        Waited::TimedOut
-    } else {
-        Waited::Failed
+        index += 1;
     }
 }
 
@@ -1059,7 +1211,7 @@ mod tests {
     /// produces — a permission request, its receipt, a prompt and a stop is four. Both earlier
     /// shapes of the listener failed this: the first told a caller arriving between two clients
     /// that there was no such pipe, the second let one of five go missing with every refusal
-    /// counter at zero.
+    /// counter at zero — and, on a loaded machine, one of these eight.
     ///
     /// **Order is compared as a set, and that is the honest comparison.** Callers are separate
     /// processes landing on whichever instance is free, so the endpoint does not promise the order
@@ -1089,7 +1241,85 @@ mod tests {
             .collect::<Vec<_>>();
         expected.sort();
         assert_eq!(arrived, expected, "counts were {:?}", pipe.counts());
+        let counts = pipe.counts();
+        assert_eq!(counts.delivered, FRAMES as u64);
+        assert_eq!(
+            counts.accepted, counts.delivered,
+            "a client attached and was not delivered: {counts:?}"
+        );
+    }
+
+    /// **Ten times the pool, from one thread with no pause: still not one lost.**
+    ///
+    /// Far past anything a hook does — the rate bound would be refusing at sixty-four in a second,
+    /// and a turn produces four — and here precisely because the previous shape of the listener
+    /// lost one frame in forty and the header carried that as an accepted limit. It is not one any
+    /// more, and this is the test that says so: replacing an instance was the whole of it, and
+    /// nothing is replaced now.
+    ///
+    /// Kept just under the rate bound, because a throttled frame is a frame the endpoint **did**
+    /// refuse — a different sentence from losing one, counted separately, and not what this is for.
+    #[test]
+    fn a_flood_far_past_any_real_producer_still_loses_nothing() {
+        const FRAMES: usize = 40;
+        let (sender, lines) = mpsc::channel();
+        let pipe = AttentionPipe::start(move |line| {
+            let _ = sender.send(line);
+        })
+        .expect("open the endpoint");
+        for index in 0..FRAMES {
+            send_line(pipe.name(), &format!("frame {index}")).expect("write");
+        }
+        let mut arrived = Vec::new();
+        while arrived.len() < FRAMES {
+            match lines.recv_timeout(Duration::from_secs(10)) {
+                Ok(line) => arrived.push(line),
+                Err(_) => break,
+            }
+        }
+        arrived.sort();
+        let mut expected = (0..FRAMES)
+            .map(|index| format!("frame {index}"))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(arrived, expected, "counts were {:?}", pipe.counts());
         assert_eq!(pipe.counts().delivered, FRAMES as u64);
+        assert_eq!(pipe.counts().silent, 0, "no client was timed out");
+    }
+
+    /// **Every client that attaches is accounted for**, which is the pin the two wrong fixes needed.
+    ///
+    /// Neither of them was aimed at the right place, and nothing in the counters could have said so
+    /// — "delivered is one short" is equally consistent with a read that failed and a connection
+    /// nobody ever saw. This asserts the arithmetic instead: attach, and become exactly one of the
+    /// four outcomes. A future change that drops a client on some new path fails this without
+    /// anybody having to guess in advance what that path is.
+    #[test]
+    fn every_client_that_attaches_is_accounted_for() {
+        let (sender, lines) = mpsc::channel();
+        let pipe = AttentionPipe::start(move |line| {
+            let _ = sender.send(line);
+        })
+        .expect("open the endpoint");
+        // A mixture on purpose: ordinary frames, and one the verb itself refuses to put on the wire.
+        for index in 0..12 {
+            send_line(pipe.name(), &format!("frame {index}")).expect("write");
+        }
+        assert!(send_line(pipe.name(), &"x".repeat(MAX_MESSAGE_BYTES + 1)).is_err());
+        let mut arrived = 0;
+        while arrived < 12 {
+            match lines.recv_timeout(Duration::from_secs(10)) {
+                Ok(_) => arrived += 1,
+                Err(_) => break,
+            }
+        }
+        let counts = pipe.counts();
+        assert_eq!(
+            counts.accepted,
+            counts.delivered + counts.oversize + counts.throttled + counts.silent,
+            "a client attached and became none of the four outcomes: {counts:?}"
+        );
+        assert_eq!(counts.delivered, 12, "{counts:?}");
     }
 
     /// A frame over the bound is refused whole rather than truncated and parsed.
