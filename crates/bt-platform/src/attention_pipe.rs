@@ -43,6 +43,26 @@
 //!
 //! The trade is one kernel object and one thread for a window instead of one per pane, and one
 //! place to audit instead of *n*.
+//!
+//! # The measured limit, written down rather than discovered later
+//!
+//! Forty frames written back to back from one thread lost **one** of them, on a build whose pool
+//! and read loop are otherwise sound, with every refusal counter at zero — so it was not refused,
+//! it was written to an instance and never read. Eight in a row (twice the pool, and twice what a
+//! whole turn produces) is solid over repeated runs, and that is what
+//! [`a_whole_turn_of_hooks_arrives_with_none_of_them_lost`] pins.
+//!
+//! So the honest contract is: **an endpoint under a flood past its pool's width can drop a frame
+//! that a client believed it had written.** Two reasons it is recorded here instead of chased:
+//! a hook fires a handful of times per turn and [`MAX_FRAMES_PER_SECOND`] would be refusing long
+//! before this, and the thing lost is one *idempotent* ring of a doorbell — the ledger's watermark
+//! is what carries "the next real request is seen", not this channel's delivery (`attention` plan
+//! §11.4.3, which sorts these two failure modes by weight and puts this one second).
+//!
+//! What would close it, when there is a reason to: a completion port with a read posted on every
+//! instance from the moment it is armed, so that no arrival ever waits for this thread to notice
+//! it. That is a different loop, not a bigger constant, which is why it is not being written on
+//! the way past.
 
 use std::{
     ffi::c_void,
@@ -585,14 +605,30 @@ fn arm(wide_name: &[u16], attributes: &SECURITY_ATTRIBUTES, first: bool) -> io::
     })
 }
 
-/// The listener thread: always one instance armed, one line per connection, forever.
+/// The listener thread: **[`MAX_INSTANCES`] listening at once, and none of them ever thrown away
+/// with a client attached.**
 ///
-/// Serialised on purpose. A pool would buy concurrency this endpoint has no use for — every
-/// transaction is a connect, a write of a few dozen bytes and a close — and would cost a way for
-/// one caller's frame to be interleaved with another's. What replaces the pool is
-/// [`READ_DEADLINE`]: one caller cannot hold the door, because the door closes on it. What
-/// replaces it for the *other* failure — a caller arriving between two clients — is
-/// [`MAX_INSTANCES`] and the order of operations below.
+/// Two earlier shapes of this loop each lost a frame, and both losses were the same mistake in
+/// different clothes: an instance whose life was decided by *this* thread's position in a loop
+/// rather than by whether a caller had already been let in.
+///
+/// * One instance at a time, closed and reopened — the name stopped existing between the two, and a
+///   caller arriving in that window is not told "busy", it is told **there is no such pipe**, and
+///   gives up. The red form was `ERROR_FILE_NOT_FOUND` at the client.
+/// * One instance plus a successor armed before the read — no gap in the *name*, but still a gap in
+///   the *chain*: only ever two instances exist, so a third caller arriving while one is being read
+///   and one is spoken for finds nothing free, and the retry window is where a frame went missing.
+///   The red form was `frame 1` absent from a run of five, with `delivered: 4` and every refusal
+///   counter at zero — the endpoint had not refused it, it had never seen it.
+///
+/// What is here instead has one invariant, and it is enough: **an instance is replaced only after
+/// its client has been read.** Four are armed at the start and the loop waits on all of them at
+/// once, so at every instant at least three are listening; the one being served is the fourth, and
+/// its slot is re-armed the moment its line has been taken. There is no ordering to get wrong,
+/// because there is no chain.
+///
+/// Still one reader, which is what keeps two callers' frames from interleaving; [`READ_DEADLINE`]
+/// is still what keeps one stalled caller from holding that reader.
 fn listen(
     name: &str,
     descriptor: SecurityDescriptor,
@@ -605,37 +641,53 @@ fn listen(
     let wide_name = wide(name);
     let mut rate = RateLimit::new(Instant::now());
     let mut buffer = vec![0u8; MAX_MESSAGE_BYTES];
-    // The word that makes `start` mean what it says: an instance exists and a connect is
-    // outstanding on it, before anybody is told the endpoint is open.
-    let mut current = match arm(&wide_name, &attributes, true) {
+    // The first instance carries the check that this name is ours, and its success is the word that
+    // makes `start` mean what it says: a connect is outstanding on a pipe that exists, before
+    // anybody is told the endpoint is open.
+    let mut pool = match arm(&wide_name, &attributes, true) {
         Ok(instance) => {
             let _ = armed.send(Ok(()));
-            instance
+            vec![instance]
         }
         Err(error) => {
             let _ = armed.send(Err(error));
             return;
         }
     };
-    loop {
-        if !current.ready {
-            match wait_for(current.event.handle(), stop, None) {
-                Waited::Signalled => {}
-                Waited::Stopped => return,
-                Waited::TimedOut | Waited::Failed => {
-                    // The instance is unusable; its `Drop` cancels and closes it.
-                    match arm(&wide_name, &attributes, false) {
-                        Ok(instance) => current = instance,
-                        Err(_) => return,
-                    }
-                    continue;
-                }
-            }
+    while pool.len() < MAX_INSTANCES as usize {
+        match arm(&wide_name, &attributes, false) {
+            Ok(instance) => pool.push(instance),
+            // Fewer than the full four is a smaller endpoint, not a broken one — one is enough to
+            // work, and the rest are headroom.
+            Err(_) => break,
         }
-        // **Before the read, not after it.** The successor is listening while this client is being
-        // served, so the name never stops answering.
-        let successor = arm(&wide_name, &attributes, false).ok();
-        match read_one(current.pipe.0, stop, &mut buffer) {
+    }
+    loop {
+        // A slot whose client was already there when it was armed needs no wait at all.
+        let served = match pool.iter().position(|instance| instance.ready) {
+            Some(index) => index,
+            None => {
+                let mut handles = pool
+                    .iter()
+                    .map(|instance| instance.event.handle())
+                    .collect::<Vec<_>>();
+                handles.push(stop.0);
+                // SAFETY: every handle in the list is owned by this thread's pool, or is the stop
+                // event, which outlives the listener.
+                let answer = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
+                let Some(index) = answer.0.checked_sub(WAIT_OBJECT_0.0) else {
+                    return;
+                };
+                let index = index as usize;
+                if index >= pool.len() {
+                    // The stop event, or a wait that failed. Either way this thread is finished,
+                    // and every instance's `Drop` cancels and closes it.
+                    return;
+                }
+                index
+            }
+        };
+        match read_one(pool[served].pipe.0, stop, &mut buffer) {
             Frame::Line(bytes) => {
                 let mut counts = counts.lock().unwrap_or_else(PoisonError::into_inner);
                 if rate.admit(Instant::now()) {
@@ -657,17 +709,20 @@ fn listen(
             }
             Frame::Stopped => return,
         }
-        drop(current);
-        current = match successor {
-            Some(instance) => instance,
-            // The successor could not be created — the process is out of handles, or the name has
-            // been taken. Try once more with nothing outstanding; a second failure ends the
-            // listener rather than spinning on the kernel.
-            None => match arm(&wide_name, &attributes, false) {
-                Ok(instance) => instance,
-                Err(_) => return,
-            },
-        };
+        // **Only now.** The slot is re-armed after its client has been read, and the old instance
+        // is dropped only once the new one is listening — so the number of instances answering this
+        // name never falls, and no instance is ever closed with a line still in it.
+        match arm(&wide_name, &attributes, false) {
+            Ok(replacement) => pool[served] = replacement,
+            // The kernel would not give another. Drop the spent slot rather than keep a dead one,
+            // and carry on with a smaller pool; an endpoint that has run out entirely is finished.
+            Err(_) => {
+                pool.remove(served);
+                if pool.is_empty() {
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -998,31 +1053,43 @@ mod tests {
         assert_eq!(pipe.counts().delivered, 1);
     }
 
-    /// Several lines in a row, which is the shape a turn actually produces.
+    /// **A whole turn's worth of hooks, back to back, and not one of them lost.**
+    ///
+    /// Twice the pool's size, from one thread with no pause, which is more than a turn ever
+    /// produces — a permission request, its receipt, a prompt and a stop is four. Both earlier
+    /// shapes of the listener failed this: the first told a caller arriving between two clients
+    /// that there was no such pipe, the second let one of five go missing with every refusal
+    /// counter at zero.
+    ///
+    /// **Order is compared as a set, and that is the honest comparison.** Callers are separate
+    /// processes landing on whichever instance is free, so the endpoint does not promise the order
+    /// two of them are read in and could not keep such a promise if it made one. What it promises
+    /// is that a frame it accepted arrives, and that is what is asserted.
     #[test]
-    fn the_endpoint_takes_one_client_after_another() {
+    fn a_whole_turn_of_hooks_arrives_with_none_of_them_lost() {
+        const FRAMES: usize = 8;
         let (sender, lines) = mpsc::channel();
         let pipe = AttentionPipe::start(move |line| {
             let _ = sender.send(line);
         })
         .expect("open the endpoint");
-        for index in 0..5 {
+        for index in 0..FRAMES {
             send_line(pipe.name(), &format!("frame {index}")).expect("write");
         }
         let mut arrived = Vec::new();
-        while arrived.len() < 5 {
+        while arrived.len() < FRAMES {
             match lines.recv_timeout(Duration::from_secs(5)) {
                 Ok(line) => arrived.push(line),
                 Err(_) => break,
             }
         }
-        assert_eq!(
-            arrived,
-            (0..5).map(|i| format!("frame {i}")).collect::<Vec<_>>(),
-            "counts were {:?}",
-            pipe.counts()
-        );
-        assert_eq!(pipe.counts().delivered, 5);
+        arrived.sort();
+        let mut expected = (0..FRAMES)
+            .map(|index| format!("frame {index}"))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(arrived, expected, "counts were {:?}", pipe.counts());
+        assert_eq!(pipe.counts().delivered, FRAMES as u64);
     }
 
     /// A frame over the bound is refused whole rather than truncated and parsed.
