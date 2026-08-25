@@ -154,6 +154,12 @@ const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "svg", "gif", "webp"]
 /// and `bt_platform`'s `DownloadStarting` handler cancels every download
 /// unconditionally, which is the abort.
 ///
+/// **The second column is what a glance can show of the file itself** (user
+/// ruling 2026-08-25) — see [`PageGlance`]. It rides on this table rather than
+/// beside it for the reason the table exists at all: a page class written down
+/// twice is a page class that comes apart, and "which of these can be read as
+/// text" is a fact about the very extensions listed here.
+///
 /// So a video on this lane would replace an honest "no preview for this file
 /// type" card with a browser error, which is strictly worse than the refusal it
 /// replaced — and the ticket's own words were 「能播的才进,播不了的仍落卡」.
@@ -169,7 +175,58 @@ const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "svg", "gif", "webp"]
 /// page's own developer tools and its `↗` hands the file to a browser — but it
 /// is no longer what a double-click does, because a double-click on a name that
 /// says "page" now means the page.
-const PAGE_EXTENSIONS: [&str; 3] = ["html", "htm", "pdf"];
+const PAGE_EXTENSIONS: [(&str, PageGlance); 3] = [
+    ("html", PageGlance::Source),
+    ("htm", PageGlance::Source),
+    ("pdf", PageGlance::Facts),
+];
+
+/// **What the glance card shows of a page's own file** (user ruling 2026-08-25;
+/// `docs/DESIGN.md` §7.10 ⑥) — [`PAGE_EXTENSIONS`]'s second column.
+///
+/// The hover card has no engine: a page is drawn by one, on a seat. From the
+/// 2026-08-23 ruling until this one, that fact was the whole of what the card
+/// said about every member of the class — one line, `Opens as a page.` — and it
+/// was right about the card and wrong about the file. `.html` **is** text; a
+/// reader who rests the pointer on one is asking what is in it, and a card that
+/// answers with a sentence about double-clicking has refused a question it could
+/// have answered.
+///
+/// So the class splits on a property of the *bytes*, which is why this is a
+/// column of the extension table and not a switch in the card: whether the file
+/// a page is made of is something this window can already read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PageGlance {
+    /// **The page's own source.** It goes down the same lane every other text
+    /// file takes — the same head read, the same mono body, the same 64KB cap —
+    /// because it is text, and a second lane for it would be a second answer to
+    /// "what does this file look like".
+    Source,
+    /// **A binary container**: nothing this window reads is *in* it. What the
+    /// glance can state without opening a renderer is what the file is — how
+    /// large, and how many pages — and that is what it states. See
+    /// [`crate::pdf::page_count`] for the half of that which has to be read off
+    /// the structure, and for what it does when the structure will not say.
+    Facts,
+}
+
+/// **What a glance shows of the file at this path**, or `None` when the path is
+/// not a page at all.
+///
+/// [`path_names_a_page`]'s own reading of the same table, carrying the second
+/// column out with the answer — so every rule written on that function holds
+/// here without being restated: the **real** extension and never a substring
+/// (`index.htmlx` and `report.html.txt` are documents), case ignored, and a file
+/// whose whole name is `.html` has no extension at all and is therefore not a
+/// page (§7.1.5j ⑦(e)).
+#[must_use]
+pub fn path_page_glance(path: &std::path::Path) -> Option<PageGlance> {
+    let extension = path.extension()?;
+    PAGE_EXTENSIONS
+        .iter()
+        .find(|(page, _)| extension.eq_ignore_ascii_case(page))
+        .map(|(_, glance)| *glance)
+}
 
 /// Extensions that name something this window can show as text (3093).
 ///
@@ -224,7 +281,7 @@ pub fn preview_ftype(name: &str) -> PreviewFtype {
     // `false` for it (§7.1.5j ⑦(e)) and this window opens it as a document. Ask
     // the page question first and the two would disagree about one name, which
     // is the thing this ruling exists to end.
-    if PAGE_EXTENSIONS.contains(&ext.as_str()) {
+    if PAGE_EXTENSIONS.iter().any(|(page, _)| *page == ext) {
         return PreviewFtype::Web;
     }
     PreviewFtype::Unknown
@@ -258,7 +315,7 @@ pub fn path_names_a_page(path: &std::path::Path) -> bool {
     path.extension().is_some_and(|extension| {
         PAGE_EXTENSIONS
             .iter()
-            .any(|page| extension.eq_ignore_ascii_case(page))
+            .any(|(page, _)| extension.eq_ignore_ascii_case(page))
     })
 }
 
@@ -2041,6 +2098,51 @@ impl PreviewBuffer {
         }
     }
 
+    /// **The buffer a glance takes over a file** (user ruling 2026-08-25;
+    /// `docs/DESIGN.md` §7.10 ⑥).
+    ///
+    /// [`Self::new`] with one difference, and the difference is the ruling: a
+    /// file whose name says page and whose **bytes are text**
+    /// ([`PageGlance::Source`] — `.html`, `.htm`) is a text buffer here. Not a
+    /// second lane for it, not a second reader: the same `Text` ftype an `.rs`
+    /// file has, so the same head read fetches it, the same [`preview_view`]
+    /// draws it and the same 64KB cap applies.
+    ///
+    /// **Why the glance and not the pane.** The pane opens a page *as a page* —
+    /// [`crate::Runtime::open_preview_source_on`] turns a page-named path onto
+    /// the engine's lane before a document buffer is ever made — so a pane that
+    /// held one of these would be the page lane having failed, and the refusal it
+    /// files is the sentence that seat owes. The card has no engine and never
+    /// will; source is not a lesser rendering of the page for it, it is the only
+    /// true thing it can show.
+    ///
+    /// **The chip still says `web`.** What the head prints is the *name's*
+    /// judgement ([`preview_ftype`], asked by `Runtime::file_peek_subject`), and
+    /// this is a judgement about which reader the glance uses. The two are
+    /// different questions and the card is where they meet: `web` in the corner,
+    /// the markup underneath.
+    ///
+    /// Only a file's own buffer is touched. A git-composed document named
+    /// `index.html` is a reading of a repository — it has no disk to read and
+    /// [`Self::view`] draws it as a diff whatever its ftype says — so it is left
+    /// exactly as [`Self::new`] made it.
+    pub fn glancing(source: PreviewSource, name: String) -> Self {
+        let mut buffer = Self::new(source, name);
+        let reads_as_text = match &buffer.source {
+            PreviewSource::File(path) => path_page_glance(path) == Some(PageGlance::Source),
+            _ => false,
+        };
+        // `Pending` is the load a page-named file lands in and the one a text
+        // file waits in, so asking it here is what keeps a network share's
+        // `Refused(NetworkPath)` card exactly where it was: this promotes a
+        // buffer that was going to sit empty, and never one that already has its
+        // answer.
+        if reads_as_text && buffer.load == PreviewLoad::Pending {
+            buffer.ftype = PreviewFtype::Text;
+        }
+        buffer
+    }
+
     /// Whether this buffer is still waiting on a head read.
     ///
     /// **A head read is a question for a disk**, so it is asked only of a source
@@ -2627,6 +2729,43 @@ pub enum PreviewWant {
     /// (mock-up 4955), which is the only thing on that line the decoder cannot
     /// answer for itself.
     Size,
+    /// **The two facts a glance states about a page it cannot render** (user
+    /// ruling 2026-08-25) — see [`PageFacts`].
+    ///
+    /// Its own want rather than [`Self::Size`] and a count asked elsewhere,
+    /// because the card prints one body out of both and a body assembled from
+    /// two answers landing on two frames is a card that changes under the
+    /// pointer.
+    PageFacts,
+}
+
+/// **What a glance says about a page whose bytes it cannot show** (user ruling
+/// 2026-08-25; `docs/DESIGN.md` §7.10 ⑥).
+///
+/// Both fields are optional and they are optional for the same reason: this is
+/// a card that would rather say less than say something untrue. A file the disk
+/// will not stat has no size to print, and a structure that will not yield a
+/// count has no page number to print — the ruling's own instruction for the
+/// second case is "then show the size alone", and the type is what makes that
+/// the ordinary path rather than an error case.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PageFacts {
+    pub bytes: Option<u64>,
+    pub pages: Option<u32>,
+}
+
+/// [`PageFacts`] for one file, read on the worker's thread.
+///
+/// The size comes from a `metadata` call and the count from
+/// [`crate::pdf::page_count`], which checks the file's own header before it
+/// counts anything — so a `.pdf` that is not a PDF answers with its size and no
+/// number, exactly as a PDF whose page tree is out of reach does.
+#[must_use]
+pub fn read_page_facts(path: &Path) -> PageFacts {
+    PageFacts {
+        bytes: read_size(path),
+        pages: crate::pdf::page_count(path),
+    }
 }
 
 /// "Answer this about this file for this tab of this window."
@@ -2704,6 +2843,8 @@ pub enum PreviewAnswer {
     /// `None` when the file could not be stat'ed, which the meta line simply
     /// leaves out rather than turning into an error of its own.
     Size(Option<u64>),
+    /// What a glance card states about a page it cannot render.
+    PageFacts(PageFacts),
 }
 
 /// How large a file is, without reading it.
@@ -2989,8 +3130,8 @@ impl PreviewWorker {
             bt_platform::ThreadPriority::BelowNormal,
             move || {
                 run_preview_worker(request_rx, |request| {
-                    // **This thread is a disk**, and both of its questions are
-                    // about bytes at a path. A source with nothing at a path is
+                    // **This thread is a disk**, and every one of its questions
+                    // is about bytes at a path. A source with nothing at a path is
                     // never sent here — [`PreviewBuffer::wants_head_read`] is the
                     // gate, and a picture's size is asked of a file the decode
                     // lane already holds — so this is the same shape a request
@@ -3002,6 +3143,7 @@ impl PreviewWorker {
                     let answer = match request.want {
                         PreviewWant::Head => PreviewAnswer::Head(read_head(path)),
                         PreviewWant::Size => PreviewAnswer::Size(read_size(path)),
+                        PreviewWant::PageFacts => PreviewAnswer::PageFacts(read_page_facts(path)),
                     };
                     if response_tx
                         .send(PreviewResponse {
@@ -4222,7 +4364,7 @@ mod tests {
     /// RED GATE: give [`crate::path_opens_as_a_page`] a list of its own again.
     #[test]
     fn every_member_of_the_page_class_is_a_page_to_both_readings() {
-        for extension in PAGE_EXTENSIONS {
+        for (extension, _) in PAGE_EXTENSIONS {
             let name = format!("subject.{extension}");
             assert_eq!(preview_ftype(&name), PreviewFtype::Web, "{name}");
             assert!(
@@ -4239,7 +4381,7 @@ mod tests {
         // A leading-dot whole name is not a page to either, and neither needs a
         // clause for it: `Path::extension` says it has no extension, and the
         // dotfile arm of `preview_ftype` runs before the page arm.
-        for whole in PAGE_EXTENSIONS {
+        for (whole, _) in PAGE_EXTENSIONS {
             let name = format!(".{whole}");
             assert_eq!(preview_ftype(&name), PreviewFtype::Text, "{name}");
             assert!(
@@ -4303,6 +4445,127 @@ mod tests {
         // its type exactly as it always was.
         let unknown = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.exe"), "a.exe".to_owned());
         assert_eq!(unknown.load, PreviewLoad::Refused(PreviewRefusal::Type));
+    }
+
+    /// PIN (user ruling 2026-08-25; `docs/DESIGN.md` §7.10 ⑥) — **a glance over
+    /// a page whose bytes are text reads them, and reads them as text.**
+    ///
+    /// The sentence above this test — "this window never reads a page off a disk
+    /// as text" — was true of every surface until the hover card, and it is
+    /// still true of every surface that can *show* a page. The card cannot: it
+    /// has no engine and never will, and one line about double-clicking is not an
+    /// answer to "what is in this file". So the glance's own buffer reads `.html`
+    /// the way it reads `.rs`, which is what puts the source in the card without
+    /// a second reader, a second lane or a second cap being written anywhere.
+    ///
+    /// `.pdf` is the control and it is the whole reason the table has two rows
+    /// rather than a `!= pdf`: nothing in it is text, so nothing is read, and the
+    /// card states facts instead.
+    ///
+    /// RED GATE: return `Self::new(source, name)` from
+    /// [`PreviewBuffer::glancing`] — the `.html` half comes back `Web`, wants no
+    /// read, and the card that was showing markup a moment ago shows an empty
+    /// box for ever.
+    #[test]
+    fn a_glance_reads_a_pages_source_when_the_page_is_made_of_text() {
+        let glance = |path: &str, name: &str| {
+            PreviewBuffer::glancing(PreviewSource::file(path), name.to_owned())
+        };
+        for (path, name) in [
+            (r"D:\site\index.html", "index.html"),
+            (r"D:\site\index.htm", "index.htm"),
+            (r"D:\site\INDEX.HTM", "INDEX.HTM"),
+        ] {
+            let buffer = glance(path, name);
+            assert_eq!(
+                buffer.ftype,
+                PreviewFtype::Text,
+                "a page made of text is read as text: {name}"
+            );
+            assert!(
+                buffer.wants_head_read(),
+                "and the read is really asked for: {name}"
+            );
+            assert_eq!(
+                preview_view(name, buffer.ftype, false),
+                PreviewView::Text,
+                "and it is drawn as source rather than as nothing: {name}"
+            );
+        }
+        // A page with no text in it is left exactly as a pane would have it: no
+        // read, no document, and the card's own facts instead.
+        let pdf = glance(r"D:\reports\report.pdf", "report.pdf");
+        assert_eq!(pdf.ftype, PreviewFtype::Web);
+        assert!(!pdf.wants_head_read(), "nothing reads a PDF as text");
+        // The three names that merely look like pages keep the answers the page
+        // class already gives them — the real extension and never a substring.
+        for (path, name, ftype) in [
+            (r"D:\site\index.htmlx", "index.htmlx", PreviewFtype::Unknown),
+            (
+                r"D:\site\report.html.txt",
+                "report.html.txt",
+                PreviewFtype::Text,
+            ),
+            (r"D:\site\.html", ".html", PreviewFtype::Text),
+        ] {
+            assert_eq!(glance(path, name).ftype, ftype, "{name}");
+        }
+        // A share's `.html` keeps the network refusal §7.1.3 has always shown:
+        // the promotion is of a buffer that was going to sit empty, never of one
+        // that already has its answer.
+        let share = glance(r"\\server\share\index.html", "index.html");
+        assert_eq!(
+            share.load,
+            PreviewLoad::Refused(PreviewRefusal::NetworkPath),
+            "a page on a share is refused before its bytes are anybody's business"
+        );
+        assert!(!share.wants_head_read(), "and no disk is dialled for it");
+        // A repository's own reading of a page-named file has no disk to read
+        // and is a diff whatever its name says.
+        let composed = PreviewBuffer::glancing(
+            PreviewSource::GitDiff {
+                root: PathBuf::from(r"D:\repo"),
+                path: "design/ui-mockup.html".to_owned(),
+                against: GitDiffAgainst::WorkingTree,
+            },
+            "ui-mockup.html".to_owned(),
+        );
+        assert_eq!(composed.ftype, PreviewFtype::Web);
+        assert_eq!(composed.view(false), PreviewView::Diff);
+        assert!(!composed.wants_head_read());
+    }
+
+    /// PIN — **the page class's second column is read off the path's real
+    /// extension**, which is the same reading its first column gets.
+    ///
+    /// MUTATION: ask the *name* for its extension instead (`rfind('.')`) and the
+    /// dotfile case answers `Source` — a file whose whole name is `.html` becomes
+    /// a page, which is the one spelling §7.1.5j ⑦(e) keeps out of the class at
+    /// both readings.
+    #[test]
+    fn what_a_glance_shows_of_a_page_is_a_property_of_the_class() {
+        let glance = |path: &str| path_page_glance(Path::new(path));
+        assert_eq!(glance(r"D:\site\index.html"), Some(PageGlance::Source));
+        assert_eq!(glance(r"D:\site\index.htm"), Some(PageGlance::Source));
+        assert_eq!(glance(r"D:\site\INDEX.HTM"), Some(PageGlance::Source));
+        assert_eq!(glance(r"D:\reports\report.pdf"), Some(PageGlance::Facts));
+        assert_eq!(glance(r"D:\reports\REPORT.PDF"), Some(PageGlance::Facts));
+        assert_eq!(glance(r"D:\site\index.htmlx"), None);
+        assert_eq!(glance(r"D:\site\report.html.txt"), None);
+        assert_eq!(glance(r"D:\site\.html"), None);
+        assert_eq!(glance(r"D:\notes\notes.md"), None);
+        // **One table, and this is the assertion that keeps it one.** Every
+        // member of the page class has a column entry and nothing else has one:
+        // a spelling added to the class without a decision about what a glance
+        // shows of it would be a card with nothing to draw.
+        for name in ["index.html", "index.htm", "report.pdf"] {
+            let path = PathBuf::from(format!(r"D:\site\{name}"));
+            assert_eq!(
+                path_names_a_page(&path),
+                path_page_glance(&path).is_some(),
+                "the two readings of one table disagree about {name}"
+            );
+        }
     }
 
     /// ④ `editable` names the surface that actually edits.
