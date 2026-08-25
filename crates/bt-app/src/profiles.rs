@@ -5258,12 +5258,15 @@ pub enum FileMenuSubject {
     Document,
 }
 
-/// One row of the menu a tree row raises under the pointer.
+/// One row of the menu a tree row raises under the pointer, or a preview's
+/// breadcrumb under its `Open ⌄`.
 ///
-/// **A flat list across both subjects rather than an enum per subject**, which
-/// is [`GitMenuRow`]'s own reasoning: three of these rows mean the same thing on
-/// a file and on a folder, the runtime's dispatch is one `match`, and two
-/// variants for `Copy path` would be two code paths to keep in step.
+/// **A flat list across every subject rather than an enum per subject**, which
+/// is [`GitMenuRow`]'s own reasoning: `Copy path` and `Insert path into
+/// terminal` mean the same thing on all three faces, the runtime's dispatch is
+/// one `match`, and two variants for one verb would be two code paths to keep in
+/// step. Which rows a face actually shows is [`file_menu`]'s answer and not this
+/// enum's — the type is shared, the lists are not.
 ///
 /// The mock-up's `Save as…` (8088) is still not here: it is conditional on a
 /// *terminal artefact* and is raised from the inline-image path, not from a row
@@ -6210,7 +6213,7 @@ pub fn git_menu_row_available(row: GitMenuRow, target: &GitMenuTarget) -> bool {
 
 /// The row a keyboard step lands on, **skipping the ones that answer nothing**.
 ///
-/// Clamped rather than cyclic, which is [`FileMenuRow::step`]'s ruling and the
+/// Clamped rather than cyclic, which is [`file_menu_step`]'s ruling and the
 /// tree's: one window should not hold two ideas of what the bottom of a list
 /// does. From nowhere, a step forwards offers the first available row and a step
 /// backwards the last. `None` when nothing in the menu is available at all,
@@ -6978,7 +6981,7 @@ pub fn term_menu_entry_available(entry: TermMenuEntry, subject: TermMenuSubject)
 }
 
 /// The row a keyboard step lands on, **skipping the ones that answer nothing** —
-/// [`git_menu_step`]'s rule and [`FileMenuRow::step`]'s clamp, on this list.
+/// [`git_menu_step`]'s rule and [`file_menu_step`]'s clamp, on this list.
 ///
 /// The rule between the two halves is not a stop: the walk crosses it, because
 /// a separator is punctuation and a keyboard that halted at one would make the
@@ -7759,9 +7762,12 @@ impl SplitZone {
 
 /// The verbs a pane head's `⌄` offers.
 ///
-/// Closed rather than a `Vec`, for [`FileMenuRow`]'s reason: a menu whose length
-/// cannot vary is also a menu whose keyboard walk cannot go looking for a row
-/// that is not there.
+/// Closed rather than a `Vec`, on the argument [`FileMenuRow`] used to be able
+/// to make and no longer can: a menu whose length cannot vary is also a menu
+/// whose keyboard walk cannot go looking for a row that is not there. That menu
+/// now varies on a subject and on a machine fact, and it keeps the argument's
+/// substance by taking its list from [`file_menu`] everywhere; this one has
+/// nothing to vary on, so it keeps the simpler shape as well.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PaneMenuRow {
     /// The Snap-Layouts picker — a drawing, not a row of text, and the only
@@ -15573,7 +15579,7 @@ mod tests {
     /// PIN (ticket #62, item 5) — **the keyboard walk steps over the rows that
     /// answer nothing, and clamps at both ends.**
     ///
-    /// Clamped rather than cyclic, which is [`FileMenuRow::step`]'s ruling and
+    /// Clamped rather than cyclic, which is [`file_menu_step`]'s ruling and
     /// the tree's: one window must not hold two ideas of what the bottom of a
     /// list does. From nowhere, a step forwards offers the first *available* row
     /// — which on a pane with no selection is `Paste`, not the greyed `Copy` the
