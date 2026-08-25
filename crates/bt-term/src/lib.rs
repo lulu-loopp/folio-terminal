@@ -45,10 +45,10 @@ pub use lifecycle::{
 };
 pub use scheduling::{PARSE_QUANTUM, RESIZE_REQUEST_QUIET, WORKER_QUEUE_CAP};
 pub use session::{
-    DualPlaneSession, FrameImageReference, HeldUnbackedRecord, InlineImageRecordView,
-    LIVE_MATH_READABLE_SCALE_MILLI, LIVE_MATH_STABLE_INTERVAL, LIVE_MIN_VISIBLE_TEXT_ROWS,
-    MathLayoutOptions, ProgressState, ResizeTraceEvent, ResizeTraceKind, ResizeTraceRowOrigin,
-    SPIKE_CELL_HEIGHT_SUBPIXELS, SessionDecorationTask, SessionError, SessionMathTask,
-    SessionStatus, TerminalNotification, decoration_state_label, path_exists,
-    render_detection_task, render_live_detection_task,
+    AttentionRequest, DualPlaneSession, FrameImageReference, HeldUnbackedRecord,
+    InlineImageRecordView, LIVE_MATH_READABLE_SCALE_MILLI, LIVE_MATH_STABLE_INTERVAL,
+    LIVE_MIN_VISIBLE_TEXT_ROWS, MathLayoutOptions, NotificationSource, ProgressState,
+    ResizeTraceEvent, ResizeTraceKind, ResizeTraceRowOrigin, SPIKE_CELL_HEIGHT_SUBPIXELS,
+    SessionDecorationTask, SessionError, SessionMathTask, SessionStatus, TerminalNotification,
+    decoration_state_label, path_exists, render_detection_task, render_live_detection_task,
 };

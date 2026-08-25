@@ -28,6 +28,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod attention;
 mod attention_trace;
 mod cli;
 mod cmdrail;
@@ -10804,15 +10805,91 @@ enum MouseRoute {
     MathBlock,
 }
 
+/// **Where one write into a child's pipe came from** (`attention` plan §10.3.2, §11.3).
+///
+/// Seven, because seven is how many *sources* of bytes there are, and the two questions this build
+/// asks about a write have different answers for different ones. The alternative — asking the
+/// function that writes the bytes — cannot work and the reason is already written at the `Enter`
+/// door: it "is handed a byte string and cannot tell an answer from a paste that happens to end in
+/// a newline".
+///
+/// A caller cannot forget to classify itself, because there is nothing to forget: the kind is an
+/// argument, and both questions are answered by methods **on this enum**. That is the same shape,
+/// in the same place, for the same reason as [`Self::returns_view_to_live`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+// The five members below `Keyboard` are the ones whose call sites A2 moves over — the IME commit,
+// the paste, the files row and the three mouse doors all write through this function today and
+// pass the one kind that existed. Naming them here first is what lets the ledger be built and
+// tested against the real vocabulary; `expect` rather than `allow` so that the first call site A2
+// converts takes the attribute away with it.
+#[allow(
+    dead_code,
+    reason = "A2 converts the five call sites that will pass these"
+)]
 enum UserInputKind {
     Keyboard,
-    Mouse,
+    /// An IME **commit**. Composition updates nothing but the window's own preedit and puts no
+    /// byte in the pipe, so they never reach here at all.
+    Ime,
+    Paste,
+    /// A path inserted into the shell from the files row: one gesture, landing in one named seat.
+    FilesRow,
+    /// A press or release forwarded to a mouse-tracking program.
+    MouseButton,
+    /// A wheel forwarded to one. On the wire this *is* a press — SGR button 64/65, with no release
+    /// of its own — so "presses count" already covered it, and it is spelled separately here only
+    /// because it enters through a different door.
+    MouseWheel,
+    /// Pointer movement forwarded to a program that asked for it (`?1002h`/`?1003h`).
+    MouseMotion,
 }
 
 impl UserInputKind {
+    /// Whether this kind of write brings the view back to the live edge.
+    ///
+    /// Every mouse kind answers `false`, which is the semantics this predicate always had: a
+    /// gesture with the pointer is not a return to the bottom of the scrollback.
     fn returns_view_to_live(self) -> bool {
-        matches!(self, Self::Keyboard)
+        matches!(
+            self,
+            Self::Keyboard | Self::Ime | Self::Paste | Self::FilesRow
+        )
+    }
+
+    /// **Whether this kind of write is an answer to a program that is waiting for one.**
+    ///
+    /// Every kind but one. `MouseMotion` is the exception and it is the whole reason this is a
+    /// method rather than a condition at a call site: sweeping a pointer across a pane answers
+    /// nothing, and a program that has turned on motion reporting would otherwise have its request
+    /// retired by the pointer merely passing over it. That defect fires only on some programs and
+    /// only while the mouse moves, which makes it close to the hardest kind there is to catch by
+    /// hand.
+    ///
+    /// **A new input path has to answer this question here**, in the enum, rather than be
+    /// remembered about inside an `if` somewhere. The terminal's own replies — a device-attributes
+    /// answer, a colour report, focus reporting, the PSReadLine repair — are not writes of a *kind*
+    /// at all and never reach this door; they are structurally out of reach rather than excluded by
+    /// a list (`attention` plan red line 10).
+    #[allow(dead_code, reason = "A2 gates the answer door on this")]
+    fn is_answer(self) -> bool {
+        self.answer_kind().is_some()
+    }
+
+    /// The same answer, in the vocabulary the ledger's `by=` field is written from.
+    ///
+    /// `None` for the one kind that is not an answer, so that "a pointer sweep answered a request"
+    /// is a sentence that cannot be constructed rather than one that is checked for.
+    #[allow(dead_code, reason = "A2 passes the result of this to the ledger")]
+    fn answer_kind(self) -> Option<attention::AnswerKind> {
+        Some(match self {
+            Self::Keyboard => attention::AnswerKind::Keyboard,
+            Self::Ime => attention::AnswerKind::Ime,
+            Self::Paste => attention::AnswerKind::Paste,
+            Self::FilesRow => attention::AnswerKind::FilesRow,
+            Self::MouseButton => attention::AnswerKind::MouseButton,
+            Self::MouseWheel => attention::AnswerKind::MouseWheel,
+            Self::MouseMotion => return None,
+        })
     }
 }
 
@@ -56067,8 +56144,8 @@ impl Runtime<'_> {
     /// one grid delivered into another. Named seat, one write, no deref.
     ///
     /// No return-to-live half, and not because this path happens not to need one
-    /// — because a mouse gesture never has one. [`UserInputKind::Mouse`] is
-    /// exactly the kind whose `returns_view_to_live` is false, so the branch
+    /// — because a mouse gesture never has one. Every mouse member of
+    /// [`UserInputKind`] answers `returns_view_to_live` with false, so the branch
     /// would be dead code standing where a policy looks like it lives.
     fn send_mouse_input_to(
         &mut self,
@@ -61181,7 +61258,7 @@ impl Runtime<'_> {
             return self.send_user_input(
                 &bytes,
                 "forward mouse button event to PTY",
-                UserInputKind::Mouse,
+                UserInputKind::MouseButton,
             );
         }
         match state {
@@ -76575,6 +76652,7 @@ mod tests {
             working: false,
             alternate_screen: false,
             published_revision: u64::MAX,
+            attention_request: None,
         }
     }
 
@@ -85553,8 +85631,31 @@ mod tests {
 
     #[test]
     fn anchored_mouse_forwarding_uses_live_viewport_rows_and_clamps_frozen_rows() {
-        assert!(!UserInputKind::Mouse.returns_view_to_live());
+        for mouse in [
+            UserInputKind::MouseButton,
+            UserInputKind::MouseWheel,
+            UserInputKind::MouseMotion,
+        ] {
+            assert!(!mouse.returns_view_to_live(), "{mouse:?}");
+        }
         assert!(UserInputKind::Keyboard.returns_view_to_live());
+
+        // The other question this enum answers, and the one member that answers it differently.
+        // A pointer sweeping across a pane is not a reply to a program waiting for one, and the
+        // shape of that fact is a `None` nobody can spell around rather than a rule in a comment.
+        for answering in [
+            UserInputKind::Keyboard,
+            UserInputKind::Ime,
+            UserInputKind::Paste,
+            UserInputKind::FilesRow,
+            UserInputKind::MouseButton,
+            UserInputKind::MouseWheel,
+        ] {
+            assert!(answering.is_answer(), "{answering:?}");
+            assert!(answering.answer_kind().is_some(), "{answering:?}");
+        }
+        assert!(!UserInputKind::MouseMotion.is_answer());
+        assert_eq!(UserInputKind::MouseMotion.answer_kind(), None);
 
         let mut session =
             DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());

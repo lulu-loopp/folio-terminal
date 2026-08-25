@@ -167,6 +167,13 @@ pub enum AdapterEvent {
     /// `DualPlaneSession::take_notifications` and `bt-app`'s own gate — and a terminal that
     /// decided it here would be one that could not be turned off.
     Notification(crate::session::TerminalNotification),
+    /// A program entered, restated or withdrew a standing request for attention
+    /// (`OSC 1337;RequestAttention=`).
+    ///
+    /// Reported exactly as it arrived, including the restatements. Which of them is a *new*
+    /// request is a question about what this session was already asserting, and the session is
+    /// where it is answered — this seam says what the bytes said.
+    AttentionRequest(crate::session::AttentionRequest),
     GridWrites {
         screen: RemovalScreen,
         rows: Vec<u32>,
@@ -629,6 +636,9 @@ impl TerminalAdapter {
                 }
                 InlineImageStreamAction::Notification(notification) => {
                     events.push(AdapterEvent::Notification(notification));
+                }
+                InlineImageStreamAction::AttentionRequest(request) => {
+                    events.push(AdapterEvent::AttentionRequest(request));
                 }
                 InlineImageStreamAction::TooLarge => {
                     self.write_inline_image_placeholder(b"[image:too-large]");

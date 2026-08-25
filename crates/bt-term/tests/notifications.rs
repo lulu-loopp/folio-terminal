@@ -6,7 +6,7 @@
 
 use std::num::NonZeroU32;
 
-use bt_term::{DualPlaneSession, ProgressState, TerminalNotification};
+use bt_term::{DualPlaneSession, NotificationSource, ProgressState, TerminalNotification};
 
 fn nz(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).unwrap()
@@ -30,10 +30,27 @@ fn one(report: &[u8]) -> Option<TerminalNotification> {
     all.pop()
 }
 
-fn titled(title: Option<&str>, body: &str) -> Option<TerminalNotification> {
+/// The notification an `OSC 9` produces. It has no title field, so it never carries one.
+fn osc9(body: &str) -> Option<TerminalNotification> {
+    Some(TerminalNotification {
+        title: None,
+        body: body.to_owned(),
+        source: NotificationSource::Osc9,
+    })
+}
+
+/// The notification an `OSC 777;notify` produces, title field and all.
+///
+/// **Two helpers rather than one, and the difference between them is the pin**: the sequence a
+/// message arrived over is now part of what the terminal understood. An empty `OSC 777` title and
+/// an absent `OSC 9` one make the same `title: None`, and they are still not the same arrival —
+/// the layer above reports them as different transports, and it can only do so because this seam
+/// stopped throwing the distinction away.
+fn osc777(title: Option<&str>, body: &str) -> Option<TerminalNotification> {
     Some(TerminalNotification {
         title: title.map(str::to_owned),
         body: body.to_owned(),
+        source: NotificationSource::Osc777,
     })
 }
 
@@ -50,12 +67,12 @@ fn titled(title: Option<&str>, body: &str) -> Option<TerminalNotification> {
 fn osc_9_reads_a_leading_number_as_conemu_and_everything_else_as_a_message() {
     assert_eq!(
         one(b"\x1b]9;build finished\x07"),
-        titled(None, "build finished"),
+        osc9("build finished"),
         "the plain iTerm2 shape"
     );
     assert_eq!(
         one(b"\x1b]9;\xe5\xae\x8c\xe6\x88\x90 \xe2\x9c\x93\x1b\\"),
-        titled(None, "完成 ✓"),
+        osc9("完成 ✓"),
         "ST terminates it and the body is UTF-8"
     );
 
@@ -83,13 +100,10 @@ fn osc_9_reads_a_leading_number_as_conemu_and_everything_else_as_a_message() {
 
     // A body that merely *contains* a digit, or starts with one that is not followed by a
     // separator, is text — the slot is "digits then `;`", not "starts with a digit".
-    assert_eq!(
-        one(b"\x1b]9;3 tests failed\x07"),
-        titled(None, "3 tests failed")
-    );
+    assert_eq!(one(b"\x1b]9;3 tests failed\x07"), osc9("3 tests failed"));
     assert_eq!(
         one(b"\x1b]9;;4;1;42\x07"),
-        titled(None, ";4;1;42"),
+        osc9(";4;1;42"),
         "an empty first field is not a number"
     );
 }
@@ -105,21 +119,21 @@ fn osc_9_reads_a_leading_number_as_conemu_and_everything_else_as_a_message() {
 fn osc_777_notify_splits_once_and_ignores_every_other_verb() {
     assert_eq!(
         one(b"\x1b]777;notify;cargo;build finished\x07"),
-        titled(Some("cargo"), "build finished")
+        osc777(Some("cargo"), "build finished")
     );
     assert_eq!(
         one(b"\x1b]777;notify;make;Error 2; see the log\x1b\\"),
-        titled(Some("make"), "Error 2; see the log"),
+        osc777(Some("make"), "Error 2; see the log"),
         "the second semicolon belongs to the body"
     );
     assert_eq!(
         one(b"\x1b]777;notify;title only\x07"),
-        titled(Some("title only"), ""),
+        osc777(Some("title only"), ""),
         "a title with no body is still a message"
     );
     assert_eq!(
         one(b"\x1b]777;notify;;body only\x07"),
-        titled(None, "body only"),
+        osc777(None, "body only"),
         "an empty title falls back to the pane's own name, exactly as OSC 9's absent one does"
     );
 
@@ -152,6 +166,7 @@ fn osc_7_and_osc_777_do_not_take_each_others_bytes() {
         vec![TerminalNotification {
             title: Some("t".to_owned()),
             body: "b".to_owned(),
+            source: NotificationSource::Osc777,
         }]
     );
     assert_eq!(
