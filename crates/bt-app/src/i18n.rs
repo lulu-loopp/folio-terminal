@@ -1182,8 +1182,19 @@ pub enum Text {
     GitMenuDeleteTag,
     GitMenuCheckoutTracking,
     GitMenuOpenDiff,
+    /// **`Reveal in Explorer` — one verb, and since 2026-08-25 three menus.**
+    ///
+    /// It was written for the Git row's menu and it sits in that block still,
+    /// because moving a string is how a merge loses one. What changed is who
+    /// says it: a tree's file row and a tree's folder row offer the same verb,
+    /// and a window that spelled it `Show in Explorer` on one menu and
+    /// `Reveal in Explorer` on another would be teaching a reader that the two
+    /// do different things. `Runtime::reveal_in_explorer` already makes that
+    /// argument about the three *feet*; this is the same argument about the
+    /// words.
+    ///
     /// `Explorer` is the name of a program on this machine and stays.
-    GitMenuReveal,
+    MenuRevealInExplorer,
     GitMenuCopyHash,
     GitMenuCopySubject,
     GitMenuCopyName,
@@ -1581,6 +1592,40 @@ pub enum Text {
     /// other panes, and it is the word this operating system has used for the
     /// window button that undoes a maximize for thirty years.
     PaneMenuRestore,
+
+    // ── the tree row's menu, completed (user ruling 2026-08-25) ────────────
+    //
+    // One contiguous block at the end, per this table's standing rule. Four
+    // entries, and **`Reveal in Explorer` is not among them**: that verb already
+    // has a string in this table ([`Text::MenuRevealInExplorer`], written for the
+    // Git row's menu) and it means exactly the same thing on a tree row. One
+    // verb printed on three menus is one verb — the rule
+    // `Runtime::reveal_in_explorer` already states about the three feet, said
+    // about their words.
+    /// **`Open with default app`** — the file menu's second door out.
+    ///
+    /// Names the *handler* and not the program, because which program that is
+    /// belongs to the machine and changes with the file: a row that promised
+    /// `Open in Notepad` would be this window guessing at a registry it does not
+    /// own. `default app` is Windows' own phrase for the same association.
+    FileMenuOpenWith,
+    /// **A folded folder row's first verb.**
+    ///
+    /// Two strings and not one, on `PaneMenuZoom`/`PaneMenuRestore`'s precedent:
+    /// the row is a toggle, so it says one thing over a shut folder and another
+    /// over an open one, and a single string would be the menu describing what
+    /// the row was a press ago.
+    FolderMenuExpand,
+    /// **An unfolded folder row's first verb** — the state's way out.
+    FolderMenuCollapse,
+    /// **`New terminal here`** — a folder row's own shell.
+    ///
+    /// The pane menu's `New terminal in folder…` without its ellipsis, and the
+    /// ellipsis is the whole of the difference: that row asks you which folder
+    /// before anything happens, and this one already knows — you right-clicked
+    /// it. Keeping the three dots here would be a promise of a chooser that
+    /// never comes.
+    FolderMenuNewTerminal,
 }
 
 impl Text {
@@ -2515,7 +2560,7 @@ impl Text {
                 pick(lang, "Checkout as local branch", "检出为本地分支")
             }
             Self::GitMenuOpenDiff => pick(lang, "Open diff", "打开差异"),
-            Self::GitMenuReveal => pick(lang, "Reveal in Explorer", "在资源管理器中显示"),
+            Self::MenuRevealInExplorer => pick(lang, "Reveal in Explorer", "在资源管理器中显示"),
             Self::GitMenuCopyHash => pick(lang, "Copy hash", "复制哈希"),
             Self::GitMenuCopySubject => pick(lang, "Copy subject", "复制标题"),
             Self::GitMenuCopyName => pick(lang, "Copy name", "复制名称"),
@@ -2624,6 +2669,17 @@ impl Text {
             // has to reassure anybody about.
             Self::PaneMenuZoom => pick(lang, "Zoom pane", "放大窗格"),
             Self::PaneMenuRestore => pick(lang, "Restore pane", "还原窗格"),
+
+            // ── the tree row's menu, completed (user ruling 2026-08-25) ────
+            //
+            // `default app` is Windows' own phrase for the association it means,
+            // and 「默认应用」is the phrase Windows' own Chinese settings use for
+            // the same page — so neither column is this window inventing a word
+            // for something the machine already names.
+            Self::FileMenuOpenWith => pick(lang, "Open with default app", "用默认应用打开"),
+            Self::FolderMenuExpand => pick(lang, "Expand", "展开"),
+            Self::FolderMenuCollapse => pick(lang, "Collapse", "折叠"),
+            Self::FolderMenuNewTerminal => pick(lang, "New terminal here", "在这里新建终端"),
 
             Self::GitDocumentEmpty => pick(lang, "No changes to show", "没有可显示的改动"),
 
@@ -2865,7 +2921,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 462] = [
+    pub const ALL: [Self; 466] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3237,7 +3293,7 @@ impl Text {
         Self::GitMenuDeleteTag,
         Self::GitMenuCheckoutTracking,
         Self::GitMenuOpenDiff,
-        Self::GitMenuReveal,
+        Self::MenuRevealInExplorer,
         Self::GitMenuCopyHash,
         Self::GitMenuCopySubject,
         Self::GitMenuCopyName,
@@ -3328,6 +3384,10 @@ impl Text {
         Self::ShortcutWindowAddress,
         Self::PaneMenuZoom,
         Self::PaneMenuRestore,
+        Self::FileMenuOpenWith,
+        Self::FolderMenuExpand,
+        Self::FolderMenuCollapse,
+        Self::FolderMenuNewTerminal,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

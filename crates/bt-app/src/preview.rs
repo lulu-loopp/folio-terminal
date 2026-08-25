@@ -125,18 +125,50 @@ const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "svg", "gif", "webp"]
 /// Extensions that name a **page** — [`PreviewFtype::Web`] asked of a name
 /// (user ruling 2026-08-23; `docs/DESIGN.md` §7.10 ⑥).
 ///
-/// The three spellings this window opens on the engine's lane, and the same
-/// three [`crate::path_opens_as_a_page`] routes there: `htm` sits beside `html`
-/// because the shortened spelling is the same object — Windows registers both
-/// against the same handler — and `pdf` sits beside them because the browser
-/// this seat already hosts has a reader for it and this window has none.
+/// **This is the page class, and it is written down exactly once.** Every door
+/// in this window asks it: [`preview_ftype`] asks it of a *name*, and
+/// [`path_names_a_page`] — which [`crate::path_opens_as_a_page`] is — asks it of
+/// a *path*. Until 2026-08-25 the second was a hand-written `html || htm || pdf`
+/// beside this table, and the two duplicate lists are precisely how a class
+/// comes apart: §7.10 ⑥'s second ruling exists because a `.pdf` had already
+/// drifted out of one of them.
 ///
-/// **They left [`TEXT_EXTENSIONS`] to get here**, and that is the whole of the
-/// cost the ruling accepted: `.html` used to be shown as source by default. What
-/// replaced the default is not nothing — the head's `</>` opens the page's own
-/// developer tools and its `↗` hands the file to a browser — but it is no longer
-/// what a double-click does, because a double-click on a name that says "page"
-/// now means the page.
+/// `htm` sits beside `html` because the shortened spelling is the same object —
+/// Windows registers both against the same handler. `pdf` sits beside them
+/// because the browser this seat already hosts has a reader for it and this
+/// window has none.
+///
+/// **No video spelling is here, and that is a measurement rather than a
+/// preference** (2026-08-25; `docs/DESIGN.md` §7.16).
+///
+/// The ticket that opened this table on 2026-08-25 asked for `mp4` and its
+/// neighbours on the argument that made PDF a member: the engine on this seat
+/// has a player and this window has none. **The engine has a player and it will
+/// not host one at the top level.** Measured in the real window, on this build:
+/// `file:///…/clip.mp4` and `file:///…/screencast.webm` both complete as
+/// `WebErrorStatus · ConnectionAborted` and draw the 「did not respond」 card,
+/// while the very same `clip.mp4` plays with controls as a `<video>` **inside**
+/// an ordinary local page in the same seat (`canPlayType` answers `maybe` for
+/// `video/mp4`, `video/webm` and `video/x-m4v`, and `""` for `video/quicktime`).
+/// A top-level media response has no viewer in WebView2 — it becomes a download,
+/// and `bt_platform`'s `DownloadStarting` handler cancels every download
+/// unconditionally, which is the abort.
+///
+/// So a video on this lane would replace an honest "no preview for this file
+/// type" card with a browser error, which is strictly worse than the refusal it
+/// replaced — and the ticket's own words were 「能播的才进,播不了的仍落卡」.
+/// The lane stays shut until something hosts the file *inside* a page; that is a
+/// design with its own questions (what the address bar says, what the head's `↗`
+/// hands over, what `session.json` stores) and it is the user's to rule on.
+/// PDF is not the counter-example: WebView2 ships a PDF viewer, so a top-level
+/// PDF renders — verified in the same session.
+///
+/// **`html` and `htm` left [`TEXT_EXTENSIONS`] to get here**, and that is the
+/// whole of the cost the ruling accepted: `.html` used to be shown as source by
+/// default. What replaced the default is not nothing — the head's `</>` opens the
+/// page's own developer tools and its `↗` hands the file to a browser — but it
+/// is no longer what a double-click does, because a double-click on a name that
+/// says "page" now means the page.
 const PAGE_EXTENSIONS: [&str; 3] = ["html", "htm", "pdf"];
 
 /// Extensions that name something this window can show as text (3093).
@@ -188,7 +220,7 @@ pub fn preview_ftype(name: &str) -> PreviewFtype {
     }
     // **After the dotfile clause, and that order is the ruling reaching one more
     // table.** A file whose whole name is `.html` has no extension as far as
-    // `Path::extension` is concerned, so [`crate::names_an_html_page`] answers
+    // `Path::extension` is concerned, so [`path_names_a_page`] answers
     // `false` for it (§7.1.5j ⑦(e)) and this window opens it as a document. Ask
     // the page question first and the two would disagree about one name, which
     // is the thing this ruling exists to end.
@@ -196,6 +228,38 @@ pub fn preview_ftype(name: &str) -> PreviewFtype {
         return PreviewFtype::Web;
     }
     PreviewFtype::Unknown
+}
+
+/// **Whether a path's real extension names a page** — [`PAGE_EXTENSIONS`] asked
+/// of a `Path` rather than of a name.
+///
+/// [`crate::path_opens_as_a_page`] is this function, and that identity is the
+/// point: a predicate that says which lane a name opens on and a table that says
+/// which class a name is in are one claim, and while they were two lists one of
+/// them drifted (§7.10 ⑥, the second ruling of 2026-08-23).
+///
+/// **The real extension and never a substring of the name**: `index.htmlx` is a
+/// template dialect this window has no browser story for, and `report.html.txt`
+/// is a text file that merely spells `.html` in the middle of itself. Both are
+/// the preview seat's, and a `contains`/`ends_with` reading would take one of
+/// them out of it.
+///
+/// **A whole name of `.html` is not a page here either**, and it does not need a
+/// clause: `Path::extension` says a leading-dot name has no extension at all
+/// (§7.1.5j ⑦(e)), which is the very answer [`preview_ftype`]'s dotfile arm
+/// gives one line earlier. Two readings, one answer, without either knowing
+/// about the other.
+///
+/// The comparison ignores case because a file system that does not distinguish
+/// `TIMELINE.HTM` from `timeline.htm` would leave this window doing two things
+/// with one file.
+#[must_use]
+pub fn path_names_a_page(path: &std::path::Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        PAGE_EXTENSIONS
+            .iter()
+            .any(|page| extension.eq_ignore_ascii_case(page))
+    })
 }
 
 /// Whether a name is a patch, which is read and never edited.
@@ -4032,7 +4096,7 @@ mod tests {
     ///
     /// The account this pays was opened by the head's hand-off arrow and
     /// recorded in `docs/HANDOFF-2026-08-21.md` section 5, item 18:
-    /// `names_an_html_page` has read both spellings since the day it was
+    /// the path-side predicate has read both spellings since the day it was
     /// written (Windows registers them against the same handler) while this
     /// table listed only `html`. So a `.htm` file drew the "no preview for this
     /// file type" card *and* the head's hand-off arrow at the same time: one
@@ -4083,7 +4147,7 @@ mod tests {
         }
         // The neighbours a substring reading would sweep up, and the one a
         // careless ordering would: `.html` as a *whole name* is a dotfile, which
-        // `Path::extension` — and therefore `crate::names_an_html_page` — reads
+        // `Path::extension` — and therefore [`path_names_a_page`] — reads
         // as having no extension at all (§7.1.5j ⑦(e)). Two tables, one answer.
         assert_eq!(preview_ftype("index.htmlx"), PreviewFtype::Unknown);
         assert_eq!(preview_ftype("notes.pdfx"), PreviewFtype::Unknown);
@@ -4094,6 +4158,95 @@ mod tests {
         // the engine.
         assert!(!is_editable("index.html", PreviewFtype::Web, false));
         assert!(!is_editable("report.pdf", PreviewFtype::Web, true));
+    }
+
+    /// PIN — **no video spelling is a page, because the engine will not host one
+    /// at the top level** (measured 2026-08-25; `docs/DESIGN.md` §7.16).
+    ///
+    /// This is a *negative* pin and it is deliberately a pin rather than an
+    /// absence. The 2026-08-25 ticket asked for `mp4` here on PDF's own argument
+    /// — the engine has a player, this window has none — and the real window
+    /// answered: a top-level `file:` navigation to `clip.mp4` or
+    /// `screencast.webm` completes as `WebErrorStatus · ConnectionAborted` and
+    /// draws the 「did not respond」 card, because WebView2 has no viewer for a
+    /// media response, turns it into a download, and every download is cancelled
+    /// unconditionally at the platform bridge. The same file plays with controls
+    /// as a `<video>` **inside** a page in the same seat. So the class stays as
+    /// it is until something hosts the file inside a page, and this test is what
+    /// tells whoever builds that where the one line is.
+    ///
+    /// RED GATE: put `mp4` (or `webm`, or `m4v`) into [`PAGE_EXTENSIONS`] on the
+    /// argument that the engine can play it, and this goes red with the reason
+    /// written on it.
+    #[test]
+    fn no_video_spelling_is_a_page_until_something_hosts_it_inside_one() {
+        for name in [
+            "clip.mp4",
+            "CLIP.MP4",
+            "trailer.m4v",
+            "screencast.webm",
+            "clip.mov",
+            "clip.mkv",
+            "clip.avi",
+            "clip.wmv",
+            "clip.flv",
+            "录屏.mp4",
+        ] {
+            assert_ne!(
+                preview_ftype(name),
+                PreviewFtype::Web,
+                "{name}: WebView2 aborts a top-level media navigation, so this \
+                 lane would replace the honest refusal card with a browser error"
+            );
+        }
+        // And they land where a name this window cannot read has always landed:
+        // the "no preview for this file type" card.
+        assert_eq!(preview_ftype("clip.mp4"), PreviewFtype::Unknown);
+    }
+
+    /// PIN — **the page class has one list, and the two readings of it agree on
+    /// every entry** (user ruling 2026-08-25).
+    ///
+    /// §7.10 ⑥ was written because the class had two lists and a `.pdf` fell
+    /// between them: the hover card said "no preview" while a double click
+    /// opened the page. The second ruling of that day fixed the *symptom* by
+    /// pointing one at the other; this pins the shape that makes the class
+    /// unable to split again — [`path_names_a_page`] and [`preview_ftype`] read
+    /// the same table, so there is no second place to spell a member wrong.
+    ///
+    /// It asks through [`crate::path_opens_as_a_page`] rather than through
+    /// [`path_names_a_page`] directly, because the claim is about *that* name:
+    /// the predicate the whole of `main.rs` routes on has to be this table and
+    /// not a copy of it.
+    ///
+    /// RED GATE: give [`crate::path_opens_as_a_page`] a list of its own again.
+    #[test]
+    fn every_member_of_the_page_class_is_a_page_to_both_readings() {
+        for extension in PAGE_EXTENSIONS {
+            let name = format!("subject.{extension}");
+            assert_eq!(preview_ftype(&name), PreviewFtype::Web, "{name}");
+            assert!(
+                crate::path_opens_as_a_page(std::path::Path::new(&format!(r"D:\work\{name}"))),
+                "{name}"
+            );
+            // And upper case is the same member, on both sides.
+            let shouted = format!("SUBJECT.{}", extension.to_ascii_uppercase());
+            assert_eq!(preview_ftype(&shouted), PreviewFtype::Web, "{shouted}");
+            assert!(crate::path_opens_as_a_page(std::path::Path::new(&format!(
+                r"D:\work\{shouted}"
+            ))));
+        }
+        // A leading-dot whole name is not a page to either, and neither needs a
+        // clause for it: `Path::extension` says it has no extension, and the
+        // dotfile arm of `preview_ftype` runs before the page arm.
+        for whole in PAGE_EXTENSIONS {
+            let name = format!(".{whole}");
+            assert_eq!(preview_ftype(&name), PreviewFtype::Text, "{name}");
+            assert!(
+                !crate::path_opens_as_a_page(std::path::Path::new(&name)),
+                "{name}"
+            );
+        }
     }
 
     /// PIN — **a page-named file is never refused for its type** (user ruling

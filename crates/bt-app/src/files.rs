@@ -679,8 +679,8 @@ pub enum TreeCommand {
     End,
     /// Enter or Space: a folder folds and unfolds, a file opens.
     Activate,
-    /// The Menu key, or `Shift+F10`: raise the selected file row's own menu
-    /// (K143).
+    /// The Menu key, or `Shift+F10`: raise the selected row's own menu (K143;
+    /// a folder row's too, since the user ruling of 2026-08-25).
     ///
     /// The keyboard's half of a verb the pointer already has. §7.1.3 requires
     /// the file row's menu to be "可键盘化", and a menu that can only be reached
@@ -752,7 +752,8 @@ pub enum TreeAction {
     Closed(String),
     /// A file was opened.
     Activate(String),
-    /// A file row asked for its own menu (K143).
+    /// A row asked for its own menu (K143; either kind of node since the user
+    /// ruling of 2026-08-25).
     ContextMenu(String),
     /// The keyboard goes back to the terminal.
     Release,
@@ -850,13 +851,20 @@ pub fn apply_tree_command(
             // show that is not already on screen, exactly as under the mouse.
             RowKind::Cycle | RowKind::Notice(_) => TreeAction::None,
         },
-        // Only files, which is the same line the right button is held to
-        // (K143): "目录行不弹". A folder standing under the selection answers
-        // the Menu key with silence rather than with a menu of three verbs that
-        // are all about a file.
+        // **Both kinds of node**, which is the same line the right button is
+        // held to (user ruling 2026-08-25). K143's "目录行不弹" was the right
+        // answer while the menu was three verbs that were all about a file; a
+        // folder row now has a menu of its own — its fold, a shell standing in
+        // it, and the same three things to do with a path — so the key that asks
+        // a row about itself gets an answer here too.
+        //
+        // The two rows that lead nowhere still answer with silence, and it is
+        // the same silence they give the second press: a cycle would open onto
+        // the place you are already standing, and a notice names no folder at
+        // all. `crate::files_row_menu_subject` is where that judgement lives.
         TreeCommand::ContextMenu => match row.kind {
-            RowKind::File => TreeAction::ContextMenu(key),
-            RowKind::Directory { .. } | RowKind::Cycle | RowKind::Notice(_) => TreeAction::None,
+            RowKind::File | RowKind::Directory { .. } => TreeAction::ContextMenu(key),
+            RowKind::Cycle | RowKind::Notice(_) => TreeAction::None,
         },
         TreeCommand::Release => TreeAction::Release,
     }
@@ -1655,10 +1663,19 @@ mod tests {
         );
     }
 
-    /// PIN — only a file row raises a menu, which is the same line the right
-    /// button is held to ("目录行不弹", K143).
+    /// PIN — **both kinds of node answer the menu key** (user ruling
+    /// 2026-08-25), and the two that lead nowhere still do not.
+    ///
+    /// K143's "目录行不弹" is overturned here for the reason the ruling gives:
+    /// the menu is no longer three verbs that are all about a file. A folder has
+    /// a path, so `Copy path`, `Insert path into terminal` and
+    /// `Reveal in Explorer` are answerable over one, and it has two verbs of its
+    /// own — the fold, and a shell standing in it.
+    ///
+    /// RED GATE: put `RowKind::Directory` back on the silent arm of
+    /// `apply_tree_command`'s `ContextMenu` match and the two folder lines fail.
     #[test]
-    fn only_a_file_row_answers_the_menu_key() {
+    fn both_kinds_of_node_answer_the_menu_key() {
         let (column, action) = press(Some("/read.me"), TreeCommand::ContextMenu);
         assert_eq!(action, TreeAction::ContextMenu("/read.me".to_owned()));
         assert_eq!(
@@ -1666,15 +1683,17 @@ mod tests {
             Some("/read.me"),
             "asking a row about itself does not move the selection"
         );
+        let (column, action) = press(Some("/docs"), TreeCommand::ContextMenu);
         assert_eq!(
-            press(Some("/docs"), TreeCommand::ContextMenu).1,
-            TreeAction::None,
-            "an open folder has none of these three verbs"
+            action,
+            TreeAction::ContextMenu("/docs".to_owned()),
+            "an open folder has a menu of its own"
         );
+        assert_eq!(column.sel.as_deref(), Some("/docs"));
         assert_eq!(
             press(Some("/src"), TreeCommand::ContextMenu).1,
-            TreeAction::None,
-            "and neither has a shut one"
+            TreeAction::ContextMenu("/src".to_owned()),
+            "and so has a shut one"
         );
         assert_eq!(
             press(None, TreeCommand::ContextMenu).1,

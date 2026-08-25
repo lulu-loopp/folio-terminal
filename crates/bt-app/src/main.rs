@@ -3242,16 +3242,6 @@ impl RowActivation {
             Self::Nowhere => None,
         }
     }
-
-    /// What the menu's first row says it will do.
-    ///
-    /// One wording, with no branch to get wrong: the row is named after the one
-    /// door there is. While there were two, this was a `match` and its comment
-    /// said "the day the second door closes this collapses to one word without
-    /// anything else moving" — and nothing else moved.
-    fn open_text(&self) -> &'static str {
-        i18n::Text::FileMenuOpenPreview.text()
-    }
 }
 
 /// The commit graph's branch filter while it is up (T2, v2 ③).
@@ -3508,13 +3498,43 @@ struct TermMenuState {
     submenu_hold_until: Option<Instant>,
 }
 
-/// A file row's context menu while it is up (K143).
+/// **One row, resolved to everything a menu about it needs.**
+///
+/// The answer [`Runtime::file_row_under`] gives and the argument
+/// [`Runtime::open_file_menu`] takes, written down as a type because the two
+/// hosts fill it in from two different places and a tuple of four would be four
+/// chances to swap two of them.
+#[derive(Clone, Debug)]
+struct FileMenuTarget {
+    host: RowHost,
+    key: String,
+    activation: RowActivation,
+    subject: profiles::FileMenuSubject,
+}
+
+/// A tree row's context menu while it is up (K143; both kinds of row since the
+/// user ruling of 2026-08-25).
 #[derive(Clone, Debug)]
 struct FileMenuState {
     /// Where it was raised, in physical pixels of the surface.
     point: [f32; 2],
+    /// **Which tree the row is in, and which row** — carried because two of the
+    /// folder's verbs act on the row itself rather than on its path: the fold
+    /// belongs to a particular tree's expansion set, and there are two trees in
+    /// this window that draw the same rows.
+    ///
+    /// A key and a host rather than an index, on [`PaneMenuState`]'s own
+    /// reasoning: an index into a list is only meaningful beside the list it
+    /// indexes, and a directory landing while the menu is up makes the tree
+    /// longer. A key that no longer names a row simply names nothing, and every
+    /// verb here asks the live tree for it before acting.
+    host: RowHost,
+    key: String,
     /// The row it is about, already resolved to a path and a door.
     activation: RowActivation,
+    /// Which verbs it holds — snapshotted for [`profiles::FileMenuSubject`]'s
+    /// own reason.
+    subject: profiles::FileMenuSubject,
     hover: Option<profiles::FileMenuRow>,
 }
 
@@ -3680,6 +3700,29 @@ fn files_row_activation(root: &str, key: &str) -> RowActivation {
     RowActivation::Preview(files::full_path(root, key))
 }
 
+/// **Which menu a row raises, if it raises one** (user ruling 2026-08-25).
+///
+/// Pure, and it is the one place the ruling that ended K143's "目录行不弹" is
+/// written down: a file row and a folder row each have a menu, and the two rows
+/// that lead nowhere have none.
+///
+/// **A `Cycle` and a `Notice` still raise nothing**, and the two refusals are
+/// not the same refusal. A cycle is a folder that resolves to one of its own
+/// ancestors: its fold would show you the place you are already standing, and
+/// `New terminal here` would put a shell somewhere you can reach by another
+/// name — the same sentence [`files_row_entry`] already makes about entering
+/// one. A notice names no folder at all, so it has no path for the three verbs
+/// under the rule.
+fn files_row_menu_subject(kind: files::RowKind) -> Option<profiles::FileMenuSubject> {
+    match kind {
+        files::RowKind::File => Some(profiles::FileMenuSubject::File),
+        files::RowKind::Directory { open } => {
+            Some(profiles::FileMenuSubject::Folder { expanded: open })
+        }
+        files::RowKind::Cycle | files::RowKind::Notice(_) => None,
+    }
+}
+
 /// Where a row's name **leads**, which is [`files_row_activation`]'s sentence
 /// said about the other kind of node (user ruling, 2026-08-19).
 ///
@@ -3753,22 +3796,32 @@ fn path_is_previewable_image(path: &Path) -> bool {
 /// none. A PDF-shaped surface of any kind would be a second answer to a
 /// question the engine has already answered.
 ///
-/// The two page spellings come from [`names_an_html_page`] rather than a second
-/// list, so `.htm` and `.html` cannot come apart here; the real extension and
-/// never a substring, for that predicate's own reason.
+/// **And the whole of video** (user ruling 2026-08-25). A `.mp4` is a page by
+/// the identical argument PDF is one: the engine already on this seat plays it
+/// and this window has no decoder of its own, so the row that used to draw the
+/// "no preview for this file type" card now opens a player with controls, a
+/// scrubber and a volume. Which spellings the engine can actually play is
+/// [`preview::PAGE_EXTENSIONS`]'s own note; a container it cannot play is not on
+/// the list and still gets the card, because a lane that opened a download
+/// dialog would be worse than the refusal it replaced.
 ///
-/// **This is where the page class is written down**, and since the second ruling
-/// of 2026-08-23 the head's `↗` asks it too ([`preview_page_hand_off`]) rather
-/// than the narrower [`names_an_html_page`] it grew up asking. A predicate that
-/// says which lane a name opens on and a button that says "this seat's content
-/// can go to a browser" are one claim about one class; written twice, the class
-/// came apart the morning `pdf` joined it, and a local `.pdf` page sat under a
-/// head that a local `.html` page did not have.
+/// **This is where the page class is written down — once**, in
+/// [`preview::PAGE_EXTENSIONS`], and this function is
+/// [`preview::path_names_a_page`] under the name the rest of this file knows it
+/// by. It used to spell the class out again here (`html || htm || pdf`) beside
+/// the table that also spelled it, and that is exactly how the class came apart
+/// the morning `pdf` joined it: a local `.pdf` page sat under a head that a
+/// local `.html` page did not have (§7.10 ⑥, the second ruling of 2026-08-23).
+/// Two readings of one class is one reading too many, so there is now one — and
+/// the day a fourth kind of page arrives there is nowhere here to spell it
+/// wrong.
+///
+/// Since that same ruling the head's `↗` asks this too
+/// ([`preview_page_hand_off`]): a predicate that says which lane a name opens on
+/// and a button that says "this seat's content can go to a browser" are one
+/// claim about one class.
 fn path_opens_as_a_page(path: &Path) -> bool {
-    names_an_html_page(path)
-        || path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+    preview::path_names_a_page(path)
 }
 
 /// **Which content lane a path activated in this window opens on.**
@@ -6439,13 +6492,16 @@ struct WindowRuntime {
     /// pane showing `README.md`. It is the same sentence `WindowRuntime::web`
     /// already carries, one table over.
     preview_head_measures: BTreeMap<LeafId, seats::PreviewHeadTools>,
-    /// The file row's context menu, and the row it was raised on (K143).
+    /// The tree row's context menu, and the row it was raised on (K143; both
+    /// kinds of row since the user ruling of 2026-08-25).
     ///
-    /// It holds the *path*, not the row — an index into a list the tree may
-    /// rebuild under it, or a host that may close. Once the menu is up, all
-    /// three of its verbs are about one file, and that file's name is a fact
-    /// nothing behind the menu can change. It is also what lets one menu serve
-    /// both hosts (K146) without carrying which one it came from.
+    /// It holds the row's *path* and its *stable key*, never an index into a
+    /// list the tree may rebuild under it. The path is what the three verbs
+    /// under the rule act on, and it is a fact nothing behind the menu can
+    /// change; the key is what the folder's own two verbs need, because a fold
+    /// belongs to a particular tree's expansion set. The host travels with the
+    /// key for the same reason — this one menu serves both trees (K146), and
+    /// there are two of them drawing the same names.
     file_menu: Option<FileMenuState>,
     /// The pane head's own menu, and the head it was raised on (user rulings,
     /// 2026-08-15 and 2026-08-16).
@@ -13394,29 +13450,17 @@ fn hyperlink_activation(
     refused
 }
 
-/// Whether a local path names an HTML page (§7.1.5g, user ruling 2026-08-20).
-///
-/// What it decides is **whether this window has an answer of its own**: for every
-/// other readable file the plain half of the table is the preview seat, and for a
-/// page the seat could only offer the source of something the link was pointing
-/// *past*. When W2 gives the seat a renderer this predicate keeps its name and
-/// changes jobs — from "there is nothing here to open" to "which content lane".
-///
-/// The *real* extension and never a substring of the name: `index.htmlx` is a
-/// template dialect this window has no browser story for, and `report.html.txt`
-/// is a text file that merely spells `.html` in the middle of itself. Both are
-/// the preview seat's, and a `contains`/`ends_with` reading would take one of
-/// them out of it.
-///
-/// `htm` sits beside `html` because the shortened spelling is the same object —
-/// Windows registers both against the same handler — and the comparison ignores
-/// case because a file system that does not distinguish `TIMELINE.HTM` from
-/// `timeline.htm` would leave this window doing two things with one file.
-fn names_an_html_page(path: &Path) -> bool {
-    path.extension().is_some_and(|extension| {
-        extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm")
-    })
-}
+// `names_an_html_page` stood here from §7.1.5g (user ruling 2026-08-20) until
+// 2026-08-25. It answered "is this HTML", and while `html` and `htm` were the
+// only spellings on the engine's lane that was the same question as "is this a
+// page" — which is why [`path_opens_as_a_page`] was written as *it, plus pdf*,
+// and why the class then had two lists to drift between. It has one now
+// ([`preview::PAGE_EXTENSIONS`]), so the narrower predicate is gone rather than
+// left standing as a second thing to reach for. Its two arguments survive on
+// [`preview::path_names_a_page`], which is where they belong: the real extension
+// and never a substring, and case-insensitively because a file system that does
+// not distinguish `TIMELINE.HTM` from `timeline.htm` would leave this window
+// doing two things with one file.
 
 /// The file a preview seat would hand to a browser, when its content is a page
 /// (user ruling 2026-08-20, §7.1.5g).
@@ -13438,7 +13482,7 @@ fn names_an_html_page(path: &Path) -> bool {
 ///
 /// **The question is "is this a page", not "is this HTML"** (user ruling
 /// 2026-08-23, the second ruling of that day; §7.10 ⑥). It asked
-/// [`names_an_html_page`] until then, which had been the same question while
+/// the narrower `names_an_html_page` until then, which had been the same question while
 /// `html` and `htm` were the only spellings this window opened on the engine's
 /// lane. That morning's ruling put `pdf` on that lane too, and the two
 /// predicates came apart: one class, two heads — a local `.html` page wore the
@@ -45395,7 +45439,7 @@ impl Runtime<'_> {
     fn file_menu_layout(&mut self) -> Option<profiles::FileMenuLayout> {
         let menu = self.window.file_menu.as_ref()?;
         let point = menu.point;
-        let open_text = menu.activation.open_text();
+        let subject = menu.subject;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
@@ -45404,26 +45448,28 @@ impl Runtime<'_> {
             point,
             (width as f32, height as f32),
             scale,
-            open_text,
+            subject,
             &mut measure,
         ))
     }
 
-    /// Raise the menu on one file row.
+    /// Raise the menu on one tree row.
     ///
-    /// **Directories are not offered one, and the refusal is here rather than at
-    /// each caller** (K143, mock-up 8122: "directory rows etc. keep the native
-    /// menu for now"). All three verbs are about a *file*: two of them hand out
-    /// its path for something else to open, and the third opens it. A folder has
-    /// a path too, which is exactly why the rule has to be stated somewhere
-    /// rather than left to look like an oversight — the folder's own verbs are
-    /// the root menu's and the drag's, and they live where they belong.
+    /// **Both kinds of node, since the user ruling of 2026-08-25.** K143 refused
+    /// a directory here — mock-up 8122's "directory rows etc. keep the native
+    /// menu for now" — and the refusal was sound while the menu was three verbs
+    /// that were all about a file. The ruling ends that: two of the three were
+    /// always answerable over a folder's path, and a folder has two verbs of its
+    /// own that no other surface offers *at the row*. Which rows a subject gets
+    /// is [`profiles::file_menu`]'s answer and not this function's.
     ///
-    /// A column with no root raises nothing either: [`RowActivation::Nowhere`]
-    /// means there is no path to put on a clipboard, and a menu of three verbs
-    /// that all do nothing is worse than no menu.
-    fn open_file_menu(&mut self, activation: RowActivation, point: [f32; 2]) -> Result<()> {
-        if activation.path().is_none() {
+    /// **What is still refused is stated in one place each.** A row that leads
+    /// nowhere and shows nothing raises no menu ([`files_row_menu_subject`]), and
+    /// a column with no root raises none either: [`RowActivation::Nowhere`] means
+    /// there is no path to put on a clipboard, and a menu whose every verb does
+    /// nothing is worse than no menu.
+    fn open_file_menu(&mut self, target: FileMenuTarget, point: [f32; 2]) -> Result<()> {
+        if target.activation.path().is_none() {
             return Ok(());
         }
         // E61: the opener closes the others. Not the float — that is a place, not
@@ -45431,7 +45477,10 @@ impl Runtime<'_> {
         self.close_popups_except(Popup::File);
         self.window.file_menu = Some(FileMenuState {
             point,
-            activation,
+            host: target.host,
+            key: target.key,
+            activation: target.activation,
+            subject: target.subject,
             hover: None,
         });
         if self.refresh_chrome() {
@@ -45453,10 +45502,15 @@ impl Runtime<'_> {
         let now = Instant::now();
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let trees = self.files_trees(now);
-        let Some(index) = trees
-            .get(&seat)
-            .and_then(|tree| tree.rows.iter().position(|row| row.key == key))
-        else {
+        let Some((index, kind)) = trees.get(&seat).and_then(|tree| {
+            tree.rows
+                .iter()
+                .position(|row| row.key == key)
+                .map(|index| (index, tree.rows[index].kind))
+        }) else {
+            return Ok(());
+        };
+        let Some(subject) = files_row_menu_subject(kind) else {
             return Ok(());
         };
         let Some(geometry) = seats::files_tree_geometry_of(
@@ -45472,25 +45526,37 @@ impl Runtime<'_> {
         let root = self.window.tabs[self.window.active_tab]
             .files_state(seat)
             .root;
-        self.open_file_menu(files_row_activation(&root, key), [rect[0], rect[3]])
+        self.open_file_menu(
+            FileMenuTarget {
+                host: RowHost::Column(seat),
+                key: key.to_owned(),
+                activation: files_row_activation(&root, key),
+                subject,
+            },
+            [rect[0], rect[3]],
+        )
     }
 
-    /// The file row under a point, in either host, resolved to the door it
-    /// opens — or nothing, when the point is not on a *file* row.
+    /// The tree row under a point, in either host, resolved to everything the
+    /// menu about it needs — or nothing, when the point is not on a row that has
+    /// a menu.
     ///
     /// The float is asked first because the float is drawn over the columns, so
     /// a row of a peek standing across a docked column is the row the pointer is
     /// really on. Both hosts re-derive their rows from the state rather than
     /// remembering the painted list, on [`Runtime::press_files_row`]'s reasoning.
-    fn file_row_under(&mut self, position: PhysicalPosition<f64>) -> Option<RowActivation> {
+    fn file_row_under(&mut self, position: PhysicalPosition<f64>) -> Option<FileMenuTarget> {
         if let Some((id, float::FloatPart::Row(index))) = self.float_hit_at(position) {
             let files = self.window.float.live(id)?.files()?;
             let rows = files::tree_view(&files.files, &files.cache).rows;
             let row = rows.get(index)?;
-            if !matches!(row.kind, files::RowKind::File) {
-                return None;
-            }
-            return Some(files_row_activation(&files.files.root, &row.key));
+            let subject = files_row_menu_subject(row.kind)?;
+            return Some(FileMenuTarget {
+                host: RowHost::Float(id),
+                key: row.key.clone(),
+                activation: files_row_activation(&files.files.root, &row.key),
+                subject,
+            });
         }
         let Some(seats::ChromeTarget::FilesRow { seat, index }) = self.chrome_target_at(position)
         else {
@@ -45499,16 +45565,19 @@ impl Runtime<'_> {
         let now = Instant::now();
         let trees = self.files_trees(now);
         let row = trees.get(&seat)?.rows.get(index)?;
-        if !matches!(row.kind, files::RowKind::File) {
-            return None;
-        }
+        let subject = files_row_menu_subject(row.kind)?;
         let key = row.key.clone();
-        Some(files_row_activation(
-            &self.window.tabs[self.window.active_tab]
-                .files_state(seat)
-                .root,
-            &key,
-        ))
+        Some(FileMenuTarget {
+            activation: files_row_activation(
+                &self.window.tabs[self.window.active_tab]
+                    .files_state(seat)
+                    .root,
+                &key,
+            ),
+            host: RowHost::Column(seat),
+            key,
+            subject,
+        })
     }
 
     /// **Which tree row the pointer is on, on whichever host owns it** (P150).
@@ -45519,10 +45588,11 @@ impl Runtime<'_> {
     /// across a column belongs to the window.
     ///
     /// [`Self::file_row_under`] answers the *context menu's* question, which is
-    /// narrower on purpose — it wants a `RowActivation` and it declines folders.
-    /// This one answers "which row", because the glance card has its own rules
-    /// about which kinds of row it will show and the drag has different ones
-    /// again.
+    /// a different question and not a narrower one: it wants a whole
+    /// [`FileMenuTarget`] — a path, a door and which verbs the row has — and it
+    /// declines the two kinds of row that lead nowhere. This one answers "which
+    /// row", because the glance card has its own rules about which kinds of row
+    /// it will show and the drag has different ones again.
     fn row_under(&mut self, position: PhysicalPosition<f64>) -> Option<(RowHost, usize)> {
         if let Some((id, float::FloatPart::Row(index))) = self.float_hit_at(position) {
             return Some((RowHost::Float(id), index));
@@ -45553,7 +45623,7 @@ impl Runtime<'_> {
         let Some(menu) = self.window.file_menu.as_ref() else {
             return Vec::new();
         };
-        profiles::file_menu_build(&layout, menu.activation.open_text(), menu.hover)
+        profiles::file_menu_build(&layout, menu.subject, menu.hover)
     }
 
     fn close_file_menu(&mut self) -> Result<bool> {
@@ -48873,7 +48943,7 @@ impl Runtime<'_> {
         let Some(menu) = self.window.file_menu.take() else {
             return Ok(());
         };
-        let activation = menu.activation;
+        let (activation, host, key) = (menu.activation, menu.host, menu.key);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -48890,10 +48960,144 @@ impl Runtime<'_> {
                 RowActivation::Preview(path) => self.open_preview(path)?,
                 RowActivation::Nowhere => {}
             },
+            // **Through `open_local_path`, which is this window's one door out
+            // to the shell for a path the user pointed at** (user ruling
+            // 2026-08-25). It is the same function the preview head's `↗`
+            // presses, and that is the point: "open this with whatever the
+            // machine has registered for it" is one verb, so the head's Open
+            // menu and this row must not grow two implementations of it. The
+            // door's own refusal for the executable list comes along —
+            // `bt_platform::open_local_path` reads `PATHEXT` and says no, which
+            // is §7.1.3's "the tree is a way of looking at files, and the thing
+            // next to it that runs programs is the terminal" enforced at the
+            // bridge rather than at each call site.
+            profiles::FileMenuRow::OpenWith => {
+                self.open_local_path(&path);
+            }
+            profiles::FileMenuRow::Fold => self.fold_files_row(host, &key)?,
+            profiles::FileMenuRow::NewTerminal => self.new_terminal_in_folder(&path)?,
             profiles::FileMenuRow::CopyPath => self.copy_path_to_clipboard(&path)?,
             profiles::FileMenuRow::InsertPath => self.insert_path_into_terminal(&path)?,
+            // **The same audited door the three feet go through**
+            // (`Runtime::reveal_in_explorer`), which already answers both halves
+            // of what this row means: a file is selected inside its folder and a
+            // folder is opened as itself, decided by `bt_platform::
+            // reveal_arguments` and not by this call site knowing which kind of
+            // row raised the menu.
+            profiles::FileMenuRow::Reveal => {
+                self.reveal_in_explorer(&path);
+            }
         }
         Ok(())
+    }
+
+    /// **`Expand` / `Collapse`** — the folder menu's first row (user ruling
+    /// 2026-08-25).
+    ///
+    /// The same toggle a press on the row is, through the same
+    /// [`press_files_node`] both hosts already call, because a menu row and a
+    /// click are one verb asked for two ways. What it deliberately does *not* go
+    /// through is either host's press handler: those two also count the row
+    /// toward the double-click chain, and a fold committed from a menu is not
+    /// half of a double click.
+    ///
+    /// **The row is asked for again**, on the live tree, because the menu can
+    /// stand open while a directory lands and the tree behind it grows. A key
+    /// that no longer names a row folds nothing, which is the honest answer.
+    fn fold_files_row(&mut self, host: RowHost, key: &str) -> Result<()> {
+        let now = Instant::now();
+        let motion = self.app.motion;
+        match host {
+            // A Git page draws no folders, so it has no fold to run and no
+            // expansion set to run it in. It cannot reach this row —
+            // `file_row_under` only answers for the two tree hosts — and
+            // answering it here rather than reaching for a tree it has not got
+            // is what keeps that true if a third caller ever appears.
+            RowHost::Git(_) => return Ok(()),
+            RowHost::Column(seat) => {
+                let trees = self.files_trees(now);
+                let Some(kind) = trees
+                    .get(&seat)
+                    .and_then(|tree| tree.rows.iter().find(|row| row.key == key))
+                    .map(|row| row.kind)
+                else {
+                    return Ok(());
+                };
+                let active = self.window.active_tab;
+                let Some(state) = self.window.tabs[active].files.get_mut(&seat) else {
+                    return Ok(());
+                };
+                let opening = press_files_node(state, key, kind);
+                self.window.tabs[active]
+                    .file_trees
+                    .entry(seat)
+                    .or_default()
+                    .turn_row(key, opening, now, motion);
+                if opening {
+                    self.refresh_files_dir(seat, key);
+                }
+                self.mark_session_dirty(now);
+            }
+            RowHost::Float(id) => {
+                let Some(win) = self.window.float.live_mut(id) else {
+                    return Ok(());
+                };
+                let epoch = win.epoch;
+                let Some(files) = win.files_mut() else {
+                    return Ok(());
+                };
+                let rows = files::tree_view(&files.files, &files.cache).rows;
+                let Some(kind) = rows.iter().find(|row| row.key == key).map(|row| row.kind) else {
+                    return Ok(());
+                };
+                let root = files.files.root.clone();
+                let opening = press_files_node(&mut files.files, key, kind);
+                files.cache.turn_row(key, opening, now, motion);
+                if opening {
+                    // Unfolding is this product's refresh gesture, so an opened
+                    // directory is re-asked exactly as a press on it re-asks.
+                    let request = files::DirRequest {
+                        window: self.window_id(),
+                        host: files::FilesHost::Float(epoch),
+                        path: files::full_path(&root, key),
+                        key: key.to_owned(),
+                    };
+                    if !self.app.files_worker.request(request) {
+                        self.disable_files_worker();
+                    }
+                }
+            }
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **`New terminal here`** — a folder row's own shell (user ruling
+    /// 2026-08-25).
+    ///
+    /// **A tab, and that is the ruling this row makes.** The verb it reuses has
+    /// two containers already — `New terminal in folder…` splits the pane when
+    /// it is raised from a pane's `⌄` and opens a tab when it is raised from the
+    /// new-tab menu (user ruling 2026-08-20) — and a menu has to pick one.
+    /// A tab, for two reasons. It is the container **both hosts can always
+    /// give**: a floating tree is not a pane, so there is nothing there to split,
+    /// and a row that meant one thing in a column and another in a float would be
+    /// the two surfaces disagreeing about one word. And a files column is very
+    /// often the whole point of the tab it stands in — halving it to push a shell
+    /// in beside it is a bigger change to the window than a row named
+    /// `New terminal here` promises.
+    ///
+    /// **No chooser, and that is why the row has no ellipsis.** The two rows that
+    /// spell this verb with three dots ask *which folder* before anything
+    /// happens; this one already knows, because you right-clicked it. It is
+    /// therefore [`Runtime::apply_folder_pick_result`]'s `NewTabIn` arm without
+    /// the dialog in front of it — the default profile, told where to stand,
+    /// because "the default profile" is what *new tab* means everywhere else in
+    /// this build.
+    fn new_terminal_in_folder(&mut self, path: &Path) -> Result<()> {
+        self.new_tab_with_profile(self.default_profile(), Some(path.to_path_buf()))
     }
 
     /// Put one row's whole path on the clipboard (K143).
@@ -59151,9 +59355,9 @@ impl Runtime<'_> {
         if state == ElementState::Pressed
             && button == MouseButton::Right
             && let Some(position) = self.window.pointer_position
-            && let Some(activation) = self.file_row_under(position)
+            && let Some(target) = self.file_row_under(position)
         {
-            self.open_file_menu(activation, [position.x as f32, position.y as f32])?;
+            self.open_file_menu(target, [position.x as f32, position.y as f32])?;
             return Ok(());
         }
         // The right press that raises the pane head's menu (user ruling,
@@ -61730,7 +61934,8 @@ impl Runtime<'_> {
                 Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
                     let forwards = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
                     if let Some(menu) = self.window.file_menu.as_mut() {
-                        menu.hover = Some(profiles::FileMenuRow::step(menu.hover, forwards));
+                        menu.hover =
+                            Some(profiles::file_menu_step(menu.subject, menu.hover, forwards));
                     }
                     if self.refresh_overlay() {
                         self.present_chrome_change()?;
@@ -77858,7 +78063,7 @@ mod tests {
     /// no way to the page's own front at all, which is §7.1.5g ②″'s complaint
     /// with the two views swapped.
     ///
-    /// **⑤ (2026-08-23) narrow the filter back to [`names_an_html_page`]** on
+    /// **⑤ (2026-08-23) narrow the filter back to the HTML-only predicate** on
     /// either arm and every `.pdf` assertion below fails: the class the window
     /// opens on one lane would be wearing two different heads again.
     #[test]
@@ -92547,36 +92752,68 @@ mod tests {
     ///
     /// While there were two doors this row had to be named after whichever one
     /// it would actually walk through, because a sentence can lie where a double
-    /// click cannot; [`RowActivation::open_text`] carried the promise that "the
+    /// click cannot; `RowActivation::open_text` carried the promise that "the
     /// day the second door closes this collapses to one word without anything
-    /// else moving". This is that day, and this is the assertion that the row
-    /// no longer has a branch to get wrong — including for the rootless column,
-    /// where the row still names the door even though it has no path for it.
-    ///
-    /// Mutation: give `open_text` back its `match`, answering "Open" for
-    /// anything.
+    /// else moving". That day came, and on 2026-08-25 the wording went the rest
+    /// of the way home: it is [`profiles::FileMenuRow::text`]'s `Open` arm, one
+    /// string with no branch and no caller able to supply another. This asserts
+    /// what is left to assert — the row a file's menu opens with, and the path
+    /// its other rows act on, including for the rootless column that has none.
     #[test]
     fn the_menus_first_row_says_one_thing_now_that_there_is_one_door() {
         let root = r"C:\work";
+        assert_eq!(
+            profiles::FileMenuRow::Open.text(profiles::FileMenuSubject::File),
+            "Open preview"
+        );
         for name in ["/shot.png", "/notes.md", "/setup.exe"] {
             assert_eq!(
-                files_row_activation(root, name).open_text(),
-                "Open preview",
+                files_row_activation(root, name).path(),
+                Some(files::full_path(root, name).as_path()),
                 "{name}"
             );
         }
         assert_eq!(
-            files_row_activation("", "/notes.md").open_text(),
-            "Open preview"
-        );
-        assert_eq!(
-            files_row_activation(root, "/shot.png").path(),
-            Some(files::full_path(root, "/shot.png").as_path())
-        );
-        assert_eq!(
             files_row_activation("", "/notes.md").path(),
             None,
             "and a column with no root has nothing to put on a clipboard"
+        );
+    }
+
+    /// PIN — **which menu each kind of tree row raises** (user ruling
+    /// 2026-08-25).
+    ///
+    /// The ruling that ended K143's "目录行不弹", said once and in the one place
+    /// both doors into the menu ask: the pointer's ([`Runtime::file_row_under`])
+    /// and the keyboard's ([`Runtime::raise_file_menu_on_row`]).
+    ///
+    /// RED GATE: answer `None` for `Directory` and the second and third lines
+    /// fail; answer `Some` for a cycle or a notice and the last two do.
+    #[test]
+    fn a_file_row_and_a_folder_row_each_raise_a_menu_and_the_dead_ends_raise_none() {
+        assert_eq!(
+            files_row_menu_subject(files::RowKind::File),
+            Some(profiles::FileMenuSubject::File)
+        );
+        assert_eq!(
+            files_row_menu_subject(files::RowKind::Directory { open: false }),
+            Some(profiles::FileMenuSubject::Folder { expanded: false }),
+        );
+        assert_eq!(
+            files_row_menu_subject(files::RowKind::Directory { open: true }),
+            Some(profiles::FileMenuSubject::Folder { expanded: true }),
+            "and the fold it is standing in travels with it, so the row that \
+             turns it can wear the right face"
+        );
+        assert_eq!(
+            files_row_menu_subject(files::RowKind::Cycle),
+            None,
+            "a folder that resolves to its own ancestor has no fold worth turning"
+        );
+        assert_eq!(
+            files_row_menu_subject(files::RowKind::Notice(files::RowNotice::Empty)),
+            None,
+            "and a notice names no file at all"
         );
     }
 
@@ -98062,6 +98299,67 @@ mod tests {
                 preview_open_lane(Path::new(document)),
                 PreviewOpenLane::Document,
                 "{document}"
+            );
+        }
+    }
+
+    /// PIN — **a video takes the document lane, and every door agrees**
+    /// (measured 2026-08-25; `docs/DESIGN.md` §7.16).
+    ///
+    /// The negative half of the same measurement `preview`'s own pin carries:
+    /// WebView2 has no viewer for a top-level media response, so it turns one
+    /// into a download and the platform bridge cancels every download — the
+    /// navigation completes `ConnectionAborted` and the seat draws 「did not
+    /// respond」. Put video on the page lane and that browser error replaces the
+    /// honest "no preview for this file type" card, which is worse than the
+    /// refusal it replaced.
+    ///
+    /// **It is asserted at every door and not only at the double click**,
+    /// because that is the shape §7.10 ⑥ exists to protect: the head's `↗` and
+    /// the pool's own door read the same predicate, so a video must be absent
+    /// from all three or present in all three. The day something hosts a video
+    /// inside a page, these are the lines that say what changes.
+    ///
+    /// RED GATE: add `mp4` to `preview::PAGE_EXTENSIONS` and every assertion
+    /// here fails, each naming the door it stands at.
+    #[test]
+    fn a_video_takes_the_document_lane_at_every_door() {
+        for video in [
+            r"D:\shots\clip.mp4",
+            r"D:\shots\CLIP.MP4",
+            r"D:\shots\trailer.m4v",
+            r"D:\shots\screencast.webm",
+            r"D:\shots\clip.mov",
+            r"D:\shots\clip.mkv",
+        ] {
+            assert_eq!(
+                preview_open_lane(Path::new(video)),
+                PreviewOpenLane::Document,
+                "the double click: {video}"
+            );
+            assert_eq!(
+                preview_page_hand_off(&preview::PreviewSource::file(video)),
+                None,
+                "the head's ↗: {video}"
+            );
+            assert_eq!(
+                source_opens_as_a_page(&preview::PreviewSource::file(video)),
+                None,
+                "the pool's own door: {video}"
+            );
+            assert_eq!(
+                peek_body_kind(
+                    preview::preview_ftype(
+                        Path::new(video)
+                            .file_name()
+                            .and_then(std::ffi::OsStr::to_str)
+                            .expect("a name")
+                    ),
+                    Some(Path::new(video)),
+                    false,
+                ),
+                PeekBodyKind::Refused,
+                "and the glance card says the same thing the door does: {video}"
             );
         }
     }
