@@ -53,6 +53,7 @@ mod marks;
 mod mouse_trace;
 mod notice;
 mod notify;
+mod pdf;
 mod peek_strip;
 mod persist;
 mod pins;
@@ -4100,7 +4101,16 @@ enum PeekBodyKind {
     Refused,
     /// The one line that says what opening the row *will* do (user ruling
     /// 2026-08-23).
+    ///
+    /// **No row of the files column earns it any more** (user ruling
+    /// 2026-08-25): the two page spellings this window meets went to
+    /// [`Self::Document`] and [`Self::Facts`] that day. It stands for the next
+    /// member of the page class whose file is neither text nor countable — see
+    /// [`file_peek::PeekBody::Page`].
     Page,
+    /// **What the card can state about a page it cannot render** — how large the
+    /// file is and how many pages it holds (user ruling 2026-08-25).
+    Facts,
     /// The preview pane's own body, laid out at the card's width.
     Document,
 }
@@ -4117,6 +4127,25 @@ enum PeekBodyKind {
 /// A composed document has no path, so it is never a page however its name is
 /// spelled: a git diff of `design/ui-mockup.html` is a reading of a repository,
 /// exactly as [`preview_page_hand_off`] has always said.
+///
+/// # What a page's row earns (user ruling 2026-08-25)
+///
+/// The 2026-08-23 ruling gave the whole page class one line — `Opens as a page.`
+/// — and it was the true sentence available that day: the card has no engine, so
+/// it cannot show a page. What it left out is that the *file* under a page is
+/// still a file, and a reader resting the pointer on one is asking about the
+/// file. So the class is asked one more question here, and it is a question
+/// about bytes rather than about the card: [`preview::path_page_glance`].
+///
+/// * `.html` / `.htm` — **the source**, down [`PeekBodyKind::Document`]'s own
+///   lane, with no branch of its own anywhere below this line. It is text; the
+///   glance reads text; there is nothing else to arrange.
+/// * `.pdf` — **the facts**, because nothing in it is text and a card that said
+///   only "opens as a page" was spending two lines to say what the `web` chip in
+///   its own corner already says.
+///
+/// Both keep the chip and both keep the foot: the row still opens as a page, and
+/// the card still says how.
 fn peek_body_kind(
     ftype: preview::PreviewFtype,
     path: Option<&Path>,
@@ -4128,7 +4157,18 @@ fn peek_body_kind(
         (preview::PreviewFtype::Web, Some(path))
             if preview_open_lane(path) == PreviewOpenLane::Page =>
         {
-            PeekBodyKind::Page
+            match preview::path_page_glance(path) {
+                // A page whose own bytes are text is read as text — and if that
+                // read came back refused (a `.html` full of NULs, a file that
+                // vanished under the pointer), the refusal is what the card
+                // owes, exactly as it does for any other document.
+                Some(preview::PageGlance::Source) if refused => PeekBodyKind::Refused,
+                Some(preview::PageGlance::Source) => PeekBodyKind::Document,
+                Some(preview::PageGlance::Facts) => PeekBodyKind::Facts,
+                // A member of the page class with no second column is one this
+                // arm has nothing to say about beyond what the row does.
+                None => PeekBodyKind::Page,
+            }
         }
         _ if refused => PeekBodyKind::Refused,
         _ => PeekBodyKind::Document,
@@ -6574,6 +6614,18 @@ struct WindowRuntime {
     /// the expense is.
     peek_picture: Option<PeekThumbnail>,
     peek_card_pending: Option<PeekThumbnailTarget>,
+    /// **What the glance says about a page it cannot render** (user ruling
+    /// 2026-08-25) — the question and, once the worker answers, the facts.
+    ///
+    /// One slot beside the picture's and for the picture's reason: there is one
+    /// pointer, so there is one glance, and the answer to the row it has moved
+    /// off is not worth a map. It is dropped with the card
+    /// ([`TabState::hide_file_peek`]) rather than kept as a cache, because these
+    /// are facts about a file on a disk somebody else is also writing to — a
+    /// remembered page count is a number that can quietly stop being true, and
+    /// the read that refreshes it costs one worker hop the next hover pays
+    /// anyway.
+    peek_facts: Option<PeekFacts>,
     /// The gesture in flight, whatever it is carrying (J111).
     ///
     /// Separate from the presses rather than a further promise state, because
@@ -12740,6 +12792,24 @@ struct PeekThumbnail {
     rgba: Arc<[u8]>,
     width_px: u32,
     height_px: u32,
+}
+
+/// **The glance card's question about a page, and its answer** (user ruling
+/// 2026-08-25) — see [`WindowRuntime::peek_facts`].
+///
+/// The path is here so that an answer arriving after the pointer has moved on is
+/// dropped where it lands, which is the same cancellation every other hover read
+/// in this window performs by comparing what came back against what is being
+/// looked at now.
+///
+/// `answer` is `None` while the read is out, and that is also what it stays as
+/// when the read comes back with nothing to say — a card that told the two apart
+/// would need a word for "asking", and a word that appears for two frames and is
+/// replaced is worse than the space it occupied
+/// ([`file_peek::PeekBody::Facts`]).
+struct PeekFacts {
+    path: PathBuf,
+    answer: Option<preview::PageFacts>,
 }
 
 /// Persistent preview-seat state. Native pixels remain in `peek_cache`; this holds only the one
@@ -23557,6 +23627,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         peek_pane: PreviewPane::default(),
         peek_picture: None,
         peek_card_pending: None,
+        peek_facts: None,
         drag: None,
         foreign: None,
         drop_preview: None,
@@ -42566,6 +42637,25 @@ impl Runtime<'_> {
                     }
                     changed |= told && index == self.window.active_tab;
                 }
+                // **The glance's own slot again**, on the head read's reasoning
+                // one arm up: a hover is not an open file, so its answer lands
+                // here or nowhere. Matched by path, because a pointer that has
+                // moved to another row has already replaced the question and the
+                // stale answer is the cancellation arriving as a dropped result.
+                preview::PreviewAnswer::PageFacts(facts) => {
+                    let Some(answered) = response.source.file_path() else {
+                        continue;
+                    };
+                    if let Some(slot) = self
+                        .window
+                        .peek_facts
+                        .as_mut()
+                        .filter(|slot| slot.path == answered)
+                    {
+                        slot.answer = Some(facts);
+                        changed |= index == self.window.active_tab;
+                    }
+                }
             }
         }
         if changed {
@@ -45197,7 +45287,12 @@ impl Runtime<'_> {
             }
             return true;
         }
-        let mut buffer = preview::PreviewBuffer::new(source.clone(), name);
+        // **The glance's buffer, not a pane's** — see
+        // [`preview::PreviewBuffer::glancing`]. The one thing it does differently
+        // is read a page whose bytes are text (`.html`) as text, which is the
+        // 2026-08-25 ruling and is why the card can show source that no seat in
+        // this window ever shows.
+        let mut buffer = preview::PreviewBuffer::glancing(source.clone(), name);
         let wants_read = buffer.claim_head_read();
         self.window.peek_buffer = Some(buffer);
         // **A composed document waits for git and never for a disk.** A glance
@@ -45254,6 +45349,9 @@ impl Runtime<'_> {
         // markdown layout for a file nobody is looking at.
         self.window.peek_pane = PreviewPane::default();
         self.window.peek_picture = None;
+        // And the facts with it: they are about the file the card was over, and
+        // the next card asks for its own.
+        self.window.peek_facts = None;
         // And any hand that was on a block inside it. The card's surface is the
         // one the sweep deliberately never retires ([`Self::sweep_preview_panes`]),
         // because its life is this field's — so this is where that life ends for
@@ -45396,6 +45494,55 @@ impl Runtime<'_> {
         empty
     }
 
+    /// **The card's facts about a page**: the question, and the answer once it
+    /// has come home (user ruling 2026-08-25).
+    ///
+    /// Asked from the frame for [`Self::file_peek_picture`]'s reason and with the
+    /// same guard: the card is rebuilt whenever the chrome is, so the question is
+    /// filed against the path the moment it is sent and a frame that finds it
+    /// already filed asks nothing. What comes back is two optional facts, and the
+    /// body is the same shape whether or not either has arrived — see
+    /// [`file_peek::PeekBody::Facts`].
+    ///
+    /// **It goes down the preview worker's lane**, not the frame's own thread. A
+    /// page count is read off the file's structure ([`pdf::page_count`]), which
+    /// is a walk over as many bytes as the file has; on the thread that draws,
+    /// that is a hover over a large document freezing the window.
+    fn file_peek_facts(&mut self, path: &Path) -> file_peek::PeekBody {
+        let empty = file_peek::PeekBody::Facts {
+            bytes: None,
+            pages: None,
+        };
+        if let Some(facts) = self
+            .window
+            .peek_facts
+            .as_ref()
+            .filter(|facts| facts.path == path)
+        {
+            let Some(answer) = facts.answer else {
+                return empty;
+            };
+            return file_peek::PeekBody::Facts {
+                bytes: answer.bytes,
+                pages: answer.pages,
+            };
+        }
+        self.window.peek_facts = Some(PeekFacts {
+            path: path.to_owned(),
+            answer: None,
+        });
+        let (tab, window) = (self.id, self.window_id());
+        if !self.app.preview_worker.request(preview::PreviewRequest {
+            window,
+            tab,
+            source: preview::PreviewSource::file(path.to_owned()),
+            want: preview::PreviewWant::PageFacts,
+        }) {
+            self.disable_preview_worker();
+        }
+        empty
+    }
+
     /// The 350ms is up — put the card on screen (P145).
     fn advance_file_peek(&mut self, now: Instant) -> Result<()> {
         // The card's three clocks, in the order they can fire: the dwell that
@@ -45449,6 +45596,17 @@ impl Runtime<'_> {
                 }
                 PeekBodyKind::Refused => file_peek::PeekBody::Refused,
                 PeekBodyKind::Page => file_peek::PeekBody::Page,
+                // The facts of a page this card cannot render. Like a picture's,
+                // they are a *file's* and are asked for by the frame that needs
+                // them — the read is one worker hop and the box it lands in is
+                // reserved from the first frame either way.
+                PeekBodyKind::Facts => {
+                    let path = subject
+                        .path
+                        .clone()
+                        .expect("a facts body is only chosen for a file");
+                    self.file_peek_facts(&path)
+                }
                 PeekBodyKind::Document => {
                     let probe = [
                         0.0,
@@ -100899,26 +101057,44 @@ mod tests {
     /// two readings of one gesture, so they read it through one function
     /// ([`preview_open_lane`]) and the card can no longer contradict the door.
     ///
+    /// **The card no longer stops at saying it** (user ruling 2026-08-25): the
+    /// page class splits on whether the file's own bytes are readable, and each
+    /// half shows what it has. `.html` shows its markup — it is text, and it goes
+    /// down the very lane every text file goes down — while `.pdf` shows the two
+    /// facts a binary container can still state. The chip and the foot are
+    /// untouched by both, so the row still says `web` and still says how to open
+    /// it.
+    ///
     /// RED GATE: delete the `Web` arm of [`peek_body_kind`] — `.pdf` falls to the
-    /// refusal arm (its buffer has no reader) and `.html` falls to the document
-    /// arm, which is the card drawing a page's *source* under a pointer while a
-    /// double click draws the page.
+    /// refusal arm (its buffer has no reader) and says "no preview" over a row a
+    /// double click renders. Point both halves of
+    /// [`preview::path_page_glance`] at `Source` and a `.pdf` card asks the
+    /// document pipeline for a body no reader in this window can build.
     #[test]
     fn the_glance_card_says_what_the_row_opens_as() {
         let kind = |name: &str, refused: bool| {
             let path = PathBuf::from(format!(r"D:\site\{name}"));
             peek_body_kind(preview::preview_ftype(name), Some(&path), refused)
         };
-        for name in ["index.html", "index.htm", "INDEX.HTM", "report.pdf"] {
+        // **A page whose bytes are text shows them.** One lane, the document's,
+        // and no branch of its own below this line.
+        for name in ["index.html", "index.htm", "INDEX.HTM"] {
             assert_eq!(
                 kind(name, false),
-                PeekBodyKind::Page,
-                "a name that opens as a page says so on the card: {name}"
+                PeekBodyKind::Document,
+                "a page made of text shows its source: {name}"
             );
-            // And it says so whatever the buffer behind it happens to hold: the
-            // card is about what the row *does*, and a page-named file in the
-            // document pool is one the page lane already refused.
-            assert_eq!(kind(name, true), PeekBodyKind::Page, "{name}");
+            // And when that read came back refused — a binary body under an
+            // `.html` name, a file that went away — the refusal is what the card
+            // owes, exactly as for any other document.
+            assert_eq!(kind(name, true), PeekBodyKind::Refused, "{name}");
+        }
+        // **A page made of nothing this window reads states its facts instead**,
+        // and states them whatever the buffer behind it holds: there is no read
+        // to be refused, because nothing is read.
+        for name in ["report.pdf", "REPORT.PDF"] {
+            assert_eq!(kind(name, false), PeekBodyKind::Facts, "{name}");
+            assert_eq!(kind(name, true), PeekBodyKind::Facts, "{name}");
         }
         // The regression half — every other class draws exactly what it drew.
         assert_eq!(kind("notes.md", false), PeekBodyKind::Document);
@@ -100948,6 +101124,25 @@ mod tests {
             peek_body_kind(preview::PreviewFtype::Image, None, false),
             PeekBodyKind::Refused,
             "and a picture with no file is still a picture nothing can decode"
+        );
+
+        // **And the glance really reads with the glance's buffer.** The ladder
+        // above says a `.html` row shows a document; what makes a document
+        // *arrive* is the buffer the card is armed with, and a card armed with a
+        // pane's buffer would ask no disk at all and sit empty for ever — the
+        // one failure the ladder cannot see. A fact about this file, so it is
+        // read off this file, exactly as the pool's own door is two tests up.
+        const SOURCE: &str = include_str!("main.rs");
+        const SIGNATURE: &str = "    fn mature_file_peek(";
+        let start = SOURCE
+            .find(SIGNATURE)
+            .expect("the glance's own arming is declared in this file");
+        let rest = &SOURCE[start + SIGNATURE.len()..];
+        let arming = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+        assert!(
+            arming.contains("preview::PreviewBuffer::glancing("),
+            "the glance arms itself with a pane's buffer, so a page's source is \
+             never read and the card stays empty:\n{arming}"
         );
     }
 

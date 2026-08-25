@@ -4367,6 +4367,25 @@ fn key_hint_more_in(lang: Lang, count: usize) -> String {
     }
 }
 
+/// **How many pages the glance card says a document holds** (user ruling
+/// 2026-08-25; `docs/DESIGN.md` §7.10 ⑥).
+///
+/// The plural is one `if`, on [`git_pill_ahead`]'s own reasoning: a one-page PDF
+/// is an everyday thing — a receipt, a boarding pass, a signed form — and "1
+/// pages" on a card whose whole job is stating a fact would undo the fact.
+#[must_use]
+pub fn peek_page_count(count: usize) -> String {
+    peek_page_count_in(current(), count)
+}
+
+fn peek_page_count_in(lang: Lang, count: usize) -> String {
+    match lang {
+        Lang::English if count == 1 => "1 page".to_owned(),
+        Lang::English => format!("{count} pages"),
+        Lang::Chinese => format!("{count} 页"),
+    }
+}
+
 /// R33's own row: the status read everything and the page shows the first two
 /// thousand, and it says so rather than quietly being short.
 #[must_use]
@@ -5679,6 +5698,8 @@ mod tests {
                     git_more_changed_files_in(lang, 12),
                 ),
                 ("key_hint_more", key_hint_more_in(lang, 4)),
+                ("peek_page_count", peek_page_count_in(lang, 1)),
+                ("peek_page_count_many", peek_page_count_in(lang, 3)),
                 (
                     "git_renamed_from",
                     git_renamed_from_in(lang, "b.rs", "a.rs"),

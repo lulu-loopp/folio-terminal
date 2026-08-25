@@ -434,7 +434,33 @@ pub enum PeekBody {
     ///
     /// No body is asked for and none arrives: a page is drawn by the engine, on
     /// a seat, and there is no engine on a hover card.
+    ///
+    /// **What is left of it since 2026-08-25**: the pages whose own file this
+    /// window cannot read at all. `.html` stopped being one of them that day —
+    /// its source is text and the card shows it, down [`Self::Document`]'s lane
+    /// — and `.pdf` states [`Self::Facts`] instead. Nothing reaches this variant
+    /// from the files column today, and it is kept rather than deleted because
+    /// it is the honest answer for the next page-class member whose bytes are
+    /// neither text nor countable: one line saying what the row does.
     Page,
+    /// **What a glance can state about a page it cannot render** (user ruling
+    /// 2026-08-25; [`crate::preview::PageGlance::Facts`]).
+    ///
+    /// A `.pdf` is a page and the card has no engine, so the card cannot show
+    /// what is inside it. What it can do is stop being empty-handed: how large
+    /// the file is and how many pages it holds are the two facts a reader hovers
+    /// one to learn, and both are readable without a renderer.
+    ///
+    /// **Both halves are optional and the box is not.** The facts come from the
+    /// worker a frame or two after the card is up, and a body that grew when
+    /// they landed would be a card that jumped under the pointer — so the height
+    /// is two lines from the first frame, whether or not there is anything in
+    /// them yet. A fact that never arrives is simply not printed, which is the
+    /// same silence [`Self::Image`] keeps while a decode is in flight.
+    Facts {
+        bytes: Option<u64>,
+        pages: Option<u32>,
+    },
 }
 
 impl PeekBody {
@@ -461,13 +487,41 @@ impl PeekBody {
             // pointer walks from a file with no reader to a file that opens as a
             // page.
             Self::Refused | Self::Page => {
-                let line = (px(PEEK_NONE_FONT_LOGICAL_PX) * 1.4).round();
                 px(PEEK_NONE_PADDING_TOP_LOGICAL_PX)
-                    + line
+                    + none_line(scale)
+                    + px(PEEK_NONE_PADDING_BOTTOM_LOGICAL_PX)
+            }
+            // **Two lines, always** — see [`Self::Facts`] for why the box does
+            // not wait to learn how many of them have something in them.
+            Self::Facts { .. } => {
+                px(PEEK_NONE_PADDING_TOP_LOGICAL_PX)
+                    + none_line(scale) * 2.0
                     + px(PEEK_NONE_PADDING_BOTTOM_LOGICAL_PX)
             }
         }
     }
+}
+
+/// One line of the card's own voice — the height a sentence in
+/// [`PEEK_NONE_FONT_LOGICAL_PX`] occupies.
+fn none_line(scale: f32) -> f32 {
+    (PEEK_NONE_FONT_LOGICAL_PX * scale * 1.4).round()
+}
+
+/// **The two lines a `.pdf`'s card prints**, in the order a reader wants them
+/// (user ruling 2026-08-25).
+///
+/// The page count first, because it is the fact that is about the *document* —
+/// how much there is to read — and the size second, because it is about the
+/// file. Either may be missing and neither is replaced by a placeholder when it
+/// is: what is unknown is left unsaid, and the line below it does not move up to
+/// take its place, so the two facts always stand where the last card put them.
+#[must_use]
+pub fn facts_lines(bytes: Option<u64>, pages: Option<u32>) -> [Option<String>; 2] {
+    [
+        pages.map(|pages| crate::i18n::peek_page_count(pages as usize)),
+        bytes.map(crate::preview::format_byte_size),
+    ]
 }
 
 /// How wide the card's body box is, in physical pixels — the card less its two
@@ -849,6 +903,29 @@ pub fn build(
                 px(PEEK_NONE_FONT_LOGICAL_PX),
                 palette.body_hint_text,
             ));
+        }
+        // The facts, in the box the refusal's one line would have stood in and
+        // in the same ink: this is the card speaking in its own voice about a
+        // file rather than showing the file, which is exactly what that box is
+        // for. A fact that has not arrived leaves its line empty rather than
+        // shifting the other one — see [`PeekBody::Facts`].
+        PeekBody::Facts { bytes, pages } => {
+            let left = layout.body[0] + px(PEEK_NONE_PADDING_X_LOGICAL_PX);
+            let right = layout.body[2] - px(PEEK_NONE_PADDING_X_LOGICAL_PX);
+            let top = layout.body[1] + px(PEEK_NONE_PADDING_TOP_LOGICAL_PX);
+            let line = none_line(scale);
+            for (row, words) in facts_lines(*bytes, *pages).into_iter().enumerate() {
+                let Some(words) = words else {
+                    continue;
+                };
+                let top = top + line * row as f32;
+                labels.push(label(
+                    &words,
+                    [left, top, right, (top + line).min(layout.body[3])],
+                    px(PEEK_NONE_FONT_LOGICAL_PX),
+                    palette.body_hint_text,
+                ));
+            }
         }
     }
 
@@ -1324,6 +1401,166 @@ mod tests {
             (layout.body[3] - layout.body[1] - LINE_HEIGHT * 6.0).abs() <= 1.0,
             "the body box is as tall as the document said: {:?}",
             layout.body
+        );
+    }
+
+    /// PIN (user ruling 2026-08-25; `docs/DESIGN.md` §7.10 ⑥) — **the card over a
+    /// page it cannot render states the facts it can.**
+    ///
+    /// A `.pdf` row used to draw one line — `Opens as a page.` — which told a
+    /// reader what a double click does and nothing about the file they were
+    /// pointing at. The two facts here are the ones a renderer is not needed
+    /// for, and they are drawn in the card's own voice, in the box the refusal's
+    /// line stood in: this is the card *saying* something, not the card showing a
+    /// document, so it belongs on the layer that draws the head and the foot.
+    ///
+    /// The head and the foot are asserted with them because they are the half of
+    /// the ruling that did **not** change: the chip still says `web` and the foot
+    /// still says how to open the row.
+    ///
+    /// RED GATE: draw [`PeekBody::Facts`] through the `Refused | Page` arm — the
+    /// card comes back with `Opens as a page.` in it and not one fact, which is
+    /// the state this ruling overturned.
+    #[test]
+    fn a_page_the_card_cannot_render_states_its_facts() {
+        let window = (1200.0, 900.0);
+        let mut card = content(PeekBody::Facts {
+            bytes: Some(83_387),
+            pages: Some(3),
+        });
+        card.name = "folio-pdf-test.pdf".to_owned();
+        card.ftype = "web".to_owned();
+        let row = [40.0, 300.0, 240.0, 320.0];
+        let stated = layout(&card, row, window, 120.0, 24.0, SCALE);
+        let layer = build(
+            &stated,
+            &card,
+            &foot(&stated, ""),
+            None,
+            &bt_render::chrome_palette(),
+            SCALE,
+        );
+        let said = |text: &str| layer.labels.iter().find(|label| label.text == text);
+        let pages = said("3 pages").expect("the card says how many pages there are");
+        let size = said("81 KB").expect("and how large the file is");
+        assert!(
+            pages.rect[1] < size.rect[1],
+            "the document's fact stands above the file's: {:?} vs {:?}",
+            pages.rect,
+            size.rect
+        );
+        for fact in [pages, size] {
+            assert!(
+                fact.rect[1] >= stated.body[1] - 0.5 && fact.rect[3] <= stated.body[3] + 0.5,
+                "a fact stands outside the body box: {:?}",
+                fact.rect
+            );
+        }
+        assert!(
+            said(peek_page_text()).is_none(),
+            "and it does not also say the sentence it replaced"
+        );
+        assert!(
+            said(peek_unknown_text()).is_none(),
+            "nor the refusal, which was never true of a row that opens"
+        );
+        // The half the ruling did not touch.
+        assert!(
+            said("folio-pdf-test.pdf").is_some(),
+            "the head names the file"
+        );
+        assert!(said("web").is_some(), "the chip still calls it a page");
+        assert!(said(peek_foot_text()).is_some(), "the foot still says how");
+
+        // **The box does not wait to learn what is in it.** The facts arrive from
+        // a worker one or two frames after the card is up, and a body that grew
+        // when they landed would be a card that jumped under the pointer.
+        let empty = content(PeekBody::Facts {
+            bytes: None,
+            pages: None,
+        });
+        let pending = layout(&empty, row, window, 120.0, 24.0, SCALE);
+        assert_eq!(
+            pending.body[3] - pending.body[1],
+            stated.body[3] - stated.body[1],
+            "the facts box is the same height before its facts arrive"
+        );
+        let blank = build(
+            &pending,
+            &empty,
+            &foot(&pending, ""),
+            None,
+            &bt_render::chrome_palette(),
+            SCALE,
+        );
+        let inside =
+            |rect: [f32; 4]| rect[1] >= pending.body[1] - 0.5 && rect[3] <= pending.body[3] + 0.5;
+        assert!(
+            !blank.labels.iter().any(|label| inside(label.rect)),
+            "a fact that has not arrived is silence, not a placeholder"
+        );
+
+        // And a file the disk would not stat still says what it can: one fact is
+        // better than none, and it stands where it always stands.
+        let one = content(PeekBody::Facts {
+            bytes: None,
+            pages: Some(12),
+        });
+        let single = layout(&one, row, window, 120.0, 24.0, SCALE);
+        let layer = build(
+            &single,
+            &one,
+            &foot(&single, ""),
+            None,
+            &bt_render::chrome_palette(),
+            SCALE,
+        );
+        let pages = layer
+            .labels
+            .iter()
+            .find(|label| label.text == "12 pages")
+            .expect("the fact that is known is printed");
+        assert_eq!(
+            pages.rect[1],
+            single.body[1] + PEEK_NONE_PADDING_TOP_LOGICAL_PX,
+            "and the surviving fact does not move up into the missing one's line"
+        );
+    }
+
+    /// PIN — **a facts card is two lines taller than a one-line card, and no
+    /// taller.**
+    ///
+    /// The whole card shrink-wraps its body, so the body's own arithmetic is what
+    /// decides the shape of every `.pdf` glance on screen.
+    ///
+    /// MUTATION: fold [`PeekBody::Facts`] into the `Refused | Page` height arm —
+    /// the second fact is drawn under the card's own bottom edge.
+    #[test]
+    fn the_facts_body_reserves_both_of_its_lines() {
+        let window = (1200.0, 900.0);
+        let row = [40.0, 300.0, 240.0, 320.0];
+        let refusal = layout(&content(PeekBody::Refused), row, window, 60.0, 24.0, SCALE);
+        let facts = layout(
+            &content(PeekBody::Facts {
+                bytes: Some(1),
+                pages: Some(1),
+            }),
+            row,
+            window,
+            60.0,
+            24.0,
+            SCALE,
+        );
+        let line = (PEEK_NONE_FONT_LOGICAL_PX * 1.4).round();
+        assert_eq!(
+            (facts.body[3] - facts.body[1]) - (refusal.body[3] - refusal.body[1]),
+            line,
+            "exactly one line more than the sentence it replaced"
+        );
+        assert!(
+            facts.foot[1] >= facts.body[3],
+            "and the foot still stands below the body: {:?}",
+            facts
         );
     }
 
