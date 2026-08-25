@@ -1003,20 +1003,13 @@ pub(crate) struct PageFacts {
     pub(crate) hover: String,
 }
 
-impl PageFacts {
-    /// What the head's name cell shows.
-    ///
-    /// The title, and the address until there is one. A blank cell over a page
-    /// that is loading would be the one moment the head says nothing at all,
-    /// and the address is what the reader just typed.
-    pub(crate) fn name(&self) -> &str {
-        if self.title.is_empty() {
-            &self.url
-        } else {
-            &self.title
-        }
-    }
-}
+// `PageFacts::name` is **retired** (user ruling 2026-08-24). It answered "what
+// the head's name cell shows" with "the title, and the address until there is
+// one", and that fallback was the head being honest for exactly as long as the
+// name cell *was* the address. The ruling gave the address a row of its own, so
+// the two facts are now read separately by the two rows that are about them —
+// `title` by the head, `url` by the rail — and a cell that fell back would be
+// one pane printing one string twice.
 
 // ── The driver ─────────────────────────────────────────────────────────────
 
@@ -2420,7 +2413,7 @@ impl WebSeat {
     /// state machine had to say about starting it.
     pub(crate) fn go_to(
         &mut self,
-        input: &str,
+        input_ref: &str,
         engine: SearchEngineV1,
         compositor: &bt_platform::Compositor,
     ) -> (bool, Vec<WebOutcome>) {
@@ -2428,6 +2421,14 @@ impl WebSeat {
         // The composed URL goes back through the same door a typed one does —
         // this build's own string gets no more trust than a person's, which is
         // 「钉不是授权」 said about the one URL this window writes itself.
+        // **A local path is minted before the door is asked** (user ruling
+        // 2026-08-25). The field shows a local file the way this machine spells
+        // one — `D:\Developer\notes.html` — and `address_bar` does not take a
+        // bare path: `D:` splits as an unknown scheme. So the one conversion
+        // happens here, at the door, and a path typed by a person becomes the
+        // same `file:` URL the files column would have minted for it.
+        let minted = crate::webnav::file_url_of_local_path(input_ref);
+        let input = minted.as_deref().unwrap_or(input_ref);
         let target = match address_bar(input) {
             Decision::Navigate(target) => target,
             Decision::Search(query) => match address_bar(&search_url(engine, &query)) {
@@ -2451,6 +2452,11 @@ impl WebSeat {
     /// The same door, asked without knocking. An empty field is not wrong — it
     /// is unfinished — so it does not light up red.
     pub(crate) fn would_go_to(input: &str) -> bool {
+        // The same normalisation `go_to` makes, for the same reason it has to be
+        // made in both: a field that lit up red over the very path it was seeded
+        // with would be this window calling its own spelling wrong.
+        let minted = crate::webnav::file_url_of_local_path(input);
+        let input = minted.as_deref().unwrap_or(input);
         input.trim().is_empty()
             || matches!(
                 address_bar(input),

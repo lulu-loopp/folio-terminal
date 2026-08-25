@@ -253,6 +253,66 @@ impl Mint {
     }
 }
 
+/// **A local file, as this product spells a local file** (user ruling
+/// 2026-08-25) — `D:\Developer\notes.html`, not `file:///D:/Developer/notes.html`.
+///
+/// The ruling came from two screenshots side by side: a page's band said
+/// `file:///D:/…` under a globe, and the preview beside it said `D:\…` under a
+/// folder, for two files on the same disk. **One machine, one spelling of a
+/// path** — so every surface that *shows* a local file shows the OS form, and
+/// the `file:` URI stays what it always was underneath: what the engine is
+/// navigated to, what a mint compares, what `session.json` keeps.
+///
+/// [`Mint::path_and_tail_of_file_url`] read for display, which is why it is here
+/// and not spelled again at each surface: this is that reader's own strictness —
+/// only the four escapes this product writes, only a drive-absolute path — so a
+/// URL that did not come out of [`Mint::file`] answers `None` and is shown
+/// exactly as it arrived. A `file:` URL from somewhere else is somebody else's
+/// string, and guessing at it is how a path comes out of something that never
+/// named one.
+///
+/// The tail rides along: `report.html#ch3` is a place in a report, and a
+/// displayed path that dropped the fragment would name the top of it.
+#[must_use]
+pub fn local_path_form(url: &str) -> Option<String> {
+    let (path, tail) = Mint::path_and_tail_of_file_url(url)?;
+    Some(format!("{}{tail}", path.display()))
+}
+
+/// The same sentence read the other way: **a drive-absolute path typed into an
+/// address field is that file** (user ruling 2026-08-25).
+///
+/// The ruling asked this door to be checked and it does *not* take a bare path:
+/// `D:\x` splits as the scheme `d`, which `classify_scheme` refuses like any
+/// other unknown scheme. So the field shows the OS form, and what it hands the
+/// door is minted back into a `file:` URL first — one conversion, at the door,
+/// so that a path typed by a person and a path arriving from the files column
+/// are the same string by the time anything decides whether to load it.
+///
+/// `None` for everything that is not a local path, which is every real address:
+/// `http://…` carries a scheme this refuses to touch, and a bare `example.com`
+/// is not absolute.
+#[must_use]
+pub fn file_url_of_local_path(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    let path = std::path::Path::new(trimmed);
+    // A scheme is never a path. `C:\x` and `c:/x` are absolute *and* split as a
+    // scheme, which is exactly the collision this function exists to resolve —
+    // so the test is the shape of the path rather than the absence of a colon:
+    // a drive letter, a separator, and no `..` to re-open.
+    if !path.is_absolute()
+        || trimmed.starts_with("//")
+        || trimmed.starts_with(r"\\")
+        || path.components().any(|part| part.as_os_str() == "..")
+    {
+        return None;
+    }
+    match Mint::file(path) {
+        Ok(mint) => mint.target().map(ToOwned::to_owned),
+        Err(_) => None,
+    }
+}
+
 /// Which door a candidate arrived at — the only thing that makes two identical
 /// strings get two different answers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -641,6 +701,64 @@ pub fn site_key(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PIN (user ruling 2026-08-25) — **a local file is shown as a path and
+    /// typed as a path, and the URI never stops being what is loaded.**
+    ///
+    /// The ruling came from two screenshots of one machine that spelled one disk
+    /// two ways, so what is pinned is the round trip a reader actually makes:
+    /// the row shows `D:\…`, the field is seeded with it, the door takes it
+    /// back, and the string the engine is handed is the `file:` URL it always
+    /// was. A real address is untouched at every step of that.
+    ///
+    /// MUTATIONS:
+    /// ① show the URL instead of the path — the first assertion goes red, which
+    ///    is the screenshot the ruling was filed with;
+    /// ② let `file_url_of_local_path` answer for `http://example.com` — a real
+    ///    address is minted into a `file:` URL and the page goes nowhere;
+    /// ③ take a bare path at `address_bar` instead of minting at the door — the
+    ///    refusal assertion goes green for the wrong reason and `D:` becomes a
+    ///    scheme this product recognises.
+    #[test]
+    fn a_local_file_is_shown_and_typed_as_a_path_and_loaded_as_a_uri() {
+        let uri = "file:///D:/Developer/notes%20and%20more.html#ch3";
+        assert_eq!(
+            local_path_form(uri).as_deref(),
+            Some(r"D:\Developer\notes and more.html#ch3"),
+            "① the row shows what this machine calls the file, fragment and all"
+        );
+        // ③ The door does not take that path on its own — checked rather than
+        // assumed, which is what the ruling asked for.
+        assert!(
+            matches!(address_bar(r"D:\Developer\notes.html"), Decision::Refuse(_)),
+            "a drive letter splits as an unknown scheme, so the conversion has \
+             to happen before the door"
+        );
+        // …and the conversion puts it back where it came from.
+        assert_eq!(
+            file_url_of_local_path(r"D:\Developer\notes and more.html").as_deref(),
+            Some("file:///D:/Developer/notes%20and%20more.html"),
+            "what the field hands over is the URL the files column would mint"
+        );
+        assert!(matches!(
+            address_bar(&file_url_of_local_path(r"D:\Developer\notes.html").expect("a mint")),
+            Decision::Refuse(_) | Decision::Navigate(_)
+        ));
+        // ② A real address is not a path and is left alone in both directions.
+        for real in [
+            "http://example.com/a",
+            "https://localhost:5173/app",
+            "example.com",
+        ] {
+            assert_eq!(file_url_of_local_path(real), None, "{real} is not a path");
+            assert_eq!(local_path_form(real), None, "{real} is shown as it is");
+        }
+        // A share is refused as a path exactly as `Mint::file` refuses it, and a
+        // `file:` URL this product did not write is shown as it arrived.
+        assert_eq!(file_url_of_local_path(r"\\server\share\x.html"), None);
+        assert_eq!(local_path_form("file://server/share/x.html"), None);
+        assert_eq!(file_url_of_local_path(r"..\x.html"), None);
+    }
 
     /// PIN (W2 slice 5) - **the file door read backwards is the file door read
     /// forwards.**
