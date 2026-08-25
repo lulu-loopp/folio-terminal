@@ -20640,6 +20640,92 @@ impl Popup {
     }
 }
 
+/// **Which of this window's popups are raised** — one bit per [`Popup`], read
+/// off the window once and answered from here after.
+///
+/// # One reading, three readers
+///
+/// "Is a menu up" was asked in three places with three hand-copied lists: the
+/// keyboard's owner ([`Runtime::keyboard_owner`]), the hover panels' exclusion
+/// rule ([`Runtime::hover_float_is_up`]) and the key ladder itself. Two of them
+/// named all eight; the ladder named six, and the two it left out — the files
+/// column's root menu and the commit graph's branch filter — are the whole of
+/// the 2026-08-25 caret report. With one of those open, `menu_or_dialog` said
+/// the keyboard had left every shell, so `bt_render::seat_caret` drew a steady,
+/// faded caret and `advance_cursor_blink_if_due` froze the phase — while the
+/// ladder, having no rung for either, handed every keystroke straight to the
+/// shell. A caret that says "nobody is typing here" over a pane that is
+/// receiving the characters is the exact inversion of the 2026-08-13 ruling
+/// ("a blink means 'typing lands here', and nothing else").
+///
+/// [`Self::holds`] is an exhaustive `match` on [`Popup`], so the ninth popup
+/// cannot be added without answering for it here, and every reader gets the
+/// answer at once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PopupsUp {
+    profile: bool,
+    root: bool,
+    file: bool,
+    pane: bool,
+    graph_filter: bool,
+    preview: bool,
+    git_menu: bool,
+    term_menu: bool,
+}
+
+impl PopupsUp {
+    /// One popup raised and nothing else — how a test names a variant. The
+    /// window never builds one this way: it reads all eight at once
+    /// ([`Runtime::popups_up`]), which is the whole point.
+    #[cfg(test)]
+    fn only(popup: Popup) -> Self {
+        let mut up = Self::default();
+        match popup {
+            Popup::Profile => up.profile = true,
+            Popup::Root => up.root = true,
+            Popup::File => up.file = true,
+            Popup::Pane => up.pane = true,
+            Popup::GraphFilter => up.graph_filter = true,
+            Popup::Preview => up.preview = true,
+            Popup::GitMenu => up.git_menu = true,
+            Popup::TermMenu => up.term_menu = true,
+        }
+        up
+    }
+
+    fn holds(self, popup: Popup) -> bool {
+        match popup {
+            Popup::Profile => self.profile,
+            Popup::Root => self.root,
+            Popup::File => self.file,
+            Popup::Pane => self.pane,
+            Popup::GraphFilter => self.graph_filter,
+            Popup::Preview => self.preview,
+            Popup::GitMenu => self.git_menu,
+            Popup::TermMenu => self.term_menu,
+        }
+    }
+
+    /// The popup standing over this window, if one is — [`Popup::ALL`]'s own
+    /// order, which is the order they were declared in and means nothing beyond
+    /// "the first one found". At most one is ever up (E61), so the order is a
+    /// formality rather than a precedence.
+    fn any(self) -> Option<Popup> {
+        Popup::ALL.into_iter().find(|popup| self.holds(*popup))
+    }
+}
+
+/// **The popup a keystroke belongs to instead of the shell**, if one is up.
+///
+/// The key ladder's question and [`KeyboardOwner::menu_or_dialog`]'s question
+/// are the same question, so they are one function — the shape
+/// [`keyboard_owner_is_a_shell`] and [`ime_owner`] already share, for the same
+/// stated reason: the day the two disagree is the day a caret blinks in a shell
+/// that is not receiving the characters, or stands frozen over one that is.
+fn popup_takes_the_key(popups: PopupsUp) -> Option<Popup> {
+    popups.any()
+}
+
 /// **Every panel this window raises by *hovering*** — [`Popup`]'s twin, one
 /// register down, and the same sentence: at most one of these is on the glass at
 /// a time (user report, 2026-08-19).
@@ -30634,21 +30720,51 @@ impl Runtime<'_> {
         HoverFloat::holding(|who| self.hover_float_is_up(who))
     }
 
+    /// **Which popups this window has raised**, read off the window once.
+    ///
+    /// The one place the eight are listed against the state that holds them;
+    /// see [`PopupsUp`] for why there is exactly one such place.
+    ///
+    /// **A popup counts only while it is one you can see** (P137, generalised
+    /// 2026-08-25). The preview switcher has said this about itself since it
+    /// was written — "a switcher whose pane is on a tab you are not looking at
+    /// is not a menu you can see, it draws nothing, and it must swallow
+    /// nothing" — and the sentence was never about switchers. Two popups hang
+    /// off a pane the way that one does and had no such scope: a files column's
+    /// root menu, whose `root_menu_layout` folds to `None` the moment its seat
+    /// is not a files column on the tab in front, and the commit graph's branch
+    /// filter, whose `graph_filter_menu_layout` folds the same way. Either one
+    /// left open behind a tab switch was a menu drawing nothing at all while
+    /// the window went on believing the keyboard was its — which, now that
+    /// belief also decides where the keystroke goes, would be a whole window
+    /// typing into nothing.
+    fn popups_up(&self) -> PopupsUp {
+        PopupsUp {
+            profile: self.window.profile_menu.is_open(),
+            root: self.window.root_menu.seat().is_some_and(|seat| {
+                self.seat_layout.rects.iter().any(|placement| {
+                    placement.id == seat && placement.kind == bt_layout::SeatKind::Files
+                })
+            }),
+            file: self.window.file_menu.is_some(),
+            pane: self.window.pane_menu.is_some(),
+            graph_filter: self
+                .window
+                .graph_filter_menu
+                .as_ref()
+                .is_some_and(|menu| self.preview_surfaces().contains(&menu.surface)),
+            preview: self.preview_menu_seat().is_some(),
+            git_menu: self.window.git_menu.is_some(),
+            term_menu: self.window.term_menu.is_some(),
+        }
+    }
+
     /// Whether one named panel is on the glass. The window's half of
     /// [`HoverFloat::holding`] — this is where the facts live, and the rule
     /// itself lives beside the enum where it can be tested.
     fn hover_float_is_up(&self, who: HoverFloat) -> bool {
         match who {
-            HoverFloat::Menu => {
-                self.window.profile_menu.is_open()
-                    || self.window.root_menu.seat().is_some()
-                    || self.preview_menu_seat().is_some()
-                    || self.window.file_menu.is_some()
-                    || self.window.pane_menu.is_some()
-                    || self.window.git_menu.is_some()
-                    || self.window.term_menu.is_some()
-                    || self.window.graph_filter_menu.is_some()
-            }
+            HoverFloat::Menu => self.popups_up().any().is_some(),
             // The **peek** only. A pinned float is a place (§7.1.2) and is on
             // nobody's exclusion list.
             HoverFloat::Flyout => self.window.float.peek_id().is_some(),
@@ -33573,11 +33689,19 @@ impl Runtime<'_> {
         // the rail on 2026-08-24 with the field it was about. What is left is
         // the half this cell always meant: a name is a label, and a label's box
         // is its label.
+        // In the name's own face, not the face's regular weight: this box is
+        // laid out by `preview_head_geometry` exactly as the committed name's
+        // is, and a draft measured a weight light would put the caret in front
+        // of the letters it is standing after. See [`seats::PREVIEW_NAME_FACE`].
         let tools = seats::PreviewHeadTools {
-            name_width: self
-                .window
-                .renderer
-                .measure_chrome_text(&mut self.app.gpu, &draft, font),
+            name_width: self.window.renderer.measure_chrome_label(
+                &mut self.app.gpu,
+                &draft,
+                font,
+                seats::PREVIEW_NAME_FACE.weight,
+                seats::PREVIEW_NAME_FACE.letter_spacing_em,
+                seats::PREVIEW_NAME_FACE.tabular_numerals,
+            ),
             ..tools
         };
         let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
@@ -33600,7 +33724,17 @@ impl Runtime<'_> {
             if text.is_empty() {
                 0.0
             } else {
-                renderer.measure_chrome_text(gpu, text, font)
+                // The name's own face, as the box above was: the caret and the
+                // selection band are offsets *into* this run, so a run measured
+                // in another weight puts both of them in the wrong place.
+                renderer.measure_chrome_label(
+                    gpu,
+                    text,
+                    font,
+                    seats::PREVIEW_NAME_FACE.weight,
+                    seats::PREVIEW_NAME_FACE.letter_spacing_em,
+                    seats::PREVIEW_NAME_FACE.tabular_numerals,
+                )
             }
         };
         editor.clamp_scroll();
@@ -36756,18 +36890,27 @@ impl Runtime<'_> {
         };
         let tools = seats::PreviewHeadTools {
             switcher: self.preview_switcher_rows(seat) > 1,
-            name_width: self.window.renderer.measure_chrome_text(
-                &mut self.app.gpu,
-                &name,
-                seats::PREVIEW_NAME_FONT_LOGICAL_PX * scale,
-            ),
-            count_width: self.window.renderer.measure_chrome_text(
-                &mut self.app.gpu,
-                &count,
-                seats::PREVIEW_COUNT_FONT_LOGICAL_PX * scale,
-            ),
             ..tools
         };
+        // **Measured wearing what they are drawn wearing** (user report,
+        // 2026-08-25). Both strings used to be measured with
+        // `measure_chrome_text`, which is the face's regular weight by
+        // definition, while the head draws the name Medium and the badge Medium
+        // in tabular figures — so the name's box came out a few pixels short of
+        // the name and the clip cut the last glyph in half. The faces are
+        // `seats`' own declaration now, read by the paint as well as by this.
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32, face: git_panel::MeasureFace| {
+            renderer.measure_chrome_label(
+                gpu,
+                text,
+                size,
+                face.weight,
+                face.letter_spacing_em,
+                face.tabular_numerals,
+            )
+        };
+        let tools = seats::preview_head_measurements(&name, &count, scale, tools, &mut measure);
         // **The editor, if this head is the one holding it** (user ruling
         // 2026-08-19). It comes last because it *replaces* the name's measured
         // width with the draft's: the box is sized to what is being typed, and
@@ -38830,18 +38973,16 @@ impl Runtime<'_> {
                 .git_menu
                 .as_ref()
                 .is_some_and(|menu| menu.prompt.is_some()),
+            // The four modals, and then **every popup, through the one reading
+            // the key ladder takes** ([`PopupsUp`]): a popup that takes the
+            // keyboard away from the shell has to take the keystroke too, and
+            // the way to keep those two answers together is to make them one
+            // answer.
             menu_or_dialog: self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
                 || self.window.dirty_gate.is_open()
                 || self.window.psreadline_invite.is_open()
                 || self.window.settings.is_open()
-                || self.window.file_menu.is_some()
-                || self.window.git_menu.is_some()
-                || self.window.pane_menu.is_some()
-                || self.window.profile_menu.is_open()
-                || self.window.root_menu.seat().is_some()
-                || self.preview_menu_seat().is_some()
-                || self.window.graph_filter_menu.is_some()
-                || self.window.term_menu.is_some(),
+                || popup_takes_the_key(self.popups_up()).is_some(),
             files_tree: self.files_keyboard_seat().is_some(),
             // The graph's search field, when it is the focused preview's and it
             // holds the keyboard.
@@ -63218,16 +63359,17 @@ impl Runtime<'_> {
         // which is a keystroke you only find out about later.
         //
         // Esc has already been answered above, where it puts the picker away.
-        if self.window.profile_menu.is_open() {
-            return Ok(());
-        }
-        // And the preview's switcher, on the identical terms (P137: "`#pv-menu`
-        // 打开时吞掉所有字符键"). A keystroke aimed at a menu you can see must not
-        // reach a shell you cannot — the same sentence, one popup along. **On
-        // the tab in front**, which is the same sentence again: a switcher whose
-        // pane is on a tab you are not looking at is not a menu you can see, and
-        // it draws nothing, so it must swallow nothing.
-        if self.preview_menu_seat().is_some() {
+        //
+        // **Every popup, and the list is the declaration's** (2026-08-25). This
+        // rung used to name two of them — the profile picker and the preview
+        // switcher — with the four menus that answer keys of their own having
+        // already returned above. That left the files column's root menu and the
+        // commit graph's branch filter on no rung at all, while
+        // `KeyboardOwner::menu_or_dialog` counted all eight: with either of
+        // those open the window said the keyboard had left every shell, so the
+        // caret went steady and faded and its clock stopped, and the keystroke
+        // went to the shell anyway. One question, asked once — see [`PopupsUp`].
+        if popup_takes_the_key(self.popups_up()).is_some() {
             return Ok(());
         }
         // **`InputOwner::FilesTree`** (§7.1.5, D47) — the last layer above the
@@ -91784,6 +91926,60 @@ mod tests {
             preview: false,
             menu_or_dialog: false,
         }));
+    }
+
+    /// PIN (user report, 2026-08-25) — **a popup that takes the keyboard takes
+    /// the keys too**, or a caret stands frozen over a shell that is receiving
+    /// the characters.
+    ///
+    /// The report: one tab whose caret could be typed into and never blinked.
+    /// The freeze is `advance_cursor_blink_if_due`'s and the fade is
+    /// `bt_render::seat_caret`'s, and both are read off one predicate —
+    /// [`keyboard_owner_is_a_shell`] — so a caret that will not blink is the
+    /// window saying "the keyboard is somewhere else". It was: `menu_or_dialog`
+    /// counted all eight [`Popup`]s, while `keyboard_input`'s ladder named six.
+    /// The two it left out are the files column's root menu and the commit
+    /// graph's branch filter, and neither draws anything at all once the tab it
+    /// was raised on is behind you — so the window could sit in "a menu owns
+    /// the keyboard" with no menu on screen, freezing the caret while every
+    /// keystroke went to the shell.
+    ///
+    /// RED EVIDENCE (2026-08-25): with `popup_takes_the_key` transcribing the
+    /// old ladder — `File | Pane | GitMenu | TermMenu | Profile | Preview` —
+    /// this test fails on `Root` and on `GraphFilter` with "the caret says the
+    /// keyboard has left every shell, so the keystroke must not reach one".
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① drop an arm from [`PopupsUp::holds`] (it will not compile) or answer
+    ///    `false` in one — that popup stops taking the key while the caret goes
+    ///    on being frozen for it;
+    /// ② give the ladder its own list again, of any length but eight.
+    #[test]
+    fn a_popup_that_takes_the_keyboard_takes_the_keystroke_too() {
+        assert!(
+            popup_takes_the_key(PopupsUp::default()).is_none(),
+            "with no popup up, the keystroke is the shell's"
+        );
+        for popup in Popup::ALL {
+            let up = PopupsUp::only(popup);
+            assert_eq!(
+                up.any(),
+                Some(popup),
+                "{popup:?} is raised, so the window has to be able to say so"
+            );
+            // The caret's question and the keystroke's, answered off the same
+            // reading — the whole of the fix, stated as an equality rather than
+            // as two lists that have to be kept in step by hand.
+            let owner = KeyboardOwner {
+                menu_or_dialog: popup_takes_the_key(up).is_some(),
+                ..KeyboardOwner::default()
+            };
+            assert!(
+                !keyboard_owner_is_a_shell(owner),
+                "{popup:?}: the caret says the keyboard has left every shell, so \
+                 the keystroke must not reach one"
+            );
+        }
     }
 
     /// PIN (user report, 2026-08-12) — **a composition goes where the keyboard

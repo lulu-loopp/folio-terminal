@@ -78,6 +78,12 @@ use bt_render::{
 };
 
 use crate::focus_thumb::MiniMetrics;
+// **A width is only worth having if it was taken wearing what the paint wears**
+// — the doctrine and the type both live on [`crate::git_panel::MeasureFace`],
+// where the Git page's own instance of this bug wrote them down. It is a fact
+// about `bt_render::chrome_label_attrs` rather than about that page, so it is
+// borrowed here rather than copied.
+use crate::git_panel::{Measure, MeasureFace};
 use crate::marks::{ChromeMark, ChromeSprite, Corner, tree_disclosure};
 
 /// `.pane:not(.focused) .panehead .ticon { opacity: .5 }` (mock-up 1647).
@@ -12213,6 +12219,68 @@ pub const PREVIEW_COUNT_RADIUS_LOGICAL_PX: f32 = 8.0;
 /// `.pv-count { font-size: 10px; font-weight: 700 }`.
 pub const PREVIEW_COUNT_FONT_LOGICAL_PX: f32 = 10.0;
 
+/// **The face `.pv-name` is drawn in — and therefore the face its box is cut
+/// from** (user report, 2026-08-25).
+///
+/// The report was a screenshot of a page head reading `folio-pdf-test.pd|`,
+/// with the `f` cut down the middle and two thirds of the head standing empty
+/// beside it. There is no clamp on this name and never was: the box is
+/// `min(what the name wants, what is left)`, so a head with room crops nothing
+/// — unless *what the name wants* was measured in a face the paint does not
+/// wear. It was: [`push_preview_head`] draws this label
+/// [`ChromeLabelWeight::Medium`] (`.pv-name { font-weight: 600 }`) and the
+/// caller measured it with `measure_chrome_text`, which is the face's regular
+/// weight by definition. Medium is about 2% wider — 3.8px on that filename at
+/// 200% — and the label is clipped to its own box, so the shortfall lands on
+/// the last glyph.
+///
+/// This is the third instance of one bug: the float's `DOCK` (weight and
+/// tracking) and the Git page's meta column (tabular figures) are the first
+/// two, and `bt_render::chrome_label_attrs`'s own note is about all three. What
+/// stops a fourth here is that the paint and the measurement now read this one
+/// declaration — see [`preview_head_measurements`].
+pub const PREVIEW_NAME_FACE: MeasureFace = MeasureFace::weighted(ChromeLabelWeight::Medium);
+/// The same, for `.pv-count`'s digits: [`PREVIEW_NAME_FACE`]'s weight and
+/// **tabular figures**, which is the badge's own half of the same lesson —
+/// `tnum` gives every digit the widest digit's advance, so a pill sized from
+/// the proportional width of `11` is a pill its own number overflows.
+pub const PREVIEW_COUNT_FACE: MeasureFace = MeasureFace {
+    weight: ChromeLabelWeight::Medium,
+    letter_spacing_em: 0.0,
+    tabular_numerals: true,
+};
+
+/// **Measure a preview head's two strings in the faces they are drawn in.**
+///
+/// The half of [`PreviewHeadTools`] only something holding a font can fill, and
+/// it is a function rather than two lines at the call site for the reason
+/// [`PREVIEW_NAME_FACE`] exists: the width and the ink are the same shaping run
+/// asked twice, and the only way to keep the two runs identical is for the
+/// measurer and the painter to read one declaration. `measure` is the Git
+/// page's own closure type — the caller's font, the caller's answer.
+#[must_use]
+pub fn preview_head_measurements(
+    name: &str,
+    count: &str,
+    scale: f32,
+    tools: PreviewHeadTools,
+    measure: &mut Measure<'_>,
+) -> PreviewHeadTools {
+    PreviewHeadTools {
+        name_width: measure(
+            name,
+            PREVIEW_NAME_FONT_LOGICAL_PX * scale,
+            PREVIEW_NAME_FACE,
+        ),
+        count_width: measure(
+            count,
+            PREVIEW_COUNT_FONT_LOGICAL_PX * scale,
+            PREVIEW_COUNT_FACE,
+        ),
+        ..tools
+    }
+}
+
 /// What the preview head is showing this frame.
 ///
 /// The state, measured where a font was available. It carries [`PreviewHeadTools`]
@@ -14497,9 +14565,13 @@ fn push_preview_head(
         },
         align_right: false,
         align_center: false,
-        letter_spacing_em: 0.0,
-        weight: ChromeLabelWeight::Medium,
-        tabular_numerals: false,
+        // **The face the box was cut from** (user report, 2026-08-25). Written
+        // out of [`PREVIEW_NAME_FACE`] rather than beside it, so the weight
+        // this label wears and the weight its width was taken in cannot be
+        // changed apart.
+        letter_spacing_em: PREVIEW_NAME_FACE.letter_spacing_em,
+        weight: PREVIEW_NAME_FACE.weight,
+        tabular_numerals: PREVIEW_NAME_FACE.tabular_numerals,
         clip: Some(geometry.name),
     });
     // The caret last: it is the one thing in the box that has to be visible over
@@ -14547,9 +14619,13 @@ fn push_preview_head(
             },
             align_right: false,
             align_center: true,
-            letter_spacing_em: 0.0,
-            weight: ChromeLabelWeight::Medium,
-            tabular_numerals: true,
+            // [`PREVIEW_COUNT_FACE`], for [`PREVIEW_NAME_FACE`]'s reason: the
+            // pill's width is this string's width plus its padding, and a pill
+            // cut from a face the digits are not drawn in is a pill the digits
+            // overflow.
+            letter_spacing_em: PREVIEW_COUNT_FACE.letter_spacing_em,
+            weight: PREVIEW_COUNT_FACE.weight,
+            tabular_numerals: PREVIEW_COUNT_FACE.tabular_numerals,
             clip: None,
         });
     }
@@ -35551,6 +35627,124 @@ mod tests {",
             assert!(
                 geometry.name[2] <= geometry.save.expect("the save button")[0],
                 "the name is cut short of the run, never drawn under it"
+            );
+        }
+    }
+
+    /// A stand-in font whose advances depend on **every** attribute
+    /// `bt_render::chrome_label_attrs` sets, so a width taken in the wrong face
+    /// is a width this test can see.
+    ///
+    /// The two ratios are the real chrome face's, measured on the machine
+    /// (2026-08-25, Segoe UI Variable): `folio-pdf-test.pdf` at 25px is
+    /// 189.76px regular against 193.57px medium — 2.0% — and `12` at 12.5px is
+    /// 11.47px proportional against 13.68px in tabular figures.
+    fn fake_face_width(text: &str, size: f32, face: MeasureFace) -> f32 {
+        let weight = match face.weight {
+            ChromeLabelWeight::Regular => 1.0,
+            ChromeLabelWeight::Medium => 1.02,
+            ChromeLabelWeight::SemiBold => 1.045,
+        };
+        let chars = text.chars().count() as f32;
+        let digits = text.chars().filter(|ch| ch.is_ascii_digit()).count() as f32;
+        let figures = if face.tabular_numerals {
+            0.09 * digits
+        } else {
+            0.0
+        };
+        size * weight * (0.5 * chars + figures + face.letter_spacing_em * chars)
+    }
+
+    /// PIN (user report, 2026-08-25) — **a preview head's name box is cut from
+    /// the face the name is drawn in**, so a head with room crops nothing.
+    ///
+    /// The report was a screenshot of a page head reading `folio-pdf-test.pd|`
+    /// with the final `f` sliced down the middle and two thirds of the head
+    /// standing empty beside it. Nothing clamps this name — `preview_head_
+    /// geometry` gives it `min(what it wants, what is left)`, and
+    /// `a_pages_head_hangs_its_whole_run_off_its_right_edge_at_every_width`
+    /// already pins that the run it must not reach is anchored to the `×`. What
+    /// was wrong was *what it wants*: the head draws this label
+    /// `ChromeLabelWeight::Medium` and the caller measured it with
+    /// `measure_chrome_text`, which is the face's regular weight by definition.
+    /// The badge beside it had the same fault in the other attribute — drawn in
+    /// tabular figures, measured proportional.
+    ///
+    /// RED EVIDENCE (2026-08-25): with `preview_head_measurements` transcribing
+    /// the old call site — `MeasureFace::PLAIN` for both strings — this fails
+    /// with "the name is drawn in a box 112.5px wide and the ink it has to hold
+    /// is 114.75px".
+    ///
+    /// MUTATIONS: measure either string in `MeasureFace::PLAIN`; change the
+    /// weight the paint gives either label without changing its face constant.
+    #[test]
+    fn a_preview_head_name_box_is_cut_from_the_face_it_is_drawn_in() {
+        const NAME: &str = "folio-pdf-test.pdf";
+        const COUNT: &str = "12";
+        let mut measure =
+            |text: &str, size: f32, face: MeasureFace| fake_face_width(text, size, face);
+        let tools = preview_head_measurements(
+            NAME,
+            COUNT,
+            1.0,
+            PreviewHeadTools {
+                switcher: true,
+                ..page_tools()
+            },
+            &mut measure,
+        );
+        let (_, _, geometry) = head_geometry(tools);
+        let (_, labels, _) = preview_chrome(
+            PreviewHeadContent {
+                tools,
+                name: NAME,
+                count: COUNT,
+                ..PreviewHeadContent::default()
+            },
+            ChromePointer::default(),
+        );
+        // A 1600px head with one name and six controls in it: there is room to
+        // spare, so the only thing that can cut this name short is a box cut
+        // too small. If the fixture ever stops having room, this claim stops
+        // being about the report.
+        assert!(
+            geometry.name[2] < geometry.devtools.expect("a page's developer tools")[0],
+            "the fixture head has room left over, so nothing here has to be cropped"
+        );
+        for (what, text, box_) in [
+            ("the name", NAME, geometry.name),
+            (
+                "the badge's digits",
+                COUNT,
+                // The pill less the padding on each side of the digits: what
+                // the number itself has to fit into.
+                {
+                    let pill = geometry.count.expect("a switcher draws its badge");
+                    let pad = PREVIEW_COUNT_PADDING_X_LOGICAL_PX;
+                    [pill[0] + pad, pill[1], pill[2] - pad, pill[3]]
+                },
+            ),
+        ] {
+            let label = labels
+                .iter()
+                .find(|label| label.text == text)
+                .unwrap_or_else(|| panic!("{what} is drawn at all"));
+            // The ink, asked for in the label's **own** declared face — the one
+            // attribute set this test never takes on trust.
+            let ink = fake_face_width(
+                &label.text,
+                label.font_size_px,
+                MeasureFace {
+                    weight: label.weight,
+                    letter_spacing_em: label.letter_spacing_em,
+                    tabular_numerals: label.tabular_numerals,
+                },
+            );
+            let room = box_[2] - box_[0];
+            assert!(
+                room + 0.5 >= ink,
+                "{what} is drawn in a box {room}px wide and the ink it has to \
+                 hold is {ink}px — a box cut in a face the paint does not wear"
             );
         }
     }
