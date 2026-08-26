@@ -8074,36 +8074,15 @@ pub fn build_chrome_for_tabs(
                     && let Some(strip) = preview_foot(placement.id)
                     && !strip.path.is_empty()
                     && let Some(geometry) = files_pane
-                    && let Some(tag) = page_hover_tag_box(geometry.body, scale, strip.path_width)
                 {
-                    pane_sprites.push(ChromeSprite::new(
-                        ChromeMark::ControlPill {
-                            radius_px: (PAGE_HOVER_TAG_RADIUS_LOGICAL_PX * scale).round().max(1.0)
-                                as u32,
-                        },
-                        tag,
-                        palette.menu_surface,
-                    ));
-                    let pad = (PAGE_HOVER_TAG_PAD_X_LOGICAL_PX * scale).round();
-                    let text = [
-                        tag[0] + pad,
-                        tag[1],
-                        (tag[2] - pad).max(tag[0] + pad),
-                        tag[3],
-                    ];
-                    pane_labels.push(ChromeLabel {
-                        mono: false,
-                        text: strip.path.to_owned(),
-                        rect: text,
-                        font_size_px: PAGE_HOVER_TAG_FONT_LOGICAL_PX * scale,
-                        color: palette.pane_title,
-                        align_right: false,
-                        align_center: false,
-                        letter_spacing_em: 0.0,
-                        weight: ChromeLabelWeight::Regular,
-                        tabular_numerals: false,
-                        clip: Some(text),
-                    });
+                    push_corner_tag(
+                        geometry.body,
+                        strip.path,
+                        strip.path_width,
+                        scale,
+                        &palette,
+                        (&mut pane_sprites, &mut pane_labels),
+                    );
                 }
                 // The "no preview" card: 30px file mark at half strength, the
                 // sentence, and the one way out (mock-up 614-623). Drawn instead
@@ -14144,6 +14123,59 @@ pub fn page_hover_tag_box(body: [f32; 4], scale: f32, text_width: f32) -> Option
     Some(pixel_snapped([left, bottom - height, left + width, bottom]))
 }
 
+/// **Draw one corner tag** — the bubble [`page_hover_tag_box`] measures.
+///
+/// One function since 2026-08-25, because there are two of them now: a docked
+/// page's hover line, and the confirmation a torn-off window flashes after the
+/// ruling that retired its foot. The two say different things and are the same
+/// object — a chip of the menu's own surface, floating over the content in the
+/// body's bottom-left corner — so a second copy of these fifteen lines would be
+/// two bubbles that drift apart at the first change to either.
+///
+/// Silent when the body has no room for the whole chip, which is
+/// [`page_hover_tag_box`]'s own answer and the rule every control in a head
+/// follows: half a tag is worse than none.
+pub fn push_corner_tag(
+    body: [f32; 4],
+    text: &str,
+    text_width: f32,
+    scale: f32,
+    palette: &ChromePalette,
+    out: (&mut Vec<ChromeSprite>, &mut Vec<ChromeLabel>),
+) {
+    let Some(tag) = page_hover_tag_box(body, scale, text_width) else {
+        return;
+    };
+    let (sprites, labels) = out;
+    sprites.push(ChromeSprite::new(
+        ChromeMark::ControlPill {
+            radius_px: (PAGE_HOVER_TAG_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32,
+        },
+        tag,
+        palette.menu_surface,
+    ));
+    let pad = (PAGE_HOVER_TAG_PAD_X_LOGICAL_PX * scale).round();
+    let run = [
+        tag[0] + pad,
+        tag[1],
+        (tag[2] - pad).max(tag[0] + pad),
+        tag[3],
+    ];
+    labels.push(ChromeLabel {
+        mono: false,
+        text: text.to_owned(),
+        rect: run,
+        font_size_px: PAGE_HOVER_TAG_FONT_LOGICAL_PX * scale,
+        color: palette.pane_title,
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: Some(run),
+    });
+}
+
 /// The border box of one named files column, or `None` when it is not a full
 /// column.
 #[must_use]
@@ -19600,6 +19632,61 @@ mod tests {
             page_hover_tag_box([100.0, 200.0, 500.0, 210.0], 1.0, 60.0),
             None,
             "half a tag is worse than none"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-25) — **there is one corner tag, and both the
+    /// things that raise one strike the same chip.**
+    ///
+    /// The page's hover line was the first; the confirmation a torn-off window
+    /// flashes after its foot retired is the second. They say different things
+    /// and are the same object, so a second copy of the painting would be two
+    /// bubbles drifting apart at the first change to either — which is why
+    /// [`push_corner_tag`] exists at all rather than the float growing fifteen
+    /// lines of its own.
+    ///
+    /// MUTATIONS: strike the chip somewhere other than the measured box, or draw
+    /// it over a body with no room for it and half a tag arrives.
+    #[test]
+    fn one_corner_tag_is_struck_wherever_a_surface_raises_one() {
+        let palette = bt_render::chrome_palette();
+        let body = [100.0, 200.0, 500.0, 460.0];
+        let (mut sprites, mut labels) = (Vec::new(), Vec::new());
+        push_corner_tag(
+            body,
+            "Saved",
+            60.0,
+            1.0,
+            &palette,
+            (&mut sprites, &mut labels),
+        );
+        let tag = page_hover_tag_box(body, 1.0, 60.0).expect("a body this size seats a tag");
+        assert_eq!(sprites.len(), 1, "one chip");
+        assert_eq!(sprites[0].rect, tag, "struck exactly where it was measured");
+        assert!(
+            matches!(sprites[0].mark, ChromeMark::ControlPill { .. }),
+            "and it is the rounded chip of the menu's own surface"
+        );
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].text, "Saved");
+        assert!(
+            labels[0].rect[0] > tag[0] && labels[0].rect[2] < tag[2],
+            "the words sit inside the chip's own inset"
+        );
+
+        // No room, nothing struck — the same answer the measurement gives.
+        let (mut sprites, mut labels) = (Vec::new(), Vec::new());
+        push_corner_tag(
+            [100.0, 200.0, 500.0, 210.0],
+            "Saved",
+            60.0,
+            1.0,
+            &palette,
+            (&mut sprites, &mut labels),
+        );
+        assert!(
+            sprites.is_empty() && labels.is_empty(),
+            "half a tag is worse than none, on the paint's side too"
         );
     }
 

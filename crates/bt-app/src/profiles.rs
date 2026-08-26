@@ -5332,13 +5332,21 @@ pub struct FileMenuLook<'a> {
     /// The names of the folded levels, **deepest first** — the rows of
     /// [`FileMenuSubject::FoldedPath`]. Empty for every other face.
     pub crumbs: &'a [String],
-    /// The mark `New terminal here` wears: **the default profile's own** (user
-    /// ruling 2026-08-25).
+    /// The mark `New terminal here` wears: **the default profile's own shape,
+    /// in this column's ink** (user rulings 2026-08-25, twice).
     ///
     /// It is passed in rather than read here because "which profile is the
     /// default" is a setting, and this module's table does not hold the setting —
     /// `Runtime::default_profile` does, and it is the one reader every other
     /// caller of that question already goes through.
+    ///
+    /// **A line rendition and not the coloured mark** (the second ruling of the
+    /// day, on the first's drawing): the shape is kept — the row is still about
+    /// the shell it is about to open — and the *style* joins the eight thin
+    /// monochrome glyphs it stands in a column with. See
+    /// [`ChromeMark::in_line`], which is where the mark loses its colours, and
+    /// `every_file_menu_row_wears_the_columns_own_ink`, which is what stops one
+    /// arriving here with them still on.
     pub terminal: ChromeMark,
 }
 
@@ -5447,6 +5455,15 @@ impl FileMenuRow {
             // it, and what it makes is a shell. So it wears the mark that shell
             // wears everywhere else this window draws one — the default profile's
             // own, the same glyph its tab and its pane head carry.
+            //
+            // **The glyph, and not its colours** (the same day's second ruling).
+            // A tab and a pane head *identify* a session, which is what a
+            // profile mark's fixed colours are for; a menu row is a verb in a
+            // column of verbs, and the one thing every other glyph in that
+            // column has in common is that it is struck in the row's own ink.
+            // The look's own note carries the argument; the mark arrives here
+            // already stripped, because `Runtime::file_menu_look` is the one
+            // place that knows which profile is the default.
             Self::NewTerminal => look.terminal,
             // The pencil, which is this window's one glyph for *you are about to
             // write this yourself* — the shortcut page already spends it on the
@@ -7937,18 +7954,40 @@ impl PaneMenuRow {
         Self::ClosePane,
     ];
 
-    /// The seven that are rows of text with a mark, in order — [`Self::ALL`]
-    /// without the picker.
-    pub const TEXT_ROWS: [Self; 8] = [
-        Self::ZoomPane,
-        Self::SplitWith,
-        Self::NewInFolder,
-        Self::Duplicate,
-        Self::MoveToNewTab,
-        Self::MoveToNewWindow,
-        Self::MoveToWindow,
-        Self::ClosePane,
-    ];
+    // **`TEXT_ROWS` is gone** (user ruling 2026-08-25). It was `ALL` without the
+    // picker, and it was the *second* list this menu was assembled from — the
+    // width and the height were measured over it while the boxes were laid out
+    // over `ALL`, which was safe only for as long as the two could not disagree.
+    // A menu that shows one row fewer is exactly the day they can, so there is
+    // one list now ([`Self::rows`]) and one place it is carried
+    // ([`PaneMenuLayout::rows`]). A caller that wants the text rows filters the
+    // drawing out of that, which is what the layout, the painter and the walk
+    // each do in one line.
+
+    /// **The rows one menu actually shows** — [`Self::ALL`] less the one row
+    /// that can have nowhere to go (user ruling 2026-08-25).
+    ///
+    /// `Move to window ▸` is the only entry here whose *existence* turns on
+    /// anything outside the pane, and it is the one entry that can be a promise
+    /// this build knows it cannot keep: it hangs a list of the other windows off
+    /// itself, and on a session with one window that list is empty. It stood
+    /// there greyed with a `▸` on it for a day, and a disclosure arrow over
+    /// nothing is worse than a missing row — the arrow says "there is more this
+    /// way" and there is not.
+    ///
+    /// **Nothing is lost by its going.** `Move pane to new window`, directly
+    /// above, is the verb for exactly the case where there is no second window,
+    /// and it is the row this one was added *beside* rather than instead of.
+    ///
+    /// A `Vec` and not a second `const`, for [`term_menu_entries`]'s reason: two
+    /// lists that share eight entries are two places for those eight to change.
+    #[must_use]
+    pub fn rows(other_windows: bool) -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|row| other_windows || *row != Self::MoveToWindow)
+            .collect()
+    }
 
     /// The glyph in this row's icon column.
     fn mark(self) -> Option<ChromeMark> {
@@ -8161,13 +8200,35 @@ impl PaneMenuHover {
     /// and close, which are verbs with side effects (a menu appears, a clock
     /// starts) rather than movements of a highlight, and they are the window's to
     /// run. See `Runtime::step_pane_menu`.
+    ///
+    /// `rows` is **the list this menu is showing** and not the enum's whole
+    /// vocabulary (user ruling 2026-08-25) — [`PaneMenuLayout::rows`], which the
+    /// picture was built from. A walk over `ALL` would stop the highlight on a
+    /// row that is not on the glass, which is the same defect
+    /// [`file_menu_step`] takes a subject to avoid one menu over.
     #[must_use]
-    pub fn step(current: Option<Self>, step: MenuStep, submenu_rows: usize) -> Option<Self> {
+    pub fn step(
+        current: Option<Self>,
+        step: MenuStep,
+        submenu_rows: usize,
+        rows: &[PaneMenuRow],
+    ) -> Option<Self> {
+        // The text rows in the order they are drawn — the walk's own list, which
+        // is `rows` less the drawing at the top of it.
+        let text: Vec<PaneMenuRow> = rows
+            .iter()
+            .copied()
+            .filter(|row| *row != PaneMenuRow::Picker)
+            .collect();
+        // A menu with no verbs in it has nowhere for a highlight to go — which
+        // cannot happen today and is answered rather than asserted, because this
+        // is a walk and a walk that panicked would take the window with it.
+        let (&first, &last) = text.first().zip(text.last())?;
         match current {
             // Nothing lit: the list is entered at whichever end the key names.
             None => match step {
                 MenuStep::Down => Some(Self::Zone(SplitZone::Right)),
-                MenuStep::Up => Some(Self::Row(PaneMenuRow::ClosePane)),
+                MenuStep::Up => Some(Self::Row(last)),
                 MenuStep::Left | MenuStep::Right => None,
             },
             Some(Self::Zone(zone)) => {
@@ -8191,23 +8252,23 @@ impl PaneMenuHover {
                     // name: §7.1.6l put a verb directly under the diagram, and a
                     // walk that named `SplitWith` here would have stepped over
                     // it.
-                    MenuStep::Down => Some(Self::Row(PaneMenuRow::TEXT_ROWS[0])),
+                    MenuStep::Down => Some(Self::Row(first)),
                     _ => None,
                 }
             }
             Some(Self::Row(row)) => {
-                let index = PaneMenuRow::TEXT_ROWS
-                    .iter()
-                    .position(|it| *it == row)
-                    .expect("a hovered row is one of TEXT_ROWS");
+                // A highlight on a row this menu is not showing: the ordinary
+                // case rather than a fault, because the list can be rebuilt
+                // between one key and the next. Answering `None` leaves the
+                // highlight where it was, which is what every other walk in this
+                // window does when a step leads nowhere.
+                let index = text.iter().position(|it| *it == row)?;
                 match step {
-                    MenuStep::Down => Some(Self::Row(
-                        PaneMenuRow::TEXT_ROWS[(index + 1).min(PaneMenuRow::TEXT_ROWS.len() - 1)],
-                    )),
+                    MenuStep::Down => Some(Self::Row(text[(index + 1).min(text.len() - 1)])),
                     // The row above the first text row is the picker, entered at
                     // the zone nearest the row being left.
                     MenuStep::Up if index == 0 => Some(Self::Zone(SplitZone::Down)),
-                    MenuStep::Up => Some(Self::Row(PaneMenuRow::TEXT_ROWS[index - 1])),
+                    MenuStep::Up => Some(Self::Row(text[index - 1])),
                     MenuStep::Left | MenuStep::Right => None,
                 }
             }
@@ -8302,9 +8363,18 @@ pub const SUBMENU_SAFE_HOLD: Duration = Duration::from_millis(300);
 pub struct PaneMenuLayout {
     scale: f32,
     frame: [f32; 4],
-    /// One rectangle per entry of [`PaneMenuRow::ALL`], in that order. The
-    /// picker's is its whole block.
-    items: [[f32; 4]; PaneMenuRow::ALL.len()],
+    /// **The entries this menu is showing**, top to bottom — [`PaneMenuRow::rows`]
+    /// for the session the menu was raised in (user ruling 2026-08-25).
+    ///
+    /// Carried rather than re-derived on [`Self::zoomed`]'s reasoning: the frame
+    /// was measured against *this* list, so a painter or a hit test that worked
+    /// the list out again would be a second opinion about a thing the layout
+    /// already knows — and the two would disagree on exactly the frame where a
+    /// second window opened or the last one closed.
+    rows: Vec<PaneMenuRow>,
+    /// One rectangle per entry of [`Self::rows`], in that order. The picker's is
+    /// its whole block.
+    items: Vec<[f32; 4]>,
     /// The pane at the middle of the picker's diagram.
     picker_pane: [f32; 4],
     /// The four slabs as they are **drawn**, in [`SplitZone::ALL`] order.
@@ -8365,11 +8435,19 @@ impl PaneMenuLayout {
     #[allow(dead_code)]
     #[must_use]
     pub fn item(&self, row: PaneMenuRow) -> [f32; 4] {
-        let index = PaneMenuRow::ALL
+        let index = self
+            .rows
             .iter()
             .position(|it| *it == row)
-            .expect("every row is in ALL");
+            .expect("every row this menu is showing has a box");
         self.items[index]
+    }
+
+    /// **What this menu is showing**, top to bottom — the walk the keyboard
+    /// takes ([`PaneMenuHover::step`]) and the list a pin asks the length of.
+    #[must_use]
+    pub fn rows(&self) -> &[PaneMenuRow] {
+        &self.rows
     }
 
     /// Where one of the picker's zones is drawn. [`Self::item`]'s sibling, and
@@ -8525,6 +8603,10 @@ impl PaneMenuLayout {
 /// words it is about to hold: `Restore pane` and `Zoom pane` are not the same
 /// width, and a menu laid out for one and drawn with the other would clip its
 /// own first row at whichever language made it wider.
+///
+/// `windows` decides **how many rows there are** as well as how wide the child
+/// is (user ruling 2026-08-25): with nowhere to go, `Move to window ▸` is not
+/// drawn at all. See [`PaneMenuRow::rows`].
 pub fn pane_menu_layout(
     point: [f32; 2],
     surface: (f32, f32),
@@ -8549,8 +8631,13 @@ pub fn pane_menu_layout(
     // it — a menu whose width depended on which rows had submenus would change
     // width the day a second row grew one.
     let indicator = px(SUBMENU_INDICATOR_LOGICAL_PX) + px(ITEM_GAP_LOGICAL_PX);
-    let content = PaneMenuRow::TEXT_ROWS
+    // **The rows this menu is showing**, which is the one list the width, the
+    // height, the boxes, the paint and the hit test are all built from.
+    let rows = PaneMenuRow::rows(!windows.is_empty());
+    let text_rows = rows.len() - 1;
+    let content = rows
         .iter()
+        .filter(|row| **row != PaneMenuRow::Picker)
         .map(|row| {
             px(ITEM_ICON_COLUMN_LOGICAL_PX)
                 + px(ITEM_GAP_LOGICAL_PX)
@@ -8566,7 +8653,7 @@ pub fn pane_menu_layout(
         .round();
     let height = (2.0 * (border + padding)
         + picker_height
-        + PaneMenuRow::TEXT_ROWS.len() as f32 * item_height
+        + text_rows as f32 * item_height
         + separator_block)
         .round();
 
@@ -8583,11 +8670,11 @@ pub fn pane_menu_layout(
     let content_right = frame[2] - border - padding;
     let mut cursor = frame[1] + border + padding;
 
-    // One walk of [`PaneMenuRow::ALL`] lays every entry out, which is what keeps
-    // the order on screen and the order the keyboard walks from being two lists.
-    let mut items = [[0.0_f32; 4]; PaneMenuRow::ALL.len()];
+    // One walk of the shown rows lays every entry out, which is what keeps the
+    // order on screen and the order the keyboard walks from being two lists.
+    let mut items = vec![[0.0_f32; 4]; rows.len()];
     let mut separator = [0.0_f32; 4];
-    for (index, row) in PaneMenuRow::ALL.iter().enumerate() {
+    for (index, row) in rows.iter().enumerate() {
         let height = match row {
             PaneMenuRow::Picker => picker_height,
             _ => item_height,
@@ -8681,12 +8768,16 @@ pub fn pane_menu_layout(
     // right *number* for the wrong reason — the heading is a fact about which
     // row is open, not about which position happens to be a submenu.
     let submenu = submenu
-        .filter(|row| row.has_submenu())
+        // **And a row this menu is not showing hangs nothing** (user ruling
+        // 2026-08-25): the state that says which child is open outlives one
+        // frame, so a window that closed while `Move to window ▸` was open would
+        // otherwise be asking for the box of a row that is no longer there.
+        .filter(|row| row.has_submenu() && rows.contains(row))
         .map(|kind| {
-            let heading = items[PaneMenuRow::ALL
+            let heading = items[rows
                 .iter()
                 .position(|row| *row == kind)
-                .expect("every row is in ALL")];
+                .expect("the row was just checked to be one this menu shows")];
             pane_submenu_layout(
                 frame,
                 heading,
@@ -8708,6 +8799,7 @@ pub fn pane_menu_layout(
     PaneMenuLayout {
         scale,
         frame,
+        rows,
         items,
         picker_pane,
         zones,
@@ -8892,12 +8984,12 @@ pub fn pane_menu_hit(layout: &PaneMenuLayout, x: f64, y: f64) -> Option<PaneMenu
             return Some(PaneMenuHit::Zone(*zone));
         }
     }
-    // Walked over `ALL` beside its own boxes, stepping over the picker — the
-    // painter's own walk, and one list for the same reason. `items[1..]` was
-    // true only while the picker was the first entry; door 4 now stands above
-    // it (§7.1.6b′ ④), and a hit test that assumed where the drawing sits would
-    // answer every press with the name of the row below it.
-    for (row, rect) in PaneMenuRow::ALL.iter().zip(layout.items.iter()) {
+    // Walked over the layout's own rows beside its own boxes, stepping over the
+    // picker — the painter's own walk, and one list for the same reason.
+    // `items[1..]` was true only while the picker was the first entry; door 4
+    // now stands above it (§7.1.6b′ ④), and a hit test that assumed where the
+    // drawing sits would answer every press with the name of the row below it.
+    for (row, rect) in layout.rows.iter().zip(layout.items.iter()) {
         if *row == PaneMenuRow::Picker {
             continue;
         }
@@ -8952,13 +9044,15 @@ pub fn pane_menu_build(
 
     push_picker(layout, hover, palette, scale, &mut quads, &mut labels);
 
-    // **Walked over `ALL` beside its own boxes**, rather than over `TEXT_ROWS`
-    // against a slice of them. An `items[1..]` would be true only while the
-    // picker is the first entry — it stopped being so the day a row was inserted
-    // above it and started again the day that row was withdrawn — and a zip that
-    // assumes where the drawing sits is a zip that silently draws every caption
-    // one row out of place the next time the order changes.
-    for (row, rect) in PaneMenuRow::ALL.iter().zip(layout.items.iter()) {
+    // **Walked over the layout's own rows beside its own boxes**, rather than
+    // over a second list against a slice of them. An `items[1..]` would be true
+    // only while the picker is the first entry — it stopped being so the day a
+    // row was inserted above it and started again the day that row was withdrawn
+    // — and a zip that assumes where the drawing sits is a zip that silently
+    // draws every caption one row out of place the next time the order changes.
+    // Since 2026-08-25 the list is not even a constant: a session with one
+    // window shows no `Move to window ▸`.
+    for (row, rect) in layout.rows.iter().zip(layout.items.iter()) {
         if *row == PaneMenuRow::Picker {
             continue;
         }
@@ -9008,7 +9102,11 @@ pub fn pane_menu_build(
                 },
             ));
         }
-        if *row == PaneMenuRow::MoveToWindow {
+        // The rule, struck at the row it stands **above** rather than at the one
+        // it happens to follow: the row above it can be missing (user ruling
+        // 2026-08-25), and a separator keyed to that one would disappear with
+        // it — which is the same list the layout keys it to, one screen up.
+        if *row == PaneMenuRow::ClosePane {
             quads.push(OverlayQuad {
                 rect: layout.separator,
                 color: palette.menu_border,
@@ -13465,6 +13563,111 @@ mod tests {
         );
     }
 
+    /// PIN (user ruling 2026-08-25, the day's second) — **every row of this
+    /// menu is struck in the column's own ink, the shell's row included.**
+    ///
+    /// The menu is eight thin monochrome glyphs down one column, and `New
+    /// terminal here` arrived wearing the default profile's *coloured* mark —
+    /// PowerShell's filled blue slab in a run of hairlines. The shape was right
+    /// and stays: the row is about the shell it opens, which is why it is not
+    /// `#i-folder`. What was wrong was the style, and the fix is
+    /// [`ChromeMark::in_line`] applied where the default profile is read.
+    ///
+    /// Asserted as **one style family over the whole list** rather than as "the
+    /// terminal row is a `ProfileLine`", because the claim the ruling made is
+    /// about the column: any row that came to carry colours of its own would be
+    /// the same defect wearing a different glyph, and a pin that named one row
+    /// would not catch it.
+    ///
+    /// All five profile marks, because which one this is depends on a setting:
+    /// a pin that only tried PowerShell would go on passing the day somebody's
+    /// default was Ubuntu.
+    ///
+    /// RED EVIDENCE (2026-08-25): with `file_menu_look` handing
+    /// `profiles::mark(default)` straight through — and `plain_look` below
+    /// standing in for it — the `Folder` face fails on `ProfilePowerShell`:
+    /// `assertion failed: the New terminal row draws ProfilePowerShell, which
+    /// carries its own colours into a column of line icons`.
+    ///
+    /// MUTATIONS: drop the `.in_line()` in `Runtime::file_menu_look`, or give
+    /// any row here a mark that paints itself.
+    #[test]
+    fn every_file_menu_row_wears_the_columns_own_ink() {
+        for mark in [
+            ChromeMark::ProfilePowerShell,
+            ChromeMark::ProfileUbuntu,
+            ChromeMark::ProfileGit,
+            ChromeMark::ProfileCmd,
+            ChromeMark::ProfileGeneric {
+                colour: crate::marks::MarkColour::Teal,
+            },
+        ] {
+            for subject in [
+                FileMenuSubject::File,
+                FileMenuSubject::Folder { expanded: false },
+                FileMenuSubject::Folder { expanded: true },
+                FileMenuSubject::Document,
+                FileMenuSubject::FoldedPath { levels: 3 },
+            ] {
+                let look = FileMenuLook {
+                    subject,
+                    crumbs: &["alpha".to_owned(), "bravo".to_owned(), "charlie".to_owned()],
+                    // What `Runtime::file_menu_look` hands in, spelled here so
+                    // the pin is about the whole trip and not about one call.
+                    terminal: mark.in_line(),
+                };
+                for row in file_menu(subject).rows {
+                    assert!(
+                        row.mark(&look).takes_current_color(),
+                        "the {row:?} row draws {:?}, which carries its own \
+                         colours into a column of line icons",
+                        row.mark(&look)
+                    );
+                }
+            }
+        }
+    }
+
+    /// PIN (user ruling 2026-08-25) — **the shell's row keeps its shape when it
+    /// loses its colours.**
+    ///
+    /// The other half of the ruling, and it needs its own nail because the pin
+    /// above is satisfied by *any* line glyph — `#i-panel` would pass it, and
+    /// `#i-panel` is exactly the answer the first ruling of the day turned down.
+    /// So: three drawings for five marks, each the one the coloured mark is, and
+    /// a mark that already follows the theme is unchanged by the trip.
+    ///
+    /// MUTATIONS: collapse `in_line` to one glyph and the Ubuntu or the Git line
+    /// names the console; make it total by mapping everything and `#i-file`
+    /// stops being itself.
+    #[test]
+    fn a_profile_marks_line_rendition_is_its_own_drawing() {
+        use crate::marks::ProfileGlyph;
+        for (coloured, line) in [
+            (ChromeMark::ProfilePowerShell, ProfileGlyph::Console),
+            (ChromeMark::ProfileCmd, ProfileGlyph::Console),
+            (
+                ChromeMark::ProfileGeneric {
+                    colour: crate::marks::MarkColour::Violet,
+                },
+                ProfileGlyph::Console,
+            ),
+            (ChromeMark::ProfileUbuntu, ProfileGlyph::Ubuntu),
+            (ChromeMark::ProfileGit, ProfileGlyph::Git),
+        ] {
+            assert_eq!(
+                coloured.in_line(),
+                ChromeMark::ProfileLine(line),
+                "{coloured:?} is one of the family's three drawings"
+            );
+        }
+        // A mark that never carried colours of its own is already its own line
+        // rendition — the fall-through is a statement, so it is pinned.
+        for already in [ChromeMark::File, ChromeMark::Folder, ChromeMark::Copy] {
+            assert_eq!(already.in_line(), already, "{already:?} was never coloured");
+        }
+    }
+
     /// PIN (user ruling 2026-08-25) — **a menu's length is a fact about its
     /// subject and nothing else.**
     ///
@@ -14065,6 +14268,31 @@ mod tests {
 
     // ── the pane head's own menu ────────────────────────────────────────────
 
+    /// The other windows a pin that is not about them stands in front of.
+    ///
+    /// **Two of them, and not none**, since the ruling of 2026-08-25: with no
+    /// second window there is no `Move to window ▸` row at all, and a pin about
+    /// the menu's shape that quietly stood on the *shorter* menu would stop
+    /// saying anything about the longer one. The menu with the row missing has a
+    /// pin of its own.
+    fn other_windows() -> Vec<String> {
+        vec!["Window 2".to_owned(), "Window 3".to_owned()]
+    }
+
+    /// The verbs of a whole menu, in order — what a pin about *every* row of it
+    /// asks for.
+    ///
+    /// A helper here rather than a `const` on the enum, since the ruling of
+    /// 2026-08-25: a second list of these rows in the library is a second list
+    /// the layout could come to disagree with, which is the very bug the ruling
+    /// made reachable. The tests are entitled to build one; the menu is not.
+    fn text_rows() -> Vec<PaneMenuRow> {
+        PaneMenuRow::rows(true)
+            .into_iter()
+            .filter(|row| *row != PaneMenuRow::Picker)
+            .collect()
+    }
+
     fn pane_menu(submenu_open: bool) -> PaneMenuLayout {
         pane_menu_layout(
             [300.0, 120.0],
@@ -14076,7 +14304,7 @@ mod tests {
             // The ordinary posture: these pins are about the menu's shape, and
             // the zoom row's second face has a pin of its own.
             false,
-            &[],
+            &other_windows(),
             &mut fake_measure,
         )
     }
@@ -14258,9 +14486,11 @@ mod tests {
             "a press on a row answers with its place in the list it is drawn from"
         );
 
-        // **One window is no choice at all**, so the row is drawn and not
-        // offered — the same face `a_submenu_row_this_machine_cannot_start_is_
-        // drawn_and_not_offered` gives a profile that will not run.
+        // **One window is no choice at all**, so there is no child — and since
+        // the ruling of 2026-08-25 no heading either. The row's whole absence is
+        // pinned next door; what this one asserts is that a menu asked for the
+        // child of a row it is not showing answers with no child rather than
+        // reaching for a box that does not exist.
         let alone = pane_menu_layout(
             [300.0, 120.0],
             (960.0, 600.0),
@@ -14273,6 +14503,131 @@ mod tests {
         assert!(
             alone.submenu_rows().is_none_or(<[[f32; 4]]>::is_empty),
             "a list of nowhere to go is not a list"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-25) — **with nowhere to go, `Move to window ▸`
+    /// is not in the menu at all.**
+    ///
+    /// It stood there greyed with its `▸` still on it for a day, and a
+    /// disclosure arrow over nothing is the one refusal this window may not
+    /// make: the arrow's whole sentence is "there is more this way", and there
+    /// was not. Nothing is lost by its going — `Move pane to new window`, the
+    /// row directly above, is the verb for exactly the case where there is no
+    /// second window, and this row was added *beside* it rather than instead of
+    /// it.
+    ///
+    /// Asserted three ways over because a row can be absent from a list and
+    /// still be on the glass: the list, the drawn captions, and the frame's own
+    /// height, which is the one that catches a row left out of the walk but
+    /// still paid for in pixels.
+    ///
+    /// **The pin next door is not in tension with this.**
+    /// `a_menus_length_is_a_fact_about_its_subject_and_nothing_else` is about
+    /// the *file* menu, whose subject is a row on the disk; this menu's subject
+    /// is a pane, and "is there a second window to move it into" is a fact about
+    /// the session the pane is in rather than a question about the machine. The
+    /// two lists never meet.
+    ///
+    /// RED EVIDENCE (2026-08-25): before the change, `pane_menu_layout` walked
+    /// `PaneMenuRow::ALL` and the row was minted whatever `windows` held —
+    /// `assertion `left == right` failed: a lone window draws no row for moving
+    /// a pane into another one` with `left: [Picker, ZoomPane, SplitWith,
+    /// NewInFolder, Duplicate, MoveToNewTab, MoveToNewWindow, MoveToWindow,
+    /// ClosePane]`.
+    ///
+    /// MUTATIONS: put the row back into `PaneMenuRow::rows` unconditionally, or
+    /// key the layout's walk to `ALL` again, and the first or the third
+    /// assertion goes red.
+    #[test]
+    fn a_lone_window_offers_no_row_for_moving_a_pane_into_another() {
+        let lay = |windows: &[String]| {
+            pane_menu_layout(
+                [300.0, 120.0],
+                (960.0, 600.0),
+                1.0,
+                None,
+                false,
+                windows,
+                &mut fake_measure,
+            )
+        };
+        let alone = lay(&[]);
+        assert_eq!(
+            alone.rows(),
+            [
+                PaneMenuRow::Picker,
+                PaneMenuRow::ZoomPane,
+                PaneMenuRow::SplitWith,
+                PaneMenuRow::NewInFolder,
+                PaneMenuRow::Duplicate,
+                PaneMenuRow::MoveToNewTab,
+                PaneMenuRow::MoveToNewWindow,
+                PaneMenuRow::ClosePane,
+            ],
+            "a lone window draws no row for moving a pane into another one"
+        );
+        let captions: Vec<String> = one_layer(pane_menu_build(
+            &alone,
+            None,
+            None,
+            &equipped(),
+            &[],
+            &mut fake_measure,
+        ))
+        .labels
+        .iter()
+        .map(|label| label.text.clone())
+        .collect();
+        assert!(
+            !captions.iter().any(|text| text == move_to_window_text()),
+            "and does not print its words either"
+        );
+
+        // A second window puts it back, in its own place — under the exit it is
+        // the third length of.
+        let peers = lay(&other_windows());
+        assert_eq!(peers.rows(), PaneMenuRow::ALL, "a peer restores the row");
+        let taller = peers.item(PaneMenuRow::ClosePane)[3] - peers.item(PaneMenuRow::Picker)[1];
+        let shorter = alone.item(PaneMenuRow::ClosePane)[3] - alone.item(PaneMenuRow::Picker)[1];
+        assert!(
+            taller > shorter,
+            "and the frame is paid for in pixels either way, never reserved for a \
+             row that is not drawn"
+        );
+        // The rule still falls above `Close pane` on both, which is what keys it
+        // to the row it stands over rather than to the one it happens to follow.
+        for menu in [&alone, &peers] {
+            let close = menu.item(PaneMenuRow::ClosePane);
+            let above = menu.item(if menu.rows().contains(&PaneMenuRow::MoveToWindow) {
+                PaneMenuRow::MoveToWindow
+            } else {
+                PaneMenuRow::MoveToNewWindow
+            });
+            assert!(
+                menu.separator[1] >= above[3] && menu.separator[3] <= close[1],
+                "the rule lies between the last mover and the one that ends a pane"
+            );
+        }
+        // And the keyboard walks what is drawn: the row below the third exit is
+        // `Close pane` on a lone window, not a highlight on nothing.
+        assert_eq!(
+            PaneMenuHover::step(
+                Some(PaneMenuHover::Row(PaneMenuRow::MoveToNewWindow)),
+                MenuStep::Down,
+                0,
+                alone.rows(),
+            ),
+            Some(PaneMenuHover::Row(PaneMenuRow::ClosePane))
+        );
+        assert_eq!(
+            PaneMenuHover::step(
+                Some(PaneMenuHover::Row(PaneMenuRow::MoveToNewWindow)),
+                MenuStep::Down,
+                0,
+                peers.rows(),
+            ),
+            Some(PaneMenuHover::Row(PaneMenuRow::MoveToWindow))
         );
     }
 
@@ -14293,7 +14648,7 @@ mod tests {
     #[test]
     fn the_zoom_row_changes_its_word_and_its_mark_with_the_state_it_names() {
         assert_eq!(
-            PaneMenuRow::TEXT_ROWS[0],
+            text_rows()[0],
             PaneMenuRow::ZoomPane,
             "the row stands directly under the diagram"
         );
@@ -14470,22 +14825,27 @@ mod tests {
     fn the_pane_menus_keyboard_walk_aims_the_picker_and_then_leaves_it() {
         use PaneMenuHover as H;
         let rows = count();
+        // The list the walk is over — the whole of it, because this pin is about
+        // the compass rather than about which verbs a session offers. The menu
+        // that shows one row fewer has a pin of its own
+        // (`a_lone_window_offers_no_row_for_moving_a_pane_into_another`).
+        let shown = PaneMenuRow::rows(true);
         // The list is entered at whichever end the key names. The picker is the
         // first entry again (user ruling 2026-08-19 withdrew the row that stood
         // above it), so `↓` into an unlit menu enters the compass.
         assert_eq!(
-            H::step(None, MenuStep::Down, rows),
+            H::step(None, MenuStep::Down, rows, &shown),
             Some(H::Zone(SplitZone::Right))
         );
         // And the picker is the top: aiming up twice from it clamps, exactly as
         // every other walk in this window clamps at its ends.
         assert_eq!(
-            H::step(Some(H::Zone(SplitZone::Up)), MenuStep::Up, rows),
+            H::step(Some(H::Zone(SplitZone::Up)), MenuStep::Up, rows, &shown),
             None,
             "nothing stands above the diagram, so the walk clamps there"
         );
         assert_eq!(
-            H::step(None, MenuStep::Up, rows),
+            H::step(None, MenuStep::Up, rows, &shown),
             Some(H::Row(PaneMenuRow::ClosePane))
         );
         // The compass: an arrow that names a zone other than the lit one aims
@@ -14499,7 +14859,7 @@ mod tests {
             (SplitZone::Down, MenuStep::Up, SplitZone::Up),
         ] {
             assert_eq!(
-                H::step(Some(H::Zone(from)), step, rows),
+                H::step(Some(H::Zone(from)), step, rows, &shown),
                 Some(H::Zone(zone)),
                 "{step:?} from {from:?} aims at {zone:?}"
             );
@@ -14507,11 +14867,16 @@ mod tests {
         // Aiming where the highlight already points is not a movement: it is
         // the request to leave, and sideways there is nowhere to go.
         assert_eq!(
-            H::step(Some(H::Zone(SplitZone::Right)), MenuStep::Right, rows),
+            H::step(
+                Some(H::Zone(SplitZone::Right)),
+                MenuStep::Right,
+                rows,
+                &shown
+            ),
             None
         );
         assert_eq!(
-            H::step(Some(H::Zone(SplitZone::Left)), MenuStep::Left, rows),
+            H::step(Some(H::Zone(SplitZone::Left)), MenuStep::Left, rows, &shown),
             None
         );
         // Aiming twice in the same direction walks out, and only downward leads
@@ -14522,30 +14887,35 @@ mod tests {
         // this reason — a step named after a verb steps over the one inserted
         // above it.
         assert_eq!(
-            H::step(Some(H::Zone(SplitZone::Down)), MenuStep::Down, rows),
-            Some(H::Row(PaneMenuRow::TEXT_ROWS[0]))
+            H::step(Some(H::Zone(SplitZone::Down)), MenuStep::Down, rows, &shown),
+            Some(H::Row(text_rows()[0]))
         );
         // Back in from below, landing on the zone nearest the row it came from.
         assert_eq!(
-            H::step(Some(H::Row(PaneMenuRow::TEXT_ROWS[0])), MenuStep::Up, rows),
+            H::step(Some(H::Row(text_rows()[0])), MenuStep::Up, rows, &shown),
             Some(H::Zone(SplitZone::Down))
         );
         // The flat part of the walk clamps at the bottom.
         assert_eq!(
-            H::step(Some(H::Row(PaneMenuRow::ClosePane)), MenuStep::Down, rows),
+            H::step(
+                Some(H::Row(PaneMenuRow::ClosePane)),
+                MenuStep::Down,
+                rows,
+                &shown
+            ),
             Some(H::Row(PaneMenuRow::ClosePane))
         );
         // And the submenu has a walk of its own, clamped at both ends.
         assert_eq!(
-            H::step(Some(H::Submenu(0)), MenuStep::Up, rows),
+            H::step(Some(H::Submenu(0)), MenuStep::Up, rows, &shown),
             Some(H::Submenu(0))
         );
         assert_eq!(
-            H::step(Some(H::Submenu(0)), MenuStep::Down, rows),
+            H::step(Some(H::Submenu(0)), MenuStep::Down, rows, &shown),
             Some(H::Submenu(1))
         );
         assert_eq!(
-            H::step(Some(H::Submenu(rows - 1)), MenuStep::Down, rows),
+            H::step(Some(H::Submenu(rows - 1)), MenuStep::Down, rows, &shown),
             Some(H::Submenu(rows - 1))
         );
     }
@@ -14558,7 +14928,7 @@ mod tests {
     #[test]
     fn the_pane_menu_answers_a_press_on_each_of_its_verbs() {
         let layout = pane_menu(false);
-        for row in PaneMenuRow::TEXT_ROWS {
+        for row in text_rows() {
             let rect = layout.item(row);
             let (x, y) = (
                 f64::from((rect[0] + rect[2]) / 2.0),
