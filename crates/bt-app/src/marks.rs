@@ -752,15 +752,15 @@ pub enum ChromeMark {
     GitMergeCurve,
     /// Three commits and the two edges between them — a DAG, in miniature.
     ///
-    /// **Struck now and drawn later.** R27 asks for it beside the fork, and its
-    /// caller is the command palette's "Git graph" entry, which arrives with the
-    /// graph itself in G-4. It is here rather than there for the reason
-    /// [`crate::git`]'s unused readers are: a pair of marks cut in one sitting
-    /// from one geometry is a pair that matches, and a second one cut months
-    /// later against a screenshot is not. The mock-up borrows `#i-app` for this
-    /// entry today, which is a mark about applications and says nothing about a
+    /// **Struck beside the fork and drawn since G-4.** R27 asks for it beside
+    /// `#i-git-branch`, and it was cut in the same sitting for the reason
+    /// [`crate::git`]'s readers were written ahead of their callers: a pair of
+    /// marks cut at one sitting from one geometry is a pair that matches, and a
+    /// second one cut months later against a screenshot is not. Its caller is
+    /// the Git panel's `Open graph` button (`crate::icons::ActionIcon::OpenGitGraph`),
+    /// which arrived with the graph itself. The mock-up borrowed `#i-app` for
+    /// that entry, which is a mark about applications and says nothing about a
     /// repository.
-    #[allow(dead_code)]
     GitGraph,
     /// **One edge of the full graph** (G-4): a branch leaving a commit, or
     /// arriving at one.
@@ -800,6 +800,28 @@ pub enum ChromeMark {
 }
 
 impl ChromeMark {
+    /// **The drawing this mark is**, as the symbol sheet's own id.
+    ///
+    /// [`Self::id`] answers with the *raster cache*'s name, and there are three
+    /// of those for one `×`: `WindowClose`, `TabClose` and `PaneClose` are one
+    /// `<symbol>` kept in three cache slots so a control that might one day be
+    /// re-struck has somewhere to be re-struck in. That is the right answer for
+    /// a cache and the wrong one for the question
+    /// `crate::icons::ActionIcon`'s reverse index asks — *how many verbs is this
+    /// one picture doing the work of* — where three names for one drawing would
+    /// hide exactly the reuse the index exists to find.
+    ///
+    /// Every other family that has one drawing already has one id: every angle
+    /// of the chevron, every angle of the triangle, all eight chassis colours.
+    /// This function is the one exception put right.
+    #[cfg(test)]
+    pub(crate) fn drawing_id(self) -> &'static str {
+        match self {
+            Self::TabClose | Self::PaneClose => Self::WindowClose.id(),
+            other => other.id(),
+        }
+    }
+
     fn id(self) -> &'static str {
         match self {
             Self::Gear => "i-gear",
@@ -1125,6 +1147,50 @@ pub fn status_dot_sprite(dot: crate::StatusDot, rect: [f32; 4], scale: f32) -> C
         ChromeMark::ControlPill { radius_px }
     };
     ChromeSprite::new(mark, rect, dot.ink)
+}
+
+/// **How wide the unsaved-edits dot is drawn** — [`bt_render::WINDOW_TAB_STATUS_DOT_LOGICAL_PX`]
+/// by identity and not by coincidence.
+///
+/// One dot means one thing, and the three heads that print this one all say so
+/// in their own comments. They were saying it about a *codepoint*: `●` (U+25CF)
+/// set at 13px on the preview head, 13px on the float's head and **9px** on the
+/// file peek's. Two of those numbers were the head's own font size rather than
+/// anything about a dot, and none of the three was a diameter — U+25CF's ink is
+/// whatever fraction of an em the font that happens to be installed draws it at,
+/// which R4 already refused to accept for `⎇` (see the module head's note on
+/// codepoints). A dot beside a *geometric* status dot, two hundred pixels away
+/// on the same window, was the last place in the chrome still asking a font what
+/// a shape looks like.
+///
+/// So it is the status dot's own six: the two dots are the same claim about the
+/// same kind of thing — *there is something here you have not dealt with* — and
+/// writing the constant rather than the number is what keeps them the same size
+/// the day either is re-measured.
+pub const DIRTY_DOT_LOGICAL_PX: f32 = bt_render::WINDOW_TAB_STATUS_DOT_LOGICAL_PX;
+
+/// **The sprite the unsaved-edits dot is**, centred in the slot its head
+/// reserved for it.
+///
+/// [`status_dot_sprite`]'s own path, for [`status_dot_sprite`]'s own reason: a
+/// `border-radius: 50%` square is a circle, [`ChromeMark::ControlPill`] clamps
+/// its round to half the short side, and a second circle in this module would be
+/// a second circle to keep in step. The slot is *reserved space* — its width is
+/// spent whether or not there is a dot in it (P16) — so the dot is centred in
+/// what it was given rather than filling it.
+#[must_use]
+pub fn dirty_dot_sprite(slot: [f32; 4], ink: [u8; 3], scale: f32) -> ChromeSprite {
+    let diameter = (DIRTY_DOT_LOGICAL_PX * scale).round().max(1.0);
+    let left = ((slot[0] + slot[2]) / 2.0 - diameter / 2.0).round();
+    let top = ((slot[1] + slot[3]) / 2.0 - diameter / 2.0).round();
+    let rect = [left, top, left + diameter, top + diameter];
+    ChromeSprite::new(
+        ChromeMark::ControlPill {
+            radius_px: (diameter / 2.0).round().max(1.0) as u32,
+        },
+        rect,
+        ink,
+    )
 }
 
 /// One stacking layer of the modal overlay as a builder leaves it: its fills, its
@@ -1883,6 +1949,215 @@ fn progress_ring_body(
     ))
 }
 
+// ── the marks' own numbers, read off the two tables below ──────────────────
+//
+// Everything in this section answers a question *about* the artwork rather than
+// drawing any of it, and every answer is read out of `SYMBOL_VIEW_BOX` and
+// `SYMBOL_BODY` rather than written down a second time. A mark's box and a
+// mark's pen are facts about those two tables; a second copy of either is the
+// copy that goes stale the day somebody re-cuts a glyph, and the whole reason
+// this module holds the artwork in one place is that nothing else gets to keep
+// an opinion about it.
+
+/// The house grid — sixteen units, the box all but nine of the quoted symbols
+/// are cut in.
+pub const HOUSE_GRID_UNITS: f32 = 16.0;
+
+/// How much of that grid the house's artwork covers: the ink runs `1.6 – 14.4`,
+/// a unit and a half of air on each of the four sides.
+pub const HOUSE_INK_UNITS: f32 = 12.8;
+
+/// [`HOUSE_INK_UNITS`] as a fraction of [`HOUSE_GRID_UNITS`] — **the number that
+/// turns one slot into two boxes.**
+///
+/// A mark that draws to the edge of its own `viewBox` puts a whole box of ink on
+/// the row; a house mark puts this fraction of one. So the two families are only
+/// the same size on screen when the edge-to-edge one is drawn at this fraction
+/// of the box the house mark gets, which is the one thing
+/// [`crate::icons::MarkSlot`] does with it.
+pub const HOUSE_INK_RATIO: f32 = HOUSE_INK_UNITS / HOUSE_GRID_UNITS;
+
+impl ChromeMark {
+    /// Whether this mark's artwork is one of [`SYMBOL_BODY`]'s quoted strings.
+    ///
+    /// The complement is the generated family — a tab silhouette, a pill, a
+    /// ring, a progress arc, a graph edge, a profile chassis struck in one of
+    /// eight hexes. None of them has a `viewBox` of its own and none of them has
+    /// a pen of its own: the caller hands them a box in *physical pixels* and,
+    /// where they are stroked at all, a stroke in physical pixels with it.
+    /// Asking one what it measures in design units is asking a question it has
+    /// no answer to, which is why every accessor below answers `None` for them
+    /// rather than inventing one.
+    fn is_quoted_symbol(self) -> bool {
+        !matches!(
+            self,
+            Self::ActiveTab { .. }
+                | Self::TabBody { .. }
+                | Self::TabBodyRing { .. }
+                | Self::ControlPill { .. }
+                | Self::ControlPillFoot { .. }
+                | Self::ControlPillRing { .. }
+                | Self::CardCorner { .. }
+                | Self::Fill
+                | Self::ProgressRing { .. }
+                | Self::GraphCurve { .. }
+                | Self::ProfileGeneric { .. }
+                | Self::ProfileLine(_)
+        )
+    }
+
+    /// The mark's own `viewBox`, as `[width, height]` in the units its artwork
+    /// is written in.
+    ///
+    /// `None` for the generated family, which has none — with the one exception
+    /// the module already names: a [`Self::ProfileLine`] is struck on the
+    /// profile chassis, so it measures exactly what its coloured twin measures.
+    #[must_use]
+    pub fn view_box_units(self) -> Option<[f32; 2]> {
+        match self {
+            Self::ProfileLine(_) => Some(view_box_extent(PROFILE_CHASSIS_VIEW_BOX)),
+            mark if mark.is_quoted_symbol() => {
+                Some(view_box_extent(SYMBOL_VIEW_BOX[symbol_index(mark)]))
+            }
+            _ => None,
+        }
+    }
+
+    /// **The pen this mark is struck with**, in its own `viewBox`'s units — the
+    /// number a reader would take off the drawing, before any surface has said
+    /// how big to draw it.
+    ///
+    /// Read out of the body rather than tabulated beside it, for the reason
+    /// stated over this whole section: a table of pens is a second authority for
+    /// a number the artwork already carries, and the day the two disagree it is
+    /// the table that will be believed.
+    ///
+    /// `None` has three spellings and one meaning — *this mark has no pen a slot
+    /// could hold it to*:
+    ///
+    /// * **A pure fill has no stroke at all**: `#i-gear`, `#i-folder`,
+    ///   `#i-folder-open`, `#i-tri`, `#i-pinned`, `#i-locked`.
+    /// * **A brand mark is not the house's to re-cut.** It carries its own
+    ///   colours and its own weights, which is exactly the class
+    ///   [`Self::takes_current_color`] already draws a line around, so the line
+    ///   is drawn there once rather than here again.
+    /// * **The generated family has no design units** —
+    ///   [`Self::is_quoted_symbol`].
+    ///
+    /// Where a drawing writes more than one weight — `#i-paste`'s `1.3` frame
+    /// around its `1.1` sheet, `#i-save`'s `1.3` and `1.15`, `#i-broom`'s handle
+    /// and its head — the answer is the **heaviest**, because the heaviest
+    /// stroke is the one a run reads the mark's weight off.
+    #[must_use]
+    #[cfg(test)]
+    pub fn design_stroke_units(self) -> Option<f32> {
+        if !self.takes_current_color() {
+            return None;
+        }
+        match self {
+            Self::ProfileLine(_) => Some(
+                PROFILE_LINE_STROKE_UNITS
+                    .parse::<f32>()
+                    .expect("the profile line's pen is written as a number"),
+            ),
+            mark if mark.is_quoted_symbol() => {
+                heaviest_stroke_units(SYMBOL_BODY[symbol_index(mark)])
+            }
+            _ => None,
+        }
+    }
+
+    /// **Whether the artwork runs to the edge of its own box.**
+    ///
+    /// A fact about the drawing and not a list of window controls, which is the
+    /// whole point of stating it here: `profiles::item_mark_logical_px` used to
+    /// name the four caption glyphs by hand, and `#i-minus`, `#i-chev` and the
+    /// resize grip — cut the same way, in the same kind of box — went on being
+    /// sized as though they carried the house's margins. A rule stated over the
+    /// geometry has no list to fall off.
+    ///
+    /// Measured off `SYMBOL_BODY`'s own coordinates with half a pen added on
+    /// each side, since a stroke centres on its path:
+    ///
+    /// | mark | box | ink | |
+    /// |---|---|---|---|
+    /// | `#i-min` | 10 | `0.0 – 10.0` | edge to edge |
+    /// | `#i-max` | 10 | `0.0 – 10.0` | edge to edge |
+    /// | `#i-close` | 10 | `0.0 – 10.0` | edge to edge |
+    /// | `#i-plus` | 10 | `-0.1 – 10.1` | edge to edge, and a hair past it |
+    /// | `#i-minus` | 10 | `-0.1 – 10.1` | `#i-plus`'s own subpath |
+    /// | grip | 8 | `0.0 – 8.0` | edge to edge |
+    /// | `#i-chev` | 10×6 | `0.4 – 9.6` across | edge to edge across |
+    /// | `#i-tri` | 10 | `3.2 – 7.8` | **not** — *more* air than the house |
+    /// | the house | 16 | `1.6 – 14.4` | the margin every other mark carries |
+    ///
+    /// `#i-tri` is the correction this rule had to be stated over geometry to
+    /// find. It is cut in a ten-unit box like the caption family and it is
+    /// nothing like them: a disclosure arrow is *supposed* to be small inside
+    /// its slot, so it takes the house's box and draws the small arrow the
+    /// design asked for. Sized as an edge-to-edge mark it would have been shrunk
+    /// twice.
+    #[must_use]
+    pub fn draws_edge_to_edge(self) -> bool {
+        matches!(
+            self,
+            Self::WindowMinimize
+                | Self::WindowMaximize
+                | Self::WindowClose
+                | Self::TabClose
+                | Self::PaneClose
+                | Self::Plus
+                | Self::Minus
+                | Self::Chevron { .. }
+                | Self::ResizeGrip
+        )
+    }
+
+    /// **What this mark's pen measures on screen**, drawn in a box this big.
+    ///
+    /// The arithmetic `preserveAspectRatio="xMidYMid meet"` does: the drawing
+    /// takes whichever of the two ratios is the smaller, and the pen is scaled
+    /// with it. This is the number the house is held to — see [`crate::icons`]
+    /// for the band, and for the gate that keeps every drawing point inside it.
+    #[must_use]
+    #[cfg(test)]
+    pub fn optical_stroke_logical_px(self, box_width: f32, box_height: f32) -> Option<f32> {
+        let [view_width, view_height] = self.view_box_units()?;
+        let units = self.design_stroke_units()?;
+        Some(units * (box_width / view_width).min(box_height / view_height))
+    }
+}
+
+/// The `width` and `height` of a `viewBox` written `"min-x min-y width height"`.
+fn view_box_extent(view_box: &str) -> [f32; 2] {
+    let mut numbers = view_box.split_ascii_whitespace().skip(2).map(|word| {
+        word.parse::<f32>()
+            .expect("a view box is written as four numbers")
+    });
+    let width = numbers.next().expect("a view box states its width");
+    let height = numbers.next().expect("a view box states its height");
+    [width, height]
+}
+
+/// The heaviest `stroke-width` a symbol body writes, or `None` where it writes
+/// none at all.
+#[cfg(test)]
+fn heaviest_stroke_units(body: &str) -> Option<f32> {
+    const ATTRIBUTE: &str = "stroke-width=\"";
+    let mut heaviest: Option<f32> = None;
+    let mut rest = body;
+    while let Some(at) = rest.find(ATTRIBUTE) {
+        rest = &rest[at + ATTRIBUTE.len()..];
+        let end = rest.find('"').expect("an attribute closes its quote");
+        let units = rest[..end]
+            .parse::<f32>()
+            .expect("a stroke width is written as a number");
+        heaviest = Some(heaviest.map_or(units, |so_far: f32| so_far.max(units)));
+        rest = &rest[end..];
+    }
+    heaviest
+}
+
 fn symbol_index(mark: ChromeMark) -> usize {
     match mark {
         ChromeMark::Gear => 0,
@@ -1979,9 +2254,15 @@ fn symbol_index(mark: ChromeMark) -> usize {
 #[must_use]
 pub fn preview_row_mark(is_page: bool, favicon: Option<crate::favicon::FaviconId>) -> ChromeMark {
     if is_page {
-        ChromeMark::Globe { favicon }
+        // The registry's page, wearing this row's own icon where the store has
+        // one: which drawing a page gets is the registry's answer, and which
+        // *picture* replaces it is this row's.
+        match crate::icons::ActionIcon::PageObject.mark() {
+            ChromeMark::Globe { .. } => ChromeMark::Globe { favicon },
+            other => other,
+        }
     } else {
-        ChromeMark::File
+        crate::icons::ActionIcon::FileObject.mark()
     }
 }
 

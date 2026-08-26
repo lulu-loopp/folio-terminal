@@ -4671,12 +4671,13 @@ fn push_detail(
 /// the sentence — and `< >` against the two-rectangles copy idiom is exactly
 /// that difference, in the two marks this product already cut.
 fn detail_part_mark(part: GraphDetailPart) -> ChromeMark {
+    use crate::icons::ActionIcon;
     match part {
-        GraphDetailPart::CopyHash => ChromeMark::Code,
-        GraphDetailPart::CopySubject => ChromeMark::Copy,
-        GraphDetailPart::LeaveCompare => ChromeMark::PaneClose,
+        GraphDetailPart::CopyHash => ActionIcon::GraphCopyHash.mark(),
+        GraphDetailPart::CopySubject => ActionIcon::CopySubject.mark(),
+        GraphDetailPart::LeaveCompare => ActionIcon::LeaveCompare.mark(),
         // Never drawn as a glyph — a parent is the text of its own hash.
-        GraphDetailPart::Parent(_) => ChromeMark::Code,
+        GraphDetailPart::Parent(_) => ActionIcon::GoToParentCommit.mark(),
     }
 }
 

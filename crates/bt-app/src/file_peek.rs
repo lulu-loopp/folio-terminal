@@ -112,8 +112,10 @@ pub const PEEK_HEAD_FONT_LOGICAL_PX: f32 = 11.5;
 pub const PEEK_HEAD_GAP_LOGICAL_PX: f32 = 6.0;
 /// `.pmark { width: 15px }` (mock-up 246), which is the head's file mark.
 pub const PEEK_MARK_LOGICAL_PX: f32 = 15.0;
-/// `.fpeek-head .dirty { font-size: 9px }` — the unsaved-edits dot.
-pub const PEEK_DIRTY_FONT_LOGICAL_PX: f32 = 9.0;
+// `.fpeek-head .dirty { font-size: 9px }` is gone: the unsaved-edits dot is a
+// drawing rather than a codepoint since the icon block, and its diameter is
+// `crate::marks::DIRTY_DOT_LOGICAL_PX` — the same one the two preview heads
+// strike, where this head used to set the same `●` four points smaller.
 /// The slot that dot is given, so a name does not reflow when it appears.
 pub const PEEK_DIRTY_SLOT_LOGICAL_PX: f32 = 10.0;
 /// `.fpeek-type { font-size: 10px }`.
@@ -899,14 +901,13 @@ pub fn build(
         palette.menu_item_text,
     ));
     if let Some(rect) = layout.dirty {
-        // `●` in the accent, the same glyph and the same ink the preview head and
-        // the switcher print for an unsaved buffer — one dot means one thing.
-        labels.push(label(
-            "●",
-            rect,
-            px(PEEK_DIRTY_FONT_LOGICAL_PX),
-            palette.accent,
-        ));
+        // The same drawing and the same ink the preview head and the switcher
+        // put on an unsaved buffer — one dot means one thing, and since the icon
+        // block that is true of the *drawing* rather than of a codepoint. It was
+        // `●` at 9px here and `●` at 13px there, which is two diameters for one
+        // claim before the font gets a say; `marks::dirty_dot_sprite` strikes
+        // the one circle at the one size.
+        sprites.push(crate::marks::dirty_dot_sprite(rect, palette.accent, scale));
     }
     // The chip: a hairline box with the type word inside it.
     quads.extend(bt_render::rounded_overlay_fill(

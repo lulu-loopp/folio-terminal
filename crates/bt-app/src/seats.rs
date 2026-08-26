@@ -30,43 +30,41 @@ use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad,
     DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX, FOCUS_CARD_BORDER_LOGICAL_PX,
-    FOCUS_CARD_CLOSE_BOX_LOGICAL_PX, FOCUS_CARD_CLOSE_GLYPH_LOGICAL_PX,
-    FOCUS_CARD_CLOSE_RADIUS_LOGICAL_PX, FOCUS_CARD_FONT_LOGICAL_PX, FOCUS_CARD_GAP_LOGICAL_PX,
-    FOCUS_CARD_HEAD_GAP_LOGICAL_PX, FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX,
-    FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX, FOCUS_CARD_PIN_BOX_LOGICAL_PX,
-    FOCUS_CARD_RADIUS_LOGICAL_PX, FOCUS_CARD_WAIT_HALO_LOGICAL_PX, FOCUS_CARD_WAIT_HALO_OPACITY,
-    FOCUS_COLUMN_WIDTH_LOGICAL_PX, FOCUS_MINI_BORDER_LOGICAL_PX, FOCUS_MINI_FILES_FONT_LOGICAL_PX,
-    FOCUS_MINI_FILES_ICON_LOGICAL_PX, FOCUS_MINI_FILES_INDENT_LOGICAL_PX,
-    FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX, FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_PADDING_LOGICAL_PX,
-    FOCUS_MINI_RADIUS_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX,
-    FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX,
-    FOCUS_MINI_SEAM_LOGICAL_PX, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
-    PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX,
-    RAIL_GAP_LOGICAL_PX, RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX,
-    RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX, RAIL_LABEL_PADDING_TOP_LOGICAL_PX,
-    RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM, RAIL_NEW_CHEVRON_BOX_LOGICAL_PX,
-    RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX, RAIL_NEW_MARGIN_TOP_LOGICAL_PX,
-    RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_TOP_LOGICAL_PX,
-    RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX, RAIL_SEAM_INSET_X_LOGICAL_PX,
-    RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX, RAIL_SHADE_WIDTH_LOGICAL_PX,
-    RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX, RAIL_TAB_HEIGHT_LOGICAL_PX,
-    RAIL_TAB_PADDING_LEFT_LOGICAL_PX, RAIL_TAB_PADDING_RIGHT_LOGICAL_PX,
-    RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX, RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX,
-    SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX,
-    SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
-    SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX,
-    SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX, SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX,
-    SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX,
-    SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
+    FOCUS_CARD_CLOSE_BOX_LOGICAL_PX, FOCUS_CARD_CLOSE_RADIUS_LOGICAL_PX,
+    FOCUS_CARD_FONT_LOGICAL_PX, FOCUS_CARD_GAP_LOGICAL_PX, FOCUS_CARD_HEAD_GAP_LOGICAL_PX,
+    FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX, FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX,
+    FOCUS_CARD_PIN_BOX_LOGICAL_PX, FOCUS_CARD_RADIUS_LOGICAL_PX, FOCUS_CARD_WAIT_HALO_LOGICAL_PX,
+    FOCUS_CARD_WAIT_HALO_OPACITY, FOCUS_COLUMN_WIDTH_LOGICAL_PX, FOCUS_MINI_BORDER_LOGICAL_PX,
+    FOCUS_MINI_FILES_FONT_LOGICAL_PX, FOCUS_MINI_FILES_ICON_LOGICAL_PX,
+    FOCUS_MINI_FILES_INDENT_LOGICAL_PX, FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX,
+    FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_PADDING_LOGICAL_PX, FOCUS_MINI_RADIUS_LOGICAL_PX,
+    FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX,
+    FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, FOCUS_MINI_SEAM_LOGICAL_PX, OverlayQuad,
+    PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
+    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
+    RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
+    RAIL_NEW_CHEVRON_BOX_LOGICAL_PX, RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX,
+    RAIL_NEW_MARGIN_TOP_LOGICAL_PX, RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX,
+    RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX,
+    RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX,
+    RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
+    RAIL_TAB_PADDING_RIGHT_LOGICAL_PX, RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX,
+    RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX, SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX,
+    SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX,
+    SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX, SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX,
+    SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX,
+    SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
     SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX, SeatViewport, WINDOW_CAPTION_BUTTON_LOGICAL_PX,
-    WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX, WINDOW_CAPTION_GLYPH_LOGICAL_PX,
-    WINDOW_NEW_TAB_BOX_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX,
-    WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX, WINDOW_NEW_TAB_GLYPH_LOGICAL_PX,
-    WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX,
-    WINDOW_NEW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
-    WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX, WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX,
-    WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX, WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX,
-    WINDOW_TAB_CLOSE_BOX_LOGICAL_PX, WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX,
+    WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_BOX_LOGICAL_PX,
+    WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX,
+    WINDOW_NEW_TAB_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX,
+    WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX, WINDOW_NEW_TAB_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_BADGE_FONT_LOGICAL_PX, WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX,
+    WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX,
+    WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX, WINDOW_TAB_CLOSE_BOX_LOGICAL_PX,
     WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX, WINDOW_TAB_FONT_LOGICAL_PX,
     WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
     WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX, WINDOW_TAB_MIN_WIDTH_LOGICAL_PX,
@@ -2782,7 +2780,7 @@ const WINDOW_TAB_PIN_RADIUS_LOGICAL_PX: f32 = WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX
 /// state and a glyph that has to survive a 45° turn, and both cost silhouette.
 /// It is not the close button's twin and sizing it like one made it read as
 /// lint."
-const WINDOW_TAB_PIN_GLYPH_LOGICAL_PX: f32 = 13.0;
+pub const WINDOW_TAB_PIN_GLYPH_LOGICAL_PX: f32 = 13.0;
 /// `.tab .pin + .close { margin-left: -4px }` (mock-up 329-333), and the same
 /// -4px again on a lone `.pin.on` (353-357): "the trailing controls cluster
 /// tighter than the tab's 8px gap — that gap is right between the title and the
@@ -5440,17 +5438,61 @@ pub const PANE_HEAD_FILES_GLYPH_LOGICAL_PX: f32 = 13.0;
 pub const PANE_HEAD_FLOAT_GLYPH_LOGICAL_PX: f32 = 14.0;
 /// `.files-head .pane-float + .pane-close { margin-left: 6px }`.
 pub const PANE_HEAD_FLOAT_CLOSE_GAP_LOGICAL_PX: f32 = 6.0;
-/// `.panehead .pane-chev svg { width: 13px }` — the folder's size, because the
-/// two stand next to each other in the same run and a run of triggers that do
-/// not agree about their glyph size reads as a mistake rather than a set.
+/// **The box a mark in a head's run of controls is drawn in**, in device
+/// pixels — [`crate::icons::MarkSlot::CompactHead`], asked of the mark.
 ///
-/// The strip's own `⌄` is drawn at 9 (`.chevbtn svg`), and this is deliberately
-/// not that number. A chevron is a wide, short arrow: at 9 it would be a third
-/// the visual mass of the 13px folder standing beside it, and the run would read
-/// as one control and one smudge. The two chevrons agree about *behaviour*,
-/// which is what the ruling is about; they wear the size their own run wears,
-/// which is what every other glyph in this window does.
-pub const PANE_HEAD_CHEVRON_GLYPH_LOGICAL_PX: f32 = 13.0;
+/// This replaces two hand-picked numbers, and the pair is the user's 2026-08-25
+/// report. `.panehead .pane-chev svg { width: 13px }` was cut to the folder's
+/// own 13 on the argument that *"the two stand next to each other in the same
+/// run and a run of triggers that do not agree about their glyph size reads as a
+/// mistake rather than a set"* — the right argument, applied to the wrong
+/// number. Equal *boxes* are not equal marks:
+///
+/// * `#i-chev` is a `10×6` arrow, and a `10×6` arrow put in a 13×13 square is
+///   scaled by `min(13/10, 13/6)` — the width ratio, `1.3` — so it drew a `1.2`
+///   pen at **1.56** logical pixels.
+/// * `#i-close` beside it was struck in an 8px box, `0.8` of its ten-unit
+///   `viewBox`, so it drew a `1.0` pen at **0.80**.
+///
+/// 1.95× between two marks in one run of three, from two constants that were
+/// each reasonable on their own. The slot asks per mark instead: it fits the
+/// arrow at its own aspect and gives the two families the boxes that put the
+/// same ink on the head, so the run is one size by derivation rather than by
+/// two people agreeing on a number.
+fn compact_head_glyph_box(mark: ChromeMark, scale: f32) -> [f32; 2] {
+    let [width, height] = crate::icons::MarkSlot::CompactHead.mark_box_logical_px(mark);
+    [
+        (width * scale).round().max(1.0),
+        (height * scale).round().max(1.0),
+    ]
+}
+
+/// The box a mark in a head's run takes, in **logical** pixels and square —
+/// [`compact_head_glyph_box`]'s answer for the callers whose control is square
+/// and who scale it themselves.
+///
+/// **The `×` family's one number.** Before the icon block the same `#i-close`
+/// was struck at four sizes in four files — 8 on a tab, 8 on a toast, 8 on a
+/// focus card, 9 on a float's head, 10 in the title bar — which the 2026-08-25
+/// audit measured as `0.80 / 0.80 / 0.80 / 0.90 / 1.00` of pen for one drawing
+/// doing one job. None of that was a decision anybody made; it was five call
+/// sites each picking a number. The slot picks one, and the caption's own ten
+/// stays the caption's because that is where the family's box is *written*.
+pub fn compact_head_glyph_logical_px(mark: ChromeMark) -> f32 {
+    crate::icons::MarkSlot::CompactHead.mark_box_logical_px(mark)[0]
+}
+
+/// The box a title-bar control's glyph is drawn in, in logical pixels —
+/// [`crate::icons::MarkSlot::Caption`].
+///
+/// The caption is where the edge-to-edge family's box is *written* rather than
+/// derived (the slot's own number is theirs), so routing the run through the
+/// slot draws exactly what `bt_render::WINDOW_CAPTION_GLYPH_LOGICAL_PX` always
+/// drew — which is the point: the number stops being a constant three call
+/// sites happen to share and becomes the slot the design names.
+fn caption_glyph_logical_px(mark: ChromeMark) -> f32 {
+    crate::icons::MarkSlot::Caption.mark_box_logical_px(mark)[0]
+}
 /// `.tab:hover .tab-files { opacity: .6 }` — the middle rung of the tab's own
 /// reveal ladder (H76/H104).
 pub const TAB_FILES_TRIGGER_REVEAL: f32 = 0.6;
@@ -7564,7 +7606,7 @@ pub fn build_chrome_for_tabs(
                     .flatten();
                 if let Some(box_) = zoom_mark {
                     pane_sprites.push(ChromeSprite::new(
-                        ChromeMark::PaneZoom { zoomed: true },
+                        crate::icons::ActionIcon::ZoomPane.engaged(true),
                         box_,
                         palette.accent,
                     ));
@@ -7612,7 +7654,8 @@ pub fn build_chrome_for_tabs(
                             // "this dropdown is expanded" tell — and it is the
                             // same rotating glyph the `˅` beside the `+` uses,
                             // not a second arrow.
-                            ChromeMark::chevron(f32::from(u8::from(menu_open))),
+                            crate::icons::ActionIcon::PickProfile
+                                .turned(f32::from(u8::from(menu_open))),
                             [
                                 chevron_left,
                                 chevron_top,
@@ -7767,12 +7810,23 @@ pub fn build_chrome_for_tabs(
                             palette.pane_close_pill,
                         ));
                     }
-                    let glyph = (SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX * scale).round().max(1.0);
-                    let glyph_left = ((close[0] + close[2] - glyph) / 2.0).round();
-                    let glyph_top = ((close[1] + close[3] - glyph) / 2.0).round();
+                    // **The head's own slot, not this control's own number.**
+                    // The `×` was struck at 8 while the `⌄` two boxes along was
+                    // struck at 13, and the two are the third and first mark of
+                    // one run: the user's 2026-08-25 report was that the run
+                    // reads as three weights, and the audit measured 1.56
+                    // against 0.80. One slot, asked per mark, is the whole fix.
+                    let [glyph_w, glyph_h] = compact_head_glyph_box(ChromeMark::PaneClose, scale);
+                    let glyph_left = ((close[0] + close[2] - glyph_w) / 2.0).round();
+                    let glyph_top = ((close[1] + close[3] - glyph_h) / 2.0).round();
                     pane_sprites.push(ChromeSprite::new(
                         ChromeMark::PaneClose,
-                        [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
+                        [
+                            glyph_left,
+                            glyph_top,
+                            glyph_left + glyph_w,
+                            glyph_top + glyph_h,
+                        ],
                         // `color: var(--ink3)` at rest, `--ink` under the
                         // pointer — and under the pointer there is always the
                         // pill this pass has just drawn, never the bare head.
@@ -7823,28 +7877,46 @@ pub fn build_chrome_for_tabs(
                                 // button, so an arrow that swung to 180° would be
                                 // pointing away from its own list as often as at
                                 // it.
-                                ChromeMark::Chevron { turned_degrees: 0 },
-                                PANE_HEAD_CHEVRON_GLYPH_LOGICAL_PX,
+                                crate::icons::ActionIcon::OpenPaneMenu.mark(),
+                                compact_head_glyph_box(
+                                    crate::icons::ActionIcon::OpenPaneMenu.mark(),
+                                    scale,
+                                ),
                             )
                         }),
                         head.files.map(|box_| {
                             (
                                 box_,
                                 ChromeTarget::PaneFiles(placement.id),
-                                ChromeMark::Folder,
-                                PANE_HEAD_FILES_GLYPH_LOGICAL_PX,
+                                crate::icons::ActionIcon::OpenFilesPane.mark(),
+                                compact_head_glyph_box(
+                                    crate::icons::ActionIcon::OpenFilesPane.mark(),
+                                    scale,
+                                ),
                             )
                         }),
                         head.float.map(|box_| {
                             (
                                 box_,
                                 ChromeTarget::PaneFloat(placement.id),
-                                ChromeMark::Float,
-                                PANE_HEAD_FLOAT_GLYPH_LOGICAL_PX,
+                                crate::icons::ActionIcon::FloatFilesPane.mark(),
+                                // **Not the slot**: the mock-up strikes this one
+                                // a pixel above the folder beside it and says
+                                // why — "the float glyph is an outline with a
+                                // gap in it, and an outline needs a little more
+                                // room than a solid to read at the same weight".
+                                // That is a fill-against-stroke judgement the
+                                // slot's ink ratio does not model, and it is on
+                                // a files head rather than in the run the
+                                // 2026-08-25 report was about.
+                                [
+                                    (PANE_HEAD_FLOAT_GLYPH_LOGICAL_PX * scale).round().max(1.0),
+                                    (PANE_HEAD_FLOAT_GLYPH_LOGICAL_PX * scale).round().max(1.0),
+                                ],
                             )
                         }),
                     ];
-                    for (box_, target, glyph_mark, glyph_logical_px) in
+                    for (box_, target, glyph_mark, [glyph_w, glyph_h]) in
                         triggers.into_iter().flatten()
                     {
                         let lit = pointer.hover == Some(target);
@@ -7860,12 +7932,16 @@ pub fn build_chrome_for_tabs(
                                 palette.pane_close_pill,
                             ));
                         }
-                        let glyph = (glyph_logical_px * scale).round().max(1.0);
-                        let glyph_left = ((box_[0] + box_[2] - glyph) / 2.0).round();
-                        let glyph_top = ((box_[1] + box_[3] - glyph) / 2.0).round();
+                        let glyph_left = ((box_[0] + box_[2] - glyph_w) / 2.0).round();
+                        let glyph_top = ((box_[1] + box_[3] - glyph_h) / 2.0).round();
                         let mut mark = ChromeSprite::new(
                             glyph_mark,
-                            [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
+                            [
+                                glyph_left,
+                                glyph_top,
+                                glyph_left + glyph_w,
+                                glyph_top + glyph_h,
+                            ],
                             // `color: var(--ink3)` rising to `var(--accent)` —
                             // and the accent is opaque in both themes, so unlike
                             // every ink around it there is nothing to pre-mix.
@@ -8360,7 +8436,7 @@ pub fn build_chrome_for_tabs(
                     if let Some(folder) = pane_ghost_folder_geometry(ghost_box, scale) {
                         door(
                             folder,
-                            ChromeMark::Folder,
+                            crate::icons::ActionIcon::OpenFilesPane.mark(),
                             PANE_GHOST_FOLDER_GLYPH_LOGICAL_PX,
                             PANE_GHOST_FOLDER_GLYPH_LOGICAL_PX,
                             pointer.hover == Some(ChromeTarget::PaneFiles(placement.id)),
@@ -8373,7 +8449,7 @@ pub fn build_chrome_for_tabs(
                         // the button and can land above, below or beside it, so
                         // an arrow swung to 180° would point away from its own
                         // list as often as at it.
-                        ChromeMark::Chevron { turned_degrees: 0 },
+                        crate::icons::ActionIcon::OpenPaneMenu.mark(),
                         PANE_GHOST_GLYPH_WIDTH_LOGICAL_PX,
                         PANE_GHOST_GLYPH_HEIGHT_LOGICAL_PX,
                         // Lit by the pointer being on it **or** by its own menu
@@ -9043,27 +9119,31 @@ fn window_chrome(
         }
     }
 
-    // `.capbtn`: a 46x40 box, a 10px glyph, and 14px for the gear alone.
+    // `.capbtn`: a 46x40 box, the caption slot's glyph, and 14px for the gear
+    // alone — the one foreign drawing in this run (a Material 24-unit fill,
+    // which the user's 2026-08-26 ruling keeps as it is), so it keeps the box
+    // the mock-up measured it at rather than taking a slot cut for the house's
+    // own line marks.
     let buttons = [
         (
             ChromeTarget::Settings,
-            ChromeMark::Gear,
+            crate::icons::ActionIcon::OpenSettings.mark(),
             WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
         ),
         (
             ChromeTarget::Minimize,
-            ChromeMark::WindowMinimize,
-            WINDOW_CAPTION_GLYPH_LOGICAL_PX,
+            crate::icons::ActionIcon::MinimiseWindow.mark(),
+            caption_glyph_logical_px(crate::icons::ActionIcon::MinimiseWindow.mark()),
         ),
         (
             ChromeTarget::Maximize,
-            ChromeMark::WindowMaximize,
-            WINDOW_CAPTION_GLYPH_LOGICAL_PX,
+            crate::icons::ActionIcon::MaximiseWindow.mark(),
+            caption_glyph_logical_px(crate::icons::ActionIcon::MaximiseWindow.mark()),
         ),
         (
             ChromeTarget::CloseWindow,
-            ChromeMark::WindowClose,
-            WINDOW_CAPTION_GLYPH_LOGICAL_PX,
+            crate::icons::ActionIcon::CloseWindow.mark(),
+            caption_glyph_logical_px(crate::icons::ActionIcon::CloseWindow.mark()),
         ),
     ];
     for (index, (target, mark, glyph_logical_px)) in buttons.into_iter().enumerate() {
@@ -9613,7 +9693,7 @@ fn window_tab_strip(
                 // and the glyph waits instead of spilling over the title.
                 if files[2] - files[0] >= glyph && within_strip(viewport, glyph_rect) {
                     let mut mark = ChromeSprite::new(
-                        ChromeMark::Folder,
+                        crate::icons::ActionIcon::OpenFilesPane.mark(),
                         glyph_rect,
                         // `.tab-files { color: var(--ink3) }` rising to
                         // `var(--accent)` under the pointer — and the accent is
@@ -9749,7 +9829,10 @@ fn window_tab_strip(
                     },
                 ));
             }
-            let glyph = (WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+            let glyph = (compact_head_glyph_logical_px(crate::icons::ActionIcon::CloseTab.mark())
+                * scale)
+                .round()
+                .max(1.0);
             let glyph_left = ((close[0] + close[2] - glyph) / 2.0).round();
             let glyph_top = ((close[1] + close[3] - glyph) / 2.0).round();
             let glyph_rect = [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph];
@@ -9757,7 +9840,7 @@ fn window_tab_strip(
                 continue;
             }
             sprites.push(ChromeSprite::new(
-                ChromeMark::TabClose,
+                crate::icons::ActionIcon::CloseTab.mark(),
                 glyph_rect,
                 // One declaration, five grounds — and the glyph has to answer to
                 // the one under it for the same reason its pill does, six lines
@@ -9815,7 +9898,7 @@ fn window_tab_strip(
     let plus_rect = [plus_left, plus_top, plus_left + plus, plus_top + plus];
     if within_strip(viewport, plus_rect) {
         sprites.push(ChromeSprite::new(
-            ChromeMark::Plus,
+            crate::icons::ActionIcon::NewTab.mark(),
             plus_rect,
             if new_hovered {
                 palette.title_text_hover
@@ -9847,7 +9930,7 @@ fn window_tab_strip(
     // does not grow and the `+` beside it does not move.
     if within_strip(viewport, chevron_rect) {
         sprites.push(ChromeSprite::new(
-            ChromeMark::chevron(chevron_turn),
+            crate::icons::ActionIcon::PickProfile.turned(chevron_turn),
             chevron_rect,
             if menu_hovered || profile_menu_open {
                 palette.title_text_hover
@@ -9886,7 +9969,7 @@ const WINDOW_PANEL_TOGGLE_RADIUS_LOGICAL_PX: f32 = 6.0;
 /// `.panel-toggle svg { width: 14px; height: 14px }` (mock-up 915) — the gear's
 /// glyph size rather than the 10px the other caption marks wear, and the
 /// mock-up sets them from the same hand.
-const WINDOW_PANEL_TOGGLE_GLYPH_LOGICAL_PX: f32 = 14.0;
+pub const WINDOW_PANEL_TOGGLE_GLYPH_LOGICAL_PX: f32 = 14.0;
 /// `.titlebar .drag { gap: 8px }` (mock-up 181) — what stands between the
 /// toggle and the name beside it.
 const WINDOW_TITLE_DRAG_GAP_LOGICAL_PX: f32 = 8.0;
@@ -10613,7 +10696,7 @@ fn rail_chrome(
                 ];
                 if files[2] - files[0] >= glyph_size && in_list(glyph_rect) {
                     let mut mark = ChromeSprite::new(
-                        ChromeMark::Folder,
+                        crate::icons::ActionIcon::OpenFilesPane.mark(),
                         glyph_rect,
                         if files_hovered {
                             palette.accent
@@ -10672,7 +10755,7 @@ fn rail_chrome(
                 let glyph_size = ((if is_pin {
                     WINDOW_TAB_PIN_GLYPH_LOGICAL_PX
                 } else {
-                    WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX
+                    compact_head_glyph_logical_px(crate::icons::ActionIcon::CloseTab.mark())
                 }) * scale)
                     .round()
                     .max(1.0);
@@ -10731,7 +10814,7 @@ fn rail_chrome(
                         // pin this"), filled is the state ("it is pinned").
                         ChromeMark::Pin { filled: pinned }
                     } else {
-                        ChromeMark::TabClose
+                        crate::icons::ActionIcon::CloseTab.mark()
                     },
                     glyph_rect,
                     ink,
@@ -10793,7 +10876,7 @@ fn rail_chrome(
     // leaves it standing on the terminal.
     if in_panel(plus_rect) {
         sprites.push(ChromeSprite::new(
-            ChromeMark::Plus,
+            crate::icons::ActionIcon::NewTab.mark(),
             plus_rect,
             if new_hovered {
                 palette.title_text_hover
@@ -10856,7 +10939,7 @@ fn rail_chrome(
         ];
         if in_panel(chevron_rect) {
             let mut chevron = ChromeSprite::new(
-                ChromeMark::chevron(chevron_turn),
+                crate::icons::ActionIcon::PickProfile.turned(chevron_turn),
                 chevron_rect,
                 if menu_hovered || profile_menu_open {
                     palette.title_text_hover
@@ -11424,11 +11507,14 @@ fn focus_rail_chrome(
                     },
                 ));
             }
-            let glyph = (FOCUS_CARD_CLOSE_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+            let glyph = (compact_head_glyph_logical_px(crate::icons::ActionIcon::CloseTab.mark())
+                * scale)
+                .round()
+                .max(1.0);
             let glyph_left = ((card.close[0] + card.close[2] - glyph) / 2.0).round();
             let glyph_top = ((card.close[1] + card.close[3] - glyph) / 2.0).round();
             sprites.push(ChromeSprite::new(
-                ChromeMark::TabClose,
+                crate::icons::ActionIcon::CloseTab.mark(),
                 [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
                 if close_hovered {
                     if staged {
@@ -11476,7 +11562,7 @@ fn focus_rail_chrome(
     let plus_left = (plus_slot_left + (mark_size - plus) / 2.0).round();
     let plus_top = ((geometry.new_tab[1] + geometry.new_tab[3] - plus) / 2.0).round();
     sprites.push(ChromeSprite::new(
-        ChromeMark::Plus,
+        crate::icons::ActionIcon::NewTab.mark(),
         [plus_left, plus_top, plus_left + plus, plus_top + plus],
         if new_hovered {
             palette.title_text_hover
@@ -11520,7 +11606,7 @@ fn focus_rail_chrome(
     let chevron_top =
         ((geometry.new_tab_menu[1] + geometry.new_tab_menu[3] - chevron_height) / 2.0).round();
     sprites.push(ChromeSprite::new(
-        ChromeMark::chevron(chevron_turn),
+        crate::icons::ActionIcon::PickProfile.turned(chevron_turn),
         [
             chevron_left,
             chevron_top,
@@ -11921,9 +12007,9 @@ fn focus_mini_seat_content(
                         // files row already draw. A third glyph invented for
                         // the card would be the card speaking a dialect.
                         if entry.directory {
-                            ChromeMark::Folder
+                            crate::icons::ActionIcon::FolderObject.mark()
                         } else {
-                            ChromeMark::File
+                            crate::icons::ActionIcon::FileObject.mark()
                         },
                         clip_to_list(icon_rect),
                         palette.focus_mini_text,
@@ -12408,10 +12494,13 @@ pub const PREVIEW_NAME_FONT_LOGICAL_PX: f32 = 12.5;
 /// `.pv-dirty { width: 12px }` — **reserved space, so appearing doesn't shove the
 /// name** (P16). The width is spent whether or not there is a dot to put in it.
 pub const PREVIEW_DIRTY_SLOT_LOGICAL_PX: f32 = 12.0;
-/// `.pv-dirty { font-size: 13px }`.
-pub const PREVIEW_DIRTY_FONT_LOGICAL_PX: f32 = 13.0;
-/// `●` — the dot itself, shared with the switcher's rows so the two cannot drift.
-pub const PREVIEW_DIRTY_DOT: &str = "\u{25cf}";
+// `.pv-dirty { font-size: 13px }` and the `●` it set are **gone** (icon block
+// P0). The mock-up printed a codepoint, and a codepoint's diameter is a fact
+// about the installed font rather than about this design — the three heads that
+// drew it set it at 13, 13 and 9, which is two diameters for one claim before
+// any font gets a say. The dot is geometry now: `marks::dirty_dot_sprite`,
+// struck at `marks::DIRTY_DOT_LOGICAL_PX` on `status_dot_sprite`'s own path.
+// The slot above stays, because the *reserved space* is still the mock-up's.
 /// `.pv-tool { width: 22px; height: 22px }` (P20) — larger than the `×`'s 17 and
 /// the files head's 19, and the mock-up means all three.
 pub const PREVIEW_TOOL_BOX_LOGICAL_PX: f32 = 22.0;
@@ -12425,7 +12514,16 @@ pub const PREVIEW_TOOL_GLYPH_LOGICAL_PX: f32 = 13.0;
 pub const PREVIEW_TOOL_REVEAL: f32 = PANE_HEAD_TRIGGER_REVEAL;
 /// `.pv-nav svg { width: 11px; height: 11px }` — the three navigation buttons
 /// carry a smaller glyph than the tools beside them, in the same 22px box.
-pub const PREVIEW_NAV_GLYPH_LOGICAL_PX: f32 = 11.0;
+///
+/// **Twelve, not eleven, since the icon block.** The mock-up's sentence is
+/// *smaller than the tools*, and twelve is still smaller than the tools'
+/// thirteen; what eleven cost was the run's own reload button, whose `#i-refresh`
+/// came out at `0.894` of a logical pixel — the thinnest ink in the head, and
+/// under the band the house holds its pens to. Twelve is
+/// [`crate::icons::MarkSlot::CompactHead`], which is what a run of head controls
+/// is, and it puts the same button at `0.975`.
+pub const PREVIEW_NAV_GLYPH_LOGICAL_PX: f32 =
+    crate::icons::MarkSlot::CompactHead.house_box_logical_px();
 /// `.preview-head .pv-tool.pv-nav { opacity: .7 }` — **the resting opacity of a
 /// resident control** (§7.7 ②).
 ///
@@ -14985,9 +15083,9 @@ pub(crate) fn push_files_tree(
                 if wholly_inside(icon_rect) {
                     sprites.push(ChromeSprite::new(
                         if open {
-                            ChromeMark::FolderOpen
+                            crate::icons::ActionIcon::OpenFolderObject.mark()
                         } else {
-                            ChromeMark::Folder
+                            crate::icons::ActionIcon::FolderObject.mark()
                         },
                         icon_rect,
                         palette.accent,
@@ -15007,7 +15105,7 @@ pub(crate) fn push_files_tree(
                 ];
                 if wholly_inside(icon_rect) {
                     sprites.push(ChromeSprite::new(
-                        ChromeMark::Folder,
+                        crate::icons::ActionIcon::FolderObject.mark(),
                         icon_rect,
                         palette.files_row_muted,
                     ));
@@ -15022,7 +15120,11 @@ pub(crate) fn push_files_tree(
                     middle(icon) + icon,
                 ];
                 if wholly_inside(icon_rect) {
-                    sprites.push(ChromeSprite::new(ChromeMark::File, icon_rect, muted));
+                    sprites.push(ChromeSprite::new(
+                        crate::icons::ActionIcon::FileObject.mark(),
+                        icon_rect,
+                        muted,
+                    ));
                 }
             }
         }
@@ -15185,7 +15287,8 @@ fn push_preview_head(
             ChromeSprite::new(
                 // Turned over while the menu is up: the same rotating glyph the
                 // files root and the `+` already use, not a second arrow.
-                ChromeMark::chevron(f32::from(u8::from(content.menu_open))),
+                crate::icons::ActionIcon::PickProfile
+                    .turned(f32::from(u8::from(content.menu_open))),
                 chevron,
                 palette.pane_title,
             )
@@ -15227,20 +15330,20 @@ fn push_preview_head(
         });
     }
     // ── the dot, in the slot that was reserved whether or not it is there ────
+    //
+    // **Geometry and not a codepoint** (icon block P0). It was `●` U+25CF set at
+    // the head's own font size, which made its diameter a fact about whichever
+    // face the machine happens to have — the thing R4 refused for `⎇` when it
+    // ruled that "a codepoint is not a drawing" — and it was drawn two hundred
+    // pixels from a status dot that is already a circle this module strikes.
+    // One dot means one thing, so it is now one drawing: see
+    // `marks::dirty_dot_sprite`, which is `status_dot_sprite`'s own path.
     if content.dirty {
-        labels.push(ChromeLabel {
-            mono: false,
-            text: PREVIEW_DIRTY_DOT.to_owned(),
-            rect: geometry.dirty,
-            font_size_px: PREVIEW_DIRTY_FONT_LOGICAL_PX * scale,
-            color: palette.accent,
-            align_right: false,
-            align_center: true,
-            letter_spacing_em: 0.0,
-            weight: ChromeLabelWeight::Regular,
-            tabular_numerals: false,
-            clip: None,
-        });
+        sprites.push(crate::marks::dirty_dot_sprite(
+            geometry.dirty,
+            palette.accent,
+            scale,
+        ));
     }
     // ── the tools ───────────────────────────────────────────────────────────
     // A free function and not a closure, for the reason the `nav` painter below
@@ -15307,7 +15410,7 @@ fn push_preview_head(
         palette,
         geometry.save,
         ChromeTarget::PreviewSave(seat),
-        ChromeMark::Save,
+        crate::icons::ActionIcon::SavePreview.mark(),
         false,
     );
     tool(
@@ -15320,9 +15423,9 @@ fn push_preview_head(
         ChromeTarget::PreviewFlip(seat),
         // The glyph names where the press takes you, not where you are.
         if content.flip_to_source {
-            ChromeMark::Code
+            crate::icons::ActionIcon::ViewSource.mark()
         } else {
-            ChromeMark::Eye
+            crate::icons::ActionIcon::ViewRendered.mark()
         },
         false,
     );
@@ -15343,7 +15446,7 @@ fn push_preview_head(
         // `#i-code` — the same glyph markdown's `Edit source` wears, and the
         // same sentence: what is behind this is the thing itself rather than a
         // rendering of it.
-        ChromeMark::Code,
+        crate::icons::ActionIcon::OpenDevTools.mark(),
         false,
     );
     tool(
@@ -15357,7 +15460,7 @@ fn push_preview_head(
         // `#i-float` — a frame with an arrow leaving through its corner, the
         // standard "opens outside this frame" idiom, and the same glyph the files
         // head's own pop-out wears. One verb, one drawing.
-        ChromeMark::Float,
+        crate::icons::ActionIcon::FloatPreview.mark(),
         false,
     );
     tool(
@@ -15372,11 +15475,9 @@ fn push_preview_head(
         // the tab's and the menu row's — both mean "this one stays in the
         // list"; this one means "do not reuse this pane", and it was wearing
         // their word and their drawing within reach of one of them.
-        ChromeMark::Lock {
-            // Fluent 2's fill axis, which the shackle says a second time:
-            // regular and open is the action, filled and shut is the state.
-            engaged: content.locked,
-        },
+        // Fluent 2's fill axis, which the shackle says a second time: regular
+        // and open is the action, filled and shut is the state.
+        crate::icons::ActionIcon::LockPreview.engaged(content.locked),
         content.locked,
     );
 }
@@ -15467,7 +15568,14 @@ pub(crate) fn push_preview_rail(
         box_: Option<[f32; 4]>,
         part: PreviewRailPart,
         mark: ChromeMark,
-        glyph_px: f32,
+        // `run_px` is the run's box for a **house** mark, in logical pixels.
+        // What this mark actually gets is derived from it the way a slot
+        // derives one: the edge-to-edge family takes the ink ratio of it, and a
+        // drawing that is not square keeps its own aspect. Derived here rather
+        // than at the nine call sites for the reason the compact head's own run
+        // has it — a `10×6` arrow handed a square box is scaled by its *width*,
+        // and that is the half of the pane head's 1.95× no pen explains.
+        run_px: f32,
         live: bool,
     ) {
         let Some(box_) = box_ else {
@@ -15485,12 +15593,29 @@ pub(crate) fn push_preview_rail(
                 palette.pane_close_pill,
             ));
         }
-        let glyph = (glyph_px * scale).round().max(1.0);
-        let left = ((box_[0] + box_[2] - glyph) / 2.0).round();
-        let top = ((box_[1] + box_[3] - glyph) / 2.0).round();
+        let across = if mark.draws_edge_to_edge() {
+            run_px * crate::marks::HOUSE_INK_RATIO
+        } else {
+            run_px
+        };
+        let (glyph_w, glyph_h) = match mark.view_box_units() {
+            Some([view_w, view_h]) => {
+                let fitted = across * scale / view_w.max(view_h);
+                (
+                    (view_w * fitted).round().max(1.0),
+                    (view_h * fitted).round().max(1.0),
+                )
+            }
+            None => {
+                let square = (across * scale).round().max(1.0);
+                (square, square)
+            }
+        };
+        let left = ((box_[0] + box_[2] - glyph_w) / 2.0).round();
+        let top = ((box_[1] + box_[3] - glyph_h) / 2.0).round();
         let mut sprite = ChromeSprite::new(
             mark,
-            [left, top, left + glyph, top + glyph],
+            [left, top, left + glyph_w, top + glyph_h],
             if lit {
                 palette.pane_close_glyph_on_pill
             } else {
@@ -15518,7 +15643,7 @@ pub(crate) fn push_preview_rail(
                 PreviewRailPart::Back,
                 // `#i-chev` turned a quarter — this window has one directional
                 // glyph, and the sentence travelled down here with the buttons.
-                ChromeMark::Chevron { turned_degrees: 90 },
+                crate::icons::ActionIcon::NavigateBack.mark(),
                 PREVIEW_RAIL_NAV_GLYPH_LOGICAL_PX,
                 content.web.can_go_back,
             );
@@ -15529,9 +15654,7 @@ pub(crate) fn push_preview_rail(
                 palette,
                 geometry.forward,
                 PreviewRailPart::Forward,
-                ChromeMark::Chevron {
-                    turned_degrees: 270,
-                },
+                crate::icons::ActionIcon::NavigateForward.mark(),
                 PREVIEW_RAIL_NAV_GLYPH_LOGICAL_PX,
                 content.web.can_go_forward,
             );
@@ -15545,9 +15668,9 @@ pub(crate) fn push_preview_rail(
                 // One button, two glyphs: while a navigation is in flight the
                 // reload is a stop.
                 if content.web.loading {
-                    ChromeMark::PaneClose
+                    crate::icons::ActionIcon::StopNavigating.mark()
                 } else {
-                    ChromeMark::Refresh
+                    crate::icons::ActionIcon::ReloadPage.mark()
                 },
                 PREVIEW_RAIL_NAV_GLYPH_LOGICAL_PX,
                 true,
@@ -15559,7 +15682,7 @@ pub(crate) fn push_preview_rail(
                 palette,
                 geometry.copy,
                 PreviewRailPart::Copy,
-                ChromeMark::Copy,
+                crate::icons::ActionIcon::CopyAddress.mark(),
                 PREVIEW_RAIL_GLYPH_LOGICAL_PX,
                 true,
             );
@@ -15573,7 +15696,7 @@ pub(crate) fn push_preview_rail(
                 // `#i-external` — the head's own arrow, moved (user ruling
                 // 2026-08-24, second round): 「在浏览器打开」 is a verb about the
                 // address, so it stands on the address's row.
-                ChromeMark::External,
+                crate::icons::ActionIcon::OpenInBrowser.mark(),
                 PREVIEW_RAIL_GLYPH_LOGICAL_PX,
                 true,
             );
@@ -15828,9 +15951,9 @@ pub(crate) fn push_preview_rail(
                 geometry.flip,
                 PreviewRailPart::Flip,
                 if content.flip_to_source {
-                    ChromeMark::Code
+                    crate::icons::ActionIcon::ViewSource.mark()
                 } else {
-                    ChromeMark::Eye
+                    crate::icons::ActionIcon::ViewRendered.mark()
                 },
                 PREVIEW_RAIL_GLYPH_LOGICAL_PX,
                 true,
@@ -15842,7 +15965,7 @@ pub(crate) fn push_preview_rail(
                 palette,
                 geometry.copy,
                 PreviewRailPart::Copy,
-                ChromeMark::Copy,
+                crate::icons::ActionIcon::CopyAddress.mark(),
                 PREVIEW_RAIL_GLYPH_LOGICAL_PX,
                 true,
             );
@@ -15894,7 +16017,7 @@ pub(crate) fn push_preview_rail(
                 ChromeSprite::new(
                     // The same rotating glyph the files root, the `+` and the
                     // preview head's own switcher use — not a second arrow.
-                    ChromeMark::chevron(0.0),
+                    crate::icons::ActionIcon::PickProfile.mark(),
                     pixel_snapped([
                         open[2] - pad - chevron_width,
                         middle - chevron_height / 2.0,
@@ -16136,7 +16259,7 @@ fn push_files_foot(
     };
     sprites.push(ChromeSprite::new(
         if revealed {
-            ChromeMark::Check
+            crate::icons::ActionIcon::MenuTick.mark()
         } else if strip.is_some_and(|strip| strip.web) {
             // `#i-globe`, or the site's own icon — **the same mark this seat
             // wears on its head, because the band is naming the same thing the
@@ -16146,7 +16269,7 @@ fn push_files_foot(
                 favicon: strip.and_then(|strip| strip.favicon),
             }
         } else {
-            ChromeMark::FolderOpen
+            crate::icons::ActionIcon::OpenFolderObject.mark()
         },
         geometry.foot_mark,
         ink,
@@ -17381,24 +17504,25 @@ pub(crate) fn pane_mark(
     content: Option<ChromeMark>,
     palette: bt_render::ChromePalette,
 ) -> (ChromeMark, f32, [u8; 3]) {
+    use crate::icons::ActionIcon;
     match kind {
         SeatKind::Terminal => (
-            content.unwrap_or(ChromeMark::Panel),
+            content.unwrap_or_else(|| ActionIcon::UnknownSeat.mark()),
             PANE_HEAD_PROFILE_MARK_LOGICAL_PX,
             palette.accent,
         ),
         SeatKind::Files => (
-            ChromeMark::Folder,
+            ActionIcon::FilesSeat.mark(),
             PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
             palette.accent,
         ),
         SeatKind::Preview => (
-            content.unwrap_or(ChromeMark::File),
+            content.unwrap_or_else(|| ActionIcon::PreviewSeat.mark()),
             PANE_HEAD_FILE_MARK_LOGICAL_PX,
             palette.accent,
         ),
         SeatKind::Placeholder => (
-            ChromeMark::Panel,
+            ActionIcon::UnknownSeat.mark(),
             PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
             palette.body_hint_text,
         ),
@@ -17991,9 +18115,18 @@ mod tests {
             );
             let expected = [
                 (ChromeMark::Gear, WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX),
-                (ChromeMark::WindowMinimize, WINDOW_CAPTION_GLYPH_LOGICAL_PX),
-                (ChromeMark::WindowMaximize, WINDOW_CAPTION_GLYPH_LOGICAL_PX),
-                (ChromeMark::WindowClose, WINDOW_CAPTION_GLYPH_LOGICAL_PX),
+                (
+                    ChromeMark::WindowMinimize,
+                    caption_glyph_logical_px(ChromeMark::WindowMinimize),
+                ),
+                (
+                    ChromeMark::WindowMaximize,
+                    caption_glyph_logical_px(ChromeMark::WindowMaximize),
+                ),
+                (
+                    ChromeMark::WindowClose,
+                    caption_glyph_logical_px(ChromeMark::WindowClose),
+                ),
             ];
             let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
             let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
@@ -19133,14 +19266,20 @@ mod tests {
                 .rect
         };
         assert_eq!(name_box(clean), name_box(dirty));
-        let (_, labels, _) = preview_chrome(dirty, ChromePointer::default());
-        let dot = labels
-            .iter()
-            .find(|label| label.text == PREVIEW_DIRTY_DOT)
-            .expect("a dirty buffer wears its dot");
-        assert_eq!(dot.color, chrome_palette().accent);
-        let (_, labels, _) = preview_chrome(clean, ChromePointer::default());
-        assert!(!labels.iter().any(|label| label.text == PREVIEW_DIRTY_DOT));
+        // The dot is a drawing rather than a `●`, so it is read back off the
+        // sprites: a filled pill of the status dot's own diameter, in the
+        // accent, inside the slot the head reserved for it.
+        let dot_in = |content| {
+            let (_, _, sprites) = preview_chrome(content, ChromePointer::default());
+            sprites.into_iter().find(|sprite| {
+                matches!(sprite.mark, crate::marks::ChromeMark::ControlPill { .. })
+                    && sprite.color == chrome_palette().accent
+                    && sprite.rect[2] - sprite.rect[0] == crate::marks::DIRTY_DOT_LOGICAL_PX
+            })
+        };
+        let dot = dot_in(dirty).expect("a dirty buffer wears its dot");
+        assert_eq!(dot.rect[2] - dot.rect[0], dot.rect[3] - dot.rect[1]);
+        assert!(dot_in(clean).is_none());
     }
 
     /// PIN (P18/P19/P23) — **the name becomes a control only when there is
@@ -25766,7 +25905,8 @@ mod tests {",
             let glyph = (WINDOW_TAB_PIN_GLYPH_LOGICAL_PX * scale).round();
             assert_ne!(
                 glyph,
-                (WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX * scale).round(),
+                (compact_head_glyph_logical_px(crate::icons::ActionIcon::CloseTab.mark()) * scale)
+                    .round(),
                 "scale {scale}: the pin is not the close button's twin"
             );
             let pin_sprite = |sprites: &[ChromeSprite], filled: bool| {
@@ -26990,7 +27130,9 @@ mod tests {",
         // silently re-read as the leading 12 and nothing noticed.
         assert_eq!(SEAT_PANE_CLOSE_BOX_LOGICAL_PX, 17.0);
         assert_eq!(SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX, 4.0);
-        assert_eq!(SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX, 8.0);
+        // The glyph inside it is no longer this control's own number: it is the
+        // compact head's slot, asked per mark, which is what put the run's three
+        // marks at one weight (icon block P0).
         assert_eq!(SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX, 6.0);
         assert_ne!(
             SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
@@ -27132,7 +27274,6 @@ mod tests {",
         // reads them: an expectation derived from the value under test is a
         // tautology.
         assert_eq!(PANE_HEAD_TRIGGER_BOX_LOGICAL_PX, 19.0);
-        assert_eq!(PANE_HEAD_CHEVRON_GLYPH_LOGICAL_PX, 13.0);
 
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let rect = device_rect_of(&layout, terminal);

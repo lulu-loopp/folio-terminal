@@ -123,7 +123,7 @@ const ROW_MARK_COLUMN_LOGICAL_PX: f32 = 15.0;
 /// `.restore-list .pmark { width: 14px; height: 14px }` — R196. One pixel
 /// narrower than its column, and centred in it, exactly as the flex box centres
 /// it.
-const ROW_MARK_LOGICAL_PX: f32 = 14.0;
+pub const ROW_MARK_LOGICAL_PX: f32 = 14.0;
 /// `.restore-list .rcwd { font-size: 11.5px }`.
 pub const ROW_CWD_FONT_LOGICAL_PX: f32 = 11.5;
 /// The 11.5px line box, measured in the mock-up.

@@ -369,13 +369,13 @@ const MENU_ACT_GAP_LOGICAL_PX: f32 = 1.0;
 const MENU_ACT_INSET_LOGICAL_PX: f32 = 12.0;
 /// `.ci-act { border-radius: 4px }`, the ground one wears under the pointer.
 const MENU_ACT_RADIUS_LOGICAL_PX: f32 = 4.0;
-/// `.combo-item .ci-act svg { width: 12px }` — the pencil, drawn on a 16 viewBox
-/// with its ink inside the margins.
-const MENU_EDIT_MARK_LOGICAL_PX: f32 = 12.0;
-/// `.combo-item .ci-del svg { width: 10px }` — the ×, drawn on a 10 viewBox with
-/// its ink corner to corner. Two numbers and one optical size: at one width the
-/// × came out both larger and heavier than the mark beside it.
-const MENU_DELETE_MARK_LOGICAL_PX: f32 = 10.0;
+// `.combo-item .ci-act svg { width: 12px }` and `.ci-del svg { width: 10px }` —
+// **two numbers and one optical size**, which is the compact head slot's whole
+// derivation arrived at by hand on one row: the pencil is drawn on a sixteen
+// with its ink inside the margins and the × on a ten corner to corner, so at one
+// width the × came out both larger and heavier than the mark beside it. The slot
+// answers the same question for the whole chrome now — see
+// `seats::compact_head_glyph_logical_px`, whose house box is that same twelve.
 /// The whole trailing run, which is what the popup's width has to hold.
 const MENU_ACT_RUN_LOGICAL_PX: f32 =
     MENU_ACT_INSET_LOGICAL_PX + 2.0 * MENU_ACT_SIDE_LOGICAL_PX + MENU_ACT_GAP_LOGICAL_PX;
@@ -1514,10 +1514,11 @@ fn split_direction_label(direction: SplitDirectionV1) -> &'static str {
 /// `Auto` wears the `⊞` the pane head used to: it is the glyph for "split, and
 /// do not ask me which way", which is precisely what the option means.
 fn split_direction_mark(direction: SplitDirectionV1) -> ChromeMark {
+    use crate::icons::ActionIcon;
     match direction {
-        SplitDirectionV1::Auto => ChromeMark::Split,
-        SplitDirectionV1::Right => ChromeMark::SplitRight,
-        SplitDirectionV1::Down => ChromeMark::SplitDown,
+        SplitDirectionV1::Auto => ActionIcon::SplitDirectionAsk.mark(),
+        SplitDirectionV1::Right => ActionIcon::SplitDirectionRight.mark(),
+        SplitDirectionV1::Down => ActionIcon::SplitDirectionDown.mark(),
     }
 }
 
@@ -9427,7 +9428,7 @@ pub fn build(
     let glyph_left = ((layout.close[0] + layout.close[2]) / 2.0 - glyph / 2.0).round();
     let glyph_top = ((layout.close[1] + layout.close[3]) / 2.0 - glyph / 2.0).round();
     sprites.push(ChromeSprite::new(
-        ChromeMark::WindowClose,
+        crate::icons::ActionIcon::CloseDialog.mark(),
         [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
         if close_hovered {
             palette.dialog_title_text
@@ -9948,14 +9949,18 @@ pub fn build(
             for (box_of, mark, side, target) in [
                 (
                     acts.edit,
-                    crate::marks::ChromeMark::Pencil,
-                    MENU_EDIT_MARK_LOGICAL_PX,
+                    crate::icons::ActionIcon::EditRow.mark(),
+                    crate::seats::compact_head_glyph_logical_px(
+                        crate::icons::ActionIcon::EditRow.mark(),
+                    ),
                     SettingsTarget::MenuItemEdit(row, index),
                 ),
                 (
                     acts.delete,
-                    crate::marks::ChromeMark::WindowClose,
-                    MENU_DELETE_MARK_LOGICAL_PX,
+                    crate::icons::ActionIcon::DeleteRow.mark(),
+                    crate::seats::compact_head_glyph_logical_px(
+                        crate::icons::ActionIcon::DeleteRow.mark(),
+                    ),
                     SettingsTarget::MenuItemDelete(row, index),
                 ),
             ] {

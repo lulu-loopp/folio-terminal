@@ -68,12 +68,17 @@ pub const GIT_HEAD_PADDING_BOTTOM_LOGICAL_PX: f32 = 6.0;
 pub const GIT_HEAD_PADDING_X_LOGICAL_PX: f32 = 2.0;
 /// `.git-branch { gap: 8px }`.
 pub const GIT_HEAD_GAP_LOGICAL_PX: f32 = 8.0;
-/// The branch mark's box (R4).
+/// The branch mark's box (R4) — [`crate::icons::MarkSlot::Toolbar`]'s own,
+/// which is what a panel head is.
 ///
 /// Fourteen and not the head's own 13.5: a mark is measured across its box and a
 /// letter across its cap height, so a mark cut to the type size always reads
-/// small beside it. Half a pixel is what closes that on this ladder.
-pub const GIT_HEAD_MARK_LOGICAL_PX: f32 = 14.0;
+/// small beside it. Half a pixel is what closes that on this ladder — and the
+/// slot arrived at the same fourteen from the other end, which is why this is
+/// now the slot's number rather than a second one that agrees with it today.
+pub fn git_head_mark_logical_px(mark: crate::marks::ChromeMark) -> f32 {
+    crate::icons::MarkSlot::Toolbar.mark_box_logical_px(mark)[0]
+}
 /// The shortest run of a name this masthead will draw (user report, 2026-08-20).
 ///
 /// **A name narrower than this says less than nothing.** At the sizes this line
@@ -450,14 +455,15 @@ impl GitAct {
     /// rungs are an opacity and a text run has none.
     #[must_use]
     pub fn mark(self) -> ChromeMark {
+        use crate::icons::ActionIcon;
         match self {
-            Self::Stage | Self::StageAll => ChromeMark::Plus,
-            Self::Unstage | Self::UnstageAll => ChromeMark::Minus,
-            Self::Discard => ChromeMark::PaneClose,
+            Self::Stage | Self::StageAll => ActionIcon::StageChange.mark(),
+            Self::Unstage | Self::UnstageAll => ActionIcon::UnstageChange.mark(),
+            Self::Discard => ActionIcon::DiscardChanges.mark(),
             // Never drawn as a glyph — the whole row is the button.
-            Self::LoadMore => ChromeMark::Plus,
-            Self::OpenGraph => ChromeMark::GitGraph,
-            Self::Refresh => ChromeMark::Refresh,
+            Self::LoadMore => ActionIcon::LoadMoreCommits.mark(),
+            Self::OpenGraph => ActionIcon::OpenGitGraph.mark(),
+            Self::Refresh => ActionIcon::RereadRepository.mark(),
         }
     }
 
@@ -2476,7 +2482,9 @@ pub fn masthead_branch_min(head: &GitHead, scale: f32) -> f32 {
 /// What a `⑂ name` segment costs with its name drawn `name` wide.
 fn masthead_branch_room(head: &GitHead, scale: f32, name: f32) -> f32 {
     let gap = (GIT_HEAD_GAP_LOGICAL_PX * scale).round();
-    let mark = (GIT_HEAD_MARK_LOGICAL_PX * scale).round().max(1.0);
+    let mark = (git_head_mark_logical_px(crate::icons::ActionIcon::CheckoutBranch.mark()) * scale)
+        .round()
+        .max(1.0);
     let badge = if head.detached {
         (GIT_PILL_PADDING_X_LOGICAL_PX * scale).round()
     } else {
@@ -2514,7 +2522,9 @@ pub fn masthead_rects(
     carries_acts: bool,
 ) -> MastheadRects {
     let gap = (GIT_HEAD_GAP_LOGICAL_PX * scale).round();
-    let mark = (GIT_HEAD_MARK_LOGICAL_PX * scale).round().max(1.0);
+    let mark = (git_head_mark_logical_px(crate::icons::ActionIcon::CheckoutBranch.mark()) * scale)
+        .round()
+        .max(1.0);
     let height = (GIT_PILL_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
     let pad = (GIT_PILL_PADDING_X_LOGICAL_PX * scale).round();
     // The masthead's buttons hold the trailing edge (G24's `margin-left:auto`),
