@@ -5186,16 +5186,48 @@ pub fn tab_strip_contains(width: f32, scale: f32, tab_count: usize, x: f64, y: f
     x >= geometry.viewport[0] && x < geometry.viewport[1] && y >= 0.0 && y < title
 }
 
+/// Whether one pane head's hover-revealed run — the `×`, the `⌄`, the folder,
+/// the pop-out — is **on screen**, which is the one question the painter draws
+/// by and the hit test answers by.
+///
+/// `revealed` is [`ChromePointer::pane_hover`]: the pane the hand is standing
+/// in, and the whole of what puts that run there
+/// (`.pane:hover .pane-close { visibility: visible }`). One function so the two
+/// sides read the same fact — see the note on [`hit_chrome`]'s own parameter for
+/// what it cost to have them read two.
+#[must_use]
+pub fn head_run_revealed(revealed: Option<SeatId>, seat: SeatId) -> bool {
+    revealed == Some(seat)
+}
+
 /// What the pointer is over, in device pixels of the window.
 ///
 /// Order is significant and is a ruling, not an accident: the close affordance
 /// sits inside a title bar which sits inside a seat, and a divider's hit zone
 /// overhangs both of its neighbours. Smallest target first, so the specific
 /// affordance wins over the general surface it lives on.
+///
+/// **`revealed` is not decoration: an invisible control does not take a press**
+/// (user report, 2026-08-26 — a layout probe pressed a files head at x≈480
+/// without ever having hovered it, and the column tore off into a floating
+/// window). The trailing run is drawn only while the hand is in the pane, and
+/// this hit test used to answer for it whatever the hand had done; the two
+/// halves of D4's "the `×` you can press is the `×` you can see" had come apart
+/// on the *visibility* axis while agreeing perfectly about the rectangle. Pass
+/// the [`ChromePointer::pane_hover`] the frame on screen was drawn with, and a
+/// head nobody has approached answers [`ChromeTarget::PaneHeader`] for its whole
+/// width — the drag handle, which is all the head is showing.
+///
+/// It is `pane_hover` and not a fresh `pane_at` of this very `x, y` on purpose:
+/// the second would be true the instant the pointer crossed the head's edge,
+/// which is exactly the "you have to know it is there to make it appear" state
+/// [`ChromePointer::pane_hover`] exists to avoid, and it would re-open this bug
+/// for the first press of every entry into a pane.
 pub fn hit_chrome(
     seats: &Seats,
     layout: &SeatLayout,
     scale: f32,
+    revealed: Option<SeatId>,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
@@ -5221,18 +5253,22 @@ pub fn hit_chrome(
             // `pane_body_viewport` both round it: the header you can grab is
             // exactly the header you can see.
             let head = pane_head_geometry(rect, placement.kind, scale);
+            // What this head is *showing*, asked once for the whole trailing
+            // run: `⌄ 🗀 ×` on a terminal, `⧉ ×` on a column, all four of them
+            // hung off the one `.pane:hover` the painter hangs them off.
+            let showing = head_run_revealed(revealed, placement.id);
             // Smallest first inside the head too: the `×` is a dead zone in the
             // drag handle (C35), so it has to answer before the handle does.
-            if head.close.is_some_and(|close| contains(close, x, y)) {
+            if showing && head.close.is_some_and(|close| contains(close, x, y)) {
                 return Some(ChromeTarget::PaneClose(placement.id));
             }
-            if head.files.is_some_and(|files| contains(files, x, y)) {
+            if showing && head.files.is_some_and(|files| contains(files, x, y)) {
                 return Some(ChromeTarget::PaneFiles(placement.id));
             }
-            if head.float.is_some_and(|float| contains(float, x, y)) {
+            if showing && head.float.is_some_and(|float| contains(float, x, y)) {
                 return Some(ChromeTarget::PaneFloat(placement.id));
             }
-            if head.chevron.is_some_and(|split| contains(split, x, y)) {
+            if showing && head.chevron.is_some_and(|split| contains(split, x, y)) {
                 return Some(ChromeTarget::PaneMenu(placement.id));
             }
             if contains(head.head, x, y) {
@@ -7748,7 +7784,13 @@ pub fn build_chrome_for_tabs(
                 // it, which does. So there is no reduced-motion branch to write
                 // — the control already behaves the way reduced motion would ask
                 // it to.
-                if pointer.pane_hover == Some(placement.id)
+                //
+                // **And the hit test asks this very question** — see
+                // [`head_run_revealed`], which both sides call: a control drawn
+                // by one predicate and pressed by another is a control you can
+                // press without seeing, which is what a layout probe found on a
+                // files head on 2026-08-26.
+                if head_run_revealed(pointer.pane_hover, placement.id)
                     && let Some(close) = head.close
                 {
                     let close_hovered =
@@ -7805,7 +7847,7 @@ pub fn build_chrome_for_tabs(
                 // pair that reveals together would rest at two different alphas.
                 // Written as one loop for D4's reason — the ladder said twice is
                 // the ladder that comes apart at the rung nobody tested.
-                if pointer.pane_hover == Some(placement.id) {
+                if head_run_revealed(pointer.pane_hover, placement.id) {
                     let triggers = [
                         head.chevron.map(|box_| {
                             (
@@ -12563,15 +12605,11 @@ pub struct PreviewHeadContent<'a> {
     /// Whether the flip would take you to the source (`#i-code`) rather than back
     /// to the render (`#i-eye`) — the glyph names the *destination*.
     pub flip_to_source: bool,
-    /// Whether this pane is locked — "do not reuse this one" (§7.7 ⑧).
-    ///
-    /// The seat's durable flag is still spelled `pinned` in [`bt_layout::Seat`]
-    /// and in `session.json`, and that is where the old word stops: the disk's
-    /// key is versioned vocabulary nobody reads, and renaming it would buy a
-    /// session-schema version and a migration to change nothing on screen. What
-    /// the reader sees is a lock, and everything the reader's hand touches is
-    /// named for one — see [`ChromeTarget::PreviewLock`].
-    pub locked: bool,
+    // Whether this pane is locked used to stand here. It is
+    // [`PreviewHeadTools::locked`] since 2026-08-26, and the move is not
+    // tidying: an engaged lock is the one tool in this head that is drawn at
+    // rest, so it is the one tool whose *presence* the hit test has to know
+    // about, and the hit test is handed the tools.
     /// Whether this pane's switcher is open, which turns the chevron over.
     pub menu_open: bool,
     /// **The open name editor, when this head is the one holding it** (user
@@ -12677,6 +12715,25 @@ pub struct PreviewHeadTools {
     pub web: bool,
     /// The pool holds more than one buffer, so the name is a control (P18/P23).
     pub switcher: bool,
+    /// **This pane is locked** — "do not reuse this one" (§7.7 ⑧).
+    ///
+    /// The seat's durable flag is still spelled `pinned` in [`bt_layout::Seat`]
+    /// and in `session.json`, and that is where the old word stops: the disk's
+    /// key is versioned vocabulary nobody reads, and renaming it would buy a
+    /// session-schema version and a migration to change nothing on screen. What
+    /// the reader sees is a lock, and everything the reader's hand touches is
+    /// named for one — see [`ChromeTarget::PreviewLock`].
+    ///
+    /// **It lives here rather than in [`PreviewHeadContent`], where it used to,
+    /// because it decides whether a button is on screen and not only what the
+    /// button looks like.** `.pv-tool.pv-pin.on { opacity: 1 }` is the last rule
+    /// in that cascade and it wins: an engaged lock is drawn at rest, with the
+    /// pane hovered by nobody, because a state that vanished when you looked
+    /// away would be a pane silently claiming to be reusable. Every other tool
+    /// in the run is gone at rest. So this is the one fact that separates "the
+    /// hit test may answer for the lock" from "it may not", and
+    /// [`hit_preview_head`] is handed exactly this struct.
+    pub locked: bool,
     /// `.pv-name`'s drawn width, measured by the caller that holds a font.
     pub name_width: f32,
     /// `.pv-count`'s digits, likewise.
@@ -14637,6 +14694,7 @@ pub fn hit_preview_head(
     layout: &SeatLayout,
     scale: f32,
     tools: &[(SeatId, PreviewHeadTools)],
+    revealed: Option<SeatId>,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
@@ -14664,23 +14722,34 @@ pub fn hit_preview_head(
         let head = pane_head_geometry(rect, placement.kind, scale);
         let geometry = preview_head_geometry(&head, scale, tools);
         let hit = |box_: Option<[f32; 4]>| box_.is_some_and(|box_| contains(box_, x, y));
-        if hit(geometry.save) {
+        // **A tool nobody can see does not take a press** — [`hit_chrome`]'s own
+        // parameter, and the same report behind it: this head's five hang off
+        // `.pane:hover` exactly as the split head's `× ⌄ 🗀` do, and answering
+        // for them at rest is the same bug in the same shape.
+        //
+        // The one exception is the mock-up's own last rule,
+        // `.pv-tool.pv-pin.on { opacity: 1 }`: an engaged lock is drawn at rest,
+        // so it is pressable at rest. That is why the lock's line below reads
+        // the tools and the four above it do not — see
+        // [`PreviewHeadTools::locked`].
+        let showing = head_run_revealed(revealed, placement.id);
+        if showing && hit(geometry.save) {
             return Some(ChromeTarget::PreviewSave(placement.id));
         }
-        if hit(geometry.flip) {
+        if showing && hit(geometry.flip) {
             return Some(ChromeTarget::PreviewFlip(placement.id));
         }
         // The hand-off arrow and a page's three navigation buttons used to be
         // asked here, between the flip and the developer tools. They are on the
         // rail since 2026-08-24 and [`hit_preview_rail`] answers for them — the
         // targets did not change, only the row they are drawn in.
-        if hit(geometry.devtools) {
+        if showing && hit(geometry.devtools) {
             return Some(ChromeTarget::PreviewDevTools(placement.id));
         }
-        if hit(geometry.popout) {
+        if showing && hit(geometry.popout) {
             return Some(ChromeTarget::PreviewPopOut(placement.id));
         }
-        if hit(geometry.lock) {
+        if (showing || tools.locked) && hit(geometry.lock) {
             return Some(ChromeTarget::PreviewLock(placement.id));
         }
         // **The name answers the pointer whether or not it is a switcher** (user
@@ -15375,9 +15444,9 @@ fn push_preview_head(
         ChromeMark::Lock {
             // Fluent 2's fill axis, which the shackle says a second time:
             // regular and open is the action, filled and shut is the state.
-            engaged: content.locked,
+            engaged: content.tools.locked,
         },
-        content.locked,
+        content.tools.locked,
     );
 }
 
@@ -17959,7 +18028,7 @@ mod tests {
             "the lone leaf wears its profile mark only in the window tab"
         );
         assert!(!quads.iter().any(|quad| quad.color == palette.pane_head));
-        assert!(hit_chrome(&seats, &layout, 1.0, 480.0, 300.0).is_none());
+        assert!(hit_chrome(&seats, &layout, 1.0, None, 480.0, 300.0).is_none());
     }
 
     /// PIN (visual fidelity pass): the caption glyphs are the mock-up's own
@@ -18666,6 +18735,7 @@ mod tests {
                         &seats,
                         &layout,
                         scale,
+                        Some(placement.id),
                         f64::from(rect.left as f32 + 1.0),
                         f64::from(top + bar - 1.0),
                     ),
@@ -18977,6 +19047,18 @@ mod tests {
         }
     }
 
+    /// The same head with its lock engaged — the one tool that stands at rest.
+    fn locked_preview_head(name: &str) -> PreviewHeadContent<'_> {
+        let head = plain_preview_head(name);
+        PreviewHeadContent {
+            tools: PreviewHeadTools {
+                locked: true,
+                ..head.tools
+            },
+            ..head
+        }
+    }
+
     /// Every chevron drawn inside one preview head — the strip's own `˅` beside
     /// the `+` is not one of them.
     fn head_chevrons(sprites: &[ChromeSprite], head: [f32; 4]) -> Vec<ChromeSprite> {
@@ -19069,13 +19151,8 @@ mod tests {
             );
         }
         // ③ An engaged lock stands at rest, in the accent, at full strength.
-        let (_, _, sprites) = preview_chrome(
-            PreviewHeadContent {
-                locked: true,
-                ..plain_preview_head("notes.md")
-            },
-            ChromePointer::default(),
-        );
+        let (_, _, sprites) =
+            preview_chrome(locked_preview_head("notes.md"), ChromePointer::default());
         let lock = sprites
             .iter()
             .find(|sprite| sprite.mark == ChromeMark::Lock { engaged: true })
@@ -19095,10 +19172,7 @@ mod tests {
         // red in both states, which is the failure the ruling names.
         for content in [
             plain_preview_head("notes.md"),
-            PreviewHeadContent {
-                locked: true,
-                ..plain_preview_head("notes.md")
-            },
+            locked_preview_head("notes.md"),
         ] {
             let (_, _, sprites) = preview_chrome(content, hovered);
             assert!(
@@ -19769,6 +19843,7 @@ mod tests {
             flip: true,
             web: false,
             switcher: true,
+            locked: false,
             name_width: 60.0,
             count_width: 8.0,
         };
@@ -19789,7 +19864,7 @@ mod tests {
         ] {
             let (x, y) = centre(box_.expect("a head this wide seats every control"));
             assert_eq!(
-                hit_preview_head(&layout, 1.0, &[(seat, tools)], x, y),
+                hit_preview_head(&layout, 1.0, &[(seat, tools)], Some(seat), x, y),
                 Some(expected),
                 "{expected:?} answers for its own rectangle"
             );
@@ -19820,9 +19895,118 @@ mod tests {
         assert_eq!(alone.pill, None, "no switcher, no pill");
         let (x, y) = centre(alone.name);
         assert_eq!(
-            hit_preview_head(&layout, 1.0, &[(seat, lone)], x, y),
+            hit_preview_head(&layout, 1.0, &[(seat, lone)], Some(seat), x, y),
             Some(ChromeTarget::PreviewName(seat)),
             "and the name answers for itself"
+        );
+        // **A name is not a hover tool** — it is the caption, printed at rest,
+        // so it answers at rest. The five tools beside it are the ones the
+        // reveal gate is about.
+        assert_eq!(
+            hit_preview_head(&layout, 1.0, &[(seat, lone)], None, x, y),
+            Some(ChromeTarget::PreviewName(seat)),
+        );
+    }
+
+    /// **看不见的控件不接按下**, in the head next door (user report,
+    /// 2026-08-26 — the same defect, found on a files head).
+    ///
+    /// P21's ladder is the pane's and not the control's: a preview tool is
+    /// invisible at rest, `.7` while the pointer is anywhere in the pane, full
+    /// under the pointer itself. The hit test used to answer for all five
+    /// whatever the pointer had done, so a press that arrived without a hover
+    /// first — a probe's injected click, or the press right after a resize,
+    /// which clears `pane_hover` — could pop a pane out or open the developer
+    /// tools off a head showing a caption and nothing else.
+    ///
+    /// **And the mock-up's one exception is kept**: `.pv-tool.pv-pin.on` is the
+    /// last rule in that cascade and it wins, so an engaged lock stands at rest
+    /// and is therefore pressable at rest. A lock you could see and not press
+    /// would be the mirror image of the bug.
+    ///
+    /// Red gate: drop the `showing &&` guards and the first loop answers for
+    /// four tools that are not on screen; drop the `|| tools.locked` and the
+    /// last assertion loses the one tool that is.
+    #[test]
+    fn an_unhovered_preview_head_answers_for_nothing_but_its_name_and_a_shut_lock() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.add_preview(&metrics).expect("the preview seat lands");
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let seat = seats.preview().expect("the preview seat");
+        let rect = full_pane_rect(&layout, seat).expect("a full pane");
+        let tools = PreviewHeadTools {
+            save: true,
+            flip: true,
+            web: true,
+            switcher: true,
+            locked: false,
+            name_width: 60.0,
+            count_width: 8.0,
+        };
+        let head = pane_head_geometry(rect, SeatKind::Preview, 1.0);
+        let geometry = preview_head_geometry(&head, 1.0, tools);
+        let centre = |box_: Option<[f32; 4]>| {
+            let box_ = box_.expect("a head this wide seats every control");
+            (
+                f64::from((box_[0] + box_[2]) / 2.0),
+                f64::from((box_[1] + box_[3]) / 2.0),
+            )
+        };
+
+        for (name, box_) in [
+            ("the save", geometry.save),
+            ("the flip", geometry.flip),
+            ("the developer tools", geometry.devtools),
+            ("the pop-out", geometry.popout),
+            ("an open lock", geometry.lock),
+        ] {
+            let (x, y) = centre(box_);
+            assert_eq!(
+                hit_preview_head(&layout, 1.0, &[(seat, tools)], None, x, y),
+                None,
+                "{name} is not on screen, so nothing in this head answers for it"
+            );
+        }
+
+        // A shut lock is a *state*, drawn at rest — so it takes a press at rest.
+        let shut = PreviewHeadTools {
+            locked: true,
+            ..tools
+        };
+        let (x, y) = centre(preview_head_geometry(&head, 1.0, shut).lock);
+        assert_eq!(
+            hit_preview_head(&layout, 1.0, &[(seat, shut)], None, x, y),
+            Some(ChromeTarget::PreviewLock(seat)),
+            "`.pv-tool.pv-pin.on {{ opacity: 1 }}` — visible at rest, pressable at rest"
+        );
+
+        // ── same source ─────────────────────────────────────────────────────
+        // What the painter draws for an unhovered head is exactly what the four
+        // assertions above say is unpressable: one caption, one shut lock, and
+        // no tools at all.
+        let sprites_of = |tools| {
+            let (_, _, sprites) = preview_chrome(
+                PreviewHeadContent {
+                    tools,
+                    name: "notes.md",
+                    ..PreviewHeadContent::default()
+                },
+                ChromePointer::default(),
+            );
+            sprites
+        };
+        for mark in [ChromeMark::Save, ChromeMark::Float, ChromeMark::Code] {
+            assert!(
+                !sprites_of(tools).iter().any(|sprite| sprite.mark == mark),
+                "{mark:?} is not drawn on a head nobody is pointing at"
+            );
+        }
+        assert!(
+            sprites_of(shut)
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::Lock { engaged: true }),
+            "and the shut lock is, which is why it alone answers"
         );
     }
 
@@ -20534,6 +20718,7 @@ mod tests {",
                         flip: true,
                         web: false,
                         switcher: true,
+                        locked: false,
                         name_width: 120.0,
                         count_width: 8.0,
                     },
@@ -20542,7 +20727,6 @@ mod tests {",
                     count: "2",
                     others_dirty: false,
                     flip_to_source: true,
-                    locked: false,
                     menu_open: false,
                     edit,
                 },
@@ -21381,6 +21565,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
+                None,
                 f64::from((bar.left + bar.right) as i32) / 2.0,
                 f64::from((bar.top + bar.bottom) as i32) / 2.0,
             ),
@@ -21464,12 +21649,12 @@ mod tests {",
         );
 
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, divider.0, divider.1),
+            hit_chrome(&seats, &layout, 1.0, None, divider.0, divider.1),
             Some(ChromeTarget::Divider(slot.id)),
             "the first point really is a divider"
         );
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, seat.0, seat.1),
+            hit_chrome(&seats, &layout, 1.0, Some(preview), seat.0, seat.1),
             Some(ChromeTarget::PaneHeader(preview)),
             "the second point really is another seat's head"
         );
@@ -22732,7 +22917,14 @@ mod tests {",
             "the × is not the root button however long the name is"
         );
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, f64::from(cx), f64::from(cy)),
+            hit_chrome(
+                &seats,
+                &layout,
+                1.0,
+                Some(column),
+                f64::from(cx),
+                f64::from(cy)
+            ),
             Some(ChromeTarget::PaneClose(column))
         );
     }
@@ -27049,6 +27241,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
+                Some(terminal),
                 f64::from((close[0] + close[2]) / 2.0),
                 middle_y
             ),
@@ -27069,11 +27262,25 @@ mod tests {",
             "the folder and the `×` share an edge — no gap for a press to fall through"
         );
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, f64::from(close[0]) - 1.0, middle_y),
+            hit_chrome(
+                &seats,
+                &layout,
+                1.0,
+                Some(terminal),
+                f64::from(close[0]) - 1.0,
+                middle_y
+            ),
             Some(ChromeTarget::PaneFiles(terminal)),
         );
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, f64::from(close[0]), middle_y),
+            hit_chrome(
+                &seats,
+                &layout,
+                1.0,
+                Some(terminal),
+                f64::from(close[0]),
+                middle_y
+            ),
             Some(ChromeTarget::PaneClose(terminal)),
             "the box is half-open on its leading edge, like every other target"
         );
@@ -27087,13 +27294,161 @@ mod tests {",
         // that changed is where the controls stand.
         let split = head.chevron.expect("a terminal head carries the divider");
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, f64::from(files[0]) - 1.0, middle_y),
+            hit_chrome(
+                &seats,
+                &layout,
+                1.0,
+                Some(terminal),
+                f64::from(files[0]) - 1.0,
+                middle_y
+            ),
             Some(ChromeTarget::PaneMenu(terminal)),
             "the box to the folder's left is the divider now, not the bar"
         );
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, f64::from(split[0]) - 1.0, middle_y),
+            hit_chrome(
+                &seats,
+                &layout,
+                1.0,
+                Some(terminal),
+                f64::from(split[0]) - 1.0,
+                middle_y
+            ),
             Some(ChromeTarget::PaneHeader(terminal)),
+        );
+    }
+
+    /// **看不见的控件不接按下** (user report, 2026-08-26, off a layout probe): a
+    /// press at x≈480 on a files head that had never been hovered tore the
+    /// column out into a floating window.
+    ///
+    /// The run at a head's trailing end — `⧉ ×` on a column, `⌄ 🗀 ×` on a
+    /// terminal — is drawn only under `.pane:hover`, and the hit test used to
+    /// answer for it whatever the hand had done. D4's "the `×` you can press is
+    /// the `×` you can see" was being kept about the *rectangle* and broken
+    /// about the *visibility*, which is the half a hand actually experiences.
+    ///
+    /// R12's 悬停显形档, read back the other way: the hand lands in the head, the
+    /// run appears, and only then does a press on it mean anything. Until then
+    /// the trailing end of a head is what the head is showing — the drag handle.
+    ///
+    /// It is [`ChromePointer::pane_hover`] on both sides and that is the point:
+    /// the reveal is not "the pointer is inside this rectangle right now" (which
+    /// would be true the instant a press crossed the edge, and would re-open the
+    /// bug for the first press of every entry) but "this pane is the one the
+    /// window is drawing a run for".
+    ///
+    /// Red gate: drop the `showing &&` guards from [`hit_chrome`] and the four
+    /// unhovered assertions below answer `PaneFloat`/`PaneClose`/`PaneMenu`/
+    /// `PaneFiles` off heads that are showing none of them.
+    #[test]
+    fn an_unhovered_head_hands_its_hidden_run_back_to_the_drag_handle() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let terminal = layout.rects[0].id;
+        let column = layout
+            .rects
+            .iter()
+            .find(|placement| placement.kind == SeatKind::Files)
+            .expect("the second seat is the files column")
+            .id;
+
+        let column_head = pane_head_geometry(device_rect_of(&layout, column), SeatKind::Files, 1.0);
+        let float = column_head.float.expect("a files head carries the pop-out");
+        let close = column_head.close.expect("and the `×` beside it");
+        let centre = |box_: [f32; 4]| {
+            (
+                f64::from((box_[0] + box_[2]) / 2.0),
+                f64::from((box_[1] + box_[3]) / 2.0),
+            )
+        };
+
+        // ── the report, reproduced: no hand has been in this pane ────────────
+        for (name, box_) in [("the pop-out", float), ("the `×`", close)] {
+            let (x, y) = centre(box_);
+            assert_eq!(
+                hit_chrome(&seats, &layout, 1.0, None, x, y),
+                Some(ChromeTarget::PaneHeader(column)),
+                "{name} is not on screen, so the head answers for its own box"
+            );
+        }
+        // And a hand in the *other* pane reveals the other pane's run, not this
+        // one's: the reveal is per pane, exactly as `.pane:hover` is.
+        let (x, y) = centre(float);
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, Some(terminal), x, y),
+            Some(ChromeTarget::PaneHeader(column)),
+        );
+
+        // ── and once the hand is in the pane, the run is there to be pressed ──
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, Some(column), x, y),
+            Some(ChromeTarget::PaneFloat(column)),
+        );
+        let (x, y) = centre(close);
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, Some(column), x, y),
+            Some(ChromeTarget::PaneClose(column)),
+        );
+
+        // ── the terminal head's own three, on the same terms ─────────────────
+        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        for (target, box_) in [
+            (
+                ChromeTarget::PaneMenu(terminal),
+                head.chevron.expect("the `⌄`"),
+            ),
+            (
+                ChromeTarget::PaneFiles(terminal),
+                head.files.expect("the folder"),
+            ),
+            (
+                ChromeTarget::PaneClose(terminal),
+                head.close.expect("the `×`"),
+            ),
+        ] {
+            let (x, y) = centre(box_);
+            assert_eq!(
+                hit_chrome(&seats, &layout, 1.0, None, x, y),
+                Some(ChromeTarget::PaneHeader(terminal)),
+                "{target:?} is hidden on an unhovered head"
+            );
+            assert_eq!(
+                hit_chrome(&seats, &layout, 1.0, Some(terminal), x, y),
+                Some(target),
+            );
+        }
+
+        // ── same source, and this is what says so ────────────────────────────
+        // The painter's gate and the hit test's gate are one function of one
+        // fact, so the frame that draws nothing is the frame that answers
+        // nothing. Asserted through the paint rather than by reading the guard
+        // twice: a sprite list with no `×` in it is the reader's own evidence.
+        let sprites_of = |pane_hover| {
+            let (_, _, sprites) = build_chrome(
+                &seats,
+                &layout,
+                1.0,
+                ChromePointer {
+                    pane_hover,
+                    ..ChromePointer::default()
+                },
+            );
+            sprites
+        };
+        assert!(
+            !sprites_of(None)
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::PaneClose),
+            "no head draws a `×` while the hand is in no pane"
+        );
+        assert!(
+            sprites_of(Some(column))
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::Float),
+            "and the hovered column draws the pop-out the hit test just answered for"
         );
     }
 
@@ -27196,26 +27551,48 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
+                Some(terminal),
                 f64::from((split[0] + split[2]) / 2.0),
                 middle_y
             ),
             Some(ChromeTarget::PaneMenu(terminal)),
         );
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, f64::from(split[0]), middle_y),
+            hit_chrome(
+                &seats,
+                &layout,
+                1.0,
+                Some(terminal),
+                f64::from(split[0]),
+                middle_y
+            ),
             Some(ChromeTarget::PaneMenu(terminal)),
             "half-open on its leading edge, like every other target"
         );
         // One pixel to the left of the run is the handle again, which is where
         // a drag is allowed to begin.
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, f64::from(split[0]) - 1.0, middle_y),
+            hit_chrome(
+                &seats,
+                &layout,
+                1.0,
+                Some(terminal),
+                f64::from(split[0]) - 1.0,
+                middle_y
+            ),
             Some(ChromeTarget::PaneHeader(terminal)),
         );
         // And one pixel to the right is the folder, not the divider: the two
         // share an edge and the edge belongs to the box on its right.
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, f64::from(split[2]), middle_y),
+            hit_chrome(
+                &seats,
+                &layout,
+                1.0,
+                Some(terminal),
+                f64::from(split[2]),
+                middle_y
+            ),
             Some(ChromeTarget::PaneFiles(terminal)),
         );
     }
@@ -27487,6 +27864,7 @@ mod tests {",
                 &split,
                 &split_layout,
                 1.0,
+                Some(terminal),
                 f64::from((chevron[0] + chevron[2]) / 2.0),
                 f64::from((chevron[1] + chevron[3]) / 2.0)
             ),
@@ -30369,6 +30747,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
+                None,
                 f64::from((bar.left + bar.right) as i32) / 2.0,
                 f64::from((bar.top + bar.bottom) as i32) / 2.0,
             ),
@@ -37234,6 +37613,7 @@ mod tests {",
                 &layout,
                 1.0,
                 &[(seat, tools)],
+                Some(seat),
                 f64::from((box_[0] + box_[2]) / 2.0),
                 f64::from((box_[1] + box_[3]) / 2.0),
             ),

@@ -4549,27 +4549,49 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
 
     /// PIN — a `git` that never finishes costs one answer, not the worker.
     ///
-    /// Stood in for by `ping`, which is on every Windows and whose only job here
-    /// is to take longer than it is given. The assertion that matters is not that
-    /// the fault is `TimedOut` but that the call *returned* — a guard that
-    /// reports a timeout after waiting for the process anyway is not a guard.
+    /// Stood in for by `ping -t`, which is on every Windows and, unlike the
+    /// `ping -n 10` this used to use, **never stops on its own**. That is the
+    /// whole of the shape: the assertion is that the call *came back*, and the
+    /// only road back is through the kill — [`run_git_with_input`] waits for the
+    /// process it killed before it reports, and a wait on a `ping -t` nobody
+    /// killed does not end. So the kill, the reaping and the report are all one
+    /// fact now, and there is no clock in any of them.
+    ///
+    /// It used to be `ping -n 10` and `waited < 5s`. The five seconds were
+    /// standing in for "less than the nine the child would have taken", which
+    /// made it a wall clock on a machine that is often carrying twenty
+    /// compilers: a hundred-and-fifty-millisecond poll loop that overruns by
+    /// thirty times is a scheduling story and not a `run_git` story, and this
+    /// test could not tell the difference.
+    ///
+    /// The guard runs on a thread of its own and its answer comes back down a
+    /// channel, so a `run_git` that really did wait for its child fails this in a
+    /// minute rather than hanging the suite for ever. **The minute is not a
+    /// budget**: the call is given a hundred and fifty milliseconds and no load
+    /// turns that into sixty seconds. It is the difference between "returned"
+    /// and "never returns", which is the only difference this test is about — and
+    /// on the day it is spent, the stray `ping` left behind is the defect itself.
     #[test]
     fn a_child_that_will_not_finish_is_killed_and_reported() {
+        /// Long enough that only a guard which never returns can reach it.
+        const NEVER: Duration = Duration::from_secs(60);
+
         let mut command = Command::new("ping");
         command
-            .args(["-n", "10", "127.0.0.1"])
+            .args(["-t", "127.0.0.1"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         no_window(&mut command);
-        let started = Instant::now();
-        let outcome = run_git(command, Duration::from_millis(150));
-        let waited = started.elapsed();
-        assert_eq!(outcome.err(), Some(GitFault::TimedOut));
-        assert!(
-            waited < Duration::from_secs(5),
-            "the guard returned after {waited:?}, not after the child felt like it"
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(run_git(command, Duration::from_millis(150)).err());
+        });
+        let fault = rx.recv_timeout(NEVER).expect(
+            "the guard came back, so it killed the child and reaped it: a guard that waited for \
+             this child would be waiting still",
         );
+        assert_eq!(fault, Some(GitFault::TimedOut));
     }
 
     // ── ⑧ The two soft landings ────────────────────────────────────────────

@@ -10995,8 +10995,81 @@ fn may_contain_math(text: &str, inline_formulas: bool) -> bool {
 /// worth asking — so the ordinary line pays exactly what it paid before this gate existed, and only
 /// the `$`-bearing line pays for the gate that is there to save it work.
 fn may_arm_math(text: &str, inline_formulas: bool, site: impl FnOnce() -> InlineMathSite) -> bool {
+    #[cfg(test)]
+    arming_ledger::note_line();
     may_contain_display_math(text)
-        || (inline_formulas && may_contain_inline_math(text) && site().permits_inline())
+        || (inline_formulas && may_contain_inline_math(text) && site_permits_inline(site))
+}
+
+/// The site question, asked in a function of its own so that the one place it is asked is the one
+/// place it can be counted. See [`arming_ledger`]; in a non-test build this is the call it wraps.
+fn site_permits_inline(site: impl FnOnce() -> InlineMathSite) -> bool {
+    #[cfg(test)]
+    arming_ledger::note_site_question();
+    site().permits_inline()
+}
+
+/// **Test-only: what the arming prefilter did, counted rather than timed.**
+///
+/// The budget on this prefilter used to be a wall clock: the pathological `$` screen with inline
+/// detection on, over the same screen with it off, and a ceiling on the quotient. Two sums of
+/// sub-millisecond windows taken while twenty other tests hold the other cores are not a quotient
+/// of anything. Measured over 24 runs against a full `cargo test --workspace`, the ratio wandered
+/// between **0.67 and 1.39** for a ceiling of 1.5 — and 0.67 is a number the code cannot produce,
+/// because the "on" arm does everything the "off" arm does and then asks two more questions. A
+/// reading below 1.0 is the machine, and so is every other reading in that range.
+///
+/// What the prefilter actually claims is countable. It claims that this screen queues **no scan**
+/// — that is `armed`, and it was always deterministic — and that the question it asks instead is
+/// asked **once per line**: never once per `$`, never once per cell, and not at all for a line
+/// whose two-byte dollar scan has already said no. Those are counts. They are identical in every
+/// run, on an idle machine and under load, and they are where the budget is kept now.
+///
+/// Thread-local, because the other three hundred tests in this binary are running on the other
+/// cores while one of them measures.
+#[cfg(test)]
+pub(crate) mod arming_ledger {
+    use std::cell::Cell;
+
+    thread_local! {
+        static LINES: Cell<u64> = const { Cell::new(0) };
+        static SITE_QUESTIONS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// One reading of this thread's ledger. Absolute values belong to whatever else the thread has
+    /// done; a measurement is always a difference — see [`Ledger::since`].
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) struct Ledger {
+        /// Logical lines put to the arming prefilter.
+        pub(crate) lines: u64,
+        /// Times the prefilter got as far as asking where the line sits.
+        pub(crate) site_questions: u64,
+    }
+
+    impl Ledger {
+        /// What has happened on this thread since `before` was read.
+        pub(crate) fn since(self, before: Self) -> Self {
+            Self {
+                lines: self.lines - before.lines,
+                site_questions: self.site_questions - before.site_questions,
+            }
+        }
+    }
+
+    pub(crate) fn read() -> Ledger {
+        Ledger {
+            lines: LINES.with(Cell::get),
+            site_questions: SITE_QUESTIONS.with(Cell::get),
+        }
+    }
+
+    pub(crate) fn note_line() {
+        LINES.with(|lines| lines.set(lines.get().wrapping_add(1)));
+    }
+
+    pub(crate) fn note_site_question() {
+        SITE_QUESTIONS.with(|asked| asked.set(asked.get().wrapping_add(1)));
+    }
 }
 
 /// The arming pre-filter for tables: could this line be the *last* line of a table?
@@ -24306,28 +24379,64 @@ mod tests {
     /// the first half. So the same bytes are then replayed on the alternate screen, where the site
     /// is eligible and the rows must genuinely arm — and must still resolve to nothing, because it
     /// is the *content* gates, not the site, that decide `PATH=$HOME/bin:$PATH` is not a formula.
+    ///
+    /// **The +44% is remembered here and measured nowhere**, because it could not be measured
+    /// honestly: see [`arming_ledger`] for the twenty-four readings that wandered between 0.67x
+    /// and 1.39x on unchanged code, one of them below the 1.0 the arithmetic makes impossible.
+    /// The claim underneath that quotient is a pair of counts and they are pinned as counts:
+    ///
+    /// * **No scan is queued.** `armed == 0` with the switch on, exactly as with it off. This was
+    ///   always the deterministic half and it is the half that carries the +44%: every one of
+    ///   those 936 futile scans is an armed row.
+    /// * **The question that replaced them is asked once per line.** Not once per `$` — a screen
+    ///   whose lines carry six times as many dollars in the same forty rows produces a ledger
+    ///   identical to the byte, which is the whole difference between a prefilter and the scan it
+    ///   is standing in front of. And not at all where the two-byte dollar scan has already
+    ///   answered: a screen of lines carrying one `$` each never reaches the site question, which
+    ///   is what makes `echo $PATH` cost two bytes and nothing else.
     #[test]
     fn a_pathological_dollar_screen_arms_nothing_where_the_site_can_never_answer_yes() {
         const ROWS: u32 = 40;
         const CYCLES: usize = 24;
 
-        // **Each configuration is measured three times and the fastest kept**
-        // (2026-08-25). Both numbers are sums of sub-millisecond windows taken
-        // while twenty other tests run on the other cores of this machine, and a
-        // ratio of two disturbed numbers is a coin toss: one memory-hungry
-        // neighbour landing inside `off` and not inside `on` inverts it. What
-        // exposed that was the picture lane learning to spread a resample over
-        // every core — a burst of memory traffic in a sibling test, which no
-        // priority band can hide because the cost is bandwidth and not CPU
-        // time — and this test then failed one run in four against twenty clean
-        // runs before it.
-        //
-        // The least-disturbed run is the one that measures this screen rather
-        // than the machine, so the minimum is the honest sample. **The claim is
-        // not weakened**: a prefilter that really cost fifty percent would cost
-        // it in every run, minimum included. The counts are deterministic, so
-        // they come from whichever run was fastest.
-        let measure_once = |inline_formulas: bool, alternate: bool| {
+        /// One line of the corpus, spelled three ways. Shell text, none of it mathematics, and all
+        /// three exactly 57 columns before the row/cycle stamp that makes each frame new — so the
+        /// grid folds them into logical lines identically and the only thing that differs is how
+        /// many `$` the prefilter walks past, which is the axis this test is about.
+        #[derive(Clone, Copy)]
+        enum Dollars {
+            /// The original screen: eight per line, in the shapes a shell really prints.
+            Several,
+            /// The same 57 columns carrying twenty-eight, and no `$$` among them, so none of this
+            /// is display mathematics either.
+            Many,
+            /// One — below the pair a run needs, so the cheap scan answers alone.
+            Lone,
+        }
+
+        impl Dollars {
+            fn line(self, row: u32, cycle: usize) -> String {
+                match self {
+                    Self::Several => format!(
+                        "PATH=$HOME/bin:$PATH FOO=$BAR:$BAZ cost $5+$10 arg $1 $2 r{row}c{cycle}"
+                    ),
+                    Self::Many => format!(
+                        "$a$b$c$d$e$f$g$h$i$j$k$l$m$n$o$p$q$r$s$t$u$v$w$x$y$z$A$B r{row}c{cycle}"
+                    ),
+                    Self::Lone => format!(
+                        "PATH=$HOME/bin/only/one/dollar/on/this/whole/line/xx/y/z r{row}c{cycle}"
+                    ),
+                }
+            }
+        }
+
+        struct Measured {
+            ledger: arming_ledger::Ledger,
+            armed: usize,
+            resolved: usize,
+        }
+
+        let measure = |inline_formulas: bool, alternate: bool, dollars: Dollars| {
             let started = Instant::now();
             let mut session = DualPlaneSession::new(nz(120), nz(ROWS));
             seat_inline_metrics(&mut session);
@@ -24336,65 +24445,95 @@ mod tests {
                 session.feed_at(b"\x1b[?1049h", started).unwrap();
             }
             let mut at = started;
-            let mut elapsed = Duration::ZERO;
             let mut armed = 0usize;
             let mut resolved = 0usize;
+            // Read after the setup and before the first stability pass: the fixture's own arming
+            // is not what is being counted.
+            let before = arming_ledger::read();
             for cycle in 0..CYCLES {
                 at += LIVE_MATH_STABLE_INTERVAL;
                 let mut bytes = String::from("\x1b[H");
                 for row in 0..ROWS {
-                    let _ = write!(
-                        bytes,
-                        "PATH=$HOME/bin:$PATH FOO=$BAR:$BAZ cost $5+$10 arg $1 $2 r{row}c{cycle}\r\n"
-                    );
+                    let _ = write!(bytes, "{}\r\n", dollars.line(row, cycle));
                 }
                 session.feed_at(bytes.as_bytes(), at).unwrap();
-                let begin = Instant::now();
                 session.advance_live_stability(at + LIVE_MATH_STABLE_INTERVAL);
-                elapsed += begin.elapsed();
                 while let Some(task) = session.take_live_worker_task() {
                     armed += 1;
                     resolved += usize::from(task.resolved);
                 }
             }
-            (elapsed, armed, resolved)
-        };
-        let measure = |inline_formulas: bool, alternate: bool| {
-            (0..3)
-                .map(|_| measure_once(inline_formulas, alternate))
-                .min_by_key(|(elapsed, _, _)| *elapsed)
-                .expect("three samples")
+            Measured {
+                ledger: arming_ledger::read().since(before),
+                armed,
+                resolved,
+            }
         };
 
-        let (off, off_armed, _) = measure(false, false);
-        let (on, on_armed, _) = measure(true, false);
-        let (alt_on, alt_armed, alt_resolved) = measure(true, true);
-        let ratio = on.as_secs_f64() / off.as_secs_f64().max(f64::EPSILON);
+        let off = measure(false, false, Dollars::Several);
+        let on = measure(true, false, Dollars::Several);
+        let many = measure(true, false, Dollars::Many);
+        let lone = measure(true, false, Dollars::Lone);
+        let alt = measure(true, true, Dollars::Several);
         println!(
-            "INLINE_ARMING rows={ROWS} cycles={CYCLES} off={off:?} armed_off={off_armed} \
-             on={on:?} armed_on={on_armed} ratio={ratio:.2} \
-             alt={alt_on:?} armed_alt={alt_armed} resolved_alt={alt_resolved}"
+            "INLINE_ARMING rows={ROWS} cycles={CYCLES} off={:?} armed_off={} on={:?} armed_on={} \
+             many={:?} lone={:?} armed_alt={} resolved_alt={}",
+            off.ledger,
+            off.armed,
+            on.ledger,
+            on.armed,
+            many.ledger,
+            lone.ledger,
+            alt.armed,
+            alt.resolved
         );
+
         assert_eq!(
-            off_armed, 0,
+            off.armed, 0,
             "with the switch off no `$` row may be armed at all"
         );
         assert_eq!(
-            on_armed, 0,
+            on.armed, 0,
             "an unintegrated primary screen can never answer yes, so it must queue no scan at all"
         );
-        assert!(
-            ratio <= 1.5,
-            "a screen that arms nothing must cost what arming nothing costs: {ratio:.2}x \
-             ({on:?} vs {off:?})"
+        assert_eq!(
+            off.ledger.site_questions, 0,
+            "with the switch off the prefilter is a display-delimiter scan and asks nothing else"
+        );
+        assert_eq!(
+            on.ledger.lines, off.ledger.lines,
+            "the switch decides what a line is asked, never how many lines there are"
         );
         assert!(
-            alt_armed > 0,
+            on.ledger.site_questions > 0 && on.ledger.site_questions <= on.ledger.lines,
+            "the site is asked at most once per line and this screen really does ask it: {:?}",
+            on.ledger
+        );
+        assert_eq!(
+            many.ledger, on.ledger,
+            "six times the dollars in the same forty rows is the same prefilter work: the scan \
+             that grows with the `$` count is the one this gate exists to keep off the queue"
+        );
+        assert_eq!(
+            many.armed, 0,
+            "and no more of it is armed than before: the site is what refuses, not the count"
+        );
+        assert_eq!(
+            lone.ledger.lines, on.ledger.lines,
+            "the same forty rows are still forty lines"
+        );
+        assert_eq!(
+            lone.ledger.site_questions, 0,
+            "a single `$` cannot make a run, so the two-byte scan answers and the site is never \
+             asked"
+        );
+        assert!(
+            alt.armed > 0,
             "the prefilter must still arm where the site is eligible, or it has simply switched \
              inline detection off"
         );
         assert_eq!(
-            alt_resolved, 0,
+            alt.resolved, 0,
             "no shell line in this corpus may survive the disambiguator into an occurrence, \
              eligible site or not"
         );
