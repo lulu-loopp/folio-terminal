@@ -797,6 +797,159 @@ pub enum ChromeMark {
         /// arriving (a close) rather than leaving (an open).
         flip_y: bool,
     },
+
+    // ── the fifteen P1 struck, and the overloads they close ───────────
+    //
+    // Every one of these exists because the 2026-08-25 audits found one
+    // drawing doing two jobs, and `crate::icons`'s reverse index wrote the
+    // pairs down so they could not be forgotten. They are cut in the house
+    // sixteen at the house pen with the house's round ends, so each is inside
+    // the optical band the day it is born rather than the day somebody
+    // measures it.
+    /// **`#i-tab-new` — "this pane leaves for a tab of its own"** (清单丙 4).
+    ///
+    /// The container is the sentence. [`Self::Float`], this, [`Self::WindowNew`]
+    /// and [`Self::WindowPick`] are one gesture — a forty-five degree arrow —
+    /// aimed at four different containers, and until P1 the first two were the
+    /// *same drawing*: `Move pane to new tab` wore `#i-float`, which is the
+    /// mark a files head wears for undocking into a floating window. Two
+    /// different destinations, one picture, in a menu whose whole job is to
+    /// tell destinations apart.
+    ///
+    /// So the tab is drawn as a tab: rounded on its top two corners only,
+    /// standing on the strip's own rule, which is the silhouette
+    /// [`Self::ActiveTab`] generates at full size and nothing else on this
+    /// sheet resembles.
+    TabNew,
+    /// **`#i-window-new` — "this pane leaves for a window of its own"**
+    /// (清单丙 4, 裁1 and 裁2).
+    ///
+    /// A window, and a window is a frame with a title bar: that rule across
+    /// the top is the whole of what separates this from a pane, and it is the
+    /// same rule the reader has been looking at since the machine booted.
+    ///
+    /// **This is also where the framed-versus-bare quarrel is settled.**
+    /// `marks.rs`'s own note on [`Self::External`] says the frame means *this
+    /// pane leaves the tree* and the bare arrow means *this content leaves the
+    /// window*; the pane menu had them the other way round, giving `Move to new
+    /// tab` the heavier framed arrow and `Move to new window` the lighter bare
+    /// one. The plan's ruling is that the split dissolves the question rather
+    /// than answering it: a bare arrow now means one thing only — the
+    /// machine's own program takes this — and every *move* names the
+    /// container it moves into.
+    WindowNew,
+    /// **`#i-window-pick` — "this pane goes into one of the windows already
+    /// open"** (清单丙 4).
+    ///
+    /// [`Self::WindowNew`]'s window with the arrow arriving instead of leaving.
+    /// The difference is a direction and not a second drawing, which is
+    /// [`Self::PaneZoom`]'s note read again: the two rows sat next to each
+    /// other in the pane menu rasterizing *identically* — the audit measured
+    /// `maxdiff 0` — with a `▸` four hundred pixels away as the only thing
+    /// telling them apart.
+    WindowPick,
+    /// **`#i-trash` — delete** (清单丙 5).
+    ///
+    /// The `×` meant close, delete, discard and stop, and those are four
+    /// different amounts of harm. This is the ones that destroy something:
+    /// `Delete branch`, `Delete tag`, `Discard changes`, and the settings
+    /// dialog's two row removals. A lid, a bin and two ribs — the one drawing
+    /// this idea has anywhere.
+    Trash,
+    /// **`#i-stop` — stop what is loading** (清单丙 6).
+    ///
+    /// A filled square, and the fill is the point rather than an exception to
+    /// the outline policy: the transport controls are the one vocabulary where
+    /// solid *is* the shape, and a hollow square is a box. It is drawn at
+    /// eleven-sixteenths of the box rather than at the house's ink band,
+    /// because a solid at the band's full width carries several times the ink
+    /// of the outlines it stands beside.
+    Stop,
+    /// **`#i-restart` — stop this and start it again** (清单丙 7).
+    ///
+    /// `Restart shell` wore `#i-refresh` beside `Reread the repository` and
+    /// `Reload the page`, and those two really are one verb — *fetch it again*
+    /// — while restarting a shell throws a process away. The power gesture,
+    /// which is what a restart is: a ring broken at the top and the bar
+    /// standing in the break.
+    Restart,
+    /// **`#i-devtools` — open the inspector** (清单丙 9).
+    ///
+    /// A spanner: the ring with a gap, and the shaft. It wore `#i-code` under a
+    /// comment saying so on purpose — *"the same glyph markdown's `Edit
+    /// source` wears, and the same sentence"* — which is true of the sentence
+    /// and not of the act: one shows you the file you are looking at, the
+    /// other opens somebody else's instrument over it.
+    ///
+    /// The gap is what keeps it off [`Self::Search`]: a closed ring on a shaft
+    /// is a magnifier, and this sheet now carries one.
+    DevTools,
+    /// **`#i-hash` — a commit's hexadecimal name** (清单丙 9).
+    ///
+    /// The graph's detail card drew `Copy hash` as `#i-code` and the row menu
+    /// drew it as `#i-copy`: one verb, two shapes, and the card's own note
+    /// argued — rightly — that a hexadecimal name needs telling from a
+    /// sentence when the two sit in one column. This says so without borrowing
+    /// the source view's brackets.
+    Hash,
+    /// **`#i-compare` — these two, against each other** (清单丙 8).
+    ///
+    /// `Compare with selected` wore `#i-split`, which means *cut this pane in
+    /// two*. Two rules with a double arrow between them: the two things, and
+    /// the looking back and forth that is the whole of the verb.
+    Compare,
+    /// **`#i-duplicate` — a second pane just like this one** (清单丙 9).
+    ///
+    /// `Duplicate pane` wore `#i-copy`, which is two sheets of paper and means
+    /// *put this text on the clipboard*. This is [`Self::Copy`]'s own idiom —
+    /// one thing now standing in two places, the back one drawn as an open
+    /// corner — struck on a **pane** instead of a sheet, with
+    /// [`Self::Panel`]'s side rule on the front one so the reader is looking at
+    /// a pane and not at paper.
+    Duplicate,
+    /// **`#i-arrow` — a real arrow, at some quarter turn** (清单丙 9).
+    ///
+    /// The chevron was doing the browser's Back and Forward, turned ninety
+    /// degrees each way, and a chevron says *there is a list folded away here*.
+    /// A history arrow has a shaft, and this is the shaft.
+    ///
+    /// `turned_degrees` is a quarter turn and not a continuous angle like
+    /// [`Self::Chevron`]'s, because nothing animates it: what turns is the
+    /// *meaning* — right is forward, left is back, up is the parent of this
+    /// commit and the row above it, down is the row below. Four cardinal points
+    /// of one drawing, keyed apart in the raster cache the way the chevron's
+    /// angles are.
+    Arrow { turned_degrees: u16 },
+    /// **`#i-more-down` — there is more of this list below** (清单丙 9).
+    ///
+    /// `Load more commits` wore `#i-plus`, beside a `Stage` and a `Create
+    /// branch` that also wore it. Two of those three make something; this one
+    /// reveals what is already there. A chevron over a rule, which is the
+    /// idiom every list with a floor uses.
+    MoreDown,
+    /// **`#i-search` — `Find…`** (清单丙 3).
+    ///
+    /// The one row in the terminal's own context menu with an empty icon
+    /// column, with a mark above it and a mark below it, reading like a glyph
+    /// that had fallen out. A magnifier: a closed ring and a handle.
+    Search,
+    /// **`#i-more` — the rest of this row's verbs** (P1, 字符退役).
+    ///
+    /// The settings dialog drew this as `⋯` U+22EF in the dialog's own type.
+    /// Three dots, struck as three dots, on the law `marks.rs` has held since
+    /// R4 struck the masthead's `⎇`: a codepoint is a fact about whichever
+    /// typeface happened to be installed and a mark is not.
+    ///
+    /// Filled, like [`Self::Folder`] and the status dot, because a dot has no
+    /// outline to draw.
+    More,
+    /// **`#i-history-restore` — put this back the way it came** (清单丙 9).
+    ///
+    /// The settings dialog drew this as `↺` U+21BA. It is deliberately not
+    /// [`Self::Refresh`]: reloading fetches the same thing again, and restoring
+    /// defaults winds a record backwards. A clock with its hands set, and the
+    /// ring turning anticlockwise round it.
+    HistoryRestore,
 }
 
 impl ChromeMark {
@@ -904,6 +1057,23 @@ impl ChromeMark {
             // One id for four mirrorings and every span, exactly as the chevron
             // has one id for every angle: `mark_key` adds the rest.
             Self::GraphCurve { .. } => "graph-curve",
+            Self::TabNew => "i-tab-new",
+            Self::WindowNew => "i-window-new",
+            Self::WindowPick => "i-window-pick",
+            Self::Trash => "i-trash",
+            Self::Stop => "i-stop",
+            Self::Restart => "i-restart",
+            Self::DevTools => "i-devtools",
+            Self::Hash => "i-hash",
+            Self::Compare => "i-compare",
+            Self::Duplicate => "i-duplicate",
+            // One id for four quarter turns, on `Self::Chevron`'s precedent:
+            // there is one arrow, and `mark_key` adds which way it points.
+            Self::Arrow { .. } => "i-arrow",
+            Self::MoreDown => "i-more-down",
+            Self::Search => "i-search",
+            Self::More => "i-more",
+            Self::HistoryRestore => "i-history-restore",
         }
     }
 
@@ -988,8 +1158,9 @@ impl ChromeMark {
     /// layout gave it, as `(x, y)`.
     ///
     /// Every other mark in this module is drawn inside its own box, because
-    /// every other mark holds still. The chevron turns, and a 9×6 arrow stood
-    /// on end is 6×9: rasterized in its own box the middle of the turn would be
+    /// every other mark holds still. The chevron turns, and an arrow whose box
+    /// is wider than the slot it was fitted into sweeps outside that slot on
+    /// the way over: rasterized in its own box the middle of the turn would be
     /// sliced off at the top and bottom, and the animation would be a glyph
     /// growing stumps. So the *raster* gets a bigger box than the *layout* did,
     /// and the extra is bled symmetrically so the mark's centre — the point it
@@ -1495,8 +1666,9 @@ fn mark_key(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> String {
     }
     // The angle is the only thing that tells one frame of the turn from
     // another: one id, one box, one colour, and different pixels.
-    if let ChromeMark::Chevron { turned_degrees } | ChromeMark::TreeDisclosure { turned_degrees } =
-        sprite.mark
+    if let ChromeMark::Chevron { turned_degrees }
+    | ChromeMark::TreeDisclosure { turned_degrees }
+    | ChromeMark::Arrow { turned_degrees } = sprite.mark
     {
         let _ = write!(key, ":d{turned_degrees}");
     }
@@ -1793,7 +1965,7 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
         // first, in the symbol's own units, about the symbol's own centre.
         ChromeMark::Chevron { turned_degrees } => {
             let geometry = chevron_raster(width_px, height_px);
-            let [centre_x, centre_y] = CHEVRON_TURN_CENTRE_UNITS;
+            let [centre_x, centre_y] = chevron_turn_centre_units();
             (
                 format!("0 0 {raster_width_px} {raster_height_px}"),
                 format!(
@@ -1805,6 +1977,19 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 ),
             )
         }
+        // The arrow turns inside its own box and needs no padded raster at
+        // all, which is the dividend of the square box P1 cut every new mark
+        // in: a square rotated by a quarter turn maps onto itself exactly, so
+        // there is nothing to bleed and nothing to re-fit. Same transform the
+        // triangle below takes, about the house box's own centre.
+        ChromeMark::Arrow { turned_degrees } => (
+            SYMBOL_VIEW_BOX[symbol_index(sprite.mark)].to_owned(),
+            format!(
+                r#"<g transform="rotate({turned_degrees} {centre} {centre})">{body}</g>"#,
+                centre = HOUSE_GRID_UNITS / 2.0,
+                body = SYMBOL_BODY[symbol_index(sprite.mark)],
+            ),
+        ),
         // The triangle turns inside its own box. No padded raster and no
         // re-derived fit: at every angle the swept glyph clears the ten-unit
         // box (see the variant's note), so the ordinary `viewBox` still holds
@@ -1839,11 +2024,21 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
 /// The centre is the box's middle, which is what CSS's own default
 /// `transform-origin: 50% 50%` names — the rotation the mock-up asks for is
 /// about the *element*, and the element is the symbol's box.
-const CHEVRON_VIEW_BOX_UNITS: [f64; 2] = [10.0, 6.0];
-const CHEVRON_TURN_CENTRE_UNITS: [f64; 2] = [
-    CHEVRON_VIEW_BOX_UNITS[0] / 2.0,
-    CHEVRON_VIEW_BOX_UNITS[1] / 2.0,
-];
+///
+/// **Read off `SYMBOL_VIEW_BOX` rather than written down**, since P1 re-cut the
+/// arrow from `10 × 6` to the house square: a second spelling of a box is a
+/// second authority for it, and the day the two disagree the turn is rasterized
+/// about a centre the artwork does not have.
+fn chevron_view_box_units() -> [f64; 2] {
+    let [width, height] =
+        view_box_extent(SYMBOL_VIEW_BOX[symbol_index(ChromeMark::Chevron { turned_degrees: 0 })]);
+    [f64::from(width), f64::from(height)]
+}
+
+fn chevron_turn_centre_units() -> [f64; 2] {
+    let [width, height] = chevron_view_box_units();
+    [width / 2.0, height / 2.0]
+}
 
 /// Where a chevron's symbol units land inside the padded raster, and how much
 /// padding that took.
@@ -1881,7 +2076,7 @@ struct ChevronRaster {
 /// "resting arrow is unchanged" promise this exists to keep. Symmetric, so the
 /// centre stays put; whole, so the sampling does.
 fn chevron_raster(width_px: u32, height_px: u32) -> ChevronRaster {
-    let [view_width, view_height] = CHEVRON_VIEW_BOX_UNITS;
+    let [view_width, view_height] = chevron_view_box_units();
     let (box_width, box_height) = (f64::from(width_px), f64::from(height_px));
     let scale = (box_width / view_width).min(box_height / view_height);
     let inset_x = (box_width - view_width * scale) / 2.0;
@@ -2084,19 +2279,30 @@ impl ChromeMark {
     /// | `#i-min` | 10 | `0.0 – 10.0` | edge to edge |
     /// | `#i-max` | 10 | `0.0 – 10.0` | edge to edge |
     /// | `#i-close` | 10 | `0.0 – 10.0` | edge to edge |
-    /// | `#i-plus` | 10 | `-0.1 – 10.1` | edge to edge, and a hair past it |
-    /// | `#i-minus` | 10 | `-0.1 – 10.1` | `#i-plus`'s own subpath |
-    /// | grip | 8 | `0.0 – 8.0` | edge to edge |
-    /// | `#i-chev` | 10×6 | `0.4 – 9.6` across | edge to edge across |
     /// | `#i-tri` | 10 | `3.2 – 7.8` | **not** — *more* air than the house |
     /// | the house | 16 | `1.6 – 14.4` | the margin every other mark carries |
     ///
-    /// `#i-tri` is the correction this rule had to be stated over geometry to
-    /// find. It is cut in a ten-unit box like the caption family and it is
-    /// nothing like them: a disclosure arrow is *supposed* to be small inside
-    /// its slot, so it takes the house's box and draws the small arrow the
-    /// design asked for. Sized as an edge-to-edge mark it would have been shrunk
-    /// twice.
+    /// **P1 emptied four names off this list by re-cutting the drawings behind
+    /// them.** `#i-plus`, `#i-minus`, `#i-chev` and the resize grip were all
+    /// edge-to-edge because all four were cut in somebody else's box — a ten
+    /// for the first three, an eight for the grip — and a small box with the
+    /// ink run to its walls is exactly what a pen cannot survive: `1.2 / 10` is
+    /// `0.12` of pen per unit against the house's `0.075`, and no slot could
+    /// have closed that, because a slot scales the ink and the pen together.
+    /// Re-cut in the house's sixteen they carry the house's air, so they are
+    /// not on this list any more and there is nothing left on it that a re-cut
+    /// would take off. What remains is one family and one exception:
+    ///
+    /// * **The caption's three.** They are the platform's glyphs at the
+    ///   platform's size, and `bt_render::WINDOW_CAPTION_GLYPH_LOGICAL_PX` is
+    ///   ten because Windows's are ten. Their box is *written* rather than
+    ///   derived — see [`crate::icons::MarkSlot::edge_to_edge_box_logical_px`].
+    /// * **`#i-tri`**, which is the correction this rule had to be stated over
+    ///   geometry to find. It is cut in a ten-unit box like the caption family
+    ///   and it is nothing like them: a disclosure arrow is *supposed* to be
+    ///   small inside its slot, so it takes the house's box and draws the small
+    ///   arrow the design asked for. Sized as an edge-to-edge mark it would
+    ///   have been shrunk twice.
     #[must_use]
     pub fn draws_edge_to_edge(self) -> bool {
         matches!(
@@ -2106,10 +2312,6 @@ impl ChromeMark {
                 | Self::WindowClose
                 | Self::TabClose
                 | Self::PaneClose
-                | Self::Plus
-                | Self::Minus
-                | Self::Chevron { .. }
-                | Self::ResizeGrip
         )
     }
 
@@ -2208,6 +2410,21 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::Split => 31,
         ChromeMark::SplitRight => 32,
         ChromeMark::SplitDown => 33,
+        ChromeMark::TabNew => 46,
+        ChromeMark::WindowNew => 47,
+        ChromeMark::WindowPick => 48,
+        ChromeMark::Trash => 49,
+        ChromeMark::Stop => 50,
+        ChromeMark::Restart => 51,
+        ChromeMark::DevTools => 52,
+        ChromeMark::Hash => 53,
+        ChromeMark::Compare => 54,
+        ChromeMark::Duplicate => 55,
+        ChromeMark::Arrow { .. } => 56,
+        ChromeMark::MoreDown => 57,
+        ChromeMark::Search => 58,
+        ChromeMark::More => 59,
+        ChromeMark::HistoryRestore => 60,
         // Handled before this function is reached; their geometry is generated,
         // not quoted.
         ChromeMark::ActiveTab { .. } => 8,
@@ -2268,17 +2485,26 @@ pub fn preview_row_mark(is_page: bool, favicon: Option<crate::favicon::FaviconId
 
 const PROFILE_CHASSIS_VIEW_BOX: &str = "0 0 16 16";
 
-const SYMBOL_VIEW_BOX: [&str; 46] = [
+const SYMBOL_VIEW_BOX: [&str; 61] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
     "0 0 10 10",
-    "0 0 10 10",
+    // `#i-plus`, re-cut to the house sixteen in P1 (清单甲 9). It was the
+    // caption family's ten because it began life beside them on the strip; it
+    // is not one of them, and the ten cost it a pen — `1.2 / 10` is `0.12` per
+    // unit against the house's `0.075`, which no box could bring into the band.
     "0 0 16 16",
     "0 0 16 16",
     "0 0 16 16",
     "0 0 16 16",
-    "0 0 10 6",
+    "0 0 16 16",
+    // `#i-chev`, re-cut from `10 × 6` to the house **square** in P1 (清单甲 2).
+    // The non-square box was the mechanical root of the pane head's 1.95×: a
+    // `10×6` arrow fitted into a square box is scaled by `min(w/10, h/6)`, and
+    // whichever of those two a surface handed it decided the arrow's pen for it.
+    // Cut square, it is fitted once, by the slot, like every other mark.
+    "0 0 16 16",
     "0 0 16 16",
     "0 0 16 16",
     "0 0 16 16",
@@ -2293,11 +2519,14 @@ const SYMBOL_VIEW_BOX: [&str; 46] = [
     // `#i-float` and `#i-dock-left`, both the house sixteen.
     "0 0 16 16",
     "0 0 16 16",
-    // The resize grip's chevron is `::after`'s own 8×8 box, not a symbol from
-    // the sheet, and it keeps that box for `#i-tri`'s reason: the CSS radius and
-    // border width are quoted in those units, and re-cutting them to sixteen
-    // would mean re-deriving both instead of reading them off.
-    "0 0 8 8",
+    // The resize grip, re-cut to the house sixteen in P1 (清单甲 10). The CSS
+    // it was translated from states an `8 × 8` box and a `1.5px` border, and
+    // quoting both was what kept it out of the house's grid — at the cost of
+    // `0.1875` of pen per unit, the heaviest ratio in the table. Re-derived
+    // here: what the mock-up is actually saying is a **radius**, `7px` outer,
+    // nesting inside the window's own `10px` corner, and a radius survives a
+    // change of units. See the body for the arithmetic that keeps it at seven.
+    "0 0 16 16",
     // `#i-check`, the house sixteen again.
     "0 0 16 16",
     // `#i-copy` and `#i-paste`, the house sixteen a third and fourth time.
@@ -2315,9 +2544,9 @@ const SYMBOL_VIEW_BOX: [&str; 46] = [
     // same optical weight as everything above them.
     "0 0 16 16",
     "0 0 16 16",
-    // `#i-minus` keeps `#i-plus`'s ten-unit box, because it is that path with
-    // one stroke removed.
-    "0 0 10 10",
+    // `#i-minus` keeps `#i-plus`'s box, because it is that path with one stroke
+    // removed — which is why it moved to the house sixteen in the same edit.
+    "0 0 16 16",
     // The mini graph's merge curve, in `.ggr`'s own box: 14 wide by 27 tall, the
     // height of one commit row. Not the house sixteen, for `#i-tri`'s reason —
     // the design quotes this curve's control points in these units.
@@ -2361,48 +2590,108 @@ const SYMBOL_VIEW_BOX: [&str; 46] = [
     // units, so the pair cannot sit at a different optical weight in either.
     "0 0 16 16",
     "0 0 16 16",
+    // **The fifteen P1 struck.** All of them the house sixteen, and that is not
+    // a coincidence to be noted but the rule this block of work exists to
+    // state: after this edit the only boxes on the sheet that are not sixteen
+    // are the caption family's ten, `#i-tri`'s ten, `#i-gear`'s twenty-four
+    // (the 2026-08-26 ruling keeps it) and the merge curve's `14 × 27` (it is
+    // a diagram of a row, not a mark). Nothing new may be cut anywhere else.
+    "0 0 16 16", // #i-tab-new
+    "0 0 16 16", // #i-window-new
+    "0 0 16 16", // #i-window-pick
+    "0 0 16 16", // #i-trash
+    "0 0 16 16", // #i-stop
+    "0 0 16 16", // #i-restart
+    "0 0 16 16", // #i-devtools
+    "0 0 16 16", // #i-hash
+    "0 0 16 16", // #i-compare
+    "0 0 16 16", // #i-duplicate
+    "0 0 16 16", // #i-arrow
+    "0 0 16 16", // #i-more-down
+    "0 0 16 16", // #i-search
+    "0 0 16 16", // #i-more
+    "0 0 16 16", // #i-history-restore
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 46] = [
+const SYMBOL_BODY: [&str; 61] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
-    // #i-min
-    r#"<path d="M0 5h10" fill="none" stroke="currentColor" stroke-width="1"/>"#,
-    // #i-max
-    r#"<rect x="0.5" y="0.5" width="9" height="9" rx="1.8" fill="none" stroke="currentColor" stroke-width="1"/>"#,
+    // #i-min. The rule is pulled half a pen in from each edge so the round cap
+    // lands *on* the box rather than half a unit past it — same ink, `0.0` to
+    // `10.0`, and the cap is what the P1 sweep gives every open path.
+    r#"<path d="M0.5 5h9" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>"#,
+    // #i-max. `rx` is the house's outer radius in this family's own units —
+    // `2.0 × 10/16`. A rounded rect has neither an open end nor a sharp join,
+    // so it takes neither of the two round attributes; that is the whole of
+    // what the 2026-08-25 audit read as "`#i-max` has no linecap".
+    r#"<rect x="0.5" y="0.5" width="9" height="9" rx="1.25" fill="none" stroke="currentColor" stroke-width="1"/>"#,
     // #i-close
-    r#"<path d="M0.5 0.5l9 9M9.5 0.5l-9 9" fill="none" stroke="currentColor" stroke-width="1"/>"#,
-    // #i-plus. `fill="none"` is ours: the mock-up's own path carries no fill
-    // attribute and therefore fills black, which costs a browser nothing because
-    // two straight subpaths enclose no area — but it is a lie about the glyph,
-    // and this rasterizer has no reason to be handed one.
-    r#"<path d="M5 0.5v9M0.5 5h9" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+    r#"<path d="M0.5 0.5l9 9M9.5 0.5l-9 9" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>"#,
+    // #i-plus, **re-cut to the house sixteen** (P1, 清单甲 9).
+    //
+    // It was the mock-up's ten because it was drawn beside the caption controls
+    // on the strip, and a ten-unit box gave it `0.12` of pen per unit against
+    // the house's `0.075` — the plus read `1.344` in a menu row where its
+    // neighbours read `1.05`, and no box could have fixed that because a box
+    // scales the ink and the pen together. Same drawing, same round cap, cut in
+    // the grid the rest of the sheet is cut in: the bar runs the house's ink
+    // band, `1.6` to `14.4` with the cap counted.
+    //
+    // `fill="none"` is ours: the mock-up's own path carries no fill attribute
+    // and therefore fills black, which costs a browser nothing because two
+    // straight subpaths enclose no area — but it is a lie about the glyph, and
+    // this rasterizer has no reason to be handed one.
+    r#"<path d="M8 2.2v11.6M2.2 8h11.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
     // #p-pwsh — flat, and its own colours (a mark carries its own).
     concat!(
         r##"<rect x="1" y="2.5" width="14" height="11" rx="1.8" fill="#2C5C9E"/>"##,
         r##"<path d="M4.4 5.7L7.3 8l-2.9 2.3" fill="none" stroke="#fff" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>"##,
         r##"<path d="M8.5 10.9h3.2" stroke="#fff" stroke-width="1.35" stroke-linecap="round"/>"##,
     ),
-    // #i-file
+    // #i-file, **re-cut into the house's ink band** (P1, 清单甲 8 and 13).
+    //
+    // Two things moved and the drawing did not. The pen goes `1.15 → 1.2`, the
+    // house's; and the page, which ran `1.2 – 15.3` of ink down a box whose air
+    // stops at `1.6` and `14.4`, is scaled about its own centre until it fits —
+    // its long side now *is* the band, which is what makes
+    // [`HOUSE_INK_RATIO`] a measurement of this sheet rather than a wish about
+    // it. The proportion is the mock-up's page to three digits; nothing about
+    // the fold, the corner radii or the silhouette is re-invented.
     concat!(
-        r#"<path d="M3.5 1.8h5.2l3.8 3.8v8.6c0 .3-.2.5-.5.5H3.5c-.3 0-.5-.2-.5-.5V2.3c0-.3.2-.5.5-.5z" fill="none" stroke="currentColor" stroke-width="1.15"/>"#,
-        r#"<path d="M8.6 1.9v3.8h3.8" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round"/>"#,
+        r#"<path d="M4.3 2.2h4.6l3.4 3.4v7.6a.6.6 0 0 1-.6.6H4.3a.6.6 0 0 1-.6-.6V2.8a.6.6 0 0 1 .6-.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+        r#"<path d="M8.9 2.3v3.3h3.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
     ),
     // #i-folder
     r#"<path d="M1.6 4.2c0-.6.5-1.1 1.1-1.1h3.1l1.3 1.5h6.2c.6 0 1.1.5 1.1 1.1v6.6c0 .6-.5 1.1-1.1 1.1H2.7c-.6 0-1.1-.5-1.1-1.1z" fill="currentColor"/>"#,
-    // #i-panel
+    // #i-panel — the pen to the house's `1.2`, and the frame pulled off the
+    // box's own edge into the band (清单甲 6 and 13). It was `0.9 – 15.1` of
+    // ink in a sixteen, which is a frame drawn *outside* the air every other
+    // mark in the column leaves.
     concat!(
-        r#"<rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
-        r#"<path d="M6.2 2.5v11" stroke="currentColor" stroke-width="1.1"/>"#,
+        r#"<rect x="2.2" y="3.1" width="11.6" height="9.8" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
+        r#"<path d="M6.4 3.1v9.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
     ),
-    // #i-chev
-    r#"<path d="M1 1l4 3.6L9 1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    // #i-chev, **re-cut from `10 × 6` to the house square** (P1, 清单甲 2).
+    //
+    // The 2026-08-25 audit traced the pane head's `1.56 : 0.80` to two causes
+    // stacked, and this is the one the slot table could not reach: a `10×6`
+    // drawing fitted into a square box under `xMidYMid meet` is scaled by
+    // `min(w/10, h/6)`, so a *square* box scaled it by its width ratio and a
+    // *wide* box by its height ratio — one arrow, and every surface picking its
+    // own scale factor before its pen was even considered. Cut square, the
+    // arrow is fitted once, by the slot, like everything else in the run.
+    //
+    // The arrow itself is the mock-up's, at the mock-up's proportion: it ran
+    // `8` across by `3.6` down, a depth of `0.45`, and it runs the house's
+    // `11.6` across by `5.2` down, which is the same number to two digits. What
+    // it gains is the house's air — `1.6` to `14.4` with the round cap counted.
+    r#"<path d="M2.2 5.4L8 10.6 13.8 5.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
     // #i-pin — the action. Outline, and the 45° turn is the symbol's own: the
     // `<g transform>` is quoted along with the path, so nothing here has to be
     // re-applied at draw time the way the open chevron's flip is.
-    r#"<g transform="rotate(45 8 8)"><path d="M5.5 1.6h5a.8.8 0 010 1.6h-.7v2.9l2.15 2.25c.42.44.65 1.03.65 1.64a.6.6 0 01-.6.6H8.8v4.2a.8.8 0 01-1.6 0v-4.2H4a.6.6 0 01-.6-.6c0-.61.23-1.2.65-1.64L6.2 6.1V3.2h-.7a.8.8 0 010-1.6z" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/></g>"#,
+    r#"<g transform="rotate(45 8 8)"><path d="M5.5 1.6h5a.8.8 0 010 1.6h-.7v2.9l2.15 2.25c.42.44.65 1.03.65 1.64a.6.6 0 01-.6.6H8.8v4.2a.8.8 0 01-1.6 0v-4.2H4a.6.6 0 01-.6-.6c0-.61.23-1.2.65-1.64L6.2 6.1V3.2h-.7a.8.8 0 010-1.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></g>"#,
     // #i-pinned — the state. Same group, same `d`, and the only difference in
     // the file is that the outline's three stroke attributes become one fill.
     r#"<g transform="rotate(45 8 8)"><path d="M5.5 1.6h5a.8.8 0 010 1.6h-.7v2.9l2.15 2.25c.42.44.65 1.03.65 1.64a.6.6 0 01-.6.6H8.8v4.2a.8.8 0 01-1.6 0v-4.2H4a.6.6 0 01-.6-.6c0-.61.23-1.2.65-1.64L6.2 6.1V3.2h-.7a.8.8 0 010-1.6z" fill="currentColor"/></g>"#,
@@ -2460,8 +2749,8 @@ const SYMBOL_BODY: [&str; 46] = [
     // #i-dock-left — the window, and the panel that will appear inside it, on
     // the side it will actually appear on.
     concat!(
-        r##"<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.2"/>"##,
-        r##"<rect x="1.6" y="2.6" width="5" height="10.8" rx="2.2" fill="currentColor" opacity=".7"/>"##,
+        r##"<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>"##,
+        r##"<rect x="1.6" y="2.6" width="5" height="10.8" rx="2" fill="currentColor" opacity=".7"/>"##,
     ),
     // The resize grip, translated from CSS rather than quoted from the sheet.
     //
@@ -2475,38 +2764,73 @@ const SYMBOL_BODY: [&str; 46] = [
     //
     // The `.55` is the mock-up's own, baked in here on `#i-folder-open`'s
     // precedent: it is part of the drawing, not a state of it.
-    r##"<path d="M7.25 0V1A6.25 6.25 0 0 1 1 7.25H0" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".55"/>"##,
-    // #i-check
-    r##"<path d="M3 8.4l3.2 3.2L13 4.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"##,
-    // #i-copy
+    // **Re-derived into the house sixteen in P1** (清单甲 10). Of the three
+    // numbers the CSS states, only one is a fact about the *shape*: the radius.
+    // The mock-up's note (line 710-712) is that the grip's curve "nests
+    // concentrically inside the window's 10px corner (10 - ~3px inset ~ 7px)",
+    // which is a statement about the float's own geometry and survives a change
+    // of units; the `1.5px` border is a fact about the *pen*, and quoting it
+    // gave this drawing `0.1875` of pen per unit against the house's `0.075` —
+    // the heaviest ratio in the table, and one no box could have fixed.
+    //
+    // So the arc is re-cut at the house pen and its box grows to carry it: an
+    // outer radius of `8.6` units in a sixteen, drawn at
+    // `float::FLOAT_GRIP_GLYPH_LOGICAL_PX`, still lands within a fifth of a
+    // pixel of the seven the note asks for. The arms keep the CSS's proportion,
+    // an eighth of the box beyond where the arc lets go, and the whole shape
+    // sits in the house's bottom-right air.
+    r##"<path d="M13.8 3.8V5.8A8 8 0 0 1 5.8 13.8H3.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".55"/>"##,
+    // #i-check, at the house pen (清单甲 3). At `1.6` it was the heaviest
+    // drawing on the sheet and read `1.400` in a menu row where its neighbours
+    // read `1.050`; the geometry is the mock-up's, untouched.
+    r##"<path d="M3 8.4l3.2 3.2L13 4.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"##,
+    // #i-copy, at the house pen, with the sheet's corner at the house's inner
+    // radius. The back sheet is an open corner and carries the round cap; the
+    // front is a rounded rect, which has neither an open end nor a sharp join
+    // and so takes neither round attribute. That is the whole of what the
+    // 2026-08-25 audit read as "the frame has no linecap and the inner path
+    // does".
     concat!(
-        r#"<rect x="5.4" y="2.4" width="8.2" height="8.2" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/>"#,
-        r#"<path d="M10.6 13.6H3.9a1.5 1.5 0 01-1.5-1.5V5.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
+        r#"<rect x="5.4" y="2.4" width="8.2" height="8.2" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
+        r#"<path d="M10.6 13.6H3.9a1.5 1.5 0 01-1.5-1.5V5.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
     ),
-    // #i-paste
+    // #i-paste, at one pen where it wrote two (`1.3` around its `1.1`), with
+    // the body at the house's outer radius and the clip at its inner one. The
+    // clip drops two tenths so its filled edge starts where the house's air
+    // does rather than a fifth of a unit above it.
     concat!(
-        r#"<rect x="3" y="2.8" width="10" height="11" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/>"#,
-        r#"<rect x="5.6" y="1.4" width="4.8" height="2.8" rx=".9" fill="currentColor"/>"#,
-        r#"<path d="M5.4 7.2h5.2M5.4 9.6h5.2M5.4 12h3.2" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>"#,
+        r#"<rect x="3" y="2.8" width="10" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
+        r#"<rect x="5.6" y="1.6" width="4.8" height="2.6" rx="1.2" fill="currentColor"/>"#,
+        r#"<path d="M5.4 7.2h5.2M5.4 9.6h5.2M5.4 12h3.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
     ),
     // #i-save — the body with its cut corner, the shutter above and the label
     // below. Quoted from the sheet at line 2252.
     concat!(
-        r#"<path d="M3.2 2.6h7.9l2.3 2.3v8c0 .3-.3.6-.6.6H3.2c-.3 0-.6-.3-.6-.6V3.2c0-.3.3-.6.6-.6z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>"#,
-        r#"<path d="M5.3 2.8v2.9h5.2V2.8M5.1 13.4V9.3h5.8v4.1" fill="none" stroke="currentColor" stroke-width="1.15"/>"#,
+        r#"<path d="M3.2 2.6h7.9l2.3 2.3v8c0 .3-.3.6-.6.6H3.2c-.3 0-.6-.3-.6-.6V3.2c0-.3.3-.6.6-.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+        r#"<path d="M5.3 2.8v2.9h5.2V2.8M5.1 13.4V9.3h5.8v4.1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
     ),
-    // #i-eye — mock-up 2171.
+    // #i-eye — mock-up 2171, at the house pen and **scaled into the band**
+    // (清单甲 13). The almond ran `0.8` to `15.2` of ink in a box whose air
+    // stops at `1.6` and `14.4`, and it is the widest drawing on the sheet, so
+    // it is the one a reader takes "how big is a mark here" from. Scaled about
+    // its own centre by `11.6 / 13.2`, pupil included: the drawing is
+    // unchanged and only its size is.
     concat!(
-        r#"<path d="M1.4 8S3.8 3.9 8 3.9 14.6 8 14.6 8 12.2 12.1 8 12.1 1.4 8 1.4 8z" fill="none" stroke="currentColor" stroke-width="1.3"/>"#,
-        r#"<circle cx="8" cy="8" r="1.9" fill="none" stroke="currentColor" stroke-width="1.3"/>"#,
+        r#"<path d="M2.2 8S4.3 4.4 8 4.4 13.8 8 13.8 8 11.7 11.6 8 11.6 2.2 8 2.2 8z" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
+        r#"<circle cx="8" cy="8" r="1.7" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
     ),
-    // #i-code — mock-up 2170.
-    r#"<path d="M5.8 4.4L2.2 8l3.6 3.6M10.2 4.4L13.8 8l-3.6 3.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    // #i-code — mock-up 2170, at the house pen (清单甲 4). `1.4` made it the
+    // second-heaviest drawing on the sheet and put it a whole weight away from
+    // the `#i-eye` it is the other face of: one control, two states, two pens.
+    r#"<path d="M5.8 4.4L2.2 8l3.6 3.6M10.2 4.4L13.8 8l-3.6 3.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
     // #i-dock-right — `#i-dock-left` mirrored about the frame's own centre: the
     // window is unchanged and the panel moves to x = 9.4, which is 16 − 1.6 − 5.
+    // Both radii are the house's outer `2.0` since P1: the filled panel shares
+    // two of the frame's own corners, so it has to turn on the frame's radius
+    // or leave a sliver of ground between two edges that are meant to be one.
     concat!(
-        r##"<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.2"/>"##,
-        r##"<rect x="9.4" y="2.6" width="5" height="10.8" rx="2.2" fill="currentColor" opacity=".7"/>"##,
+        r##"<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>"##,
+        r##"<rect x="9.4" y="2.6" width="5" height="10.8" rx="2" fill="currentColor" opacity=".7"/>"##,
     ),
     // `#i-git-branch` — a trunk with three nodes and one branch leaving it.
     //
@@ -2520,7 +2844,7 @@ const SYMBOL_BODY: [&str; 46] = [
     // cubic, and one shape rasterized through a different primitive is one
     // shape that antialiases differently.
     concat!(
-        r#"<g fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round">"#,
+        r#"<g fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">"#,
         r#"<circle cx="4.7" cy="3.5" r="1.85"/>"#,
         r#"<circle cx="4.7" cy="12.5" r="1.85"/>"#,
         r#"<circle cx="11.3" cy="3.5" r="1.85"/>"#,
@@ -2535,7 +2859,7 @@ const SYMBOL_BODY: [&str; 46] = [
     // because two is the fewest that can show a *join* — one edge would be a
     // line and no graph at all.
     concat!(
-        r#"<g fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round">"#,
+        r#"<g fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">"#,
         r#"<circle cx="4.7" cy="3.3" r="1.8"/>"#,
         r#"<circle cx="4.7" cy="12.7" r="1.8"/>"#,
         r#"<circle cx="11.6" cy="8" r="1.8"/>"#,
@@ -2543,8 +2867,12 @@ const SYMBOL_BODY: [&str; 46] = [
         r#"<path d="M9.8 8H8.2C6.25 8 4.7 6.45 4.7 4.5"/>"#,
         r#"</g>"#,
     ),
-    // #i-minus — `#i-plus`'s second subpath, alone.
-    r#"<path d="M0.5 5h9" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+    // #i-minus — `#i-plus`'s second subpath, alone, and re-cut with it into
+    // the house sixteen (P1, 清单甲 9). The pair are one drawing minus a stroke
+    // and the contract `ChromeMark::Minus` states in as many words is that they
+    // are one weight; keeping the plus's box is how that stays true through a
+    // re-cut rather than after one.
+    r#"<path d="M2.2 8h11.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
     // The merge curve — mock-up 4933, `.ggr path.side`, verbatim. It enters at
     // the row's top right and lands on the dot's edge at (7.6, 12.6), which is
     // just short of the 3.1-radius circle centred at (7, 13.5) — so the line
@@ -2557,22 +2885,28 @@ const SYMBOL_BODY: [&str; 46] = [
     // stopping short, because a rule that stops short is a rule floating inside
     // a box; a division reaches the walls.
     concat!(
-        r#"<rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
-        r#"<path d="M8 2.5v11M1.5 8h13" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
+        r#"<rect x="2.2" y="3.1" width="11.6" height="9.8" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
+        r#"<path d="M8 3.1v9.8M2.2 8h11.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
     ),
     // `#i-split-right` — the two panes the cut leaves, side by side. The gutter
     // is 1.2 units, which at a menu row's fourteen pixels is one pixel of gap:
     // enough to be a gap and not enough to be a third shape.
+    //
+    // The panes take the house's **inner** radius and not the outer one their
+    // parent frame wears, which is the one place the two-radius rule needs
+    // saying out loud: `2.0` against a pane five units across is a third of its
+    // short side, and two of those side by side stop reading as panes and start
+    // reading as capsules. A radius is a fraction of what it is turning.
     concat!(
-        r#"<rect x="1.5" y="2.5" width="5.9" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
-        r#"<rect x="8.6" y="2.5" width="5.9" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
+        r#"<rect x="2.2" y="3.1" width="5.2" height="9.8" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
+        r#"<rect x="8.6" y="3.1" width="5.2" height="9.8" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
     ),
     // `#i-split-down` — the same two panes, stacked. Same gutter, same stroke,
     // same outer box; only the axis differs, because that is the only thing the
     // reader is being asked to tell apart.
     concat!(
-        r#"<rect x="1.5" y="2.5" width="13" height="4.9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
-        r#"<rect x="1.5" y="8.6" width="13" height="4.9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
+        r#"<rect x="2.2" y="3.1" width="11.6" height="4.3" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
+        r#"<rect x="2.2" y="8.6" width="11.6" height="4.3" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
     ),
     // `#i-tag` — the label with a punched hole (T7). The outline runs from the
     // top-left corner along the top, out to the point at the right, back along
@@ -2580,7 +2914,7 @@ const SYMBOL_BODY: [&str; 46] = [
     // one-unit ring at this size closes up into a dot anyway, and a dot is what
     // it is meant to read as.
     concat!(
-        r#"<path d="M2.9 2.2h4.9c.27 0 .53.11.72.3l5.28 5.28c.4.4.4 1.04 0 1.44l-4.26 4.26c-.4.4-1.04.4-1.44 0L2.5 7.88c-.19-.19-.3-.45-.3-.72V2.9c0-.39.31-.7.7-.7z" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round"/>"#,
+        r#"<path d="M2.9 2.2h4.9c.27 0 .53.11.72.3l5.28 5.28c.4.4.4 1.04 0 1.44l-4.26 4.26c-.4.4-1.04.4-1.44 0L2.5 7.88c-.19-.19-.3-.45-.3-.72V2.9c0-.39.31-.7.7-.7z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
         r#"<circle cx="5.1" cy="5.1" r="1" fill="currentColor"/>"#,
     ),
     // `#i-refresh` — a circle with a bite out of the top and a head on the end
@@ -2590,45 +2924,52 @@ const SYMBOL_BODY: [&str; 46] = [
     // head are one fact, and an arc written the other way would have needed the
     // head turned round by hand.
     concat!(
-        r#"<path d="M12.33 5.5a5 5 0 1 1-4.33-2.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
-        r#"<path d="M8 1.3 11 3 8 4.7z" fill="currentColor"/>"#,
+        r#"<path d="M12.68 5.7a5.4 5.4 0 1 1-4.68-2.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M8 1.6 11.2 3 8 4.4z" fill="currentColor"/>"#,
     ),
     // `#i-select` — mock-up 2373, verbatim. Four corner brackets and the rule
     // between them; the brackets are drawn as one path so the marquee reads as
     // one gesture rather than as four ticks that happen to line up.
     concat!(
-        r#"<path d="M2.4 4.4v-2h2M11.6 2.4h2v2M13.6 11.6v2h-2M4.4 13.6h-2v-2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>"#,
-        r#"<path d="M4.8 8h6.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
+        r#"<path d="M2.4 4.4v-2h2M11.6 2.4h2v2M13.6 11.6v2h-2M4.4 13.6h-2v-2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+        r#"<path d="M4.8 8h6.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
     ),
     // `#i-broom` — mock-up 2374, verbatim: the handle, and the head splayed
     // where it meets the floor.
     concat!(
-        r#"<path d="M9.6 2.2l4.2 4.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
-        r#"<path d="M11.7 6.4L9.6 4.3 3.4 9.7c-.9.8-1.2 2-.8 3.1l.6 1.5 1.5.6c1.1.4 2.3.1 3.1-.8l3.9-4.4z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+        r#"<path d="M9.6 2.2l4.2 4.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M11.7 6.4L9.6 4.3 3.4 9.7c-.9.8-1.2 2-.8 3.1l.6 1.5 1.5.6c1.1.4 2.3.1 3.1-.8l3.9-4.4z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
     ),
     // `#i-clear` — mock-up 2371, verbatim: the eraser held at an angle, and the
     // line it has been rubbing along.
     concat!(
-        r#"<path d="M6.4 12.6H13" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
-        r#"<path d="M9.1 3.3l3.6 3.6c.4.4.4 1 0 1.4l-3.8 3.8c-.4.4-1 .4-1.4 0L3.9 8.5c-.4-.4-.4-1 0-1.4l3.8-3.8c.4-.4 1-.4 1.4 0z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>"#,
+        r#"<path d="M6.4 12.6H13" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M9.1 3.3l3.6 3.6c.4.4.4 1 0 1.4l-3.8 3.8c-.4.4-1 .4-1.4 0L3.9 8.5c-.4-.4-.4-1 0-1.4l3.8-3.8c.4-.4 1-.4 1.4 0z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
     ),
     // `#i-pencil` — mock-up 3452, verbatim: the ferrule, then the body of the
     // pencil with its point.
     concat!(
-        r#"<path d="M10.6 2.4l3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
-        r#"<path d="M11.5 1.5l3 3-8.4 8.4-3.9.9.9-3.9z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>"#,
+        r#"<path d="M10.6 2.4l3 3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M11.5 1.5l3 3-8.4 8.4-3.9.9.9-3.9z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
     ),
     // `#i-external` — the hand-off arrow, one path: the corner bracket that is
     // the head, and the shaft it stands on, drawn without the frame `#i-float`
     // wraps its own arrow in. The arms are two fifths of the shaft, which is what
     // keeps a bare arrowhead reading as one at thirteen pixels.
-    r#"<path d="M7.4 3.6h5v5M12.4 3.6L3.6 12.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    //
+    // **Scaled into the band in P1** (清单甲 13). Its pen was already the
+    // house's, and it still measured `10.0` of ink in a menu column running
+    // `12.0` to `14.0` — because a bare glyph with no frame around it has to be
+    // drawn to the *ink* box the framed ones fill, which is what this variant's
+    // own note says and what the drawing did not do. Scaled about its own
+    // centre by `11.6 / 8.8`; the arms are still two fifths of the shaft.
+    r#"<path d="M7.2 2.2h6.6v6.6M13.8 2.2L2.2 13.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
     // `#i-globe` — byte for byte from `design/ui-mockup.html:4358`: a circle, the
     // two latitudes, and the ellipse that is every meridian seen edge on.
     concat!(
-        r#"<circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.15"/>"#,
-        r#"<path d="M2.6 6.2h10.8M2.6 9.8h10.8" stroke="currentColor" stroke-width="1.15" stroke-linecap="round"/>"#,
-        r#"<ellipse cx="8" cy="8" rx="2.7" ry="6" fill="none" stroke="currentColor" stroke-width="1.15"/>"#,
+        r#"<circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
+        r#"<path d="M2.6 6.2h10.8M2.6 9.8h10.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<ellipse cx="8" cy="8" rx="2.7" ry="6" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
     ),
     // `#i-lock` — the action, "you could lock this". The shackle is OPEN: it
     // stands on the body's right-hand leg only and leans away, which is how
@@ -2637,8 +2978,8 @@ const SYMBOL_BODY: [&str; 46] = [
     // two are read in the same window at the same size and a lock drawn lighter
     // would read as a lock in a different mood rather than a different glyph.
     concat!(
-        r#"<path d="M10.4 7.2V5a2.4 2.4 0 014.8 0v1" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#,
-        r#"<rect x="3.1" y="7.2" width="9.8" height="6.6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.25"/>"#,
+        r#"<path d="M10.4 7.2V5a2.4 2.4 0 014.8 0v1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<rect x="3.1" y="7.2" width="9.8" height="6.6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
     ),
     // `#i-locked` — the state, "it is locked". SAME BODY RECTANGLE, so the two
     // rasters differ only where the meaning does; the shackle comes down over
@@ -2646,17 +2987,126 @@ const SYMBOL_BODY: [&str; 46] = [
     // pixels the fill alone is what the pin has to live on because Windows fixed
     // its angle, and a padlock has a second axis available, so it is spent.
     concat!(
-        r#"<path d="M5.6 7.2V5a2.4 2.4 0 014.8 0v2.2" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#,
-        r#"<rect x="3.1" y="7.2" width="9.8" height="6.6" rx="1.6" fill="currentColor"/>"#,
+        r#"<path d="M5.6 7.2V5a2.4 2.4 0 014.8 0v2.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<rect x="3.1" y="7.2" width="9.8" height="6.6" rx="1.2" fill="currentColor"/>"#,
     ),
     // `#i-zoom-in` — four corner brackets thrown OUT to the frame: "fill it".
     // One subpath per corner, all four in one `d`, because they are one drawing
     // and a reader who moves one has to move the others.
-    r#"<path d="M2.2 6.6V2.2h4.4M9.4 2.2h4.4v4.4M13.8 9.4v4.4H9.4M6.6 13.8H2.2V9.4" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    r#"<path d="M2.2 6.6V2.2h4.4M9.4 2.2h4.4v4.4M13.8 9.4v4.4H9.4M6.6 13.8H2.2V9.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
     // `#i-zoom-out` — the same four pulled IN: "come back". Same arm length and
     // same stroke as the one above; what differs is which way each corner
     // points, which is the whole of the pair.
-    r#"<path d="M6.2 2.6v3.6H2.6M9.8 2.6v3.6h3.6M13.4 9.8H9.8v3.6M2.6 9.8h3.6v3.6" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    r#"<path d="M6.2 2.6v3.6H2.6M9.8 2.6v3.6h3.6M13.4 9.8H9.8v3.6M2.6 9.8h3.6v3.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    // `#i-tab-new` — the strip's rule, one tab standing on it, and the
+    // hand-off arrow leaving over its shoulder. The tab is rounded on its top
+    // two corners only, which is `.tab { border-radius: var(--tabr) var(--tabr)
+    // 0 0 }` and the silhouette `active_tab_path` generates at full size.
+    concat!(
+        r#"<path d="M2.2 12.6h11.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M2.8 12.6V6.4c0-.7.5-1.2 1.2-1.2h3.4c.7 0 1.2.5 1.2 1.2v6.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+        r#"<path d="M10.4 2.6h3.4v3.4M13.8 2.6L9.8 6.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    ),
+    // `#i-window-new` — a window (a frame with its title bar) and the arrow
+    // leaving for it. The frame is drawn small and low so the arrow has the
+    // top-right quadrant to itself: two objects in one box, neither overlapping
+    // the other, which is what keeps both legible at a menu row's fourteen
+    // pixels.
+    concat!(
+        r#"<rect x="2.2" y="5.6" width="8.2" height="7.2" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
+        r#"<path d="M2.2 7.8h8.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M9.4 2.2h4.4v4.4M13.8 2.2L10.8 5.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    ),
+    // `#i-window-pick` — the same window, the same shaft, and the head on the
+    // other end of it. The arms are the arrival's, so the arrow points *into*
+    // the frame; nothing else about the drawing differs, which is the whole
+    // claim the pair makes.
+    concat!(
+        r#"<rect x="2.2" y="5.6" width="8.2" height="7.2" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
+        r#"<path d="M2.2 7.8h8.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M13.8 2.2L10.8 5.2M10.8 3.5v1.7h1.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    ),
+    // `#i-trash` — the lid, the handle above it, the bin below and the two
+    // ribs. The bin's sides taper, because a bin whose sides are parallel is a
+    // cup.
+    concat!(
+        r#"<path d="M2.6 4.4h10.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M6.4 4.4V3.2a.8.8 0 0 1 .8-.8h1.6a.8.8 0 0 1 .8.8v1.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+        r#"<path d="M4 4.4l.66 7.9a1.2 1.2 0 0 0 1.2 1.1h4.28a1.2 1.2 0 0 0 1.2-1.1l.66-7.9" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+        r#"<path d="M6.8 6.9v4.2M9.2 6.9v4.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+    ),
+    // `#i-stop` — the transport control's solid, at the house's inner radius.
+    r#"<rect x="3.6" y="3.6" width="8.8" height="8.8" rx="1.2" fill="currentColor"/>"#,
+    // `#i-restart` — the power gesture: a ring open at the top and the bar
+    // standing in the opening. The arc is written from nine o'clock the long
+    // way round so the gap lands at twelve, where the bar is.
+    r#"<path d="M5.5 3.87a5 5 0 1 0 5 0M8 2.2v5.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+    // `#i-devtools` — the spanner. The head is an arc rather than a circle and
+    // the mouth faces away from the shaft, which is the one thing that keeps it
+    // off `#i-search`: a closed ring on a handle is a magnifier.
+    //
+    // **The mouth is a hundred and twenty degrees**, and that number was
+    // measured off the drawing rather than chosen. Cut at seventy the head read
+    // as a ring with a nick in it, and this sheet's magnifier is a ring on a
+    // stick pointing the other way — two mirrored silhouettes differing by a
+    // notch, which is exactly the failure `ChromeMark::SplitRight`'s note names.
+    // At a hundred and twenty it is a horseshoe and there is nothing to
+    // mistake.
+    concat!(
+        r#"<path d="M11.7 2.66A3.4 3.4 0 1 0 11.7 8.54" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M8.2 8.2L3.4 13" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+    ),
+    // `#i-hash` — the number sign, struck from geometry. The uprights lean,
+    // because an upright `#` reads as a grid and a leaning one reads as the
+    // character every reader already knows a hash by.
+    r#"<path d="M6.2 2.6L4.8 13.4M11.2 2.6L9.8 13.4M3.2 6h10.4M2.8 10h10.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+    // `#i-compare` — two things and the looking between them. The two rules
+    // are the two versions; deliberately not two closed panes, which is
+    // `#i-split-right` and would put two marks in one build that differ only by
+    // whether their boxes are shut.
+    concat!(
+        r#"<path d="M3.4 2.8v10.4M12.6 2.8v10.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M5.6 8h4.8M7.2 6.4L5.6 8l1.6 1.6M8.8 6.4L10.4 8l-1.6 1.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    ),
+    // `#i-duplicate` — `#i-copy`'s idiom on a pane. The back one is an open
+    // corner, exactly as the copy's is; the front one carries `#i-panel`'s side
+    // rule, which is what says the reader is looking at a pane and not at
+    // paper.
+    concat!(
+        r#"<path d="M10.6 2.6H4a1.4 1.4 0 0 0-1.4 1.4v6.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<rect x="5.2" y="5.2" width="8.6" height="7.2" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
+        r#"<path d="M8 5.2v7.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+    ),
+    // `#i-arrow` — the shaft and the head, pointing right at rest. Which way
+    // it points is a quarter turn applied in `svg_document`, on `#i-chev`'s
+    // precedent: one drawing, four meanings, and no second artwork to drift.
+    r#"<path d="M2.6 8h10.8M9.6 4.2L13.4 8l-3.8 3.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    // `#i-more-down` — the chevron over the floor it is pointing at. Deliberately
+    // `#i-chev`'s own arrow rather than a second one: what this adds to a
+    // chevron is the rule, which is the list's end.
+    concat!(
+        r#"<path d="M3.4 4.4L8 9 12.6 4.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+        r#"<path d="M3.4 12.4h9.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+    ),
+    // `#i-search` — the ring and the handle, on the ring's own diagonal so
+    // the two read as one instrument.
+    concat!(
+        r#"<circle cx="7" cy="7" r="4.4" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
+        r#"<path d="M10.3 10.3l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+    ),
+    // `#i-more` — three dots on the row's own centre line, at the house's ink
+    // band's two ends and its middle.
+    r#"<g fill="currentColor"><circle cx="3.4" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="12.6" cy="8" r="1.2"/></g>"#,
+    // `#i-history-restore` — a clock with its hands set, and the ring turning
+    // back. The head is filled and the ring stroked, for `#i-refresh`'s reason:
+    // an arrowhead outlined at this size is three hairlines meeting, which
+    // reads as a smudge rather than as a direction. It turns anticlockwise,
+    // which is the whole of what separates restoring from reloading.
+    concat!(
+        r#"<path d="M3.2 8a4.8 4.8 0 1 1 1.4 3.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M3.2 10.9 4.7 8 1.7 8z" fill="currentColor"/>"#,
+        r#"<path d="M8 5.2V8l2.2 1.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    ),
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the
@@ -3201,9 +3651,32 @@ mod tests {
     /// Red gate: a placeholder block would be opaque *everywhere*, so each mark
     /// is also required to leave transparent pixels — that is what tells a glyph
     /// apart from the filled square this pass exists to delete.
+    ///
+    /// **The list walks the registry and not a hand-written roll**, since P1
+    /// struck fifteen drawings in one sitting and a hand-written roll is
+    /// exactly what would have been extended by fourteen. `ActionIcon::ALL` is
+    /// every mark the chrome puts on a control, so a new drawing that does not
+    /// parse, or parses and draws nothing — an arc with the wrong sweep flag,
+    /// a `d` with a typo in it — fails here the day it is written rather than
+    /// the day somebody opens the menu it is in. The bespoke sizes below stay
+    /// on top of that: they are the boxes the chrome actually asks for, and
+    /// several of them are smaller than any slot.
     #[test]
     fn every_chrome_mark_rasterizes_to_its_box_with_ink_and_negative_space() {
         let accent = [0x7a, 0x99, 0xff];
+        let registry: Vec<(ChromeMark, f32)> = crate::icons::ActionIcon::ALL
+            .iter()
+            .flat_map(|icon| {
+                let mark = icon.mark();
+                [
+                    (mark, crate::icons::MarkSlot::Menu.house_box_logical_px()),
+                    (
+                        mark,
+                        crate::icons::MarkSlot::CompactHead.house_box_logical_px(),
+                    ),
+                ]
+            })
+            .collect();
         let cases = [
             (ChromeMark::Gear, 14.0_f32),
             (ChromeMark::WindowMinimize, 10.0),
@@ -3252,7 +3725,7 @@ mod tests {
             (ChromeMark::Lock { engaged: false }, 13.0),
             (ChromeMark::Lock { engaged: true }, 13.0),
         ];
-        for (mark, size) in cases {
+        for (mark, size) in cases.into_iter().chain(registry) {
             for scale in [1.0_f32, 1.5, 2.0] {
                 let side = (size * scale).round();
                 let mut rasters = ChromeMarkRasters::default();
@@ -3260,14 +3733,20 @@ mod tests {
                 let icon = icons
                     .first()
                     .unwrap_or_else(|| panic!("{mark:?} must rasterize at {side}px"));
+                // The box it was given, plus whatever room the drawing
+                // needs *outside* it — which is nothing for every mark but the
+                // turning chevron, and stated as the derivation so that a
+                // second drawing needing bleed does not have to be remembered
+                // here. See `ChromeMark::raster_bleed`.
+                let (want_width, want_height) = mark.raster_size(side as u32, side as u32);
                 assert_eq!(
                     (icon.width_px, icon.height_px),
-                    (side as u32, side as u32),
+                    (want_width, want_height),
                     "{mark:?} must fill exactly the box it was given"
                 );
                 assert_eq!(
                     icon.rgba.len(),
-                    (side as usize) * (side as usize) * 4,
+                    (want_width as usize) * (want_height as usize) * 4,
                     "{mark:?} raster is not its own dimensions"
                 );
                 let inked = icon.rgba.chunks_exact(4).filter(|p| p[3] > 0).count();
@@ -4006,7 +4485,11 @@ mod tests {
             "`.chevbtn.open svg {{ transform: rotate(180deg) }}`"
         );
 
-        let icons = turn_sweep(ink, 18.0, 12.0);
+        // A square box, because the arrow is a square drawing since P1. The
+        // fixture used to be `18 × 12` — the `10 × 6` symbol's own
+        // proportion — and a wide box now letterboxes the glyph down to
+        // its short side, which is a test measuring its own fixture.
+        let icons = turn_sweep(ink, 18.0, 18.0);
         let last = icons.len() - 1;
         let (down, side, up) = (&icons[0], &icons[last / 2], &icons[last]);
         assert_ne!(down.key, up.key);
@@ -4042,7 +4525,7 @@ mod tests {
         }
 
         // Halfway through, the arrow is standing on end. Nothing that swaps two
-        // 9x6 drawings ever produces this frame.
+        // resting drawings ever produces this frame.
         let (down_w, down_h) = ink_span(down);
         let (side_w, side_h) = ink_span(side);
         assert!(
@@ -4083,8 +4566,9 @@ mod tests {
     /// PIN — the turn needs room the layout never gave it, and taking that room
     /// does not move the arrow.
     ///
-    /// A 9x6 arrow at 90° is 6x9, so the raster box is grown past the CSS box
-    /// or the middle of the transition is drawn with its ends sliced off. The
+    /// An arrow at 90° reaches where its box is widest, so the raster box is
+    /// grown past the CSS box or the middle of the transition is drawn with its
+    /// ends sliced off. The
     /// price of growing it would be re-aligning the *resting* arrow, which is on
     /// screen essentially always — so the growth is whole pixels, symmetric, and
     /// this proves what that buys: the glyph lands on exactly the pixels it
@@ -4097,16 +4581,24 @@ mod tests {
     /// remembered number.
     #[test]
     fn the_turning_box_leaves_the_resting_arrow_exactly_where_it_was() {
+        // Read off the sheet rather than written down, so a re-cut of the
+        // arrow — P1 moved it from `10 × 6` to the house square — is checked by
+        // this test rather than checked *against* it.
+        let view_box = SYMBOL_VIEW_BOX[symbol_index(ChromeMark::chevron(0.0))];
+        let [view_width, view_height] = chevron_view_box_units();
         assert_eq!(
-            SYMBOL_VIEW_BOX[symbol_index(ChromeMark::chevron(0.0))],
-            "0 0 10 6",
-            "the padding arithmetic is written against this box"
+            chevron_turn_centre_units(),
+            [view_width / 2.0, view_height / 2.0],
         );
-        assert_eq!(CHEVRON_VIEW_BOX_UNITS, [10.0, 6.0]);
+        let turned = format!(
+            r#" transform="rotate(180 {} {})""#,
+            view_width / 2.0,
+            view_height / 2.0,
+        );
 
         let ink = [0x9d, 0x9d, 0x9d];
-        for (glyph_width, glyph_height) in [(9u32, 6u32), (11, 8), (18, 12), (27, 18)] {
-            for (turn, rotation) in [(0.0_f32, ""), (1.0, r#" transform="rotate(180 5 3)""#)] {
+        for (glyph_width, glyph_height) in [(9u32, 9u32), (11, 11), (18, 18), (27, 27)] {
+            for (turn, rotation) in [(0.0_f32, ""), (1.0, turned.as_str())] {
                 let mark = ChromeMark::chevron(turn);
                 let mut rasters = ChromeMarkRasters::default();
                 let icons =
@@ -4120,7 +4612,7 @@ mod tests {
                 let body = SYMBOL_BODY[symbol_index(mark)]
                     .replace("currentColor", &format!("#{r:02x}{g:02x}{b:02x}"));
                 let legacy = format!(
-                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="{glyph_width}" height="{glyph_height}" viewBox="0 0 10 6"><g{rotation}>{body}</g></svg>"#
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="{glyph_width}" height="{glyph_height}" viewBox="{view_box}"><g{rotation}>{body}</g></svg>"#
                 );
                 let legacy = bt_math::rasterize_svg_document(legacy.as_bytes())
                     .expect("the symbol sheet's own form still rasterizes");
@@ -4182,7 +4674,18 @@ mod tests {
     /// rotation moves ink, it never spends any.
     #[test]
     fn no_angle_of_the_turn_is_clipped_by_its_own_box() {
-        for (width, height) in [(9.0_f32, 6.0_f32), (14.0, 9.0), (18.0, 12.0), (27.0, 18.0)] {
+        // Boxes the chrome actually gives a chevron, and up. Below the compact
+        // head's own box the house pen is under a physical pixel, and the
+        // coverage a rotation lands on the grid then swings by more than this
+        // assertion's four percent — which is a fact about sampling and not
+        // about clipping, and a test that cannot tell the two apart is not
+        // testing the thing it names.
+        for (width, height) in [
+            (14.0_f32, 14.0_f32),
+            (18.0, 18.0),
+            (27.0, 27.0),
+            (40.0, 40.0),
+        ] {
             let icons = turn_sweep([0xed, 0xed, 0xec], width, height);
             let resting = ink_mass(&icons[0]);
             for (step, icon) in icons.iter().enumerate() {

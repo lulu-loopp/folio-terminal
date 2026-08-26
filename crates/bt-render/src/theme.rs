@@ -2287,18 +2287,32 @@ pub const WINDOW_TAB_SQUEEZED_LOGICAL_PX: f32 = 90.0;
 pub const WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX: f32 = 4.0;
 /// The new-tab button and its placement (`design/ui-mockup.html` lines 386-408).
 pub const WINDOW_NEW_TAB_BOX_LOGICAL_PX: f32 = 28.0;
-pub const WINDOW_NEW_TAB_GLYPH_LOGICAL_PX: f32 = 10.0;
+/// The `+` inside that box.
+///
+/// **Thirteen since P1**, which is `bt_app::icons::MarkSlot::CompactHead`'s
+/// number said in the crate that cannot name it. `#i-plus` was cut in a
+/// ten-unit box and drawn in a ten-pixel one, so its ink ran corner to corner
+/// and its pen came out `1.2`; re-cut into the house sixteen it carries the
+/// house's air, and a ten-pixel box would have drawn a `0.75` pen — the
+/// thinnest control glyph in the window — beside a `✕` drawing `1.04`.
+pub const WINDOW_NEW_TAB_GLYPH_LOGICAL_PX: f32 = 13.0;
 /// `.newtab { border-radius: 6px }` — the round on the hover fill, and the whole
 /// of what the button is at rest: `background: none` until the pointer arrives.
 pub const WINDOW_NEW_TAB_RADIUS_LOGICAL_PX: f32 = 6.0;
 pub const WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX: f32 = 6.0;
 pub const WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX: f32 = 3.0;
-/// `.chevbtn svg { width: 9px; height: 6px }` — the profile picker's arrow. It
-/// wears the same 28px `.newtab` box as the `+` beside it (`.tabs-inline
-/// .chevbtn { margin-left: 0 }`): two buttons of the same kind, side by side, at
-/// two different widths reads as a mistake rather than as a hierarchy.
-pub const WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX: f32 = 9.0;
-pub const WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX: f32 = 6.0;
+/// `.chevbtn svg` — the profile picker's arrow. It wears the same 28px
+/// `.newtab` box as the `+` beside it (`.tabs-inline .chevbtn { margin-left: 0
+/// }`): two buttons of the same kind, side by side, at two different widths
+/// reads as a mistake rather than as a hierarchy.
+///
+/// The mock-up writes `width: 9px; height: 6px`, which is the `10 × 6` symbol's
+/// own proportion. P1 re-cut the arrow to the house square, so the box is
+/// square and it is the same box the `+` beside it takes — which is that
+/// sentence about two buttons of the same kind, carried through to the glyphs
+/// inside them.
+pub const WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX: f32 = WINDOW_NEW_TAB_GLYPH_LOGICAL_PX;
+pub const WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX: f32 = WINDOW_NEW_TAB_GLYPH_LOGICAL_PX;
 
 // ── R1/R2: the vertical rail (`design/ui-mockup.html` 802-964) ──
 //

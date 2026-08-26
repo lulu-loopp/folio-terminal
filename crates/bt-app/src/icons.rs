@@ -68,8 +68,25 @@ const MENU_HOUSE_BOX_LOGICAL_PX: f32 = 14.0;
 /// `工具栏 14` — the same number for a panel head, and the same reason: both are
 /// a column of marks beside a column of words.
 const TOOLBAR_HOUSE_BOX_LOGICAL_PX: f32 = 14.0;
-/// `紧凑头 12` — a head's run of controls.
-const COMPACT_HEAD_HOUSE_BOX_LOGICAL_PX: f32 = 12.0;
+/// `紧凑头 13` — a head's run of controls.
+///
+/// **The plan wrote `12` and P0 found that the two halves of the specification
+/// did not both fit.** A house mark's pen on screen is `1.2 / 16 × box`, so a
+/// twelve-pixel box draws `0.90` — below the band's floor before any drawing
+/// has been chosen, which P0 recorded in its own exemption note as the one
+/// thing P1 had to rule on. It stayed green only because nothing house-family
+/// was drawn there yet: the head's tools were at `13`, its folder is a fill.
+/// P1 moves the whole run into this slot, so the day had come.
+///
+/// Thirteen, and not a pen of the compact head's own. The alternative was to
+/// let one surface carry a heavier pen so its smaller box came out level, which
+/// is the *compensation* the 2026-08-25 audit found the menu column doing by
+/// hand — `#i-code` reading a correct `1.050` at twelve beside neighbours drawn
+/// at fourteen, a twelve-pixel mark in a fourteen-pixel column. One pen and one
+/// box per slot is the whole of what this table is for; thirteen is the
+/// smallest box that carries the house pen, and a head's run is the tightest
+/// place the chrome puts a button.
+const COMPACT_HEAD_HOUSE_BOX_LOGICAL_PX: f32 = 13.0;
 /// `标题栏 10` — **and this one is written for the other family.**
 ///
 /// The three caption controls are the ten-unit window-control glyphs, drawn edge
@@ -308,9 +325,25 @@ pub enum ActionIcon {
     OpenInBrowser,
 
     // ── the settings dialog ──────────────────────────────────────────────
+    /// `Find…`, on the terminal's own context menu — **the row that had no
+    /// mark**, because until P1 the house had no magnifier. It read as a glyph
+    /// that had fallen out of the column: rows above it and below it wore one.
+    FindInTerminal,
     EditRow,
     DeleteRow,
     CloseDialog,
+    /// **The four verbs the dialog was spending font characters on** (P1, the
+    /// plan's 字符退役). `↺`, `↑`, `↓`, `⋯` and `✕` were drawn as text runs
+    /// in the dialog's own type, which is the thing `marks.rs`'s opening
+    /// paragraph forbids: a codepoint is a fact about the installed font, its
+    /// width is another, and the row beside it is drawing geometry.
+    RestoreRowDefaults,
+    MoveRowUp,
+    MoveRowDown,
+    OpenRowMenu,
+    /// The dialog's `✕` on an environment row — a *removal*, which is why it
+    /// joins [`Self::DeleteRow`] on the bin rather than the close cross.
+    RemoveEnvironmentRow,
     /// The three pictures the `Split direction` combo draws: *ask me*, *to the
     /// right*, *below*.
     SplitDirectionAsk,
@@ -337,7 +370,7 @@ pub enum ActionIcon {
 impl ActionIcon {
     /// Every verb, for the reverse index to walk.
     #[cfg(test)]
-    pub const ALL: [Self; 76] = [
+    pub const ALL: [Self; 82] = [
         Self::OpenSettings,
         Self::MinimiseWindow,
         Self::MaximiseWindow,
@@ -401,9 +434,15 @@ impl ActionIcon {
         Self::StopNavigating,
         Self::CopyAddress,
         Self::OpenInBrowser,
+        Self::FindInTerminal,
         Self::EditRow,
         Self::DeleteRow,
         Self::CloseDialog,
+        Self::RestoreRowDefaults,
+        Self::MoveRowUp,
+        Self::MoveRowDown,
+        Self::OpenRowMenu,
+        Self::RemoveEnvironmentRow,
         Self::SplitDirectionAsk,
         Self::SplitDirectionRight,
         Self::SplitDirectionDown,
@@ -484,9 +523,15 @@ impl ActionIcon {
             Self::StopNavigating => "StopNavigating",
             Self::CopyAddress => "CopyAddress",
             Self::OpenInBrowser => "OpenInBrowser",
+            Self::FindInTerminal => "FindInTerminal",
             Self::EditRow => "EditRow",
             Self::DeleteRow => "DeleteRow",
             Self::CloseDialog => "CloseDialog",
+            Self::RestoreRowDefaults => "RestoreRowDefaults",
+            Self::MoveRowUp => "MoveRowUp",
+            Self::MoveRowDown => "MoveRowDown",
+            Self::OpenRowMenu => "OpenRowMenu",
+            Self::RemoveEnvironmentRow => "RemoveEnvironmentRow",
             Self::SplitDirectionAsk => "SplitDirectionAsk",
             Self::SplitDirectionRight => "SplitDirectionRight",
             Self::SplitDirectionDown => "SplitDirectionDown",
@@ -513,14 +558,40 @@ impl ActionIcon {
             Self::OpenSettings => ChromeMark::Gear,
             Self::MinimiseWindow => ChromeMark::WindowMinimize,
             Self::MaximiseWindow => ChromeMark::WindowMaximize,
-            Self::CloseWindow | Self::DeleteRow | Self::CloseDialog => ChromeMark::WindowClose,
+            // **Closing a surface, and nothing else.** P1 took the other three
+            // senses off the cross: deleting goes to the bin below, stopping to
+            // the square below that. What is left is one act at three sizes,
+            // which is what the three variant names are for.
+            Self::CloseWindow | Self::CloseDialog => ChromeMark::WindowClose,
             Self::CloseTab => ChromeMark::TabClose,
-            Self::NewTab | Self::CreateBranch | Self::StageChange | Self::LoadMoreCommits => {
-                ChromeMark::Plus
-            }
+            // Leaving a comparison closes it: the two versions stop being on
+            // screen and nothing is destroyed, which is the cross's own sense
+            // and not the bin's.
+            Self::ClosePane | Self::LeaveCompare => ChromeMark::PaneClose,
+            // **Destroying something.** A branch, a tag, a working-tree change,
+            // a row of the reader's own settings.
+            Self::DeleteRow
+            | Self::RemoveEnvironmentRow
+            | Self::DeleteBranch
+            | Self::DeleteTag
+            | Self::DiscardChanges => ChromeMark::Trash,
+            Self::StopNavigating => ChromeMark::Stop,
+            // **Making something that was not there.** `Load more` is off this
+            // list since P1: it reveals what is already written down.
+            Self::NewTab | Self::CreateBranch | Self::StageChange => ChromeMark::Plus,
+            Self::LoadMoreCommits => ChromeMark::MoreDown,
+            // A list that is folded away, and nothing else: the browser's Back
+            // and Forward moved to the arrow below.
             Self::PickProfile | Self::OpenPaneMenu => ChromeMark::chevron(0.0),
-            Self::NavigateBack => ChromeMark::Chevron { turned_degrees: 90 },
-            Self::NavigateForward => ChromeMark::Chevron {
+            // One arrow at four quarter turns. East is forward, west is back,
+            // north is the parent of this commit and the row above it, south is
+            // the row below.
+            Self::NavigateForward => ChromeMark::Arrow { turned_degrees: 0 },
+            Self::MoveRowDown => ChromeMark::Arrow { turned_degrees: 90 },
+            Self::NavigateBack => ChromeMark::Arrow {
+                turned_degrees: 180,
+            },
+            Self::GoToParentCommit | Self::MoveRowUp => ChromeMark::Arrow {
                 turned_degrees: 270,
             },
             Self::OpenFilesPane
@@ -528,37 +599,46 @@ impl ActionIcon {
             | Self::FolderObject
             | Self::FilesSeat => ChromeMark::Folder,
             Self::RevealInFolder | Self::OpenFolderObject => ChromeMark::FolderOpen,
-            Self::FloatFilesPane | Self::MoveToNewTab | Self::FloatPreview => ChromeMark::Float,
-            Self::ClosePane
-            | Self::DeleteBranch
-            | Self::DeleteTag
-            | Self::DiscardChanges
-            | Self::LeaveCompare
-            | Self::StopNavigating => ChromeMark::PaneClose,
+            // **One gesture, four containers.** The frame says which one, which
+            // is the whole of the 裁2 quarrel: a pane pops out into a float, or
+            // leaves for a tab, or for a window of its own, or for one already
+            // open. Until P1 the first two were the same drawing.
+            Self::FloatFilesPane | Self::FloatPreview => ChromeMark::Float,
+            Self::MoveToNewTab => ChromeMark::TabNew,
+            Self::MoveToNewWindow => ChromeMark::WindowNew,
+            Self::MoveToWindow => ChromeMark::WindowPick,
+            // And the bare arrow, which now says one thing: the machine's own
+            // program takes this.
+            Self::OpenWith | Self::OpenInBrowser => ChromeMark::External,
             Self::ZoomPane => ChromeMark::PaneZoom { zoomed: false },
-            Self::SplitPane | Self::CompareVersions | Self::SplitDirectionAsk => ChromeMark::Split,
+            Self::SplitPane | Self::SplitDirectionAsk => ChromeMark::Split,
             Self::SplitDirectionRight => ChromeMark::SplitRight,
             Self::SplitDirectionDown => ChromeMark::SplitDown,
-            Self::DuplicatePane
-            | Self::CopySelection
+            Self::CompareVersions => ChromeMark::Compare,
+            // Putting text on the clipboard — one sense, whatever the text is.
+            Self::CopySelection
             | Self::CopyPath
-            | Self::CopyHash
             | Self::CopySubject
             | Self::CopyName
             | Self::CopyAddress => ChromeMark::Copy,
+            Self::CopyHash | Self::GraphCopyHash => ChromeMark::Hash,
+            Self::DuplicatePane => ChromeMark::Duplicate,
             Self::PasteClipboard | Self::InsertPath => ChromeMark::Paste,
             Self::SelectAll => ChromeMark::SelectAll,
             Self::ClearScreen => ChromeMark::Broom,
             Self::ClearScrollback => ChromeMark::Eraser,
-            Self::RestartShell | Self::RereadRepository | Self::ReloadPage => ChromeMark::Refresh,
+            // Fetching the same thing again — and *not* restarting a shell,
+            // which throws a process away.
+            Self::RereadRepository | Self::ReloadPage => ChromeMark::Refresh,
+            Self::RestartShell => ChromeMark::Restart,
+            Self::RestoreRowDefaults => ChromeMark::HistoryRestore,
+            Self::OpenRowMenu => ChromeMark::More,
+            Self::FindInTerminal => ChromeMark::Search,
             Self::OpenFile | Self::OpenDiff | Self::FileObject | Self::PreviewSeat => {
                 ChromeMark::File
             }
             Self::PageObject => ChromeMark::Globe { favicon: None },
             Self::UnknownSeat => ChromeMark::Panel,
-            Self::OpenWith | Self::MoveToNewWindow | Self::MoveToWindow | Self::OpenInBrowser => {
-                ChromeMark::External
-            }
             Self::RenameFile | Self::RenameBranch | Self::EditRow => ChromeMark::Pencil,
             Self::CheckoutBranch => ChromeMark::GitBranch,
             Self::CreateTag => ChromeMark::Tag,
@@ -567,10 +647,8 @@ impl ActionIcon {
             Self::MenuTick => ChromeMark::Check,
             Self::SavePreview => ChromeMark::Save,
             Self::ViewRendered => ChromeMark::Eye,
-            Self::ViewSource
-            | Self::OpenDevTools
-            | Self::GraphCopyHash
-            | Self::GoToParentCommit => ChromeMark::Code,
+            Self::ViewSource => ChromeMark::Code,
+            Self::OpenDevTools => ChromeMark::DevTools,
             Self::LockPreview => ChromeMark::Lock { engaged: false },
         }
     }
@@ -888,6 +966,35 @@ mod tests {
             ChromeMark::chevron(0.0),
             crate::search::BUTTON_GLYPH_LOGICAL_PX,
         );
+        // The two breadcrumbs' punctuation, which was a `‹` and a `›` set in
+        // each surface's own type until P1 and is the house's arrow now. Both
+        // are drawn at the compact head's box, whatever cell the layout gives
+        // them — see `seats::crumb_punctuation_box`.
+        for mark in [
+            crate::seats::crumb_back_mark(),
+            crate::seats::crumb_separator_mark(),
+        ] {
+            wide.push((
+                "breadcrumb punctuation",
+                mark,
+                MarkSlot::CompactHead.mark_box_logical_px(mark),
+            ));
+        }
+        // The settings dialog's own row verbs, which were five font characters
+        // in the same edit.
+        for icon in [
+            ActionIcon::RestoreRowDefaults,
+            ActionIcon::MoveRowUp,
+            ActionIcon::MoveRowDown,
+            ActionIcon::OpenRowMenu,
+            ActionIcon::RemoveEnvironmentRow,
+        ] {
+            wide.push((
+                "settings row verb",
+                icon.mark(),
+                MarkSlot::CompactHead.mark_box_logical_px(icon.mark()),
+            ));
+        }
         sites.extend(
             squares
                 .into_iter()
@@ -948,120 +1055,54 @@ mod tests {
         "pane head zoom",
     ];
 
-    /// **The transitional exemption list, and what closes each entry.**
+    /// **The transitional exemption list is empty.**
     ///
-    /// Six drawings, and the rule the list is held to is that **no box may fix
-    /// them**: each one is red at every box its family could legitimately take
-    /// in any of the four slots, because what is wrong is the *pen against its
-    /// own box* rather than the box. Anything a slot could have fixed was fixed
-    /// in this block instead of being written down here — that is what moved the
-    /// menu's whole terminal run from `1.219` to `1.05`, the pane head's `✕`
-    /// from `0.80` to `0.96`, and the same `#i-close` — struck at `8` on a tab,
-    /// `8` on a toast, `8` on a focus card, `9` on a float's head, `10` in a
-    /// menu and `10` in the title bar — down to two boxes: the compact head's
-    /// and the caption's, which are two *slots* and not six opinions.
+    /// P0 left six drawings on it, and the rule it held them to was that *no
+    /// box could fix them*: each was outside the band at every box its family
+    /// could legitimately take, because what was wrong was the pen against its
+    /// own box rather than the box. `#i-plus` and `#i-minus` wrote `0.12` of
+    /// pen per unit and `#i-chev` the same, `#i-code` `0.0875`, `#i-check`
+    /// `0.10`, the grip `0.1875`; the house writes `1.2 / 16`, which is
+    /// `0.075`. Nothing about a slot changes a ratio.
     ///
-    /// | drawing | its pen | worst reading now | what P1 does |
-    /// |---|---|---|---|
-    /// | `#i-plus` | `1.2` in a **ten**-unit box | `1.344` in a menu row | re-cut into the house sixteen |
-    /// | `#i-minus` | `1.2` / 10 | `1.344` in a menu row | with the plus — they are one drawing |
-    /// | `#i-chev` | `1.2` / 10×6 | `1.344` in a menu row | re-cut to a sixteen **square** |
-    /// | `#i-check` | `1.6` / 16 | `1.400` in a menu row | the pen to `1.2` |
-    /// | `#i-code` | `1.4` / 16 | `1.225` in a menu row | the pen to `1.2` |
-    /// | grip | `1.5` in an **eight** | `1.500` on a float | `1.2` in a sixteen |
-    ///
-    /// The arithmetic behind "no box may fix them": a mark's pen on screen is
-    /// `units × box / viewBox`, so holding the *ink* level across a run fixes
-    /// the box and leaves the pen wherever `units / viewBox` puts it. The house
-    /// writes `1.2 / 16`; these six write `0.12`, `0.12`, `0.12`, `0.10`,
-    /// `0.0875` and `0.1875` per unit. Nothing about a slot changes that ratio.
-    ///
-    /// **One finding for P1 to rule on, recorded here because this list is where
-    /// it will bite.** The plan's compact-head slot is `12`, and `12 × 1.2/16 =
-    /// 0.90` — *below the band's floor before any drawing is chosen*. The two
-    /// halves of the specification do not both fit: after P1 re-cuts the table
-    /// to one `1.2` pen, a house mark in a 12px head reads `0.90` and only a
-    /// box of `12.67` or more reads `0.95`. Today nothing house-family is red
-    /// there (the head's tools are drawn at 13 and its folder is a fill), so the
-    /// gate is green; the day P1 moves the tools into the slot it will not be.
-    /// Either the slot goes to 13–14 or the compact head gets a pen of its own.
-    fn exempt(surface: &str, mark: ChromeMark) -> bool {
-        if NOT_A_CONTROL_SLOT.contains(&surface) {
-            return true;
-        }
-        matches!(
-            mark,
-            ChromeMark::Plus
-                | ChromeMark::Minus
-                | ChromeMark::Chevron { .. }
-                | ChromeMark::Check
-                | ChromeMark::Code
-                | ChromeMark::ResizeGrip
-        )
+    /// P1 changed the ratios, which was the only thing left to change. Four of
+    /// the six were re-cut into the house's sixteen (`#i-plus`, `#i-minus`,
+    /// `#i-chev`, the grip) and two had their pens brought to the house's
+    /// (`#i-check` from `1.6`, `#i-code` from `1.4`). What remains here is
+    /// [`NOT_A_CONTROL_SLOT`], which is a different claim entirely — not "this
+    /// drawing is wrong" but "the band is not about this surface".
+    fn exempt(surface: &str, _mark: ChromeMark) -> bool {
+        NOT_A_CONTROL_SLOT.contains(&surface)
     }
 
-    /// The transitional list is only worth what its rule is worth, so the rule
-    /// is asserted: **every drawing on it is outside the band in the box its own
-    /// run gives it.**
+    /// The other half of P0's rule, and now the whole of it: **every drawing
+    /// the chrome puts on a button lands in the band in the house's own box.**
     ///
-    /// The run is the menu's, which is the house's own box — `14`, the number
-    /// the band's `1.05` is *defined* at (`1.2 / 16 × 14`). A drawing that
-    /// cannot make the band there cannot be brought into it by any box a run
-    /// would tolerate: the only boxes that work are smaller ones, and a smaller
-    /// box in a column of marks is the *other* half of the 2026-08-25 audit —
-    /// a menu column running `10.0` to `14.0` of ink, with whichever marks
-    /// happened to need the compensation drawn a size down from their
-    /// neighbours. `#i-code` is the case in point: it reads `1.050` at twelve,
-    /// which is the right pen and the wrong size — a twelve-pixel mark in a
-    /// fourteen-pixel column. The pen is what P1 fixes, and until it does, the
-    /// mark stays the size of its run and the reading stays on this list.
+    /// The box is the menu's `14`, which is the number the band's `1.05` is
+    /// *defined* at (`1.2 / 16 × 14`). Take `#i-check` back to `1.6` and this
+    /// goes red at `1.400`; take `#i-chev` back to `10 × 6` and it goes red at
+    /// `1.344`; put `#i-copy` back on a 15px box and it reads `1.219`, which is
+    /// the number the 2026-08-25 audit measured across the terminal menu's
+    /// whole run.
     #[test]
-    fn nothing_on_the_transitional_list_is_in_the_band_in_its_own_run() {
+    fn no_drawing_is_waiting_for_a_re_cut() {
         let [floor, ceiling] = OPTICAL_STROKE_BAND_LOGICAL_PX;
-        for mark in [
-            ChromeMark::Plus,
-            ChromeMark::Minus,
-            ChromeMark::chevron(0.0),
-            ChromeMark::Check,
-            ChromeMark::Code,
-            ChromeMark::ResizeGrip,
-        ] {
-            let [width, height] = MarkSlot::Menu.mark_box_logical_px(mark);
-            let optical = mark
-                .optical_stroke_logical_px(width, height)
-                .expect("every drawing on this list has a pen");
-            assert!(
-                optical < floor || optical > ceiling,
-                "{} reads {optical:.3} in the house's own box — it does not belong on the \
-                 transitional list",
-                mark.drawing_id(),
-            );
-        }
-    }
-
-    /// And the other half of the same rule: **every drawing that is *not* on the
-    /// list lands in the band in the slot it lives in.** This is what makes the
-    /// list a list rather than a habit — take `#i-copy` off the conversion and
-    /// put it back on 15px and this goes red at `1.219`, which is the number the
-    /// audit measured on the terminal menu's whole run.
-    #[test]
-    fn every_other_drawing_lands_in_the_band_in_its_own_slot() {
-        let [floor, ceiling] = OPTICAL_STROKE_BAND_LOGICAL_PX;
+        let mut wrong = Vec::new();
         for icon in ActionIcon::ALL {
             let mark = icon.mark();
-            if exempt("menu row", mark) {
-                continue;
-            }
             let [width, height] = MarkSlot::Menu.mark_box_logical_px(mark);
             let Some(optical) = mark.optical_stroke_logical_px(width, height) else {
                 continue;
             };
-            assert!(
-                optical >= floor && optical <= ceiling,
-                "{} reads {optical:.3} in a menu row",
-                mark.drawing_id(),
-            );
+            if optical < floor || optical > ceiling {
+                wrong.push(format!("{} reads {optical:.3}", mark.drawing_id()));
+            }
         }
+        assert!(
+            wrong.is_empty(),
+            "these do not draw the house pen in the house's own box:\n{}",
+            wrong.join("\n"),
+        );
     }
 
     /// **The red gate.** Every mark, in every box the chrome draws it in, has to
@@ -1116,6 +1157,8 @@ mod tests {
             "peek strip leaf",
             "Git row button",
             "float close",
+            "breadcrumb punctuation",
+            "settings row verb",
         ] {
             assert!(
                 sites.iter().any(|(name, _, _)| *name == surface),
@@ -1187,108 +1230,125 @@ mod tests {
     /// shared by two verbs is a shape the reader has to disambiguate from the
     /// row's text, and the four rows the users actually reported (`Move pane to
     /// new window` beside `Move to window ▸`, rasterizing *identically*) are
-    /// what that costs. P1 splits them; until it does, they are declared.
+    /// what that costs.
     ///
-    /// `true` means **P1 has to split this** — the audit judged the senses
-    /// genuinely different. `false` means the verbs are one sense wearing one
-    /// shape, which is what a shape is for (`Copy path`, `Copy name` and
-    /// `Copy subject` all mean *put this text on the clipboard*).
+    /// `true` means **a split is still owed**. **Nothing on this list carries
+    /// one any more**, which is the other half of P1's acceptance: the nine
+    /// groups P0 recorded as owing one were split, and what is left is the five
+    /// P0 already judged to be one sense wearing one shape, plus the two the
+    /// splits produced. A shape worn by several verbs is not a fault — it is
+    /// what a shape is *for*, when the verbs are the same act aimed at
+    /// different nouns. What was a fault was the shape standing for two
+    /// different acts, and there is none of that left.
     const REUSED_SHAPES: &[(&str, &[ActionIcon], bool)] = &[
+        // Closing a surface. Four names for one act at three sizes, and
+        // `LeaveCompare` because leaving a comparison puts two versions away
+        // and destroys nothing — which is the cross's sense and not the bin's.
         (
             "i-close",
             &[
                 ActionIcon::CloseWindow,
-                ActionIcon::DeleteRow,
                 ActionIcon::CloseDialog,
                 ActionIcon::CloseTab,
                 ActionIcon::ClosePane,
+                ActionIcon::LeaveCompare,
+            ],
+            false,
+        ),
+        // Destroying something. P1 struck this to take four verbs off the
+        // cross: a branch, a tag, a working-tree change and a row of the
+        // reader's own settings are not "closed".
+        (
+            "i-trash",
+            &[
+                ActionIcon::DeleteRow,
+                ActionIcon::RemoveEnvironmentRow,
                 ActionIcon::DeleteBranch,
                 ActionIcon::DeleteTag,
                 ActionIcon::DiscardChanges,
-                ActionIcon::LeaveCompare,
-                ActionIcon::StopNavigating,
             ],
-            true,
+            false,
         ),
+        // One arrow at four quarter turns, which is a direction and not a
+        // second drawing — `ChromeMark::PaneZoom`'s note said the same thing
+        // about a pair of brackets.
         (
-            "i-external",
+            "i-arrow",
             &[
-                ActionIcon::OpenWith,
-                ActionIcon::MoveToNewWindow,
-                ActionIcon::MoveToWindow,
-                ActionIcon::OpenInBrowser,
-            ],
-            true,
-        ),
-        (
-            "i-code",
-            &[
-                ActionIcon::GraphCopyHash,
-                ActionIcon::GoToParentCommit,
-                ActionIcon::ViewSource,
-                ActionIcon::OpenDevTools,
-            ],
-            true,
-        ),
-        (
-            "i-refresh",
-            &[
-                ActionIcon::RestartShell,
-                ActionIcon::RereadRepository,
-                ActionIcon::ReloadPage,
-            ],
-            true,
-        ),
-        (
-            "i-split",
-            &[
-                ActionIcon::SplitPane,
-                ActionIcon::CompareVersions,
-                ActionIcon::SplitDirectionAsk,
-            ],
-            true,
-        ),
-        (
-            "i-chev",
-            &[
-                ActionIcon::PickProfile,
-                ActionIcon::OpenPaneMenu,
                 ActionIcon::NavigateBack,
                 ActionIcon::NavigateForward,
+                ActionIcon::GoToParentCommit,
+                ActionIcon::MoveRowUp,
+                ActionIcon::MoveRowDown,
             ],
-            true,
+            false,
         ),
-        (
-            "i-copy",
-            &[
-                ActionIcon::DuplicatePane,
-                ActionIcon::CopySelection,
-                ActionIcon::CopyPath,
-                ActionIcon::CopyHash,
-                ActionIcon::CopySubject,
-                ActionIcon::CopyName,
-                ActionIcon::CopyAddress,
-            ],
-            true,
-        ),
+        // Making something that was not there. `Load more` came off this list
+        // in P1 and wears `#i-more-down`.
         (
             "i-plus",
             &[
                 ActionIcon::NewTab,
                 ActionIcon::CreateBranch,
                 ActionIcon::StageChange,
-                ActionIcon::LoadMoreCommits,
             ],
-            true,
+            false,
         ),
+        // A list that is folded away. The browser's Back and Forward came off
+        // this list in P1 and wear the arrow above.
+        (
+            "i-chev",
+            &[ActionIcon::PickProfile, ActionIcon::OpenPaneMenu],
+            false,
+        ),
+        // Fetching the same thing again. `Restart shell` came off this list in
+        // P1 and wears `#i-restart`, because restarting throws a process away.
+        (
+            "i-refresh",
+            &[ActionIcon::RereadRepository, ActionIcon::ReloadPage],
+            false,
+        ),
+        // Cutting a pane in two. `Compare with…` came off this list in P1.
+        (
+            "i-split",
+            &[ActionIcon::SplitPane, ActionIcon::SplitDirectionAsk],
+            false,
+        ),
+        // Putting text on the clipboard. `Duplicate pane` and `Copy hash` came
+        // off this list in P1 — the first is not text and the second is a
+        // hexadecimal name, which the graph's detail card was right to want
+        // told apart.
+        (
+            "i-copy",
+            &[
+                ActionIcon::CopySelection,
+                ActionIcon::CopyPath,
+                ActionIcon::CopySubject,
+                ActionIcon::CopyName,
+                ActionIcon::CopyAddress,
+            ],
+            false,
+        ),
+        // A commit's hexadecimal name, wherever it is copied from.
+        (
+            "i-hash",
+            &[ActionIcon::CopyHash, ActionIcon::GraphCopyHash],
+            false,
+        ),
+        // Popping a pane out into a floating window. `Move pane to new tab`
+        // came off this list in P1 and wears a tab.
         (
             "i-float",
-            &[
-                ActionIcon::FloatFilesPane,
-                ActionIcon::MoveToNewTab,
-                ActionIcon::FloatPreview,
-            ],
-            true,
+            &[ActionIcon::FloatFilesPane, ActionIcon::FloatPreview],
+            false,
+        ),
+        // Handing content to the program the machine keeps for it. `Move to new
+        // window` and `Move to window ▸` came off this list in P1 and wear
+        // windows, which is what settled 裁2: a bare arrow means one thing.
+        (
+            "i-external",
+            &[ActionIcon::OpenWith, ActionIcon::OpenInBrowser],
+            false,
         ),
         // One sense, several rows. A folder is a folder and a file is a file;
         // that a menu row and a tree row and a pane head all say so with one
@@ -1382,29 +1442,50 @@ mod tests {
         }
     }
 
-    /// The groups the two audits *both* reported are the ones carrying the P1
-    /// verdict, so nobody can quietly downgrade one to "this is fine".
+    /// **Nothing is waiting for a split.** The other half of P1's acceptance,
+    /// and the reason the flag survives the block rather than being deleted
+    /// with the last `true`: the day somebody finds a shape doing two jobs
+    /// again, it is written down here as owing a split, and this goes red until
+    /// the split lands.
+    ///
+    /// The seven the two audits *both* reported — `i-external`, `i-close`,
+    /// `i-refresh`, `i-code`, `i-split`, `i-copy`, `i-chev` — are named
+    /// explicitly, so that "no shape owes a split" cannot be reached by quietly
+    /// dropping one of them off the list instead of splitting it.
     #[test]
-    fn the_audits_own_findings_are_the_ones_awaiting_a_split() {
+    fn no_shape_is_still_waiting_for_a_split() {
+        let owed: Vec<&str> = REUSED_SHAPES
+            .iter()
+            .filter(|(_, _, splits)| *splits)
+            .map(|(shape, _, _)| *shape)
+            .collect();
+        assert!(owed.is_empty(), "still awaiting a split: {owed:?}");
         for shape in [
             "i-external",
             "i-close",
             "i-refresh",
-            "i-code",
             "i-split",
             "i-copy",
             "i-chev",
         ] {
-            let (_, worn_by, splits) = REUSED_SHAPES
+            let (_, worn_by, _) = REUSED_SHAPES
                 .iter()
                 .find(|(name, _, _)| *name == shape)
                 .unwrap_or_else(|| panic!("{shape} is one of the audits' findings"));
             assert!(
-                *splits,
-                "{shape} is worn by {} verbs and is not marked for P1",
-                worn_by.len(),
+                !worn_by.is_empty(),
+                "{shape} was split by emptying it rather than by splitting it",
             );
         }
+        // `#i-code` is the one of the seven that came out of P1 worn by a
+        // single verb, so it has no entry at all: `View source` kept it,
+        // `DevTools` took the spanner, `Copy hash` took the hash and `Go to
+        // parent` took the arrow.
+        assert!(
+            !REUSED_SHAPES.iter().any(|(name, _, _)| *name == "i-code"),
+            "#i-code is worn by one verb and should not be on the shared list",
+        );
+        assert_eq!(ActionIcon::ViewSource.mark(), ChromeMark::Code);
     }
 
     /// **Every verb answers, and answers once.** The registry is a `match`, so
@@ -1423,12 +1504,136 @@ mod tests {
         );
     }
 
+    /// **No codepoint stands in for a drawing** — the law `crate::marks`'
+    /// opening paragraph states, checked over the source of every file that
+    /// paints chrome.
+    ///
+    /// R4 struck this once, over the Git masthead's `⎇`, and wrote down why: a
+    /// codepoint is a fact about the font the machine happens to have, its
+    /// width is another, and a masthead whose first mark is a hollow box on a
+    /// machine without it is worse than no mark. Two audits on 2026-08-25 then
+    /// found eight survivors — the settings dialog's `↺ ↑ ↓ ⋯ ✕`, two
+    /// breadcrumbs' `‹ ›`, and the preview switcher's `●` — which is what a
+    /// law with no gate under it is worth.
+    ///
+    /// **What this reads is the escape spelling**, `\u{...}`, and that is the
+    /// whole of what makes the gate precise rather than noisy. The characters
+    /// themselves appear all over this crate for reasons that are none of this
+    /// rule's business: `↑ ↓ ← →` are the names of four keys in
+    /// `shortcuts.rs`; `›` joins a path into a sentence for a window title;
+    /// `→` sits inside the translated sentence `Comparing a → b`; `×` is a
+    /// multiplication sign in `800×600`; a hundred doc comments write `▸` and
+    /// `✕` while explaining the drawings that replaced them. None of those is
+    /// a glyph pretending to be an icon, and none of them is written as an
+    /// escape. A drawn one was, every single time, because a control glyph is
+    /// bound to a named constant and this house spells an invisible character
+    /// in a constant by its codepoint.
+    #[test]
+    fn no_font_character_stands_in_for_a_mark() {
+        // The retired eight, and `⎇`, which R4 struck first.
+        const RETIRED: &[(&str, &str)] = &[
+            ("21ba", "restore defaults"),
+            ("2191", "move this row up"),
+            ("2193", "move this row down"),
+            ("22ef", "the rest of this row's verbs"),
+            ("2715", "remove this row"),
+            ("2039", "a breadcrumb's way back"),
+            ("203a", "a breadcrumb's separator"),
+            ("25cf", "unsaved edits"),
+            ("2387", "a branch"),
+            ("25b8", "a submenu"),
+            ("2304", "a list folded away"),
+        ];
+        // **The one survivor, and what it is doing.** A gate whose exceptions
+        // are written down is a scope; one that quietly skips a file is a hole.
+        const SPELT_AS_TEXT: &[(&str, &str, &str)] = &[(
+            "seats.rs",
+            "203a",
+            "`PREVIEW_CRUMB_SEPARATOR` joins a path's segments into a *sentence* \
+             — a window's title, a tooltip's line — where it is a character \
+             again and this question does not arise. What the rail *draws* is \
+             `crumb_separator_mark`.",
+        )];
+        for (file, source) in [
+            ("settings.rs", include_str!("settings.rs")),
+            ("seats.rs", include_str!("seats.rs")),
+            ("profiles.rs", include_str!("profiles.rs")),
+            ("git_panel.rs", include_str!("git_panel.rs")),
+            ("git_graph.rs", include_str!("git_graph.rs")),
+            ("float.rs", include_str!("float.rs")),
+            ("toast.rs", include_str!("toast.rs")),
+            ("notice.rs", include_str!("notice.rs")),
+            ("search.rs", include_str!("search.rs")),
+            ("peek_strip.rs", include_str!("peek_strip.rs")),
+            ("file_peek.rs", include_str!("file_peek.rs")),
+            ("restore.rs", include_str!("restore.rs")),
+        ] {
+            for (codepoint, meaning) in RETIRED {
+                if SPELT_AS_TEXT
+                    .iter()
+                    .any(|(where_, which, _)| *where_ == file && which == codepoint)
+                {
+                    continue;
+                }
+                let escape = format!("\\u{{{codepoint}}}");
+                assert!(
+                    !source.contains(&escape),
+                    "{file} spells U+{} — {meaning} — as a character. \
+                     It is a drawing: see crate::marks.",
+                    codepoint.to_uppercase(),
+                );
+            }
+        }
+    }
+
+    /// And the exception is held to its own claim: the surviving separator is
+    /// **joined into strings and never set into a box**.
+    ///
+    /// `ChromeLabel`'s `text` field is how a run of type reaches the renderer,
+    /// so a constant that is never written next to it is a constant no surface
+    /// draws. This is the assertion the exception above is worth exactly as
+    /// much as.
+    #[test]
+    fn the_separator_that_stayed_a_character_is_never_set_into_a_box() {
+        let source = include_str!("seats.rs");
+        assert!(
+            !source.contains("text: PREVIEW_CRUMB_SEPARATOR"),
+            "the preview rail is setting its separator as type again",
+        );
+        assert!(
+            source.contains("crumb_separator_mark()"),
+            "the preview rail draws the separator as a mark",
+        );
+    }
+
     /// The slot table says what the plan says.
     #[test]
     fn the_slots_are_the_plans_four_numbers() {
         assert!((MarkSlot::Menu.house_box_logical_px() - 14.0).abs() < f32::EPSILON);
         assert!((MarkSlot::Toolbar.house_box_logical_px() - 14.0).abs() < f32::EPSILON);
-        assert!((MarkSlot::CompactHead.house_box_logical_px() - 12.0).abs() < f32::EPSILON);
+        // `13` and not the plan's `12` — the 2026-08-26 ruling on the finding
+        // P0 filed against its own exemption note. See the constant.
+        assert!((MarkSlot::CompactHead.house_box_logical_px() - 13.0).abs() < f32::EPSILON);
+        let [floor, _] = OPTICAL_STROKE_BAND_LOGICAL_PX;
+        for slot in MarkSlot::ALL {
+            let pen = ChromeMark::File
+                .optical_stroke_logical_px(
+                    slot.mark_box_logical_px(ChromeMark::File)[0],
+                    slot.mark_box_logical_px(ChromeMark::File)[1],
+                )
+                .expect("the house pen");
+            if slot == MarkSlot::Caption {
+                // The caption's box is the *edge-to-edge* family's ten, and a
+                // house mark has no business there: its box is derived the
+                // other way round, which is what the slot's own note says.
+                continue;
+            }
+            assert!(
+                pen >= floor,
+                "{}: a house mark draws {pen:.3}, under the band's floor",
+                slot.name(),
+            );
+        }
         assert!((MarkSlot::Caption.edge_to_edge_box_logical_px() - 10.0).abs() < f32::EPSILON);
     }
 
@@ -1452,32 +1657,91 @@ mod tests {
         }
     }
 
-    /// The chevron is fitted at its own aspect, which is the half of the pane
-    /// head's problem the pen does not explain.
+    /// **No mark is squeezed into somebody else's proportion**, which is the
+    /// half of the pane head's 1.95× the pen does not explain.
+    ///
+    /// It used to be a statement about the chevron alone — that a `10 × 6`
+    /// arrow had to be given a `10 × 6` box or `xMidYMid meet` would scale it
+    /// by whichever of the two ratios happened to be smaller. P1 deleted the
+    /// premise: the arrow is a house square, so it is fitted like everything
+    /// else. What the rule becomes is the general one it always was — a slot
+    /// hands out the mark's own aspect, whatever that is.
     #[test]
-    fn a_chevron_is_never_squeezed_into_a_square() {
+    fn no_mark_is_squeezed_into_a_box_of_another_shape() {
         for slot in MarkSlot::ALL {
-            let [width, height] = slot.mark_box_logical_px(ChromeMark::chevron(0.0));
-            assert!(
-                (width * 0.6 - height).abs() < 0.01,
-                "{}: the chevron is drawn {width}×{height}",
-                slot.name(),
-            );
+            for icon in ActionIcon::ALL {
+                let mark = icon.mark();
+                let Some([view_width, view_height]) = mark.view_box_units() else {
+                    continue;
+                };
+                let [width, height] = slot.mark_box_logical_px(mark);
+                assert!(
+                    (width * view_height - height * view_width).abs() < 0.01,
+                    "{}: {} is drawn {width}×{height} out of a {view_width}×{view_height} box",
+                    slot.name(),
+                    mark.drawing_id(),
+                );
+            }
         }
+        // And the arrow itself: the box it is cut in is square, so a run of
+        // three on a head can give it the same box as its neighbours.
+        assert_eq!(
+            ChromeMark::chevron(0.0).view_box_units(),
+            Some([marks::HOUSE_GRID_UNITS, marks::HOUSE_GRID_UNITS]),
+        );
     }
 
     /// The pens the marks answer with are the pens their bodies write.
     #[test]
     fn a_marks_pen_is_read_off_its_own_body() {
-        assert_eq!(ChromeMark::File.design_stroke_units(), Some(1.15));
-        assert_eq!(
-            ChromeMark::Chevron { turned_degrees: 0 }.design_stroke_units(),
-            Some(1.2)
-        );
-        assert_eq!(ChromeMark::Check.design_stroke_units(), Some(1.6));
-        // The heaviest of the two `#i-paste` writes, which is the one the row
-        // reads its weight off.
-        assert_eq!(ChromeMark::Paste.design_stroke_units(), Some(1.3));
+        // **One pen, and P1 is where it became one.** Every drawing on this
+        // sheet that the theme inks now writes `1.2`: `#i-file` came up from
+        // `1.15`, `#i-check` down from `1.6`, `#i-paste` from a `1.3` frame
+        // around a `1.1` sheet, the grip from `1.5` in an eight-unit box.
+        for mark in [
+            ChromeMark::File,
+            ChromeMark::Chevron { turned_degrees: 0 },
+            ChromeMark::Check,
+            ChromeMark::Paste,
+            ChromeMark::Code,
+            ChromeMark::Copy,
+            ChromeMark::Split,
+            ChromeMark::Panel,
+            ChromeMark::Eye,
+            ChromeMark::Tag,
+            ChromeMark::GitBranch,
+            ChromeMark::GitGraph,
+            ChromeMark::Globe { favicon: None },
+            ChromeMark::Plus,
+            ChromeMark::Minus,
+            ChromeMark::ResizeGrip,
+            ChromeMark::Lock { engaged: false },
+            ChromeMark::PaneZoom { zoomed: false },
+            ChromeMark::Pin { filled: false },
+            ChromeMark::Trash,
+            ChromeMark::Search,
+            ChromeMark::Arrow { turned_degrees: 0 },
+            ChromeMark::Hash,
+            ChromeMark::Compare,
+            ChromeMark::Duplicate,
+            ChromeMark::DevTools,
+            ChromeMark::Restart,
+            ChromeMark::MoreDown,
+            ChromeMark::HistoryRestore,
+            ChromeMark::TabNew,
+            ChromeMark::WindowNew,
+            ChromeMark::WindowPick,
+        ] {
+            assert_eq!(
+                mark.design_stroke_units(),
+                Some(1.2),
+                "{} is not struck with the house pen",
+                mark.drawing_id(),
+            );
+        }
+        // The caption family keeps the platform's hairline in the platform's
+        // own ten-unit box, which the slot table's own note is about.
+        assert_eq!(ChromeMark::WindowClose.design_stroke_units(), Some(1.0));
         // Pure fills and brand marks have no pen a slot could hold them to.
         assert_eq!(ChromeMark::Folder.design_stroke_units(), None);
         assert_eq!(ChromeMark::Gear.design_stroke_units(), None);
@@ -1494,11 +1758,22 @@ mod tests {
     #[test]
     fn a_marks_box_is_read_off_the_view_box_table() {
         assert_eq!(ChromeMark::File.view_box_units(), Some([16.0, 16.0]));
+        // **The two boxes P1 closed.** The arrow was `10 × 6` and the grip an
+        // eight, and both were the mock-up quoting a *placement* as though it
+        // were a grid.
         assert_eq!(
             ChromeMark::Chevron { turned_degrees: 0 }.view_box_units(),
-            Some([10.0, 6.0]),
+            Some([16.0, 16.0]),
         );
-        assert_eq!(ChromeMark::ResizeGrip.view_box_units(), Some([8.0, 8.0]));
+        assert_eq!(ChromeMark::ResizeGrip.view_box_units(), Some([16.0, 16.0]));
+        // What is left off the house's sixteen, and why, is written at
+        // `SYMBOL_VIEW_BOX`: the caption family's ten, `#i-tri`'s ten, the
+        // gear's twenty-four and the merge curve's row.
+        assert_eq!(ChromeMark::WindowClose.view_box_units(), Some([10.0, 10.0]));
+        assert_eq!(
+            marks::tree_disclosure(0.0).view_box_units(),
+            Some([10.0, 10.0]),
+        );
         assert_eq!(
             ChromeMark::GitMergeCurve.view_box_units(),
             Some([14.0, 27.0])
@@ -1517,10 +1792,6 @@ mod tests {
             ChromeMark::PaneClose,
             ChromeMark::WindowMinimize,
             ChromeMark::WindowMaximize,
-            ChromeMark::Plus,
-            ChromeMark::Minus,
-            ChromeMark::chevron(0.0),
-            ChromeMark::ResizeGrip,
         ] {
             assert!(mark.draws_edge_to_edge(), "{mark:?} draws edge to edge");
         }
@@ -1529,6 +1800,12 @@ mod tests {
             ChromeMark::Folder,
             ChromeMark::Copy,
             marks::tree_disclosure(0.0),
+            // **The four P1 took off the list**, by re-cutting them into the
+            // house's grid rather than by arguing about them.
+            ChromeMark::Plus,
+            ChromeMark::Minus,
+            ChromeMark::chevron(0.0),
+            ChromeMark::ResizeGrip,
         ] {
             assert!(
                 !mark.draws_edge_to_edge(),

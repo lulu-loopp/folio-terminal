@@ -5515,7 +5515,17 @@ fn compact_head_glyph_box(mark: ChromeMark, scale: f32) -> [f32; 2] {
 /// sites each picking a number. The slot picks one, and the caption's own ten
 /// stays the caption's because that is where the family's box is *written*.
 pub fn compact_head_glyph_logical_px(mark: ChromeMark) -> f32 {
-    crate::icons::MarkSlot::CompactHead.mark_box_logical_px(mark)[0]
+    compact_head_glyph_box_logical_px(mark)[0]
+}
+
+/// The same answer as `[width, height]`, for a caller whose mark is not square.
+///
+/// Every drawing P1 struck is cut in the house square, so the two spellings
+/// agree for all of them; what this exists for is the day one is not, and for
+/// the callers — the settings dialog's row verbs, the breadcrumbs' punctuation
+/// — that would otherwise have to know which.
+pub fn compact_head_glyph_box_logical_px(mark: ChromeMark) -> [f32; 2] {
+    crate::icons::MarkSlot::CompactHead.mark_box_logical_px(mark)
 }
 
 /// The box a title-bar control's glyph is drawn in, in logical pixels —
@@ -5588,12 +5598,22 @@ pub const PANE_GHOST_RIGHT_LOGICAL_PX: f32 =
 pub const PANE_GHOST_BOX_LOGICAL_PX: f32 = 22.0;
 /// `.pane-ghost { border-radius: 6px }`.
 pub const PANE_GHOST_RADIUS_LOGICAL_PX: f32 = 6.0;
-/// `.pane-ghost svg { width: 11px }`.
-pub const PANE_GHOST_GLYPH_WIDTH_LOGICAL_PX: f32 = 11.0;
-/// `.pane-ghost svg { height: 7px }` — a chevron is a wide, short arrow, and
-/// this is the one place in the window it is drawn at its own aspect rather than
-/// fitted into the square its neighbours in a run wear.
-pub const PANE_GHOST_GLYPH_HEIGHT_LOGICAL_PX: f32 = 7.0;
+/// `.pane-ghost svg { width: 11px }` — **the slot's box since P1**.
+///
+/// The ghost opens the pane menu, which is what the head's own chevron does,
+/// and a control that is the same control at another size is the sixth of the
+/// six weights one arrow was drawing. It takes the head's box now.
+pub const PANE_GHOST_GLYPH_WIDTH_LOGICAL_PX: f32 =
+    crate::icons::MarkSlot::CompactHead.house_box_logical_px();
+/// `.pane-ghost svg { height: 7px }`.
+///
+/// **Square since P1.** A chevron is still a wide, short arrow — what changed
+/// is that the *air around it* is the house's, so the arrow's own aspect lives
+/// inside the drawing instead of in every box that holds one. This was the one
+/// place in the window the arrow was fitted at its own proportion rather than
+/// into a square, which was the right instinct against a `10 × 6` symbol and
+/// is what the re-cut makes unnecessary.
+pub const PANE_GHOST_GLYPH_HEIGHT_LOGICAL_PX: f32 = PANE_GHOST_GLYPH_WIDTH_LOGICAL_PX;
 /// `.pane-ghost { opacity: .45 }` — the resting ink, and it is
 /// [`crate::cmdrail::TICK_REST_OPACITY`] **by identity and not by coincidence**.
 ///
@@ -12399,9 +12419,17 @@ pub const FILES_ROOT_BUTTON_HEIGHT_LOGICAL_PX: f32 = 19.0;
 pub const FILES_ROOT_BUTTON_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// `.files-root { gap: 4px }`, between the name and its chevron.
 pub const FILES_ROOT_BUTTON_GAP_LOGICAL_PX: f32 = 4.0;
-/// `.rootchev { width: 8px; height: 5px }`.
-pub const FILES_ROOT_CHEVRON_WIDTH_LOGICAL_PX: f32 = 8.0;
-pub const FILES_ROOT_CHEVRON_HEIGHT_LOGICAL_PX: f32 = 5.0;
+/// `.rootchev { width: 8px; height: 5px }` — **the slot's box since P1**.
+///
+/// The CSS states the `10 × 6` symbol's own proportion at the size a tree
+/// header wanted, and it was one of six surfaces that each picked a box of
+/// roughly that shape: one arrow drawing `0.96` here, `1.08` on the strip,
+/// `1.20` in the search bar, `1.32` on a ghost, `1.56` on a pane head. The
+/// arrow is a house square since P1, so its box is the house's box, and this
+/// chevron is the pane head's chevron because there is only one.
+pub const FILES_ROOT_CHEVRON_WIDTH_LOGICAL_PX: f32 =
+    crate::icons::MarkSlot::CompactHead.house_box_logical_px();
+pub const FILES_ROOT_CHEVRON_HEIGHT_LOGICAL_PX: f32 = FILES_ROOT_CHEVRON_WIDTH_LOGICAL_PX;
 /// `.rootchev { opacity: .6 }` — quieter than the name it belongs to, because it
 /// is punctuation on the name rather than a control of its own.
 pub const FILES_ROOT_CHEVRON_OPACITY: f32 = 0.6;
@@ -12605,15 +12633,17 @@ pub const PREVIEW_SWITCH_HEIGHT_LOGICAL_PX: f32 = 19.0;
 pub const PREVIEW_SWITCH_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// `.pv-name.switch { gap: 4px }`, between the name, the chevron and the badge.
 pub const PREVIEW_SWITCH_GAP_LOGICAL_PX: f32 = 4.0;
-/// `.pv-name .rootchev { width: 9px }`.
-pub const PREVIEW_SWITCH_CHEVRON_WIDTH_LOGICAL_PX: f32 = 9.0;
-/// And its drawn height. The CSS asks for a 9px square, but `#i-chev`'s own view
-/// box is `0 0 10 6` and an `<svg>` letterboxes rather than stretches
-/// (`preserveAspectRatio` defaults to `xMidYMid meet`), so nine wide is five and
-/// two fifths tall. Quoting the CSS square here would draw a chevron half again
-/// too deep.
-pub const PREVIEW_SWITCH_CHEVRON_HEIGHT_LOGICAL_PX: f32 =
-    PREVIEW_SWITCH_CHEVRON_WIDTH_LOGICAL_PX * 6.0 / 10.0;
+/// `.pv-name .rootchev { width: 9px }` — **the slot's box since P1**.
+///
+/// The CSS asks for a square and this used to refuse it, because `#i-chev`'s
+/// view box was `0 0 10 6` and an `<svg>` letterboxes rather than stretches:
+/// nine wide was five and two fifths tall, and quoting the CSS square would
+/// have drawn a chevron half again too deep. P1 re-cut the arrow into the house
+/// square, which makes the CSS right and this correction unnecessary — and
+/// gives the switcher the same chevron the pane head beside it wears.
+pub const PREVIEW_SWITCH_CHEVRON_WIDTH_LOGICAL_PX: f32 =
+    crate::icons::MarkSlot::CompactHead.house_box_logical_px();
+pub const PREVIEW_SWITCH_CHEVRON_HEIGHT_LOGICAL_PX: f32 = PREVIEW_SWITCH_CHEVRON_WIDTH_LOGICAL_PX;
 /// `.pv-count { line-height: 14px }` — the badge's height.
 pub const PREVIEW_COUNT_HEIGHT_LOGICAL_PX: f32 = 14.0;
 /// `.pv-count { padding: 0 5px }`, on each side of the digits.
@@ -13105,13 +13135,65 @@ pub const PREVIEW_CRUMB_RADIUS_LOGICAL_PX: f32 = 4.0;
 /// The cell the `›` between two segments is drawn in, centred.
 ///
 /// A fixed cell and not a measured one, deliberately: the separator is one
-/// character this window chose and never changes, so measuring it would put a
-/// font on the path of a layout that has one possible answer.
+/// mark this window chose and never changes, so measuring it would put a font
+/// on the path of a layout that has one possible answer. Since P1 that is
+/// true twice over — there is no font on the path at all.
 pub const PREVIEW_CRUMB_SEPARATOR_CELL_LOGICAL_PX: f32 = 11.0;
 /// And the cell the folded middle's `…` is drawn in.
 pub const PREVIEW_CRUMB_FOLD_CELL_LOGICAL_PX: f32 = 18.0;
-/// `›` — the separator between two segments.
+/// `›` — how a path reads **in a sentence**: the window's title, a
+/// tooltip's line, anywhere the crumb's segments are joined into running text.
+///
+/// **It is no longer what the rail draws.** P1 retired the drawn character in
+/// favour of [`crate::marks::ChromeMark::Chevron`] at the crumb's own size,
+/// on `marks.rs`'s founding law: a codepoint is a fact about whichever
+/// typeface the machine happens to have, and the segments beside it are
+/// geometry. In a *sentence* it is a character again, and that is not the same
+/// question — the sentence is text all the way through.
 pub const PREVIEW_CRUMB_SEPARATOR: &str = "\u{203a}";
+/// **The mark a breadcrumb spends where it used to spend a guillemet.**
+///
+/// One drawing at two quarter turns: east between two segments, west in front
+/// of the way back. `ChromeMark::chevron` is the house's disclosure arrow and
+/// this is deliberately it rather than the history arrow `ChromeMark::Arrow`
+/// — a crumb's punctuation is not a Back button, it is the sentence's own
+/// comma, and what it says is *and then, inside that*.
+#[must_use]
+pub fn crumb_separator_mark() -> ChromeMark {
+    ChromeMark::Chevron {
+        turned_degrees: 270,
+    }
+}
+
+/// The same arrow pointing the other way — what stands in front of a
+/// breadcrumb's way back.
+#[must_use]
+pub fn crumb_back_mark() -> ChromeMark {
+    ChromeMark::Chevron { turned_degrees: 90 }
+}
+
+/// **Where a crumb's punctuation is struck inside the cell the layout gave
+/// it**, in physical pixels.
+///
+/// The cell is the *advance* — how far the next segment starts — and the box
+/// is the compact head's, because a mark drawn smaller than that carries a pen
+/// below the band whatever else is true of it (see `crate::icons`). The two
+/// need not agree: a turned chevron's ink is a fifth of its box across, so a
+/// thirteen-pixel box centred on an eleven-pixel cell puts four and a half
+/// pixels of ink in the middle of it and nothing anywhere near either edge.
+#[must_use]
+pub fn crumb_punctuation_box(cell: [f32; 4], mark: ChromeMark, scale: f32) -> [f32; 4] {
+    let [width, height] = compact_head_glyph_box(mark, scale);
+    let left = f32::midpoint(cell[0], cell[2]) - width / 2.0;
+    let top = f32::midpoint(cell[1], cell[3]) - height / 2.0;
+    [
+        left.round(),
+        top.round(),
+        left.round() + width,
+        top.round() + height,
+    ]
+}
+
 /// `…` — what the folded middle of a long path is drawn as.
 pub const PREVIEW_CRUMB_FOLD: &str = "\u{2026}";
 /// The `Open ⌄` pill's inset, each side of its caption.
@@ -15899,23 +15981,22 @@ pub(crate) fn push_preview_rail(
                     clip: Some(fold),
                 });
             }
+            // **The house's own arrow, turned east** (P1, 字符退役). It was
+            // `›` U+203A in the rail's own type until this block, which put a
+            // third folded-arrow language on screen beside the chevron and the
+            // disclosure triangle — and put it there as a *codepoint*, whose
+            // width and weight are facts about the installed font rather than
+            // about this drawing.
+            //
+            // The palest ink the row has: a separator is punctuation and not a
+            // segment, and one drawn in the segments' own ink reads as a folder
+            // called `›`.
             for seam in &geometry.separators {
-                labels.push(ChromeLabel {
-                    mono: false,
-                    text: PREVIEW_CRUMB_SEPARATOR.to_owned(),
-                    rect: *seam,
-                    font_size_px: font,
-                    // The palest ink the row has: a separator is punctuation and
-                    // not a segment, and one drawn in the segments' own ink
-                    // reads as a folder called `›`.
-                    color: palette.files_row_muted,
-                    align_right: false,
-                    align_center: true,
-                    letter_spacing_em: 0.0,
-                    weight: ChromeLabelWeight::Regular,
-                    tabular_numerals: false,
-                    clip: Some(*seam),
-                });
+                sprites.push(ChromeSprite::new(
+                    crumb_separator_mark(),
+                    crumb_punctuation_box(*seam, crumb_separator_mark(), scale),
+                    palette.files_row_muted,
+                ));
             }
             for crumb in &geometry.crumbs {
                 let Some(text) = content.segments.get(crumb.depth) else {
@@ -37883,18 +37964,12 @@ mod tests {",
             resting,
         );
         assert_eq!(
-            glyphs(&sprites, ChromeMark::Chevron { turned_degrees: 90 }).len(),
+            glyphs(&sprites, crate::icons::ActionIcon::NavigateBack.mark()).len(),
             1,
             "back is drawn on a head nobody is pointing at"
         );
         assert_eq!(
-            glyphs(
-                &sprites,
-                ChromeMark::Chevron {
-                    turned_degrees: 270
-                }
-            )
-            .len(),
+            glyphs(&sprites, crate::icons::ActionIcon::NavigateForward.mark()).len(),
             1,
             "and so is forward"
         );
@@ -37904,7 +37979,7 @@ mod tests {",
             "and so is reload"
         );
         assert!(
-            glyphs(&sprites, ChromeMark::Code).is_empty(),
+            glyphs(&sprites, crate::icons::ActionIcon::OpenDevTools.mark()).is_empty(),
             "the developer tools are an offer and wait to be approached — and \
              they are not on this row at all"
         );
@@ -37943,7 +38018,7 @@ mod tests {",
             loading: false,
         };
         let (_, _, sprites) = page_rail(spent, ChromePointer::default());
-        let back = glyphs(&sprites, ChromeMark::Chevron { turned_degrees: 90 });
+        let back = glyphs(&sprites, crate::icons::ActionIcon::NavigateBack.mark());
         assert_eq!(back.len(), 1, "a spent button is dimmed, never hidden");
         assert!((back[0].opacity - PREVIEW_NAV_SPENT).abs() < 1e-6);
         // And the box does not move: the geometry is a function of the
@@ -37959,7 +38034,7 @@ mod tests {",
             },
             ChromePointer::default(),
         );
-        let alive = glyphs(&live, ChromeMark::Chevron { turned_degrees: 90 });
+        let alive = glyphs(&live, crate::icons::ActionIcon::NavigateBack.mark());
         assert_eq!(
             back[0].rect, alive[0].rect,
             "a history that has run out moves nothing"
@@ -37997,7 +38072,10 @@ mod tests {",
         };
         let geometry = preview_rail_geometry(rect, 1.0, &measure);
         let reload = geometry.reload.expect("a reload box");
-        let stop = glyphs(&sprites, ChromeMark::PaneClose)
+        // **A square and not the close cross** since P1: stopping a load is not
+        // closing anything, and the `×` was standing for four different
+        // amounts of harm.
+        let stop = glyphs(&sprites, crate::icons::ActionIcon::StopNavigating.mark())
             .into_iter()
             .find(|sprite| {
                 sprite.rect[0] >= reload[0]
@@ -38041,8 +38119,11 @@ mod tests {",
             ..PreviewHeadContent::default()
         };
         let (_, _, resting) = preview_chrome(content, ChromePointer::default());
+        // **A spanner and not `#i-code`** since P1: showing a reader the file
+        // they are looking at and opening somebody else's instrument over it
+        // are two acts, and they wore one drawing on the same head.
         assert!(
-            glyphs(&resting, ChromeMark::Code).is_empty(),
+            glyphs(&resting, crate::icons::ActionIcon::OpenDevTools.mark()).is_empty(),
             "no tool is drawn on a head nobody is pointing at"
         );
         let (_, _, hovered) = preview_chrome(
@@ -38053,7 +38134,7 @@ mod tests {",
             },
         );
         assert_eq!(
-            glyphs(&hovered, ChromeMark::Code).len(),
+            glyphs(&hovered, crate::icons::ActionIcon::OpenDevTools.mark()).len(),
             1,
             "and one arrives with the pointer"
         );

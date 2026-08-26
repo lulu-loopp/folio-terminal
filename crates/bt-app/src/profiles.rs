@@ -3980,7 +3980,7 @@ pub fn build(
                 } else {
                     Some(hint(unavailable_hint_text().to_owned()))
                 },
-                hint_ink: None,
+                dirty: false,
                 hovered: hover == Some(MenuRow::Profile(index)),
                 available,
                 pin: None,
@@ -4009,7 +4009,7 @@ pub fn build(
             mark: Some(ChromeMark::Folder),
             name: files_pane_text(),
             hint: Some(hint(files_pane_hint_text().to_owned())),
-            hint_ink: None,
+            dirty: false,
             hovered: hover == Some(MenuRow::FilesPane),
             // A files column needs no program behind it, so there is nothing
             // this machine could be missing and no greyed state to reach.
@@ -4032,7 +4032,7 @@ pub fn build(
             mark: Some(ChromeMark::Folder),
             name: new_in_folder_text(),
             hint: None,
-            hint_ink: None,
+            dirty: false,
             hovered: hover == Some(MenuRow::NewInFolder),
             available: true,
             pin: None,
@@ -4067,7 +4067,7 @@ pub fn build(
                 // "can you", and losing the timestamp would cost the row the
                 // only thing that orders it against its neighbours.
                 hint: Some(hint(ago_label(entry.at, now))),
-                hint_ink: None,
+                dirty: false,
                 hovered: hover == Some(MenuRow::Recent(index)),
                 available: recent_is_available(&entry.seed, programs),
                 pin: None,
@@ -4194,13 +4194,15 @@ struct Row<'a> {
     /// once: the hint is right-aligned into it and the name's box ends where it
     /// begins.
     hint: Option<(String, f32)>,
-    /// What the hint is set in, when it is not the menu's own quiet report ink.
+    /// **Unsaved edits — the dot at the row's trailing edge.**
     ///
-    /// One caller: the preview switcher's dirty dot, which is `--accent` because
-    /// it is the same dot the header wears (mock-up 580-582). Everything else
-    /// leaves it alone and gets `--ink3` — a hint that *reports* rather than
-    /// *warns*, which is why the ink is a parameter and not a rule.
-    hint_ink: Option<[u8; 3]>,
+    /// A fact and not a string, since P1. It reached this row as `●` in the
+    /// hint slot, which made the one dot in the window that is a *codepoint* sit
+    /// two hundred pixels from three that are geometry: `marks.rs`'s R4 note
+    /// says why that cannot stand, and this is the last of the four put right.
+    /// The dot is struck at `crate::marks::DIRTY_DOT_LOGICAL_PX`, the same
+    /// diameter the two preview heads and the file peek use.
+    dirty: bool,
     hovered: bool,
     /// Whether this row can do what it says. A row that cannot is drawn and not
     /// offered — see [`hit`], which is where "not offered" is actually enforced.
@@ -4322,7 +4324,13 @@ fn push_row(
             // which is the same ink over `--win` — the settings dialog's
             // surface, not this one. Identical in the light theme, six levels
             // adrift in the dark.
-            color: row.hint_ink.unwrap_or(palette.menu_item_hint_text),
+            // `--ink3` over `--menu`, for every hint there is. It was a
+            // parameter until P1, with exactly one caller overriding it: the
+            // preview switcher's dirty dot, which set it to `--accent` because
+            // the dot is `--accent`. The dot is a sprite now and carries its
+            // own ink, so what is left is the rule the parameter was an
+            // exception to — a hint *reports* rather than *warns*.
+            color: palette.menu_item_hint_text,
             align_right: true,
             align_center: false,
             letter_spacing_em: 0.0,
@@ -4330,6 +4338,18 @@ fn push_row(
             tabular_numerals: false,
             clip: None,
         });
+    }
+    // The dirty dot, in the cell the hint reserved for it. `--accent`, because
+    // it is the same dot the head wears (mock-up 580-582) and the same drawing:
+    // `marks::dirty_dot_sprite` is one function and four surfaces.
+    if row.dirty {
+        let diameter = (crate::marks::DIRTY_DOT_LOGICAL_PX * scale).round();
+        let right = item[2] - px(ITEM_PADDING_X_LOGICAL_PX) - pin_claim;
+        sprites.push(crate::marks::dirty_dot_sprite(
+            [right - diameter, item[1], right, item[3]],
+            palette.accent,
+            scale,
+        ));
     }
     // ── the pin (user ruling 2026-08-19) ────────────────────────────────────
     //
@@ -5097,7 +5117,7 @@ pub fn root_menu_build(
                 }),
                 name: &cwd_leaf_or_path(&choice.path),
                 hint: Some((note, width)),
-                hint_ink: None,
+                dirty: false,
                 hovered: hover.map(RootMenuHit::row) == Some(row),
                 available: true,
                 pin: Some(RowPin {
@@ -5141,7 +5161,7 @@ pub fn root_menu_build(
             // offered because nothing else was, and a hint saying so would be the
             // menu apologising for itself.
             hint: None,
-            hint_ink: None,
+            dirty: false,
             hovered: hover == Some(RootMenuHit::Row(RootMenuRow::Browse)),
             // The system always has a folder picker; there is no machine on which
             // this row is a promise the window cannot keep.
@@ -5849,7 +5869,7 @@ pub fn file_menu_build(
                 mark: Some(item.row.mark(look)),
                 name: item.row.text(look),
                 hint: None,
-                hint_ink: None,
+                dirty: false,
                 hovered: hover == Some(item.row),
                 // Every verb here acts on a path this process enumerated. There
                 // is no machine on which one of them is a promise that cannot be
@@ -6779,7 +6799,7 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
                 mark: item.row.mark(),
                 name: item.row.text(),
                 hint: None,
-                hint_ink: None,
+                dirty: false,
                 hovered: look.hover == Some(item.row) && item.available,
                 available: item.available,
                 pin: None,
@@ -7180,22 +7200,19 @@ impl TermMenuRow {
 
     /// The mark in the row's 14-pixel column.
     ///
-    /// **`Find…` has none**, and it is the git menu's `Rename…` decision made a
-    /// second time for the same reason: the house's mark set is cut from the
-    /// mock-up's own sheet, that sheet has no magnifier in it, and the nearest
-    /// thing to one would be a mark that means something else. A wrong picture is
-    /// read faster than a missing one; the row's name says what it does.
+    /// **Every row has one since P1.** `Find…` was the one gap, on the
+    /// argument that the mock-up's sheet has no magnifier and that a wrong
+    /// picture is read faster than a missing one — which was true of the
+    /// alternatives on offer and stopped being true the day the house struck
+    /// its own (`ChromeMark::Search`). The empty cell was the only one in the
+    /// column, with a mark above it and a mark below it.
     #[must_use]
     fn mark(self) -> Option<ChromeMark> {
         Some(match self {
             Self::Copy => ActionIcon::CopySelection.mark(),
             Self::Paste => ActionIcon::PasteClipboard.mark(),
             Self::SelectAll => ActionIcon::SelectAll.mark(),
-            // The one verb with no entry in the registry, because there is no
-            // shape for it to have: `Find` waits on the magnifier plan §1 P1
-            // adds, and until then it is the registry saying "nothing" rather
-            // than a dispatcher deciding so on its own.
-            Self::Find => return None,
+            Self::Find => ActionIcon::FindInTerminal.mark(),
             Self::ClearScreen => ActionIcon::ClearScreen.mark(),
             Self::ClearScrollback => ActionIcon::ClearScrollback.mark(),
             Self::RestartShell => ActionIcon::RestartShell.mark(),
@@ -7558,7 +7575,7 @@ pub fn term_menu_build(
                 mark: item.entry.mark(),
                 name: item.entry.text(),
                 hint: None,
-                hint_ink: None,
+                dirty: false,
                 hovered,
                 available: item.available,
                 pin: None,
@@ -9176,7 +9193,7 @@ pub fn pane_menu_build(
                 mark: row.mark_when(layout.zoomed),
                 name: row.text_when(layout.zoomed),
                 hint: None,
-                hint_ink: None,
+                dirty: false,
                 hovered: hover == Some(PaneMenuHover::Row(*row)),
                 // A split the solver has no room for is refused *by the solver*,
                 // after the press, exactly as the chord's is; a pane can always
@@ -9385,7 +9402,7 @@ fn push_submenu(
                     mark: None,
                     name: windows.get(of).map_or("", String::as_str),
                     hint: None,
-                    hint_ink: None,
+                    dirty: false,
                     hovered,
                     available: true,
                     pin: None,
@@ -9409,7 +9426,7 @@ fn push_submenu(
                         mark: Some(mark(of)),
                         name: title(of),
                         hint,
-                        hint_ink: None,
+                        dirty: false,
                         hovered,
                         // The picker's own rule, and the same fact: a profile
                         // whose program this machine does not have cannot start
@@ -9724,7 +9741,7 @@ pub fn git_filter_menu_build(
                 mark: git_filter_mark(row, on),
                 name: git_filter_text(row),
                 hint: None,
-                hint_ink: None,
+                dirty: false,
                 hovered: hover == Some(row),
                 // Every row here is a setting, and a setting can always be set.
                 // There is no machine on which one of these is a promise that
@@ -9758,8 +9775,23 @@ pub fn git_filter_menu_build(
 // like its neighbours but was drawn by different code would be a second popup
 // wearing the first one's clothes.
 
-/// The dot a dirty buffer wears in the switcher — `.pvm-dot` (mock-up 581).
-pub const PREVIEW_MENU_DIRTY_DOT: &str = "\u{25cf}";
+/// **What a dirty buffer's dot claims out of the switcher row** — `.pvm-dot`
+/// (mock-up 581).
+///
+/// The dot itself is `crate::marks::dirty_dot_sprite`, which is where the other
+/// three heads' dots already came from. This one was still `●` U+25CF set in
+/// the menu's hint type until P1 — the last of the four, missed because it is
+/// the only one that rides in a *row* rather than on a head, so it was reached
+/// through the hint slot instead of through a sprite.
+///
+/// The width is the dot's own diameter and the row's gap, on
+/// [`row_pin_claim`]'s pattern: a reservation is what stops a name shortening
+/// when the thing beside it appears, so it is spent whether the dot is struck
+/// or not.
+#[must_use]
+pub fn preview_menu_dirty_claim(scale: f32) -> f32 {
+    (crate::marks::DIRTY_DOT_LOGICAL_PX * scale).round() + ITEM_GAP_LOGICAL_PX * scale
+}
 
 /// One row of the switcher: a live buffer in the tab's pool, **or a file the
 /// user pinned and nobody has opened yet** (user ruling 2026-08-19).
@@ -9959,7 +9991,7 @@ pub fn preview_menu_layout(
     // the root menu's note already states: a menu that changed width because a
     // buffer was edited would move under the pointer. It is the same reservation
     // the header's own `.pv-dirty { width: 12px }` makes, for the same reason.
-    let dot = measure(PREVIEW_MENU_DIRTY_DOT, px(HINT_FONT_LOGICAL_PX)) + px(ITEM_GAP_LOGICAL_PX);
+    let dot = preview_menu_dirty_claim(scale);
     let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
     // The pin's column, reserved wherever any row could carry one — the dot's
     // own reservation, one control further out. A switcher of nothing but
@@ -10091,12 +10123,15 @@ pub fn preview_menu_hit(
 
 /// The switcher as one overlay layer.
 #[must_use]
+/// **No `measure` arm.** It had one until P1, for exactly one purpose: to ask
+/// the font how wide `●` was. The dot is geometry now, so the whole switcher
+/// is laid out and painted without a typeface having an opinion about any of
+/// its boxes.
 pub fn preview_menu_build(
     layout: &PreviewMenuLayout,
     items: &[PreviewMenuItem],
     hover: Option<PreviewMenuHit>,
     favicons: &crate::favicon::Favicons,
-    measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
     let scale = layout.scale;
@@ -10132,7 +10167,7 @@ pub fn preview_menu_build(
         });
     }
 
-    let dot_width = measure(PREVIEW_MENU_DIRTY_DOT, px(HINT_FONT_LOGICAL_PX));
+    let dot_width = preview_menu_dirty_claim(scale) - px(ITEM_GAP_LOGICAL_PX);
     for (index, (item, rect)) in items.iter().zip(&layout.items).enumerate() {
         push_row(
             &Row {
@@ -10152,15 +10187,11 @@ pub fn preview_menu_build(
                 // empty string rather than omitted so the name's box ends in the
                 // same place down the whole list — see the reservation in
                 // [`preview_menu_layout`].
-                hint: Some((
-                    if item.dirty {
-                        PREVIEW_MENU_DIRTY_DOT.to_owned()
-                    } else {
-                        String::new()
-                    },
-                    dot_width,
-                )),
-                hint_ink: Some(palette.accent),
+                // The words are empty and the reservation is not: the name's
+                // box has to end in the same place down the whole list, dot or
+                // no dot — see the reservation in [`preview_menu_layout`].
+                hint: Some((String::new(), dot_width)),
+                dirty: item.dirty,
                 // `.tm-item.cur { background: var(--hover) }` is the same fill
                 // the pointer draws, which is what the mock-up asks for: the row
                 // you are on and the row you are pointing at look alike, and when
@@ -10317,7 +10348,6 @@ mod tests {
             &items,
             None,
             &crate::favicon::Favicons::default(),
-            &mut fake_measure,
         ));
         for (name, _, _) in [("a.txt", 0, 0), ("notes.md", 0, 0), ("main.rs", 0, 0)] {
             assert!(
@@ -10326,13 +10356,29 @@ mod tests {
             );
         }
         let palette = chrome_palette();
+        // **A drawing and not a codepoint** (P1, 字符退役). It was a `●` in the
+        // hint slot until this block — the last of the four dirty dots in the
+        // window still set in a typeface, two hundred pixels from three that
+        // were geometry — so the assertion moved from the labels to the
+        // sprites, which is the whole of the change stated as a test.
+        // Written as a number and turned into a character here, rather than as
+        // an escape: `icons::tests::no_font_character_stands_in_for_a_mark`
+        // reads this crate's own source for the escape spelling, and a test
+        // that proves a codepoint is gone must not be the reason it is found.
+        let dot = char::from_u32(0x25cf).expect("U+25CF is a character");
+        assert!(
+            !layer.labels.iter().any(|label| label.text.contains(dot)),
+            "the switcher's dirty dot is a drawing, not a character",
+        );
         let dots: Vec<_> = layer
-            .labels
+            .sprites
             .iter()
-            .filter(|label| label.text == PREVIEW_MENU_DIRTY_DOT)
+            .filter(|sprite| {
+                matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                    && sprite.color == palette.accent
+            })
             .collect();
         assert_eq!(dots.len(), 1, "one dot, for the one dirty buffer");
-        assert_eq!(dots[0].color, palette.accent);
 
         // The width does not move with the dirty bit: the dot's column is
         // reserved on every row.
@@ -10459,7 +10505,6 @@ mod tests {
             &items,
             None,
             &crate::favicon::Favicons::default(),
-            &mut fake_measure,
         ));
         assert!(
             layer
@@ -10508,7 +10553,6 @@ mod tests {
             &items,
             None,
             &crate::favicon::Favicons::default(),
-            &mut fake_measure,
         ));
         assert_eq!(
             resting
@@ -10524,7 +10568,6 @@ mod tests {
             &items,
             Some(PreviewMenuHit::Row(current_row)),
             &crate::favicon::Favicons::default(),
-            &mut fake_measure,
         ));
         assert_eq!(
             pointed
@@ -15727,18 +15770,19 @@ mod tests {
         let house = crate::icons::MarkSlot::Menu.house_box_logical_px();
         let edge = crate::icons::MarkSlot::Menu.edge_to_edge_box_logical_px();
         assert!(edge < house, "the edge-to-edge family is given less room");
+        // **Five, and P1 is why it is not nine.** The three the enumerated
+        // list never reached — `#i-minus`, `#i-chev`, the grip — were
+        // edge-to-edge because they were cut in somebody else's box, which
+        // is also what cost them their pen; re-cut into the house's sixteen
+        // they carry the house's air and take the house's box, and so does
+        // `#i-plus` beside them. What is left is the caption family, whose
+        // ten is the platform's and not this design's.
         for edge_to_edge in [
             ChromeMark::WindowClose,
             ChromeMark::TabClose,
             ChromeMark::PaneClose,
             ChromeMark::WindowMinimize,
             ChromeMark::WindowMaximize,
-            ChromeMark::Plus,
-            // The three the enumerated list never reached, which is why the
-            // rule is stated over the geometry now.
-            ChromeMark::Minus,
-            ChromeMark::chevron(0.0),
-            ChromeMark::ResizeGrip,
         ] {
             assert_eq!(
                 item_mark_box_logical_px(edge_to_edge)[0],
@@ -15747,6 +15791,10 @@ mod tests {
             );
         }
         for other in [
+            ChromeMark::Plus,
+            ChromeMark::Minus,
+            ChromeMark::chevron(0.0),
+            ChromeMark::ResizeGrip,
             ChromeMark::Folder,
             ChromeMark::Copy,
             ChromeMark::Split,
@@ -15793,8 +15841,11 @@ mod tests {
         assert_eq!(folder[2] - folder[0], house);
         for (glyph, wanted) in [
             (ChromeMark::Split, house),
-            (ChromeMark::Copy, house),
-            (ChromeMark::Float, house),
+            // `Duplicate pane` since P1: it wore `#i-copy`, which is two sheets
+            // of paper and means *put this text on the clipboard*. And `Move to
+            // new tab`, which wore the files head's `#i-float`.
+            (ChromeMark::Duplicate, house),
+            (ChromeMark::TabNew, house),
         ] {
             let rect = sprite_of(glyph);
             assert_eq!(
@@ -16666,11 +16717,17 @@ mod tests {
         assert_eq!(R::Paste.text(), "Paste");
         assert_eq!(R::SelectAll.text(), "Select all");
         assert_eq!(R::ClearScreen.text(), "Clear screen");
-        // `Find…` is the one row with no mark, and it is a decision rather than
-        // an omission — see `TermMenuRow::mark`.
+        // **Every row wears a mark since P1.** `Find…` was the one empty cell
+        // in the column, on the argument that the house had no magnifier —
+        // which stopped being true the day it struck one.
         for row in TERM_MENU_ROWS {
-            assert_eq!(row.mark().is_none(), row == R::Find, "{row:?}");
+            assert!(row.mark().is_some(), "{row:?} has no mark");
         }
+        assert_eq!(R::Find.mark(), Some(ChromeMark::Search));
+        // And `Restart shell…` is off the refresh: it throws a process away,
+        // where rereading a repository and reloading a page fetch the same
+        // thing again.
+        assert_eq!(R::RestartShell.mark(), Some(ChromeMark::Restart));
     }
 
     /// PIN (ticket #62, item 4) — **three rows can be greyed and no others**:
