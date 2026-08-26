@@ -3499,6 +3499,40 @@ impl OverlayLayer {
             })
             .collect()
     }
+
+    /// **The pictures inside the document this layer carries** — [`Self::body`]'s
+    /// third channel, beside its fills and its letters — with the layer's
+    /// [`opacity`](Self::opacity) folded in.
+    ///
+    /// A [`PreviewBody`] holds rasters at two depths for one reason: a formula
+    /// wider than the measure lives inside the block that scrolls it, and a
+    /// picture that stayed on the page would slide out from under its own clip.
+    /// Both depths come out here, because the pass below draws pictures and does
+    /// not care which of them a picture was filed against — the crop each one
+    /// carries is what keeps it inside its own region.
+    ///
+    /// **Its absence was a bug** (user report, 2026-08-26: a glance card over a
+    /// markdown file showed the headings and left every formula's block blank).
+    /// The seat's lane gathers exactly this list for the documents it draws;
+    /// the overlay's lane gathered the body's quads and the body's text and
+    /// nothing else, so a document one layer up reserved the room for its
+    /// pictures and drew none of them. Everything that rides `body` is affected
+    /// — the card and the undocked preview window alike — because it is the
+    /// channel that was missing and not the tenant.
+    #[must_use]
+    pub fn faded_document_rasters(&self) -> Vec<ChromeIcon> {
+        let Some(body) = self.body.as_ref() else {
+            return Vec::new();
+        };
+        body.rasters
+            .iter()
+            .chain(body.blocks.iter().flat_map(|block| block.rasters.iter()))
+            .map(|icon| ChromeIcon {
+                opacity: icon.opacity * self.opacity,
+                ..icon.clone()
+            })
+            .collect()
+    }
 }
 
 /// The fills a rounded rectangle is made of: whole runs where it covers a pixel
@@ -5716,8 +5750,16 @@ impl WindowRenderer {
                         usage: wgpu::BufferUsages::VERTEX,
                     })
             });
-            let (icon_draws, icon_vertices) =
-                self.prepare_chrome_icon_draws(gpu, &layer.faded_icons());
+            // **The layer's own marks and its document's pictures, one channel.**
+            // The two are the same kind of thing — a content-keyed raster placed
+            // in surface pixels and cropped to a box — and the body's had no way
+            // through at all until 2026-08-26: a glance card over a markdown file
+            // with mathematics in it reserved every formula's room and drew none
+            // of them, because this lane picked up the body's fills and the body's
+            // letters and stopped one channel short.
+            let mut icons = layer.faded_icons();
+            icons.extend(layer.faded_document_rasters());
+            let (icon_draws, icon_vertices) = self.prepare_chrome_icon_draws(gpu, &icons);
             let icon_buffer = (!icon_vertices.is_empty()).then(|| {
                 gpu.device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -16029,6 +16071,87 @@ mod tests {
         // The raster's identity must not move with the fade, or a 90ms fade mints
         // a fresh texture on every frame of itself.
         assert_eq!(icons[0].key, "mark");
+    }
+
+    /// PIN (user report, 2026-08-26: *md 的 hover 预览卡不显示 LaTeX 公式* — the
+    /// card showed the headings and left every formula's block blank) — **a
+    /// document riding an overlay layer brings its pictures with it**, from the
+    /// page and from the blocks that scroll inside themselves alike.
+    ///
+    /// The card and the preview pane run one pipeline and one formula cache, so
+    /// by the time the body was built the pictures were already in it; what did
+    /// not exist was a way out of the layer. The overlay lane gathered `body`'s
+    /// fills into its rectangles and `body`'s runs into its glyphs, and there was
+    /// no third gather — so the room a formula reserved stayed empty for as long
+    /// as the card was up.
+    ///
+    /// The clip travels untouched: a formula wider than the measure is drawn
+    /// inside its own scrolling block, and a picture that arrived here without
+    /// the box it is seen through would paint over the prose beside it.
+    ///
+    /// MUTATIONS: drop the `blocks` half of the chain and the wide formula
+    /// disappears again; drop the fold and a fading card's mathematics stays at
+    /// full strength while its window dissolves; return `Vec::new()` for a layer
+    /// with a body and the whole report comes back.
+    #[test]
+    fn a_document_on_an_overlay_layer_hands_over_its_pictures() {
+        let picture = |key: &str, rect: [f32; 4], clip: Option<[f32; 4]>| ChromeIcon {
+            key: key.to_owned(),
+            rect,
+            rgba: Arc::from(vec![0_u8; 4].into_boxed_slice()),
+            width_px: 1,
+            height_px: 1,
+            opacity: 1.0,
+            clip,
+        };
+        let card = [0.0, 0.0, 300.0, 264.0];
+        let block = [8.0, 40.0, 292.0, 120.0];
+        let layer = OverlayLayer {
+            body: Some(PreviewBody {
+                clip: card,
+                quads: Vec::new(),
+                paragraphs: Vec::new(),
+                blocks: vec![PreviewBlock {
+                    clip: block,
+                    quads: Vec::new(),
+                    paragraphs: Vec::new(),
+                    // The formula too wide for the card's measure, cropped to the
+                    // region it scrolls in.
+                    rasters: vec![picture("wide", [-40.0, 44.0, 400.0, 96.0], Some(block))],
+                }],
+                // The one that fits, standing on the page itself.
+                rasters: vec![picture("fits", [90.0, 8.0, 210.0, 38.0], Some(card))],
+            }),
+            opacity: 0.5,
+            ..OverlayLayer::default()
+        };
+
+        let drawn = layer.faded_document_rasters();
+        let keys = drawn
+            .iter()
+            .map(|icon| icon.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            ["fits", "wide"],
+            "both depths come out: the page's own pictures and the blocks'",
+        );
+        assert_eq!(
+            drawn[1].clip,
+            Some(block),
+            "and a wide formula keeps the region it is seen through",
+        );
+        for icon in &drawn {
+            assert!(
+                (icon.opacity - 0.5).abs() < 1e-6,
+                "the layer's fade reaches its document's pictures too: {}",
+                icon.opacity
+            );
+        }
+        assert!(
+            OverlayLayer::default().faded_document_rasters().is_empty(),
+            "a layer carrying no document hands over nothing",
+        );
     }
 
     /// The same fold, for the one channel that cannot carry it on a struct field:

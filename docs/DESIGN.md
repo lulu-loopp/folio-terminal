@@ -2706,6 +2706,16 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **被否掉的两案。** **B:把页面道收回去**——`.pdf` 也当文档,两处一致地说「无法预览」。它确实能让一个名字只有一个含义,但代价是把片⑤ 已经证明能用的东西拆掉,用「两处都做不到」换「一处说谎」,而读者要的是那一页。**C:只改卡的文案,分类不动**——给 `.pdf` 的卡贴一句「双击会开成页面」而 `preview_ftype` 照旧答 `Unknown`。它把症状盖住而把病留下:`is_editable`、`preview_view`、`PreviewBuffer::new` 的落点、切换器行的记号仍然按「这是个没人能读的类型」回答,下一处问「这是什么」的表面就是下一次不一致——**这正是片⑤ 那笔账的形状本身**,而本裁决要的是把账还掉,不是再记一笔。
 
+**⑥‴ 卡上的公式是同一张图片,缺的从来不是它——是它出门的那条道(用户实机报 2026-08-26;`crates/bt-render/src/lib.rs`、`crates/bt-app/src/main.rs`)。** 报的是:files 列悬停 `test-assets/latex-render-check.md`,卡里只剩标题,`$$` 块整段空白,而**同一份文件在预览席里公式画得好好的**。查下去,这一句「同一份文件在预览席里好好的」正是答案本身:卡的文档走的**就是**预览席那条流水线——`rebuild_preview_document(PreviewSurface::Peek, …)` → `resolve_document_math` → 同一个 `PreviewMathKey`(源文、模式、字号、墨色,**没有度量、没有路径、没有表面**)→ 窗口那一个 `PreviewMathCache` → `build_preview_body_in` 把图放进 `PreviewBody::rasters`。所以图早就在卡的文档里了:块按图的高度留了位,`place_preview_math` 把行内那颗按基线摆好了,**一张也没画出来**——因为一张卡的文档不走座位那条道(它必须画在卡自己的面**之上**,而座位道整整低一整趟),它骑的是 `bt_render::OverlayLayer::body`,而那条道**只捡了 body 的填色与 body 的字**,到图片这一格就停了。三条通道,实现了两条。
+
+**修的是通道,不是租客。** `OverlayLayer::faded_document_rasters()` 与既有的 `faded_quads` / `faded_icons` 并排:把 `body.rasters` 与 `body.blocks[].rasters` 两层一起交出来(两层是因为**比 measure 宽的公式活在它自己那块滚动区里**,留在页面上的那一份会从自己的裁切下面滑走),各自带着自己的 `clip`,并把这一层的 `opacity` 折进去——一张正在淡出的卡,它的数学得跟着淡。**受影响的是所有骑 `body` 的租客,不只是悬停卡**:拆出去的预览窗同样从没画过它文档里的公式,而它与卡从来不是两个毛病,是同一格空着。
+
+**「卡先出、图后到」还差最后一步:那一帧得有人要。** 图落地时 `apply_math_results` 只 `publish_frame`,而 `publish_frame` **不重建覆盖层**——它把上一次 `refresh_overlay` 合成的东西再呈现一遍。于是指针停着不动时,图进了缓存、`math_generation` 跳了一格、**没人去读**,卡就一直站在它的 LaTeX 上,直到某个不相干的手势顺手重建了覆盖层。`complete_peek_page` 对一张 PDF 首页说的是同一句话,这里照抄:**一批答复里只要有一张真图落地、且此刻确实有一张卡在台上(`file_peek_subject`),就在这一批的末尾要一次 `refresh_overlay` + `present_chrome_change`。** 攒到批尾而不是每条答复要一次——一页四十个公式答四十次,四十次全窗覆盖层重建是一张卡付不起的价;而拒绝(`Refused`)一格也不欠,因为它让块继续画作者写的那行源码,画面一个像素没变,这也正是它不跳 `generation` 的同一条理由。
+
+**字号仍是块自己的,裁切仍是卡自己的——两条都不是新规矩,只是这里第一次被看见。** 标题里的公式按标题号问引擎(`document_formulas` 走的是 `metrics.heading_font(level)`),这条上一片就立了;卡的 264px 天花板之下,一个被放到底边以外的公式**一张也不画**,与卡上任何别的块撞同一条 `overflow: hidden`。两条都在红门里按住。
+
+**红门。** `a_document_on_an_overlay_layer_hands_over_its_pictures`(bt-render:页面那一层与滚动块那一层都出来、宽公式保住它的 `clip`、淡入淡出折进去;把 `blocks` 那一半摘掉,宽公式当场消失)、`a_glance_cards_formula_is_drawn_where_it_was_reserved_and_reaches_the_glass`(bt-app:在**卡自己的** `body_width`/`body_max_height` 盒子里,里面那个公式画在它块的顶上、底边以外那个不画,并且——这一句就是这份报告本身——`faded_icons()` 是空的而 `faded_document_rasters()` 交得出它)、`the_card_and_the_pane_ask_the_engine_for_one_and_the_same_picture`(卡与席把同一份文件排成明显不同高的两页,而两边问引擎的键一模一样:席先 `mark_pending`,卡走一遍**一次未命中**。给 `PreviewMathKey` 加一个表面/路径/度量字段——那正是「给卡另做一套」的样子——它当场全红)。
+
 ### 7.11 卡片上的网页是它最后一次在玻璃上的样子（Web 预览块 W2 片⑥，2026-08-23，已落地；`crates/bt-app/src/{web_thumb(新),focus_thumb,seats,webhost,main}.rs`、`crates/bt-platform/src/webview.rs`、`spikes/webview2-w0/src/{gates_w2s6(新),host,win,main}.rs`）
 
 **这一片只回答一个问题:聚焦卡片上的网页座位画什么。** 片③ 之后网页是预览缓冲,而卡片的投影层「只从内存里的缓冲取文本」——网页缓冲里没有文本,于是那一格一直是一张面(名字 + 类型词)。本片让它变成一张真的图。头/脚/三钮是片④,live 缩略图与远程投影按 `plan.md` §5 另立性能片,本片一行不做。
