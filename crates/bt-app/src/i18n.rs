@@ -1079,16 +1079,19 @@ pub enum Text {
     GitGroupUntracked,
     /// Their teaching sentences. They are the only place this page explains what
     /// the index is, so the Chinese teaches too rather than naming.
+    ///
+    /// **Read by the rows and no longer by the heading** (user report,
+    /// 2026-08-25) — see `crate::git_panel::group_tooltip`. The heading's own
+    /// two sentences, `GitBranchesTip` and `GitCommitsTip`, went altogether:
+    /// what they promised is on the rows that keep the promise.
     GitGroupStagedTip,
     GitGroupChangesTip,
     GitGroupUntrackedTip,
     GitBranchesHeading,
-    GitBranchesTip,
     GitRemotesHeading,
     GitRemotesTipShut,
     GitRemotesTipOpen,
     GitCommitsHeading,
-    GitCommitsTip,
     /// One verb on one repository, seen from the panel's masthead and the
     /// graph's toolbar — one string, for [`Self::Settings`]'s reason.
     GitRefreshTip,
@@ -2568,11 +2571,6 @@ impl Text {
                 "还不在仓库里 —— git 没有盯着这些",
             ),
             Self::GitBranchesHeading => pick(lang, "BRANCHES", "分支"),
-            Self::GitBranchesTip => pick(
-                lang,
-                "Local branches, current one first — click one to check it out",
-                "本地分支，当前的排在最前 —— 点一个就检出它",
-            ),
             Self::GitRemotesHeading => pick(lang, "REMOTES", "远程"),
             Self::GitRemotesTipShut => pick(
                 lang,
@@ -2585,11 +2583,6 @@ impl Text {
                 "远程上的分支 —— 点一下收起",
             ),
             Self::GitCommitsHeading => pick(lang, "COMMITS", "提交"),
-            Self::GitCommitsTip => pick(
-                lang,
-                "Recent history, newest first — the curve marks a merge, where a branch's history joins this line",
-                "近期历史，最新的排在最前 —— 弧线标记一次合并，某个分支的历史在那里并入这条线",
-            ),
             Self::GitRefreshTip => pick(lang, "Read the repository again", "再读一次仓库"),
             Self::GitActStage => pick(lang, "Stage", "暂存"),
             Self::GitActUnstage => pick(lang, "Unstage", "取消暂存"),
@@ -3162,7 +3155,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 490] = [
+    pub const ALL: [Self; 488] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3471,12 +3464,10 @@ impl Text {
         Self::GitGroupChangesTip,
         Self::GitGroupUntrackedTip,
         Self::GitBranchesHeading,
-        Self::GitBranchesTip,
         Self::GitRemotesHeading,
         Self::GitRemotesTipShut,
         Self::GitRemotesTipOpen,
         Self::GitCommitsHeading,
-        Self::GitCommitsTip,
         Self::GitRefreshTip,
         Self::GitActStage,
         Self::GitActUnstage,
