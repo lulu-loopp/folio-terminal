@@ -545,14 +545,17 @@ pub enum SpanStyle {
     /// URL is never *printed* — that was wrong under every future ruling and it
     /// is still wrong under this one.
     Link,
-    /// `$…$` — one inline formula, **stored with its delimiters**.
+    /// `$…$`, `\(…\)` or a bare `\begin{pmatrix}…\end{pmatrix}` — one inline
+    /// formula, **stored with its delimiters**.
     ///
     /// The delimiters stay in [`Span::text`] because they are what the run draws
     /// while it has no picture yet, and because they are what it goes back to
     /// when the engine refuses the source: a formula that cannot be set is the
     /// author's literal text and must come back byte for byte. The LaTeX handed
     /// to the engine is [`Span::math_source`], which is the same string without
-    /// the two dollars.
+    /// the delimiters — and for an environment it is the same string, because an
+    /// environment has no delimiters to drop: the `\begin` and the `\end` are the
+    /// formula.
     Math,
 }
 
@@ -601,7 +604,7 @@ impl Span {
         }
     }
 
-    /// One inline formula, `text` **including** the `$` at each end.
+    /// One inline formula, `text` **including** whatever delimits it.
     pub fn math(text: &str) -> Self {
         Self::styled(text, SpanStyle::Math)
     }
@@ -611,15 +614,24 @@ impl Span {
     /// One accessor rather than a second copy of the source on the span, because
     /// the delimited text and the source are the same bytes read two ways, and a
     /// pair of fields is a pair that can disagree.
+    ///
+    /// A run delimited by neither `$…$` nor `\(…\)` is a bare environment, and a
+    /// bare environment is its own source: there is nothing to take off it.
     #[must_use]
     pub fn math_source(&self) -> Option<&str> {
-        (self.style == SpanStyle::Math)
-            .then(|| {
-                self.text
-                    .strip_prefix('$')
-                    .and_then(|rest| rest.strip_suffix('$'))
-            })
-            .flatten()
+        if self.style != SpanStyle::Math {
+            return None;
+        }
+        let text = self.text.as_str();
+        Some(
+            text.strip_prefix('$')
+                .and_then(|rest| rest.strip_suffix('$'))
+                .or_else(|| {
+                    text.strip_prefix(INLINE_MATH_OPEN)
+                        .and_then(|rest| rest.strip_suffix(INLINE_MATH_CLOSE))
+                })
+                .unwrap_or(text),
+        )
     }
 }
 
@@ -685,8 +697,13 @@ pub enum MarkdownBlock {
     /// `---` or `***` alone on a line.
     Rule,
     Paragraph(Vec<Span>),
-    /// `$$…$$` — one display formula, the LaTeX **without** its delimiters and
-    /// with its own line breaks intact.
+    /// `$$…$$`, `\[…\]` or a bare `\begin{align}…\end{align}` — one display
+    /// formula, the LaTeX **without** its delimiters and with its own line
+    /// breaks intact.
+    ///
+    /// An environment keeps its `\begin` and its `\end`, because those are not
+    /// delimiters around a formula — they are the formula, and the alignment
+    /// they set up is the whole reason the author reached for one.
     ///
     /// A block of its own rather than a paragraph carrying a wide run, because
     /// display mathematics is a block in every dialect that has it: it takes the
@@ -710,14 +727,16 @@ pub enum MarkdownBlock {
 /// **Four passes, and the order is the ruling.** Backticks first, which is the
 /// mock-up's order (4915-4917) and the one that makes `` `**not bold**` `` come
 /// out as literal code rather than as a bold run inside a code span; then
-/// dollars, so that a formula's own `*`, `_` and `[` are the formula's and not
-/// this renderer's; then links, so a `**[bold link](url)**`'s brackets are gone
-/// before the asterisks are read; then asterisks over whatever is still plain.
+/// mathematics, so that a formula's own `*`, `_` and `[` are the formula's and
+/// not this renderer's; then links, so a `**[bold link](url)**`'s brackets are
+/// gone before the asterisks are read; then asterisks over whatever is still
+/// plain.
 ///
-/// **The backtick pass standing in front of the dollar pass is the whole of
-/// "a dollar inside code is a dollar."** There is no second rule and no list of
-/// things that look like shell: a code span has already been claimed by the time
-/// the dollars are read, and a fenced block never reaches this function at all.
+/// **The backtick pass standing in front of the mathematics pass is the whole of
+/// "a dollar inside code is a dollar"** — and of "a `\begin{align}` inside code
+/// is a `\begin{align}`". There is no second rule and no list of things that look
+/// like shell or like LaTeX: a code span has already been claimed by the time the
+/// formulas are read, and a fenced block never reaches this function at all.
 ///
 /// **One door for every block that has text in it.** A table cell, a list item,
 /// a quote line and a paragraph all come through here, which is the whole of why
@@ -739,9 +758,9 @@ pub fn parse_inline(line: &str) -> Vec<Span> {
     spans
 }
 
-/// The second pass: `$…$` inside whatever the backtick pass left plain.
+/// The second pass: mathematics inside whatever the backtick pass left plain.
 ///
-/// **The rule is Pandoc's `tex_math_dollars`**, which is the written-down
+/// **The rule for the dollar is Pandoc's `tex_math_dollars`**, which is the written-down
 /// standard for mathematics in a markdown document and is therefore something
 /// this file can cite rather than something it had to guess:
 ///
@@ -770,16 +789,71 @@ pub fn parse_inline(line: &str) -> Vec<Span> {
 /// are shared by calling the same function rather than by writing it twice.
 fn push_math_runs(text: &str, spans: &mut Vec<Span>) {
     let mut rest = text;
-    while let Some((open, close)) = next_inline_math(rest) {
+    while let Some((open, end)) = next_inline_math(rest) {
         push_link_runs(&rest[..open], spans);
-        spans.push(Span::math(&rest[open..=close]));
-        rest = &rest[close + 1..];
+        spans.push(Span::math(&rest[open..end]));
+        rest = &rest[end..];
     }
     push_link_runs(rest, spans);
 }
 
-/// The byte offsets of the next inline formula's two delimiters, if there is one.
+/// The byte range of the next inline formula, **delimiters included**.
+///
+/// **Three flavours, one scanner, and the earliest one wins.** `$…$` is
+/// Pandoc's; `\(…\)` is the pair GitHub has read as mathematics since 2022 and
+/// LaTeX has read as mathematics since there was LaTeX; a `\begin{pmatrix}`
+/// standing inside a sentence is a formula that never had delimiters at all.
+/// Which of the three an author reached for is not an order of precedence, so
+/// the run that starts first is the run that is claimed first — `\(x\) and $y$`
+/// is two formulas in the order they were written, not one flavour's sweep
+/// followed by another's.
 fn next_inline_math(text: &str) -> Option<(usize, usize)> {
+    [
+        next_dollar_math(text),
+        next_delimited_math(text, INLINE_MATH_OPEN, INLINE_MATH_CLOSE),
+        next_environment_math(text),
+    ]
+    .into_iter()
+    .flatten()
+    .min_by_key(|(open, _)| *open)
+}
+
+/// `\(…\)`, the pair whose only rule is that neither delimiter was escaped.
+///
+/// **None of the dollar's four rules apply here, and none of them need to.**
+/// They exist because a `$` is also a price, a shell variable and a `$$` — a
+/// `\(` is none of those, so asking whether the author meant it would be the
+/// renderer overruling the document about its own contents with nothing to gain.
+/// The first opener pairs with the first closer after it, which is TeX's own
+/// rule; an opener with nothing after it to close it is two characters of text
+/// and the scan stops there rather than reading on to the end of the line.
+fn next_delimited_math(text: &str, open: &str, close: &str) -> Option<(usize, usize)> {
+    let start = find_unescaped(text, open, 0)?;
+    let end = find_unescaped(text, close, start + open.len())?;
+    Some((start, end + close.len()))
+}
+
+/// A mathematics environment written inside a sentence.
+///
+/// An environment whose partner is missing is passed over rather than returned
+/// empty-handed, because the next one along may well have its own — and an
+/// environment that is not mathematics is passed over for the same reason it is
+/// never a block: `\begin{itemize}` is a list.
+fn next_environment_math(text: &str) -> Option<(usize, usize)> {
+    let mut at = 0usize;
+    while let Some(start) = find_unescaped(text, ENVIRONMENT_OPEN, at) {
+        if let Some(end) = math_environment_name(&text[start..])
+            .and_then(|name| environment_close(text, name, start))
+        {
+            return Some((start, end));
+        }
+        at = start + ENVIRONMENT_OPEN.len();
+    }
+    None
+}
+
+/// The byte offsets of the next `$…$`'s two delimiters, if there is one.
+fn next_dollar_math(text: &str) -> Option<(usize, usize)> {
     let dollars: Vec<usize> = text
         .char_indices()
         .filter_map(|(byte, character)| (character == '$').then_some(byte))
@@ -799,7 +873,7 @@ fn next_inline_math(text: &str) -> Option<(usize, usize)> {
             .copied()
             .find(|close| closes_inline_math(text, *close))
         {
-            return Some((open, close));
+            return Some((open, close + 1));
         }
         index += 1;
     }
@@ -837,6 +911,121 @@ fn is_paired_dollar(text: &str, byte: usize) -> bool {
         || byte
             .checked_sub(1)
             .is_some_and(|before| text.as_bytes().get(before) == Some(&b'$'))
+}
+
+/// `\(` — inline mathematics.
+const INLINE_MATH_OPEN: &str = "\\(";
+/// `\)` — the end of it.
+const INLINE_MATH_CLOSE: &str = "\\)";
+/// `\[` — display mathematics.
+const DISPLAY_MATH_OPEN: &str = "\\[";
+/// `\]` — the end of it.
+const DISPLAY_MATH_CLOSE: &str = "\\]";
+/// `\begin{` — the head of every environment, mathematical or not.
+const ENVIRONMENT_OPEN: &str = "\\begin{";
+
+/// The environments amsmath sets as mathematics, **without their stars**.
+///
+/// A written-down list rather than "every `\begin{…}`", because `\begin{itemize}`
+/// is a list and `\begin{verbatim}` is a code sample: handing either to a formula
+/// engine does not get a refusal, it gets a picture of something that was never a
+/// formula. Names only — whether a given one *renders* is the engine's answer,
+/// and §7.1.3i′⑩ already rules what happens when that answer is no: the author's
+/// own text stands, unmarked.
+///
+/// The half of this list that is only ever legal *inside* mathematics in real
+/// LaTeX — the matrix family, `cases`, `aligned`, `array` — is here because a
+/// markdown document is not real LaTeX: GitHub and MathJax both let one stand on
+/// its own, the user's corpus writes `\begin{pmatrix}` at the top of a paragraph,
+/// and MiTeX sets it.
+const MATH_ENVIRONMENTS: [&str; 23] = [
+    "align",
+    "alignat",
+    "aligned",
+    "alignedat",
+    "array",
+    "Bmatrix",
+    "bmatrix",
+    "cases",
+    "dcases",
+    "eqnarray",
+    "equation",
+    "flalign",
+    "gather",
+    "gathered",
+    "matrix",
+    "multline",
+    "pmatrix",
+    "rcases",
+    "smallmatrix",
+    "split",
+    "subarray",
+    "Vmatrix",
+    "vmatrix",
+];
+
+/// The first occurrence of `needle` at or after `from` whose leading backslash
+/// the author did not escape.
+///
+/// **`\\[2pt]` is the case this exists for.** A `\\` is a line break and the `[`
+/// after it is that break's own optional argument — a display delimiter is a `\[`
+/// whose backslash stands alone. The parity is
+/// [`bt_detect::delimiter_is_escaped`], the same count the dollar pass and the
+/// terminal's own detector read: one definition, three callers.
+fn find_unescaped(text: &str, needle: &str, from: usize) -> Option<usize> {
+    let mut at = from;
+    while let Some(found) = text[at..].find(needle) {
+        let found = at + found;
+        if !bt_detect::delimiter_is_escaped(text, found) {
+            return Some(found);
+        }
+        // Every needle here begins with the backslash whose parity was just
+        // rejected, so one byte on is both past it and on a character boundary.
+        at = found + 1;
+    }
+    None
+}
+
+/// The environment `\begin{…}` opens at the head of `text`, if it is one whose
+/// contents are mathematics.
+fn math_environment_name(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix(ENVIRONMENT_OPEN)?;
+    let name = &rest[..rest.find('}')?];
+    let unstarred = name.strip_suffix('*').unwrap_or(name);
+    MATH_ENVIRONMENTS.contains(&unstarred).then_some(name)
+}
+
+/// Where the `\end{name}` that closes the `\begin{name}` at `open` ends.
+///
+/// **A depth count rather than the first `\end{name}` along**, because an
+/// environment may hold another of its own name and the closer of the outer one
+/// is the `\end` that brings the count back to zero. Names are matched whole —
+/// `\end{aligned}` is not an `\end{align}` — which is what lets an `aligned`
+/// inside an `align` be the ordinary case it is in a real document.
+fn environment_close(text: &str, name: &str, open: usize) -> Option<usize> {
+    let begin = format!("{ENVIRONMENT_OPEN}{name}}}");
+    let end = format!("\\end{{{name}}}");
+    debug_assert!(text[open..].starts_with(&begin));
+    // The caller's own opener is the one already counted, so the walk starts
+    // past it and the count can only come back to zero by returning.
+    let mut depth = 1usize;
+    let mut at = open + begin.len();
+    loop {
+        let close = find_unescaped(text, &end, at)?;
+        match find_unescaped(text, &begin, at) {
+            Some(nested) if nested < close => {
+                depth += 1;
+                at = nested + begin.len();
+            }
+            _ => {
+                depth -= 1;
+                at = close + end.len();
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+        }
+    }
 }
 
 /// The second pass: `[text](url)` inside whatever the code pass left plain.
@@ -1023,6 +1212,21 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
             continue;
         }
 
+        // ── the same block written the other two ways ───────────────────────
+        //
+        // `\[…\]` and a bare `\begin{align}…\end{align}` are display
+        // mathematics on the same terms `$$` is, and stand in the same place in
+        // this walk: after the fence, which has already taken anything inside
+        // it, and before every branch that would otherwise read these lines as
+        // prose, as a rule or as a table.
+        if let Some((source, after)) = display_math_block(&lines, index) {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            flush_list(&mut list, &mut ordered, &mut blocks);
+            blocks.push(MarkdownBlock::Math { source });
+            index = after;
+            continue;
+        }
+
         // ── the table, which is the one block needing lookahead ─────────────
         if is_pipe_row(line)
             && lines
@@ -1126,6 +1330,86 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
     flush_paragraph(&mut paragraph, &mut blocks);
     flush_list(&mut list, &mut ordered, &mut blocks);
     blocks
+}
+
+/// The display formula the line at `start` opens with `\[` or with a bare
+/// `\begin{…}`, and the line the document goes on at — or `None`, meaning what
+/// looked like an opener was text and this walk should read on as if it were.
+///
+/// **The opener is first on its line and the closer is last on its.** That is
+/// the shape `$$` already has, and it is what keeps a `\[` inside a sentence the
+/// author's own bracket: markdown's `\[` is *also* CommonMark's escape for a
+/// literal `[`, so a renderer that read every one of them as mathematics would
+/// be wrong in prose about markdown far more often than it was right in prose
+/// about physics.
+///
+/// **Bounded by the paragraph, which is the one place this parts company with
+/// `$$`.** An unclosed `$$` swallows the rest of the document and draws it,
+/// because a `$$` standing first on a line is not something prose contains by
+/// accident. A `\[` is — see above — and so the partner has to turn up before
+/// the blank line that ends this paragraph; if it does not, nothing here was
+/// mathematics and every line of it stays prose. Nothing is lost by the bound: a
+/// formula with a blank line through the middle of it is not a formula TeX would
+/// set either.
+fn display_math_block(lines: &[&str], start: usize) -> Option<(String, usize)> {
+    let first = *lines.get(start)?;
+    if !first.starts_with(DISPLAY_MATH_OPEN) && !first.starts_with(ENVIRONMENT_OPEN) {
+        return None;
+    }
+    let end = lines[start..]
+        .iter()
+        .position(|line| line.trim().is_empty())
+        .map_or(lines.len(), |at| start + at);
+    let paragraph = lines[start..end].join("\n");
+    let (body, close_end) = if paragraph.starts_with(DISPLAY_MATH_OPEN) {
+        let close = find_unescaped(&paragraph, DISPLAY_MATH_CLOSE, DISPLAY_MATH_OPEN.len())?;
+        (
+            &paragraph[DISPLAY_MATH_OPEN.len()..close],
+            close + DISPLAY_MATH_CLOSE.len(),
+        )
+    } else {
+        // An environment keeps both of its ends: they are the formula.
+        let name = math_environment_name(&paragraph)?;
+        let close_end = environment_close(&paragraph, name, 0)?;
+        (&paragraph[..close_end], close_end)
+    };
+    let tail = &paragraph[close_end..];
+    if !tail
+        .split_once('\n')
+        .map_or(tail, |(rest_of_line, _)| rest_of_line)
+        .trim()
+        .is_empty()
+    {
+        return None;
+    }
+    Some((
+        math_block_body(body),
+        start + paragraph[..close_end].matches('\n').count() + 1,
+    ))
+}
+
+/// A display formula's source with the blank its delimiters left behind taken
+/// off.
+///
+/// **Only the first line and the last, and only their own ends.** What is
+/// between them is the author's own layout: a `&` column that lost its leading
+/// spaces is a column that no longer lines up in the source a reader falls back
+/// to when the engine refuses.
+fn math_block_body(body: &str) -> String {
+    let mut lines: Vec<&str> = body
+        .lines()
+        .skip_while(|line| line.trim().is_empty())
+        .collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    if let Some(first) = lines.first_mut() {
+        *first = first.trim();
+    }
+    if let Some(last) = lines.last_mut() {
+        *last = last.trim();
+    }
+    lines.join("\n")
 }
 
 /// The source lines of one paragraph, as the single line CommonMark reads them
@@ -5147,6 +5431,242 @@ mod tests {
         assert_eq!(parse_inline("a $ x $ b"), vec![Span::plain("a $ x $ b")]);
         // Nothing between the delimiters is nothing, not an empty formula.
         assert_eq!(parse_inline("a $$ b"), vec![Span::plain("a $$ b")]);
+    }
+
+    /// PIN (user report, 2026-08-25, second pass: two whole families in
+    /// `test-assets/latex-render-check.md` stood as literal text) —
+    /// **`\[…\]` is display mathematics**, on one line or spread over several,
+    /// and it is the same block `$$…$$` opens.
+    ///
+    /// The delimiter is GitHub's since 2022 and Pandoc's
+    /// `tex_math_single_backslash` before that; it is block-only here for the
+    /// same reason `$$` is, and the delimiters are markup rather than source.
+    ///
+    /// MUTATIONS: emit the delimiters inside `source`; accept an opener that is
+    /// not the first thing on its line; let the multi-line arm run past `\]`.
+    #[test]
+    fn backslash_brackets_open_a_block_of_mathematics() {
+        assert_eq!(
+            parse_markdown("\\[\\hat{H}\\psi = E\\psi\\]\n"),
+            vec![MarkdownBlock::Math {
+                source: "\\hat{H}\\psi = E\\psi".to_owned(),
+            }]
+        );
+        assert_eq!(
+            parse_markdown("\\[\n\\oint_{\\partial \\Sigma} \\mathbf{E} = 0\n\\]\n"),
+            vec![MarkdownBlock::Math {
+                source: "\\oint_{\\partial \\Sigma} \\mathbf{E} = 0".to_owned(),
+            }]
+        );
+        // Prose either side of it keeps its own blocks.
+        assert_eq!(
+            parse_markdown("before\n\n\\[x^2\\]\n\nafter\n"),
+            vec![
+                MarkdownBlock::Paragraph(vec![Span::plain("before")]),
+                MarkdownBlock::Math {
+                    source: "x^2".to_owned(),
+                },
+                MarkdownBlock::Paragraph(vec![Span::plain("after")]),
+            ]
+        );
+    }
+
+    /// PIN (same report) — **a bare mathematics environment is a block of
+    /// mathematics**, `\begin{…}` first on its line through the `\end{…}` that
+    /// closes it, and the environment stays in the source because the
+    /// environment *is* the formula.
+    ///
+    /// MUTATIONS: drop the environment out of `source` the way `$$` is dropped;
+    /// close on the first `\end{…}` of any name; accept any environment name.
+    #[test]
+    fn a_bare_mathematics_environment_is_a_block() {
+        assert_eq!(
+            parse_markdown("\\begin{align}\na &= b \\\\\nc &= d\n\\end{align}\n"),
+            vec![MarkdownBlock::Math {
+                source: "\\begin{align}\na &= b \\\\\nc &= d\n\\end{align}".to_owned(),
+            }]
+        );
+        assert_eq!(
+            parse_markdown("\\begin{pmatrix}\na & b \\\\\nc & d\n\\end{pmatrix}\n"),
+            vec![MarkdownBlock::Math {
+                source: "\\begin{pmatrix}\na & b \\\\\nc & d\n\\end{pmatrix}".to_owned(),
+            }]
+        );
+        assert_eq!(
+            parse_markdown("\\begin{cases}\nx, & x \\geq 0 \\\\\n-x, & x < 0\n\\end{cases}\n"),
+            vec![MarkdownBlock::Math {
+                source: "\\begin{cases}\nx, & x \\geq 0 \\\\\n-x, & x < 0\n\\end{cases}".to_owned(),
+            }]
+        );
+        // A starred environment is the same environment.
+        assert_eq!(
+            parse_markdown("\\begin{align*}\na &= b\n\\end{align*}\n"),
+            vec![MarkdownBlock::Math {
+                source: "\\begin{align*}\na &= b\n\\end{align*}".to_owned(),
+            }]
+        );
+        // The `\end` that closes is the one that matches, not the first one.
+        assert_eq!(
+            parse_markdown(
+                "\\begin{align}\n\\begin{aligned}\na &= b\n\\end{aligned}\n\\end{align}\n"
+            ),
+            vec![MarkdownBlock::Math {
+                source: "\\begin{align}\n\\begin{aligned}\na &= b\n\\end{aligned}\n\\end{align}"
+                    .to_owned(),
+            }]
+        );
+    }
+
+    /// PIN (same report) — **`\(…\)` is mathematics inside prose**, and so is a
+    /// mathematics environment written inside a sentence. Both keep the bytes
+    /// they were written with, so a formula the engine refuses prints back
+    /// exactly as the author typed it.
+    ///
+    /// MUTATIONS: strip the delimiters into `text`; let `\(` pair with a `\)`
+    /// that is not there; hand the engine the delimiters as source.
+    #[test]
+    fn backslash_parentheses_delimit_mathematics_inside_prose() {
+        assert_eq!(
+            parse_inline("勾股 \\(a^2 + b^2 = c^2\\) 定理"),
+            vec![
+                Span::plain("勾股 "),
+                Span::math("\\(a^2 + b^2 = c^2\\)"),
+                Span::plain(" 定理"),
+            ]
+        );
+        assert_eq!(
+            Span::math("\\(a^2 + b^2 = c^2\\)").math_source(),
+            Some("a^2 + b^2 = c^2"),
+        );
+        assert_eq!(
+            parse_inline("矩阵 \\begin{pmatrix}a & b\\end{pmatrix} 在句子里"),
+            vec![
+                Span::plain("矩阵 "),
+                Span::math("\\begin{pmatrix}a & b\\end{pmatrix}"),
+                Span::plain(" 在句子里"),
+            ]
+        );
+        // An environment carries no delimiters to drop: it is its own source.
+        assert_eq!(
+            Span::math("\\begin{pmatrix}a & b\\end{pmatrix}").math_source(),
+            Some("\\begin{pmatrix}a & b\\end{pmatrix}"),
+        );
+        // Whichever comes first in the line comes first in the spans.
+        assert_eq!(
+            parse_inline("\\(x\\) and $y$"),
+            vec![
+                Span::math("\\(x\\)"),
+                Span::plain(" and "),
+                Span::math("$y$"),
+            ]
+        );
+    }
+
+    /// PIN (same report) — **the five things a backslash is not.** A fence and a
+    /// code span protect their contents here exactly as they protect a dollar;
+    /// an opener the author never closed is text and the scan that looks for its
+    /// partner stops at the end of the paragraph rather than eating the rest of
+    /// the document; `\\[2pt]` is a line break with a gap after it; and an
+    /// environment that is not mathematics is not handed to a mathematics
+    /// engine.
+    ///
+    /// MUTATIONS, one per assertion: run the backslash pass over the raw line
+    /// before the backtick pass; scan for `\]` past the blank line; read the
+    /// `[` of `\\[2pt]` as an opener; accept every `\begin{…}`.
+    #[test]
+    fn a_backslash_inside_code_and_an_unclosed_one_are_not_mathematics() {
+        assert_eq!(
+            parse_markdown("```text\n\\[x^2\\]\n\\begin{align}a\\end{align}\n```\n"),
+            vec![MarkdownBlock::Code {
+                lang: Some("text".to_owned()),
+                text: "\\[x^2\\]\n\\begin{align}a\\end{align}".to_owned(),
+            }]
+        );
+        assert_eq!(
+            parse_inline("write `\\(x\\)` or `\\begin{align}a\\end{align}`"),
+            vec![
+                Span::plain("write "),
+                Span::code("\\(x\\)"),
+                Span::plain(" or "),
+                Span::code("\\begin{align}a\\end{align}"),
+            ]
+        );
+        // An opener with no partner is text, and the paragraph after it is its
+        // own paragraph.
+        assert_eq!(
+            parse_markdown("\\[ unfinished\n\nnext paragraph\n"),
+            vec![
+                MarkdownBlock::Paragraph(vec![Span::plain("\\[ unfinished")]),
+                MarkdownBlock::Paragraph(vec![Span::plain("next paragraph")]),
+            ]
+        );
+        assert_eq!(
+            parse_markdown("\\begin{align}\nunfinished\n\nnext paragraph\n"),
+            vec![
+                MarkdownBlock::Paragraph(vec![Span::plain("\\begin{align} unfinished"),]),
+                MarkdownBlock::Paragraph(vec![Span::plain("next paragraph")]),
+            ]
+        );
+        assert_eq!(
+            parse_inline("open \\( and never close it"),
+            vec![Span::plain("open \\( and never close it")]
+        );
+        // `\\` is an escaped backslash, so the `[` after it opens nothing.
+        assert_eq!(
+            parse_markdown("\\\\[2pt] and on\n"),
+            vec![MarkdownBlock::Paragraph(vec![Span::plain(
+                "\\\\[2pt] and on"
+            )])]
+        );
+        assert_eq!(
+            parse_inline("a \\\\(x\\\\) b"),
+            vec![Span::plain("a \\\\(x\\\\) b")]
+        );
+        // An environment that sets a list is not an environment that sets a
+        // formula, whatever the engine would make of it.
+        assert_eq!(
+            parse_markdown("\\begin{itemize}\n\\item a\n\\end{itemize}\n"),
+            vec![MarkdownBlock::Paragraph(vec![Span::plain(
+                "\\begin{itemize} \\item a \\end{itemize}"
+            )])]
+        );
+    }
+
+    /// PIN (same report) — **the user's own corpus, read as blocks.** The three
+    /// tests above are the rules; this is the file the rules were reported
+    /// against, and it is here because a rule can be right on the sentence it
+    /// was written for and still miss the section it was written about.
+    ///
+    /// `include_str!` rather than a copy: a corpus that moves is a compile
+    /// error, and a corpus that is edited is a test that reads the edit.
+    #[test]
+    fn the_latex_corpus_sets_every_section_it_promises() {
+        let blocks = parse_markdown(include_str!("../../../test-assets/latex-render-check.md"));
+        let sources: Vec<&str> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                MarkdownBlock::Math { source } => Some(source.as_str()),
+                _ => None,
+            })
+            .collect();
+        // §2 — the backslash-bracket pair, delimiters off.
+        assert!(
+            sources.contains(&"\\hat{H}\\psi = E\\psi"),
+            "§2 is display mathematics: {sources:?}",
+        );
+        // §5, §6 and §7 — one block each, the environment kept at both ends.
+        for environment in ["align", "pmatrix", "bmatrix", "vmatrix", "cases"] {
+            let head = format!("\\begin{{{environment}}}");
+            let foot = format!("\\end{{{environment}}}");
+            assert!(
+                sources
+                    .iter()
+                    .any(|source| source.starts_with(&head) && source.ends_with(&foot)),
+                "{environment} is one block that keeps its own ends",
+            );
+        }
+        // And the fenced formula at the foot of the file is still a fence.
+        assert!(!sources.contains(&"x^2 + y^2"));
     }
 
     /// PIN (user report, 2026-08-13: "做得不太好") — **the five block kinds the
