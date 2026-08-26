@@ -40394,6 +40394,10 @@ impl Runtime<'_> {
         };
         let tools = seats::PreviewHeadTools {
             switcher: self.preview_switcher_rows(seat) > 1,
+            // Read off the seat and not off the buffer, which is what makes it
+            // survive the two `match`es above: a lock is a fact about the pane,
+            // and the pane keeps it whatever it is showing.
+            locked: self.seats.preview_is_locked(seat),
             ..tools
         };
         // **Measured wearing what they are drawn wearing** (user report,
@@ -40438,7 +40442,6 @@ impl Runtime<'_> {
                 dirty,
                 others_dirty,
                 flip_to_source,
-                locked: self.seats.preview_is_locked(seat),
                 menu_open: self.preview_menu_seat() == Some(seat),
                 ..seats::PreviewHeadContent::default()
             },
@@ -40830,6 +40833,10 @@ impl Runtime<'_> {
             // buffer above.
             web: self.seat_holds_a_page(seat),
             switcher: self.preview_switcher_rows(seat) > 1,
+            // The one tool in this head that stands at rest, so the one the hit
+            // test may answer for without a hover — see
+            // [`seats::PreviewHeadTools::locked`].
+            locked: self.seats.preview_is_locked(seat),
             // Zero until this seat's head has been drawn once, which is the
             // honest answer for a frame the paint has not reached yet: a pill
             // sized to no name is a pill nothing is inside, and the press it
@@ -59058,27 +59065,57 @@ impl Runtime<'_> {
     /// as the reader leaves it there. Each miss stops the walk where it is rather than falling
     /// back to something nearby — a click that lands on a pane the notification was not about is
     /// worse than one that lands on the window and stops.
+    ///
+    /// **One `open` line per click** (`BT_ATTENTION_TRACE`, §11.1.5's station list). The whole of
+    /// this walk used to be silent, and silence here is what left the C slice's own report saying
+    /// the path "was not verified on a real machine": a click that landed correctly and a click
+    /// that was swallowed by a closed tab looked exactly alike from outside the window — and a
+    /// toast banner is gone in five seconds, so there is nothing on screen to go back to either.
+    /// Every arm below writes its own, `leave=` naming what it did not find, on the same
+    /// one-line-per-decision rule the rest of the file keeps.
     fn open_from_notification(&mut self, route: notify::NotificationRoute) -> Result<()> {
+        let launch = route.launch();
         let Some(index) = self
             .window
             .tabs
             .iter()
             .position(|tab| tab.id.0 == route.tab)
         else {
+            attention_trace::line(|| format!("open route={launch} leave=no-tab"));
             return Ok(());
         };
         // Un-minimised first: `focus_window` on an iconified window brings it forward without
         // restoring it on some configurations, and a restored window that never came forward is
         // the same click going unanswered twice.
-        if self.window.window.is_minimized() == Some(true) {
+        let restored = self.window.window.is_minimized() == Some(true);
+        if restored {
             self.window.window.set_minimized(false);
         }
         self.window.window.focus_window();
         self.activate_tab(index, false)?;
         let seat = route.seat_id();
         if !self.window.tabs[index].sessions.contains_key(&seat) {
+            attention_trace::line(|| {
+                format!(
+                    "open tab={index} seat={seat:?} id={} by=toast restored={} leave=no-seat",
+                    route.tab,
+                    u8::from(restored)
+                )
+            });
             return Ok(());
         }
+        // `tab=` is the **index**, which is what every other station in this file
+        // means by the word (`attention::Site`); `id=` is the `TabId` the toast
+        // was written with. Both, because they are two different numbers and the
+        // whole point of this line is being able to line it up against the
+        // `toast` line that raised it.
+        attention_trace::line(|| {
+            format!(
+                "open tab={index} seat={seat:?} id={} by=toast restored={}",
+                route.tab,
+                u8::from(restored)
+            )
+        });
         if self.window.tabs[index].focused_leaf != seat {
             self.window.tabs[index].focused_leaf = seat;
             // The slot holds the pane that *was* focused; leaving it would let the next present
@@ -62281,7 +62318,16 @@ impl Runtime<'_> {
                 .into_iter()
                 .map(|seat| (seat, self.preview_head_tools(seat)))
                 .collect();
-            seats::hit_preview_head(&self.seat_layout, scale, &tools, position.x, position.y)
+            // The reveal, on [`seats::hit_chrome`]'s own terms and for its own
+            // reason: these five are the split head's run in another head.
+            seats::hit_preview_head(
+                &self.seat_layout,
+                scale,
+                &tools,
+                self.window.seat_pointer.pane_hover,
+                position.x,
+                position.y,
+            )
         })
         // And the row under it (user ruling 2026-08-24), on the same terms: its
         // controls stand inside a band the pane head's drag would otherwise
@@ -62320,6 +62366,22 @@ impl Runtime<'_> {
                 &self.seats,
                 &self.seat_layout,
                 scale,
+                // **The run that is on screen, not the run the rectangles
+                // allow** (user report, 2026-08-26). A pane head's `×`, `⌄`,
+                // folder and pop-out are drawn only while the hand is inside
+                // that pane, and this hit test used to answer for them whatever
+                // the hand had done — so a press that arrived without a hover
+                // first (a probe's injected click, or the press right after a
+                // resize, which clears `pane_hover` because the border being
+                // dragged is non-client) tore a column out into a floating
+                // window from a head showing nothing but a drag handle.
+                //
+                // It is the *stored* hover and not a fresh `pane_at` of this
+                // very position, which is what makes it the same fact the paint
+                // used: this is asked on the press as well as on the move, and
+                // on the press the only honest question is "what is the reader
+                // looking at".
+                self.window.seat_pointer.pane_hover,
                 position.x,
                 position.y,
             )
@@ -74734,11 +74796,14 @@ impl FolioApp {
         };
         for launch in app.notifications.take_activations() {
             let Some(route) = notify::NotificationRoute::parse(&launch) else {
+                attention_trace::line(|| format!("open route={launch} leave=unparsed"));
                 continue;
             };
-            if let Some(mut runtime) = self.runtime(WindowId::from(route.window)) {
-                runtime.open_from_notification(route)?;
-            }
+            let Some(mut runtime) = self.runtime(WindowId::from(route.window)) else {
+                attention_trace::line(|| format!("open route={launch} leave=no-window"));
+                continue;
+            };
+            runtime.open_from_notification(route)?;
         }
         Ok(())
     }

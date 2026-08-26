@@ -682,11 +682,15 @@ fn recalled_input_keeps_its_prompt_head_and_never_welds_to_the_banner_after_wide
 ///
 /// Thread-local on purpose: the other 41 tests of this binary are running on their own threads
 /// while the drag runs, and must not land in its total.
-struct DragHeapCounter;
+///
+/// **Two pins spend their budget here now.**
+/// `g1_primary_tui_explicit_scroll_repaint_is_fast_and_never_becomes_transcript` was the same
+/// story with the same ending, told a year apart: see its own comment for the numbers.
+struct HeapCounter;
 
 thread_local! {
-    static DRAG_HEAP_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    static DRAG_HEAP_ALLOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static HEAP_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static HEAP_ALLOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[expect(
@@ -695,7 +699,7 @@ thread_local! {
               `std::alloc::System` with its arguments unchanged and adds nothing but two \
               thread-local counter bumps, so the safety contract is exactly System's."
 )]
-unsafe impl std::alloc::GlobalAlloc for DragHeapCounter {
+unsafe impl std::alloc::GlobalAlloc for HeapCounter {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
         charge(layout.size() as u64);
         unsafe { std::alloc::System.alloc(layout) }
@@ -720,12 +724,12 @@ unsafe impl std::alloc::GlobalAlloc for DragHeapCounter {
 }
 
 fn charge(bytes: u64) {
-    DRAG_HEAP_BYTES.with(|counter| counter.set(counter.get().wrapping_add(bytes)));
-    DRAG_HEAP_ALLOCATIONS.with(|counter| counter.set(counter.get().wrapping_add(1)));
+    HEAP_BYTES.with(|counter| counter.set(counter.get().wrapping_add(bytes)));
+    HEAP_ALLOCATIONS.with(|counter| counter.set(counter.get().wrapping_add(1)));
 }
 
 #[global_allocator]
-static DRAG_HEAP_COUNTER: DragHeapCounter = DragHeapCounter;
+static HEAP_COUNTER: HeapCounter = HeapCounter;
 
 /// The frames in one measured drag. A real divider drag delivers a width change per pointer event
 /// and never waits for the child between two of them, which is what this reproduces.
@@ -764,15 +768,14 @@ impl DragArm {
         } else {
             self.wide
         };
-        let bytes_before = DRAG_HEAP_BYTES.with(std::cell::Cell::get);
-        let allocations_before = DRAG_HEAP_ALLOCATIONS.with(std::cell::Cell::get);
+        let bytes_before = HEAP_BYTES.with(std::cell::Cell::get);
+        let allocations_before = HEAP_ALLOCATIONS.with(std::cell::Cell::get);
         let started = Instant::now();
         self.session.resize(nz32(columns), self.rows).unwrap();
         std::hint::black_box(self.session.transcript().staging_len());
         let elapsed = started.elapsed();
-        self.heap_bytes += DRAG_HEAP_BYTES.with(std::cell::Cell::get) - bytes_before;
-        self.heap_allocations +=
-            DRAG_HEAP_ALLOCATIONS.with(std::cell::Cell::get) - allocations_before;
+        self.heap_bytes += HEAP_BYTES.with(std::cell::Cell::get) - bytes_before;
+        self.heap_allocations += HEAP_ALLOCATIONS.with(std::cell::Cell::get) - allocations_before;
         self.frame_nanos.push(elapsed.as_nanos() as u64);
     }
 
@@ -1985,48 +1988,130 @@ fn g1_local_scroll_region_never_enters_history() {
     assert_eq!(session.document().entries(), &before);
 }
 
-#[test]
-fn g1_primary_tui_explicit_scroll_repaint_is_fast_and_never_becomes_transcript() {
-    const CYCLES: usize = 512;
-    // 2026-07-19 same-host release exact single-test: HEAD 1.2546 ms, fixed worktree 1.0785 ms.
-    // A 25 ms gate leaves ~23x full-suite scheduling headroom while still rejecting the measured
-    // 200+ ms M1.9e regression. Any increase requires same-condition HEAD/worktree evidence.
-    const BUDGET: Duration = Duration::from_millis(25);
+/// The cycles in one measured burst of explicit TUI repaint.
+const EXPLICIT_SCROLL_REPAINT_CYCLES: usize = 512;
 
-    let mut session = DualPlaneSession::new(nz32(120), nz32(40));
-    let initial = (0..40)
+/// One arm of the repaint pin: `EXPLICIT_SCROLL_REPAINT_CYCLES` explicit scroll/repaints on a
+/// screen of the given shape. Returns what one cycle drew from the heap, in allocations and in
+/// bytes, and proves along the way that none of it reached the transcript.
+///
+/// The escape sequences are built before the meter starts. A `format!` per cycle is this test's
+/// own bookkeeping, and charging the session for it would be measuring the fixture.
+fn explicit_scroll_repaint_arm(columns: u32, rows: u32) -> (u64, u64) {
+    let mut session = DualPlaneSession::new(nz32(columns), nz32(rows));
+    let initial = (0..rows)
         .map(|row| format!("frame-row-{row:02}"))
         .collect::<Vec<_>>()
         .join("\r\n");
     session.feed(initial.as_bytes()).unwrap();
     assert!(history_text(&session).is_empty());
 
-    let started = Instant::now();
-    for cycle in 0..CYCLES {
+    let repaints = (0..EXPLICIT_SCROLL_REPAINT_CYCLES)
         // CSI S is an explicit full-screen manipulation used to collapse/repaint an upward TUI.
         // It is not a linefeed carrying new process output into canonical history.
-        session
-            .feed(format!("\x1b[S\x1b[40;1H\x1b[2Kframe-{cycle:03}").as_bytes())
-            .unwrap();
+        .map(|cycle| format!("\x1b[S\x1b[{rows};1H\x1b[2Kframe-{cycle:03}").into_bytes())
+        .collect::<Vec<_>>();
+
+    let bytes_before = HEAP_BYTES.with(std::cell::Cell::get);
+    let allocations_before = HEAP_ALLOCATIONS.with(std::cell::Cell::get);
+    let started = Instant::now();
+    for repaint in &repaints {
+        session.feed(repaint).unwrap();
     }
     let elapsed = started.elapsed();
-    eprintln!("G1_TUI_REPAINT cycles={CYCLES} elapsed={elapsed:?} budget={BUDGET:?}");
+    let cycles = EXPLICIT_SCROLL_REPAINT_CYCLES as u64;
+    let heap_bytes = (HEAP_BYTES.with(std::cell::Cell::get) - bytes_before) / cycles;
+    let heap_allocations =
+        (HEAP_ALLOCATIONS.with(std::cell::Cell::get) - allocations_before) / cycles;
+    // The wall clock is still printed, because it is what a human reads when they want to know
+    // whether this got slower. It is no longer what the test concludes from.
+    eprintln!(
+        "G1_TUI_REPAINT {columns}x{rows} cycles={EXPLICIT_SCROLL_REPAINT_CYCLES} \
+         elapsed={elapsed:?} per_cycle_allocations={heap_allocations} per_cycle_bytes={heap_bytes}"
+    );
 
     assert!(
-        elapsed <= BUDGET,
-        "{CYCLES} explicit TUI scroll/repaint cycles took {elapsed:?}, budget {BUDGET:?}"
-    );
-    assert!(
         history_text(&session).is_empty(),
-        "explicit TUI repaint polluted {} frozen rows in {elapsed:?}",
+        "explicit TUI repaint polluted {} frozen rows on a {columns}x{rows} screen",
         history_text(&session).len()
     );
     assert_eq!(session.transcript().staging_len(), 0);
 
     // The exemption is specific to explicit screen manipulation; a bottom-edge linefeed remains
     // genuine process output and must still enter the normal transcript path.
-    session.feed(b"\x1b[40;1H\r\nreal-output").unwrap();
+    session
+        .feed(format!("\x1b[{rows};1H\r\nreal-output").as_bytes())
+        .unwrap();
     assert_eq!(history_text(&session).len(), 1);
+
+    (heap_allocations, heap_bytes)
+}
+
+/// PIN - **an explicit TUI scroll/repaint costs the row that scrolled off, never the screen it
+/// left, and never becomes transcript.**
+///
+/// **This used to be a 25 ms wall clock over the whole burst, and could not stay one.** One cycle
+/// costs about two microseconds; the gate stood at ~23x the measured total and called the
+/// difference "full-suite scheduling headroom". It was not headroom. Ten identical runs of the
+/// old test against a full `cargo test --workspace` on the other cores, with not one line of this
+/// crate changing, summed to 6.5, 13.7, 18.5, 30.7, 33.7, 35.1, 38.1, 47.2, 48.7 and 62.0 ms -
+/// a ninefold spread and seven reds - against 19.5 ms on the same idle machine that had set the
+/// gate at 25. The number was reporting the scheduler.
+///
+/// What the M1.9e regression was is a thing that can be *counted*: work proportional to the whole
+/// screen on every cycle, where the screen manipulation only ever moves one row off the top. So
+/// that is what is pinned, in the currency
+/// `resize_drag_200_frames_stays_within_the_sparse_and_full_budget` already banked one screen up
+/// and for the same reason - the heap draw does not move when the machine does.
+///
+/// **The sharp half is the second arm.** Doubling the rows and changing nothing else must change
+/// nothing: a repaint that rebuilt a screenful of anything per cycle would grow with the screen,
+/// and a per-row rebuild cannot cover forty more rows without asking for at least forty more
+/// allocations. Measured 2026-08-26, identical in every run - alone, inside the 42-test suite,
+/// and against a full workspace test run: 16 allocations per cycle at both heights, 25_144 B per
+/// cycle at 40 rows and 25_344 B at 80. Doubling the *columns* instead does double the bytes
+/// (49_344 B at 240 columns, still 16 allocations), which is the one row that really did scroll
+/// off, and is exactly the shape this pin wants to see.
+///
+/// The absolute budgets are the other half, for a constant-factor blow-up that would keep the
+/// shape: ~12% of slack over the measured figures, which is room for the same work written
+/// differently and not room for a second structure per cycle.
+#[test]
+fn g1_primary_tui_explicit_scroll_repaint_is_fast_and_never_becomes_transcript() {
+    /// Measured 16; a per-row rebuild of a 40-row screen is at least 40 more.
+    const CYCLE_HEAP_ALLOCATIONS: u64 = 18;
+    /// Measured 25_144 B on the 120-column arm.
+    const CYCLE_HEAP_BYTES: u64 = 28 * 1024;
+    /// Measured 5 B per extra row: the one scrolled row's own bookkeeping growing with the grid
+    /// it is indexed in. A rebuilt row is a `String` and a boundary table - two orders of
+    /// magnitude more than this.
+    const BYTES_PER_EXTRA_ROW: u64 = 16;
+    /// The rows the second arm adds to the first.
+    const EXTRA_ROWS: u64 = 40;
+
+    let (short_allocations, short_bytes) = explicit_scroll_repaint_arm(120, 40);
+    let (tall_allocations, tall_bytes) = explicit_scroll_repaint_arm(120, 80);
+
+    assert!(
+        short_allocations <= CYCLE_HEAP_ALLOCATIONS,
+        "one explicit TUI scroll/repaint cycle made {short_allocations} allocations, budget \
+         {CYCLE_HEAP_ALLOCATIONS}"
+    );
+    assert!(
+        short_bytes <= CYCLE_HEAP_BYTES,
+        "one explicit TUI scroll/repaint cycle asked for {short_bytes} B, budget \
+         {CYCLE_HEAP_BYTES} B"
+    );
+    assert_eq!(
+        tall_allocations, short_allocations,
+        "twice the rows must be the same repaint: a cycle costs the row that scrolled off, not \
+         the screen it left"
+    );
+    assert!(
+        tall_bytes <= short_bytes + BYTES_PER_EXTRA_ROW * EXTRA_ROWS,
+        "twice the rows took {tall_bytes} B a cycle against {short_bytes} B, which is more than \
+         {BYTES_PER_EXTRA_ROW} B a row for {EXTRA_ROWS} rows that did not move"
+    );
 }
 
 #[test]

@@ -6389,8 +6389,12 @@ mod windows_impl {
     /// rather than one time in three.
     #[cfg(test)]
     pub(crate) mod first_read_gate {
+        use super::WatchDepth;
         use std::{
-            sync::{Condvar, Mutex, MutexGuard, PoisonError},
+            sync::{
+                Condvar, Mutex, MutexGuard, PoisonError,
+                atomic::{AtomicUsize, Ordering},
+            },
             time::Duration,
         };
 
@@ -6487,8 +6491,31 @@ mod windows_impl {
             let _ = RELEASED.wait_timeout_while(gate, HELD_AT_MOST, |gate| gate.held);
         }
 
-        /// Called by the watcher thread the moment a read is outstanding.
-        pub(crate) fn note_read_issued() {
+        /// **Test-only: how many reads have asked the kernel for a whole subtree.**
+        ///
+        /// The depth is the entire difference between the two subscriptions this
+        /// module offers, and it is decided in exactly one place: the argument
+        /// `ReadDirectoryChangesW` is handed. Counting it there is what lets
+        /// "this watch is shallow" be *read off the call* instead of inferred
+        /// from a stretch of time in which nothing happened — see the shallow
+        /// watch's test for why that inference was never sound. Process-wide,
+        /// like the gate beside it and for the same reason, so every test that
+        /// starts a watcher takes the turn first.
+        static RECURSIVE_READS: AtomicUsize = AtomicUsize::new(0);
+
+        /// How many reads issued so far asked for the tree rather than the
+        /// directory. A test compares this across its own watch's lifetime; the
+        /// absolute value belongs to whoever else has held the turn.
+        pub(crate) fn recursive_reads() -> usize {
+            RECURSIVE_READS.load(Ordering::Relaxed)
+        }
+
+        /// Called by the watcher thread the moment a read is outstanding, with
+        /// the depth that read asked for.
+        pub(crate) fn note_read_issued(depth: WatchDepth) {
+            if depth.recursive() {
+                RECURSIVE_READS.fetch_add(1, Ordering::Relaxed);
+            }
             GATE.lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .read_issued = true;
@@ -6734,7 +6761,7 @@ mod windows_impl {
             };
             #[cfg(test)]
             if issued.is_ok() {
-                first_read_gate::note_read_issued();
+                first_read_gate::note_read_issued(depth);
             }
             if let Some(armed) = armed.take() {
                 let _ = armed.send(issued.clone().map_err(win32_io_error));
@@ -7681,8 +7708,8 @@ mod dir_watch_tests {
         }
     }
 
-    /// PIN (W2 slice 5) - **a shallow watch hears its own directory and
-    /// nothing under it.**
+    /// PIN (W2 slice 5) - **a shallow watch hears its own directory, and the
+    /// read it issues asks for that directory and nothing under it.**
     ///
     /// `preview_watch` subscribes to the folder a previewed file lives in,
     /// because Windows has no way to subscribe to a single file. Watching the
@@ -7691,19 +7718,45 @@ mod dir_watch_tests {
     /// a storm that the debounce would then have to absorb sixty times a second
     /// for news that was never about the watched file at all.
     ///
-    /// Both halves in one test for the reason the recursive one above gives:
-    /// "nothing arrived" is also what a subscription that never worked reports,
-    /// so the shallow watch is proved to be *awake* on its own directory first
-    /// and only then proved deaf to the subtree.
+    /// **The second half used to be a silence, and a silence was never sound
+    /// here.** It wrote a file into the subtree and asserted that six hundred
+    /// milliseconds then went by without a wake - and that is not a claim
+    /// `ReadDirectoryChangesW` makes. `nested` is *itself an entry of the watched
+    /// directory*; [`DIR_WATCH_FILTER`] includes `FILE_NOTIFY_CHANGE_LAST_WRITE`;
+    /// and NTFS moves a directory's write time when something is added to it. A
+    /// shallow watch is therefore entitled to say "`nested` changed", and it
+    /// does - at whatever moment that metadata is flushed, which is usually
+    /// after the window and sometimes inside it. Measured against a full
+    /// `cargo test --workspace` on the other cores: 3 reds in 40 runs, every one
+    /// of them on the silence and none on the wake-up. That the leak is the entry
+    /// and not the subtree is what the *rate* says: a watch that really was
+    /// recursive hears `deep.txt` in single-digit milliseconds every time - the
+    /// recursive test above is built on exactly that - and would have been red
+    /// forty times in forty.
     ///
-    /// MUTATION: make `start_shallow` pass `WatchDepth::Tree`, and the second
-    /// half goes red.
+    /// So the depth is proved where it is decided, at the syscall that is handed
+    /// it. No window, no schedule, and the same fact the silence was trying to
+    /// infer from the outside.
+    ///
+    /// The wake-up half stays behavioural and stays first, for the reason the
+    /// recursive test above gives: a subscription that never worked issues no
+    /// recursive read either, so this watch is proved *awake* on its own
+    /// directory before anything is concluded from a count. It is waited for
+    /// rather than timed - `recv_timeout` comes back the instant the news lands,
+    /// and the budget only separates "slow" from "never" - and a sentinel written
+    /// into the watched directory *after* the subtree write, and heard, is what
+    /// says the depth below is read off a watcher that is still turning rather
+    /// than one that stopped.
+    ///
+    /// MUTATION: make `start_shallow` pass `WatchDepth::Tree`, and the recursive
+    /// read count moves.
     #[test]
     fn a_shallow_watch_hears_its_own_directory_and_not_the_tree_below_it() {
         let _turn = first_read_gate::watchers_take_turns();
         let scratch = Scratch::new("shallow");
         let subtree = scratch.0.join("nested");
         std::fs::create_dir_all(&subtree).expect("make the subtree before arming");
+        let recursive_reads_before = first_read_gate::recursive_reads();
         let (tx, rx) = mpsc::channel::<()>();
         let watch = DirWatch::start_shallow(&scratch.0, move || {
             let _ = tx.send(());
@@ -7714,16 +7767,21 @@ mod dir_watch_tests {
         rx.recv_timeout(ARRIVES_WITHIN)
             .expect("a shallow watch still hears its own directory");
 
+        // Whatever that write is still going to say, said and thrown away: the
+        // wake this test waits for next has to be caused by something after this
+        // line, or it proves nothing about what happens after this line.
         while rx.try_recv().is_ok() {}
         std::fs::write(subtree.join("deep.txt"), b"not ours").expect("write into the subtree");
-        let deadline = Instant::now() + SILENCE_FOR;
-        while Instant::now() < deadline {
-            assert!(
-                rx.try_recv().is_err(),
-                "a shallow watch does not hear a directory below the one it was given"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        std::fs::write(scratch.0.join("sentinel.txt"), b"and this")
+            .expect("write beside the file again");
+        rx.recv_timeout(ARRIVES_WITHIN)
+            .expect("the watch is still delivering after the subtree was written into");
+
+        assert_eq!(
+            first_read_gate::recursive_reads(),
+            recursive_reads_before,
+            "a shallow watch never asks the kernel for the tree below the directory it was given"
+        );
         drop(watch);
     }
 
