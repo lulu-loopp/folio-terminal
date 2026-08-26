@@ -1592,7 +1592,7 @@ mod tests {
         assert_eq!(action, TreeAction::Select("/docs/a.md".to_owned()));
     }
 
-    /// PIN — C33. The row's triangle turns over its own 120ms, and reduced
+    /// PIN — C33. The row's triangle turns over the base span, and reduced
     /// motion leaves it standing at the end rather than part-way.
     ///
     /// The red gate this fills: nothing anywhere referenced `turn_row` or
@@ -1602,11 +1602,17 @@ mod tests {
     /// *chevron* had a test for. A triangle wired to the wrong span, or one
     /// whose reduced branch left it frozen half-turned, would have been drawn
     /// wrong with every test in the workspace still green.
+    ///
+    /// **The mock-up's own 120 is gone, deliberately** (§7.18, user ruling
+    /// 2026-08-26): this triangle and the profile picker's chevron are the same
+    /// gesture, and they ran at 120 and 140 for no reason either file could
+    /// state. The number asserted here is the archive's base span, and the two
+    /// arrows now turn together.
     #[test]
-    fn a_row_triangle_turns_over_its_own_120ms_and_snaps_under_reduced_motion() {
+    fn a_row_triangle_turns_over_the_base_span_and_snaps_under_reduced_motion() {
         let now = Instant::now();
         let turn = Duration::from_millis(crate::seats::FILES_ROW_TRI_TURN_MS);
-        assert_eq!(turn, Duration::from_millis(120), "the mock-up's own number");
+        assert_eq!(turn, bt_render::MOTION_BASE, "one arrow, one rhythm");
 
         let mut cache = DirCache::default();
         cache.turn_row("/docs", true, now, crate::Motion::Full);

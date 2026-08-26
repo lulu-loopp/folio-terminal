@@ -60,7 +60,7 @@ pub const KEY_HINT_DELAY: Duration = Duration::from_millis(800);
 /// for the same reason a tip has none: leaving is the half nobody is waiting
 /// for, and a card that lingered after the key that dismissed it would be
 /// standing over the thing that key just did.
-pub const KEY_HINT_FADE: Duration = Duration::from_millis(90);
+pub const KEY_HINT_FADE: Duration = bt_render::MOTION_FAST;
 
 // ── the box ────────────────────────────────────────────────────────────────
 

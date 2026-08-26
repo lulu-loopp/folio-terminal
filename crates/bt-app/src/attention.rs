@@ -277,6 +277,64 @@ pub(crate) enum Via {
     AgentSettled,
 }
 
+/// **The two switches a turn-end-shaped arrival can be stopped by, and the rule
+/// that says which one applies** (§7.1.5o deviation ②, user ruling 2026-08-26).
+///
+/// # What was wrong with one
+///
+/// There used to be one door: `turn_end_notification`, read at the top of
+/// [`AttentionLedger::announce_turn_end`] for every arrival on every transport.
+/// Which meant that a person who turned `Turn finished` off — a row on the
+/// **Agents** page, whose sentence is about an agent going quiet — also silenced
+/// every `OSC 9;<text>` and `OSC 777;notify` any program in any pane could
+/// write. A build script saying "deploy failed" went missing because somebody
+/// did not want to be told when Claude stopped talking. Two unrelated statements
+/// behind one switch, and no way for a reader of either row to guess it.
+///
+/// # The rule
+///
+/// **Who is speaking decides which door, not what is said.** An announcement a
+/// *program* wrote and sent down the wire itself is a desktop message, and
+/// Settings ▸ Terminal ▸ `Notifications` is the row whose own words are *"programs
+/// that ask can put a message on the desktop"*. An announcement that exists
+/// because a **turn ended** — a hook `Stop`, a bare bell, an `OSC 1337;…=once`
+/// arm, a codex `notify`, a pi `agent_settled` — is what Settings ▸ Agents ▸
+/// `Turn finished` is about, and it stays there.
+///
+/// The match in [`Self::admits`] is exhaustive on [`Via`] deliberately: a new
+/// way of hearing about a turn ending has to say which of the two rows governs
+/// it, at compile time, rather than inheriting whichever door the last one used.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NotificationSwitches {
+    /// Settings ▸ Agents ▸ `Turn finished` (`turn_end_notification`).
+    pub(crate) turn_end: bool,
+    /// Settings ▸ Terminal ▸ `Notifications` (`terminal_notifications`).
+    pub(crate) desktop_messages: bool,
+}
+
+impl NotificationSwitches {
+    /// Whether an arrival heard over `via` is allowed through its own door.
+    #[must_use]
+    pub(crate) fn admits(self, via: Via) -> bool {
+        match via {
+            // The program wrote this itself, and it has words. It is a desktop
+            // message, and the Terminal page governs desktop messages.
+            Via::Osc9 | Via::Osc777 | Via::Osc99 => self.desktop_messages,
+            // These carry no sentence of their own — they are ways of saying
+            // "the turn ended", which is the Agents page's row. `Osc1337` is on
+            // this side despite its name: `RequestAttention=once` is an arm, not
+            // a message, and it is the one the survey found agents using to
+            // report a turn ending.
+            Via::Stop
+            | Via::StopFailure
+            | Via::Bel
+            | Via::Osc1337
+            | Via::Notify
+            | Via::AgentSettled => self.turn_end,
+        }
+    }
+}
+
 impl fmt::Display for Via {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -1494,8 +1552,11 @@ impl AttentionLedger {
     /// while you were watching — a notification queued and delivered late, which is exactly what is
     /// forbidden.
     ///
-    /// With the setting off the whole door is shut: no evaluation, no line, and **no bit set**, so
-    /// that turning it off and on again cannot leave half a state behind.
+    /// With the governing row off the whole door is shut: no evaluation, no line, and **no bit
+    /// set**, so that turning it off and on again cannot leave half a state behind. *Which* row
+    /// governs is [`NotificationSwitches::admits`]'s decision and depends on how the arrival
+    /// reached this window — a program's own `OSC 9` message answers to Terminal ▸ `Notifications`,
+    /// and everything that is only a report that a turn ended answers to Agents ▸ `Turn finished`.
     ///
     /// # What the bit is allowed to swallow, and what it is not
     ///
@@ -1520,7 +1581,7 @@ impl AttentionLedger {
         &mut self,
         at: Site,
         reach: Reach,
-        enabled: bool,
+        switches: NotificationSwitches,
         source: Transport,
         via: Via,
         words: Option<&str>,
@@ -1532,7 +1593,12 @@ impl AttentionLedger {
         // It is also the form the reader sees — a toast body that begins with three spaces is a
         // toast that looks broken.
         let words = words.map(str::trim).filter(|words| !words.is_empty());
-        if !enabled {
+        // **The door this arrival knocks on is chosen by how it arrived**
+        // ([`NotificationSwitches`]), and it is still read here at the top for
+        // the reason it always was: with the governing row off the lane is not
+        // walked at all — no evaluation, no line, and no bit set — so turning a
+        // row off and on again cannot leave half a state behind.
+        if !switches.admits(via) {
             return out;
         }
         if self.announced_turn_end && words.is_none_or(|new| Some(new) == self.announced_words()) {

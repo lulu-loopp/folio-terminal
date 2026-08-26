@@ -256,6 +256,16 @@ const PANIC_LOG_FILENAME: &str = "bt-app-panic.log";
 #[derive(Clone, Copy, Debug)]
 enum AppEvent {
     PtyOutput,
+    /// **A system-wide preference has moved** (`bt_platform::SystemSettingsWatch`).
+    ///
+    /// The same family as everything below it and its own wake for the strongest
+    /// version of their reason: a person who opens Settings, turns animation off
+    /// and comes back has touched nothing in this window at all. There is no
+    /// output, no keystroke and no hover to produce a turn, so the broadcast has
+    /// to ask for one — and what it wants asked is one `SystemParametersInfoW`,
+    /// which is why it carries nothing itself. Windows told this window that
+    /// *something* changed; the answer to *what* is the read on the next turn.
+    SystemPreferencesChanged,
     MathReady,
     /// A directory the files worker was asked about has been read.
     ///
@@ -6759,6 +6769,19 @@ impl NewWindowPlan {
 /// something the type system can express.
 struct WindowRuntime {
     renderer: WindowRenderer,
+    /// This window's ear for `WM_SETTINGCHANGE`, held only so that dropping the
+    /// window takes the subclass off the HWND (§7.18).
+    ///
+    /// `None` on a window whose handle could not be reached or whose subclass
+    /// would not install, which is the same best-effort the taskbar's mirror
+    /// takes: a window with no ear behaves exactly the way every window behaved
+    /// before there were any — it reads the preference once, at start-up.
+    #[expect(
+        dead_code,
+        reason = "held for its Drop; the subclass talks to the loop through the \
+                  event proxy it was built with, never through this field"
+    )]
+    system_settings_watch: Option<bt_platform::SystemSettingsWatch>,
     tabs: Vec<TabState>,
     active_tab: usize,
     /// The one bit every shell in this window nudges the loop through. See
@@ -16177,7 +16200,7 @@ fn settle_attention(
     active_tab: usize,
     window_is_focused: bool,
     window_is_hidden: bool,
-    turn_end_enabled: bool,
+    switches: attention::NotificationSwitches,
     next_place: &mut u64,
     now: Instant,
     trace: Option<&attention_trace::Trace>,
@@ -16234,14 +16257,9 @@ fn settle_attention(
                 // fallen back to the oldest byte there is, and recording them alike makes "is the
                 // far end reaching us over OSC?" unanswerable.
                 let (source, via) = attention_map::bell_provenance(rang);
-                let outcome = leaf.attention.announce_turn_end(
-                    at,
-                    reach,
-                    turn_end_enabled,
-                    source,
-                    via,
-                    None,
-                );
+                let outcome = leaf
+                    .attention
+                    .announce_turn_end(at, reach, switches, source, via, None);
                 emit_attention_lines(trace, outcome.lines);
                 allowed.extend(outcome.raised.map(|one| (*seat, one)));
             }
@@ -16449,7 +16467,7 @@ fn deliver_osc_attention(
     tab_is_active: bool,
     window_is_focused: bool,
     window_is_hidden: bool,
-    turn_end_enabled: bool,
+    switches: attention::NotificationSwitches,
     next_place: &mut u64,
     announcements: &[(SeatId, bt_term::TerminalNotification)],
     now: Instant,
@@ -16500,7 +16518,7 @@ fn deliver_osc_attention(
                 seat: *seat,
             },
             reach,
-            turn_end_enabled,
+            switches,
             attention_map::OSC_TRANSPORT,
             attention_map::osc_via(notification.source),
             words,
@@ -16544,7 +16562,7 @@ fn deliver_attention(
     active_tab: usize,
     window_is_focused: bool,
     window_is_hidden: bool,
-    turn_end_enabled: bool,
+    switches: attention::NotificationSwitches,
     next_place: &mut u64,
     messages: &[attention_wire::Message],
     installed: &[attention::MappingRow],
@@ -16591,7 +16609,7 @@ fn deliver_attention(
                 let outcome = leaf.attention.announce_turn_end(
                     at,
                     reach,
-                    turn_end_enabled,
+                    switches,
                     attention_map::PIPE_TRANSPORT,
                     via,
                     None,
@@ -16715,10 +16733,14 @@ pub(crate) fn cubic_bezier(x: f32, control: [f32; 4]) -> f32 {
     axis(t, y1, y2)
 }
 
-/// CSS `ease-in-out`, worn by `@keyframes breathe`.
-const EASE_IN_OUT: [f32; 4] = [0.42, 0.0, 0.58, 1.0];
 /// CSS `ease`, worn by the progress arc's `transition`.
-pub(crate) const EASE: [f32; 4] = [0.25, 0.1, 0.25, 1.0];
+pub(crate) use bt_render::motion::EASE;
+/// CSS `ease-in-out`, worn by `@keyframes breathe`.
+///
+/// The curves live in [`bt_render::motion`] with the spans they are run over,
+/// and this window names them locally so the hundred call sites below read the
+/// way they always did. One definition, three names for it.
+use bt_render::motion::EASE_IN_OUT;
 
 /// `.ticon.working { animation: breathe 1.7s ease-in-out infinite }`.
 ///
@@ -16832,6 +16854,362 @@ impl Motion {
 /// preference is opt-in, and a failed read is not a request for less motion.
 fn read_motion_preference() -> Motion {
     Motion::from_client_area_animation(bt_platform::client_area_animation_enabled().ok())
+}
+
+/// **The window's whole rhythm, written out by hand.**
+///
+/// One register naming every duration this product holds that is either a
+/// transition or the wait around one, each with what it is. It lives in this
+/// crate rather than beside the tokens in [`bt_render::motion`] because this is
+/// the only place that can see both crates' constants at once, and a rhythm kept
+/// in two lists is not kept.
+///
+/// # Why it is written out rather than found
+///
+/// A scan of the source would find what it knew how to match and say nothing
+/// about a duration spelled a way it did not expect — silence that reads exactly
+/// like a clean gate. A hand-written register fails the other way: a span nobody
+/// wrote a line about is a span that is simply not here, and the line a reviewer
+/// has to write is the one sentence saying which of the three things it is.
+///
+/// # What is deliberately not in it
+///
+/// Frame cadences (`STRIP_ANIMATION_FRAME`, `IME_CURSOR_AREA_INTERVAL`: how
+/// often, not how long), input timings that never draw anything
+/// (`MULTI_CLICK_INTERVAL`), worker timeouts, watch debounces and process
+/// deadlines. None of them is a transition or a wait before one, and pulling
+/// them in would make the register a list of every `Duration` in the program,
+/// which is a list nobody maintains.
+#[cfg(test)]
+mod motion_archive_tests {
+    use std::time::Duration;
+
+    use bt_render::{MotionKind, MotionSpan, unarchived};
+
+    use super::{
+        CHEVRON_TURN, CURSOR_BLINK_PHASE, DOCK_PREVIEW_FADE, FILES_NOTICE_DWELL,
+        FOOT_REVEAL_FEEDBACK, HYPERLINK_HOVER_DELAY, PANE_FADE_IN, PANE_FLIP,
+        RESIZING_CARD_TRANSITION, TAB_FLIP, TAB_LAND, TAB_PRESS_ACTIVATION_GRACE,
+    };
+
+    fn ms(span: Duration) -> u64 {
+        u64::try_from(span.as_millis()).expect("no span in this window is four billion ms")
+    }
+
+    /// The register itself.
+    fn register() -> Vec<MotionSpan> {
+        let archived = |name, span| MotionSpan {
+            name,
+            ms: span,
+            kind: MotionKind::Archived,
+        };
+        let exempt = |name, span, why| MotionSpan {
+            name,
+            ms: span,
+            kind: MotionKind::Exempt(why),
+        };
+        let wait = |name, span, why| MotionSpan {
+            name,
+            ms: span,
+            kind: MotionKind::Intent(why),
+        };
+        vec![
+            // ── transitions, in the archive ────────────────────────────────
+            archived(
+                "bt_render::RAIL_TRANSITION_MS",
+                bt_render::RAIL_TRANSITION_MS,
+            ),
+            archived("bt_render::RAIL_TEXT_FADE_MS", bt_render::RAIL_TEXT_FADE_MS),
+            archived(
+                "bt_render::FLOAT_WINDOW_ANIMATION_MS",
+                bt_render::FLOAT_WINDOW_ANIMATION_MS,
+            ),
+            archived(
+                "bt_render::WINDOW_TAB_PIN_REVEAL_MS",
+                bt_render::WINDOW_TAB_PIN_REVEAL_MS,
+            ),
+            archived(
+                "bt_render::WINDOW_TAB_PIN_FADE_MS",
+                bt_render::WINDOW_TAB_PIN_FADE_MS,
+            ),
+            archived("main::CHEVRON_TURN", ms(CHEVRON_TURN)),
+            archived("main::TAB_FLIP", ms(TAB_FLIP)),
+            archived("main::TAB_LAND", ms(TAB_LAND)),
+            archived("main::PANE_FLIP", ms(PANE_FLIP)),
+            archived("main::PANE_FADE_IN", ms(PANE_FADE_IN)),
+            archived(
+                "main::RESIZING_CARD_TRANSITION",
+                ms(RESIZING_CARD_TRANSITION),
+            ),
+            archived("main::DOCK_PREVIEW_FADE", ms(DOCK_PREVIEW_FADE)),
+            archived(
+                "seats::FILES_ROW_TRI_TURN_MS",
+                crate::seats::FILES_ROW_TRI_TURN_MS,
+            ),
+            archived("toast::TOAST_ENTER", ms(crate::toast::TOAST_ENTER)),
+            archived("toast::TOAST_EXIT", ms(crate::toast::TOAST_EXIT)),
+            archived("tooltip::TOOLTIP_FADE", ms(crate::tooltip::TOOLTIP_FADE)),
+            archived("keyhint::KEY_HINT_FADE", ms(crate::keyhint::KEY_HINT_FADE)),
+            archived("termscroll::THUMB_FADE", ms(crate::termscroll::THUMB_FADE)),
+            archived(
+                "cmdrail::TICK_WIDTH_TRANSITION",
+                ms(crate::cmdrail::TICK_WIDTH_TRANSITION),
+            ),
+            archived(
+                "cmdrail::TICK_BACKGROUND_TRANSITION",
+                ms(crate::cmdrail::TICK_BACKGROUND_TRANSITION),
+            ),
+            archived(
+                "cmdrail::TICK_OPACITY_TRANSITION",
+                ms(crate::cmdrail::TICK_OPACITY_TRANSITION),
+            ),
+            // ── spans that are not the span of one interaction ─────────────
+            exempt(
+                "bt_render::WINDOW_TAB_BREATHE_PERIOD_MS",
+                bt_render::WINDOW_TAB_BREATHE_PERIOD_MS,
+                "a breathing rate, not an arrival: nothing appears, and 140 would be a strobe",
+            ),
+            exempt(
+                "bt_render::WINDOW_TAB_RING_SPIN_PERIOD_MS",
+                bt_render::WINDOW_TAB_RING_SPIN_PERIOD_MS,
+                "one turn of an indeterminate arc — a period, not a transition",
+            ),
+            exempt(
+                "bt_render::WINDOW_TAB_RING_SWEEP_TRANSITION_MS",
+                bt_render::WINDOW_TAB_RING_SWEEP_TRANSITION_MS,
+                "a number arriving at a new reading; the travel is the measurement \
+                 (user ruling 2026-08-26)",
+            ),
+            exempt(
+                "main::CURSOR_BLINK_PHASE",
+                ms(CURSOR_BLINK_PHASE),
+                "a blink is a period, and this one is the platform's own beat",
+            ),
+            exempt(
+                "main::FOOT_REVEAL_FEEDBACK",
+                ms(FOOT_REVEAL_FEEDBACK),
+                "how long a receipt stands before the verb comes back — a hold, not a fade",
+            ),
+            exempt(
+                "cmdrail::JUMP_FLASH",
+                ms(crate::cmdrail::JUMP_FLASH),
+                "how long the row a jump landed on stays findable; shortened to a transition \
+                 it would be gone before the eye arrived",
+            ),
+            // ── waits: intent, grace, dwell and life ───────────────────────
+            wait(
+                "bt_render::RAIL_TEXT_FADE_OPEN_DELAY_MS",
+                bt_render::RAIL_TEXT_FADE_OPEN_DELAY_MS,
+                "the panel gets a moment to be wide enough to hold words",
+            ),
+            wait(
+                "main::TAB_PRESS_ACTIVATION_GRACE",
+                ms(TAB_PRESS_ACTIVATION_GRACE),
+                "how long a press may still turn out to be the start of a drag",
+            ),
+            wait(
+                "main::HYPERLINK_HOVER_DELAY",
+                ms(HYPERLINK_HOVER_DELAY),
+                "how long a pointer rests on a link before the window claims it",
+            ),
+            wait(
+                "main::FILES_NOTICE_DWELL",
+                ms(FILES_NOTICE_DWELL),
+                "how long the tree's own notice stands",
+            ),
+            wait(
+                "float::FLOAT_OPEN_INTENT_DELAY",
+                ms(crate::float::FLOAT_OPEN_INTENT_DELAY),
+                "how long a hand rests on a trigger before a peek is summoned",
+            ),
+            wait(
+                "float::FLOAT_CLOSE_GRACE",
+                ms(crate::float::FLOAT_CLOSE_GRACE),
+                "the forgiveness after a pointer leaves a peek",
+            ),
+            wait(
+                "float::FLOAT_CLOSE_GRACE_LEFT",
+                ms(crate::float::FLOAT_CLOSE_GRACE_LEFT),
+                "the longer forgiveness for a departure off the left edge, which is usually \
+                 still an arrival",
+            ),
+            wait(
+                "profiles::CHEVRON_HOVER_OPEN_DELAY",
+                ms(crate::profiles::CHEVRON_HOVER_OPEN_DELAY),
+                "how long a hand rests on a chevron before its menu opens",
+            ),
+            wait(
+                "profiles::CHEVRON_LEAVE_GRACE",
+                ms(crate::profiles::CHEVRON_LEAVE_GRACE),
+                "how long that menu survives the gap between itself and its button",
+            ),
+            wait(
+                "profiles::SUBMENU_SAFE_HOLD",
+                ms(crate::profiles::SUBMENU_SAFE_HOLD),
+                "how long a submenu is held while a pointer crosses its parent diagonally",
+            ),
+            wait(
+                "tooltip::TOOLTIP_DELAY",
+                ms(crate::tooltip::TOOLTIP_DELAY),
+                "the transit guard: a hand passing over is not a hand asking",
+            ),
+            wait(
+                "tooltip::PEEK_INTENT_DELAY",
+                ms(crate::tooltip::PEEK_INTENT_DELAY),
+                "the settle on a rail tick, which is travelled to rather than passed over",
+            ),
+            wait(
+                "keyhint::KEY_HINT_DELAY",
+                ms(crate::keyhint::KEY_HINT_DELAY),
+                "how long modifiers stay down alone before the card is offered",
+            ),
+            wait(
+                "peek_strip::PEEK_DELAY",
+                ms(crate::peek_strip::PEEK_DELAY),
+                "how long a hand rests on a tab before the strip's flyout is summoned",
+            ),
+            wait(
+                "file_peek::PEEK_INTENT_MS",
+                crate::file_peek::PEEK_INTENT_MS,
+                "how long a hand rests on a file row before its head is read",
+            ),
+            wait(
+                "termscroll::THUMB_REST",
+                ms(crate::termscroll::THUMB_REST),
+                "the dwell *after*: how long a thumb with no reason left to be up stays up",
+            ),
+            wait(
+                "toast::TOAST_LIFE_ERROR",
+                ms(crate::toast::TOAST_LIFE_ERROR),
+                "how long a failure stands, which is a reading time",
+            ),
+            wait(
+                "toast::TOAST_LIFE_QUIET",
+                ms(crate::toast::TOAST_LIFE_QUIET),
+                "how long a confirmation stands, which is a shorter reading time",
+            ),
+        ]
+    }
+
+    /// **RED GATE — every transition in this product is one of three spans, and
+    /// every duration that is not is written down with the reason it is not.**
+    ///
+    /// This is the test the whole of [`bt_render::motion`] exists to make
+    /// possible, and it is the one that stops the fourth span. Nine different
+    /// fade lengths did not get into this window by anyone deciding on nine; they
+    /// got in one at a time, each defensible on its own page, because no page
+    /// could see the others. This one can.
+    ///
+    /// Mutation: change any archived constant to a number of its own and the
+    /// gate names it; file a governed span as an exemption and rule 2 catches it;
+    /// give a wait a name that does not say it is one and rule 3 does.
+    #[test]
+    fn every_duration_in_this_window_is_an_archived_span_a_stated_exemption_or_a_named_wait() {
+        let complaints = unarchived(&register());
+        assert!(
+            complaints.is_empty(),
+            "the window's rhythm has drifted:\n  {}",
+            complaints.join("\n  ")
+        );
+    }
+
+    /// PIN — the register is not empty and not a stub, and the three kinds are
+    /// all really used.
+    ///
+    /// Without this the gate above passes triumphantly on a register somebody
+    /// emptied.
+    #[test]
+    fn the_register_names_every_kind_and_is_not_a_stub() {
+        let register = register();
+        assert!(register.len() >= 40, "{} spans named", register.len());
+        let count =
+            |want: fn(&MotionKind) -> bool| register.iter().filter(|span| want(&span.kind)).count();
+        assert!(count(|kind| matches!(kind, MotionKind::Archived)) >= 20);
+        assert!(count(|kind| matches!(kind, MotionKind::Exempt(_))) >= 6);
+        assert!(count(|kind| matches!(kind, MotionKind::Intent(_))) >= 15);
+    }
+
+    /// PIN — no two rows in the register name the same constant.
+    ///
+    /// A duplicated row is a row that can go stale without failing: the copy
+    /// somebody edits keeps passing while the copy the product reads does not
+    /// exist any more.
+    #[test]
+    fn no_constant_is_registered_twice() {
+        let mut names: Vec<&str> = register().iter().map(|span| span.name).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "a constant is named twice");
+    }
+}
+
+/// **A caret answers the preference on the frame the preference moves** (§7.18).
+#[cfg(test)]
+mod motion_preference_change_tests {
+    use std::time::{Duration, Instant};
+
+    use super::{CURSOR_BLINK_PHASE, CursorBlink, Motion};
+
+    /// RED GATE — turning animation off stops the caret and takes its wake-up
+    /// away; turning it back on gives both back, with no restart in between.
+    ///
+    /// The bug this is the gate for is the one the code used to admit in a
+    /// comment: the preference was read once at start-up, so a person who turned
+    /// animation off while Folio was running had to restart it to be believed.
+    /// The two assertions are the two halves of "believed" — the caret stops
+    /// switching, *and* the loop stops waking twice a second to switch it.
+    ///
+    /// Mutation: keep the deadline under `Reduced` and the second line fails;
+    /// forget to re-arm on the way back and the fourth does.
+    #[test]
+    fn a_caret_stops_blinking_the_moment_the_system_says_so_and_starts_again_after() {
+        let start = Instant::now();
+        let mut blink = CursorBlink::new(start, Motion::Full);
+        assert_eq!(blink.deadline(), Some(start + CURSOR_BLINK_PHASE));
+
+        // Half a phase in, the caret is hidden and the system preference moves.
+        assert!(blink.advance(start + CURSOR_BLINK_PHASE));
+        assert!(!blink.visible());
+        let changed_at = start + CURSOR_BLINK_PHASE + Duration::from_millis(10);
+        blink.reset(changed_at, Motion::Reduced);
+        assert!(
+            blink.visible(),
+            "a still caret is a lit caret, not a gone one"
+        );
+        assert_eq!(
+            blink.deadline(),
+            None,
+            "and a still window is not woken to draw it"
+        );
+        assert!(
+            !blink.advance(changed_at + Duration::from_secs(60)),
+            "a minute later it has still not moved"
+        );
+        assert!(blink.visible());
+
+        let back_at = changed_at + Duration::from_secs(61);
+        blink.reset(back_at, Motion::Full);
+        assert!(blink.visible());
+        assert_eq!(blink.deadline(), Some(back_at + CURSOR_BLINK_PHASE));
+    }
+
+    /// PIN — an unfocused window's caret stays still whatever the preference is.
+    ///
+    /// Two independent reasons to hold still, and neither may cancel the other:
+    /// re-reading the preference on a background window must not start a caret
+    /// blinking in a window nobody is typing into.
+    #[test]
+    fn a_background_caret_is_still_under_either_preference() {
+        let start = Instant::now();
+        let mut blink = CursorBlink::new(start, Motion::Full);
+        blink.set_focused(false, start, Motion::Full);
+        assert_eq!(blink.deadline(), None);
+        blink.reset(start, Motion::Reduced);
+        assert_eq!(blink.deadline(), None);
+        blink.reset(start, Motion::Full);
+        assert_eq!(blink.deadline(), None, "still nobody is typing here");
+    }
 }
 
 /// `.pring.indeterminate { animation: pring-spin 1.1s linear infinite }`.
@@ -17715,7 +18093,11 @@ const RAIL_TEXT_FADE_OPEN_DELAY: Duration =
 
 /// `.chevbtn svg { transition: transform 140ms cubic-bezier(.2,0,0,1) }` —
 /// the profile picker's arrow turning over (mock-up 415-420).
-const CHEVRON_TURN: Duration = Duration::from_millis(140);
+///
+/// This is the number the base span was chosen *from*: the arrow and the list it
+/// points at are two halves of one action, and 140 was already the half that had
+/// a rhythm. See [`bt_render::motion`].
+const CHEVRON_TURN: Duration = bt_render::MOTION_BASE;
 
 /// The `˅` beside the `+`, turning over to say where its list went.
 ///
@@ -17779,12 +18161,19 @@ impl ChevronTurn {
 
 /// `transform .16s cubic-bezier(.2, 0, 0, 1)` — the one easing the whole reorder
 /// is drawn with (`GRAB_EASE`, mock-up 6570).
-const TAB_FLIP: Duration = Duration::from_millis(160);
+///
+/// **The base span, not the mock-up's 160.** A tab sliding one slot along a row
+/// is one interaction, which is what the base span is for; the sixteen
+/// hundredths the stylesheet writes and the fourteen this window now runs are
+/// the same gesture spelled by two people. What is *not* folded in with it is
+/// the pane FLIP below — that one moves half the window and keeps the slow span,
+/// which is the distinction the old pair of numbers was reaching for.
+const TAB_FLIP: Duration = bt_render::MOTION_BASE;
 /// The curve of that transition. Not one of the CSS keywords the strip already
 /// had, so it is a third set of control points through the same solver.
-const GRAB_EASE: [f32; 4] = [0.2, 0.0, 0.0, 1.0];
+use bt_render::motion::GRAB_EASE;
 /// `animation: tab-land .2s cubic-bezier(.2, 0, 0, 1)` (mock-up 967).
-const TAB_LAND: Duration = Duration::from_millis(200);
+const TAB_LAND: Duration = bt_render::MOTION_SLOW;
 
 /// A tab sliding back to the slot its index gives it.
 ///
@@ -17925,7 +18314,11 @@ impl LandTween {
 /// half the window changing shape, and the larger movement needs the longer
 /// span or it reads as a cut. Folding them into one constant makes the strip
 /// sluggish or the split abrupt depending on which number survives.
-const PANE_FLIP: Duration = Duration::from_millis(200);
+///
+/// The archive keeps that distinction rather than dissolving it: this is the
+/// **slow** span, [`TAB_FLIP`] is the **base** one, and they are two rungs of
+/// one ladder instead of two numbers that happened to differ by forty.
+const PANE_FLIP: Duration = bt_render::MOTION_SLOW;
 
 /// `el.style.transition = "opacity .18s ease"` for a pane that was not there
 /// before (mock-up 6572).
@@ -17938,7 +18331,11 @@ const PANE_FLIP: Duration = Duration::from_millis(200);
 /// its parent's box, say, or a zero-width sliver at the divider — would animate
 /// a history the layout never had, and would make the two panes either side of a
 /// fresh split behave differently for no reason the user could name.
-const PANE_FADE_IN: Duration = Duration::from_millis(180);
+///
+/// **The slow span**, alongside the FLIP it happens instead of: the two are the
+/// two halves of one split, and a pane that arrived a fifth of a second before
+/// its neighbour finished moving was one event drawn at two tempos.
+const PANE_FADE_IN: Duration = bt_render::MOTION_SLOW;
 
 /// `.pane { transition: margin .1s ease, border-radius .1s ease, box-shadow .1s
 /// ease }` (mock-up 1464) — B22, the hundred milliseconds F63's cards were
@@ -17960,13 +18357,14 @@ const PANE_FADE_IN: Duration = Duration::from_millis(180);
 /// lags the hand by a tenth of a second, which is the one thing a resize may
 /// never do, and no amount of polish elsewhere buys it back.
 ///
-/// A hundred milliseconds on [`EASE`] (CSS `ease`), against the pane FLIP's two
-/// hundred on `cubic-bezier(.2,0,0,1)` — the mock-up's own arithmetic, and both
-/// halves differ deliberately. A card inset is five pixels of chrome answering a
-/// button press; a pane FLIP is half the window changing shape. Borrowing the
-/// FLIP's span here would leave the cards still arriving a tenth of a second
-/// after the pointer had already dragged the seam somewhere else.
-const RESIZING_CARD_TRANSITION: Duration = Duration::from_millis(100);
+/// The **fast** span on [`EASE`] (CSS `ease`), against the pane FLIP's slow one
+/// on `cubic-bezier(.2,0,0,1)` — and both halves differ deliberately. A card
+/// inset is five pixels of chrome answering a button press; a pane FLIP is half
+/// the window changing shape. Borrowing the FLIP's span here would leave the
+/// cards still arriving a tenth of a second after the pointer had already
+/// dragged the seam somewhere else. The mock-up wrote a hundred and the archive
+/// answers ninety, which is the same sentence in the window's own vocabulary.
+const RESIZING_CARD_TRANSITION: Duration = bt_render::MOTION_FAST;
 
 /// `Math.abs(dx) < .5 && Math.abs(dy) < .5` — the displacement below which a
 /// pane is held not to have moved (mock-up 6580, P178).
@@ -20085,7 +20483,7 @@ struct Drag {
     /// clock for the whole length of a drag ("a gesture in flight is not a
     /// hover"), so a rest accumulated in that machinery would be thrown away on
     /// the very pointer move that earned it. What the two share is the **number**
-    /// — [`profiles::CHEVRON_HOVER_OPEN`] — because they are one hand doing one
+    /// — [`profiles::CHEVRON_HOVER_OPEN_DELAY`] — because they are one hand doing one
     /// thing: stopping on something to say "this one".
     spring: SpringGate,
 }
@@ -20154,7 +20552,7 @@ impl SpringGate {
     fn due(&self, now: Instant) -> Option<TabId> {
         match self.aim {
             Some(SpringAim::Waiting { tab, since })
-                if now.duration_since(since) >= profiles::CHEVRON_HOVER_OPEN =>
+                if now.duration_since(since) >= profiles::CHEVRON_HOVER_OPEN_DELAY =>
             {
                 Some(tab)
             }
@@ -20174,7 +20572,9 @@ impl SpringGate {
     /// gesture that never rests on a tab costs no wake-ups at all.
     fn deadline(&self) -> Option<Instant> {
         match self.aim {
-            Some(SpringAim::Waiting { since, .. }) => Some(since + profiles::CHEVRON_HOVER_OPEN),
+            Some(SpringAim::Waiting { since, .. }) => {
+                Some(since + profiles::CHEVRON_HOVER_OPEN_DELAY)
+            }
             Some(SpringAim::Sprung { .. }) | None => None,
         }
     }
@@ -20241,12 +20641,13 @@ struct DropPreview {
 
 /// `#dock-preview { transition: opacity .1s ease }` (mock-up 1663).
 ///
-/// The one duration in this drawing. It is deliberately shorter than every other
-/// transition the chrome runs — the pin's 160, the chevron's 140 — because it is
-/// the only one attached to an answer rather than to a control: what a box that
-/// says "let go here" owes is to be there, and a hundred milliseconds is about
-/// the least a fade can take and still be a fade rather than a flicker.
-const DOCK_PREVIEW_FADE: Duration = Duration::from_millis(100);
+/// The one duration in this drawing, and it is the **fast** span. It is
+/// deliberately shorter than the chrome's base — the pin's, the chevron's —
+/// because it is the only one attached to an answer rather than to a control:
+/// what a box that says "let go here" owes is to be there, and ninety
+/// milliseconds is about the least a fade can take and still be a fade rather
+/// than a flicker.
+const DOCK_PREVIEW_FADE: Duration = bt_render::MOTION_FAST;
 
 /// The inputs a [`seats::DropPlan`] is a function of — see [`DropPreview::inputs`].
 #[derive(Clone, Debug, PartialEq)]
@@ -21227,7 +21628,7 @@ struct FilePeek {
     // so the number no longer has to be carried across from the frame that drew
     // it. One fewer copy of a fact is one fewer copy that can be stale.
     /// When the grace runs out, once the pointer has left the corridor
-    /// (`float::FLY_CLOSE`, the constant every other transient surface in this
+    /// (`float::FLOAT_CLOSE_GRACE`, the constant every other transient surface in this
     /// window closes on — a card that took its own number would be a fourth
     /// answer to "how long does a hand get").
     ///
@@ -21665,6 +22066,16 @@ impl TabState {
     }
 }
 
+/// The caret's two-value clock.
+///
+/// **It answers to [`Motion`], and did not always.** A blink is the one piece of
+/// motion in this window that is never decorative — it says "typing lands here"
+/// — so the answer under `Reduced` is not to take the caret away but to stop it
+/// switching: a *solid* caret, permanently lit, which says the same thing with
+/// no motion in it at all. That is [`wait_halo_opacity`]'s pattern (go the
+/// glow, keep the orange border) applied to the last surface in the window that
+/// had not been told about the preference, and it costs the window every wake-up
+/// it used to owe twice a second.
 #[derive(Debug)]
 struct CursorBlink {
     focused: bool,
@@ -21673,28 +22084,37 @@ struct CursorBlink {
 }
 
 impl CursorBlink {
-    fn new(now: Instant) -> Self {
+    fn new(now: Instant, motion: Motion) -> Self {
         Self {
             focused: true,
             visible: true,
-            next_toggle: Some(now + CURSOR_BLINK_PHASE),
+            next_toggle: Self::next(true, now, motion),
         }
+    }
+
+    /// When a caret in this state next flips, if it flips at all.
+    ///
+    /// Two reasons for `None` and they are the same reason twice: an unfocused
+    /// window is not where typing lands, and a window told to hold still has
+    /// been asked not to say it this way.
+    fn next(focused: bool, now: Instant, motion: Motion) -> Option<Instant> {
+        (focused && motion == Motion::Full).then_some(now + CURSOR_BLINK_PHASE)
     }
 
     fn visible(&self) -> bool {
         self.visible
     }
 
-    fn reset(&mut self, now: Instant) -> bool {
+    fn reset(&mut self, now: Instant, motion: Motion) -> bool {
         let changed = !self.visible;
         self.visible = true;
-        self.next_toggle = self.focused.then_some(now + CURSOR_BLINK_PHASE);
+        self.next_toggle = Self::next(self.focused, now, motion);
         changed
     }
 
-    fn set_focused(&mut self, focused: bool, now: Instant) -> bool {
+    fn set_focused(&mut self, focused: bool, now: Instant, motion: Motion) -> bool {
         self.focused = focused;
-        self.reset(now)
+        self.reset(now, motion)
     }
 
     fn advance(&mut self, now: Instant) -> bool {
@@ -23116,8 +23536,9 @@ fn popup_owner(popup: Popup, tabs: TabSurface) -> PopupOwner {
 /// The report was a screenshot with a pane head's `⌄` menu and a files flyout
 /// standing on top of each other, each half-covering the other. Neither was
 /// wrong on its own, and that is the point: the flyout keeps a
-/// [`float::FLY_CLOSE_LEFT`] grace (420ms) after the hand leaves it, the chevron
-/// opens its menu on a [`profiles::CHEVRON_HOVER_OPEN`] rest (250ms), and 250 is
+/// [`float::FLOAT_CLOSE_GRACE_LEFT`] grace (420ms) after the hand leaves it, the
+/// chevron opens its menu on a [`profiles::CHEVRON_HOVER_OPEN_DELAY`] rest
+/// (250ms), and 250 is
 /// inside 420 — so a hand that walks off a flyout onto the `⌄` beside it holds
 /// two hover panels open **by arithmetic**. Every pair on this list has that
 /// shape, because every pair is two independent clocks neither of which has ever
@@ -25540,6 +25961,16 @@ struct NewWindowParts {
     raise_restore_prompt: bool,
     /// The tab that is only scaffolding, if this window opened with one.
     placeholder_tab: Option<TabId>,
+    /// Whether this system wants animation, as the application last read it.
+    ///
+    /// Carried in rather than read again here: the two carets this window arms
+    /// at birth have to be armed the way every other tween in the process is,
+    /// and a second read is a second answer on a machine where the preference
+    /// changed between them.
+    motion: Motion,
+    /// How this window asks the loop to re-read that preference when Windows
+    /// says it has moved.
+    event_proxy: EventLoopProxy<AppEvent>,
 }
 
 /// Assemble a window's runtime from [`NewWindowParts`] and the resting value of
@@ -25564,9 +25995,29 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         pending_restore,
         raise_restore_prompt,
         placeholder_tab,
+        motion,
+        event_proxy,
     } = parts;
+    // **The preference stops being a start-up reading here** (§7.18). One watch
+    // per window rather than one per process: the broadcast reaches every
+    // top-level window anyway, a process whose first window has closed still has
+    // to notice, and a duplicate wake costs one `SystemParametersInfoW` on a turn
+    // that was going to happen. Best-effort, like the taskbar's own subclass — a
+    // window that cannot install it keeps exactly the behaviour this window had
+    // before there was one.
+    let system_settings_watch = window_hwnd(&window).ok().and_then(|hwnd| {
+        let proxy = event_proxy.clone();
+        bt_platform::SystemSettingsWatch::install(
+            hwnd,
+            Box::new(move || {
+                let _ = proxy.send_event(AppEvent::SystemPreferencesChanged);
+            }),
+        )
+        .ok()
+    });
     WindowRuntime {
         renderer,
+        system_settings_watch,
         tabs,
         active_tab,
         pty_wake,
@@ -25634,7 +26085,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         ime_active: false,
         ime_cursor_throttle: ImeCursorThrottle::default(),
         rename_caret_line: None,
-        cursor_blink: CursorBlink::new(Instant::now()),
+        cursor_blink: CursorBlink::new(Instant::now(), motion),
         // A window is focused when it opens, and `CursorBlink` starts from
         // the same assumption — the two must agree or the strip and the
         // caret would disagree about whether anyone is home.
@@ -25765,7 +26216,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         files_focus: FilesKeyboardFocus::default(),
         rename: None,
         blank_page: None,
-        rename_blink: CursorBlink::new(Instant::now()),
+        rename_blink: CursorBlink::new(Instant::now(), motion),
         settings_marks: marks::ChromeMarkRasters::default(),
         divider_drag: None,
         resizing_card_transition: RevealTween::over(RESIZING_CARD_TRANSITION),
@@ -26417,6 +26868,8 @@ impl Runtime<'_> {
             ime_system_caret,
             rail,
             seat_viewport,
+            motion: app.motion,
+            event_proxy: app.event_proxy.clone(),
             pending_restore,
             // **The one card, in the window the process opened with** (ruling
             // ①). It names every tab the launch is asking about, in every window,
@@ -26760,6 +27213,8 @@ impl Runtime<'_> {
             ime_system_caret,
             rail,
             seat_viewport,
+            motion: app.motion,
+            event_proxy: app.event_proxy.clone(),
             // **The question stays with the window it is about**, so answering it
             // once puts each row back where it came from. The card itself is
             // raised in one window and once per process — see
@@ -29196,7 +29651,7 @@ impl Runtime<'_> {
             title,
             body,
             None,
-            self.app.motion == Motion::Reduced,
+            self.app.motion,
             Instant::now(),
         );
         if self.refresh_overlay() {
@@ -29289,8 +29744,17 @@ impl Runtime<'_> {
         );
         let pointer = self.toast_pointer(&layouts);
         let palette = bt_render::chrome_palette();
-        let layers = toast::build(&layouts, &self.window.toasts, pointer, &palette, scale, now);
-        self.window.toasts_drawn = self.window.toasts.frame_state(now);
+        let motion = self.app.motion;
+        let layers = toast::build(
+            &layouts,
+            &self.window.toasts,
+            pointer,
+            &palette,
+            scale,
+            now,
+            motion,
+        );
+        self.window.toasts_drawn = self.window.toasts.frame_state(now, motion);
         self.window.toast_pointer_drawn = pointer;
         self.window.toast_layouts = layouts;
         layers
@@ -29322,7 +29786,7 @@ impl Runtime<'_> {
             None,
             body,
             Some(verb.to_owned()),
-            self.app.motion == Motion::Reduced,
+            self.app.motion,
             Instant::now(),
         );
         if self.refresh_overlay() {
@@ -29359,7 +29823,7 @@ impl Runtime<'_> {
 
     /// Whether the cards on screen differ from the cards last painted.
     fn toasts_owe_frame(&self, now: Instant) -> bool {
-        self.window.toasts_drawn != self.window.toasts.frame_state(now)
+        self.window.toasts_drawn != self.window.toasts.frame_state(now, self.app.motion)
     }
 
     /// When this window next has notice work: an entrance landing, a life running
@@ -29368,12 +29832,12 @@ impl Runtime<'_> {
         if self.toasts_owe_frame(now) {
             return Some(now);
         }
-        self.window.toasts.deadline(now)
+        self.window.toasts.deadline(now, self.app.motion)
     }
 
     /// Move every card's clock on, and pay the frames the movement owes.
     fn advance_toasts(&mut self, now: Instant) -> Result<()> {
-        let moved = self.window.toasts.advance(now);
+        let moved = self.window.toasts.advance(now, self.app.motion);
         if (moved || self.toasts_owe_frame(now)) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -29425,13 +29889,21 @@ impl Runtime<'_> {
         if let toast::ToastHit::Action(id) = hit {
             self.take_profile_undo(id)?;
             self.take_checkout_undo(id)?;
-            if self.window.toasts.dismiss(id, Instant::now()) && self.refresh_overlay() {
+            if self
+                .window
+                .toasts
+                .dismiss(id, Instant::now(), self.app.motion)
+                && self.refresh_overlay()
+            {
                 self.present_chrome_change()?;
             }
             return Ok(true);
         }
         if let toast::ToastHit::Close(id) = hit
-            && self.window.toasts.dismiss(id, Instant::now())
+            && self
+                .window
+                .toasts
+                .dismiss(id, Instant::now(), self.app.motion)
             && self.refresh_overlay()
         {
             self.present_chrome_change()?;
@@ -36485,7 +36957,9 @@ impl Runtime<'_> {
         }
         let (source, name) = (buffer.source.clone(), buffer.name.clone());
         self.window.rename = Some(TabRename::open_file(surface, source, &name));
-        self.window.rename_blink.reset(Instant::now());
+        self.window
+            .rename_blink
+            .reset(Instant::now(), self.app.motion);
         self.refresh_chrome();
         self.present_chrome_change()
     }
@@ -36518,7 +36992,9 @@ impl Runtime<'_> {
         }
         let (source, name) = (buffer.source.clone(), buffer.name.clone());
         self.window.rename = Some(TabRename::open_crumb(surface, source, &name));
-        self.window.rename_blink.reset(Instant::now());
+        self.window
+            .rename_blink
+            .reset(Instant::now(), self.app.motion);
         self.refresh_chrome();
         self.present_chrome_change()
     }
@@ -37008,7 +37484,7 @@ impl Runtime<'_> {
         let leaf = self.leaf_here(seat);
         self.window.rename = Some(TabRename::open_files_row(leaf, key, &name));
         // A caret that arrives mid-blink arrives invisible half the time.
-        self.window.rename_blink.reset(now);
+        self.window.rename_blink.reset(now, self.app.motion);
         self.refresh_chrome();
         self.present_chrome_change()
     }
@@ -48759,7 +49235,7 @@ impl Runtime<'_> {
         }
         let peek = self.window.file_peek.as_mut().expect("just borrowed");
         if peek.closing_at.is_none() {
-            peek.closing_at = Some(now + float::FLY_CLOSE);
+            peek.closing_at = Some(now + float::FLOAT_CLOSE_GRACE);
         }
         false
     }
@@ -52358,7 +52834,7 @@ impl Runtime<'_> {
         // the house takes. Armed here and matured in `advance_term_menu`.
         if hit == Some(heading) && !menu.submenu_open {
             menu.submenu_hold_until
-                .get_or_insert(now + profiles::CHEVRON_HOVER_OPEN);
+                .get_or_insert(now + profiles::CHEVRON_HOVER_OPEN_DELAY);
         }
         let inside = hit.is_some();
         if changed && self.refresh_overlay() {
@@ -53050,7 +53526,7 @@ impl Runtime<'_> {
         };
         if resting_on.is_some() && menu.submenu != resting_on {
             menu.submenu_hold_until
-                .get_or_insert(now + profiles::CHEVRON_HOVER_OPEN);
+                .get_or_insert(now + profiles::CHEVRON_HOVER_OPEN_DELAY);
         }
         let inside = hit.is_some();
         let aim = ring.and_then(|at| self.other_window_ids().get(at).copied());
@@ -58834,10 +59310,31 @@ impl Runtime<'_> {
     ///
     /// **`terminal_notifications` gates the toast and not the flash**, and the split is the row's
     /// own sentence: it governs whether a program may *put a message on the desktop*. A taskbar
-    /// button calling for attention is not a message and leaves nothing behind; the switch that
-    /// governs whether the end of a turn may do even that is `turn_end_notification`, and it is
-    /// read at the door rather than here, because with it off §11.7 requires that the lane not be
-    /// evaluated at all.
+    /// button calling for attention is not a message and leaves nothing behind.
+    ///
+    /// That is the *last* gate a delivery passes and not the first: which of the two rows decides
+    /// whether an announcement is made at all is read at the door, by
+    /// [`attention::NotificationSwitches`], because a row that is off requires that its lane not be
+    /// evaluated at all — no trace, no bit set. The two are not a double negative. This one asks
+    /// "may a message be put on the desktop"; the door asks "is there an announcement to make".
+    /// A `Reach::Flash` that the door let through still flashes with `Notifications` off, which is
+    /// the whole of "a taskbar button is not a message".
+    /// **The two rows that can stop an announcement, read together** (§7.1.5o ③′, user ruling
+    /// 2026-08-26).
+    ///
+    /// Read on the turn rather than cached, for the reason every other settings read on this path
+    /// is: a row toggled in the settings panel has to take effect on the next arrival and not on
+    /// the next restart. Read as a *pair* rather than one at a time, because the door's whole job
+    /// is to choose between them, and a caller that fetched only the one it expected to need would
+    /// be making that choice itself, in a second place, from a guess about the transport.
+    fn notification_switches(&self) -> attention::NotificationSwitches {
+        let settings = self.app.settings_store.loaded();
+        attention::NotificationSwitches {
+            turn_end: settings.turn_end_notification,
+            desktop_messages: settings.terminal_notifications,
+        }
+    }
+
     fn raise_attention(&mut self, raised: Vec<AttentionDelivery>) -> Result<()> {
         if raised.is_empty() {
             return Ok(());
@@ -59010,7 +59507,7 @@ impl Runtime<'_> {
         // transition is a cached answer about a window that has since been minimised.
         self.window.window_hidden = window_is_hidden(&self.window.window);
         let window_hidden = self.window.window_hidden;
-        let turn_end_enabled = self.app.settings_store.loaded().turn_end_notification;
+        let switches = self.notification_switches();
         let owner_is_a_shell = self.keyboard_owner_is_a_shell();
         let active_tab = self.window.active_tab;
         // One instant for the whole drain, for the reason a frame takes one: the OSC lane below
@@ -59032,7 +59529,7 @@ impl Runtime<'_> {
                 index == active_tab,
                 window_focused,
                 window_hidden,
-                turn_end_enabled,
+                switches,
                 &mut self.window.attention_next_place,
                 &outcome.notifications,
                 now,
@@ -59164,7 +59661,7 @@ impl Runtime<'_> {
     }
 
     fn reset_cursor_blink(&mut self, now: Instant) -> bool {
-        let changed = self.window.cursor_blink.reset(now);
+        let changed = self.window.cursor_blink.reset(now, self.app.motion);
         self.window
             .renderer
             .set_cursor_blink_visible(self.window.cursor_blink.visible());
@@ -59183,7 +59680,9 @@ impl Runtime<'_> {
             self.window.tooltip.hide();
             self.window.layout_peek.hide();
         }
-        self.window.cursor_blink.set_focused(focused, now);
+        self.window
+            .cursor_blink
+            .set_focused(focused, now, self.app.motion);
         self.window.renderer.set_window_focused(focused);
         self.window
             .renderer
@@ -59199,7 +59698,7 @@ impl Runtime<'_> {
         // phase, so the instant a shell has the keyboard back the caret is
         // *there* rather than half a beat away.
         if !self.keyboard_owner_is_a_shell() {
-            self.window.cursor_blink.reset(now);
+            self.window.cursor_blink.reset(now, self.app.motion);
             self.window
                 .renderer
                 .set_cursor_blink_visible(self.window.cursor_blink.visible());
@@ -59277,12 +59776,13 @@ impl Runtime<'_> {
         // the one that decides what the reader is owed.
         self.window.window_hidden = window_is_hidden(&self.window.window);
         let mut raised: Vec<AttentionDelivery> = Vec::new();
+        let switches = self.notification_switches();
         settle_attention(
             &mut self.window.tabs,
             self.window.active_tab,
             self.window.window_focused,
             self.window.window_hidden,
-            self.app.settings_store.loaded().turn_end_notification,
+            switches,
             &mut self.window.attention_next_place,
             now,
             attention_trace::global(),
@@ -64344,7 +64844,9 @@ impl Runtime<'_> {
             self.window.tabs[index].manual_name.as_deref(),
         ));
         // A caret that arrives mid-blink arrives invisible half the time.
-        self.window.rename_blink.reset(Instant::now());
+        self.window
+            .rename_blink
+            .reset(Instant::now(), self.app.motion);
         self.refresh_chrome();
         self.present_chrome_change()
     }
@@ -68351,7 +68853,7 @@ impl Runtime<'_> {
                     // Typing reveals the caret, exactly as it does in the
                     // terminal — a caret that blinks out from under the letter
                     // you just typed reads as a dropped keystroke.
-                    self.window.rename_blink.reset(now);
+                    self.window.rename_blink.reset(now, self.app.motion);
                     self.refresh_chrome();
                     self.present_chrome_change()?;
                 }
@@ -68996,7 +69498,9 @@ impl Runtime<'_> {
                         let mut editor = self.window.rename.take().expect("the editor is open");
                         editor.insert(text);
                         self.window.rename = Some(editor);
-                        self.window.rename_blink.reset(Instant::now());
+                        self.window
+                            .rename_blink
+                            .reset(Instant::now(), self.app.motion);
                         self.refresh_chrome();
                         self.present_chrome_change()?;
                     }
@@ -70391,7 +70895,9 @@ impl Runtime<'_> {
             let _ = bt_platform::take_keyboard_focus(hwnd);
         }
         self.window.rename = Some(TabRename::open_address(leaf, &url));
-        self.window.rename_blink.reset(Instant::now());
+        self.window
+            .rename_blink
+            .reset(Instant::now(), self.app.motion);
         self.refresh_chrome();
         self.present_chrome_change()
     }
@@ -74611,6 +75117,48 @@ impl FolioApp {
         Ok(())
     }
 
+    /// **Read the animation preference again, and act on it if it moved** (§7.18).
+    ///
+    /// Windows has said that *something* in Settings changed; this is the one
+    /// question this program asks in reply. Nothing at all happens when the
+    /// answer is the one already held, which is the common case — a person
+    /// changing their wallpaper broadcasts the same message.
+    ///
+    /// # Why anything has to happen at all
+    ///
+    /// Almost every tween in this window reads [`Runtime::app`]'s `motion` at
+    /// *sample* time, so the very next frame draws under the new preference with
+    /// nothing pushed at it. The two carets do not: a blink is a clock, and a
+    /// clock that has already booked its next tick keeps it. Turning animation
+    /// off would otherwise leave the caret blinking until the next keystroke
+    /// reset it, and turning it back on would leave a caret that had stopped
+    /// with no deadline to start it again — the second of those never recovering
+    /// on its own. `reset` on both is the whole of the fix, and it also asks for
+    /// the frame that draws the answer.
+    fn adopt_motion_preference(&mut self) -> Result<()> {
+        let fresh = read_motion_preference();
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        if app.motion == fresh {
+            return Ok(());
+        }
+        app.motion = fresh;
+        let now = Instant::now();
+        self.for_each_window(|runtime| {
+            runtime.window.cursor_blink.reset(now, fresh);
+            runtime.window.rename_blink.reset(now, fresh);
+            runtime
+                .window
+                .renderer
+                .set_cursor_blink_visible(runtime.window.cursor_blink.visible());
+            if runtime.refresh_overlay() {
+                runtime.present_chrome_change()?;
+            }
+            Ok(())
+        })
+    }
+
     /// Take a window off the screen, and the process with it if it was the last.
     ///
     /// **The last window closing is the process exiting** — the semantics this
@@ -75890,12 +76438,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 self.for_each_window(|runtime| {
                     runtime.window.window_hidden = window_is_hidden(&runtime.window.window);
                     let mut raised: Vec<AttentionDelivery> = Vec::new();
+                    let switches = runtime.notification_switches();
                     deliver_attention(
                         &mut runtime.window.tabs,
                         runtime.window.active_tab,
                         runtime.window.window_focused,
                         runtime.window.window_hidden,
-                        runtime.app.settings_store.loaded().turn_end_notification,
+                        switches,
                         &mut runtime.window.attention_next_place,
                         &messages,
                         &installed,
@@ -75913,6 +76462,15 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::BackgroundPictureReady => {
                 self.for_each_window(|runtime| runtime.adopt_background_picture())
             }
+            // **Ask the system again, and tell every window the answer** (§7.18).
+            //
+            // The application holds one preference because it is one machine's
+            // preference, so the read happens once here rather than once per
+            // window; what is per-window is the *consequence*, and that is the
+            // two carets, which have a live deadline that has to be dropped or
+            // re-armed on the frame the answer changes rather than the next time
+            // somebody types.
+            AppEvent::SystemPreferencesChanged => self.adopt_motion_preference(),
             AppEvent::NotificationClicked => self.route_clicked_notifications(),
             // Every window, on this family's standing reason: an answer carries
             // its own address and a window with no page finds nothing to read.
@@ -84092,6 +84650,13 @@ mod tests {
 
     /// One turn of the event loop's attention pass over one window's tabs.
     ///
+    /// Both notification rows on, which is what a fresh install is.
+    const BOTH_NOTIFICATION_ROWS_ON: attention::NotificationSwitches =
+        attention::NotificationSwitches {
+            turn_end: true,
+            desktop_messages: true,
+        };
+
     /// A window that is on a screen and a turn-end lane that is switched on, which is what a fresh
     /// install is. The deliveries are collected and dropped: what these tests are about is the
     /// ledger's own bookkeeping, and `raise_attention` is the window's.
@@ -84101,7 +84666,7 @@ mod tests {
             active,
             focused,
             false,
-            true,
+            BOTH_NOTIFICATION_ROWS_ON,
             next,
             Instant::now(),
             None,
@@ -84124,7 +84689,10 @@ mod tests {
             active,
             focused,
             hidden,
-            turn_end_enabled,
+            attention::NotificationSwitches {
+                turn_end: turn_end_enabled,
+                desktop_messages: true,
+            },
             next,
             Instant::now(),
             None,
@@ -84522,7 +85090,7 @@ mod tests {
                 active,
                 true,
                 false,
-                true,
+                BOTH_NOTIFICATION_ROWS_ON,
                 next,
                 Instant::now(),
                 Some(&trace),
@@ -85384,19 +85952,22 @@ mod tests {
     #[test]
     fn cursor_blink_resets_flips_and_stays_visible_while_unfocused() {
         let start = Instant::now();
-        let mut blink = CursorBlink::new(start);
+        let mut blink = CursorBlink::new(start, Motion::Full);
         assert!(blink.visible());
         assert_eq!(blink.deadline(), Some(start + CURSOR_BLINK_PHASE));
 
         assert!(blink.advance(start + CURSOR_BLINK_PHASE));
         assert!(!blink.visible(), "the first phase boundary hides the caret");
         let input_at = start + CURSOR_BLINK_PHASE + Duration::from_millis(10);
-        assert!(blink.reset(input_at), "input reveals a hidden caret");
+        assert!(
+            blink.reset(input_at, Motion::Full),
+            "input reveals a hidden caret"
+        );
         assert!(blink.visible());
         assert_eq!(blink.deadline(), Some(input_at + CURSOR_BLINK_PHASE));
 
         let unfocused_at = input_at + Duration::from_millis(20);
-        blink.set_focused(false, unfocused_at);
+        blink.set_focused(false, unfocused_at, Motion::Full);
         assert!(blink.visible(), "the unfocused outline is always visible");
         assert_eq!(
             blink.deadline(),
@@ -85407,7 +85978,7 @@ mod tests {
         assert!(blink.visible());
 
         let refocused_at = unfocused_at + Duration::from_secs(61);
-        blink.set_focused(true, refocused_at);
+        blink.set_focused(true, refocused_at, Motion::Full);
         assert!(blink.visible());
         assert_eq!(blink.deadline(), Some(refocused_at + CURSOR_BLINK_PHASE));
     }
@@ -85415,7 +85986,7 @@ mod tests {
     #[test]
     fn cursor_blink_deadline_is_registered_with_the_event_loop_wake_set() {
         let start = Instant::now();
-        let blink = CursorBlink::new(start);
+        let blink = CursorBlink::new(start, Motion::Full);
         let later = start + Duration::from_secs(10);
         assert_eq!(
             earliest_deadline([Some(later), blink.deadline(), None]),
@@ -94018,7 +94589,7 @@ mod tests {
 
     #[test]
     fn a_flip_runs_the_displacement_down_to_nothing_on_the_grab_curve() {
-        // K117/K118. One motion, 160ms, cubic-bezier(.2, 0, 0, 1).
+        // K117/K118. One motion, the base span, cubic-bezier(.2, 0, 0, 1).
         let now = Instant::now();
         let mut flip = FlipTween::default();
         assert_eq!(flip.sample(now, Motion::Full), (0.0, false));
@@ -94036,20 +94607,18 @@ mod tests {
             mid.abs() < 48.0,
             "the curve leaves fast: half the time is well past half the distance"
         );
-        assert_eq!(
-            TAB_FLIP,
-            Duration::from_millis(160),
-            "`transform .16s` (mock-up 6570)"
-        );
+        // The mock-up writes `.16s` at 6570; the archive answers the base span,
+        // because a tab sliding one slot along a row is one interaction (§7.18).
+        assert_eq!(TAB_FLIP, bt_render::MOTION_BASE);
         assert!(
-            flip.sample(now + Duration::from_millis(159), Motion::Full)
+            flip.sample(now + TAB_FLIP - Duration::from_millis(1), Motion::Full)
                 .1,
             "still moving one millisecond short of the end"
         );
         assert_eq!(
-            flip.sample(now + Duration::from_millis(160), Motion::Full),
+            flip.sample(now + TAB_FLIP, Motion::Full),
             (0.0, false),
-            "at 160ms the tab is simply in its slot"
+            "and at the end the tab is simply in its slot"
         );
     }
 
@@ -94183,19 +94752,22 @@ mod tests {
         assert_eq!(landed.applied_to(after), after);
     }
 
-    /// PIN — the two spans the mock-up writes down for a pane, against the
-    /// numbers next door that they get quietly rounded into.
+    /// PIN — the two halves of a split run on **one** span, and it is the slow
+    /// one.
+    ///
+    /// The mock-up writes `.2s` for the FLIP (6555) and `.18s` for the arriving
+    /// pane (6572), and this test used to hold both apart against being "quietly
+    /// rounded into" each other. §7.18 rounds them deliberately: the two are the
+    /// two halves of one split, they happen instead of each other on the very
+    /// same event, and a pane that arrived a fifth of a second before its
+    /// neighbour finished moving was one event drawn at two tempos.
     #[test]
-    fn a_pane_flips_over_two_hundred_milliseconds_and_arrives_over_a_hundred_and_eighty() {
+    fn a_split_flips_and_arrives_on_the_one_slow_span() {
+        assert_eq!(PANE_FLIP, bt_render::MOTION_SLOW);
+        assert_eq!(PANE_FADE_IN, bt_render::MOTION_SLOW);
         assert_eq!(
-            PANE_FLIP,
-            Duration::from_millis(200),
-            "`PANE_EASE = \"transform .2s cubic-bezier(.2, 0, 0, 1)\"` (mock-up 6555)"
-        );
-        assert_eq!(
-            PANE_FADE_IN,
-            Duration::from_millis(180),
-            "`el.style.transition = \"opacity .18s ease\"` (mock-up 6572)"
+            PANE_FLIP, PANE_FADE_IN,
+            "one split, one span — see `bt_render::motion`"
         );
     }
 
@@ -94529,14 +95101,14 @@ mod tests {
             Some(now + STRIP_ANIMATION_FRAME)
         );
         assert_eq!(
-            motion.deadline(now + PANE_FADE_IN, Motion::Full),
-            Some(now + PANE_FADE_IN + STRIP_ANIMATION_FRAME),
-            "the fade is done but the FLIP beside it is not"
+            motion.deadline(now + PANE_FLIP / 2, Motion::Full),
+            Some(now + PANE_FLIP / 2 + STRIP_ANIMATION_FRAME),
+            "halfway through, both halves of the split are still moving"
         );
         assert_eq!(
             motion.deadline(now + PANE_FLIP, Motion::Full),
             None,
-            "and once the longest of them lands, the loop may sleep"
+            "and once the split lands, the loop may sleep"
         );
 
         motion.retire(now + PANE_FLIP, Motion::Full);
@@ -95358,11 +95930,15 @@ mod tests {
              around a pane that has not moved"
         );
 
-        for ms in [20_u64, 50, 80] {
+        let span = RESIZING_CARD_TRANSITION.as_millis() as u64;
+        for ms in [20_u64, 45, 70] {
             let at = now + Duration::from_millis(ms);
             let (inset, moving) = cards.sample(at, Motion::Full);
-            assert!(moving, "{ms}ms into a 100ms transition it is still running");
-            let want = cubic_bezier(ms as f32 / 100.0, EASE);
+            assert!(
+                moving,
+                "{ms}ms into a {span}ms transition it is still running"
+            );
+            let want = cubic_bezier(ms as f32 / span as f32, EASE);
             assert!(
                 (inset - want).abs() < 1e-6,
                 "{ms}ms in the inset is {inset} where CSS `ease` says {want}"
@@ -96696,7 +97272,7 @@ mod tests {
             start,
         );
         assert_eq!(
-            spring.due(start + profiles::CHEVRON_HOVER_OPEN),
+            spring.due(start + profiles::CHEVRON_HOVER_OPEN_DELAY),
             Some(mine),
             "and resting on it brings the stage back, on the same quarter \
              second that took you away"
@@ -96795,12 +97371,12 @@ mod tests {
         );
         assert_eq!(
             spring.deadline(),
-            Some(start + profiles::CHEVRON_HOVER_OPEN),
+            Some(start + profiles::CHEVRON_HOVER_OPEN_DELAY),
             "the same quarter second the `⌄` menus rest for — one constant, and \
              the state lives on the drag rather than being shared with them"
         );
         assert_eq!(
-            spring.due(start + profiles::CHEVRON_HOVER_OPEN),
+            spring.due(start + profiles::CHEVRON_HOVER_OPEN_DELAY),
             Some(other),
             "so the stage goes to that tab with the pane still in the air"
         );
@@ -96826,7 +97402,7 @@ mod tests {
     /// can be driven without a pointer, a window or a sleep.
     ///
     /// Red gate: give the spring a number of its own instead of
-    /// `profiles::CHEVRON_HOVER_OPEN` and the first block fails; leave `observe`
+    /// `profiles::CHEVRON_HOVER_OPEN_DELAY` and the first block fails; leave `observe`
     /// assigning rather than keeping the instant it already has and a pointer
     /// twitching inside one tab never matures; drop `SpringAim::Sprung` and the
     /// last block switches to the tab it is already showing, every 250ms, for as
@@ -96841,12 +97417,12 @@ mod tests {
         gate.observe(Some(TabId(7)), start);
         assert_eq!(
             gate.deadline(),
-            Some(start + profiles::CHEVRON_HOVER_OPEN),
+            Some(start + profiles::CHEVRON_HOVER_OPEN_DELAY),
             "one number for 'a hand has settled on something', shared with the \
              two chevrons rather than copied"
         );
         assert_eq!(
-            gate.due(start + profiles::CHEVRON_HOVER_OPEN - Duration::from_millis(1)),
+            gate.due(start + profiles::CHEVRON_HOVER_OPEN_DELAY - Duration::from_millis(1)),
             None,
             "a millisecond short is still a hand passing through"
         );
@@ -96854,7 +97430,7 @@ mod tests {
         // on it, and must not throw away the rest it has earned.
         gate.observe(Some(TabId(7)), start + Duration::from_millis(200));
         assert_eq!(
-            gate.due(start + profiles::CHEVRON_HOVER_OPEN),
+            gate.due(start + profiles::CHEVRON_HOVER_OPEN_DELAY),
             Some(TabId(7)),
             "the quarter second is measured from when the hand arrived"
         );
@@ -96864,23 +97440,23 @@ mod tests {
         wandering.observe(Some(TabId(7)), start);
         wandering.observe(None, start + Duration::from_millis(200));
         assert_eq!(
-            wandering.due(start + profiles::CHEVRON_HOVER_OPEN),
+            wandering.due(start + profiles::CHEVRON_HOVER_OPEN_DELAY),
             None,
             "leaving spends nothing and starts nothing"
         );
         wandering.observe(Some(TabId(7)), start + Duration::from_millis(240));
         assert_eq!(
-            wandering.due(start + profiles::CHEVRON_HOVER_OPEN),
+            wandering.due(start + profiles::CHEVRON_HOVER_OPEN_DELAY),
             None,
             "and coming back starts the clock again from zero"
         );
         assert_eq!(
-            wandering.due(start + Duration::from_millis(240) + profiles::CHEVRON_HOVER_OPEN),
+            wandering.due(start + Duration::from_millis(240) + profiles::CHEVRON_HOVER_OPEN_DELAY),
             Some(TabId(7))
         );
 
         // Sprung, with the pointer still on the tab it sprang to.
-        let matured = start + profiles::CHEVRON_HOVER_OPEN;
+        let matured = start + profiles::CHEVRON_HOVER_OPEN_DELAY;
         gate.spend(TabId(7));
         assert_eq!(gate.deadline(), None, "a spent rest costs no wake-ups");
         for later in [1_u64, 250, 5_000] {
@@ -96900,7 +97476,7 @@ mod tests {
             "which starts its own quarter second"
         );
         assert_eq!(
-            gate.due(matured + profiles::CHEVRON_HOVER_OPEN),
+            gate.due(matured + profiles::CHEVRON_HOVER_OPEN_DELAY),
             Some(TabId(9))
         );
     }
@@ -104862,10 +105438,15 @@ mod tests {
             (ChevronPointer::Away, false),
             start,
         );
-        assert_eq!(gates.deadline(), Some(start + profiles::CHEVRON_HOVER_OPEN));
+        assert_eq!(
+            gates.deadline(),
+            Some(start + profiles::CHEVRON_HOVER_OPEN_DELAY)
+        );
         assert_eq!(gates.pane.deadline(), None, "an idle chevron owes nothing");
         assert_eq!(
-            gates.profile.due(start + profiles::CHEVRON_HOVER_OPEN),
+            gates
+                .profile
+                .due(start + profiles::CHEVRON_HOVER_OPEN_DELAY),
             Some(ChevronAction::Open)
         );
 
@@ -106325,15 +106906,13 @@ mod tests {
     /// satisfied by an implementation that has no way to lag.
     ///
     /// What is left is the fade, and this is its span and its reduced-motion
-    /// answer. The 160ms next door is the pin's; borrowing it would be the wrong
+    /// answer. It is the archive's **fast** rung and the pin's is the base one:
+    /// a box that says "let go here" owes only to be there, while a control
+    /// widening open is one interaction. Borrowing the pin's would be the wrong
     /// number arrived at silently.
     #[test]
-    fn the_dock_box_fades_over_its_own_hundred_milliseconds_and_not_at_all_reduced() {
-        assert_eq!(
-            DOCK_PREVIEW_FADE,
-            Duration::from_millis(100),
-            "`transition: opacity .1s ease`"
-        );
+    fn the_dock_box_fades_over_the_fast_span_and_not_at_all_reduced() {
+        assert_eq!(DOCK_PREVIEW_FADE, bt_render::MOTION_FAST);
         assert_ne!(
             DOCK_PREVIEW_FADE,
             Duration::from_millis(bt_render::WINDOW_TAB_PIN_REVEAL_MS),
@@ -108668,12 +109247,12 @@ mod cross_window_drag_tests {
         );
         assert_eq!(
             broker.next_deadline(),
-            Some(start + profiles::CHEVRON_HOVER_OPEN),
+            Some(start + profiles::CHEVRON_HOVER_OPEN_DELAY),
             "the same quarter second the `⌄` menus and the in-window spring rest \
              for — one constant, three clocks"
         );
         assert_eq!(
-            broker.due(start + profiles::CHEVRON_HOVER_OPEN),
+            broker.due(start + profiles::CHEVRON_HOVER_OPEN_DELAY),
             Some((target, other)),
             "and it names the window as well as the tab, because the window that \
              has to switch is not the window holding the pointer"

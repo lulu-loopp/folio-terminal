@@ -646,6 +646,14 @@ pub struct SettingsV1 {
     /// **Whether a program may put a message on the desktop** — the Terminal page's
     /// `Notifications` row, and the switch behind `OSC 9` / `OSC 777;notify` (DESIGN §7.6).
     ///
+    /// **It is the door those sequences knock on, and not only the final write** (DESIGN
+    /// §7.1.5o ③′, user ruling 2026-08-26). An announcement a program wrote down its own tty is a
+    /// desktop message, which is this row's own sentence, so with the row off the lane is not
+    /// walked at all — no trace, no bit set. It used to be `turn_end_notification` that decided
+    /// this, which meant a build script's `OSC 9;deploy failed` went missing because somebody had
+    /// turned off being told when their agent stopped talking. Two unrelated statements, one
+    /// switch, and neither row's words hinted at it.
+    ///
     /// Off is silence and not concealment: no toast is raised, and the pane's own unread dot goes
     /// on saying what it always said. It does not un-write the AppUserModelID — that key is where
     /// Windows keeps the *user's* choices about Folio's notifications, and taking it away would
@@ -720,14 +728,26 @@ pub struct SettingsV1 {
     /// so*. That is why it is a settings key and not a member of any layout's identity.
     #[serde(default = "default_key_hints")]
     pub key_hints: bool,
-    /// **Whether the end of a turn is allowed to reach the desktop** — the Terminal page's
-    /// `Turn finished` row (`docs/plans/attention/plan.md` §11.7, user ruling 2026-08-25).
+    /// **Whether the end of a turn is allowed to reach the desktop** — the **Agents** page's
+    /// `Turn finished` row (`docs/plans/attention/plan.md` §11.7, user ruling 2026-08-25; the row
+    /// moved off the Terminal page by the categorisation ruling of the same day, and this sentence
+    /// said `Terminal` until 2026-08-26 — `bt_app::settings::SettingsRow::category` is the one
+    /// that decides).
     ///
     /// One key and not two, though the ruling names two arms — a taskbar flash on a window that
     /// has not got the keyboard, and a toast on one that is minimised. "May the end of a turn
     /// reach the desktop" is one sentence, and two switches would make legal two combinations
     /// nobody asked for: flashing without toasting, and toasting without flashing. If the two are
     /// ever wanted apart that is a second row, not a changed judgement.
+    ///
+    /// **What it does *not* cover is a message a program wrote itself** (DESIGN §7.1.5o ③′, user
+    /// ruling 2026-08-26). This row's sentence is about an agent going quiet, so it governs the
+    /// arrivals that say only that — a hook `Stop`, a bare bell, an `OSC 1337;…=once` arm, a codex
+    /// `notify`, a pi `agent_settled`. An `OSC 9;<text>` or `OSC 777;notify` carries the program's
+    /// own words and answers to `terminal_notifications` instead. Which door an arrival knocks on
+    /// is decided by *who is speaking*, in one exhaustive match
+    /// (`bt_app::attention::NotificationSwitches::admits`), so a new way of hearing about a turn
+    /// ending has to choose a row at compile time.
     ///
     /// **It governs how far, never what the pane says.** Off leaves the bell dot, the unread dot
     /// and the attention queue's own badge exactly as they were: this key is about the desktop
