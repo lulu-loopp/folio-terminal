@@ -35,6 +35,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod arrival;
 mod attention;
 mod attention_codex;
 mod attention_copilot;
@@ -118,7 +119,7 @@ use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtyError, PtySession, P
 use bt_render::{
     ChromePalette, CursorStyle, FrameSource, FrameTrigger, GpuContext, GridSize, ImeCursorArea,
     LatestFrameSlot, MathHit, MathHitTarget, PREVIEW_BODY_INSET_LOGICAL_PX, PeekImageOverlay,
-    Preedit, PresentOutcome, PreviewImage, SeatViewport, Theme, ThemeChange,
+    Preedit, PresentOutcome, PreviewImage, SeatViewport, Theme, ThemeChange, Travel,
     WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_PERIOD_MS,
     WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_PIN_FADE_MS, WINDOW_TAB_PIN_REVEAL_MS,
     WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
@@ -7337,6 +7338,23 @@ struct WindowRuntime {
     /// [`Self::tooltip_drawn_opacity`]'s own frame-debt question, asked about
     /// this fade.
     key_hint_drawn_opacity: Option<f32>,
+    /// **Every band of the overlay that is arriving or leaving** (the animation
+    /// slice, 2026-08-26).
+    ///
+    /// One register for the eight menus, their submenus, the settings scrim and
+    /// dialog, the notice strip, the tip and the key hint — see
+    /// [`arrival::Passages`] for why it is one and not thirteen, and why a
+    /// departure lives here rather than in the popups' own state. Nothing in it
+    /// is ever consulted by a hit test: the whole of it is ink.
+    passages: arrival::Passages<Layered>,
+    /// What that register would have *painted* on the frame it last did, as
+    /// `(band, opacity, dx, dy)` — [`Self::tooltip_drawn_opacity`]'s own
+    /// frame-debt question asked about all of them at once.
+    ///
+    /// Quantised by [`arrival::Passages::drawn`] to the 1/255 a layer's alpha
+    /// and the whole pixel a rectangle can move by, so a curve settling through
+    /// its long tail stops owing presents once the picture has stopped changing.
+    passages_drawn: Vec<(Layered, u8, i32, i32)>,
     /// Every notice this window is showing (user ruling, 2026-08-16).
     ///
     /// One host for the window, with each card carrying the surface it belongs
@@ -16943,6 +16961,11 @@ mod motion_archive_tests {
                 "bt_render::FLOAT_WINDOW_ANIMATION_MS",
                 bt_render::FLOAT_WINDOW_ANIMATION_MS,
             ),
+            // The animation slice's two, and the pair the whole of `arrival`
+            // runs on: every popup, submenu, dialog, scrim and notice strip in
+            // this window arrives on the first and leaves on the second.
+            archived("bt_render::POPUP_ENTER_MS", bt_render::POPUP_ENTER_MS),
+            archived("bt_render::POPUP_EXIT_MS", bt_render::POPUP_EXIT_MS),
             archived(
                 "bt_render::WINDOW_TAB_PIN_REVEAL_MS",
                 bt_render::WINDOW_TAB_PIN_REVEAL_MS,
@@ -23387,6 +23410,386 @@ impl Popup {
     }
 }
 
+/// **Every band of the overlay that arrives and leaves on the window's own
+/// rhythm** — [`arrival::Passages`]'s key, and the whole of the animation
+/// slice's subject.
+///
+/// It is a list of *bands* and not of states, which is the arrangement
+/// [`arrival`] exists to make possible: a popup's state dies on the frame it is
+/// closed, so nothing on this list can be pressed, and what passes is the
+/// picture. See that module for why that is the only shape a menu's departure
+/// can take.
+///
+/// **[`Self::ALL`] names all eight popups one at a time** rather than folding
+/// over [`Popup::ALL`], and the repetition is the point: a ninth popup is a
+/// menu that would otherwise go on hard-cutting while every other one breathes,
+/// and the gate below is what says so out loud.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layered {
+    /// One of the eight menus.
+    Popup(Popup),
+    /// **The list one of that menu's own rows hangs out**, keyed by the menu it
+    /// belongs to. Its own band because it is its own gesture: the parent came
+    /// up on a press and the child on a rest 250ms later, and one clock for both
+    /// would either re-run the parent's entrance or deny the child one.
+    Submenu(Popup),
+    /// The settings dialog's scrim. It only deepens — a dimming that slid would
+    /// be the window itself moving.
+    SettingsScrim,
+    /// The dialog standing on it.
+    SettingsDialog,
+    /// The PowerShell integration notice, in its strip across a pane's body.
+    Notice,
+    /// The tip. **Departure only** — its 90ms entrance is its own and predates
+    /// this register ([`arrival::Passages::stage_departure`]).
+    Tip,
+    /// The card a held modifier raises. Departure only, for the tip's reason —
+    /// and it is the surface whose own source said *"It has no exit fade at
+    /// all"*, which this slice is the answer to.
+    KeyHint,
+}
+
+impl Layered {
+    /// Every band that passes.
+    ///
+    /// Read by the gate that pins the list rather than by the window, which
+    /// reaches each band through the one call site that draws it — the same
+    /// arrangement `GitFilterMenuLayout::rows` keeps, and for its reason: a list
+    /// the product walked would be a second way of deciding what is on the glass.
+    #[allow(dead_code)]
+    const ALL: [Self; 15] = [
+        Self::Popup(Popup::Profile),
+        Self::Popup(Popup::Root),
+        Self::Popup(Popup::File),
+        Self::Popup(Popup::Pane),
+        Self::Popup(Popup::GraphFilter),
+        Self::Popup(Popup::Preview),
+        Self::Popup(Popup::GitMenu),
+        Self::Popup(Popup::TermMenu),
+        Self::Submenu(Popup::Pane),
+        Self::Submenu(Popup::TermMenu),
+        Self::SettingsScrim,
+        Self::SettingsDialog,
+        Self::Notice,
+        Self::Tip,
+        Self::KeyHint,
+    ];
+
+    /// **The bands that share the modal level**, where one `else if` chain draws
+    /// at most one of them and the rest may still have a picture to fade.
+    ///
+    /// Every other band on [`Self::ALL`] has a level to itself, so it is handed
+    /// its own layers every frame — empty ones included — and needs no such
+    /// list: [`arrival::Passages::stage`] sees the emptiness and begins the
+    /// departure. These five are the exception, and this is the list that keeps
+    /// a menu the chain has stopped drawing from disappearing in one frame.
+    const MODAL_BANDS: [Self; 6] = [
+        Self::Popup(Popup::Profile),
+        Self::Popup(Popup::Root),
+        Self::Popup(Popup::GraphFilter),
+        Self::Popup(Popup::Preview),
+        Self::SettingsScrim,
+        Self::SettingsDialog,
+    ];
+}
+
+/// **Which surface produced the modal band this frame**, carried out of the one
+/// `else if` chain that decides it.
+///
+/// A second `if` outside that chain would be a second opinion about which of the
+/// nine surfaces is up, and the day the two disagreed a dialog would be drawn
+/// through a menu's entrance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModalBand {
+    /// A surface this slice does not animate: the quit card, the dirty gate, the
+    /// PowerShell invite, the restore prompt — and the empty band of a window
+    /// with none of them up.
+    ///
+    /// They are confirmations standing in front of something already happening
+    /// (plan §2, first slice: the dialog and the menus, and nothing else yet).
+    Fixed,
+    /// One of the four menus in the chain, and which way it grew.
+    Menu(Popup, Travel),
+    /// The settings dialog — the one member of the chain that passes as **two**
+    /// bands, because its scrim only deepens while the dialog on it also
+    /// travels.
+    Settings,
+}
+
+impl ModalBand {
+    /// Which of [`Layered::MODAL_BANDS`] this frame is actually drawing, so the
+    /// rest can be asked for their ghosts.
+    fn holding(self) -> Vec<Layered> {
+        match self {
+            Self::Fixed => Vec::new(),
+            Self::Menu(popup, _) => vec![Layered::Popup(popup)],
+            Self::Settings => vec![Layered::SettingsScrim, Layered::SettingsDialog],
+        }
+    }
+}
+
+/// **One menu band as its builder leaves it**: the menu, the child one of its
+/// rows may be holding out, and which way each of them grew.
+///
+/// The two are separated here rather than in the register because this is where
+/// the fact lives: `profiles::pane_menu_build` puts the parent on the first
+/// layer and the child on the ones after it ("The submenu as its own layer,
+/// above the parent's"), and that split is exactly the seam the two passages run
+/// on. A child raised on a 250ms rest, a quarter of a second after the press
+/// that raised its parent, is its own arrival.
+struct MenuPaint {
+    menu: Vec<marks::OverlayLayer>,
+    travel: Travel,
+    /// The child's own band, or `None` for a menu that **has** no child.
+    ///
+    /// The distinction is not decoration: `Some(vec![])` is a submenu that has
+    /// closed and therefore owes a departure, while `None` is a menu with no such
+    /// row at all — and a band that is asked for a departure it can never have is
+    /// a band on a list of things that pass.
+    child: Option<(Vec<marks::OverlayLayer>, Travel)>,
+}
+
+impl MenuPaint {
+    /// **No menu at all** — what four of these bands hold almost always.
+    ///
+    /// The direction is the one nothing will read: an empty band has no entrance
+    /// to give one to, and a departure never travels.
+    fn none() -> Self {
+        Self {
+            menu: Vec::new(),
+            travel: Travel::Down,
+            child: None,
+        }
+    }
+
+    /// A menu with no child, from the layers its builder returned.
+    fn plain(menu: Vec<marks::OverlayLayer>, travel: Travel) -> Self {
+        Self {
+            menu,
+            travel,
+            child: None,
+        }
+    }
+}
+
+/// **The animation slice's wiring, pinned where it is easy to unpick**: which
+/// bands pass, that the overlay build really hands every one of them over, and
+/// that the loop is woken while one is in flight.
+///
+/// [`arrival`] holds the rhythm and its own tests hold the curves. What these
+/// hold is the join — the half that a refactor of `refresh_overlay` can quietly
+/// drop while every test in that module goes on passing.
+#[cfg(test)]
+mod arrival_wiring_tests {
+    use super::{Layered, ModalBand, Popup, Travel};
+
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The body of a top-level-in-`impl` `fn <name>(`, delimited by the one `}`
+    /// at that `fn`'s own indentation which follows it.
+    fn fn_body(name: &str) -> &'static str {
+        let head = format!(
+            "
+    fn {name}("
+        );
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`fn {name}` is declared once in an `impl`"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find(
+                    "
+    }
+",
+                )
+                .expect("a method is closed by a `}` at the `impl`'s indentation");
+        &SOURCE[start..end]
+    }
+
+    /// RED GATE — **every one of the eight popups arrives and leaves.**
+    ///
+    /// The ninth popup's gate, and the animation slice's half of the one
+    /// [`super::PopupsUp::holds`] and [`super::popup_owner`] already keep: a menu
+    /// added without a line here is a menu that hard-cuts while every other one
+    /// in the window breathes, which is exactly the state the 2026-08-25 audits
+    /// found and this slice exists to end.
+    ///
+    /// Mutation: drop any popup from `Layered::ALL` and it names the one missing.
+    #[test]
+    fn all_eight_popups_are_on_the_list_of_bands_that_pass() {
+        for popup in Popup::ALL {
+            assert!(
+                Layered::ALL.contains(&Layered::Popup(popup)),
+                "{popup:?} has no passage: it would appear and vanish in one frame"
+            );
+        }
+        assert_eq!(
+            Layered::ALL.len(),
+            15,
+            "eight menus, two submenus, a scrim, a dialog, a notice, a tip and a card"
+        );
+        for band in Layered::MODAL_BANDS {
+            assert!(
+                Layered::ALL.contains(&band),
+                "{band:?} shares the modal level but is not a band that passes"
+            );
+        }
+    }
+
+    /// RED GATE — **the overlay build really hands every band over.**
+    ///
+    /// A list of bands nothing stages is a list, and this is what makes
+    /// `Layered::ALL` a rule instead. Read off the source because that is the
+    /// only way to ask the question without a GPU: `refresh_overlay` needs a
+    /// renderer, a device and a window, and none of the three exists in a test.
+    ///
+    /// Mutation: delete any one of the twelve staging calls and the assertion
+    /// names the band that would go back to hard-cutting.
+    #[test]
+    fn every_band_that_passes_is_handed_over_by_the_overlay_build() {
+        let body = fn_body("refresh_overlay");
+        for spelling in [
+            "ModalBand::Menu(Popup::Profile",
+            "ModalBand::Menu(Popup::Root",
+            "ModalBand::Menu(Popup::GraphFilter",
+            "ModalBand::Menu(Popup::Preview",
+            "ModalBand::Settings",
+            "self.stage_menu(Popup::File",
+            "self.stage_menu(Popup::Pane",
+            "self.stage_menu(Popup::GitMenu",
+            "self.stage_menu(Popup::TermMenu",
+            "Layered::Notice",
+            "Layered::KeyHint",
+            "Layered::Tip",
+        ] {
+            assert!(
+                body.contains(spelling),
+                "`refresh_overlay` no longer stages `{spelling}`"
+            );
+        }
+        // And the two submenus, which are staged by the one door the four
+        // own-band menus go through.
+        assert!(
+            fn_body("stage_menu").contains("Layered::Submenu(popup)"),
+            "a menu's child has no passage of its own"
+        );
+    }
+
+    /// RED — the modal chain says which of its five bands it is drawing, so the
+    /// other four are asked for the pictures they left behind.
+    ///
+    /// Mutation: answer `Vec::new()` from `holding` for a menu that is up and the
+    /// menu is asked to depart on the very frame it arrived — it never appears at
+    /// all.
+    #[test]
+    fn the_modal_band_names_what_it_is_drawing_and_nothing_else() {
+        assert!(
+            ModalBand::Fixed.holding().is_empty(),
+            "a gate or a quit card holds none of the bands that pass"
+        );
+        assert_eq!(
+            ModalBand::Menu(Popup::Root, Travel::Down).holding(),
+            vec![Layered::Popup(Popup::Root)]
+        );
+        assert_eq!(
+            ModalBand::Settings.holding(),
+            vec![Layered::SettingsScrim, Layered::SettingsDialog],
+            "the dialog passes as two bands, because only one of them travels"
+        );
+    }
+
+    /// RED GATE — **a menu that is leaving cannot be pressed**, because the only
+    /// thing that survives it is ink and nothing but the paint may look at it.
+    ///
+    /// This is the whole reason the fade lives in a register of pictures instead
+    /// of in the popups' own state, and it is a claim about the *shape* of the
+    /// code rather than about any one press: a hit test, a key ladder rung or a
+    /// hover router that learned to consult `passages` would be a fading menu
+    /// answering for itself again, and no amount of care at the call site would
+    /// make that safe.
+    ///
+    /// The readers are named here rather than counted, so that adding one is a
+    /// deliberate act: two build the picture, two settle the frame debt.
+    ///
+    /// Mutation: read the register from `mouse_input`, `keyboard_input` or any
+    /// `*_hit` and this names the function that did it.
+    #[test]
+    fn nothing_but_the_paint_and_the_frame_clock_reads_the_register() {
+        const ALLOWED: [&str; 4] = [
+            // The two doors the paint goes through. `refresh_overlay` never
+            // touches the register itself — it hands its bands to these, which
+            // is what keeps the span, the curve and the reduced-motion branch in
+            // one place instead of at thirteen call sites.
+            "stage",
+            "stage_departure",
+            // The two that decide when to paint next.
+            "advance_strip_animation",
+            "strip_animation_deadline",
+        ];
+        // Spelled in two halves so that this very line is not one of the
+        // readers it is looking for. The field access and not the field: a
+        // declaration is not a reading, and `rustfmt` is entitled to put the
+        // receiver on a line of its own.
+        let needle = concat!(".", "passages");
+        let mut seen = Vec::new();
+        for (at, _) in SOURCE.match_indices(needle) {
+            let head = SOURCE[..at]
+                .rfind("\n    fn ")
+                .expect("every reader is inside a method");
+            let name = SOURCE[head + "\n    fn ".len()..]
+                .split('(')
+                .next()
+                .expect("a method's name ends at its parameter list");
+            assert!(
+                ALLOWED.contains(&name),
+                "`{name}` reads the arrival register: a picture that is fading is \
+                 not a surface, and anything that asks it a question is asking a \
+                 menu that has already closed"
+            );
+            seen.push(name);
+        }
+        for reader in ALLOWED {
+            assert!(
+                seen.contains(&reader),
+                "`{reader}` no longer reads the register — the wiring has moved"
+            );
+        }
+    }
+
+    /// RED — **the loop is woken while a passage runs, and settles its debt.**
+    ///
+    /// Both halves, because they answer different questions and the second is the
+    /// one that is easy to forget: `moving` schedules the *next* frame, and the
+    /// drawn reading is what makes the window paint the one it was woken for —
+    /// and what stops it painting when nothing has changed.
+    ///
+    /// Mutation: drop `passing` from the deadline's fold and a menu's fade
+    /// freezes wherever the last unrelated event left it; drop the debt and the
+    /// woken frame returns without drawing.
+    #[test]
+    fn the_frame_schedule_knows_about_the_register() {
+        let deadline = fn_body("strip_animation_deadline");
+        assert!(
+            deadline.contains("passages.moving(now, motion)"),
+            "nothing wakes the loop for a menu that is still arriving"
+        );
+        assert!(
+            deadline.contains("|| passing)"),
+            "the reading is taken and then dropped: the fold never asks for the frame"
+        );
+        let advance = fn_body("advance_strip_animation");
+        assert!(
+            advance.contains("passages.drawn(now, motion, scale)"),
+            "the woken frame does not ask what the register would paint"
+        );
+        assert!(
+            advance.contains("passages_drawn = passing"),
+            "the debt is never settled, so every wake-up owes a present forever"
+        );
+    }
+}
+
 /// **Which of this window's popups are raised** — one bit per [`Popup`], read
 /// off the window once and answered from here after.
 ///
@@ -26141,6 +26544,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         tooltip_drawn_opacity: None,
         key_hint: keyhint::KeyHintHost::default(),
         key_hint_drawn_opacity: None,
+        passages: arrival::Passages::default(),
+        passages_drawn: Vec::new(),
         toasts: toast::ToastHost::default(),
         toast_layouts: Vec::new(),
         toasts_drawn: Vec::new(),
@@ -32722,6 +33127,64 @@ impl Runtime<'_> {
         )
     }
 
+    /// **Hand one band of the overlay to the arrival register** — see
+    /// [`arrival::Passages::stage`].
+    ///
+    /// The one door, so that "how a popup arrives" is a fact about this window
+    /// rather than about each of the thirteen bands: the span, the curve, the
+    /// travel and the reduced-motion branch are all inside, and a call site says
+    /// only which band it is and which way that band grew.
+    fn stage(
+        &mut self,
+        band: Layered,
+        layers: Vec<marks::OverlayLayer>,
+        travel: Option<Travel>,
+        now: Instant,
+    ) -> Vec<marks::OverlayLayer> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let motion = self.app.motion;
+        self.window
+            .passages
+            .stage(band, layers, travel, now, motion, scale)
+    }
+
+    /// The same for a surface that fades itself in and only wants the way out.
+    fn stage_departure(
+        &mut self,
+        band: Layered,
+        layers: Vec<marks::OverlayLayer>,
+        now: Instant,
+    ) -> Vec<marks::OverlayLayer> {
+        let motion = self.app.motion;
+        self.window
+            .passages
+            .stage_departure(band, layers, now, motion)
+    }
+
+    /// **One of the four menus that has a level to itself**, through its own
+    /// passage and its child's.
+    ///
+    /// Exhaustive on the four rather than taking a closure, because which
+    /// builder draws which menu is the one thing that differs and a fifth menu
+    /// with a band of its own must not be able to reach this without saying so.
+    fn stage_menu(&mut self, popup: Popup, now: Instant) -> Vec<marks::OverlayLayer> {
+        let paint = match popup {
+            Popup::File => self.file_menu_layer(),
+            Popup::Pane => self.pane_menu_layer(),
+            Popup::GitMenu => self.git_menu_layer(),
+            Popup::TermMenu => self.term_menu_layer(),
+            // The other four are drawn by the modal chain, which passes them
+            // itself: see [`ModalBand`].
+            Popup::Profile | Popup::Root | Popup::GraphFilter | Popup::Preview => MenuPaint::none(),
+        };
+        let mut layers = self.stage(Layered::Popup(popup), paint.menu, Some(paint.travel), now);
+        if let Some((submenu, travel)) = paint.child {
+            let child = self.stage(Layered::Submenu(popup), submenu, Some(travel), now);
+            layers.extend(child);
+        }
+        layers
+    }
+
     /// Rebuild the blended layer over the chrome. Returns whether anything
     /// visible changed.
     ///
@@ -32785,6 +33248,14 @@ impl Runtime<'_> {
             web_sheet: self.web_sheet_layers(),
             ..OverlayStack::default()
         };
+        // **The notice joins the popup family** (the animation slice, 2026-08-26).
+        // It arrives downward because it does: the strip takes a row off the top
+        // of a pane's body and the body yields, so what it comes out of is the
+        // head above it. One passage for the band and not one per pane — two
+        // shells reporting at once is one piece of news arriving, and a second
+        // clock would fade the first strip out from under a reader mid-sentence.
+        let notices = std::mem::take(&mut stack.pane_notices);
+        stack.pane_notices = self.stage(Layered::Notice, notices, Some(Travel::Down), now);
         // **The gate is above the settings dialog**, and that is the one ordering
         // it could have: it is the only surface in this window that stands in
         // front of something already happening, so nothing may cover it. Every
@@ -32795,19 +33266,32 @@ impl Runtime<'_> {
         // surface in this window that is drawn from a fact none of the others
         // can see — the application's — so a window whose own gate happened to
         // be up must still show what is being asked of all of them.
-        stack.modal = if let Some(layout) = self.quit_card_layout() {
+        //
+        // **Which of them it was is carried out of the chain** (the animation
+        // slice, 2026-08-26), because four of these arms are popups that arrive
+        // and leave on the window's rhythm, one is a dialog that passes as two
+        // bands, and four are surfaces this slice does not touch. The chain is
+        // the only place that knows which — a second `if` outside it would be a
+        // second opinion about which surface is up.
+        let (modal, band) = if let Some(layout) = self.quit_card_layout() {
             let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-            restore::quit_build(
-                &layout,
-                (width as f32, height as f32),
-                self.app.quit.as_ref().and_then(quit::Quit::hover),
+            (
+                restore::quit_build(
+                    &layout,
+                    (width as f32, height as f32),
+                    self.app.quit.as_ref().and_then(quit::Quit::hover),
+                ),
+                ModalBand::Fixed,
             )
         } else if let Some(layout) = self.dirty_gate_layout() {
             let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-            restore::gate_build(
-                &layout,
-                (width as f32, height as f32),
-                self.window.dirty_gate.hover(),
+            (
+                restore::gate_build(
+                    &layout,
+                    (width as f32, height as f32),
+                    self.window.dirty_gate.hover(),
+                ),
+                ModalBand::Fixed,
             )
         } else if let Some(layout) = self.psreadline_invite_layout() {
             // **Under the gate and over the settings dialog.** The gate stands in
@@ -32816,10 +33300,13 @@ impl Runtime<'_> {
             // dialog the user opened on purpose — and the dialog is where the
             // same question keeps a row, so nothing is lost by being covered.
             let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-            restore::invite_build(
-                &layout,
-                (width as f32, height as f32),
-                self.window.psreadline_invite.hover(),
+            (
+                restore::invite_build(
+                    &layout,
+                    (width as f32, height as f32),
+                    self.window.psreadline_invite.hover(),
+                ),
+                ModalBand::Fixed,
             )
         } else if let Some(layout) = self.settings_layout() {
             // The hover and the readings first, then the renderer: a combo whose
@@ -32867,50 +33354,61 @@ impl Runtime<'_> {
             });
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-            settings::build(
-                &layout,
-                hover,
-                focus,
-                values,
-                &shortcuts,
-                &profile_lines,
-                &background_image,
-                recording,
-                editor,
-                &mut measure,
+            (
+                settings::build(
+                    &layout,
+                    hover,
+                    focus,
+                    values,
+                    &shortcuts,
+                    &profile_lines,
+                    &background_image,
+                    recording,
+                    editor,
+                    &mut measure,
+                ),
+                ModalBand::Settings,
             )
         } else if let Some(layout) = self.restore_layout() {
             // Above the strip but under no scrim: the prompt floats over a
             // window that already works, which is the whole reason it is
             // allowed to exist (mock-up 2219-2221).
-            restore::build(&layout, self.window.restore_prompt.hover())
+            (
+                restore::build(&layout, self.window.restore_prompt.hover()),
+                ModalBand::Fixed,
+            )
         } else if let Some(layout) = self.profile_menu_layout() {
-            {
-                let default = self.default_profile();
-                // Taken before the device is borrowed mutably, and handed over as
-                // a borrow of the store rather than of `self.app`: the measure
-                // closure below holds the GPU for the whole call.
-                let favicons = Rc::clone(&self.app.favicons);
-                let favicons = favicons.borrow();
-                let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-                let mut measure =
-                    |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-                profiles::build(
-                    &layout,
-                    &self.app.profile_programs,
-                    default,
-                    self.window.profile_menu.hover(),
-                    self.app.recent.entries(),
-                    SystemTime::now(),
-                    &favicons,
-                    &mut measure,
-                )
-            }
+            let travel = layout.travel();
+            (
+                {
+                    let default = self.default_profile();
+                    // Taken before the device is borrowed mutably, and handed over as
+                    // a borrow of the store rather than of `self.app`: the measure
+                    // closure below holds the GPU for the whole call.
+                    let favicons = Rc::clone(&self.app.favicons);
+                    let favicons = favicons.borrow();
+                    let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+                    let mut measure =
+                        |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
+                    profiles::build(
+                        &layout,
+                        &self.app.profile_programs,
+                        default,
+                        self.window.profile_menu.hover(),
+                        self.app.recent.entries(),
+                        SystemTime::now(),
+                        &favicons,
+                        &mut measure,
+                    )
+                },
+                ModalBand::Menu(Popup::Profile, travel),
+            )
         } else if let Some(layout) = self.root_menu_layout() {
             // Beside the picker in the same `else if` chain, which is what makes
             // the two mutually exclusive in the *picture* as well as in the
             // state: E61's rule is that one popup is up at a time, and a chain
             // cannot draw both however the flags are set.
+            let travel = layout.travel();
             let choices = self
                 .window
                 .root_menu
@@ -32926,13 +33424,17 @@ impl Runtime<'_> {
             let hover = self.window.root_menu.hover();
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-            profiles::root_menu_build(&layout, &choices, &current, hover, &mut measure)
+            (
+                profiles::root_menu_build(&layout, &choices, &current, hover, &mut measure),
+                ModalBand::Menu(Popup::Root, travel),
+            )
         } else if self.window.graph_filter_menu.is_some()
             && let Some(layout) = self.graph_filter_menu_layout()
         {
             // The fifth arm of the same chain, and in it for E61's reason: one
             // popup is up at a time, and a chain cannot draw two however the
             // flags are set.
+            let travel = layout.travel();
             let surface = self
                 .window
                 .graph_filter_menu
@@ -32951,23 +33453,71 @@ impl Runtime<'_> {
                 })
                 .map(|view| view.filter.clone())
                 .unwrap_or_default();
-            profiles::git_filter_menu_build(&layout, &filter, hover.as_ref())
+            (
+                profiles::git_filter_menu_build(&layout, &filter, hover.as_ref()),
+                ModalBand::Menu(Popup::GraphFilter, travel),
+            )
         } else if let Some(seat) = self.preview_menu_seat()
             && let Some(layout) = self.preview_menu_layout()
         {
             // The fourth arm of the same chain, and it is in the chain for E61's
             // reason: one popup is up at a time, and a chain cannot draw two
             // however the flags are set.
+            let travel = layout.travel();
             let items = self.preview_menu_items(seat);
             let hover = self.window.preview_menu.hover();
             let favicons = Rc::clone(&self.app.favicons);
             let favicons = favicons.borrow();
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-            profiles::preview_menu_build(&layout, &items, hover, &favicons, &mut measure)
+            (
+                profiles::preview_menu_build(&layout, &items, hover, &favicons, &mut measure),
+                ModalBand::Menu(Popup::Preview, travel),
+            )
         } else {
-            Vec::new()
+            (Vec::new(), ModalBand::Fixed)
         };
+        // **The band, put through whatever passage it is in** — and the bands
+        // that are *not* on it asked for the pictures they left behind, which is
+        // the frame a departure begins on.
+        let holding = band.holding();
+        let live = match band {
+            // Nothing this slice animates: the quit card, the dirty gate, the
+            // PowerShell invite and the restore prompt are drawn exactly as they
+            // were, and an empty band is empty.
+            ModalBand::Fixed => modal,
+            ModalBand::Menu(popup, travel) => {
+                self.stage(Layered::Popup(popup), modal, Some(travel), now)
+            }
+            ModalBand::Settings => {
+                // `settings::build` puts the scrim on the first layer and the
+                // dialog on the ones after it (its own red gate), which is what
+                // lets the dimming stand still while the dialog travels four
+                // pixels out of nowhere.
+                let mut layers = modal;
+                let dialog = layers.split_off(1);
+                // **The scrim does not travel** — `None` and not a direction,
+                // because it did not come from anywhere: it is the window
+                // itself going dark, and a dimming that slid four pixels would
+                // be the whole window sliding under the dialog on it.
+                let mut painted = self.stage(Layered::SettingsScrim, layers, None, now);
+                let dialog = self.stage(Layered::SettingsDialog, dialog, Some(Travel::Down), now);
+                painted.extend(dialog);
+                painted
+            }
+        };
+        // **Under whatever is live**, and that ordering is the whole of it: a
+        // menu that is going and a menu that is coming are one gesture seen from
+        // both ends (E61 — the opener closes the others), and what a hand is
+        // reaching for is the one that is arriving.
+        stack.modal = Vec::new();
+        for leaving in Layered::MODAL_BANDS {
+            if !holding.contains(&leaving) {
+                let ghost = self.stage(leaving, Vec::new(), None, now);
+                stack.modal.extend(ghost);
+            }
+        }
+        stack.modal.extend(live);
         stack.layout_peek = self.layout_peek_layer();
         // **Read after the last group under the floats and before the floats
         // themselves** (§7.14c): this is the offset every floated page's hole is
@@ -32975,13 +33525,21 @@ impl Runtime<'_> {
         // are the same statement.
         let below_floats = stack.below_the_floats();
         stack.float = self.float_layer(now, below_floats);
-        stack.file_menu = self.file_menu_layer();
-        stack.pane_menu = self.pane_menu_layer();
-        stack.git_menu = self.git_menu_layer();
-        stack.term_menu = self.term_menu_layer();
+        // The four menus with bands of their own, each through its own passage —
+        // and each with the child it may be holding out through a second, for
+        // [`Layered::Submenu`]'s reason. A band handed in empty is a menu that
+        // has closed, which is the whole of what starts a departure.
+        stack.file_menu = self.stage_menu(Popup::File, now);
+        stack.pane_menu = self.stage_menu(Popup::Pane, now);
+        stack.git_menu = self.stage_menu(Popup::GitMenu, now);
+        stack.term_menu = self.stage_menu(Popup::TermMenu, now);
         stack.toast = self.toast_layer();
-        stack.key_hint = self.key_hint_layer();
-        stack.tooltip = self.tooltip_layer();
+        // The card and the tip keep the entrances they were written with — 90ms
+        // of their own — and gain only the way out, which neither had.
+        let key_hint = self.key_hint_layer();
+        stack.key_hint = self.stage_departure(Layered::KeyHint, key_hint, now);
+        let tooltip = self.tooltip_layer();
+        stack.tooltip = self.stage_departure(Layered::Tip, tooltip, now);
         stack.file_peek = self.file_peek_layer();
         stack.drag_ghost = self.drag_ghost_layer();
         stack.window_ring = self.window_ring_layer();
@@ -51554,17 +52112,18 @@ impl Runtime<'_> {
 
     /// The file menu's own level of the overlay stack, or nothing when none is
     /// up.
-    fn file_menu_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    fn file_menu_layer(&mut self) -> MenuPaint {
         let Some(layout) = self.file_menu_layout() else {
-            return Vec::new();
+            return MenuPaint::none();
         };
         let Some(menu) = self.window.file_menu.as_ref() else {
-            return Vec::new();
+            return MenuPaint::none();
         };
         let (subject, hover) = (menu.subject, menu.hover);
         let crumbs: Vec<String> = menu.crumbs.iter().map(|level| level.name.clone()).collect();
         let look = self.file_menu_look(subject, &crumbs);
-        profiles::file_menu_build(&layout, &look, hover)
+        let travel = layout.travel();
+        MenuPaint::plain(profiles::file_menu_build(&layout, &look, hover), travel)
     }
 
     fn close_file_menu(&mut self) -> Result<bool> {
@@ -51638,14 +52197,15 @@ impl Runtime<'_> {
     }
 
     /// The git menu's own level of the overlay stack.
-    fn git_menu_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    fn git_menu_layer(&mut self) -> MenuPaint {
         let Some(draw) = self.git_menu_draw() else {
-            return Vec::new();
+            return MenuPaint::none();
         };
         let Some(layout) = self.git_menu_layout() else {
-            return Vec::new();
+            return MenuPaint::none();
         };
-        profiles::git_menu_build(&layout, &draw.look())
+        let travel = layout.travel();
+        MenuPaint::plain(profiles::git_menu_build(&layout, &draw.look()), travel)
     }
 
     fn close_git_menu(&mut self) -> Result<bool> {
@@ -52761,7 +53321,7 @@ impl Runtime<'_> {
     }
 
     /// The terminal menu's own level of the overlay stack.
-    fn term_menu_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    fn term_menu_layer(&mut self) -> MenuPaint {
         let Some((look, seat)) = self.window.term_menu.as_ref().map(|menu| {
             (
                 profiles::TermMenuLook {
@@ -52773,11 +53333,15 @@ impl Runtime<'_> {
                 menu.seat,
             )
         }) else {
-            return Vec::new();
+            return MenuPaint::none();
         };
         let Some(layout) = self.term_menu_layout() else {
-            return Vec::new();
+            return MenuPaint::none();
         };
+        let travel = layout.travel();
+        // The child's own direction, or the parent's for the frames where there
+        // is no child to have one — an empty band reads neither.
+        let child_travel = layout.submenu_travel().unwrap_or(Travel::Right);
         // The profile the pane is *running*, which is what the child marks —
         // `pane_menu_layer`'s own sentence, read at this menu's door: a pane you
         // split from a Git Bash is a Git Bash, and a child that ticked PowerShell
@@ -52786,7 +53350,16 @@ impl Runtime<'_> {
         let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-        profiles::term_menu_build(&layout, &look, current, programs, &mut measure)
+        let mut layers = profiles::term_menu_build(&layout, &look, current, programs, &mut measure);
+        // The seam `push_submenu` states: the menu on the first layer, the child
+        // on the ones after it. Splitting there is what gives the two their own
+        // clocks.
+        let child = layers.split_off(1);
+        MenuPaint {
+            menu: layers,
+            travel,
+            child: Some((child, child_travel)),
+        }
     }
 
     fn close_term_menu(&mut self) -> Result<bool> {
@@ -53447,13 +54020,15 @@ impl Runtime<'_> {
 
     /// The pane menu's own level of the overlay stack, or nothing when none is
     /// up.
-    fn pane_menu_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    fn pane_menu_layer(&mut self) -> MenuPaint {
         let Some(layout) = self.pane_menu_layout() else {
-            return Vec::new();
+            return MenuPaint::none();
         };
         let Some(menu) = self.window.pane_menu.as_ref() else {
-            return Vec::new();
+            return MenuPaint::none();
         };
+        let travel = layout.travel();
+        let child_travel = layout.submenu_travel().unwrap_or(Travel::Right);
         let (hover, seat) = (menu.hover, menu.seat);
         // The profile the pane is *running*, which is what the submenu marks —
         // never the window's default. A pane you split from a Git Bash is a Git
@@ -53464,7 +54039,15 @@ impl Runtime<'_> {
         let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-        profiles::pane_menu_build(&layout, hover, current, programs, &windows, &mut measure)
+        let mut layers =
+            profiles::pane_menu_build(&layout, hover, current, programs, &windows, &mut measure);
+        // `push_submenu`'s seam again: the menu first, the child after it.
+        let child = layers.split_off(1);
+        MenuPaint {
+            menu: layers,
+            travel,
+            child: Some((child, child_travel)),
+        }
     }
 
     /// **The other windows, as the submenu names them** (B9, user ruling
@@ -60091,6 +60674,20 @@ impl Runtime<'_> {
             self.window.last_drawn_resizing_card = carded;
             owes_frame = true;
         }
+        // **The popups' own debt** (the animation slice, 2026-08-26), on exactly
+        // the resizing cards' terms and for a sharper version of their reason:
+        // the last frame of a *departure* is the one nothing else in this window
+        // asks for. The menu's state is already gone, the press that dismissed it
+        // is long over and the pointer has stopped — what is left is a picture
+        // fading in the arrival register, and only this reading knows it is
+        // there. `drawn` is empty under reduced motion, so a window that asked
+        // for stillness settles this debt once and never again.
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let passing = self.window.passages.drawn(now, motion, scale);
+        if self.window.passages_drawn != passing {
+            self.window.passages_drawn = passing;
+            owes_frame = true;
+        }
         // **§7.1.6b′ F3 — the card column's entrance, settled on the same
         // terms.** Quantised to the whole physical pixel the slide can actually
         // move a rectangle by, for `drawn_rail`'s reason one paragraph up: a
@@ -60244,6 +60841,14 @@ impl Runtime<'_> {
         // window rather than a fast animation.
         let page_loading =
             motion != Motion::Reduced && self.window.web.values().any(|web| web.page().loading);
+        // The animation slice's own, and the same argument once more: a menu's
+        // entrance runs for 140ms after the press that raised it and its
+        // departure for 90ms after the one that dismissed it, with the pointer
+        // already still and nothing else in the window moving. Under reduced
+        // motion the register holds nothing at all, so this is never true and a
+        // window that asked for stillness is genuinely idle rather than quickly
+        // animated.
+        let passing = self.window.passages.moving(now, motion);
         [
             (tabs_moving
                 || chevron_turning
@@ -60252,7 +60857,8 @@ impl Runtime<'_> {
                 || focus_arriving
                 || rail_moving
                 || files_turning
-                || page_loading)
+                || page_loading
+                || passing)
                 .then(|| now + STRIP_ANIMATION_FRAME),
             self.window.pane_motion.deadline(now, motion),
         ]

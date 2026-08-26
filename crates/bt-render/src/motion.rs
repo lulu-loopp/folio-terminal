@@ -104,6 +104,77 @@ pub const MOTION_ARCHIVE_MS: [u64; 3] = [MOTION_FAST_MS, MOTION_BASE_MS, MOTION_
 /// somewhere", and a layer that is ending is not going anywhere.
 pub const MOTION_TRAVEL_LOGICAL_PX: f32 = 4.0;
 
+/// **Which way a layer travels as it arrives** — the direction half of the rule
+/// [`MOTION_TRAVEL_LOGICAL_PX`] states the distance half of.
+///
+/// The name is the direction the layer *finishes* moving in, which is the
+/// direction it grew in: a menu that drops out of the button above it travels
+/// [`Travel::Down`], and it therefore starts four pixels *up*, against that
+/// button. So a reader of a call site sees where the thing came from, and
+/// [`Travel::offset`] is the one place the sign is worked out.
+///
+/// Four directions and no diagonals. Every layer in this window hangs off an
+/// edge of the control that raised it — under a chevron, beside a row, off a
+/// pane's head — and a diagonal entrance would say the thing came from a
+/// corner, which nothing here does.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Travel {
+    /// Grew downward: it starts against the control above it.
+    Down,
+    /// Grew upward — a menu that had no room below its button.
+    Up,
+    /// Grew to the right: a submenu off its parent's row, the icon rail's own
+    /// list off the panel beside it.
+    Right,
+    /// Grew to the left — the same, with no room on the right.
+    Left,
+}
+
+impl Travel {
+    /// Every direction, for a test that means to walk them all.
+    pub const ALL: [Self; 4] = [Self::Down, Self::Up, Self::Right, Self::Left];
+
+    /// **Which way a box at `frame` grew out of the control at `anchor`** — the
+    /// derivation, so that a layer that had to flip is never drawn arriving from
+    /// the side it did not come from.
+    ///
+    /// Both rectangles are `[left, top, right, bottom]` in the same space, and
+    /// the answer is the axis their centres differ on most: a menu hanging under
+    /// a button is far below it and barely beside it, a submenu beside a row is
+    /// the reverse, and the larger difference is the one the eye reads as "it
+    /// came out of there". Ties fall to the vertical, which is the way all but
+    /// one family of this window's popups open.
+    #[must_use]
+    pub fn away_from(anchor: [f32; 4], frame: [f32; 4]) -> Self {
+        let dx = (frame[0] + frame[2]) / 2.0 - (anchor[0] + anchor[2]) / 2.0;
+        let dy = (frame[1] + frame[3]) / 2.0 - (anchor[1] + anchor[3]) / 2.0;
+        if dx.abs() > dy.abs() {
+            if dx < 0.0 { Self::Left } else { Self::Right }
+        } else if dy < 0.0 {
+            Self::Up
+        } else {
+            Self::Down
+        }
+    }
+
+    /// **Where the layer stands when it is `remaining` of the way from its
+    /// origin**, in physical pixels, at `scale`.
+    ///
+    /// `remaining` is `1.0` on the first frame of an entrance and `0.0` when it
+    /// has landed — the complement of the eased progress — so the displacement
+    /// is always *back toward the anchor* and always reaches zero.
+    #[must_use]
+    pub fn offset(self, remaining: f32, scale: f32) -> [f32; 2] {
+        let distance = remaining * MOTION_TRAVEL_LOGICAL_PX * scale;
+        match self {
+            Self::Down => [0.0, -distance],
+            Self::Up => [0.0, distance],
+            Self::Right => [-distance, 0.0],
+            Self::Left => [distance, 0.0],
+        }
+    }
+}
+
 // ── the curves ─────────────────────────────────────────────────────────────
 
 /// CSS `ease` — the keyword the mock-up writes for nearly every transition it
@@ -148,6 +219,29 @@ pub const RAIL_TEXT_FADE_OPEN_DELAY_MS: u64 = 60;
 ///
 /// **Base**: a float is a popup, and popups are one interaction.
 pub const FLOAT_WINDOW_ANIMATION_MS: u64 = MOTION_BASE_MS;
+
+/// **Every popup arriving** — the eight menus, their submenus, the settings
+/// dialog and its scrim, the notice strip.
+///
+/// **Base**, and it is the span the base was chosen *from*: `.chevbtn svg {
+/// transition: transform 140ms }` is the arrow over the profile list, and the
+/// list is the other half of that same press. The arrow turned over 140ms while
+/// the menu it pointed at appeared in one frame — one gesture with a rhythm on
+/// one side of it only — and this is the number that ends that.
+pub const POPUP_ENTER_MS: u64 = MOTION_BASE_MS;
+/// **Every popup leaving.**
+///
+/// **Fast**, and asymmetric on purpose. An entrance is read: the eye is told
+/// where a thing came from and what is now in front of it. A departure is not —
+/// what a hand is waiting for after the press that dismissed a menu is the thing
+/// *underneath* it, and a menu leaving at the base span is a menu in the way for
+/// half again as long as it needs to be. Nothing travels on the way out, for
+/// [`MOTION_TRAVEL_LOGICAL_PX`]'s stated reason.
+pub const POPUP_EXIT_MS: u64 = MOTION_FAST_MS;
+/// [`POPUP_ENTER_MS`] as the type the samplers take.
+pub const POPUP_ENTER: Duration = Duration::from_millis(POPUP_ENTER_MS);
+/// [`POPUP_EXIT_MS`] as the type the samplers take.
+pub const POPUP_EXIT: Duration = Duration::from_millis(POPUP_EXIT_MS);
 
 /// `transition: width .16s ease, margin-left .16s ease` (line 341) — the pin's
 /// zero-width expansion. One continuous layout change, not a fade-in on top of
@@ -291,6 +385,60 @@ mod tests {
         assert!((MOTION_TRAVEL_LOGICAL_PX - 4.0).abs() < f32::EPSILON);
     }
 
+    /// RED — **a layer arrives from the direction of the thing that summoned
+    /// it**, including when that thing is below it.
+    ///
+    /// Mutation: return a constant direction and the flipped menu below arrives
+    /// from the side it did not come from — the four-pixel lie the derivation
+    /// exists to prevent.
+    #[test]
+    fn a_box_grows_away_from_its_anchor_on_whichever_axis_it_grew_most() {
+        let button = [100.0, 40.0, 140.0, 64.0];
+        // The ordinary drop: a menu under the button that raised it.
+        assert_eq!(
+            Travel::away_from(button, [100.0, 64.0, 300.0, 300.0]),
+            Travel::Down
+        );
+        // The same menu with no room below it, standing on the button instead.
+        assert_eq!(
+            Travel::away_from(button, [100.0, -200.0, 300.0, 40.0]),
+            Travel::Up
+        );
+        // A submenu off a row: far beside it, barely below it.
+        let row = [100.0, 200.0, 300.0, 224.0];
+        assert_eq!(
+            Travel::away_from(row, [300.0, 200.0, 500.0, 400.0]),
+            Travel::Right
+        );
+        assert_eq!(
+            Travel::away_from(row, [-100.0, 200.0, 100.0, 400.0]),
+            Travel::Left
+        );
+    }
+
+    /// RED — the displacement is **toward** the anchor and it reaches zero.
+    ///
+    /// Mutation: drop the minus signs and every popup in the window arrives from
+    /// the far side of itself, sliding *away* from the control that raised it.
+    #[test]
+    fn the_travel_starts_against_the_anchor_and_lands_at_nothing() {
+        for travel in Travel::ALL {
+            assert_eq!(
+                travel.offset(0.0, 2.0),
+                [0.0, 0.0],
+                "{travel:?} never lands"
+            );
+        }
+        assert_eq!(Travel::Down.offset(1.0, 1.0), [0.0, -4.0]);
+        assert_eq!(Travel::Up.offset(1.0, 1.0), [0.0, 4.0]);
+        assert_eq!(Travel::Right.offset(1.0, 1.0), [-4.0, 0.0]);
+        assert_eq!(Travel::Left.offset(1.0, 1.0), [4.0, 0.0]);
+        // The distance is logical, so a 200% window travels twice as far in
+        // pixels and exactly as far to the eye.
+        assert_eq!(Travel::Down.offset(1.0, 2.0), [0.0, -8.0]);
+        assert_eq!(Travel::Down.offset(0.5, 1.0), [0.0, -2.0]);
+    }
+
     /// PIN — the gate passes a well-formed register and nothing else.
     #[test]
     fn a_registered_span_is_archived_exempt_with_a_reason_or_a_named_wait() {
@@ -362,6 +510,8 @@ mod tests {
             ("RAIL_TRANSITION_MS", RAIL_TRANSITION_MS),
             ("RAIL_TEXT_FADE_MS", RAIL_TEXT_FADE_MS),
             ("FLOAT_WINDOW_ANIMATION_MS", FLOAT_WINDOW_ANIMATION_MS),
+            ("POPUP_ENTER_MS", POPUP_ENTER_MS),
+            ("POPUP_EXIT_MS", POPUP_EXIT_MS),
             ("WINDOW_TAB_PIN_REVEAL_MS", WINDOW_TAB_PIN_REVEAL_MS),
             ("WINDOW_TAB_PIN_FADE_MS", WINDOW_TAB_PIN_FADE_MS),
         ] {

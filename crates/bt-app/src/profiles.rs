@@ -47,7 +47,7 @@ use bt_persist::{
 use bt_pty::{ShellEnvironment, resolve_powershell_seven};
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, FLOAT_WINDOW_BORDER_LOGICAL_PX,
-    FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, chrome_palette, rounded_overlay_fill,
+    FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, Travel, chrome_palette, rounded_overlay_fill,
 };
 
 use crate::{
@@ -3481,9 +3481,27 @@ pub struct ProfileMenuLayout {
     section_label: Option<[f32; 4]>,
     /// One row per vault entry the menu shows, newest first.
     recent: Vec<[f32; 4]>,
+    /// **Which way this menu grew out of the button that raised it** — the
+    /// arrival's four pixels, decided here because this is the one place that
+    /// knows both boxes.
+    ///
+    /// Every menu in this file carries one, and every one of them derives it the
+    /// same way: [`Travel::away_from`] against the anchor the placement was
+    /// solved from. It is a fact about *this* placement and not about the kind of
+    /// menu, which is the whole reason it is a field — the same list drops out of
+    /// a chevron near the top of the window and stands on it near the bottom, and
+    /// a menu that slid down out of a button underneath it would be four pixels
+    /// of a lie about where it came from.
+    travel: Travel,
 }
 
 impl ProfileMenuLayout {
+    /// **Which way this menu grew** — see [`Self::travel`].
+    #[must_use]
+    pub fn travel(&self) -> Travel {
+        self.travel
+    }
+
     /// Whether this point is on the menu at all.
     ///
     /// [`hit`] answers the same question and more, and cannot be used for it: it
@@ -3786,6 +3804,7 @@ pub fn layout(
         separator,
         section_label,
         recent: recent_rows,
+        travel: Travel::away_from(anchor, frame),
     }
 }
 
@@ -4813,9 +4832,18 @@ pub struct RootMenuLayout {
     /// Recent section it introduces can be empty.
     browse_separator: [f32; 4],
     browse: [f32; 4],
+    /// Which way it grew — [`ProfileMenuLayout::travel`]'s field, derived the
+    /// same way from this menu's own anchor.
+    travel: Travel,
 }
 
 impl RootMenuLayout {
+    /// Which way this menu grew out of the root button.
+    #[must_use]
+    pub fn travel(&self) -> Travel {
+        self.travel
+    }
+
     /// Every row paired with the path it stands for, so a caption showing only
     /// the last segment can hang the whole path off itself.
     pub fn tips<'a>(
@@ -4977,6 +5005,7 @@ pub fn root_menu_layout(
         items,
         browse_separator,
         browse,
+        travel: Travel::away_from(anchor, frame),
     }
 }
 
@@ -5642,6 +5671,27 @@ pub struct FileMenuLayout {
     /// The rule under the last row that acts on the row itself — mock-up 8089,
     /// which separates *what this row is* from *what its path is*.
     separator: Option<[f32; 4]>,
+    /// Which way it grew — [`ProfileMenuLayout::travel`]'s field.
+    travel: Travel,
+}
+
+impl FileMenuLayout {
+    /// Which way this menu grew out of the press that raised it.
+    #[must_use]
+    pub fn travel(&self) -> Travel {
+        self.travel
+    }
+}
+
+/// **The anchor a menu raised at the pointer grew from**: the point itself.
+///
+/// A press has no rectangle, and where it landed is the whole of what raised the
+/// menu — so the anchor is that point with no width and no height, which
+/// [`Travel::away_from`] reads exactly as it reads a button. Four of this
+/// window's eight menus are raised this way and all four say so through here,
+/// rather than each spelling the degenerate rectangle out.
+fn pressed_at(point: [f32; 2]) -> [f32; 4] {
+    [point[0], point[1], point[0], point[1]]
 }
 
 /// `Insert path into terminal` — the widest row of either menu, and the reason
@@ -5746,6 +5796,7 @@ pub fn file_menu_layout(
         frame,
         items,
         separator,
+        travel: Travel::away_from(pressed_at(point), frame),
     }
 }
 
@@ -6420,9 +6471,17 @@ pub struct GitMenuLayout {
     items: Vec<GitMenuItem>,
     separator: Option<[f32; 4]>,
     prompt: Option<GitPromptRects>,
+    /// Which way it grew — [`ProfileMenuLayout::travel`]'s field.
+    travel: Travel,
 }
 
 impl GitMenuLayout {
+    /// Which way this menu grew out of the press that raised it.
+    #[must_use]
+    pub fn travel(&self) -> Travel {
+        self.travel
+    }
+
     /// The prompt's rectangles, when this menu has become one.
     ///
     /// Read by the window so the IME can be told where the name is being typed —
@@ -6547,6 +6606,7 @@ pub fn git_menu_layout(
             frame,
             items: Vec::new(),
             separator: None,
+            travel: Travel::away_from(pressed_at(point), frame),
             prompt: Some(GitPromptRects {
                 caption,
                 field,
@@ -6586,6 +6646,7 @@ pub fn git_menu_layout(
         frame,
         items,
         separator,
+        travel: Travel::away_from(pressed_at(point), frame),
         prompt: None,
     }
 }
@@ -7195,6 +7256,22 @@ pub struct TermMenuLayout {
     /// the head's, down to the seam it meets its parent on and the profile list
     /// it draws, so it is the same type placed by the same function.
     submenu: Option<PaneSubmenuLayout>,
+    /// Which way it grew — [`ProfileMenuLayout::travel`]'s field.
+    travel: Travel,
+}
+
+impl TermMenuLayout {
+    /// Which way this menu grew out of the press that raised it.
+    #[must_use]
+    pub fn travel(&self) -> Travel {
+        self.travel
+    }
+
+    /// Which way the child hanging off its heading grew, when one is up.
+    #[must_use]
+    pub fn submenu_travel(&self) -> Option<Travel> {
+        self.submenu.as_ref().map(PaneSubmenuLayout::travel)
+    }
 }
 
 impl TermMenuLayout {
@@ -7401,6 +7478,7 @@ pub fn term_menu_layout(
         separator,
         lone_separator,
         submenu,
+        travel: Travel::away_from(pressed_at(point), frame),
     }
 }
 
@@ -8402,6 +8480,8 @@ pub struct PaneMenuLayout {
     zoomed: bool,
     /// The submenu's frame and rows, when it is open.
     submenu: Option<PaneSubmenuLayout>,
+    /// Which way it grew — [`ProfileMenuLayout::travel`]'s field.
+    travel: Travel,
 }
 
 /// A submenu's own boxes, and **which of its parent's rows opened it** (B9).
@@ -8425,9 +8505,32 @@ pub struct PaneSubmenuLayout {
     rows: Vec<usize>,
     /// The parent row this hangs off.
     kind: PaneMenuRow,
+    /// Which way it grew out of that row — [`ProfileMenuLayout::travel`]'s
+    /// field, and the one place in this window where the answer is horizontal.
+    travel: Travel,
+}
+
+impl PaneSubmenuLayout {
+    /// Which way this child grew out of its parent's row.
+    #[must_use]
+    pub fn travel(&self) -> Travel {
+        self.travel
+    }
 }
 
 impl PaneMenuLayout {
+    /// Which way this menu grew out of the press that raised it.
+    #[must_use]
+    pub fn travel(&self) -> Travel {
+        self.travel
+    }
+
+    /// Which way the child hanging off one of its rows grew, when one is up.
+    #[must_use]
+    pub fn submenu_travel(&self) -> Option<Travel> {
+        self.submenu.as_ref().map(PaneSubmenuLayout::travel)
+    }
+
     /// Where one entry landed.
     ///
     /// Read by the tests that pin the geometry; the window walks the entries
@@ -8811,6 +8914,7 @@ pub fn pane_menu_layout(
         separator,
         zoomed,
         submenu,
+        travel: Travel::away_from(pressed_at(point), frame),
     }
 }
 
@@ -8957,6 +9061,11 @@ fn pane_submenu_layout(
         items,
         rows: offered,
         kind,
+        // **Off the row, not off the menu.** A child hangs on the seam beside
+        // the heading that opened it, so the heading is what it grew out of —
+        // which is also what makes the flip above visible in the entrance: a
+        // child forced to the left arrives from the right, and says so.
+        travel: Travel::away_from(heading, frame),
     }
 }
 
@@ -9382,9 +9491,17 @@ pub struct GitFilterMenuLayout {
     rows: Vec<GitFilterRow>,
     /// The rule between the branches and the two flags.
     separator: [f32; 4],
+    /// Which way it grew — [`ProfileMenuLayout::travel`]'s field.
+    travel: Travel,
 }
 
 impl GitFilterMenuLayout {
+    /// Which way this menu grew out of the filter button.
+    #[must_use]
+    pub fn travel(&self) -> Travel {
+        self.travel
+    }
+
     /// The rows this menu is showing, in the order they are drawn.
     ///
     /// Read by the tests that pin the layout; the window walks the rows through
@@ -9494,6 +9611,7 @@ pub fn git_filter_menu_layout(
         items,
         rows,
         separator,
+        travel: Travel::away_from(anchor, frame),
     }
 }
 
@@ -9807,6 +9925,16 @@ pub struct PreviewMenuLayout {
     /// nothing under it is a boundary between one thing and no things.
     pinned_separator: Option<[f32; 4]>,
     items: Vec<[f32; 4]>,
+    /// Which way it grew — [`ProfileMenuLayout::travel`]'s field.
+    travel: Travel,
+}
+
+impl PreviewMenuLayout {
+    /// Which way this switcher grew out of the name it hangs under.
+    #[must_use]
+    pub fn travel(&self) -> Travel {
+        self.travel
+    }
 }
 
 /// The switcher hung under the head's file name.
@@ -9929,6 +10057,7 @@ pub fn preview_menu_layout(
         pinned_label,
         pinned_separator,
         items: rects,
+        travel: Travel::away_from(anchor, frame),
     }
 }
 
@@ -14313,6 +14442,62 @@ mod tests {
             &other_windows(),
             &mut fake_measure,
         )
+    }
+
+    /// RED GATE (the animation slice, 2026-08-26) — **every menu in this file
+    /// says which way it grew, and a menu the window's edge pushed back up says
+    /// so.**
+    ///
+    /// The four pixels a popup travels as it arrives are provenance and nothing
+    /// else: they say *this came out of that*. A menu raised near the floor of
+    /// the window is placed above the point that raised it, and one that slid
+    /// down into place from the direction it is standing on would be four pixels
+    /// of a lie — the one failure mode a constant direction cannot avoid, which
+    /// is why the direction is derived per placement.
+    ///
+    /// Mutation: hard-code `Travel::Down` at any of the eight construction sites
+    /// and the flipped case below reverses.
+    #[test]
+    fn a_menu_grows_down_out_of_the_press_and_up_when_the_floor_pushes_it_back() {
+        assert_eq!(
+            pane_menu(false).travel(),
+            Travel::Down,
+            "a menu with room below the press hangs off it"
+        );
+        // The same press, near the floor: the clamp puts the whole menu above
+        // where the hand was, so it has to arrive from below.
+        let low = pane_menu_layout(
+            [300.0, 590.0],
+            (960.0, 600.0),
+            1.0,
+            None,
+            false,
+            &other_windows(),
+            &mut fake_measure,
+        );
+        assert_eq!(
+            low.travel(),
+            Travel::Up,
+            "a menu the floor pushed up above the press must arrive from below it"
+        );
+        // And the child hangs off a *row*, which makes its direction the one
+        // horizontal answer in the window.
+        assert_eq!(
+            pane_menu(true).submenu_travel(),
+            Some(Travel::Right),
+            "a child with room to its right comes out of its parent's row"
+        );
+        // Pushed against the right edge, the child opens to the left and says so.
+        let cornered = pane_menu_layout(
+            [700.0, 120.0],
+            (960.0, 600.0),
+            1.0,
+            Some(PaneMenuRow::SplitWith),
+            false,
+            &other_windows(),
+            &mut fake_measure,
+        );
+        assert_eq!(cornered.submenu_travel(), Some(Travel::Left));
     }
 
     /// PIN (user ruling, 2026-08-16): **the menu is a picker and six verbs,
