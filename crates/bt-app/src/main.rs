@@ -58537,6 +58537,21 @@ impl Runtime<'_> {
         lane_gone: bool,
     ) -> Result<()> {
         let mut changed = lane_gone;
+        // **A formula that lands under a glance card owes the *chrome* a frame,
+        // not the seats'** (user report, 2026-08-26).
+        //
+        // The card is an overlay layer, and `publish_frame` does not rebuild one:
+        // it presents what the last `refresh_overlay` composed. So a picture that
+        // arrived while the pointer rested still would be filed in the window's
+        // cache, tick the generation nothing was going to read, and leave the card
+        // standing on its source text until some unrelated gesture rebuilt the
+        // overlay. `complete_peek_page` says the same sentence about a page for
+        // the same reason.
+        //
+        // Gathered across the drain and asked once at the end rather than per
+        // completion: a page of forty formulas answers forty times, and forty
+        // rebuilds of every layer in the window would be the cost of one card.
+        let mut card_owes_frame = false;
         for completion in answers_for(batch, |result| self.owns(result.owner())) {
             let leaf = completion.leaf.leaf;
             let target_index = self.window.tabs.iter().position(|tab| tab.id == leaf.tab);
@@ -58641,6 +58656,11 @@ impl Runtime<'_> {
                         }),
                         Err(_) => PreviewMathArtifact::Refused,
                     };
+                    // Only a picture moves anything. A refusal leaves the block
+                    // drawing exactly what it was drawing — the source the author
+                    // wrote — so it owes nobody a frame, which is the same reason
+                    // it does not tick the generation.
+                    card_owes_frame |= matches!(artifact, PreviewMathArtifact::Ready(_));
                     self.window.preview_math.land(*key, artifact);
                     true
                 }
@@ -58680,6 +58700,16 @@ impl Runtime<'_> {
             &mut self.app.math_worker_running,
             &mut self.app.math_worker_notice_pending,
         );
+        // The card re-lays its document out of the same cache the picture just
+        // landed in, so this is the whole of "the card first, the picture when it
+        // comes": nothing is held back waiting for the engine, and the block that
+        // was standing on its LaTeX is drawn as a picture on the next frame.
+        // Asked only while a card is actually up — `file_peek_subject` is the one
+        // gate that says so, and asking it is what keeps a document nobody is
+        // hovering from paying for an overlay rebuild per formula.
+        if card_owes_frame && self.file_peek_subject().is_some() && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
         if changed {
             self.publish_frame(FrameTrigger {
                 occurred_at: Instant::now(),
@@ -98780,6 +98810,250 @@ mod tests {
             ],
             "five inline formulas, one display block, nothing from the fence — and \
              the one in the masthead asked for at the masthead's size",
+        );
+    }
+
+    /// PIN (user report, 2026-08-26: *md 的 hover 预览卡不显示 LaTeX 公式*) —
+    /// **the glance card asks the engine the pane's own question**, so a file
+    /// already set in a preview pane costs the card nothing at all.
+    ///
+    /// The card is a 298-pixel mirror of a pane and the pane can be a thousand
+    /// wide: the two lay the same file out in boxes that do not resemble each
+    /// other, and the first assertion here is that they really do — a fixture
+    /// whose two layouts came out the same height would prove nothing about the
+    /// second.
+    ///
+    /// The second is the ruling. What decides a formula's picture is its source,
+    /// its mode, its size and its ink ([`PreviewMathKey`]) — the measure it stands
+    /// in is not among them, because a picture is the same picture wherever the
+    /// prose around it broke. So the card's walk finds every formula the pane
+    /// already asked for **in flight**, and sends nothing.
+    ///
+    /// MUTATION: give [`PreviewMathKey`] a surface, a path or a measure — the
+    /// obvious way to "give the card its own formulas" — and every one of them
+    /// comes back a miss, which on the glass is the same document typeset twice
+    /// and a second copy of every picture held in a budget sized for one.
+    #[test]
+    fn the_card_and_the_pane_ask_the_engine_for_one_and_the_same_picture() {
+        let scale = 1.0;
+        let metrics = seats::preview_markdown_metrics(scale);
+        let blocks = preview::parse_markdown(
+            "# The $\\alpha$ chapter\n\
+             \n\
+             A paragraph long enough that a three-hundred-pixel card and a pane \
+             twice as wide cannot possibly wrap it to the same number of lines.\n\
+             \n\
+             $$E = mc^2$$\n",
+        );
+        // A shaper's answer in the one way a test can own: a line's worth of
+        // room per seven pixels of text, folded to the width it was given.
+        let mut wrap = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
+            let ink = runs
+                .iter()
+                .map(|run| run.text.chars().count() as f32 * 7.0)
+                .sum::<f32>();
+            line * (ink / width.max(1.0)).ceil().max(1.0)
+        };
+        let intrinsic = vec![MarkdownBlockIntrinsic::default(); blocks.len()];
+        let height = |box_width: f32, wrap: &mut WrapMeasure<'_>| {
+            let (left, right) =
+                preview::markdown_measure_box([0.0, 0.0, box_width, 4000.0], metrics);
+            lay_markdown_out(
+                &blocks,
+                &intrinsic,
+                right - left,
+                metrics,
+                &DocumentMath::default(),
+                wrap,
+            )
+            .last()
+            .map_or(0.0, |last| last.top + last.height)
+        };
+        let in_the_card = height(file_peek::body_width(scale), &mut wrap);
+        let in_a_pane = height(900.0, &mut wrap);
+        assert!(
+            in_the_card > in_a_pane,
+            "the two boxes are genuinely different measures: {in_the_card} vs {in_a_pane}",
+        );
+
+        // What each of them would ask the engine for, built exactly as
+        // `resolve_document_math` builds it.
+        let ink = bt_render::chrome_palette().files_row_text;
+        let asked = || {
+            document_formulas(&blocks, metrics)
+                .into_iter()
+                .map(|(source, mode, em_px)| PreviewMathKey {
+                    source,
+                    mode,
+                    em_milli_px: math_em_milli(em_px),
+                    foreground_rgb: ink,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut cache = PreviewMathCache::default();
+        let from_the_pane = asked();
+        assert_eq!(
+            from_the_pane.len(),
+            2,
+            "the masthead's formula and the display block, or this proves nothing",
+        );
+        for key in from_the_pane.clone() {
+            cache.mark_pending(key);
+        }
+        let missed = asked()
+            .into_iter()
+            .filter(|key| cache.get(key).is_none())
+            .collect::<Vec<_>>();
+        assert!(
+            missed.is_empty(),
+            "the card finds every one of them already in flight: {missed:?}",
+        );
+        // And the identity the GPU knows them by is the same identity, or the
+        // one cache above would still be two textures.
+        assert_eq!(
+            asked()
+                .iter()
+                .map(PreviewMathKey::texture_key)
+                .collect::<Vec<_>>(),
+            from_the_pane
+                .iter()
+                .map(PreviewMathKey::texture_key)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// PIN (same report) — **the card draws its formulas where it reserved them,
+    /// cuts the ones past its own bottom, and hands what is left to the glass.**
+    ///
+    /// The reported card showed its headings and left the first `$$` block blank:
+    /// the picture was in hand, the block was as tall as it, and the raster was
+    /// filed on the document — where nothing was looking. A card's document does
+    /// not ride the seats' lane (it has to be drawn *above* the card's own face),
+    /// so it rides [`bt_render::OverlayLayer::body`], and that lane picked up the
+    /// body's fills and the body's letters and stopped one channel short of its
+    /// pictures.
+    ///
+    /// The last assertion is that seam and nothing else. The two above it are the
+    /// card's own arithmetic: a formula is drawn at the top its block was placed
+    /// at, and one placed past the 264-pixel cap is not drawn at all — the same
+    /// `overflow: hidden` every other block on a card meets.
+    ///
+    /// MUTATIONS: draw every block whatever its top and the second assertion goes
+    /// red; hand the layer's icons over without
+    /// [`bt_render::OverlayLayer::faded_document_rasters`] and the last does,
+    /// which is the report exactly.
+    #[test]
+    fn a_glance_cards_formula_is_drawn_where_it_was_reserved_and_reaches_the_glass() {
+        let scale = 1.0;
+        let palette = bt_render::chrome_palette();
+        let metrics = seats::preview_markdown_metrics(scale);
+        // The card's own body box: the probe `file_peek_layer` lays the document
+        // out in before it knows how tall the card will be.
+        let card = [
+            0.0,
+            0.0,
+            file_peek::body_width(scale),
+            file_peek::body_max_height(scale),
+        ];
+        let blocks = [
+            preview::MarkdownBlock::Heading {
+                level: 1,
+                spans: vec![preview::Span::plain("LaTeX 渲染验收语料")],
+            },
+            preview::MarkdownBlock::Math {
+                source: "E = mc^2".to_owned(),
+            },
+            preview::MarkdownBlock::Math {
+                source: "a^2 + b^2 = c^2".to_owned(),
+            },
+        ];
+        let mut math = one_picture(
+            "E = mc^2",
+            MathMode::Display,
+            metrics.font_size,
+            (120, 30, 20.0),
+        );
+        math.insert(
+            &PreviewMathKey {
+                source: "a^2 + b^2 = c^2".to_owned(),
+                mode: MathMode::Display,
+                em_milli_px: math_em_milli(metrics.font_size),
+                foreground_rgb: [0, 0, 0],
+            },
+            PreviewMathPicture {
+                key: "test:below the cut".to_owned(),
+                rgba: Arc::from(vec![0_u8; 120 * 30 * 4].into_boxed_slice()),
+                width_px: 120,
+                height_px: 30,
+                baseline_px: 20.0,
+            },
+        );
+        // Placed by hand so the cut is the thing under test and not the stacking:
+        // the first formula well inside the card, the second below its bottom.
+        let layout = [
+            MarkdownBlockLayout::solid(24.0),
+            MarkdownBlockLayout {
+                width: 120.0,
+                top: 40.0,
+                ..MarkdownBlockLayout::solid(30.0)
+            },
+            MarkdownBlockLayout {
+                width: 120.0,
+                top: card[3] + 10.0,
+                ..MarkdownBlockLayout::solid(30.0)
+            },
+        ];
+        let rendered = build_preview_markdown_body(
+            card,
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (&blocks, &[], &layout),
+            &palette,
+            &math,
+        );
+        let drawn = &rendered.body.rasters;
+        assert_eq!(
+            drawn.len(),
+            1,
+            "the formula inside the card is drawn and the one past its bottom is not",
+        );
+        assert_eq!(
+            (drawn[0].rect[1], drawn[0].rect[3]),
+            (
+                card[1] + metrics.padding_y + 40.0,
+                card[1] + metrics.padding_y + 70.0
+            ),
+            "and it stands at the top its own block was placed at",
+        );
+        assert!(
+            inside(drawn[0].rect, card),
+            "inside the card's body: {:?} in {card:?}",
+            drawn[0].rect,
+        );
+
+        // The seam the report was about: the card hangs its document on an
+        // overlay layer, and the pictures in it have to come back out.
+        let layer = bt_render::OverlayLayer {
+            body: Some(rendered.body.clone()),
+            ..bt_render::OverlayLayer::default()
+        };
+        assert!(
+            layer.faded_icons().is_empty(),
+            "a document's pictures are not the layer's own marks — which is the \
+             whole of the report: the channel they do belong to has to exist",
+        );
+        assert_eq!(
+            layer
+                .faded_document_rasters()
+                .iter()
+                .map(|icon| icon.key.clone())
+                .collect::<Vec<_>>(),
+            drawn
+                .iter()
+                .map(|icon| icon.key.clone())
+                .collect::<Vec<_>>(),
+            "every picture the card's document holds reaches the layer's own channel",
         );
     }
 
