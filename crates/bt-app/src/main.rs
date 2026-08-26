@@ -23034,6 +23034,81 @@ fn popup_takes_the_key(popups: PopupsUp) -> Option<Popup> {
     popups.any()
 }
 
+/// **Which of the three surfaces is carrying the tab list right now.**
+///
+/// One list of tabs, three places it can be drawn — and every question about
+/// the `+`, its `˅` and the menu that `˅` raises has to start by answering
+/// which. [`tab_surface`] is the one author of that answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabSurface {
+    /// `.tabs` — the horizontal strip under the caption.
+    Strip,
+    /// `.rail` — the vertical sidebar down the left edge, expanded or parked as
+    /// an icon strip.
+    Rail,
+    /// Focus mode's column of tab cards (§7.1.6b′), which supersedes both.
+    FocusColumn,
+}
+
+/// **Which surface a popup grew out of** — §7.1.6e″'s one fact.
+///
+/// A popup is not a rectangle that happens to be floating over this window: it
+/// is an *extension of the control that raised it*, and there is exactly one
+/// place in this program where that difference is load-bearing — the icon
+/// rail's hover zone. The rail rolls out under a pointer and rolls back when
+/// the pointer leaves its box, so a menu the rail itself grew, standing beside
+/// the rail and therefore outside that box, used to read as "the hand has left"
+/// the instant the hand reached the menu: the panel retracted out from under
+/// the very list it had just opened (user report, 2026-08-25).
+///
+/// **Derived, never guessed from coordinates.** "Is this rectangle near the
+/// rail" is the question that produced the bug in the first place — it is what
+/// `rail_zone_wants_open` was already having to special-case for the flyout a
+/// rail row hangs out (G102). What closes it generally is the popup saying
+/// where it came from, which is a fact this window already holds for every one
+/// of them: [`Popup::Profile`] hangs off whichever surface carries the `+`
+/// ([`tab_surface`]), and the other seven are raised inside the stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PopupOwner {
+    /// The tab list's own surface, whichever of the three it currently is.
+    Tabs(TabSurface),
+    /// **The stage** — a files column's head or one of its rows, a pane head, a
+    /// preview's title, a commit graph's toolbar, a terminal's own body.
+    ///
+    /// Seat-less on purpose. The owner is consulted by surfaces that open and
+    /// close *under a pointer*, and nothing standing in the stage does that —
+    /// the panes are where they are put. The day one does, this is the one
+    /// place that has to learn a seat, and the exhaustive match below is what
+    /// will make it say so.
+    Stage,
+}
+
+/// **Which surface each popup is an extension of**, given the surface the tab
+/// list is currently drawn on.
+///
+/// Exhaustive on [`Popup`] for [`PopupsUp::holds`]'s reason: a ninth popup does
+/// not compile until it has said where it grows from.
+fn popup_owner(popup: Popup, tabs: TabSurface) -> PopupOwner {
+    match popup {
+        // The `+`'s own `˅`, wherever the `+` is — the strip's, the rail's, or
+        // the focus column's. `profile_menu_anchor` hangs the box off that same
+        // answer, so the menu and its owner can never name two different
+        // buttons.
+        Popup::Profile => PopupOwner::Tabs(tabs),
+        // Everything else is raised by a press somewhere in the panes: a files
+        // column's root button and its rows, a pane head's `⌄`, the commit
+        // graph's branch filter, a preview head's switcher, a repository row,
+        // and a terminal's own right press.
+        Popup::Root
+        | Popup::File
+        | Popup::Pane
+        | Popup::GraphFilter
+        | Popup::Preview
+        | Popup::GitMenu
+        | Popup::TermMenu => PopupOwner::Stage,
+    }
+}
+
 /// **Every panel this window raises by *hovering*** — [`Popup`]'s twin, one
 /// register down, and the same sentence: at most one of these is on the glass at
 /// a time (user report, 2026-08-19).
@@ -33366,6 +33441,22 @@ impl Runtime<'_> {
                 self.window.preview_menu.close();
             }
         }
+        // **And the rail is asked again, because its answer just changed under a
+        // pointer that did not move** (§7.1.6e″ ②). A popup the sidebar grew
+        // holds the panel out for as long as it is up; the frame it goes away in
+        // is therefore the frame the panel has to be re-asked about, and nothing
+        // else will ask — a hand that clicked into a pane to dismiss the list is
+        // already where it is going to be, and the panel would stand out over
+        // the terminal until it happened to move again. The same door
+        // `drive_rail_zone` is already asked at after a float opens and after a
+        // drag ends, for word-for-word the same reason.
+        //
+        // Only for a popup that was actually the rail's: `aim_rail_at` would
+        // no-op for the rest, and asking anyway would say this function knows
+        // something about the stage's menus that it does not.
+        if popup_owner(popup, self.tab_surface_now()) == PopupOwner::Tabs(TabSurface::Rail) {
+            self.drive_rail_zone(self.window.pointer_position);
+        }
     }
 
     /// **Every popup, with nothing kept** (user ruling 2026-08-25, B10).
@@ -33436,6 +33527,49 @@ impl Runtime<'_> {
             preview: self.preview_menu_seat().is_some(),
             git_menu: self.window.git_menu.is_some(),
             term_menu: self.window.term_menu.is_some(),
+        }
+    }
+
+    /// **Which surface this window is drawing its tab list on right now** —
+    /// [`tab_surface`] asked of this window's posture.
+    ///
+    /// Of the *posture* and not of the stored preference, for
+    /// [`Self::rail_posture`]'s own reason: a window in focus mode carries the
+    /// `+` on the card column whatever `Tab layout` says.
+    fn tab_surface_now(&self) -> TabSurface {
+        let posture = self.rail_posture();
+        tab_surface(posture.draws_focus_rail(), posture.layout)
+    }
+
+    /// **Whether one of the popups now up is one the sidebar grew** —
+    /// §7.1.6e″'s rule ①, as the question the rail's zone asks.
+    ///
+    /// A popup owned by the rail is part of the rail, so the pointer being in it
+    /// is the pointer being in the rail; and because at most one popup is ever
+    /// up (E61) the rail stays out for exactly as long as that popup does. That
+    /// covers the corridor between the panel and the menu without a grace of its
+    /// own — the hand crossing pixels that belong to neither is crossing them
+    /// while the menu is still up, which is the same answer at both ends.
+    fn rail_grew_a_popup(&self) -> bool {
+        let up = self.popups_up();
+        let tabs = self.tab_surface_now();
+        Popup::ALL.into_iter().any(|popup| {
+            up.holds(popup) && popup_owner(popup, tabs) == PopupOwner::Tabs(TabSurface::Rail)
+        })
+    }
+
+    /// **Put away every popup the sidebar grew** — §7.1.6e″'s rule ③.
+    ///
+    /// [`Self::close_popup`]'s own loop, filtered by owner: what leaves with the
+    /// panel is what the panel raised, and nothing else. Nothing is repainted
+    /// here, for [`Self::close_popups_except`]'s reason — the one caller is
+    /// mid-way through a posture change that repaints at its end.
+    fn close_rail_popups(&mut self) {
+        let tabs = self.tab_surface_now();
+        for popup in Popup::ALL {
+            if popup_owner(popup, tabs) == PopupOwner::Tabs(TabSurface::Rail) {
+                self.close_popup(popup);
+            }
         }
     }
 
@@ -33553,15 +33687,22 @@ impl Runtime<'_> {
     /// chevron's and not the menu's own goes through here first, exactly as the
     /// mock-up's document-level `click` handler does.
     fn close_profile_menu(&mut self) -> Result<bool> {
-        if !self.window.profile_menu.close() {
+        if !self.window.profile_menu.is_open() {
             return Ok(false);
         }
+        // **Through [`Self::close_popup`] rather than past it** (§7.1.6e″). This
+        // used to shut the picker itself and turn the arrow itself, which is a
+        // second spelling of the one arm E61 exists to keep single — and the day
+        // that arm grew a third thing to do (re-asking the rail's zone, because
+        // the panel this list was holding out may now have to park) was the day
+        // the copy started being wrong. The arrow still turns: that is
+        // `close_popup`'s own `Profile` arm, unchanged.
+        self.close_popup(Popup::Profile);
         // The gate goes with it. A grace still running against a menu that has
         // already gone would fire a second close on an empty state — harmless
         // today, and exactly the kind of live clock that stops being harmless
         // when a third chevron is added.
         self.window.chevrons.profile.clear();
-        self.start_chevron_turn();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -66809,11 +66950,16 @@ impl Runtime<'_> {
         // yes/no: only a peek hanging off a rail row is the rail's business, and
         // that is a question about identity that no boolean can carry. See
         // [`rail_zone_wants_open`].
+        //
+        // The popup arrives as a yes/no for the opposite reason: which popup it
+        // is has already been decided by [`Self::rail_grew_a_popup`], against a
+        // fact — [`popup_owner`] — rather than against a rectangle.
         self.aim_rail_at(rail_zone_wants_open(
             position,
             width,
             top,
             self.window.float.peek().and_then(|win| win.origin),
+            self.rail_grew_a_popup(),
         ));
     }
 
@@ -66874,6 +67020,17 @@ impl Runtime<'_> {
     /// session file following it.
     fn set_rail_state(&mut self, state: seats::RailState) -> Result<()> {
         let moved = (self.window.rail.layout, self.window.rail.mode) != (state.layout, state.mode);
+        // **The panel takes its own popups with it** (§7.1.6e″ ③). A menu the
+        // rail grew is part of the rail, so it cannot be left standing over a
+        // window whose rail has just folded away or moved house — see
+        // [`rail_change_strands_its_popups`] for which changes those are.
+        //
+        // Ahead of the assignment below, and that is the point of the order:
+        // ownership is read off the posture the popup was raised in, not the one
+        // that is about to replace it.
+        if rail_change_strands_its_popups(self.window.rail, state) {
+            self.close_rail_popups();
+        }
         // P168 — the fold travels rather than cutting. `.window.rail-collapsed`
         // sets `.rail`'s width to zero and `.rail` carries `width .18s ease`, so
         // the panel is seen to leave instead of blinking out.
@@ -76709,22 +76866,45 @@ fn profile_menu_anchor(
     // that was somewhere else. What is left here is the half only this function
     // wants: *which box*.
     let side = state.profile_menu_side()?;
-    // §7.1.6b′: the focus column keeps the panel's `+` and its `˅`, and
-    // `hit_focus_rail` answers `NewTabMenu` for it — so in focus mode the button
-    // that opened this menu is not the one either arm below describes.
-    if let Some(column) = focus_column {
-        return Some((column.new_tab_menu, side));
+    // **And neither is the precedence** (§7.1.6e″, 2026-08-25). *Which* of the
+    // three surfaces holds the `+` is [`tab_surface`]'s one sentence, for the
+    // reason the side is `profile_menu_side`'s: [`popup_owner`] needs that same
+    // answer without needing a rectangle, and two spellings of one precedence is
+    // how the menu and the panel it belongs to came to disagree about which
+    // button they were talking about. What is left here is the half only this
+    // function wants: *which box*.
+    let anchor = match tab_surface(focus_column.is_some(), state.layout) {
+        // §7.1.6b′: the focus column keeps the panel's `+` and its `˅`, and
+        // `hit_focus_rail` answers `NewTabMenu` for it — so in focus mode the
+        // button that opened this menu is not the one either arm below
+        // describes.
+        TabSurface::FocusColumn => focus_column.map(|column| column.new_tab_menu),
+        // Q181: a parked rail has no chevron — 28px of it would leave the `+`
+        // nothing — so the `+` is what the menu hangs off there. The two share a
+        // right edge and a top, so the menu does not jump when the panel slides
+        // open and the chevron reappears.
+        TabSurface::Rail => rail.map(|rail| rail.new_tab_menu.unwrap_or(rail.new_tab)),
+        TabSurface::Strip => Some(strip_new_tab_menu),
+    }?;
+    Some((anchor, side))
+}
+
+/// **Which surface this window is drawing its tab list on** — §7.1.6e″'s one
+/// author, and the precedence [`profile_menu_anchor`] walks for the `+`'s box.
+///
+/// `focus_column` is "the card column is on screen", which is focus mode and
+/// nothing else: [`seats::focus_rail_geometry`] answers `Some` for every window
+/// wearing [`seats::RailState::focus`], because the column is a fixed width and
+/// has no fold of its own. It is taken as a bare fact rather than re-derived
+/// here so that the anchor and the owner ask the *same* question of the *same*
+/// frame.
+fn tab_surface(focus_column: bool, layout: seats::TabLayoutMode) -> TabSurface {
+    if focus_column {
+        return TabSurface::FocusColumn;
     }
-    match state.layout {
-        seats::TabLayoutMode::Vertical => {
-            // Q181: a parked rail has no chevron — 28px of it would leave the
-            // `+` nothing — so the `+` is what the menu hangs off there. The two
-            // share a right edge and a top, so the menu does not jump when the
-            // panel slides open and the chevron reappears.
-            let rail = rail?;
-            Some((rail.new_tab_menu.unwrap_or(rail.new_tab), side))
-        }
-        seats::TabLayoutMode::Horizontal => Some((strip_new_tab_menu, side)),
+    match layout {
+        seats::TabLayoutMode::Vertical => TabSurface::Rail,
+        seats::TabLayoutMode::Horizontal => TabSurface::Strip,
     }
 }
 
@@ -78349,9 +78529,34 @@ fn rail_zone_wants_open(
     rail_right: f64,
     rail_top: f64,
     peek_origin: Option<float::FloatTrigger>,
+    popup_from_the_rail: bool,
 ) -> bool {
     let inside = position.is_some_and(|position| position.y >= rail_top && position.x < rail_right);
-    inside || matches!(peek_origin, Some(float::FloatTrigger::Tab(_)))
+    inside || matches!(peek_origin, Some(float::FloatTrigger::Tab(_))) || popup_from_the_rail
+}
+
+/// **Whether this change of posture leaves the rail's own popups hanging.**
+///
+/// §7.1.6e″'s third clause — the one that keeps rule ① honest in the other
+/// direction. A popup the rail grew holds the panel out for as long as it is up,
+/// so the *hover* zone can no longer retract out from under one; what can still
+/// take the panel away underneath it is a change of posture, which does not go
+/// past the zone at all:
+///
+/// * **The fold** (`.panel-toggle`, `Ctrl+B`). The rail leaves the screen
+///   entirely and `rail_geometry` stops answering, so `profile_menu_anchor` has
+///   no box — a menu that is open, draws nothing, and swallows the keyboard.
+///   Only the folding direction: un-folding strands nothing.
+/// * **The tab list moving house** — `Tab layout` from vertical to horizontal,
+///   or `Sidebar` from expanded to icons. The first hands the `+` to the strip
+///   and the second rebuilds the rail parked at the top of its list
+///   (`set_rail_state`'s "born parked"), and a menu that was the sidebar's is
+///   then hanging off a button in another surface or another place.
+///
+/// Focus mode is deliberately not here: the card column keeps the `+` and its
+/// `˅` (§7.1.6b′), so the menu changes owner rather than losing one.
+fn rail_change_strands_its_popups(from: seats::RailState, to: seats::RailState) -> bool {
+    (from.layout, from.mode) != (to.layout, to.mode) || (to.collapsed && !from.collapsed)
 }
 
 /// The rail's own level of the overlay stack — [`seats::WindowChrome::rail`]
@@ -90395,20 +90600,20 @@ mod tests {
         }));
 
         assert!(
-            !rail_zone_wants_open(on_pane_head, rail_right, rail_top, None),
+            !rail_zone_wants_open(on_pane_head, rail_right, rail_top, None, false),
             "a pointer out in the panes with nothing open leaves the rail parked"
         );
         assert!(
-            !rail_zone_wants_open(on_pane_head, rail_right, rail_top, pane_peek),
+            !rail_zone_wants_open(on_pane_head, rail_right, rail_top, pane_peek, false),
             "and a flyout it summoned from the pane's own head is none of the \
              rail's business — the rail must stay parked (2026-08-15)"
         );
         assert!(
-            rail_zone_wants_open(on_the_rail, rail_right, rail_top, None),
+            rail_zone_wants_open(on_the_rail, rail_right, rail_top, None, false),
             "the rail's own rectangle is still the whole of the ordinary trigger"
         );
         assert!(
-            rail_zone_wants_open(on_pane_head, rail_right, rail_top, tab_peek),
+            rail_zone_wants_open(on_pane_head, rail_right, rail_top, tab_peek, false),
             "G102 survives: a peek hanging off a rail row overhangs the rail, so \
              the pointer on it must not read as having left the rail"
         );
@@ -90421,11 +90626,220 @@ mod tests {
             in_the_caption,
             rail_right,
             rail_top,
-            None
+            None,
+            false
         ));
         // And a pointer that has left the window entirely.
-        assert!(!rail_zone_wants_open(None, rail_right, rail_top, pane_peek));
-        assert!(rail_zone_wants_open(None, rail_right, rail_top, tab_peek));
+        assert!(!rail_zone_wants_open(
+            None, rail_right, rail_top, pane_peek, false
+        ));
+        assert!(rail_zone_wants_open(
+            None, rail_right, rail_top, tab_peek, false
+        ));
+    }
+
+    /// **Red gate (user report, 2026-08-25): the menu the sidebar opened is part
+    /// of the sidebar.**
+    ///
+    /// `Sidebar: Icons`, the panel rolled out under the hand, `New tab`'s `˅`
+    /// pressed — and the moment the pointer reached the profile list the rail
+    /// retracted out from under it. The zone knew one thing about the pointer,
+    /// "is it in the rail's box", and the list it had just raised stands
+    /// *beside* that box ([`profiles::MenuSide::Beside`]), so reaching for it
+    /// read as leaving.
+    ///
+    /// All four rows are asserted together because three of them pass while the
+    /// fourth is broken, exactly as in
+    /// `only_a_peek_hanging_off_a_rail_row_holds_the_icon_rail_open`:
+    /// holding the panel out for *any* popup would make every pane-head menu a
+    /// second, invisible rail trigger, which is the 2026-08-15 report all over
+    /// again — so the flag is the owner's answer and not "a menu is up".
+    ///
+    /// Mutation: drop the `popup_from_the_rail` arm of [`rail_zone_wants_open`]
+    /// and the second row goes red, which is the reported bug.
+    #[test]
+    fn a_menu_the_rail_opened_holds_the_icon_rail_open() {
+        const SCALE: f64 = 1.5;
+        let rail_right = f64::from(bt_render::RAIL_PARK_LOGICAL_PX) * SCALE;
+        let rail_top = f64::from(bt_render::WINDOW_TITLE_BAR_LOGICAL_PX) * SCALE;
+
+        // The profile list hangs off the `˅` and opens to the right of the
+        // panel, so every pixel of it is outside the box the zone measures.
+        let in_the_menu = Some(PhysicalPosition::new(rail_right + 90.0, rail_top + 60.0));
+        let on_the_rail = Some(PhysicalPosition::new(rail_right - 1.0, rail_top + 120.0));
+
+        // Whether the rail grew this popup, asked the way the window asks it:
+        // of `popup_owner`, under a vertical layout out of focus mode.
+        let grown_by_the_rail = |popup: Popup| {
+            popup_owner(popup, tab_surface(false, seats::TabLayoutMode::Vertical))
+                == PopupOwner::Tabs(TabSurface::Rail)
+        };
+
+        assert!(
+            !rail_zone_wants_open(in_the_menu, rail_right, rail_top, None, false),
+            "with nothing open, a pointer out past the panel's edge is a pointer \
+             that has left it"
+        );
+        assert!(
+            rail_zone_wants_open(
+                in_the_menu,
+                rail_right,
+                rail_top,
+                None,
+                grown_by_the_rail(Popup::Profile)
+            ),
+            "but the list the `˅` raised is the rail's own extension, so the hand \
+             on it has not left the rail (user report 2026-08-25)"
+        );
+        assert!(
+            !rail_zone_wants_open(
+                in_the_menu,
+                rail_right,
+                rail_top,
+                None,
+                grown_by_the_rail(Popup::Pane)
+            ),
+            "while a menu the *stage* raised holds nothing open — the owner tells \
+             the two apart, not a rectangle (2026-08-15's report, kept)"
+        );
+        assert!(
+            rail_zone_wants_open(on_the_rail, rail_right, rail_top, None, false),
+            "and the plain rectangle still answers on its own"
+        );
+
+        // The corridor: while the menu is up the panel stays out wherever the
+        // hand is — the pixels between panel and list that belong to neither,
+        // and the window's outside. That is rule ②, and the grace is the popup's
+        // own life rather than a second clock.
+        assert!(rail_zone_wants_open(
+            None,
+            rail_right,
+            rail_top,
+            None,
+            grown_by_the_rail(Popup::Profile)
+        ));
+    }
+
+    /// **PIN — every popup says which surface it grew out of, and only the `˅`
+    /// can name the sidebar.**
+    ///
+    /// The other seven are raised by a press somewhere in the panes. If any of
+    /// them ever answered [`PopupOwner::Tabs`] the rail would be held open by a
+    /// menu standing in the middle of the stage — the 2026-08-15 flyout report
+    /// with a different panel in it.
+    ///
+    /// Mutation: move any arm of [`popup_owner`] onto the `Profile` line and the
+    /// loop goes red at that popup on all three surfaces.
+    #[test]
+    fn only_the_new_tab_chevrons_menu_belongs_to_a_tab_surface() {
+        for surface in [TabSurface::Strip, TabSurface::Rail, TabSurface::FocusColumn] {
+            assert_eq!(
+                popup_owner(Popup::Profile, surface),
+                PopupOwner::Tabs(surface),
+                "the `˅`'s list hangs off whichever surface carries the `+`"
+            );
+            for popup in Popup::ALL.into_iter().filter(|p| *p != Popup::Profile) {
+                assert_eq!(
+                    popup_owner(popup, surface),
+                    PopupOwner::Stage,
+                    "{popup:?} is raised inside the stage and belongs to no tab \
+                     surface"
+                );
+            }
+        }
+    }
+
+    /// **PIN — which surface the `+` stands on, and the one place that decides.**
+    ///
+    /// [`profile_menu_anchor`] hangs the menu's box off this answer and
+    /// [`popup_owner`] hangs its ownership off it; the day the two disagree is
+    /// the day the sidebar retracts out from under a menu it is still drawing.
+    #[test]
+    fn the_focus_column_supersedes_both_ordinary_tab_surfaces() {
+        for layout in [
+            seats::TabLayoutMode::Horizontal,
+            seats::TabLayoutMode::Vertical,
+        ] {
+            assert_eq!(
+                tab_surface(true, layout),
+                TabSurface::FocusColumn,
+                "{layout:?}: focus mode carries the `+` in either tab layout"
+            );
+        }
+        assert_eq!(
+            tab_surface(false, seats::TabLayoutMode::Vertical),
+            TabSurface::Rail
+        );
+        assert_eq!(
+            tab_surface(false, seats::TabLayoutMode::Horizontal),
+            TabSurface::Strip
+        );
+    }
+
+    /// **Red gate (§7.1.6e″ ③): a sidebar that goes away takes its menus with
+    /// it.**
+    ///
+    /// The other half of the fix. Rule ① means the hover zone can no longer
+    /// retract out from under a menu the rail raised — but the fold and the two
+    /// posture rows do not go past the zone at all, so without this a
+    /// `Ctrl+B` under an open profile list leaves a menu that draws nothing,
+    /// swallows the keyboard and cannot be clicked away.
+    ///
+    /// Mutation: drop the `collapsed` clause and the fold row goes red; drop the
+    /// `(layout, mode)` clause and both posture rows do.
+    #[test]
+    fn a_rail_that_folds_away_or_moves_house_strands_no_menu() {
+        let icons = seats::RailState {
+            layout: seats::TabLayoutMode::Vertical,
+            mode: seats::RailMode::Icons,
+            ..seats::RailState::default()
+        };
+
+        assert!(
+            !rail_change_strands_its_popups(icons, icons),
+            "a posture that did not move takes nothing down"
+        );
+        assert!(
+            rail_change_strands_its_popups(
+                icons,
+                seats::RailState {
+                    collapsed: true,
+                    ..icons
+                }
+            ),
+            "the fold takes the whole panel off the screen, so the menu hanging \
+             off its `˅` has no button left"
+        );
+        assert!(
+            rail_change_strands_its_popups(
+                icons,
+                seats::RailState {
+                    mode: seats::RailMode::Expanded,
+                    ..icons
+                }
+            ),
+            "and a rail rebuilt in the other mode is born parked at the top of \
+             its list — the button has moved"
+        );
+        assert!(
+            rail_change_strands_its_popups(
+                icons,
+                seats::RailState {
+                    layout: seats::TabLayoutMode::Horizontal,
+                    ..icons
+                }
+            ),
+            "the tab list moving to the strip hands the `+` to another surface"
+        );
+
+        let folded = seats::RailState {
+            collapsed: true,
+            ..icons
+        };
+        assert!(
+            !rail_change_strands_its_popups(folded, icons),
+            "un-folding strands nothing: the panel is arriving, not leaving"
+        );
     }
 
     /// **PIN (user report, 2026-08-23): a pane being carried to another tab has
