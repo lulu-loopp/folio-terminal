@@ -1771,11 +1771,16 @@ pub enum Text {
 
     // ── the Agents page (user ruling 2026-08-25) ───────────────────────────
     //
-    // One contiguous block at the end, per this table's standing rule. **Seven
+    // One contiguous block at the end, per this table's standing rule. **Fourteen
     // entries**: the page's own two words — the heading and the word in the rail,
     // which are two literals rather than one transformed, per this file's own
-    // ruling on case — and the codex installer's row, its sentence and its three
-    // cards.
+    // ruling on case — the codex installer's row, its sentence and its three
+    // cards, and the copilot installer's row, its **three** sentences and its
+    // three cards. Three, because that row's line is the one on this page that
+    // changes with the machine: a copilot too old to mean what the hook would be
+    // read as, and a copilot whose owner has switched every hook file off, are
+    // two different things to have to fix and neither is what the plain sentence
+    // describes.
     /// `AGENTS` — the page's heading.
     CategoryAgents,
     /// `Agents` — the word in the rail.
@@ -1794,6 +1799,25 @@ pub enum Text {
     /// The refusal's own half of the sentence; the reason follows it, in the
     /// installer's words.
     CodexNotifyFailedToast,
+    /// `Agents ▸ Copilot CLI hooks` — the row.
+    RowCopilotHooks,
+    /// Its sentence on a machine that can carry the signal, or on one that has
+    /// not been asked yet. `DescClaudeHooks`'s two facts and no third, because
+    /// what this row installs reaches the same lane that one does.
+    DescCopilotHooks,
+    /// Its sentence on a copilot older than `1.0.26`. Says what the machine is
+    /// rather than what the switch would do, because on such a machine the
+    /// switch does not do it: before that version the permission-prompt
+    /// notification fired for tool calls nobody was ever asked about.
+    DescCopilotHooksTooOld,
+    /// Its sentence on a machine whose own settings switch every hook file off.
+    /// The one failure that looks exactly like never having installed, so the
+    /// row says it rather than leaving somebody to watch nothing happen.
+    DescCopilotHooksDisabled,
+    CopilotHooksAddedToast,
+    CopilotHooksRemovedToast,
+    /// See [`Self::CodexNotifyFailedToast`].
+    CopilotHooksFailedToast,
 }
 
 impl Text {
@@ -3201,6 +3225,40 @@ impl Text {
                 "codex's configuration was not changed",
                 "codex 的配置没有被改动",
             ),
+            // 「Copilot CLI」 stays in Latin on both sides, as 「Claude Code」 does
+            // two rows up and for its reason: it is the program's own name, and
+            // the row beside it already spells the same kind of thing that way.
+            Self::RowCopilotHooks => pick(lang, "Copilot CLI hooks", "Copilot CLI 钩子"),
+            Self::DescCopilotHooks => pick(
+                lang,
+                "Adds a hook file to your own ~/.copilot/hooks/ so copilot CLI tells this window when it is waiting for you. Nothing is written into a folder or a repository",
+                "向你自己的 ~/.copilot/hooks/ 写入一个 hook 文件,copilot CLI 在等你回答时会告诉这扇窗。不往任何文件夹或仓库里写",
+            ),
+            Self::DescCopilotHooksTooOld => pick(
+                lang,
+                "This machine's copilot CLI is older than 1.0.26, which is the first version that reports a permission prompt only when one was shown to you",
+                "这台机器上的 copilot CLI 早于 1.0.26,而 1.0.26 才是只在真的问了你时才报权限提示的第一个版本",
+            ),
+            Self::DescCopilotHooksDisabled => pick(
+                lang,
+                "Hooks are switched off in your own ~/.copilot/settings.json, so a hook file installed here would not run",
+                "你自己的 ~/.copilot/settings.json 里关掉了 hooks,装在这里的 hook 文件不会运行",
+            ),
+            Self::CopilotHooksAddedToast => pick(
+                lang,
+                "Added to ~/.copilot/hooks/folio.json. Takes effect in a new copilot session.",
+                "已加进 ~/.copilot/hooks/folio.json。新开的 copilot 会话生效。",
+            ),
+            Self::CopilotHooksRemovedToast => pick(
+                lang,
+                "Removed ~/.copilot/hooks/folio.json",
+                "已删除 ~/.copilot/hooks/folio.json",
+            ),
+            Self::CopilotHooksFailedToast => pick(
+                lang,
+                "copilot's hooks were not changed",
+                "copilot 的 hooks 没有被改动",
+            ),
             Self::RowSearchEngine => pick(lang, "Search engine", "搜索引擎"),
             // Names the field rather than the feature, because that is where a
             // reader meets it: they typed a word into the place an address goes
@@ -3226,7 +3284,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 495] = [
+    pub const ALL: [Self; 502] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3722,6 +3780,13 @@ impl Text {
         Self::CodexNotifyAddedToast,
         Self::CodexNotifyRemovedToast,
         Self::CodexNotifyFailedToast,
+        Self::RowCopilotHooks,
+        Self::DescCopilotHooks,
+        Self::DescCopilotHooksTooOld,
+        Self::DescCopilotHooksDisabled,
+        Self::CopilotHooksAddedToast,
+        Self::CopilotHooksRemovedToast,
+        Self::CopilotHooksFailedToast,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

@@ -2446,6 +2446,24 @@ pub enum SettingsRow {
     /// turn under the `Turn finished` switch three rows up, and mints nothing.
     /// `attention_codex`'s header has the rest.
     CodexNotify,
+    /// **Whether copilot CLI tells this window when it is waiting for you**
+    /// (`docs/plans/attention/evidence-copilot-cli-2026-08-26.md`).
+    ///
+    /// [`Self::ClaudeHooks`]'s row over a third upstream, and it reaches the
+    /// same lane that one does rather than [`Self::CodexNotify`]'s: what it
+    /// installs raises a wait on a pane, because copilot's `notification` hook
+    /// says *the agent requests permission to execute a tool* and says it
+    /// without blocking the session.
+    ///
+    /// **Its sentence is the one row here that changes with the machine**, and
+    /// that is the difference from the two above it. A copilot older than
+    /// `1.0.26` fired `permission_prompt` for tool calls nobody was ever asked
+    /// about, so on such a machine the row says what is needed instead of
+    /// offering to install something that would misreport; and a machine whose
+    /// own settings switch every hook file off can be installed into perfectly
+    /// and stay silent, which is the one failure that looks exactly like never
+    /// having installed. Both answers come from `attention_copilot::readiness`.
+    CopilotHooks,
 
     // ── the profile editor's own rows (§7.1.6c-6b) ─────────────────────────
     //
@@ -2553,9 +2571,10 @@ impl SettingsRow {
             // governs a capability of the terminal that anything holding a tty
             // can reach, and only its most visible caller happens to be an agent.
             // See [`SettingsCategory::Agents`].
-            Self::ClaudeHooks | Self::CodexNotify | Self::TurnEndNotifications => {
-                SettingsCategory::Agents
-            }
+            Self::ClaudeHooks
+            | Self::CodexNotify
+            | Self::CopilotHooks
+            | Self::TurnEndNotifications => SettingsCategory::Agents,
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2570), beside that page's own Maximum height row.
             Self::Formulas | Self::InlineFormulas | Self::Tables | Self::BlockMaxHeight => {
@@ -2629,6 +2648,7 @@ impl SettingsRow {
             Self::PowerShellOffer => Text::RowPowerShellOffer.text(),
             Self::ClaudeHooks => Text::RowClaudeHooks.text(),
             Self::CodexNotify => Text::RowCodexNotify.text(),
+            Self::CopilotHooks => Text::RowCopilotHooks.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
             Self::KeyHints => Text::RowKeyHints.text(),
             Self::ContextMenu => Text::RowContextMenu.text(),
@@ -2755,6 +2775,17 @@ impl SettingsRow {
             // carries — because a reader who installs it expecting a dot on a
             // waiting pane has been told something that is not true.
             Self::CodexNotify => Text::DescCodexNotify.text(),
+            // **Not a constant, and it is the row above's two facts plus a third
+            // that is only sometimes true**: a copilot older than `1.0.26`
+            // reported a permission prompt for tool calls nobody was ever asked
+            // about, and a machine whose own settings switch every hook file off
+            // takes this install and stays silent. Both are things the reader has
+            // to fix before the switch means anything, so the sentence says which
+            // one they are looking at instead of describing a switch that would
+            // not work. See `attention_copilot::row_description`.
+            Self::CopilotHooks => {
+                crate::attention_copilot::row_description(values.copilot_readiness)
+            }
             // Says what Off *does* rather than what it hides, because what it
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
@@ -2991,6 +3022,7 @@ impl SettingsRow {
             // switch behind a disclosure is a switch they will not find.
             | Self::ClaudeHooks
             | Self::CodexNotify
+            | Self::CopilotHooks
             | Self::Scrollback
             | Self::LineWrapping
             | Self::Notifications
@@ -3092,6 +3124,7 @@ impl SettingsRow {
             | Self::PowerShellOffer
             | Self::ClaudeHooks
             | Self::CodexNotify
+            | Self::CopilotHooks
             | Self::LineWrapping => FORMULA_OPTIONS.len(),
             Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.len(),
             Self::Scrollback => SCROLLBACK_OPTIONS.len(),
@@ -3160,6 +3193,7 @@ impl SettingsRow {
             | Self::PowerShellOffer
             | Self::ClaudeHooks
             | Self::CodexNotify
+            | Self::CopilotHooks
             | Self::LineWrapping => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
             // The one item that is a word goes through the i18n table and the
             // three that are quantities do not — the table's own header lists
@@ -3485,6 +3519,10 @@ impl SettingsRow {
             Self::CodexNotify => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.codex_notify),
+            // And over `~/.copilot/hooks/folio.json` — see `attention_copilot`.
+            Self::CopilotHooks => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.copilot_hooks),
             // The *state of the machine*, like `PsReadLine` below and for the
             // same reason: what is ticked is whether Explorer's menu carries the
             // verb, which is a question only the registry can answer.
@@ -3719,18 +3757,20 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // ── Agents (user ruling 2026-08-25) ──
     //
     // **What the program in the pane can be told to say, then what this window
-    // does with it.** The two installers first, in the order the two upstreams
-    // arrived and each carrying the same kind of answer — a fact about a file in
-    // the reader's own home — and under them the one row here that is a setting
-    // of Folio's, because it governs what happens to what those two report.
+    // does with it.** The installers first, in the order their upstreams arrived
+    // and each carrying the same kind of answer — a fact about a file in the
+    // reader's own home — and under them the one row here that is a setting of
+    // Folio's, because it governs what happens to what those report.
     //
     // `Notifications` is deliberately **not** in this group; see
     // [`SettingsCategory::Agents`].
     rows.push(SettingsRow::ClaudeHooks);
     rows.push(SettingsRow::CodexNotify);
-    // **Last**, because it is the answer to a question the two rows above raise:
-    // they arrange for a turn's end to be reported at all, and this decides
-    // whether a reported one is allowed off this window and onto the desktop.
+    rows.push(SettingsRow::CopilotHooks);
+    // **Last**, because it is the answer to a question the three rows above
+    // raise: they arrange for a turn's end to be reported at all, and this
+    // decides whether a reported one is allowed off this window and onto the
+    // desktop.
     rows.push(SettingsRow::TurnEndNotifications);
     rows
 }
@@ -3938,6 +3978,18 @@ impl SettingsContent<'_> {
             .any(|row| *row == SettingsRow::PsReadLine && row.category() == category)
     }
 
+    /// **Whether showing this page has to ask the machine which copilot it has.**
+    ///
+    /// [`Self::probes_psreadline`]'s twin, derived from the page's own rows for that one's reason:
+    /// the row is what needs the answer, so moving it moves the trigger and a build that has lost
+    /// the row stops starting a node process to answer a question nobody prints.
+    #[must_use]
+    pub fn probes_copilot(&self, category: SettingsCategory) -> bool {
+        self.rows
+            .iter()
+            .any(|row| *row == SettingsRow::CopilotHooks && row.category() == category)
+    }
+
     /// The category a dialog opened now would land on: the first the rail holds.
     ///
     /// Asked rather than assumed, because `General` is only the answer while
@@ -4031,6 +4083,17 @@ pub struct SettingsValues {
     ///
     /// The field above's answer over `~/.codex/config.toml`, and read off that file for its reason.
     pub codex_notify: bool,
+    /// Whether the user's own `~/.copilot/hooks/` holds Folio's hook file.
+    ///
+    /// The field above's answer over a third upstream, read off that directory for its reason.
+    pub copilot_hooks: bool,
+    /// **What copilot on this machine can be told**, which is the second half of the row above and
+    /// not a restatement of the first: a machine can hold the file and still say nothing.
+    ///
+    /// Handed in rather than asked for here, because one half of the answer costs a process — see
+    /// `attention_copilot::begin_probe`, and `SettingsRow::description`'s own note on why a
+    /// sentence that varies with the machine may still only ever be one of a few literals.
+    pub copilot_readiness: crate::attention_copilot::Readiness,
     /// Which way a split with no direction of its own cuts.
     pub split_direction: SplitDirectionV1,
     /// Where a web preview's address field sends a non-address.
@@ -4178,6 +4241,8 @@ impl SettingsValues {
             context_menu: false,
             claude_hooks: false,
             codex_notify: false,
+            copilot_hooks: false,
+            copilot_readiness: crate::attention_copilot::Readiness::Unknown,
             split_direction: SplitDirectionV1::Auto,
             search_engine: SearchEngineV1::DuckDuckGo,
             minimum_contrast: MinimumContrastV1::Off,
@@ -6970,6 +7035,19 @@ pub fn claude_hooks_requested(target: SettingsTarget) -> Option<bool> {
 pub fn codex_notify_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::CodexNotify, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Whether copilot CLI's hook file is installed, as a press on this row's picker.
+///
+/// The two rows above's door over a third upstream and a third file — see `attention_copilot`.
+#[must_use]
+pub fn copilot_hooks_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::CopilotHooks, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -17171,9 +17249,10 @@ mod tests {
                 vec![
                     SettingsRow::ClaudeHooks,
                     SettingsRow::CodexNotify,
+                    SettingsRow::CopilotHooks,
                     SettingsRow::TurnEndNotifications
                 ],
-                "{tab_layout:?}: the two installers in the order their upstreams \
+                "{tab_layout:?}: the three installers in the order their upstreams \
                  arrived, and under them the one row here that is a setting of \
                  Folio's"
             );
@@ -17197,6 +17276,7 @@ mod tests {
         for row in [
             SettingsRow::ClaudeHooks,
             SettingsRow::CodexNotify,
+            SettingsRow::CopilotHooks,
             SettingsRow::TurnEndNotifications,
         ] {
             assert!(!row.advanced(), "{row:?}");
@@ -17245,6 +17325,123 @@ mod tests {
         };
         assert_eq!(SettingsRow::CodexNotify.selected_index(&installed), Some(0));
         assert_eq!(SettingsRow::CodexNotify.selected_index(&values()), Some(1));
+    }
+
+    /// PIN — **the `Copilot CLI hooks` row's own picker asks for it and nothing
+    /// else does, and its sentence is the only one on this page that reads the
+    /// machine.**
+    ///
+    /// `codex_notify_requested`'s shape over a third upstream, plus the half that
+    /// is this row's alone: a copilot older than `1.0.26` reported a permission
+    /// prompt for tool calls nobody was ever asked about, and a machine that
+    /// switches every hook file off takes the install and stays silent. A row
+    /// that said the same sentence in all three states would be offering a switch
+    /// that does not work on two of them.
+    ///
+    /// MUTATION: return the plain sentence for `TooOld` and the switch invites an
+    /// install that puts a standing wait on a pane nobody is waiting at.
+    #[test]
+    fn only_the_copilot_rows_items_ask_for_it_and_its_sentence_reads_the_machine() {
+        use crate::attention_copilot::Readiness;
+
+        assert_eq!(
+            copilot_hooks_requested(SettingsTarget::Choice(SettingsRow::CopilotHooks, 0)),
+            Some(true)
+        );
+        assert_eq!(
+            copilot_hooks_requested(SettingsTarget::Choice(SettingsRow::CopilotHooks, 1)),
+            Some(false)
+        );
+        assert_eq!(
+            copilot_hooks_requested(SettingsTarget::Choice(SettingsRow::CopilotHooks, 2)),
+            None,
+            "a two-item picker has no third answer"
+        );
+        for other in visible_rows(TabLayoutMode::Vertical) {
+            if other == SettingsRow::CopilotHooks {
+                continue;
+            }
+            assert_eq!(
+                copilot_hooks_requested(SettingsTarget::Choice(other, 0)),
+                None,
+                "{other:?} answers for copilot"
+            );
+        }
+        // The tick is the directory's answer and never a stored one.
+        let installed = SettingsValues {
+            copilot_hooks: true,
+            ..values()
+        };
+        assert_eq!(
+            SettingsRow::CopilotHooks.selected_index(&installed),
+            Some(0)
+        );
+        assert_eq!(SettingsRow::CopilotHooks.selected_index(&values()), Some(1));
+        // And the sentence: three answers, and the two that describe a machine
+        // rather than a switch are distinct from the plain one and from each
+        // other.
+        let sentence = |readiness| {
+            SettingsRow::CopilotHooks.description(&SettingsValues {
+                copilot_readiness: readiness,
+                ..values()
+            })
+        };
+        assert_eq!(
+            sentence(Readiness::Unknown),
+            sentence(Readiness::Ready),
+            "not having asked yet is not a state to hedge about — the honest \
+             thing to describe is what the switch does"
+        );
+        for reading in [Readiness::TooOld, Readiness::HooksDisabled] {
+            assert_ne!(sentence(reading), sentence(Readiness::Ready), "{reading:?}");
+        }
+        assert_ne!(
+            sentence(Readiness::TooOld),
+            sentence(Readiness::HooksDisabled),
+            "two different things to have to fix"
+        );
+    }
+
+    /// PIN — **the page that prints which copilot this machine has is the page
+    /// that asks it**, and no other page starts a process to answer a question it
+    /// does not draw.
+    ///
+    /// `showing_the_page_the_probe_answers_on_is_what_starts_the_probe`'s claim
+    /// over a second probe, and the derivation is the load-bearing half: a build
+    /// whose row list has lost the row has no page that asks, whatever the
+    /// categories are called.
+    #[test]
+    fn showing_the_agents_page_is_what_asks_which_copilot_this_machine_has() {
+        let rows = visible_rows(TabLayoutMode::Horizontal);
+        let lines = shortcut_lines();
+        let content = content(&rows, &lines);
+        assert!(content.probes_copilot(SettingsCategory::Agents));
+        for category in SettingsCategory::ALL {
+            if category == SettingsCategory::Agents {
+                continue;
+            }
+            assert!(
+                !content.probes_copilot(category),
+                "{category:?} starts a process to answer a question it does not draw"
+            );
+        }
+        let without: Vec<SettingsRow> = rows
+            .iter()
+            .copied()
+            .filter(|row| *row != SettingsRow::CopilotHooks)
+            .collect();
+        let thinner = SettingsContent {
+            rows: &without,
+            shortcuts: &lines,
+            profiles: &[],
+            scheme_files: &[],
+            advanced: AdvancedOpen::default(),
+            editor: None,
+            values: Box::leak(Box::new(SettingsValues::sample())),
+        };
+        for category in SettingsCategory::ALL {
+            assert!(!thinner.probes_copilot(category), "{category:?}");
+        }
     }
 
     /// PIN — the Line wrapping row's own items ask for it and nothing else does.
@@ -18183,6 +18380,7 @@ mod tests {
                 SettingsRow::Notifications,
                 SettingsRow::ClaudeHooks,
                 SettingsRow::CodexNotify,
+                SettingsRow::CopilotHooks,
                 SettingsRow::TurnEndNotifications
             ]
         );
@@ -18224,6 +18422,7 @@ mod tests {
                 SettingsRow::Notifications,
                 SettingsRow::ClaudeHooks,
                 SettingsRow::CodexNotify,
+                SettingsRow::CopilotHooks,
                 SettingsRow::TurnEndNotifications
             ],
             "Sidebar stands directly under `Tab layout`; the two font rows stay \

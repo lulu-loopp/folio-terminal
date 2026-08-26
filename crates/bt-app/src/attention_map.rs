@@ -48,14 +48,48 @@
 //! **pi has no wait rows at all**, and that is a finding rather than an omission (§12.3). The one
 //! event its survey turned up fires "only once a run fully settles", which is the end of a turn.
 //!
-//! **copilot CLI is not here yet, and this is the open account.** §11.10.3 files it as a family of
-//! this shape, on two notification subtypes; §12.3 then withdrew a third for naming the same thing
-//! Claude Code's `idle_prompt` names, which a ruling had already refused. What its two remaining
-//! subtypes and its `agent_completed` / `shell_completed` clears say **verbatim** has not been
-//! fetched under §10.4's rule, and this file's own discipline is that a row is written from a
-//! quotation or not at all. When that quotation is taken, copilot is a block of rows here and
-//! nothing else changes — which is the claim [`a_family_is_rows_and_nothing_else`] exists to keep
+//! **copilot CLI's account is closed, and closing it cost a block of rows.**
+//! `docs/plans/attention/evidence-copilot-cli-2026-08-26.md` took the quotation §10.4 asks for:
+//! thirteen hook events out of upstream's own reference, then every one of them checked against the
+//! unminified `app.js` GitHub publishes. Two of its six `notification` subtypes are waits, its
+//! `userPromptSubmitted` / `agentStop` / `sessionEnd` are the clears, and `agentStop` is also a
+//! turn's end — the same double filing `Stop` has, for the same reason. Nothing else in this crate
+//! changed to support it, which is the claim [`a_family_is_rows_and_nothing_else`] exists to keep
 //! honest.
+//!
+//! **What that evidence kept out, and why** (§4.5, written down so that none of the six is
+//! proposed a second time):
+//!
+//! * **`permissionRequest` as a wait.** It "fires before the permission service runs—before rule
+//!   checks, session approvals, auto-allow/auto-deny, **and user prompting**", so a request a rule
+//!   waves through lights it while nobody is ever asked anything. It is also a *synchronous
+//!   decision gate* whose exit code `2` is a deny — a signal hooked onto it could refuse somebody's
+//!   tool call by crashing. copilot's primary wait layer is therefore `notification`, which is the
+//!   opposite of Claude Code's arrangement and is upstream's own doing: this family's
+//!   `notification` "never blocks the session" and its `permissionRequest` does.
+//! * **`Notification.agent_idle` as a wait.** "A background agent finishes a turn and enters idle
+//!   state (waiting for `write_agent`)" — and `write_agent` is the parent session's tool, not
+//!   anybody's keyboard. §12.3 withdrew this one by analogy with Claude Code's `idle_prompt`; the
+//!   quotation closes it outright.
+//! * **`Notification.agent_completed` / `shell_completed` / `shell_detached_completed` as waits.**
+//!   All three read as completions, verbatim, and a thing that has finished is not a thing waiting.
+//! * **`errorOccurred` as a clear.** "An error occurs during execution." does not say which wait,
+//!   if any, that error ended. `StopFailure` is the near miss and it is a different sentence: that
+//!   one says the *turn* ended.
+//! * **Title sniffing.** `Action Required` has zero hits in the whole bundle; the title reads
+//!   `<intent> - <session> - GitHub Copilot`, which carries neither busy nor waiting.
+//! * **The desktop toast's seven `activityLabel` values.** Upstream separates *needs you* from
+//!   *finished* internally and names seven flavours of the first — but they go to an OS toast and
+//!   reach neither a tty nor a hook. Two of the seven have a hook door, and those two are the rows
+//!   below. The other five are on the plan's upstream-asks ledger.
+//!
+//! **copilot contributes no [`OSC_ROWS`], on three quotations rather than on a shrug.** Its bare
+//! `0x07` is written by one `beep()` that a settled turn and six approval queues both reach, with
+//! no distinguishing byte between them — upstream's own maintainer: "Setting `beep` to `false`
+//! disables all terminal bell notifications, including permission prompts, plan approvals, and
+//! agent completion". Its `OSC 9;4` is gated on a closed set of twelve terminal names that Folio is
+//! not one of, so today it writes none. And `OSC 777`, `OSC 1337`, `OSC 99`, `OSC 133` and the text
+//! arm of `OSC 9` have zero hits apiece.
 
 use bt_term::{AttentionRequest, BellSource, NotificationSource, TerminalNotification};
 
@@ -70,6 +104,8 @@ pub(crate) const CLAUDE_CODE: &str = "claude-code";
 pub(crate) const CODEX: &str = "codex";
 /// pi, which reaches us as an announcement and never as a wait.
 pub(crate) const PI: &str = "pi";
+/// GitHub's copilot CLI — the standalone `copilot`, and never `gh copilot`.
+pub(crate) const COPILOT: &str = "copilot";
 
 /// **The catalogue.** Every row every supported family could contribute, tier included.
 ///
@@ -358,6 +394,95 @@ pub(crate) const ROWS: &[MappingRow] = &[
             begins_turn: false,
         },
     },
+    // -- copilot CLI: the third family, and it is rows and a template --------
+    //
+    // Every row below is quoted in `evidence-copilot-cli-2026-08-26.md` §4.1–§4.3, and the six
+    // candidates that evidence refused are in the module header rather than here, because a row
+    // that is not written leaves nothing to read.
+    //
+    // **Both waits arrive on the one `notification` hook, told apart by a matcher on
+    // `notification_type`** — §1.4's table, whose six subtypes this build wants exactly two of.
+    // "`permission_prompt` | The agent requests permission to execute a tool", and the source has
+    // it fired from the step that puts the box in front of somebody:
+    // `L=j=>(this.fireNotificationHook(…,"permission_prompt","Permission needed")…,
+    // this.requestPermissionWithHooks(j))`.
+    //
+    // **`Tier::Primary` by being the only layer there**, not by beating a fallback: this family
+    // publishes no second, slower announcement of the same request, so there is nothing for it to
+    // displace. `Notification.agent_needs_input` above is the same shape.
+    //
+    // **`IdSource::None`, and that is the answer rather than a gap** (§12.1.6). The `notification`
+    // payload is quoted whole — `{sessionId, timestamp, cwd, hook_event_name, message, title?,
+    // notification_type}` — and carries no request identifier; `permissionRequest`, which might
+    // have carried one, has no payload section in the reference at all. `title` is documented by
+    // example rather than by enumeration and is not a routing field.
+    MappingRow {
+        family: COPILOT,
+        event: "notification.permission_prompt",
+        kind: WaitKind::Permission,
+        id: IdSource::None,
+        action: MappedAction::Wait {
+            tier: Tier::Primary,
+        },
+    },
+    // "`elicitation_dialog` | The agent requests additional information from the user", fired
+    // beside `this.pendingRequests.requestElicitation(Ge)` — the moment the question is asked, not
+    // a report that one was.
+    MappingRow {
+        family: COPILOT,
+        event: "notification.elicitation_dialog",
+        kind: WaitKind::Elicitation,
+        id: IdSource::None,
+        action: MappedAction::Wait {
+            tier: Tier::Primary,
+        },
+    },
+    // "The user submits a prompt." You have replied, so nothing here is waiting on you — and this
+    // is the one copilot event that re-arms the announcement of a turn's end.
+    MappingRow {
+        family: COPILOT,
+        event: "userPromptSubmitted",
+        kind: WaitKind::Permission,
+        id: IdSource::None,
+        action: MappedAction::Clear {
+            class: ClearClass::Boundary,
+            scope: ClearScope::All,
+            reason: ClearReason::Hook,
+            begins_turn: true,
+        },
+    },
+    // "The main agent finishes a turn." A boundary, never a wait.
+    MappingRow {
+        family: COPILOT,
+        event: "agentStop",
+        kind: WaitKind::Permission,
+        id: IdSource::None,
+        action: MappedAction::Clear {
+            class: ClearClass::Boundary,
+            scope: ClearScope::All,
+            reason: ClearReason::Hook,
+            begins_turn: false,
+        },
+    },
+    // "The session terminates."
+    //
+    // **`ClearReason::SessionEnd` and not the `Hook` the evidence's own column suggested**, which
+    // is the one place these rows depart from that table and is a departure about *this* build
+    // rather than about upstream. The reason is a word in the trace, `SessionEnd` is the word Claude
+    // Code's identical event already writes, and two families spelling one sentence two ways would
+    // make the trace harder to read for no gain.
+    MappingRow {
+        family: COPILOT,
+        event: "sessionEnd",
+        kind: WaitKind::Permission,
+        id: IdSource::None,
+        action: MappedAction::Clear {
+            class: ClearClass::Boundary,
+            scope: ClearScope::All,
+            reason: ClearReason::SessionEnd,
+            begins_turn: false,
+        },
+    },
 ];
 
 /// **The other lane**: events that say a turn ended.
@@ -379,6 +504,10 @@ pub(crate) const TURN_END: &[(&str, &str, Via)] = &[
     (CODEX, "agent-turn-complete", Via::Notify),
     // pi's whole contribution. "Fires only once a run fully settles."
     (PI, "agent_settled", Via::AgentSettled),
+    // copilot's, and the only one of its thirteen hook events that says a turn is over: "The main
+    // agent finishes a turn." Its payload's `stopReason` is quoted as the single value `"end_turn"`.
+    // In both tables for `Stop`'s reason, which the header states.
+    (COPILOT, "agentStop", Via::Stop),
 ];
 
 /// The row a `<family>:<event>` names, if this build knows one.
@@ -756,6 +885,8 @@ mod tests {
             (CLAUDE_CODE, WaitKind::Agent),
             (CLAUDE_CODE, WaitKind::Quota),
             (CODEX, WaitKind::Permission),
+            (COPILOT, WaitKind::Permission),
+            (COPILOT, WaitKind::Elicitation),
         ] {
             let installed = installed_rows(ROWS, family, |_| true);
             assert_eq!(
@@ -881,7 +1012,79 @@ mod tests {
             [
                 (CLAUDE_CODE, "UserPromptSubmit"),
                 (CODEX, "user-prompt-submit"),
+                (COPILOT, "userPromptSubmitted"),
             ]
+        );
+    }
+
+    /// **The six candidates copilot's evidence refused, kept refused** (§4.5).
+    ///
+    /// Each of them is a name somebody reading the family's thirteen hook events would reach for,
+    /// and each was taken out for a quoted reason the module header carries. A list is the only
+    /// form the rule has — there is no value to check, only an absence to keep — and without it the
+    /// absence is indistinguishable from an oversight, which is how `agent_idle` came back once
+    /// already after §12.3 had withdrawn it.
+    ///
+    /// MUTATIONS: map `permissionRequest` to a wait and a signal hook sits on a synchronous deny
+    /// gate; map `agent_idle` and a background subagent waiting for its *parent's* tool call reads
+    /// as a person being waited on.
+    #[test]
+    fn the_candidates_copilots_own_evidence_refused_are_still_refused() {
+        for refused in [
+            "permissionRequest",
+            "PermissionRequest",
+            "notification.agent_idle",
+            "notification.agent_completed",
+            "notification.shell_completed",
+            "notification.shell_detached_completed",
+            "errorOccurred",
+        ] {
+            assert!(
+                row(ROWS, COPILOT, refused).is_none(),
+                "{refused} was kept out of the table by a quotation, and the quotation has not \
+                 changed"
+            );
+            assert!(turn_end(COPILOT, refused).is_none(), "{refused}");
+        }
+        // And the two that *are* here are the two the `notification` hook can be narrowed to.
+        let waits = ROWS
+            .iter()
+            .filter(|row| row.family == COPILOT && row.is_wait())
+            .map(|row| row.event)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            waits,
+            [
+                "notification.permission_prompt",
+                "notification.elicitation_dialog",
+            ],
+            "six subtypes arrive on one hook and exactly two of them are somebody being waited on"
+        );
+    }
+
+    /// **copilot writes nothing on the OSC lane, and the table says so by holding no row for it.**
+    ///
+    /// The lane is keyed by sequence rather than by family, so "copilot has no rows here" cannot be
+    /// asserted directly — what can be asserted is the shape of the finding that produced it: the
+    /// only thing this family puts on a tty that the ledger hears is a bare `0x07`, and a bare
+    /// `0x07` is [`Via::Bel`] for everybody. Reading that bell as a wait is the substitution this
+    /// whole block exists to undo, and here it would be wrong twice over — upstream's own
+    /// maintainer says the same byte carries permission prompts, plan approvals *and* agent
+    /// completion.
+    #[test]
+    fn the_one_byte_copilot_puts_on_a_tty_is_a_bell_and_stays_one() {
+        assert_eq!(
+            bell_provenance(BellSource::Bel),
+            (Transport::Bel, Via::Bel),
+            "one beep(), two meanings, and no bit on the wire telling them apart"
+        );
+        // `OSC 9;4` is the one sequence this family would otherwise reach us with, and it is the
+        // progress ring rather than a message — which is also the level it would be worth if the
+        // terminal allowlist upstream keeps ever let Folio receive one.
+        assert_eq!(
+            osc_credential(OscArrival::Notification(NotificationSource::Osc9)),
+            Some(Credential::Announced),
+            "no sequence on this lane is the strong level, this family's least of all"
         );
     }
 
@@ -913,6 +1116,56 @@ mod tests {
         // answer, not an unfinished one.
         assert_eq!(installed_rows(ROWS, PI, |_| true), Vec::new());
         assert_eq!(turn_end(PI, "agent_settled"), Some(Via::AgentSettled));
+        // **copilot is the claim's third witness, and the widest of the three**: two waits of
+        // different kinds, three clears, and a turn's end — the whole shape the block supports —
+        // and still nothing but rows. The one thing this crate learned in order to carry it is the
+        // block above; the file that installs it is `attention_copilot`, which knows about a JSON
+        // document and nothing about the ledger.
+        let copilot = installed_rows(ROWS, COPILOT, |_| true);
+        assert_eq!(copilot.len(), 5, "copilot is five rows");
+        assert_eq!(
+            copilot.iter().map(|row| row.event).collect::<Vec<_>>(),
+            [
+                "notification.permission_prompt",
+                "notification.elicitation_dialog",
+                "userPromptSubmitted",
+                "agentStop",
+                "sessionEnd",
+            ]
+        );
+        let prompt = row(ROWS, COPILOT, "notification.permission_prompt").expect("row");
+        assert_eq!(
+            event_for(&copilot, prompt, Some("ignored")),
+            Event::StrongWait(WaitSlot::Level(WaitKind::Permission)),
+            "the `notification` payload carries no request identifier, so an identifier offered \
+             from anywhere else must not be taken"
+        );
+        let elicitation = row(ROWS, COPILOT, "notification.elicitation_dialog").expect("row");
+        assert_eq!(
+            event_for(&copilot, elicitation, None),
+            Event::StrongWait(WaitSlot::Level(WaitKind::Elicitation)),
+            "two kinds on one hook, and each keeps its own slot"
+        );
+        // `agentStop` is in both tables, and the two say different sentences about one instant.
+        assert_eq!(turn_end(COPILOT, "agentStop"), Some(Via::Stop));
+        assert_eq!(
+            event_for(
+                &copilot,
+                row(ROWS, COPILOT, "agentStop").expect("row"),
+                None
+            ),
+            Event::StrongClear {
+                selector: ClearSelector::All,
+                class: ClearClass::Boundary,
+                reason: ClearReason::Hook,
+                begins_turn: false,
+            }
+        );
+        assert_eq!(
+            turn_end(COPILOT, "userPromptSubmitted"),
+            None,
+            "the announcement lane and the queue lane do not share rows"
+        );
     }
 
     // -- the OSC lane (§11.6) ------------------------------------------------

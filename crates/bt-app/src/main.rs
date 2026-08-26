@@ -37,6 +37,7 @@ use std::{
 
 mod attention;
 mod attention_codex;
+mod attention_copilot;
 mod attention_hooks;
 mod attention_map;
 mod attention_trace;
@@ -306,6 +307,13 @@ enum AppEvent {
     /// has printed its prompt and gone quiet produces no further frame, so an
     /// answer landing after that frame would sit unread until somebody typed.
     PowerShellProfileProbed,
+    /// **The copilot version probe answered** (`attention_copilot`).
+    ///
+    /// The seventh of the same family, separate from the two above it for their reason and owed a
+    /// wake for the first one's in its purest form: the row this answer is printed on is on the
+    /// Agents page, the page is only reachable through a modal, and a modal is exactly the state in
+    /// which no shell output, no hover and no keystroke is coming.
+    CopilotProbed,
     /// **Something spoke into this process's attention endpoint** (`attention_wire`).
     ///
     /// The same family again and the same reason for a wake of its own, in its strongest form: the
@@ -6395,6 +6403,16 @@ struct App {
     /// **Whether the user's own `~/.codex/config.toml` runs `folio attention` at the end of a
     /// turn**, cached exactly as the field above is and for its two reasons.
     codex_notify_installed: bool,
+    /// **Whether the user's own `~/.copilot/hooks/` holds Folio's hook file**, cached as the two
+    /// fields above are and for their reasons.
+    copilot_hooks_installed: bool,
+    /// **What copilot on this machine can be told**, which is a second fact about it and not a
+    /// restatement of the first: a machine can hold the file perfectly and still say nothing,
+    /// because the copilot reading it predates the changelog entry that made
+    /// `permission_prompt` mean "somebody was asked", or because the user has switched every hook
+    /// file off. Cached beside the field above rather than read on every frame — one half of it is
+    /// a file read and the other half is a process — and refreshed when the probe's answer lands.
+    copilot_readiness: attention_copilot::Readiness,
     /// **This process's voice in the notification centre** (§7.6).
     ///
     /// On `App` and not on `WindowRuntime`, which is the opposite of
@@ -25849,6 +25867,16 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::PowerShellProfileProbed);
             });
         }
+        // And the third's. This one answers a row on the Agents page — which copilot this machine
+        // has, and therefore whether its `permission_prompt` means what this build reads it as —
+        // and the row is only ever drawn while a modal is up, which is precisely when nothing else
+        // is going to produce a frame.
+        {
+            let proxy = proxy.clone();
+            attention_copilot::install_wake(move || {
+                let _ = proxy.send_event(AppEvent::CopilotProbed);
+            });
+        }
         // **The attention endpoint, before the first shell exists to be told about it.**
         //
         // Ordering that has to be this way round: `create_leaf_session` writes the endpoint's name
@@ -26329,6 +26357,12 @@ impl Runtime<'_> {
             // The same, over codex's own file — see the field above's note, which holds word for
             // word for this one.
             codex_notify_installed: attention_codex::state() == attention_codex::State::Installed,
+            // And again over copilot's own hooks directory. The readiness beside it starts at
+            // `Unknown` on every machine, because the probe that could better it has not been
+            // started — nothing has shown the page it is printed on yet.
+            copilot_hooks_installed: attention_copilot::state()
+                == attention_copilot::State::Installed,
+            copilot_readiness: attention_copilot::readiness(),
             notifications: NotificationDesk::new(proxy.clone()),
             session_store,
             settings_store,
@@ -31856,6 +31890,12 @@ impl Runtime<'_> {
         if content.probes_psreadline(self.window.settings.category()) {
             psreadline::begin_probe();
         }
+        // The second probe on the same door and for the same argument: the page that prints which
+        // copilot this machine has is the page that asks. Idempotent, and an atomic load after the
+        // first call — see `attention_copilot::begin_probe`.
+        if content.probes_copilot(self.window.settings.category()) {
+            attention_copilot::begin_probe();
+        }
         let category = self.window.settings.category();
         let menu = self.window.settings.menu();
         let scroll = self.window.settings_scroll;
@@ -32093,6 +32133,10 @@ impl Runtime<'_> {
             claude_hooks: self.app.claude_hooks_installed,
             // And the same again, over codex's own file.
             codex_notify: self.app.codex_notify_installed,
+            // And over copilot's own hooks directory, with the second fact this one needs beside
+            // it: whether the copilot on this machine can carry the signal at all.
+            copilot_hooks: self.app.copilot_hooks_installed,
+            copilot_readiness: self.app.copilot_readiness,
             split_direction: self.app.settings_store.loaded().split_direction,
             search_engine: self.app.settings_store.loaded().search_engine,
             minimum_contrast: self.app.settings_store.loaded().minimum_contrast,
@@ -33833,6 +33877,9 @@ impl Runtime<'_> {
         if let Some(install) = settings::codex_notify_requested(target) {
             self.apply_codex_notify(install)?;
         }
+        if let Some(install) = settings::copilot_hooks_requested(target) {
+            self.apply_copilot_hooks(install)?;
+        }
         if let Some(engine) = settings::search_engine_requested(target) {
             self.apply_search_engine(engine)?;
         }
@@ -34089,6 +34136,7 @@ impl Runtime<'_> {
             // own `~/.claude/settings.json`.
             | Row::ClaudeHooks
             | Row::CodexNotify
+            | Row::CopilotHooks
             // The editor's own advanced rows are put back by the page's own foot
             // verb — `Restore all defaults` on a built-in — which restores the
             // whole profile rather than four of its fields. A second verb that
@@ -38111,6 +38159,60 @@ impl Runtime<'_> {
                     toast::ToastAnchor::Window,
                     None,
                     format!("{} — {reason}", i18n::Text::CodexNotifyFailedToast.text()),
+                )?;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Write Folio's hook file into the user's own copilot hooks directory, or take it back out.
+    ///
+    /// [`Self::apply_claude_hooks`]'s verb over a third upstream, and every clause of that note
+    /// holds: the row is redrawn from the machine either way, so a refusal leaves the switch where
+    /// the machine actually is; nothing is written anywhere but the one user-level file; and a
+    /// refusal carries a sentence, because on the machine where it fires nobody else can see it.
+    ///
+    /// The refusals this one has that the others do not are **a version too old to mean what this
+    /// build would read** — see `attention_copilot`'s header for the changelog entry that bought
+    /// the gate — and **a `folio.json` that is somebody else's**, which is the same refusal codex's
+    /// installer makes about a `notify` key, over a file name instead of a key name.
+    ///
+    /// The readiness is re-read after the press for the reason the installed flag is: the sentence
+    /// under the row is a fact about the machine, and a press is one of the moments a fact about
+    /// the machine can have changed.
+    fn apply_copilot_hooks(&mut self, install: bool) -> Result<bool> {
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("folio.exe"));
+        let outcome = attention_copilot::apply(install, &exe);
+        self.app.copilot_hooks_installed =
+            attention_copilot::state() == attention_copilot::State::Installed;
+        self.app.copilot_readiness = attention_copilot::readiness();
+        match outcome {
+            attention_copilot::Outcome::Installed => {
+                self.toast(
+                    toast::ToastKind::Ok,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::Text::CopilotHooksAddedToast.text().to_owned(),
+                )?;
+                Ok(true)
+            }
+            attention_copilot::Outcome::Removed => {
+                self.toast(
+                    toast::ToastKind::Ok,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::Text::CopilotHooksRemovedToast.text().to_owned(),
+                )?;
+                Ok(true)
+            }
+            // The directory already said what the press asked for.
+            attention_copilot::Outcome::Unchanged => Ok(true),
+            attention_copilot::Outcome::Refused(reason) => {
+                self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    None,
+                    format!("{} — {reason}", i18n::Text::CopilotHooksFailedToast.text()),
                 )?;
                 Ok(false)
             }
@@ -75893,6 +75995,23 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::PowerShellProfileProbed => {
                 self.for_each_window(|runtime| runtime.settle_pane_notices())
             }
+            // The answer is in `attention_copilot::probe()`, and unlike the two above it there is
+            // something to *apply*: the readiness the row reads is a fact about this machine, held
+            // on `App` so that a page redrawn on hover does not re-ask a question that costs a
+            // process. Every window, because the row is a fact about the machine and any of them
+            // may be showing it.
+            AppEvent::CopilotProbed => {
+                if let Some(app) = self.app.as_mut() {
+                    app.copilot_readiness = attention_copilot::readiness();
+                }
+                self.for_each_window(|runtime| {
+                    if runtime.refresh_chrome() {
+                        runtime.present_chrome_change()
+                    } else {
+                        Ok(())
+                    }
+                })
+            }
             // **The lines are already in the inbox; what is owed is reading them.**
             //
             // Every window, because a capability names one pane in this *process* and the listener
@@ -75911,10 +76030,17 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // Not one line understood — every one was rubbish, or from a build whose wire this
                 // one does not know. Reading the settings file for that would be reading it for
                 // nothing.
+                // Both installers' files, because `kind_mode` is asked per family and a family
+                // whose rows never reach this list is a family whose mode is decided by their
+                // absence. That answers `Level` today for every one of them, which is right — and
+                // it would go on answering `Level` on the day a row here declared an identifier,
+                // silently, which is the trap this concatenation closes.
                 let installed = if messages.is_empty() {
                     Vec::new()
                 } else {
-                    attention_hooks::installed_rows()
+                    let mut rows = attention_hooks::installed_rows();
+                    rows.extend(attention_copilot::installed_rows());
+                    rows
                 };
                 let now = Instant::now();
                 self.for_each_window(|runtime| {
