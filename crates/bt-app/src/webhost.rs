@@ -3517,7 +3517,51 @@ mod keyboard_tests {
             .map(|(id, chord)| (*id, (*chord).to_owned()))
             .collect();
         assert_eq!(spelled, expected);
-        assert_eq!(spelled.len(), 36);
+        assert_eq!(spelled.len(), EXPECTED_CHORDS.len());
+    }
+
+    /// RED (user ruling 2026-08-26) — **the claim follows the user's table and
+    /// not this build's.**
+    ///
+    /// `claimable_chords` has read the effective table since it was written, and
+    /// `WebSeat::set_claims` recomputes on every turn — but nothing said so, and
+    /// the count above was a literal `36` that a shortcut page could not move.
+    /// Now that a chord can be rebound and swapped from a dialog, the derivation
+    /// is what the page is *for*: a page that kept handing the window back the
+    /// factory chords after somebody rebound one would be a shortcut table with
+    /// two answers, and the second one would only be wrong over a web seat.
+    ///
+    /// MUTATION: pass `Shortcuts::defaults()` to `WebSeat::set_claims` instead
+    /// of the runtime's table — this goes red on both halves at once, and on the
+    /// real window `Ctrl+Shift+Y` would open a tab everywhere except over a page.
+    #[test]
+    fn the_claims_follow_a_rebound_chord_rather_than_the_one_this_build_ships() {
+        let mut table = Shortcuts::defaults();
+        let shipped = claimable_chords(&table, every_focus());
+        assert!(claims_chord(&shipped, b'N' as u16, true, true, false));
+
+        table.set("new-tab", crate::shortcuts::parse_chord("Ctrl+Shift+y"));
+        let claims = claimable_chords(&table, every_focus());
+        assert!(
+            claims_chord(&claims, b'Y' as u16, true, true, false),
+            "the page hands back the chord the user chose"
+        );
+        assert!(
+            !claims_chord(&claims, b'N' as u16, true, true, false),
+            "and keeps the one they gave up"
+        );
+        assert_eq!(
+            claims.len(),
+            shipped.len(),
+            "a rebinding moves a claim; it does not add or drop one"
+        );
+
+        // A row cleared outright leaves the page one key richer, which is the
+        // whole of what `\"chord\": null` is for.
+        table.set("new-tab", None);
+        let cleared = claimable_chords(&table, every_focus());
+        assert_eq!(cleared.len(), shipped.len() - 1);
+        assert!(!claims_chord(&cleared, b'Y' as u16, true, true, false));
     }
 
     /// RED — and every one of them reaches a virtual key, because
@@ -3527,7 +3571,7 @@ mod keyboard_tests {
         let claims = claimable_chords(&Shortcuts::defaults(), every_focus());
         assert_eq!(
             claims.len(),
-            36,
+            EXPECTED_CHORDS.len(),
             "a chord this window owns that the web host cannot name in Win32 is \
              a chord that silently stops working while a page has the focus"
         );
