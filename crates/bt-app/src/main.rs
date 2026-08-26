@@ -46237,6 +46237,22 @@ impl Runtime<'_> {
     /// press is about and carries out the answer, exactly as
     /// [`Self::press_git_act`] carries out `press_outcome`'s.
     fn press_git_row(&mut self, seat: SeatId, index: usize) -> Result<()> {
+        // **A press does not reach the page's furniture** (user report,
+        // 2026-08-25). A heading, the masthead and a notice are not controls,
+        // and the hit test hands this function their index for one reason only:
+        // a hand resting inside a heading is what reveals the `+` in its corner,
+        // and that verb answers ahead of the row. Left unguarded, a click on the
+        // word `BRANCHES` moved the keyboard onto it — and the selected ground
+        // is the block the reader reported.
+        if self
+            .window
+            .git_pages_shown
+            .get(&seat)
+            .and_then(|page| page.rows.get(index))
+            .is_none_or(git_panel::GitRow::is_furniture)
+        {
+            return Ok(());
+        }
         // **The selection follows the hand**, before anything this press could
         // also mean and whether or not the row has a verb — the graph's own
         // first line (`press_graph_row`), and it is what makes `↑` after a click
@@ -47773,12 +47789,16 @@ impl Runtime<'_> {
             // that was just built (焦点跟随可见视图). The column remembers a row
             // number and the repository rebuilds the list under it every frame,
             // so the clamp belongs here — beside the scroll's, which is owed for
-            // exactly the same reason.
-            content.selected = self.window.tabs[active]
-                .files
-                .get(&seat)
-                .and_then(|state| state.git_sel)
-                .filter(|row| *row < content.rows.len());
+            // exactly the same reason. The clamp is `git_panel`'s own, so a
+            // number that has landed on the page's furniture is moved to a row
+            // rather than lighting a heading (user report, 2026-08-25).
+            content.selected = git_panel::clamp_git_selection(
+                &content.rows,
+                self.window.tabs[active]
+                    .files
+                    .get(&seat)
+                    .and_then(|state| state.git_sel),
+            );
             pages.insert(seat, content);
         }
         // R2 乙案 again, one list along: the painter believes the stored scroll,
@@ -55182,6 +55202,19 @@ impl Runtime<'_> {
     /// its file list over, and a branch row is a checkout that answers the three
     /// tiers at [`Self::ask_to_checkout`].
     fn press_float_git_row(&mut self, id: float::FloatId, index: usize) -> Result<()> {
+        // A press does not reach the page's furniture — the docked page's own
+        // first line, and it is first here for the same reason: the guard has to
+        // stand ahead of the selection or the selection is the bug (user report,
+        // 2026-08-25).
+        if self
+            .window
+            .float_git_pages_shown
+            .get(&id)
+            .and_then(|page| page.rows.get(index))
+            .is_none_or(git_panel::GitRow::is_furniture)
+        {
+            return Ok(());
+        }
         // The selection follows the hand, before anything else this press could
         // mean — the docked page's own first line.
         self.select_float_git_row(id, index);
@@ -56483,7 +56516,7 @@ impl Runtime<'_> {
         // goes back where it came from, so the picture and the window cannot
         // disagree even on the frame the heal happens.
         content.scroll_px = git_panel::clamp_git_scroll(body, &content, stored, scale);
-        content.selected = sel.filter(|row| *row < content.rows.len());
+        content.selected = git_panel::clamp_git_selection(&content.rows, sel);
         if let Some(files) = self
             .window
             .float

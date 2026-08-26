@@ -289,14 +289,24 @@ pub fn group_heading(group: GitGroup) -> &'static str {
     .text()
 }
 
-/// The heading's tooltip — mock-up 4950-4952, with the third written to match.
+/// **What a row standing in this group is** — mock-up 4950-4952, with the third
+/// written to match.
 ///
 /// These are *teaching* text, and that is the design's own reading of them: the
-/// whole reason a heading explains what the index is, is that a person who does
-/// not know has no other way to find out from this page. The `Changes` line lost
-/// its second clause ("hover a row and press + to stage it") because R12 made the
+/// whole reason this page explains what the index is, is that a person who does
+/// not know has no other way to find out from it. The `Changes` line lost its
+/// second clause ("hover a row and press + to stage it") because R12 made the
 /// verb visible at seven-tenths the moment the pointer is on the row, so the
 /// tooltip no longer has to describe a control the user cannot see.
+///
+/// **On the rows and no longer on the heading** (user report, 2026-08-25). The
+/// mock-up hung them off the words `STAGED` / `CHANGES` / `UNTRACKED`, and a
+/// word that pops up an explanation is a word that behaves like a control: the
+/// reported picture was a tip standing over the list it was describing, thrown
+/// by a heading that answers no press. The sentence follows the row's own name
+/// instead — the grammar the branch rows have always used (`main - the branch
+/// you are on`), which says the thing under the pointer rather than the group
+/// the pointer happens to be inside.
 #[must_use]
 pub fn group_tooltip(group: GitGroup) -> &'static str {
     match group {
@@ -320,15 +330,15 @@ pub const GIT_BRANCH_DOT_EDGE_LOGICAL_PX: f32 = 1.5;
 pub fn git_branches_heading() -> &'static str {
     Text::GitBranchesHeading.text()
 }
-/// The teaching sentence over the list, in the voice its three siblings use.
-///
-/// It says what a press does, because the row itself cannot: unlike a change
-/// row, a branch row has no hover button to point at, and a list of names with
-/// no visible verb is a list nobody tries.
-#[must_use]
-pub fn git_branches_tooltip() -> &'static str {
-    Text::GitBranchesTip.text()
-}
+// The sentence this heading used to carry — *"Local branches, current one first
+// — click one to check it out"* — is gone, and its verb is not (user report,
+// 2026-08-25). It was written on the reading that a branch row has no hover
+// button to point at, so the list needed a word above it naming the press; what
+// it produced on screen was a tip hanging over the list from a heading nobody
+// can press. Every branch row already says the same thing about itself and says
+// which branch it is saying it about — `Check out side`,
+// `main - the branch you are on`, `origin/main - a branch on a remote` — which
+// is the promise the heading was making, kept by the thing that keeps it.
 
 /// The sub-group under BRANCHES (T9, v2 ③).
 #[must_use]
@@ -353,12 +363,11 @@ pub fn git_remotes_tooltip_open() -> &'static str {
 pub fn git_commits_heading() -> &'static str {
     Text::GitCommitsHeading.text()
 }
-/// Mock-up 4952, cut to what this slice draws: the merge curve is here, the
-/// lanes are G-4's.
-#[must_use]
-pub fn git_commits_tooltip() -> &'static str {
-    Text::GitCommitsTip.text()
-}
+// Mock-up 4952's sentence over this word — *"Recent history, newest first — the
+// curve marks a merge…"* — went the same way as the branches one and for the
+// same reason (user report, 2026-08-25). Its one fact a reader could not get
+// from the list is what the curve means, and the row that draws the curve
+// already says it: a merge commit's own tip opens with `Text::GraphMergeCommit`.
 // What both refresh buttons say — the panel masthead's and the graph toolbar's
 // (T5) — is `Text::GitRefreshTip`, read by [`GitAct::tooltip`] here and by
 // `crate::git_graph::GraphTool::tooltip` there. One entry because it is one
@@ -860,8 +869,14 @@ pub enum GitRow {
         group: Option<GitGroup>,
         /// The heading's own word — already upper case, because the chrome text
         /// path has no `text-transform` and the design's `.glabel` does.
+        ///
+        /// **The whole of what a heading has to say** (user report,
+        /// 2026-08-25). It carried a `tooltip` beside this until then, and a
+        /// word that explains itself when you rest on it is a word that behaves
+        /// like a control — which is exactly how the reader read it. The
+        /// teaching those sentences did is on the rows now; see
+        /// [`group_tooltip`].
         label: &'static str,
-        tooltip: &'static str,
         /// How many rows are under it. **Every heading carries its number**
         /// (R7): the design gave one of its four a count and left three bare
         /// with no reason written down, and a heading that says how many is one
@@ -905,9 +920,18 @@ impl GitRow {
     /// Whether a pointer resting on this row lights its ground, and the inks
     /// that go with it.
     ///
-    /// Two kinds answer something other than "wherever the pointer is": the
-    /// branch you are **already standing on** has nowhere to go, so lighting it
-    /// would offer a checkout that is not on the table; and an **open commit
+    /// **A lit ground is this page's one promise that a press would land**, so
+    /// three kinds answer something other than "wherever the pointer is".
+    ///
+    /// The page's own **furniture** never lights ([`Self::is_furniture`], user
+    /// report 2026-08-25): a heading is a word over a list and a masthead is the
+    /// repository saying its name, and neither is a thing you press. Drawn with
+    /// the ground under it, `BRANCHES (13)` was a full-width filled rounded
+    /// block — the very picture this page uses for *the row you picked* — and it
+    /// read as a card that had been selected.
+    ///
+    /// The branch you are **already standing on** has nowhere to go, so lighting
+    /// it would offer a checkout that is not on the table; and an **open commit
     /// keeps the ground its hover gave it** — the accordion's whole affordance,
     /// and the reason the row's inks are then the hovered set too, because a lit
     /// row with unlit text reads as a row the pointer has left rather than as
@@ -915,10 +939,42 @@ impl GitRow {
     #[must_use]
     fn ground_lit(&self, hovered: bool) -> bool {
         match self {
+            _ if self.is_furniture() => false,
             Self::Branch(branch) => hovered && !branch.current,
             Self::Commit(commit) => hovered || commit.expanded,
             _ => hovered,
         }
+    }
+
+    /// Whether this row is the page's own **furniture** rather than an item in
+    /// one of its lists (user report, 2026-08-25).
+    ///
+    /// Three kinds are: the masthead, which is the repository saying its own
+    /// name; a [`Self::Heading`], which is a word over the rows under it; and a
+    /// [`Self::Notice`], which is a sentence in the list's voice. None of the
+    /// three answers a press, none of them is a document, and none of them is
+    /// somewhere a reader can be taken.
+    ///
+    /// **It is the ground rule, said once.** The reported bug was `BRANCHES
+    /// (13)` and `COMMITS (50)` drawn as full-width filled rounded blocks — the
+    /// picture this page uses for *the row you picked* — and it had two sources,
+    /// the pointer's hover and the keyboard's selection. A predicate the paint,
+    /// the keyboard, the tooltip list and both hosts' press handlers all read is
+    /// what stops the next one growing back somewhere else.
+    ///
+    /// The branch you are standing on is deliberately **not** here: it is an
+    /// item in a list — the keyboard stands on it, the context menu opens over
+    /// it — and it merely has no checkout to offer, which is why it is
+    /// [`Self::ground_lit`] that declines it and not this.
+    ///
+    /// [`Self::Remotes`] is not here either, and that is the same distinction
+    /// its own doc draws: it wears a heading's clothes and it is a *control*.
+    #[must_use]
+    pub fn is_furniture(&self) -> bool {
+        matches!(
+            self,
+            Self::Masthead(_) | Self::Heading { .. } | Self::Notice(_)
+        )
     }
 
     /// Whether this row stands on a section card.
@@ -1402,7 +1458,6 @@ pub fn build(
             content.rows.push(GitRow::Heading {
                 group: None,
                 label: git_branches_heading(),
-                tooltip: git_branches_tooltip(),
                 // **The locals and not the whole answer.** The number over a
                 // heading is how many rows are under it, and the remotes are
                 // under a heading of their own that carries its own count.
@@ -1470,7 +1525,6 @@ pub fn build(
         content.rows.push(GitRow::Heading {
             group: Some(group),
             label: group_heading(group),
-            tooltip: group_tooltip(group),
             count: entries.len(),
             act: group_act(group),
         });
@@ -1498,7 +1552,6 @@ pub fn build(
             content.rows.push(GitRow::Heading {
                 group: None,
                 label: git_commits_heading(),
-                tooltip: git_commits_tooltip(),
                 count: log.commits.len(),
                 act: None,
             });
@@ -1777,10 +1830,20 @@ fn change_row(entry: &GitStatusEntry, group: GitGroup, cache: &GitCache) -> GitC
     let untracked = group == GitGroup::Untracked;
     let badges = badges_of(entry);
     GitChangeRow {
-        tooltip: match &entry.renamed_from {
-            Some(from) => crate::i18n::git_renamed_from(&entry.path, from),
-            None => entry.path.clone(),
-        },
+        // **The row's own name, and then what it is** (user report,
+        // 2026-08-25) — the grammar the branch rows have always used, taken over
+        // from the heading that used to hold the second half. A row under
+        // STAGED and the identical path under CHANGES are two different claims
+        // about one file (R11), and this is where the page now says which of
+        // them the pointer is on.
+        tooltip: format!(
+            "{}\n{}",
+            match &entry.renamed_from {
+                Some(from) => crate::i18n::git_renamed_from(&entry.path, from),
+                None => entry.path.clone(),
+            },
+            group_tooltip(group)
+        ),
         pending: cache.write_pending(&entry.path),
         path: entry.path.clone(),
         renamed_from: entry.renamed_from.clone(),
@@ -2051,6 +2114,45 @@ pub fn clamp_git_scroll(
     scroll_px.clamp(0.0, max)
 }
 
+/// The only selection a Git page is allowed to hold — [`clamp_git_scroll`]'s
+/// twin, and it is owed for exactly the same two reasons.
+///
+/// The number is remembered on the column and the list under it is rebuilt from
+/// the repository every frame, so a row that was legal when it was written can
+/// be **past the end** of a list a `git add` has since shortened, or can have
+/// become a row the selection is not allowed to stand on: the page's own
+/// furniture ([`GitRow::is_furniture`]). Both hosts call this, so a float and a
+/// column cannot disagree about where the keyboard is.
+#[must_use]
+pub fn clamp_git_selection(rows: &[GitRow], selected: Option<usize>) -> Option<usize> {
+    let row = selected.filter(|row| *row < rows.len())?;
+    nearest_place(rows, row, true)
+}
+
+/// The nearest row the selection may stand on, from `row` — looking the way it
+/// was travelling first, and then the other way.
+///
+/// Both directions, always, because a list can end in furniture as easily as it
+/// can begin with it: this page opens on a masthead and a repository whose
+/// status git refused closes on a notice. Falling back is what makes `↓` on the
+/// last row stand still instead of walking off into a sentence.
+#[must_use]
+fn nearest_place(rows: &[GitRow], row: usize, forward: bool) -> Option<usize> {
+    let ahead: Box<dyn Iterator<Item = usize>> = if forward {
+        Box::new(row..rows.len())
+    } else {
+        Box::new((0..=row).rev())
+    };
+    let behind: Box<dyn Iterator<Item = usize>> = if forward {
+        Box::new((0..row).rev())
+    } else {
+        Box::new((row + 1)..rows.len())
+    };
+    ahead
+        .chain(behind)
+        .find(|index| !rows[*index].is_furniture())
+}
+
 /// One page of a repository that has answered, for tests in **other** modules.
 ///
 /// It lives out here rather than in `mod tests` because the float's chassis has
@@ -2125,10 +2227,20 @@ pub fn sample_page_for_tests() -> GitPanelContent {
 ///   still never reaches a child: with a column focused there is nothing to type
 ///   into, and the caller consumes every key it is offered.
 ///
-/// **Every row is a place.** The selection walks the list exactly as drawn,
-/// headings and masthead included, because this page has no rows that exist only
-/// to make the geometry a multiplication — that is the graph's detail block, and
-/// it is the only thing `step_over_detail` was ever about.
+/// **Every row of the *list* is a place, and the page's furniture is not** (user
+/// report, 2026-08-25). This page has no rows that exist only to make the
+/// geometry a multiplication — that is the graph's detail block, and it is the
+/// only thing `step_over_detail` was ever about — but it does have a masthead,
+/// four headings and its notices, and the selection steps over all of them.
+///
+/// That **supersedes** the clause of the 2026-08-19 ruling that read *nine kinds
+/// of row, every one of them a landing*. It was written to close a real hole —
+/// the selection used to be invisible on the three kinds that had no ground —
+/// and the answer it chose was to give them one. The 2026-08-25 ruling says
+/// those three must never wear a ground at all, and the two are reconcilable
+/// exactly one way: the keyboard does not go there. It is the truer reading in
+/// any case, because none of the three answers `Enter` with anything — a walk
+/// that stopped on them was a walk with dead steps in it.
 #[must_use]
 pub fn panel_key(content: &GitPanelContent, key: GraphKey) -> GraphKeyAction {
     let total = content.rows.len();
@@ -2142,11 +2254,28 @@ pub fn panel_key(content: &GitPanelContent, key: GraphKey) -> GraphKeyAction {
         };
     }
     if let Some(row) = crate::git_graph::list_travel(total, content.selected, key) {
-        return GraphKeyAction::Select(row);
+        // Where the shared law lands, pushed on to the nearest row that is a
+        // place — the way it was travelling first, so `↓` never doubles back
+        // over a heading it has just crossed. `Home` and `End` are absolute and
+        // therefore look outwards from the end they name.
+        let forward = matches!(key, GraphKey::Down | GraphKey::Home);
+        return match nearest_place(&content.rows, row, forward) {
+            Some(row) => GraphKeyAction::Select(row),
+            // A page that is all furniture — a repository git would not read,
+            // whose masthead stands over one notice — has nowhere for a
+            // selection to be.
+            None => GraphKeyAction::None,
+        };
     }
     match key {
         GraphKey::Enter => match content.selected {
-            Some(row) if row < total => GraphKeyAction::Toggle(row),
+            // The same ruling from the other side: `Enter` is the row's own
+            // press minus the pointer, and the press handlers refuse furniture,
+            // so an `Enter` that offered to turn a heading over would be this
+            // function promising something the two hosts both decline.
+            Some(row) if row < total && !content.rows[row].is_furniture() => {
+                GraphKeyAction::Toggle(row)
+            }
             _ => GraphKeyAction::None,
         },
         GraphKey::Compare => GraphKeyAction::None,
@@ -2474,8 +2603,11 @@ fn masthead_acts_left(rect: [f32; 4], scale: f32, gap: f32) -> f32 {
 #[must_use]
 pub fn row_tooltip(row: &GitRow) -> Option<String> {
     match row {
-        GitRow::Masthead(_) => None,
-        GitRow::Heading { tooltip, .. } => Some((*tooltip).to_owned()),
+        // **The page's furniture explains nothing** (user report, 2026-08-25):
+        // a tip is what a control says about itself, and none of these three is
+        // one. See [`GitRow::is_furniture`], and [`group_tooltip`] for where the
+        // headings' teaching went.
+        GitRow::Masthead(_) | GitRow::Heading { .. } | GitRow::Notice(_) => None,
         GitRow::Branch(branch) => Some(branch.tooltip.clone()),
         GitRow::Change(change) => Some(change.tooltip.clone()),
         GitRow::Commit(commit) => Some(commit.tooltip.clone()),
@@ -2489,7 +2621,6 @@ pub fn row_tooltip(row: &GitRow) -> Option<String> {
             }
             .to_owned(),
         ),
-        GitRow::Notice(_) => None,
     }
 }
 
@@ -2583,7 +2714,12 @@ pub fn push_git_panel(
         push_row_ground(
             rect,
             lit,
-            content.selected == Some(index),
+            // **A ground is a property of the row kind, not of the number it was
+            // handed** (user report, 2026-08-25). `clamp_git_selection` is what
+            // keeps the selection off this page's furniture; this is the paint
+            // saying the same thing in its own voice, so that no stale index
+            // from either host can put a filled block under a heading.
+            content.selected == Some(index) && !row.is_furniture(),
             scale,
             palette,
             sprites,
@@ -3310,10 +3446,18 @@ fn push_acts(
     // is what makes every hover verb in this product fade at one rate.
     let glyph = (GIT_ACT_GLYPH_LOGICAL_PX * scale).round().max(1.0);
     let radius = (GIT_ACT_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
-    // The masthead stands on the pane's own body and every other row on a
-    // `--panel` card, so a button up there wears the body's inks — the same
-    // split the branch name and the group headings already live by.
-    let on_body = matches!(row, GitRow::Masthead(_));
+    // The masthead and the headings stand on the pane's own body and every other
+    // row on a `--panel` card, so a button up there wears the body's inks — the
+    // same split the branch name and the headings' own ink already live by, and
+    // it is [`GitRow::on_card`]'s answer rather than a second reading of it.
+    //
+    // **It named only the masthead until 2026-08-25**, and a `+` on the STAGED
+    // heading therefore lit in `git_act_pill`, which is `--active` *mixed over a
+    // hovered row's ground*. That was already a shade meant for a card; once the
+    // headings stopped lighting at all it was a mix over a ground that is not
+    // there. A heading's own `+` and `−` are the only verbs this touches, and
+    // they are exactly the ones that were wrong.
+    let on_body = !row.on_card();
     // The reveal is now [`act_boxes`]'s own answer rather than a second filter
     // here: what is drawn and what can be pressed are the same list, so a verb
     // cannot be one and not the other.
@@ -5921,59 +6065,83 @@ mod tests {
     /// The travel law itself is [`crate::git_graph::list_travel`]'s and is not
     /// restated here; what this pins is that this page uses it, including the
     /// edge that matters most: **the first press with nothing selected lands on
-    /// the top row**, never on the bottom one.
+    /// the top of the list**, never on the bottom of it.
+    ///
+    /// *Top of the list* and not *row zero*: row zero is the masthead, which is
+    /// furniture as of 2026-08-25 and is stepped over. That the stepping happens
+    /// at all is
+    /// [`the_keyboard_walks_the_rows_and_steps_over_the_furniture`]'s; what is
+    /// held here is that the shared arithmetic still runs underneath it.
     #[test]
     fn the_git_pages_keyboard_walks_its_own_list_the_way_the_graph_walks_its() {
         let fresh = keyed(None);
-        let last = fresh.rows.len() - 1;
-        assert_eq!(panel_key(&fresh, GraphKey::Down), GraphKeyAction::Select(0));
-        assert_eq!(panel_key(&fresh, GraphKey::Up), GraphKeyAction::Select(0));
+        let places = place_rows(&fresh);
+        let top = places[0];
+        let bottom = *places.last().expect("the fixture has rows");
+        let second = places[1];
+        assert_eq!(
+            panel_key(&fresh, GraphKey::Down),
+            GraphKeyAction::Select(top)
+        );
+        assert_eq!(panel_key(&fresh, GraphKey::Up), GraphKeyAction::Select(top));
         assert_eq!(
             panel_key(&fresh, GraphKey::End),
-            GraphKeyAction::Select(last)
+            GraphKeyAction::Select(bottom)
         );
 
-        let standing = keyed(Some(3));
+        let standing = keyed(Some(second));
         assert_eq!(
             panel_key(&standing, GraphKey::Down),
-            GraphKeyAction::Select(4)
+            GraphKeyAction::Select(places[2])
         );
         assert_eq!(
             panel_key(&standing, GraphKey::Up),
-            GraphKeyAction::Select(2)
+            GraphKeyAction::Select(top)
         );
         assert_eq!(
             panel_key(&standing, GraphKey::Home),
-            GraphKeyAction::Select(0)
+            GraphKeyAction::Select(top)
         );
 
         // The ends hold: neither key walks off the list it is in.
         assert_eq!(
-            panel_key(&keyed(Some(0)), GraphKey::Up),
-            GraphKeyAction::Select(0)
+            panel_key(&keyed(Some(top)), GraphKey::Up),
+            GraphKeyAction::Select(top)
         );
         assert_eq!(
-            panel_key(&keyed(Some(last)), GraphKey::Down),
-            GraphKeyAction::Select(last)
+            panel_key(&keyed(Some(bottom)), GraphKey::Down),
+            GraphKeyAction::Select(bottom)
         );
         // And a selection left over from a longer list is clamped before it is
         // stepped, not after.
         assert_eq!(
-            panel_key(&keyed(Some(last + 40)), GraphKey::Up),
-            GraphKeyAction::Select(last - 1)
+            panel_key(&keyed(Some(fresh.rows.len() + 40)), GraphKey::Up),
+            GraphKeyAction::Select(places[places.len() - 2])
         );
     }
 
     /// **`Enter` is the row's own press, minus the pointer** — and with nothing
     /// selected there is no row for it to be the press of.
+    ///
+    /// Nor with the number standing on the page's furniture, which is the same
+    /// refusal both hosts' press handlers make (2026-08-25): a state
+    /// `clamp_git_selection` will not produce, answered here anyway so that the
+    /// key and the press cannot come to mean different things.
     #[test]
     fn enter_turns_over_the_row_the_selection_is_standing_on_and_no_other() {
+        let page = keyed(None);
+        let row = place_rows(&page)[2];
         assert_eq!(
-            panel_key(&keyed(Some(5)), GraphKey::Enter),
-            GraphKeyAction::Toggle(5)
+            panel_key(&keyed(Some(row)), GraphKey::Enter),
+            GraphKeyAction::Toggle(row)
         );
         assert_eq!(
             panel_key(&keyed(None), GraphKey::Enter),
+            GraphKeyAction::None
+        );
+        let furniture = furniture_rows(&page)[0];
+        assert_eq!(
+            panel_key(&keyed(Some(furniture)), GraphKey::Enter),
             GraphKeyAction::None
         );
     }
@@ -6092,13 +6260,20 @@ mod tests {
     }
 
     /// **Exactly the selected row wears the selected ground**, whatever kind of
-    /// row it is — and it wears it *over* a hover, because the selection is where
-    /// the keyboard is.
+    /// row in the list it is — and it wears it *over* a hover, because the
+    /// selection is where the keyboard is.
     ///
     /// Red gate: leave the ground inside the six arms that used to draw one and
-    /// a selection standing on a heading, on the masthead or on a notice is a
-    /// selection the reader cannot see — which is the reported bug in a
-    /// different hat.
+    /// a selection standing on a row kind that has none is a selection the
+    /// reader cannot see.
+    ///
+    /// **The page's furniture is the exception, and is the one this test was
+    /// once the other way round about** (user report, 2026-08-25). It used to
+    /// walk every row and demand a ground on each, masthead and headings
+    /// included, on the 2026-08-19 reading that all nine kinds were landings.
+    /// They are not: the selection does not go there any more, so the ground
+    /// does not either — and the ground is refused by *row kind* rather than by
+    /// trusting the number, which is what makes this half of it checkable.
     #[test]
     fn exactly_the_selected_row_wears_the_selected_ground() {
         let palette = bt_render::chrome_palette();
@@ -6112,15 +6287,15 @@ mod tests {
         };
         assert_eq!(grounds(&content), 0, "nothing selected, nothing lit");
 
-        // Every row kind on the page, one at a time — including the three that
-        // had no ground of their own before this slice.
+        // Every row kind on the page, one at a time.
         for index in 0..content.rows.len() {
             let mut standing = content.clone();
             standing.selected = Some(index);
+            let wanted = usize::from(!content.rows[index].is_furniture());
             assert_eq!(
                 grounds(&standing),
-                1,
-                "row {index} ({:?}) wears exactly one selected ground",
+                wanted,
+                "row {index} ({:?}) wears {wanted} selected ground",
                 standing.rows[index]
             );
         }
@@ -6129,9 +6304,10 @@ mod tests {
         // still the selection, which is the graph's own rung order. Asked of the
         // **row's own rectangle**, because a hovered row also reveals its verbs
         // and those wear a hover ground of their own inside it.
+        let row = place_rows(&content)[2];
         let mut standing = content.clone();
-        standing.selected = Some(4);
-        let rect = git_panel_geometry([0.0, 0.0, 240.0, 2000.0], &standing, 1.0).row_rect(4);
+        standing.selected = Some(row);
+        let rect = git_panel_geometry([0.0, 0.0, 240.0, 2000.0], &standing, 1.0).row_rect(row);
         let hovered = painted_at(
             &standing,
             240.0,
@@ -6150,5 +6326,304 @@ mod tests {
             ground.color, palette.git_row_selected,
             "the hover ground gives way to the selection it is standing on"
         );
+    }
+
+    // ── furniture is not the list (user report, 2026-08-25) ────────────────
+
+    /// A page with all three kinds of furniture on it and rows under each of
+    /// them: a masthead, four headings, branches, changes, a history — and a
+    /// notice, which the status cap's own row is.
+    fn furnished() -> GitPanelContent {
+        let mut content = rows_of(&with_branches(
+            answered(PORCELAIN, vec![commit("aaaaaaa", "first", 1)], false),
+            vec![branch("main", true, 0, 0), branch("side", false, 0, 0)],
+        ));
+        content
+            .rows
+            .push(GitRow::Notice("a sentence in the list's voice".to_owned()));
+        content
+    }
+
+    fn furniture_rows(content: &GitPanelContent) -> Vec<usize> {
+        content
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.is_furniture())
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn place_rows(content: &GitPanelContent) -> Vec<usize> {
+        content
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| !row.is_furniture())
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// **A heading is a word over a list, not a card under the hand** (user
+    /// report, 2026-08-25).
+    ///
+    /// The report was a screenshot: `BRANCHES (13)` and `COMMITS (50)` drawn as
+    /// full-width filled rounded blocks, indistinguishable from a row that had
+    /// been picked. Both grounds are asked for here — the pointer's and the
+    /// keyboard's — because the page had two ways of arriving at the same
+    /// picture and closing one of them would have left the other.
+    ///
+    /// The positive half is in the same test on purpose: a page where *nothing*
+    /// lights would pass a test that only asked about headings.
+    #[test]
+    fn the_pages_furniture_never_wears_a_ground_and_its_rows_still_do() {
+        let palette = bt_render::chrome_palette();
+        let grounds = [palette.git_row_hover, palette.git_row_selected];
+        let content = furnished();
+        let body = [0.0, 0.0, 240.0, 4_000.0];
+        assert!(
+            furniture_rows(&content).len() >= 5,
+            "the fixture has a masthead, its headings and a notice on it: {:#?}",
+            content.rows
+        );
+
+        for index in furniture_rows(&content) {
+            let mut page = content.clone();
+            page.selected = Some(index);
+            let rect = git_panel_geometry(body, &page, 1.0).row_rect(index);
+            let glass = painted_at(
+                &page,
+                240.0,
+                body[3],
+                GitHover {
+                    row: Some(index),
+                    act: None,
+                },
+            );
+            for sprite in &glass.sprites {
+                assert!(
+                    !(grounds.contains(&sprite.color)
+                        && sprite.rect[1] < rect[3]
+                        && sprite.rect[3] > rect[1]),
+                    "row {index} ({:?}) wears a lit ground at {:?}",
+                    page.rows[index],
+                    sprite.rect
+                );
+            }
+        }
+
+        // And a row that *is* an item in a list lights under the pointer, so the
+        // reader can still tell the two apart.
+        let row = *place_rows(&content)
+            .iter()
+            .find(|index| matches!(content.rows[**index], GitRow::Change(_)))
+            .expect("the fixture has changed files on it");
+        let rect = git_panel_geometry(body, &content, 1.0).row_rect(row);
+        let glass = painted_at(
+            &content,
+            240.0,
+            body[3],
+            GitHover {
+                row: Some(row),
+                act: None,
+            },
+        );
+        assert!(
+            glass
+                .sprites
+                .iter()
+                .any(|sprite| sprite.color == palette.git_row_hover && sprite.rect == rect),
+            "a change row still lights the whole of its own ground"
+        );
+
+        // A heading keeps the one thing that made it worth hit-testing: the
+        // pointer resting inside it reveals its own verb. The verb is drawn in
+        // the **body's** ink, because the ground it used to be mixed over is the
+        // ground this ruling took away.
+        let heading = content
+            .rows
+            .iter()
+            .position(|row| matches!(row, GitRow::Heading { act: Some(_), .. }))
+            .expect("a status group's heading carries its own verb");
+        let glass = painted_at(
+            &content,
+            240.0,
+            body[3],
+            GitHover {
+                row: Some(heading),
+                act: None,
+            },
+        );
+        let verb = act_boxes(
+            &content.rows[heading],
+            git_panel_geometry(body, &content, 1.0).row_rect(heading),
+            1.0,
+            true,
+        );
+        assert_eq!(verb.len(), 1, "one verb over a status group");
+        let glyph = glass
+            .sprites
+            .iter()
+            .find(|sprite| {
+                sprite.rect[0] >= verb[0].1[0]
+                    && sprite.rect[2] <= verb[0].1[2]
+                    && sprite.rect[1] >= verb[0].1[1]
+            })
+            .expect("the heading's verb is revealed under the hand");
+        assert_eq!(
+            glyph.color, palette.git_head_muted,
+            "a heading's verb wears the body's ink, not a card's"
+        );
+    }
+
+    /// **The keyboard walks the page's rows and steps over its furniture.**
+    ///
+    /// This supersedes the half of 焦点跟随可见视图 (2026-08-19) that read *every
+    /// row is a place*: that ruling gave the masthead, the headings and the
+    /// notices a selected ground so the selection would never be invisible, and
+    /// the 2026-08-25 ruling says those three must never wear a ground at all.
+    /// The two are only reconcilable one way — the selection does not go there —
+    /// and that is also the truer reading, because none of the three answers
+    /// `Enter` with anything.
+    #[test]
+    fn the_keyboard_walks_the_rows_and_steps_over_the_furniture() {
+        let content = furnished();
+        let places = place_rows(&content);
+        assert!(places.len() > 4, "the fixture has a list to walk");
+        let first = places[0];
+        let last = *places.last().expect("there is a last place");
+
+        let mut page = content.clone();
+        page.selected = None;
+        assert_eq!(
+            panel_key(&page, GraphKey::Down),
+            GraphKeyAction::Select(first)
+        );
+        assert_eq!(
+            panel_key(&page, GraphKey::Home),
+            GraphKeyAction::Select(first)
+        );
+        assert_eq!(
+            panel_key(&page, GraphKey::End),
+            GraphKeyAction::Select(last)
+        );
+
+        // Down the whole list, one press at a time: every place is reached, in
+        // order, and no press ever lands on furniture.
+        let mut walked = vec![first];
+        let mut standing = first;
+        loop {
+            page.selected = Some(standing);
+            let GraphKeyAction::Select(next) = panel_key(&page, GraphKey::Down) else {
+                panic!("a travel key answers with a landing");
+            };
+            assert!(
+                !content.rows[next].is_furniture(),
+                "`Down` from {standing} landed on furniture at {next} ({:?})",
+                content.rows[next]
+            );
+            if next == standing {
+                break;
+            }
+            walked.push(next);
+            standing = next;
+        }
+        assert_eq!(walked, places, "every row, and nothing between them");
+
+        // And back up, for the same two facts in the other direction.
+        let mut back = vec![last];
+        standing = last;
+        loop {
+            page.selected = Some(standing);
+            let GraphKeyAction::Select(next) = panel_key(&page, GraphKey::Up) else {
+                panic!("a travel key answers with a landing");
+            };
+            assert!(
+                !content.rows[next].is_furniture(),
+                "`Up` from {standing} landed on furniture at {next} ({:?})",
+                content.rows[next]
+            );
+            if next == standing {
+                break;
+            }
+            back.push(next);
+            standing = next;
+        }
+        back.reverse();
+        assert_eq!(back, places);
+
+        // A number stored while the list was another shape is healed to a place
+        // rather than lighting a heading, which is the same clamp the scroll
+        // already gets and for the same reason.
+        for index in furniture_rows(&content) {
+            let healed = clamp_git_selection(&content.rows, Some(index));
+            assert!(
+                healed.is_some_and(|row| !content.rows[row].is_furniture()),
+                "a selection left on row {index} is moved to a row, not drawn there"
+            );
+        }
+        assert_eq!(
+            clamp_git_selection(&content.rows, Some(content.rows.len() + 40)),
+            None,
+            "and one past the end of the list is dropped, as it always was"
+        );
+    }
+
+    /// **A heading carries no tip; what it used to teach is on the rows under
+    /// it** (user report, 2026-08-25).
+    ///
+    /// The report's own picture was the BRANCHES tip — *"Local branches, current
+    /// one first — click one to check it out"* — hanging over the list it was
+    /// describing. A word that is not a control does not explain itself; the row
+    /// that carries the verb does, and it already did.
+    #[test]
+    fn a_heading_says_nothing_of_its_own_and_the_rows_under_it_say_it_instead() {
+        let content = furnished();
+        for (index, row) in content.rows.iter().enumerate() {
+            if row.is_furniture() {
+                assert_eq!(
+                    row_tooltip(row),
+                    None,
+                    "row {index} ({row:?}) is furniture and explains nothing"
+                );
+            }
+        }
+
+        // The branch row names the verb the heading used to promise.
+        let branch = content
+            .rows
+            .iter()
+            .find(|row| matches!(row, GitRow::Branch(branch) if !branch.current))
+            .expect("the fixture has a branch to check out");
+        assert_eq!(
+            row_tooltip(branch),
+            Some(crate::i18n::git_branch_checkout_tip("side"))
+        );
+
+        // And what a status group *means* is on every row standing in it, in the
+        // branch rows' own grammar: the row's own name, then what it is.
+        for (group, sentence) in [
+            (GitGroup::Staged, Text::GitGroupStagedTip),
+            (GitGroup::Changes, Text::GitGroupChangesTip),
+            (GitGroup::Untracked, Text::GitGroupUntrackedTip),
+        ] {
+            let row = content
+                .rows
+                .iter()
+                .find(|row| matches!(row, GitRow::Change(change) if change.group == group))
+                .unwrap_or_else(|| panic!("the fixture has a row under {group:?}"));
+            let GitRow::Change(change) = row else {
+                unreachable!()
+            };
+            let tip = row_tooltip(row).expect("a change row says what it is");
+            assert!(
+                tip.starts_with(&change.path),
+                "the row's own name leads: {tip:?}"
+            );
+            assert!(
+                tip.contains(sentence.text()),
+                "and the group's sentence follows it: {tip:?}"
+            );
+        }
     }
 }
