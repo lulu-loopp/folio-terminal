@@ -9615,11 +9615,22 @@ pub fn build(
 
     // The scrim: the whole window, dimmed. Not a rounded shape and not inset —
     // it is `position: absolute; inset: 0` on the window's own client area.
-    quads.push(OverlayQuad {
-        rect: [0.0, 0.0, layout.surface[0], layout.surface[1]],
-        color: palette.modal_scrim,
-        alpha: alpha(palette.modal_scrim_alpha),
-    });
+    //
+    // **A layer of its own**, and it is the arrival that made it one (2026-08-26).
+    // The dialog and the dimming behind it come up on the same span but they do
+    // not do the same thing: the dialog travels four pixels and the scrim must
+    // not, because a scrim that slid would be the window itself sliding. Two
+    // layers is the only way to say that — see `Layered::SettingsScrim` and the
+    // `arrival` module. It is first for the reason it was first among the quads:
+    // everything the dialog draws stands on it.
+    let scrim = OverlayLayer {
+        quads: vec![OverlayQuad {
+            rect: [0.0, 0.0, layout.surface[0], layout.surface[1]],
+            color: palette.modal_scrim,
+            alpha: alpha(palette.modal_scrim_alpha),
+        }],
+        ..Default::default()
+    };
 
     // The dialog: the floating-window craft — lift, hairline, face — at the
     // 10px round every window that floats shares, with `--win` for its face
@@ -10341,9 +10352,9 @@ pub fn build(
         ..Default::default()
     };
     if popup.is_empty() {
-        vec![content]
+        vec![scrim, content]
     } else {
-        vec![content, popup]
+        vec![scrim, content, popup]
     }
 }
 
@@ -15306,6 +15317,50 @@ mod tests {
     /// Whether the two rectangles share any area at all.
     fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
         a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+    }
+
+    /// RED GATE — **the scrim is the first layer and it is alone on it.**
+    ///
+    /// `Runtime::refresh_overlay` splits this band in two at exactly that seam:
+    /// the head of it dims and the tail of it dims *and travels four pixels*, on
+    /// the arrival slice's rule that a dialog comes out of nowhere while the
+    /// window behind it merely darkens. Put anything else on the scrim's layer
+    /// and that thing stops travelling with the dialog it belongs to; put the
+    /// scrim second and the whole dialog slides while the dimming stays put.
+    ///
+    /// Mutation: push the scrim back into `content`'s quads and the split takes
+    /// the dialog's own face for a scrim.
+    #[test]
+    fn the_scrim_is_the_first_layer_and_carries_nothing_but_itself() {
+        let placed = open(1.0, false);
+        let layers = built(&placed, None, &values());
+        let scrim = layers.first().expect("the dialog draws at least one layer");
+        assert_eq!(
+            scrim.quads.len(),
+            1,
+            "the scrim's layer holds one quad: the dimming"
+        );
+        assert_eq!(scrim.quads[0].color, chrome_palette().modal_scrim);
+        assert_eq!(
+            scrim.quads[0].rect,
+            [0.0, 0.0, SURFACE.0, SURFACE.1],
+            "and it is the whole window"
+        );
+        assert!(
+            scrim.labels.is_empty() && scrim.sprites.is_empty(),
+            "nothing else may ride on the layer that must not move"
+        );
+        assert!(
+            layers.len() >= 2,
+            "the dialog is on its own layer above the scrim"
+        );
+        assert!(
+            layers[1..].iter().all(|layer| layer
+                .quads
+                .iter()
+                .all(|quad| quad.rect != [0.0, 0.0, SURFACE.0, SURFACE.1])),
+            "there is one scrim and it is not drawn twice"
+        );
     }
 
     /// Which layer the open picker's own surface is drawn on.
