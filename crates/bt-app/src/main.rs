@@ -36,6 +36,7 @@ use std::{
 };
 
 mod attention;
+mod attention_codex;
 mod attention_hooks;
 mod attention_map;
 mod attention_trace;
@@ -6311,6 +6312,9 @@ struct App {
     /// desktop — and rewriting a file belonging to another program at every launch, without being
     /// asked, is not something this build does.
     claude_hooks_installed: bool,
+    /// **Whether the user's own `~/.codex/config.toml` runs `folio attention` at the end of a
+    /// turn**, cached exactly as the field above is and for its two reasons.
+    codex_notify_installed: bool,
     /// **This process's voice in the notification centre** (§7.6).
     ///
     /// On `App` and not on `WindowRuntime`, which is the opposite of
@@ -26015,6 +26019,9 @@ impl Runtime<'_> {
             context_menu_installed: context_menu::reassert(),
             // Read once, and *only* read: see the field for why this one is not repaired.
             claude_hooks_installed: attention_hooks::state() == attention_hooks::State::Installed,
+            // The same, over codex's own file — see the field above's note, which holds word for
+            // word for this one.
+            codex_notify_installed: attention_codex::state() == attention_codex::State::Installed,
             notifications: NotificationDesk::new(proxy.clone()),
             session_store,
             settings_store,
@@ -31527,8 +31534,9 @@ impl Runtime<'_> {
         // disappears with the Tab layout combo, the shortcut lines change as the
         // user records, and the height, the hit test and the draw all come off
         // this one call, so all three follow it in the same frame.
-        let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
-        let content = self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
+        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+        let content =
+            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
         // **The probe's second trigger** (§7.1.6c-5), and it is here because this
         // is the one place that knows which page is being shown *and* is reached
         // by every road to showing it — the gear, a press on the rail, an arrow
@@ -31580,6 +31588,7 @@ impl Runtime<'_> {
         Vec<shortcuts::ShortcutRow>,
         Vec<profiles::ProfileLine>,
         Vec<settings::SchemeFileLine>,
+        settings::SettingsValues,
     ) {
         (
             settings::visible_rows(self.window.rail.layout),
@@ -31606,6 +31615,11 @@ impl Runtime<'_> {
                     file: file.to_owned(),
                 })
                 .collect(),
+            // **And what every row reads**, which is what the dialog is holding as much as its
+            // rows are: a sentence is a function of the answer beside it, and since 2026-08-25 a
+            // row's height is a function of the sentence. Derived here with the lists, and for
+            // their reason — every caller then reads the *same* answers it hands to the panel.
+            self.settings_values(),
         )
     }
 
@@ -31624,6 +31638,7 @@ impl Runtime<'_> {
         shortcuts: &'a [shortcuts::ShortcutRow],
         profiles: &'a [profiles::ProfileLine],
         scheme_files: &'a [settings::SchemeFileLine],
+        values: &'a settings::SettingsValues,
     ) -> settings::SettingsContent<'a> {
         settings::SettingsContent {
             rows,
@@ -31632,6 +31647,7 @@ impl Runtime<'_> {
             scheme_files,
             advanced: self.advanced_open(),
             editor: self.editor_subject(),
+            values,
         }
     }
 
@@ -31666,6 +31682,10 @@ impl Runtime<'_> {
                 _ => None,
             },
             colour_reason: profiles::mark_is_its_own(index),
+            // **The `Name` field's refusal travels with the answers** (moved here 2026-08-25): it
+            // replaces that row's sentence, a sentence is a number of lines and a number of lines
+            // is a row's height, so the layout has to be able to read it.
+            refusal: editor.refusal.map(i18n::Text::text),
             start_at: match start_at {
                 profiles::StartAt::Inherit => 0,
                 profiles::StartAt::Home => 1,
@@ -31762,6 +31782,8 @@ impl Runtime<'_> {
             context_menu: self.app.context_menu_installed,
             // The same, over a file instead of the registry.
             claude_hooks: self.app.claude_hooks_installed,
+            // And the same again, over codex's own file.
+            codex_notify: self.app.codex_notify_installed,
             split_direction: self.app.settings_store.loaded().split_direction,
             search_engine: self.app.settings_store.loaded().search_engine,
             minimum_contrast: self.app.settings_store.loaded().minimum_contrast,
@@ -32016,7 +32038,6 @@ impl Runtime<'_> {
                 args: editor.args.text(),
                 env: &editor_env,
                 caret: editor_caret,
-                refusal: editor.refusal.map(i18n::Text::text),
             });
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -33350,12 +33371,13 @@ impl Runtime<'_> {
         // this press went would be a second reading of `is_open` between two
         // frames that disagree about it.
         settings::rescan_monospace_families();
-        let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
+        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
         self.window.settings.toggle(self.settings_dialog(
             &rows,
             &shortcuts,
             &profile_lines,
             &scheme_files,
+            &values,
         ));
         // A dialog opens at its top. The distance belongs to the sitting the
         // wheel moved, not to the preference the dialog edits, so it does not
@@ -33432,6 +33454,9 @@ impl Runtime<'_> {
         }
         if let Some(install) = settings::claude_hooks_requested(target) {
             self.apply_claude_hooks(install)?;
+        }
+        if let Some(install) = settings::codex_notify_requested(target) {
+            self.apply_codex_notify(install)?;
         }
         if let Some(engine) = settings::search_engine_requested(target) {
             self.apply_search_engine(engine)?;
@@ -33540,8 +33565,9 @@ impl Runtime<'_> {
         // Tab layout is the one choice that changes which rows exist, and the
         // focus may be standing on the row it just deleted. So is the
         // disclosure, which is the same sentence with eight rows in it.
-        let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
-        let content = self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
+        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+        let content =
+            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
         self.window.settings.keep_focus_reachable(content);
         Ok(())
     }
@@ -33585,9 +33611,9 @@ impl Runtime<'_> {
     /// this discards is exactly the eight rows the reader is looking at while
     /// they press it.
     fn reset_advanced_group(&mut self, category: settings::SettingsCategory) -> Result<()> {
-        let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
+        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
         let advanced = self
-            .settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files)
+            .settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values)
             .advanced_rows(category);
         for row in advanced {
             self.reset_advanced_row(row)?;
@@ -33687,6 +33713,7 @@ impl Runtime<'_> {
             // reset would be putting back is not a value in this file, it is a block in the user's
             // own `~/.claude/settings.json`.
             | Row::ClaudeHooks
+            | Row::CodexNotify
             // The editor's own advanced rows are put back by the page's own foot
             // verb — `Restore all defaults` on a built-in — which restores the
             // whole profile rather than four of its fields. A second verb that
@@ -33734,8 +33761,9 @@ impl Runtime<'_> {
             _ => return Ok(()),
         }
         self.store_keybindings();
-        let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
-        let content = self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
+        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+        let content =
+            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
         self.window.settings.keep_focus_reachable(content);
         Ok(())
     }
@@ -34545,9 +34573,10 @@ impl Runtime<'_> {
                     self.app.shortcuts.set(id, chord);
                     self.store_keybindings();
                 }
-                let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
+                let (rows, shortcuts, profile_lines, scheme_files, values) =
+                    self.settings_content();
                 let content =
-                    self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
+                    self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
                 self.window.settings.keep_focus_reachable(content);
             }
         }
@@ -37330,8 +37359,9 @@ impl Runtime<'_> {
         // table does not have. Same call the verbs of this dialog make after
         // they move the list, for the same reason — and **before** the frame
         // below, because the frame is what draws the ring.
-        let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
-        let content = self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
+        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+        let content =
+            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
         self.window.settings.keep_focus_reachable(content);
         self.adopt_profile_table()?;
         // One card per refused entry, `report_skipped_schemes`' shape: a file
@@ -37657,6 +37687,55 @@ impl Runtime<'_> {
                     toast::ToastAnchor::Window,
                     None,
                     format!("{} — {reason}", i18n::Text::ClaudeHooksFailedToast.text()),
+                )?;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Write Folio's `notify` program into the user's own codex configuration, or take it back out.
+    ///
+    /// [`Self::apply_claude_hooks`]'s verb over a second upstream and a second file format, and
+    /// every clause of that one's note holds here: the row is redrawn from the file either way, so
+    /// a refusal leaves the switch standing where the machine actually is; nothing is written
+    /// anywhere but the one user-level file; and a refusal carries a sentence, because on the
+    /// machine where it fires nobody else can see it.
+    ///
+    /// The refusal this one has that the other does not is **somebody else's `notify`**. There is
+    /// one such key in that file, so installing over it would delete a program this build cannot
+    /// give back — see `attention_codex`'s header.
+    fn apply_codex_notify(&mut self, install: bool) -> Result<bool> {
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("folio.exe"));
+        let outcome = attention_codex::apply(install, &exe);
+        self.app.codex_notify_installed =
+            attention_codex::state() == attention_codex::State::Installed;
+        match outcome {
+            attention_codex::Outcome::Installed => {
+                self.toast(
+                    toast::ToastKind::Ok,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::Text::CodexNotifyAddedToast.text().to_owned(),
+                )?;
+                Ok(true)
+            }
+            attention_codex::Outcome::Removed => {
+                self.toast(
+                    toast::ToastKind::Ok,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::Text::CodexNotifyRemovedToast.text().to_owned(),
+                )?;
+                Ok(true)
+            }
+            // The file already said what the press asked for.
+            attention_codex::Outcome::Unchanged => Ok(true),
+            attention_codex::Outcome::Refused(reason) => {
+                self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    None,
+                    format!("{} — {reason}", i18n::Text::CodexNotifyFailedToast.text()),
                 )?;
                 Ok(false)
             }
@@ -67468,8 +67547,9 @@ impl Runtime<'_> {
             }
             let key = settings_key_of(&event.logical_key, self.window.modifiers, event.repeat);
             let before = self.window.settings.category();
-            let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
-            let content = self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
+            let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+            let content =
+                self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
             let verdict = self
                 .window
                 .settings
@@ -84902,6 +84982,7 @@ mod tests {
             scheme_files: &[],
             advanced: settings::AdvancedOpen::default(),
             editor: None,
+            values: Box::leak(Box::new(settings::SettingsValues::sample())),
         });
         assert!(panel.is_open(), "the gear's verb is 'open the dialog'");
         assert_eq!(

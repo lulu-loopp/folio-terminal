@@ -51,6 +51,11 @@ winit.workspace = true
 # no new package — `docs/DESIGN.md` §8's bar, met by a dependency that was
 # present and is now also compiled into the product.
 serde_json.workspace = true
+# **And the third document that is not ours**: `~/.codex/config.toml`
+# (`attention_codex`). Same contract as the settings file above and a stronger
+# reason for the crate chosen — TOML carries comments, and a round trip through
+# a value model would silently delete every one of them.
+toml_edit.workspace = true
 
 # Tests only. This crate writes `session.json` through `bt-persist` and never
 # touches that file's JSON itself — which is exactly why one test needs to: the
