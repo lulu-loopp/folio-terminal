@@ -529,10 +529,37 @@ pub const FLOAT_FOOT_PADDING_LEFT_LOGICAL_PX: f32 = 10.0;
 pub const FLOAT_FOOT_PADDING_RIGHT_LOGICAL_PX: f32 = 18.0;
 /// `.float-win .fly-foot { font-size: 11px }`.
 pub const FLOAT_FOOT_FONT_LOGICAL_PX: f32 = 11.0;
-/// `.float-win .fly-resize::after` — the chevron's box inside the grip.
-pub const FLOAT_GRIP_GLYPH_LOGICAL_PX: f32 = 8.0;
-/// `right: 3px; bottom: 3px` — how far that chevron sits in from the corner.
-pub const FLOAT_GRIP_GLYPH_INSET_LOGICAL_PX: f32 = 3.0;
+/// `.float-win .fly-resize::after` — the grip's box.
+///
+/// **The compact head's number since P1**, and the arithmetic is the whole of
+/// why. The mock-up states an `8 × 8` box with a `1.5px` border; the border was
+/// quoted into the drawing as a pen of `1.5` in an eight-unit grid, which is
+/// `0.1875` of pen per unit against the house's `0.075` — the heaviest ratio in
+/// the sheet, and one no box could have brought into the band, because a box
+/// scales a mark's ink and its pen together. The grip is cut in the house
+/// sixteen at the house pen now, so its box has to be one that carries that
+/// pen: `1.2 / 16 × 13` is `0.975`, and anything under `12.67` is below the
+/// band's floor.
+///
+/// **The arc it draws is still seven pixels.** That is the number the mock-up
+/// actually states about this shape (line 710-712: the curve "nests
+/// concentrically inside the window's 10px corner"), and the re-cut kept it by
+/// drawing a smaller arc inside a bigger box rather than the same arc scaled
+/// up: an `8.6`-unit outer radius in a sixteen, at thirteen pixels, is `6.99`.
+pub const FLOAT_GRIP_GLYPH_LOGICAL_PX: f32 =
+    crate::icons::MarkSlot::CompactHead.house_box_logical_px();
+/// `right: 3px; bottom: 3px` — how far the grip's **ink** sits in from the
+/// corner, which is what the mock-up is measuring.
+///
+/// The box is bigger than the ink since P1 — the drawing carries the house's
+/// air — so the box has to be placed further out than the ink is meant to
+/// land, by exactly the air on that side. Written as the derivation rather than
+/// as the number it currently comes to, so that re-striking the grip or moving
+/// the slot cannot silently walk the curve away from the window's corner.
+pub const FLOAT_GRIP_GLYPH_INSET_LOGICAL_PX: f32 = 3.0
+    - FLOAT_GRIP_GLYPH_LOGICAL_PX
+        * (1.0 - crate::marks::HOUSE_INK_UNITS / crate::marks::HOUSE_GRID_UNITS)
+        / 2.0;
 /// `#pv-float .pv-dirty { width: 12px }` (P47) — the dot's reserved slot.
 pub const FLOAT_DIRTY_SLOT_LOGICAL_PX: f32 = 12.0;
 // `#pv-float .pv-dirty { font-size: 13px }` is gone with the docked head's own —

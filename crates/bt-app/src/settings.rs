@@ -487,18 +487,19 @@ const SHORTCUT_RECORD_WIDTH_LOGICAL_PX: f32 = 84.0;
 const SHORTCUT_RESTORE_SIDE_LOGICAL_PX: f32 = 24.0;
 /// Between the two right-hand controls.
 const SHORTCUT_CONTROL_GAP_LOGICAL_PX: f32 = 8.0;
-/// The glyph the restore verb wears. `↺` and not a word, because it stands
-/// beside a button that is already a word and a second one would read as a
-/// choice between two verbs rather than as an undo of one.
-const RESTORE_GLYPH: &str = "\u{21ba}";
-
-/// The two glyphs the reorder buttons wear — `↑` and `↓`, the mock-up's own.
-///
-/// Arrows and not chevrons: a chevron in this window means "there is more here"
-/// (a combo opens one, a menu turns one), and a button that moved a row while
-/// wearing the disclosure glyph would be borrowing a word that is already taken.
-const PROFILE_UP_GLYPH: &str = "\u{2191}";
-const PROFILE_DOWN_GLYPH: &str = "\u{2193}";
+// The restore verb wears a mark and not a word, because it stands beside a
+// button that is already a word and a second one would read as a choice between
+// two verbs rather than as an undo of one. Which mark is
+// `icons::ActionIcon::RestoreRowDefaults`; it was `↺` U+21BA in the dialog's
+// own type until P1.
+//
+// The reorder buttons are arrows and not chevrons, and that argument survives
+// the retirement intact: a chevron in this window means "there is more here"
+// (a combo opens one, a menu turns one), and a button that moved a row while
+// wearing the disclosure glyph would be borrowing a word that is already taken.
+// What changed is that the house now *has* an arrow — `ChromeMark::Arrow`,
+// struck for the browser's Back and Forward in the same block — so the
+// distinction is drawn instead of typed.
 
 /// The badge a row wears, or none.
 ///
@@ -642,17 +643,20 @@ const ENV_GHOSTS: [(&str, &str); 3] = [
 /// type — which is what it is: the editor's heading, wearing the heading's face.
 const CRUMB_MARGIN_TOP_LOGICAL_PX: f32 = 10.0;
 const CRUMB_MARGIN_BOTTOM_LOGICAL_PX: f32 = 2.0;
-/// `.pf-crumb { gap: 6px }`, between `‹ Profiles`, the `›` and the name.
+/// `.pf-crumb { gap: 6px }`, between the way back, the separator and the name.
 const CRUMB_GAP_LOGICAL_PX: f32 = 6.0;
-/// The separator the breadcrumb draws between the way back and where you are.
-const CRUMB_SEPARATOR: &str = "\u{203a}";
-/// And the guillemet `‹ Profiles` opens with — the same character turned, so the
-/// pair reads as one direction and not as two glyphs that happen to point.
-const CRUMB_BACK_PREFIX: &str = "\u{2039} ";
-/// `.pf-more > button { width: 26px }` — the `⋯` trigger, which explicitly
-/// undoes `.combo > button`'s 118px floor, its hairline and its space-between,
-/// because every line of that recipe is wrong for a trigger one glyph wide.
-const ROW_MORE_GLYPH: &str = "\u{22ef}";
+// The separator between the way back and where you are, and the arrow the way
+// back opens with, are `crate::seats::crumb_separator_mark` and
+// `crate::seats::crumb_back_mark` — one drawing at two quarter turns, which is
+// what makes the pair read as one direction rather than as two glyphs that
+// happen to point. They were `›` and `‹` in the dialog's own type until P1,
+// and the preview rail's own breadcrumb was retired in the same edit and to the
+// same two marks: two breadcrumbs in one window may not be two vocabularies.
+// `.pf-more > button { width: 26px }` — the `⋯` trigger, which explicitly
+// undoes `.combo > button`'s 118px floor, its hairline and its space-between,
+// because every line of that recipe is wrong for a trigger one glyph wide. The
+// three dots are `icons::ActionIcon::OpenRowMenu` since P1 and were U+22EF in
+// the dialog's own type before it.
 /// `.pf-more .combo-menu { min-width: 150px }`.
 const ROW_MENU_MIN_WIDTH_LOGICAL_PX: f32 = 150.0;
 /// `Delete profile` and `Restore all defaults`, the editor foot's two verbs —
@@ -660,8 +664,10 @@ const ROW_MENU_MIN_WIDTH_LOGICAL_PX: f32 = 150.0;
 const DELETE_PROFILE_WIDTH_LOGICAL_PX: f32 = 124.0;
 /// `+ New profile`, the list's own foot verb.
 const NEW_PROFILE_WIDTH_LOGICAL_PX: f32 = 116.0;
-/// The `✕` that takes one of the reader's own environment rows out.
-const ENV_REMOVE_GLYPH: &str = "\u{2715}";
+// What takes one of the reader's own environment rows out is
+// `icons::ActionIcon::RemoveEnvironmentRow` — the bin, because a row that goes
+// away is destroyed and not closed. It was `✕` U+2715 in the dialog's own type
+// until P1, which is both the wrong substance and the wrong verb.
 /// How far the caret stops short of a field's inside edge, top and bottom, so
 /// that it reads as a caret in a line of text rather than as a second hairline.
 const FIELD_CARET_INSET_LOGICAL_PX: f32 = 5.0;
@@ -763,9 +769,14 @@ const DISCLOSURE_HEIGHT_LOGICAL_PX: f32 =
 /// all, so there is no column to cut out of a margin and nothing to be too
 /// narrow. It is the same [`crate::marks::ChromeMark::chevron`] the preview
 /// head and the tab strip turn, at the same 180°, through the same door.
-const DISCLOSURE_CHEVRON_WIDTH_LOGICAL_PX: f32 = 10.0;
+///
+/// **The slot's box, square, since P1**: the arrow was re-cut from `10 × 6` to
+/// the house sixteen, so "the same chevron the preview head and the tab strip
+/// turn" is now true of its size as well as of its drawing.
+const DISCLOSURE_CHEVRON_WIDTH_LOGICAL_PX: f32 =
+    crate::icons::MarkSlot::CompactHead.house_box_logical_px();
 /// The chevron's height; see [`DISCLOSURE_CHEVRON_WIDTH_LOGICAL_PX`].
-const DISCLOSURE_CHEVRON_HEIGHT_LOGICAL_PX: f32 = 6.0;
+const DISCLOSURE_CHEVRON_HEIGHT_LOGICAL_PX: f32 = DISCLOSURE_CHEVRON_WIDTH_LOGICAL_PX;
 
 // ── every word this dialog puts in front of a person ───────────────────────
 //
@@ -6434,7 +6445,9 @@ pub struct CrumbLayout {
     pub band: [f32; 4],
     /// `‹ Profiles`, the only way back that is a control.
     pub back: [f32; 4],
-    /// The `›`.
+    /// The arrow in front of the way back.
+    back_mark: [f32; 4],
+    /// The separator's own cell.
     pub separator: [f32; 4],
     /// The profile's own name, which reports and is not a control.
     pub name: [f32; 4],
@@ -8061,26 +8074,37 @@ pub fn layout_for_menus(
                 // label's face, and a width measured without the letter-spacing
                 // that face carries is a width one glyph short — which is exactly
                 // far enough for the `›` to sit on the last letter.
-                let back_word = format!("{CRUMB_BACK_PREFIX}{}", Text::CategoryProfiles.text());
+                let back_word = Text::CategoryProfiles.text();
                 let tracked = |text: &str, measure: &mut dyn FnMut(&str, f32) -> f32| {
                     measure(text, font)
                         + font * GROUP_LABEL_TRACKING_EM * text.chars().count() as f32
                 };
+                // The arrow's own box carries its air, so the word starts where
+                // the box ends and no gap is spent between them: the two are one
+                // phrase, and the gap is what separates *phrases*.
+                let back_mark_width = px(crate::seats::compact_head_glyph_box_logical_px(
+                    crate::seats::crumb_back_mark(),
+                )[0]);
+                let back_mark = [band[0], band[1], band[0] + back_mark_width, band[3]];
                 let back = [
                     band[0],
                     band[1],
-                    band[0] + tracked(&back_word, measure),
+                    back_mark[2] + tracked(back_word, measure),
                     band[3],
                 ];
+                let separator_width = px(crate::seats::compact_head_glyph_box_logical_px(
+                    crate::seats::crumb_separator_mark(),
+                )[0]);
                 let separator = [
                     back[2] + px(CRUMB_GAP_LOGICAL_PX),
                     band[1],
-                    back[2] + px(CRUMB_GAP_LOGICAL_PX) + tracked(CRUMB_SEPARATOR, measure),
+                    back[2] + px(CRUMB_GAP_LOGICAL_PX) + separator_width,
                     band[3],
                 ];
                 placed_crumb = Some(CrumbLayout {
                     band,
                     back,
+                    back_mark,
                     separator,
                     name: [
                         separator[2] + px(CRUMB_GAP_LOGICAL_PX),
@@ -10640,24 +10664,24 @@ fn push_profile_page(
         // The first row's `↑` and the last row's `↓` are **dark, not absent**: a
         // row missing a button shifts every button beside it out of column, and
         // a run of verbs that moves from row to row is a run nobody can aim at.
-        for (box_, glyph, target, enabled) in [
+        for (box_, icon, target, enabled) in [
             (
                 placed.up,
-                PROFILE_UP_GLYPH,
+                crate::icons::ActionIcon::MoveRowUp,
                 SettingsTarget::ProfileUp(placed.index),
                 placed.index > 0,
             ),
             (
                 placed.down,
-                PROFILE_DOWN_GLYPH,
+                crate::icons::ActionIcon::MoveRowDown,
                 SettingsTarget::ProfileDown(placed.index),
                 placed.index < last,
             ),
         ] {
-            push_glyph_verb(
+            push_mark_verb(
                 stack,
                 box_,
-                glyph,
+                icon.mark(),
                 enabled && hover == Some(target),
                 enabled,
                 scale,
@@ -10687,30 +10711,35 @@ fn push_profile_page(
         // a person came to this list to do, and duplicating, hiding, deleting
         // and setting a default are the rarer four. The row applies this block's
         // own progressive-disclosure rule to itself.
-        for (box_, word, target) in [
-            (
-                placed.edit,
-                Text::ProfilesEdit.text(),
-                SettingsTarget::ProfileEdit(placed.index),
-            ),
-            (
-                placed.more,
-                ROW_MORE_GLYPH,
-                SettingsTarget::ProfileMore(placed.index),
-            ),
-        ] {
-            push_glyph_verb(
-                stack,
-                box_,
-                word,
-                hover == Some(target),
-                true,
-                scale,
-                palette,
-            );
-            if focus == Some(target) {
-                stack.quads.extend(focus_ring(box_, scale, palette.accent));
-            }
+        let edit = SettingsTarget::ProfileEdit(placed.index);
+        push_glyph_verb(
+            stack,
+            placed.edit,
+            Text::ProfilesEdit.text(),
+            hover == Some(edit),
+            true,
+            scale,
+            palette,
+        );
+        if focus == Some(edit) {
+            stack
+                .quads
+                .extend(focus_ring(placed.edit, scale, palette.accent));
+        }
+        let more = SettingsTarget::ProfileMore(placed.index);
+        push_mark_verb(
+            stack,
+            placed.more,
+            crate::icons::ActionIcon::OpenRowMenu.mark(),
+            hover == Some(more),
+            true,
+            scale,
+            palette,
+        );
+        if focus == Some(more) {
+            stack
+                .quads
+                .extend(focus_ring(placed.more, scale, palette.accent));
         }
     }
     // **`+ New profile` copies the default** rather than opening a blank one: a
@@ -10810,16 +10839,43 @@ fn push_editor_page(
     let Some(ink) = editor else { return };
     if let Some(crumb) = layout.crumb {
         let font = px(GROUP_LABEL_FONT_LOGICAL_PX);
-        // `‹ Profiles` is the way back and wears the ink a control wears under
-        // the pointer; the `›` and the name after it report and stay muted.
+        // The way back wears the ink a control wears under the pointer; the
+        // separator and the name after it report and stay muted.
+        let lit = hover == Some(SettingsTarget::EditorBack);
+        for (mark, cell, ink) in [
+            (
+                crate::seats::crumb_back_mark(),
+                crumb.back_mark,
+                if lit {
+                    palette.dialog_title_text
+                } else {
+                    palette.dialog_muted_text
+                },
+            ),
+            (
+                crate::seats::crumb_separator_mark(),
+                crumb.separator,
+                palette.dialog_muted_text,
+            ),
+        ] {
+            stack.sprites.push(ChromeSprite::new(
+                mark,
+                crate::seats::crumb_punctuation_box(cell, mark, scale),
+                ink,
+            ));
+        }
         for (rect, text, muted, align_right) in [
             (
-                crumb.back,
-                format!("{CRUMB_BACK_PREFIX}{}", Text::CategoryProfiles.text()),
-                hover != Some(SettingsTarget::EditorBack),
+                [
+                    crumb.back_mark[2],
+                    crumb.back[1],
+                    crumb.back[2],
+                    crumb.back[3],
+                ],
+                Text::CategoryProfiles.text().to_owned(),
+                !lit,
                 false,
             ),
-            (crumb.separator, CRUMB_SEPARATOR.to_owned(), true, false),
             (
                 crumb.name,
                 values
@@ -10937,10 +10993,10 @@ fn push_editor_page(
         }
         if let Some(index) = index {
             let target = SettingsTarget::EnvRemove(index);
-            push_glyph_verb(
+            push_mark_verb(
                 stack,
                 line.remove,
-                ENV_REMOVE_GLYPH,
+                crate::icons::ActionIcon::RemoveEnvironmentRow.mark(),
                 hover == Some(target),
                 true,
                 scale,
@@ -11180,6 +11236,48 @@ fn wrapped_pair(
 /// Not [`push_button`]: these are `.pf-act`s, which have no border and no face
 /// at rest (`background: none`), because a run of three bordered buttons on
 /// every row would out-weigh the row.
+fn push_mark_verb(
+    stack: &mut OverlayLayer,
+    rect: [f32; 4],
+    mark: ChromeMark,
+    hovered: bool,
+    enabled: bool,
+    scale: f32,
+    palette: bt_render::ChromePalette,
+) {
+    let px = |value: f32| value * scale;
+    if hovered {
+        stack.quads.extend(rounded_overlay_fill(
+            rect,
+            px(BUTTON_RADIUS_LOGICAL_PX),
+            palette.dialog_hover,
+            1.0,
+        ));
+    }
+    let [width, height] = crate::seats::compact_head_glyph_box_logical_px(mark);
+    let (width, height) = (px(width), px(height));
+    let left = f32::midpoint(rect[0], rect[2]) - width / 2.0;
+    let top = f32::midpoint(rect[1], rect[3]) - height / 2.0;
+    stack.sprites.push(ChromeSprite::new(
+        mark,
+        [
+            left.round(),
+            top.round(),
+            left.round() + width.round(),
+            top.round() + height.round(),
+        ],
+        if !enabled {
+            palette.menu_item_hint_text
+        } else if hovered {
+            palette.dialog_title_text
+        } else {
+            palette.dialog_secondary_text
+        },
+    ));
+}
+
+/// The same verb when what it wears is a *word* rather than a mark — `Edit`,
+/// which is the one open verb on a Profiles row.
 fn push_glyph_verb(
     stack: &mut OverlayLayer,
     rect: [f32; 4],
@@ -11341,10 +11439,12 @@ fn push_shortcut_page(
             }
         }
         if let Some(restore) = placed.restore {
-            push_restore_verb(
+            push_mark_verb(
                 stack,
                 restore,
+                crate::icons::ActionIcon::RestoreRowDefaults.mark(),
                 hover == Some(SettingsTarget::RestoreRow(placed.index)),
+                true,
                 scale,
                 palette,
             );
@@ -11593,44 +11693,6 @@ fn push_button(
         rect,
         font_size_px,
         color: palette.dialog_title_text,
-        align_right: false,
-        align_center: true,
-        letter_spacing_em: 0.0,
-        weight: ChromeLabelWeight::Regular,
-        tabular_numerals: false,
-        clip: None,
-    });
-}
-
-/// The `↺` beside an overridden row — the house's own three-step reveal, one
-/// step short: it is only drawn at all when there is something to undo, so
-/// "absent" is already doing the work "invisible until hovered" does elsewhere.
-fn push_restore_verb(
-    stack: &mut OverlayLayer,
-    rect: [f32; 4],
-    hovered: bool,
-    scale: f32,
-    palette: bt_render::ChromePalette,
-) {
-    let px = |value: f32| value * scale;
-    if hovered {
-        stack.quads.extend(rounded_overlay_fill(
-            rect,
-            px(BUTTON_RADIUS_LOGICAL_PX),
-            palette.dialog_hover,
-            1.0,
-        ));
-    }
-    stack.labels.push(ChromeLabel {
-        mono: false,
-        text: RESTORE_GLYPH.to_owned(),
-        rect,
-        font_size_px: px(BUTTON_FONT_LOGICAL_PX),
-        color: if hovered {
-            palette.dialog_title_text
-        } else {
-            palette.dialog_secondary_text
-        },
         align_right: false,
         align_center: true,
         letter_spacing_em: 0.0,

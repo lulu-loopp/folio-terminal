@@ -32962,9 +32962,7 @@ impl Runtime<'_> {
             let hover = self.window.preview_menu.hover();
             let favicons = Rc::clone(&self.app.favicons);
             let favicons = favicons.borrow();
-            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-            profiles::preview_menu_build(&layout, &items, hover, &favicons, &mut measure)
+            profiles::preview_menu_build(&layout, &items, hover, &favicons)
         } else {
             Vec::new()
         };
