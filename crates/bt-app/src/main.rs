@@ -15980,7 +15980,7 @@ fn settle_attention(
                 seat: *seat,
             };
             for expired in leaf.attention_clock.due(now) {
-                let outcome = leaf.attention.apply(at, reach, expired, next_place);
+                let outcome = leaf.attention.apply(at, reach, expired, next_place, now);
                 emit_attention_lines(trace, outcome.lines);
                 allowed.extend(outcome.raised.map(|one| (*seat, one)));
             }
@@ -15995,7 +15995,7 @@ fn settle_attention(
             // readings of one shell.
             let reported = leaf.session.status();
             if let Some(edge) = leaf.attention.weak_edge(reported.attention_request) {
-                let outcome = leaf.attention.apply(at, reach, edge, next_place);
+                let outcome = leaf.attention.apply(at, reach, edge, next_place, now);
                 emit_attention_lines(trace, outcome.lines);
                 allowed.extend(outcome.raised.map(|one| (*seat, one)));
             }
@@ -16025,7 +16025,7 @@ fn settle_attention(
                 active: tab_is_active,
                 focused: window_is_focused,
             };
-            let outcome = leaf.attention.apply(at, reach, settle, next_place);
+            let outcome = leaf.attention.apply(at, reach, settle, next_place, now);
             emit_attention_lines(trace, outcome.lines);
             allowed.extend(outcome.raised.map(|one| (*seat, one)));
             if consumed {
@@ -16080,6 +16080,11 @@ fn settle_attention(
 /// A free function rather than a method, because [`Runtime::answer_attention`] is this call plus
 /// one borrow split, and a fixture holding a bare tab should exercise the window's own rule rather
 /// than a second copy of it.
+// Eight, and `settle_attention`'s allowance for its reason: every one is a different question about
+// one answer — whose panes, which of them, what kind of action it was, how far this window is from
+// the reader's eyes, what serial to draw a place from, when now is, and where the lines go. A struct
+// would move the list rather than shorten it.
+#[allow(clippy::too_many_arguments)]
 fn answer_attention_in(
     tab: &mut TabState,
     index: usize,
@@ -16087,6 +16092,7 @@ fn answer_attention_in(
     by: UserInputKind,
     reach: attention::Reach,
     next_place: &mut u64,
+    now: Instant,
     trace: Option<&attention_trace::Trace>,
 ) {
     let Some(answered) = by.answer_kind() else {
@@ -16102,6 +16108,7 @@ fn answer_attention_in(
             reach,
             attention::Event::Answer(answered),
             next_place,
+            now,
         )
         .lines;
     emit_attention_lines(trace, lines);
@@ -16117,10 +16124,11 @@ fn expire_leaf_attention(
     reach: attention::Reach,
     leaf: &mut LeafSession,
     next_place: &mut u64,
+    now: Instant,
 ) {
     let lines = leaf
         .attention
-        .apply(at, reach, attention::Event::LeafGone, next_place)
+        .apply(at, reach, attention::Event::LeafGone, next_place, now)
         .lines;
     emit_attention_lines(attention_trace::global(), lines);
 }
@@ -16206,8 +16214,10 @@ fn attention_delivery(
 /// Run from the animation tick instead, the announcement would arrive at a pane with no live
 /// request and its sentence would be dropped — the program's own words lost to a scheduling
 /// detail.
-// Nine, and `settle_attention`'s allowance for its reason: every one is a different question about
-// one turn of one tab's OSC lane, and a struct would move the list rather than shorten it.
+// Ten, and `settle_attention`'s allowance for its reason: every one is a different question about
+// one turn of one tab's OSC lane, and a struct would move the list rather than shorten it. The
+// tenth is when now is, which this lane needs because a `RequestAttention=yes` arriving on it is a
+// program speaking in that pane (`attention` plan §11.10.4).
 #[allow(clippy::too_many_arguments)]
 fn deliver_osc_attention(
     tab: &mut TabState,
@@ -16218,6 +16228,7 @@ fn deliver_osc_attention(
     turn_end_enabled: bool,
     next_place: &mut u64,
     announcements: &[(SeatId, bt_term::TerminalNotification)],
+    now: Instant,
     trace: Option<&attention_trace::Trace>,
     raised: &mut Vec<AttentionDelivery>,
 ) {
@@ -16238,7 +16249,7 @@ fn deliver_osc_attention(
             tab: index,
             seat: *seat,
         };
-        let outcome = leaf.attention.apply(at, reach, event, next_place);
+        let outcome = leaf.attention.apply(at, reach, event, next_place, now);
         emit_attention_lines(trace, outcome.lines);
         allowed.extend(outcome.raised.map(|one| (*seat, None, one)));
     }
@@ -16345,7 +16356,7 @@ fn deliver_attention(
                     }
                     _ => {}
                 }
-                let outcome = leaf.attention.apply(at, reach, event, next_place);
+                let outcome = leaf.attention.apply(at, reach, event, next_place, now);
                 emit_attention_lines(trace, outcome.lines);
                 allowed.extend(outcome.raised.map(|one| (seat, one)));
             }
@@ -27213,6 +27224,7 @@ impl Runtime<'_> {
                     self.window.window_focused,
                     self.window.window_hidden,
                 );
+                let now = Instant::now();
                 for (seat, leaf) in removed.leaves_mut() {
                     expire_leaf_attention(
                         attention::Site {
@@ -27222,6 +27234,7 @@ impl Runtime<'_> {
                         reach,
                         leaf,
                         &mut self.window.attention_next_place,
+                        now,
                     );
                 }
                 // Every leaf's shell, not the focused one's. Reaching for
@@ -38362,6 +38375,7 @@ impl Runtime<'_> {
                 reach,
                 &mut leaf,
                 &mut self.window.attention_next_place,
+                Instant::now(),
             );
             if let Some(pty) = leaf.pty.as_mut() {
                 pty.shutdown().context("shut down closed pane's shell")?;
@@ -58327,6 +58341,10 @@ impl Runtime<'_> {
         let turn_end_enabled = self.app.settings_store.loaded().turn_end_notification;
         let owner_is_a_shell = self.keyboard_owner_is_a_shell();
         let active_tab = self.window.active_tab;
+        // One instant for the whole drain, for the reason a frame takes one: the OSC lane below
+        // stamps the panes a program spoke in (`attention` plan §11.10.4), and two tabs of one turn
+        // sampled at two times would be two turns as far as that stamp is concerned.
+        let now = Instant::now();
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let outcome =
                 drain_tab_pty(tab, window_focused, index == active_tab, owner_is_a_shell)?;
@@ -58345,6 +58363,7 @@ impl Runtime<'_> {
                 turn_end_enabled,
                 &mut self.window.attention_next_place,
                 &outcome.notifications,
+                now,
                 attention_trace::global(),
                 &mut raised,
             );
@@ -66032,6 +66051,7 @@ impl Runtime<'_> {
             by,
             reach,
             attention_next_place,
+            Instant::now(),
             attention_trace::global(),
         );
     }
@@ -66045,6 +66065,12 @@ impl Runtime<'_> {
     fn mark_attention_seen(&mut self, index: usize) {
         let reach =
             notify::desktop_reach(true, self.window.window_focused, self.window.window_hidden);
+        // A look is not a program speaking, so this instant stamps nothing (`attention` plan
+        // §11.10.4 — [`attention::Event::is_the_programs_voice`] answers `MarkSeen` with `false`).
+        // It is read here rather than threaded down from a frame because a tab switch is not part
+        // of one: there is no animation being sampled, and the moment the switch happens is the
+        // only moment this arrival is about.
+        let now = Instant::now();
         let WindowRuntime {
             tabs,
             attention_next_place,
@@ -66057,7 +66083,13 @@ impl Runtime<'_> {
             };
             let lines = leaf
                 .attention
-                .apply(at, reach, attention::Event::MarkSeen, attention_next_place)
+                .apply(
+                    at,
+                    reach,
+                    attention::Event::MarkSeen,
+                    attention_next_place,
+                    now,
+                )
                 .lines;
             emit_attention_lines(attention_trace::global(), lines);
         }
@@ -83396,6 +83428,7 @@ mod tests {
             by,
             attention::Reach::Nothing,
             next,
+            Instant::now(),
             trace,
         );
     }

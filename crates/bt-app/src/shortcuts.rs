@@ -632,6 +632,16 @@ pub(crate) const BINDINGS: &[Binding] = &[
     // modified `Enter` until somebody has found out what Windows and winit
     // between them are doing with it, and this comment is that finding.
     //
+    // **Measured a second time on 2026-08-25, and it still does not arrive.** The
+    // `zoom-pane` row below was written on `Ctrl+Shift+Enter` that morning, over
+    // this note, on the argument that one machine on one day is a record and not a
+    // rule; the user pressed it on the real window and the pane did not zoom. Two
+    // measurements six days apart make this a rule rather than a record, so the
+    // zoom verb moved to `Ctrl+Shift+X` and **no row of this table is keyed on
+    // `Enter` in any combination** — which `the_zoom_verb_has_a_chord_of_its_own`
+    // now asserts over the whole table instead of leaving it to whoever writes the
+    // next row.
+    //
     // `M` wears the modifier pair every window verb in this table wears
     // (discipline (1): bare `Ctrl+letter` belongs to the shell), and `^M` — which
     // is what a bare `Ctrl+M` would take — stays with the terminal, where it is
@@ -798,23 +808,27 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Action::DuplicatePaneSplit,
         Chord::new(CTRL_SHIFT, character("d")),
     ),
-    // **`Ctrl+Shift+Enter`, ruled by the user 2026-08-25** — the keyboard door
+    // **`Ctrl+Shift+X`, ruled by the user 2026-08-25** — the keyboard door
     // §7.1.6l shipped without. The verb had two pointer doors (a double-click on
     // the pane head, the `⌄` menu's row) and no key, which made it the one pane
     // verb in this build a hand on the keyboard could not reach.
     //
-    // The key was free: no row in this table is keyed on `Enter` in any
-    // combination, and `Ctrl+Shift+Enter` is not a sequence a shell claims — a
-    // bare `Enter` is `\r` and stays with the terminal, exactly as `^M` stays
-    // with it. It is also the chord Windows Terminal spends on maximising a
-    // pane, so it arrives already meaning this to the hands that have met it.
+    // **It was `Ctrl+Shift+Enter` for half a day, and the machine took it back.**
+    // That chord is what Windows Terminal spends on maximising a pane, so the row
+    // was written on it over the `new-window` note above on the argument that one
+    // measurement on one machine is not a rule. The user pressed it on the real
+    // window the same day and nothing happened — the second measurement of the
+    // same finding — so the ruling moved the verb to a key that arrives. The note
+    // above is now a rule rather than a record, and the test below holds the whole
+    // table to it.
     //
-    // **The `new-window` row's 2026-08-19 note is above, and it is kept.** That
-    // note measured a modified `Enter` failing to arrive and, on that evidence,
-    // declined to key a row on it. The note is a record of one machine on one
-    // day, not a rule; this row is the ruling. Both stay written down, so that a
-    // reader who finds this chord dead on their machine finds the earlier
-    // measurement beside it rather than having to make it again.
+    // **`X` and not `C` or `V`.** It is free in this table, it is outside the
+    // `Ctrl+Alt` AltGr zone this table's header rules out, and `^X` — what a bare
+    // `Ctrl+X` would take — stays with the terminal, where readline spends it on
+    // its own prefix. The two letters beside it are not free in the same sense:
+    // `Ctrl+Shift+C`/`V` are copy and paste to every hand that has used a terminal,
+    // and a window layout answering to either is a window people stop trusting the
+    // first time they press it.
     //
     // Titled with the menu row's action face on `focus-mode`'s precedent: the
     // chord and the row turn one field, so they are one name.
@@ -822,7 +836,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         "zoom-pane",
         Text::PaneMenuZoom,
         Action::ZoomPane,
-        Chord::new(CTRL_SHIFT, ChordKey::Named(NamedKey::Enter)),
+        Chord::new(CTRL_SHIFT, character("x")),
     ),
     // **`Ctrl+Shift+B`, and pointedly not the mock-up's `Ctrl+B`.**
     //
@@ -2914,8 +2928,10 @@ mod tests {
         // `Ctrl+Shift+L` — 23 single actions, and the second row in the table
         // that puts a caret in an address. See [`Action::WindowAddress`] for why
         // it is a row rather than a second chord on the first one.
-        // **One more on 2026-08-25** (B7): `zoom-pane` on `Ctrl+Shift+Enter` —
-        // 24 single actions, and the first row in the table keyed on `Enter`.
+        // **One more on 2026-08-25** (B7): `zoom-pane` on `Ctrl+Shift+X` — 24
+        // single actions. It was written on `Ctrl+Shift+Enter` first and moved the
+        // same day, because a modified `Enter` does not reach this application;
+        // the table is keyed on `Enter` nowhere, and that is now asserted.
         assert_eq!(BINDINGS.len(), 40);
         assert_eq!(
             BINDINGS
@@ -2954,8 +2970,8 @@ mod tests {
         }
     }
 
-    /// PIN (user ruling 2026-08-25, B7) — **the pane zoom has a chord, and it is
-    /// `Ctrl+Shift+Enter`.**
+    /// PIN (user ruling 2026-08-25, B7 and its correction the same day) — **the
+    /// pane zoom has a chord, and it is `Ctrl+Shift+X`.**
     ///
     /// §7.1.6l shipped the verb with two pointer doors and no keyboard one: a
     /// double-click on the pane head and the `⌄` menu's row. The ruling gives it
@@ -2965,16 +2981,19 @@ mod tests {
     /// a shortcut row says what a key *does*, and this key does the same thing
     /// both ways round, which is what makes it a toggle.
     ///
-    /// **The 2026-08-19 note on `new-window` is not a refutation of this row.**
-    /// That note recorded a modified `Enter` failing to arrive on one machine on
-    /// one day and, on that evidence, declined to key a row on it. What this test
-    /// pins is the half this file owns: the chord is claimed, it is claimed by
-    /// nothing else, and the table answers it. Whether Windows delivers it is a
-    /// fact about Windows, and the note stays where it is so that the next reader
-    /// meets both halves.
+    /// **The chord was `Ctrl+Shift+Enter` for half a day, and the machine had the
+    /// last word.** The `new-window` row's 2026-08-19 note had already measured a
+    /// modified `Enter` never arriving; this row was written over that note on the
+    /// argument that one measurement on one machine is not a rule. It was measured
+    /// again on 2026-08-25 on the real window and it did not arrive then either,
+    /// so the ruling moved the verb to a key that does. **The half this test owns
+    /// is both directions**: the row answers `X`, and no row of the table is keyed
+    /// on `Enter` in any combination at all — a chord this application cannot be
+    /// reached by is a row that silently does nothing, and the table may not carry
+    /// one.
     ///
     /// Red gate: leave the row out and the lookup falls through to the PTY
-    /// encoder, where `Ctrl+Shift+Enter` is a `\r` the shell already had.
+    /// encoder, where `Ctrl+Shift+X` is a `^X` the shell already had.
     #[test]
     fn the_zoom_verb_has_a_chord_of_its_own() {
         let row = BINDINGS
@@ -2984,18 +3003,33 @@ mod tests {
         assert_eq!(row.action, Action::ZoomPane);
         assert_eq!(
             row.chord,
-            Some(Chord::new(CTRL_SHIFT, ChordKey::Named(NamedKey::Enter))),
+            Some(Chord::new(
+                CTRL_SHIFT,
+                ChordKey::Character(Cow::Borrowed("x"))
+            )),
             "the chord the ruling names"
         );
         assert!(
-            press_on_primary_screen(Key::Named(NamedKey::Enter), CTRL_SHIFT).is_some(),
+            press_on_primary_screen(character("x"), CTRL_SHIFT).is_some(),
             "and a press on a terminal is answered by the table, not the encoder"
         );
         assert_eq!(
-            press_on_primary_screen(Key::Named(NamedKey::Enter), ModifiersState::empty()),
+            press_on_primary_screen(character("x"), ModifiersState::empty()),
             None,
-            "a bare Enter is still the shell's"
+            "a bare x is still the shell's"
         );
+        for binding in BINDINGS {
+            let Some(chord) = binding.chord.as_ref() else {
+                continue;
+            };
+            assert_ne!(
+                chord.key,
+                ChordKey::Named(NamedKey::Enter),
+                "{}: a modified Enter does not reach this application (measured \
+                 2026-08-19 and again 2026-08-25), so no row may be keyed on it",
+                binding.id
+            );
+        }
     }
 
     /// Every id the table names must be its own, because the file names rows by

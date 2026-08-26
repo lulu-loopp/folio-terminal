@@ -3456,7 +3456,13 @@ mod keyboard_tests {
         // the reason every window row is on this list: a chord the window owns
         // that a focused page keeps is a chord that stops working exactly where
         // a reader is most likely to want the pane bigger.
-        ("zoom-pane", "Ctrl+Shift+Enter"),
+        //
+        // It read `Ctrl+Shift+Enter` for half a day. A modified `Enter` never
+        // reaches this application at all (measured 2026-08-19 and again
+        // 2026-08-25), so the ruling moved the verb to a key that arrives, and
+        // this list moved with it — a claim spelled for a chord the window can
+        // never be reached by is a claim that takes nothing back from anybody.
+        ("zoom-pane", "Ctrl+Shift+x"),
         ("files-pane", "Ctrl+Shift+b"),
         ("git-page", "Ctrl+Shift+g"),
         ("open-settings", "Ctrl+,"),
