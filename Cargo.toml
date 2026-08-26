@@ -56,6 +56,33 @@ base64 = "0.22"
 bitflags = "2"
 bytemuck = { version = "1", features = ["derive"] }
 glyphon = "0.12"
+# The glance card's first page (`bt_app::pdf::first_page`, §7.10 ⑥). It was
+# **already in the lock file** transitively — `typst-svg` rasterises the PDFs a
+# Typst document embeds with it — so naming it here costs no new package, which
+# is `docs/DESIGN.md` §8's bar and the same one `regex`, `rayon` and `two-face`
+# were admitted under.
+#
+# Exact, like every other pin in this table, and here for a reason of its own:
+# hayro is young and moving fast, and what it produces is a *picture* — a 0.7.x
+# that resolved on its own would change what the card draws, and what
+# `the_shipped_fixture_rasters_its_first_page` measures, under a build nobody
+# touched.
+#
+# **One feature on and one deliberately off**, which is what keeps "no new
+# package" true:
+#
+# * `embed-fonts` carries the fourteen faces the PDF specification says every
+#   reader already has. A page that names Helvetica without embedding it draws
+#   its text as nothing without them, which is most of what a card would be
+#   showing. It is 300KB of Foxit metric-compatible fonts inside the exe and it
+#   pulls in nothing.
+# * `embed-cmaps` is **off**: it carries Adobe's predefined CJK CMaps, and it
+#   reaches them through brotli — four packages this lock file does not have. A
+#   CJK page that embeds its own CMap (which is what every current producer
+#   writes) is unaffected; one that names a predefined CMap instead will draw its
+#   Latin and lose its CJK glyphs. Turn it on the day such a page turns up, and
+#   accept the four packages then rather than on a guess.
+hayro = { version = "=0.7.1", default-features = false, features = ["embed-fonts"] }
 image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 mitex = "=0.2.4"
 mitex-spec-gen = "=0.2.4"

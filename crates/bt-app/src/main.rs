@@ -563,6 +563,9 @@ impl MathWorkerResult {
         match self.completion {
             DecorationWorkerCompletion::PeekImage { .. }
             | DecorationWorkerCompletion::PeekScaledImage { .. }
+            // A glance card's page is the window's on the same terms: one slot per window, keyed
+            // by the file it was drawn from, and no pane owns it.
+            | DecorationWorkerCompletion::PeekPage { .. }
             // A preview's formula is the window's on exactly the terms the two
             // hover completions are: it is filed in one map per window, keyed by
             // its own content, and no pane owns it.
@@ -594,6 +597,24 @@ enum MathWorkerRequest {
     /// decoration record. The completion routes only to the app-side peek cache, so the band
     /// creation gates (cursor line, semantic input region) are never bypassed.
     PeekImage { leaf: ShellAddress, path: PathBuf },
+    /// **Raster the first page of a PDF the glance card is over** (user ruling 2026-08-25;
+    /// `docs/DESIGN.md` §7.10 ⑥).
+    ///
+    /// Here rather than on the preview worker because that thread's own note calls it *a disk*:
+    /// every question on it is bytes at a path, answered in the time a read takes, and a page
+    /// rasteriser standing in that queue would put a report's first page in front of the head read
+    /// a preview pane is waiting on. This lane is where CPU work that answers a pointer already
+    /// lives — a formula through MiTeX and Typst, a wallpaper through the image decoder — and a
+    /// page is the same shape of work asked by the same gesture.
+    ///
+    /// `known` is the modification time the window's slot already holds pixels for, so the worker
+    /// can answer a re-hover with a `stat` instead of a render — see [`PeekPageOutcome`].
+    PeekPage {
+        leaf: ShellAddress,
+        path: PathBuf,
+        fit: (u32, u32),
+        known: Option<SystemTime>,
+    },
     /// Ask the disk whether one printed path names anything (§7.1.5j). The cheapest thing this
     /// worker is ever handed, and it is here rather than on the event thread for the reason every
     /// other read is: the answer costs a syscall and the frame is being drawn.
@@ -765,6 +786,12 @@ enum DecorationWorkerCompletion {
         path: PathBuf,
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
     },
+    /// One glance card's first page, or the news that it did not need drawing again.
+    PeekPage {
+        path: PathBuf,
+        fit: (u32, u32),
+        outcome: PeekPageOutcome,
+    },
     PeekScaledImage {
         scaled: bt_term::ScaledInlineImage,
     },
@@ -785,6 +812,47 @@ enum DecorationWorkerCompletion {
         key: Box<PreviewMathKey>,
         result: std::result::Result<MathRaster, MathRenderError>,
     },
+}
+
+/// **What the page lane found** — two shapes rather than one optional picture, because a re-hover
+/// and a first hover are different questions and only one of them is expensive.
+///
+/// The window keeps exactly one rastered page (see `WindowRuntime::peek_page`), and a pointer that
+/// comes back to the same row wants the pixels it already has rather than the same page drawn
+/// again. It cannot simply keep them: the file is on a disk somebody else is also writing to, and a
+/// remembered first page is a picture that can quietly stop being true.
+///
+/// So the freshness check is asked of the worker rather than of the thread that draws — a `stat` on
+/// a network share can block for seconds, and the window's own thread is the one place in this
+/// process where that is not survivable. A re-hover costs one `metadata` call on a background
+/// thread and answers [`Self::Unchanged`]; nothing on screen moves.
+enum PeekPageOutcome {
+    /// The file has not been written since the pixels the window is already holding were drawn.
+    Unchanged,
+    /// It has been — or the window was holding none — and this is what it looks like now. `raster`
+    /// is `None` for a file this process will not draw, which is the card's whole degradation
+    /// path: an empty ground under two lines that are still true (`pdf::first_page`).
+    Drawn {
+        mtime: Option<SystemTime>,
+        raster: Option<pdf::PageRaster>,
+    },
+}
+
+/// [`PeekPageOutcome`] for one file, on the worker's own thread.
+fn raster_peek_page(path: &Path, fit: (u32, u32), known: Option<SystemTime>) -> PeekPageOutcome {
+    let mtime = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok();
+    // Both halves have to be known for "unchanged" to mean anything: a filesystem that does not
+    // report a modification time answers `None` every time, and a cache keyed on that would hold a
+    // stale page for ever. Such a file is simply drawn again.
+    if known.is_some() && known == mtime {
+        return PeekPageOutcome::Unchanged;
+    }
+    PeekPageOutcome::Drawn {
+        mtime,
+        raster: pdf::first_page(path, fit.0, fit.1),
+    }
 }
 
 struct MathWorker {
@@ -906,6 +974,18 @@ impl MathWorker {
                                 source: bt_term::InlineImageSource::LocalPath(path.clone()),
                             });
                             (leaf, DecorationWorkerCompletion::PeekImage { path, result })
+                        }
+                        MathWorkerRequest::PeekPage {
+                            leaf,
+                            path,
+                            fit,
+                            known,
+                        } => {
+                            let outcome = raster_peek_page(&path, fit, known);
+                            (
+                                leaf,
+                                DecorationWorkerCompletion::PeekPage { path, fit, outcome },
+                            )
                         }
                     };
                     if result_tx
@@ -7627,6 +7707,15 @@ struct WindowRuntime {
     /// the read that refreshes it costs one worker hop the next hover pays
     /// anyway.
     peek_facts: Option<PeekFacts>,
+    /// **The first page the glance card is drawing** (user ruling 2026-08-25) — see
+    /// [`PeekPageSlot`].
+    ///
+    /// One slot beside the picture's and for the picture's reason: there is one pointer, so there
+    /// is one glance. Unlike the facts above it, it is **not** dropped when the card comes down —
+    /// a page costs a parse and a rasterisation where a fact costs a `metadata` call, so the
+    /// pointer coming back to a row it just left is the one case worth remembering. What keeps
+    /// that memory honest is `PeekPageOutcome`, not the card's lifetime.
+    peek_page: Option<PeekPageSlot>,
     /// The gesture in flight, whatever it is carrying (J111).
     ///
     /// Separate from the presses rather than a further promise state, because
@@ -14057,6 +14146,81 @@ struct PeekThumbnail {
 struct PeekFacts {
     path: PathBuf,
     answer: Option<preview::PageFacts>,
+}
+
+/// **The glance card's rastered first page, and whether the disk has been asked about it since the
+/// card came up** (user ruling 2026-08-25; [`file_peek::PeekBody::Facts`]).
+///
+/// # Why the pixels outlive the card and the question does not
+///
+/// `asked` is cleared when the card comes down and `raster` is not. That pair is the whole cache
+/// policy, and it buys both halves of what a hover owes:
+///
+/// * A pointer returning to a row it just left finds its page **already drawn** — no empty ground,
+///   no second parse, nothing that flickers.
+/// * And a question goes out anyway, so a file that has been rewritten since is noticed. It is
+///   answered `PeekPageOutcome::Unchanged` in the ordinary case, which costs one `metadata` call on
+///   a background thread and changes nothing on screen.
+///
+/// # Why one slot and not a map
+///
+/// A rastered page is a third of a megabyte and a session browsing a folder of reports would
+/// accumulate one per file, unbounded, for a card that shows one at a time. The single slot is
+/// `PeekThumbnail`'s policy — "a peek is transient and singular (one flyout at a time)" — restated
+/// about a costlier picture, and what it gives up is small: walking back and forth between two
+/// PDFs re-draws each of them, which costs a render this window can afford rather than memory it
+/// cannot bound.
+struct PeekPageSlot {
+    path: PathBuf,
+    /// The box the page was fitted into, in physical pixels. A DPI change or a window moved to
+    /// another monitor makes it a different question, and the raster it already holds would be
+    /// drawn soft.
+    fit: (u32, u32),
+    /// When the file said it was last written, as the worker that drew this saw it. `None` for a
+    /// filesystem that does not report one, which is also why it can never answer "unchanged".
+    mtime: Option<SystemTime>,
+    /// Whether a question about this file is out, or has already been answered, since the card
+    /// came up. Cleared by `TabState::hide_file_peek` so the next card asks once and only once.
+    asked: bool,
+    /// The pixels, or `None` for a file this process will not raster — see `pdf::first_page` for
+    /// the list, and `file_peek::PeekBody::Facts` for what the card draws instead.
+    raster: Option<PeekPageRaster>,
+}
+
+/// **What the shared GPU cache calls one drawn page**: the file, when it was last written, and the
+/// size it was drawn at.
+///
+/// All three, because all three can change while the string is still a valid name for something.
+/// Two files at one size are two pictures; one file rewritten is two pictures; one file at two
+/// DPIs is two rasters of the same picture, and a cache that served either for the other would put
+/// the wrong document, the stale document or a soft document on the card.
+fn peek_page_texture_key(
+    path: &Path,
+    mtime: Option<SystemTime>,
+    width: u32,
+    height: u32,
+) -> String {
+    let stamp = mtime
+        .and_then(|mtime| mtime.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map_or_else(
+            // A filesystem that will not say is never treated as saying "the same as last time":
+            // such a file is re-rastered on every question anyway (`raster_peek_page`), so what
+            // this needs is a name that does not collide with a real timestamp.
+            || "?".to_owned(),
+            |since| since.as_nanos().to_string(),
+        );
+    format!("peek-page:{}:{stamp}:{width}x{height}", path.display())
+}
+
+/// One drawn page, in the shape the renderer takes it.
+struct PeekPageRaster {
+    /// The texture identity, carrying the file, its modification time and the size it was drawn
+    /// at — so the shared GPU cache can never serve the page of a file that has since been
+    /// replaced, nor one rastered for another box.
+    key: String,
+    rgba: Arc<[u8]>,
+    width_px: u32,
+    height_px: u32,
 }
 
 /// Persistent preview-seat state. Native pixels remain in `peek_cache`; this holds only the one
@@ -25413,6 +25577,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         peek_picture: None,
         peek_card_pending: None,
         peek_facts: None,
+        peek_page: None,
         drag: None,
         foreign: None,
         drop_preview: None,
@@ -48428,6 +48593,14 @@ impl Runtime<'_> {
         // And the facts with it: they are about the file the card was over, and
         // the next card asks for its own.
         self.window.peek_facts = None;
+        // **The page's pixels stay and its question does not.** A rastered page
+        // is worth keeping across a pointer that leaves a row and comes back;
+        // what it is not worth is trusting, so the next card over the same file
+        // asks the disk once more whether it is still that file. See
+        // [`PeekPageSlot`].
+        if let Some(slot) = self.window.peek_page.as_mut() {
+            slot.asked = false;
+        }
         // And any hand that was on a block inside it. The card's surface is the
         // one the sweep deliberately never retires ([`Self::sweep_preview_panes`]),
         // because its life is this field's — so this is where that life ends for
@@ -48570,53 +48743,127 @@ impl Runtime<'_> {
         empty
     }
 
-    /// **The card's facts about a page**: the question, and the answer once it
-    /// has come home (user ruling 2026-08-25).
+    /// **The card's whole body over a page**: its first page and its two facts,
+    /// each asked for once and each drawn whenever it gets home (user rulings
+    /// 2026-08-25).
     ///
     /// Asked from the frame for [`Self::file_peek_picture`]'s reason and with the
-    /// same guard: the card is rebuilt whenever the chrome is, so the question is
+    /// same guard: the card is rebuilt whenever the chrome is, so each question is
     /// filed against the path the moment it is sent and a frame that finds it
-    /// already filed asks nothing. What comes back is two optional facts, and the
-    /// body is the same shape whether or not either has arrived — see
+    /// already filed asks nothing. What comes back is three optional things, and
+    /// the body is the same shape whether or not any of them has arrived — see
     /// [`file_peek::PeekBody::Facts`].
     ///
-    /// **It goes down the preview worker's lane**, not the frame's own thread. A
-    /// page count is read off the file's structure ([`pdf::page_count`]), which
-    /// is a walk over as many bytes as the file has; on the thread that draws,
-    /// that is a hover over a large document freezing the window.
-    fn file_peek_facts(&mut self, path: &Path) -> file_peek::PeekBody {
-        let empty = file_peek::PeekBody::Facts {
-            bytes: None,
-            pages: None,
-        };
-        if let Some(facts) = self
+    /// **Neither question is answered on the frame's own thread, and they are not
+    /// answered on the same one.** A page count is read off the file's structure
+    /// ([`pdf::page_count`]) — a walk over as many bytes as the file has — and
+    /// goes down the preview worker's lane, which is a disk. A raster
+    /// ([`pdf::first_page`]) is a parse and a rasterisation and goes to the
+    /// decoration worker, beside the formula engine; putting it in front of the
+    /// disk's queue would make a preview pane's head read wait on a picture.
+    /// Either one on the thread that draws is a hover over a large document
+    /// freezing the window.
+    fn file_peek_facts(&mut self, path: &Path, scale: f32) -> file_peek::PeekBody {
+        // **The page is asked for first and unconditionally.** It is the slower of the two by
+        // orders of magnitude, and the two answers land in the one body: filing its question
+        // behind the facts' would put the picture a whole page-count scan later than it needs to
+        // be, on a file whose size is the reason that scan is slow.
+        let page = self.file_peek_page(path, scale);
+        let facts = match self
             .window
             .peek_facts
             .as_ref()
             .filter(|facts| facts.path == path)
         {
-            let Some(answer) = facts.answer else {
-                return empty;
-            };
-            return file_peek::PeekBody::Facts {
-                bytes: answer.bytes,
-                pages: answer.pages,
-            };
+            Some(facts) => facts.answer,
+            None => {
+                self.window.peek_facts = Some(PeekFacts {
+                    path: path.to_owned(),
+                    answer: None,
+                });
+                let (tab, window) = (self.id, self.window_id());
+                if !self.app.preview_worker.request(preview::PreviewRequest {
+                    window,
+                    tab,
+                    source: preview::PreviewSource::file(path.to_owned()),
+                    want: preview::PreviewWant::PageFacts,
+                }) {
+                    self.disable_preview_worker();
+                }
+                None
+            }
+        };
+        file_peek::PeekBody::Facts {
+            page,
+            bytes: facts.and_then(|facts| facts.bytes),
+            pages: facts.and_then(|facts| facts.pages),
         }
-        self.window.peek_facts = Some(PeekFacts {
-            path: path.to_owned(),
-            answer: None,
-        });
-        let (tab, window) = (self.id, self.window_id());
-        if !self.app.preview_worker.request(preview::PreviewRequest {
-            window,
-            tab,
-            source: preview::PreviewSource::file(path.to_owned()),
-            want: preview::PreviewWant::PageFacts,
-        }) {
-            self.disable_preview_worker();
+    }
+
+    /// **The card's first page**: the size to draw it at once it is home, and the question that
+    /// puts it on its way (user ruling 2026-08-25).
+    ///
+    /// Asked from the frame for [`Self::file_peek_picture`]'s reason and guarded the same way —
+    /// the card is rebuilt whenever the chrome is, so the question is filed against the file the
+    /// moment it goes out and a frame that finds it already filed asks nothing. What is different
+    /// is what happens when the pointer comes back: the pixels are still here, they are drawn on
+    /// the first frame, and the disk is asked once more in the background whether they are still
+    /// the file's. See [`PeekPageSlot`].
+    fn file_peek_page(&mut self, path: &Path, scale: f32) -> Option<[f32; 2]> {
+        let fit = |logical: f32| ((logical * scale).round() as u32).max(1);
+        let fit = (
+            fit(file_peek::PEEK_PAGE_W_LOGICAL_PX),
+            fit(file_peek::PEEK_PAGE_H_LOGICAL_PX),
+        );
+        // A slot about another file — or about this one at another size — is not this card's, and
+        // is replaced whole rather than edited: its pixels were drawn for a question nobody is
+        // asking any more.
+        let mine = self
+            .window
+            .peek_page
+            .as_ref()
+            .is_some_and(|slot| slot.path == path && slot.fit == fit);
+        if !mine {
+            self.window.peek_page = Some(PeekPageSlot {
+                path: path.to_owned(),
+                fit,
+                mtime: None,
+                asked: false,
+                raster: None,
+            });
         }
-        empty
+        let slot = self
+            .window
+            .peek_page
+            .as_mut()
+            .expect("the slot was just filled");
+        let known = slot.mtime;
+        let drawn = slot
+            .raster
+            .as_ref()
+            .map(|raster| [raster.width_px as f32, raster.height_px as f32]);
+        if !slot.asked && self.app.math_worker_running {
+            slot.asked = true;
+            let leaf = self.focused_shell_address();
+            if self
+                .app
+                .math_worker
+                .tasks
+                .send(MathWorkerRequest::PeekPage {
+                    leaf,
+                    path: path.to_owned(),
+                    fit,
+                    known,
+                })
+                .is_err()
+                && let Some(slot) = self.window.peek_page.as_mut()
+            {
+                // Nobody is going to answer, so nothing is out: leave the slot able to ask again
+                // rather than waiting for ever on a lane that has gone.
+                slot.asked = false;
+            }
+        }
+        drawn
     }
 
     /// The 350ms is up — put the card on screen (P145).
@@ -48681,7 +48928,7 @@ impl Runtime<'_> {
                         .path
                         .clone()
                         .expect("a facts body is only chosen for a file");
-                    self.file_peek_facts(&path)
+                    self.file_peek_facts(&path, scale)
                 }
                 PeekBodyKind::Document => {
                     let probe = [
@@ -48723,16 +48970,33 @@ impl Runtime<'_> {
             ftype_width,
             scale,
         );
-        let picture = self
-            .window
-            .peek_picture
-            .as_ref()
-            .map(|picture| file_peek::PeekPicture {
-                key: &picture.key,
-                rgba: &picture.rgba,
-                width_px: picture.width_px,
-                height_px: picture.height_px,
-            });
+        // The one picture this card draws, whichever body it is wearing: a file's own image off
+        // the resample lane, or a page this window rastered for itself. They are two slots
+        // because they are two hovers over two different things, and one argument because the
+        // card draws exactly one of them.
+        let picture = match layout.body_kind {
+            file_peek::PeekBody::Facts { .. } => self
+                .window
+                .peek_page
+                .as_ref()
+                .and_then(|slot| slot.raster.as_ref())
+                .map(|raster| file_peek::PeekPicture {
+                    key: &raster.key,
+                    rgba: &raster.rgba,
+                    width_px: raster.width_px,
+                    height_px: raster.height_px,
+                }),
+            _ => self
+                .window
+                .peek_picture
+                .as_ref()
+                .map(|picture| file_peek::PeekPicture {
+                    key: &picture.key,
+                    rgba: &picture.rgba,
+                    width_px: picture.width_px,
+                    height_px: picture.height_px,
+                }),
+        };
         // The foot's two halves, measured here for the reason the name and the
         // chip were: only something holding a font can say how wide a line is.
         // The card is never saved into and never reveals a folder, so it has no
@@ -57937,6 +58201,13 @@ impl Runtime<'_> {
                     // Peek state never enters frames, so no republish is needed.
                     false
                 }
+                // **The glance card's page**, on the same reasoning and with one difference: unlike
+                // the flyout's decode it *is* drawn by the chrome, so a page that has arrived owes
+                // the overlay a rebuild. That is asked below rather than here.
+                DecorationWorkerCompletion::PeekPage { path, fit, outcome } => {
+                    self.complete_peek_page(&path, fit, outcome)?;
+                    false
+                }
                 // **Not gated on the asking tab either, and for the stronger
                 // reason**: the answer is not addressed to a tab at all. It is
                 // filed against its own content, and the pages that were waiting
@@ -59820,6 +60091,49 @@ impl Runtime<'_> {
                 .is_some_and(|path| normalized_local_image_path_key(path) == cache_key)
         }) && self.refresh_overlay()
         {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **Take delivery of a glance card's first page** (user ruling 2026-08-25).
+    ///
+    /// The answer is filed only against the slot that asked for it — same file, same box — so a
+    /// page arriving after the pointer has moved to another row is dropped where it lands, which
+    /// is the cancellation every other hover in this window performs the same way.
+    ///
+    /// A [`PeekPageOutcome::Unchanged`] writes nothing and owes no frame: the pixels it is about
+    /// are already on the card. Anything else replaces both the pixels and the modification time
+    /// they were drawn at, including the `None` that means this file will not raster — a card that
+    /// kept the *previous* file's page because this one failed would be a card showing the wrong
+    /// document.
+    fn complete_peek_page(
+        &mut self,
+        path: &Path,
+        fit: (u32, u32),
+        outcome: PeekPageOutcome,
+    ) -> Result<()> {
+        let Some(slot) = self
+            .window
+            .peek_page
+            .as_mut()
+            .filter(|slot| slot.path == path && slot.fit == fit)
+        else {
+            return Ok(());
+        };
+        let PeekPageOutcome::Drawn { mtime, raster } = outcome else {
+            return Ok(());
+        };
+        slot.mtime = mtime;
+        slot.raster = raster.map(|raster| PeekPageRaster {
+            key: peek_page_texture_key(path, mtime, raster.width, raster.height),
+            rgba: Arc::from(raster.rgba.into_boxed_slice()),
+            width_px: raster.width,
+            height_px: raster.height,
+        });
+        // The card is chrome, and a page that lands while it is up owes the frame that shows it —
+        // nothing else is going to move the pointer.
+        if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -102799,6 +103113,7 @@ mod tests {
                 MathWorkerRequest::Math { leaf, .. }
                 | MathWorkerRequest::InlineImage { leaf, .. }
                 | MathWorkerRequest::PeekImage { leaf, .. }
+                | MathWorkerRequest::PeekPage { leaf, .. }
                 | MathWorkerRequest::PreviewMath { leaf, .. }
                 | MathWorkerRequest::VerifyPath { leaf, .. } => leaf,
             })
@@ -102817,6 +103132,113 @@ mod tests {
                 .collect::<std::collections::BTreeSet<_>>(),
             "every pane's file reference reaches the worker under its own seat — and under its own \
              window, because the answer comes home on a channel every window can see"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-25; `docs/DESIGN.md` §7.10 ⑥) — **a glance card's
+    /// page is drawn once per version of the file, and a pointer coming back is
+    /// answered by a `stat`.**
+    ///
+    /// The window keeps one rastered page and does not throw it away when the
+    /// card comes down, because a parse and a rasterisation are worth more than
+    /// the third of a megabyte they produce. What makes that safe is this
+    /// function and nothing else: the file is on a disk somebody else is also
+    /// writing to, so every card asks again, and the *worker* — never the thread
+    /// that draws, where a network `stat` can block for seconds — decides whether
+    /// the answer is new pixels or the word `Unchanged`.
+    ///
+    /// RED GATE ①: drop the `known == mtime` arm and the second assertion comes
+    /// back `Drawn`, which is the whole cache doing nothing.
+    /// RED GATE ②: compare only `known.is_some()` — or compare the two without
+    /// requiring `known` to be `Some` — and the last case says a file that has
+    /// been rewritten is unchanged, which is a card showing yesterday's report.
+    #[test]
+    fn a_hovered_page_is_drawn_once_per_version_of_its_file() {
+        let dir = std::env::temp_dir().join(format!("bt-peek-page-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("report.pdf");
+        std::fs::write(
+            &path,
+            include_bytes!("../../../test-assets/folio-pdf-test.pdf"),
+        )
+        .expect("the fixture is copied where it can be re-stamped");
+        let fit = (280_u32, 160_u32);
+
+        let PeekPageOutcome::Drawn { mtime, raster } = raster_peek_page(&path, fit, None) else {
+            panic!("a window holding no pixels is answered with pixels");
+        };
+        let first = raster.expect("and a real PDF draws");
+        let mtime = mtime.expect("carrying the time the file said it was written");
+        assert!(first.width <= fit.0 && first.height <= fit.1);
+
+        // The same file at the same stamp: what the window is holding is still
+        // the file's, and nothing is parsed, rendered or sent.
+        assert!(
+            matches!(
+                raster_peek_page(&path, fit, Some(mtime)),
+                PeekPageOutcome::Unchanged
+            ),
+            "a re-hover costs one metadata call"
+        );
+
+        // Written since — the same bytes under a later stamp, which is exactly
+        // what an editor that rewrote the report leaves behind.
+        let later = mtime + Duration::from_secs(10);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("the scratch file opens")
+            .set_modified(later)
+            .expect("and takes a later stamp");
+        let PeekPageOutcome::Drawn {
+            mtime: seen,
+            raster,
+        } = raster_peek_page(&path, fit, Some(mtime))
+        else {
+            panic!("a file written since the pixels were drawn is drawn again");
+        };
+        assert_eq!(seen, Some(later), "and the new stamp comes home with it");
+        assert_eq!(
+            raster.map(|raster| (raster.width, raster.height)),
+            Some((first.width, first.height))
+        );
+
+        // A file that is not there at all is `Drawn` with nothing in it rather
+        // than `Unchanged`: the card must lose the page it was showing, not keep
+        // the previous file's.
+        std::fs::remove_file(&path).expect("the scratch file goes");
+        let PeekPageOutcome::Drawn { mtime, raster } = raster_peek_page(&path, fit, Some(later))
+        else {
+            panic!("a file that has gone is not 'unchanged'");
+        };
+        assert_eq!(mtime, None);
+        assert_eq!(raster, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PIN — **the texture a page is cached under names the file, its version and
+    /// its size**, so the shared GPU cache can never serve one for another.
+    ///
+    /// MUTATION: drop any one of the three from the key and the matching
+    /// assertion goes red — which on screen is the wrong document, yesterday's
+    /// document, or a page rastered for another monitor drawn soft on this one.
+    #[test]
+    fn one_page_texture_is_one_file_at_one_version_at_one_size() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let then = now + Duration::from_secs(1);
+        let key = |path: &str, mtime, w, h| peek_page_texture_key(Path::new(path), mtime, w, h);
+        let base = key(r"D:\reports\q3.pdf", Some(now), 124, 160);
+        assert_ne!(base, key(r"D:\reports\q4.pdf", Some(now), 124, 160));
+        assert_ne!(base, key(r"D:\reports\q3.pdf", Some(then), 124, 160));
+        assert_ne!(base, key(r"D:\reports\q3.pdf", Some(now), 248, 320));
+        assert_eq!(base, key(r"D:\reports\q3.pdf", Some(now), 124, 160));
+        // A filesystem that will not say when a file was written gets a name of
+        // its own rather than one that could collide with a real stamp — such a
+        // file is re-drawn on every question anyway.
+        assert_ne!(base, key(r"D:\reports\q3.pdf", None, 124, 160));
+        assert_ne!(
+            key(r"D:\reports\q3.pdf", None, 124, 160),
+            key(r"D:\reports\q3.pdf", Some(SystemTime::UNIX_EPOCH), 124, 160)
         );
     }
 
