@@ -21,9 +21,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bt_layout::{
-    Axis, DIVIDER, Edit, EditError, FILES_W, LayoutMode, LayoutNode, LogicalPx, LogicalRect,
-    LogicalSize, Presentation, Ratio, SUBPIXELS_PER_PX, Seat, SeatId, SeatKind, SeatLayout,
-    SeatMetrics, SizePolicy, SplitId, WorkAreaHint, apply, solve, window_min_inner_size,
+    Axis, DIVIDER, Edit, EditError, FILES_W, Landing, LayoutMode, LayoutNode, LogicalPx,
+    LogicalRect, LogicalSize, Presentation, Ratio, SUBPIXELS_PER_PX, Seat, SeatId, SeatKind,
+    SeatLayout, SeatMetrics, SizePolicy, SplitId, WorkAreaHint, apply, solve,
+    window_min_inner_size,
 };
 use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
@@ -1329,6 +1330,23 @@ impl Seats {
         out
     }
 
+    /// The pixels on each side of a split that its ratio does not divide —
+    /// [`bt_layout::reserved_extent`] of the two children, in `[a, b]` order.
+    ///
+    /// The one thing [`requested_ratio`] cannot ask a [`SplitSlot`] for, because
+    /// a slot is rectangles and this is a fact about the tree.
+    #[must_use]
+    pub fn split_reserved(&self, metrics: &SeatMetrics, split: SplitId) -> Option<[LogicalPx; 2]> {
+        let path = bt_layout::path_to_split(&self.tree, split)?;
+        let LayoutNode::Split { dir, a, b, .. } = bt_layout::node_at(&self.tree, &path)? else {
+            return None;
+        };
+        Some([
+            bt_layout::reserved_extent(a, *dir, metrics),
+            bt_layout::reserved_extent(b, *dir, metrics),
+        ])
+    }
+
     /// **M155 — the layout this drop would make, computed rather than estimated.**
     ///
     /// The mock-up's `planDrop`, and its argument for existing is a bug report:
@@ -1404,28 +1422,49 @@ impl Seats {
                 // layout takes the slot it vacated.
                 None => chain.push(Edit::ReplaceSeat { target, arriving }),
             },
-            LayoutAim::SeatEdge(target, edge) => {
-                // The same pluck the drop will do, rebalance included: the leaf
-                // leaves its run and that run is re-divided before the new one is
-                // cut. Two opinions here is exactly what M155 is about.
-                chain.extend(moving.map(|target| Edit::CloseSeat { target }));
-                chain.push(Edit::SplitSeat {
+            // **A pane of this tree re-placing itself is one edit, not two**
+            // (用户裁决 2026-08-25). It used to be a close followed by a split,
+            // and each of those re-divides its run by column count — the rule
+            // that fires when a run's *members* change. A re-place changes no
+            // members, so running it twice charged panes nobody had touched: a
+            // hand-set 65:35 between two siblings came back 50:50, and a files
+            // column moved along its own row left the middle pane 145px wider
+            // than it found it. [`Edit::MoveSeat`] carries the shares across
+            // instead, which is what makes putting one back a true no-op.
+            LayoutAim::SeatEdge(target, edge) => match moving {
+                Some(seat) => chain.push(Edit::MoveSeat {
+                    seat,
+                    landing: Landing::Edge {
+                        target,
+                        dir: edge.axis(),
+                        leading: edge.leading(),
+                    },
+                    split_id: ids.split(),
+                }),
+                None => chain.push(Edit::SplitSeat {
                     target,
                     dir: edge.axis(),
                     leading: edge.leading(),
                     arriving,
                     split_id: ids.split(),
-                });
-            }
-            LayoutAim::Rim(edge) => {
-                chain.extend(moving.map(|target| Edit::CloseSeat { target }));
-                chain.push(Edit::RootRimDrop {
+                }),
+            },
+            LayoutAim::Rim(edge) => match moving {
+                Some(seat) => chain.push(Edit::MoveSeat {
+                    seat,
+                    landing: Landing::Rim {
+                        dir: edge.axis(),
+                        leading: edge.leading(),
+                    },
+                    split_id: ids.split(),
+                }),
+                None => chain.push(Edit::RootRimDrop {
                     dir: edge.axis(),
                     leading: edge.leading(),
                     arriving,
                     split_id: ids.split(),
-                });
-            }
+                }),
+            },
         }
         let mut tree = self.tree.clone();
         for edit in &chain {
@@ -17400,8 +17439,17 @@ pub fn requested_fixed_extent(
 
 /// The ratio a pointer at `position` (device pixels along `slot.dir`) is asking
 /// this split for. The clamp is `apply`'s job, not this function's.
+///
+/// `reserved` is the two sides' [`bt_layout::reserved_extent`] — the pixels in
+/// each of them that no ratio divides, fixed columns and the dividers standing
+/// beside them. It is a parameter and not a re-derivation, because this is
+/// exactly the *inverse* of what the solver does with the ratio it is handed,
+/// and an inverse worked out here from rectangles is the second geometry D4
+/// forbids: the hand would put the divider somewhere and the frame would draw
+/// it somewhere else, by the width of whatever band sits inside the slot.
 pub fn requested_ratio(
     slot: SplitSlot,
+    reserved: [LogicalPx; 2],
     scale_ppm: u32,
     position: f64,
 ) -> Option<(Ratio, LogicalPx)> {
@@ -17409,10 +17457,16 @@ pub fn requested_ratio(
     if !usable.subpixels().is_positive() {
         return None;
     }
+    // What the ratio actually divides. Not positive means the slot is entirely
+    // spoken for, and a proportion of nothing is not an answer the drag has.
+    let flex = usable - reserved[0] - reserved[1];
+    if !flex.subpixels().is_positive() {
+        return None;
+    }
     let pointer = device_to_logical_signed(position, scale_ppm);
-    let leading = pointer - slot.slot.near(slot.dir).subpixels();
-    let ppm = (i128::from(leading) * 1_000_000 / i128::from(usable.subpixels())).clamp(0, 1_000_000)
-        as u32;
+    let leading = pointer - slot.slot.near(slot.dir).subpixels() - reserved[0].subpixels();
+    let ppm =
+        (i128::from(leading) * 1_000_000 / i128::from(flex.subpixels())).clamp(0, 1_000_000) as u32;
     Some((Ratio::clamped_from_ppm(ppm), usable))
 }
 
@@ -20581,7 +20635,13 @@ mod tests {",
         seats.add_preview(&metrics).expect("the preview seat lands");
         let slot = seats.split_slots(&solved(&seats, viewport, &metrics))[0];
 
-        let (requested, usable) = requested_ratio(slot, 1_000_000, -400.0).unwrap();
+        let (requested, usable) = requested_ratio(
+            slot,
+            seats.split_reserved(&metrics, slot.id).unwrap(),
+            1_000_000,
+            -400.0,
+        )
+        .unwrap();
         seats
             .drag_divider(&metrics, slot.id, requested, usable)
             .expect("dragging to the left edge is feasible, only clamped");
@@ -20592,7 +20652,13 @@ mod tests {",
             .unwrap();
         assert_eq!(terminal.extent(Axis::Row).floor_px(), 260);
 
-        let (requested, usable) = requested_ratio(slot, 1_000_000, 1_600.0).unwrap();
+        let (requested, usable) = requested_ratio(
+            slot,
+            seats.split_reserved(&metrics, slot.id).unwrap(),
+            1_000_000,
+            1_600.0,
+        )
+        .unwrap();
         seats
             .drag_divider(&metrics, slot.id, requested, usable)
             .expect("dragging to the right edge is feasible, only clamped");
@@ -20801,7 +20867,13 @@ mod tests {",
         )
         .expect("the tiled tree fits");
         let slot = seats.split_slots(&tiled)[0];
-        let (requested, usable) = requested_ratio(slot, 1_000_000, 120.0).unwrap();
+        let (requested, usable) = requested_ratio(
+            slot,
+            seats.split_reserved(&metrics, slot.id).unwrap(),
+            1_000_000,
+            120.0,
+        )
+        .unwrap();
         seats
             .drag_divider(&metrics, slot.id, requested, usable)
             .expect("the drag is feasible");
@@ -21108,7 +21180,13 @@ mod tests {",
         // Drag to a ratio that is nobody's default, so a round trip cannot pass
         // by landing back on a constant.
         let slot = seats.split_slots(&solved(&seats, viewport, &metrics))[0];
-        let (requested, usable) = requested_ratio(slot, scale_ppm(dpi_milli), 913.0).unwrap();
+        let (requested, usable) = requested_ratio(
+            slot,
+            seats.split_reserved(&metrics, slot.id).unwrap(),
+            scale_ppm(dpi_milli),
+            913.0,
+        )
+        .unwrap();
         seats
             .drag_divider(&metrics, slot.id, requested, usable)
             .unwrap();
@@ -38012,12 +38090,19 @@ mod drop_plan_tests {
         }
     }
 
-    /// **M155 — the same `pluckLeaf` and the same rebalance, reused rather than
-    /// re-derived.**
+    /// **M155 — the same edit, reused rather than re-derived.**
     ///
-    /// Built here out of `bt-layout`'s own edits, in the order the commit will run
-    /// them, and compared against what `plan_drop` answered. Drop the pluck, or
-    /// insert without re-dividing the run, and the two sides part company.
+    /// Built here out of `bt-layout`'s own edit, and compared against what
+    /// `plan_drop` answered: the preview and the commit are one arithmetic or
+    /// they are two that will drift.
+    ///
+    /// **It used to be two edits, and the 2026-08-25 ruling is why it is one.**
+    /// The chain read `CloseSeat` then `SplitSeat` — "the leaf leaves its run and
+    /// that run is re-divided before the new one is cut" — and each of those
+    /// halves re-divides its run by column count, which is the rule for a run
+    /// whose *members* changed. Re-placing a pane changes no members, so the
+    /// rule fired twice over a set that never changed and the bill went to panes
+    /// nobody had touched. [`Edit::MoveSeat`] carries the shares across instead.
     #[test]
     fn the_plan_runs_the_edit_chain_the_drop_will_run() {
         let seats = window(row(1, row(2, term(1), term(2)), term(3)));
@@ -38027,27 +38112,41 @@ mod drop_plan_tests {
             DropCargo::Pane(SeatId(1)),
         );
 
-        let plucked = apply(
+        let moved = apply(
             seats.tree(),
             &metrics(),
-            &Edit::CloseSeat { target: SeatId(1) },
-        )
-        .expect("a tree of three may lose one")
-        .tree;
-        let split = apply(
-            &plucked,
-            &metrics(),
-            &Edit::SplitSeat {
-                target: SeatId(3),
-                dir: Axis::Row,
-                leading: false,
-                arriving: term(1),
+            &Edit::MoveSeat {
+                seat: SeatId(1),
+                landing: Landing::Edge {
+                    target: SeatId(3),
+                    dir: Axis::Row,
+                    leading: false,
+                },
                 split_id: SplitId(seats.next_split),
             },
         )
-        .expect("splitting a seat is always structurally possible")
+        .expect("a pane of this tree has somewhere to go")
         .tree;
-        assert_eq!(planned.tree, split);
+        assert_eq!(planned.tree, moved);
+        // And what that edit is, spelled out: the same three columns in a new
+        // order, at the widths they already had.
+        assert_eq!(
+            planned
+                .tree
+                .seats_in_order()
+                .iter()
+                .map(|seat| seat.id)
+                .collect::<Vec<_>>(),
+            vec![SeatId(2), SeatId(3), SeatId(1)]
+        );
+        let (was, now) = (live(&seats), live(&window(planned.tree.clone())));
+        for seat in [1, 2, 3] {
+            assert_eq!(
+                width_px(&now, seat),
+                width_px(&was, seat),
+                "seat {seat} came out of a re-place at a different width"
+            );
+        }
     }
 
     /// **H94 — "too small" is a fact about the layout that would exist.**

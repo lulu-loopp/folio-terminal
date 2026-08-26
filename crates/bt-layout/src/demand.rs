@@ -118,6 +118,140 @@ pub fn run_demand(node: &LayoutNode, axis: Axis) -> u64 {
     }
 }
 
+/// How many columns of a subtree take a *share* of the run along `axis`.
+///
+/// §3.3 read against §2.3: a fixed column takes pixels out of the run before
+/// anything is divided, so it is not one of the parties the division is between.
+/// Counting it as one is what put a files column's 240px into a ratio and then
+/// charged that ratio to the pane beside it — three columns that were equal came
+/// back 240/824/533 the moment a re-place changed which side of the tree the
+/// fixed column hung on.
+///
+/// A wholly fixed subtree answers `0` whatever it holds, for the same reason
+/// [`fixed_width`] folds one: it is a band of pixels, not a set of shares.
+#[must_use]
+pub fn flex_run_demand(node: &LayoutNode, axis: Axis, metrics: &SeatMetrics) -> u64 {
+    if fixed_width(node, axis, metrics).is_some() {
+        return 0;
+    }
+    match node {
+        LayoutNode::Seat(_) => 1,
+        LayoutNode::Split { dir, a, b, .. } => {
+            let (ra, rb) = (
+                flex_run_demand(a, axis, metrics),
+                flex_run_demand(b, axis, metrics),
+            );
+            if *dir == axis { ra + rb } else { ra.max(rb) }
+        }
+    }
+}
+
+/// The unit a column's share of its run's flexible extent is measured in.
+///
+/// A million times finer than a [`Ratio`] on purpose. The share vector is read
+/// out of the ratios and written straight back into them by a move, and at ppm
+/// that round trip loses a part per million at every split it passes. At `1e18`
+/// the trip is exact for the first three levels of a run and never off by more
+/// than a part per million below that — 0.004px across a 4K width, which is two
+/// orders of magnitude under the device pixel the boundaries snap to anyway.
+pub(crate) const SHARE_DENOM: u128 = 1_000_000_000_000_000_000;
+
+/// The columns of the run rooted here, in order.
+///
+/// One entry per *column*: a cross-direction subtree is a single entry however
+/// many seats it holds, which is the same reading of "run" [`run_demand`] and
+/// [`run_split_ids`] take.
+pub(crate) fn run_columns(node: &LayoutNode, axis: Axis) -> Vec<&LayoutNode> {
+    fn go<'a>(node: &'a LayoutNode, axis: Axis, out: &mut Vec<&'a LayoutNode>) {
+        match node {
+            LayoutNode::Split { dir, a, b, .. } if *dir == axis => {
+                go(a, axis, out);
+                go(b, axis, out);
+            }
+            _ => out.push(node),
+        }
+    }
+    let mut out = Vec::new();
+    go(node, axis, &mut out);
+    out
+}
+
+/// The name a column answers to in a share table: its first seat in in-order.
+///
+/// Total by construction — every subtree has a first leaf — and stable across a
+/// move, which re-arranges whole columns and never what is inside one.
+pub(crate) fn column_key(node: &LayoutNode) -> SeatId {
+    match node {
+        LayoutNode::Seat(seat) => seat.id,
+        LayoutNode::Split { a, .. } => column_key(a),
+    }
+}
+
+/// Every column's share of the run's flexible extent, keyed by [`column_key`].
+///
+/// This is what a run's ratios *mean* once the allocator has taken the fixed
+/// columns and the dividers out (§2.3): a column holding no flex seat has no
+/// share at all, and the rest sum to [`SHARE_DENOM`] exactly — `b` is given the
+/// remainder rather than its own rounded product, so no run leaks a subpixel.
+pub(crate) fn column_shares(
+    run_root: &LayoutNode,
+    axis: Axis,
+    metrics: &SeatMetrics,
+) -> Vec<(SeatId, u128)> {
+    fn go(
+        node: &LayoutNode,
+        axis: Axis,
+        metrics: &SeatMetrics,
+        share: u128,
+        out: &mut Vec<(SeatId, u128)>,
+    ) {
+        if let LayoutNode::Split {
+            dir, ratio, a, b, ..
+        } = node
+            && *dir == axis
+        {
+            let flex_a = fixed_width(a, axis, metrics).is_none();
+            let flex_b = fixed_width(b, axis, metrics).is_none();
+            let sa = match (flex_a, flex_b) {
+                (true, true) => share * u128::from(ratio.ppm()) / u128::from(RATIO_DENOM_PPM),
+                // One side holds every share there is to hold. When neither
+                // does, `share` is already zero — a split of two fixed sides is
+                // a fixed subtree, and its parent handed it nothing.
+                (true, false) => share,
+                (false, _) => 0,
+            };
+            go(a, axis, metrics, sa, out);
+            go(b, axis, metrics, share - sa, out);
+            return;
+        }
+        out.push((column_key(node), share));
+    }
+    let total = if fixed_width(run_root, axis, metrics).is_none() {
+        SHARE_DENOM
+    } else {
+        0
+    };
+    let mut out = Vec::new();
+    go(run_root, axis, metrics, total, &mut out);
+    out
+}
+
+/// One column's entry in a share table, or zero when it holds no share.
+pub(crate) fn share_of(shares: &[(SeatId, u128)], key: SeatId) -> u128 {
+    shares
+        .iter()
+        .find(|(id, _)| *id == key)
+        .map_or(0, |(_, share)| *share)
+}
+
+/// What a subtree is worth in a share table: the sum over the columns it holds.
+pub(crate) fn weight_of(node: &LayoutNode, axis: Axis, shares: &[(SeatId, u128)]) -> u128 {
+    run_columns(node, axis)
+        .into_iter()
+        .map(|column| share_of(shares, column_key(column)))
+        .sum()
+}
+
 /// Which child of a split.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Side {
@@ -356,7 +490,28 @@ pub fn collapse_order(root: &LayoutNode, focus: SeatId) -> Vec<SeatId> {
     ranked.into_iter().map(|(_, _, _, id)| id).collect()
 }
 
-/// The ratio a split in a balanced run takes: its two sides' column counts.
-pub(crate) fn balanced_ratio(a: &LayoutNode, b: &LayoutNode, axis: Axis) -> Ratio {
-    Ratio::from_parts(run_demand(a, axis), run_demand(b, axis))
+/// The ratio a split in a balanced run takes: its two sides' *share-holding*
+/// column counts ([`flex_run_demand`]).
+///
+/// When one side holds no share the ratio is not consulted by the allocator at
+/// all — a fixed band spends pixels — so the structural column count is written
+/// there instead of the degenerate `0:n`. It is a number nobody reads today and
+/// a sane one for the day a centre swap turns that band into a flex pane.
+pub(crate) fn balanced_ratio(
+    a: &LayoutNode,
+    b: &LayoutNode,
+    axis: Axis,
+    metrics: &SeatMetrics,
+) -> Ratio {
+    let (fa, fb) = (
+        flex_run_demand(a, axis, metrics),
+        flex_run_demand(b, axis, metrics),
+    );
+    if fa == 0 || fb == 0 {
+        return Ratio::from_parts(
+            u128::from(run_demand(a, axis)),
+            u128::from(run_demand(b, axis)),
+        );
+    }
+    Ratio::from_parts(u128::from(fa), u128::from(fb))
 }
