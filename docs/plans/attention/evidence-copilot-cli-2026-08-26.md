@@ -794,3 +794,60 @@ issue #1651(`https://github.com/github/copilot-cli/issues/1651`,"Add hook for pe
   `gh extension list` 空、全局 npm 只有 `@playwright/mcp` 与 `pnpm`、两个 WSL 里也没有)。
   上面每一条都是文档 + 官方发布二进制里的源码,**不是运行时观测**。
   §2.5 的焦点门方向、§2.2 的铃双出处,都值得在真装上之后各录一段确认。
+
+## 8. 实机补录(2026-08-26 晚,施工时补)
+
+§7 最后一条写的是「本机没装 copilot」。**施工当天装了一份隔离的。**
+隔离面:`npm install --prefix <scratch> @github/copilot`(1.0.80),
+跑的时候 `COPILOT_HOME` 指到那个 scratch 目录里 —— **用户真实的 `~/.copilot` 一个字节没动**。
+
+量到了两件,差一件。
+
+### 8.1 量到:`copilot --version` 的逐字输出
+
+```text
+GitHub Copilot CLI 1.0.80.
+Run 'copilot update' to check for updates.
+```
+
+**两个事实对安装器的版本门是可施工的**:① `--version` 是真有的 flag;
+② 它印的是**一句话不是一个字段**,而且号后面跟着一个**句号**。
+一个把整个词拿去 parse 的读法会把 `1.0.80.` 读成四段或读成无;
+`@github/copilot` 的 `dist-tags.prerelease` 又是 `1.0.81-12` 这种形状。
+所以 `attention_copilot::Version::parse` 是一遍**扫描**:逐词去头尾非数字非点,
+再按点分三段、每段取**它开头的数字**。
+
+另外量到一条施工细节:npm 把它装成 `copilot.cmd`,
+而 `CreateProcess` 只补 `.exe`、不查 `PATHEXT` —— 直接 spawn `copilot` 在寻常安装上**什么都找不到**。
+`cmd.exe /c copilot --version` 实测可以,且对 `.exe` 形态的安装也成立。
+
+### 8.2 量到:hook 文件的目录与加载面,以及它自己的日志里没有 hook
+
+把本片会写的那个文件(命令换成一句追写 trace 的 `cmd /c echo`)放进
+`$COPILOT_HOME/hooks/folio.json`,再跑 `copilot -p "say hi" --allow-all-tools --log-level debug`。
+`--log-level debug` 的整份日志里 **`hook` 零命中**,trace 文件也没生成。
+**但这不能当作「hook 没被加载」的证据** —— 见 §8.3:那次会话根本没走到一个回合,
+而日志里本来就没有任何一行讲 hook 加载(包括成功的情形),所以零命中既不证实也不证伪。
+**这一格仍然是欠的。**
+
+### 8.3 差的那件:这台机器开不了 copilot 会话
+
+认证是通的(日志:`GitHub CLI authenticated with valid token`),但服务端拒绝,逐字:
+
+```text
+! Third-party MCP servers are disabled by your organization's Copilot policy. Only built-in servers
+  are available.
+
+Error: Access denied by policy settings (Request ID: ...)
+```
+
+**所以 §2.5 的焦点门方向、§2.2 的铃双出处、以及片 A0.5 落地后的那一格复测,仍然都是源码取证而不是运行时观测。**
+要补这一格,需要的不是一台装了 copilot 的机器,是一个 Copilot CLI 没被组织策略关掉的账号。
+
+### 8.4 §6 三处出入的下落
+
+1. **plan §11.10.1 已就地补限定**(2026-08-26):copilot 那一源对 Folio 恒关,
+   并与 codex 的 `notification_method = auto` 白名单**并列记入**;不改设计、不伪装 `TERM_PROGRAM`。
+2. **§4.6 那条 `MessageBeep()` 存疑已撤**,理由在 §2.2 / §3.2;同时
+   `evidence-cli-survey-2026-08-25.md` 头部添了一条**默认值以程序为准**的取证纪律。
+3. **片 A0.5 的副作用已写进 `docs/DESIGN.md` §7.1.5o ⑨**,并注明实机复测欠着(§8.3)。

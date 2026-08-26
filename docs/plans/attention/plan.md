@@ -1474,6 +1474,24 @@ B2 ──▶ 独立等命令面板
 
 > **进度环在 Claude Code 与 codex 上无源**(claude 三段、codex 四段录音全部零命中,且 codex 的二进制里连 `\x1b]9;4` 字面量都搜不到);**但它有源** —— **pi** 的 TUI 核心发 `\x1b]9;4;3\x07`(不定式进度,每 1000ms 重发保活)与 `\x1b]9;4;0\x07`(回合首尾各一次),**copilot CLI** 有 `terminalProgress` 设置专门开关 OSC 9;4。
 
+**补一个限定(2026-08-26 取证,`evidence-copilot-cli-2026-08-26.md` §2.3):copilot 那一源今天对 Folio 是关的。**
+
+上面那句「copilot CLI 有 `terminalProgress` 设置专门开关 OSC 9;4」**属实**,但它发不发还隔着一张**终端白名单**。`app.js` 1.0.80 逐字:
+
+```js
+Zzn=new Set(["ghostty","kitty","rio","foot","alacritty","iterm2","wezterm","windows-terminal","vscode","vscode-insiders","cursor","windsurf"])
+function kDe(){let t=w6();return t==="apple-terminal"?!1:t!==null&&Zzn.has(t)}
+setProgress(e){!this.acceptsOsc()||!kDe()||(…this.writeOut(ao.PROGRESS_INDETERMINATE,this.stdout))}
+```
+
+**`Zzn` 是一个闭集合,Folio 不在里面**;终端身份的解析器 `Pwt` 只认 `TERM_PROGRAM` / `TERM` / `WT_SESSION` 等十几个已知前缀,答 XTVERSION 也进不去。**后果:copilot 在 Folio 里一个 `9;4` 都不会发。**
+
+**这是 codex 那张 `notification_method = auto` 白名单在第二家身上原样重演**(`evidence-cli-survey-2026-08-25.md` §2.4),**两条并列记在这里**:一家拿白名单决定发不发通知、一家拿白名单决定发不发进度环,**病因是同一个:所有新终端都拿到最差的那一档。**
+
+**这不改设计,也不伪装 `TERM_PROGRAM`。** 把自己报成 `windows-terminal` 能骗这两家开口,但那是把一句关于自己是谁的声明改成假话,而且它会跟着每一个读 `TERM_PROGRAM` 的程序一路错下去。**两家合成一份上游诉求(把白名单换成能力探询),走 §11.10.5 的账。**
+
+**pi 那一源不受影响** —— 它无条件地发,所以下面「零适配红利」那句话只对 pi 成立。
+
 **对本方案的影响,两条,都很轻**:
 
 - **D4 的诊断不变。** 「长驻 agent 的 tab 什么都不显示」那条缺陷的两个分支(装没装 shell 整合)是 **claude pane** 上的事实,而 claude 确实不发 9;4。**普查没有给 D4 松绑**。
