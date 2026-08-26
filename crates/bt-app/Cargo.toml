@@ -29,6 +29,11 @@ bt-term = { path = "../bt-term" }
 bt-transcript = { path = "../bt-transcript" }
 bt-unicode = { path = "../bt-unicode" }
 bt-viewport = { path = "../bt-viewport" }
+# **The glance card's first page** (`pdf::first_page`, `docs/DESIGN.md` §7.10 ⑥).
+# The pane draws a `.pdf` with WebView2's own engine and hands this process no
+# pixels at all, so a card that wants to show the page has to raster one itself.
+# See the workspace table for why this is hayro and not a pdfium binding.
+hayro.workspace = true
 # The one decoder this crate needs of its own: `ICoreWebView2::CapturePreview`
 # hands a page's picture over as an encoded PNG and offers no other shape, so a
 # focus card that draws a page has to decode one (W2 slice 6, `web_thumb`). The

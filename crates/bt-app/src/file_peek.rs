@@ -152,6 +152,25 @@ pub const PEEK_IMAGE_H_LOGICAL_PX: f32 = 120.0;
 /// `<rect rx="6">` — the corner of the ground the picture stands on.
 pub const PEEK_IMAGE_RADIUS_LOGICAL_PX: f32 = 6.0;
 
+/// **The box a page is fitted into** (user ruling 2026-08-25) — the picture's
+/// width and forty pixels more of height.
+///
+/// Wider than it is tall would be the wrong frame for the one thing this box
+/// ever holds. A picture may be any shape; a *page* is portrait far more often
+/// than not, and a portrait page fitted into the picture's 280×120 comes out
+/// eighty-five pixels wide with two hundred pixels of empty ground beside it.
+///
+/// 160 rather than more, because the card's own cap decides it: 264 less its two
+/// hairlines, its head, its foot, the two fact lines under the page and the
+/// padding around all of them leaves 162, and this is that number with the
+/// rounding taken off. A page box any taller would push the card past
+/// [`PEEK_MAX_HEIGHT_LOGICAL_PX`], and what `overflow: hidden` would then cut is
+/// the size line — see [`PeekBody::Facts`].
+pub const PEEK_PAGE_W_LOGICAL_PX: f32 = 280.0;
+pub const PEEK_PAGE_H_LOGICAL_PX: f32 = 160.0;
+/// The air between the page and the first line of facts under it.
+pub const PEEK_PAGE_GAP_LOGICAL_PX: f32 = 8.0;
+
 /// `.fpeek-foot { padding: 5px 10px }`.
 pub const PEEK_FOOT_PADDING_Y_LOGICAL_PX: f32 = 5.0;
 pub const PEEK_FOOT_PADDING_X_LOGICAL_PX: f32 = 10.0;
@@ -443,21 +462,35 @@ pub enum PeekBody {
     /// it is the honest answer for the next page-class member whose bytes are
     /// neither text nor countable: one line saying what the row does.
     Page,
-    /// **What a glance can state about a page it cannot render** (user ruling
-    /// 2026-08-25; [`crate::preview::PageGlance::Facts`]).
+    /// **A page this window drew for itself, and the two facts under it** (user
+    /// rulings 2026-08-25; [`crate::preview::PageGlance::Facts`]).
     ///
-    /// A `.pdf` is a page and the card has no engine, so the card cannot show
-    /// what is inside it. What it can do is stop being empty-handed: how large
-    /// the file is and how many pages it holds are the two facts a reader hovers
-    /// one to learn, and both are readable without a renderer.
+    /// A `.pdf` opens in the pane on WebView2's engine, and that engine hands
+    /// this process no pixels — so for a day the card's answer was two sentences
+    /// and no picture: how large the file is and how many pages it holds, the
+    /// two facts a reader hovers one to learn, both readable without a renderer.
     ///
-    /// **Both halves are optional and the box is not.** The facts come from the
-    /// worker a frame or two after the card is up, and a body that grew when
-    /// they landed would be a card that jumped under the pointer — so the height
-    /// is two lines from the first frame, whether or not there is anything in
-    /// them yet. A fact that never arrives is simply not printed, which is the
-    /// same silence [`Self::Image`] keeps while a decode is in flight.
+    /// The second ruling is that a reader hovering a report wants to see the
+    /// report. The card still has no *engine*; what it grew is a rasteriser of
+    /// its own ([`crate::pdf::first_page`]), which draws the first page at the
+    /// size the card will show it and nothing else. So the body is a page over
+    /// two lines: the picture that says which document this is, and the facts
+    /// that say how much of it there is.
+    ///
+    /// **All three parts are optional and the box is not.** The picture is
+    /// rastered on a worker and the facts are read on another, so both land a
+    /// frame or several after the card is up; a body that grew when they arrived
+    /// would be a card that jumped under the pointer. The height is the page box
+    /// plus two lines from the first frame, whether or not anything has filled
+    /// them. What never arrives is simply not drawn — the same silence
+    /// [`Self::Image`] keeps while a decode is in flight, and the whole of this
+    /// feature's degradation: a file that will not raster leaves an empty ground
+    /// with its size printed underneath.
     Facts {
+        /// The rastered first page's physical size, fitted inside
+        /// [`PEEK_PAGE_W_LOGICAL_PX`] × [`PEEK_PAGE_H_LOGICAL_PX`], or `None`
+        /// while the raster is out or after it came back with nothing.
+        page: Option<[f32; 2]>,
         bytes: Option<u64>,
         pages: Option<u32>,
     },
@@ -491,12 +524,16 @@ impl PeekBody {
                     + none_line(scale)
                     + px(PEEK_NONE_PADDING_BOTTOM_LOGICAL_PX)
             }
-            // **Two lines, always** — see [`Self::Facts`] for why the box does
-            // not wait to learn how many of them have something in them.
+            // **The page's whole box and two lines, always** — see
+            // [`Self::Facts`] for why none of the three waits to learn whether
+            // it has anything in it. The frame around the page is the picture's
+            // (2 above, 8 below the lot), because that is what it is.
             Self::Facts { .. } => {
-                px(PEEK_NONE_PADDING_TOP_LOGICAL_PX)
+                px(PEEK_BODY_PADDING_TOP_LOGICAL_PX)
+                    + px(PEEK_PAGE_H_LOGICAL_PX)
+                    + px(PEEK_PAGE_GAP_LOGICAL_PX)
                     + none_line(scale) * 2.0
-                    + px(PEEK_NONE_PADDING_BOTTOM_LOGICAL_PX)
+                    + px(PEEK_BODY_PADDING_BOTTOM_LOGICAL_PX)
             }
         }
     }
@@ -580,17 +617,54 @@ pub struct PeekPicture<'a> {
     pub height_px: u32,
 }
 
-/// The ground a picture stands on: the mock-up's own 280×120 frame, centred in
-/// the card's body and cut by it if the card is short.
+/// The ground something drawn stands on: a `width` × `height` frame hung under
+/// the body's own top padding, centred in the card and cut by it if the card is
+/// short.
+///
+/// One function for the picture's frame and the page's because they are one
+/// shape asked for at two sizes — see [`picture_ground`] and [`page_ground`],
+/// which are what the rest of the module says instead of repeating the numbers.
 #[must_use]
-fn picture_ground(body: [f32; 4], scale: f32) -> [f32; 4] {
+fn fitted_ground(body: [f32; 4], scale: f32, width: f32, height: f32) -> [f32; 4] {
     let px = |logical: f32| logical * scale;
-    let width = px(PEEK_IMAGE_W_LOGICAL_PX)
-        .min(body[2] - body[0] - px(PEEK_BODY_PADDING_X_LOGICAL_PX) * 2.0);
+    let width = px(width).min(body[2] - body[0] - px(PEEK_BODY_PADDING_X_LOGICAL_PX) * 2.0);
     let left = ((body[0] + body[2] - width) / 2.0).round();
     let top = body[1] + px(PEEK_BODY_PADDING_TOP_LOGICAL_PX);
-    let bottom = (top + px(PEEK_IMAGE_H_LOGICAL_PX)).min(body[3]);
+    let bottom = (top + px(height)).min(body[3]);
     [left, top.round(), left + width, bottom.round()]
+}
+
+/// The ground a picture stands on: the mock-up's own 280×120 frame.
+#[must_use]
+fn picture_ground(body: [f32; 4], scale: f32) -> [f32; 4] {
+    fitted_ground(
+        body,
+        scale,
+        PEEK_IMAGE_W_LOGICAL_PX,
+        PEEK_IMAGE_H_LOGICAL_PX,
+    )
+}
+
+/// The ground a page stands on — the same frame, forty pixels taller, because a
+/// page is usually portrait ([`PEEK_PAGE_H_LOGICAL_PX`]).
+#[must_use]
+fn page_ground(body: [f32; 4], scale: f32) -> [f32; 4] {
+    fitted_ground(body, scale, PEEK_PAGE_W_LOGICAL_PX, PEEK_PAGE_H_LOGICAL_PX)
+}
+
+/// Something already fitted, centred on the ground it was fitted to.
+#[must_use]
+fn centred_on(ground: [f32; 4], width: f32, height: f32) -> Option<[f32; 4]> {
+    if !(width >= 1.0 && height >= 1.0) {
+        return None;
+    }
+    let (width, height) = (
+        width.min(ground[2] - ground[0]),
+        height.min(ground[3] - ground[1]),
+    );
+    let left = ((ground[0] + ground[2] - width) / 2.0).round();
+    let top = ((ground[1] + ground[3] - height) / 2.0).round();
+    Some([left, top, left + width, top + height])
 }
 
 /// Where the picture itself goes: its own size, centred on its ground.
@@ -604,17 +678,22 @@ pub fn picture_rect(layout: &PeekLayout, scale: f32) -> Option<[f32; 4]> {
     let PeekBody::Image { width, height } = layout.body_kind else {
         return None;
     };
-    if !(width >= 1.0 && height >= 1.0) {
+    centred_on(picture_ground(layout.body, scale), width, height)
+}
+
+/// Where the rastered first page goes: its own size, centred on its ground.
+///
+/// `None` on the same three occasions the picture's is — the raster has not come
+/// home yet, or it came home empty-handed, or this card is not about a page at
+/// all — and the card draws the ground either way, which is what keeps its
+/// height from depending on how the raster turned out.
+#[must_use]
+pub fn page_rect(layout: &PeekLayout, scale: f32) -> Option<[f32; 4]> {
+    let PeekBody::Facts { page, .. } = layout.body_kind else {
         return None;
-    }
-    let ground = picture_ground(layout.body, scale);
-    let (width, height) = (
-        width.min(ground[2] - ground[0]),
-        height.min(ground[3] - ground[1]),
-    );
-    let left = ((ground[0] + ground[2] - width) / 2.0).round();
-    let top = ((ground[1] + ground[3] - height) / 2.0).round();
-    Some([left, top, left + width, top + height])
+    };
+    let [width, height] = page?;
+    centred_on(page_ground(layout.body, scale), width, height)
 }
 
 /// Everything the card says, before it is placed.
@@ -904,15 +983,40 @@ pub fn build(
                 palette.body_hint_text,
             ));
         }
-        // The facts, in the box the refusal's one line would have stood in and
-        // in the same ink: this is the card speaking in its own voice about a
-        // file rather than showing the file, which is exactly what that box is
-        // for. A fact that has not arrived leaves its line empty rather than
-        // shifting the other one — see [`PeekBody::Facts`].
-        PeekBody::Facts { bytes, pages } => {
+        // The page over the facts. The picture is drawn exactly as the image
+        // body's is — its own ground, its own fit — and the two sentences stand
+        // under it in the card's own voice, which is what that ink is for. A
+        // fact that has not arrived leaves its line empty rather than shifting
+        // the other one, and a page that has not arrived leaves its ground empty
+        // rather than moving the lines up — see [`PeekBody::Facts`].
+        PeekBody::Facts { bytes, pages, .. } => {
+            let ground = page_ground(layout.body, scale);
+            quads.extend(bt_render::rounded_overlay_fill(
+                ground,
+                px(PEEK_IMAGE_RADIUS_LOGICAL_PX),
+                // The same ground the picture stands on, for the same reason:
+                // whatever is behind the drawn thing is the terminal's own.
+                bt_render::background_rgb(),
+                1.0,
+            ));
+            if let Some((rect, picture)) = page_rect(layout, scale).zip(picture) {
+                images.push(bt_render::ChromeIcon {
+                    key: picture.key.to_owned(),
+                    rect,
+                    rgba: std::sync::Arc::clone(picture.rgba),
+                    width_px: picture.width_px,
+                    height_px: picture.height_px,
+                    opacity: 1.0,
+                    // Fitted to its ground, so it is inside its own box by
+                    // construction — the same sentence the picture's clip says.
+                    clip: None,
+                });
+            }
             let left = layout.body[0] + px(PEEK_NONE_PADDING_X_LOGICAL_PX);
             let right = layout.body[2] - px(PEEK_NONE_PADDING_X_LOGICAL_PX);
-            let top = layout.body[1] + px(PEEK_NONE_PADDING_TOP_LOGICAL_PX);
+            // Under the page's whole box rather than under the picture that
+            // landed in it: the lines stand where the last card put them.
+            let top = ground[3] + px(PEEK_PAGE_GAP_LOGICAL_PX);
             let line = none_line(scale);
             for (row, words) in facts_lines(*bytes, *pages).into_iter().enumerate() {
                 let Some(words) = words else {
@@ -1405,14 +1509,18 @@ mod tests {
     }
 
     /// PIN (user ruling 2026-08-25; `docs/DESIGN.md` §7.10 ⑥) — **the card over a
-    /// page it cannot render states the facts it can.**
+    /// page states the two facts a renderer is not needed for.**
     ///
     /// A `.pdf` row used to draw one line — `Opens as a page.` — which told a
     /// reader what a double click does and nothing about the file they were
-    /// pointing at. The two facts here are the ones a renderer is not needed
-    /// for, and they are drawn in the card's own voice, in the box the refusal's
+    /// pointing at. The two facts here are the ones that can be read off the
+    /// file, and they are drawn in the card's own voice, in the box the refusal's
     /// line stood in: this is the card *saying* something, not the card showing a
     /// document, so it belongs on the layer that draws the head and the foot.
+    ///
+    /// The picture that later arrived above them is the next test's; every card
+    /// built here is one whose raster has not come home, which is also the shape
+    /// every `.pdf` card wears for its first frames.
     ///
     /// The head and the foot are asserted with them because they are the half of
     /// the ruling that did **not** change: the chip still says `web` and the foot
@@ -1422,9 +1530,10 @@ mod tests {
     /// card comes back with `Opens as a page.` in it and not one fact, which is
     /// the state this ruling overturned.
     #[test]
-    fn a_page_the_card_cannot_render_states_its_facts() {
+    fn a_page_card_states_the_two_facts_it_can_read() {
         let window = (1200.0, 900.0);
         let mut card = content(PeekBody::Facts {
+            page: None,
             bytes: Some(83_387),
             pages: Some(3),
         });
@@ -1476,6 +1585,7 @@ mod tests {
         // a worker one or two frames after the card is up, and a body that grew
         // when they landed would be a card that jumped under the pointer.
         let empty = content(PeekBody::Facts {
+            page: None,
             bytes: None,
             pages: None,
         });
@@ -1503,6 +1613,7 @@ mod tests {
         // And a file the disk would not stat still says what it can: one fact is
         // better than none, and it stands where it always stands.
         let one = content(PeekBody::Facts {
+            page: None,
             bytes: None,
             pages: Some(12),
         });
@@ -1515,52 +1626,210 @@ mod tests {
             &bt_render::chrome_palette(),
             SCALE,
         );
-        let pages = layer
+        let lone = layer
             .labels
             .iter()
             .find(|label| label.text == "12 pages")
             .expect("the fact that is known is printed");
         assert_eq!(
-            pages.rect[1],
-            single.body[1] + PEEK_NONE_PADDING_TOP_LOGICAL_PX,
-            "and the surviving fact does not move up into the missing one's line"
+            lone.rect[1], pages.rect[1],
+            "and the surviving fact stands on the line it always stands on"
+        );
+
+        // The other way round: with only the size known, the size does **not**
+        // climb into the page count's line.
+        let other = content(PeekBody::Facts {
+            page: None,
+            bytes: Some(83_387),
+            pages: None,
+        });
+        let sized = layout(&other, row, window, 120.0, 24.0, SCALE);
+        let layer = build(
+            &sized,
+            &other,
+            &foot(&sized, ""),
+            None,
+            &bt_render::chrome_palette(),
+            SCALE,
+        );
+        let lone = layer
+            .labels
+            .iter()
+            .find(|label| label.text == "81 KB")
+            .expect("the fact that is known is printed");
+        assert_eq!(
+            lone.rect[1], size.rect[1],
+            "the second line is still the second line with the first one missing"
         );
     }
 
-    /// PIN — **a facts card is two lines taller than a one-line card, and no
-    /// taller.**
+    /// PIN (user ruling 2026-08-25) — **the page card draws the first page over
+    /// its two facts, and reserves the box for it before the raster is home.**
+    ///
+    /// The card's founding sentence was *there is no engine on a hover card*, and
+    /// it stayed true of the pane's engine and stopped being true of the card the
+    /// day this window grew a rasteriser ([`crate::pdf::first_page`]). What this
+    /// pins is the arrangement the ruling asks for and the two properties that
+    /// keep it from flickering: the picture is above the words, and the body is
+    /// the same height whether or not it has arrived.
+    ///
+    /// RED GATE ①: leave the page out of [`PeekBody::height`] and the card that is
+    /// waiting for its raster is 160 pixels shorter than the one that has it —
+    /// which on screen is a card growing under a stationary pointer.
+    /// RED GATE ②: draw the facts from `layout.body[1]` as they were drawn before
+    /// the ruling and the first line lands on top of the page.
+    #[test]
+    fn a_page_card_draws_its_first_page_above_the_facts() {
+        let window = (1200.0, 900.0);
+        let row = [40.0, 300.0, 240.0, 320.0];
+        // A US Letter page fitted into 280×160 by height, which is the shape
+        // nearly every hovered `.pdf` produces.
+        let drawn = content(PeekBody::Facts {
+            page: Some([124.0, 160.0]),
+            bytes: Some(83_387),
+            pages: Some(3),
+        });
+        let waiting = content(PeekBody::Facts {
+            page: None,
+            bytes: Some(83_387),
+            pages: Some(3),
+        });
+        let with = layout(&drawn, row, window, 120.0, 24.0, SCALE);
+        let without = layout(&waiting, row, window, 120.0, 24.0, SCALE);
+        assert_eq!(
+            with.frame, without.frame,
+            "the card is the same card before and after its page arrives"
+        );
+
+        let rect = page_rect(&with, SCALE).expect("the page has somewhere to go");
+        assert!(
+            (rect[2] - rect[0] - 124.0).abs() < 0.5 && (rect[3] - rect[1] - 160.0).abs() < 0.5,
+            "drawn at the size the rasteriser fitted it to: {rect:?}"
+        );
+        assert!(
+            rect[1] >= with.body[1] && rect[3] <= with.body[3],
+            "and inside the body: {rect:?} in {:?}",
+            with.body
+        );
+        assert_eq!(
+            page_rect(&without, SCALE),
+            None,
+            "and nothing at all is drawn while the raster is out"
+        );
+
+        let picture: std::sync::Arc<[u8]> =
+            std::sync::Arc::from(vec![0_u8; 124 * 160 * 4].into_boxed_slice());
+        let layer = build(
+            &with,
+            &drawn,
+            &foot(&with, ""),
+            Some(PeekPicture {
+                key: "peek-page:test",
+                rgba: &picture,
+                width_px: 124,
+                height_px: 160,
+            }),
+            &bt_render::chrome_palette(),
+            SCALE,
+        );
+        let page = layer
+            .images
+            .iter()
+            .find(|icon| icon.key == "peek-page:test")
+            .expect("the page reaches the renderer");
+        assert_eq!(page.rect, rect);
+        let said = |text: &str| {
+            layer
+                .labels
+                .iter()
+                .find(|label| label.text == text)
+                .unwrap_or_else(|| panic!("the card says {text}"))
+        };
+        assert!(
+            page.rect[3] <= said("3 pages").rect[1],
+            "the page stands above the facts: {:?} vs {:?}",
+            page.rect,
+            said("3 pages").rect
+        );
+        assert!(
+            said("3 pages").rect[3] <= said("81 KB").rect[1] + 0.5,
+            "and the facts are still in the order the ruling put them"
+        );
+
+        // The whole arrangement fits the card's own cap, which is what decides
+        // how tall the page box may be — see [`PEEK_PAGE_H_LOGICAL_PX`].
+        assert!(
+            with.frame[3] - with.frame[1] <= PEEK_MAX_HEIGHT_LOGICAL_PX,
+            "the card is inside its cap: {}",
+            with.frame[3] - with.frame[1]
+        );
+        assert!(
+            with.foot[1] >= with.body[3],
+            "so nothing is cut off the bottom: {with:?}"
+        );
+    }
+
+    /// PIN — **a page card reserves its page box and both of its lines, and
+    /// nothing else.**
     ///
     /// The whole card shrink-wraps its body, so the body's own arithmetic is what
-    /// decides the shape of every `.pdf` glance on screen.
+    /// decides the shape of every `.pdf` glance on screen — and that shape has to
+    /// be settled before either worker answers, or the card changes size under
+    /// the pointer twice ([`PeekBody::Facts`]).
     ///
-    /// MUTATION: fold [`PeekBody::Facts`] into the `Refused | Page` height arm —
-    /// the second fact is drawn under the card's own bottom edge.
+    /// MUTATION ①: fold [`PeekBody::Facts`] into the `Refused | Page` height arm
+    /// — the page and the second fact are both drawn under the card's own bottom
+    /// edge.
+    /// MUTATION ②: size the box to the page that arrived rather than to
+    /// [`PEEK_PAGE_H_LOGICAL_PX`] and the first assertion goes red, which is the
+    /// jump.
     #[test]
-    fn the_facts_body_reserves_both_of_its_lines() {
+    fn the_page_body_reserves_its_picture_and_both_of_its_lines() {
         let window = (1200.0, 900.0);
         let row = [40.0, 300.0, 240.0, 320.0];
         let refusal = layout(&content(PeekBody::Refused), row, window, 60.0, 24.0, SCALE);
-        let facts = layout(
-            &content(PeekBody::Facts {
-                bytes: Some(1),
-                pages: Some(1),
-            }),
-            row,
-            window,
-            60.0,
-            24.0,
-            SCALE,
-        );
+        let facts = |page| {
+            layout(
+                &content(PeekBody::Facts {
+                    page,
+                    bytes: Some(1),
+                    pages: Some(1),
+                }),
+                row,
+                window,
+                60.0,
+                24.0,
+                SCALE,
+            )
+        };
         let line = (PEEK_NONE_FONT_LOGICAL_PX * 1.4).round();
+        let waiting = facts(None);
+        let body = waiting.body[3] - waiting.body[1];
         assert_eq!(
-            (facts.body[3] - facts.body[1]) - (refusal.body[3] - refusal.body[1]),
-            line,
-            "exactly one line more than the sentence it replaced"
+            body,
+            PEEK_BODY_PADDING_TOP_LOGICAL_PX
+                + PEEK_PAGE_H_LOGICAL_PX
+                + PEEK_PAGE_GAP_LOGICAL_PX
+                + line * 2.0
+                + PEEK_BODY_PADDING_BOTTOM_LOGICAL_PX,
+            "the page's whole box and two lines, before either has arrived"
+        );
+        // A short page and a tall one are the same card: the box is the box.
+        for page in [[280.0, 40.0], [124.0, 160.0], [1.0, 1.0]] {
+            let drawn = facts(Some(page));
+            assert_eq!(
+                drawn.body[3] - drawn.body[1],
+                body,
+                "a {page:?} page did not change the body"
+            );
+        }
+        assert!(
+            body > refusal.body[3] - refusal.body[1],
+            "and it is taller than the one-line refusal it grew out of"
         );
         assert!(
-            facts.foot[1] >= facts.body[3],
-            "and the foot still stands below the body: {:?}",
-            facts
+            waiting.foot[1] >= waiting.body[3],
+            "and the foot still stands below the body: {waiting:?}"
         );
     }
 

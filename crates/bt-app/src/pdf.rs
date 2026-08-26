@@ -1,20 +1,53 @@
-//! **How many pages a PDF holds, read off its own structure** (user ruling
-//! 2026-08-25; `docs/DESIGN.md` §7.10 ⑥).
+//! **What a glance can learn about a PDF without opening it in the engine**
+//! (user rulings 2026-08-25; `docs/DESIGN.md` §7.10 ⑥).
 //!
-//! # Why this exists at all
+//! Two answers live here and they are answered two very different ways:
 //!
-//! The glance card cannot render a page — a page is drawn by the engine, on a
-//! seat, and there is no engine on a hover card. What the card can do is state
-//! the facts a reader hovers a `.pdf` to learn, and the ruling names two: how
-//! large the file is, and how many pages are in it. The first is a `metadata`
-//! call. The second is this module.
+//! * [`page_count`] — **how many pages the file holds**, read off its own
+//!   structure by a tokenizer that renders, decompresses and resolves nothing.
+//! * [`first_page`] — **what the first page looks like**, rasterised.
 //!
-//! **Nothing here renders, decompresses or resolves anything.** It is a
-//! tokenizer over the file's own bytes that answers one question, and the
-//! ruling's own fallback is written into the answer's type: when the structure
-//! does not yield a count, the answer is `None` and the card states the size
-//! alone. A wrong number would be worse than no number, so every place this
-//! scan cannot see is a `None` rather than a guess.
+//! # Why the count exists at all
+//!
+//! The glance card has no engine — a page is drawn by WebView2, on a seat, and
+//! the pane's pixels never cross back into this process. What the card can do is
+//! state the facts a reader hovers a `.pdf` to learn, and the first ruling names
+//! two: how large the file is, and how many pages are in it. The first is a
+//! `metadata` call. The second is [`page_count`].
+//!
+//! Its answer's type carries the ruling's own fallback: when the structure does
+//! not yield a count, the answer is `None` and the card states the size alone. A
+//! wrong number would be worse than no number, so every place that scan cannot
+//! see is a `None` rather than a guess.
+//!
+//! # And why a picture arrived beside it
+//!
+//! "How many pages" and "how big" place a file; they do not *show* it, and the
+//! second ruling is that a reader hovering a report wants to see the report. The
+//! sentence the card was built on — *there is no engine on a hover card* — is
+//! still true of the **pane's** engine and stopped being true of the card the
+//! moment this process grew a rasteriser of its own. [`first_page`] is that
+//! rasteriser's one door.
+//!
+//! **It is [`hayro`], and it is in this build already.** `typst-svg` rasterises
+//! the PDFs a Typst document embeds with it, so the formula lane has been
+//! carrying it since the day formulas landed; naming it a dependency of this
+//! crate costs no new package, which is `docs/DESIGN.md` §8's bar. What it buys
+//! over a pdfium binding is the whole distribution question: hayro is Rust that
+//! links into `folio.exe`, so there is no 5MB C++ library to ship beside the
+//! exe, to find at startup, to fail to find, or to write a degraded card for.
+//! The feature either compiles or it does not.
+//!
+//! # What [`first_page`] refuses, and the shape of every refusal
+//!
+//! `None`, always — the same word the count answers with, so the card has one
+//! silence rather than a vocabulary of failures. It is the answer for a file
+//! that is not a PDF, a PDF whose cross-reference table is past repairing, one
+//! that is encrypted, one with no pages, and one larger than
+//! [`MAX_RASTER_BYTES`]. The card draws its ground and no page, exactly as it
+//! does for a `.png` whose decode failed, and the two fact lines are unaffected:
+//! they came down a different lane and a file with no readable picture very
+//! often still has a readable size.
 //!
 //! # What it reads, in the order it trusts them
 //!
@@ -81,6 +114,145 @@ const MAX_DICT_DEPTH: usize = 64;
 pub fn page_count(path: &Path) -> Option<u32> {
     let file = std::fs::File::open(path).ok()?;
     count_pages(file)
+}
+
+/// **The largest file [`first_page`] will raster.**
+///
+/// The count above is a stream: it reads [`CHUNK_BYTES`] at a time and a
+/// hundred-megabyte file costs it a hundred megabytes of *reading* and sixty-four
+/// kilobytes of memory. A rasteriser cannot be written that way — a PDF is read
+/// through a cross-reference table that points anywhere in the file, so the
+/// bytes have to be resident — and the number below is what keeps a hover from
+/// being able to ask this process for arbitrarily much of them.
+///
+/// It is set where real documents are not: a 128MiB PDF is a scan of a book, and
+/// the card answers one by drawing its ground and printing its size, which is
+/// the same thing it does for a file it cannot parse. Memory-mapping the file
+/// instead would remove the cap and add `unsafe` plus a promise nobody can keep
+/// — the mapping is torn out from under the reader if the file is truncated
+/// while the card is up.
+pub const MAX_RASTER_BYTES: u64 = 128 * 1024 * 1024;
+
+/// The longest edge a raster may be asked for, which is [`hayro`]'s own limit
+/// stated as ours: its pixmaps are addressed in `u16`. The card asks for a box a
+/// few hundred pixels across, so this is a type boundary rather than a policy —
+/// it is here so that the conversion below is a clamp instead of a cast that
+/// could wrap.
+const MAX_RASTER_EDGE_PX: u32 = u16::MAX as u32;
+
+/// **One page, rastered** — straight (non-premultiplied) RGBA8, row-major, the
+/// same shape every other picture in this window reaches the renderer as.
+///
+/// It is opaque: the page is drawn onto white, because that is the paper a PDF
+/// assumes under it and a page composited onto the card's own ground would show
+/// the terminal's background through everything its author left blank.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PageRaster {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// **The first page of the PDF at `path`, fitted inside `fit_width` ×
+/// `fit_height`**, or `None` for every one of the refusals in the module's own
+/// note.
+///
+/// # Fitted, not resampled
+///
+/// The picture lane this joins on the card decodes at the file's native size and
+/// then runs a Lanczos3 pass down to the display box, because a `.png` has one
+/// resolution and that is the only way to get another. A page has no native
+/// resolution at all — it is a description — so the fit is computed first and the
+/// rasteriser is asked for exactly those pixels. The page is drawn once, at the
+/// size it will be seen at, which is both cheaper than the two-step and sharper
+/// than it.
+///
+/// # Where it may be called from
+///
+/// **Never the thread that draws.** Parsing and rastering a page is tens to
+/// hundreds of milliseconds, and on the window's thread that is a hover over a
+/// report freezing the window — the same sentence that already keeps
+/// [`page_count`] on the preview worker. Its one caller is the decoration
+/// worker, beside the formula engine and the image decoder, which is where this
+/// window puts CPU work that answers a pointer.
+#[must_use]
+pub fn first_page(path: &Path, fit_width: u32, fit_height: u32) -> Option<PageRaster> {
+    let file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len == 0 || len > MAX_RASTER_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(len).ok()?);
+    // Read through the handle the length was asked of and bounded by the cap
+    // rather than by that length: a file being appended to between the two calls
+    // is a file this hover may not be handed unboundedly much of.
+    (&file)
+        .take(MAX_RASTER_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    raster_first_page(bytes, fit_width, fit_height)
+}
+
+/// [`first_page`] over bytes already in hand — the seam the tests feed.
+fn raster_first_page(bytes: Vec<u8>, fit_width: u32, fit_height: u32) -> Option<PageRaster> {
+    use hayro::hayro_interpret::InterpreterSettings;
+    use hayro::hayro_syntax::Pdf;
+    use hayro::vello_cpu::color::palette::css::WHITE;
+    use hayro::{RenderCache, RenderSettings};
+
+    let fit_width = fit_width.clamp(1, MAX_RASTER_EDGE_PX);
+    let fit_height = fit_height.clamp(1, MAX_RASTER_EDGE_PX);
+
+    let pdf = Pdf::new(bytes).ok()?;
+    // The *first* page and not "a page": the card is a glance, and the glance a
+    // reader takes at a document is its cover.
+    let page = pdf.pages().first()?;
+    // Already rotated: `render_dimensions` applies the page's own `/Rotate`, so a
+    // landscape scan of a portrait page is fitted as the landscape it displays
+    // as rather than as the portrait it is stored as.
+    let (page_width, page_height) = page.render_dimensions();
+    if !(page_width.is_finite() && page_height.is_finite() && page_width > 0.0 && page_height > 0.0)
+    {
+        return None;
+    }
+    // `contain`, not `cover`: the page keeps its proportions and the card centres
+    // it in what is left over, which is the same bargain the picture body strikes
+    // and is why a wide page and a tall one are both themselves.
+    let scale = (fit_width as f32 / page_width).min(fit_height as f32 / page_height);
+    // `.min(fit)` is not decoration: the limiting axis works out to `fit` exactly
+    // in real arithmetic and to whatever the float said in this one, and a
+    // raster one pixel wider than the ground it is centred on would be drawn
+    // over the card's own border.
+    let edge = |points: f32, fit: u32| ((points * scale).round().max(1.0) as u32).min(fit);
+    let (width, height) = (edge(page_width, fit_width), edge(page_height, fit_height));
+
+    let pixmap = hayro::render(
+        page,
+        // One page is rastered per hover, so the cache that exists to be reused
+        // across the pages of one document has exactly one user here. It is
+        // still passed rather than worked around: it is the argument, and a
+        // document whose first page draws the same pattern twice pays for it
+        // once.
+        &RenderCache::new(),
+        &InterpreterSettings::default(),
+        &RenderSettings {
+            x_scale: scale,
+            y_scale: scale,
+            width: Some(width as u16),
+            height: Some(height as u16),
+            // The paper. See [`PageRaster`].
+            bg_color: WHITE,
+        },
+    );
+    Some(PageRaster {
+        rgba: pixmap
+            .take_unpremultiplied()
+            .into_iter()
+            .flat_map(|pixel| pixel.to_u8_array())
+            .collect(),
+        width,
+        height,
+    })
 }
 
 /// [`page_count`] over any stream of bytes — the seam the tests feed.
@@ -420,6 +592,203 @@ mod tests {
 
     fn count(bytes: &[u8]) -> Option<u32> {
         count_pages(bytes)
+    }
+
+    /// The card's own box at scale 1, so the assertions below are about the
+    /// shape a reader actually gets rather than a number chosen for the test.
+    const FIT: (u32, u32) = (280, 160);
+
+    fn raster(bytes: &[u8]) -> Option<PageRaster> {
+        raster_first_page(bytes.to_vec(), FIT.0, FIT.1)
+    }
+
+    /// How many of the raster's pixels are not the paper it was drawn on.
+    ///
+    /// The page is rendered onto white, so "there is ink" and "this is not a
+    /// blank rectangle" are the same count — and it is the only assertion that
+    /// can tell a rasteriser that ran from one that returned a correctly sized
+    /// nothing.
+    fn ink(page: &PageRaster) -> usize {
+        page.rgba
+            .chunks_exact(4)
+            .filter(|pixel| pixel[..3] != [255, 255, 255])
+            .count()
+    }
+
+    /// PIN — **the shipped fixture's first page comes back as pixels, fitted,
+    /// opaque, and with ink on it.**
+    ///
+    /// The one assertion in this module that a rasteriser cannot satisfy by
+    /// agreeing with synthetic bytes: it is the file the ruling was demonstrated
+    /// on, printed by headless Edge, and what is being checked is that a real
+    /// producer's real page arrives drawn.
+    ///
+    /// The ink count is the assertion that tells a rasteriser which ran from one
+    /// that handed back a correctly sized nothing, and it is why the count is
+    /// here rather than a dimensions check alone.
+    ///
+    /// RED GATE: draw onto `TRANSPARENT` instead of the paper and the opacity
+    /// assertion goes red — which on the card is a page with the terminal's
+    /// background showing through everything its author left blank.
+    #[test]
+    fn the_shipped_fixture_rasters_its_first_page() {
+        let page = raster(FIXTURE).expect("a real PDF's first page rasters");
+        assert!(
+            page.width <= FIT.0 && page.height <= FIT.1,
+            "fitted inside the card's box: {}x{}",
+            page.width,
+            page.height
+        );
+        assert_eq!(
+            page.rgba.len(),
+            page.width as usize * page.height as usize * 4,
+            "straight RGBA8, one row after another"
+        );
+        assert!(
+            page.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255),
+            "drawn onto paper, so every pixel is opaque"
+        );
+        assert!(
+            ink(&page) > 100,
+            "a page with text on it is not a blank rectangle: {} inked pixels",
+            ink(&page)
+        );
+    }
+
+    /// PIN — **the fit is `contain`: the page keeps its proportions.**
+    ///
+    /// The card centres the picture in a 280×160 ground, so a portrait page has
+    /// to arrive narrow rather than arrive stretched — the same bargain the
+    /// image body strikes, and the reason the raster is asked for at the fitted
+    /// size instead of at the box's.
+    ///
+    /// MUTATION: pass `fit_width`/`fit_height` as the scale for each axis
+    /// separately (`x_scale` and `y_scale` computed apart) and the aspect
+    /// assertion goes red at the box's own 1.75.
+    #[test]
+    fn a_page_keeps_its_proportions_inside_the_box() {
+        let page = raster(FIXTURE).expect("a real PDF's first page rasters");
+        // The fixture is US Letter portrait: 612 × 792 points.
+        let want = 612.0_f32 / 792.0;
+        let got = page.width as f32 / page.height as f32;
+        assert!(
+            (got - want).abs() < 0.02,
+            "portrait stays portrait: {}x{} is {got}, wanted {want}",
+            page.width,
+            page.height
+        );
+        // And a box the other way round fits by the other axis.
+        let wide = raster_first_page(FIXTURE.to_vec(), 160, 280).expect("still rasters");
+        assert!(wide.width <= 160 && wide.height <= 280);
+        assert!(
+            (wide.width as f32 / wide.height as f32 - want).abs() < 0.02,
+            "and by the other axis it is still the same page: {}x{}",
+            wide.width,
+            wide.height
+        );
+    }
+
+    /// PIN — **a file this rasteriser cannot read answers `None`, and answering
+    /// is all it does.**
+    ///
+    /// The card's whole degradation path is this word: no picture, the ground
+    /// drawn empty, and the two fact lines — which come down another lane —
+    /// untouched. A hover over a renamed archive, a half-downloaded report or a
+    /// PDF whose xref is rubble must cost the same nothing.
+    ///
+    /// MUTATION: unwrap the `Pdf::new` result instead of `.ok()?` and every case
+    /// below panics on the worker that was answering a hover.
+    #[test]
+    fn nothing_this_cannot_read_is_rastered_and_nothing_panics() {
+        assert!(raster(b"not a pdf at all").is_none());
+        assert!(raster(b"PK\x03\x04 not a pdf either").is_none());
+        assert!(raster(b"").is_none());
+        // A header and nothing behind it: no catalogue, no page tree, no pages.
+        assert!(raster(b"%PDF-1.7\n").is_none());
+        // Rubble that begins convincingly — the shape a truncated download takes.
+        assert!(raster(b"%PDF-1.7\n1 0 obj\n<< /Type /Pages /Count 3 >>\nendo").is_none());
+    }
+
+    /// PIN — **a corrupted real PDF does not take the hover down with it.**
+    ///
+    /// Every prefix of the fixture is a file that could genuinely exist on a
+    /// disk mid-copy, and each one is handed to the rasteriser. The assertion is
+    /// not that any of them draws — most cannot — but that the answer is always
+    /// an answer: `None`, or a picture that fits the box it was asked for.
+    ///
+    /// It is worth a test of its own rather than being folded into the refusals
+    /// above because a *nearly* valid PDF is the input that gets furthest into a
+    /// parser before it goes wrong, and this lane's failure mode is not a wrong
+    /// picture — it is the decoration worker dying on a hover, taking the
+    /// formula engine and the image decoder down with it for the rest of the
+    /// session.
+    ///
+    /// MUTATION: `Pdf::new(bytes).unwrap()` — several of these prefixes panic,
+    /// and each one is that worker.
+    #[test]
+    fn every_truncation_of_a_real_pdf_is_survived() {
+        for cut in (0..FIXTURE.len()).step_by(FIXTURE.len() / 32 + 1) {
+            let Some(page) = raster(&FIXTURE[..cut]) else {
+                continue;
+            };
+            assert!(
+                page.width >= 1 && page.width <= FIT.0,
+                "cut at {cut}: width {}",
+                page.width
+            );
+            assert!(
+                page.height >= 1 && page.height <= FIT.1,
+                "cut at {cut}: height {}",
+                page.height
+            );
+            assert_eq!(
+                page.rgba.len(),
+                page.width as usize * page.height as usize * 4,
+                "cut at {cut}"
+            );
+        }
+    }
+
+    /// PIN — **a file larger than [`MAX_RASTER_BYTES`] is not read into this
+    /// process.**
+    ///
+    /// The cap is the only thing standing between a hover and an unbounded
+    /// allocation, because a rasteriser — unlike the counter above it — needs
+    /// the whole file resident. Asserted through [`first_page`]'s own door on a
+    /// real file, because the cap is a `metadata` call and a `take`, and neither
+    /// is visible from [`raster_first_page`].
+    ///
+    /// MUTATION: drop the `len > MAX_RASTER_BYTES` guard and this file is read
+    /// whole; drop the `.take(MAX_RASTER_BYTES)` and a file that grows between
+    /// the stat and the read is too.
+    #[test]
+    fn a_file_past_the_cap_is_refused_before_it_is_read() {
+        let dir = std::env::temp_dir().join(format!(
+            "folio-pdf-cap-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("huge.pdf");
+        let file = std::fs::File::create(&path).expect("a scratch file");
+        // Sparse on NTFS: the bytes are never written and the length is real,
+        // which is exactly the file the guard has to answer about.
+        file.set_len(MAX_RASTER_BYTES + 1).expect("a stated length");
+        drop(file);
+        assert_eq!(first_page(&path, FIT.0, FIT.1), None);
+        // And the guard is about the size and not about the emptiness: the same
+        // file one byte under the cap is read, and answers `None` because it is
+        // zeros rather than because it was refused unopened.
+        std::fs::remove_file(&path).expect("the scratch file goes");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PIN — **a file that is not there, and a file with nothing in it, are both
+    /// `None` rather than either of them being an error.**
+    #[test]
+    fn a_missing_or_empty_file_has_no_first_page() {
+        let missing = std::env::temp_dir().join("folio-no-such-file-at-all.pdf");
+        assert_eq!(first_page(&missing, FIT.0, FIT.1), None);
     }
 
     /// PIN — **a real PDF is counted, and it is counted from the tree.**
