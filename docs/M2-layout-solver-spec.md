@@ -441,6 +441,7 @@ pub enum Presentation { Full, Collapsed }   // §2.6.3;让步等级本身不外�
 |---|---|
 | 在座位 `s` 的边缘裂出新座位(dir = d) | `members(s, d)` 所在的那条 run |
 | 关闭座位 `s`(兄弟被提升) | 被提升者所在的那条 run |
+| **拖动重放一个已在树里的 pane**(`MoveSeat`,用户裁决 2026-08-25) | **它离开的那条 run + 它落进的那条 run**;落回同一条 run 时 `F` 收窄到那一条,落回原位则 `F = ∅` |
 | 根 rim 投放 / **preview 落固定右席**(§1.3 三档落位) | **root 那条 run** |
 | **preview 复用未 pin 的既有座位**(§1.3 第 ① 档) | **∅**(换的是内容,不是几何) |
 | divider 拖拽 | **恰好那一个 split**(§3.4) |
@@ -470,10 +471,40 @@ pub enum Presentation { Full, Collapsed }   // §2.6.3;让步等级本身不外�
 代价如实承认:**你手拖过的比例,在有座位加入/离开那一串时会被重新分配**——因为那一串已经不是
 原来那组座位了。
 
+**但「重放」不是加入也不是离开(用户裁决 2026-08-25,拖放份额结算的不变量)**:把一个**已经在
+这棵树里**的 pane 拖起来重新放下,run 的成员一个没变,只是次序变了。因此它是**一条编辑**
+(`Edit::MoveSeat`)而不是「关闭 + 裂出」两条,并且**不跑均分**,而是**结转份额**:
+
+- **不变量 ①(没碰到的兄弟之间比例不变)**:每一个没动的列都保住自己在 run 里的份额;
+  离开释放的空间在**它原来那条 run** 内按份额归一化(相对比例因此逐值不变),落地挤占的
+  空间**只与落点相邻的那一列结算**(按 flex 列数对半),其余列一个数都不改写。
+- **不变量 ②(放回原位 = 完全无操作)**:落点仍在原来那条 run 时,**run 的骨架原样保留**,
+  只把「哪一列坐哪一格」重排,份额原样写回;次序没变就**连编辑都不是**——树逐 bit 相等、
+  `F = ∅`。骨架不重切这一条同时保住了 divider 的身份,以及「谁在替某个触底 pane 垫最小值」
+  这件事不会因为树换个方向倾斜就悄悄换人。
+- 跨 run(含从纵向堆叠里拖出来)才谈得上「加入」:此时向落点那一列买份额,卖方没有份额可卖
+  (rim 没有邻居、固定列只占像素)时才由整条 run 按 flex 列数出钱。
+
+**均分只数「拿份额的列」(`flex_run_demand`)**:固定列(files)按像素先被扣掉,它**不是**
+被分的那几方之一。把它当一列去数,再由分配器把它的 240px 记到「它恰好挂在树的哪一侧」头上,
+正是 2026-08-25 那份实证的成因:1600px 下 `[files|mid|right]` 本是 240/679/679,把 files
+拖回同一条带子后变成 **240/824/533**。
+
+**§2.3 补齐到任意形状**:分配器过去只在「整棵子树都是固定的」时才按像素给,固定列一旦**嵌**
+在 flex pane 旁边就重新变回按 ratio 分。现在改为:每个 split 先扣掉两侧的 **`reserved`**
+(其中的固定列、折叠条,以及它们与其余部分之间的 divider),ratio 只分剩下的 flex 空间;
+一侧没有任何拿份额的东西时它就拿 0。于是**同一条 run 无论往哪边倾斜都解出同一组宽度**,
+「树的形状」彻底不再是用户能看见的东西。钉死名
+`a_fixed_column_takes_pixels_wherever_it_sits_in_the_tree`。
+
 **钉死名(实现必须存在的 pin)**:
 
 - `opening_a_seat_rebalances_only_its_own_run`
 - `closing_a_seat_rebalances_only_the_run_it_left`
+- `a_re_placed_pane_leaves_its_untouched_siblings_in_proportion`(不变量 ①)
+- `a_pane_let_go_where_it_was_moves_nothing_at_all`(不变量 ②)
+- `a_pane_arriving_from_another_run_is_paid_for_by_the_pane_it_landed_beside`
+- `a_fixed_column_takes_pixels_wherever_it_sits_in_the_tree`
 - `a_center_swap_moves_no_rectangle`
 - `a_dpi_change_rewrites_no_ratio`
 - `opening_the_preview_seat_narrows_the_root_run_and_nothing_else`
@@ -481,7 +512,9 @@ pub enum Presentation { Full, Collapsed }   // §2.6.3;让步等级本身不外�
 - `entering_and_leaving_focus_mode_rewrites_no_ratio`
 
 **红门**:把 `balanceRunAt` 的作用域从 run 放宽到整棵树 → 前两条立刻转红;在 `ScaleFactorChanged`
-路径上加一次 ratio 归一化 → 第四条立刻转红。
+路径上加一次 ratio 归一化 → `a_dpi_change_rewrites_no_ratio` 立刻转红;把拖动重放改回
+「`CloseSeat` + `SplitSeat`」两条链,或让 `flex_run_demand` 把固定列也数成一列 → 那两条
+不变量当场按实证里的原始数字转红。
 
 ### 3.4 divider 拖拽是编辑,不是求解
 
@@ -489,6 +522,10 @@ pub enum Presentation { Full, Collapsed }   // §2.6.3;让步等级本身不外�
 
 - **红线 L9:拖拽期间不得触发任何 rebalance**。手拖比例的全部意思就是「我要这个比例」,而
   rebalance 的意思是「这一串成员变了」——成员没变。
+- **手要落在哪里,ratio 就得是那个位置的逆**:分配器把 `reserved` 先扣掉再按 ratio 分,所以
+  「指针在槽内 `leading` 处」问的是 `(leading - reserved(a)) / (usable - reserved(a) - reserved(b))`,
+  由 `bt_layout::reserved_extent` 供数(`seats::requested_ratio` 收它作参数,不自己从矩形反推——
+  自己反推就是 D4 明令禁止的第二套几何,症状是 divider 在手底下偏出一整条固定列的宽度)。
 - 固定列**按像素拖**,不按 ratio;夹取为 **`[0, usable]`**(2026-08-08 修订,原为
   `[FILES_W_MIN, usable - demand(other, Row)]`,见 §2.4)。槽位是算术,`FILES_W_MIN` 是偏好。
 - **拖拽是 `Sovereign` 的定义性场景**,所以这里没有政策位可传:程序侧没有「拖 divider」这件事。

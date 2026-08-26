@@ -184,10 +184,16 @@ impl Ratio {
     }
 
     /// The ratio that gives `a` out of `a + b` of the space, clamped into the
-    /// domain. Used only by rebalance, which divides a run by integer demands.
-    pub(crate) fn from_parts(a: u64, b: u64) -> Self {
+    /// domain.
+    ///
+    /// The two weights are integers — column counts when a run is rebalanced,
+    /// shares out of `SHARE_DENOM` when a move settles one — and the callers
+    /// are required to hand a pair that is not `0:0`, which is not a division
+    /// anybody can name a ratio for.
+    pub(crate) fn from_parts(a: u128, b: u128) -> Self {
         let total = a + b;
-        let ppm = (u128::from(a) * u128::from(RATIO_DENOM_PPM) / u128::from(total)) as u32;
+        debug_assert!(total > 0, "a ratio has no meaning between two nothings");
+        let ppm = (a * u128::from(RATIO_DENOM_PPM) / total) as u32;
         Self::clamped_from_ppm(ppm)
     }
 }

@@ -61212,7 +61212,11 @@ impl Runtime<'_> {
         // so neither holds an opinion this module could get out of step with.
         let moved = match drag.grip {
             DividerGrip::Ratio(_) => {
-                let Some((requested, usable)) = seats::requested_ratio(slot, scale_ppm, along)
+                let Some(reserved) = self.seats.split_reserved(&metrics, drag.split) else {
+                    return Ok(true);
+                };
+                let Some((requested, usable)) =
+                    seats::requested_ratio(slot, reserved, scale_ppm, along)
                 else {
                     return Ok(true);
                 };

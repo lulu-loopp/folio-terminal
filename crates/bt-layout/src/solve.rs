@@ -250,6 +250,42 @@ impl AxisPlan {
         }
     }
 
+    /// The pixels inside a subtree that no ratio may divide: its fixed columns,
+    /// its collapsed bars, and the dividers standing between them and the rest
+    /// of it, along the plan's axis.
+    ///
+    /// §2.3 said "a fixed column takes pixels and the ratios divide what is
+    /// left" and [`Self::fixed_extent`] only ever answered for a subtree that
+    /// was fixed *entirely* — so the rule held for a files column hanging
+    /// directly off a split and quietly lapsed the moment one was nested beside
+    /// a flex pane. The same three columns then came out at two different sets
+    /// of widths depending on which way the tree happened to lean, which is how
+    /// a pane that was merely re-placed made an untouched sibling change size.
+    ///
+    /// The dividers are in here for the same reason the fixed columns are: a
+    /// divider is a pixel nobody has a share of, and leaving it inside the
+    /// divided extent made a column's width depend on how many dividers
+    /// happened to sit on its side of the tree rather than on its share.
+    fn reserved(&self, node: &LayoutNode, metrics: &SeatMetrics) -> LogicalPx {
+        match node {
+            LayoutNode::Split { dir, a, b, .. } if *dir == self.axis => {
+                self.reserved(a, metrics) + self.reserved(b, metrics) + DIVIDER
+            }
+            // A leaf, or a cross-direction subtree — one column of this run,
+            // and reserved only if the whole of it is a band of pixels.
+            _ => self.fixed_extent(node, metrics).unwrap_or(LogicalPx::ZERO),
+        }
+    }
+
+    /// Whether this subtree holds anything that takes a share at all.
+    ///
+    /// The exact complement of [`Self::fixed_extent`]: a subtree with no flex
+    /// seat in it folds to a fixed extent at every level, and one with a flex
+    /// seat cannot.
+    fn has_flex(&self, node: &LayoutNode, metrics: &SeatMetrics) -> bool {
+        self.fixed_extent(node, metrics).is_none()
+    }
+
     /// Whether every seat in this subtree is collapsed along the plan's axis.
     ///
     /// Such a subtree is a bar, and a bar stays exactly [`COLLAPSED_EXTENT`]: it
@@ -525,11 +561,10 @@ fn allocate(
         } => {
             let plan = if *dir == Axis::Row { row } else { col };
             let avail = rect.extent(*dir) - DIVIDER;
-            let fa = plan.fixed_extent(a, metrics);
-            let fb = plan.fixed_extent(b, metrics);
-            let raw = match (fa, fb) {
-                (Some(fa), None) => fa,
-                (None, Some(fb)) => avail - fb,
+            // §2.3, stated once and for every shape: the pixels nobody has a
+            // share of come off the top, and the ratio divides what is left.
+            let (res_a, res_b) = (plan.reserved(a, metrics), plan.reserved(b, metrics));
+            let raw = match (plan.has_flex(a, metrics), plan.has_flex(b, metrics)) {
                 // Both sides fixed: someone has to eat the surplus, or it is a
                 // patch of white that can never be filled and never be clicked
                 // (§2.3, "the trailing side absorbs — kill the dead white").
@@ -537,14 +572,18 @@ fn allocate(
                 // but collapsed bars, which must stay exactly 24; then the
                 // leading side eats it. Both sides cannot be all-collapsed,
                 // because the focus seat is never collapsed (W2).
-                (Some(fa), Some(fb)) => {
+                (false, false) => {
                     if plan.is_all_collapsed(b) {
-                        avail - fb
+                        avail - res_b
                     } else {
-                        fa
+                        res_a
                     }
                 }
-                (None, None) => ratio.apply(avail),
+                // One side holds every share there is, so it takes the whole of
+                // what is left over from the other side's band.
+                (false, true) => res_a,
+                (true, false) => avail - res_b,
+                (true, true) => res_a + ratio.apply(avail - res_a - res_b),
             };
             // The flex squeeze of L2: shares give way proportionally, and the
             // floor is what each *subtree* demands rather than what one seat
@@ -582,6 +621,24 @@ fn allocate(
             allocate(b, rect_b, row, col, metrics, out);
         }
     }
+}
+
+/// The pixels of a subtree that no ratio divides, with nothing conceded: its
+/// fixed columns and the dividers between them and the rest of it, along `axis`.
+///
+/// Published because a divider drag has to *invert* what [`allocate`] does with
+/// a ratio, and the two must not be two opinions: a cut `leading` px into a slot
+/// is asking for `(leading - reserved(a)) / (usable - reserved(a) - reserved(b))`
+/// and for nothing else. Working the inverse out at the call site from
+/// rectangles is exactly the second, drifting geometry D4 forbids.
+///
+/// "With nothing conceded" is the honest scope. The concession chain can shrink
+/// a fixed column or collapse a seat, and this does not model that — the drag
+/// asks where the hand is, and `allocate`'s own `lo`/`hi` clamp is what holds
+/// the answer inside the slot when a floor is in force.
+#[must_use]
+pub fn reserved_extent(node: &LayoutNode, axis: Axis, metrics: &SeatMetrics) -> LogicalPx {
+    AxisPlan::intact(axis).reserved(node, metrics)
 }
 
 /// Snap a rectangle's four boundaries onto the device grid.

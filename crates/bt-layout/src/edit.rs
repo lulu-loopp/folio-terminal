@@ -7,8 +7,8 @@
 
 use crate::LogicalPx;
 use crate::demand::{
-    Path, Side, balanced_ratio, fixed_width, node_at, node_at_mut, path_to_seat, run_root_path,
-    run_split_ids,
+    Path, Side, balanced_ratio, column_key, column_shares, fixed_width, flex_run_demand, node_at,
+    node_at_mut, path_to_seat, run_columns, run_root_path, run_split_ids, share_of, weight_of,
 };
 use crate::geom::Axis;
 use crate::metrics::SeatMetrics;
@@ -57,6 +57,41 @@ impl FocusSet {
     }
 }
 
+/// Where a pane already in the tree lets go (§3.3, the move row).
+///
+/// The two shapes a drag can aim at along one axis: beside one pane, or beside
+/// the whole tree. A centre is not among them — taking another pane's place is
+/// [`Edit::CenterSwap`], which moves no boxes and settles no shares.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Landing {
+    /// On the named side of one pane.
+    Edge {
+        target: SeatId,
+        dir: Axis,
+        leading: bool,
+    },
+    /// On the named side of the whole tree.
+    Rim { dir: Axis, leading: bool },
+}
+
+impl Landing {
+    /// The axis the new split runs along.
+    #[must_use]
+    pub fn dir(self) -> Axis {
+        match self {
+            Landing::Edge { dir, .. } | Landing::Rim { dir, .. } => dir,
+        }
+    }
+
+    /// Whether the arriving pane goes on the leading side of the new split.
+    #[must_use]
+    pub fn leading(self) -> bool {
+        match self {
+            Landing::Edge { leading, .. } | Landing::Rim { leading, .. } => leading,
+        }
+    }
+}
+
 /// A structural edit.
 ///
 /// Every variant here is a row of the §3.3 table, including the rows whose focus
@@ -81,6 +116,37 @@ pub enum Edit {
         dir: Axis,
         leading: bool,
         arriving: LayoutNode,
+        split_id: SplitId,
+    },
+    /// **Move a pane that is already in this tree to another place in it**, at
+    /// the shares it and everybody else already had (用户裁决 2026-08-25).
+    /// `F` = the run it leaves and the run it lands in.
+    ///
+    /// Emphatically **not** [`Edit::CloseSeat`] followed by [`Edit::SplitSeat`],
+    /// which is what a drag used to be. Those two are the right edits for a pane
+    /// that is *going away* and a pane that is *arriving*, and each of them
+    /// re-divides its run by column count — the rule that says "these members
+    /// changed". A re-place changes no members: the same panes are in the same
+    /// run afterwards, in a different order. Spelling it as a leave and a join
+    /// therefore ran the members-changed rule twice over a set that never
+    /// changed, and the bill landed on panes nobody had touched — a hand-set
+    /// 65:35 between two siblings came back 50:50, and a files column moved
+    /// along its own row left the middle pane 145px wider than it found it.
+    ///
+    /// So the shares are carried instead of re-decided:
+    ///
+    /// * every column that did not move keeps its share of its run, which is
+    ///   theorem N's promise stated in widths rather than in ratios;
+    /// * the traveller keeps its **own** share when it comes back to the run it
+    ///   left — a pane put back where it was is then a no-op to the pixel,
+    ///   whichever of the shapes that place can be written as it lands in;
+    /// * a traveller arriving in a *different* run has no share there yet and
+    ///   buys one off whoever the landing rule says pays — the pane it landed
+    ///   beside, by column count, or the whole run when it landed on a rim or
+    ///   beside a fixed band that has no share to sell.
+    MoveSeat {
+        seat: SeatId,
+        landing: Landing,
         split_id: SplitId,
     },
     /// Close a seat; its sibling is promoted. `F` = the run the promoted subtree
@@ -236,7 +302,7 @@ fn apply_inner(
                 arriving.clone(),
                 *split_id,
             );
-            Ok(balance_run_containing(next, &path, *dir))
+            Ok(balance_run_containing(next, metrics, &path, *dir))
         }
 
         Edit::RootRimDrop {
@@ -247,7 +313,7 @@ fn apply_inner(
         } => {
             let mut next = tree.clone();
             insert_split_at(&mut next, &[], *dir, *leading, arriving.clone(), *split_id);
-            Ok(balance_run_containing(next, &[], *dir))
+            Ok(balance_run_containing(next, metrics, &[], *dir))
         }
 
         Edit::ReplaceSeat { target, arriving } => {
@@ -263,7 +329,13 @@ fn apply_inner(
             })
         }
 
-        Edit::CloseSeat { target } => close_seat(tree, *target),
+        Edit::MoveSeat {
+            seat,
+            landing,
+            split_id,
+        } => move_seat(tree, metrics, *seat, *landing, *split_id),
+
+        Edit::CloseSeat { target } => close_seat(tree, metrics, *target),
 
         Edit::LandPreview { seat, split_id } => land_preview(tree, metrics, seat, *split_id),
 
@@ -302,11 +374,16 @@ fn insert_split_at(
 }
 
 /// Re-divide the run that the node at `path` now belongs to.
-fn balance_run_containing(mut tree: LayoutNode, path: &[Side], dir: Axis) -> EditOutcome {
+fn balance_run_containing(
+    mut tree: LayoutNode,
+    metrics: &SeatMetrics,
+    path: &[Side],
+    dir: Axis,
+) -> EditOutcome {
     let run_root = run_root_path(&tree, path, dir);
     let focus_set = FocusSet::of(run_split_ids(&tree, &run_root, dir));
     if let Some(node) = node_at_mut(&mut tree, &run_root) {
-        rebalance_run(node, dir);
+        rebalance_run(node, metrics, dir);
     }
     EditOutcome { tree, focus_set }
 }
@@ -325,7 +402,7 @@ fn balance_run_containing(mut tree: LayoutNode, path: &[Side], dir: Axis) -> Edi
 ///
 /// Recursion stops at the first cross-direction split — that subtree is one
 /// column of this run, and its interior belongs to a different run.
-fn rebalance_run(node: &mut LayoutNode, dir: Axis) {
+fn rebalance_run(node: &mut LayoutNode, metrics: &SeatMetrics, dir: Axis) {
     if let LayoutNode::Split {
         dir: node_dir,
         ratio,
@@ -335,9 +412,40 @@ fn rebalance_run(node: &mut LayoutNode, dir: Axis) {
     } = node
         && *node_dir == dir
     {
-        *ratio = balanced_ratio(a, b, dir);
-        rebalance_run(a, dir);
-        rebalance_run(b, dir);
+        *ratio = balanced_ratio(a, b, dir, metrics);
+        rebalance_run(a, metrics, dir);
+        rebalance_run(b, metrics, dir);
+    }
+}
+
+/// Write a run's ratios from a table of shares its columns are owed.
+///
+/// The counterpart of [`rebalance_run`] and the whole of what a move does with
+/// arithmetic: equal columns is what "these members changed" means, and *these
+/// shares* is what "the same members, re-arranged" means. Only the splits of
+/// this run are written, so `F` says exactly what it did.
+///
+/// A side owed nothing takes no share, and the ratio there is not a number the
+/// allocator will read — [`balanced_ratio`] leaves a structurally sane one on
+/// the books rather than the degenerate `0:n` this would otherwise compute.
+fn settle_run(node: &mut LayoutNode, metrics: &SeatMetrics, dir: Axis, shares: &[(SeatId, u128)]) {
+    if let LayoutNode::Split {
+        dir: node_dir,
+        ratio,
+        a,
+        b,
+        ..
+    } = node
+        && *node_dir == dir
+    {
+        let (wa, wb) = (weight_of(a, dir, shares), weight_of(b, dir, shares));
+        *ratio = if wa == 0 || wb == 0 {
+            balanced_ratio(a, b, dir, metrics)
+        } else {
+            Ratio::from_parts(wa, wb)
+        };
+        settle_run(a, metrics, dir, shares);
+        settle_run(b, metrics, dir, shares);
     }
 }
 
@@ -363,7 +471,324 @@ fn center_swap(tree: &LayoutNode, a: SeatId, b: SeatId) -> Result<EditOutcome, E
     })
 }
 
-fn close_seat(tree: &LayoutNode, target: SeatId) -> Result<EditOutcome, EditError> {
+/// A pane already in this tree, moving house (用户裁决 2026-08-25).
+///
+/// Two shapes, and which one it is turns on a single question: **is the pane
+/// coming back to the run it is already in?**
+///
+/// * **Yes** — then nothing joins the run and nothing leaves it. The run's
+///   columns are re-ordered in place: the skeleton keeps its splits, its ids
+///   and its nesting, and only which column sits in which slot changes. The
+///   shares are then written back exactly as they were, so every pane in the run
+///   comes out at the width it went in at, the traveller included. Letting one
+///   go in the gap it came out of is not even an edit — the same order is the
+///   same layout, and it is answered with the tree untouched and `F` = `∅`.
+/// * **No** — the pane is plucked out of one run and cut into another, and each
+///   run settles on the shares it can account for: the one it left divides what
+///   it had between the columns still in it, and the one it joins hands the
+///   newcomer a share off whoever the landing rule says pays.
+///
+/// Neither shape is a *rebalance*, and that is the whole of the ruling. A run
+/// re-divides itself by column count when its members change (§3.3); a move
+/// changes no members, and spelling it as a close plus a split ran the
+/// members-changed rule twice over a set that never changed. What that cost was
+/// paid by panes nobody had touched: a hand-set 65:35 between two siblings came
+/// back 50:50, and a files column re-placed along its own row left the middle
+/// pane 145px wider than it found it.
+fn move_seat(
+    tree: &LayoutNode,
+    metrics: &SeatMetrics,
+    seat: SeatId,
+    landing: Landing,
+    split_id: SplitId,
+) -> Result<EditOutcome, EditError> {
+    let dir = landing.dir();
+    let path = path_to_seat(tree, seat).ok_or(EditError::UnknownSeat(seat))?;
+    let Some((&last, parent_path)) = path.split_last().map(|(l, p)| (l, p.to_vec())) else {
+        // The only pane in the tree has no other place in it to be. Refused for
+        // the reason G84 refuses the last close: there is no tree on the far
+        // side of the edit.
+        return Err(EditError::Refused);
+    };
+    let Some(LayoutNode::Split {
+        dir: src_dir, a, b, ..
+    }) = node_at(tree, &parent_path)
+    else {
+        return Err(EditError::UnknownSeat(seat));
+    };
+    let src_dir = *src_dir;
+    let sibling = match last {
+        Side::A => (**b).clone(),
+        Side::B => (**a).clone(),
+    };
+    // The run it is in now, and the shares that run's columns hold today.
+    let src_run_path = run_root_path(tree, &path, src_dir);
+    let src_run = node_at(tree, &src_run_path).ok_or(EditError::UnknownSeat(seat))?;
+    let src_shares = column_shares(src_run, src_dir, metrics);
+
+    if dir == src_dir && stays_in_run(tree, &src_run_path, dir, seat, landing) {
+        return reorder_run(
+            tree,
+            metrics,
+            seat,
+            landing,
+            &src_run_path,
+            dir,
+            &src_shares,
+        );
+    }
+
+    // Cloned before the pluck: everything durable about the pane — its kind, its
+    // fixed extent, its pin — lives on the `Seat` (§5).
+    let travelling = LayoutNode::seat(
+        tree.find_seat(seat)
+            .ok_or(EditError::UnknownSeat(seat))?
+            .clone(),
+    );
+
+    // ① The pluck, and the run it leaves settled onto what its remaining columns
+    //   already held. Promoting the sibling on its own is not enough: the space
+    //   the traveller frees would go to whatever subtree happened to be beside
+    //   it, so a run written `((a b) c)` would give `b` the whole of `a`'s width
+    //   while `c`, which nobody touched, kept its own.
+    let mut next = tree.clone();
+    // The path came from this very tree, so the slot is there.
+    if let Some(slot) = node_at_mut(&mut next, &parent_path) {
+        *slot = sibling;
+    }
+    // Every path at or above the run's root is untouched by a pluck below it, so
+    // the run is still rooted where it was.
+    let survivors: Vec<(SeatId, u128)> = src_shares
+        .iter()
+        .copied()
+        .filter(|(id, _)| *id != seat)
+        .collect();
+    if let Some(node) = node_at_mut(&mut next, &src_run_path) {
+        settle_run(node, metrics, src_dir, &survivors);
+    }
+    let mut splits = run_split_ids(&next, &src_run_path, src_dir);
+
+    // ② Where it lands, cut exactly where `SplitSeat` and `RootRimDrop` cut
+    //   theirs, and what that run is worth without it.
+    let anchor_path = match landing {
+        Landing::Edge { target, .. } => {
+            path_to_seat(&next, target).ok_or(EditError::UnknownSeat(target))?
+        }
+        Landing::Rim { .. } => Path::new(),
+    };
+    let dst_run_path = run_root_path(&next, &anchor_path, dir);
+    let dst_run = node_at(&next, &dst_run_path).ok_or(EditError::Refused)?;
+    let dst_shares = column_shares(dst_run, dir, metrics);
+    let arriving = arriving_share(&travelling, landing, dir, metrics, dst_run, &dst_shares);
+
+    let mut settled: Vec<(SeatId, u128)> = dst_shares
+        .iter()
+        .map(|&(id, share)| match arriving.paid_by {
+            // The buyer's share comes out of the seller's and out of nobody
+            // else's, which is what "settles with the pane it landed beside"
+            // means in numbers.
+            Some(payer) if payer == id => (id, share - arriving.share),
+            _ => (id, share),
+        })
+        .collect();
+    settled.push((column_key(&travelling), arriving.share));
+
+    insert_split_at(
+        &mut next,
+        &anchor_path,
+        dir,
+        landing.leading(),
+        travelling,
+        split_id,
+    );
+
+    // ③ The settlement. The run's root is read back off the tree it is now in:
+    //   an insert at the run's own root — every rim drop, and an edge drop on a
+    //   lone column — pushes it down a level, and a path taken before the cut
+    //   would name the wrong node.
+    let arrived_path = path_to_seat(&next, seat).ok_or(EditError::UnknownSeat(seat))?;
+    let dst_run_path = run_root_path(&next, &arrived_path, dir);
+    if let Some(node) = node_at_mut(&mut next, &dst_run_path) {
+        settle_run(node, metrics, dir, &settled);
+    }
+    splits.extend(run_split_ids(&next, &dst_run_path, dir));
+    Ok(EditOutcome {
+        tree: next,
+        focus_set: FocusSet::of(splits),
+    })
+}
+
+/// Whether this landing puts the pane back into the run it is already in.
+///
+/// A rim along the run's own axis is that run's own end exactly when the run is
+/// the root one; an edge is, when the pane it names is a column of the same run.
+/// Aiming at the traveller itself is neither: it names a gap that will not exist
+/// once the pane is out of it.
+fn stays_in_run(
+    tree: &LayoutNode,
+    run_path: &[Side],
+    dir: Axis,
+    seat: SeatId,
+    landing: Landing,
+) -> bool {
+    match landing {
+        Landing::Rim { .. } => run_path.is_empty(),
+        Landing::Edge { target, .. } => {
+            target != seat
+                && path_to_seat(tree, target)
+                    .is_some_and(|at| run_root_path(tree, &at, dir) == run_path)
+        }
+    }
+}
+
+/// A move that begins and ends in the same run: the columns re-ordered, the
+/// skeleton and the shares left exactly as they were.
+///
+/// The run's shape carries no geometry of its own — the allocator takes the
+/// fixed bands and the dividers out and then divides by share, so which way a
+/// chain of same-direction splits leans is not something anybody can see. What
+/// *is* visible is which column stands where and how wide each one is, and this
+/// changes the first and preserves the second. Re-cutting the skeleton instead
+/// would renumber the dividers under the user's hand, and would move a floor
+/// that one neighbour was paying for quietly onto another.
+fn reorder_run(
+    tree: &LayoutNode,
+    metrics: &SeatMetrics,
+    seat: SeatId,
+    landing: Landing,
+    run_path: &[Side],
+    dir: Axis,
+    shares: &[(SeatId, u128)],
+) -> Result<EditOutcome, EditError> {
+    let run = node_at(tree, run_path).ok_or(EditError::UnknownSeat(seat))?;
+    let mut order: Vec<LayoutNode> = run_columns(run, dir).into_iter().cloned().collect();
+    let from = order
+        .iter()
+        .position(|column: &LayoutNode| column.contains(seat))
+        .ok_or(EditError::UnknownSeat(seat))?;
+    let travelling = order.remove(from);
+    let to = match landing {
+        Landing::Rim { leading, .. } => {
+            if leading {
+                0
+            } else {
+                order.len()
+            }
+        }
+        Landing::Edge {
+            target, leading, ..
+        } => {
+            let beside = order
+                .iter()
+                .position(|column: &LayoutNode| column.contains(target))
+                .ok_or(EditError::UnknownSeat(target))?;
+            if leading { beside } else { beside + 1 }
+        }
+    };
+    if to == from {
+        // It is already there, and "already there" is the second half of the
+        // ruling entire: a pane let go in the gap it came out of is not an edit
+        // at all, so not one number moves and `F` is empty.
+        return Ok(EditOutcome {
+            tree: tree.clone(),
+            focus_set: FocusSet::empty(),
+        });
+    }
+    order.insert(to, travelling);
+    let mut next = tree.clone();
+    // The path came from this very tree, so the slot is there.
+    if let Some(node) = node_at_mut(&mut next, run_path) {
+        reseat_columns(node, dir, &mut order.into_iter());
+        settle_run(node, metrics, dir, shares);
+    }
+    let focus_set = FocusSet::of(run_split_ids(&next, run_path, dir));
+    Ok(EditOutcome {
+        tree: next,
+        focus_set,
+    })
+}
+
+/// Put a run's columns back into its own skeleton, in the order given.
+///
+/// The skeleton has exactly one slot per column and the caller hands back
+/// exactly the columns it took out of it, so the two run out together.
+fn reseat_columns(node: &mut LayoutNode, dir: Axis, order: &mut impl Iterator<Item = LayoutNode>) {
+    match node {
+        LayoutNode::Split {
+            dir: node_dir,
+            a,
+            b,
+            ..
+        } if *node_dir == dir => {
+            reseat_columns(a, dir, order);
+            reseat_columns(b, dir, order);
+        }
+        slot => {
+            *slot = order
+                .next()
+                .expect("a run has exactly as many columns as its skeleton has slots");
+        }
+    }
+}
+
+/// The share a moving pane is owed in the run it has just landed in, and whose
+/// share it came out of.
+struct ArrivingShare {
+    share: u128,
+    /// The column that gives the share up, or `None` when the whole run does —
+    /// which needs no bookkeeping, because settling normalises what is left.
+    paid_by: Option<SeatId>,
+}
+
+/// What a pane arriving from *another* run is owed where it lands.
+///
+/// It buys a share the way a split has always cut one: by column count, off the
+/// pane it landed beside. Two things can leave that pane with nothing to sell —
+/// a rim has no neighbour at all, and a fixed band holds pixels rather than a
+/// share — and in both the run pays instead, every column giving up the same
+/// proportion of what it holds, which is the bill §3.3 already states for a
+/// column joining a row.
+fn arriving_share(
+    travelling: &LayoutNode,
+    landing: Landing,
+    dir: Axis,
+    metrics: &SeatMetrics,
+    dst_run: &LayoutNode,
+    dst_shares: &[(SeatId, u128)],
+) -> ArrivingShare {
+    let mine = u128::from(flex_run_demand(travelling, dir, metrics));
+    if let Landing::Edge { target, .. } = landing {
+        // A landing names a *seat*, and the run's root was found by walking up
+        // from it through same-direction splits alone, so that seat is one whole
+        // column of this run — worth one column exactly when it holds a share.
+        let theirs = share_of(dst_shares, target);
+        if theirs > 0 {
+            return ArrivingShare {
+                share: theirs * mine / (mine + 1),
+                paid_by: Some(target),
+            };
+        }
+    }
+    let held: u128 = dst_shares.iter().map(|(_, share)| *share).sum();
+    let columns = u128::from(flex_run_demand(dst_run, dir, metrics));
+    ArrivingShare {
+        // A fixed band landing among fixed bands asks for nothing and is owed
+        // nothing: there is no flexible extent here for anyone to have a share
+        // of, and the ratio the settlement writes will not be read.
+        share: if mine + columns == 0 {
+            0
+        } else {
+            held * mine / (mine + columns)
+        },
+        paid_by: None,
+    }
+}
+
+fn close_seat(
+    tree: &LayoutNode,
+    metrics: &SeatMetrics,
+    target: SeatId,
+) -> Result<EditOutcome, EditError> {
     let path = path_to_seat(tree, target).ok_or(EditError::UnknownSeat(target))?;
     let Some((&last, parent_path)) = path.split_last().map(|(l, p)| (l, p.to_vec())) else {
         // The last pane closing is the tab closing (§7.1.4); an empty tree is
@@ -382,7 +807,7 @@ fn close_seat(tree: &LayoutNode, target: SeatId) -> Result<EditOutcome, EditErro
     if let Some(slot) = node_at_mut(&mut next, &parent_path) {
         *slot = promoted;
     }
-    Ok(balance_run_containing(next, &parent_path, dir))
+    Ok(balance_run_containing(next, metrics, &parent_path, dir))
 }
 
 /// Land the preview seat at its fixed address (§1.3, three tiers).
@@ -442,7 +867,7 @@ fn land_preview(
         LayoutNode::seat(seat.clone()),
         split_id,
     );
-    Ok(balance_run_containing(next, &tail, Axis::Row))
+    Ok(balance_run_containing(next, metrics, &tail, Axis::Row))
 }
 
 /// Drag one divider (§2.4, §3.4).

@@ -6,12 +6,12 @@
 //! physical enforcement CONVENTIONS §three asks of the gate tests.
 
 use bt_layout::{
-    Axis, AxisSet, COLLAPSED_EXTENT, DIVIDER, Edit, EditError, FILES_W, FILES_W_MIN, LayoutError,
-    LayoutMode, LayoutNode, LogicalPx, LogicalRect, LogicalSize, MIN_PANE_H, MIN_PANE_W,
-    MIN_PREVIEW_W, Presentation, Ratio, Seat, SeatId, SeatKind, SeatLayout, SeatMetrics,
-    SizePolicy, SplitId, WorkAreaHint, apply, collapse_order, demand, floor_demand, in_order_index,
-    members, necessity_holds, path_to_seat, run_demand, run_root_path_of_seat, run_split_ids,
-    share_ppm, solve, tree_distance, window_min_inner_size,
+    Axis, AxisSet, COLLAPSED_EXTENT, DIVIDER, Edit, EditError, FILES_W, FILES_W_MIN, Landing,
+    LayoutError, LayoutMode, LayoutNode, LogicalPx, LogicalRect, LogicalSize, MIN_PANE_H,
+    MIN_PANE_W, MIN_PREVIEW_W, Presentation, Ratio, Seat, SeatId, SeatKind, SeatLayout,
+    SeatMetrics, SizePolicy, SplitId, WorkAreaHint, apply, collapse_order, demand, floor_demand,
+    in_order_index, members, necessity_holds, path_to_seat, run_demand, run_root_path_of_seat,
+    run_split_ids, share_ppm, solve, tree_distance, window_min_inner_size,
 };
 
 // ---------------------------------------------------------------- fixtures --
@@ -1517,4 +1517,242 @@ fn the_run_vocabulary_answers_on_the_tree_alone() {
 
 fn demand_at_min(tree: &LayoutNode, axis: Axis) -> LogicalPx {
     bt_layout::demand_at_min(tree, axis, &m())
+}
+
+// ------------------------------ §3.3 a pane re-placed carries its own share --
+
+/// The three-column layout the 2026-08-25 report was made against: a files
+/// column on the left and two terminals beside it.
+fn files_and_two_terminals() -> LayoutNode {
+    row(1, files(1), row(2, term(2), term(3)))
+}
+
+fn dragged(tree: &LayoutNode, split: u64, ppm: u32, usable: i64) -> LayoutNode {
+    apply(
+        tree,
+        &m(),
+        &Edit::DragDivider {
+            split: SplitId(split),
+            requested: Ratio::from_ppm(ppm).expect("a legal ratio"),
+            usable: LogicalPx::px(usable),
+        },
+    )
+    .expect("the divider is draggable")
+    .tree
+}
+
+fn move_pane(tree: &LayoutNode, seat: u64, landing: Landing) -> LayoutNode {
+    apply(
+        tree,
+        &m(),
+        &Edit::MoveSeat {
+            seat: SeatId(seat),
+            landing,
+            split_id: SplitId(90),
+        },
+    )
+    .expect("a pane of this tree has somewhere to go")
+    .tree
+}
+
+fn row_widths(layout: &SeatLayout) -> Vec<i64> {
+    layout
+        .rects
+        .iter()
+        .map(|p| {
+            p.rect
+                .map(|r| r.extent(Axis::Row).floor_px())
+                .expect("seat should be presented")
+        })
+        .collect()
+}
+
+fn left_rim() -> Landing {
+    Landing::Rim {
+        dir: Axis::Row,
+        leading: true,
+    }
+}
+
+fn before(target: u64) -> Landing {
+    Landing::Edge {
+        target: SeatId(target),
+        dir: Axis::Row,
+        leading: true,
+    }
+}
+
+/// **用户裁决 2026-08-25 ①.** Picking a pane up and putting it down again
+/// re-divides nothing between the panes it did not land beside.
+///
+/// The report, to the pixel: a 1600px window holding `[files | mid | right]`
+/// draws 240/679/679, and dragging the files column back into its own band came
+/// back **240/824/533** — two siblings that were equal, that nobody had aimed
+/// at, left in a proportion nobody chose. The cause was the drag being spelled
+/// as a close plus a split, each of which re-divides its run *by column count*:
+/// the fixed band was counted as one of the columns being divided, while the
+/// allocator was charging its 240px to whichever side of the tree it had come
+/// to hang on.
+///
+/// Red gate: put the `CloseSeat` + `SplitSeat` chain back under a pane that is
+/// already in the tree, or count fixed bands in `flex_run_demand`, and this goes
+/// red on the very numbers the report carried.
+#[test]
+fn a_re_placed_pane_leaves_its_untouched_siblings_in_proportion() {
+    let view = viewport(1600, 900);
+    let tree = files_and_two_terminals();
+    assert_eq!(row_widths(&solved(&tree, view, 2)), vec![240, 679, 679]);
+
+    // Both landings that mean "back into the band it came from": the window's
+    // own rim, and the leading edge of the pane that is now leftmost.
+    for landing in [left_rim(), before(2)] {
+        let after = move_pane(&tree, 1, landing);
+        assert_eq!(
+            row_widths(&solved(&after, view, 2)),
+            vec![240, 679, 679],
+            "{landing:?} redistributed two siblings it never touched"
+        );
+    }
+
+    // And the same with a proportion the user set by hand, which is where the
+    // rebalance used to be most visible: 65:35 came back 50:50.
+    let hand = dragged(&tree, 2, 650_000, 1349);
+    assert_eq!(row_widths(&solved(&hand, view, 2)), vec![240, 882, 475]);
+    for landing in [left_rim(), before(2)] {
+        let after = move_pane(&hand, 1, landing);
+        assert_eq!(
+            row_widths(&solved(&after, view, 2)),
+            vec![240, 882, 475],
+            "{landing:?} re-divided a hand-set proportion between untouched siblings"
+        );
+    }
+
+    // A move that really does change the order still costs the untouched
+    // siblings nothing: the two terminals keep 882:475 with the band standing
+    // between them instead of before them.
+    let between = move_pane(&hand, 1, before(3));
+    assert_eq!(row_widths(&solved(&between, view, 2)), vec![882, 240, 475]);
+}
+
+/// **用户裁决 2026-08-25 ②.** A pane let go in the gap it came out of is
+/// not an edit: the tree comes back value for value and `F` is empty.
+///
+/// It holds for both spellings of that gap — the rim and the near edge of the
+/// pane beside it — because a run's *shape* carries no geometry: the columns are
+/// re-ordered inside the skeleton the run already had, so an order that did not
+/// change leaves the tree bit-identical, split ids and all. That is what makes
+/// the promise hold even where a pane is sitting on its own floor, where which
+/// neighbour pays for that floor is decided by the slot rather than by the
+/// share.
+#[test]
+fn a_pane_let_go_where_it_was_moves_nothing_at_all() {
+    let view = viewport(1600, 900);
+    let hand = dragged(&files_and_two_terminals(), 2, 650_000, 1349);
+    // A run leaning the other way, hand-dragged until its middle terminal is
+    // pinned to its own minimum.
+    let leaning = dragged(&row(1, row(2, term(1), term(2)), term(3)), 2, 700_000, 999);
+    assert_eq!(row_widths(&solved(&leaning, view, 1)), vec![539, 260, 799]);
+
+    for (tree, travelling, neighbour) in [(hand, 1u64, 2u64), (leaning, 1, 2)] {
+        for landing in [left_rim(), before(neighbour)] {
+            let outcome = apply(
+                &tree,
+                &m(),
+                &Edit::MoveSeat {
+                    seat: SeatId(travelling),
+                    landing,
+                    split_id: SplitId(90),
+                },
+            )
+            .expect("a pane of this tree has somewhere to go");
+            assert_eq!(
+                outcome.tree, tree,
+                "{landing:?} rewrote a tree it was asked to leave alone"
+            );
+            assert!(
+                outcome.focus_set.is_empty(),
+                "{landing:?} claimed the right to rewrite a ratio"
+            );
+        }
+    }
+}
+
+/// **§2.3, wherever it sits.** A fixed band spends pixels and the ratios divide
+/// what is left — including when the band is nested beside a flex pane rather
+/// than hanging straight off a split.
+///
+/// The rule used to be written only for a subtree that was fixed *entirely*, so
+/// the same three columns solved to two different sets of widths depending on
+/// which way the tree leaned. Shape is not something the user can see, and it
+/// must not be something the widths can.
+#[test]
+fn a_fixed_column_takes_pixels_wherever_it_sits_in_the_tree() {
+    let view = viewport(1600, 900);
+    // The same three columns, written both ways round.
+    let leaning_right = row(1, files(1), row(2, term(2), term(3)));
+    let leaning_left = row(1, row(2, files(1), term(2)), term(3));
+    assert_eq!(
+        row_widths(&solved(&leaning_right, view, 2)),
+        row_widths(&solved(&leaning_left, view, 2)),
+        "the same run came out at different widths for leaning the other way"
+    );
+
+    // And the ratio a rebalance writes is about the columns that take a share,
+    // so the terminals come out equal however the band is nested.
+    let rebalanced = apply(
+        &leaning_left,
+        &m(),
+        &Edit::SplitSeat {
+            target: SeatId(3),
+            dir: Axis::Row,
+            leading: false,
+            arriving: term(4),
+            split_id: SplitId(3),
+        },
+    )
+    .expect("a split at the end of the run")
+    .tree;
+    let widths = row_widths(&solved(&rebalanced, view, 2));
+    assert_eq!(widths[0], FILES_W.floor_px());
+    assert_eq!(
+        widths[1..],
+        [widths[1], widths[1], widths[1]],
+        "a rebalanced run must divide equally among the columns that take a share"
+    );
+}
+
+/// A pane arriving in a run it was *not* in buys its share off the pane it
+/// landed beside, and off nobody else — the landing rule §3.3 already had,
+/// applied to one column instead of re-divided across the whole run.
+#[test]
+fn a_pane_arriving_from_another_run_is_paid_for_by_the_pane_it_landed_beside() {
+    let view = viewport(1600, 900);
+    // Three columns with a stack in the last of them, the first hand-widened.
+    let tree = dragged(
+        &row(1, term(1), row(2, term(2), col(3, term(3), term(4)))),
+        1,
+        600_000,
+        1599,
+    );
+    let was = row_widths(&solved(&tree, view, 1));
+    assert_eq!(was, vec![958, 319, 319, 319]);
+
+    // Seat 4 comes up out of its stack and lands on seat 1's leading edge.
+    let after = move_pane(&tree, 4, before(1));
+    // In-order afterwards: the traveller, the pane it landed beside, then the
+    // two it did not.
+    let widths = row_widths(&solved(&after, view, 1));
+    assert_eq!(
+        widths[2], was[1],
+        "a column nobody landed beside paid for the landing"
+    );
+    assert_eq!(
+        widths[0], widths[1],
+        "the buyer and the seller divide what the seller held, by column count"
+    );
+    assert_eq!(
+        widths[3], was[2],
+        "the column the traveller stood in keeps the width it had — it was a \
+         stack, so the two of them shared it rather than divided it"
+    );
 }

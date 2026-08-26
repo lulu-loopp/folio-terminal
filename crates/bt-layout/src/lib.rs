@@ -60,15 +60,18 @@ mod tree;
 mod window;
 
 pub use demand::{
-    Path, Side, collapse_order, demand, demand_at_min, fixed_width, floor_demand, in_order_index,
-    members, node_at, path_to_seat, run_demand, run_root_path, run_root_path_of_seat,
-    run_split_ids, share_ppm, tree_distance,
+    Path, Side, collapse_order, demand, demand_at_min, fixed_width, flex_run_demand, floor_demand,
+    in_order_index, members, node_at, path_to_seat, run_demand, run_root_path,
+    run_root_path_of_seat, run_split_ids, share_ppm, tree_distance,
 };
-pub use edit::{Edit, EditError, EditOutcome, FocusSet, apply, necessity_holds, path_to_split};
+pub use edit::{
+    Edit, EditError, EditOutcome, FocusSet, Landing, apply, necessity_holds, path_to_split,
+};
 pub use geom::{Axis, AxisSet, DeviceRect, LogicalPx, LogicalRect, LogicalSize, SUBPIXELS_PER_PX};
 pub use metrics::{KindMetrics, SeatMetrics};
 pub use solve::{
-    LayoutError, LayoutMode, Presentation, SeatLayout, SeatPlacement, SizePolicy, solve,
+    LayoutError, LayoutMode, Presentation, SeatLayout, SeatPlacement, SizePolicy, reserved_extent,
+    solve,
 };
 pub use tree::{ExtentClass, LayoutNode, Ratio, Seat, SeatId, SeatKind, SplitId};
 pub use window::{WorkAreaHint, window_min_inner_size};
