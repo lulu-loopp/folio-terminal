@@ -185,6 +185,24 @@ pub struct FloatGeometry {
     pub grip: Option<[f32; 4]>,
 }
 
+impl FloatGeometry {
+    /// **Whether this window has a foot at all** (user ruling 2026-08-25).
+    ///
+    /// Asked of the rectangle rather than of the tenant, exactly as a docked
+    /// pane's retired strip is: the collapse is the geometry's answer, and a
+    /// painter that re-derived "does this window wear a rail" would be a second
+    /// opinion about a thing the box in front of it already states.
+    ///
+    /// It is not the same question as "is the pointer on the foot" — a strip
+    /// with no height is unhittable by construction — and it exists because a
+    /// *painter* is not asked about a point: it would otherwise strike a folder
+    /// glyph centred on a box with no middle.
+    #[must_use]
+    pub fn wears_a_foot(&self) -> bool {
+        self.foot[3] > self.foot[1]
+    }
+}
+
 /// Snap a box to whole device pixels, so a hairline is one row of pixels rather
 /// than two half-lit ones.
 fn snap(rect: [f32; 4]) -> [f32; 4] {
@@ -267,6 +285,33 @@ pub fn float_geometry(
         snap([inner[0], top, inner[2], (top + bar).min(inner[3]).max(top)])
     });
     let under_head = rail.map_or(head_edge[3], |rail| rail[3]);
+    // **The foot is retired where the rail took the question over** (user ruling
+    // 2026-08-25), which is `preview_pane_geometry`'s own sentence arriving on
+    // the second host — 「去掉整条脚」.
+    //
+    // The slice before this one retired the foot's *left hand* and kept the
+    // strip, on two reasons: the strip was still a **button** (press it and
+    // Explorer opens on this file) and it was this window's only channel for a
+    // flashed confirmation. The ruling spends both. The first is answered a band
+    // higher — `Reveal in Explorer` is a row of the breadcrumb's own `Document`
+    // menu, which is a *named* door instead of a whole strip that turns out to
+    // be pressable. The second is answered by a corner tag over the body
+    // (`seats::page_hover_tag_box`, the shape a page's own status already
+    // takes), which costs the window no rows at all. What was left once both
+    // had gone was the thing the report photographed: an empty band with one
+    // folder glyph in the corner of it.
+    //
+    // Collapsed to the window's floor rather than removed from the type, for the
+    // docked pane's reason exactly: every reader of a foot asks `contains` of it,
+    // and a rectangle with no height contains nothing.
+    //
+    // **A window with no rail keeps its foot**, and that is the ruling's own
+    // reasoning rather than a hedge — the path is 「已在面包屑轨」 only where
+    // there is a breadcrumb. A torn-off file tree has no rail and no second
+    // place its root is written; a commit graph is a document with no file
+    // behind it and grows no crumbs. Retiring the strip out from under those two
+    // would delete the answer instead of moving it.
+    //
     // The head and the foot both keep their whole height even when the window
     // has been squeezed to the honest floor; what gives way is the body, which
     // is allowed to reach zero. A strip-height window is therefore all header,
@@ -275,14 +320,23 @@ pub fn float_geometry(
     // "where is this and how do I get there", and a row that shrank while the
     // document beside it kept its height would be the one thing in the window a
     // reader cannot aim at.
-    let foot_top = (inner[3] - foot_height).max(under_head);
-    let foot = snap([inner[0], foot_top, inner[2], inner[3]]);
-    let foot_edge = snap([
-        foot[0],
-        (foot[1] - border).max(under_head),
-        foot[2],
-        foot[1],
-    ]);
+    let retired = rail.is_some();
+    let foot_top = if retired {
+        inner[3]
+    } else {
+        (inner[3] - foot_height).max(under_head)
+    };
+    let foot = snap([inner[0], foot_top, inner[2], inner[3].max(foot_top)]);
+    let foot_edge = if retired {
+        foot
+    } else {
+        snap([
+            foot[0],
+            (foot[1] - border).max(under_head),
+            foot[2],
+            foot[1],
+        ])
+    };
     let body = snap([inner[0], under_head, inner[2], foot_edge[1].max(under_head)]);
 
     let mark = px(FLOAT_HEAD_MARK_LOGICAL_PX);
@@ -380,19 +434,29 @@ pub fn float_geometry(
 
     let foot_pad_left = px(FLOAT_FOOT_PADDING_LEFT_LOGICAL_PX);
     let foot_pad_right = px(FLOAT_FOOT_PADDING_RIGHT_LOGICAL_PX);
-    let [foot_mark_top, foot_mark_bottom] = centred(mark, foot);
-    let foot_mark = snap([
-        foot[0] + foot_pad_left,
-        foot_mark_top,
-        foot[0] + foot_pad_left + mark,
-        foot_mark_bottom,
-    ]);
-    let foot_path = snap([
-        foot_mark[2] + gap,
-        foot[1],
-        (foot[2] - foot_pad_right).max(foot_mark[2] + gap),
-        foot[3],
-    ]);
+    // Both collapse with the strip they stand in, and they have to be said
+    // rather than inherited: `centred` puts a mark in the *middle* of the box it
+    // is given, so a glyph centred on a strip with no height straddles the
+    // window's floor — half a folder hanging out of the bottom border, which is
+    // exactly the thing the ruling was photographed complaining about.
+    let (foot_mark, foot_path) = if retired {
+        (foot, foot)
+    } else {
+        let [foot_mark_top, foot_mark_bottom] = centred(mark, foot);
+        let foot_mark = snap([
+            foot[0] + foot_pad_left,
+            foot_mark_top,
+            foot[0] + foot_pad_left + mark,
+            foot_mark_bottom,
+        ]);
+        let foot_path = snap([
+            foot_mark[2] + gap,
+            foot[1],
+            (foot[2] - foot_pad_right).max(foot_mark[2] + gap),
+            foot[3],
+        ]);
+        (foot_mark, foot_path)
+    };
 
     let grip_box = px(FLOAT_WINDOW_GRIP_LOGICAL_PX);
     let grip = (mode == FloatMode::Pinned)
@@ -1844,7 +1908,15 @@ pub fn build(
     // pane head's edge is the same weight of separation over the same kind of
     // surface, and reusing it keeps one answer to "how loud is a rule inside a
     // panel" rather than minting a second.
-    for edge in [geometry.head_edge, geometry.foot_edge] {
+    // The foot's own goes with the foot: a rule under nothing is a rule that
+    // reads as the window's bottom border drawn twice.
+    for edge in [
+        Some(geometry.head_edge),
+        geometry.wears_a_foot().then_some(geometry.foot_edge),
+    ]
+    .into_iter()
+    .flatten()
+    {
         quads.push(OverlayQuad {
             rect: edge,
             color: palette.pane_head_edge,
@@ -2038,61 +2110,67 @@ pub fn build(
     labels.extend(body.labels);
     sprites.extend(body.sprites);
 
-    // `.fly-foot.done { color: var(--accent) }` — the confirmation takes both the
-    // mark and the words, because a tick beside an unchanged path would read as a
-    // property of the folder rather than as an answer to the click.
-    let foot_ink = if revealed {
-        palette.accent
-    } else if hover == Some(FloatPart::Foot) {
-        palette.dialog_secondary_text
-    } else {
-        palette.dialog_muted_text
-    };
-    sprites.push(ChromeSprite::new(
-        if revealed {
-            ChromeMark::Check
+    // **Nothing at all where the strip has retired** (user ruling 2026-08-25).
+    // Asked once, over the whole of the foot's drawing, rather than clause by
+    // clause: a glyph struck into a box with no height is not invisible, it is
+    // a glyph centred on the window's floor with half of it below the border.
+    if geometry.wears_a_foot() {
+        // `.fly-foot.done { color: var(--accent) }` — the confirmation takes both
+        // the mark and the words, because a tick beside an unchanged path would
+        // read as a property of the folder rather than as an answer to the click.
+        let foot_ink = if revealed {
+            palette.accent
+        } else if hover == Some(FloatPart::Foot) {
+            palette.dialog_secondary_text
         } else {
-            ChromeMark::FolderOpen
-        },
-        geometry.foot_mark,
-        foot_ink,
-    ));
-    // The right hand and what it costs the path — the docked foot's rule, in
-    // the float's own numbers (user ruling, 2026-08-15).
-    let (path_box, notice_box) = crate::seats::foot_notice_split(
-        geometry.foot_path,
-        notice_width,
-        px(crate::seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX),
-    );
-    labels.push(ChromeLabel {
-        mono: false,
-        text: path.to_owned(),
-        rect: path_box,
-        font_size_px: px(FLOAT_FOOT_FONT_LOGICAL_PX),
-        color: foot_ink,
-        align_right: false,
-        align_center: false,
-        letter_spacing_em: 0.0,
-        weight: ChromeLabelWeight::Regular,
-        tabular_numerals: false,
-        clip: Some(path_box),
-    });
-    if !notice.is_empty() {
+            palette.dialog_muted_text
+        };
+        sprites.push(ChromeSprite::new(
+            if revealed {
+                ChromeMark::Check
+            } else {
+                ChromeMark::FolderOpen
+            },
+            geometry.foot_mark,
+            foot_ink,
+        ));
+        // The right hand and what it costs the path — the docked foot's rule, in
+        // the float's own numbers (user ruling, 2026-08-15).
+        let (path_box, notice_box) = crate::seats::foot_notice_split(
+            geometry.foot_path,
+            notice_width,
+            px(crate::seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX),
+        );
         labels.push(ChromeLabel {
             mono: false,
-            text: notice.to_owned(),
-            rect: notice_box,
+            text: path.to_owned(),
+            rect: path_box,
             font_size_px: px(FLOAT_FOOT_FONT_LOGICAL_PX),
-            // The strip's palest ink whatever the hover is doing: this half is a
-            // fact about the file, not part of the button's label.
-            color: palette.dialog_muted_text,
-            align_right: true,
+            color: foot_ink,
+            align_right: false,
             align_center: false,
             letter_spacing_em: 0.0,
             weight: ChromeLabelWeight::Regular,
             tabular_numerals: false,
-            clip: Some(notice_box),
+            clip: Some(path_box),
         });
+        if !notice.is_empty() {
+            labels.push(ChromeLabel {
+                mono: false,
+                text: notice.to_owned(),
+                rect: notice_box,
+                font_size_px: px(FLOAT_FOOT_FONT_LOGICAL_PX),
+                // The strip's palest ink whatever the hover is doing: this half
+                // is a fact about the file, not part of the button's label.
+                color: palette.dialog_muted_text,
+                align_right: true,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: Some(notice_box),
+            });
+        }
     }
     if let Some(grip) = geometry.grip {
         let glyph = px(FLOAT_GRIP_GLYPH_LOGICAL_PX);
@@ -2127,6 +2205,28 @@ mod tests {
 
     fn frame(left: f32, top: f32, width: f32, height: f32) -> [f32; 4] {
         [left, top, left + width, top + height]
+    }
+
+    /// What a foot would print, if there were one.
+    const FOOT_PATH: &str = "C:\\Users\\Weiyi\\notes.md";
+
+    /// A tenant's dressing with nothing unusual in it — enough for a pin about
+    /// the chassis rather than about what is written on it.
+    fn chrome(hover: Option<FloatPart>) -> FloatChrome<'static> {
+        FloatChrome {
+            mode: FloatMode::Pinned,
+            mark: ChromeMark::File,
+            title: "notes.md",
+            path: FOOT_PATH,
+            notice: "",
+            notice_width: 0.0,
+            dock_label: "DOCK",
+            dock_mark: ChromeMark::DockRight,
+            hover,
+            revealed: false,
+            dirty: false,
+            flip_to_source: false,
+        }
     }
 
     /// A tree tenant on this root, at the column's opening width.
@@ -3791,11 +3891,176 @@ mod tests {
             bare.body[1], bare.head_edge[3],
             "and a tenant that asked for no row pays nothing"
         );
-        assert_eq!(
-            dressed.body[3], bare.body[3],
-            "the foot keeps its whole height either way — the body is what gives"
+        assert!(
+            dressed.body[3] > bare.body[3],
+            "and the retired foot's pixels go back to the body (2026-08-25)"
         );
         assert!(bare.rail.is_none(), "a tree grows no row");
+    }
+
+    /// RED (user ruling 2026-08-25) — **a window that wears a rail wears no
+    /// foot**, and every rectangle of the strip goes with it.
+    ///
+    /// 「去掉整条脚」. The slice before this one retired the foot's left hand and
+    /// kept the band, on two reasons the ruling spends: the band was a button
+    /// (`Reveal in Explorer` is a row of the breadcrumb's own menu now) and it
+    /// was the window's only channel for a flashed confirmation (that is a
+    /// corner tag over the body now). What was left is the picture the report
+    /// carried — an empty strip with one folder glyph in the corner of it.
+    ///
+    /// **All four rectangles, not just `foot`.** `foot_mark` is centred *in* the
+    /// strip, so a collapse that stopped at the strip would leave a glyph
+    /// straddling the window's floor — half a folder below the border, which is
+    /// worse than the band it replaced. The same trap `preview_pane_geometry`
+    /// names one host over.
+    ///
+    /// **And a window with no rail keeps its foot**, which is the ruling's own
+    /// reasoning rather than a hedge: the path is 「已在面包屑轨」 only where
+    /// there is a breadcrumb, and a torn-off file tree has no second place its
+    /// root is written.
+    ///
+    /// RED EVIDENCE (2026-08-25): before the change, with `rail: true`,
+    /// `foot[3] - foot[1]` was `FLOAT_WINDOW_FOOT_LOGICAL_PX * SCALE` — the
+    /// first assertion read `assertion failed: the strip has no height left`
+    /// with a foot 28 physical pixels tall.
+    ///
+    /// MUTATIONS: collapse `foot` and leave `foot_mark` alone and the third
+    /// assertion catches the straddling glyph; collapse the railed window's foot
+    /// *and* the bare one's and the last block goes red.
+    #[test]
+    fn a_window_that_wears_a_rail_wears_no_foot() {
+        let tools = FloatHeadTools {
+            dirty: true,
+            save: false,
+            flip: false,
+            rail: true,
+        };
+        let railed = float_geometry(
+            frame(100.0, 100.0, 430.0, 400.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            tools,
+        );
+        assert!(!railed.wears_a_foot(), "the strip has no height left");
+        assert_eq!(
+            railed.body[3], railed.foot[1],
+            "and the body reaches the window's own floor"
+        );
+        for (name, rect) in [
+            ("foot", railed.foot),
+            ("foot_edge", railed.foot_edge),
+            ("foot_mark", railed.foot_mark),
+            ("foot_path", railed.foot_path),
+        ] {
+            assert_eq!(
+                rect[3] - rect[1],
+                0.0,
+                "{name} collapses with the strip it stood in"
+            );
+        }
+        // Nothing of the strip is struck, either — a glyph in a box with no
+        // middle is not an invisible glyph.
+        let palette = bt_render::chrome_palette();
+        let layer = build(
+            &railed,
+            &chrome(Some(FloatPart::Foot)),
+            FloatBody::default(),
+            SCALE,
+            &palette,
+            FloatFade {
+                opacity: 1.0,
+                rise: 0.0,
+                moving: false,
+            },
+        );
+        assert!(
+            !layer
+                .sprites
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::FolderOpen),
+            "no folder glyph survives the strip"
+        );
+        assert!(
+            !layer.labels.iter().any(|label| label.text == FOOT_PATH),
+            "and no path is printed where there is no strip to print it in"
+        );
+
+        // The tenant that grew no row keeps the strip, because nothing else in
+        // that window says where it is.
+        let bare = float_geometry(
+            frame(100.0, 100.0, 430.0, 400.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            FloatHeadTools {
+                rail: false,
+                ..tools
+            },
+        );
+        assert!(bare.wears_a_foot(), "a tree keeps the strip its root is on");
+        assert_eq!(
+            bare.foot[3] - bare.foot[1],
+            (FLOAT_WINDOW_FOOT_LOGICAL_PX * SCALE).round(),
+            "at its whole height"
+        );
+    }
+
+    /// RED (user ruling 2026-08-25) — **the verb the retired strip carried is
+    /// still within reach of the window it left.**
+    ///
+    /// The foot was a button and pressing it revealed the file. Taking the strip
+    /// away would be taking the verb away if nothing else in the window offered
+    /// it, so the ruling's second half is asserted rather than assumed: a
+    /// torn-off document wears a breadcrumb, the breadcrumb has an `Open ⌄`
+    /// pill, and the list that pill raises — the `Document` face — carries
+    /// `Reveal in Explorer`.
+    ///
+    /// Two facts and one window, because either alone is not the claim: a pill
+    /// with no `Reveal` on its list is a door to somewhere else, and a `Reveal`
+    /// on a list nothing in this window raises is a verb in a drawer.
+    ///
+    /// MUTATIONS: drop `Reveal` from `file_menu`'s `Document` arm, or squeeze
+    /// the pill out of `preview_rail_geometry_in`, and one half goes red.
+    #[test]
+    fn a_footless_window_still_reaches_reveal_through_its_breadcrumb() {
+        let geometry = float_geometry(
+            frame(100.0, 100.0, 430.0, 400.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            FloatHeadTools {
+                dirty: true,
+                save: false,
+                flip: false,
+                rail: true,
+            },
+        );
+        assert!(!geometry.wears_a_foot(), "this is the window with no strip");
+        let band = geometry.rail.expect("a band");
+        let rail = crate::seats::preview_rail_geometry_in(
+            band,
+            SCALE,
+            &crate::seats::PreviewRailMeasure {
+                kind: crate::seats::PreviewRailKind::Crumbs,
+                segments: vec![40.0, 60.0, 70.0],
+                open_width: 34.0,
+                ..crate::seats::PreviewRailMeasure::default()
+            },
+        );
+        let pill = rail.open.expect("a document's row wears its `Open ⌄`");
+        let (x, y) = ((pill[0] + pill[2]) / 2.0, (pill[1] + pill[3]) / 2.0);
+        assert_eq!(
+            float_hit(&geometry, x, y, Some(&rail), |_, _| None),
+            Some(FloatPart::Rail(crate::seats::PreviewRailPart::OpenWith)),
+            "and the window answers a press on it"
+        );
+        assert!(
+            crate::profiles::file_menu(crate::profiles::FileMenuSubject::Document)
+                .rows
+                .contains(&crate::profiles::FileMenuRow::Reveal),
+            "and that press raises a list with the retired button's verb on it"
+        );
     }
 
     /// RED — **and the row answers the pointer**, control by control, through

@@ -9270,6 +9270,62 @@ struct {name} {{
         );
     }
 
+    /// PIN (user ruling 2026-08-25) — **the retired strip's two phrases go to
+    /// the two places that already hold them, and neither is invented here.**
+    ///
+    /// 「去掉整条脚」 leaves a torn-off window with a standing fact and a flashed
+    /// confirmation and nowhere they used to be printed. The ruling names where
+    /// each goes and both are places this window already draws:
+    ///
+    /// * the **standing fact** — `Read-only · 64 KB`, a refused save — onto the
+    ///   rail's right hand, which is exactly where a *docked* pane's went when
+    ///   its own strip retired the day before (see `chrome_layers`' lift). A
+    ///   fact that stays true until something changes it belongs in chrome.
+    /// * the **confirmation** — `Saved`, `Revealed…` — into the corner tag a
+    ///   page's hover line already floats in (`seats::push_corner_tag`). It is
+    ///   not chrome: it is true for two seconds, and a band that exists for two
+    ///   seconds in a window's whole life is the band this ruling deleted.
+    ///
+    /// Both are taken off the **one dressing this frame already made**
+    /// (`seats::dress_foot`), which is what stops one window saying two things
+    /// about one file — and `dress_foot`'s own rule is that a flash owns both
+    /// halves, so the two are never on screen at once.
+    ///
+    /// A source pin because the claim is *wiring*: the geometry has its own pin
+    /// (`float::tests::a_window_that_wears_a_rail_wears_no_foot`) and the bubble
+    /// has its own (`seats::tests`), and what neither can see is which of them
+    /// this function hands the words to.
+    ///
+    /// MUTATION: drop the `footless` guard on the tag and an ordinary window
+    /// prints `Saved` twice, once in its own foot; drop the lift and a torn-off
+    /// read-only file stops saying it is read-only.
+    #[test]
+    fn a_footless_window_prints_its_standing_fact_on_the_rail_and_flashes_in_a_tag() {
+        let layer = fn_body("preview_float_layer");
+        assert!(
+            layer.contains("let footless = !geometry.wears_a_foot();"),
+            "the chassis is asked whether there is a strip, rather than a second \
+             reader working it out from the rail"
+        );
+        assert!(
+            layer.contains("frame.notice.clone_from(&foot.notice);")
+                && layer.contains("frame.measure.notice_width ="),
+            "the standing fact is lifted onto the rail, measured, and the \
+             measurement stored where the hit test reads it"
+        );
+        assert!(
+            layer.contains("if footless && foot.flashing && !foot.lead.is_empty()")
+                && layer.contains("seats::push_corner_tag("),
+            "and the confirmation goes to the bubble, only on a window that has \
+             no strip left to print it in"
+        );
+        assert!(
+            layer.contains("seats::dress_foot("),
+            "both come off one dressing, so no window says two things about one \
+             file"
+        );
+    }
+
     /// PIN (user ruling 2026-08-24) — **a page's title is not a door.**
     ///
     /// W2 ① made the name cell the address, so a double click on it opened the
@@ -50159,6 +50215,13 @@ impl Runtime<'_> {
     /// already hold them; the mark is read here because "which profile is the
     /// default" is a setting and [`Self::default_profile`] is the one reader of
     /// it this window has (user ruling 2026-08-25).
+    ///
+    /// **And it is stripped of its colours on the way out** (the same day's
+    /// second ruling, [`marks::ChromeMark::in_line`]). Here rather than in
+    /// `profiles`, because this is the seam between "which shell is the
+    /// default", which is a setting, and "what does a row of this menu look
+    /// like", which is the menu's own business — and the menu's business is a
+    /// column of thin monochrome glyphs.
     fn file_menu_look<'a>(
         &self,
         subject: profiles::FileMenuSubject,
@@ -50167,7 +50230,7 @@ impl Runtime<'_> {
         profiles::FileMenuLook {
             subject,
             crumbs,
-            terminal: profiles::mark(self.default_profile()),
+            terminal: profiles::mark(self.default_profile()).in_line(),
         }
     }
 
@@ -56130,21 +56193,29 @@ impl Runtime<'_> {
                 )
             }
         };
-        // **The row above takes the path, and the foot stops repeating it**
-        // (§7.7 ⑩ 欠账, 2026-08-25) — the docked pane's own judgement, applied
-        // to the one strip a window has that a pane no longer does.
+        // **The row above takes the path, and the whole strip goes with it**
+        // (§7.7 ⑩ 欠账, and the ruling of 2026-08-25 evening) — the docked
+        // pane's own judgement, arriving in full on the one strip a window had
+        // that a pane no longer does.
         //
-        // It is the *left* half of the foot that retires and not the strip, and
-        // the difference is what the strip still is: a **button** — pressing it
-        // reveals this file — and this window's only channel for a flashed
-        // confirmation (`Saved`, `Revealed…`, ⑪'s zoom). A docked page's foot
-        // was neither by the time (8) retired it, which is why that ruling could
-        // take the whole band and this one cannot.
+        // The slice before this one retired the *left half* and kept the band,
+        // on the argument that the band was still a button and still this
+        // window's only channel for a flashed confirmation. The ruling spends
+        // both: `Reveal in Explorer` is a named row of the breadcrumb's own
+        // `Document` menu, and the confirmation is a corner tag over the body
+        // (below) that costs the window no rows. What the report photographed
+        // was what those two reasons left behind — an empty band with one folder
+        // glyph in the corner of it.
         //
         // Found on the machine the hour the rail landed: the window's rail read
         // `…/bravo.html` while its foot, six pixels below, still read
         // `…/alpha.html` — one surface saying two things about where it is,
         // which is the exact duplication ⑩ opened this debt to avoid.
+        //
+        // [`float::FloatGeometry::wears_a_foot`] and not `rail.is_some()`: the
+        // collapse is the chassis's answer, and asking it here a second way is
+        // how two readers of one rule come to disagree.
+        let footless = !geometry.wears_a_foot();
         let path = if geometry.rail.is_some() {
             String::new()
         } else {
@@ -56169,6 +56240,27 @@ impl Runtime<'_> {
             .to_owned();
         let head_font = float::FLOAT_HEAD_FONT_LOGICAL_PX * scale;
         let foot_font = float::FLOAT_FOOT_FONT_LOGICAL_PX * scale;
+        // **The run the words are cut to is the run they are drawn in.** With
+        // the strip retired there is no `foot_path` left to cut against — it
+        // collapsed with the rest of it — and the two phrases go to two places:
+        // the flash into a bubble inside the body, the standing fact onto the
+        // rail's right hand, which is where a docked pane's went when its own
+        // strip retired. So the cut is made to the *bubble's* room, which is the
+        // narrower of the two and therefore the honest one to measure against.
+        // `dress_preview_foot` makes the same substitution for the same reason
+        // one host over.
+        let run = if footless {
+            let margin = (seats::PAGE_HOVER_TAG_MARGIN_LOGICAL_PX * scale).round();
+            let pad = (seats::PAGE_HOVER_TAG_PAD_X_LOGICAL_PX * scale).round();
+            [
+                geometry.body[0] + margin + pad,
+                geometry.body[1],
+                (geometry.body[2] - margin - pad).max(geometry.body[0] + margin + pad),
+                geometry.body[3],
+            ]
+        } else {
+            geometry.foot_path
+        };
         let (title, foot) = {
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -56184,7 +56276,7 @@ impl Runtime<'_> {
                 ),
                 seats::dress_foot(
                     seats::FootDress {
-                        run: geometry.foot_path,
+                        run,
                         lead: &path,
                         flash,
                         notice: &notice,
@@ -56208,7 +56300,33 @@ impl Runtime<'_> {
         // 欠账, 2026-08-25) — one `dress_preview_rail`, one measurement, one
         // record in `preview_rail_measures`, so the tip, the menu and the press
         // all read what this frame drew.
-        let rail = self.dress_preview_rail(surface, scale);
+        let mut rail = self.dress_preview_rail(surface, scale);
+        // **The retired strip's standing phrase, hung on the row that replaced
+        // it** (user ruling 2026-08-25) — the docked pane's own move, made here
+        // for the second host. `Read-only · 64 KB` and a refused save are facts
+        // about the buffer, and a fact that is true until something changes it
+        // belongs in chrome; the *flash* is not, and goes to the bubble below.
+        //
+        // Taken off the dressing this frame already made rather than derived a
+        // second time, so no window can say two different things about one file.
+        // The measurement goes back into `preview_rail_measures` because the hit
+        // test and the tips read the number the picture was built from.
+        if let Some(frame) = rail.as_mut()
+            && footless
+            && !foot.notice.is_empty()
+        {
+            frame.notice.clone_from(&foot.notice);
+            frame.notice_flashing = false;
+            frame.measure.notice_width = self.window.renderer.measure_chrome_text(
+                &mut self.app.gpu,
+                &frame.notice,
+                seats::FILES_FOOT_FONT_LOGICAL_PX * scale,
+            );
+            self.window
+                .preview_rail_measures
+                .insert(surface, frame.measure.clone());
+        }
+        let rail = rail;
         let palette = bt_render::chrome_palette();
         // **What fills the body, decided by what is in it** (user report,
         // 2026-08-20).
@@ -56296,6 +56414,36 @@ impl Runtime<'_> {
             &palette,
             fade,
         );
+        // **The confirmation, in the corner of the body** (user ruling
+        // 2026-08-25) — `Saved` and `Revealed…`, in the bubble a docked page's
+        // hover line already stands in ([`seats::push_corner_tag`]).
+        //
+        // A bubble and not a strip, which is the whole of why the foot could go:
+        // it occupies no rows, so the document under it does not move when a word
+        // arrives and does not move back when the word expires. A band that
+        // exists only for the two seconds after a press is a band that is empty
+        // for every other second of the window's life, which is precisely the
+        // picture the ruling was handed.
+        //
+        // Only while there is something to say — an idle window draws nothing —
+        // and only on a window whose strip has retired: one that still has a foot
+        // has somewhere to print this already, and two of them would be the same
+        // word twice.
+        if footless && foot.flashing && !foot.lead.is_empty() {
+            let width = self.window.renderer.measure_chrome_text(
+                &mut self.app.gpu,
+                &foot.lead,
+                seats::PAGE_HOVER_TAG_FONT_LOGICAL_PX * scale,
+            );
+            seats::push_corner_tag(
+                geometry.body,
+                &foot.lead,
+                width,
+                scale,
+                &palette,
+                (&mut layer.sprites, &mut layer.labels),
+            );
+        }
         // **And drawn, on the window's own layer.** The chassis reserved the
         // band ([`float::FloatGeometry::rail`]) and the tenant fills it, which is
         // the division of labour this whole module is built on — the body's own
@@ -67716,12 +67864,22 @@ impl Runtime<'_> {
                     // profile list was the only child; a walk that clamped a
                     // window list against `profiles::count()` would step past
                     // its own last row.
-                    let rows = self
-                        .pane_menu_layout()
+                    let laid_out = self.pane_menu_layout();
+                    let rows = laid_out
+                        .as_ref()
                         .and_then(|layout| layout.submenu_rows().map(<[[f32; 4]]>::len))
                         .unwrap_or(0);
+                    // **And which rows the parent is showing** (user ruling
+                    // 2026-08-25) — read off the picture rather than off the
+                    // enum, so the walk cannot stop on a `Move to window ▸` that
+                    // this session has no second window for.
+                    let shown: Vec<profiles::PaneMenuRow> = laid_out
+                        .as_ref()
+                        .map(|layout| layout.rows().to_vec())
+                        .unwrap_or_default();
                     if let Some(menu) = self.window.pane_menu.as_mut()
-                        && let Some(moved) = profiles::PaneMenuHover::step(menu.hover, step, rows)
+                        && let Some(moved) =
+                            profiles::PaneMenuHover::step(menu.hover, step, rows, &shown)
                     {
                         menu.hover = Some(moved);
                     }

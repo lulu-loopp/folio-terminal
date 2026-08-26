@@ -122,6 +122,39 @@ impl MarkColour {
     }
 }
 
+/// **How many drawings the profile family actually is** — three, not five.
+///
+/// [`ChromeMark::ProfileLine`]'s parameter, and the reason it is this list is
+/// written there: strip the colours off `#p-pwsh`, `#p-cmd` and `#p-shell` and
+/// what is left is one console panel three times over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProfileGlyph {
+    /// The rounded panel with a chevron and an underline — `#p-pwsh`, `#p-cmd`
+    /// and `#p-shell`'s one silhouette.
+    Console,
+    /// The Circle of Friends — `#p-ubuntu`.
+    Ubuntu,
+    /// The lozenge with the branch and its three nodes — `#p-git`.
+    Git,
+}
+
+/// The pen every [`ChromeMark::ProfileLine`] is struck with, in the sixteen-unit
+/// box the profile marks are drawn in.
+///
+/// **The one number, and it is the column's rather than the mark's.** The file
+/// row's menu draws its glyphs between `1.15` (`#i-file`) and `1.3`
+/// (`#i-copy`, `#i-paste`, `#i-pencil`); `#i-external`, the row directly above
+/// `New terminal here`, is `1.2`, and so is `#i-float`. A line rendition exists
+/// to stop one row standing out, so it takes the weight its neighbours have
+/// rather than inventing a ninth.
+///
+/// Every outline below is written **half a pen inside** the fill it replaces —
+/// `0.6` of a unit — because a stroke centres on its path: an outline written on
+/// the filled shape's own edge would hang half a pen outside the silhouette it
+/// is describing, and the line mark would draw a pixel bigger than the coloured
+/// one it stands in for.
+const PROFILE_LINE_STROKE_UNITS: &str = "1.2";
+
 /// One mark the chrome can wear. Every variant except [`ChromeMark::ActiveTab`]
 /// is a `<symbol>` lifted straight out of the mock-up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -247,6 +280,30 @@ pub enum ChromeMark {
     /// fill through `currentColor` would have handed the mark to the theme —
     /// see [`Self::takes_current_color`], which a profile mark answers `false`.
     ProfileGeneric { colour: MarkColour },
+    /// **A profile's mark redrawn as a line icon** — the same shape, in the
+    /// theme's ink and the line family's own pen (user ruling 2026-08-25).
+    ///
+    /// The five marks above state their own colours because a mark is how you
+    /// recognise a shell — 「认出 PowerShell 靠的是那块蓝」 — and that is right
+    /// wherever a shell is *identified*: a tab, a pane head, the picker, the
+    /// drag ghost. It is wrong in a **list of verbs**. The file row's menu draws
+    /// eight rows of thin monochrome glyphs down one column, and a filled blue
+    /// slab in the middle of them reads as a badge somebody pasted into a menu:
+    /// the eye stops on the colour, and the colour is not saying anything the
+    /// row's own words have not said.
+    ///
+    /// So the ruling splits the two questions the coloured marks were answering
+    /// at once. **The shape stays** — `New terminal here` still wears the mark
+    /// of the shell it is about to open, which is the whole reason it is not
+    /// `#i-panel` — and the *style* joins the column it stands in.
+    ///
+    /// [`ProfileGlyph`] and not the five variants, because the five are three
+    /// drawings: `#p-pwsh`, `#p-cmd` and `#p-shell` are one panel filled three
+    /// ways ([`Self::ProfileGeneric`]'s own note says so), and once the fill is
+    /// gone they are one drawing. Collapsing them here is therefore not a loss
+    /// of information — it is the drawing telling the truth about how many
+    /// drawings there ever were.
+    ProfileLine(ProfileGlyph),
     /// `#i-file`.
     File,
     /// `#i-globe` — **the web class's own mark** (Web 预览块 W2 片③, 片④).
@@ -764,6 +821,15 @@ impl ChromeMark {
             // id for every angle: there is one chassis, and what tells two of
             // them apart is a parameter `mark_key` adds.
             Self::ProfileGeneric { .. } => "p-shell",
+            // One id per *drawing* rather than one per family, so the three
+            // rasters are three cache slots without `mark_key` having to add a
+            // discriminant the way it adds the chassis's colour. There is no
+            // parameter left to add: a line mark has no colour of its own, and
+            // the ink it does take rides in on the sprite's hex like every other
+            // `currentColor` glyph's.
+            Self::ProfileLine(ProfileGlyph::Console) => "p-shell-line",
+            Self::ProfileLine(ProfileGlyph::Ubuntu) => "p-ubuntu-line",
+            Self::ProfileLine(ProfileGlyph::Git) => "p-git-line",
             Self::File => "i-file",
             Self::Globe { .. } => "i-globe",
             Self::Folder => "i-folder",
@@ -846,6 +912,28 @@ impl ChromeMark {
         }
     }
 
+    /// **This mark as a line icon** — the same drawing, in the theme's ink
+    /// (user ruling 2026-08-25).
+    ///
+    /// Total, and the fall-through is a statement rather than a default: a mark
+    /// that already [`takes_current_color`](Self::takes_current_color) *is* its
+    /// own line rendition, so the five that state their own colours are the
+    /// whole of what this function has to say. That is also why it lives here
+    /// and not beside the table in `profiles`: the question is "what does this
+    /// drawing look like without its colours", which is a fact about the
+    /// drawing, and every one of the five is spelled out one screen up.
+    #[must_use]
+    pub fn in_line(self) -> Self {
+        match self {
+            Self::ProfilePowerShell | Self::ProfileCmd | Self::ProfileGeneric { .. } => {
+                Self::ProfileLine(ProfileGlyph::Console)
+            }
+            Self::ProfileUbuntu => Self::ProfileLine(ProfileGlyph::Ubuntu),
+            Self::ProfileGit => Self::ProfileLine(ProfileGlyph::Git),
+            other => other,
+        }
+    }
+
     /// Whether `color` reaches this mark at all. A profile mark paints itself.
     ///
     /// The house rule is the mock-up's own (line 2148, `Fixed colours, no theme
@@ -856,7 +944,11 @@ impl ChromeMark {
     /// the second spelling is the same sentence only while there is one profile
     /// — and the day a second one arrives it silently recolours somebody's
     /// orange to the accent.
-    fn takes_current_color(self) -> bool {
+    ///
+    /// `pub(crate)` since 2026-08-25 so that a *list* can be asserted to be one
+    /// style family — see `profiles::every_file_menu_row_wears_the_columns_own_
+    /// ink`, which is the pin the ruling that added [`Self::ProfileLine`] earned.
+    pub(crate) fn takes_current_color(self) -> bool {
         !matches!(
             self,
             Self::ProfilePowerShell
@@ -1546,6 +1638,66 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 ),
             )
         }
+        // The same three drawings with the colour taken out of them — generated
+        // rather than quoted for `ProfileGeneric`'s reason one line up, since
+        // all three carry [`PROFILE_LINE_STROKE_UNITS`] and a constant cannot
+        // carry a parameter. Every one of them keeps the coloured mark's own
+        // coordinates: this is that drawing re-struck, not a fourth glyph.
+        ChromeMark::ProfileLine(glyph) => (
+            PROFILE_CHASSIS_VIEW_BOX.to_owned(),
+            match glyph {
+                // `#p-pwsh`'s panel as an outline — the fill's box pulled in by
+                // half a pen on every side (1 → 1.6, 2.5 → 3.1, and the radius
+                // 1.8 → 1.2, because a corner's centre line turns on a radius
+                // half a pen smaller than the edge it belongs to). The chevron
+                // and the underline are the coloured mark's own `d` to the
+                // digit, at this column's weight instead of the panel's 1.35.
+                ProfileGlyph::Console => format!(
+                    concat!(
+                        r#"<rect x="1.6" y="3.1" width="12.8" height="9.8" rx="1.2" fill="none" stroke="currentColor" stroke-width="{pen}"/>"#,
+                        r#"<path d="M4.4 5.7L7.3 8l-2.9 2.3" fill="none" stroke="currentColor" stroke-width="{pen}" stroke-linecap="round" stroke-linejoin="round"/>"#,
+                        r#"<path d="M8.5 10.9h3.2" fill="none" stroke="currentColor" stroke-width="{pen}" stroke-linecap="round"/>"#,
+                    ),
+                    pen = PROFILE_LINE_STROKE_UNITS,
+                ),
+                // The disc as an outline (7 → 6.4, half a pen in) and the three
+                // friends as filled dots, **exactly where the coloured mark puts
+                // them** — on `r=4.1`, one pointing up, which is the constraint
+                // `ChromeMark::ProfileUbuntu` states in as many words.
+                //
+                // **The white ring between them does not survive the trip, and
+                // that is the drawing rather than a shortcut.** Its job in the
+                // coloured mark is to be the white figure the orange field is
+                // there to show off, and the three friends *punch holes in it*
+                // with the field's own colour — a trick a `currentColor` glyph
+                // has no second colour to play. Drawn straight it would be a
+                // second concentric hairline 1.1 units inside the first, which
+                // at the thirteen pixels a menu row gives a mark is not a ring
+                // beside a ring but a grey band. The outer circle already
+                // supplies the closed curve the friends stand on.
+                ProfileGlyph::Ubuntu => format!(
+                    concat!(
+                        r#"<circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="{pen}"/>"#,
+                        r#"<g fill="currentColor"><circle cx="8" cy="3.9" r="1.5"/><circle cx="11.55" cy="10.05" r="1.5"/><circle cx="4.45" cy="10.05" r="1.5"/></g>"#,
+                    ),
+                    pen = PROFILE_LINE_STROKE_UNITS,
+                ),
+                // The lozenge on its own `d` — no inset, because the coloured
+                // mark already *strokes* that path rather than only filling it,
+                // so the silhouette was a stroke's centre line to begin with.
+                // The branch, its three nodes and their radius are the coloured
+                // mark's own; what changes is that the nodes are the ink instead
+                // of the white they were against the orange.
+                ProfileGlyph::Git => format!(
+                    concat!(
+                        r#"<path d="M8 1.3L14.7 8 8 14.7 1.3 8z" fill="none" stroke="currentColor" stroke-width="{pen}" stroke-linejoin="round"/>"#,
+                        r#"<g stroke="currentColor" stroke-width="{pen}" fill="none" stroke-linecap="round"><path d="M5.7 10.3l4.6-4.6"/><path d="M8 8l2.3 2.3"/></g>"#,
+                        r#"<g fill="currentColor"><circle cx="5.7" cy="10.3" r="1.2"/><circle cx="10.3" cy="5.7" r="1.2"/><circle cx="10.3" cy="10.3" r="1.2"/></g>"#,
+                    ),
+                    pen = PROFILE_LINE_STROKE_UNITS,
+                ),
+            },
+        ),
         ChromeMark::ProgressRing {
             start_milliturns,
             sweep_milliturns,
@@ -1794,6 +1946,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::ProgressRing { .. } => 8,
         ChromeMark::GraphCurve { .. } => 8,
         ChromeMark::ProfileGeneric { .. } => 8,
+        ChromeMark::ProfileLine(_) => 8,
     }
 }
 
@@ -2785,6 +2938,15 @@ mod tests {
             (ChromeMark::ProfileUbuntu, 15.0),
             (ChromeMark::ProfileGit, 15.0),
             (ChromeMark::ProfileCmd, 15.0),
+            // The three line renditions, at the menu icon column's fourteen —
+            // the only place one is ever drawn (user ruling 2026-08-25). They
+            // are in this list rather than beside it because the trap they can
+            // fall into is exactly the one this pin catches: an outline written
+            // on the fill's own edge clips against its raster, and an outline
+            // written too far in reads as haze.
+            (ChromeMark::ProfileLine(ProfileGlyph::Console), 14.0),
+            (ChromeMark::ProfileLine(ProfileGlyph::Ubuntu), 14.0),
+            (ChromeMark::ProfileLine(ProfileGlyph::Git), 14.0),
             (ChromeMark::File, 14.0),
             // The page's mark, at the file mark's size: they share one column.
             (ChromeMark::Globe { favicon: None }, 14.0),
@@ -2980,6 +3142,86 @@ mod tests {
                 assert_ne!(
                     left.rgba, right.rgba,
                     "two profile marks rasterized to the same pixels"
+                );
+            }
+        }
+    }
+
+    /// PIN (user ruling 2026-08-25) — **a profile mark's line rendition is the
+    /// exact opposite of the mark it came from: it takes the ink it is handed,
+    /// and it is still three drawings.**
+    ///
+    /// The mirror of the pin above, and it is worth its own case because the two
+    /// halves fail in opposite directions. A line glyph that kept a literal hex
+    /// somewhere would sit in a menu column wearing PowerShell blue — the whole
+    /// defect the ruling was about, moved one function along. And three glyphs
+    /// that collapsed into one raster would mean `New terminal here` drew the
+    /// console panel for a reader whose default shell is Ubuntu, which is the
+    /// *first* ruling of that day undone — the shape is what the row keeps.
+    ///
+    /// **Ink in the cache key is the tell for the first half**: `mark_key` folds
+    /// the ink in only for a mark that follows the theme, so "two inks, two
+    /// keys" is the same assertion as "this glyph is `currentColor` all the way
+    /// down", read where a stray literal cannot hide.
+    ///
+    /// MUTATIONS: put a hex back into any of the three bodies; add
+    /// `ProfileLine` to `takes_current_color`'s list; give the three one shared
+    /// `id`.
+    #[test]
+    fn a_line_rendition_takes_the_ink_it_is_handed_and_is_still_three_drawings() {
+        const SIDE: f32 = 32.0;
+        let glyphs = [
+            ProfileGlyph::Console,
+            ProfileGlyph::Ubuntu,
+            ProfileGlyph::Git,
+        ];
+        let inks = [[0x7a, 0x99, 0xff], [0xff, 0x00, 0x00]];
+        for glyph in glyphs {
+            let mark = ChromeMark::ProfileLine(glyph);
+            assert!(
+                mark.takes_current_color(),
+                "{glyph:?}'s line rendition follows the theme"
+            );
+            let mut rasters = ChromeMarkRasters::default();
+            let icons: Vec<_> = inks
+                .iter()
+                .map(|ink| rasters.resolve(&[sprite(mark, SIDE, SIDE, *ink)]).remove(0))
+                .collect();
+            assert_ne!(
+                icons[0].key, icons[1].key,
+                "{glyph:?} is struck in the ink it is given, so the ink is part of \
+                 its key"
+            );
+            assert_ne!(
+                icons[0].rgba, icons[1].rgba,
+                "{glyph:?} really is drawn twice, in two colours"
+            );
+            // Every pixel that carries ink carries *this* ink and nothing the
+            // coloured original was filled with.
+            for pixel in icons[0].rgba.chunks_exact(4).filter(|p| p[3] == 255) {
+                assert_eq!(
+                    [pixel[0], pixel[1], pixel[2]],
+                    inks[0],
+                    "{glyph:?} kept a colour of its own"
+                );
+            }
+        }
+        let ink = [0x7a, 0x99, 0xff];
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(
+            &glyphs
+                .iter()
+                .map(|glyph| sprite(ChromeMark::ProfileLine(*glyph), SIDE, SIDE, ink))
+                .collect::<Vec<_>>(),
+        );
+        let keys: std::collections::HashSet<_> = icons.iter().map(|icon| &icon.key).collect();
+        assert_eq!(keys.len(), glyphs.len(), "three shapes, three rasters");
+        for (index, left) in icons.iter().enumerate() {
+            for right in &icons[index + 1..] {
+                assert_ne!(
+                    left.rgba, right.rgba,
+                    "two line renditions rasterized to the same pixels — the row \
+                     would stop naming the shell it opens"
                 );
             }
         }
