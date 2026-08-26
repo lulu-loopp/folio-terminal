@@ -785,9 +785,23 @@ const RECORD_LISTENING_LABEL: &str = "Press…";
 /// to the caps that a settings row keeps. A sentence that started by repeating
 /// the button would have spent the room it had on the half a reader already
 /// knew, and arrived at the three things they do not cut off.
-const RECORD_PROMPT: &str = "Enter keeps it · Esc cancels · Del clears";
+///
+/// **In the table since 2026-08-26**, with the two below it: the recorder's
+/// lines are the ones a reader has to act on, and they were the last English
+/// literals left on a page whose every row name was already translated.
+fn record_prompt() -> &'static str {
+    Text::ShortcutRecordPrompt.text()
+}
 /// What it says when a key arrives that no file could hold.
-const RECORD_UNUSABLE_HINT: &str = "That key cannot be written down";
+fn record_unusable_hint() -> &'static str {
+    Text::ShortcutRecordUnusable.text()
+}
+/// **The Shortcuts page's foot note** — the fact that a chord can be pressed and
+/// never arrive. See [`Text::ShortcutUndelivered`] for the measurements behind
+/// it and for why it is on the foot rather than in the box.
+fn shortcut_undelivered_note() -> &'static str {
+    Text::ShortcutUndelivered.text()
+}
 const RESTORE_ALL_LABEL: &str = "Restore all defaults";
 
 // ── the one picker whose items carry a mark (mock-up 7647) ─────────────────
@@ -4553,6 +4567,15 @@ struct Recording {
     caps: Vec<String>,
     /// The chord `Enter` would take, if there is one.
     candidate: Option<crate::shortcuts::Chord>,
+    /// **The chord `Enter` would take *off another row*, and which row**
+    /// (user ruling 2026-08-26).
+    ///
+    /// A second field beside [`Self::candidate`] and not a flag on it, because
+    /// the two are different offers and `Enter` has to be able to tell them
+    /// apart: one costs nothing and the other costs a row its key. They are
+    /// never both set — a chord is free or it is somebody's — and the invariant
+    /// is kept by every arm of [`SettingsPanel::record`] clearing the other.
+    conflict: Option<(String, crate::shortcuts::Chord)>,
     /// Why the last press was refused, if it was.
     hint: Option<String>,
 }
@@ -5698,6 +5721,22 @@ pub enum RecordInput {
         chord: crate::shortcuts::Chord,
         refusal: Option<String>,
     },
+    /// **A complete chord another row already answers to** (user ruling
+    /// 2026-08-26).
+    ///
+    /// Its own input and not a [`Self::Candidate`] with a refusal on it, because
+    /// it is the one refusal that has a way out: `holder` is the row the chord
+    /// would come off, and `hint` is the sentence that says so before `Enter` is
+    /// pressed. Every other refusal is final and this one is an offer, and a
+    /// state machine that could not tell them apart would have to re-derive the
+    /// difference from the text of a translated string.
+    Conflict {
+        caps: Vec<String>,
+        chord: crate::shortcuts::Chord,
+        /// The stable id of the row that has the chord.
+        holder: String,
+        hint: String,
+    },
     /// Bare `Esc`.
     Cancel,
     /// Bare `Backspace` or `Delete`.
@@ -5719,6 +5758,19 @@ pub enum RecordVerdict {
     /// Give the line at this index this chord — or, with `None`, take its chord
     /// away — and write the file.
     Commit(usize, Option<crate::shortcuts::Chord>),
+    /// **Move the chord from the row named by `take_from` onto the line at
+    /// `row`, and write the file** (user ruling 2026-08-26).
+    ///
+    /// One verdict and not a `Commit` preceded by a second one, because the two
+    /// writes are one edit — see `shortcuts::Shortcuts::take_chord_from`, which
+    /// is what the runtime answers this with. A pair of verdicts would let a
+    /// caller write the file from between them, and the file written from
+    /// between them is one with the chord on nobody.
+    Swap {
+        row: usize,
+        chord: crate::shortcuts::Chord,
+        take_from: String,
+    },
 }
 
 impl SettingsPanel {
@@ -5747,6 +5799,7 @@ impl SettingsPanel {
             RecordInput::Modifier { caps } => {
                 capture.caps = caps;
                 capture.candidate = None;
+                capture.conflict = None;
                 capture.hint = None;
                 RecordVerdict::Moved
             }
@@ -5756,6 +5809,7 @@ impl SettingsPanel {
                 refusal,
             } => {
                 capture.caps = caps;
+                capture.conflict = None;
                 match refusal {
                     Some(reason) => {
                         capture.candidate = None;
@@ -5768,9 +5822,22 @@ impl SettingsPanel {
                 }
                 RecordVerdict::Moved
             }
+            RecordInput::Conflict {
+                caps,
+                chord,
+                holder,
+                hint,
+            } => {
+                capture.caps = caps;
+                capture.candidate = None;
+                capture.conflict = Some((holder, chord));
+                capture.hint = Some(hint);
+                RecordVerdict::Moved
+            }
             RecordInput::Unusable => {
                 capture.candidate = None;
-                capture.hint = Some(RECORD_UNUSABLE_HINT.to_owned());
+                capture.conflict = None;
+                capture.hint = Some(record_unusable_hint().to_owned());
                 RecordVerdict::Moved
             }
             RecordInput::Cancel => {
@@ -5785,17 +5852,31 @@ impl SettingsPanel {
                 self.focus = Some(SettingsTarget::Record(row));
                 RecordVerdict::Commit(row, None)
             }
-            RecordInput::Confirm => match capture.candidate.take() {
-                // Nothing standing: `Enter` with no candidate is not "bind
-                // Enter" and it is not "give up" either — the box is still
-                // waiting, and saying so costs nothing.
-                None => RecordVerdict::Moved,
-                Some(chord) => {
+            // **`Enter` takes whatever is standing**, and since 2026-08-26 a
+            // conflict is one of the two things that can stand. It is the same
+            // verb either way — the difference is in what the line said the
+            // press would cost, which was printed before the key came down.
+            RecordInput::Confirm => match (capture.candidate.take(), capture.conflict.take()) {
+                (Some(chord), _) => {
                     let row = capture.row;
                     self.recording = None;
                     self.focus = Some(SettingsTarget::Record(row));
                     RecordVerdict::Commit(row, Some(chord))
                 }
+                (None, Some((take_from, chord))) => {
+                    let row = capture.row;
+                    self.recording = None;
+                    self.focus = Some(SettingsTarget::Record(row));
+                    RecordVerdict::Swap {
+                        row,
+                        chord,
+                        take_from,
+                    }
+                }
+                // Nothing standing: `Enter` with no candidate is not "bind
+                // Enter" and it is not "give up" either — the box is still
+                // waiting, and saying so costs nothing.
+                (None, None) => RecordVerdict::Moved,
             },
         }
     }
@@ -6422,6 +6503,17 @@ pub struct SettingsLayout {
     editor_foot: Option<[f32; 4]>,
     /// The shortcut page's `Restore all defaults`.
     restore_all: Option<[f32; 4]>,
+    /// **The shortcut page's foot note**, left of that verb on the same line
+    /// (user ruling 2026-08-26).
+    ///
+    /// Its own rect and not a label pushed at draw time from the button's,
+    /// because the two share a line and the note has to be told where the button
+    /// starts: a sentence that ran under `Restore all defaults` would be the one
+    /// place in this dialog where two things are drawn on top of each other.
+    ///
+    /// Not a focus stop and not a hit target — it is a statement, and this
+    /// dialog's ring only ever lands on things that answer a press.
+    foot_note: Option<[f32; 4]>,
     /// This page's Advanced disclosure, when it has advanced rows to disclose.
     advanced: Option<AdvancedLayout>,
     /// The `Reset to defaults` that closes an **open** Advanced group. `None`
@@ -7345,6 +7437,46 @@ pub(crate) fn wrapped_description(
     lines
 }
 
+/// **The room the Shortcuts page's foot note is given** — what the page's own
+/// verb leaves of the row (user ruling 2026-08-26).
+///
+/// A function of the row span and nothing else, because it is read twice: once
+/// where the note is placed and once where the page's height is solved. A width
+/// written out at both would be free to drift by a rounding, and the drift shows
+/// up as a foot that is one line taller than the scroll can reach.
+#[must_use]
+fn shortcut_foot_note_width(span: f32, scale: f32) -> f32 {
+    span - (RESTORE_ALL_WIDTH_LOGICAL_PX + ROW_GAP_LOGICAL_PX) * scale
+}
+
+/// How tall the note stands, wrapped into that width.
+#[must_use]
+fn shortcut_foot_note_height(
+    span: f32,
+    scale: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> f32 {
+    description_lines(
+        shortcut_undelivered_note(),
+        shortcut_foot_note_width(span, scale),
+        ROW_DESC_FONT_LOGICAL_PX * scale,
+        measure,
+    ) as f32
+        * ROW_DESC_LINE_LOGICAL_PX
+        * scale
+}
+
+/// **How tall the Shortcuts page's foot is**: the taller of its two occupants.
+///
+/// The one place that answers it, for [`shortcut_foot_note_width`]'s reason
+/// exactly — `page_height` reserves it and `layout_for_menu` fills it, and a
+/// page whose foot is measured by one rule and drawn by another is a page whose
+/// last line is off the end of its own scroll.
+#[must_use]
+fn shortcut_foot_band(span: f32, scale: f32, measure: &mut dyn FnMut(&str, f32) -> f32) -> f32 {
+    (BUTTON_HEIGHT_LOGICAL_PX * scale).max(shortcut_foot_note_height(span, scale, measure))
+}
+
 /// How tall that sentence stands, in line boxes.
 ///
 /// **One for a row with no sentence at all**, which is what keeps such a row the
@@ -7999,6 +8131,7 @@ pub fn layout_for_menus(
     }
     let mut placed_lines: Vec<ShortcutLineLayout> = Vec::with_capacity(shortcut_lines.len());
     let mut restore_all = None;
+    let mut foot_note = None;
     if !shortcut_lines.is_empty() {
         cursor += px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX);
         let label = [
@@ -8072,12 +8205,40 @@ pub fn layout_for_menus(
         }
         cursor += px(FOOT_MARGIN_TOP_LOGICAL_PX);
         let width = px(RESTORE_ALL_WIDTH_LOGICAL_PX);
-        restore_all = Some([
+        // **The note takes what the verb leaves, and it wraps** — §7.1.6c-5′'s
+        // ruling, met on the one sentence in this dialog that is not a row's.
+        // The column left over is 340px at the dialog's own width and the
+        // sentence is a hundred characters: cut to one line it would lose
+        // exactly the half that carries the fact, which is the screenshot that
+        // withdrew the one-line rule in the first place.
+        //
+        // **The band is measured by the same call `page_height` makes**
+        // ([`shortcut_foot_band`]), so the room reserved for the foot and the
+        // room the foot takes are one derivation. A two-line note under a
+        // one-line reservation is the last row of a page falling off the end of
+        // its own scroll.
+        let band = shortcut_foot_band(row_span, scale, measure);
+        // The foot is as tall as the taller of the two things standing in it,
+        // and both are centred in it: one is a button and the other is a run of
+        // text, and two things of different heights share a row by their
+        // middles.
+        let middle = cursor + band / 2.0;
+        let button = [
             row_right - width,
-            cursor,
+            middle - px(BUTTON_HEIGHT_LOGICAL_PX) / 2.0,
             row_right,
-            cursor + px(BUTTON_HEIGHT_LOGICAL_PX),
+            middle + px(BUTTON_HEIGHT_LOGICAL_PX) / 2.0,
+        ];
+        restore_all = Some(button);
+        let note_width = shortcut_foot_note_width(row_span, scale);
+        let note_height = shortcut_foot_note_height(row_span, scale, measure);
+        foot_note = Some([
+            row_left,
+            middle - note_height / 2.0,
+            row_left + note_width,
+            middle + note_height / 2.0,
         ]);
+        cursor += band;
     }
     let mut placed_profiles: Vec<ProfileLineLayout> = Vec::with_capacity(profile_lines.len());
     let mut new_profile: Option<[f32; 4]> = None;
@@ -8368,6 +8529,7 @@ pub fn layout_for_menus(
         env_add: placed_env_add,
         editor_foot,
         restore_all,
+        foot_note,
         advanced: placed_advanced,
         reset_advanced,
         menu: popup.map(|menu| menu.frame),
@@ -8706,7 +8868,12 @@ impl StackMetrics {
         if category == SettingsCategory::Shortcuts && !content.shortcuts.is_empty() {
             stack += self.heading_advance;
             stack += content.shortcuts.len() as f32 * self.row_height;
-            stack += self.foot_advance;
+            // **Not `foot_advance`, since this foot has a sentence in it**
+            // (user ruling 2026-08-26). Every other foot in this dialog is a
+            // button alone and is exactly `BUTTON_HEIGHT` tall; this one is as
+            // tall as its note when the note runs to two lines, which it does at
+            // this dialog's own width.
+            stack += px(FOOT_MARGIN_TOP_LOGICAL_PX) + shortcut_foot_band(span, self.scale, measure);
         }
         // The list's own rows, and **only while the list is the view that is
         // up**: the editor replaces it, so a page measured with both would
@@ -11101,7 +11268,7 @@ fn push_shortcut_page(
         let (note, note_ink) = match (listening, recording) {
             (true, Some((_, _, Some(hint)))) => (Some(hint.to_owned()), palette.status_err),
             (true, Some((_, _, None))) => {
-                (Some(RECORD_PROMPT.to_owned()), palette.dialog_muted_text)
+                (Some(record_prompt().to_owned()), palette.dialog_muted_text)
             }
             _ => (
                 line.note.as_ref().map(|note| note.to_string()),
@@ -11181,6 +11348,43 @@ fn push_shortcut_page(
                     .quads
                     .extend(focus_ring(restore, scale, palette.accent));
             }
+        }
+    }
+    // **The page's own sentence, drawn whether a row is listening or not.**
+    // It is a fact about the keyboard rather than about a capture, and the one
+    // moment a reader needs it is the moment a chord they pressed left no mark
+    // — at which point a note that only appeared *during* a capture would be a
+    // note that appeared and said nothing, because the capture is still open and
+    // still showing its prompt.
+    if let Some(note) = layout.foot_note {
+        // **The same call, on the same string, at the same width** the layout
+        // measured the band from — a row's own description's rule, met on the
+        // page's own sentence.
+        let font = px(ROW_DESC_FONT_LOGICAL_PX);
+        let line_height = px(ROW_DESC_LINE_LOGICAL_PX);
+        for (ordinal, line) in wrapped_description(
+            shortcut_undelivered_note(),
+            note[2] - note[0],
+            font,
+            measure,
+        )
+        .into_iter()
+        .enumerate()
+        {
+            let top = note[1] + ordinal as f32 * line_height;
+            stack.labels.push(ChromeLabel {
+                mono: false,
+                text: line,
+                rect: [note[0], top, note[2], top + line_height],
+                font_size_px: font,
+                color: palette.dialog_muted_text,
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: None,
+            });
         }
     }
     if let Some(restore_all) = layout.restore_all {
@@ -20175,7 +20379,7 @@ mod tests {
         assert_eq!(panel.record(RecordInput::Unusable), RecordVerdict::Moved);
         assert_eq!(
             panel.recording_state().and_then(|(_, _, hint)| hint),
-            Some(RECORD_UNUSABLE_HINT)
+            Some(record_unusable_hint())
         );
         assert_eq!(panel.recording_row(), Some(0));
 
@@ -20203,6 +20407,93 @@ mod tests {
         );
         panel.press(SettingsTarget::Panel);
         assert_eq!(panel.recording_row(), None);
+    }
+
+    /// RED (user ruling 2026-08-26) — **a conflict stands, and `Enter` takes the
+    /// chord off the row that had it.**
+    ///
+    /// The one refusal with a way out, and the state machine has to be able to
+    /// tell it from the two that have none: `Ctrl+Alt+P` is refused by a
+    /// keyboard and `Enter` after it takes nothing, while a chord another row
+    /// holds is refused by *this table* and `Enter` after it is a decision the
+    /// line beside the box has already priced.
+    ///
+    /// **`Enter` and no button**, which is not keyboard-only by accident: the
+    /// ordinary candidate has been committed by `Enter` and by nothing else
+    /// since the recorder was written, because the recorder holds the whole
+    /// keyboard while it is open. A conflict is the same verb over a second kind
+    /// of standing offer.
+    ///
+    /// MUTATIONS:
+    /// (1) let `Conflict` set `candidate` — `Enter` commits a chord two rows
+    ///     then answer to, and the swap assertion goes red for naming nobody;
+    /// (2) leave `conflict` standing across the next press — a modifier tapped
+    ///     after a refusal leaves `Enter` still armed to take somebody's key.
+    #[test]
+    fn a_conflict_stands_until_enter_takes_the_chord_from_the_row_that_had_it() {
+        let chord = |text: &str| crate::shortcuts::parse_chord(text).expect("a chord");
+        let caps = |text: &str| crate::shortcuts::chord_caps(&chord(text));
+        let offer = crate::i18n::shortcut_take_it_from("Close pane");
+        let offer = offer.as_str();
+
+        let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
+        panel.begin_recording(0);
+        assert_eq!(
+            panel.record(RecordInput::Conflict {
+                caps: caps("Ctrl+Shift+W"),
+                chord: chord("Ctrl+Shift+W"),
+                holder: "close-pane".to_owned(),
+                hint: offer.to_owned(),
+            }),
+            RecordVerdict::Moved,
+            "an offer is held pending exactly as a free chord is"
+        );
+        assert_eq!(
+            panel.recording_state().and_then(|(_, _, hint)| hint),
+            Some(offer),
+            "and the line under the name says who it comes off before it does"
+        );
+        assert_eq!(panel.recording_row(), Some(0), "the box stays open");
+        assert_eq!(
+            panel.record(RecordInput::Confirm),
+            RecordVerdict::Swap {
+                row: 0,
+                chord: chord("Ctrl+Shift+W"),
+                take_from: "close-pane".to_owned(),
+            }
+        );
+        assert_eq!(panel.recording_row(), None, "confirming closes the box");
+
+        // A refusal with no way out is still a refusal: `Enter` after one takes
+        // nothing at all.
+        let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
+        panel.begin_recording(0);
+        panel.record(RecordInput::Candidate {
+            caps: caps("Ctrl+Alt+P"),
+            chord: chord("Ctrl+Alt+P"),
+            refusal: Some(crate::shortcuts::hint_altgr_zone().to_owned()),
+        });
+        assert_eq!(panel.record(RecordInput::Confirm), RecordVerdict::Moved);
+
+        // And an offer does not outlive the press that follows it. A hand that
+        // lets go and takes hold again is a hand that has not decided yet.
+        let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
+        panel.begin_recording(0);
+        panel.record(RecordInput::Conflict {
+            caps: caps("Ctrl+Shift+W"),
+            chord: chord("Ctrl+Shift+W"),
+            holder: "close-pane".to_owned(),
+            hint: offer.to_owned(),
+        });
+        panel.record(RecordInput::Modifier {
+            caps: vec!["Ctrl".to_owned()],
+        });
+        assert_eq!(
+            panel.record(RecordInput::Confirm),
+            RecordVerdict::Moved,
+            "there is nothing standing for Enter to take"
+        );
+        assert_eq!(panel.recording_row(), Some(0));
     }
 
     /// Visual PIN — **a listening row says what it is waiting for, and says why
@@ -20257,7 +20548,7 @@ mod tests {
         assert!(
             labels
                 .iter()
-                .any(|label| label.text == fitted(RECORD_PROMPT)),
+                .any(|label| label.text == fitted(record_prompt())),
             "the box says what it is waiting for"
         );
         assert!(
@@ -20312,7 +20603,7 @@ mod tests {
             by_pointer
                 .iter()
                 .flat_map(|layer| layer.labels.clone())
-                .any(|label| label.text == fitted(RECORD_PROMPT)),
+                .any(|label| label.text == fitted(record_prompt())),
             "a capture with no ring is still a capture"
         );
         assert_eq!(
@@ -20323,6 +20614,137 @@ mod tests {
             hint.rect, placed.shortcuts[0].desc,
             "and it stands where the row's own muted line does"
         );
+
+        // RED (found on the real window, first smoke run 2026-08-26) — **the
+        // one refusal that has a way out has to still say what the way out is.**
+        // The joined form this shipped with, `Already used by Close pane · Enter
+        // takes it from that row`, came off the glass as `… · Enter take…`: the
+        // recorder's line is one line of the narrowest column in this dialog,
+        // and what an ellipsis took was the half that names the key. The offer
+        // is now one clause with the holder as the object of its verb, and this
+        // is what keeps it that short.
+        //
+        // Measured through this module's own stand-in metric, which is **wider**
+        // than the real face — so an offer that fits here fits on the glass.
+        let offer = crate::i18n::shortcut_take_it_from(crate::i18n::Text::ClosePane.text());
+        assert_eq!(
+            fitted(&offer),
+            offer,
+            "the conflict's offer must survive the recorder's own line whole"
+        );
+    }
+
+    /// RED (user ruling 2026-08-26) — **the page says, in its own words, that a
+    /// chord can be pressed and never arrive.**
+    ///
+    /// Twice measured on the real machine, 2026-08-19 and 2026-08-25:
+    /// `Ctrl+Shift+Enter` was pressed with the window focused and **no key event
+    /// reached the process at all** — the chord is taken above this window, so
+    /// the recorder has nothing to refuse and nothing to show. Two tables'
+    /// worth of rulings are written against that fact (`DESIGN.md`: "在弄清
+    /// Windows 与 winit 对带修饰的 Enter 到底做了什么之前,这张表里不许再有任何
+    /// 一行钉在带修饰的 Enter 上"), and until this note the page said none of it:
+    /// a reader who pressed one of those chords watched the box sit there and
+    /// had no way to tell a keyboard that is broken from a page that is.
+    ///
+    /// **On the foot and not in the box**, and it is drawn whether a row is
+    /// listening or not: the box's own line is one line and is already spoken
+    /// for by the prompt and by the refusal a press earns — and the moment the
+    /// note is needed is the moment nothing happened, which is exactly when a
+    /// note that only appeared *on a refusal* would not be there.
+    ///
+    /// MUTATION: draw it only while `recording` is `Some` — the frame that
+    /// matters, the one where a press left no mark, still says nothing.
+    #[test]
+    fn the_shortcut_page_says_that_not_every_chord_reaches_this_window() {
+        let lines = shortcut_lines();
+        let rows = visible_rows(TabLayoutMode::Horizontal);
+        // **Laid out through the same metric it is drawn through.** The other
+        // pins here reach for `flat(0.0)` because their claim is about boxes and
+        // a zero-width word keeps the arithmetic readable; this one's claim is
+        // that the room reserved and the lines printed are one derivation, and
+        // two metrics would make that trivially false in the test and trivially
+        // true on the glass.
+        let page = |scroll: f32| {
+            layout_for_menu(
+                SURFACE.0,
+                SURFACE.1,
+                1.0,
+                None,
+                None,
+                content(&rows, &lines),
+                SettingsCategory::Shortcuts,
+                scroll,
+                MENU_UNSCROLLED,
+                &mut measure,
+            )
+            .expect("this window hosts the dialog")
+        };
+        let at_foot = page(page(UNSCROLLED).max_scroll());
+        let foot = at_foot.foot_note.expect("the page carries its own note");
+        let verb = at_foot.restore_all.expect("the page's own verb");
+        assert!(
+            foot[2] <= verb[0] + 0.5,
+            "the note stops where the verb starts: {foot:?} against {verb:?}"
+        );
+        // **Wrapped, never cut** (§7.1.6c-5′): the column the verb leaves is
+        // narrower than the sentence, and the half a cut would take is the half
+        // that carries the fact.
+        let wrapped = wrapped_description(
+            shortcut_undelivered_note(),
+            foot[2] - foot[0],
+            ROW_DESC_FONT_LOGICAL_PX,
+            &mut measure,
+        );
+        assert!(
+            !wrapped.iter().any(|line| line.ends_with('…')),
+            "the note is short enough to fit the three lines this dialog allows: {wrapped:?}"
+        );
+        assert!(
+            (foot[3] - foot[1] - wrapped.len() as f32 * ROW_DESC_LINE_LOGICAL_PX).abs() < 0.5,
+            "the box the layout reserved holds exactly the lines the note takes"
+        );
+        let waiting = vec!["Ctrl".to_owned(), "Shift".to_owned()];
+        for recording in [None, Some((0usize, waiting.as_slice(), None))] {
+            let labels: Vec<ChromeLabel> = build(
+                &at_foot,
+                None,
+                None,
+                &values(),
+                &lines,
+                &[],
+                "",
+                recording,
+                None,
+                &mut measure,
+            )
+            .iter()
+            .flat_map(|layer| layer.labels.clone())
+            .collect();
+            for (ordinal, line) in wrapped.iter().enumerate() {
+                let top = foot[1] + ordinal as f32 * ROW_DESC_LINE_LOGICAL_PX;
+                let printed = labels
+                    .iter()
+                    .find(|label| &label.text == line)
+                    .unwrap_or_else(|| panic!("line {ordinal} of the foot note is drawn"));
+                assert!((printed.rect[1] - top).abs() < 0.5, "{:?}", printed.rect);
+                assert_eq!(printed.rect[0], foot[0]);
+                assert_eq!(
+                    printed.color,
+                    chrome_palette().dialog_muted_text,
+                    "it is a standing fact and not a refusal"
+                );
+            }
+        }
+        // And the page reserved room for it: scrolled to the end, the whole note
+        // is inside the scrollport rather than off the bottom of a page that was
+        // measured for a foot one line shorter.
+        assert!(
+            at_foot.shows(foot),
+            "the note ends inside the scrollport: {foot:?} in {:?}",
+            at_foot.clip
+        );
+        assert!(at_foot.shows(verb), "and so does the verb beside it");
     }
 
     /// PIN — **the shortcut page's focus order is its own controls, and a `↺`

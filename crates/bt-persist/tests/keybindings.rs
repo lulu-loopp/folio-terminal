@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bt_persist::{
-    BindingOverrideV1, FallbackReason, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1, ReadReport,
-    read_keybindings, write_keybindings_atomic,
+    BindingOverrideV1, FallbackReason, KEYBINDINGS_MIGRATIONS, KEYBINDINGS_SCHEMA_VERSION,
+    KeybindingsV1, ReadReport, read_keybindings, write_keybindings_atomic,
 };
 
 fn unique_dir(tag: &str) -> PathBuf {
@@ -146,4 +146,73 @@ fn a_file_from_a_future_build_is_refused_whole_rather_than_read_in_part() {
         ),
         "{report:?}"
     );
+}
+
+/// RED (2026-08-26) — **every version this file has ever carried reaches the
+/// current one**, and the emptiness of the migration table is a claim about
+/// today rather than a permanent licence.
+///
+/// `KEYBINDINGS_MIGRATIONS` is empty on purpose and its own doc says why: adding,
+/// renaming or retiring a shortcut row does not change this *document*, so it
+/// does not owe a version. What the emptiness must never mean is "there is a
+/// version step nobody wrote a migration for" — a gap there does not raise an
+/// error, it makes an old file fall back to *no departures at all*, which on a
+/// machine that has customised its keyboard is every custom chord silently
+/// going back to the factory on one launch.
+///
+/// It also pins the ordinary path: a file written at the current version reads
+/// back as `Loaded` and never goes near a migration at all.
+///
+/// **Stated as the shape of the step list rather than as a walk over `1..v`**,
+/// which says the same thing and says one more: a table with two steps out of
+/// v1, or with v3 written before v2, is as broken as one with a hole in it, and
+/// a loop that only asked "is `version` in there somewhere" would pass on both.
+/// (It is also the only spelling that survives `-D warnings` while the version
+/// is 1: `1..1` is a range clippy can evaluate, and it is right that it is
+/// empty — that is the fact this test is about.)
+///
+/// MUTATION: bump `KEYBINDINGS_SCHEMA_VERSION` without adding a step — the count
+/// goes red, and the launch it stands for is the one where somebody's keyboard
+/// would have quietly reset.
+#[test]
+fn every_version_of_this_file_has_a_step_that_reaches_the_current_one() {
+    let steps: Vec<u32> = KEYBINDINGS_MIGRATIONS
+        .iter()
+        .map(|(from, _)| *from)
+        .collect();
+    assert_eq!(
+        steps.len() as u32,
+        KEYBINDINGS_SCHEMA_VERSION - 1,
+        "keybindings.json is at v{KEYBINDINGS_SCHEMA_VERSION} with {} step(s) \
+         written: a version with no step towards the current one does not raise \
+         an error, it makes a file at that version fall back to no overrides at \
+         all — every custom chord on the machine going back to the factory \
+         without a word",
+        steps.len()
+    );
+    for (index, from) in steps.iter().enumerate() {
+        assert_eq!(
+            *from,
+            index as u32 + 1,
+            "the steps are v1 upwards in order, and this one is not"
+        );
+    }
+
+    let dir = unique_dir("versions");
+    let path = dir.join("keybindings.json");
+    write_keybindings_atomic(
+        &path,
+        &KeybindingsV1 {
+            schema_version: KEYBINDINGS_SCHEMA_VERSION,
+            bindings: vec![BindingOverrideV1 {
+                action: "new-tab".to_owned(),
+                chord: Some("Ctrl+Shift+w".to_owned()),
+            }],
+        },
+    )
+    .unwrap();
+    let (read, report) = read_keybindings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(read.schema_version, KEYBINDINGS_SCHEMA_VERSION);
+    assert_eq!(read.bindings.len(), 1);
 }

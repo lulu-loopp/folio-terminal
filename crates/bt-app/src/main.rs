@@ -34975,14 +34975,30 @@ impl Runtime<'_> {
                     .get(row)
                     .and_then(|line| line.ids.first().copied())
                     .unwrap_or_default();
-                let refusal = match self.app.shortcuts.verdict_for(id, &chord) {
-                    shortcuts::ChordVerdict::Free => None,
-                    refused => Some(refused.hint().into_owned()),
-                };
-                settings::RecordInput::Candidate {
-                    caps: shortcuts::chord_caps(&chord),
-                    chord,
-                    refusal,
+                let verdict = self.app.shortcuts.verdict_for(id, &chord);
+                // **A conflict is the one refusal with a way out** (user ruling
+                // 2026-08-26). It arrives as its own input carrying the id of
+                // the row that has the chord, because the sentence beside it is
+                // an offer and the state machine has to be able to act on the
+                // offer without reading the sentence back.
+                match (verdict.holder(), verdict.swap_offer()) {
+                    (Some(holder), Some(hint)) => settings::RecordInput::Conflict {
+                        caps: shortcuts::chord_caps(&chord),
+                        chord,
+                        holder: holder.to_owned(),
+                        hint,
+                    },
+                    _ => {
+                        let refusal = match verdict {
+                            shortcuts::ChordVerdict::Free => None,
+                            refused => Some(refused.hint().into_owned()),
+                        };
+                        settings::RecordInput::Candidate {
+                            caps: shortcuts::chord_caps(&chord),
+                            chord,
+                            refusal,
+                        }
+                    }
                 }
             }
         };
@@ -34994,6 +35010,24 @@ impl Runtime<'_> {
                     && let Some(id) = line.ids.first()
                 {
                     self.app.shortcuts.set(id, chord);
+                    self.store_keybindings();
+                }
+                let (rows, shortcuts, profile_lines, scheme_files, values) =
+                    self.settings_content();
+                let content =
+                    self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
+                self.window.settings.keep_focus_reachable(content);
+            }
+            settings::RecordVerdict::Swap {
+                row: index,
+                chord,
+                take_from,
+            } => {
+                let lines = self.app.shortcuts.editor_rows();
+                if let Some(line) = lines.get(index)
+                    && let Some(id) = line.ids.first()
+                {
+                    self.app.shortcuts.take_chord_from(&take_from, id, chord);
                     self.store_keybindings();
                 }
                 let (rows, shortcuts, profile_lines, scheme_files, values) =

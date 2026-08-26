@@ -3882,6 +3882,17 @@
      over one button. The 152 that `Customise scheme…` needed leaves with it —
      140 is the width of every `.btn` in this foot again, and the only one. */
   .sc-foot, .adv-foot { display: flex; justify-content: flex-end; margin-top: 14px; gap: 8px; }
+  /* The shortcut page's own sentence, sharing the foot with the verb
+     (user ruling 2026-08-26, DESIGN §7.1.6c-2′). `margin-right:auto` and
+     not a second flex child with a width: the note takes what the button
+     leaves and nothing has to be told how much that is, and it WRAPS: the
+     column left over is 340px at this dialog's width and the sentence is a
+     hundred characters, so `min-width:0` is what lets a flex item narrower than
+     its content break instead of pushing the button off the row. `align-self:center`
+     because a line of text and a 28px button share a row by their middles.
+     It wears `.desc`'s ink and size — it is the same kind of thing those
+     lines are, one level up: a fact about the page rather than about a row. */
+  .sc-note { flex: 1 1 auto; min-width: 0; align-self: center; font-size: 12px; line-height: 14.5px; color: var(--ink3); }
   .adv-foot .btn { width: 140px; }
   /* The colour under the pointer (§7.1.6c-4c). `#cmd-peek`'s card wearing a
      third face: same 380ms, same surface, same radius — a 28px well before the
@@ -6182,7 +6193,17 @@
           </div>
           <div class="caps"><span class="cap">Alt</span><span class="cap">← ↑ → ↓</span></div>
         </div>
-        <div class="sc-foot"><button class="btn">Restore all defaults</button></div>
+        <!-- Measured twice on the real machine (2026-08-19, 2026-08-25):
+             `Ctrl+Shift+Enter` was pressed with the window focused and NO key
+             event reached the process at all. The recorder therefore has
+             nothing to refuse and nothing to show, and a page that stayed
+             silent about that leaves a reader unable to tell a keyboard that
+             is broken from a page that is. On the foot and not in the box:
+             the box’s own line is one line and is already spoken for by the
+             prompt and by the refusal a press earns, and the moment this note
+             is needed is the moment nothing happened — which is exactly when
+             one that only appeared on a refusal would not be there. -->
+        <div class="sc-foot"><span class="sc-note">Windows does not hand every chord to a program; one that never appears in the box cannot be recorded here</span><button class="btn">Restore all defaults</button></div>
         </section>
 
         <!-- "Clicking a tab: Switch view / Swap focused pane" was here and is

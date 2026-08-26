@@ -20,6 +20,19 @@
 //! dialog asks it while the user is still holding the keys down, and `apply_overrides` asks it of
 //! every line of a hand-edited file. A file that could consent to `Ctrl+Alt+P` on behalf of a
 //! German keyboard would be a second answer to a question with one.
+//!
+//! **The third refusal has a way out and the other two have none** (user ruling 2026-08-26). AltGr
+//! and the shell's alphabet are facts about a keyboard; a chord another row claims is a fact about
+//! this table, and a table is a thing the person in front of it is allowed to change. So the
+//! recorder's refusal names the holder *and* offers to take the chord off it
+//! ([`ChordVerdict::swap_offer`], [`Shortcuts::take_chord_from`]) — an offer only the recorder can
+//! make, because only there is somebody still holding the keys to accept it. At the file's door the
+//! same conflict is still a plain refusal.
+//!
+//! **A file is a set of sentences about the rows it names, not a sequence of edits.** A row the
+//! file mentions holds nothing until its own line says so, which is why `apply_overrides` reads in
+//! two passes — see it for the launch on which this build refused a file it had itself written a
+//! minute earlier.
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
@@ -1273,8 +1286,38 @@ impl Shortcuts {
     /// ordinary reason rather than as corruption: a file written by a newer
     /// build, or a row this one has since renamed. §5.4's "逐叶降级" applied to a
     /// table.
+    ///
+    /// # A row the file names has no chord but the one its own line gives it
+    ///
+    /// **The reading is in two passes, and it has to be** (found 2026-08-26 by
+    /// the swap the recorder now offers: a file this build had just written was
+    /// refused by this build on the next launch). Read line by line into a table
+    /// still holding the factory chords, a file is judged against a state that
+    /// never existed — `new-tab: Ctrl+Shift+W` is refused because `close-pane`
+    /// still has that chord two lines further down, where the file is about to
+    /// take it away. Order would decide the answer, and JSON's order is the
+    /// order a person typed in.
+    ///
+    /// So the file is read as what it is: a set of sentences about the rows it
+    /// names, in which **a row it names holds nothing until its own line says
+    /// so**. Every named row is cleared first, then the chords are dealt out.
+    /// Every table that is legal at all can be written down this way — including
+    /// a rotation, which no line-at-a-time reading can accept — and the files
+    /// that are still refused are exactly the ones describing a table two rows
+    /// of which answer to one press.
+    ///
+    /// A line refused *here* leaves its row at the default after all, offered
+    /// through the same judge: the promise above is kept where it can be, and a
+    /// default some other line of the same file has since claimed leaves the row
+    /// with no chord rather than with a second claim on one.
     pub(crate) fn apply_overrides(&mut self, overrides: &[Override]) -> Vec<OverrideFault> {
         let mut faults = Vec::new();
+        // Pass one: the refusals a row can earn on its own, with no reference to
+        // any other row — an id nobody answers to, text that is not a chord, and
+        // the two disciplines that are about the keyboard rather than about the
+        // table. A line refused here never reaches the clear below, which is
+        // what leaves its row untouched at the default.
+        let mut named: Vec<(usize, Option<Chord>)> = Vec::with_capacity(overrides.len());
         for entry in overrides {
             let Some(index) = self.rows.iter().position(|row| row.id == entry.id) else {
                 faults.push(OverrideFault {
@@ -1293,7 +1336,10 @@ impl Shortcuts {
                         });
                         continue;
                     };
-                    match chord_verdict(&self.rows, self.rows[index].id, &chord) {
+                    // Only the two keyboard disciplines can answer here: a
+                    // conflict is a fact about the table the file describes, and
+                    // that table does not exist yet.
+                    match chord_discipline(&chord) {
                         ChordVerdict::Free => {}
                         refused => {
                             faults.push(OverrideFault {
@@ -1306,7 +1352,37 @@ impl Shortcuts {
                     Some(chord)
                 }
             };
-            self.rows[index].chord = chord;
+            named.push((index, chord));
+        }
+        for (index, _) in &named {
+            self.rows[*index].chord = None;
+        }
+        // Pass two: deal the chords out. The judge now sees the table the file
+        // is building, so what it refuses is one press with two answers in it
+        // and never an artefact of which line came first.
+        let mut refused_rows: Vec<usize> = Vec::new();
+        for (index, chord) in named {
+            let Some(chord) = chord else {
+                continue;
+            };
+            match chord_verdict(&self.rows, self.rows[index].id, &chord) {
+                ChordVerdict::Free => self.rows[index].chord = Some(chord),
+                refused => {
+                    faults.push(OverrideFault {
+                        id: self.rows[index].id.to_owned(),
+                        reason: refused.hint().into_owned(),
+                    });
+                    refused_rows.push(index);
+                }
+            }
+        }
+        for index in refused_rows {
+            let Some(default) = BINDINGS[index].chord.clone() else {
+                continue;
+            };
+            if chord_verdict(&self.rows, self.rows[index].id, &default) == ChordVerdict::Free {
+                self.rows[index].chord = Some(default);
+            }
         }
         faults
     }
@@ -1346,6 +1422,25 @@ impl Shortcuts {
         if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
             row.chord = chord;
         }
+    }
+
+    /// **Move a chord from the row that has it to the row that wants it** (user
+    /// ruling 2026-08-26).
+    ///
+    /// One call and not `set(holder, None)` followed by `set(id, chord)` at the
+    /// call site, because the two writes are one edit: a table seen between them
+    /// has the chord on neither row, and the one caller that would have written
+    /// them apart is the one that also writes the file. Stated here, the file
+    /// cannot be written from between them.
+    ///
+    /// The chord it moves is the one `holder` is actually holding — the caller
+    /// hands the chord it recorded, and this asserts nothing about the two being
+    /// equal because they always are: `holder` came out of
+    /// [`ChordVerdict::AlreadyUsed`], which is how the recorder learned there was
+    /// a chord to take.
+    pub(crate) fn take_chord_from(&mut self, holder: &str, id: &str, chord: Chord) {
+        self.set(holder, None);
+        self.set(id, Some(chord));
     }
 
     /// Put one row back the way this build ships it.
@@ -1693,22 +1788,63 @@ pub(crate) enum ChordVerdict {
     ShellControlLetter,
     /// Another row in this table already answers to it, in a focus state this
     /// one is also in force in.
-    AlreadyUsed(Text),
+    ///
+    /// **It carries the holder's id as well as its name**, and the two are not
+    /// the same fact: the name is what the sentence says and the id is what the
+    /// swap acts on ([`Shortcuts::take_chord_from`]). A refusal that carried only
+    /// the title would leave the one caller that can *do* something about it
+    /// searching the table by a translated string.
+    AlreadyUsed { holder: &'static str, title: Text },
 }
 
 impl ChordVerdict {
     /// The sentence the recorder shows, and the reason a refused file line
     /// carries.
+    ///
+    /// **The file's door and the recorder read the same sentence**, and the
+    /// recorder adds one of its own on top ([`Self::swap_offer`]) rather than
+    /// having a second copy of this one: a hand-edited line cannot be offered a
+    /// swap — there is nobody holding the keyboard to accept it — so the offer
+    /// is the part that differs and it is the only part that is written twice.
     #[must_use]
     pub(crate) fn hint(&self) -> Cow<'static, str> {
         match self {
             Self::Free => Cow::Borrowed(""),
             Self::AltGrZone => Cow::Borrowed(hint_altgr_zone()),
             Self::ShellControlLetter => Cow::Borrowed(hint_shell_control_letter()),
-            Self::AlreadyUsed(title) => {
+            Self::AlreadyUsed { title, .. } => {
                 Cow::Owned(crate::i18n::shortcut_already_used(title.text()))
             }
         }
+    }
+
+    /// The id of the row that already answers to this chord, when one does.
+    #[must_use]
+    pub(crate) const fn holder(&self) -> Option<&'static str> {
+        match self {
+            Self::AlreadyUsed { holder, .. } => Some(holder),
+            _ => None,
+        }
+    }
+
+    /// **The whole sentence the recorder shows on a conflict**: who has the
+    /// chord, and what the key still in the user's hand would do about it.
+    ///
+    /// One clause and not [`Self::hint`] with an offer joined onto it, and the
+    /// real window is what settled that (2026-08-26, first smoke run): the
+    /// recorder writes into the place the scope tag was, that place is **one
+    /// line of the narrowest column in the dialog**, and
+    /// `Already used by Close pane · Enter takes it from that row` came back off
+    /// the glass as `Already used by Close pane · Enter take…` — cut in exactly
+    /// the half that says what to press. A sentence that names the holder *as*
+    /// the object of the verb says both facts in thirty characters and needs no
+    /// second clause to lose.
+    #[must_use]
+    pub(crate) fn swap_offer(&self) -> Option<String> {
+        let Self::AlreadyUsed { title, .. } = self else {
+            return None;
+        };
+        Some(crate::i18n::shortcut_take_it_from(title.text()))
     }
 }
 
@@ -1722,23 +1858,27 @@ impl ChordVerdict {
 /// on, because a panel that judged conflicts by a second rule would let a user
 /// build a table the test forbids.
 ///
-/// **No swap is offered.** A "use it here and take it away from there" would
-/// leave a second row silently unbound behind a dialog the user is already
-/// looking away from, and a shortcut a user did not ask to lose is a shortcut
-/// they will report as broken. The refusal names the row that has it, which is
-/// what they need in order to go and clear it themselves.
+/// **The third refusal now carries an offer** (user ruling 2026-08-26, and it
+/// overturns this comment's own first answer). What stood here was "no swap is
+/// offered", on the grounds that a "use it here and take it away from there"
+/// would leave a second row silently unbound behind a dialog the user has
+/// already looked away from. The objection was to the *silence*, and the silence
+/// is what changed: the refusal names the row that has the chord **and says, in
+/// the same line, that `Enter` will take it from that row** — so the cost is
+/// printed before it is paid, by a user who is still holding the keys. What it
+/// buys is the case the old answer had no answer for: rebinding onto a chord you
+/// already use is the ordinary reason to open this page, and "go and clear the
+/// other row yourself, then come back" is four more steps to do the thing the
+/// user just asked for.
+///
+/// The verdict is still a refusal and never a silent success — [`Shortcuts::set`]
+/// is not reached until the other row has been cleared, and clearing it is
+/// [`Shortcuts::take_chord_from`], which is one call and writes both rows.
 #[must_use]
 pub(crate) fn chord_verdict(rows: &[Binding], id: &str, chord: &Chord) -> ChordVerdict {
-    let ctrl_alt = ModifiersState::CONTROL.union(ModifiersState::ALT);
-    if chord.modifiers.contains(ctrl_alt) {
-        return ChordVerdict::AltGrZone;
-    }
-    if chord.modifiers == ModifiersState::CONTROL
-        && matches!(&chord.key, ChordKey::Character(text)
-            if text.chars().count() == 1
-                && text.chars().all(|glyph| glyph.is_ascii_alphabetic()))
-    {
-        return ChordVerdict::ShellControlLetter;
+    match chord_discipline(chord) {
+        ChordVerdict::Free => {}
+        refused => return refused,
     }
     let Some(subject) = rows.iter().find(|row| row.id == id) else {
         return ChordVerdict::Free;
@@ -1750,9 +1890,35 @@ pub(crate) fn chord_verdict(rows: &[Binding], id: &str, chord: &Chord) -> ChordV
     rows.iter()
         .filter(|row| row.id != id)
         .find(|row| claimed.conflicts_with(row))
-        .map_or(ChordVerdict::Free, |row| {
-            ChordVerdict::AlreadyUsed(row.title)
+        .map_or(ChordVerdict::Free, |row| ChordVerdict::AlreadyUsed {
+            holder: row.id,
+            title: row.title,
         })
+}
+
+/// **The two refusals that are about the keyboard and not about the table** —
+/// the audit's own disciplines, asked of a chord with nothing else in the room.
+///
+/// Lifted out of [`chord_verdict`] the day [`Shortcuts::apply_overrides`] needed
+/// to ask them *before* it had a table to ask the third one of. They are the two
+/// that can be answered that early precisely because they are not about any
+/// other row: `Ctrl+Alt` is what a German keyboard sends for `@`, and
+/// `Ctrl+letter` is the shell's control-code alphabet, and neither fact changes
+/// with what the rest of the table happens to hold.
+#[must_use]
+fn chord_discipline(chord: &Chord) -> ChordVerdict {
+    let ctrl_alt = ModifiersState::CONTROL.union(ModifiersState::ALT);
+    if chord.modifiers.contains(ctrl_alt) {
+        return ChordVerdict::AltGrZone;
+    }
+    if chord.modifiers == ModifiersState::CONTROL
+        && matches!(&chord.key, ChordKey::Character(text)
+            if text.chars().count() == 1
+                && text.chars().all(|glyph| glyph.is_ascii_alphabetic()))
+    {
+        return ChordVerdict::ShellControlLetter;
+    }
+    ChordVerdict::Free
 }
 
 impl Binding {
@@ -3246,8 +3412,10 @@ mod tests {
     /// (2) judge conflicts by "same chord" without the scope overlap — the
     ///     preview's `Ctrl+S` becomes unbindable from a window row that could
     ///     never meet it;
-    /// (3) offer a swap instead of refusing — nothing here goes red, which is
-    ///     why the refusal is also written into `chord_verdict`'s own doc.
+    /// (3) drop the holder's id from the verdict — the swap the recorder offers
+    ///     (user ruling 2026-08-26) would have to find the row it takes the
+    ///     chord off by matching a translated title, which is the one lookup
+    ///     that changes answer with the language the window started in.
     #[test]
     fn a_chord_is_refused_for_altgr_for_the_shells_alphabet_and_for_a_row_that_has_it() {
         let table = Shortcuts::defaults();
@@ -3275,9 +3443,12 @@ mod tests {
         );
         assert_eq!(
             table.verdict_for("new-tab", &Chord::new(CTRL_SHIFT, super::character("w"))),
-            ChordVerdict::AlreadyUsed(Text::ClosePane),
-            "the refusal names the row that has it, which is what a user needs \
-             in order to go and clear it"
+            ChordVerdict::AlreadyUsed {
+                holder: "close-pane",
+                title: Text::ClosePane,
+            },
+            "the refusal names the row that has it - by the name a reader sees \
+             and by the id the swap acts on"
         );
         // A row may be given the chord it already has: that is not a conflict
         // with itself, it is a no-op the recorder must not refuse.
@@ -4040,6 +4211,309 @@ mod tests {
                 .is_empty(),
             "and nothing in this table wears the Windows key"
         );
+    }
+
+    /// RED (user ruling 2026-08-26) — **a conflict names the row that has the
+    /// chord twice over: once for the reader and once for the machine**, and
+    /// the second one is the whole of what makes a swap possible.
+    ///
+    /// The title is a translated string and cannot be looked up in the table;
+    /// the id is the same word `keybindings.json` uses and is the same in every
+    /// language this window starts in.
+    ///
+    /// MUTATION: return `holder: ""` from `chord_verdict` — the offer still
+    /// reads correctly and takes the chord off nothing.
+    #[test]
+    fn a_conflict_carries_the_id_of_the_row_that_has_the_chord() {
+        let table = Shortcuts::defaults();
+        let taken = Chord::new(CTRL_SHIFT, super::character("w"));
+        let verdict = table.verdict_for("new-tab", &taken);
+        assert_eq!(verdict.holder(), Some("close-pane"));
+        assert!(
+            table.rows().iter().any(|row| row.id == "close-pane"),
+            "the id the verdict hands back is a row of the table it judged"
+        );
+        // A verdict with nobody behind it has no holder and no offer: the two
+        // other refusals are final, and a recorder that read an offer off them
+        // would be promising to take a chord away from Windows.
+        let altgr = Chord::new(
+            ModifiersState::CONTROL.union(ModifiersState::ALT),
+            super::character("p"),
+        );
+        assert_eq!(table.verdict_for("new-tab", &altgr).holder(), None);
+        assert_eq!(table.verdict_for("new-tab", &altgr).swap_offer(), None);
+        assert!(table.verdict_for("new-tab", &taken).swap_offer().is_some());
+    }
+
+    /// RED (user ruling 2026-08-26) — **the swap is one edit and it costs
+    /// exactly one row its key.**
+    ///
+    /// The row that had the chord is left *unbound* rather than restored to some
+    /// other default, because unbound is what the user chose: they were told
+    /// which row it would come off and they pressed `Enter` anyway. It is also
+    /// the state `keybindings.json` can say — `"chord": null` — so the swap
+    /// survives the next launch, which a table that quietly left the holder on
+    /// its default would not.
+    ///
+    /// MUTATION: make `take_chord_from` skip the `set(holder, None)` — the
+    /// table now has one chord on two rows, which is the ambiguity the flat
+    /// table has forbidden since it was flat.
+    #[test]
+    fn taking_a_chord_from_a_row_leaves_that_row_unbound_and_this_one_holding_it() {
+        let mut table = Shortcuts::defaults();
+        let taken = Chord::new(CTRL_SHIFT, super::character("w"));
+        let ChordVerdict::AlreadyUsed { holder, .. } = table.verdict_for("new-tab", &taken) else {
+            panic!("Ctrl+Shift+W is close-pane's in this build");
+        };
+        table.take_chord_from(holder, "new-tab", taken.clone());
+        let row = |id: &str| {
+            table
+                .rows()
+                .iter()
+                .find(|row| row.id == id)
+                .expect("both rows are in the table")
+        };
+        assert_eq!(row("new-tab").chord.as_ref(), Some(&taken));
+        assert_eq!(row("close-pane").chord, None, "one row, one key");
+        // And the table it left behind is one the file can hold and the judge
+        // agrees with: nothing claims the chord twice.
+        assert_eq!(
+            table.verdict_for("close-pane", &taken),
+            ChordVerdict::AlreadyUsed {
+                holder: "new-tab",
+                title: Text::RailNewTab,
+            },
+            "the chord has moved, and the judge now names the row it moved to"
+        );
+        let departures = table.overrides();
+        assert!(
+            departures
+                .iter()
+                .any(|entry| entry.id == "close-pane" && entry.chord.is_none())
+        );
+        assert!(
+            departures.iter().any(
+                |entry| entry.id == "new-tab" && entry.chord.as_deref() == Some("Ctrl+Shift+w")
+            )
+        );
+    }
+
+    /// RED (found 2026-08-26) — **a file that moves a chord from one row to
+    /// another lands whole, in either order**, and so does one that trades two
+    /// chords between two rows.
+    ///
+    /// This is the defect the swap uncovered on the first launch after it: read
+    /// a line at a time into a table still holding the factory chords, the
+    /// *user's own file* is refused — `new-tab: Ctrl+Shift+w` conflicts with a
+    /// `close-pane` that the very next line is about to clear. The file has to
+    /// be read as a set of sentences about the rows it names, which is what
+    /// `apply_overrides`' two passes do.
+    ///
+    /// The trade is the case no line-at-a-time reading can ever accept, in any
+    /// order: each of the two lines conflicts with the row the other one is
+    /// about. It is here because it is the proof that the two passes are the
+    /// *general* answer and not a re-ordering that happens to fix one shape.
+    ///
+    /// MUTATION: put the reading back to one pass — both halves go red, and the
+    /// second stays red however the lines are shuffled.
+    #[test]
+    fn a_file_that_moves_a_chord_between_rows_lands_whole_in_either_order() {
+        let moved = [
+            Override {
+                id: "new-tab".to_owned(),
+                chord: Some("Ctrl+Shift+w".to_owned()),
+            },
+            Override {
+                id: "close-pane".to_owned(),
+                chord: None,
+            },
+        ];
+        for order in [0, 1] {
+            let mut lines = moved.to_vec();
+            if order == 1 {
+                lines.reverse();
+            }
+            let mut table = Shortcuts::defaults();
+            let faults = table.apply_overrides(&lines);
+            assert!(faults.is_empty(), "order {order}: {faults:?}");
+            let chord_of = |id: &str| {
+                table
+                    .rows()
+                    .iter()
+                    .find(|row| row.id == id)
+                    .and_then(|row| row.chord.clone())
+            };
+            assert_eq!(
+                chord_of("new-tab"),
+                Some(Chord::new(CTRL_SHIFT, super::character("w")))
+            );
+            assert_eq!(chord_of("close-pane"), None);
+        }
+
+        // The trade: two rows, two chords, each line naming the other's.
+        let mut table = Shortcuts::defaults();
+        let faults = table.apply_overrides(&[
+            Override {
+                id: "new-tab".to_owned(),
+                chord: Some("Ctrl+Shift+w".to_owned()),
+            },
+            Override {
+                id: "close-pane".to_owned(),
+                chord: Some("Ctrl+Shift+n".to_owned()),
+            },
+        ]);
+        assert!(faults.is_empty(), "{faults:?}");
+        assert_eq!(
+            table.lookup(
+                &Key::Character("w".into()),
+                &Key::Character("w".into()),
+                CTRL_SHIFT,
+                Focus::default()
+            ),
+            Some(Action::NewTab)
+        );
+        assert_eq!(
+            table.lookup(
+                &Key::Character("n".into()),
+                &Key::Character("n".into()),
+                CTRL_SHIFT,
+                Focus::default()
+            ),
+            Some(Action::ClosePane)
+        );
+
+        // And a file that really does claim one chord twice is still refused —
+        // the second line, and only the second, with the first row left holding
+        // the key it asked for.
+        let mut table = Shortcuts::defaults();
+        let faults = table.apply_overrides(&[
+            Override {
+                id: "new-tab".to_owned(),
+                chord: Some("Ctrl+Shift+j".to_owned()),
+            },
+            Override {
+                id: "close-pane".to_owned(),
+                chord: Some("Ctrl+Shift+j".to_owned()),
+            },
+        ]);
+        assert_eq!(faults.len(), 1);
+        assert_eq!(faults[0].id, "close-pane");
+        assert_eq!(
+            table
+                .rows()
+                .iter()
+                .find(|row| row.id == "close-pane")
+                .and_then(|row| row.chord.clone()),
+            Some(Chord::new(CTRL_SHIFT, super::character("w"))),
+            "a refused line leaves its row at the default, when the default is \
+             still free to be given back"
+        );
+    }
+
+    /// RED — **a customised table survives the round trip through
+    /// `keybindings.json` and comes back the same table.**
+    ///
+    /// The whole of what the file has to preserve, in one walk: a moved chord, a
+    /// row whose key was taken away on purpose, and a slot that shipped with no
+    /// chord and was given one. The third is the one a round trip most easily
+    /// loses — `Binding::unassigned`'s rows have `None` as their *default*, so a
+    /// writer that thought "absent means unbound" would drop the line that gave
+    /// one a key.
+    ///
+    /// MUTATION: have `overrides()` skip rows whose default chord is `None` —
+    /// the picture-in-picture slot comes back empty on the next launch.
+    #[test]
+    fn a_customised_table_survives_the_round_trip_through_the_file() {
+        let mut table = Shortcuts::defaults();
+        let taken = Chord::new(CTRL_SHIFT, super::character("w"));
+        table.take_chord_from("close-pane", "new-tab", taken);
+        table.set(
+            "summon-pip-1",
+            Some(Chord::new(ALT_SHIFT, ChordKey::Named(NamedKey::F8))),
+        );
+
+        // Out through the vocabulary the file is written in, and back in the
+        // vocabulary a launch reads it in — the two conversions `persist.rs`
+        // makes, with the disk taken out of the middle.
+        let file = bt_persist::KeybindingsV1 {
+            schema_version: bt_persist::KEYBINDINGS_SCHEMA_VERSION,
+            bindings: table
+                .overrides()
+                .into_iter()
+                .map(|entry| bt_persist::BindingOverrideV1 {
+                    action: entry.id,
+                    chord: entry.chord,
+                })
+                .collect(),
+        };
+        let wire = serde_json::to_string(&file).expect("the file serialises");
+        let read: bt_persist::KeybindingsV1 = serde_json::from_str(&wire).expect("and reads back");
+        let overrides: Vec<Override> = read
+            .bindings
+            .into_iter()
+            .map(|entry| Override {
+                id: entry.action,
+                chord: entry.chord,
+            })
+            .collect();
+
+        let mut relaunched = Shortcuts::defaults();
+        let faults = relaunched.apply_overrides(&overrides);
+        assert!(
+            faults.is_empty(),
+            "a file this build wrote is a file this build can read: {faults:?}"
+        );
+        assert_eq!(relaunched, table, "the same table, chord for chord");
+    }
+
+    /// RED (§7.1.5e′, and the hot-effect half of the 2026-08-26 slice) — **every
+    /// surface that prints a chord reads the effective table, so an edit is on
+    /// the glass without anything being told about it.**
+    ///
+    /// Three readers, one table: the shortcut page's own line, the hint card,
+    /// and dispatch itself. There is no revision counter and no invalidation
+    /// call anywhere in this module, and that is the design — the caches that
+    /// would need one do not exist, because all three are derived per frame from
+    /// `Shortcuts::rows`.
+    ///
+    /// MUTATIONS: fold `hint_lines`' members out of `BINDINGS`, or take
+    /// `editor_rows`' caps off `BINDINGS[index]` — each on its own puts the
+    /// factory chord back on one surface while the window answers to the other,
+    /// which is a shortcut table with two answers.
+    #[test]
+    fn a_rebound_chord_is_on_every_surface_that_prints_one() {
+        let mut table = Shortcuts::defaults();
+        let moved = Chord::new(CTRL_SHIFT, super::character("y"));
+        table.set("new-tab", Some(moved));
+
+        let line = table
+            .editor_rows()
+            .into_iter()
+            .find(|line| line.ids.first() == Some(&"new-tab"))
+            .expect("the page still lists the row");
+        assert_eq!(line.caps, vec!["Ctrl", "Shift", "Y"]);
+        assert!(
+            line.overridden,
+            "and marks it as departing from the default"
+        );
+
+        let card = table.hint_lines(CTRL_SHIFT, ON_A_TERMINAL);
+        assert!(
+            card.iter()
+                .any(|hint| hint.title == Text::RailNewTab.text() && hint.key == "Y"),
+            "the hint card prints the new key: {card:?}"
+        );
+        assert!(
+            !card.iter().any(|hint| hint.key == "N"),
+            "and never the one the build shipped"
+        );
+
+        let press = |glyph: &str| {
+            let key = Key::Character(glyph.into());
+            table.lookup(&key, &key, CTRL_SHIFT, ON_A_TERMINAL)
+        };
+        assert_eq!(press("y"), Some(Action::NewTab));
+        assert_eq!(press("n"), None, "and the old chord is nobody's");
     }
 
     /// PIN §7.1.5e′ — **every cap the card prints is a cap somebody can find on

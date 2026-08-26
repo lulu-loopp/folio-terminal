@@ -1818,6 +1818,40 @@ pub enum Text {
     CopilotHooksRemovedToast,
     /// See [`Self::CodexNotifyFailedToast`].
     CopilotHooksFailedToast,
+
+    // ── the shortcut recorder's own words (user ruling 2026-08-26) ─────────
+    //
+    // One contiguous block at the end, per this table's standing rule. **Three
+    // entries**, all of them strings that were already on the glass as English
+    // literals in `settings.rs`: the recorder writes sentences a reader has to
+    // *act* on, and a sentence that stayed in one language while the row above
+    // it turned over was the one place the Shortcuts page said something the
+    // rest of the dialog did not. The conflict's own offer is **not** here — it
+    // carries the name of a row, so it lives with the value-carrying family
+    // below (`shortcut_take_it_from`).
+    /// **What the recorder's own line says while it is waiting** — its three
+    /// verbs, joined by the product's separator.
+    ShortcutRecordPrompt,
+    /// **A press this grammar has no name for.** Says the *file* cannot hold it
+    /// and not that the key is invalid: the key is real and the user just
+    /// pressed it, and a refusal that called it wrong would be arguing with
+    /// their keyboard.
+    ShortcutRecordUnusable,
+    /// **The Shortcuts page's foot note** (user ruling 2026-08-26).
+    ///
+    /// Written after two measurements on the real machine (2026-08-19 and
+    /// 2026-08-25) in which `Ctrl+Shift+Enter` was pressed and **no key event
+    /// reached the process at all** — the chord is taken above this window, so
+    /// the recorder has nothing to refuse and nothing to show. A recorder that
+    /// stayed silent about that teaches a reader that their keyboard is broken
+    /// or that this page is; the note says which of the two it is, in the one
+    /// place that is on the glass whether a row is listening or not.
+    ///
+    /// **On the page's foot and not inside the recording box**, because it is
+    /// true of the page and not of a row: the box's own line is the recorder's,
+    /// it is one line, and it is already spoken for by the refusal a press
+    /// earns.
+    ShortcutUndelivered,
 }
 
 impl Text {
@@ -3259,6 +3293,21 @@ impl Text {
                 "copilot's hooks were not changed",
                 "copilot 的 hooks 没有被改动",
             ),
+
+            // ── the shortcut recorder ──────────────────────────────────────
+            Self::ShortcutRecordPrompt => pick(
+                lang,
+                "Enter keeps it · Esc cancels · Del clears",
+                "Enter 留下 · Esc 取消 · Del 清空",
+            ),
+            Self::ShortcutRecordUnusable => {
+                pick(lang, "That key cannot be written down", "这个键写不进文件")
+            }
+            Self::ShortcutUndelivered => pick(
+                lang,
+                "Windows does not hand every chord to a program; one that never appears in the box cannot be recorded here",
+                "Windows 不会把每一个和弦都交给程序;在框里始终不出现的和弦,这里录不到",
+            ),
             Self::RowSearchEngine => pick(lang, "Search engine", "搜索引擎"),
             // Names the field rather than the feature, because that is where a
             // reader meets it: they typed a word into the place an address goes
@@ -3284,7 +3333,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 502] = [
+    pub const ALL: [Self; 505] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3787,6 +3836,9 @@ impl Text {
         Self::CopilotHooksAddedToast,
         Self::CopilotHooksRemovedToast,
         Self::CopilotHooksFailedToast,
+        Self::ShortcutRecordPrompt,
+        Self::ShortcutRecordUnusable,
+        Self::ShortcutUndelivered,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -4720,6 +4772,32 @@ fn shortcut_already_used_in(lang: Lang, title: &str) -> String {
     match lang {
         Lang::English => format!("Already used by {title}"),
         Lang::Chinese => format!("已被「{title}」占用"),
+    }
+}
+
+/// **The offer a conflict carries** (user ruling 2026-08-26): the key still
+/// under the reader's finger, and the row the chord would come off.
+///
+/// **One clause and not [`shortcut_already_used`] with an offer joined to it.**
+/// The recorder writes into the muted line under a shortcut's name — one line of
+/// the narrowest column in the dialog — and the joined form came off the real
+/// window as `Already used by Close pane · Enter take…`, cut in exactly the half
+/// that says what to press. Naming the holder as the *object of the verb* says
+/// both facts in thirty characters, and a sentence with no second clause has no
+/// second clause to lose.
+///
+/// It names the key rather than a button because there is no button: the
+/// recorder holds the whole keyboard while it is open, and `Enter` is already
+/// the only way an ordinary candidate is committed.
+#[must_use]
+pub fn shortcut_take_it_from(title: &str) -> String {
+    shortcut_take_it_from_in(current(), title)
+}
+
+fn shortcut_take_it_from_in(lang: Lang, title: &str) -> String {
+    match lang {
+        Lang::English => format!("Enter takes it from {title}"),
+        Lang::Chinese => format!("按 Enter 从「{title}」拿过来"),
     }
 }
 
@@ -6106,6 +6184,10 @@ mod tests {
                 (
                     "shortcut_already_used",
                     shortcut_already_used_in(lang, "Close pane"),
+                ),
+                (
+                    "shortcut_take_it_from",
+                    shortcut_take_it_from_in(lang, "Close pane"),
                 ),
                 (
                     "git_more_changed_files",
