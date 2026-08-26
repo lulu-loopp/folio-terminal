@@ -1533,7 +1533,9 @@ B2 ──▶ 独立等命令面板
 
 **上游诉求账(记账,不占本块工期,接 §3.3 路线 C)**:①**Claude Code** —— 把 OSC 1337 加进 `terminalSequence` 白名单(§10.4.2 已记);②**codex** —— `notification_method` 的 `auto` 判定表里加 Folio,**更好的是改成按 OSC 9 的能力探询而不是按终端名白名单**(今天那张白名单让所有新终端都拿到最差的那一档);③**gemini-cli** —— 给它一个 hook/extension 面,哪怕只有一个 `notification` 事件。
 
-#### 11.10.4 【留裁 B1】第八记号 `Attached` 的判据罩不住 codex
+#### 11.10.4 【B1 已裁:乙】第八记号 `Attached` 的判据罩不住 codex
+
+> **2026-08-25 用户裁决:乙。** 判据 = **这个 pane 的注意力信号来源**(活凭据,或 `WAIT_TTL` 之内由管道/OSC/hook 说过话),**`alternate_screen` 从判据里整个退出**——不是下表乙行写的「alt 屏 **或** 有端点」,是替换。用户给的理由正是下面这段事实的直接推论:codex 不住备用屏,甲案会把用户正盯着的 codex 判成「这里没有全屏程序」。落点 `AttentionLedger::is_agent_seat`(账本两臂 + `Event::is_the_programs_voice()`),行为与推导写在 **DESIGN §7.1.5n「B1 落裁」**那一段;记号本身仍按 A1 归 §7.1.5b 的独立扩条,未施工。下表原样留作两案的对照。
 
 **事实(普查 §2.5,实测)**:codex 0.144.4 在 ConPTY 上跑**内联模式**,四段录音的 `?1049` 命中数**全部是 0**;而 Claude Code 的 `?1049h` 在第 86 字节、整场不退。于是 §3.5 提的 `Attached`,判据 `alternate_screen == true`,**在 codex pane 上恒为假**。
 

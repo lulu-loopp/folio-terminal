@@ -757,6 +757,9 @@ mod tests {
         let mut ledger = AttentionLedger::default();
         let mut place = 0;
         let mut trace = Vec::new();
+        // The ledger reads no clock of its own; every arrival below lands at one instant, which is
+        // the truth for a sequence a test walks in a few microseconds.
+        let now = Instant::now();
 
         // What a hook would run: `folio attention claude-code:<event>`, whose whole effect is one
         // line on this pipe.
@@ -784,7 +787,13 @@ mod tests {
         let asks = say("PermissionRequest");
         trace.extend(
             ledger
-                .apply(at, Reach::Flash, asks.ledger.expect("a wait"), &mut place)
+                .apply(
+                    at,
+                    Reach::Flash,
+                    asks.ledger.expect("a wait"),
+                    &mut place,
+                    now,
+                )
                 .lines,
         );
         assert_eq!(ledger.state(), State::Requested(1));
@@ -799,6 +808,7 @@ mod tests {
                         focused: false,
                     },
                     &mut place,
+                    now,
                 )
                 .lines,
         );
@@ -817,6 +827,7 @@ mod tests {
                     Reach::Flash,
                     Event::Answer(AnswerKind::Keyboard),
                     &mut place,
+                    now,
                 )
                 .lines,
         );
@@ -826,7 +837,13 @@ mod tests {
         let stop = say("Stop");
         trace.extend(
             ledger
-                .apply(at, Reach::Flash, stop.ledger.expect("a clear"), &mut place)
+                .apply(
+                    at,
+                    Reach::Flash,
+                    stop.ledger.expect("a clear"),
+                    &mut place,
+                    now,
+                )
                 .lines,
         );
         trace.extend(
@@ -848,7 +865,13 @@ mod tests {
         let asks = say("PermissionRequest");
         trace.extend(
             ledger
-                .apply(at, Reach::Flash, asks.ledger.expect("a wait"), &mut place)
+                .apply(
+                    at,
+                    Reach::Flash,
+                    asks.ledger.expect("a wait"),
+                    &mut place,
+                    now,
+                )
                 .lines,
         );
         assert_eq!(ledger.state(), State::Requested(2));

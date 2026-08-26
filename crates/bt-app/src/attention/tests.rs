@@ -14,6 +14,8 @@
 
 use super::*;
 
+use std::time::Duration;
+
 fn site() -> Site {
     Site {
         tab: 1,
@@ -21,11 +23,17 @@ fn site() -> Site {
     }
 }
 
-/// One pane's ledger and the window serial it draws places from.
+/// One pane's ledger, the window serial it draws places from, and the clock it is read against.
+///
+/// The clock does not advance on its own: every arrival lands at [`Pane::now`], and a test that
+/// wants time to have passed says so with [`Pane::wait`]. That is the whole benefit of the ledger
+/// reading no clock of its own — the ten-minute arm of `is_agent_seat` is a one-line assertion
+/// rather than a ten-minute test.
 struct Pane {
     ledger: AttentionLedger,
     next_ticket: u64,
     reach: Reach,
+    now: Instant,
 }
 
 impl Pane {
@@ -35,20 +43,26 @@ impl Pane {
             // The window's counter starts where the running build's does.
             next_ticket: 0,
             reach: Reach::Flash,
+            now: Instant::now(),
         }
+    }
+
+    /// Move this pane's clock forward. Nothing else happens: no arrival, no pass.
+    fn wait(&mut self, how_long: Duration) {
+        self.now += how_long;
     }
 
     /// One arrival, and the lines it decided.
     fn at(&mut self, event: Event) -> Vec<String> {
         self.ledger
-            .apply(site(), self.reach, event, &mut self.next_ticket)
+            .apply(site(), self.reach, event, &mut self.next_ticket, self.now)
             .lines
     }
 
     /// One arrival, and everything it decided.
     fn outcome(&mut self, event: Event) -> Outcome {
         self.ledger
-            .apply(site(), self.reach, event, &mut self.next_ticket)
+            .apply(site(), self.reach, event, &mut self.next_ticket, self.now)
     }
 
     fn state(&self) -> State {
@@ -119,6 +133,78 @@ fn acknowledged() -> Pane {
     );
     assert_eq!(pane.state(), State::Acknowledged(1));
     pane
+}
+
+/// PIN (**user ruling 乙, 2026-08-25**; `attention` plan §11.10.4) — **an agent's seat is a pane
+/// that has been spoken to, and the alternate screen has nothing to do with it.**
+///
+/// The three cells the ruling names, and the third is the one that decides between the two
+/// candidates:
+///
+/// 1. **A main-screen TUI holding a credential is a seat.** This is `codex`: inline, never a
+///    DECSET 1049 in four recordings (survey §2.5), and the reader is looking straight at it. 甲
+///    answers "no" here — which is the whole reason the criterion moved.
+/// 2. **A shell nobody has ever signalled from is not a seat**, however long it has been open. The
+///    criterion has to be able to say no, or it is not a criterion.
+/// 3. **A pane on the alternate screen that has never signalled is not a seat either.** This is
+///    甲's one exclusive cell — the case where the two candidates give different answers with the
+///    ledger identical — and pinning it is what makes this a *replacement* of 甲 rather than a
+///    widening of it. Nothing below constructs an alternate screen, and **that is the assertion**:
+///    the criterion takes no such parameter, so a `less` or a `vim` with an empty ledger is cell 2
+///    to the letter and there is no third answer for a screen mode to reach.
+///
+/// The fourth cell is time: a program that spoke and went quiet is still a seat for as long as one
+/// of its credentials would have stood, and one tick past that it is not.
+///
+/// MUTATION: put `alternate_screen` back in as an `or` (§11.10.4's own 乙 row proposed exactly
+/// that) and cell 3 is the only assertion here that goes red — which is the point of writing it.
+#[test]
+fn a_pane_is_an_agents_seat_when_an_agent_has_spoken_in_it_and_never_because_of_a_screen_mode() {
+    let plain = Pane::new();
+    assert!(
+        !plain.ledger.is_agent_seat(plain.now),
+        "cell 2 — and cell 3: a shell with an empty ledger is not a seat, and the ledger of a \
+         full-screen program that has said nothing is this same ledger"
+    );
+
+    // ① A main-screen TUI that is holding somebody up.
+    let mut codex = Pane::new();
+    codex.at(strong_wait(WaitKind::Permission));
+    assert!(
+        codex.ledger.is_agent_seat(codex.now),
+        "cell 1 — a live credential is a seat, and no screen was consulted to say so"
+    );
+
+    // ② It answers, the program takes its request back, and the pane goes quiet.
+    codex.at(Event::Answer(AnswerKind::Keyboard));
+    codex.at(clear_all(ClearReason::Hook));
+    assert_eq!(codex.state(), State::Idle);
+    assert!(
+        codex.ledger.is_agent_seat(codex.now),
+        "an agent between turns has not stopped being the thing sitting in this pane"
+    );
+    codex.wait(WAIT_TTL);
+    assert!(
+        codex.ledger.is_agent_seat(codex.now),
+        "the memory is the credential's own ten minutes, and the boundary is inside it"
+    );
+    codex.wait(Duration::from_secs(1));
+    assert!(
+        !codex.ledger.is_agent_seat(codex.now),
+        "and one tick past it the pane is a pane again"
+    );
+
+    // ③ **A timer is not a voice.** The clear that fires when a credential ages out is this side
+    // talking to itself, and a seat that renewed itself out of its own expiry would never end.
+    let mut expired = Pane::new();
+    expired.at(strong_wait(WaitKind::Permission));
+    expired.wait(WAIT_TTL);
+    expired.at(clear_all(ClearReason::Ttl));
+    expired.wait(Duration::from_secs(1));
+    assert!(
+        !expired.ledger.is_agent_seat(expired.now),
+        "the TTL clear must not have re-stamped the pane as freshly spoken in"
+    );
 }
 
 // ---------------------------------------------------------------------------

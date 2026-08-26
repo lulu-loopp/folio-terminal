@@ -50,19 +50,23 @@
 //!
 //! # What is deliberately not here
 //!
-//! Nothing in this file reads the window. The four-state machine is a pure function of the fields
-//! below, the trace lines are returned rather than written, and the two facts that belong to the
-//! frame — whether the tab is active and the window focused, and how far a notification can reach —
-//! are handed in. That is what lets the arrival grid of §11.1.4 be tested cell by cell instead of
-//! by driving a terminal.
+//! Nothing in this file reads the window, **and nothing in it reads a clock**. The four-state
+//! machine is a pure function of the fields below, the trace lines are returned rather than
+//! written, and the facts that belong to the frame — whether the tab is active and the window
+//! focused, how far a notification can reach, and what time it is — are handed in. That is what
+//! lets the arrival grid of §11.1.4 be tested cell by cell instead of by driving a terminal, and it
+//! is why [`AttentionLedger::is_agent_seat`] can be asked about a pane whose last signal was nine
+//! minutes ago without anybody having to wait nine minutes.
 
 // **A2 took the blanket `dead_code` excuse away**, which is what it said it would do: this module
 // is the running build's attention queue now, and the two things left unconstructed below carry
 // their own one-line reasons at the point where the gap is rather than over the whole file.
 
-use std::fmt;
+use std::{fmt, time::Instant};
 
 use bt_layout::SeatId;
+
+use crate::attention_wire::WAIT_TTL;
 
 /// How many outstanding strong credentials one pane may hold (`attention` plan §11.4.1).
 ///
@@ -429,6 +433,20 @@ impl ClearReason {
             Self::Overflow => "overflow",
         }
     }
+
+    /// **Whether the far end is the one that said this** — the half of a clear that counts as an
+    /// agent having spoken in this pane ([`AttentionLedger::is_agent_seat`]).
+    ///
+    /// Three of the six are the program's own sentence: it withdrew the request, its hook said the
+    /// turn was over, or it went back to work. The other three are **this** side talking to itself —
+    /// a timer that fired, a shell that ended, a bound this pane hit — and reading one of those as
+    /// "an agent just spoke here" would let the seat renew itself out of its own expiry.
+    fn is_the_programs_own(self) -> bool {
+        match self {
+            Self::Program | Self::Hook | Self::AutoResume => true,
+            Self::Ttl | Self::SessionEnd | Self::Overflow => false,
+        }
+    }
 }
 
 /// **The kinds of user action that count as answering** (`attention` plan §11.3).
@@ -679,6 +697,30 @@ pub(crate) enum Event {
     MarkSeen,
 }
 
+impl Event {
+    /// **Whether this arrival is a program talking, rather than the window or the person**
+    /// (`attention` plan §11.10.4, user ruling 乙, 2026-08-25).
+    ///
+    /// The seat criterion is "an agent has spoken in this pane", and the only place that question
+    /// can be answered without getting it wrong is **on the enum** — the same shape and the same
+    /// reason as `UserInputKind::is_answer()` one lane over: a path added later has to take a
+    /// position here, in one `match` the compiler checks, rather than be remembered at whichever
+    /// call site happens to construct it.
+    ///
+    /// The four that count are the two withdrawable tiers and their withdrawals — a program saying
+    /// `RequestAttention=yes` or `=no` over its own tty, and a `folio attention wait` or its clear
+    /// over the pane's pipe. `Settle` is this window's own heartbeat, `Answer` is the person,
+    /// `LeafGone` is the pane dying and `MarkSeen` is a look; none of the four is anybody's voice
+    /// but ours. A clear is asked one question further — see [`ClearReason::is_the_programs_own`].
+    fn is_the_programs_voice(&self) -> bool {
+        match self {
+            Self::WeakYes(_) | Self::WeakNo | Self::StrongWait(_) => true,
+            Self::StrongClear { reason, .. } => reason.is_the_programs_own(),
+            Self::Settle { .. } | Self::Answer(_) | Self::LeafGone | Self::MarkSeen => false,
+        }
+    }
+}
+
 /// A desktop interruption the ledger has decided to allow, exactly once.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Raised {
@@ -790,6 +832,19 @@ pub(crate) struct AttentionLedger {
     /// swallowing something it was never about — see [`Self::announce_turn_end`] for the whole of
     /// why a wordless second source is the same fact and a second *sentence* is not.
     announced_words: Option<String>,
+    /// **When a program last spoke in this pane**, or `None` when none ever has (`attention` plan
+    /// §11.10.4, user ruling 乙, 2026-08-25).
+    ///
+    /// Stamped in [`Self::apply`] for every arrival [`Event::is_the_programs_voice`] admits, and
+    /// nowhere else — one place, so that a lane added later cannot forget it. It is the *only*
+    /// field here that is a fact about wall-clock time, and it is a stamp rather than a countdown
+    /// because a countdown would have to be driven, and a ledger nobody drives would answer this
+    /// question with whatever it was told last.
+    ///
+    /// **A drop does not clear it**, exactly as `last_episode` is not cleared: the pane goes on
+    /// being the pane an agent was working in after the agent stops asking for anything, and that
+    /// is the whole content of [`Self::is_agent_seat`]'s second arm.
+    spoke_at: Option<Instant>,
 }
 
 impl Default for AttentionLedger {
@@ -809,6 +864,7 @@ impl Default for AttentionLedger {
             lent: None,
             announced_turn_end: false,
             announced_words: None,
+            spoke_at: None,
         }
     }
 }
@@ -883,6 +939,52 @@ impl AttentionLedger {
         self.ticket
     }
 
+    /// **Whether an agent sits in this pane** — the one criterion, and it is the ledger's
+    /// (`attention` plan §11.10.4, **user ruling 乙, 2026-08-25**).
+    ///
+    /// The question the eighth mark `Attached` asks, and the plan left two candidate answers for a
+    /// person to choose between. **甲** was `alternate_screen == true`: honest, free, and a fact
+    /// about the screen rather than about who is using it. **乙** is this — the pane's own
+    /// attention signals. The user ruled 乙 on an observation the survey had already measured and
+    /// the plan had not drawn the consequence from: `codex` runs **inline**, on the main screen,
+    /// and never sets DECSET 1049 at all (survey §2.5 — `?1049` hits are zero across four
+    /// recordings). Under 甲 a `codex` the reader is looking straight at answers "no full-screen
+    /// program here", and every rule downstream of the mark inherits that mistake.
+    ///
+    /// **So the alternate screen is not a criterion any more**, and the substitution is not a
+    /// widening of 甲 (which is what §11.10.4's 乙 row proposed — `alt-screen` *or* a live
+    /// endpoint). It is a replacement: a screen mode says which buffer the bytes are landing in,
+    /// and this asks whether anything in this pane has ever spoken the language a request is
+    /// written in. The two are independent, and keeping the first as an `or` would have kept
+    /// exactly the class of answer the ruling was made to remove.
+    ///
+    /// **Two arms, and the second is why there is a clock in this at all.**
+    ///
+    /// * A live credential — [`Self::any_asserted`], which is true while either tier is asserting
+    ///   and which the pane's `WaitClock` already ages out at [`WAIT_TTL`]. A pane that is holding
+    ///   somebody up right now is beyond argument an agent's seat.
+    /// * A signal inside [`WAIT_TTL`] of now. An agent that has answered and gone quiet is still
+    ///   the thing sitting in that pane, and a criterion that flickered off between one request and
+    ///   the next would be a mark that blinked once per turn.
+    ///
+    /// **The same ten minutes as a standing credential, on purpose**: the number means "how long a
+    /// thing this producer said is still current", and it would be a second number to keep in step
+    /// for no second reason. **An announcement is deliberately not an arm** — red line 14 says an
+    /// event-level arrival mints nothing and holds nothing, and "there is an agent in this pane" is
+    /// as much a state as any other; a bare `BEL` from `make` establishing a seat would be that red
+    /// line broken by the one door built to respect it.
+    #[allow(
+        dead_code,
+        reason = "the eighth mark `Attached` is §7.1.5b's own row and is not built; the ruling \
+                  it is built from is, and its witness is the three cells below"
+    )]
+    pub(crate) fn is_agent_seat(&self, now: Instant) -> bool {
+        self.any_asserted()
+            || self
+                .spoke_at
+                .is_some_and(|when| now.saturating_duration_since(when) <= WAIT_TTL)
+    }
+
     /// The episode a `claim` line names (`attention` plan §13.2.1).
     ///
     /// Three branches and **the third is the common one**: a claim line is drawn from the whole
@@ -923,15 +1025,26 @@ impl AttentionLedger {
     /// stored, because none is stored.
     ///
     /// `next_ticket` is the window's serial and is handed in rather than held, because places are
-    /// ordered across the whole window and a per-pane counter would order nothing.
+    /// ordered across the whole window and a per-pane counter would order nothing. `now` is handed
+    /// in for the same reason every other fact about the frame is (see this module's header): the
+    /// ledger reads no clock of its own, and the one thing it does with the instant is stamp the
+    /// arrivals a program made, so that [`Self::is_agent_seat`] can answer without a caller having
+    /// to remember to tell it.
     pub(crate) fn apply(
         &mut self,
         at: Site,
         reach: Reach,
         event: Event,
         next_ticket: &mut u64,
+        now: Instant,
     ) -> Outcome {
         let mut out = Outcome::default();
+        // **Before the arm and not inside one of them.** Every lane that can carry a program's
+        // voice is one `match` away from being added, and a stamp written in four arms is a stamp
+        // the fifth forgets.
+        if event.is_the_programs_voice() {
+            self.spoke_at = Some(now);
+        }
         match event {
             Event::WeakYes(generation) => self.weak_yes(at, generation, &mut out),
             Event::WeakNo => self.weak_no(at, &mut out),
