@@ -7581,7 +7581,7 @@ pub fn term_menu_build(
 /// which is why the mock-up's own menus were click-only to begin with. Longer,
 /// and the gesture stops reading as "rest here" and starts reading as "wait
 /// here", which is a different and worse instruction.
-pub const CHEVRON_HOVER_OPEN: Duration = Duration::from_millis(250);
+pub const CHEVRON_HOVER_OPEN_DELAY: Duration = Duration::from_millis(250);
 
 /// How long a menu a `⌄` opened stays up once the pointer has left **both** it
 /// and the button.
@@ -7676,7 +7676,7 @@ impl ChevronGate {
     pub fn due(&self, now: Instant) -> Option<ChevronAction> {
         if self
             .resting_since
-            .is_some_and(|since| now.duration_since(since) >= CHEVRON_HOVER_OPEN)
+            .is_some_and(|since| now.duration_since(since) >= CHEVRON_HOVER_OPEN_DELAY)
         {
             return Some(ChevronAction::Open);
         }
@@ -7696,7 +7696,7 @@ impl ChevronGate {
     #[must_use]
     pub fn deadline(&self) -> Option<Instant> {
         match (self.resting_since, self.leaving_since) {
-            (Some(since), _) => Some(since + CHEVRON_HOVER_OPEN),
+            (Some(since), _) => Some(since + CHEVRON_HOVER_OPEN_DELAY),
             (None, Some(since)) => Some(since + CHEVRON_LEAVE_GRACE),
             (None, None) => None,
         }
@@ -14155,19 +14155,19 @@ mod tests {
     /// all, because a hand is never perfectly still.
     #[test]
     fn a_chevron_opens_after_a_rest_of_exactly_the_ruled_delay_and_not_before() {
-        assert_eq!(CHEVRON_HOVER_OPEN, Duration::from_millis(250));
+        assert_eq!(CHEVRON_HOVER_OPEN_DELAY, Duration::from_millis(250));
         let start = Instant::now();
         let mut gate = ChevronGate::default();
         gate.observe(ChevronPointer::Button, false, start);
         assert_eq!(gate.due(start), None);
         assert_eq!(gate.due(start + Duration::from_millis(249)), None);
         assert_eq!(
-            gate.due(start + CHEVRON_HOVER_OPEN),
+            gate.due(start + CHEVRON_HOVER_OPEN_DELAY),
             Some(ChevronAction::Open)
         );
         assert_eq!(
             gate.deadline(),
-            Some(start + CHEVRON_HOVER_OPEN),
+            Some(start + CHEVRON_HOVER_OPEN_DELAY),
             "and the loop is told exactly when to wake for it"
         );
 
@@ -14182,7 +14182,7 @@ mod tests {
             );
         }
         assert_eq!(
-            jittering.due(start + CHEVRON_HOVER_OPEN),
+            jittering.due(start + CHEVRON_HOVER_OPEN_DELAY),
             Some(ChevronAction::Open),
             "the rest accumulates across moves inside the button"
         );

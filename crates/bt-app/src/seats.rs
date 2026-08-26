@@ -12382,7 +12382,12 @@ pub const FILES_ROW_ICON_LOGICAL_PX: f32 = 15.0;
 /// `.files-tree { font-size: 13px }`.
 pub const FILES_TREE_FONT_LOGICAL_PX: f32 = 13.0;
 /// `.frow .tri { transition: transform 120ms cubic-bezier(.2,0,0,1) }`.
-pub const FILES_ROW_TRI_TURN_MS: u64 = 120;
+///
+/// **The base span**, not the stylesheet's 120: this triangle and the profile
+/// picker's chevron are the same gesture — a two-state arrow turning over to say
+/// where a list went — and they used to run at 120 and 140 for no reason either
+/// file could state. One rhythm for one gesture ([`bt_render::motion`]).
+pub const FILES_ROW_TRI_TURN_MS: u64 = bt_render::MOTION_BASE_MS;
 /// `.files-tree:focus-visible .frow.sel { box-shadow: inset 0 0 0 1.5px }` (C32).
 pub const FILES_ROW_FOCUS_RING_LOGICAL_PX: f32 = 1.5;
 /// `.files-root { padding: 2px 5px; margin: 0 -3px }` — the two together are the

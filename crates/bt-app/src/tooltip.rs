@@ -66,8 +66,9 @@ pub const TOOLTIP_DELAY: Duration = Duration::from_millis(380);
 /// pointer runs down — the passed-over story again, wearing a peek.
 pub const PEEK_INTENT_DELAY: Duration = Duration::from_millis(120);
 
-/// `transition: opacity .09s ease` (mock-up 1220).
-pub const TOOLTIP_FADE: Duration = Duration::from_millis(90);
+/// `transition: opacity .09s ease` (mock-up 1220) — the **fast** span, which
+/// this tip is where the archive got the number from.
+pub const TOOLTIP_FADE: Duration = bt_render::MOTION_FAST;
 
 /// `border-radius: 5px`.
 pub const TIP_RADIUS_LOGICAL_PX: f32 = 5.0;

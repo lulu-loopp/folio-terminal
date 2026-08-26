@@ -1635,7 +1635,7 @@ mod windows_impl {
                 SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
                 SWP_NOZORDER, SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW,
                 TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE, WM_GETMINMAXINFO,
-                WM_NCCALCSIZE, WM_NCHITTEST, WindowFromPoint,
+                WM_NCCALCSIZE, WM_NCHITTEST, WM_SETTINGCHANGE, WM_THEMECHANGED, WindowFromPoint,
             },
         },
     };
@@ -1673,6 +1673,7 @@ mod windows_impl {
     const IMAGE_PICKER_SUBCLASS_ID: usize = 0x4254_4950;
     const CUSTOM_FRAME_SUBCLASS_ID: usize = 0x4254_4346;
     const TASKBAR_SUBCLASS_ID: usize = 0x4254_5442;
+    const SYSTEM_SETTINGS_SUBCLASS_ID: usize = 0x4254_5343;
     const CAPTION_BUTTON_COUNT: i32 = 4;
 
     /// The shell's `TaskbarButtonCreated` broadcast, registered once per process.
@@ -3229,6 +3230,114 @@ mod windows_impl {
                 }
             }
         }
+    }
+
+    /// **Windows saying a system-wide preference has moved.**
+    ///
+    /// One subclass for one broadcast. `WM_SETTINGCHANGE` goes to every top-level
+    /// window when somebody changes something in Settings — and the only thing
+    /// this window does with it is *ask again*: the message's `wparam`/`lparam`
+    /// name an area and a section, but the areas are not enumerated for
+    /// accessibility preferences and the section string is documented as
+    /// best-effort, so filtering on them would mean a window that quietly stopped
+    /// noticing on the next Windows build. Re-reading one `SystemParametersInfoW`
+    /// when a person opens Settings costs nothing; missing it costs a user who
+    /// turned animation off and has to restart the terminal to be believed.
+    ///
+    /// It exists because the preference used to be read exactly once, at
+    /// start-up, and the code said so in a comment ending *"until this window
+    /// listens for `WM_SETTINGCHANGE`"*. This is that.
+    pub struct SystemSettingsWatch {
+        hwnd: HWND,
+        /// Held for as long as the subclass is installed, because the subclass
+        /// reaches it through the reference data and nothing may move it.
+        wake: Box<SystemSettingsWake>,
+    }
+
+    /// What the subclass calls, and all it may do: nudge the loop that owns the
+    /// window so the *next turn* re-reads the preference.
+    ///
+    /// The reading itself is deliberately not done here. A subclass procedure
+    /// runs inside somebody else's `DispatchMessage`, on a broadcast that may
+    /// arrive while this window is halfway through a frame; doing the work on the
+    /// event loop's own turn is what keeps "when we read it" a property of the
+    /// loop rather than of when Windows felt like talking.
+    struct SystemSettingsWake(Box<dyn Fn()>);
+
+    impl SystemSettingsWatch {
+        pub fn install(hwnd: NonZeroIsize, wake: Box<dyn Fn()>) -> Result<Self, String> {
+            let hwnd = HWND(hwnd.get() as *mut c_void);
+            let wake = Box::new(SystemSettingsWake(wake));
+            let reference_data = (&*wake as *const SystemSettingsWake) as usize;
+            // SAFETY: called on the window's own thread with a live HWND, and
+            // the box above outlives the subclass — `Drop` removes it first.
+            let installed = unsafe {
+                SetWindowSubclass(
+                    hwnd,
+                    Some(system_settings_subclass),
+                    SYSTEM_SETTINGS_SUBCLASS_ID,
+                    reference_data,
+                )
+            };
+            if !installed.as_bool() {
+                return Err(format!(
+                    "SetWindowSubclass(system settings) failed: {}",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            Ok(Self { hwnd, wake })
+        }
+    }
+
+    impl Drop for SystemSettingsWatch {
+        fn drop(&mut self) {
+            // SAFETY: dropped on the thread that installed it; the subclass goes
+            // before the box it reads through.
+            unsafe {
+                let _ = RemoveWindowSubclass(
+                    self.hwnd,
+                    Some(system_settings_subclass),
+                    SYSTEM_SETTINGS_SUBCLASS_ID,
+                );
+            }
+            let _ = &self.wake;
+        }
+    }
+
+    /// Whether a message is one that can have moved a system preference.
+    ///
+    /// Pure, and its own function, for the reason every other pure half in this
+    /// crate is: it is the part that can be wrong without a window, and therefore
+    /// the part a test can hold. `WM_THEMECHANGED` is in it beside
+    /// `WM_SETTINGCHANGE` because the visual-effects page is where both the
+    /// animation switch and the theme live, and a person turning one off often
+    /// turns the other with it — a second re-read costs one `SystemParametersInfoW`.
+    #[must_use]
+    pub(super) fn is_system_preference_message(message: u32) -> bool {
+        message == WM_SETTINGCHANGE || message == WM_THEMECHANGED
+    }
+
+    unsafe extern "system" fn system_settings_subclass(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        reference_data: usize,
+    ) -> LRESULT {
+        if is_system_preference_message(message) {
+            let wake = reference_data as *const SystemSettingsWake;
+            if !wake.is_null() {
+                // SAFETY: the owning `SystemSettingsWatch` holds this box for the
+                // whole installed interval and removes the subclass before
+                // freeing it, on this same thread.
+                (unsafe { &*wake }.0)();
+            }
+        }
+        // Forwarded either way: a broadcast this program answers is still a
+        // broadcast every other subclass in the chain is entitled to see.
+        // SAFETY: forwarding untouched messages is the required subclass contract.
+        unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
     }
 
     unsafe extern "system" fn taskbar_subclass(
@@ -7313,10 +7422,10 @@ impl TaskbarProgress {
 #[cfg(windows)]
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirWatch, FilePickKind, FolderPicker, ImagePicker,
-    ImeSystemCaret, MathContextMenu, Notifier, PROGRAM_REFUSED, Taskbar, adopt_parent_console,
-    client_area_animation_enabled, clipboard_text, cloaked_from_attribute, current_thread_priority,
-    detach_console, documents_directory, dpi_at, file_product_version, flash_window,
-    get_dpi_for_window, get_window_rect, get_work_area, install_console_ctrl_handler,
+    ImeSystemCaret, MathContextMenu, Notifier, PROGRAM_REFUSED, SystemSettingsWatch, Taskbar,
+    adopt_parent_console, client_area_animation_enabled, clipboard_text, cloaked_from_attribute,
+    current_thread_priority, detach_console, documents_directory, dpi_at, file_product_version,
+    flash_window, get_dpi_for_window, get_window_rect, get_work_area, install_console_ctrl_handler,
     install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
     message_box, monospace_font_families, open_local_file, open_local_path, open_system_fonts_page,
     os_ui_language, read_context_menu, recycle, redirect_std_streams_to_file, remove_context_menu,
@@ -7327,6 +7436,32 @@ pub use windows_impl::{
     virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount, work_area_at,
     write_to_console,
 };
+
+/// **The one decision in the system-preference watch.**
+///
+/// Everything else about [`SystemSettingsWatch`] is `SetWindowSubclass` and a
+/// forward; this is the part with an opinion in it.
+#[cfg(all(test, windows))]
+mod system_preference_message_tests {
+    use super::windows_impl::is_system_preference_message;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        WM_MOUSEMOVE, WM_NCHITTEST, WM_SETTINGCHANGE, WM_THEMECHANGED,
+    };
+
+    /// PIN — the two broadcasts that mean "ask again", and nothing else.
+    ///
+    /// Mutation: widen it to every message and the window re-reads a system
+    /// setting on every mouse move; narrow it to `WM_SETTINGCHANGE` alone and a
+    /// visual-effects change made through the theme lane is missed until
+    /// something else happens to wake the loop.
+    #[test]
+    fn only_a_settings_or_theme_broadcast_asks_the_system_again() {
+        assert!(is_system_preference_message(WM_SETTINGCHANGE));
+        assert!(is_system_preference_message(WM_THEMECHANGED));
+        assert!(!is_system_preference_message(WM_MOUSEMOVE));
+        assert!(!is_system_preference_message(WM_NCHITTEST));
+    }
+}
 
 /// **The one decision in the cloak reading** (`attention` plan §5.2, slice C1).
 ///

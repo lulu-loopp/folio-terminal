@@ -2242,27 +2242,15 @@ pub const WINDOW_TAB_RING_RADIUS_LOGICAL_PX: f32 =
 /// asserts the two agree, so a future edit to either cannot drift alone.
 pub const WINDOW_TAB_RING_INDETERMINATE_TURNS: f32 = 13.0 / 53.4;
 
-/// `.ticon.working { animation: breathe 1.7s ease-in-out infinite }` (line 245).
-pub const WINDOW_TAB_BREATHE_PERIOD_MS: u64 = 1_700;
 /// `@keyframes breathe { 0%, 100% { opacity: 1 } 50% { opacity: .28 } }`.
+///
+/// The *period* the breath runs on lives with the window's other spans, in
+/// [`crate::motion`]; this is how deep the breath goes, which is ink.
 pub const WINDOW_TAB_BREATHE_MIN_OPACITY: f32 = 0.28;
 /// `@media (prefers-reduced-motion: reduce) { .ticon.working { opacity: .6 } }`
 /// (lines 1925-1928) — with the animation off, "working" still has to be said,
 /// so the breath collapses to one held value rather than to nothing.
 pub const WINDOW_TAB_BREATHE_REDUCED_OPACITY: f32 = 0.6;
-/// `.pring.indeterminate { animation: pring-spin 1.1s linear infinite }` (282).
-pub const WINDOW_TAB_RING_SPIN_PERIOD_MS: u64 = 1_100;
-/// `.pring .arc { transition: stroke-dashoffset .3s ease }` (line 279) — a
-/// progress report jumps, and the arc that reports it must not.
-pub const WINDOW_TAB_RING_SWEEP_TRANSITION_MS: u64 = 300;
-/// `transition: width .16s ease, margin-left .16s ease` (line 341) — the pin's
-/// zero-width expansion. One continuous layout change, not a fade-in on top of a
-/// jump: the control widens *in* and the badge beside it slides aside.
-pub const WINDOW_TAB_PIN_REVEAL_MS: u64 = 160;
-/// `opacity .12s ease` from the same declaration — the ink arrives a touch
-/// ahead of the box finishing, which is what keeps the expansion from reading as
-/// an empty gap opening first.
-pub const WINDOW_TAB_PIN_FADE_MS: u64 = 120;
 /// `.ticon-wrap.dead .ticon { opacity: .35 }` (line 285).
 pub const WINDOW_TAB_DEAD_MARK_OPACITY: f32 = 0.35;
 
@@ -2432,18 +2420,9 @@ pub const RAIL_SEAM_MARGIN_Y_LOGICAL_PX: f32 = 5.0;
 /// of grey across that join — "the panel drew its own seam against the very
 /// thing it was supposed to be continuous with".
 pub const RAIL_SHADE_WIDTH_LOGICAL_PX: f32 = 14.0;
-/// The rail's open/close transition (`width .18s ease, padding .18s ease,
-/// opacity .18s ease`, and the shade's `left .18s ease`) — P168.
-pub const RAIL_TRANSITION_MS: u64 = 180;
-/// The label/title/badge/`×` fade in icon mode (`opacity .1s ease`) — Q183.
-///
-/// The text fades rather than being removed, so the layout is identical in both
-/// states and the icons never jump; the rail's own overflow does the clipping
-/// while the width animates.
-pub const RAIL_TEXT_FADE_MS: u64 = 100;
-/// `transition-delay: .06s` on the way *open* only — the panel gets a moment to
-/// be wide enough to hold words before the words arrive.
-pub const RAIL_TEXT_FADE_OPEN_DELAY_MS: u64 = 60;
+
+// The rail's open/close span, its labels' fade and that fade's opening delay
+// have moved to [`crate::motion`], with every other duration this window holds.
 
 // ── §7.1.6b′: the focus column, one card per tab ──
 //
@@ -2822,12 +2801,17 @@ pub const FLOAT_WINDOW_VIEWPORT_MARGIN_LOGICAL_PX: f32 = 8.0;
 /// 8665-8666). A margin you chose to close is not the same as a margin the app
 /// chose for you.
 pub const FLOAT_WINDOW_DRAG_MARGIN_LOGICAL_PX: f32 = 6.0;
-/// `@keyframes flyIn/flyOut` — `.12s` in and the same back out (§7.1.2「进出
-/// 动画 120ms」).
-pub const FLOAT_WINDOW_ANIMATION_MS: u64 = 120;
-/// `transform: translateY(-5px)` — how far a float rises into place, and falls
-/// back out of it.
-pub const FLOAT_WINDOW_RISE_LOGICAL_PX: f32 = 5.0;
+/// `transform: translateY(-5px)` — how far a float rises into place.
+///
+/// **Four rather than the stylesheet's five**, because it is the window's one
+/// travel and not this surface's own: a float arrives from the direction of the
+/// trigger that was pressed exactly as a menu arrives from its anchor and a
+/// toast from its edge, and three surfaces saying "four pixels from where it
+/// came from" in three numbers is three chances to disagree. See
+/// [`crate::motion::MOTION_TRAVEL_LOGICAL_PX`], where the fifth pixel went.
+///
+/// The float's own span moved there too, and became the base 140.
+pub const FLOAT_WINDOW_RISE_LOGICAL_PX: f32 = crate::motion::MOTION_TRAVEL_LOGICAL_PX;
 
 /// `.drag-ghost { border-radius: 7px }` (mock-up 1719) — the label that rides
 /// the pointer for the length of a drag.

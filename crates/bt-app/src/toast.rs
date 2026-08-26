@@ -47,22 +47,23 @@ use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, OverlayQuad};
 
 use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
 use crate::settings::push_float_window;
-use crate::{EASE, LeafId, cubic_bezier};
+use crate::{EASE, LeafId, Motion, cubic_bezier};
 
 // ── the clocks ─────────────────────────────────────────────────────────────
 
-/// How long a card takes to arrive: `120ms` of fade paired with an 8px slide.
+/// How long a card takes to arrive: the **base** span, paired with the window's
+/// one travel.
 ///
-/// Longer than the tip's 90 (`TOOLTIP_FADE`) and for the opposite reason. A tip
-/// is summoned by *not moving* and has to feel instantaneous once the wait is
-/// over; a toast arrives unbidden, and something that appears unbidden at full
-/// strength in one frame reads as a flash. The extra thirty milliseconds is the
+/// Longer than the tip's fast span (`TOOLTIP_FADE`) and for the opposite reason.
+/// A tip is summoned by *not moving* and has to feel instantaneous once the wait
+/// is over; a toast arrives unbidden, and something that appears unbidden at
+/// full strength in one frame reads as a flash. The step up a rung is the
 /// difference between a card sliding into place and a card blinking on.
-pub const TOAST_ENTER: Duration = Duration::from_millis(120);
+pub const TOAST_ENTER: Duration = bt_render::MOTION_BASE;
 
-/// How long it takes to leave: the tip's own `90ms`, because leaving is the half
+/// How long it takes to leave: the **fast** span, because leaving is the half
 /// nobody is waiting for and there is nothing to read on the way out.
-pub const TOAST_EXIT: Duration = Duration::from_millis(90);
+pub const TOAST_EXIT: Duration = bt_render::MOTION_FAST;
 
 /// How long a failure stands: six seconds.
 ///
@@ -84,11 +85,15 @@ pub const TOAST_LIFE_QUIET: Duration = Duration::from_millis(4000);
 /// How far the card travels as it arrives, in logical pixels.
 ///
 /// Away from the edge it comes from and never across the surface: an anchored
-/// card falls the eight pixels from under the head it hangs off, and the corner
-/// fallback rises the same eight off the window's floor. The distance is small
-/// on purpose — motion here is *provenance*, telling the eye where this thing
-/// came from, and eight pixels says it without becoming an animation.
-pub const TOAST_SLIDE_LOGICAL_PX: f32 = 8.0;
+/// card falls from under the head it hangs off, and the corner fallback rises
+/// off the window's floor. The distance is small on purpose — motion here is
+/// *provenance*, telling the eye where this thing came from — and it is
+/// [`bt_render::MOTION_TRAVEL_LOGICAL_PX`] rather than a number of this file's
+/// own. **Four rather than the eight it used to be**: at eight the card was
+/// travelling far enough to read as a slide, which is a claim about distance,
+/// and every other layer in this window that arrives from somewhere says the
+/// same thing in four.
+pub const TOAST_SLIDE_LOGICAL_PX: f32 = bt_render::MOTION_TRAVEL_LOGICAL_PX;
 
 /// How many cards one anchor may show at once.
 ///
@@ -351,16 +356,27 @@ impl Toast {
     ///
     /// `EASE` on the way in and on the way out — the mock-up's own keyword for
     /// every transition it declares, and the one [`crate::tooltip`] already
-    /// fades on. Reduced motion is *not* consulted here: the caller passes the
-    /// instants, and a still window is served by [`ToastHost::still`], which
-    /// lands every card at its resting state on the frame it is born. Folding
-    /// the preference in here would mean this function needed a `Motion` it does
-    /// nothing else with.
+    /// fades on.
+    ///
+    /// **Reduced motion is consulted here, and it was not always.** The old
+    /// arrangement pushed the preference up into the caller: `raise` took a
+    /// `still` flag and back-dated the card's birth so that its entrance was
+    /// already over. That answered the entrance and left the *exit* running —
+    /// ninety milliseconds of decorative fade, with the frames to draw it, in a
+    /// window that had asked for no animation — and it bought the wrong thing
+    /// besides, because a card born in the past has a life that started in the
+    /// past. Reading the preference here is one line and it covers both ends.
     #[must_use]
-    pub fn opacity(&self, now: Instant) -> f32 {
+    pub fn opacity(&self, now: Instant, motion: Motion) -> f32 {
         if let Some((left, from)) = self.leaving {
+            if motion == Motion::Reduced {
+                return 0.0;
+            }
             let progress = ratio(now.saturating_duration_since(left), TOAST_EXIT);
             return from * (1.0 - cubic_bezier(progress, EASE));
+        }
+        if motion == Motion::Reduced {
+            return 1.0;
         }
         cubic_bezier(
             ratio(now.saturating_duration_since(self.born), TOAST_ENTER),
@@ -375,9 +391,11 @@ impl Toast {
     /// came from, because the two motions do not mean the same thing: arriving
     /// from an edge says where a thing came from, and retreating to an edge says
     /// it is going somewhere — and it is not, it is ending.
+    /// Under [`Motion::Reduced`] it does not travel at all — the card is simply
+    /// where it belongs, which is the whole of what the four pixels were saying.
     #[must_use]
-    pub fn slide(&self, now: Instant) -> f32 {
-        if self.leaving.is_some() {
+    pub fn slide(&self, now: Instant, motion: Motion) -> f32 {
+        if self.leaving.is_some() || motion == Motion::Reduced {
             return 0.0;
         }
         let progress = cubic_bezier(
@@ -416,21 +434,29 @@ impl Toast {
     /// `None` while it is held: a stopped clock owes no wake-ups, and the pointer
     /// leaving is an event that will re-arm it. This is the same silence a tip
     /// with nothing settling keeps.
-    fn deadline(&self, now: Instant) -> Option<Instant> {
+    ///
+    /// Under [`Motion::Reduced`] the two animation deadlines — the end of the
+    /// entrance and the end of the exit — are both gone, and the only instant
+    /// left is the life running out. That is not a tween; it is when the notice
+    /// stops being true. A departing card owes nothing at all there, because
+    /// under reduced motion a departing card is already off the list.
+    fn deadline(&self, now: Instant, motion: Motion) -> Option<Instant> {
         if let Some((left, _)) = self.leaving {
-            return Some(left + TOAST_EXIT);
+            return (motion == Motion::Full).then_some(left + TOAST_EXIT);
         }
-        let arrived = self.born + TOAST_ENTER;
-        if now < arrived {
-            return Some(arrived);
+        if motion == Motion::Full {
+            let arrived = self.born + TOAST_ENTER;
+            if now < arrived {
+                return Some(arrived);
+            }
         }
         self.hover_since.is_none().then(|| self.expires_at(now))
     }
 
     /// Begin the exit, from wherever this card currently stands.
-    fn depart(&mut self, now: Instant) {
+    fn depart(&mut self, now: Instant, motion: Motion) {
         if self.leaving.is_none() {
-            self.leaving = Some((now, self.opacity(now)));
+            self.leaving = Some((now, self.opacity(now, motion)));
         }
     }
 }
@@ -486,7 +512,7 @@ impl ToastHost {
         title: Option<String>,
         body: impl Into<String>,
         action: Option<String>,
-        still: bool,
+        motion: Motion,
         now: Instant,
     ) -> ToastId {
         // The fourth card on a crowded anchor pushes the oldest out *now*, not
@@ -506,7 +532,8 @@ impl ToastHost {
             else {
                 break;
             };
-            oldest.depart(now);
+            oldest.depart(now, motion);
+            self.retire_the_departed(now, motion);
         }
         let id = ToastId(self.next_id);
         self.next_id += 1;
@@ -517,7 +544,7 @@ impl ToastHost {
             title,
             body: body.into(),
             action,
-            born: if still { now - TOAST_ENTER } else { now },
+            born: now,
             held: Duration::ZERO,
             hover_since: None,
             leaving: None,
@@ -538,12 +565,13 @@ impl ToastHost {
 
     /// Send one card away at once — the `×`, pressed. Returns whether it was
     /// there to send.
-    pub fn dismiss(&mut self, id: ToastId, now: Instant) -> bool {
+    pub fn dismiss(&mut self, id: ToastId, now: Instant, motion: Motion) -> bool {
         let Some(toast) = self.toasts.iter_mut().find(|toast| toast.id == id) else {
             return false;
         };
         let already = toast.leaving();
-        toast.depart(now);
+        toast.depart(now, motion);
+        self.retire_the_departed(now, motion);
         !already
     }
 
@@ -574,31 +602,48 @@ impl ToastHost {
 
     /// Move every clock forward: start the exits that are due, and drop the
     /// cards whose exits have finished. Returns whether anything changed.
-    pub fn advance(&mut self, now: Instant) -> bool {
+    pub fn advance(&mut self, now: Instant, motion: Motion) -> bool {
         let mut changed = false;
         for toast in &mut self.toasts {
             if toast.leaving.is_none() && now >= toast.expires_at(now) {
-                toast.depart(now);
+                toast.depart(now, motion);
                 changed = true;
             }
         }
         let before = self.toasts.len();
+        self.retire_the_departed(now, motion);
+        changed || self.toasts.len() != before
+    }
+
+    /// Drop the cards whose exit is over — which, under [`Motion::Reduced`], is
+    /// every card that has begun one.
+    ///
+    /// Called from all three places a card can be sent away rather than only
+    /// from [`Self::advance`], and that is what makes the reduced-motion promise
+    /// hold rather than nearly hold. With no exit fade there is no span to hold
+    /// a departing card on the list for, and a card that stayed there at zero
+    /// opacity would be invisible, un-hittable, and still occupying one of the
+    /// three places an anchor has.
+    fn retire_the_departed(&mut self, now: Instant, motion: Motion) {
+        let exit = match motion {
+            Motion::Full => TOAST_EXIT,
+            Motion::Reduced => Duration::ZERO,
+        };
         self.toasts.retain(|toast| {
             toast
                 .leaving
-                .is_none_or(|(left, _)| now.saturating_duration_since(left) < TOAST_EXIT)
+                .is_none_or(|(left, _)| now.saturating_duration_since(left) < exit)
         });
-        changed || self.toasts.len() != before
     }
 
     /// The next instant this host needs a frame: the end of an entrance, a life
     /// running out, or the end of an exit — whichever comes first across every
     /// card. `None` when there is nothing to wait for.
     #[must_use]
-    pub fn deadline(&self, now: Instant) -> Option<Instant> {
+    pub fn deadline(&self, now: Instant, motion: Motion) -> Option<Instant> {
         self.toasts
             .iter()
-            .filter_map(|toast| toast.deadline(now))
+            .filter_map(|toast| toast.deadline(now, motion))
             .min()
     }
 
@@ -610,10 +655,10 @@ impl ToastHost {
     /// exactly the instant that matters — the frame an animation lands on, which
     /// "still running" answers `false` for and which therefore never gets drawn.
     #[must_use]
-    pub fn frame_state(&self, now: Instant) -> Vec<(ToastId, f32)> {
+    pub fn frame_state(&self, now: Instant, motion: Motion) -> Vec<(ToastId, f32)> {
         self.toasts
             .iter()
-            .map(|toast| (toast.id, toast.opacity(now)))
+            .map(|toast| (toast.id, toast.opacity(now, motion)))
             .collect()
     }
 }
@@ -992,6 +1037,7 @@ pub fn build(
     palette: &ChromePalette,
     scale: f32,
     now: Instant,
+    motion: Motion,
 ) -> Vec<OverlayLayer> {
     let px = |logical: f32| logical * scale;
     let alpha = |value: u8| f32::from(value) / 255.0;
@@ -1001,11 +1047,11 @@ pub fn build(
         let Some(toast) = host.toasts.iter().find(|toast| toast.id == layout.id) else {
             continue;
         };
-        let opacity = toast.opacity(now);
+        let opacity = toast.opacity(now, motion);
         if opacity <= 0.0 {
             continue;
         }
-        let dy = (toast.slide(now) * scale).round();
+        let dy = (toast.slide(now, motion) * scale).round();
         let mut card = layout.clone();
         card.shift(dy);
 
@@ -1163,6 +1209,7 @@ fn centred(rect: [f32; 4], size: f32) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Motion;
 
     const SCALE: f32 = 1.0;
     const WINDOW: (f32, f32) = (1000.0, 700.0);
@@ -1176,15 +1223,19 @@ mod tests {
 
     fn host_with(kind: ToastKind, anchor: ToastAnchor, now: Instant) -> (ToastHost, ToastId) {
         let mut host = ToastHost::default();
-        let id = host.raise(kind, anchor, None, "git said no", None, false, now);
+        let id = host.raise(kind, anchor, None, "git said no", None, Motion::Full, now);
         (host, id)
     }
 
     fn opacity_of(host: &ToastHost, id: ToastId, now: Instant) -> Option<f32> {
+        seen_as(host, id, now, Motion::Full)
+    }
+
+    fn seen_as(host: &ToastHost, id: ToastId, now: Instant, motion: Motion) -> Option<f32> {
         host.toasts()
             .iter()
             .find(|toast| toast.id == id)
-            .map(|toast| toast.opacity(now))
+            .map(|toast| toast.opacity(now, motion))
     }
 
     // ── the three clocks ───────────────────────────────────────────────────
@@ -1208,25 +1259,38 @@ mod tests {
             "solid at a hundred and twenty"
         );
         // The first thing it asks for is the frame its entrance lands on.
-        assert_eq!(host.deadline(start), Some(start + TOAST_ENTER));
+        assert_eq!(
+            host.deadline(start, Motion::Full),
+            Some(start + TOAST_ENTER)
+        );
 
         // Standing. Solid the whole way, and the wake-up it now asks for is the
         // instant its time runs out.
         let expiry = start + TOAST_LIFE_ERROR;
         let nearly = expiry - Duration::from_millis(1);
         assert!((opacity_of(&host, id, nearly).unwrap() - 1.0).abs() < 0.001);
-        assert!(!host.advance(nearly), "nothing is due yet");
-        assert_eq!(host.deadline(nearly), Some(expiry));
+        assert!(!host.advance(nearly, Motion::Full), "nothing is due yet");
+        assert_eq!(host.deadline(nearly, Motion::Full), Some(expiry));
 
         // Its time is up: the exit begins, and the last wake-up is its end.
-        assert!(host.advance(expiry), "the exit begins");
-        assert_eq!(host.deadline(expiry), Some(expiry + TOAST_EXIT));
+        assert!(host.advance(expiry, Motion::Full), "the exit begins");
+        assert_eq!(
+            host.deadline(expiry, Motion::Full),
+            Some(expiry + TOAST_EXIT)
+        );
         let fading = opacity_of(&host, id, expiry + TOAST_EXIT / 2).unwrap();
         assert!(fading > 0.0 && fading < 1.0, "fading: {fading}");
 
-        assert!(host.advance(expiry + TOAST_EXIT), "and it is gone");
+        assert!(
+            host.advance(expiry + TOAST_EXIT, Motion::Full),
+            "and it is gone"
+        );
         assert!(host.is_empty());
-        assert_eq!(host.deadline(expiry + TOAST_EXIT), None, "and owes nothing");
+        assert_eq!(
+            host.deadline(expiry + TOAST_EXIT, Motion::Full),
+            None,
+            "and owes nothing"
+        );
     }
 
     /// PIN — **time under the pointer does not count.** Three seconds of reading
@@ -1242,20 +1306,23 @@ mod tests {
         assert!(host.toasts()[0].hover_since.is_some());
         // A held card asks for no wake-ups at all: its clock is stopped, and the
         // pointer leaving is the event that starts it again.
-        assert_eq!(host.deadline(entered), None);
+        assert_eq!(host.deadline(entered, Motion::Full), None);
 
         let left = entered + Duration::from_secs(3);
         assert!(host.hover(None, left));
         assert!(host.toasts()[0].hover_since.is_none());
 
         let expiry = start + TOAST_LIFE_ERROR + Duration::from_secs(3);
-        assert_eq!(host.deadline(left), Some(expiry));
+        assert_eq!(host.deadline(left, Motion::Full), Some(expiry));
         assert!(
-            !host.advance(start + TOAST_LIFE_ERROR),
+            !host.advance(start + TOAST_LIFE_ERROR, Motion::Full),
             "the unheld deadline has passed and the card is still standing"
         );
-        assert!(host.advance(expiry), "and it leaves three seconds later");
-        assert!(host.advance(expiry + TOAST_EXIT));
+        assert!(
+            host.advance(expiry, Motion::Full),
+            "and it leaves three seconds later"
+        );
+        assert!(host.advance(expiry + TOAST_EXIT, Motion::Full));
         assert!(host.is_empty());
     }
 
@@ -1269,8 +1336,11 @@ mod tests {
 
         let start = Instant::now();
         let (mut host, _) = host_with(ToastKind::Ok, ToastAnchor::Window, start);
-        assert!(!host.advance(start + TOAST_LIFE_QUIET - Duration::from_millis(1)));
-        assert!(host.advance(start + TOAST_LIFE_QUIET));
+        assert!(!host.advance(
+            start + TOAST_LIFE_QUIET - Duration::from_millis(1),
+            Motion::Full
+        ));
+        assert!(host.advance(start + TOAST_LIFE_QUIET, Motion::Full));
     }
 
     /// PIN — **the fourth card evicts the oldest of its own anchor, now.**
@@ -1290,7 +1360,7 @@ mod tests {
                     None,
                     format!("{n}"),
                     None,
-                    false,
+                    Motion::Full,
                     start,
                 )
             })
@@ -1305,7 +1375,7 @@ mod tests {
             None,
             "graph",
             None,
-            false,
+            Motion::Full,
             start,
         );
         assert!(host.toasts().iter().all(|toast| !toast.leaving()));
@@ -1317,7 +1387,7 @@ mod tests {
             None,
             "fourth",
             None,
-            false,
+            Motion::Full,
             fourth,
         );
         let leaving: Vec<ToastId> = host
@@ -1335,7 +1405,7 @@ mod tests {
         assert!(host.toasts().iter().any(|toast| toast.id == last));
 
         // And it is gone once its own exit has run, leaving three again.
-        assert!(host.advance(fourth + TOAST_EXIT));
+        assert!(host.advance(fourth + TOAST_EXIT, Motion::Full));
         assert_eq!(
             host.toasts()
                 .iter()
@@ -1355,19 +1425,30 @@ mod tests {
         let early = start + Duration::from_millis(40);
         let stood = opacity_of(&host, id, early).unwrap();
         assert!(stood < 1.0);
-        assert!(host.dismiss(id, early));
+        assert!(host.dismiss(id, early, Motion::Full));
         assert!(
             opacity_of(&host, id, early).unwrap() <= stood + 0.001,
             "it does not brighten on the way out"
         );
-        assert!(!host.dismiss(id, early + Duration::from_millis(10)));
-        assert!(host.advance(early + TOAST_EXIT));
+        assert!(!host.dismiss(id, early + Duration::from_millis(10), Motion::Full));
+        assert!(host.advance(early + TOAST_EXIT, Motion::Full));
         assert!(host.is_empty());
-        assert!(!host.dismiss(id, early + TOAST_EXIT));
+        assert!(!host.dismiss(id, early + TOAST_EXIT, Motion::Full));
     }
 
     /// Stillness lands the card where it is going on the frame it is born, and
     /// then it owes nothing until its own time is up.
+    /// PIN — **a still window gets the card, and none of the journey.**
+    ///
+    /// The card is whole on the frame it is born, does not travel, and asks for
+    /// no frame at all until its life runs out — no entrance to land, no exit to
+    /// fade. The life itself is the plain six seconds from birth, which is the
+    /// half the old arrangement got wrong: it obtained the still first frame by
+    /// back-dating the card's birth by an entrance, so a notice under reduced
+    /// motion stood for a hundred and forty milliseconds less than one beside it.
+    ///
+    /// Mutation: read the preference anywhere but in `opacity`/`slide`/`deadline`
+    /// and one of these three lines fails.
     #[test]
     fn a_still_window_gets_the_card_without_the_journey() {
         let start = Instant::now();
@@ -1378,16 +1459,65 @@ mod tests {
             None,
             "no",
             None,
-            true,
+            Motion::Reduced,
             start,
         );
-        assert!((opacity_of(&host, id, start).unwrap() - 1.0).abs() < 0.001);
+        assert!((seen_as(&host, id, start, Motion::Reduced).unwrap() - 1.0).abs() < 0.001);
         let toast = &host.toasts()[0];
-        assert!(toast.slide(start).abs() < 0.001, "and it does not travel");
+        assert!(
+            toast.slide(start, Motion::Reduced).abs() < 0.001,
+            "and it does not travel"
+        );
         assert_eq!(
-            host.deadline(start),
-            Some(start + TOAST_LIFE_ERROR - TOAST_ENTER),
-            "its life began when the entrance would have"
+            host.deadline(start, Motion::Reduced),
+            Some(start + TOAST_LIFE_ERROR),
+            "the only instant it wants is the end of its life"
+        );
+    }
+
+    /// PIN — **under reduced motion a card that has been sent away is gone, not
+    /// fading.**
+    ///
+    /// The two halves are one promise: nothing decorative is drawn, and nothing
+    /// decorative is *waited for*. A card left on the list at zero opacity would
+    /// satisfy the first and break the second, and would also hold one of the
+    /// three places its anchor has.
+    ///
+    /// Mutation: retire only from `advance` and the dismissed card lingers
+    /// invisibly; give the exit its span back and the deadline reappears.
+    #[test]
+    fn a_still_window_takes_a_dismissed_card_away_at_once_and_waits_for_nothing() {
+        let start = Instant::now();
+        let mut host = ToastHost::default();
+        let id = host.raise(
+            ToastKind::Error,
+            ToastAnchor::Window,
+            None,
+            "no",
+            None,
+            Motion::Reduced,
+            start,
+        );
+        assert!(host.dismiss(id, start, Motion::Reduced), "it was there");
+        assert!(host.is_empty(), "and it is not there now");
+        assert_eq!(host.deadline(start, Motion::Reduced), None);
+
+        // The same card in a window that wants animation keeps both halves.
+        let mut moving = ToastHost::default();
+        let id = moving.raise(
+            ToastKind::Error,
+            ToastAnchor::Window,
+            None,
+            "no",
+            None,
+            Motion::Full,
+            start,
+        );
+        assert!(moving.dismiss(id, start, Motion::Full));
+        assert!(!moving.is_empty(), "it is still leaving");
+        assert_eq!(
+            moving.deadline(start, Motion::Full),
+            Some(start + TOAST_EXIT)
         );
     }
 
@@ -1398,20 +1528,26 @@ mod tests {
         let (anchored, _) = host_with(ToastKind::Error, ToastAnchor::FilesColumn(SEAT), start);
         let (corner, id) = host_with(ToastKind::Error, ToastAnchor::Window, start);
         assert!(
-            (anchored.toasts()[0].slide(start) + TOAST_SLIDE_LOGICAL_PX).abs() < 0.001,
+            (anchored.toasts()[0].slide(start, Motion::Full) + TOAST_SLIDE_LOGICAL_PX).abs()
+                < 0.001,
             "an anchored card starts above its place"
         );
         assert!(
-            (corner.toasts()[0].slide(start) - TOAST_SLIDE_LOGICAL_PX).abs() < 0.001,
+            (corner.toasts()[0].slide(start, Motion::Full) - TOAST_SLIDE_LOGICAL_PX).abs() < 0.001,
             "the corner card starts below its place"
         );
-        assert!(anchored.toasts()[0].slide(start + TOAST_ENTER).abs() < 0.001);
+        assert!(
+            anchored.toasts()[0]
+                .slide(start + TOAST_ENTER, Motion::Full)
+                .abs()
+                < 0.001
+        );
 
         let mut corner = corner;
-        corner.dismiss(id, start + TOAST_ENTER);
+        corner.dismiss(id, start + TOAST_ENTER, Motion::Full);
         assert!(
             corner.toasts()[0]
-                .slide(start + TOAST_ENTER + TOAST_EXIT / 2)
+                .slide(start + TOAST_ENTER + TOAST_EXIT / 2, Motion::Full)
                 .abs()
                 < 0.001,
             "and nothing travels on the way out"
@@ -1451,7 +1587,7 @@ mod tests {
             None,
             "one",
             None,
-            false,
+            Motion::Full,
             start,
         );
         let second = host.raise(
@@ -1460,7 +1596,7 @@ mod tests {
             None,
             "two",
             None,
-            false,
+            Motion::Full,
             start,
         );
         let laid = placed(&host, Some(body));
@@ -1501,7 +1637,7 @@ mod tests {
             None,
             "one",
             None,
-            false,
+            Motion::Full,
             start,
         );
         let second = host.raise(
@@ -1510,7 +1646,7 @@ mod tests {
             None,
             "two",
             None,
-            false,
+            Motion::Full,
             start,
         );
         // The column has closed: its rectangle cannot be resolved.
@@ -1571,7 +1707,7 @@ mod tests {
             None,
             words.join(" "),
             None,
-            false,
+            Motion::Full,
             start,
         );
         let laid = placed(&host, Some([0.0, 0.0, 260.0, 600.0]));
@@ -1607,7 +1743,7 @@ mod tests {
             Some("Git".to_owned()),
             "fatal: no",
             None,
-            false,
+            Motion::Full,
             start,
         );
         let laid = placed(&host, Some([0.0, 0.0, 300.0, 400.0]));
@@ -1684,7 +1820,7 @@ mod tests {
                 None,
                 "PowerShell 7 copy is gone.",
                 Some(word.to_owned()),
-                false,
+                Motion::Full,
                 start,
             );
             let laid = placed(&host, Some([0.0, 0.0, 300.0, 400.0]));
@@ -1736,7 +1872,7 @@ mod tests {
             None,
             "PowerShell 7 copy is gone.",
             None,
-            false,
+            Motion::Full,
             start,
         );
         let mut verbed = ToastHost::default();
@@ -1746,7 +1882,7 @@ mod tests {
             None,
             "PowerShell 7 copy is gone.",
             Some("Undo".to_owned()),
-            false,
+            Motion::Full,
             start,
         );
         let plain = placed(&plain, body).remove(0);
@@ -1779,17 +1915,20 @@ mod tests {
             Some("Git".to_owned()),
             "fatal: no",
             None,
-            true,
+            Motion::Full,
             start,
         );
+        // Born an entrance later, so on the frame below it is exactly at zero
+        // while the card above it is exactly whole.
+        let arrived = start + TOAST_ENTER;
         host.raise(
             ToastKind::Ok,
             ToastAnchor::FilesColumn(SEAT),
             None,
             "done",
             None,
-            false,
-            start,
+            Motion::Full,
+            arrived,
         );
         let laid = placed(&host, Some([100.0, 60.0, 400.0, 600.0]));
         let layers = build(
@@ -1802,7 +1941,8 @@ mod tests {
             },
             &palette,
             SCALE,
-            start,
+            arrived,
+            Motion::Full,
         );
         // The second card is at zero on the frame it is born, so it draws nothing.
         assert_eq!(layers.len(), 1, "a card at zero is not a layer");
@@ -1840,7 +1980,15 @@ mod tests {
         let start = Instant::now();
         for kind in [ToastKind::Error, ToastKind::Ok, ToastKind::Info] {
             let mut host = ToastHost::default();
-            host.raise(kind, ToastAnchor::Window, None, "x", None, true, start);
+            host.raise(
+                kind,
+                ToastAnchor::Window,
+                None,
+                "x",
+                None,
+                Motion::Reduced,
+                start,
+            );
             let laid = placed(&host, None);
             let layers = build(
                 &laid,
@@ -1849,6 +1997,7 @@ mod tests {
                 &palette,
                 SCALE,
                 start,
+                Motion::Reduced,
             );
             let marks: Vec<&ChromeSprite> = layers[0].sprites.iter().collect();
             assert_eq!(marks.len(), 1, "{kind:?}: the dot and nothing else at rest");
@@ -1880,9 +2029,17 @@ mod tests {
         let (host, id) = host_with(ToastKind::Error, ToastAnchor::Window, start);
         let laid = placed(&host, None);
         let sprites = |pointer| {
-            build(&laid, &host, pointer, &palette, SCALE, start + TOAST_ENTER)[0]
-                .sprites
-                .clone()
+            build(
+                &laid,
+                &host,
+                pointer,
+                &palette,
+                SCALE,
+                start + TOAST_ENTER,
+                Motion::Full,
+            )[0]
+            .sprites
+            .clone()
         };
 
         assert_eq!(sprites(ToastPointer::default()).len(), 1, "the dot only");
@@ -1928,7 +2085,7 @@ mod tests {
             Some("Git".to_owned()),
             words,
             None,
-            false,
+            Motion::Full,
             start,
         );
         assert_eq!(host.toasts().len(), 1, "one answer, one card");
@@ -1957,10 +2114,14 @@ mod tests {
     fn the_frame_state_reports_every_card_and_what_it_should_look_like() {
         let start = Instant::now();
         let (host, id) = host_with(ToastKind::Error, ToastAnchor::Window, start);
-        let state = host.frame_state(start + TOAST_ENTER);
+        let state = host.frame_state(start + TOAST_ENTER, Motion::Full);
         assert_eq!(state.len(), 1);
         assert_eq!(state[0].0, id);
         assert!((state[0].1 - 1.0).abs() < 0.001);
-        assert_ne!(host.frame_state(start), state, "and it moves with the fade");
+        assert_ne!(
+            host.frame_state(start, Motion::Full),
+            state,
+            "and it moves with the fade"
+        );
     }
 }

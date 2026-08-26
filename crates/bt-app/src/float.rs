@@ -64,19 +64,27 @@ use bt_render::{
 use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
 use crate::{LeafId, Motion, TabId};
 
-/// `FLY_OPEN_MS` — how long the pointer must rest on a trigger before a peek is
+/// `FLOAT_OPEN_INTENT_DELAY_MS` — how long the pointer must rest on a trigger before a peek is
 /// summoned (§7.1.2, mock-up 3908).
-pub const FLY_OPEN: Duration = Duration::from_millis(180);
-/// `FLY_CLOSE_MS` — the grace after the pointer leaves the peek's region.
-pub const FLY_CLOSE: Duration = Duration::from_millis(220);
-/// `FLY_CLOSE_MS_LEFT` — the *longer* grace for a departure off the **left**
-/// edge.
+///
+/// **A wait, and the name now says so.** It was called `FLY_OPEN`, and both of
+/// the 2026-08-25 audits independently read it as a 180ms *entrance animation*
+/// and filed it for collapsing into the archive's slow span. It is not an
+/// animation at all — nothing moves for these 180ms; they are how long a hand
+/// has to mean it. The float's actual entrance is
+/// [`bt_render::FLOAT_WINDOW_ANIMATION_MS`]. Two independent readers making the
+/// same mistake off the same name is what a name is for.
+pub const FLOAT_OPEN_INTENT_DELAY: Duration = Duration::from_millis(180);
+/// The grace after the pointer leaves the peek's region — also a wait, not a
+/// fade-out.
+pub const FLOAT_CLOSE_GRACE: Duration = Duration::from_millis(220);
+/// The *longer* grace for a departure off the **left** edge.
 ///
 /// Not a rounding of the one above: a peek is left-aligned to the icon that
 /// summoned it, so the trip in runs down that edge, and a little leftward drift
 /// is almost always still heading in rather than leaving. Every other direction
 /// is a decisive departure and gets the short one.
-pub const FLY_CLOSE_LEFT: Duration = Duration::from_millis(420);
+pub const FLOAT_CLOSE_GRACE_LEFT: Duration = Duration::from_millis(420);
 /// `PEEK_PAD` — how far past its own edge a peek still counts as "the pointer is
 /// dealing with me" (§7.1.2「命中容差 8px」).
 ///
@@ -86,7 +94,8 @@ pub const FLY_CLOSE_LEFT: Duration = Duration::from_millis(420);
 /// the seam it had just been invited across.
 pub const PEEK_PAD_LOGICAL_PX: f32 = 8.0;
 
-/// The entrance and its reverse, one span for both (§7.1.2「进出动画 120ms」).
+/// The entrance and its reverse, one span for both (§7.1.2「进出动画 120ms」) —
+/// now the archive's **base** span, because a float is a popup.
 const FLOAT_ANIMATION: Duration = Duration::from_millis(FLOAT_WINDOW_ANIMATION_MS);
 
 /// Which of the two promises this float is standing on.
@@ -1513,7 +1522,7 @@ impl FloatHost {
                     return;
                 }
                 if self.settling.map(|(armed, _)| armed) != Some(trigger) {
-                    self.settling = Some((trigger, now + FLY_OPEN));
+                    self.settling = Some((trigger, now + FLOAT_OPEN_INTENT_DELAY));
                 }
             }
             None => self.settling = None,
@@ -1725,7 +1734,13 @@ impl FloatHost {
         if self.closing_at.is_some() || !self.peek_is_open() {
             return;
         }
-        self.closing_at = Some(now + if off_left { FLY_CLOSE_LEFT } else { FLY_CLOSE });
+        self.closing_at = Some(
+            now + if off_left {
+                FLOAT_CLOSE_GRACE_LEFT
+            } else {
+                FLOAT_CLOSE_GRACE
+            },
+        );
     }
 
     /// Whether the grace has run out. Clears the clock either way it is read —
@@ -2910,9 +2925,21 @@ mod tests {
         let now = Instant::now();
         let mut host = FloatHost::default();
         host.observe(Some(TAB), now);
-        assert_eq!(host.take_due(now + FLY_OPEN / 2), None, "not yet");
-        assert_eq!(host.take_due(now + FLY_OPEN), Some(TAB), "now");
-        assert_eq!(host.take_due(now + FLY_OPEN), None, "and only once");
+        assert_eq!(
+            host.take_due(now + FLOAT_OPEN_INTENT_DELAY / 2),
+            None,
+            "not yet"
+        );
+        assert_eq!(
+            host.take_due(now + FLOAT_OPEN_INTENT_DELAY),
+            Some(TAB),
+            "now"
+        );
+        assert_eq!(
+            host.take_due(now + FLOAT_OPEN_INTENT_DELAY),
+            None,
+            "and only once"
+        );
     }
 
     // ── 浮窗多开 (user ruling 2026-08-12) ────────────────────────────────────
@@ -2941,7 +2968,7 @@ mod tests {
         );
         host.observe(Some(OTHER), now);
         assert_eq!(
-            host.take_due(now + FLY_OPEN),
+            host.take_due(now + FLOAT_OPEN_INTENT_DELAY),
             Some(OTHER),
             "another trigger's peek is still summonable"
         );
@@ -2973,7 +3000,7 @@ mod tests {
 
         // A hover matures over a third trigger and its peek arrives.
         host.observe(Some(THIRD), now);
-        assert_eq!(host.take_due(now + FLY_OPEN), Some(THIRD));
+        assert_eq!(host.take_due(now + FLOAT_OPEN_INTENT_DELAY), Some(THIRD));
         let peek = open_peek_at(&mut host, THIRD, "C:/z", now);
 
         assert_eq!(
@@ -3077,7 +3104,7 @@ mod tests {
         // answered — the standing window is not a reason to say nothing.
         host.observe(Some(TAB), now);
         assert_eq!(
-            host.take_due(now + FLY_OPEN),
+            host.take_due(now + FLOAT_OPEN_INTENT_DELAY),
             Some(TAB),
             "a trigger whose root is already open still answers a hover"
         );
@@ -3357,7 +3384,7 @@ mod tests {
         let mut host = FloatHost::default();
         open_peek(&mut host, TAB, now);
         host.observe(Some(TAB), now);
-        assert_eq!(host.take_due(now + FLY_OPEN * 2), None);
+        assert_eq!(host.take_due(now + FLOAT_OPEN_INTENT_DELAY * 2), None);
     }
 
     /// G87: Esc with an intent in flight must take the intent too, or the peek
@@ -3370,7 +3397,7 @@ mod tests {
         host.observe(Some(OTHER), now);
         assert!(host.dismiss(peek, now));
         assert_eq!(
-            host.take_due(now + FLY_OPEN * 2),
+            host.take_due(now + FLOAT_OPEN_INTENT_DELAY * 2),
             None,
             "the armed intent died with the peek"
         );
@@ -3384,10 +3411,10 @@ mod tests {
         open_peek(&mut host, TAB, now);
         host.release(true, now);
         assert!(
-            !host.grace_expired(now + FLY_CLOSE),
+            !host.grace_expired(now + FLOAT_CLOSE_GRACE),
             "the short grace is not this one's"
         );
-        assert!(host.grace_expired(now + FLY_CLOSE_LEFT));
+        assert!(host.grace_expired(now + FLOAT_CLOSE_GRACE_LEFT));
     }
 
     /// G85, the bug spelled as a test: a spent clock must not still *look*
@@ -3409,19 +3436,22 @@ mod tests {
         let mut host = FloatHost::default();
         open_peek(&mut host, TAB, now);
         host.release(false, now);
-        assert!(host.grace_expired(now + FLY_CLOSE), "the first one fires");
+        assert!(
+            host.grace_expired(now + FLOAT_CLOSE_GRACE),
+            "the first one fires"
+        );
         // The pointer came back and left again, without the peek ever having been
         // taken down — the second departure has to get a clock of its own, and
         // **the assertion is about when it fires, not that it does**. A stale
         // clock is a clock that has already expired, so "did it fire" cannot tell
         // a fresh one from a leftover; only "did it wait its full grace" can.
-        host.release(false, now + FLY_CLOSE);
+        host.release(false, now + FLOAT_CLOSE_GRACE);
         assert!(
-            !host.grace_expired(now + FLY_CLOSE),
+            !host.grace_expired(now + FLOAT_CLOSE_GRACE),
             "the second grace starts now, so it is not due at the instant it began"
         );
         assert!(
-            host.grace_expired(now + FLY_CLOSE * 2),
+            host.grace_expired(now + FLOAT_CLOSE_GRACE * 2),
             "and it comes due a full grace later"
         );
     }
@@ -3435,7 +3465,7 @@ mod tests {
         let peek = open_peek(&mut host, TAB, now);
         assert!(host.promote().is_some());
         host.release(false, now);
-        assert!(!host.grace_expired(now + FLY_CLOSE_LEFT * 4));
+        assert!(!host.grace_expired(now + FLOAT_CLOSE_GRACE_LEFT * 4));
         assert!(host.is_pinned(peek), "and it is still there");
     }
 
@@ -3466,11 +3496,11 @@ mod tests {
 
         assert!(host.promote().is_some(), "the header drag keeps it");
         assert!(
-            !host.grace_expired(now + FLY_CLOSE_LEFT * 4),
+            !host.grace_expired(now + FLOAT_CLOSE_GRACE_LEFT * 4),
             "the grace is out: a window being carried is not one that times out"
         );
         assert_eq!(
-            host.take_due(now + FLY_OPEN * 4),
+            host.take_due(now + FLOAT_OPEN_INTENT_DELAY * 4),
             None,
             "and the intent is out: it would have opened a second float over this one"
         );

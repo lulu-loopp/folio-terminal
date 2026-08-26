@@ -1287,7 +1287,7 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 **这一片的门是形状,不是「哪个 agent 亮了」——而且必须是。** CLI 普查实测八家:**`OSC 1337;RequestAttention` 一家都不发**(codex 是四段录音零命中加二进制零字面量),`OSC 133` 同样八家全零。所以它接住的不是这八家,是**协议本身**,而协议的用户在这八家之外;Claude Code 那条 `terminalSequence` 白名单逐字点名拒收 1337,上游哪天松口,**这个解析器当天接住,一行不改**。拿「某个 agent 亮了」当验收门,等于把一片做不完。
 
-**两处与方案对不上,写下来不绕过。** ① 方案 §11.10.3 说「`OSC 777` / `OSC 99` 收侧一行不用写,`bt-term` 早就把这两条解析成 `TerminalNotification`」——**对 777 成立,对 99 不成立**:kitty 的 `OSC 99` 有 id / 分块 / base64 的元数据语法,这只 crate 里还没有它的解析器,`NotificationSource::Osc99` 是一个**没人构造**的具名变体,而那是「认得,还没读」的诚实形状,不是漏项。② 方案 §13.2.2 与验收门 ⑱② 要一条 `why=turn-end src=osc` 的行(pi / codex 走 OSC 报回合结束)。**这一片不产它**:线上没有任何字节说「我这条通知是一次回合结束」,而「哪一家的哪个事件算回合结束」今天只有管道那条道问得出家族名。把任意一条 `OSC 9` 当回合结束,会让 `announced_turn_end` 那一位把下一条**内容不同**的消息吞掉。这条腿归 C2/C3——它要的是 `desktop_reach` 三档,而三档里的第三档还欠 C1 的两个事实。**2026-08-25 由 §7.1.5o 就地结:两半各有下落**,而它们不是同一个答案——`src=osc` 那一半成立并已落地,「任意 `OSC 9` 当回合结束会吞掉下一条不同的消息」那一半是真的,所以那一位改成了**认句子**的去重位。详见下一节。
+**两处与方案对不上,写下来不绕过。** ① 方案 §11.10.3 说「`OSC 777` / `OSC 99` 收侧一行不用写,`bt-term` 早就把这两条解析成 `TerminalNotification`」——**对 777 成立,对 99 不成立**:kitty 的 `OSC 99` 有 id / 分块 / base64 的元数据语法,这只 crate 里还没有它的解析器,`NotificationSource::Osc99` 是一个**没人构造**的具名变体,而那是「认得,还没读」的诚实形状,不是漏项。② 方案 §13.2.2 与验收门 ⑱② 要一条 `why=turn-end src=osc` 的行(pi / codex 走 OSC 报回合结束)。**这一片不产它**:线上没有任何字节说「我这条通知是一次回合结束」,而「哪一家的哪个事件算回合结束」今天只有管道那条道问得出家族名。把任意一条 `OSC 9` 当回合结束,会让 `announced_turn_end` 那一位把下一条**内容不同**的消息吞掉。这条腿归 C2/C3——它要的是 `desktop_reach` 三档,而三档里的第三档还欠 C1 的两个事实。**2026-08-25 由 §7.1.5o 就地结:两半各有下落**,而它们不是同一个答案——`src=osc` 那一半成立并已落地,「任意 `OSC 9` 当回合结束会吞掉下一条不同的消息」那一半是真的,所以那一位改成了**认句子**的去重位。详见下一节。**2026-08-26 销账:这条偏离的最后一笔是「一扇门」本身,已改判为两扇。**留下的病不是去重位而是**门**——`OSC 9` / `777` 的宣告与 hook `Stop` 报的回合结束共用 `turn_end_notification` 一个判据,于是把 Agents 页那行「Turn finished」关掉,连一个从来没听说过 agent 的 build 脚本写的 `OSC 9;deploy failed` 一起哑了。两句话没有任何关系,却挂在同一个开关上,而且看任何一行的文案都猜不出来。§7.1.5o ③′ 是它的落地。
 
 **7.1.5o 三档、一扇门、一次投递:注意力块的收官(注意力块片 C1/C2/C3;方案 `docs/plans/attention/plan.md` §5.2 / §10.7 / §11.2 / §11.7 / §13.2.2 / §13.3,五轮评审全过,A4/A8 用户裁 2026-08-25;`crates/bt-{platform,term,render,app}`)。** 前面四片把三条真信号源接到了同一本账上,而那本账一直在对着空气说话:`Raised` 造出来就被丢掉,`Reach` 只有两档,`turn_end_notification` 那个开关在两处代码里被硬写成 `true` 并各自留了一行「等 C2」。这一片把这三件事一次做完,外加红线 3 那笔从 §7.1.5b 起就欠着的账。
 
@@ -1303,7 +1303,26 @@ else                       { Flash }    // 在这台屏上,但不在你眼前
 
 三个 bool 欠八个输入八个答案,而「最小化的窗口还持着键盘」那两行不可达——把 `hidden` 写在最外层不是防御性编程,它同时**盖住了刚刚最小化、焦点位还没跟上的那一帧**。第二行是诚实而不是字面:`FlashWindowEx` 对前台窗口是 Win32 明文的 no-op,所以「有焦窗口的非活动 tab」这一格的可见产物是**窗内那两枚记号**;写成 `Flash` 而不是 `Nothing`,是因为它答的那句话与第 3/4 行一字不差,而你下一秒切走它就变成真的闪,**谓词一个字都不用改**。写成 `Nothing` 才是撒谎——那会让「隔壁 tab」和「你正盯着的那一格」在函数里长得一模一样。
 
-**③ 一扇门,两条道,一次投递(C3)。** 队列那条道由账本的单一 toast 门管(红线 12:C3 不许再立第二处判断),事件那条道由 §11.7 的事件门管,两条道共用 `Notifier` 与 `NotificationRoute`(点击回原 pane,一行没改)。门给出的是一个**带 `Reach` 的决定**,窗口这边只是它三条臂的消费者:`Nothing` 什么都不加、`Flash` 请任务栏按钮叫一声(**一轮一次**,按钮是窗口的,闪两遍不是两倍)、`Toast` 上桌面。`terminal_notifications` 管的是 **toast**——那一行的原话就是「程序可以在桌面上放一条消息」,而任务栏按钮不是一条消息、也不留下任何东西;`turn_end_notification` 管的是事件那条道,而且**读在门口**,因为 §11.7 要求它关着的时候那条道整个不走:不求值、不写 trace、不置位,于是把这一行关掉再打开不会留下半个「这个回合已经处理过」的状态。
+**③ 一扇门,两条道,一次投递(C3)。** 队列那条道由账本的单一 toast 门管(红线 12:C3 不许再立第二处判断),事件那条道由 §11.7 的事件门管,两条道共用 `Notifier` 与 `NotificationRoute`(点击回原 pane,一行没改)。门给出的是一个**带 `Reach` 的决定**,窗口这边只是它三条臂的消费者:`Nothing` 什么都不加、`Flash` 请任务栏按钮叫一声(**一轮一次**,按钮是窗口的,闪两遍不是两倍)、`Toast` 上桌面。`terminal_notifications` 管的是 **toast**——那一行的原话就是「程序可以在桌面上放一条消息」,而任务栏按钮不是一条消息、也不留下任何东西;事件那条道的门**读在门口**,因为 §11.7 要求它关着的时候那条道整个不走:不求值、不写 trace、不置位,于是把开关关掉再打开不会留下半个「这个回合已经处理过」的状态。**门口读的是哪一行,由 ③′ 决定。**
+
+**③′ 一扇门是两扇:说话的人决定敲哪一扇(2026-08-26 用户裁,`crates/bt-app/src/{attention,attention_wire,main}.rs`)。** ③ 写的时候门口只有一个判据,而它是 `turn_end_notification`——Agents 页那一行,文案讲的是「agent 不说话了」。于是**任何**走到那扇门的宣告都归它管,包括程序自己写下 tty 的 `OSC 9;<text>` 与 `OSC 777;notify`。后果是一句与 agent 毫无关系的话被一个只讲 agent 的开关静音:关掉 `Turn finished`,build 脚本写的 `deploy failed` 也没了;而 Terminal 页那行 `Notifications`——**原话就是「程序主动要求时可以在桌面放消息」**——救不回来,因为门已经关在它前面,后面没有消息可写。两行文案都读不出这层关系。
+
+判据因此拆成两条,**按「谁在说话」分,不按「说了什么」分**:
+
+| 到达方式 (`via`) | 归哪一行 | 为什么 |
+|---|---|---|
+| `osc-9` / `osc-777` / `osc-99` | **Terminal ▸ `Notifications`** | 程序自己写下 tty 的一句话,带正文,这就是那一行说的「在桌面放消息」 |
+| `stop` / `stop-failure` / `bel` / `osc-1337` / `notify` / `agent-settled` | **Agents ▸ `Turn finished`** | 都不带正文,它们说的只有「回合结束了」,而那正是那一行的题目 |
+
+两处容易读反的,写在这里:**`osc-1337` 归 Agents**,`RequestAttention=once` 是一次**举手**不是一条消息,而调查里 agent 正是用它报回合结束(§7.1.5o ⑤);**`osc-99` 归 Terminal**,虽然 `bt-term` 今天还没有它的解析器(偏离 ①),它是消息,所以出生就站对边。
+
+落地是 `attention::NotificationSwitches` 一个两位的值,`admits(via)` 一个**穷尽 match**——新加一条 `Via` 必须在编译期挑一扇门,不能继承上一条用的那扇。`Runtime::notification_switches()` 每回合读一次两行(不缓存,设置面板一改下一条到达就算数),三个入口(`settle_attention` 裸铃/`once`、`deliver_osc_attention` OSC、`deliver_attention` hook)一律带着这对值走,门在 `announce_turn_end` 里开一次。**`settings.json` 不加键**:两行本来就都在,v23 与 v17 一个字不动。
+
+`raise_attention` 里 `terminal_notifications` 那道 `Reach::Toast` 闸**留着**,它和门不是同一个问题:门问「有没有一条宣告」,闸问「这条宣告能不能上桌面」。所以 `Notifications` 关着时,一次 hook `Stop` 仍然闪任务栏按钮——「任务栏按钮不是一条消息」还是那句话。
+
+**没有动的那条腿**:一条带正文的 `Announced` 落在**有 live episode**的 pane 上时,走的是 §11.6 规矩 2 的「借正文」路(`AttentionLedger::announce`),那条从来没经过这扇门,归队列那条道与 `raise_attention` 的闸管。拆门不碰它。
+
+红门:`each_lane_answers_to_its_own_settings_row_and_to_neither_of_the_others` 两开关 × 两条道 = 四格,断言 trace 行的有无;`a_program_writing_its_own_sentence_is_the_terminals_row_and_everything_else_is_the_agents` 钉住上表每一行;`neither_shut_door_sets_the_bit_it_did_not_walk_past` 把 §11.7「关着不置位」这条从一行变成两行都欠。
 
 **④ 投递失败要有回声(用户裁 2026-08-25)。** 桌面拒收一条通知,以前只落一行 `stderr`——那是这一块唯一一种**没人查得出来**的失败:人没被通知,而且没被通知「你没被通知」。现在 `NotificationDesk::show` 把平台的话答回来,窗口里就地起一张既有族的卡片(`toast.rs` 的 `ToastKind::Error`),标题说发生了什么、正文接上平台自己的原句——**这张表不替它转述一条它没见过的错误**。一次会话一张:那个 desk 自己就把拒绝闩住了,后面每一条都答 `Ok`,而这句话是「这台机器发不出通知」,它真一次,不会更真。卡片落在**角落**而不是某个 pane 上:发得出 toast 的前提是这扇窗当时没人在看,那就没有哪个 pane 在人眼底下可挂;而卡片说的是**这条通道**的事,通道是窗口的,不是最先说话的那个 shell 的。
 
@@ -1315,7 +1334,7 @@ else                       { Flash }    // 在这台屏上,但不在你眼前
 
 **⑦ 红线 3 兑现:一点一断言,关了动画也还是。** §7.1.5b 立的规矩是「点位冲突按严重度取一」,而 `Bell` 与 `Awaiting` **同色**(小样 345-346 把它们写在相邻两行,`--warn` 一份),分辨全靠其中一个会呼吸——于是系统的动画开关一关,两个断言**逐像素相同**,一枚点在说两句话。这一片给它第二根轴,而且是**静态的**:`StatusDot { ink, hollow }`,**实心是一个正立着的状态,空心是一件响过的事**。四个说话的断言里 `Unread` / `Failed` / `Awaiting` 都是此刻为真、要到某件事发生才落下的状态,而铃是**响过**的一次性事实——一看就消,而把它读成「它正站在那儿等你」正是这一整块花四段录音证伪的那件事。所以空心的有且只有铃。它不花颜色也不花动作,于是同时活过了两样旧办法活不过的条件:关掉动画,和一份让两个断言撞色的配色。四个画这枚点的面(横 tab / 竖 tab / 卡片 / 监视卡的 schematic)共用同一个 `marks::status_dot_sprite`,环的粗细是直径的三分之一并**永远被夹在半径之下一个设备像素**——2px 环套在 3px 半径上留得下洞,3px 就悄悄画成一个实心圆,而那正是这条区分要躲的那几个像素,从取整那头绕回来。
 
-**⑧ 设置行:`Terminal ▸ Turn finished`,`settings.json` v23。** 一行管两条臂(无焦闪 + 最小化 toast),**不拆成两个**:拆开会让「闪但不 toast」和「toast 但不闪」这两个没人要的组合合法化;真要拆是加一行,不是改判据。默认 On,理由是这条道最常走的那一档是**最轻的**——你正看着就什么都不加,你不看着才闪一个你本来没在看的按钮,而 toast 只有窗口根本不在任何一块屏上时才够得着。迁移 v22→v23 写 `true`:没有哪个能写出 v22 文件的 build 有过回合结束这条道,`false` 是把一个空白冻成一个答案。这一行**只管够不够得到桌面**,窗内的铃点、未读点、队列徽章一个都不受它影响——与红线 4 划的是同一条线。
+**⑧ 设置行:`Agents ▸ Turn finished`,`settings.json` v23。**(页面归属 2026-08-25 用户裁时改到 Agents 页,本行原写 `Terminal ▸`,2026-08-26 就地更正;`settings.rs:2551-2558` 是准。)一行管两条臂(无焦闪 + 最小化 toast),**不拆成两个**:拆开会让「闪但不 toast」和「toast 但不闪」这两个没人要的组合合法化;真要拆是加一行,不是改判据。**这条只管两条臂,不管两条道**——③′ 拆的是「哪条道归哪一行」,不是把这一行的两条臂拆开,两件事互不相干。默认 On,理由是这条道最常走的那一档是**最轻的**——你正看着就什么都不加,你不看着才闪一个你本来没在看的按钮,而 toast 只有窗口根本不在任何一块屏上时才够得着。迁移 v22→v23 写 `true`:没有哪个能写出 v22 文件的 build 有过回合结束这条道,`false` 是把一个空白冻成一个答案。这一行**只管够不够得到桌面**,窗内的铃点、未读点、队列徽章一个都不受它影响——与红线 4 划的是同一条线。
 
 **⑨ 第四家把焦点门开反了,而这是片 A0.5 的一条副作用而不是一条反对意见(2026-08-26 取证;`docs/plans/attention/evidence-copilot-cli-2026-08-26.md` §2.5、§2.6)。** 普查当时记的横向事实是「`?1004` 焦点上报,三家把它当闸门」,而那三家的初值都等价于「你正看着呢」—— 于是一个一个焦点字节都不发的终端挨闷棍。**copilot 是第四家开 `?1004h` 的,但它的门朝反方向开**:内部那一位初值是 `null`,而门写的是 `s.current !== true`,所以「不知道」在它那里等于「那就通知」。**片 A0.5 对它因此不是修复而是收紧**:发了焦点上报之后,Folio 里的 copilot 在前台时反而会闭嘴。**这不改 A0.5 的裁决**—— 它对三家是修复,而发焦点上报本来就是终端该做的事;**也不落在本块的账上**:那道门管的是它自己的 OS 桌面 toast,**一个字节也不上 tty**,所以 Folio 今天既收不到那条 toast、也不因它闭嘴 —— 副作用落在**用户的桌面通知**上。它的铃没有焦点门。**实机复测欠着**:本机可以装到 copilot 并量到它的版本,但开不了会话(组织策略拒绝,原文 「Access denied by policy settings」),所以这一格是源码与文档取证而不是一段录音。
 
@@ -3051,6 +3070,41 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 **留给 P1 的一条发现**：plan 的紧凑头槽位是 `12`，而 `12 × 1.2/16 = 0.90`——**在选任何一枚画之前就已经在带子下沿之外**。槽位表和带子这两半规格合不到一起：P1 把全表收成一支 1.2 笔之后，十二像素的头只能读 0.90，要 0.95 得 12.67 以上。今天没红（头上的工具画在 13、文件夹是纯填充），P1 把工具挪进槽位的那天就会红。要么槽位走到 13–14，要么紧凑头有自己的一支笔。
 
 **④ 三件零成本。** `RenameBranch → Pencil`（连同那句过期注释）；`GitGraph` 上的 `#[allow(dead_code)]` 撤掉——它的调用者（Git 面板 `Open graph`）早就到了；**「未保存」`●` 变几何**：三处头（预览头 13px、浮窗头 13px、file peek 头 **9px**）画的是字体字符 U+25CF，直径是「机器上装了哪套字」的事实而不是本设计的事实，两百像素外就站着一枚本模块自己画的状态点。`marks::dirty_dot_sprite` 走 `status_dot_sprite` 的同一条路（`ControlPill` 就是圆），直径写成 `WINDOW_TAB_STATUS_DOT_LOGICAL_PX` 本身——一枚点说一件事，两枚点说的是同一类事。这补上的是 R4 给 `⎇` 立规矩时漏网的最后一枚：「a codepoint is not a drawing」。
+### 7.18 motion 令牌:三档、一段位移、两条曲线,和一张不许出现第四档的登记表（动画块前置片 丙12，2026-08-26 用户裁；`crates/bt-render/src/{motion(新),theme,lib}.rs`、`crates/bt-app/src/{main,toast,tooltip,keyhint,seats,cmdrail,termscroll,float,profiles,files}.rs`、`crates/bt-platform/src/lib.rs`）
+
+**一句话:这扇窗的节奏第一次是一处决定,而不是九处各自都说得通的数字。**
+
+**① 病在哪。** 2026-08-25 双引擎审计(`docs/plans/ui-style/audit-{claude,codex}-2026-08-25.md`)独立报出同一条:时长散在 `main.rs` 八处、`theme.rs` 九处,加上 `float.rs` / `toast.rs` / `tooltip.rs` / `keyhint.rs` / `seats.rs` / `cmdrail.rs` / `termscroll.rs` 各一两处,于是这扇窗在画 90 / 100 / 120 / 140 / 160 / 180 / 200 / 220 / 420 九种淡入淡出。**那不是九个决定,那是一个没人做过的决定**——每一处单看都有 mock-up 的行号撑着,而没有一处看得见另外八处。
+
+**② 三档。** `crates/bt-render/src/motion.rs`,与 `theme.rs` 的其余设计常量同居:
+
+| 档 | 长 | 谁穿 |
+|---|---|---|
+| `MOTION_FAST_MS` | **90** | 不是主语的那层 chrome 的 opacity 与颜色:tooltip、keyhint、rail 文字、停靠预览、divider 卡片内缩、命令刻的峰跨格 |
+| `MOTION_BASE_MS` | **140** | **一次交互**:浮窗、toast、chevron 转向、files 三角、tab 被挤开、pin 展开、命令刻的暖起来 |
+| `MOTION_SLOW_MS` | **200** | 搬**版面**的:rail 宽度、pane FLIP、新 pane 淡入、tab 落地、滚动条退场 |
+
+140 作基准的理由不是取中:`.chevbtn svg { transition: transform 140ms }` 早就是这个产品的一次交互节拍,而箭头指的那张菜单是同一个动作的另一半。位移只有一段——`MOTION_TRAVEL_LOGICAL_PX = 4.0`,**从召唤它的那个东西的方向来**:菜单从锚点、toast 从它挂的边、浮窗从被按的位置。toast 原来的 8 收到 4(8 读起来是「滑」,那是一句关于距离的话),浮窗原来的 5 收到 4(那个 5 不是谁定的,是没人把它跟别人对过)。曲线三条(`EASE` / `EASE_IN_OUT` / `GRAB_EASE`)一并搬来,`main.rs` 退化成 re-export。
+
+**③ 红门:一张显式登记表,不靠 grep。** 规则在 `bt_render::motion::unarchived`,表在 `bt-app`(唯一能同时看见两只 crate 的地方),红测 `every_duration_in_this_window_is_an_archived_span_a_stated_exemption_or_a_named_wait`。**为什么不扫源码**:扫描器只找得到它认得的写法,一个拼法不同的时长它会安静地跳过——而安静跳过跟干净通过在输出上一模一样,那是红门不许有的失败形状。手写表反过来错:表里没有的常量就是没人为它写过一句话。三条规则:
+
+1. `Archived` 的必须 ∈ {90, 140, 200};
+2. `Exempt` 的必须**带理由**且**不等于三档中的任何一个**——一个本来就合档的数字不是例外,把它记成例外等于把一条受管的时长藏起来;
+3. `Intent` 的必须带理由,且**名字里要有** `DELAY` / `DWELL` / `GRACE` / `HOLD` / `INTENT` / `LIFE` / `REST` 之一。
+
+**豁免表(六条,逐条带理由)**:`WINDOW_TAB_BREATHE_PERIOD_MS` 1700(呼吸是周期,不是到达)、`WINDOW_TAB_RING_SPIN_PERIOD_MS` 1100(转一圈)、`WINDOW_TAB_RING_SWEEP_TRANSITION_MS` 300(**数值抵达**,用户 2026-08-26 裁定接受;它也是全库唯一一处故意不遵守 reduced-motion 的,同一个理由:值就是内容)、`CURSOR_BLINK_PHASE` 550(闪是周期)、`FOOT_REVEAL_FEEDBACK` 1300(回执停留)、`cmdrail::JUMP_FLASH` 950(**本片新增第六条**:一次跳转落在哪一行的**可读时间**,收到 140 就会在眼睛到达之前消失,与 1300 那条同族)。
+
+**④ 意图延迟族不入档也不入豁免(照 Codex 裁定)。** command preview 120、float intent 180、submenu 250、peek 350、tooltip 380、keyhint 800、scrollbar dwell 900 都不是过渡,是「手要停多久」和「离开之后宽限多久」。它们**独立命名**并登记为 `Intent`。三个名字因此改了:`float::FLY_OPEN` → `FLOAT_OPEN_INTENT_DELAY`、`FLY_CLOSE` → `FLOAT_CLOSE_GRACE`、`FLY_CLOSE_LEFT` → `FLOAT_CLOSE_GRACE_LEFT`,`profiles::CHEVRON_HOVER_OPEN` → `CHEVRON_HOVER_OPEN_DELAY`。改名不是洁癖:**两份互相独立的审计都把 `FLY_OPEN` 读成了一段 180ms 的进场动画**并写进了「收到 200」的施工单里,而那 180ms 里屏幕上没有任何东西在动。两个人对着同一个名字犯同一个错,就是名字的问题。
+
+**⑤ 本片只收敛,不给硬切的表面加动画。** 菜单族、设置对话框、tooltip 退场这些「有进无退 / 一帧从无到有」的,归动画第一片,另开。本片动的是既有值归档:120→140、160→140、180→200、100→90、files 三角 120→140、toast 位移 8→4、浮窗位移 5→4。有七条测试原来钉着旧数字,它们钉的是 mock-up 的行号——逐条改成钉档位并写下为什么这条裁决压过那行 CSS。两处值得单说:`cmdrail` 的三条过渡原来是 100/140/120,文件里写着「故意不圆整,三个各差四十分之一秒」——本片把那句话翻案成一次**明确**的裁决(峰的travel 留快档,颜色与墨迹一起进基准档:三个属性各走一档是没人听得见的节奏和三个要维护的数字);`PANE_FLIP` 200 与 `PANE_FADE_IN` 180 原来分开钉,现在合成一档,因为它们是同一次分屏的两半、互为替代地发生。
+
+**⑥ 顺手补齐的三个 reduced-motion 缺口。**
+
+- **`toast.rs` 从来没收过 `Motion`。** 旧做法把偏好推给调用方:`raise` 收一个 `still: bool`,把卡片的出生时间往前挪一整段进场。它答对了进场、漏掉了**退场**(Reduced 下仍然淡出 90ms 并为此要帧),而且顺手买错了一件事——出生在过去的卡片,寿命也从过去开始算,于是 Reduced 下的一张通知比旁边那张少站 140ms。改成 `opacity` / `slide` / `deadline` 各自读偏好,`still` 那个参数换成 `motion`。附带一条:Reduced 下**没有退场就没有可等的跨度**,所以送走的卡片当场离场(`retire_the_departed`,三个送走的入口都调),不然它会以零 opacity 留在表上占着那个锚点的三个位置之一。
+- **光标闪烁的签名里根本没有 `Motion`。** 答案不是把光标拿走而是**不让它切**:Reduced 下常亮,并且**不登记下一次翻转**——这正是 `wait_halo_opacity`(去光晕、留橙边)那条范式用在窗里最后一处没被告知的表面上,顺带把每秒两次的唤醒也省了。
+- **`motion` 只在启动读一次**,代码注释自己写着 *"until this window listens for `WM_SETTINGCHANGE`"*。本片接上:`bt_platform::SystemSettingsWatch` 一个 `SetWindowSubclass`,收到 `WM_SETTINGCHANGE` / `WM_THEMECHANGED` 就唤醒事件循环(`AppEvent::SystemPreferencesChanged`),下一回合 `adopt_motion_preference` 重读一次 `SPI_GETCLIENTAREAANIMATION`。**不按 `wparam`/`lparam` 过滤**:无障碍偏好的 area 没有枚举、section 字符串文档上是尽力而为,按它过滤等于造一扇下个 Windows build 就安静失灵的窗。**订阅按窗装而不是按进程**:广播本来就发给每一扇顶层窗,首窗关掉之后这个进程还得听得见,而重复唤醒的代价是本来就要发生的那一回合上多一次 `SystemParametersInfoW`。绝大多数 tween 在**取样时**读 `app.motion`,所以下一帧自然就换了;要推的只有两支光标——闪是一口钟,已经订好的下一响不会自己取消。红测:`a_caret_stops_blinking_the_moment_the_system_says_so_and_starts_again_after`(关掉即常亮且 deadline 变 `None`,打开即重新上钟)、`only_a_settings_or_theme_broadcast_asks_the_system_again`。
+
+**⑦ 没动的。** peek strip / glance 卡故意无淡入(有书面辩护)、tab 内容硬切(跨淡会让终端文字发糊)、拖拽 ghost 的位置绝不缓动、pane 关闭不为动画持尸——四条安全边界原样。
 
 ## 9. 里程碑
 

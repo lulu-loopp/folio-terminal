@@ -145,13 +145,13 @@ pub const THUMB_REACH_LOGICAL_PX: f32 = TERMINAL_SCROLL_LANE_LOGICAL_PX + RAIL_L
 
 /// **How long a thumb with no reason left to be up stays up anyway.**
 ///
-/// Nine hundred milliseconds, and a new constant rather than a borrowed one.
-/// Everything in this window that carries a duration is a *transition* — the
-/// rail's `.18s`, a pin's 120ms, a tooltip's 90 — and a transition is the
-/// travel, not the wait before it. The two clocks this window already runs that
-/// really are waits belong to intent (`PEEK_INTENT_MS`, the float's 180) and
-/// answer the opposite question: how long a hand must stay before something
-/// appears. This is a dwell *after*, and nothing here was that.
+/// Nine hundred milliseconds, and a constant of its own rather than a rung of
+/// [`bt_render::motion`]'s archive. Everything in that archive is a *transition*
+/// — the fast, base and slow spans — and a transition is the travel, not the
+/// wait around it. The other clocks this window runs that really are waits
+/// belong to intent (`PEEK_INTENT_MS`, the float's open delay) and answer the
+/// opposite question: how long a hand must stay before something appears. This
+/// is a dwell *after*, and nothing in the archive was that.
 ///
 /// It is deliberately longer than any of them. The bar's whole job in this
 /// moment is to have been seen, and a mark that leaves as fast as a hover
@@ -159,13 +159,12 @@ pub const THUMB_REACH_LOGICAL_PX: f32 = TERMINAL_SCROLL_LANE_LOGICAL_PX + RAIL_L
 pub const THUMB_REST: Duration = Duration::from_millis(900);
 /// The fade itself, once the rest has run out.
 ///
-/// A transition, so it is in the family the constants above are: the rail's
-/// `.18s ease` is the longest thing this window fades and this is the same
-/// length, because the two are the same gesture — a piece of a pane's own edge
-/// going quiet. Under [`Motion::Reduced`] it does not run at all; the thumb is
-/// simply gone when the rest ends, which is what `prefers-reduced-motion` asks
-/// for (mock-up 359-361).
-pub const THUMB_FADE: Duration = Duration::from_millis(180);
+/// A transition, so it is in the archive the wait above is not: the **slow**
+/// span, which is also the rail's, because the two are the same gesture — a
+/// piece of a pane's own edge going quiet. Under [`Motion::Reduced`] it does not
+/// run at all; the thumb is simply gone when the rest ends, which is what
+/// `prefers-reduced-motion` asks for (mock-up 359-361).
+pub const THUMB_FADE: Duration = bt_render::MOTION_SLOW;
 
 /// The bar, in the one shape the painter, the hit test and the drag all read.
 ///

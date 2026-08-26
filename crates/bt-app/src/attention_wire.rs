@@ -851,7 +851,10 @@ mod tests {
                 .announce_turn_end(
                     at,
                     Reach::Flash,
-                    true,
+                    crate::attention::NotificationSwitches {
+                        turn_end: true,
+                        desktop_messages: true,
+                    },
                     attention_map::PIPE_TRANSPORT,
                     stop.turn_end.expect("an announcement"),
                     None,

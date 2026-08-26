@@ -201,18 +201,22 @@ pub const TICK_MATCH_HOT_OPACITY: f32 = 0.75;
 /// 宽度过渡使切换读作运动"* — the peak jumps a whole ordinal at the midpoint, and
 /// the tenth of a second is what turns that jump into a movement rather than a
 /// flicker.
-pub const TICK_WIDTH_TRANSITION: Duration = Duration::from_millis(100);
+pub const TICK_WIDTH_TRANSITION: Duration = bt_render::MOTION_FAST;
 /// `transition: background .14s ease` (mock 1369) — grey to accent as the rail
 /// warms, and accent to the deepened crest under the pointer.
-pub const TICK_BACKGROUND_TRANSITION: Duration = Duration::from_millis(140);
+pub const TICK_BACKGROUND_TRANSITION: Duration = bt_render::MOTION_BASE;
 /// `transition: opacity .12s ease` (mock 1369) — `.45 → .55 → 1`.
 ///
-/// **A separate span from the background's**, and deliberately not rounded to
-/// match it: the stylesheet declares three durations on one line and they differ
-/// by a fortieth of a second each. Collapsing them would be an aesthetic decision
-/// taken by an implementer, and the sum of the three is what the rail's warming
-/// actually looks like.
-pub const TICK_OPACITY_TRANSITION: Duration = Duration::from_millis(120);
+/// **It used to be a separate span from the background's, and is not any more.**
+/// The stylesheet declares three durations on one line and they differ by a
+/// fortieth of a second each; this file argued that collapsing them would be an
+/// aesthetic decision taken by an implementer. The archive is that decision
+/// taken deliberately instead ([`bt_render::motion`], user ruling 2026-08-26):
+/// three tick properties easing at 100/140/120 is a rhythm nobody can hear and
+/// three numbers everybody has to maintain. The width keeps the **fast** span
+/// because it is a crest jumping an ordinal; the colour and the ink take the
+/// **base** one together, because they are one tick warming up.
+pub const TICK_OPACITY_TRANSITION: Duration = bt_render::MOTION_BASE;
 /// `left = r.left − peek.offsetWidth − 12` (mock 8476) — the card stands this far
 /// to the **left** of the tick it names.
 ///
@@ -245,6 +249,14 @@ pub fn peek_empty_text() -> &'static str {
 pub const FISHEYE_RELAYOUT_CAP: usize = 2;
 /// `.term > div.cmd-jump { animation: cmdflash .95s ease }` — how long the row a
 /// jump landed on says so.
+///
+/// **Exempt from the archive** ([`bt_render::motion`]), and registered as such
+/// with this reason: it is not the span of something appearing, it is how long
+/// an *answer stays legible*. A reader who has just been thrown a thousand rows
+/// down the scrollback has to find the row the jump chose, and the band is the
+/// only thing pointing at it. Shortened to the base 140 it would be gone before
+/// the eye arrived — the same family as the foot's 1300ms receipt, and the
+/// opposite of a transition.
 pub const JUMP_FLASH: Duration = Duration::from_millis(950);
 /// `@keyframes cmdflash { 0% { background: color-mix(in srgb, var(--accent) 22%,
 /// transparent) } }` — the flash's opening alpha, easing to nothing.
@@ -1764,7 +1776,7 @@ mod tests {
     use super::*;
     use bt_doc::AnchorId;
 
-    const EASE: [f32; 4] = [0.25, 0.1, 0.25, 1.0];
+    const EASE: [f32; 4] = bt_render::EASE;
 
     fn mark(id: u64, exit_code: Option<i32>) -> CommandMark {
         CommandMark {
@@ -2593,8 +2605,18 @@ mod tests {
         assert_eq!(peek_host(&rail, 9), None);
     }
 
-    /// The three timelines, each on its own span and each still owing frames until
-    /// its own is up.
+    /// The three timelines, on the archive's two spans, each still owing frames
+    /// until its own is up.
+    ///
+    /// **Two spans and not three** (§7.18, user ruling 2026-08-26). The
+    /// stylesheet declares 100/140/120 on one line and this file used to argue
+    /// that rounding them together would be an aesthetic decision taken by an
+    /// implementer. It is now a decision taken deliberately instead: the crest's
+    /// travel keeps the fast span because it is a jump being made readable, and
+    /// the colour and the ink take the base span together because they are one
+    /// tick warming up. What the test still holds is the shape that matters —
+    /// the short one lands first, the long ones land together, and nothing owes
+    /// a frame after the longest.
     #[test]
     fn the_three_transitions_run_for_their_own_durations_and_then_stop_asking_for_frames() {
         let palette = bt_render::chrome_palette();
@@ -2616,14 +2638,14 @@ mod tests {
         );
         let (warmth, moving) = pointer.hot_ink.sample(mid, Motion::Full);
         assert!(warmth > 0.0 && warmth < 1.0 && moving);
-        // Each span ends on its own schedule, longest last.
+        // The short span ends first and the two long ones end together.
         assert!(pointer.is_animating(start + TICK_WIDTH_TRANSITION, Motion::Full));
-        assert!(pointer.is_animating(start + TICK_OPACITY_TRANSITION, Motion::Full));
+        assert!(!pointer.is_animating(start + TICK_OPACITY_TRANSITION, Motion::Full));
         assert!(!pointer.is_animating(start + TICK_BACKGROUND_TRANSITION, Motion::Full));
-        assert!(
-            TICK_WIDTH_TRANSITION < TICK_OPACITY_TRANSITION
-                && TICK_OPACITY_TRANSITION < TICK_BACKGROUND_TRANSITION
-        );
+        assert!(TICK_WIDTH_TRANSITION < TICK_BACKGROUND_TRANSITION);
+        assert_eq!(TICK_OPACITY_TRANSITION, TICK_BACKGROUND_TRANSITION);
+        assert_eq!(TICK_WIDTH_TRANSITION, bt_render::MOTION_FAST);
+        assert_eq!(TICK_BACKGROUND_TRANSITION, bt_render::MOTION_BASE);
         // Landed, the picture is the one the aim asked for.
         let landed = start + TICK_BACKGROUND_TRANSITION;
         let quads = paint(&rail, &pointer, &palette, landed, Motion::Full).quads;

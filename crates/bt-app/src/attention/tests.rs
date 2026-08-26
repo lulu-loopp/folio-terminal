@@ -16,6 +16,28 @@ use super::*;
 
 use std::time::Duration;
 
+/// Both settings rows on, which is how they ship and what most cells below are
+/// about — they are testing the ledger, not the switches.
+const BOTH_ON: NotificationSwitches = NotificationSwitches {
+    turn_end: true,
+    desktop_messages: true,
+};
+/// Both rows off: the shut-door cells, which have to record nothing at all.
+const BOTH_OFF: NotificationSwitches = NotificationSwitches {
+    turn_end: false,
+    desktop_messages: false,
+};
+/// Agents ▸ `Turn finished` on, Terminal ▸ `Notifications` off.
+const ONLY_TURN_END: NotificationSwitches = NotificationSwitches {
+    turn_end: true,
+    desktop_messages: false,
+};
+/// Terminal ▸ `Notifications` on, Agents ▸ `Turn finished` off.
+const ONLY_DESKTOP_MESSAGES: NotificationSwitches = NotificationSwitches {
+    turn_end: false,
+    desktop_messages: true,
+};
+
 fn site() -> Site {
     Site {
         tab: 1,
@@ -1209,7 +1231,7 @@ fn a_turn_end_is_decided_once_even_when_the_decision_was_to_say_nothing() {
     let first = pane.ledger.announce_turn_end(
         site(),
         Reach::Nothing,
-        true,
+        BOTH_ON,
         Transport::Pipe,
         Via::Stop,
         None,
@@ -1220,9 +1242,14 @@ fn a_turn_end_is_decided_once_even_when_the_decision_was_to_say_nothing() {
         "a decision leaves a mark even when the decision was to add nothing"
     );
 
-    let second =
-        pane.ledger
-            .announce_turn_end(site(), Reach::Flash, true, Transport::Bel, Via::Bel, None);
+    let second = pane.ledger.announce_turn_end(
+        site(),
+        Reach::Flash,
+        BOTH_ON,
+        Transport::Bel,
+        Via::Bel,
+        None,
+    );
     assert_eq!(second.lines, Vec::<String>::new());
     assert_eq!(
         second.raised, None,
@@ -1234,7 +1261,7 @@ fn a_turn_end_is_decided_once_even_when_the_decision_was_to_say_nothing() {
     let next = pane.ledger.announce_turn_end(
         site(),
         Reach::Toast,
-        true,
+        BOTH_ON,
         Transport::Osc,
         Via::Osc777,
         None,
@@ -1255,15 +1282,20 @@ fn a_disabled_turn_end_door_records_nothing_at_all() {
     let off = pane.ledger.announce_turn_end(
         site(),
         Reach::Toast,
-        false,
+        BOTH_OFF,
         Transport::Pipe,
         Via::Stop,
         None,
     );
     assert_eq!(off, Outcome::default());
-    let on =
-        pane.ledger
-            .announce_turn_end(site(), Reach::Toast, true, Transport::Pipe, Via::Stop, None);
+    let on = pane.ledger.announce_turn_end(
+        site(),
+        Reach::Toast,
+        BOTH_ON,
+        Transport::Pipe,
+        Via::Stop,
+        None,
+    );
     assert_eq!(
         on.lines.len(),
         1,
@@ -1294,7 +1326,7 @@ fn a_second_report_of_one_turn_is_silent_and_a_second_sentence_is_not() {
     let first = pane.ledger.announce_turn_end(
         site(),
         Reach::Toast,
-        true,
+        BOTH_ON,
         Transport::Osc,
         Via::Osc9,
         Some("build finished"),
@@ -1311,7 +1343,7 @@ fn a_second_report_of_one_turn_is_silent_and_a_second_sentence_is_not() {
         let repeat = pane.ledger.announce_turn_end(
             site(),
             Reach::Toast,
-            true,
+            BOTH_ON,
             Transport::Bel,
             Via::Bel,
             words,
@@ -1327,7 +1359,7 @@ fn a_second_report_of_one_turn_is_silent_and_a_second_sentence_is_not() {
     let second = pane.ledger.announce_turn_end(
         site(),
         Reach::Toast,
-        true,
+        BOTH_ON,
         Transport::Osc,
         Via::Osc777,
         Some("deploy finished"),
@@ -1347,7 +1379,7 @@ fn a_second_report_of_one_turn_is_silent_and_a_second_sentence_is_not() {
         shut.ledger.announce_turn_end(
             site(),
             Reach::Toast,
-            false,
+            BOTH_OFF,
             Transport::Osc,
             Via::Osc9,
             Some("build finished"),
@@ -1420,7 +1452,7 @@ fn the_event_door_never_mints_an_episode_or_takes_a_place() {
         (Transport::Osc, Via::Osc1337),
     ] {
         pane.ledger
-            .announce_turn_end(site(), Reach::Toast, true, source, via, None);
+            .announce_turn_end(site(), Reach::Toast, BOTH_ON, source, via, None);
         pane.at(Event::Answer(AnswerKind::Keyboard));
     }
     assert_eq!(pane.state(), State::Idle);
@@ -1450,7 +1482,14 @@ fn a_long_run() -> Vec<String> {
     lines.extend(pane.at(Event::WeakNo));
     lines.extend(
         pane.ledger
-            .announce_turn_end(site(), Reach::Flash, true, Transport::Osc, Via::Osc9, None)
+            .announce_turn_end(
+                site(),
+                Reach::Flash,
+                BOTH_ON,
+                Transport::Osc,
+                Via::Osc9,
+                None,
+            )
             .lines,
     );
     lines.extend(pane.at(keyed_wait(WaitKind::Elicitation, "e-1")));
@@ -1556,7 +1595,7 @@ fn a_turn_end_reported_over_an_osc_is_never_written_as_a_bell() {
         let mut pane = Pane::new();
         let out = pane
             .ledger
-            .announce_turn_end(site(), Reach::Flash, true, source, via, None);
+            .announce_turn_end(site(), Reach::Flash, BOTH_ON, source, via, None);
         assert!(
             out.lines[0].ends_with(expected),
             "{:?}/{:?}: {}",
@@ -2019,4 +2058,204 @@ fn the_weak_level_turns_into_edges_exactly_once_each() {
     );
     pane.at(Event::WeakNo);
     assert_eq!(pane.ledger.weak_edge(None), None);
+}
+
+/// **RED GATE — two rows, two lanes, and neither one hears the other's switch**
+/// (§7.1.5o deviation ②, user ruling 2026-08-26).
+///
+/// # The bug this is the gate for
+///
+/// One `enabled: bool` used to be read at the top of `announce_turn_end` for
+/// every arrival on every transport, and it came from `turn_end_notification` —
+/// the **Agents** page's `Turn finished` row, whose sentence is about an agent
+/// going quiet. So turning that row off also silenced every `OSC 9;<text>` and
+/// `OSC 777;notify` any program in any pane wrote, including the ones from
+/// build scripts that had never heard of an agent. The Terminal page's
+/// `Notifications` row — the one whose own words are about a program putting a
+/// message on the desktop — governed only the final write and could not save
+/// them, because with the door shut there was nothing left to write.
+///
+/// # What the grid asserts
+///
+/// Both switches, both ways, against both lanes, on the one observable that
+/// says a decision was made at all: the trace line. Sixteen readings, and the
+/// shape of the answer is the ruling — each lane's line appears exactly when its
+/// **own** row is on, whatever the other row says.
+///
+/// Mutation: put either lane back on the other's row and four cells fail; read
+/// one row for both and eight do.
+#[test]
+fn each_lane_answers_to_its_own_settings_row_and_to_neither_of_the_others() {
+    /// One arrival on a fresh pane, and whether it left a line.
+    fn announced(switches: NotificationSwitches, source: Transport, via: Via) -> bool {
+        let mut pane = Pane::new();
+        let out = pane
+            .ledger
+            .announce_turn_end(site(), Reach::Toast, switches, source, via, None);
+        !out.lines.is_empty()
+    }
+    /// A turn ending, reported the way a hook reports one.
+    fn turn_end(switches: NotificationSwitches) -> bool {
+        announced(switches, Transport::Pipe, Via::Stop)
+    }
+    /// A program's own message, written down its own tty.
+    fn program_message(switches: NotificationSwitches) -> bool {
+        announced(switches, Transport::Osc, Via::Osc9)
+    }
+
+    assert!(
+        turn_end(BOTH_ON),
+        "both rows on: a turn ending is announced"
+    );
+    assert!(
+        program_message(BOTH_ON),
+        "both rows on: a program's message is announced"
+    );
+
+    assert!(
+        turn_end(ONLY_TURN_END),
+        "`Turn finished` alone still announces the end of a turn"
+    );
+    assert!(
+        !program_message(ONLY_TURN_END),
+        "`Notifications` off silences the program's message — and this is the \
+         half that used to be impossible to have"
+    );
+
+    assert!(
+        !turn_end(ONLY_DESKTOP_MESSAGES),
+        "`Turn finished` off silences the end of a turn"
+    );
+    assert!(
+        program_message(ONLY_DESKTOP_MESSAGES),
+        "`Notifications` alone still lets a program speak — and this is the half \
+         the old single door took away"
+    );
+
+    assert!(!turn_end(BOTH_OFF));
+    assert!(!program_message(BOTH_OFF));
+}
+
+/// PIN — **which door each way of hearing about a turn's end knocks on.**
+///
+/// The table, stated once so that adding a `Via` cannot inherit a door by
+/// accident. Two of these are the ones a reader would get wrong from the name
+/// alone: `Osc1337` is an *arm* rather than a message and belongs to
+/// `Turn finished` despite being an OSC, and `Osc99` is a message and belongs to
+/// `Notifications` despite having no producer in the parser yet.
+#[test]
+fn a_program_writing_its_own_sentence_is_the_terminals_row_and_everything_else_is_the_agents() {
+    for via in [Via::Osc9, Via::Osc777, Via::Osc99] {
+        assert!(
+            ONLY_DESKTOP_MESSAGES.admits(via),
+            "{via} is a program putting a message on the desktop"
+        );
+        assert!(!ONLY_TURN_END.admits(via));
+    }
+    for via in [
+        Via::Stop,
+        Via::StopFailure,
+        Via::Bel,
+        Via::Osc1337,
+        Via::Notify,
+        Via::AgentSettled,
+    ] {
+        assert!(ONLY_TURN_END.admits(via), "{via} is only a turn ending");
+        assert!(!ONLY_DESKTOP_MESSAGES.admits(via));
+    }
+    for via in [Via::Osc9, Via::Stop, Via::Bel, Via::Notify] {
+        assert!(BOTH_ON.admits(via));
+        assert!(!BOTH_OFF.admits(via));
+    }
+}
+
+/// PIN — **a shut door leaves no half-state, on either row.**
+///
+/// §11.7's rule, now owed twice: turning a row off and on again may not leave
+/// `announced_turn_end` set behind, because the lane it governs was never
+/// walked. The old test held this for one row; the split makes it two.
+#[test]
+fn neither_shut_door_sets_the_bit_it_did_not_walk_past() {
+    let mut pane = Pane::new();
+    let refused = pane.ledger.announce_turn_end(
+        site(),
+        Reach::Toast,
+        ONLY_TURN_END,
+        Transport::Osc,
+        Via::Osc9,
+        Some("deploy failed"),
+    );
+    assert_eq!(refused, Outcome::default(), "no line, no raise");
+    let allowed = pane.ledger.announce_turn_end(
+        site(),
+        Reach::Toast,
+        BOTH_ON,
+        Transport::Osc,
+        Via::Osc9,
+        Some("deploy failed"),
+    );
+    assert_eq!(
+        allowed.lines.len(),
+        1,
+        "the bit was not left set by the closed door"
+    );
+
+    let mut pane = Pane::new();
+    let refused = pane.ledger.announce_turn_end(
+        site(),
+        Reach::Toast,
+        ONLY_DESKTOP_MESSAGES,
+        Transport::Pipe,
+        Via::Stop,
+        None,
+    );
+    assert_eq!(refused, Outcome::default());
+    let allowed = pane.ledger.announce_turn_end(
+        site(),
+        Reach::Toast,
+        BOTH_ON,
+        Transport::Pipe,
+        Via::Stop,
+        None,
+    );
+    assert_eq!(allowed.lines.len(), 1);
+}
+
+/// PIN — the two lanes' trace lines are the ones the acceptance gate reads, and
+/// each carries its own provenance.
+#[test]
+fn the_two_lanes_write_the_lines_the_gate_greps_for() {
+    let mut pane = Pane::new();
+    let hook = pane.ledger.announce_turn_end(
+        site(),
+        Reach::Flash,
+        BOTH_ON,
+        Transport::Pipe,
+        Via::Stop,
+        None,
+    );
+    assert_eq!(
+        hook.lines,
+        vec![
+            "toast tab=1 seat=SeatId(2) why=turn-end episode=- reach=flash src=pipe via=stop"
+                .to_owned()
+        ]
+    );
+
+    let mut pane = Pane::new();
+    let program = pane.ledger.announce_turn_end(
+        site(),
+        Reach::Toast,
+        BOTH_ON,
+        Transport::Osc,
+        Via::Osc9,
+        Some("deploy failed"),
+    );
+    assert_eq!(
+        program.lines,
+        vec![
+            "toast tab=1 seat=SeatId(2) why=turn-end episode=- reach=toast src=osc via=osc-9"
+                .to_owned()
+        ]
+    );
 }
