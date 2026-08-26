@@ -270,6 +270,7 @@ dependencies = [
  "pollster",
  "serde_json",
  "syntect",
+ "toml_edit 0.22.27",
  "two-face",
  "winit",
 ]

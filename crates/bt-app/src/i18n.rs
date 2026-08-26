@@ -1765,6 +1765,32 @@ pub enum Text {
     /// No ellipsis and no plural: the row opens a list rather than a chooser,
     /// and the list is what says which windows there are.
     PaneMenuMoveToWindow,
+
+    // ── the Agents page (user ruling 2026-08-25) ───────────────────────────
+    //
+    // One contiguous block at the end, per this table's standing rule. **Seven
+    // entries**: the page's own two words — the heading and the word in the rail,
+    // which are two literals rather than one transformed, per this file's own
+    // ruling on case — and the codex installer's row, its sentence and its three
+    // cards.
+    /// `AGENTS` — the page's heading.
+    CategoryAgents,
+    /// `Agents` — the word in the rail.
+    NavAgents,
+    /// `Agents ▸ Codex notify` — the row.
+    RowCodexNotify,
+    /// Its sentence. Two facts and a boundary, on `DescClaudeHooks`'s shape: what
+    /// is written and where, and then **which** of the two things an agent can
+    /// say this one carries. The third clause earns its place — the row beside it
+    /// arranges for a pane to say *it is waiting for you*, and a reader who
+    /// assumed this did the same would install it, watch an approval box sit
+    /// there with nothing on the tab, and conclude the switch was broken.
+    DescCodexNotify,
+    CodexNotifyAddedToast,
+    CodexNotifyRemovedToast,
+    /// The refusal's own half of the sentence; the reason follows it, in the
+    /// installer's words.
+    CodexNotifyFailedToast,
 }
 
 impl Text {
@@ -2943,9 +2969,14 @@ impl Text {
             // that earns its place — every rung above `Off` changes a colour the
             // program named, and a reader who turns this on without knowing that
             // will file the result as a bug. It states the fact and stops.
+            //
+            // **Shortened to three lines** (2026-08-25, the wrap ruling's own
+            // consequence — see `DescFocusCardHeight`). All three clauses are
+            // still here; what went was the passive voice each of them was
+            // wearing.
             Self::DescMinimumContrast => pick(
                 lang,
-                "Lightens or darkens terminal text until it meets this ratio against the cell behind it. Backgrounds are never changed, and neither is anything outside the grid. Above Off, colours a program asked for are overridden",
+                "Lightens or darkens terminal text to meet this ratio against its cell. Backgrounds never change, nor does anything outside the grid. Above Off it overrides a program's colours",
                 "把终端文字提亮或压暗,直到与它所在格子的底色达到这个对比度。底色一律不动,网格以外的一切也不动。Off 以上的档位会覆盖程序指定的颜色",
             ),
             // 「通知」and not 「桌面通知」: Windows itself calls the surface
@@ -3064,10 +3095,17 @@ impl Text {
             // left is the one row in this file that is already about a card's
             // picture — and "how tall the picture is" and "which rows it shows"
             // are the same reader's question one sentence apart.
+            // **Shortened to three lines** (2026-08-25). The wrap ruling caps a
+            // row's sentence at three and says in as many words that a fourth is
+            // copy to shorten; `no_settings_sentence_needs_a_fourth_line` found
+            // this one, which was the longest in the dialog. Every fact it
+            // carried is still here — what the number measures, how many rows
+            // each rung buys at the default face, and that Alt+wheel scrolls the
+            // picture a row at a time — said in fewer words.
             Self::DescFocusCardHeight => pick(
                 lang,
-                "How tall each card's picture of its tab stands. At the default face a lone pane's seat holds 12 rows at 160, 20 at 240 and 27 at 320. Alt+wheel over a seat lifts its picture off the bottom of that pane, a row per notch",
-                "每张卡片里那幅 tab 缩图的高度。默认字面下,单 pane 的格子在 160 装得下 12 行、240 装 20 行、320 装 27 行。在格子上 Alt+滚轮,把这幅图从那块 pane 的底部往上抬,一格一行",
+                "How tall each card's picture of its tab stands. At the default face a lone pane holds 12 rows at 160, 20 at 240, 27 at 320. Alt+wheel over a seat scrolls it a row per notch",
+                "每张卡片里那幅 tab 缩图的高度。默认字面下,单 pane 在 160 装得下 12 行、240 装 20 行、320 装 27 行。在格子上 Alt+滚轮滚动这幅图,一格一行",
             ),
             // A fact and no more: where the page goes. Not "open this page in
             // your default browser" — "your default" is the machine's setting
@@ -3137,6 +3175,39 @@ impl Text {
             // 「移到新标签」/「移到新窗口」, and a third exit spelling the same
             // verb differently would read as a different verb.
             Self::PaneMenuMoveToWindow => pick(lang, "Move to window", "移到窗口"),
+            // ── the Agents page ────────────────────────────────────────────
+            // 「Agents」stays in Latin in both columns and it is the honest
+            // reading rather than a gap in the table: what the page is about is
+            // the class of program that calls itself an agent, and every one of
+            // them — Claude Code, codex — is written this way in Chinese prose
+            // too. Upper-cased at the source for the heading, as every other page
+            // is, and lower-cased by hand for the rail.
+            Self::CategoryAgents => pick(lang, "AGENTS", "AGENTS"),
+            Self::NavAgents => pick(lang, "Agents", "Agents"),
+            // 「通知程序」and not 「通知」: what the row installs is a *program*
+            // codex runs, and the row three lines up already owns the word for
+            // the thing a program puts on your desktop.
+            Self::RowCodexNotify => pick(lang, "Codex notify", "Codex 通知程序"),
+            Self::DescCodexNotify => pick(
+                lang,
+                "Adds a notify program to your own ~/.codex/config.toml so codex says when a turn has ended. It does not report a codex waiting for you, and writes nothing into a repository",
+                "向你自己的 ~/.codex/config.toml 写入 notify 程序,codex 结束一个回合时会说一声。它不报告 codex 在等你回答,也不往仓库里写",
+            ),
+            Self::CodexNotifyAddedToast => pick(
+                lang,
+                "Added to ~/.codex/config.toml. Takes effect in a new codex session.",
+                "已加进 ~/.codex/config.toml。新开的 codex 会话生效。",
+            ),
+            Self::CodexNotifyRemovedToast => pick(
+                lang,
+                "Removed from ~/.codex/config.toml",
+                "已从 ~/.codex/config.toml 移除",
+            ),
+            Self::CodexNotifyFailedToast => pick(
+                lang,
+                "codex's configuration was not changed",
+                "codex 的配置没有被改动",
+            ),
             Self::RowSearchEngine => pick(lang, "Search engine", "搜索引擎"),
             // Names the field rather than the feature, because that is where a
             // reader meets it: they typed a word into the place an address goes
@@ -3162,7 +3233,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 490] = [
+    pub const ALL: [Self; 497] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3653,6 +3724,13 @@ impl Text {
         Self::FileMenuRename,
         Self::GateDiscardAll,
         Self::PaneMenuMoveToWindow,
+        Self::CategoryAgents,
+        Self::NavAgents,
+        Self::RowCodexNotify,
+        Self::DescCodexNotify,
+        Self::CodexNotifyAddedToast,
+        Self::CodexNotifyRemovedToast,
+        Self::CodexNotifyFailedToast,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -3663,7 +3741,16 @@ impl Text {
     /// program is not called. Every entry not on this list must differ between
     /// the columns and must carry Chinese in the Chinese one.
     #[cfg(test)]
-    const UNTRANSLATED: [Self; 2] = [
+    const UNTRANSLATED: [Self; 4] = [
+        // The class of program the page is about, and the word every one of them
+        // calls itself — Claude Code, codex — in Chinese prose as much as in
+        // English. A page named 「代理」 would be naming a proxy server (user
+        // ruling 2026-08-25).
+        Self::CategoryAgents,
+        // The same word in the rail. A second entry and not a reuse of the
+        // heading's, for `FilesViewFiles`'s reason: case is content in this
+        // table, and the two columns are two literals.
+        Self::NavAgents,
         // The program's name. It appears untranslated inside a dozen sentences
         // in this table already; a tab that named it in Chinese would be naming
         // something else.

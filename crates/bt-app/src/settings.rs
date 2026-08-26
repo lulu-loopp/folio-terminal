@@ -182,6 +182,23 @@ const ROW_DESC_FONT_LOGICAL_PX: f32 = 12.0;
 /// The 12px line box, measured in the mock-up.
 const ROW_DESC_LINE_LOGICAL_PX: f32 = 14.5;
 const ROW_DESC_MARGIN_TOP_LOGICAL_PX: f32 = 1.0;
+/// **How many lines a row's sentence may take** (user ruling 2026-08-25, which
+/// revises 0817's fixed row height).
+///
+/// The fixed height came with a fixed rule — one line, ellipsised — and the
+/// ruling that replaced it came from a screenshot: `Offer PowerShell
+/// integration`, `Claude Code hooks`, `Notifications` and `Turn finished` were
+/// all cut, four rows in a column, and every one of them was cut in the half of
+/// the sentence that carried the fact. A row's sentence now **wraps** and the
+/// row grows to hold it; a row whose sentence fits on one line, or that has no
+/// sentence at all, is exactly as tall as it was.
+///
+/// Three is where it stops, and the cap is not a layout compromise: a fourth
+/// line is a **copy** fault, not a geometry one. What a third line's `…` reports
+/// is a sentence that has to be shortened, and
+/// `no_settings_sentence_needs_a_fourth_line` is the pin that reports it in the
+/// test run rather than in a screenshot.
+const ROW_DESC_MAX_LINES: usize = 3;
 
 // ── `.combo` ───────────────────────────────────────────────────────────────
 /// `.combo > button { min-width: 118px }` — **a floor, and since §7.1.6c-5 only
@@ -1549,6 +1566,26 @@ pub enum SettingsCategory {
     /// once `bt_persist::SettingsV1` grew a key for it at schema v21, and the
     /// page now holds the whole set the mock-up drew.
     Terminal,
+    /// **The agents running inside those panes** (user ruling 2026-08-25).
+    ///
+    /// Born out of `Terminal`, and the line it draws is the one that page's own
+    /// name draws one step further out: `Terminal` is how ONE pane behaves once
+    /// something is running, and this is what the *program* running in it can be
+    /// told to say. Both of its rows answer the same question — what has this
+    /// terminal got to write into somebody else's configuration so that the agent
+    /// in this pane can tell the window it is there — and neither is a setting of
+    /// Folio's at all: what they report is a fact about a file on the machine.
+    ///
+    /// **`Notifications` stayed behind**, and that is the ruling's own boundary
+    /// rather than a leftover: `OSC 9` and `OSC 777` are a capability of the
+    /// *terminal*, available to a build script and a shell function as much as to
+    /// an agent, and filing them here would name one kind of caller as if it were
+    /// the only one.
+    ///
+    /// **After `Terminal` in the rail**, which is where the reading order puts
+    /// it: the pages narrow from the product to the window to the session to the
+    /// pane, and the program inside the pane is one step in from the pane.
+    Agents,
     RenderedBlocks,
     /// The profile table, one row per profile (§7.1.6c-6).
     ///
@@ -1606,11 +1643,13 @@ impl SettingsCategory {
     /// `nav_items`, `first_category`, the arrow walk and Home/End all read it;
     /// nothing on disk does ([`Self::key`] says why), so a reorder is this
     /// literal and the two pins that quote it.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::General,
         Self::Appearance,
         Self::Profiles,
         Self::Terminal,
+        // — the program running inside that pane, which is one step in from it
+        Self::Agents,
         Self::RenderedBlocks,
         Self::Shortcuts,
     ];
@@ -1650,6 +1689,7 @@ impl SettingsCategory {
             Self::Profiles => "profiles",
             Self::Appearance => "appearance",
             Self::Terminal => "terminal",
+            Self::Agents => "agents",
             Self::RenderedBlocks => "rendered-blocks",
             Self::Shortcuts => "shortcuts",
         }
@@ -1681,6 +1721,7 @@ impl SettingsCategory {
             Self::Profiles => Text::CategoryProfiles.text(),
             Self::Appearance => Text::CategoryAppearance.text(),
             Self::Terminal => Text::CategoryTerminal.text(),
+            Self::Agents => Text::CategoryAgents.text(),
             Self::RenderedBlocks => Text::CategoryRenderedBlocks.text(),
             Self::Shortcuts => Text::CategoryShortcuts.text(),
         }
@@ -1702,6 +1743,7 @@ impl SettingsCategory {
             Self::Profiles => Text::NavProfiles.text(),
             Self::Appearance => Text::NavAppearance.text(),
             Self::Terminal => Text::NavTerminal.text(),
+            Self::Agents => Text::NavAgents.text(),
             Self::RenderedBlocks => Text::NavRenderedBlocks.text(),
             Self::Shortcuts => Text::NavShortcuts.text(),
         }
@@ -2387,6 +2429,23 @@ pub enum SettingsRow {
     /// looking for exactly this, and a switch behind a disclosure is a switch
     /// they will not find.
     ClaudeHooks,
+    /// **Whether codex runs `folio attention` when a turn ends** (A3's B-shaped
+    /// account, ruled 2026-08-25;
+    /// `docs/plans/attention/evidence-cli-survey-2026-08-25.md` §2.6 ①).
+    ///
+    /// [`Self::ClaudeHooks`]'s row over a second upstream, and everything that
+    /// row's own note says applies word for word: the answer is a fact about a
+    /// file on the machine rather than a line in `settings.json`, it is read back
+    /// off that file every time the dialog is drawn, and it is not an Advanced
+    /// row.
+    ///
+    /// **What it reaches is the event lane and not the queue**, and that is the
+    /// difference from the row above it. codex's `notify` says
+    /// `agent-turn-complete` and nothing else — the survey watched it stay silent
+    /// through a whole approval box — so what it installs announces the end of a
+    /// turn under the `Turn finished` switch three rows up, and mints nothing.
+    /// `attention_codex`'s header has the rest.
+    CodexNotify,
 
     // ── the profile editor's own rows (§7.1.6c-6b) ─────────────────────────
     //
@@ -2486,11 +2545,17 @@ impl SettingsRow {
             // the past the pane keeps, asked sideways.
             Self::PsReadLine
             | Self::PowerShellOffer
-            | Self::ClaudeHooks
             | Self::Scrollback
             | Self::LineWrapping
-            | Self::Notifications
-            | Self::TurnEndNotifications => SettingsCategory::Terminal,
+            | Self::Notifications => SettingsCategory::Terminal,
+            // **The rows about the program running in the pane** (user ruling
+            // 2026-08-25). `Notifications` deliberately stayed on `Terminal`: it
+            // governs a capability of the terminal that anything holding a tty
+            // can reach, and only its most visible caller happens to be an agent.
+            // See [`SettingsCategory::Agents`].
+            Self::ClaudeHooks | Self::CodexNotify | Self::TurnEndNotifications => {
+                SettingsCategory::Agents
+            }
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2570), beside that page's own Maximum height row.
             Self::Formulas | Self::InlineFormulas | Self::Tables | Self::BlockMaxHeight => {
@@ -2563,6 +2628,7 @@ impl SettingsRow {
             Self::TurnEndNotifications => Text::RowTurnEndNotifications.text(),
             Self::PowerShellOffer => Text::RowPowerShellOffer.text(),
             Self::ClaudeHooks => Text::RowClaudeHooks.text(),
+            Self::CodexNotify => Text::RowCodexNotify.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
             Self::KeyHints => Text::RowKeyHints.text(),
             Self::ContextMenu => Text::RowContextMenu.text(),
@@ -2684,6 +2750,11 @@ impl SettingsRow {
             // does not know a terminal is about to edit a file belonging to
             // another program has been told something they would want to know.
             Self::ClaudeHooks => Text::DescClaudeHooks.text(),
+            // Two facts and no third, the row above's shape: what is written and
+            // where, then which of the two things an agent can say this one
+            // carries — because a reader who installs it expecting a dot on a
+            // waiting pane has been told something that is not true.
+            Self::CodexNotify => Text::DescCodexNotify.text(),
             // Says what Off *does* rather than what it hides, because what it
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
@@ -2740,7 +2811,16 @@ impl SettingsRow {
             // installed, and what that costs today. It is also where the reason
             // a greyed item is grey is written — see the variant.
             Self::PsReadLine => crate::psreadline::row_description(values.psreadline),
-            Self::ProfileName => Text::ProfilesRowNameDesc.text(),
+            // **A refusal replaces the sentence**, which is this dialog's own
+            // idiom for a control that cannot act — the same line
+            // `psreadline::row_description` writes on its greyed row and the same
+            // line an unavailable profile carries. The field keeps what was typed
+            // while it says so, because the refusal is a state the reader is
+            // standing in and not an error they submitted.
+            Self::ProfileName => values
+                .editor
+                .and_then(|editor| editor.refusal)
+                .unwrap_or_else(|| Text::ProfilesRowNameDesc.text()),
             Self::ProfileProgram => Text::ProfilesRowProgramDesc.text(),
             Self::ProfileStartAt => Text::ProfilesRowStartingDirDesc.text(),
             // **The row's sentence becomes the reason** on a built-in, which is
@@ -2910,6 +2990,7 @@ impl SettingsRow {
             // wait for them with nothing on its tab: this is what they are looking for, and a
             // switch behind a disclosure is a switch they will not find.
             | Self::ClaudeHooks
+            | Self::CodexNotify
             | Self::Scrollback
             | Self::LineWrapping
             | Self::Notifications
@@ -3010,6 +3091,7 @@ impl SettingsRow {
             | Self::TurnEndNotifications
             | Self::PowerShellOffer
             | Self::ClaudeHooks
+            | Self::CodexNotify
             | Self::LineWrapping => FORMULA_OPTIONS.len(),
             Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.len(),
             Self::Scrollback => SCROLLBACK_OPTIONS.len(),
@@ -3077,6 +3159,7 @@ impl SettingsRow {
             | Self::TurnEndNotifications
             | Self::PowerShellOffer
             | Self::ClaudeHooks
+            | Self::CodexNotify
             | Self::LineWrapping => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
             // The one item that is a word goes through the i18n table and the
             // three that are quantities do not — the table's own header lists
@@ -3398,6 +3481,10 @@ impl SettingsRow {
             Self::ClaudeHooks => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.claude_hooks),
+            // The same, over `~/.codex/config.toml` — see `attention_codex`.
+            Self::CodexNotify => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.codex_notify),
             // The *state of the machine*, like `PsReadLine` below and for the
             // same reason: what is ticked is whether Explorer's menu carries the
             // verb, which is a question only the registry can answer.
@@ -3615,11 +3702,6 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // wrong with the module this shell already loads, and what this shell is not
     // loading at all (§7.1.6j).
     rows.push(SettingsRow::PowerShellOffer);
-    // **Under both**, because it is the third question about the same pane and
-    // the only one about a program Folio did not start: what is wrong with the
-    // module this shell loads, what this shell is not loading, and what the
-    // agent running inside it has no way to tell the terminal.
-    rows.push(SettingsRow::ClaudeHooks);
     // **Under the PSReadLine row**, which is the mock-up's own order for this page
     // (4838, then 4862): the row that reports a fact about the machine stands
     // first and the row that changes what a pane does stands under it.
@@ -3634,10 +3716,21 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // patched with, and this is the only row here whose answer shows up outside
     // this window.
     rows.push(SettingsRow::Notifications);
-    // **Directly under it**, because the two are one reader's two questions about the same
-    // outside: may a program put a message on my desktop, and does my agent finishing count as
-    // one. The row above is about a sentence a program wrote; this one is about an event nobody
-    // wrote down.
+    // ── Agents (user ruling 2026-08-25) ──
+    //
+    // **What the program in the pane can be told to say, then what this window
+    // does with it.** The two installers first, in the order the two upstreams
+    // arrived and each carrying the same kind of answer — a fact about a file in
+    // the reader's own home — and under them the one row here that is a setting
+    // of Folio's, because it governs what happens to what those two report.
+    //
+    // `Notifications` is deliberately **not** in this group; see
+    // [`SettingsCategory::Agents`].
+    rows.push(SettingsRow::ClaudeHooks);
+    rows.push(SettingsRow::CodexNotify);
+    // **Last**, because it is the answer to a question the two rows above raise:
+    // they arrange for a turn's end to be reported at all, and this decides
+    // whether a reported one is allowed off this window and onto the desktop.
     rows.push(SettingsRow::TurnEndNotifications);
     rows
 }
@@ -3691,6 +3784,18 @@ pub struct SettingsContent<'a> {
     /// through [`Self::page_rows`], so none of them carries a second copy of the
     /// rule "the list's rows and the editor's are never both on screen".
     pub editor: Option<EditorSubject>,
+    /// **What every row currently reads** — here since a sentence became a
+    /// height (user ruling 2026-08-25).
+    ///
+    /// It rides beside `advanced` and `editor` on their own stated reason: it
+    /// decides *what the dialog is holding this frame*. A row's sentence is a
+    /// function of the row's answer ([`SettingsRow::description`]), the number of
+    /// lines that sentence takes is a function of the sentence, and the row's
+    /// height is a function of that number — so a layout that could not read the
+    /// answers would be a layout reserving room for a sentence other than the one
+    /// about to be drawn. `build` is handed the same borrow, which is what makes
+    /// **measure and paint one derivation** rather than two that agree today.
+    pub values: &'a SettingsValues,
 }
 
 /// The editor sub-page's rows, top to bottom — its whole page, since it has
@@ -3922,6 +4027,10 @@ pub struct SettingsValues {
     ///
     /// Read off that file rather than stored here, for [`Self::context_menu`]'s reason.
     pub claude_hooks: bool,
+    /// Whether the user's own codex configuration runs `folio attention` at the end of a turn.
+    ///
+    /// The field above's answer over `~/.codex/config.toml`, and read off that file for its reason.
+    pub codex_notify: bool,
     /// Which way a split with no direction of its own cuts.
     pub split_direction: SplitDirectionV1,
     /// Where a web preview's address field sends a non-address.
@@ -4068,6 +4177,7 @@ impl SettingsValues {
             // one is.
             context_menu: false,
             claude_hooks: false,
+            codex_notify: false,
             split_direction: SplitDirectionV1::Auto,
             search_engine: SearchEngineV1::DuckDuckGo,
             minimum_contrast: MinimumContrastV1::Off,
@@ -4133,6 +4243,17 @@ pub struct EditorSubject {
     /// Why the colour row is dark, when it is — the row's own sentence become
     /// the reason, interned so this stays `Copy`.
     pub colour_reason: &'static str,
+    /// **Why the `Name` field is refusing**, when it is — an exact duplicate of
+    /// another row's name, or nothing at all.
+    ///
+    /// It replaces that row's sentence, which is this dialog's own idiom for a
+    /// control that cannot act. **Here rather than beside the typed text** (where
+    /// it was until 2026-08-25): a refusal is a sentence, a sentence is a number
+    /// of lines and a number of lines is a row's height, so a refusal the layout
+    /// could not see would be a row drawn taller or shorter than it was measured.
+    /// One copy, read by [`SettingsRow::description`], and therefore by the
+    /// height, the boxes and the ink alike.
+    pub refusal: Option<&'static str>,
     /// Which of [`START_AT_OPTIONS`] the starting directory is on.
     pub start_at: usize,
     /// The fixed folder's own path, when the row is on one. It is what the
@@ -5975,7 +6096,21 @@ pub struct RowLayout {
     /// the row's rule and its breathing room cut by the content edge.
     pub band: [f32; 4],
     pub title: [f32; 4],
+    /// **The first line box of the row's sentence**, and the column every line of
+    /// it is set in.
+    ///
+    /// One box and not the whole block, which is what keeps `width(desc)` the
+    /// answer to "how wide is this row's text column" it has always been. How
+    /// many boxes stand under this one is [`Self::desc_lines`].
     pub desc: [f32; 4],
+    /// **How many line boxes the sentence takes**, `1..=`[`ROW_DESC_MAX_LINES`]
+    /// (user ruling 2026-08-25).
+    ///
+    /// One for a row whose sentence fits, and one for a row with no sentence at
+    /// all — both of which are exactly as tall as they were before the ruling.
+    /// The `n`th line stands at `desc[1] + n * ROW_DESC_LINE`, which is the one
+    /// arithmetic `build` uses and the one the band was reserved from.
+    pub desc_lines: usize,
     pub combo: [f32; 4],
 }
 
@@ -6828,6 +6963,19 @@ pub fn claude_hooks_requested(target: SettingsTarget) -> Option<bool> {
     }
 }
 
+/// Whether codex's `notify` program is installed, as a press on this row's picker.
+///
+/// The row above's door over a second upstream and a second file — see `attention_codex`.
+#[must_use]
+pub fn codex_notify_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::CodexNotify, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
 /// Whether a held modifier raises the hint card, as a press on its picker
 /// (§7.1.5e′).
 #[must_use]
@@ -7031,6 +7179,111 @@ pub(crate) fn ellipsized(
     format!("{}{ELLIPSIS}", &text[..ends[best]])
 }
 
+/// **One layout's measurements, remembered.**
+///
+/// The face is the caller's and answering it costs a shaped `cosmic-text` buffer
+/// — an allocation and a full shaping pass per call. One layout asks the same
+/// question over and over by construction, and always for the same answer:
+///
+/// * the dialog is **as tall as its tallest page**, so every page is measured
+///   every time, and the cap over them is measured again on top of that;
+/// * a page's control column is the widest of its own rows' answers, so the
+///   `Terminal font` row's forty family names are asked for once per page-sweep;
+/// * a sentence is broken by asking the face for each of its words, and the
+///   sweeps above break every sentence in the dialog rather than the page's.
+///
+/// Multiplied out that is a few thousand shaping passes for a few hundred
+/// distinct strings, and the difference is this table. It is **not a cache**:
+/// nothing here outlives the call that made it, so there is no revision to keep
+/// in step and nothing to invalidate when a face, a scale or a language changes
+/// — the next layout starts empty. Memoising a pure function is all this is.
+///
+/// Keyed by size **and** text because a width is a fact about the pair. The
+/// buckets are per size so a lookup can be made from a borrowed `&str`
+/// (`String: Borrow<str>`) and only a miss allocates.
+#[derive(Default)]
+struct MeasureMemo {
+    seen: std::collections::HashMap<u32, std::collections::HashMap<String, f32>>,
+}
+
+impl MeasureMemo {
+    fn width(
+        &mut self,
+        text: &str,
+        font_size_px: f32,
+        measure: &mut dyn FnMut(&str, f32) -> f32,
+    ) -> f32 {
+        let size = font_size_px.to_bits();
+        if let Some(found) = self.seen.get(&size).and_then(|bucket| bucket.get(text)) {
+            return *found;
+        }
+        let width = measure(text, font_size_px);
+        self.seen
+            .entry(size)
+            .or_default()
+            .insert(text.to_owned(), width);
+        width
+    }
+}
+
+/// **A row's sentence, broken into the lines it will be drawn as** (user ruling
+/// 2026-08-25).
+///
+/// The one derivation the height, the boxes and the ink all read: `page_height`
+/// asks it how many lines to reserve, the placement walk asks it the same
+/// question to size the band, and `build` asks it for the strings themselves.
+/// Three readings of one function rather than three rules kept in agreement by
+/// hand — R8, and the reason a row cannot be sized for two lines and drawn with
+/// three.
+///
+/// The breaking itself is [`crate::tooltip::wrap`], which is already this
+/// product's answer to "put this sentence in a box that wide": break at spaces,
+/// and break a run too wide for the box between characters. That second half is
+/// what makes it right in Chinese as well as in English — a Chinese sentence
+/// carries no spaces, arrives as one run, and is broken where it fills the line,
+/// which is where Chinese breaks.
+///
+/// **The cap is [`ROW_DESC_MAX_LINES`] and the last line then says so.** What is
+/// ellipsised is everything the cap refused, joined — so the third line is full
+/// rather than being whatever the wrapper happened to put there, and the `…` is
+/// the honest report that a sentence was too long for the rule (see the
+/// constant: that is a copy fault and there is a pin that names it).
+#[must_use]
+pub(crate) fn wrapped_description(
+    text: &str,
+    max_width: f32,
+    font_size_px: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = crate::tooltip::wrap(text, max_width, |word| measure(word, font_size_px));
+    if lines.len() <= ROW_DESC_MAX_LINES {
+        return lines;
+    }
+    let refused = lines.split_off(ROW_DESC_MAX_LINES - 1).join(" ");
+    lines.push(ellipsized(&refused, max_width, font_size_px, measure));
+    lines
+}
+
+/// How tall that sentence stands, in line boxes.
+///
+/// **One for a row with no sentence at all**, which is what keeps such a row the
+/// height it has always been: the box is empty, and an empty box is still the
+/// gap the design puts under a title.
+#[must_use]
+fn description_lines(
+    text: &str,
+    max_width: f32,
+    font_size_px: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> usize {
+    wrapped_description(text, max_width, font_size_px, measure)
+        .len()
+        .max(1)
+}
+
 /// The same, cut from the **front**: `text` if it fits, else a `…` and the
 /// longest *suffix* that fits after it.
 ///
@@ -7161,6 +7414,13 @@ pub fn layout_for_menus(
     menu_scroll: f32,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Option<SettingsLayout> {
+    // **Every question below goes through the memo** (see [`MeasureMemo`]): this
+    // function asks the face for the same few hundred strings a few thousand
+    // times, because the dialog is as tall as its tallest page and every sweep
+    // over the pages re-measures every one of them.
+    let mut memo = MeasureMemo::default();
+    let mut memoised = |text: &str, size: f32| memo.width(text, size, measure);
+    let measure: &mut dyn FnMut(&str, f32) -> f32 = &mut memoised;
     let px = |value: f32| value * scale;
     let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
     let metrics = StackMetrics::new(scale);
@@ -7187,7 +7447,13 @@ pub fn layout_for_menus(
     // does not give the box more window to fill.
     let available =
         (surface_height - px(DIALOG_TOP_LOGICAL_PX) - px(DIALOG_BOTTOM_LOGICAL_PX)).round();
-    let page_height = metrics.page_height(content_of, category);
+    // **The band a row stands in, before there is a frame to measure it off.**
+    // A sentence's line count is a function of the column it is set in and a
+    // row's height is a function of that count, so the width has to be known
+    // before the height can be — see `StackMetrics::row_span`, whose answer the
+    // placement walk below then reads rather than deriving a second time.
+    let row_span = metrics.row_span(width);
+    let page_height = metrics.page_height(content_of, category, row_span, measure);
     // **The dialog is as tall as its tallest page, whatever page is up** (user
     // ruling 2026-08-17).
     //
@@ -7203,7 +7469,7 @@ pub fn layout_for_menus(
     // happened to have rows this frame.
     let tallest_page = SettingsCategory::ALL
         .into_iter()
-        .map(|each| metrics.page_height(content_of, each))
+        .map(|each| metrics.page_height(content_of, each, row_span, measure))
         .fold(page_height, f32::max);
     // The rail does not scroll — five words never overflow a dialog that is
     // already as tall as its window — but it is still part of what the body has
@@ -7220,7 +7486,7 @@ pub fn layout_for_menus(
     // is why the shortcut table's forty lines do not turn this into a
     // whole-window surface — see [`everyday_cap`].
     let height = (2.0 * border + header + body_height)
-        .min(2.0 * border + header + everyday_cap(metrics))
+        .min(2.0 * border + header + everyday_cap(metrics, content_of.values, row_span, measure))
         .min(px(DIALOG_MAX_HEIGHT_LOGICAL_PX))
         .min(available)
         .round();
@@ -7310,7 +7576,10 @@ pub fn layout_for_menus(
     let text_left = content[0] + px(CONTENT_PADDING_X_LOGICAL_PX);
     let text_right = content[2] - px(CONTENT_PADDING_X_LOGICAL_PX);
     let row_left = text_left + px(ROW_PADDING_X_LOGICAL_PX);
-    let row_right = text_right - px(ROW_PADDING_X_LOGICAL_PX);
+    // **The same span the height was solved from**, and not `text_right` less a
+    // padding a second time: the two are the same arithmetic, and one of them
+    // written twice is one of them free to drift by a rounding.
+    let row_right = row_left + row_span;
     let combo_height = px(COMBO_HEIGHT_LOGICAL_PX);
     // One walk down the same list the height was measured from — `page_items`,
     // read twice and disagreed with nowhere. A heading, a disclosure and a foot
@@ -7323,13 +7592,7 @@ pub fn layout_for_menus(
     // from row to row is not one. Measured over *all* of the page's rows, the
     // folded ones included, so opening the advanced group never moves the
     // buttons above it. See `page_combo_width`.
-    let button = page_combo_width(
-        &content_of.category_rows(category),
-        scale,
-        border,
-        row_right - row_left,
-        measure,
-    );
+    let button = metrics.page_button(content_of, category, row_span, measure);
     let mut placed_groups: Vec<GroupLayout> = Vec::new();
     let mut placed_rows: Vec<RowLayout> = Vec::new();
     let mut placed_advanced: Option<AdvancedLayout> = None;
@@ -7359,7 +7622,8 @@ pub fn layout_for_menus(
             // drawn, the boxes hit-tested and the height reserved stay three
             // readings of one derivation (R8).
             PageItem::Row(row) if row.stacked() => {
-                let height = metrics.stacked_height(row, content_of.editor);
+                let lines = metrics.desc_lines(row, content_of.values, row_span, button, measure);
+                let height = metrics.stacked_height(row, content_of.editor, lines);
                 let band = [row_left, cursor, row_right, cursor + height];
                 let top = cursor + px(ROW_PADDING_Y_LOGICAL_PX);
                 cursor += height;
@@ -7369,13 +7633,17 @@ pub fn layout_for_menus(
                     row_right,
                     top + px(ROW_TITLE_LINE_LOGICAL_PX),
                 ];
+                // **The first line's box**, and `desc_lines` says how many stand
+                // under it — see [`RowLayout::desc`].
                 let desc = [
                     row_left,
                     title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX),
                     row_right,
                     title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX),
                 ];
-                let control_top = desc[3] + px(STACKED_GAP_LOGICAL_PX);
+                let control_top = desc[3]
+                    + (lines - 1) as f32 * px(ROW_DESC_LINE_LOGICAL_PX)
+                    + px(STACKED_GAP_LOGICAL_PX);
                 let field_height = px(FIELD_HEIGHT_LOGICAL_PX);
                 let control = match row.control() {
                     // The field gives way inside the pair, because the pair is
@@ -7447,14 +7715,17 @@ pub fn layout_for_menus(
                     band,
                     title,
                     desc,
+                    desc_lines: lines,
                     combo: control,
                 });
             }
             PageItem::Row(row) => {
-                let band = [row_left, cursor, row_right, cursor + metrics.row_height];
+                let lines = metrics.desc_lines(row, content_of.values, row_span, button, measure);
+                let height = metrics.row_height_for(lines);
+                let band = [row_left, cursor, row_right, cursor + height];
                 let top = cursor + px(ROW_PADDING_Y_LOGICAL_PX);
-                cursor += metrics.row_height;
-                let combo_top = top + (metrics.row_content_height - combo_height) / 2.0;
+                cursor += height;
+                let combo_top = top + (metrics.row_content_height_for(lines) - combo_height) / 2.0;
                 let combo = [
                     row_right - button,
                     combo_top,
@@ -7464,8 +7735,8 @@ pub fn layout_for_menus(
                 // `.row .text` is `flex: 1` beside a `flex: none` control, one gap
                 // apart — and `min-width: 0`, which is why the control's own cap
                 // (`COMBO_MAX_ROW_SHARE`) is what keeps this column off zero. The
-                // sentence that does not fit what is left is ellipsised and never
-                // allowed to run under the button: see `build`.
+                // sentence that does not fit what is left **wraps into it** and is
+                // never allowed to run under the button: see `build`.
                 let text_column_right = combo[0] - px(ROW_GAP_LOGICAL_PX);
                 let title = [
                     row_left,
@@ -7484,6 +7755,7 @@ pub fn layout_for_menus(
                     band,
                     title,
                     desc,
+                    desc_lines: lines,
                     combo,
                 });
             }
@@ -8137,9 +8409,14 @@ fn page_items(content: SettingsContent<'_>, category: SettingsCategory) -> Vec<P
 #[derive(Clone, Copy, Debug)]
 struct StackMetrics {
     scale: f32,
-    /// `.row .text`'s two stacked line boxes against the control beside them.
-    row_content_height: f32,
-    /// That, inside `.row`'s own two paddings.
+    /// The frame's own edge, which every horizontal span below is measured
+    /// inside. Derived from the scale and nothing else, so the number the layout
+    /// draws with and the number the height was solved from are the same number.
+    border: f32,
+    /// **A one-line row's band**, inside `.row`'s own two paddings — the height
+    /// of every line of the shortcut table, and the floor a settings row grows
+    /// from. See [`Self::row_height_for`], which is the rule; this is its answer
+    /// for the sentence that fits.
     row_height: f32,
     /// A Profiles row: three text lines rather than two, on the same paddings.
     profile_row_height: f32,
@@ -8149,9 +8426,6 @@ struct StackMetrics {
     disclosure_height: f32,
     /// A closing verb and the air above it.
     foot_advance: f32,
-    /// `.row .text`'s two stacked line boxes alone, without the control beside
-    /// them — what a stacked row puts its control *under*.
-    text_height: f32,
     /// The breadcrumb's margin, line box and margin (§7.1.6c-6b).
     crumb_advance: f32,
 }
@@ -8159,32 +8433,33 @@ struct StackMetrics {
 impl StackMetrics {
     fn new(scale: f32) -> Self {
         let px = |value: f32| value * scale;
-        // `.row .text` is two stacked line boxes; the row is as tall as the
-        // taller of that column and the control beside it, which is what
-        // `align-items: center` on a flex row resolves to. A shortcut line is
-        // the same `.row` with a different control, so it is the same height by
-        // construction.
-        let text_height = px(ROW_TITLE_LINE_LOGICAL_PX
-            + ROW_DESC_MARGIN_TOP_LOGICAL_PX
-            + ROW_DESC_LINE_LOGICAL_PX);
-        let row_content_height = text_height.max(px(COMBO_HEIGHT_LOGICAL_PX));
-        Self {
+        // `.row .text` is the title's line box, the gap under it and one `.desc`
+        // box per line of the sentence; the row is as tall as the taller of that
+        // column and the control beside it, which is what `align-items: center`
+        // on a flex row resolves to. A shortcut line is the same `.row` with a
+        // different control and a sentence that fits, so it is the one-line
+        // height by construction.
+        let bare = Self {
             scale,
-            row_content_height,
-            row_height: 2.0 * px(ROW_PADDING_Y_LOGICAL_PX) + row_content_height,
-            profile_row_height: 2.0 * px(ROW_PADDING_Y_LOGICAL_PX)
-                + row_content_height
-                + 2.0 * px(ROW_DESC_LINE_LOGICAL_PX)
-                + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX),
+            border: (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0),
+            row_height: 0.0,
+            profile_row_height: 0.0,
             heading_advance: px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX)
                 + px(GROUP_LABEL_LINE_LOGICAL_PX)
                 + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX),
             disclosure_height: px(DISCLOSURE_HEIGHT_LOGICAL_PX),
             foot_advance: px(FOOT_MARGIN_TOP_LOGICAL_PX) + px(BUTTON_HEIGHT_LOGICAL_PX),
-            text_height,
             crumb_advance: px(CRUMB_MARGIN_TOP_LOGICAL_PX)
                 + px(GROUP_LABEL_LINE_LOGICAL_PX)
                 + px(CRUMB_MARGIN_BOTTOM_LOGICAL_PX),
+        };
+        Self {
+            row_height: bare.row_height_for(1),
+            profile_row_height: 2.0 * px(ROW_PADDING_Y_LOGICAL_PX)
+                + bare.row_content_height_for(1)
+                + 2.0 * px(ROW_DESC_LINE_LOGICAL_PX)
+                + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX),
+            ..bare
         }
     }
 
@@ -8197,7 +8472,11 @@ impl StackMetrics {
     /// *pages*: the frame is locked to the tallest page, measured when the dialog
     /// opens and when a disclosure turns, so adding a variable makes this page
     /// scroll a little further and never makes the dialog grow under the rail.
-    fn stacked_height(self, row: SettingsRow, editor: Option<EditorSubject>) -> f32 {
+    ///
+    /// Since 2026-08-25 a sentence is a second such variable, and it is the same
+    /// answer: `lines` is how many line boxes this row's own sentence takes, and
+    /// the page grows by the difference.
+    fn stacked_height(self, row: SettingsRow, editor: Option<EditorSubject>, lines: usize) -> f32 {
         let px = |value: f32| value * self.scale;
         let control = if row == SettingsRow::ProfileEnv {
             let rows = ENV_GHOSTS.len() + editor.map_or(0, |editor| editor.env_rows);
@@ -8206,30 +8485,145 @@ impl StackMetrics {
         } else {
             px(FIELD_HEIGHT_LOGICAL_PX)
         };
-        2.0 * px(ROW_PADDING_Y_LOGICAL_PX) + self.text_height + px(STACKED_GAP_LOGICAL_PX) + control
+        2.0 * px(ROW_PADDING_Y_LOGICAL_PX)
+            + self.text_height_for(lines)
+            + px(STACKED_GAP_LOGICAL_PX)
+            + control
+    }
+
+    /// `.row .text`'s stacked line boxes for a sentence of `lines` — the title's
+    /// box, the gap under it, and one `.desc` box per line.
+    ///
+    /// `lines` is never zero: a row with no sentence still leaves the box the
+    /// design puts under a title, which is what keeps such a row exactly as tall
+    /// as it has always been. [`description_lines`] is where that floor is.
+    fn text_height_for(self, lines: usize) -> f32 {
+        let px = |value: f32| value * self.scale;
+        px(ROW_TITLE_LINE_LOGICAL_PX + ROW_DESC_MARGIN_TOP_LOGICAL_PX)
+            + lines as f32 * px(ROW_DESC_LINE_LOGICAL_PX)
+    }
+
+    /// The taller of that column and the control beside it, which is what
+    /// `align-items: center` on a flex row resolves to.
+    fn row_content_height_for(self, lines: usize) -> f32 {
+        let px = |value: f32| value * self.scale;
+        self.text_height_for(lines).max(px(COMBO_HEIGHT_LOGICAL_PX))
+    }
+
+    /// That, inside `.row`'s own two paddings — **the band a row of `lines`
+    /// stands in**.
+    fn row_height_for(self, lines: usize) -> f32 {
+        2.0 * (ROW_PADDING_Y_LOGICAL_PX * self.scale) + self.row_content_height_for(lines)
+    }
+
+    /// **The row band, from the left edge of a title to the right edge of a
+    /// picker**, for a dialog this wide.
+    ///
+    /// Solved from the dialog's width alone, and it has to be: the page's height
+    /// is wanted *before* the frame is placed (a sentence's line count is a
+    /// function of the column it is set in, and the height is a function of the
+    /// line count), while `row_left` and `row_right` cannot exist until the frame
+    /// does. The placement walk then takes its right edge from this same number
+    /// rather than re-deriving it, so the two cannot come apart.
+    fn row_span(self, dialog_width: f32) -> f32 {
+        let px = |value: f32| value * self.scale;
+        dialog_width
+            - 2.0 * self.border
+            - px(NAV_WIDTH_LOGICAL_PX
+                + 2.0 * CONTENT_PADDING_X_LOGICAL_PX
+                + 2.0 * ROW_PADDING_X_LOGICAL_PX)
+    }
+
+    /// **The column one row writes its sentence in.**
+    ///
+    /// A stacked row's title and sentence take the whole band and its control
+    /// goes underneath; every other row's text column is the band less the
+    /// picker and the gap the design puts between them — `.row .text` is
+    /// `flex: 1; min-width: 0` beside a `flex: none` control.
+    fn desc_width(self, row: SettingsRow, span: f32, button: f32) -> f32 {
+        if row.stacked() {
+            span
+        } else {
+            span - button - ROW_GAP_LOGICAL_PX * self.scale
+        }
+    }
+
+    /// How many line boxes this row's sentence takes on this page.
+    fn desc_lines(
+        self,
+        row: SettingsRow,
+        values: &SettingsValues,
+        span: f32,
+        button: f32,
+        measure: &mut dyn FnMut(&str, f32) -> f32,
+    ) -> usize {
+        description_lines(
+            row.description(values),
+            self.desc_width(row, span, button),
+            ROW_DESC_FONT_LOGICAL_PX * self.scale,
+            measure,
+        )
     }
 
     /// What one item of the stack advances the cursor by.
-    fn advance(self, item: PageItem, editor: Option<EditorSubject>) -> f32 {
+    fn advance(
+        self,
+        item: PageItem,
+        content: SettingsContent<'_>,
+        span: f32,
+        button: f32,
+        measure: &mut dyn FnMut(&str, f32) -> f32,
+    ) -> f32 {
         match item {
             PageItem::Heading(_) => self.heading_advance,
             PageItem::Crumb => self.crumb_advance,
-            PageItem::Row(row) if row.stacked() => self.stacked_height(row, editor),
-            PageItem::Row(_) => self.row_height,
+            PageItem::Row(row) if row.stacked() => self.stacked_height(
+                row,
+                content.editor,
+                self.desc_lines(row, content.values, span, button, measure),
+            ),
+            PageItem::Row(row) => {
+                self.row_height_for(self.desc_lines(row, content.values, span, button, measure))
+            }
             PageItem::EditorFoot => self.foot_advance,
             PageItem::Disclosure(_) => self.disclosure_height,
             PageItem::Reset => self.foot_advance,
         }
     }
 
+    /// **The width every picker on one page takes**, which is also what its rows
+    /// have left over for their sentences.
+    fn page_button(
+        self,
+        content: SettingsContent<'_>,
+        category: SettingsCategory,
+        span: f32,
+        measure: &mut dyn FnMut(&str, f32) -> f32,
+    ) -> f32 {
+        page_combo_width(
+            &content.category_rows(category),
+            self.scale,
+            self.border,
+            span,
+            measure,
+        )
+    }
+
     /// One page's whole height, paddings included — what the dialog has to be
     /// tall enough for if this page is not to scroll.
     #[must_use]
-    fn page_height(self, content: SettingsContent<'_>, category: SettingsCategory) -> f32 {
+    fn page_height(
+        self,
+        content: SettingsContent<'_>,
+        category: SettingsCategory,
+        span: f32,
+        measure: &mut dyn FnMut(&str, f32) -> f32,
+    ) -> f32 {
         let px = |value: f32| value * self.scale;
+        let button = self.page_button(content, category, span, measure);
         let mut stack: f32 = page_items(content, category)
             .into_iter()
-            .map(|item| self.advance(item, content.editor))
+            .map(|item| self.advance(item, content, span, button, measure))
             .sum();
         if category == SettingsCategory::Shortcuts && !content.shortcuts.is_empty() {
             stack += self.heading_advance;
@@ -8285,7 +8679,16 @@ impl StackMetrics {
 /// of pages. So the maximal list answers, and the horizontal window carries a
 /// row's worth of empty body it never fills. That is the same spare room a short
 /// page already leaves, and the ruling already says what happens to it: nothing.
-fn everyday_cap(metrics: StackMetrics) -> f32 {
+/// **The reader's own answers reach it**, because a sentence is a height now and
+/// two of this dialog's sentences change with the answer beside them. The cap is
+/// still a fact about the build rather than about the machine in every other
+/// respect — the maximal row list, no lists, every group folded.
+fn everyday_cap(
+    metrics: StackMetrics,
+    values: &SettingsValues,
+    span: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> f32 {
     let rows = visible_rows(TabLayoutMode::Vertical);
     let everyday = SettingsContent {
         rows: &rows,
@@ -8294,10 +8697,11 @@ fn everyday_cap(metrics: StackMetrics) -> f32 {
         scheme_files: &[],
         advanced: AdvancedOpen::default(),
         editor: None,
+        values,
     };
     SettingsCategory::ALL
         .into_iter()
-        .map(|category| metrics.page_height(everyday, category))
+        .map(|category| metrics.page_height(everyday, category, span, measure))
         .fold(0.0, f32::max)
 }
 
@@ -8947,6 +9351,13 @@ pub fn build(
     editor: Option<EditorInk<'_>>,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
+    // The same memo the layout runs on, for the same reason one step later: this
+    // pass breaks every visible sentence again (the *same* break, on the same
+    // string at the same width — that is what makes measure and paint one
+    // derivation) and ellipsises every picker's value beside it.
+    let mut memo = MeasureMemo::default();
+    let mut memoised = |text: &str, size: f32| memo.width(text, size, measure);
+    let measure: &mut dyn FnMut(&str, f32) -> f32 = &mut memoised;
     let palette = chrome_palette();
     let scale = layout.scale;
     let px = |value: f32| value * scale;
@@ -9142,41 +9553,42 @@ pub fn build(
         // column is the row less the button and the gap — and a label longer
         // than that used to be laid out in the box anyway and drawn straight
         // over the picker beside it, because a `ChromeLabel` with no `clip`
-        // is not cut by its own rectangle. One line, ellipsised, which is what
-        // the mock-up's own single-line `.desc` is; a description that could not
-        // survive one line at 720px would be copy to shorten, not a rule to
-        // change.
+        // is not cut by its own rectangle.
+        //
+        // **It wraps rather than being cut** (user ruling 2026-08-25). The rule
+        // it replaces was one line, ellipsised, on the argument that a sentence
+        // which could not survive one line at 720px was copy to shorten — and a
+        // screenshot of four consecutive rows all cut in the half that carried
+        // the fact is what withdrew it. What is drawn here is exactly what the
+        // layout reserved the band for: **the same call, on the same string, at
+        // the same width** ([`wrapped_description`]), so a row cannot be measured
+        // for two lines and painted with three.
         let desc_font = px(ROW_DESC_FONT_LOGICAL_PX);
-        // **A refusal replaces the sentence**, which is this dialog's own idiom
-        // for a control that cannot act — the same line `psreadline` writes on
-        // its greyed row and the same line an unavailable profile carries. The
-        // name field keeps what was typed while it says so, because the refusal
-        // is a state the reader is standing in and not an error they submitted.
-        let description = editor
-            .and_then(|ink| {
-                (placed.row == SettingsRow::ProfileName)
-                    .then_some(ink.refusal)
-                    .flatten()
-            })
-            .unwrap_or_else(|| placed.row.description(values));
-        content_stack.labels.push(ChromeLabel {
-            mono: false,
-            text: ellipsized(
-                description,
-                placed.desc[2] - placed.desc[0],
-                desc_font,
-                measure,
-            ),
-            rect: placed.desc,
-            font_size_px: desc_font,
-            color: palette.dialog_muted_text,
-            align_right: false,
-            align_center: false,
-            letter_spacing_em: 0.0,
-            weight: ChromeLabelWeight::Regular,
-            tabular_numerals: false,
-            clip: None,
-        });
+        let line_height = px(ROW_DESC_LINE_LOGICAL_PX);
+        for (ordinal, line) in wrapped_description(
+            placed.row.description(values),
+            placed.desc[2] - placed.desc[0],
+            desc_font,
+            measure,
+        )
+        .into_iter()
+        .enumerate()
+        {
+            let top = placed.desc[1] + ordinal as f32 * line_height;
+            content_stack.labels.push(ChromeLabel {
+                mono: false,
+                text: line,
+                rect: [placed.desc[0], top, placed.desc[2], top + line_height],
+                font_size_px: desc_font,
+                color: palette.dialog_muted_text,
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: None,
+            });
+        }
     }
     // The buttons after every row's text, so a row's own control cannot be
     // covered by the *fill* of a later row's — the same channel ordering the
@@ -10098,10 +10510,10 @@ pub struct EditorInk<'a> {
     /// is one keyboard: the field with the caret is the field with the focus,
     /// and a second copy of that fact is a second thing to keep in step.
     pub caret: Option<(SettingsTarget, usize, usize)>,
-    /// Why the `Name` field is refusing, when it is — an exact duplicate of
-    /// another row's name, or nothing at all. It replaces the row's sentence,
-    /// which is this dialog's own idiom for a control that cannot act.
-    pub refusal: Option<&'static str>,
+    // **The `Name` field's refusal is not here** (moved 2026-08-25). It is a
+    // sentence, and since a sentence decides a row's height it has to be
+    // somewhere the *layout* can read — which is `EditorSubject::refusal`, on the
+    // borrowed `SettingsValues` both the layout and this pass are handed.
 }
 
 impl<'a> EditorInk<'a> {
@@ -11245,7 +11657,19 @@ mod tests {
 
     /// `.row`'s own height at scale 1: `2 * 11` of padding around the taller of
     /// the two-line text column (16.5 + 1 + 14.5) and the 27.5 control.
+    ///
+    /// **A one-line sentence's** since 2026-08-25 — which is every row's, on a
+    /// fixture whose face reports zero for every word (see [`flat`]). The pins
+    /// that are about the wrap hand over a real face and say so.
     const ROW_HEIGHT: f32 = 54.0;
+
+    /// How wide the dialog opens in [`SURFACE`], which is the width every row's
+    /// text column is measured inside.
+    fn dialog_width() -> f32 {
+        DIALOG_MAX_WIDTH_LOGICAL_PX
+            .min(SURFACE.0 * DIALOG_WIDTH_RATIO)
+            .round()
+    }
 
     /// The `Advanced` heading's own band at scale 1: `2 * 11` of `.row` padding
     /// around one line box, and no sentence under it.
@@ -11402,6 +11826,12 @@ mod tests {
             // The list, which is where the Profiles page opens. The pins that
             // are about the editor open it themselves.
             editor: None,
+            // **The answers this fixture's rows read**, which a `SettingsContent`
+            // borrows since a sentence became a height. Leaked rather than taken
+            // by parameter: `sample` is what every one of these fixtures wants,
+            // it is rebuilt here so a pin can never read a stale catalogue, and a
+            // `let` at each of eighty call sites would say nothing.
+            values: Box::leak(Box::new(SettingsValues::sample())),
         }
     }
 
@@ -11651,6 +12081,7 @@ mod tests {
                 scheme_files: files,
                 advanced: every_group_open(),
                 editor: None,
+                values: Box::leak(Box::new(SettingsValues::sample())),
             },
             SettingsCategory::Appearance,
             scroll,
@@ -11994,24 +12425,31 @@ mod tests {
         );
     }
 
-    /// PIN (§7.1.6c-5) — **a row's sentence stops where its column does.**
+    /// PIN (§7.1.6c-5; wrapping ruled 2026-08-25) — **a row's sentence stops
+    /// where its column does, and wraps rather than being cut.**
     ///
     /// `.row .text` is `flex: 1; min-width: 0` beside a `flex: none` control, so
     /// the text column is the row less the button and the gap. A `ChromeLabel`
     /// is not cut by its own rectangle, so a description longer than that used
     /// to be laid out in the column and drawn straight across the picker beside
-    /// it — invisible until a button grew, which is exactly what this slice did
+    /// it — invisible until a button grew, which is exactly what §7.1.6c-5 did
     /// to eight of them.
     ///
-    /// One line and ellipsised, which is what the mock-up's own single-line
-    /// `.desc` is.
+    /// **What replaced the cut is the ruling this pin now states.** Every line
+    /// fits the column; the lines together are the whole sentence; the row's
+    /// band is as tall as the lines it drew; and nothing is ellipsised unless the
+    /// sentence needed a fourth line, which
+    /// [`no_settings_sentence_needs_a_fourth_line`] separately says never
+    /// happens.
     ///
-    /// Red gate: hand `build` the raw description again and the second assertion
-    /// goes red on the first row whose sentence is longer than its column.
+    /// Red gate: draw the raw description in one label again and the first
+    /// assertion goes red on the first row whose sentence is longer than its
+    /// column; reserve the one-line height instead of `row_height_for(lines)`
+    /// and the band assertion does.
     #[test]
-    fn a_rows_sentence_is_cut_to_its_own_column_and_never_runs_under_the_control() {
+    fn a_rows_sentence_wraps_inside_its_own_column_and_never_runs_under_the_control() {
         let at_rest = shaped(SettingsCategory::Appearance, every_group_open(), None);
-        let mut cut = 0;
+        let mut wrapped = 0;
         for entry in &at_rest.rows {
             // One dialog per row, each scrolled to show the row it is about: an
             // open group takes this page past the dialog's 600px cap, and a
@@ -12030,31 +12468,148 @@ mod tests {
                 "{:?}: the text column ends one gap before the control",
                 row.row
             );
-            let drawn = labels
+            // Every line of it, in the order they are stacked — found by the
+            // column they share, because that is what a line of this sentence is.
+            let drawn: Vec<&ChromeLabel> = labels
                 .iter()
-                .find(|label| label.rect == row.desc)
-                .expect("every row draws its sentence");
-            assert!(
-                measure(&drawn.text, ROW_DESC_FONT_LOGICAL_PX) <= width(row.desc),
-                "{:?}: {:?} is {} wide in a {} column",
+                .filter(|label| {
+                    label.rect[0] == row.desc[0]
+                        && label.rect[2] == row.desc[2]
+                        && label.rect[1] >= row.desc[1]
+                        && label.rect[3] <= row.band[3]
+                })
+                .collect();
+            assert_eq!(
+                drawn.len(),
+                row.desc_lines,
+                "{:?}: the layout reserved {} lines and the ink drew {}",
                 row.row,
-                drawn.text,
-                measure(&drawn.text, ROW_DESC_FONT_LOGICAL_PX),
-                width(row.desc)
+                row.desc_lines,
+                drawn.len()
             );
-            if drawn.text != row.row.description(&values()) {
+            for (ordinal, line) in drawn.iter().enumerate() {
                 assert!(
-                    drawn.text.ends_with(ELLIPSIS),
-                    "{:?}: a shortened sentence says so",
+                    measure(&line.text, ROW_DESC_FONT_LOGICAL_PX) <= width(row.desc),
+                    "{:?}: {:?} is {} wide in a {} column",
+                    row.row,
+                    line.text,
+                    measure(&line.text, ROW_DESC_FONT_LOGICAL_PX),
+                    width(row.desc)
+                );
+                assert_eq!(
+                    line.rect[1],
+                    row.desc[1] + ordinal as f32 * ROW_DESC_LINE_LOGICAL_PX,
+                    "{:?}: line {ordinal} stands one line box under the last",
                     row.row
                 );
-                cut += 1;
+            }
+            // **Nothing was thrown away**: the lines put back together are the
+            // sentence, word for word — unless the third one had to say `…`,
+            // which on this page is reachable because `Appearance` is where a
+            // picker takes its half of the row (`COMBO_MAX_ROW_SHARE`) and leaves
+            // the narrowest text column in the dialog. Then what is drawn is the
+            // sentence's own beginning and never a rewrite of it.
+            let said = drawn
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let sentence = row.row.description(&values());
+            if said.ends_with(ELLIPSIS) {
+                assert_eq!(
+                    row.desc_lines, ROW_DESC_MAX_LINES,
+                    "{:?}: only the last line this dialog allows may be cut",
+                    row.row
+                );
+                assert!(
+                    sentence.starts_with(said.trim_end_matches(ELLIPSIS)),
+                    "{:?}: a cut sentence is its own beginning, not a summary: {said:?}",
+                    row.row
+                );
+            } else {
+                assert_eq!(
+                    said, sentence,
+                    "{:?}: the lines are the sentence and not a summary of it",
+                    row.row
+                );
+            }
+            // **And the band was reserved for exactly those lines.**
+            assert_eq!(
+                height(row.band),
+                StackMetrics::new(1.0).row_height_for(row.desc_lines),
+                "{:?}: the band holds the lines it drew",
+                row.row
+            );
+            if row.desc_lines > 1 {
+                wrapped += 1;
             }
         }
         assert!(
-            cut > 0,
-            "this fixture is supposed to contain a sentence too long for its \
-             column — otherwise it proves the rule against nothing"
+            wrapped > 0,
+            "this fixture is supposed to contain a sentence too long for one \
+             line — otherwise it proves the rule against nothing"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-25) — **no sentence in this dialog needs a
+    /// fourth line.**
+    ///
+    /// The cap is three, and what a third line's `…` reports is a **copy** fault
+    /// rather than a geometry one: the ruling that set the cap said so in as many
+    /// words. This is where that fault is reported — in the test run, naming the
+    /// row, rather than in a screenshot of a shipped build.
+    ///
+    /// Every page and every row this build can draw, at the dialog's own width
+    /// and **the design's own control column** — the 118px floor a picker takes
+    /// when nothing on its page has a long answer to print.
+    ///
+    /// That column and not the page's measured one, and the difference is what
+    /// makes this a claim about the *copy*: what a page's pickers actually
+    /// measure depends on the fonts this machine has installed and the schemes in
+    /// this reader's folder, so a pin read off them would call a sentence too
+    /// long on one desk and short enough on the next. A page whose pickers have
+    /// grown past the floor is a **geometry** fact about the machine, and the
+    /// third line's `…` is what the ruling already provides for it.
+    ///
+    /// One language — the one this process is running in — and it is a real
+    /// limit rather than an oversight: `description` reads the process-wide
+    /// language through `Text::text`, this crate refuses the `unsafe` that
+    /// changing a process-wide variable now is, and [`measure`] is a flat half-em
+    /// per character, which is not what a Chinese face does.
+    #[test]
+    fn no_settings_sentence_needs_a_fourth_line() {
+        let metrics = StackMetrics::new(1.0);
+        let span = metrics.row_span(dialog_width());
+        let button = COMBO_MIN_WIDTH_LOGICAL_PX;
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        // **Every offender, not the first one.** A pin that stops at the first
+        // over-long sentence turns one report into a queue of runs, and what the
+        // reader of this failure wants is the list of sentences to shorten.
+        let mut over: Vec<(SettingsRow, usize)> = Vec::new();
+        for category in SettingsCategory::ALL {
+            for row in held.category_rows(category) {
+                let sentence = row.description(&values());
+                let lines = wrapped_description(
+                    sentence,
+                    metrics.desc_width(row, span, button),
+                    ROW_DESC_FONT_LOGICAL_PX,
+                    &mut measure,
+                );
+                assert!(
+                    lines.len() <= ROW_DESC_MAX_LINES,
+                    "{row:?}: the cap is {ROW_DESC_MAX_LINES} and the wrap returned {}",
+                    lines.len()
+                );
+                if lines.last().is_some_and(|last| last.ends_with(ELLIPSIS)) {
+                    over.push((row, sentence.chars().count()));
+                }
+            }
+        }
+        assert!(
+            over.is_empty(),
+            "these sentences do not fit three lines, which is copy to shorten \
+             rather than a rule to change: {over:?}"
         );
     }
 
@@ -12389,6 +12944,7 @@ mod tests {
             scheme_files: &files,
             advanced: every_group_open(),
             editor: None,
+            values: Box::leak(Box::new(SettingsValues::sample())),
         };
         let row = SettingsRow::DarkScheme;
         let open = shaped_picker(&files, Some(row), UNSCROLLED);
@@ -12509,6 +13065,7 @@ mod tests {
             scheme_files: &files,
             advanced: every_group_open(),
             editor: None,
+            values: Box::leak(Box::new(SettingsValues::sample())),
         };
         let row = SettingsRow::DarkScheme;
         let open = shaped_picker(&files, Some(row), UNSCROLLED);
@@ -12586,6 +13143,7 @@ mod tests {
             scheme_files: &files,
             advanced: every_group_open(),
             editor: None,
+            values: Box::leak(Box::new(SettingsValues::sample())),
         };
         let row = SettingsRow::DarkScheme;
         let mine = (0..row.option_count())
@@ -12683,6 +13241,7 @@ mod tests {
             scheme_files: &files,
             advanced: every_group_open(),
             editor: None,
+            values: Box::leak(Box::new(SettingsValues::sample())),
         };
         let row = SettingsRow::DarkScheme;
         let mine = (0..row.option_count())
@@ -14975,15 +15534,30 @@ mod tests {
             if category == SettingsCategory::Shortcuts {
                 continue;
             }
-            let placed = shaped(category, AdvancedOpen::default(), None);
+            let at_rest = shaped(category, AdvancedOpen::default(), None);
+            // **Scrolled to the end of the page.** The claim is that the *page*
+            // was measured with its heading in it, and a page that reaches the
+            // reader by scrolling has reached them: since a sentence became a
+            // height (2026-08-25) an everyday page can be taller than the frame's
+            // own 600px ceiling, which is the case that ceiling's doc rules on —
+            // it scrolls rather than swallowing the window. A height that forgot
+            // the heading is still caught, and caught harder: the scroll range is
+            // derived from the same number, so a page short by a heading leaves
+            // its last row below the fold with nowhere left to scroll.
+            let placed = shaped_scrolled(
+                category,
+                AdvancedOpen::default(),
+                None,
+                at_rest.max_scroll(),
+            );
             let content = placed.content;
             let Some(last) = placed.rows.last() else {
                 continue;
             };
             assert!(
-                last.desc[3] + CONTENT_PADDING_BOTTOM_LOGICAL_PX <= content[3] + 0.5,
+                last.band[3] + CONTENT_PADDING_BOTTOM_LOGICAL_PX <= content[3] + 0.5,
                 "{category:?}: the last row and the content's bottom padding both \
-                 fit inside the content box"
+                 fit inside the content box once the page is scrolled to its end"
             );
         }
     }
@@ -15101,7 +15675,12 @@ mod tests {
     fn the_height_cap_is_the_tallest_everyday_page_and_not_a_number() {
         let metrics = StackMetrics::new(1.0);
         assert_eq!(
-            dialog_around(everyday_cap(metrics)),
+            dialog_around(everyday_cap(
+                metrics,
+                &values(),
+                metrics.row_span(dialog_width()),
+                &mut flat(0.0)
+            )),
             everyday_cap_height(),
             "the sweep and the hand derivation are one number: `Appearance` \
              under the vertical rail, its Advanced folded"
@@ -15151,6 +15730,7 @@ mod tests {
                             scheme_files: &[],
                             advanced,
                             editor: None,
+                            values: Box::leak(Box::new(SettingsValues::sample())),
                         },
                         SettingsCategory::Appearance,
                         UNSCROLLED,
@@ -15188,6 +15768,7 @@ mod tests {
                 scheme_files: &[],
                 advanced: AdvancedOpen::default(),
                 editor: None,
+                values: Box::leak(Box::new(SettingsValues::sample())),
             },
             SettingsCategory::Appearance,
             UNSCROLLED,
@@ -15522,6 +16103,7 @@ mod tests {
                     SettingsCategory::RenderedBlocks,
                     SettingsCategory::General,
                     SettingsCategory::Terminal,
+                    SettingsCategory::Agents,
                 ],
                 "{tab_layout:?}: every category with rows is shown once, its rows \
                  together"
@@ -15579,6 +16161,7 @@ mod tests {
                     SettingsCategory::General,
                     SettingsCategory::Appearance,
                     SettingsCategory::Terminal,
+                    SettingsCategory::Agents,
                     SettingsCategory::RenderedBlocks,
                     SettingsCategory::Shortcuts,
                 ],
@@ -15605,6 +16188,7 @@ mod tests {
                     },
                     advanced: AdvancedOpen::default(),
                     editor: None,
+                    values: Box::leak(Box::new(SettingsValues::sample())),
                 };
                 assert!(
                     !thinner.nav_items().contains(&absent),
@@ -15669,6 +16253,7 @@ mod tests {
             scheme_files: &[],
             advanced: AdvancedOpen::default(),
             editor: None,
+            values: Box::leak(Box::new(SettingsValues::sample())),
         };
         for category in SettingsCategory::ALL {
             assert!(
@@ -16443,11 +17028,9 @@ mod tests {
             vec![
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
-                SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
-                SettingsRow::Notifications,
-                SettingsRow::TurnEndNotifications
+                SettingsRow::Notifications
             ],
             "the mock-up's order for this page, with the two PowerShell rows \n             together at the top: the row that reports a fact about the machine, \n             the row that offers what this one is missing, then the pane's two \n             axes — what it keeps of what has gone past, and what it does with a \n             line wider than itself — and last the only row on this page whose \n             answer shows up outside this window"
         );
@@ -16531,11 +17114,9 @@ mod tests {
             vec![
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
-                SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
-                SettingsRow::Notifications,
-                SettingsRow::TurnEndNotifications
+                SettingsRow::Notifications
             ],
             "the mock-up's order for this page"
         );
@@ -16562,6 +17143,108 @@ mod tests {
             !SettingsRow::LineWrapping.advanced(),
             "the Terminal page has no Advanced group and this row does not open one"
         );
+    }
+
+    /// PIN (user ruling 2026-08-25) — **the Agents page holds the rows about the
+    /// program running in a pane, and `Notifications` is not one of them.**
+    ///
+    /// The page was cut out of `Terminal` because the two `Claude Code hooks` and
+    /// `Turn finished` rows are not about a pane at all — they are about what the
+    /// program inside it can be told to say. The boundary is the load-bearing
+    /// half and it is where the ruling drew it: `OSC 9` and `OSC 777` are a
+    /// capability of the terminal that a build script or a shell function reaches
+    /// as readily as an agent does, so the row that governs them stays where a
+    /// pane's rows are.
+    ///
+    /// Red gate: file `Notifications` under `Agents` and the last assertion goes
+    /// red; put the page anywhere but after `Terminal` and the rail assertion
+    /// does.
+    #[test]
+    fn the_agents_page_holds_the_rows_about_agents() {
+        for tab_layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            let agents = visible_rows(tab_layout)
+                .into_iter()
+                .filter(|row| row.category() == SettingsCategory::Agents)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                agents,
+                vec![
+                    SettingsRow::ClaudeHooks,
+                    SettingsRow::CodexNotify,
+                    SettingsRow::TurnEndNotifications
+                ],
+                "{tab_layout:?}: the two installers in the order their upstreams \
+                 arrived, and under them the one row here that is a setting of \
+                 Folio's"
+            );
+        }
+        assert_eq!(
+            SettingsRow::Notifications.category(),
+            SettingsCategory::Terminal,
+            "`OSC 9` is a capability of the terminal and not of an agent — filing \
+             it here would name one caller as if it were the only one"
+        );
+        // **After `Terminal` in the rail**, which is the reading order the page
+        // was placed by: the pages narrow from the product to the window to the
+        // session to the pane, and a program inside a pane is one step in again.
+        let after = SettingsCategory::ALL
+            .windows(2)
+            .find(|pair| pair[0] == SettingsCategory::Terminal)
+            .map(|pair| pair[1]);
+        assert_eq!(after, Some(SettingsCategory::Agents));
+        // And nothing on it is folded away: an installer behind a disclosure is
+        // an installer nobody finds (`ContextMenu`'s own test).
+        for row in [
+            SettingsRow::ClaudeHooks,
+            SettingsRow::CodexNotify,
+            SettingsRow::TurnEndNotifications,
+        ] {
+            assert!(!row.advanced(), "{row:?}");
+            assert!(matches!(row.control(), SettingsControl::Combo));
+            assert_eq!(row.option_count(), 2);
+        }
+    }
+
+    /// PIN — **the `Codex notify` row's own picker asks for it and nothing else
+    /// does**, and what it asks for is what `attention_codex` writes.
+    ///
+    /// `claude_hooks_requested`'s shape over the second upstream. The second half
+    /// is what keeps the row honest: a switch that installed a line no lane of
+    /// this build reads would be a switch that reports success and changes
+    /// nothing.
+    #[test]
+    fn only_the_codex_rows_items_ask_for_it_and_they_reach_the_turn_end_lane() {
+        assert_eq!(
+            codex_notify_requested(SettingsTarget::Choice(SettingsRow::CodexNotify, 0)),
+            Some(true)
+        );
+        assert_eq!(
+            codex_notify_requested(SettingsTarget::Choice(SettingsRow::CodexNotify, 1)),
+            Some(false)
+        );
+        assert_eq!(
+            codex_notify_requested(SettingsTarget::Choice(SettingsRow::CodexNotify, 2)),
+            None,
+            "a two-item picker has no third answer"
+        );
+        for other in visible_rows(TabLayoutMode::Vertical) {
+            if other == SettingsRow::CodexNotify {
+                continue;
+            }
+            assert_eq!(
+                codex_notify_requested(SettingsTarget::Choice(other, 0)),
+                None,
+                "{other:?} answers for codex"
+            );
+        }
+        // The tick is the file's answer and never a stored one — `ContextMenu`'s
+        // ruling over a third store.
+        let installed = SettingsValues {
+            codex_notify: true,
+            ..values()
+        };
+        assert_eq!(SettingsRow::CodexNotify.selected_index(&installed), Some(0));
+        assert_eq!(SettingsRow::CodexNotify.selected_index(&values()), Some(1));
     }
 
     /// PIN — the Line wrapping row's own items ask for it and nothing else does.
@@ -17495,10 +18178,11 @@ mod tests {
                 SettingsRow::ContextMenu,
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
-                SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::Notifications,
+                SettingsRow::ClaudeHooks,
+                SettingsRow::CodexNotify,
                 SettingsRow::TurnEndNotifications
             ]
         );
@@ -17535,10 +18219,11 @@ mod tests {
                 SettingsRow::ContextMenu,
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
-                SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::Notifications,
+                SettingsRow::ClaudeHooks,
+                SettingsRow::CodexNotify,
                 SettingsRow::TurnEndNotifications
             ],
             "Sidebar stands directly under `Tab layout`; the two font rows stay \
@@ -19653,6 +20338,12 @@ mod tests {
             scheme_files: &[],
             advanced: every_group_open(),
             editor: None,
+            // **The answers this fixture's rows read**, which a `SettingsContent`
+            // borrows since a sentence became a height. Leaked rather than taken
+            // by parameter: `sample` is what every one of these fixtures wants,
+            // it is rebuilt here so a pin can never read a stale catalogue, and a
+            // `let` at each of eighty call sites would say nothing.
+            values: Box::leak(Box::new(SettingsValues::sample())),
         }
     }
 
@@ -19733,6 +20424,7 @@ mod tests {
                 SettingsCategory::Appearance,
                 SettingsCategory::Profiles,
                 SettingsCategory::Terminal,
+                SettingsCategory::Agents,
                 SettingsCategory::RenderedBlocks,
                 SettingsCategory::Shortcuts,
             ]
@@ -19878,6 +20570,9 @@ mod tests {
             user,
             colour: Some(3),
             colour_reason: "PowerShell 7's mark is its own",
+            // Nothing typed and nothing refused, which is what the mock-up draws.
+            // The pins that are *about* a refusal put one here.
+            refusal: None,
             start_at: 0,
             fixed_folder: None,
             hyperlink: 0,
@@ -19908,6 +20603,12 @@ mod tests {
             scheme_files: &[],
             advanced: every_group_open(),
             editor: Some(subject),
+            // The same fixture's answers **with the editor standing in them**,
+            // which is what makes the sentence the layout measures the sentence
+            // `build` paints: two of this page's rows say something different
+            // while the editor is open, and one of them says it about a
+            // refusal.
+            values: Box::leak(Box::new(editing_values(subject))),
         }
     }
 

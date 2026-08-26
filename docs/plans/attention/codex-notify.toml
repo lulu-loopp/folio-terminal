@@ -1,0 +1,1 @@
+notify = ['C:\folio\folio.exe', "attention", "codex:agent-turn-complete", "--json"]

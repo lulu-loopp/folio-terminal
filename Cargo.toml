@@ -104,6 +104,13 @@ regex = "1"
 # one belongs to the whole process — typst's layout included.
 rayon = "1"
 thiserror = "2"
+# The user's own `~/.codex/config.toml`, which the attention block's codex
+# installer adds one key to and must be able to hand back byte for byte
+# (`attention_codex`). A format-preserving editor and not `toml` + a serializer:
+# re-emitting a parsed document throws away every comment and every choice of
+# layout the person who wrote it made, and this file is not ours. Already in the
+# lock file transitively, so naming it here costs no new package.
+toml_edit = "0.22"
 resvg = { version = "=0.47.0", default-features = false, features = ["text"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

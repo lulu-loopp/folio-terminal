@@ -378,7 +378,11 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
 }
 
 /// `YYYYMMDD` for the backup's name, from the wall clock and nothing else.
-fn today() -> String {
+///
+/// Shared with [`attention_codex`](crate::attention_codex), which keeps a copy of the user's own
+/// `config.toml` beside it under the same rule: one installer's backup and another's are the same
+/// promise about the same day, and two civil-from-days implementations would be two answers to it.
+pub(crate) fn today() -> String {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
