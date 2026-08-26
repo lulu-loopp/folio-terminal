@@ -52,6 +52,7 @@ use bt_render::{
 
 use crate::{
     LeafId,
+    icons::ActionIcon,
     marks::{ChromeMark, ChromeSprite, MarkColour, OverlayLayer},
     seed::{RECENT_CAPACITY, RecentEntry, Seed, ago_label},
     settings::push_float_window,
@@ -83,58 +84,31 @@ const ITEM_FONT_LOGICAL_PX: f32 = 13.0;
 /// `.profile-item .ticon { width: 14px }` — the column. The mark inside it is
 /// the strip's own 15px `.pmark`, centred, exactly as the flex box centres it.
 const ITEM_ICON_COLUMN_LOGICAL_PX: f32 = 14.0;
-const ITEM_MARK_LOGICAL_PX: f32 = 15.0;
-/// The box the **window-control family** gets in that same column — **ten, not
-/// fifteen** (user rulings, 2026-08-16 and 2026-08-19), and a deliberate
-/// deviation from the mock-up.
+/// **How big a mark is drawn inside that column** —
+/// [`crate::icons::MarkSlot::Menu`], asked of the mark.
 ///
-/// These marks' artwork runs **edge to edge of its own `viewBox`**: they are the
-/// four ten-unit symbols the title bar wears (`#i-min`, `#i-max`, `#i-close`,
-/// `#i-plus`), drawn with no margin because every other place they appear is a
-/// *button* whose padding supplies the air. Every other mark a menu row can wear
-/// comes out of the house's sixteen-unit box with a unit and a half of margin
-/// built into the drawing. Struck at the same fifteen, the two families are not
-/// the same size on screen at all — which is measured, not guessed:
+/// It was two constants and a list of enum names until the icon block: a `15`
+/// for most marks and a `10` for the four the title bar lends a menu, with those
+/// four written out by name. **The list was the bug.** `#i-minus` is cut exactly
+/// as `#i-plus` is — `marks.rs` says so in as many words, "the pair are one
+/// drawing minus a stroke: same ten-unit box, same 1.2 weight, same round cap"
+/// — and `#i-plus` was on the list while `#i-minus` was not, so `Unstage` drew
+/// a stroke of `1.80` where `Stage` drew `1.20` and out-weighed every neighbour
+/// in its own menu by half again. `#i-chev` and the resize grip were off it for
+/// the same reason: nobody had thought of them the day the list was written.
 ///
-/// | mark        | `viewBox` | ink across  | at a 15px box | stroke at 15px |
-/// |-------------|-----------|-------------|---------------|----------------|
-/// | `#i-max`    | 10        | 0.0 – 10.0  | **15.0px**    | **1.50px**     |
-/// | `#i-close`  | 10        | 0.0 – 10.0  | **15.0px**    | **1.50px**     |
-/// | `#i-folder` | 16        | 1.6 – 14.4  | 12.0px        | filled         |
-/// | `#i-copy`   | 16        | 1.75 – 14.25| 11.7px        | 1.22px         |
-/// | `#i-float`  | 16        | 2.6 – 13.8  | 10.5px        | 1.13px         |
+/// The slot asks [`ChromeMark::draws_edge_to_edge`] instead — a fact about
+/// where a drawing's ink stops — and derives the two boxes from the ink the two
+/// families carry rather than from two hand-picked numbers. Both user rulings
+/// the old list was written for (2026-08-16, the `×`; 2026-08-19,
+/// `Enter focus mode`'s `#i-max`) are the same ruling under that derivation, and
+/// so is the `#i-minus` nobody got round to reporting.
 ///
-/// A ten-unit mark in a ten-pixel box draws 10.0px of ink with a 1.0px stroke,
-/// which stands beside that 10.5–12.0 band instead of a quarter to a half above
-/// it — and, more to the point, it is **the same box `Close pane` already
-/// takes**, so the two ends of the same menu match each other exactly. So the
-/// rule is one rule: **the ten-unit marks take a ten-pixel box, everything else
-/// takes [`ITEM_MARK_LOGICAL_PX`]**, split glyphs included.
-///
-/// It is stated over the *family* rather than over the mark some menu happens to
-/// use today, and both user reports are what that buys. The first (2026-08-16)
-/// was the `×`, and the rule was written for all three of its spellings
-/// ([`ChromeMark::WindowClose`], [`ChromeMark::TabClose`],
-/// [`ChromeMark::PaneClose`]) because they are one drawing under three names.
-/// The second (2026-08-19) was `Enter focus mode`, whose `#i-max` is the *same
-/// artwork discipline under a different glyph* — it read "a size bigger than the
-/// other rows" because at 15px it was a quarter to a half wider than every mark
-/// beside it and its outline a third of a pixel heavier. A rule that had named
-/// the cross rather than the family would have had to be discovered again on
-/// every mark the title bar lends a menu.
-const ITEM_MARK_EDGE_TO_EDGE_LOGICAL_PX: f32 = 10.0;
-
-/// How big this mark is drawn inside a menu row's icon column.
-fn item_mark_logical_px(mark: ChromeMark) -> f32 {
-    match mark {
-        ChromeMark::WindowClose
-        | ChromeMark::TabClose
-        | ChromeMark::PaneClose
-        | ChromeMark::WindowMinimize
-        | ChromeMark::WindowMaximize
-        | ChromeMark::Plus => ITEM_MARK_EDGE_TO_EDGE_LOGICAL_PX,
-        _ => ITEM_MARK_LOGICAL_PX,
-    }
+/// It answers `[width, height]` rather than one number, because a mark that is
+/// not square is now fitted at its own aspect — see the slot for why that is
+/// the other half of the pane head's problem.
+fn item_mark_box_logical_px(mark: ChromeMark) -> [f32; 2] {
+    crate::icons::MarkSlot::Menu.mark_box_logical_px(mark)
 }
 /// `.default-hint { margin-left: auto; font-size: 11px; color: var(--ink3) }`.
 ///
@@ -4238,20 +4212,26 @@ fn push_row(
             1.0,
         ));
     }
-    // The 15px mark centred on its own 14px column, which is what a flex box
-    // does with a child one pixel wider than the box it is in — or the 10px box
-    // a `×` gets instead, centred in exactly the same column so that a row with
-    // a cross and a row with a folder still line their names up. See
-    // [`ITEM_MARK_EDGE_TO_EDGE_LOGICAL_PX`].
+    // The mark centred on its own 14px column — the slot's box for whichever
+    // family this mark is in, centred in exactly the same column so that a row
+    // with a cross and a row with a folder still line their names up. See
+    // [`item_mark_box_logical_px`].
     let column_left = item[0] + px(ITEM_PADDING_X_LOGICAL_PX);
     let column_right = column_left + px(ITEM_ICON_COLUMN_LOGICAL_PX);
     if let Some(glyph) = row.mark {
-        let mark = px(item_mark_logical_px(glyph)).round();
-        let mark_left = ((column_left + column_right - mark) / 2.0).round();
-        let mark_top = ((item[1] + item[3] - mark) / 2.0).round();
+        let [box_width, box_height] = item_mark_box_logical_px(glyph);
+        let mark_width = px(box_width).round();
+        let mark_height = px(box_height).round();
+        let mark_left = ((column_left + column_right - mark_width) / 2.0).round();
+        let mark_top = ((item[1] + item[3] - mark_height) / 2.0).round();
         let mut sprite = ChromeSprite::new(
             glyph,
-            [mark_left, mark_top, mark_left + mark, mark_top + mark],
+            [
+                mark_left,
+                mark_top,
+                mark_left + mark_width,
+                mark_top + mark_height,
+            ],
             palette.accent,
         );
         if !row.available {
@@ -4386,7 +4366,7 @@ fn separator_alpha(ink: [u8; 3]) -> f32 {
 fn recent_mark(seed: &Seed, favicons: &crate::favicon::Favicons) -> ChromeMark {
     match seed {
         Seed::Term { profile_id, .. } => mark(index_of_id(profile_id)),
-        Seed::Files { .. } => ChromeMark::Folder,
+        Seed::Files { .. } => ActionIcon::FilesSeat.mark(),
         // A page wears the web class's globe and a file wears `#i-file`, through
         // the one door every preview row asks (`docs/DESIGN.md` §7.7 ⑤/⑥) —
         // **and the site's own icon where the session has one.** A vault row has
@@ -5427,13 +5407,16 @@ impl FileMenuRow {
         }
     }
 
+    /// The mark in the row's icon column — **the row's verb, asked of
+    /// [`ActionIcon`]**, which is the one table that answers what a verb looks
+    /// like. What stays here is why each row *is* that verb.
     fn mark(self, look: &FileMenuLook<'_>) -> ChromeMark {
         match self {
-            Self::Open => ChromeMark::File,
+            Self::Open => ActionIcon::OpenFile.mark(),
             // `#i-external` — the bare arrow that means *this content leaves the
             // window*, which is exactly what the preview head's `↗` already uses
             // it to say about the same act.
-            Self::OpenWith => ChromeMark::External,
+            Self::OpenWith => ActionIcon::OpenWith.mark(),
             // The tree's own triangle at the angle the tree turns it to, so the
             // mark turns with the word. Not a second glyph for a second kind of
             // disclosure: a reader who has opened a folder in this window has
@@ -5471,17 +5454,18 @@ impl FileMenuRow {
             // folder row and a file row take this verb identically, and a mark
             // that changed with the subject would be saying which kind of thing
             // is being renamed, which the row above it already said.
-            Self::Rename => ChromeMark::Pencil,
-            Self::CopyPath => ChromeMark::Copy,
-            Self::InsertPath => ChromeMark::Paste,
+            Self::Rename => ActionIcon::RenameFile.mark(),
+            Self::CopyPath => ActionIcon::CopyPath.mark(),
+            Self::InsertPath => ActionIcon::InsertPath.mark(),
             // The Git row's `Reveal in Explorer` wears this one, for the reason
-            // its string is shared: it is the same verb.
-            Self::Reveal => ChromeMark::FolderOpen,
+            // its string is shared: it is the same verb, so it is the same entry
+            // in the registry.
+            Self::Reveal => ActionIcon::RevealInFolder.mark(),
             // A shut folder, which is what every one of these levels is: a place
             // in the tree the reader has not got open in front of them. The tree
             // draws its own shut folders with this glyph, so the chip's list
             // reads as a run of folders rather than as a run of verbs.
-            Self::Crumb(_) => ChromeMark::Folder,
+            Self::Crumb(_) => ActionIcon::FolderObject.mark(),
         }
     }
 }
@@ -6124,31 +6108,42 @@ impl GitMenuRow {
         }
     }
 
-    /// The mark in the row's 14-pixel column.
+    /// The mark in the row's 14-pixel column — the row's verb, asked of
+    /// [`ActionIcon`].
     ///
-    /// **`Rename…` has none, and that is a choice rather than an oversight.**
-    /// The house's mark set is cut from geometry and has no pencil in it; the
-    /// nearest thing to one would be a mark that means something else, and a
-    /// wrong picture is read faster than a missing one. The row's own name, with
-    /// its ellipsis, already says what it does.
+    /// **`Rename…` had none, and it was an oversight wearing a choice's
+    /// clothes.** The note here read: *"the house's mark set is cut from
+    /// geometry and has no pencil in it; the nearest thing to one would be a
+    /// mark that means something else, and a wrong picture is read faster than a
+    /// missing one"*. It stopped being true on 2026-08-19, when `#i-pencil` was
+    /// cut — and it was already untrue *in this file*, where `Rename` on a file
+    /// row had been drawing that pencil seven hundred lines further up. One
+    /// verb table is exactly what stops one dispatcher going stale against
+    /// another; this arm is the first thing it found.
     #[must_use]
     fn mark(self) -> Option<ChromeMark> {
-        match self {
-            Self::Checkout | Self::CheckoutTracking => Some(ChromeMark::GitBranch),
-            Self::CreateBranchHere | Self::Stage => Some(ChromeMark::Plus),
-            Self::CreateTagHere => Some(ChromeMark::Tag),
-            Self::RenameBranch => None,
-            Self::DeleteBranch | Self::DeleteTag | Self::Discard => Some(ChromeMark::PaneClose),
-            Self::Unstage => Some(ChromeMark::Minus),
-            Self::OpenDiff => Some(ChromeMark::File),
-            Self::RevealInExplorer => Some(ChromeMark::FolderOpen),
-            Self::CopyPath | Self::CopyHash | Self::CopySubject | Self::CopyName => {
-                Some(ChromeMark::Copy)
-            }
+        Some(match self {
+            Self::Checkout | Self::CheckoutTracking => ActionIcon::CheckoutBranch.mark(),
+            Self::CreateBranchHere => ActionIcon::CreateBranch.mark(),
+            Self::Stage => ActionIcon::StageChange.mark(),
+            Self::CreateTagHere => ActionIcon::CreateTag.mark(),
+            Self::RenameBranch => ActionIcon::RenameBranch.mark(),
+            Self::DeleteBranch => ActionIcon::DeleteBranch.mark(),
+            Self::DeleteTag => ActionIcon::DeleteTag.mark(),
+            Self::Discard => ActionIcon::DiscardChanges.mark(),
+            Self::Unstage => ActionIcon::UnstageChange.mark(),
+            Self::OpenDiff => ActionIcon::OpenDiff.mark(),
+            Self::RevealInExplorer => ActionIcon::RevealInFolder.mark(),
+            Self::CopyPath => ActionIcon::CopyPath.mark(),
+            Self::CopyHash => ActionIcon::CopyHash.mark(),
+            Self::CopySubject => ActionIcon::CopySubject.mark(),
+            Self::CopyName => ActionIcon::CopyName.mark(),
             // A comparison is two things stood beside each other, which is what
             // this mark draws.
-            Self::CompareWithSelected | Self::CompareWithWorkingTree => Some(ChromeMark::Split),
-        }
+            Self::CompareWithSelected | Self::CompareWithWorkingTree => {
+                ActionIcon::CompareVersions.mark()
+            }
+        })
     }
 }
 
@@ -7131,15 +7126,19 @@ impl TermMenuRow {
     /// read faster than a missing one; the row's name says what it does.
     #[must_use]
     fn mark(self) -> Option<ChromeMark> {
-        match self {
-            Self::Copy => Some(ChromeMark::Copy),
-            Self::Paste => Some(ChromeMark::Paste),
-            Self::SelectAll => Some(ChromeMark::SelectAll),
-            Self::Find => None,
-            Self::ClearScreen => Some(ChromeMark::Broom),
-            Self::ClearScrollback => Some(ChromeMark::Eraser),
-            Self::RestartShell => Some(ChromeMark::Refresh),
-        }
+        Some(match self {
+            Self::Copy => ActionIcon::CopySelection.mark(),
+            Self::Paste => ActionIcon::PasteClipboard.mark(),
+            Self::SelectAll => ActionIcon::SelectAll.mark(),
+            // The one verb with no entry in the registry, because there is no
+            // shape for it to have: `Find` waits on the magnifier plan §1 P1
+            // adds, and until then it is the registry saying "nothing" rather
+            // than a dispatcher deciding so on its own.
+            Self::Find => return None,
+            Self::ClearScreen => ActionIcon::ClearScreen.mark(),
+            Self::ClearScrollback => ActionIcon::ClearScrollback.mark(),
+            Self::RestartShell => ActionIcon::RestartShell.mark(),
+        })
     }
 }
 
@@ -7989,40 +7988,44 @@ impl PaneMenuRow {
             .collect()
     }
 
-    /// The glyph in this row's icon column.
+    /// The glyph in this row's icon column — the row's verb, asked of
+    /// [`ActionIcon`].
     fn mark(self) -> Option<ChromeMark> {
-        match self {
+        Some(match self {
             // The picker is the drawing; it has no column and no glyph.
-            Self::Picker => None,
+            Self::Picker => return None,
             // The face over a tiled pane. `mark_when` is what turns it, and this
             // arm is the state a row with nothing to turn it is asked about —
             // see `text` below, which says the same thing at more length.
-            Self::ZoomPane => Some(ChromeMark::PaneZoom { zoomed: false }),
+            Self::ZoomPane => ActionIcon::ZoomPane.mark(),
             // The `⊞` the pane head just gave up, in the one place it still
             // means what it always meant: "another one of these, beside this".
-            Self::SplitWith => Some(ChromeMark::Split),
-            Self::NewInFolder => Some(ChromeMark::Folder),
-            Self::Duplicate => Some(ChromeMark::Copy),
+            Self::SplitWith => ActionIcon::SplitPane.mark(),
+            Self::NewInFolder => ActionIcon::NewTerminalInFolder.mark(),
+            Self::Duplicate => ActionIcon::DuplicatePane.mark(),
             // `#i-float`'s own sentence is "opens outside this frame" — and a
             // pane leaving for a tab of its own is exactly that. It is the same
             // glyph the files head wears for undocking, which is the same idea
             // aimed at a different container.
-            Self::MoveToNewTab => Some(ChromeMark::Float),
+            Self::MoveToNewTab => ActionIcon::MoveToNewTab.mark(),
             // **The bare arrow beside the framed one**, which is the pair's own
             // sentence read one container up: `#i-float`'s doc says the frame is
             // *this pane leaves the tree* and the bare arrow is *this content
             // leaves the window*, and these two rows differ by exactly that. Two
             // framed arrows in adjacent rows would be one drawing asked to mean
             // both — the argument `ChromeMark::External` was drawn for.
-            Self::MoveToNewWindow => Some(ChromeMark::External),
+            Self::MoveToNewWindow => ActionIcon::MoveToNewWindow.mark(),
             // **The same bare arrow as the row above it**, because it is the
             // same sentence — this content leaves the window — and what differs
             // is only where it lands, which is what the submenu is for. Giving
             // this row a glyph of its own would be the drawing claiming a
             // difference the words are already carrying.
-            Self::MoveToWindow => Some(ChromeMark::External),
-            Self::ClosePane => Some(ChromeMark::TabClose),
-        }
+            Self::MoveToWindow => ActionIcon::MoveToWindow.mark(),
+            // **The pane's own `×` and not the tab's**, since the registry: the
+            // two are one `<symbol>` under two names, and which of them a menu
+            // row reached for was arbitrary — this row closes a *pane*.
+            Self::ClosePane => ActionIcon::ClosePane.mark(),
+        })
     }
 
     /// The words on this row, in the state a row that has no state is in.
@@ -9551,7 +9554,7 @@ fn git_filter_mark(row: &GitFilterRow, on: bool) -> Option<ChromeMark> {
             radius_px: GIT_FILTER_RADIO_RADIUS_PX,
             stroke_px: 1,
         }),
-        (_, true) => Some(ChromeMark::Check),
+        (_, true) => Some(ActionIcon::MenuTick.mark()),
         (_, false) => None,
     }
 }
@@ -12805,7 +12808,10 @@ mod tests {
             .iter()
             .find(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
             .expect("every row wears its profile's mark");
-        assert_eq!(mark.rect[2] - mark.rect[0], ITEM_MARK_LOGICAL_PX * scale);
+        assert_eq!(
+            mark.rect[2] - mark.rect[0],
+            (item_mark_box_logical_px(ChromeMark::ProfilePowerShell)[0] * scale).round(),
+        );
         let column_left = layout.items[0][0] + ITEM_PADDING_X_LOGICAL_PX * scale;
         let column_mid = column_left + ITEM_ICON_COLUMN_LOGICAL_PX * scale / 2.0;
         assert!(
@@ -15514,23 +15520,28 @@ mod tests {
 
     // ── the window-control marks in a menu row (rulings 2026-08-16, -19) ────
 
-    /// PIN — **every ten-unit mark in a menu row is struck in a 10px box, and
-    /// every other mark keeps its 15**, in whichever menu it appears.
+    /// PIN — **every edge-to-edge mark in a menu row is struck in the slot's
+    /// smaller box, and every house mark takes the slot's own**, in whichever
+    /// menu it appears.
     ///
     /// A deliberate deviation from the mock-up, whose title-bar symbols run edge
-    /// to edge of their own `viewBox`: struck at the column's full fifteen they
+    /// to edge of their own `viewBox`: struck at the column's full width they
     /// out-weigh the folder and the copy glyph beside them, which are shapes
     /// drawn inside a box with a unit and a half of margin of their own. See
-    /// [`ITEM_MARK_EDGE_TO_EDGE_LOGICAL_PX`] for the measured table.
+    /// [`item_mark_box_logical_px`], and `icons::MarkSlot` for the derivation.
     ///
     /// Red gate: apply the rule to `TabClose` alone and a menu that reaches for
     /// `PaneClose` — the same drawing under another name — gets the heavy cross
     /// back with nothing to say so. Apply it to the crosses alone and
     /// `Enter focus mode`'s `#i-max` comes back a third bigger than the rows
-    /// around it, which is the 2026-08-19 report.
+    /// around it, which is the 2026-08-19 report; apply it to the *names* rather
+    /// than to the geometry and `#i-minus` never joins at all, which is the
+    /// 2026-08-25 audit's P0.
     #[test]
-    fn a_menu_rows_window_control_marks_are_struck_ten_wide_and_every_other_fifteen() {
-        assert_eq!(ITEM_MARK_EDGE_TO_EDGE_LOGICAL_PX, 10.0);
+    fn a_menu_rows_edge_to_edge_marks_are_struck_smaller_than_the_house_ones() {
+        let house = crate::icons::MarkSlot::Menu.house_box_logical_px();
+        let edge = crate::icons::MarkSlot::Menu.edge_to_edge_box_logical_px();
+        assert!(edge < house, "the edge-to-edge family is given less room");
         for edge_to_edge in [
             ChromeMark::WindowClose,
             ChromeMark::TabClose,
@@ -15538,11 +15549,16 @@ mod tests {
             ChromeMark::WindowMinimize,
             ChromeMark::WindowMaximize,
             ChromeMark::Plus,
+            // The three the enumerated list never reached, which is why the
+            // rule is stated over the geometry now.
+            ChromeMark::Minus,
+            ChromeMark::chevron(0.0),
+            ChromeMark::ResizeGrip,
         ] {
             assert_eq!(
-                item_mark_logical_px(edge_to_edge),
-                ITEM_MARK_EDGE_TO_EDGE_LOGICAL_PX,
-                "{edge_to_edge:?} is drawn to the edges of a ten-unit box"
+                item_mark_box_logical_px(edge_to_edge)[0],
+                edge,
+                "{edge_to_edge:?} is drawn to the edges of its own box"
             );
         }
         for other in [
@@ -15552,10 +15568,14 @@ mod tests {
             ChromeMark::SplitRight,
             ChromeMark::SplitDown,
             ChromeMark::Float,
+            // A ten-unit box and *not* an edge-to-edge drawing: the disclosure
+            // triangle carries more air than the house does, so shrinking it
+            // would have shrunk it twice.
+            crate::marks::tree_disclosure(0.0),
         ] {
             assert_eq!(
-                item_mark_logical_px(other),
-                ITEM_MARK_LOGICAL_PX,
+                item_mark_box_logical_px(other)[0],
+                house,
                 "{other:?} keeps the column's own size"
             );
         }
@@ -15582,14 +15602,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("{glyph:?} is one of this menu's rows"));
             sprite.rect
         };
-        let cross = sprite_of(ChromeMark::TabClose);
+        let cross = sprite_of(ChromeMark::PaneClose);
         let folder = sprite_of(ChromeMark::Folder);
-        assert_eq!(cross[2] - cross[0], 10.0);
-        assert_eq!(folder[2] - folder[0], 15.0);
+        assert_eq!(cross[2] - cross[0], edge.round());
+        assert_eq!(folder[2] - folder[0], house);
         for (glyph, wanted) in [
-            (ChromeMark::Split, 15.0),
-            (ChromeMark::Copy, 15.0),
-            (ChromeMark::Float, 15.0),
+            (ChromeMark::Split, house),
+            (ChromeMark::Copy, house),
+            (ChromeMark::Float, house),
         ] {
             let rect = sprite_of(glyph);
             assert_eq!(
@@ -15601,9 +15621,9 @@ mod tests {
         }
         // Within half a pixel of each other, which is as centred as two boxes of
         // different parity can be: both are snapped to whole device pixels — a
-        // mark on a subpixel is a resampled mark — and 10 and 15 cannot both
-        // land symmetrically on the same column. Half a pixel is the rounding,
-        // not a drift.
+        // mark on a subpixel is a resampled mark — and two boxes of unequal
+        // parity cannot both land symmetrically on the same column. Half a pixel
+        // is the rounding, not a drift.
         let centre = |rect: [f32; 4]| (rect[0] + rect[2]) / 2.0;
         assert!(
             (centre(cross) - centre(folder)).abs() <= 0.5,

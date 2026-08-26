@@ -158,8 +158,11 @@ pub const TOAST_MARK_GAP_LOGICAL_PX: f32 = 8.0;
 pub const TOAST_CLOSE_LOGICAL_PX: f32 = 18.0;
 /// `.gact { border-radius: 5px }` — its pill.
 pub const TOAST_CLOSE_RADIUS_LOGICAL_PX: f32 = 5.0;
-/// The `×` inside that box.
-pub const TOAST_CLOSE_GLYPH_LOGICAL_PX: f32 = 8.0;
+// Its glyph is the compact head's slot now, asked per mark: the same `#i-close`
+// was struck at 8 here, 8 on a tab, 8 on a focus card, 9 on a float's head and
+// 10 in the title bar, which the 2026-08-25 audit measured as three pens
+// (`0.80 / 0.90 / 1.00`) for one drawing doing one job. See
+// `seats::compact_head_glyph_logical_px`.
 /// The verb's own type — the body's 12px, because it stands under the body and
 /// a second size would read as a second voice.
 pub const TOAST_ACTION_FONT_LOGICAL_PX: f32 = 12.0;
@@ -1050,7 +1053,12 @@ pub fn build(
             }
             let mut glyph = ChromeSprite::new(
                 ChromeMark::TabClose,
-                centred(card.close, px(TOAST_CLOSE_GLYPH_LOGICAL_PX)),
+                centred(
+                    card.close,
+                    px(crate::seats::compact_head_glyph_logical_px(
+                        crate::icons::ActionIcon::CloseTab.mark(),
+                    )),
+                ),
                 if lit {
                     palette.menu_item_text_selected
                 } else {

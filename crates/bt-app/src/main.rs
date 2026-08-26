@@ -60,6 +60,7 @@ mod hang_watch;
 mod hex_peek;
 mod highlight;
 mod i18n;
+mod icons;
 mod input;
 mod keyhint;
 mod marks;

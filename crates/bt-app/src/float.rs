@@ -497,8 +497,11 @@ pub const FLOAT_HEAD_FONT_LOGICAL_PX: f32 = 11.0;
 pub const FLOAT_HEAD_TRACKING_EM: f32 = 0.04;
 /// `.float-win .fly-close { padding: 4px }` around a `9px` glyph.
 pub const FLOAT_CLOSE_BOX_LOGICAL_PX: f32 = 17.0;
-/// `.float-win .fly-close svg { width: 9px }`.
-pub const FLOAT_CLOSE_GLYPH_LOGICAL_PX: f32 = 9.0;
+// Its glyph is the compact head's slot now, asked per mark: the same `#i-close`
+// was struck at 9 here, 8 on a tab, 8 on a toast, 8 on a focus card and 10 in
+// the title bar, which the 2026-08-25 audit measured as three pens
+// (`0.80 / 0.90 / 1.00`) for one drawing doing one job. See
+// `seats::compact_head_glyph_logical_px`.
 /// `.float-win .fly-head button { padding: 3px 6px }` — the horizontal half.
 pub const FLOAT_DOCK_PADDING_X_LOGICAL_PX: f32 = 6.0;
 /// `.float-win .fly-head button svg { width: 13px }`.
@@ -523,9 +526,10 @@ pub const FLOAT_GRIP_GLYPH_LOGICAL_PX: f32 = 8.0;
 pub const FLOAT_GRIP_GLYPH_INSET_LOGICAL_PX: f32 = 3.0;
 /// `#pv-float .pv-dirty { width: 12px }` (P47) — the dot's reserved slot.
 pub const FLOAT_DIRTY_SLOT_LOGICAL_PX: f32 = 12.0;
-/// `#pv-float .pv-dirty { font-size: 13px }` — the glyph inside that slot, the
-/// same size the docked head sets it at.
-pub const FLOAT_DIRTY_GLYPH_LOGICAL_PX: f32 = crate::seats::PREVIEW_DIRTY_FONT_LOGICAL_PX;
+// `#pv-float .pv-dirty { font-size: 13px }` is gone with the docked head's own —
+// the dot is a drawing rather than a codepoint since the icon block, and its
+// diameter is `crate::marks::DIRTY_DOT_LOGICAL_PX`, one number for all three
+// heads. The slot above stays: the *reserved space* is still the mock-up's.
 
 // ── the preview float's own numbers (P45, P49, P65 — N36's "second set") ────
 //
@@ -2024,19 +2028,7 @@ pub fn build(
     if let Some(slot) = geometry.dirty
         && dirty
     {
-        labels.push(ChromeLabel {
-            mono: false,
-            text: crate::seats::PREVIEW_DIRTY_DOT.to_owned(),
-            rect: slot,
-            font_size_px: px(FLOAT_DIRTY_GLYPH_LOGICAL_PX),
-            color: palette.accent,
-            align_right: false,
-            align_center: true,
-            letter_spacing_em: 0.0,
-            weight: ChromeLabelWeight::Regular,
-            tabular_numerals: false,
-            clip: None,
-        });
+        sprites.push(crate::marks::dirty_dot_sprite(slot, palette.accent, scale));
     }
     for (box_, part, glyph_mark) in [
         (geometry.save, FloatPart::Save, ChromeMark::Save),
@@ -2086,7 +2078,9 @@ pub fn build(
             palette.dialog_hover,
         ));
     }
-    let close_glyph = px(FLOAT_CLOSE_GLYPH_LOGICAL_PX);
+    let close_glyph = px(crate::seats::compact_head_glyph_logical_px(
+        crate::icons::ActionIcon::ClosePane.mark(),
+    ));
     let close_left =
         geometry.close[0] + ((geometry.close[2] - geometry.close[0]) - close_glyph) / 2.0;
     let close_top =
