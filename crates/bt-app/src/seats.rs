@@ -5554,7 +5554,7 @@ pub fn tab_strip_contains(width: f32, scale: f32, tab_count: usize, x: f64, y: f
 /// a head is showing its run if either of them names it.
 ///
 /// It was one fact until 裁4 (2026-08-26). See [`head_run_revealed`] for the
-/// question the pair answers and [`Self::menu`] for the arm the acceptance
+/// question the pair answers and [`Self::raised`] for the arm the acceptance
 /// added.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HeadRun {
@@ -5562,16 +5562,48 @@ pub struct HeadRun {
     /// and the whole of what `.pane:hover .pane-close { visibility: visible }`
     /// says.
     pub hovered: Option<SeatId>,
-    /// **The pane whose own menu is standing open** — the `⌄`'s list, which is
-    /// dropped under the button that raised it so the hand walks *off* the head
-    /// to reach it.
-    pub menu: Option<SeatId>,
+    /// **The pane whose own head raised the layer that is standing** — its `⌄`'s
+    /// menu, or the folder flyout its 🗀 peeked open.
+    ///
+    /// It was `menu` until 2026-08-27, and the rename is the ruling: what
+    /// matters is not which *kind* of layer is up but that this head put it
+    /// there. Every one of them is dropped at the button that raised it, so the
+    /// hand reaching it walks off the head — and a head that went dark under
+    /// its own flyout is 裁4's bug wearing a different popup. The window
+    /// derives this from what each layer says about where it came from
+    /// (`Runtime::head_that_raised_a_layer`), never from where its rectangle
+    /// happens to be.
+    pub raised: Option<SeatId>,
+}
+
+/// **A layer standing on the glass that one pane's own head put there**, and
+/// which of that head's controls put it there (user ruling 2026-08-27).
+///
+/// One fact rather than a register of booleans, because the two readers of it
+/// want two different grains of the same sentence and must not be allowed to
+/// disagree: the head's *run* reveals for the seat (see [`HeadRun::raised`]),
+/// and a lone pane's corner lights the one **door** the layer came out of —
+/// its `⌄` under its own menu, its 🗀 under its own flyout — because the corner
+/// draws its two doors separately and lighting both would say the wrong thing
+/// about one of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaneLayer {
+    /// Whose head raised it.
+    pub seat: SeatId,
+    /// **Which door**, when it is one of the two a pane wears in its head and
+    /// in its corner ([`crate::icons::PANE_DOOR_RUN`]).
+    ///
+    /// `None` for a head control that is not one of those pair — a files
+    /// column's root button, a preview head's name-as-switcher. Those heads
+    /// have no corner rendition, so nothing needs to know which control it was;
+    /// what the run needs is the seat, and that is [`Self::seat`].
+    pub door: Option<crate::icons::ActionIcon>,
 }
 
 impl HeadRun {
-    /// The hand is in this pane and no menu is up — what every reading of this
-    /// predicate meant before 裁4, and what a test that is not about menus
-    /// says.
+    /// The hand is in this pane and nothing it raised is standing — what every
+    /// reading of this predicate meant before 裁4, and what a test that is not
+    /// about layers says.
     ///
     /// Test-only, and that is the honest shape: the one place the window builds
     /// this pair for real (`Runtime::head_run`) has both facts to hand and must
@@ -5582,7 +5614,7 @@ impl HeadRun {
     pub const fn hovered(seat: SeatId) -> Self {
         Self {
             hovered: Some(seat),
-            menu: None,
+            raised: None,
         }
     }
 }
@@ -5611,12 +5643,21 @@ impl HeadRun {
 /// in it: a `⌄` that stays lit beside a `×` that has faded out from under the
 /// pointer is a worse answer than either.
 ///
+/// **And 2026-08-27 says it is every layer a head raises, not only its menu**
+/// (user report — 「文件夹浮窗开着时,头上的控件没显形」). 裁4 was written with
+/// the `⌄` in front of it and landed as a field called `menu`, so the head's
+/// *other* door — the 🗀, whose flyout is dropped in exactly the same place and
+/// reached by walking off the head in exactly the same way — kept the bug 裁4
+/// had just fixed beside it. The rule is about the head having put something on
+/// the glass; which register that something lives in is the window's business,
+/// and [`HeadRun::raised`] is where the window has already answered it.
+///
 /// Two seats can be showing a run at once and that is not a bug: open a pane's
 /// menu, then walk into the pane beside it, and one head is lit because its
 /// list is standing while the other is lit because the hand is in it.
 #[must_use]
 pub fn head_run_revealed(revealed: HeadRun, seat: SeatId) -> bool {
-    revealed.hovered == Some(seat) || revealed.menu == Some(seat)
+    revealed.hovered == Some(seat) || revealed.raised == Some(seat)
 }
 
 /// What the pointer is over, in device pixels of the window.
@@ -6064,50 +6105,90 @@ pub const PANE_GHOST_HOVER_INK: f32 = 0.75;
 /// corner is re-measured both marks move together.
 pub const PANE_GHOST_FOLDER_GLYPH_LOGICAL_PX: f32 = PANE_GHOST_GLYPH_WIDTH_LOGICAL_PX;
 
-/// The corner ghost's box inside one pane rectangle, in physical pixels, or
-/// `None` when the pane is too small to seat it.
+/// **The corner's whole run of doors**, indexed by
+/// [`crate::icons::PANE_DOOR_RUN`] — `[0]` is the leftmost door's box, `[1]` the
+/// next one's, and either is `None` when the corner has no room for it.
 ///
 /// Pure, and asked of a *rectangle* rather than of a seat, for the reason
 /// [`pane_head_geometry`] is: the painter asks it of the card a pane rides
 /// mid-resize and the hit test asks it of the solved rectangle, and the box you
 /// can press is the box you can see by one derivation rather than by two.
+///
+/// **One walk for both doors**, which is what keeps them a *run*: each box is
+/// the next one's own box stepped left, so an inner edge is shared exactly at
+/// every scale and no rounding can open a seam of unclaimed pixels between two
+/// live buttons. It is the rule the head's own run keeps at its other joint
+/// (`.panehead .pane-files + .pane-close { margin-left: 0 }`): a gap inside a
+/// run that has no gap elsewhere reads as two runs, and a *fractional* gap
+/// reads as a dead pixel in the middle of a button.
+///
+/// **The run is right-aligned and drops from its right end**, which is where it
+/// differs from the head's (the head drops from the left, keeping the `×`
+/// reachable longest). The reason is stated in [`crate::icons::PANE_DOOR_RUN`]'s
+/// own note read the other way round: the `⌄` is the door the 2026-08-20 ruling
+/// put in this corner and the folder joined it five days later, so when only one
+/// box fits it is the chevron that stays — and it stays in the corner it had to
+/// itself, which is this run's right end.
 #[must_use]
-pub fn pane_ghost_geometry(rect: [f32; 4], scale: f32) -> Option<[f32; 4]> {
+fn pane_ghost_run(rect: [f32; 4], scale: f32) -> [Option<[f32; 4]>; 2] {
     let box_ = (PANE_GHOST_BOX_LOGICAL_PX * scale).round().max(1.0);
-    let right = (rect[2] - PANE_GHOST_RIGHT_LOGICAL_PX * scale).round();
-    let left = right - box_;
+    let anchor_right = (rect[2] - PANE_GHOST_RIGHT_LOGICAL_PX * scale).round();
     let top = (rect[1] + PANE_GHOST_TOP_LOGICAL_PX * scale).round();
     let bottom = top + box_;
     // A control half off its own pane is worse than none, which is the rule the
     // head's own run keeps: below this the pane simply has no ghost, and the
     // right-click floor under it (§7.1.6i) is what a hand still has.
-    (left > rect[0] && bottom <= rect[3]).then_some([left, top, right, bottom])
+    if bottom > rect[3] {
+        return [None, None];
+    }
+    let fitting = (0..crate::icons::PANE_DOOR_RUN.len())
+        .take_while(|seated| anchor_right - box_ * (*seated as f32 + 1.0) > rect[0])
+        .count();
+    let mut boxes = [None, None];
+    for (place, seat) in boxes.iter_mut().enumerate().take(fitting) {
+        // Right-aligned: the last door that fits takes the corner, and the ones
+        // before it step left by one box each. With one door that is the corner
+        // itself, which is where the chevron stood before the folder existed.
+        let right = anchor_right - box_ * (fitting - 1 - place) as f32;
+        *seat = Some([right - box_, top, right, bottom]);
+    }
+    boxes
 }
 
-/// The **folder** door beside that ghost — 🗀 on the left, `⌄` on the right
-/// (user proposal, Claude 认可 2026-08-25; §7.1.6i), or `None` when the corner
-/// has room for only one of them.
+/// The box behind one of a pane's two corner doors, or `None` when the corner
+/// has no room for it.
 ///
-/// Derived from [`pane_ghost_geometry`] and never from the rectangle a second
-/// time, which is the whole of what makes the two a *run*: the folder is the
-/// chevron's own box stepped one box left, so its right edge **is** the
-/// chevron's left edge at every scale and no rounding can open a seam of
-/// unclaimed pixels between two live buttons. It is the rule the head's own run
-/// keeps at its other joint (`.panehead .pane-files + .pane-close
-/// { margin-left: 0 }`): a gap inside a run that has no gap elsewhere reads as
-/// two runs, and a *fractional* gap reads as a dead pixel in the middle of a
-/// button.
+/// The order — which of the two is on the left — is
+/// [`crate::icons::PANE_DOOR_RUN`]'s and not this function's, so the corner and
+/// the head cannot come to disagree about it again.
+#[must_use]
+fn pane_ghost_door_geometry(
+    rect: [f32; 4],
+    scale: f32,
+    door: crate::icons::ActionIcon,
+) -> Option<[f32; 4]> {
+    pane_ghost_run(rect, scale)[door.place_in_a_panes_door_run()?]
+}
+
+/// The corner ghost's `⌄` — the door the 2026-08-20 ruling put there, and the
+/// one that stays when only one box fits.
+#[must_use]
+pub fn pane_ghost_geometry(rect: [f32; 4], scale: f32) -> Option<[f32; 4]> {
+    pane_ghost_door_geometry(rect, scale, crate::icons::ActionIcon::OpenPaneMenu)
+}
+
+/// The **folder** door beside that ghost (user proposal, Claude 认可
+/// 2026-08-25; §7.1.6i), or `None` when the corner has room for only one of
+/// them.
 ///
-/// **The chevron is the door that stays.** When only one box fits, this answers
-/// `None` and the corner keeps the `⌄` — the ruling put that one there, and the
-/// menu behind it still carries every verb this pane has, while a folder half
-/// over the pane's left edge is the control the head's run refuses.
+/// **It is on the chevron's right since 2026-08-27** (user ruling — 「统一为 ⌄
+/// 在文件夹左边」). It was on the left for two days, which put a pane's two
+/// doors in one order in a split head (`⌄ 🗀 ✕`) and the opposite order in a
+/// lone pane's corner (`🗀 ⌄`) — the same two buttons, the same two verbs, and
+/// nothing but the day they were written to say which way round they go.
 #[must_use]
 pub fn pane_ghost_folder_geometry(rect: [f32; 4], scale: f32) -> Option<[f32; 4]> {
-    let chevron = pane_ghost_geometry(rect, scale)?;
-    let right = chevron[0];
-    let left = right - (chevron[2] - chevron[0]);
-    (left > rect[0]).then_some([left, chevron[1], right, chevron[3]])
+    pane_ghost_door_geometry(rect, scale, crate::icons::ActionIcon::OpenFilesPane)
 }
 
 /// The zoom state mark's own box, in physical pixels — 13 logical, the size the
@@ -6265,6 +6346,35 @@ pub struct PaneHeadGeometry {
     /// did not go away: it is the first entry of the menu this now opens, where
     /// it is a picture of four directions instead of one silent guess.
     pub chevron: Option<[f32; 4]>,
+}
+
+/// **Every control one pane head is drawing this frame, with its box and the
+/// verb it wears** — [`preview_head_tool_boxes`]'s sentence for the head every
+/// pane has (user ruling 2026-08-27).
+///
+/// The trailing run in the order it stands, left to right, which is
+/// [`crate::icons::PANE_DOOR_RUN`]'s order followed by the `×` the run ends at.
+/// A files column carries `.pane-float` where a terminal carries `.pane-files`,
+/// and the two are two verbs in one slot rather than one control with two
+/// meanings — see [`PaneHeadGeometry::files`] — so both are asked and at most
+/// one answers.
+///
+/// The leading run is deliberately absent: the seat's own mark and the zoom mark
+/// are *labels*, and a files column's root button carries the folder's name
+/// beside it. What this lists is the marks with no word next to them.
+#[must_use]
+pub fn pane_head_control_boxes(
+    geometry: &PaneHeadGeometry,
+) -> Vec<(crate::icons::ActionIcon, [f32; 4])> {
+    [
+        (crate::icons::ActionIcon::OpenPaneMenu, geometry.chevron),
+        (crate::icons::ActionIcon::OpenFilesPane, geometry.files),
+        (crate::icons::ActionIcon::FloatFilesPane, geometry.float),
+        (crate::icons::ActionIcon::ClosePane, geometry.close),
+    ]
+    .into_iter()
+    .filter_map(|(verb, box_)| Some((verb, box_?)))
+    .collect()
 }
 
 /// Lay out one pane head.
@@ -7171,7 +7281,7 @@ pub fn build_chrome_with_preview(
             chevron_turn: 0.0,
             pane_motion: PaneMotionFrame::default(),
             search_seat: None,
-            pane_menu_seat: None,
+            head_raised: None,
             resizing_cards: None,
         },
     )
@@ -7725,14 +7835,19 @@ pub struct ChromeContent<'a> {
     /// head, because the capsule's corner is the head's corner and the head's
     /// run is elsewhere.
     pub search_seat: Option<SeatId>,
-    /// Which pane's own menu is up, if any — `.pane-ghost.open`.
+    /// **Which pane's own head has a layer of its own standing, and out of
+    /// which door** — `.pane-ghost.open`, generalised.
     ///
     /// A separate channel from [`ChromePointer::hover`] and it has to be: the
-    /// menu is dropped *under* the ghost and the pointer walks onto it, at which
-    /// point nothing is hovering the button that raised it. A mark that went out
-    /// the instant its list appeared would be the stranded chevron E61 is a list
-    /// of six instances of.
-    pub pane_menu_seat: Option<SeatId>,
+    /// layer is dropped *under* the control that raised it and the pointer walks
+    /// onto it, at which point nothing is hovering the button. A mark that went
+    /// out the instant its list appeared would be the stranded chevron E61 is a
+    /// list of six instances of.
+    ///
+    /// **It was `pane_menu_seat` until 2026-08-27**, which named one door and
+    /// one register; the user's report was the other door — a folder flyout —
+    /// leaving the head dark under it. See [`PaneLayer`].
+    pub head_raised: Option<PaneLayer>,
 }
 
 /// **How solid each pane's hover-revealed head furniture is drawn**, already
@@ -8005,7 +8120,7 @@ pub fn build_chrome_for_tabs(
         chevron_turn,
         pane_motion,
         search_seat,
-        pane_menu_seat,
+        head_raised,
         resizing_cards: carded,
     } = content;
     // Each seat is asked about *itself*. Written as a closure beside the two
@@ -8387,7 +8502,7 @@ pub fn build_chrome_for_tabs(
                     head_run_revealed(
                         HeadRun {
                             hovered: pointer.pane_hover,
-                            menu: pane_menu_seat,
+                            raised: head_raised.map(|layer| layer.seat),
                         },
                         placement.id,
                     ),
@@ -9214,17 +9329,38 @@ pub fn build_chrome_for_tabs(
                         };
                         pane_sprites.push(mark);
                     };
-                    // 🗀 first, because the run reads left to right — and it is
-                    // lit by the pointer alone. There is no second face for "the
-                    // files are open": the split head's folder has none, and
-                    // this is that button in the other layout.
+                    // **Each door is lit by the pointer on it, or by the layer
+                    // it is itself holding open** (user ruling 2026-08-27). Both
+                    // of a corner's doors drop what they raise underneath
+                    // themselves and the hand walks onto it, at which point
+                    // nothing is hovering the button — a mark that went dark the
+                    // instant its own list appeared is E61's stranded chevron,
+                    // and until this ruling the folder beside it was a second
+                    // instance of exactly that.
+                    //
+                    // It is `head_raised` that says *which* door, and that is
+                    // why one fact carries the door as well as the seat: lighting
+                    // both of a corner's doors because one of them is holding
+                    // something open would be the corner saying two things are
+                    // going on when one is.
+                    let holding = |door: crate::icons::ActionIcon| {
+                        head_raised
+                            == Some(PaneLayer {
+                                seat: placement.id,
+                                door: Some(door),
+                            })
+                    };
+                    // 🗀 second, because the run reads `⌄ 🗀` left to right
+                    // (`icons::PANE_DOOR_RUN`) and the folder is drawn first only
+                    // so the two calls read in the order the boxes were derived.
                     if let Some(folder) = pane_ghost_folder_geometry(ghost_box, scale) {
                         door(
                             folder,
                             crate::icons::ActionIcon::OpenFilesPane.mark(),
                             PANE_GHOST_FOLDER_GLYPH_LOGICAL_PX,
                             PANE_GHOST_FOLDER_GLYPH_LOGICAL_PX,
-                            pointer.hover == Some(ChromeTarget::PaneFiles(placement.id)),
+                            pointer.hover == Some(ChromeTarget::PaneFiles(placement.id))
+                                || holding(crate::icons::ActionIcon::OpenFilesPane),
                         );
                     }
                     door(
@@ -9237,12 +9373,8 @@ pub fn build_chrome_for_tabs(
                         crate::icons::ActionIcon::OpenPaneMenu.mark(),
                         PANE_GHOST_GLYPH_WIDTH_LOGICAL_PX,
                         PANE_GHOST_GLYPH_HEIGHT_LOGICAL_PX,
-                        // Lit by the pointer being on it **or** by its own menu
-                        // standing: the menu is dropped under the button and the
-                        // hand walks onto it, and a chevron that went dark the
-                        // instant its list appeared is E61's stranded mark.
                         pointer.hover == Some(ChromeTarget::PaneMenu(placement.id))
-                            || pane_menu_seat == Some(placement.id),
+                            || holding(crate::icons::ActionIcon::OpenPaneMenu),
                     );
                 }
             }
@@ -13834,6 +13966,120 @@ pub struct PreviewHeadGeometry {
     pub lock: Option<[f32; 4]>,
 }
 
+/// **Every control a preview head can carry**, in the order the run stands in
+/// (left to right).
+///
+/// The head's own answer to [`PreviewRailTip`] one band up, and it exists for
+/// the same reason that one does — 「头/轨上每一枚可点的东西都必须有 tooltip,且
+/// 由注册表守着」 (user ruling 2026-08-27). Until this enum the run was written
+/// out three times: once in [`push_preview_head`] as a list of `tool(…)` calls,
+/// once in [`hit_preview_head`] as a ladder of `if hit(…)`, and once in the
+/// window's tip pass as four loops that between them named three of the six
+/// controls. The two no loop named — the player's `■` and the pop-out `↗` —
+/// were the report: *「一枚实心方块按钮和 ↗ 悬停无 tooltip,其它头按钮有」*.
+///
+/// One list, and every reader walks it: the press, the tip, and the gate
+/// `every_control_on_a_preview_head_says_what_it_does`, which is what makes a
+/// seventh control impossible to add without words on it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreviewHeadTool {
+    /// `.pv-save` — write this buffer back to its file.
+    Save,
+    /// `.pv-md-flip` — the per-type slot's markdown face.
+    Flip,
+    /// `.pv-stop` — the per-type slot's *player* face (§7.23 ⑩). Never drawn at
+    /// the same time as [`Self::Flip`]; see [`PreviewHeadTools::stop`].
+    Stop,
+    /// `.pv-devtools` — the inspector, on a head holding a page.
+    DevTools,
+    /// `.pv-popout` — this preview leaves for a window of its own.
+    PopOut,
+    /// `.pv-lock` — do not reuse this pane.
+    Lock,
+}
+
+impl PreviewHeadTool {
+    /// Every control, in the run's own order — the gate's walk.
+    pub const ALL: [Self; 6] = [
+        Self::Save,
+        Self::Flip,
+        Self::Stop,
+        Self::DevTools,
+        Self::PopOut,
+        Self::Lock,
+    ];
+
+    /// **The press this control answers.** One arm each, so a control cannot be
+    /// drawn, hit-tested and tipped as three different verbs.
+    #[must_use]
+    pub fn target(self, seat: SeatId) -> ChromeTarget {
+        match self {
+            Self::Save => ChromeTarget::PreviewSave(seat),
+            Self::Flip => ChromeTarget::PreviewFlip(seat),
+            Self::Stop => ChromeTarget::PreviewStop(seat),
+            Self::DevTools => ChromeTarget::PreviewDevTools(seat),
+            Self::PopOut => ChromeTarget::PreviewPopOut(seat),
+            Self::Lock => ChromeTarget::PreviewLock(seat),
+        }
+    }
+
+    /// **The verb it wears**, in [`crate::icons::ActionIcon`]'s own vocabulary —
+    /// which is how the tip gate reaches the registry's words without this
+    /// module holding a second copy of them.
+    ///
+    /// The flip answers with the face it *would turn to* at rest; both of its
+    /// faces are one verb as far as the registry is concerned, and which of the
+    /// two words a tip says is the window's to decide from the buffer.
+    #[must_use]
+    pub fn verb(self) -> crate::icons::ActionIcon {
+        match self {
+            Self::Save => crate::icons::ActionIcon::SavePreview,
+            Self::Flip => crate::icons::ActionIcon::ViewSource,
+            Self::Stop => crate::icons::ActionIcon::StopNavigating,
+            Self::DevTools => crate::icons::ActionIcon::OpenDevTools,
+            Self::PopOut => crate::icons::ActionIcon::FloatPreview,
+            Self::Lock => crate::icons::ActionIcon::LockPreview,
+        }
+    }
+
+    /// **Whether this control is on screen with nobody pointing at the pane.**
+    ///
+    /// One is, and it is the mock-up's own last rule in that cascade
+    /// (`.pv-tool.pv-pin.on { opacity: 1 }`): an engaged lock is drawn at rest,
+    /// because a state that vanished when you looked away would be a pane
+    /// silently claiming to be reusable. See [`PreviewHeadTools::locked`].
+    #[must_use]
+    pub fn stands_at_rest(self, tools: PreviewHeadTools) -> bool {
+        matches!(self, Self::Lock) && tools.locked
+    }
+}
+
+/// **Every control one preview head is drawing this frame, with its box** — the
+/// one walk the hit test, the window's tip pass and the gate all read.
+///
+/// A function of the geometry rather than a second walk of it, for
+/// [`preview_rail_tip_boxes`]'s standing reason: a tip anchored on a rectangle a
+/// second derivation produced is a tip that stands beside its button rather than
+/// on it. The controls do not nest, so the order is only the order they are
+/// drawn in.
+#[must_use]
+pub fn preview_head_tool_boxes(geometry: &PreviewHeadGeometry) -> Vec<(PreviewHeadTool, [f32; 4])> {
+    PreviewHeadTool::ALL
+        .into_iter()
+        .filter_map(|tool| {
+            let box_ = match tool {
+                PreviewHeadTool::Save => geometry.save,
+                PreviewHeadTool::Flip => geometry.flip,
+                PreviewHeadTool::Stop => geometry.stop,
+                PreviewHeadTool::DevTools => geometry.devtools,
+                PreviewHeadTool::PopOut => geometry.popout,
+                PreviewHeadTool::Lock => geometry.lock,
+            }?;
+            Some((tool, box_))
+        })
+        .collect()
+}
+
 /// Lay one preview head's contents out inside the common head it rides on.
 ///
 /// The trailing run is taken off the right in the mock-up's own DOM order —
@@ -15551,6 +15797,53 @@ pub fn pane_files_box(
         .flatten()
 }
 
+/// **Every control one pane offers this frame, whichever layout it is in** —
+/// the head's run, or the corner's two doors (user ruling 2026-08-27).
+///
+/// [`pane_chevron_box`]'s "two rectangles, one question" said about the whole
+/// run rather than about one button at a time, which is what the tip pass needs:
+/// a window that asks per-button has to remember to ask once per button, and the
+/// report was three buttons nobody had remembered.
+///
+/// `None` entries never appear — a control with no box is a control that is not
+/// on screen, and it is left out rather than registered empty.
+#[must_use]
+pub fn pane_control_boxes(
+    seats: &Seats,
+    layout: &SeatLayout,
+    seat: SeatId,
+    scale: f32,
+    capsule: Option<SeatId>,
+) -> Vec<(crate::icons::ActionIcon, [f32; 4])> {
+    let Some(placement) = layout.rects.iter().find(|placement| {
+        placement.id == seat && matches!(placement.presentation, Presentation::Full)
+    }) else {
+        return Vec::new();
+    };
+    let Some(device) = placement.device_rect else {
+        return Vec::new();
+    };
+    let rect = [
+        device.left as f32,
+        device.top as f32,
+        device.right as f32,
+        device.bottom as f32,
+    ];
+    if seats.seat_wears_head(placement.kind) {
+        return pane_head_control_boxes(&pane_head_geometry(rect, placement.kind, scale));
+    }
+    if !seats.seat_wears_ghost(placement.kind, placement.id, capsule) {
+        return Vec::new();
+    }
+    // The corner's run, in [`crate::icons::PANE_DOOR_RUN`]'s order — the same
+    // order the head's is in, since the 2026-08-27 ruling.
+    crate::icons::PANE_DOOR_RUN
+        .into_iter()
+        .zip(pane_ghost_run(rect, scale))
+        .filter_map(|(door, box_)| Some((door, box_?)))
+        .collect()
+}
+
 /// The tree's own rectangle inside one named files column.
 ///
 /// The third caller of the same subtraction the paint and the wheel already
@@ -15862,39 +16155,31 @@ pub fn hit_preview_head(
         };
         let head = pane_head_geometry(rect, placement.kind, scale);
         let geometry = preview_head_geometry(&head, scale, tools);
-        let hit = |box_: Option<[f32; 4]>| box_.is_some_and(|box_| contains(box_, x, y));
+        let hit = |box_: [f32; 4]| contains(box_, x, y);
         // **A tool nobody can see does not take a press** — [`hit_chrome`]'s own
-        // parameter, and the same report behind it: this head's five hang off
+        // parameter, and the same report behind it: this head's tools hang off
         // `.pane:hover` exactly as the split head's `× ⌄ 🗀` do, and answering
         // for them at rest is the same bug in the same shape.
         //
-        // The one exception is the mock-up's own last rule,
-        // `.pv-tool.pv-pin.on { opacity: 1 }`: an engaged lock is drawn at rest,
-        // so it is pressable at rest. That is why the lock's line below reads
-        // the tools and the four above it do not — see
-        // [`PreviewHeadTools::locked`].
-        let showing = head_run_revealed(revealed, placement.id);
-        if showing && hit(geometry.save) {
-            return Some(ChromeTarget::PreviewSave(placement.id));
-        }
-        if showing && hit(geometry.flip) {
-            return Some(ChromeTarget::PreviewFlip(placement.id));
-        }
-        if showing && hit(geometry.stop) {
-            return Some(ChromeTarget::PreviewStop(placement.id));
-        }
+        // The one exception is [`PreviewHeadTool::stands_at_rest`], which is the
+        // mock-up's own last rule in that cascade.
+        //
+        // **The ladder is a walk of [`preview_head_tool_boxes`] since
+        // 2026-08-27**, and it used to be six hand-written `if`s. The run is one
+        // list now because the tip pass has to walk the same one — see
+        // [`PreviewHeadTool`], and the report that a control which nobody had
+        // remembered to add to a second list is a control with no words on it.
+        //
         // The hand-off arrow and a page's three navigation buttons used to be
         // asked here, between the flip and the developer tools. They are on the
         // rail since 2026-08-24 and [`hit_preview_rail`] answers for them — the
         // targets did not change, only the row they are drawn in.
-        if showing && hit(geometry.devtools) {
-            return Some(ChromeTarget::PreviewDevTools(placement.id));
-        }
-        if showing && hit(geometry.popout) {
-            return Some(ChromeTarget::PreviewPopOut(placement.id));
-        }
-        if (showing || tools.locked) && hit(geometry.lock) {
-            return Some(ChromeTarget::PreviewLock(placement.id));
+        let showing = head_run_revealed(revealed, placement.id);
+        if let Some((tool, _)) = preview_head_tool_boxes(&geometry)
+            .into_iter()
+            .find(|(tool, box_)| (showing || tool.stands_at_rest(tools)) && hit(*box_))
+        {
+            return Some(tool.target(placement.id));
         }
         // **The name answers the pointer whether or not it is a switcher** (user
         // ruling 2026-08-19). The pill exists only while the pool holds more
@@ -15904,7 +16189,7 @@ pub fn hit_preview_head(
         // now opens the file's name for editing, and that is true of every
         // preview head; the pill is still tried first, because when there IS a
         // switcher its box is the larger one and its inset is the affordance.
-        if hit(geometry.pill) || contains(geometry.name, x, y) {
+        if geometry.pill.is_some_and(hit) || contains(geometry.name, x, y) {
             return Some(ChromeTarget::PreviewName(placement.id));
         }
     }
@@ -20472,7 +20757,7 @@ mod tests {
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
                 search_seat: None,
-                pane_menu_seat: None,
+                head_raised: None,
                 resizing_cards: None,
             },
         );
@@ -20551,7 +20836,7 @@ mod tests {
                     chevron_turn: 0.0,
                     pane_motion: PaneMotionFrame::default(),
                     search_seat: None,
-                    pane_menu_seat: None,
+                    head_raised: None,
                     resizing_cards: None,
                 },
             );
@@ -23865,7 +24150,7 @@ mod tests {",
                     chevron_turn: 0.0,
                     pane_motion: PaneMotionFrame::default(),
                     search_seat: None,
-                    pane_menu_seat: None,
+                    head_raised: None,
                     resizing_cards: None,
                 },
             )
@@ -24092,7 +24377,7 @@ mod tests {",
                 chevron_turn,
                 pane_motion: PaneMotionFrame::default(),
                 search_seat: None,
-                pane_menu_seat: None,
+                head_raised: None,
                 resizing_cards: None,
             },
         )
@@ -24201,7 +24486,7 @@ mod tests {",
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
                 search_seat: None,
-                pane_menu_seat: None,
+                head_raised: None,
                 resizing_cards: None,
             },
         )
@@ -25929,7 +26214,7 @@ mod tests {",
                 preview_cards: &[],
                 fit_overflow: None,
                 search_seat: None,
-                pane_menu_seat: None,
+                head_raised: None,
                 profile_menu_open: true,
                 chevron_turn: 1.0,
                 pane_motion: PaneMotionFrame::default(),
@@ -28379,7 +28664,7 @@ mod tests {",
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
                 search_seat: None,
-                pane_menu_seat: None,
+                head_raised: None,
                 resizing_cards: None,
             },
         )
@@ -28588,7 +28873,7 @@ mod tests {",
                     chevron_turn: 0.0,
                     pane_motion: PaneMotionFrame::default(),
                     search_seat: None,
-                    pane_menu_seat: None,
+                    head_raised: None,
                     resizing_cards: None,
                 },
             )
@@ -28705,7 +28990,7 @@ mod tests {",
                     chevron_turn: 0.0,
                     pane_motion: PaneMotionFrame::default(),
                     search_seat: None,
-                    pane_menu_seat: None,
+                    head_raised: None,
                     resizing_cards: None,
                 },
             )
@@ -28881,7 +29166,7 @@ mod tests {",
 
     /// The same build again, with the two facts §7.1.6i's corner ghost is a
     /// function of said out loud: which pane the search capsule stands on, and
-    /// which pane's menu is up.
+    /// which pane's head has a layer of its own standing.
     ///
     /// Every caller above passes `(None, None)` because none of them is about a
     /// lone pane — and a lone pane is the only seat either fact can change.
@@ -28891,7 +29176,7 @@ mod tests {",
         scale: f32,
         pointer: ChromePointer,
         cards: Option<ResizingCards>,
-        (search_seat, pane_menu_seat): (Option<SeatId>, Option<SeatId>),
+        (search_seat, head_raised): (Option<SeatId>, Option<PaneLayer>),
     ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
         build_chrome_for_tabs(
             seats,
@@ -28946,7 +29231,7 @@ mod tests {",
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
                 search_seat,
-                pane_menu_seat,
+                head_raised,
                 resizing_cards: cards,
             },
         )
@@ -29514,7 +29799,7 @@ mod tests {",
     /// that the whole run obeys it, on one predicate, so the paint and the hit
     /// test cannot disagree about it.
     ///
-    /// MUTATION: drop [`HeadRun::menu`] from [`head_run_revealed`] and every
+    /// MUTATION: drop [`HeadRun::raised`] from [`head_run_revealed`] and every
     /// assertion in the first two blocks below answers `PaneHeader` off a head
     /// that is drawing three buttons.
     #[test]
@@ -29555,7 +29840,7 @@ mod tests {",
         // ── the hand is on the menu, so it is in no pane at all ──────────────
         let standing = HeadRun {
             hovered: None,
-            menu: Some(terminal),
+            raised: Some(terminal),
         };
         assert!(head_run_revealed(standing, terminal));
         for (target, box_) in run {
@@ -29582,7 +29867,7 @@ mod tests {",
         // head while the hand has walked into the pane beside it.
         let both = HeadRun {
             hovered: Some(column),
-            menu: Some(terminal),
+            raised: Some(terminal),
         };
         assert_eq!(
             hit_chrome(&seats, &layout, 1.0, both, x, y),
@@ -29613,7 +29898,13 @@ mod tests {",
                 1.0,
                 ChromePointer::default(),
                 None,
-                (None, menu),
+                (
+                    None,
+                    menu.map(|seat| PaneLayer {
+                        seat,
+                        door: Some(crate::icons::ActionIcon::OpenPaneMenu),
+                    }),
+                ),
             );
             sprites
                 .iter()
@@ -29629,6 +29920,192 @@ mod tests {",
             crosses(None),
             0,
             "and with no menu and no hand, no head draws one",
+        );
+    }
+
+    /// RED (user ruling 2026-08-27) — **a head stays lit while the float it
+    /// raised is open**, and not only while its menu is.
+    ///
+    /// RED EVIDENCE (2026-08-27, the user's own report). 裁4 ruled the run stays
+    /// up under a standing layer and landed as a field called `menu`, so the
+    /// head's *other* door kept the bug 裁4 had just fixed beside it: press 🗀,
+    /// the flyout opens under the pointer, `pane_hover` clears the instant the
+    /// hand reaches it — and the whole run fades out from under a hand that has
+    /// not left the control it is using. On that build the first block below
+    /// draws **zero** `PaneClose` sprites and the hit test answers
+    /// `PaneHeader` for all three boxes.
+    ///
+    /// Both halves are here because the ruling has two: the *run* obeys the
+    /// seat, and a lone pane's *corner* lights the one door the layer came out
+    /// of — lighting both would be the corner saying two things are going on
+    /// when one is.
+    ///
+    /// MUTATION ①: point [`HeadRun::raised`] back at the pane menu alone and the
+    /// first block goes red. MUTATION ②: light a corner door on the seat rather
+    /// than on the door and the last block goes red.
+    #[test]
+    fn a_head_stays_lit_while_the_float_it_raised_is_open() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let terminal = layout.rects[0].id;
+        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        let centre = |box_: [f32; 4]| {
+            (
+                f64::from((box_[0] + box_[2]) / 2.0),
+                f64::from((box_[1] + box_[3]) / 2.0),
+            )
+        };
+
+        // ── the hand is down in the flyout, so it is in no pane at all ──────
+        let peeking = HeadRun {
+            hovered: None,
+            raised: Some(terminal),
+        };
+        assert!(head_run_revealed(peeking, terminal));
+        for (target, box_) in [
+            (
+                ChromeTarget::PaneMenu(terminal),
+                head.chevron.expect("the `⌄`"),
+            ),
+            (
+                ChromeTarget::PaneFiles(terminal),
+                head.files.expect("the folder"),
+            ),
+            (
+                ChromeTarget::PaneClose(terminal),
+                head.close.expect("the `×`"),
+            ),
+        ] {
+            let (x, y) = centre(box_);
+            assert_eq!(
+                hit_chrome(&seats, &layout, 1.0, peeking, x, y),
+                Some(target),
+                "{target:?} is on screen while the flyout its head raised stands"
+            );
+        }
+
+        // ── and the paint says the same thing, whichever door raised it ─────
+        let crosses = |layer: Option<PaneLayer>| {
+            let (_, _, sprites) = pane_chrome(
+                &seats,
+                &layout,
+                1.0,
+                ChromePointer::default(),
+                None,
+                (None, layer),
+            );
+            sprites
+                .iter()
+                .filter(|sprite| sprite.mark == ChromeMark::PaneClose)
+                .count()
+        };
+        for door in crate::icons::PANE_DOOR_RUN {
+            assert_eq!(
+                crosses(Some(PaneLayer {
+                    seat: terminal,
+                    door: Some(door),
+                })),
+                1,
+                "a head with a layer standing off its {door:?} draws its `×`",
+            );
+        }
+
+        // ── the corner lights the door that raised it, and only that one ────
+        //
+        // A lone terminal, which is the layout the corner exists in.
+        let lone = Seats::lone_terminal();
+        let layout = solved(&lone, viewport, &metrics);
+        let seat = layout.rects[0].id;
+        let rect = device_rect_of(&layout, seat);
+        let boxes = [
+            (
+                crate::icons::ActionIcon::OpenPaneMenu,
+                pane_ghost_geometry(rect, 1.0).expect("the corner's `⌄`"),
+            ),
+            (
+                crate::icons::ActionIcon::OpenFilesPane,
+                pane_ghost_folder_geometry(rect, 1.0).expect("and its folder"),
+            ),
+        ];
+        for holding in crate::icons::PANE_DOOR_RUN {
+            let (_, _, sprites) = pane_chrome(
+                &lone,
+                &layout,
+                1.0,
+                ChromePointer::default(),
+                None,
+                (
+                    None,
+                    Some(PaneLayer {
+                        seat,
+                        door: Some(holding),
+                    }),
+                ),
+            );
+            for (door, box_) in boxes {
+                // A lit door brings its own ground — a `ControlPill` under the
+                // glyph — which is the one difference a screenshot shows and the
+                // one this reads.
+                let ground = sprites.iter().any(|sprite| {
+                    matches!(sprite.mark, ChromeMark::ControlPill { .. }) && sprite.rect == box_
+                });
+                assert_eq!(
+                    ground,
+                    door == holding,
+                    "with the {holding:?} layer standing, the corner's {door:?} \
+                     is {} lit",
+                    if ground { "" } else { "not" },
+                );
+            }
+        }
+
+        // ── and the window really derives that fact from the flyout ─────────
+        //
+        // Everything above is about the predicate. **This is about the fact fed
+        // into it, which is where the report actually was**: `head_run` read the
+        // pane menu and nothing else, so no frame ever carried this state and
+        // every assertion above would have passed on the broken build. Read off
+        // the source for the reason every gate in this house that watches a
+        // derivation is — what went wrong was a *shape*, and the shape is "one
+        // function, exhaustive over the layers" against "one field per menu".
+        //
+        // MUTATION: drop the `HoverFloat::Flyout` arm and the first block here
+        // names it; go back to reading `pane_menu` in `head_run` and the second
+        // does.
+        const SOURCE: &str = include_str!("main.rs");
+        let body = |name: &str| {
+            let head = format!("\n    fn {name}(");
+            let start = SOURCE
+                .find(&head)
+                .unwrap_or_else(|| panic!("`fn {name}` is declared once in an `impl`"))
+                + head.len();
+            let end = start
+                + SOURCE[start..]
+                    .find("\n    }\n")
+                    .expect("a method is closed at the `impl`'s indentation");
+            &SOURCE[start..end]
+        };
+        let derivation = body("head_that_raised_a_layer");
+        for arm in [
+            "HoverFloat::Flyout",
+            "float::FloatTrigger::Pane(leaf)",
+            "icons::ActionIcon::OpenFilesPane",
+        ] {
+            assert!(
+                derivation.contains(arm),
+                "the derivation no longer names `{arm}`, so a head goes dark \
+                 under the flyout it raised"
+            );
+        }
+        assert!(
+            body("head_run").contains("self.head_that_raised_a_layer()"),
+            "the run's second arm is no longer the derivation"
+        );
+        assert!(
+            SOURCE.contains("head_raised: self.head_that_raised_a_layer(),"),
+            "the paint is no longer handed the derivation"
         );
     }
 
@@ -29928,8 +30405,15 @@ mod tests {",
                 "22 logical pixels wide at {scale}x"
             );
             assert_eq!(ghost[3] - ghost[1], box_px, "and square at {scale}x");
+            // **The run ends at the gutter, and the `⌄` is no longer its last
+            // member** (user ruling 2026-08-27): the corner reads `⌄ 🗀` now,
+            // so it is the folder that stands against the lane and the chevron
+            // that steps one box in. What the constant governs is the run's own
+            // right edge, which is the assertion this always was.
+            let run_right =
+                pane_ghost_folder_geometry(rect, scale).map_or(ghost[2], |folder| folder[2]);
             assert_eq!(
-                ghost[2],
+                run_right,
                 (rect[2] - 11.0 * scale).round(),
                 "inboard of the scroll gutter at {scale}x"
             );
@@ -29990,12 +30474,12 @@ mod tests {",
             ),
             Some(ChromeTarget::PaneMenu(seat)),
         );
-        // **This one pixel changed hands on 2026-08-25** and the assertion is
-        // rewritten rather than deleted: it used to be the terminal's own text,
-        // and it is the folder's door now that the corner carries two. What the
-        // pin was about survives one box to the left, in
-        // `the_corner_folder_answers_the_head_folders_own_target`: the *run* has
-        // an outer edge and the pixel beyond it is content.
+        // **This one pixel changed hands twice.** It was the terminal's own
+        // text; on 2026-08-25 the folder took it, when the corner grew a second
+        // door on the chevron's left; and on 2026-08-27 it went back, when the
+        // ruling put the two doors in the head's order (`⌄ 🗀`) and the
+        // chevron became the run's leading member again. The pixel beyond a
+        // run's outer edge is content, which is what the pin was always about.
         assert_eq!(
             hit_pane_ghost(
                 &lone,
@@ -30005,9 +30489,8 @@ mod tests {",
                 f64::from(ghost[0]) - 1.0,
                 centre.1
             ),
-            Some(ChromeTarget::PaneFiles(seat)),
-            "left of the `⌄` is its neighbour the folder — not a gap, and no \
-             longer text"
+            None,
+            "one pixel left of the run is the terminal's own text, not a button"
         );
         // And the menu hangs off the box it was drawn in — the same question
         // `pane_chevron_box` answers for a head, so the window's toggle and its
@@ -30097,7 +30580,11 @@ mod tests {",
             .expect("a full-window pane seats the mark");
 
         let run = |pointer: ChromePointer, menu: Option<SeatId>| {
-            let (_, _, sprites) = pane_chrome(&seats, &layout, 1.0, pointer, None, (None, menu));
+            let layer = menu.map(|seat| PaneLayer {
+                seat,
+                door: Some(crate::icons::ActionIcon::OpenPaneMenu),
+            });
+            let (_, _, sprites) = pane_chrome(&seats, &layout, 1.0, pointer, None, (None, layer));
             let mark = sprites
                 .iter()
                 .find(|sprite| {
@@ -30211,11 +30698,12 @@ mod tests {",
 
     // ── the folder beside it (user proposal, Claude 认可 2026-08-25, §7.1.6i) ──
 
-    /// **Two doors in one corner: 🗀 on the left, `⌄` on the right.**
+    /// **Two doors in one corner: `⌄` on the left, 🗀 on the right** (user
+    /// ruling 2026-08-27; it was the other way round for two days).
     ///
-    /// The folder is the chevron's own box stepped exactly one box left, and
+    /// The chevron is the folder's own box stepped exactly one box left, and
     /// that is what makes the pair a *run* rather than two marks that happen to
-    /// be near each other: the folder's right edge **is** the chevron's left
+    /// be near each other: the chevron's right edge **is** the folder's left
     /// edge at every scale, so no rounding can open a seam of unclaimed pixels
     /// between two live buttons. It is the rule the head's own run keeps
     /// (`.panehead .pane-files + .pane-close { margin-left: 0 }`), and the
@@ -30241,7 +30729,7 @@ mod tests {",
             let chevron = pane_ghost_geometry(rect, scale).expect("a 600px pane seats the mark");
             let folder = pane_ghost_folder_geometry(rect, scale).expect("and the door beside it");
             assert_eq!(
-                folder[2], chevron[0],
+                chevron[2], folder[0],
                 "one shared edge and no gap at {scale}x"
             );
             assert_eq!(
@@ -30255,15 +30743,18 @@ mod tests {",
                 "and the same lane at {scale}x"
             );
             assert!(
-                folder[0] < chevron[0],
-                "🗀 on the left, `⌄` on the right at {scale}x"
+                chevron[0] < folder[0],
+                "`⌄` on the left, 🗀 on the right at {scale}x — \
+                 `icons::PANE_DOOR_RUN`'s order, which is the head's"
             );
         }
 
         // A corner with room for one door seats one. The chevron is the door
         // that stays, because it is the one the ruling put there: a folder half
         // over the pane's left edge is the head run's forbidden control, and the
-        // menu behind the `⌄` still carries every verb this pane has.
+        // menu behind the `⌄` still carries every verb this pane has. With the
+        // folder gone the chevron takes the corner box itself — the run is
+        // right-aligned, and a run of one ends where a run of two ends.
         let narrow = [0.0_f32, 0.0, 40.0, 400.0];
         assert!(pane_ghost_geometry(narrow, 1.0).is_some());
         assert_eq!(pane_ghost_folder_geometry(narrow, 1.0), None);
@@ -30308,21 +30799,23 @@ mod tests {",
             "the same target the split head's folder answers",
         );
         // Half-open on its leading edge, like every other target in this window.
+        // The shared edge is the folder's, because it belongs to the box on its
+        // right — no pixel answers both.
         assert_eq!(at(folder[0]), Some(ChromeTarget::PaneFiles(seat)));
         assert_eq!(
             at(folder[0] - 1.0),
+            Some(ChromeTarget::PaneMenu(seat)),
+            "left of the folder is its neighbour the `⌄` — the run reads \
+             `⌄ 🗀` since 2026-08-27",
+        );
+        assert_eq!(
+            at(chevron[0] - 1.0),
             None,
             "one pixel left of the run is the terminal's own text, not a button"
         );
         assert_eq!(
-            at(chevron[0]),
-            Some(ChromeTarget::PaneMenu(seat)),
-            "the shared edge belongs to the box on its right — no pixel answers both",
-        );
-        assert_eq!(
             at((chevron[0] + chevron[2]) / 2.0),
             Some(ChromeTarget::PaneMenu(seat)),
-            "and the `⌄` is exactly where it was before the folder joined it",
         );
         assert_eq!(
             pane_files_box(&lone, &layout, seat, 1.0, None),
@@ -32273,7 +32766,7 @@ mod tests {",
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
                 search_seat: None,
-                pane_menu_seat: None,
+                head_raised: None,
                 resizing_cards: None,
             },
         )
@@ -32344,7 +32837,7 @@ mod tests {",
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::new(transforms),
                 search_seat: None,
-                pane_menu_seat: None,
+                head_raised: None,
                 resizing_cards: None,
             },
         )
@@ -33150,7 +33643,7 @@ mod tests {",
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
                 search_seat: None,
-                pane_menu_seat: None,
+                head_raised: None,
                 resizing_cards: None,
             },
         )
@@ -33429,7 +33922,7 @@ mod tests {",
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
                 search_seat: None,
-                pane_menu_seat: None,
+                head_raised: None,
                 resizing_cards: None,
             },
         )
@@ -33692,7 +34185,7 @@ mod tests {",
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
                 search_seat: None,
-                pane_menu_seat: None,
+                head_raised: None,
                 resizing_cards: None,
             },
         )
@@ -33860,7 +34353,7 @@ mod tests {",
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
                 search_seat: None,
-                pane_menu_seat: None,
+                head_raised: None,
                 resizing_cards: None,
             },
         )
@@ -35251,7 +35744,7 @@ mod tests {",
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
                 search_seat: None,
-                pane_menu_seat: None,
+                head_raised: None,
                 resizing_cards: None,
             },
         )
@@ -38628,7 +39121,7 @@ mod tests {",
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
                 search_seat: None,
-                pane_menu_seat: None,
+                head_raised: None,
                 resizing_cards: None,
             },
         );
@@ -40383,7 +40876,7 @@ mod tests {",
                     chevron_turn: 0.0,
                     pane_motion: PaneMotionFrame::default(),
                     search_seat: None,
-                    pane_menu_seat: None,
+                    head_raised: None,
                     resizing_cards: None,
                 },
             );
@@ -40524,7 +41017,7 @@ mod tests {",
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
                 search_seat: None,
-                pane_menu_seat: None,
+                head_raised: None,
                 resizing_cards: None,
             },
         );
@@ -42665,7 +43158,10 @@ mod tests {",
         // would fade the run out from under an open list while the hit test
         // went on answering for it — which is this rule's own failure, in the
         // other direction.
-        for arm in ["hovered: pointer.pane_hover", "menu: pane_menu_seat"] {
+        for arm in [
+            "hovered: pointer.pane_hover",
+            "raised: head_raised.map(|layer| layer.seat)",
+        ] {
             assert!(
                 gate.contains(arm),
                 "the paint's gate has lost `{arm}`, so the two have come apart"

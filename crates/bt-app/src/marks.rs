@@ -1066,16 +1066,22 @@ pub enum ChromeMark {
     /// which is what a restart is: a ring broken at the top and the bar
     /// standing in the break.
     Restart,
-    /// **`#i-devtools` — open the inspector** (清单丙 9).
+    /// **`#i-devtools` — open the inspector** (清单丙 9; redrawn 2026-08-27).
     ///
-    /// A spanner: the ring with a gap, and the shaft. It wore `#i-code` under a
-    /// comment saying so on purpose — *"the same glyph markdown's `Edit
-    /// source` wears, and the same sentence"* — which is true of the sentence
-    /// and not of the act: one shows you the file you are looking at, the
-    /// other opens somebody else's instrument over it.
+    /// A frame's four corner marks with a pointer standing in them. It wore
+    /// `#i-code` under a comment saying so on purpose — *"the same glyph
+    /// markdown's `Edit source` wears, and the same sentence"* — which is true
+    /// of the sentence and not of the act: one shows you the file you are
+    /// looking at, the other opens somebody else's instrument over it.
     ///
-    /// The gap is what keeps it off [`Self::Search`]: a closed ring on a shaft
-    /// is a magnifier, and this sheet now carries one.
+    /// **P1 drew it as a spanner and the user rejected that drawing**
+    /// (2026-08-27). A spanner is maintenance — a verb about repairing the
+    /// machine — where this button is about *looking at* the page in front of
+    /// you; and drawn as an open ring on a shaft it stood one notch away from
+    /// [`Self::Search`], which cost P1's own note two paragraphs of arguing
+    /// about how wide the mouth had to be cut. The corner marks say *an
+    /// element* and the pointer says *this one*, which is the sentence the
+    /// button actually makes, and no other drawing on this sheet is a pointer.
     DevTools,
     /// **`#i-hash` — a commit's hexadecimal name** (清单丙 9).
     ///
@@ -3633,20 +3639,30 @@ const SYMBOL_BODY: [&str; 67] = [
     // standing in the opening. The arc is written from nine o'clock the long
     // way round so the gap lands at twelve, where the bar is.
     r#"<path d="M5.5 3.87a5 5 0 1 0 5 0M8 2.2v5.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
-    // `#i-devtools` — the spanner. The head is an arc rather than a circle and
-    // the mouth faces away from the shaft, which is the one thing that keeps it
-    // off `#i-search`: a closed ring on a handle is a magnifier.
+    // `#i-devtools` — **the pointer inside the corner marks of a frame**: pick
+    // a thing apart and look inside it. Four short brackets stand where a
+    // frame's corners would be, and the inspector's own cursor stands in the
+    // middle of them.
     //
-    // **The mouth is a hundred and twenty degrees**, and that number was
-    // measured off the drawing rather than chosen. Cut at seventy the head read
-    // as a ring with a nick in it, and this sheet's magnifier is a ring on a
-    // stick pointing the other way — two mirrored silhouettes differing by a
-    // notch, which is exactly the failure `ChromeMark::SplitRight`'s note names.
-    // At a hundred and twenty it is a horseshoe and there is nothing to
-    // mistake.
+    // **It was a spanner until 2026-08-27** (user report — 「DevTools 图标太
+    // 丑」), and the spanner was wrong twice over. It read as *maintenance*,
+    // which is a plumber's verb and not this button's: what is behind this
+    // button is an instrument for looking, and the thing it looks at is the
+    // page in the pane. And it was drawn as an open ring on a shaft, which put
+    // it a notch away from `#i-search` — the note under the old drawing spent
+    // two paragraphs widening the mouth to a hundred and twenty degrees so the
+    // two silhouettes could be told apart, which is a long argument for a
+    // drawing that had already lost. A cursor is not a ring at all.
+    //
+    // The idiom is every inspector's own — the corner marks say *an element*,
+    // the pointer says *this one* — and the geometry here is struck in this
+    // sheet's grid rather than lifted from anybody's: the brackets take the
+    // house's inner radius and its pen, and the cursor is four points with a
+    // round join. Nothing on the sheet is a pointer, so there is nothing left
+    // to mistake it for.
     concat!(
-        r#"<path d="M11.7 2.66A3.4 3.4 0 1 0 11.7 8.54" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
-        r#"<path d="M8.2 8.2L3.4 13" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M5.2 2.4H3.6a1.2 1.2 0 0 0-1.2 1.2v1.6M10.8 2.4h1.6a1.2 1.2 0 0 1 1.2 1.2v1.6M13.6 10.8v1.6a1.2 1.2 0 0 1-1.2 1.2h-1.6M5.2 13.6H3.6a1.2 1.2 0 0 1-1.2-1.2v-1.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M6.6 5L6.6 11.6 8.2 9.9H10.8Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
     ),
     // `#i-hash` — the number sign, struck from geometry. The uprights lean,
     // because an upright `#` reads as a grid and a leaning one reads as the
@@ -6314,8 +6330,16 @@ mod tests {
         const SIZES_PX: [u32; 3] = [14, 26, 64];
         /// Wide enough for the three sizes and their gaps, tall enough for the
         /// largest plus the bleed a turning glyph asks for outside its box.
-        const CELL_WIDE_PX: u32 = 4 + 64 + 4 + 26 + 4 + 14 + 4;
-        const CELL_TALL_PX: u32 = 88;
+        ///
+        /// **The bleed is counted on both axes** (fixed 2026-08-27): the note
+        /// above said so and only the height obeyed it, so the sheet panicked
+        /// on `pen_x + x` the first time a chevron reached the right-hand
+        /// column. A turning arrow is rasterized into the circle its own box
+        /// sweeps, which at a `16 × 16` viewBox is `√2` of the box —
+        /// `ceil(64 × (√2 − 1) / 2) = 14` on each side of the largest sample.
+        const BLEED_PX: u32 = 14;
+        const CELL_WIDE_PX: u32 = 4 + (64 + 2 * BLEED_PX) + 4 + (26 + 6) + 4 + (14 + 4) + 4;
+        const CELL_TALL_PX: u32 = 64 + 2 * BLEED_PX + 12;
         const COLUMNS: u32 = 4;
         // Every drawing a verb can wear, plus the object renditions and the two
         // frames of each turning family — in one order, so the sheet and its
@@ -6374,6 +6398,13 @@ mod tests {
                 let top = row * CELL_TALL_PX + (CELL_TALL_PX - 8).saturating_sub(icon.height_px);
                 for y in 0..icon.height_px {
                     for x in 0..icon.width_px {
+                        // A sheet is a picture for a person and not an
+                        // assertion: a drawing that outgrows its cell is
+                        // cropped rather than allowed to panic halfway through
+                        // writing the file.
+                        if pen_x + x >= width || top + y >= height {
+                            continue;
+                        }
                         let base = ((y * icon.width_px + x) * 4) as usize;
                         let alpha = f32::from(icon.rgba[base + 3]) / 255.0;
                         if alpha <= 0.0 {
