@@ -2165,7 +2165,9 @@ pub fn build(
             if revealed {
                 ChromeMark::Check
             } else {
-                ChromeMark::FolderOpen
+                // The files pane's own foot glyph, and the same act: a button
+                // that opens File Explorer, struck since P2.
+                crate::icons::ActionIcon::RevealInFolder.mark()
             },
             geometry.foot_mark,
             foot_ink,
@@ -4029,7 +4031,7 @@ mod tests {
             !layer
                 .sprites
                 .iter()
-                .any(|sprite| sprite.mark == ChromeMark::FolderOpen),
+                .any(|sprite| sprite.mark == ChromeMark::FolderOpenOutline),
             "no folder glyph survives the strip"
         );
         assert!(

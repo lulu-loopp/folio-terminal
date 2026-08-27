@@ -31,7 +31,7 @@
 6. 拆分+新形:External 拆三(`External` 交外部 / `WindowNew` / `WindowPick`);✕ 拆三(Close / `Trash` / `Stop`,统一三个变体名);`Refresh`/`Restart`;`Code`/`DevTools`/`Hash`;`Split`/`Compare`;`Copy`/`Duplicate`;`Chevron`/`NavBack`/`NavForward`;新 `Search`(Find);`Plus` 收窄(load-more 改 `MoreDown`,stage/unstage 用 Plus/Minus 本形留在 git 行内按钮)。
 7. settings 页 7 处字符图标迁入 ChromeMark(`↺`→`HistoryRestore`、`↑↓`→矢量箭头族、`⋯`→受控形、`✕`→Close、`‹›`→chevron 小尺寸导出);面包屑 `‹›` 同迁。
 
-**P2(第三片,收尾):**三套展开语言合一(留可旋转 chevron;TreeDisclosure 保留与否见留裁)、品牌标统一 16px chassis、profile 菜单与 pane 菜单的实心/描边二语言统一政策(action 一律描边,fill 只给 selected/状态点/品牌)。
+**P2(第三片,收尾,2026-08-26 已落地 → `docs/DESIGN.md` §7.18 P2 续写):**三套展开语言合一(留可旋转 chevron;TreeDisclosure 保留与否见留裁)、品牌标统一 16px chassis、profile 菜单与 pane 菜单的实心/描边二语言统一政策(action 一律描边,fill 只给 selected/状态点/品牌)。
 
 ## 2. 动画块施工序
 
