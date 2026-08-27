@@ -2190,9 +2190,11 @@ pub fn build(
             if revealed {
                 ChromeMark::Check
             } else {
-                // The files pane's own foot glyph, and the same act: a button
-                // that opens File Explorer, struck since P2.
-                crate::icons::ActionIcon::RevealInFolder.mark()
+                // The files pane's own foot glyph, and the same row: the
+                // folder this window is standing in, solid because it is a
+                // place and not a column of verbs (user report, 2026-08-27 —
+                // see `seats::push_files_foot`, whose strip this one is).
+                crate::icons::ActionIcon::OpenFolderObject.mark()
             },
             geometry.foot_mark,
             foot_ink,

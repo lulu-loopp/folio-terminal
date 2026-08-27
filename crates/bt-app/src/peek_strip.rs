@@ -908,6 +908,7 @@ fn push_mark_slot(
                 color,
                 opacity: leaf.mark_opacity,
                 grayscale: false,
+                above_text: false,
             });
         }
     }

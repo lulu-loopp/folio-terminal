@@ -5805,6 +5805,16 @@ pub fn pane_ghost_folder_geometry(rect: [f32; 4], scale: f32) -> Option<[f32; 4]
 /// seat marks beside it are cut at.
 pub const PANE_ZOOM_MARK_LOGICAL_PX: f32 = 13.0;
 
+/// **How far a head's run dissolves the title under it** — one character of the
+/// title's own type (user ruling, 2026-08-27:「渐变底…宽度约控件运宽 + 一个字
+/// 宽」).
+///
+/// Written as the caption's own font size rather than as a number, because that
+/// is what the ruling says: a *character*, and an em is a character's width in
+/// the one script this window's own chrome is set in. It follows the type if
+/// the type is ever re-sized, which a `12.0` here would not.
+pub const HEAD_RUN_SCRIM_FADE_LOGICAL_PX: f32 = bt_render::SEAT_TITLE_FONT_LOGICAL_PX;
+
 /// Where the zoom mark stands in a head, or `None` when the head has no room for
 /// it (§7.1.6l).
 ///
@@ -5826,7 +5836,9 @@ pub fn pane_zoom_mark_box(head: &PaneHeadGeometry, scale: f32) -> Option<[f32; 4
     let left = (head.mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale).round();
     let top = ((head.mark[1] + head.mark[3] - size) / 2.0).round();
     let right = left + size;
-    (right <= head.title[2]).then_some([left, top, right, top + size])
+    // `control_limit` and not the title's own right edge: the name may run
+    // under the trailing run and dissolve into it, and a state mark may not.
+    (right <= head.control_limit).then_some([left, top, right, top + size])
 }
 
 /// Where the name starts in a head that may be wearing the zoom mark.
@@ -5867,10 +5879,50 @@ pub struct PaneHeadGeometry {
     pub content_bottom: f32,
     /// The seat's own mark, at its per-kind size.
     pub mark: [f32; 4],
-    /// What is left for the title once the mark and the trailing run have taken
-    /// theirs. `.ptitle` is the flex child that gives, so this shrinks rather
-    /// than pushing the controls off the end.
+    /// **The whole of the row after the leading mark**, less the head's own
+    /// trailing padding — and *not* less the trailing run (user report,
+    /// 2026-08-27).
+    ///
+    /// The run is revealed by a hover and the head kept a hole for it at rest,
+    /// so a long name was cut sixty pixels early to make room for three buttons
+    /// that were not on screen: 「批2进度 · D:\Documents\…\user_pa…」 beside a
+    /// stripe of empty head. A head at rest shows one thing and it should have
+    /// all of the row to show it in; when the run comes up it is drawn *over*
+    /// this box, on [`Self::scrim`], and the tail it covers dissolves into the
+    /// head rather than being walled off.
+    ///
+    /// **Nothing else in the head grew with it.** The leading run — the zoom
+    /// mark, a files head's root button — still stops at [`Self::run`], because
+    /// those are controls and a control half under another control is the bug
+    /// this house has fixed twice. What may run under the buttons is type, and
+    /// only type.
     pub title: [f32; 4],
+    /// **The trailing run's own box**, `[left, top, right, bottom]` over every
+    /// control in it, or `None` on a head with room for none.
+    ///
+    /// One rectangle rather than the union recomputed at each caller: it is
+    /// where the title's tail goes under, where [`Self::scrim`] starts, and the
+    /// wall every control in the *leading* run has to stop at.
+    pub run: Option<[f32; 4]>,
+    /// **The ground the run stands on** — [`Self::run`] grown left by one
+    /// character of the title's own type and right to the head's edge, or
+    /// `None` when there is no run.
+    ///
+    /// Drawn in the head's ground colour over the title, at the run's own
+    /// opacity, so the two arrive and leave together: see
+    /// [`marks::ChromeMark::HeadRunScrim`] for the drawing and
+    /// [`marks::ChromeSprite::above_text`] for how it gets over the letters.
+    pub scrim: Option<[f32; 4]>,
+    /// **Where a control in this head has to stop** — one gap short of
+    /// [`Self::run`], or [`Self::title`]'s right edge on a head showing none.
+    ///
+    /// This is what [`Self::title`] used to be, and keeping it under its own
+    /// name is the whole of the 2026-08-27 ruling's discipline: *type* may run
+    /// under the trailing run and be dissolved into it, and nothing else may. A
+    /// zoom mark or a files head's root button that slid under the `⌄` would be
+    /// a control the reader can see half of and press none of — the failure
+    /// [`hit_chrome`]'s own note is about, met from the other side.
+    pub control_limit: f32,
     /// `.pane-close`'s 17px box, or `None` when the head is too narrow to seat
     /// it — at which point a press there must fall through to the head, exactly
     /// as a squeezed tab's does.
@@ -6006,10 +6058,20 @@ pub fn pane_head_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> PaneHea
         .map(|chevron| chevron[0])
         .or_else(|| trigger.map(|(_, box_)| box_[0]))
         .or(close.map(|close| close[0]));
-    let title_right = match run_left {
-        Some(left) => left - SEAT_TITLE_GAP_LOGICAL_PX * scale,
-        None => rect[2] - trailing_pad,
-    };
+    // The run as one box, from its leftmost control's left edge to the `×`'s
+    // right — which is the head's own trailing padding, since the `×` is last.
+    let run = run_left.zip(close).map(|(left, close)| {
+        [
+            left,
+            close[1].min(trigger_top),
+            close[2],
+            close[3].max(trigger_top + trigger_box),
+        ]
+    });
+    // **The title runs the whole row** (user report, 2026-08-27) — see the
+    // field's own note. What it stops at is the head's padding and nothing
+    // else.
+    let title_right = rect[2] - trailing_pad;
     PaneHeadGeometry {
         head,
         content_bottom,
@@ -6020,6 +6082,26 @@ pub fn pane_head_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> PaneHea
             title_right.max(mark[2]),
             content_bottom,
         ],
+        run,
+        // One character of the title's own type at the left edge, and the
+        // head's own right edge at the other: the ramp is a fact about the
+        // letters it dissolves, and what lies under the run's own boxes and
+        // under the padding beside them is covered flat.
+        scrim: run.map(|run| {
+            [
+                (run[0] - HEAD_RUN_SCRIM_FADE_LOGICAL_PX * scale).max(rect[0]),
+                rect[1],
+                rect[2],
+                content_bottom,
+            ]
+        }),
+        // What the title's right edge was before the ruling, kept under the
+        // name that says what it is for.
+        control_limit: match run_left {
+            Some(left) => left - SEAT_TITLE_GAP_LOGICAL_PX * scale,
+            None => title_right,
+        }
+        .max(mark[2]),
         close,
         files: trigger.and_then(|(is_float, box_)| (!is_float).then_some(box_)),
         float: trigger.and_then(|(is_float, box_)| is_float.then_some(box_)),
@@ -8093,6 +8175,48 @@ pub fn build_chrome_for_tabs(
                 // by one predicate and pressed by another is a control you can
                 // press without seeing, which is what a layout probe found on a
                 // files head on 2026-08-26.
+                // **Everything the head reveals is drawn over the title from
+                // here down** (user report, 2026-08-27). The name runs the whole
+                // row now — see [`PaneHeadGeometry::title`] — so the run covers
+                // its tail instead of the row keeping a hole for the run to
+                // stand in, and the scrim below is what turns "covers" into a
+                // dissolve rather than a wall.
+                //
+                // The index is taken once and the flag applied once, at the end
+                // of the run, because the alternative is remembering it at four
+                // separate pushes and the fifth one somebody adds later is the
+                // one that prints the title through a button.
+                let head_run_from = pane_sprites.len();
+                // **Only where there is a name running under it.** A preview
+                // head draws its own furniture instead of the generic caption
+                // and keeps its reservation — see `preview_head_geometry`, and
+                // `DESIGN` §7.18 for why the unsaved dot is the reason. A
+                // ground laid over a row with nothing under it would be a wash
+                // over the tool beside the `×`, which is the ramp's own left
+                // half landing on a button.
+                if head_ink_here > 0.0
+                    && preview_head.is_none()
+                    && let Some(scrim) = head.scrim
+                {
+                    pane_sprites.push(
+                        ChromeSprite::new(
+                            ChromeMark::HeadRunScrim {
+                                fade_px: (HEAD_RUN_SCRIM_FADE_LOGICAL_PX * scale).round().max(1.0)
+                                    as u32,
+                            },
+                            scrim,
+                            // The head's own ground, so what the ramp dissolves
+                            // the letters into is the band they are standing on
+                            // — `push_files_foot`'s dissolve one surface over,
+                            // as a drawing instead of as a mixed ink.
+                            palette.pane_head,
+                        )
+                        // The same number the run itself rides, so the ground
+                        // and the buttons on it arrive and leave together
+                        // rather than the ground snapping in under a fade.
+                        .with_opacity(head_ink_here),
+                    );
+                }
                 if head_ink_here > 0.0
                     && let Some(close) = head.close
                 {
@@ -8273,6 +8397,11 @@ pub fn build_chrome_for_tabs(
                             if lit { 1.0 } else { PANE_HEAD_TRIGGER_REVEAL } * head_ink_here;
                         pane_sprites.push(mark);
                     }
+                }
+                // And the whole of it goes over the letters — the scrim, the
+                // pills and the glyphs alike, in the order they were pushed.
+                for sprite in &mut pane_sprites[head_run_from..] {
+                    *sprite = sprite.above_text();
                 }
                 // C28-C43: a files column draws its rows into the body the floor
                 // quad above just laid down, and only falls through to a centred
@@ -12449,6 +12578,7 @@ fn focus_mini_seat_content(
                     height_px: *height_px,
                     opacity: 1.0,
                     clip: Some(clip_to_list(inner)),
+                    above_text: false,
                 });
             }
         }
@@ -12862,7 +12992,9 @@ pub fn files_root_box(head: &PaneHeadGeometry, scale: f32, name_width: f32) -> O
         .round()
         .max(1.0);
     let left = head.title[0] - inset;
-    let right = (head.title[0] + name_width + gap + chevron + inset).min(head.title[2]);
+    // Clamped to the run's own wall rather than to the title's right edge: this
+    // is a *button*, and half of it under the `⧉` would be half of it unpressable.
+    let right = (head.title[0] + name_width + gap + chevron + inset).min(head.control_limit);
     if right <= left + chevron {
         return None;
     }
@@ -13262,7 +13394,17 @@ pub fn preview_head_geometry(
     // Right to left from the `×`. A control that would reach the name's own left
     // edge has nowhere to stand, and half a control is worse than none — the rule
     // `pane_head_geometry` already holds the `×` and the files trigger to.
-    let mut right = head.close.map_or(head.title[2], |close| close[0]);
+    // `control_limit` where there is no `×`: the title's own right edge is the
+    // whole row since 2026-08-27 and a tool anchored to it would stand off the
+    // end of the head.
+    //
+    // **And this head keeps its reservation**, which is the 2026-08-27 ruling's
+    // one stated boundary rather than an oversight. What the terminal head was
+    // holding empty was room for chrome that is not on screen; what this head
+    // holds is a slot for the *unsaved dot* — a state the reader has to be able
+    // to see, and a state cannot be dissolved under a button. The dot follows
+    // the name, so the name cannot run past the run either. See `DESIGN` §7.18.
+    let mut right = head.close.map_or(head.control_limit, |close| close[0]);
     let mut take_wide = |wanted: bool, width: f32, height: f32| -> Option<[f32; 4]> {
         if !wanted {
             return None;
@@ -13299,7 +13441,7 @@ pub fn preview_head_geometry(
         .into_iter()
         .flatten()
         .map(|box_| box_[0])
-        .fold(head.title[2], f32::min);
+        .fold(head.control_limit, f32::min);
     let dirty_slot = (PREVIEW_DIRTY_SLOT_LOGICAL_PX * scale).round().max(1.0);
     // What is left for the flexible half of the row: the name bits and the dot,
     // with the spacer taking whatever neither of them wants.
@@ -16842,10 +16984,15 @@ fn push_files_foot(
                 favicon: strip.and_then(|strip| strip.favicon),
             }
         } else {
-            // **The act of revealing, not the folder itself** (P2): this glyph
-            // is a button that opens File Explorer, and it stands in the same
-            // foot as the tick above it.
-            crate::icons::ActionIcon::RevealInFolder.mark()
+            // **The folder this column is standing in, not the act of going
+            // and looking at it** (user report, 2026-08-27). P2 read this mark
+            // as the button it also is — press the strip and File Explorer
+            // opens — and gave it the act's struck rendition; what the reader
+            // meets here is a row that says *where you are*, beside a path and
+            // nothing else, and there is no column of verbs for a fill to be
+            // the odd one in. The struck folder belongs on the menu rows, which
+            // is where `RevealInFolder` still is.
+            crate::icons::ActionIcon::OpenFolderObject.mark()
         },
         geometry.foot_mark,
         ink,
@@ -23668,7 +23815,7 @@ mod tests {",
 
         let short = files_root_box(&head, 1.0, 30.0).expect("a named head has a button");
         assert!(
-            short[2] < head.title[2] - 40.0,
+            short[2] < head.control_limit - 40.0,
             "a 30px name must leave the rest of the head alone: {short:?} in {:?}",
             head.title
         );
@@ -23684,7 +23831,10 @@ mod tests {",
         // A name longer than the head has stops at the head's own edge rather
         // than growing under the `×`.
         let long = files_root_box(&head, 1.0, 10_000.0).expect("a long name still has a button");
-        assert!(long[2] <= head.title[2]);
+        // The wall a *control* stops at, which is the run's and not the row's:
+        // the name inside this button may be cut, but the button itself may not
+        // slide under the `⧉` (2026-08-27).
+        assert!(long[2] <= head.control_limit);
 
         // The hit test reads the same box from the same measurement.
         let mut widths = BTreeMap::new();
@@ -24182,8 +24332,9 @@ mod tests {",
             .iter()
             .find(|sprite| sprite.rect == geometry.foot_mark)
             .expect("the foot wears a mark");
-        // The folder, solid — 裁1 (2026-08-26) took the struck rendition off
-        // the sheet, so a button about a folder wears the folder.
+        // The folder, solid — the strip is a place and not a column of verbs
+        // (user report, 2026-08-27), so it wears the object's open folder and
+        // not the struck one the menu rows carry.
         assert_eq!(mark.mark, ChromeMark::FolderOpen);
         assert_eq!(mark.color, palette.files_row_muted, "`color: var(--ink3)`");
         let label = chrome
@@ -28093,14 +28244,192 @@ mod tests {",
                 (close[1] - (rect[1] + slack / 2.0)).abs() <= 1.0,
                 "vertically centred at {scale}x"
             );
-            // C29: the title yields, the control does not. The label's box stops
-            // before the button rather than running under it.
+            // **The title runs the whole row** (user report, 2026-08-27), and
+            // C29 is now a rule about *controls*: what yields is the name and
+            // what stops before the button is `control_limit`.
+            assert_eq!(
+                head.title[2],
+                rect[2] - 6.0 * scale,
+                "the caption's box runs to the head's own trailing padding at \
+                 {scale}x"
+            );
             assert!(
-                head.title[2] <= close[0],
-                "the title's box ends before the `×` begins at {scale}x"
+                head.title[2] > close[0],
+                "and past the `×`, which is drawn over it at {scale}x"
+            );
+            assert!(
+                head.control_limit <= close[0],
+                "while a control's wall still ends before the `×` begins at \
+                 {scale}x"
             );
             assert!(head.title[0] >= head.mark[2], "and starts after the mark");
         }
+    }
+
+    /// **A head at rest gives its name the whole row; the run covers the tail**
+    /// (user report, 2026-08-27).
+    ///
+    /// RED EVIDENCE (2026-08-27, the report, on a terminal head at `1.0`): the
+    /// caption read `批 2进度 · D:\Documents\SyncFolder\Developer\WorldQuant\user_pa…`
+    /// and the pixels to the right of it were empty head. They were empty
+    /// because `pane_head_geometry` subtracted the trailing run — `⌄ 🗀 ✕`,
+    /// three boxes and two joints — from the title's box whether or not the run
+    /// was on screen, and the run is *hover-revealed*: at rest the name was cut
+    /// to make room for nothing.
+    ///
+    /// What replaces the hole is a cover. The name is laid out to the head's
+    /// own padding; when the hand arrives, the run is drawn on top of it,
+    /// standing on a scrim in the head's own ground that ramps up over one
+    /// character of the title's type — so the tail dissolves into the band
+    /// instead of ending at a wall a reader would read as the end of the name.
+    ///
+    /// MUTATION: put `- SEAT_TITLE_GAP_LOGICAL_PX * scale` back on
+    /// `title_right` and every assertion in the first block goes red; write
+    /// `scrim: None` and the second block does.
+    #[test]
+    fn a_head_at_rest_gives_its_name_the_whole_row() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let rect = [100.0_f32, 40.0, 700.0, 500.0];
+            let head = pane_head_geometry(rect, SeatKind::Terminal, scale);
+            let chevron = head.chevron.expect("a 600px head seats the whole run");
+            let files = head.files.expect("and the folder");
+            let close = head.close.expect("and the `×`");
+            let run = head.run.expect("a head with a run reports it");
+
+            // The run is exactly the three boxes it was, to the pixel: the
+            // title grew and nothing else moved. This is the half of the ruling
+            // that says the hit boxes are untouched — `hit_chrome` reads these
+            // very fields.
+            assert_eq!(run[0], chevron[0], "the run starts at its leftmost box");
+            assert_eq!(run[2], close[2], "and ends at the `×`'s own right edge");
+            assert_eq!(
+                close[2],
+                (rect[2] - 6.0 * scale).round(),
+                "which is `padding-right: 6px` and has not moved at {scale}x",
+            );
+            assert_eq!(files[2], close[0], "the run's joints are untouched");
+            assert_eq!(chevron[2], files[0]);
+
+            // And the name is laid out across all three of them.
+            assert!(
+                head.title[2] > run[0],
+                "the name runs under the whole run at {scale}x: {:?} against {run:?}",
+                head.title,
+            );
+            assert!(head.control_limit <= run[0], "and no control does");
+
+            // The scrim: one character of the title's type of ramp at its left
+            // edge, and every pixel of the run and the padding beside it
+            // covered flat.
+            let scrim = head.scrim.expect("a head with a run stands it on a ground");
+            assert_eq!(
+                scrim[0],
+                run[0] - HEAD_RUN_SCRIM_FADE_LOGICAL_PX * scale,
+                "the ramp is one character of the caption's own type at {scale}x",
+            );
+            assert!(scrim[2] >= run[2], "and the ground covers the whole run");
+            assert_eq!(scrim[2], rect[2], "out to the head's own edge");
+            assert_eq!([scrim[1], scrim[3]], [rect[1], head.content_bottom]);
+        }
+
+        // A head too narrow for even the `×` has no run, so it has no ground
+        // to stand one on and nothing to dissolve.
+        let narrow = pane_head_geometry([0.0, 0.0, 30.0, 200.0], SeatKind::Terminal, 1.0);
+        assert_eq!(narrow.close, None);
+        assert_eq!(narrow.run, None);
+        assert_eq!(narrow.scrim, None);
+        assert_eq!(narrow.control_limit, narrow.title[2]);
+    }
+
+    /// **And the run is drawn over the letters, on its own ground, at its own
+    /// opacity** — the painter's half of the same ruling.
+    ///
+    /// The order matters and is not free: the chrome pass draws grounds, then
+    /// flat ink, then marks, then text. Every mark in this window wanted to be
+    /// under the type until this run started covering it, so the scrim and the
+    /// buttons carry [`marks::ChromeSprite::above_text`] and the pass issues
+    /// them again after the letters (`bt_render::ChromeIcon::above_text`).
+    /// Without it the name prints straight through the `×`.
+    ///
+    /// MUTATION: drop the `above_text` loop at the end of the head's run and
+    /// this goes red naming the sprites that stayed under the type.
+    #[test]
+    fn a_heads_run_is_drawn_over_the_name_it_covers() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let terminal = layout.rects[0].id;
+        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        let scrim = head.scrim.expect("the head has a run to cover with");
+        let run = head.run.expect("and the run itself");
+
+        let (_, labels, sprites) = build_chrome(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer {
+                pane_hover: Some(terminal),
+                ..ChromePointer::default()
+            },
+        );
+
+        // The name is laid out across the run, which is the only reason any of
+        // the rest of this is needed.
+        let caption = labels
+            .iter()
+            .find(|label| label.rect[1] == head.title[1] && label.rect[0] >= head.mark[2])
+            .expect("the head prints its name");
+        assert!(
+            caption.rect[2] > run[0],
+            "the name is laid out under the run: {:?}",
+            caption.rect,
+        );
+
+        let ground = sprites
+            .iter()
+            .find(|sprite| matches!(sprite.mark, ChromeMark::HeadRunScrim { .. }))
+            .expect("the run stands on a ground");
+        assert_eq!(ground.rect, scrim);
+        assert!(ground.above_text, "and the ground is over the letters");
+        assert_eq!(
+            ground.mark,
+            ChromeMark::HeadRunScrim {
+                fade_px: HEAD_RUN_SCRIM_FADE_LOGICAL_PX.round() as u32,
+            },
+        );
+
+        // Every mark in the run is over the letters, and every one of them is
+        // over the ground — which is push order, so the ground is first.
+        let over: Vec<&ChromeSprite> = sprites.iter().filter(|sprite| sprite.above_text).collect();
+        assert!(
+            over.first().is_some_and(|first| first.mark == ground.mark),
+            "the ground goes down before the buttons that stand on it",
+        );
+        for mark in [ChromeMark::PaneClose, ChromeMark::FolderOutline] {
+            assert!(
+                over.iter().any(|sprite| sprite.mark == mark),
+                "{mark:?} is part of the run and is drawn over the name",
+            );
+        }
+        for sprite in &sprites {
+            assert!(
+                !sprite.above_text || sprite.rect[0] >= scrim[0],
+                "nothing outside a run is lifted over the type: {:?}",
+                sprite.mark,
+            );
+        }
+
+        // And a head nobody is near draws none of it — the ground arrives with
+        // the buttons or the reader gets a stripe over the tail of a name that
+        // nothing is covering.
+        let (_, _, resting) = build_chrome(&seats, &layout, 1.0, ChromePointer::default());
+        assert!(
+            !resting
+                .iter()
+                .any(|sprite| matches!(sprite.mark, ChromeMark::HeadRunScrim { .. })),
+            "a head at rest stands nothing on its name",
+        );
     }
 
     /// C35/I110: the `×` is a dead zone inside the drag handle, so it has to win
@@ -28536,8 +28865,12 @@ mod tests {",
                 "and the joint the run already had is untouched"
             );
             assert!(
-                head.title[2] <= split[0],
-                "the caption's box ends before the whole run begins at {scale}x"
+                head.control_limit <= split[0],
+                "no control stands in the run's own space at {scale}x"
+            );
+            assert!(
+                head.title[2] > split[0],
+                "while the caption's box runs under all three (2026-08-27)"
             );
         }
     }
@@ -28675,7 +29008,9 @@ mod tests {",
                 .map(|sprite| sprite.rect);
             (
                 find(ChromeMark::Chevron { turned_degrees: 0 }, head.chevron),
-                find(ChromeMark::Folder, head.files),
+                // The head's `🗀` is a *button*, so it is the struck
+                // rendition (user ruling, 2026-08-27).
+                find(ChromeMark::FolderOutline, head.files),
                 pill,
             )
         };
@@ -29239,7 +29574,7 @@ mod tests {",
                 })
                 .map(|sprite| (sprite.rect, sprite.color));
             (
-                pick(ChromeMark::Folder),
+                pick(ChromeMark::FolderOutline),
                 pick(ChromeMark::Chevron { turned_degrees: 0 }),
                 chip,
             )
@@ -29501,7 +29836,8 @@ mod tests {",
                 // difference and it is the honest filter: the strip is the title
                 // bar, the ghost is out over the terminal.
                 .find(|sprite| {
-                    sprite.mark == ChromeMark::Folder && !in_the_pane_layer(sprite.rect, scale)
+                    sprite.mark == ChromeMark::FolderOutline
+                        && !in_the_pane_layer(sprite.rect, scale)
                 })
                 .map(|sprite| sprite.opacity)
         };

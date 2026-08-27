@@ -1133,6 +1133,7 @@ pub fn build(
                     // is inside its own box by construction — the crop is the
                     // preview float's, whose picture can be zoomed past its body.
                     clip: None,
+                    above_text: false,
                 });
             }
         }
@@ -1220,6 +1221,7 @@ pub fn build(
                     // a window, and the sheet at each end of the run is
                     // deliberately half outside it.
                     clip: Some(ground),
+                    above_text: false,
                 });
             }
             let left = layout.body[0] + px(PEEK_NONE_PADDING_X_LOGICAL_PX);
@@ -1273,6 +1275,7 @@ pub fn build(
                     // Fitted to its ground by construction, exactly as the
                     // picture body's is — nothing here is wound past a window.
                     clip: None,
+                    above_text: false,
                 });
             }
             let left = layout.body[0] + px(PEEK_NONE_PADDING_X_LOGICAL_PX);
