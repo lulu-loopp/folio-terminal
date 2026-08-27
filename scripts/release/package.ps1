@@ -16,6 +16,21 @@
         subdirectory, and this loader never reads it — carrying it would be 1.7
         MiB of a second copy nothing opens.
 
+    There is deliberately no `README.md` in it. Every relative link and every
+    image in that file resolves against the repository, and inside a zip it
+    resolves against nothing: a reader who opens it offline gets a page of dead
+    references to screenshots they do not have. The archive carries what a
+    recipient is owed rather than what the project would like to show them —
+    the two licences, the third-party notices, and `TRADEMARK.md`, which says
+    what the two licences do not grant.
+
+    One asset is written beside the archive rather than into it:
+    `option-ext-0.2.0.crate`. The MPL-2.0 asks that the Source Code Form be
+    available to recipients, not that it be handed to each of them, and a 7 KB
+    crate archive in the folder somebody extracts a terminal into is noise.
+    `SHA256SUMS.txt` covers it, so the offer in `THIRD-PARTY-NOTICES.md` is made
+    good by this release rather than by crates.io still being there.
+
     Everything here is a check on what was actually produced rather than a
     description of what was meant to be:
 
@@ -37,8 +52,8 @@
     `target/release`.
 
 .PARAMETER Documents
-    Where the two licences and the third-party notices are. Defaults to the
-    repository root.
+    Where the two licences, the third-party notices and the trademark notice
+    are. Defaults to the repository root.
 
 .PARAMETER Output
     Where the archive and `SHA256SUMS.txt` are written. Defaults to
@@ -77,7 +92,8 @@ function Get-WorkspaceVersion {
 if (-not $Version) { $Version = Get-WorkspaceVersion }
 
 # The archive, in the order a person opening it should meet it: the program,
-# the two files it cannot start without, then what it is under.
+# the two files it cannot start without, then what it is under and what that
+# does not give them.
 #
 # **The README is deliberately not here.** It is written for a repository page:
 # every link in it is relative (`docs/PRIVACY.md`, `CONTRIBUTING.md`) and every
@@ -92,7 +108,8 @@ $manifest = @(
     @{ Name = 'OpenConsole.exe';          From = $Binaries },
     @{ Name = 'LICENSE-MIT';              From = $Documents },
     @{ Name = 'LICENSE-APACHE';           From = $Documents },
-    @{ Name = 'THIRD-PARTY-NOTICES.md';   From = $Documents }
+    @{ Name = 'THIRD-PARTY-NOTICES.md';   From = $Documents },
+    @{ Name = 'TRADEMARK.md';             From = $Documents }
 )
 
 $missing = @()
@@ -177,6 +194,48 @@ try {
     }
 }
 finally { $zip.Dispose() }
+
+# **The MPL-2.0 source offer, made good by the release rather than by a URL.**
+# `option-ext` reaches this binary through `dirs` -> `dirs-sys`, and section 3.2
+# obliges whoever distributes the executable to make the Source Code Form of the
+# covered files available to recipients. `THIRD-PARTY-NOTICES.md` says where it
+# is and pins it by hash; this puts the archive itself among the release assets,
+# so the offer does not expire the day somebody else's host does.
+#
+# It is not put in the `.zip` — see the note at the top of this file.
+$crateName = 'option-ext'
+$crateVersion = '0.2.0'
+$crateFile = "$crateName-$crateVersion.crate"
+
+# The hash is read out of `Cargo.lock` rather than written here a second time.
+# That entry is cargo's own record of the bytes it downloaded and verified, and a
+# copy of it in this script is a copy that can go stale by itself.
+$lock = Get-Content -LiteralPath (Join-Path $root 'Cargo.lock') -Raw
+$entry = '(?ms)^\[\[package\]\]\r?\nname = "' + [regex]::Escape($crateName) +
+         '"\r?\nversion = "' + [regex]::Escape($crateVersion) + '".*?^checksum = "([0-9a-f]{64})"'
+if ($lock -notmatch $entry) {
+    throw "Cargo.lock records no checksum for $crateName $crateVersion"
+}
+$crateSum = $Matches[1]
+
+$cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME '.cargo' }
+$cache = Join-Path $cargoHome 'registry\cache'
+$copies = @(Get-ChildItem -Path $cache -Recurse -Filter $crateFile -File -ErrorAction SilentlyContinue)
+if ($copies.Count -eq 0) {
+    throw "$crateFile is not under $cache - run ``cargo fetch --locked`` first"
+}
+
+# A registry cache can hold the same name under more than one index. Take the one
+# whose bytes are the bytes `Cargo.lock` names, or none of them.
+$exact = @($copies | Where-Object {
+    (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -eq $crateSum
+})
+if ($exact.Count -eq 0) {
+    throw "no copy of $crateFile under $cargoHome hashes to the checksum Cargo.lock records ($crateSum)"
+}
+Copy-Item -LiteralPath $exact[0].FullName -Destination (Join-Path $Output $crateFile) -Force
+Write-Host ''
+Write-Host ('{0,12:N0}  {1}  (MPL-2.0 source, sha256 {2})' -f $exact[0].Length, $crateFile, $crateSum)
 
 # Every asset this release publishes, in the format `sha256sum -c` reads.
 $sums = Join-Path $Output 'SHA256SUMS.txt'

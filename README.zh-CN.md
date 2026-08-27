@@ -186,6 +186,9 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
 MIT 或 Apache-2.0，任选其一。每个依赖的许可与完整声明在
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
 
+双许可给的是版权与专利许可，不含别的。Folio 这个名字与标识不在其中——
+[`TRADEMARK.md`](TRADEMARK.md) 写了这对改版分发意味着什么。
+
 从源码构建见 [`docs/BUILDING.md`](docs/BUILDING.md)，参与开发见
 [`CONTRIBUTING.md`](CONTRIBUTING.md)，安全问题走 [`SECURITY.md`](SECURITY.md) 里的私下
 渠道，不要开公开 issue。

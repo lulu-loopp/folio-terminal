@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 # The package keeps its `bt-` name and the binary carries the product's, which is
 # the whole of the split: `bt-app` is what the other twelve crates in this

@@ -11,7 +11,9 @@
 #     directory. The placeholder list below is the whole permitted vocabulary.
 #   * an e-mail address outside the reserved example domains (RFC 2606/6761).
 #   * the checkout path this product was developed in.
-#   * the author's account name, in any case.
+#   * the author's account name, in any case — except on a line that is a
+#     copyright notice naming them as the holder, which is the one place the
+#     name is the attribution rather than a leak of it.
 #
 # Excluded, deliberately, and each for its own reason:
 #   * `vendor/`, `licenses/` and `THIRD-PARTY-NOTICES.md` — third-party code and
@@ -58,6 +60,8 @@ try {
     $mail_re = [regex]"[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.([A-Za-z]{2,24}))"
     $checkout_re = [regex]"(?i)Developer[\\/]{1,2}BetterTerminal"
     $author_re = [regex]"(?i)weiyi|umich\.edu"
+    # The one sentence the name above may appear in — see the loop below.
+    $copyright_re = [regex]"(?i)copyright\b.*\bweiyi shi\b"
 
     $problems = New-Object System.Collections.Generic.List[string]
 
@@ -70,8 +74,21 @@ try {
         $bytes = [IO.File]::ReadAllBytes($full)
         $text = [Text.Encoding]::Latin1.GetString($bytes)
 
-        foreach ($m in $author_re.Matches($text)) {
-            $problems.Add("$rel names the author: $($m.Value)")
+        # **A copyright notice names its holder, and that is not leakage.** The
+        # author's name is forbidden here as a trace of whose machine this was
+        # written on, and required in `LICENSE-MIT`, in the appendix of
+        # `LICENSE-APACHE` and in the binary's own `LegalCopyright` as the
+        # attribution the two licences are granted by. The difference is the
+        # sentence the name stands in, so that is what is asked: the name is
+        # allowed on a line that is a copyright notice for it, and refused on
+        # every other line in the tree. The address is never allowed — a mailbox
+        # is not a holder, and no licence asks for one.
+        foreach ($line in ($text -split "`n")) {
+            $notice = $copyright_re.IsMatch($line)
+            foreach ($m in $author_re.Matches($line)) {
+                if ($notice -and $m.Value -notmatch "(?i)umich") { continue }
+                $problems.Add("$rel names the author: $($m.Value)")
+            }
         }
         foreach ($m in $checkout_re.Matches($text)) {
             $problems.Add("$rel names the development checkout: $($m.Value)")

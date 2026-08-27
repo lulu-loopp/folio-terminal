@@ -219,6 +219,10 @@ What is in each file, and why a full address ends up in `session.json`, is in
 MIT or Apache-2.0, at your option. Every dependency's licence and the notices they
 require are in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
 
+The two licences grant copyright and patent permissions and nothing else. The
+Folio name and the marks are not covered — [`TRADEMARK.md`](TRADEMARK.md) says
+what that means for a modified distribution.
+
 Building from source is in [`docs/BUILDING.md`](docs/BUILDING.md);
 [`CONTRIBUTING.md`](CONTRIBUTING.md) is how a change gets made; security reports
 go through the private channel in [`SECURITY.md`](SECURITY.md), not an issue.

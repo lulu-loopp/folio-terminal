@@ -181,6 +181,15 @@ jobs:
       - name: fetch the sources the notices gates read
         run: cargo fetch --locked
 
+      # `check-notices.ps1` regenerates `THIRD-PARTY-NOTICES.md` and compares
+      # bytes, and the generator is `cargo about`. Without this the gate below
+      # does not report drift — it reports a missing tool, which is a different
+      # failure wearing the same red. Pinned to the version the checked-in file
+      # was generated with: a newer one that renders a heading differently would
+      # read as drift in the licences rather than a change in the renderer.
+      - name: cargo-about
+        run: cargo install cargo-about --locked --version 0.9.2 --features cli
+
       # The three gates the licensing line owns: the generated third-party
       # notices still match the lock file, no machine path or personal name is
       # tracked, and every modified vendored file carries its Apache-2.0 §4(b)

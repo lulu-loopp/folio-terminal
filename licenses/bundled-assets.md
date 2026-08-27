@@ -49,6 +49,37 @@ declares MIT — so the upstream text is carried beside them, and here:
 
 <!-- verbatim: vendor/conpty/LICENSE-MICROSOFT-TERMINAL -->
 
+**The MIT text is not the whole of what these two binaries owe.**
+`OpenConsole.exe` is statically linked, and what it is linked against carries
+attribution of its own: `jsoncpp`, `{fmt}`, `chromium/base/numerics`,
+`interval_tree`, PCG, `wyhash`, `stb`, Oklab, ColorBrewer, `cmark`, `fzf`, and
+Microsoft's own `GSL`, `Microsoft-UI-XAML`, `VirtualDesktopUtils` and `wil`.
+Upstream states all of them in one `NOTICE.md` at the root of
+`microsoft/terminal`, and that file is in neither `.nupkg` — the packages carry
+a `.nuspec` and the binaries, and nothing else. So it is fetched from the
+repository at the tag the pinned package is a release asset of, and reproduced
+below:
+
+| | |
+|---|---|
+| File | `NOTICE.md` |
+| Tag | `v1.25.1912.0` — the Windows Terminal release the pinned `.nupkg` is an asset of; `vendor/conpty/README.md` records the same tag against the package hash |
+| URL | <https://raw.githubusercontent.com/microsoft/terminal/v1.25.1912.0/NOTICE.md> |
+| SHA-256 | `e7fbaadee6ab20c28b87730a510ee5f5815d8fb4bd88d1d54d282dc2a74c0726` |
+| Size | 23,176 bytes |
+
+That same SHA-256 answers `v1.25.1322.0`, the earlier 1.25 servicing tag: the
+notice did not move between them, so which of the two a reader fetches does not
+change what they read.
+
+It is reproduced **whole**, as the repository publishes it, rather than narrowed
+to the components this one executable links. Which of them the shipped
+`OpenConsole.exe` actually pulls in is a question about a build we did not run
+and cannot read back out of the binary; attributing more than is owed is not a
+breach of anyone's licence, and attributing less would be.
+
+<!-- verbatim: licenses/microsoft-terminal-NOTICE-v1.25.1912.0.md -->
+
 ---
 
 ### `portable-pty` 0.9.0, vendored and patched
@@ -101,8 +132,12 @@ The settings gear is the Material Design `settings` icon at 24dp, copied path
 data and all. It is `SYMBOL_BODY[0]` in `crates/bt-app/src/marks.rs` (`#i-gear`)
 and the sole `viewBox="0 0 24 24"` in the tree; every other mark in this product
 is drawn here, on a 16- or 10-unit box. **It has been modified**: it is drawn at
-this product's own sizes and inherits `currentColor` rather than carrying a fill
-of its own. The path geometry is unchanged.
+this product's own sizes, it inherits `currentColor` rather than carrying a fill
+of its own, and the `<svg>`/`<g>` wrapper and the transparent
+`M0,0h24v24H0V0z` bounding path upstream draws behind it are gone. The gear
+itself is not redrawn: the path is upstream's own coordinates in the minified
+serialisation Google also publishes, where one rounded corner of the hub is
+written as an arc rather than as the cubic the unminified file spells it with.
 
 <!-- verbatim: licenses/material-design-icons-LICENSE.txt -->
 
@@ -233,6 +268,12 @@ hash rather than by a pointer at a page that can change:
 That SHA-256 is the same value `Cargo.lock` records for the package, so the
 archive a recipient downloads is verifiably the one this binary was built from.
 No file of it was modified.
+
+**The archive travels with every release.** `option-ext-0.2.0.crate` is
+published as an asset of each GitHub release beside the `.zip`, and its hash is
+one of the lines in that release's `SHA256SUMS.txt`. A source offer that points
+only at somebody else's host is an offer that expires when they do; this one
+does not need crates.io to still be there.
 
 <!-- verbatim: licenses/option-ext-MPL-2.0.txt -->
 

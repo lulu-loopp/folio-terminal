@@ -36,6 +36,18 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.89"
 
+# **None of these fifteen crates is a crates.io package.** They are one product
+# cut into compilation units; `bt-math` and `bt-detect` would be squatting names
+# that mean nothing outside this tree, and a `cargo publish` typed in the wrong
+# directory is the only way any of them would ever get there. `vendor/` does not
+# inherit this table, so this line says nothing about the two crates in it —
+# republishing somebody else's package is a different mistake with a different
+# guard.
+#
+# The repository field is deliberately absent until there is a repository to
+# name. It goes here, once, with `repository.workspace = true` in each member.
+publish = false
+
 # Pinned here rather than left to whatever clippy happens to default to, so the
 # same code gets the same verdict on every machine and in CI.
 #

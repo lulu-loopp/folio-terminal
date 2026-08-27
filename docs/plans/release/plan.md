@@ -19,12 +19,17 @@
 - 上游完整 NOTICE 原样传播:`typst-assets`(含 CC BY 4.0/BSD-3/W3C/NewCM10 GPL3+FE+DE——不许手摘五类)、`hayro`(14 Foxit 字体 + LAB/CGATS ICC)、Noto OFL、Material 齿轮署名、十套 scheme、PSReadLine。
 - `vendor/alacritty_terminal`:23 个差异文件逐文件核 §4(b) 显著修改声明(上游无 NOTICE,不是缺件);`CHANGES-FOLIO.md` 作索引。
 - `vendor/conpty/` 两份 nupkg 与 zip 均随附 Microsoft Terminal MIT 版权/许可原文。
+- `OpenConsole.exe` 静态含 fmt/WIL/jsoncpp 等组件,署名只在 `microsoft/terminal` 的 `NOTICE.md`(NuGet 包不带):按 tag 取原文入 `licenses/`,记 URL/tag/SHA-256,整段纳入 `THIRD-PARTY-NOTICES.md`。
+- 版权行署名到人:`LICENSE-MIT`、`LICENSE-APACHE` 附录、PE `LegalCopyright` 三处一致。
+- 根目录 `TRADEMARK.md`(双许可不授商标,改版必须换名换标识;图标文件的**版权**照常随双许可给)。
+- `CONTRIBUTING.md` 的 `## Licensing contributions`(Apache-2.0 §5 口径的入站=出站,不做 CLA/DCO)。
+- 一方 crate 全部 `publish = false`,防误发 crates.io。
 
 ## 门 2 构建与分发(必须)
 - 版本 `0.1.0` 一处定、四处一致:`Cargo.toml`、`--version`(新增;`--help` 已有)、PE `VERSIONINFO`+图标(`build.rs` 资源)、三类诊断文件头。
 - `[profile.release]`(现只有 profile.test):LTO/codegen-units/strip 量体积与启动;保留 unwind 直到 panic 策略另定。
 - CRT:**先做实验再定**——独立目录 `+crt-static` release 构建(webview2-com-sys 静态链 `WebView2LoaderStatic.lib`)→ PE 导入表无 `VCRUNTIME140*` → 干净 VM 启动;三步过才采用,否则 README 写明需 VC++ Redistributable(winget 有独立拒收标签 `Validation-VCRuntime-Dependency`,runner 预装 VC++ 故 CI 绿灯对此零证明力)。
-- zip 精确清单:`folio.exe`、根目录 `conpty.dll` + `OpenConsole.exe`(加载器只读根目录;`x64\` 副本不带)、README、双许可证、THIRD-PARTY-NOTICES;`SHA256SUMS.txt`;由 tag 触发的 release workflow 自动产出并校验清单/尺寸/哈希 + SBOM,**禁止从 dist/ 手挑**。
+- zip 精确清单**七个文件**:`folio.exe`、根目录 `conpty.dll` + `OpenConsole.exe`(加载器只读根目录;`x64\` 副本不带)、`LICENSE-MIT`、`LICENSE-APACHE`、`THIRD-PARTY-NOTICES.md`、`TRADEMARK.md`。**README 不进 zip**(用户裁 2026-08-27:相对链接与截图在 zip 里全死)。zip 之外的 release 附件:`SHA256SUMS.txt`、SBOM、`option-ext-0.2.0.crate`(MPL-2.0 源码可得性)。由 tag 触发的 release workflow 自动产出并校验清单/尺寸/哈希,打包前自己跑 `check-notices.ps1` + `check-vendor-notices.ps1`,**禁止从 dist/ 手挑**。
 - panic:双击用户要看到可见提示 + 日志路径(`%TEMP%\bt-app-panic.log` 现在无提示);三类诊断文件含版本与 commit。
 - 签名:v0.1 **不签**(EV 即时放行 2024 已取消;SignPath 要求「已发布过」),README 写 SmartScreen 说明(MOTW 触发,不教绕);v0.2 首选 SignPath Foundation(免费、OV、基金会名下);**一旦签就不能换身份**。
 
@@ -50,6 +55,7 @@ Win10 1809+ 与 Win11 各一台无 VS/VC redist/WebView2 的 VM,从 zip 开始:`
 - ~~Store 版 pwsh 探测(AppExecLink)修复~~——**翻案(2026-08-27)**:std 1.85–1.94 的 `is_file` 对 AppExecLink 本就答 true,picker 从未灰过;审计缺口 B「成因 B」是推断错误,只有注释写反(已改+钉)。
 - **待裁**:`default_profile` 未设时 floor=winps 改为「探测顺序第一个在场的」(推荐改);PowerShell 整合提示条「一次运行只问一次」(推荐改)。
 - 首窗 960×600 不居中、无 `--version`——随门 2。
+- 建仓后补 `repository` 并 `repository.workspace = true`(现在 GitHub 仓库还没建,字段先空着;`[workspace.package]` 里 `publish = false` 旁已留位置)。
 
 ## 门 7 文档(该做)
 README(中英:是什么、截图/GIF、下载、SmartScreen 说明、隐私节、快捷键表自 `BINDINGS` 生成、已知问题含跨 DPI 未复现)、SECURITY.md、CHANGELOG、CONTRIBUTING(三门纪律);内部中文规划文档保留公开(透明)但门 0 已清路径。
