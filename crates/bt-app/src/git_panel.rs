@@ -217,6 +217,19 @@ pub const GIT_TIME_FONT_LOGICAL_PX: f32 = 10.0;
 /// the honest thing to say about eighty milliseconds of `git add`.
 pub const GIT_PENDING_FADE: f32 = 0.45;
 
+/// How solid a row with `pending` set is, **as a still picture**.
+///
+/// The whole of what this module knows about the dimming: it has no clock, so
+/// what it produces is the state's own two values and the window eases between
+/// them. A reader of this content with no clock at all — a test, a hit test, a
+/// window under reduced motion — gets exactly the picture the panel had before
+/// there was a transition, which is the red line the animation block is written
+/// under said in one function.
+#[must_use]
+pub fn pending_fade(pending: bool) -> f32 {
+    if pending { GIT_PENDING_FADE } else { 1.0 }
+}
+
 // ── the words ──────────────────────────────────────────────────────────────
 
 /// The one empty state (R17).
@@ -735,7 +748,25 @@ pub struct GitChangeRow {
     /// Whether a discard here deletes rather than restores.
     pub untracked: bool,
     /// A write about this path is in flight (R13).
+    ///
+    /// **The truth, and the fade below is only how it is drawn.** This is what
+    /// decides that the row offers no verbs, and it flips in one frame — a row
+    /// whose `git add` is already running must not go on offering to stage it.
     pub pending: bool,
+    /// How solid the row is drawn this frame, `0.0 ..= 1.0`.
+    ///
+    /// [`GIT_PENDING_FADE`] when the write is in flight and `1.0` when it is
+    /// not — that is what [`build`] fills in, and it is the whole answer under
+    /// reduced motion and everywhere else this content is read without a clock.
+    /// `bt-app` then eases it through its own register, because a list that is
+    /// otherwise perfectly still reads a step change in one row as a flicker
+    /// rather than as the row waiting (`bt_render::GIT_PENDING_FADE_SPAN`).
+    ///
+    /// A second field rather than a fade computed from `pending` at the paint,
+    /// because the two answer different questions: `pending` is about the
+    /// repository and can only ever be yes or no, and this is about the glass and
+    /// spends ninety milliseconds in between.
+    pub fade: f32,
 }
 
 /// One letter, and the ink it wears.
@@ -771,6 +802,9 @@ pub struct GitBranchRow {
     /// history, and which of these dots is filled. A list that stayed bright
     /// while that was in flight would be claiming to still be true.
     pub pending: bool,
+    /// How solid the row is drawn this frame — [`GitChangeRow::fade`]'s twin,
+    /// carried the same way and for the same reason.
+    pub fade: f32,
     /// When it was last committed to, through the one relative-time table (R8).
     pub time: String,
     pub time_width: f32,
@@ -1705,6 +1739,7 @@ fn branch_row(
         name: branch.name.clone(),
         current: branch.is_head,
         pending: waiting,
+        fade: pending_fade(waiting),
         time: branch.committerdate_relative.clone(),
         pills,
     }
@@ -1851,6 +1886,7 @@ fn change_row(entry: &GitStatusEntry, group: GitGroup, cache: &GitCache) -> GitC
             group_tooltip(group)
         ),
         pending: cache.write_pending(&entry.path),
+        fade: pending_fade(cache.write_pending(&entry.path)),
         path: entry.path.clone(),
         renamed_from: entry.renamed_from.clone(),
         badges,
@@ -3023,11 +3059,7 @@ fn push_branch(
     // **A checkout in flight fades the list, it does not empty it** (R13's own
     // pessimism, one list along): what is on screen is still what the repository
     // last said, and it is about to stop being true.
-    let opacity = if branch.pending {
-        GIT_PENDING_FADE
-    } else {
-        1.0
-    };
+    let opacity = branch.fade;
     let middle = |size: f32| ((rect[1] + rect[3] - size) / 2.0).round();
 
     let dot_rect = [
@@ -3283,11 +3315,7 @@ fn push_change(
         palette.git_section
     };
     let middle = |size: f32| ((rect[1] + rect[3] - size) / 2.0).round();
-    let fade = if change.pending {
-        GIT_PENDING_FADE
-    } else {
-        1.0
-    };
+    let fade = change.fade;
 
     let mut left = rect[0] + pad;
     for mark in &change.badges {
@@ -3312,11 +3340,13 @@ fn push_change(
             font_size_px: GIT_BADGE_FONT_LOGICAL_PX * scale,
             // A status letter is a *signal*, and signals are the one thing this
             // product's ink discipline lets hold colour at rest (mock-up 1612).
-            color: if change.pending {
-                bt_render::ink_over(ground, ink, (fade * 1000.0) as i32)
-            } else {
-                ink
-            },
+            // **Read off the fade and not off the flag** — a row a tenth of the
+            // way into its dimming has to have ink a tenth of the way there
+            // too, or the badges would step while the pills slide. At `fade ==
+            // 1.0` this is `ink_over(ground, ink, 1000)`, which is `ink`, so the
+            // resting row is unchanged and there is no second branch to keep in
+            // agreement with the first.
+            color: bt_render::ink_over(ground, ink, (fade * 1000.0).round() as i32),
             align_right: false,
             align_center: true,
             letter_spacing_em: 0.0,
@@ -3348,11 +3378,7 @@ fn push_change(
         text: change.path.clone(),
         rect: name_rect,
         font_size_px: GIT_ROW_FONT_LOGICAL_PX * scale,
-        color: if change.pending {
-            bt_render::ink_over(ground, text, (fade * 1000.0) as i32)
-        } else {
-            text
-        },
+        color: bt_render::ink_over(ground, text, (fade * 1000.0).round() as i32),
         align_right: false,
         align_center: false,
         letter_spacing_em: 0.0,

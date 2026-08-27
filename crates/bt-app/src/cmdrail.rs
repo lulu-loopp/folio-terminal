@@ -1718,16 +1718,43 @@ fn lerp(from: f32, to: f32, t: f32) -> f32 {
 /// imported so that this file has no opinion about the window's timing and the
 /// test can state the curve it is asserting.
 ///
-/// **No reduced-motion branch, deliberately.** The mock-up declares five
-/// `prefers-reduced-motion` overrides and none of them is this one, which is the
-/// stylesheet saying that a fading row band is not the kind of motion that rule is
-/// about: it does not travel, and what it carries is a *reading* — which of a
-/// thousand rows the jump landed on — rather than polish. Killing it would leave a
-/// silent scroll with nothing to point at the answer.
+/// # Reduced motion: the band stands still and stays exactly as long
+///
+/// The band is **kept** under [`Motion::Reduced`] and it is **not animated**,
+/// which is the second animation slice's ruling on the question §7.18 left open
+/// (2026-08-26, decided at the glass rather than on the page).
+///
+/// It is kept because of what it carries. A jump throws a reader a thousand rows
+/// down their own scrollback, and the two things that then say *which* row was
+/// chosen are the scroll — the row lands [`JUMP_TOP_INSET_LOGICAL_PX`] below the
+/// top edge, which is a static fact and survives everything — and this band.
+/// Position alone answers "roughly here"; the band answers "that one". Reduced
+/// motion is a request not to be moved, not a request to be told less, and the
+/// red line the whole block is written under says the opposite of removal: an
+/// animation may only ever be *gain* on a state that is already statically
+/// legible. Here the static state — the row at the top — is legible, and the
+/// band is the gain. Taking the gain away is allowed; taking it away is also the
+/// only change that makes the answer harder to find, so it is not taken.
+///
+/// It is not animated because a *fade* is exactly the part reduced motion is
+/// about, and because the fade was never what made the band legible: what makes
+/// it legible is that it is there for 950ms. So under `Reduced` the band is one
+/// flat [`JUMP_FLASH_OPACITY`] for its whole life and then gone in a frame — the
+/// hold with the easing taken off it, which is what this exemption said it was
+/// all along ("how long an answer stays legible", not a transition). It costs
+/// two frames instead of sixty, which is the same saving `Reduced` buys
+/// everywhere else in this window.
 #[must_use]
-pub fn flash_alpha(elapsed: Duration, curve: impl FnOnce(f32) -> f32) -> Option<f32> {
+pub fn flash_alpha(
+    elapsed: Duration,
+    motion: Motion,
+    curve: impl FnOnce(f32) -> f32,
+) -> Option<f32> {
     if !flash_is_running(elapsed) {
         return None;
+    }
+    if motion == Motion::Reduced {
+        return Some(JUMP_FLASH_OPACITY);
     }
     let progress = elapsed.as_secs_f32() / JUMP_FLASH.as_secs_f32();
     Some(JUMP_FLASH_OPACITY * (1.0 - curve(progress)))
@@ -2804,27 +2831,70 @@ mod tests {
         );
     }
 
+    /// RED — **under reduced motion the band is still there, and it does not
+    /// move.**
+    ///
+    /// The two halves are one ruling (2026-08-26): a reader who asked not to be
+    /// animated still has to be able to find the row a jump chose, and the thing
+    /// that made that findable was never the fade — it was the 950ms. So the
+    /// band holds one flat alpha for its whole life and then goes in a frame.
+    ///
+    /// Mutation: return `None` under `Reduced` and a jump becomes a silent
+    /// thousand-row scroll with nothing pointing at the answer. Mutation the
+    /// other way: sample the curve under `Reduced` and the window animates a band
+    /// for somebody who asked it not to — and pays sixty frames to do it.
+    #[test]
+    fn a_reduced_window_holds_the_jump_band_still_for_the_whole_of_its_life() {
+        let ease = |x: f32| crate::cubic_bezier(x, EASE);
+        for millis in [0, 1, 475, 900, 949] {
+            assert_eq!(
+                flash_alpha(Duration::from_millis(millis), Motion::Reduced, ease),
+                Some(JUMP_FLASH_OPACITY),
+                "the band moved at {millis}ms under reduced motion"
+            );
+        }
+        assert_eq!(flash_alpha(JUMP_FLASH, Motion::Reduced, ease), None);
+        // And the same predicate still decides both the picture and the wake-up,
+        // so a still band is woken exactly twice: on and off.
+        for millis in [0, 949, 950, 3_000] {
+            let elapsed = Duration::from_millis(millis);
+            assert_eq!(
+                flash_is_running(elapsed),
+                flash_alpha(elapsed, Motion::Reduced, ease).is_some(),
+                "the wake-up and the picture disagree at {millis}ms"
+            );
+        }
+    }
+
     /// The 950 ms row flash, from its opening alpha to nothing.
     #[test]
     fn the_jump_flash_runs_for_950ms_and_then_stops_existing() {
         let ease = |x: f32| crate::cubic_bezier(x, EASE);
-        assert_eq!(flash_alpha(Duration::ZERO, ease), Some(JUMP_FLASH_OPACITY));
-        let midway = flash_alpha(Duration::from_millis(475), ease).expect("still running");
+        assert_eq!(
+            flash_alpha(Duration::ZERO, Motion::Full, ease),
+            Some(JUMP_FLASH_OPACITY)
+        );
+        let midway =
+            flash_alpha(Duration::from_millis(475), Motion::Full, ease).expect("still running");
         assert!(
             midway > 0.0 && midway < JUMP_FLASH_OPACITY,
             "halfway is between the two ends, not at either: {midway}"
         );
-        let late = flash_alpha(Duration::from_millis(900), ease).expect("still running");
+        let late =
+            flash_alpha(Duration::from_millis(900), Motion::Full, ease).expect("still running");
         assert!(late < midway, "the curve only ever fades");
-        assert_eq!(flash_alpha(JUMP_FLASH, ease), None);
-        assert_eq!(flash_alpha(Duration::from_secs(3), ease), None);
+        assert_eq!(flash_alpha(JUMP_FLASH, Motion::Full, ease), None);
+        assert_eq!(
+            flash_alpha(Duration::from_secs(3), Motion::Full, ease),
+            None
+        );
         // The deadline the loop wakes on and the paint that runs when it does are
         // the same predicate, at every instant on both sides of the end.
         for millis in [0, 1, 474, 949, 950, 951, 3_000] {
             let elapsed = Duration::from_millis(millis);
             assert_eq!(
                 flash_is_running(elapsed),
-                flash_alpha(elapsed, ease).is_some(),
+                flash_alpha(elapsed, Motion::Full, ease).is_some(),
                 "the wake-up and the picture disagree at {millis}ms"
             );
         }

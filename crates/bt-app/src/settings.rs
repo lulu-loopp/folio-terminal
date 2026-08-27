@@ -3832,6 +3832,27 @@ pub struct SettingsContent<'a> {
     /// through [`Self::page_rows`], so none of them carries a second copy of the
     /// rule "a collapsed group's rows are not there".
     pub advanced: AdvancedOpen,
+    /// **How far one page's Advanced group has opened**, when something is
+    /// easing it (animation block, second slice; `bt_render::DISCLOSURE_REVEAL`).
+    ///
+    /// `None` is **"no clock"**, and it is the value under a test, under a window
+    /// whose reader asked for reduced motion, and on every frame outside those two
+    /// hundred milliseconds. It means the group is exactly what [`Self::advanced`]
+    /// says it is — today's layout, to the pixel — which is what makes the whole
+    /// of this animation a layer of gain over a state that was already legible
+    /// without it (§7.19 ⑧).
+    ///
+    /// `Some((page, t))` bears on `page` and on no other, and `t ∈ [0, 1]` is the
+    /// fraction of that group's **own height** currently shown. It is a fraction
+    /// and not a pixel count because the number of pixels is the layout's answer,
+    /// not the clock's: the clock knows only how far along it is.
+    ///
+    /// It rides here, beside `advanced`, for `advanced`'s own stated reason — it
+    /// decides *which rows the dialog is holding this frame*. A group being shut
+    /// on its way out still has its rows on screen, so the predicate the whole
+    /// module reads is [`Self::advanced_showing`] and not the bool alone: were it
+    /// the bool, the closing frame would have nothing left to close.
+    pub advanced_reveal: Option<(SettingsCategory, f32)>,
     /// **The user's own scheme files** (user report 2026-08-18), as the
     /// `Delete scheme…` menu lists them.
     ///
@@ -3951,6 +3972,36 @@ impl SettingsContent<'_> {
     #[must_use]
     pub fn has_advanced(&self, category: SettingsCategory) -> bool {
         !self.advanced_rows(category).is_empty()
+    }
+
+    /// **How far this page's group has opened**, or `None` when no clock is
+    /// pushing it — see [`Self::advanced_reveal`].
+    ///
+    /// Clamped here rather than trusted, because this is the boundary between a
+    /// sampled curve and a geometry: a `t` a hair past 1.0 would reserve *more*
+    /// height for the group than the group has, and a hair below 0.0 would
+    /// reserve a negative one.
+    #[must_use]
+    pub fn advanced_reveal_of(&self, category: SettingsCategory) -> Option<f32> {
+        self.advanced_reveal
+            .filter(|(page, _)| *page == category)
+            .map(|(_, fraction)| fraction.clamp(0.0, 1.0))
+    }
+
+    /// **Whether this page's Advanced rows are in the layout at all** — the one
+    /// predicate the stack, the height and the draw ask.
+    ///
+    /// The bool *or* a reveal that has anything left to show. The second half is
+    /// the whole of what closing needs: [`AdvancedOpen`] goes false on the frame
+    /// the disclosure is pressed, and a group whose rows left with it would give
+    /// the two hundred milliseconds after that nothing to close. They leave when
+    /// `t` reaches zero, which is where the clock says they are gone.
+    #[must_use]
+    pub fn advanced_showing(&self, category: SettingsCategory) -> bool {
+        self.advanced.is_open(category)
+            || self
+                .advanced_reveal_of(category)
+                .is_some_and(|fraction| fraction > 0.0)
     }
 
     /// **The rail**, derived: every category with something on its page, in
@@ -5980,8 +6031,25 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
     // `Reset` with them.
     let env_rows = content.editor.map_or(0, |editor| editor.env_rows);
     let env_ghosts = content.editor.map_or(0, EditorSubject::ghost_count);
+    // **A group still opening or still closing holds no keyboard stop**
+    // (animation block, second slice). It is the hit test's own law — what can be
+    // pressed is what can be seen — read by the one reader in this module that
+    // has no geometry to read it from: this list is derived from the content
+    // alone, because `SettingsPanel::key` has no layout and a Tab order that
+    // needed one would be a Tab order that changed with the scroll.
+    //
+    // So the rule is stated in the only terms available here, and it is stated on
+    // the safe side: while a clock is on the group, *none* of what the group
+    // holds is a stop. Every band the geometry would have refused is refused, and
+    // the two hundred milliseconds during which a fully-uncovered row is
+    // pressable but not yet tabbable are two hundred milliseconds nobody can Tab
+    // twice in. The moment the reveal lands, the whole group is back.
+    let settled = content
+        .advanced_reveal_of(category)
+        .is_none_or(|fraction| fraction >= 1.0);
     page_items(content, category)
         .into_iter()
+        .filter(|item| settled || !item.in_advanced_group())
         .flat_map(|item| match item {
             // A row with more than one control contributes all of them, in the
             // order they are drawn: the `Program` field then its `Browse…`, and
@@ -6534,6 +6602,20 @@ pub struct SettingsLayout {
     /// while the group is shut, because a verb inside a collapsed group is a
     /// verb nobody can see and the focus order must not hold it.
     reset_advanced: Option<[f32; 4]>,
+    /// **The band the Advanced group has opened to**, while something is easing
+    /// it (`SettingsContent::advanced_reveal`).
+    ///
+    /// It runs from the disclosure's foot down as far as the reveal has come, and
+    /// it is what every band the group holds is cut to: the rows stand at their
+    /// final places at their whole height and this is the window onto them, which
+    /// is `clip_content`'s own law — *geometry translates, only drawing is cut* —
+    /// said one box further in.
+    ///
+    /// `None` whenever the group is simply open or simply shut, which is every
+    /// frame but those two hundred milliseconds. That is deliberate: a `Some`
+    /// carrying the whole page would be a second box every hit test had to agree
+    /// with, and the way two boxes stay in agreement is for there to be one.
+    advanced_clip: Option<[f32; 4]>,
     /// The open menu's border box and its items, top to bottom in its row's own
     /// option order. Empty when the menu is shut.
     ///
@@ -6634,6 +6716,14 @@ impl SettingsLayout {
     #[must_use]
     pub fn reset_advanced(&self) -> Option<[f32; 4]> {
         self.reset_advanced
+    }
+
+    /// The band this page's Advanced group has opened to, or `None` when no
+    /// clock is easing it — see [`Self::advanced_clip`].
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn advanced_clip(&self) -> Option<[f32; 4]> {
+        self.advanced_clip
     }
 
     /// The open picker's scrollable body, or `None` while none is open.
@@ -6784,6 +6874,28 @@ impl SettingsLayout {
     /// and a dialog that scrolls is the same list with a different border.
     fn shows(&self, rect: [f32; 4]) -> bool {
         rect[1] >= self.clip[1] && rect[3] <= self.clip[3]
+    }
+
+    /// Whether a box the Advanced group **holds** has been revealed far enough to
+    /// answer a press.
+    ///
+    /// [`Self::shows`]'s rule, one box further in, and the same sentence:
+    /// half-revealed is not revealed enough to press. **What can be pressed is
+    /// what can be seen** — a row sliced by the reveal's own edge is a picture of
+    /// a row, and a press it took would be a press aimed at whatever the eye can
+    /// actually see there.
+    ///
+    /// This is not fastidiousness. On 2026-08-26 a layout probe pressed a button
+    /// nobody could see and tore the files column out into a float; this house
+    /// answered it with one law — *the drawn and the pressable are one
+    /// derivation* — and this is that law said about a band that is opening.
+    ///
+    /// True when nothing is easing the group, which is why every caller can ask
+    /// unconditionally: with no clock there is no band, and a group that is
+    /// simply open shows all of itself.
+    fn reveals(&self, rect: [f32; 4]) -> bool {
+        self.advanced_clip
+            .is_none_or(|band| wholly_inside(rect, band))
     }
 }
 
@@ -7242,6 +7354,41 @@ fn clipped(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
 /// Whether `rect` lies wholly inside `clip`.
 fn wholly_inside(rect: [f32; 4], clip: [f32; 4]) -> bool {
     rect[0] >= clip[0] && rect[1] >= clip[1] && rect[2] <= clip[2] && rect[3] <= clip[3]
+}
+
+/// **Where a stack's three channels had got to**, so that what is pushed next can
+/// be cut on its own.
+///
+/// The Advanced group's ink is not gathered into a stack of its own and appended,
+/// because the order *inside* a layer is what decides which fill covers which and
+/// a group's rows are drawn in the same walk as every other row on the page.
+/// Marking where the group's ink starts and cutting it where it ends leaves the
+/// layer in exactly the order it was written in — see [`cut_since`].
+fn ink_mark(stack: &OverlayLayer) -> [usize; 3] {
+    [stack.quads.len(), stack.labels.len(), stack.sprites.len()]
+}
+
+/// Cut everything pushed since [`ink_mark`] to `band`, in place.
+///
+/// [`clip_content`]'s three answers, applied a second time and one box further
+/// in: the page is cut to its scrollport and the Advanced group is cut to the
+/// window its reveal has opened. The two compose — a label already carrying a
+/// clip keeps the intersection — which is why the group can be cut here and the
+/// page cut over it afterwards without either forgetting the other.
+fn cut_since(stack: &mut OverlayLayer, from: [usize; 3], band: [f32; 4]) {
+    let cut = OverlayLayer {
+        quads: stack.quads.split_off(from[0]),
+        labels: stack.labels.split_off(from[1]),
+        sprites: stack.sprites.split_off(from[2]),
+        ..OverlayLayer::default()
+    };
+    clip_content(
+        band,
+        cut,
+        &mut stack.quads,
+        &mut stack.labels,
+        &mut stack.sprites,
+    );
 }
 
 /// **`overflow-y` on `.content`, in the three primitives this overlay draws in.**
@@ -7817,6 +7964,22 @@ pub fn layout_for_menus(
     // folded ones included, so opening the advanced group never moves the
     // buttons above it. See `page_combo_width`.
     let button = metrics.page_button(content_of, category, row_span, measure);
+    // **The reveal, in this page's own pixels** (animation block, second slice).
+    //
+    // The bands the disclosure holds are placed exactly where an open group puts
+    // them — a clip reveal moves nothing, it opens a window onto things already
+    // standing at their final places — and everything *after* the group is lifted
+    // by the part still folded away. That is the same number the height was
+    // solved with a few lines up, from the same call on the same list, so the
+    // scrollbar cannot point at a page the walk did not lay out.
+    let folded = metrics.advanced_folded(&items, content_of, category, row_span, button, measure);
+    // Where the group ends, so the lift is taken once and taken there. `None` on
+    // every page that has no group and on a page whose group is shut with no
+    // clock on it — and then `folded` is zero anyway, which is why nothing below
+    // needs a second branch for "not animating".
+    let group_tail = items.iter().rposition(|item| item.in_advanced_group());
+    let mut group_top: Option<f32> = None;
+    let mut advanced_clip: Option<[f32; 4]> = None;
     let mut placed_groups: Vec<GroupLayout> = Vec::new();
     let mut placed_rows: Vec<RowLayout> = Vec::new();
     let mut placed_advanced: Option<AdvancedLayout> = None;
@@ -7826,7 +7989,7 @@ pub fn layout_for_menus(
     let mut placed_env_add: Option<[f32; 4]> = None;
     let mut editor_foot: Option<[f32; 4]> = None;
     let mut reset_advanced: Option<[f32; 4]> = None;
-    for item in &items {
+    for (ordinal, item) in items.iter().enumerate() {
         match *item {
             PageItem::Heading(group) => {
                 cursor += px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX);
@@ -8036,6 +8199,10 @@ pub fn layout_for_menus(
                     cursor + metrics.disclosure_height,
                 ];
                 cursor += metrics.disclosure_height;
+                // The header's foot is where the group's own band begins — the
+                // top edge the reveal grows down from, and it is written down
+                // here because this is the one place that knows it.
+                group_top = Some(cursor);
                 let middle = (band[1] + band[3]) / 2.0;
                 let mark = [
                     row_right - mark_width,
@@ -8152,6 +8319,23 @@ pub fn layout_for_menus(
                 ]);
                 cursor += px(BUTTON_HEIGHT_LOGICAL_PX);
             }
+        }
+        // **The group closes here, and the page under it comes up.** The cursor
+        // has just walked the whole group at its whole height; the band the rows
+        // are cut to runs from the header's foot to as far as the reveal has
+        // come, and everything after this item stands on the bottom of that band
+        // rather than on the bottom of the group.
+        //
+        // `None` once the reveal is over, and that is not an optimisation: a clip
+        // that changes nothing is a clip the hit test and the draw would still
+        // have to ask about, and every one of them asking would be a chance for
+        // one of them to answer differently.
+        if Some(ordinal) == group_tail
+            && let Some(top) = group_top
+            && folded > 0.0
+        {
+            advanced_clip = Some([clip[0], top, clip[2], cursor - folded]);
+            cursor -= folded;
         }
     }
     let mut placed_lines: Vec<ShortcutLineLayout> = Vec::with_capacity(shortcut_lines.len());
@@ -8557,6 +8741,7 @@ pub fn layout_for_menus(
         foot_note,
         advanced: placed_advanced,
         reset_advanced,
+        advanced_clip,
         menu: popup.map(|menu| menu.frame),
         items: popup.map_or_else(Vec::new, |menu| menu.items.clone()),
         menu_separators: popup.map_or_else(Vec::new, |menu| menu.separators.clone()),
@@ -8602,6 +8787,25 @@ enum PageItem {
     EditorFoot,
 }
 
+impl PageItem {
+    /// Whether this band is one of the ones the disclosure **holds** — an
+    /// advanced row, or the verb that closes them.
+    ///
+    /// The disclosure row itself is not, and that is the whole of what makes the
+    /// reveal a clip rather than a slide: the header is on the page whether the
+    /// group is open or shut, it is where the band the rows are cut to begins,
+    /// and nothing about it moves. Everything this answers `true` for stands at
+    /// its final place and is cut; everything after them is lifted by what is
+    /// still folded away.
+    fn in_advanced_group(self) -> bool {
+        match self {
+            Self::Row(row) => row.advanced(),
+            Self::Reset => true,
+            Self::Heading(_) | Self::Disclosure(_) | Self::Crumb | Self::EditorFoot => false,
+        }
+    }
+}
+
 /// Everything one page stacks, top to bottom.
 ///
 /// The everyday rows, then the disclosure, then — while it is open — the
@@ -8642,11 +8846,22 @@ fn page_items(content: SettingsContent<'_>, category: SettingsCategory) -> Vec<P
             items.push(PageItem::Heading(category));
         }
         let open = content.advanced.is_open(category);
+        // The chevron's angle is the **bool** and not the reveal: a press turns
+        // the mark at once and the rows follow it, which is the order the reader
+        // acted in. It is also the one part of this group that never moves, so
+        // there is nothing for a clip to do to it.
         items.push(PageItem::Disclosure(open));
-        for row in rows.iter().copied().filter(|row| row.advanced()) {
-            items.push(PageItem::Row(row));
-        }
-        if open {
+        // **Every advanced row of the page, asked of the page and not of
+        // `page_rows`.** While the group is easing shut the bool is already
+        // false, so `page_rows` — which is the bool, said as a list — no longer
+        // holds them; `advanced_rows` is what the group *has*, which is what a
+        // group with a hundred and some milliseconds left to live is showing.
+        // The two are the same list in the same order whenever the group is
+        // open, which is why this is not a second derivation.
+        if content.advanced_showing(category) {
+            for row in content.advanced_rows(category) {
+                items.push(PageItem::Row(row));
+            }
             // **Except in the profile editor** (user ruling 2026-08-18). Every
             // other Advanced group ends in this verb; this page's foot already
             // carries `Restore all defaults`, which puts the *whole* profile
@@ -8856,6 +9071,48 @@ impl StackMetrics {
         }
     }
 
+    /// **The group's own height**: every band the disclosure holds, summed at
+    /// this scale. This is the number [`SettingsContent::advanced_reveal`]'s
+    /// fraction is a fraction *of*.
+    fn advanced_span(
+        self,
+        items: &[PageItem],
+        content: SettingsContent<'_>,
+        span: f32,
+        button: f32,
+        measure: &mut dyn FnMut(&str, f32) -> f32,
+    ) -> f32 {
+        items
+            .iter()
+            .copied()
+            .filter(|item| item.in_advanced_group())
+            .map(|item| self.advance(item, content, span, button, measure))
+            .sum()
+    }
+
+    /// **How much of the group is still folded away this frame** — what the page
+    /// under it is lifted by, and what the page's height is short by.
+    ///
+    /// One subtraction and one only. `page_items` is already read twice — once
+    /// to measure and once to place — and held in agreement by being the same
+    /// call; this is the second thing both readings have to agree about, so it is
+    /// the same call too. A group measured by one rule and placed by another
+    /// would be a scrollbar pointing at a height nothing occupies.
+    fn advanced_folded(
+        self,
+        items: &[PageItem],
+        content: SettingsContent<'_>,
+        category: SettingsCategory,
+        span: f32,
+        button: f32,
+        measure: &mut dyn FnMut(&str, f32) -> f32,
+    ) -> f32 {
+        let Some(fraction) = content.advanced_reveal_of(category) else {
+            return 0.0;
+        };
+        (1.0 - fraction) * self.advanced_span(items, content, span, button, measure)
+    }
+
     /// **The width every picker on one page takes**, which is also what its rows
     /// have left over for their sentences.
     fn page_button(
@@ -8886,10 +9143,17 @@ impl StackMetrics {
     ) -> f32 {
         let px = |value: f32| value * self.scale;
         let button = self.page_button(content, category, span, measure);
-        let mut stack: f32 = page_items(content, category)
-            .into_iter()
+        let items = page_items(content, category);
+        let mut stack: f32 = items
+            .iter()
+            .copied()
             .map(|item| self.advance(item, content, span, button, measure))
             .sum();
+        // **Less whatever of the Advanced group is still folded away.** The
+        // group's rows are in the stack above at their whole height — they stand
+        // at their final places and are cut, not squashed — so the page is as
+        // tall as all of them minus the part no band of it has reached yet.
+        stack -= self.advanced_folded(&items, content, category, span, button, measure);
         if category == SettingsCategory::Shortcuts && !content.shortcuts.is_empty() {
             stack += self.heading_advance;
             stack += content.shortcuts.len() as f32 * self.row_height;
@@ -8966,6 +9230,7 @@ fn everyday_cap(
         profiles: &[],
         scheme_files: &[],
         advanced: AdvancedOpen::default(),
+        advanced_reveal: None,
         editor: None,
         values,
     };
@@ -9485,6 +9750,11 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
     {
         return SettingsTarget::EditorBrowse;
     }
+    // **The environment table stands inside the editor's Advanced group**, so
+    // every cell of it answers on that group's terms as well as the page's: asked
+    // per box rather than per table, because the table is taller than most of
+    // what a reveal has uncovered on its way past — half a table is exactly the
+    // case the rule is about.
     for (ordinal, line) in layout.env_rows.iter().enumerate() {
         // **A ghost is one target and the whole line is it** (§7.1.6c-6c): a
         // press adopts it, and until then there are no cells to land in — its
@@ -9492,25 +9762,28 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
         // the first rows would bend the table's right edge (mock-up,
         // `.envrow.ghost .env-del`).
         let Some(index) = line.index else {
-            if (layout.shows(line.name) && contains(line.name, x, y))
-                || (layout.shows(line.value) && contains(line.value, x, y))
+            if (layout.shows(line.name) && layout.reveals(line.name) && contains(line.name, x, y))
+                || (layout.shows(line.value)
+                    && layout.reveals(line.value)
+                    && contains(line.value, x, y))
             {
                 return SettingsTarget::EnvGhost(ordinal);
             }
             continue;
         };
-        if layout.shows(line.name) && contains(line.name, x, y) {
+        if layout.shows(line.name) && layout.reveals(line.name) && contains(line.name, x, y) {
             return SettingsTarget::EnvName(index);
         }
-        if layout.shows(line.value) && contains(line.value, x, y) {
+        if layout.shows(line.value) && layout.reveals(line.value) && contains(line.value, x, y) {
             return SettingsTarget::EnvValue(index);
         }
-        if layout.shows(line.remove) && contains(line.remove, x, y) {
+        if layout.shows(line.remove) && layout.reveals(line.remove) && contains(line.remove, x, y) {
             return SettingsTarget::EnvRemove(index);
         }
     }
     if let Some(add) = layout.env_add
         && layout.shows(add)
+        && layout.reveals(add)
         && contains(add, x, y)
     {
         return SettingsTarget::EnvAdd;
@@ -9526,6 +9799,14 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
         };
     }
     for placed in &layout.rows {
+        // **A row the reveal has not finished uncovering answers nothing.** It is
+        // the row's whole band that has to be inside the opened window and not
+        // just its picker, for the reason `scroll_to_show` brings whole bands into
+        // view: a control whose own title is cut off above it is a control nobody
+        // can see they are pressing.
+        if placed.row.advanced() && !layout.reveals(placed.band) {
+            continue;
+        }
         if layout.shows(placed.combo) && contains(placed.combo, x, y) {
             // **A row this machine cannot honour is dialog body**, which is
             // `option_enabled`'s ruling one level up and enforced in the same
@@ -9567,8 +9848,11 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
     {
         return SettingsTarget::Advanced(group.group);
     }
+    // The verb closes the group and is therefore inside it: it is the last band
+    // the reveal uncovers, and until it is wholly uncovered it is a picture.
     if let Some(reset) = layout.reset_advanced
         && layout.shows(reset)
+        && layout.reveals(reset)
         && contains(reset, x, y)
     {
         return SettingsTarget::ResetAdvanced(layout.category);
@@ -9795,6 +10079,12 @@ pub fn build(
         );
     }
     for placed in &layout.rows {
+        // **A row inside the Advanced group is cut to what the reveal has
+        // opened**, which is the whole of the animation: the row is drawn where
+        // an open group would draw it, at its whole height, and the band it is
+        // seen through is what grows. Marked before the row's ink and cut after
+        // it, so this row is cut and no other.
+        let from = ink_mark(&content_stack);
         // A row the machine cannot honour is greyed WHOLE — title, sentence and
         // control — and its sentence has already become the reason (see
         // `SettingsRow::description`). Same ink and same rule as the Shortcuts
@@ -9870,11 +10160,17 @@ pub fn build(
                 clip: None,
             });
         }
+        if placed.row.advanced()
+            && let Some(band) = layout.advanced_clip
+        {
+            cut_since(&mut content_stack, from, band);
+        }
     }
     // The buttons after every row's text, so a row's own control cannot be
     // covered by the *fill* of a later row's — the same channel ordering the
     // popup's layer exists for, one scale down.
     for placed in &layout.rows {
+        let from = ink_mark(&content_stack);
         let available = placed.row.available(values);
         match placed.row.control() {
             SettingsControl::Combo => {
@@ -9959,6 +10255,11 @@ pub fn build(
             content_stack
                 .quads
                 .extend(focus_ring(placed.combo, scale, palette.accent));
+        }
+        if placed.row.advanced()
+            && let Some(band) = layout.advanced_clip
+        {
+            cut_since(&mut content_stack, from, band);
         }
     }
     push_editor_page(
@@ -10514,7 +10815,11 @@ fn push_advanced_group(
         scale,
         ink,
     );
+    // The verb closes the group and is therefore inside it: it takes the group's
+    // own cut, while the header above it — which never moves and is on the page
+    // whether the group is open or shut — does not.
     if let Some(reset) = layout.reset_advanced {
+        let from = ink_mark(stack);
         push_button(
             &mut stack.quads,
             &mut stack.labels,
@@ -10528,6 +10833,9 @@ fn push_advanced_group(
         );
         if focus == Some(SettingsTarget::ResetAdvanced(group.group)) {
             stack.quads.extend(focus_ring(reset, scale, palette.accent));
+        }
+        if let Some(band) = layout.advanced_clip {
+            cut_since(stack, from, band);
         }
     }
 }
@@ -10939,6 +11247,11 @@ fn push_editor_page(
                 .extend(focus_ring(browse, scale, palette.accent));
         }
     }
+    // The table and its `Add` stand inside the editor's Advanced group, so they
+    // are seen through the window that group's reveal has opened — the same cut
+    // the group's rows take, marked here because this is where their ink is
+    // written.
+    let group_from = ink_mark(stack);
     // **The ghosts are the table's first rows by construction**, which is why
     // the ordinal is enough to name them: the layout pushes this profile's
     // ghosts and then the reader's own, in that order, and `EnvRowLayout::index`
@@ -11036,6 +11349,9 @@ fn push_editor_page(
         if focus == Some(SettingsTarget::EnvAdd) {
             stack.quads.extend(focus_ring(add, scale, palette.accent));
         }
+    }
+    if let Some(band) = layout.advanced_clip {
+        cut_since(stack, group_from, band);
     }
     if let Some(foot) = layout.editor_foot {
         let user = values.editor.is_some_and(|subject| subject.user);
@@ -12184,6 +12500,7 @@ mod tests {
             profiles: &[],
             scheme_files: &[],
             advanced,
+            advanced_reveal: None,
             // The list, which is where the Profiles page opens. The pins that
             // are about the editor open it themselves.
             editor: None,
@@ -12441,6 +12758,7 @@ mod tests {
                 profiles: &[],
                 scheme_files: files,
                 advanced: every_group_open(),
+                advanced_reveal: None,
                 editor: None,
                 values: Box::leak(Box::new(SettingsValues::sample())),
             },
@@ -13304,6 +13622,7 @@ mod tests {
             profiles: &[],
             scheme_files: &files,
             advanced: every_group_open(),
+            advanced_reveal: None,
             editor: None,
             values: Box::leak(Box::new(SettingsValues::sample())),
         };
@@ -13425,6 +13744,7 @@ mod tests {
             profiles: &[],
             scheme_files: &files,
             advanced: every_group_open(),
+            advanced_reveal: None,
             editor: None,
             values: Box::leak(Box::new(SettingsValues::sample())),
         };
@@ -13503,6 +13823,7 @@ mod tests {
             profiles: &[],
             scheme_files: &files,
             advanced: every_group_open(),
+            advanced_reveal: None,
             editor: None,
             values: Box::leak(Box::new(SettingsValues::sample())),
         };
@@ -13601,6 +13922,7 @@ mod tests {
             profiles: &[],
             scheme_files: &files,
             advanced: every_group_open(),
+            advanced_reveal: None,
             editor: None,
             values: Box::leak(Box::new(SettingsValues::sample())),
         };
@@ -13779,6 +14101,543 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // ── the disclosure's own two hundred milliseconds ────────────────────────
+
+    /// `PAGE` with its group in a named state, a named reveal on it, and the
+    /// page scrolled this far down.
+    ///
+    /// It goes through `content_with` and then writes the one field, rather than
+    /// spelling a whole `SettingsContent` out: every other answer this fixture
+    /// gives has to be the answer the rest of the module's claims are stated
+    /// against, or a difference in the reveal would be reading as a difference in
+    /// something else.
+    fn revealed(
+        advanced: AdvancedOpen,
+        reveal: Option<(SettingsCategory, f32)>,
+        scroll: f32,
+    ) -> SettingsLayout {
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let mut content = content_with(&rows, &lines, advanced);
+        content.advanced_reveal = reveal;
+        layout_for_menu(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            None,
+            None,
+            content,
+            PAGE,
+            scroll,
+            MENU_UNSCROLLED,
+            &mut measure,
+        )
+        .expect("this window hosts the dialog")
+    }
+
+    /// The one page in the dialog that has something **under** its Advanced
+    /// group — the profile editor, whose foot closes the page below the group's
+    /// last row — with a named reveal on it.
+    fn editor_revealed(
+        subject: EditorSubject,
+        reveal: Option<(SettingsCategory, f32)>,
+    ) -> SettingsLayout {
+        editor_revealed_scrolled(subject, reveal, UNSCROLLED)
+    }
+
+    /// The same, scrolled this far down — which the claims about the group's
+    /// lower rows need, because the editor is taller than the dialog's cap.
+    fn editor_revealed_scrolled(
+        subject: EditorSubject,
+        reveal: Option<(SettingsCategory, f32)>,
+        scroll: f32,
+    ) -> SettingsLayout {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let lines = profile_lines();
+        let mut content = editing_content(&rows, &lines, subject);
+        content.advanced_reveal = reveal;
+        layout_for_menu(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            None,
+            None,
+            content,
+            SettingsCategory::Profiles,
+            scroll,
+            MENU_UNSCROLLED,
+            &mut flat(0.0),
+        )
+        .expect("this window can host the dialog")
+    }
+
+    /// Every advanced row `PAGE` holds, in the order the group stacks them.
+    fn advanced_rows_of_page() -> Vec<SettingsRow> {
+        flat_rows()
+            .into_iter()
+            .filter(|row| row.category() == PAGE && row.advanced())
+            .collect()
+    }
+
+    /// The height of `PAGE`'s open group — the header's foot down to the foot of
+    /// the verb that closes it, which is the number a reveal's `t` is a fraction
+    /// of.
+    fn open_group_span(open: &SettingsLayout) -> f32 {
+        let header = open.advanced().expect("the page has a disclosure");
+        let verb = open.reset_advanced().expect("an open group has its verb");
+        verb[3] - header.band[3]
+    }
+
+    /// PIN (animation block, second slice) — **`None` is today's dialog, to the
+    /// pixel, and a reveal that has landed is the same dialog again.**
+    ///
+    /// This is the reduced-motion red line stated where it is actually paid.
+    /// A window whose reader has asked for less motion passes no clock at all, so
+    /// the whole of what that reader gets is the first frame at its final value:
+    /// the same group in the same place with the same rows and the same verb, no
+    /// band cut out of anything, and nothing to wake the window for. The
+    /// animation is a layer of gain over a state that was already legible
+    /// without it — `wait_halo_opacity`'s own paradigm — and the way to prove it
+    /// is a layer is to take it away and find the page unchanged.
+    ///
+    /// Red gate: make `advanced_reveal_of` answer `Some(0.5)` where it answers
+    /// `None` and every assertion here goes red at once; make it answer
+    /// `Some(0.999)` for a landed reveal and the third does.
+    #[test]
+    fn a_group_with_no_clock_on_it_is_exactly_the_group_the_bool_describes() {
+        let shut = revealed(AdvancedOpen::default(), None, UNSCROLLED);
+        let open = revealed(every_group_open(), None, UNSCROLLED);
+        assert_eq!(
+            (shut.advanced_clip(), open.advanced_clip()),
+            (None, None),
+            "with no clock on it there is no band to cut anything to"
+        );
+        for row in advanced_rows_of_page() {
+            assert!(
+                shut.row(row).is_none(),
+                "{row:?} is placed inside a group that is shut and unmoving"
+            );
+            assert!(
+                open.row(row).is_some(),
+                "{row:?} is missing from a group that is open and unmoving"
+            );
+        }
+        assert_eq!(shut.reset_advanced(), None);
+        assert!(open.reset_advanced().is_some());
+
+        // **And a reveal that has landed is that same page**, whole and not
+        // merely equivalent: the clock's last frame has to be the frame the
+        // clock is then taken off, or the group would settle with a visible
+        // step in it.
+        let landed = revealed(every_group_open(), Some((PAGE, 1.0)), UNSCROLLED);
+        assert_eq!(
+            landed, open,
+            "a reveal at its end is the open page it is easing towards, band and \
+             all"
+        );
+        // A clock on a *different* page is no clock on this one, which is what
+        // makes the field a fact about one group rather than about the dialog.
+        let elsewhere = revealed(
+            every_group_open(),
+            Some((SettingsCategory::Profiles, 0.25)),
+            UNSCROLLED,
+        );
+        assert_eq!(
+            elsewhere, open,
+            "a reveal names the page it is easing, and bears on no other"
+        );
+        // The keyboard's own copy of the same sentence.
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let mut content = content_with(&rows, &lines, every_group_open());
+        let settled = focus_order(content, PAGE);
+        content.advanced_reveal = Some((PAGE, 1.0));
+        assert_eq!(
+            focus_order(content, PAGE),
+            settled,
+            "and the Tab order it lands on is the Tab order it would have had \
+             with no clock at all"
+        );
+    }
+
+    /// RED (animation block, second slice) — **a half-open group stands where an
+    /// open group stands, and half a band is opened onto it.**
+    ///
+    /// The whole mechanism in one claim. The rows do not slide in, they do not
+    /// squash and they do not grow: they are laid out at the places and at the
+    /// heights an open group gives them, and what moves is the edge of the
+    /// window they are seen through. That is `clip_content`'s own law — *geometry
+    /// translates, only drawing is cut* — one box further in, and it is the
+    /// reason a row caught mid-reveal is the top half of a whole row rather than
+    /// a squat one.
+    ///
+    /// Red gate: place the group's rows from the reveal (advance the cursor by
+    /// `t ×` each band) and the first loop goes red; drop the `- folded` from
+    /// `advance`'s caller and the height claim does; start the band on the
+    /// disclosure's *top* rather than its foot and the third does.
+    #[test]
+    fn half_a_reveal_leaves_every_row_where_it_stands_and_opens_half_a_band() {
+        let open = revealed(every_group_open(), None, UNSCROLLED);
+        let half = revealed(every_group_open(), Some((PAGE, 0.5)), UNSCROLLED);
+        assert_eq!(
+            half.frame, open.frame,
+            "the dialog does not change shape while a group inside it opens"
+        );
+        // Every band of the page, the group's own included, is where an open
+        // group puts it.
+        for row in flat_rows().into_iter().filter(|row| row.category() == PAGE) {
+            assert_eq!(
+                half.row(row).map(|placed| placed.band),
+                open.row(row).map(|placed| placed.band),
+                "{row:?} moved while the band over it was opening"
+            );
+        }
+        assert_eq!(
+            half.advanced().map(|group| group.band),
+            open.advanced().map(|group| group.band),
+            "the header is the page's, not the group's: it does not move"
+        );
+        assert_eq!(
+            half.reset_advanced(),
+            open.reset_advanced(),
+            "and neither does the verb that closes the group"
+        );
+
+        let span = open_group_span(&open);
+        let band = half
+            .advanced_clip()
+            .expect("a reveal in flight opens a band");
+        assert_eq!(
+            band[1],
+            open.advanced().expect("the page has a disclosure").band[3],
+            "the band grows downwards from the header's own foot"
+        );
+        assert!(
+            (band[3] - band[1] - span / 2.0).abs() < 0.5,
+            "half the group's height is showing: {} of {span}",
+            band[3] - band[1]
+        );
+        assert!(
+            ((open.max_scroll() - half.max_scroll()) - span / 2.0).abs() < 0.5,
+            "and the page is exactly the other half shorter: {} against {}",
+            open.max_scroll(),
+            half.max_scroll()
+        );
+    }
+
+    /// RED (animation block, second slice) — **what stands under a half-open
+    /// group stands on the bottom of its band.**
+    ///
+    /// The other half of the mechanism, and the only page in the dialog that can
+    /// state it: every other Advanced group ends its page, so the lift has
+    /// nothing to lift. The profile editor's foot is under one, and it comes up
+    /// by exactly what is still folded away — not by a fraction of its own
+    /// travel, and not on a curve of its own. One clock, one number, and the
+    /// page below simply stands on the band's bottom edge.
+    ///
+    /// Red gate: lift the page by `folded` at the *disclosure* instead of at the
+    /// group's last item and the foot lands a whole group too high; drop the
+    /// lift and it lands a half-group too low.
+    #[test]
+    fn what_stands_under_a_half_open_group_stands_on_the_bottom_of_its_band() {
+        let subject = editor_subject(true);
+        let open = editor_revealed(subject, None);
+        let half = editor_revealed(subject, Some((SettingsCategory::Profiles, 0.5)));
+        let opened_foot = open.editor_foot.expect("the editor closes with a verb");
+        let half_foot = half.editor_foot.expect("and it is there mid-reveal too");
+        let band = half
+            .advanced_clip()
+            .expect("a reveal in flight opens a band");
+        assert_eq!(
+            half_foot[1],
+            band[3] + FOOT_MARGIN_TOP_LOGICAL_PX,
+            "the foot stands on the bottom of the band, one margin down"
+        );
+        let span = (opened_foot[1] - FOOT_MARGIN_TOP_LOGICAL_PX)
+            - half.advanced().expect("the editor has a disclosure").band[3];
+        assert!(
+            ((opened_foot[1] - half_foot[1]) - span / 2.0).abs() < 0.5,
+            "and it came up by the half that is still folded: {} of {span}",
+            opened_foot[1] - half_foot[1]
+        );
+        // The rows above it did not come with it, which is what makes this a
+        // reveal rather than a slide.
+        for row in EDITOR_ROWS.into_iter().filter(|row| row.advanced()) {
+            assert_eq!(
+                half.row(row).map(|placed| placed.band),
+                open.row(row).map(|placed| placed.band),
+                "{row:?} moved while the band over it was opening"
+            );
+        }
+    }
+
+    /// RED (animation block, second slice) — **a group easing shut keeps its
+    /// rows until the clock says they are gone, and a group that has only just
+    /// begun to open has them and shows none of them.**
+    ///
+    /// [`AdvancedOpen`] goes false on the frame the disclosure is pressed — it is
+    /// the answer to *what does this reader want*, and the reader wants it shut.
+    /// So the rows cannot be the bool: a group whose rows left with the press
+    /// would have nothing left to close, and the two hundred milliseconds after
+    /// it would be a page that had already finished changing.
+    ///
+    /// **Zero is where the clock hands the group back to the bool.** At `t = 0`
+    /// on the way out there is nothing of the group left to show, so the page is
+    /// the shut page — every row gone, every pixel of height gone, and the frame
+    /// the clock is taken off on identical to the frame after it. On the way *in*
+    /// the same `t = 0` is a group the bool has already opened: its rows are
+    /// placed, at their whole height, and the band opened onto them has none —
+    /// which is the first frame of the reveal, and it looks exactly like the last
+    /// frame of the close. The two ends meet, which is what keeps a group that is
+    /// opened and shut again from stepping.
+    ///
+    /// Red gate: make `advanced_showing` the bool alone and the first loop goes
+    /// red; make it `is_some()` rather than `> 0.0` and the closed-at-zero page
+    /// stops being the shut page; drop the `- folded` and the opening page
+    /// reserves a whole group for a band with no height — which is what the last
+    /// loop then finds drawn, because a page that reserved the room would have
+    /// scrolled to it. (The band's own cut is not what that loop catches at zero:
+    /// the page's clip and the band agree there. It is pinned where they can
+    /// disagree, in `a_row_the_reveal_has_half_uncovered_…`.)
+    #[test]
+    fn a_group_easing_shut_keeps_its_rows_until_the_clock_says_they_are_gone() {
+        let closing = revealed(AdvancedOpen::default(), Some((PAGE, 0.4)), UNSCROLLED);
+        for row in advanced_rows_of_page() {
+            assert!(
+                closing.row(row).is_some(),
+                "{row:?} left on the press instead of on the clock, and the close \
+                 has nothing to close"
+            );
+        }
+        assert!(
+            closing.reset_advanced().is_some(),
+            "and so does the verb that closes the group"
+        );
+        assert!(
+            closing.advanced_clip().is_some(),
+            "and there is a band for them to be leaving through"
+        );
+
+        // The close's last frame **is** the shut page, whole and not merely
+        // equivalent: it is the frame the clock is taken off on.
+        let shut = revealed(AdvancedOpen::default(), None, UNSCROLLED);
+        let gone = revealed(AdvancedOpen::default(), Some((PAGE, 0.0)), UNSCROLLED);
+        assert_eq!(
+            gone, shut,
+            "a group showing none of itself with the bool already false is the \
+             shut page, and there is nothing left for the clock to say"
+        );
+        for row in advanced_rows_of_page() {
+            assert!(
+                shut.row(row).is_none(),
+                "{row:?} is placed inside a group nobody is opening"
+            );
+        }
+        assert_eq!(shut.advanced_clip(), None);
+
+        // And the open's *first* frame: the rows are there, the band is not.
+        let opening = revealed(every_group_open(), Some((PAGE, 0.0)), UNSCROLLED);
+        let band = opening
+            .advanced_clip()
+            .expect("a group the bool has opened has a band, even an empty one");
+        assert_eq!(
+            band[3], band[1],
+            "and on the first frame that band has no height at all"
+        );
+        for row in advanced_rows_of_page() {
+            assert!(
+                opening.row(row).is_some(),
+                "{row:?} is missing from a group that is opening"
+            );
+        }
+        assert!(
+            (opening.max_scroll() - shut.max_scroll()).abs() < 0.5,
+            "a band with no height reserves no height: {} against {}",
+            opening.max_scroll(),
+            shut.max_scroll()
+        );
+
+        // **And none of it is drawn**, which is the half a placed row could
+        // still have got wrong: the rows are in the layout, so the only thing
+        // keeping them off the glass is the band they are cut to.
+        let at_group = revealed(
+            every_group_open(),
+            Some((PAGE, 0.0)),
+            scroll_showing(&shut, shut.advanced().expect("a disclosure").band),
+        );
+        let drawn = labels_of(&at_group, None, &values());
+        for row in advanced_rows_of_page() {
+            assert!(
+                !drawn.iter().any(|label| label.text == row.title()),
+                "{row:?} is drawn inside a band with no height"
+            );
+        }
+        assert!(
+            !drawn
+                .iter()
+                .any(|label| label.text == Text::ResetAdvanced.text()),
+            "and so is the verb"
+        );
+    }
+
+    /// RED (animation block, second slice; the law of 2026-08-26) — **a row the
+    /// reveal has only half uncovered answers no press and takes no ring.**
+    ///
+    /// **What can be pressed is what can be seen.** A row sliced by the band's
+    /// own edge is a picture of a row: the eye cannot tell which row it is aiming
+    /// at, and a press it took would be a press aimed at something else. This is
+    /// the law the house wrote on 2026-08-26 after a layout probe pressed a
+    /// button nobody could see and tore the files column out into a float — the
+    /// drawn and the pressable are one derivation — and a band that is opening is
+    /// exactly the case that can put them out of step.
+    ///
+    /// **Stated on the profile editor**, which is the one page in this dialog
+    /// with something under its Advanced group. Everywhere else the group ends
+    /// the page, so at the foot of the scroll the band's bottom edge and the
+    /// scrollport's are the same line and `shows` already refuses everything
+    /// `reveals` would: the rule is right there too and cannot be caught there.
+    /// Here the editor's own verb holds the two edges apart, and it is the band's
+    /// that has to answer.
+    ///
+    /// The keyboard answers the same question from the content alone, because
+    /// `SettingsPanel::key` has no layout to read: while a clock is on the group,
+    /// nothing the group holds is a stop at all. That refuses every band the
+    /// geometry refuses and a few it would have allowed, which is the safe side
+    /// of a rule about what may be acted on.
+    ///
+    /// Red gate: drop the `reveals` guard from the rows loop in `hit` and the
+    /// sliced row answers with its own field; drop the `settled` filter in
+    /// `page_order` and the Tab order holds rows nobody can press; stop cutting
+    /// the row ink and the sliced row's title is drawn to its own full box.
+    #[test]
+    fn a_row_the_reveal_has_half_uncovered_answers_no_press_and_takes_no_ring() {
+        let subject = editor_subject(true);
+        let open = editor_revealed(subject, None);
+        let header = open.advanced().expect("the editor has a disclosure");
+        let foot = open.editor_foot.expect("the editor closes with a verb");
+        let span = (foot[1] - FOOT_MARGIN_TOP_LOGICAL_PX) - header.band[3];
+        // The reveal that stops **halfway down the last row of the group**, so
+        // that one row is cut by the band's edge and the ones above it are whole.
+        let cut = SettingsRow::ProfileIntegration;
+        let whole = SettingsRow::ProfileHyperlink;
+        let target = {
+            let band = open.row(cut).expect("the group holds its rows").band;
+            (band[1] + band[3]) / 2.0
+        };
+        let fraction = (target - header.band[3]) / span;
+        let reveal = Some((SettingsCategory::Profiles, fraction));
+        let unscrolled = editor_revealed(subject, reveal);
+        let half = editor_revealed_scrolled(subject, reveal, unscrolled.max_scroll());
+        let band = half
+            .advanced_clip()
+            .expect("a reveal in flight opens a band");
+
+        let sliced = half.row(cut).expect("the group holds its rows").band;
+        assert!(
+            half.shows(sliced),
+            "{cut:?} is wholly inside the scrollport, so the scrollport is not \
+             what refuses it"
+        );
+        assert!(
+            !within(sliced, band) && sliced[1] < band[3],
+            "and it is cut by the band's own edge: {sliced:?} against {band:?}"
+        );
+        let uncovered = half.row(whole).expect("the group holds its rows").band;
+        assert!(
+            half.shows(uncovered) && within(uncovered, band),
+            "{whole:?} is wholly uncovered and wholly on screen"
+        );
+
+        let (x, y) = centre(combo_of(&half, whole));
+        assert_eq!(
+            hit(&half, &editing_values(subject), x, y),
+            whole.control_target(),
+            "{whole:?} is wholly uncovered and still answers its own press"
+        );
+        let (x, y) = centre(combo_of(&half, cut));
+        assert_eq!(
+            hit(&half, &editing_values(subject), x, y),
+            SettingsTarget::Panel,
+            "{cut:?} is cut by the band's edge and must be a picture, not a button"
+        );
+
+        // **And the ink is cut where the press is.** The sliced row is drawn —
+        // half of it is what the reader can see — but only as far as the band,
+        // so what answers no press is exactly what cannot be read.
+        let drawn = labels_of(&half, None, &editing_values(subject));
+        let title = drawn
+            .iter()
+            .find(|label| label.text == cut.title())
+            .expect("the sliced row's title is on the visible half of it");
+        assert!(
+            title.clip.is_some_and(|window| window[3] <= band[3] + 0.01),
+            "the sliced row is drawn past the band that opens onto it: {title:?}"
+        );
+
+        // The keyboard, from the content alone — stated on `PAGE`, because this
+        // list is a fact about the content and every page's group answers it the
+        // same way.
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let mut content = content_with(&rows, &lines, every_group_open());
+        content.advanced_reveal = Some((PAGE, 0.5));
+        let order = focus_order(content, PAGE);
+        for row in advanced_rows_of_page() {
+            assert!(
+                !order.contains(&row.control_target()),
+                "{row:?} is a Tab stop while the band over it is still moving"
+            );
+        }
+        assert!(
+            !order.contains(&SettingsTarget::ResetAdvanced(PAGE)),
+            "and so is the verb"
+        );
+        assert!(
+            order.contains(&SettingsTarget::Advanced(PAGE)),
+            "the disclosure itself is not inside the group and stays reachable — \
+             it is how the reader turns the group back"
+        );
+    }
+
+    /// PIN (animation block, second slice) — **the page is as tall as the part
+    /// of the group that is showing, on every frame of the way.**
+    ///
+    /// One subtraction, read by the height, by `max_scroll` and by the placement
+    /// walk alike. `page_items` is read twice in this module and held in
+    /// agreement by being the same call; the reveal is the second thing both
+    /// readings have to agree about, so it is the same call too. Measured one way
+    /// and placed another, the bar down the side would spend two hundred
+    /// milliseconds pointing at a height nothing occupies — the classic shape of
+    /// "one gesture, two geometries".
+    ///
+    /// Red gate: leave `page_height` reading the whole stack and the ladder goes
+    /// red at the first step; measure the folded part from a second walk of
+    /// `page_items` taken before the reveal was applied and the last claim does.
+    #[test]
+    fn the_page_is_as_tall_as_the_part_of_the_group_that_is_showing() {
+        let open = revealed(every_group_open(), None, UNSCROLLED);
+        let span = open_group_span(&open);
+        let shut = revealed(AdvancedOpen::default(), None, UNSCROLLED);
+        for step in 0..=4 {
+            let fraction = step as f32 / 4.0;
+            let easing = revealed(every_group_open(), Some((PAGE, fraction)), UNSCROLLED);
+            assert!(
+                ((easing.max_scroll() - shut.max_scroll()) - fraction * span).abs() < 0.5,
+                "at {fraction} the page carries {} of the group's {span}",
+                easing.max_scroll() - shut.max_scroll()
+            );
+            // The bar and the band are the same number, which is the whole of
+            // why the bar cannot point at nothing.
+            let shown = easing
+                .advanced_clip()
+                .map_or(span, |band| band[3] - band[1]);
+            assert!(
+                (shown - fraction * span).abs() < 0.5,
+                "and the band over it shows {shown} of the same {span}"
+            );
         }
     }
 
@@ -16134,6 +16993,7 @@ mod tests {
                             profiles,
                             scheme_files: &[],
                             advanced,
+                            advanced_reveal: None,
                             editor: None,
                             values: Box::leak(Box::new(SettingsValues::sample())),
                         },
@@ -16172,6 +17032,7 @@ mod tests {
                 profiles: &[],
                 scheme_files: &[],
                 advanced: AdvancedOpen::default(),
+                advanced_reveal: None,
                 editor: None,
                 values: Box::leak(Box::new(SettingsValues::sample())),
             },
@@ -16592,6 +17453,7 @@ mod tests {
                         &lines
                     },
                     advanced: AdvancedOpen::default(),
+                    advanced_reveal: None,
                     editor: None,
                     values: Box::leak(Box::new(SettingsValues::sample())),
                 };
@@ -16657,6 +17519,7 @@ mod tests {
             profiles: &[],
             scheme_files: &[],
             advanced: AdvancedOpen::default(),
+            advanced_reveal: None,
             editor: None,
             values: Box::leak(Box::new(SettingsValues::sample())),
         };
@@ -17763,6 +18626,7 @@ mod tests {
             profiles: &[],
             scheme_files: &[],
             advanced: AdvancedOpen::default(),
+            advanced_reveal: None,
             editor: None,
             values: Box::leak(Box::new(SettingsValues::sample())),
         };
@@ -21081,6 +21945,7 @@ mod tests {
             profiles,
             scheme_files: &[],
             advanced: every_group_open(),
+            advanced_reveal: None,
             editor: None,
             // **The answers this fixture's rows read**, which a `SettingsContent`
             // borrows since a sentence became a height. Leaked rather than taken
@@ -21346,6 +22211,7 @@ mod tests {
             profiles,
             scheme_files: &[],
             advanced: every_group_open(),
+            advanced_reveal: None,
             editor: Some(subject),
             // The same fixture's answers **with the editor standing in them**,
             // which is what makes the sentence the layout measures the sentence

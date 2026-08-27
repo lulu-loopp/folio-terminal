@@ -6630,6 +6630,8 @@ pub fn build_chrome_with_preview(
         scale,
         pointer,
         ChromeContent {
+            head_ink: HeadInk::default(),
+            active_ink: TabInk::default(),
             tabs: &tabs,
             active_tab: 0,
             grabbed: None,
@@ -6880,6 +6882,11 @@ pub struct TabRing {
 
 pub struct ChromeContent<'a> {
     pub tabs: &'a [TabContent],
+    /// How far each pane's hover-revealed head furniture has come up — see
+    /// [`HeadInk`], which is also where the rule about the hit test is written.
+    pub head_ink: HeadInk<'a>,
+    /// How far each tab's chrome has changed hands — see [`TabInk`].
+    pub active_ink: TabInk<'a>,
     pub active_tab: usize,
     /// The tab currently riding the pointer, if any — `.tab.grabbed`.
     ///
@@ -7188,6 +7195,87 @@ pub struct ChromeContent<'a> {
     pub pane_menu_seat: Option<SeatId>,
 }
 
+/// **How solid each pane's hover-revealed head furniture is drawn**, already
+/// sampled — the `⌄`, the folder, the pop-out and the `×` on a pane head, and
+/// the tools on a preview head, which reveal on one predicate and so wear one
+/// number (`bt_render::HOVER_CHROME_FADE`).
+///
+/// A slice of pairs and not a map for [`PaneMotionFrame`]'s reason, and sampled
+/// for its other one: this module does not know what time it is, so what reaches
+/// it is a fraction and the clock that produced it is `bt-app`'s.
+///
+/// **The entry is a gain and never the state.** [`Self::of`] is asked the static
+/// answer as well — [`head_run_revealed`], the very predicate the hit test uses
+/// — and returns it whenever nothing is easing: under reduced motion, in every
+/// test with no clock, and on every frame outside the ninety milliseconds. A
+/// reader must not be able to make the run disappear by forgetting to fill this
+/// in, because the run is not this register's to grant.
+///
+/// **And it is not the hit test.** A control is pressable from the frame its
+/// reveal begins and unpressable from the frame the hand leaves the pane, which
+/// is [`head_run_revealed`] on both counts; this only says how much ink is on the
+/// glass while those two frames are being caught up with. Going out, that makes
+/// the run exactly what a departing menu is — a picture with nothing to press.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeadInk<'a> {
+    fades: &'a [(SeatId, f32)],
+}
+
+/// **How far each tab's chrome has taken on the active colours**, already
+/// sampled — [`HeadInk`]'s twin, one surface along, and read the same way.
+///
+/// `bt_render::TAB_ACTIVATION`: the ground, the ring, the title and the small
+/// marks of the tab that has just become the active one, and of the one that has
+/// just stopped being it. **The tab's *content* does not cross-fade** — that is
+/// a rule and it is written out at the constant.
+///
+/// **The entry is a gain and never the state**, exactly as `HeadInk`'s is:
+/// [`Self::of`] is asked whether this index is the active one and answers that
+/// whenever nothing is easing, which is every window under reduced motion and
+/// every test in this module. And **it never reaches the geometry**: which tab
+/// keeps its `×` at the tight width tier is decided by `active_tab` in
+/// [`tab_strip_geometry`], on the frame of the press, so no rectangle in this
+/// strip is ever drawn at a place the hit test does not agree with.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TabInk<'a> {
+    fades: &'a [(usize, f32)],
+}
+
+impl<'a> TabInk<'a> {
+    /// The handovers `bt-app` sampled this frame, by index into the strip.
+    #[must_use]
+    pub fn new(fades: &'a [(usize, f32)]) -> Self {
+        Self { fades }
+    }
+
+    /// How far the tab at `index` wears the active colours, given whether it is
+    /// the active one at all.
+    #[must_use]
+    pub fn of(self, index: usize, active: bool) -> f32 {
+        self.fades
+            .iter()
+            .find(|(held, _)| *held == index)
+            .map_or(if active { 1.0 } else { 0.0 }, |(_, ink)| *ink)
+    }
+}
+
+impl<'a> HeadInk<'a> {
+    /// The fades `bt-app` sampled this frame.
+    #[must_use]
+    pub fn new(fades: &'a [(SeatId, f32)]) -> Self {
+        Self { fades }
+    }
+
+    /// How solid `seat`'s run is, given whether it is revealed at all.
+    #[must_use]
+    pub fn of(self, seat: SeatId, revealed: bool) -> f32 {
+        self.fades
+            .iter()
+            .find(|(held, _)| *held == seat)
+            .map_or(if revealed { 1.0 } else { 0.0 }, |(_, ink)| *ink)
+    }
+}
+
 /// **B22 — the split whose panes are drawn as inset cards, and how far the
 /// 100ms transition has run.**
 ///
@@ -7334,6 +7422,8 @@ pub fn build_chrome_for_tabs(
 ) -> WindowChrome {
     let ChromeContent {
         tabs,
+        head_ink,
+        active_ink,
         active_tab,
         grabbed,
         strip_preview,
@@ -7423,6 +7513,7 @@ pub fn build_chrome_for_tabs(
         TabStrip {
             tabs,
             active_tab,
+            active_ink,
             grabbed,
             strip_preview,
             scroll: tab_scroll,
@@ -7735,6 +7826,14 @@ pub fn build_chrome_for_tabs(
                 // file's name (real-machine capture, slice 5): the kind of the
                 // seat says *whether* it has a preview head, and only its
                 // identity says which.
+                // **How solid this pane's hover-revealed furniture is**, once for
+                // the whole head: the preview tools, the trigger run and the
+                // close affordance all reveal on the one predicate, so they read
+                // one number and cannot come apart mid-fade.
+                let head_ink_here = head_ink.of(
+                    placement.id,
+                    head_run_revealed(pointer.pane_hover, placement.id),
+                );
                 let preview_head = (placement.kind == SeatKind::Preview)
                     .then(|| preview_head(placement.id))
                     .flatten();
@@ -7744,6 +7843,7 @@ pub fn build_chrome_for_tabs(
                         content,
                         placement.id,
                         pointer,
+                        head_ink_here,
                         focused,
                         scale,
                         &palette,
@@ -7853,7 +7953,7 @@ pub fn build_chrome_for_tabs(
                 // by one predicate and pressed by another is a control you can
                 // press without seeing, which is what a layout probe found on a
                 // files head on 2026-08-26.
-                if head_run_revealed(pointer.pane_hover, placement.id)
+                if head_ink_here > 0.0
                     && let Some(close) = head.close
                 {
                     let close_hovered =
@@ -7862,15 +7962,19 @@ pub fn build_chrome_for_tabs(
                         // `.panehead .pane-close:hover { background: var(--active) }`
                         // at `border-radius: 4px`, over the one ground a pane
                         // head has.
-                        pane_sprites.push(ChromeSprite::new(
-                            ChromeMark::ControlPill {
-                                radius_px: (SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX * scale)
-                                    .round()
-                                    .max(1.0) as u32,
-                            },
-                            close,
-                            palette.pane_close_pill,
-                        ));
+                        pane_sprites.push(
+                            ChromeSprite::new(
+                                ChromeMark::ControlPill {
+                                    radius_px: (SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX * scale)
+                                        .round()
+                                        .max(1.0)
+                                        as u32,
+                                },
+                                close,
+                                palette.pane_close_pill,
+                            )
+                            .with_opacity(head_ink_here),
+                        );
                     }
                     // **The head's own slot, not this control's own number.**
                     // The `×` was struck at 8 while the `⌄` two boxes along was
@@ -7881,23 +7985,26 @@ pub fn build_chrome_for_tabs(
                     let [glyph_w, glyph_h] = compact_head_glyph_box(ChromeMark::PaneClose, scale);
                     let glyph_left = ((close[0] + close[2] - glyph_w) / 2.0).round();
                     let glyph_top = ((close[1] + close[3] - glyph_h) / 2.0).round();
-                    pane_sprites.push(ChromeSprite::new(
-                        ChromeMark::PaneClose,
-                        [
-                            glyph_left,
-                            glyph_top,
-                            glyph_left + glyph_w,
-                            glyph_top + glyph_h,
-                        ],
-                        // `color: var(--ink3)` at rest, `--ink` under the
-                        // pointer — and under the pointer there is always the
-                        // pill this pass has just drawn, never the bare head.
-                        if close_hovered {
-                            palette.pane_close_glyph_on_pill
-                        } else {
-                            palette.pane_close_glyph
-                        },
-                    ));
+                    pane_sprites.push(
+                        ChromeSprite::new(
+                            ChromeMark::PaneClose,
+                            [
+                                glyph_left,
+                                glyph_top,
+                                glyph_left + glyph_w,
+                                glyph_top + glyph_h,
+                            ],
+                            // `color: var(--ink3)` at rest, `--ink` under the
+                            // pointer — and under the pointer there is always the
+                            // pill this pass has just drawn, never the bare head.
+                            if close_hovered {
+                                palette.pane_close_glyph_on_pill
+                            } else {
+                                palette.pane_close_glyph
+                            },
+                        )
+                        .with_opacity(head_ink_here),
+                    );
                 }
                 // `.pane-files` / `.pane-float`, revealed by the same pane hover
                 // that reveals the `×` beside them.
@@ -7921,7 +8028,7 @@ pub fn build_chrome_for_tabs(
                 // pair that reveals together would rest at two different alphas.
                 // Written as one loop for D4's reason — the ladder said twice is
                 // the ladder that comes apart at the rung nobody tested.
-                if head_run_revealed(pointer.pane_hover, placement.id) {
+                if head_ink_here > 0.0 {
                     let triggers = [
                         head.chevron.map(|box_| {
                             (
@@ -7983,16 +8090,19 @@ pub fn build_chrome_for_tabs(
                     {
                         let lit = pointer.hover == Some(target);
                         if lit {
-                            pane_sprites.push(ChromeSprite::new(
-                                ChromeMark::ControlPill {
-                                    radius_px: (PANE_HEAD_TRIGGER_RADIUS_LOGICAL_PX * scale)
-                                        .round()
-                                        .max(1.0)
-                                        as u32,
-                                },
-                                box_,
-                                palette.pane_close_pill,
-                            ));
+                            pane_sprites.push(
+                                ChromeSprite::new(
+                                    ChromeMark::ControlPill {
+                                        radius_px: (PANE_HEAD_TRIGGER_RADIUS_LOGICAL_PX * scale)
+                                            .round()
+                                            .max(1.0)
+                                            as u32,
+                                    },
+                                    box_,
+                                    palette.pane_close_pill,
+                                )
+                                .with_opacity(head_ink_here),
+                            );
                         }
                         let glyph_left = ((box_[0] + box_[2] - glyph_w) / 2.0).round();
                         let glyph_top = ((box_[1] + box_[3] - glyph_h) / 2.0).round();
@@ -8013,7 +8123,14 @@ pub fn build_chrome_for_tabs(
                                 palette.pane_close_glyph
                             },
                         );
-                        mark.opacity = if lit { 1.0 } else { PANE_HEAD_TRIGGER_REVEAL };
+                        // **The run's own resting ladder, multiplied by the
+                        // reveal.** `PANE_HEAD_TRIGGER_REVEAL` is where this
+                        // control sits once it is *there*; `head_ink_here` is how
+                        // far "there" has got. Two facts, and multiplying them is
+                        // what makes the ladder survive the fade instead of the
+                        // fade flattening it.
+                        mark.opacity =
+                            if lit { 1.0 } else { PANE_HEAD_TRIGGER_REVEAL } * head_ink_here;
                         pane_sprites.push(mark);
                     }
                 }
@@ -8217,6 +8334,7 @@ pub fn build_chrome_for_tabs(
                             // one's.
                             path_width: 0.0,
                             revealed: tree.foot_revealed,
+                            dissolved: tree.foot_dissolved,
                             notice: "",
                             notice_width: 0.0,
                             web: false,
@@ -9046,6 +9164,8 @@ fn profile_menu_tell(
 struct TabStrip<'a> {
     tabs: &'a [TabContent],
     active_tab: usize,
+    /// How far each tab's chrome has changed hands — see [`TabInk`].
+    active_ink: TabInk<'a>,
     grabbed: Option<usize>,
     /// K124's stand-in slot — see [`ChromeContent::strip_preview`].
     strip_preview: Option<usize>,
@@ -9263,6 +9383,7 @@ fn window_tab_strip(
     let TabStrip {
         tabs,
         active_tab,
+        active_ink,
         grabbed,
         strip_preview,
         scroll: tab_scroll,
@@ -9349,6 +9470,26 @@ fn window_tab_strip(
             let tab_hovered = hover == Some(ChromeTarget::Tab(index))
                 || hover == Some(ChromeTarget::TabClose(index))
                 || hover == Some(ChromeTarget::TabPin(index));
+            // **How far this tab's chrome has changed hands**
+            // (`bt_render::TAB_ACTIVATION`), and one ladder for every ink that
+            // depended on the answer: what the tab would wear if it were not the
+            // active one — hovered, or at rest — mixed toward what it wears
+            // when it is. At 0.0 and 1.0 it is exactly the two branches each of
+            // these call sites used to be, so every one of them still says the
+            // design's own three declarations and none of them says a fourth.
+            //
+            // `ink_over` with the fraction in thousandths **is** the mix: it is
+            // `from + (to - from) * alpha`, which is what that function has
+            // always been — the palette's own compositor, asked at draw time the
+            // way the Git page's badges already ask it.
+            let activation = active_ink.of(index, active);
+            let wearing = |on_active: [u8; 3], on_hover: [u8; 3], resting: [u8; 3]| -> [u8; 3] {
+                bt_render::ink_over(
+                    if tab_hovered { on_hover } else { resting },
+                    on_active,
+                    (activation * 1000.0).round() as i32,
+                )
+            };
             // **A tab that is moving is drawn on the level above** (§7.1.6b″).
             // `layer_of` above is the mock-up's `z-index` and it was never
             // enough: it orders this run's *mark* channel, and the text channel
@@ -9381,15 +9522,16 @@ fn window_tab_strip(
                 shadow.opacity = flight_shadow_opacity(content.flight);
                 sprites.push(shadow);
             }
-            if active && tab_right - tab_left >= 2.0 * radius && within_strip(viewport, skirted) {
-                sprites.push(ChromeSprite::new(
-                    ChromeMark::ActiveTab {
-                        radius_px: radius as u32,
-                    },
-                    skirted,
-                    palette.active_tab,
-                ));
-            } else if (tab_hovered || grabbed_here || flying) && within_strip(viewport, tab.body) {
+            // **The two grounds are laid down one over the other now, and are no
+            // longer each other's `else`.** They used to be, and could be while
+            // the handover was a step: an active tab covered its own hover fill
+            // exactly. A tab whose silhouette is half faded in has to have
+            // something under it — the strip's bare panel if it is not hovered,
+            // its `--hover` fill if it is — or the ground it is dissolving into
+            // would be a hole. At `activation == 1.0` the silhouette is opaque
+            // and covers the body rectangle whole, which is what makes this the
+            // same picture it always was at rest.
+            if (tab_hovered || grabbed_here || flying) && within_strip(viewport, tab.body) {
                 // **`flying` joins the two that were already here** (§7.1.6b″ ①).
                 // The comment on `grabbed_here` above says why that one is in the
                 // list — a tab in the hand that is neither active nor hovered
@@ -9406,6 +9548,21 @@ fn window_tab_strip(
                     tab.body,
                     palette.caption_hover,
                 ));
+            }
+            if activation > 0.0
+                && tab_right - tab_left >= 2.0 * radius
+                && within_strip(viewport, skirted)
+            {
+                sprites.push(
+                    ChromeSprite::new(
+                        ChromeMark::ActiveTab {
+                            radius_px: radius as u32,
+                        },
+                        skirted,
+                        palette.active_tab,
+                    )
+                    .with_opacity(activation),
+                );
             }
             // `@keyframes tab-land` — the wash and the ring the landing tab
             // arrives wearing, on their way to nothing. Both are the accent at a
@@ -9491,13 +9648,11 @@ fn window_tab_strip(
                                     stroke_px: stroke,
                                 },
                                 mark_rect,
-                                if active {
-                                    palette.ring_track_on_active_tab
-                                } else if tab_hovered {
-                                    palette.ring_track_on_hovered_tab
-                                } else {
-                                    palette.ring_track_on_resting_tab
-                                },
+                                wearing(
+                                    palette.ring_track_on_active_tab,
+                                    palette.ring_track_on_hovered_tab,
+                                    palette.ring_track_on_resting_tab,
+                                ),
                             ));
                             sprites.push(ChromeSprite::new(
                                 ChromeMark::ProgressRing {
@@ -9585,11 +9740,11 @@ fn window_tab_strip(
                         }
                         None => (
                             content.title.clone(),
-                            if active || tab_hovered {
-                                palette.pane_title_focus
-                            } else {
-                                palette.title_text
-                            },
+                            wearing(
+                                palette.pane_title_focus,
+                                palette.pane_title_focus,
+                                palette.title_text,
+                            ),
                         ),
                     };
                     // The selection goes down before the text and after the tab's
@@ -9684,13 +9839,11 @@ fn window_tab_strip(
                     // `background: var(--active)` on every tab — the same fill the
                     // `×`'s pill wears, over whichever of the three surfaces this tab
                     // is showing.
-                    if active {
-                        palette.tab_close_pill_on_content
-                    } else if tab_hovered {
-                        palette.tab_close_pill_on_hovered_tab
-                    } else {
-                        palette.tab_badge_on_resting_tab
-                    },
+                    wearing(
+                        palette.tab_close_pill_on_content,
+                        palette.tab_close_pill_on_hovered_tab,
+                        palette.tab_badge_on_resting_tab,
+                    ),
                 ));
                 labels.push(ChromeLabel {
                     mono: false,
@@ -9701,13 +9854,11 @@ fn window_tab_strip(
                     font_size_px: WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale,
                     // `--ink2`, rising to `--ink` on the active tab and deliberately
                     // never to the accent (mock-up line 297).
-                    color: if active {
-                        palette.tab_badge_text_on_active_tab
-                    } else if tab_hovered {
-                        palette.tab_badge_text_on_hovered_tab
-                    } else {
-                        palette.tab_badge_text_on_resting_tab
-                    },
+                    color: wearing(
+                        palette.tab_badge_text_on_active_tab,
+                        palette.tab_badge_text_on_hovered_tab,
+                        palette.tab_badge_text_on_resting_tab,
+                    ),
                     align_right: false,
                     align_center: true,
                     letter_spacing_em: 0.0,
@@ -9737,11 +9888,13 @@ fn window_tab_strip(
                                 .max(1.0) as u32,
                         },
                         pixel_snapped(files),
-                        if active {
-                            palette.tab_close_pill_on_content
-                        } else {
-                            palette.tab_close_pill_on_hovered_tab
-                        },
+                        // Drawn only under the pointer, so the tab is hovered by
+                        // construction and the resting ink is the hovered one.
+                        wearing(
+                            palette.tab_close_pill_on_content,
+                            palette.tab_close_pill_on_hovered_tab,
+                            palette.tab_close_pill_on_hovered_tab,
+                        ),
                     );
                     pill.opacity = tab.trailer.reveal;
                     sprites.push(pill);
@@ -9763,12 +9916,12 @@ fn window_tab_strip(
                         // because it is opaque in both themes.
                         if files_hovered {
                             palette.accent
-                        } else if active {
-                            palette.tab_close_glyph_on_active_tab
-                        } else if tab_hovered {
-                            palette.tab_close_glyph_on_hovered_tab
                         } else {
-                            palette.title_text_muted
+                            wearing(
+                                palette.tab_close_glyph_on_active_tab,
+                                palette.tab_close_glyph_on_hovered_tab,
+                                palette.title_text_muted,
+                            )
                         },
                     );
                     // **Two multipliers, and they are not the same number.**
@@ -9798,11 +9951,11 @@ fn window_tab_strip(
                                 as u32,
                         },
                         pixel_snapped(pin),
-                        if active {
-                            palette.tab_close_pill_on_content
-                        } else {
-                            palette.tab_close_pill_on_hovered_tab
-                        },
+                        wearing(
+                            palette.tab_close_pill_on_content,
+                            palette.tab_close_pill_on_hovered_tab,
+                            palette.tab_close_pill_on_hovered_tab,
+                        ),
                     );
                     pill.opacity = opacity;
                     sprites.push(pill);
@@ -9837,32 +9990,30 @@ fn window_tab_strip(
                         if pin_hovered {
                             // `.pin:hover` — `var(--ink)` over the pill this pass
                             // has just drawn, which is the `×`'s own lit ink.
-                            if active {
-                                palette.tab_close_glyph_on_pill_over_active_tab
-                            } else {
-                                palette.tab_close_glyph_on_pill_over_hovered_tab
-                            }
+                            wearing(
+                                palette.tab_close_glyph_on_pill_over_active_tab,
+                                palette.tab_close_glyph_on_pill_over_hovered_tab,
+                                palette.tab_close_glyph_on_pill_over_hovered_tab,
+                            )
                         } else if pinned {
                             // `.pin.on` — `var(--ink)` with nothing under it but
                             // the tab. "The state is darker than the action: one
                             // is a fact about this tab, the other is an offer that
                             // only exists while you are hovering it."
-                            if active {
-                                palette.tab_pin_state_on_active_tab
-                            } else if tab_hovered {
-                                palette.tab_pin_state_on_hovered_tab
-                            } else {
-                                palette.title_text_hover
-                            }
-                        } else if active {
+                            wearing(
+                                palette.tab_pin_state_on_active_tab,
+                                palette.tab_pin_state_on_hovered_tab,
+                                palette.title_text_hover,
+                            )
+                        } else {
                             // `.tab .pin { color: var(--ink3) }` — the resting
                             // `×`'s own ink, because at rest they are the same
                             // kind of offer, so they are the same three mixes.
-                            palette.tab_close_glyph_on_active_tab
-                        } else if tab_hovered {
-                            palette.tab_close_glyph_on_hovered_tab
-                        } else {
-                            palette.title_text_muted
+                            wearing(
+                                palette.tab_close_glyph_on_active_tab,
+                                palette.tab_close_glyph_on_hovered_tab,
+                                palette.title_text_muted,
+                            )
                         },
                     );
                     glyph.opacity = opacity;
@@ -9884,11 +10035,11 @@ fn window_tab_strip(
                             .max(1.0) as u32,
                     },
                     pixel_snapped(close),
-                    if active {
-                        palette.tab_close_pill_on_content
-                    } else {
-                        palette.tab_close_pill_on_hovered_tab
-                    },
+                    wearing(
+                        palette.tab_close_pill_on_content,
+                        palette.tab_close_pill_on_hovered_tab,
+                        palette.tab_close_pill_on_hovered_tab,
+                    ),
                 ));
             }
             let glyph = (compact_head_glyph_logical_px(crate::icons::ActionIcon::CloseTab.mark())
@@ -9912,21 +10063,21 @@ fn window_tab_strip(
                 if close_hovered {
                     // `.tab .close:hover { color: var(--ink) }`, standing on the
                     // pill this pass has just drawn — never on the bare tab.
-                    if active {
-                        palette.tab_close_glyph_on_pill_over_active_tab
-                    } else {
-                        palette.tab_close_glyph_on_pill_over_hovered_tab
-                    }
-                } else if active {
-                    palette.tab_close_glyph_on_active_tab
-                } else if tab_hovered {
-                    palette.tab_close_glyph_on_hovered_tab
+                    wearing(
+                        palette.tab_close_glyph_on_pill_over_active_tab,
+                        palette.tab_close_glyph_on_pill_over_hovered_tab,
+                        palette.tab_close_glyph_on_pill_over_hovered_tab,
+                    )
                 } else {
                     // `.tab .close { color: var(--ink3) }` — a step below the caption
                     // run's own ink, because closing a tab is not what the strip is for.
                     // Over `--panel` that ink is the strip's own muted one, which the
                     // `+`/`˅` pair beside these tabs already wears.
-                    palette.title_text_muted
+                    wearing(
+                        palette.tab_close_glyph_on_active_tab,
+                        palette.tab_close_glyph_on_hovered_tab,
+                        palette.title_text_muted,
+                    )
                 },
             ));
         }
@@ -13928,6 +14079,14 @@ pub struct FilesTreeContent {
     /// the same swap the float's foot makes because it is the same function
     /// making it.
     pub foot_revealed: bool,
+    /// How far the foot's phrase has dissolved — [`FootStrip::dissolved`].
+    ///
+    /// A field on the *content* and not a second reading of the clock, for
+    /// `foot_path`'s own reason: the string this column is saying and the
+    /// strength it is saying it at are one answer, resolved in `bt-app` where the
+    /// clock is, and a painter that worked one of them out for itself would be a
+    /// painter that can disagree with the words it was handed.
+    pub foot_dissolved: f32,
 }
 
 /// Which page one files column is on, and how wide its switch's words are.
@@ -15329,6 +15488,10 @@ fn push_preview_head(
     content: PreviewHeadContent<'_>,
     seat: SeatId,
     pointer: ChromePointer,
+    // How far the pane's hover-revealed furniture has come up — see `HeadInk`.
+    // The tools below are on the pane head's own predicate, so they are handed
+    // the pane head's own number rather than asking the pointer again.
+    ink: f32,
     focused: bool,
     scale: f32,
     palette: &bt_render::ChromePalette,
@@ -15340,7 +15503,6 @@ fn push_preview_head(
 ) {
     let (_quads, labels, sprites) = out;
     let geometry = preview_head_geometry(head, scale, content.tools);
-    let pane_hovered = pointer.pane_hover == Some(seat);
 
     // ── the name, and the pill it wears when it is a control ────────────────
     if let Some(pill) = geometry.pill {
@@ -15520,7 +15682,7 @@ fn push_preview_head(
     fn tool(
         sprites: &mut Vec<ChromeSprite>,
         pointer: ChromePointer,
-        pane_hovered: bool,
+        ink: f32,
         scale: f32,
         palette: &bt_render::ChromePalette,
         box_: Option<[f32; 4]>,
@@ -15533,7 +15695,12 @@ fn push_preview_head(
         };
         // `.pv-tool.pv-pin.on` is the last rule in the cascade and it wins: a
         // pinned pin is drawn at rest, without the pane being hovered at all.
-        if !pane_hovered && !on {
+        //
+        // **`ink` is the pane hover, eased** (`bt_render::HOVER_CHROME_FADE`):
+        // these tools reveal on exactly the predicate the pane head's own run
+        // does, so they wear exactly its number — the two used to appear together
+        // in one frame and they still appear together, over ninety milliseconds.
+        if ink <= 0.0 && !on {
             return;
         }
         let lit = pointer.hover == Some(target);
@@ -15541,13 +15708,16 @@ fn push_preview_head(
             // `.pv-tool:hover { background: var(--hover); border-radius: 5px }` —
             // a rounded fill and not a square, which is why it is a sprite and
             // not one of the flat quads beside it.
-            sprites.push(ChromeSprite::new(
-                ChromeMark::ControlPill {
-                    radius_px: (PREVIEW_TOOL_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32,
-                },
-                box_,
-                palette.pane_close_pill,
-            ));
+            sprites.push(
+                ChromeSprite::new(
+                    ChromeMark::ControlPill {
+                        radius_px: (PREVIEW_TOOL_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32,
+                    },
+                    box_,
+                    palette.pane_close_pill,
+                )
+                .with_opacity(ink),
+            );
         }
         let glyph = (PREVIEW_TOOL_GLYPH_LOGICAL_PX * scale).round().max(1.0);
         let left = ((box_[0] + box_[2] - glyph) / 2.0).round();
@@ -15564,13 +15734,22 @@ fn push_preview_head(
                 palette.pane_close_glyph
             },
         );
-        sprite.opacity = if lit || on { 1.0 } else { PREVIEW_TOOL_REVEAL };
+        // The pinned pin is the one tool that is not this reveal's to fade: it
+        // is drawn at rest with no hover at all, so it has no reveal to be part
+        // of the way through.
+        sprite.opacity = if on {
+            1.0
+        } else if lit {
+            ink
+        } else {
+            PREVIEW_TOOL_REVEAL * ink
+        };
         sprites.push(sprite);
     }
     tool(
         sprites,
         pointer,
-        pane_hovered,
+        ink,
         scale,
         palette,
         geometry.save,
@@ -15581,7 +15760,7 @@ fn push_preview_head(
     tool(
         sprites,
         pointer,
-        pane_hovered,
+        ink,
         scale,
         palette,
         geometry.flip,
@@ -15603,7 +15782,7 @@ fn push_preview_head(
     tool(
         sprites,
         pointer,
-        pane_hovered,
+        ink,
         scale,
         palette,
         geometry.devtools,
@@ -15617,7 +15796,7 @@ fn push_preview_head(
     tool(
         sprites,
         pointer,
-        pane_hovered,
+        ink,
         scale,
         palette,
         geometry.popout,
@@ -15631,7 +15810,7 @@ fn push_preview_head(
     tool(
         sprites,
         pointer,
-        pane_hovered,
+        ink,
         scale,
         palette,
         geometry.lock,
@@ -16214,6 +16393,20 @@ pub struct FootStrip<'a> {
     /// Whether it is confirming rather than reporting, which takes the mark as
     /// well as the words.
     pub revealed: bool,
+    /// **How far into the ground the phrase has dissolved**, `0.0` at rest
+    /// (`bt_render::FOOT_RECEIPT_CROSSFADE`).
+    ///
+    /// Zero for every frame the strip has not just changed its mind on, which is
+    /// nearly all of them. Above it, the phrase and the mark are mixed toward the
+    /// ground they stand on — which is what this pipeline does instead of an
+    /// alpha on a label; see `crate::settling::Crossfade` for why the two phrases
+    /// take turns in the box rather than overlapping in it.
+    ///
+    /// **Spelled as the distance from rest and not as the ink**, deliberately:
+    /// `FilesTreeContent` has a `Default` that fifteen call sites lean on, and a
+    /// number whose resting value is zero is one a builder can leave out without
+    /// drawing an invisible strip.
+    pub dissolved: f32,
     /// The standing fact hung on the strip's **right hand** — "Read-only ·
     /// 64 KB", "Not saved · changed on disk · edits kept" — or empty when there
     /// is none (user ruling, 2026-08-15). See [`dress_foot`].
@@ -16294,6 +16487,11 @@ pub struct FootWords {
     pub notice_width: f32,
     /// Whether the lead is a confirmation rather than the sentence it usually is.
     pub flashing: bool,
+    /// How far the lead has dissolved — [`FootStrip::dissolved`]'s own number,
+    /// carried through the dressing so that the surface which measures the words
+    /// and the surface which draws them cannot disagree about which frame of the
+    /// dissolve this is.
+    pub dissolved: f32,
 }
 
 /// What to dress one foot with, before it is measured.
@@ -16315,6 +16513,9 @@ pub struct FootDress<'a> {
     pub cut_left: bool,
     pub font_px: f32,
     pub gap_px: f32,
+    /// How far the lead has dissolved, `0.0` at rest — see
+    /// [`FootStrip::dissolved`].
+    pub dissolved: f32,
 }
 
 /// Lay one foot's words out: the phrase on the right, the lead in what is left.
@@ -16338,6 +16539,7 @@ pub fn dress_foot(dress: FootDress<'_>, measure: &mut impl FnMut(&str, f32) -> f
         cut_left,
         font_px,
         gap_px,
+        dissolved,
     } = dress;
     let flashing = flash.is_some();
     let notice = if flashing { "" } else { notice };
@@ -16369,6 +16571,7 @@ pub fn dress_foot(dress: FootDress<'_>, measure: &mut impl FnMut(&str, f32) -> f
         notice_box,
         notice_width,
         flashing,
+        dissolved,
     }
 }
 
@@ -16421,6 +16624,19 @@ fn push_files_foot(
     } else {
         palette.files_row_muted
     };
+    // **Mid-dissolve, mixed toward whatever this strip is standing on**
+    // (`crate::settling::Crossfade`): `--hover` when the foot is under the
+    // pointer, the seat's own floor when it is not. At `ink_fade == 1.0` this is
+    // `ink_over(ground, ink, 1000)`, which is `ink` — so the resting strip is
+    // untouched and there is no second branch to keep in agreement with the
+    // first.
+    let ground = if hovered {
+        palette.files_row_hover
+    } else {
+        palette.seat_body
+    };
+    let standing = 1.0 - strip.map_or(0.0, |strip| strip.dissolved);
+    let ink = bt_render::ink_over(ground, ink, (standing * 1000.0).round() as i32);
     sprites.push(ChromeSprite::new(
         if revealed {
             crate::icons::ActionIcon::MenuTick.mark()
@@ -19105,6 +19321,8 @@ mod tests {
             1.0,
             pointer,
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -19180,6 +19398,8 @@ mod tests {
                 1.0,
                 ChromePointer::default(),
                 ChromeContent {
+                    head_ink: HeadInk::default(),
+                    active_ink: TabInk::default(),
                     tabs: &tabs,
                     active_tab: 0,
                     grabbed: None,
@@ -19661,6 +19881,7 @@ mod tests {
                 path: r"C:\w\huge.txt",
                 path_width: 0.0,
                 revealed: false,
+                dissolved: 0.0,
                 notice,
                 notice_width,
                 web: false,
@@ -21845,6 +22066,7 @@ mod tests {",
             None,
             None,
             crate::settings::SettingsContent {
+                advanced_reveal: None,
                 rows: &rows,
                 shortcuts: &[],
                 profiles: &[],
@@ -22377,6 +22599,8 @@ mod tests {",
                     ..ChromePointer::default()
                 },
                 ChromeContent {
+                    head_ink: HeadInk::default(),
+                    active_ink: TabInk::default(),
                     tabs: &tabs,
                     active_tab: 0,
                     grabbed: None,
@@ -22600,6 +22824,8 @@ mod tests {",
                 ..ChromePointer::default()
             },
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs,
                 active_tab,
                 grabbed: None,
@@ -22705,6 +22931,8 @@ mod tests {",
                 ..ChromePointer::default()
             },
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs: &[],
                 files_views: &NO_FILES_VIEWS,
                 git_pages: &NO_GIT_PAGES,
@@ -22756,6 +22984,7 @@ mod tests {",
 
     fn three_row_tree() -> FilesTreeContent {
         FilesTreeContent {
+            foot_dissolved: 0.0,
             rows: vec![
                 tree_row(
                     "/src",
@@ -23414,6 +23643,7 @@ mod tests {",
     /// A three-row column with a path in its foot.
     fn footed_tree(path: &str) -> FilesTreeContent {
         FilesTreeContent {
+            foot_dissolved: 0.0,
             foot_path: path.to_owned(),
             ..three_row_tree()
         }
@@ -23717,6 +23947,7 @@ mod tests {",
             .collect();
         let (_, _, _, chrome) = files_chrome(
             FilesTreeContent {
+                foot_dissolved: 0.0,
                 rows,
                 ..FilesTreeContent::default()
             },
@@ -23980,6 +24211,7 @@ mod tests {",
         use crate::files::{RowKind, RowNotice};
         let (_, _, _, chrome) = files_chrome(
             FilesTreeContent {
+                foot_dissolved: 0.0,
                 rows: vec![tree_row(
                     "",
                     "Empty folder",
@@ -23999,6 +24231,7 @@ mod tests {",
 
         let (_, _, _, tail) = files_chrome(
             FilesTreeContent {
+                foot_dissolved: 0.0,
                 rows: vec![tree_row(
                     "",
                     "7 more not shown",
@@ -24425,6 +24658,8 @@ mod tests {",
             1.0,
             ChromePointer::default(),
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -26735,6 +26970,8 @@ mod tests {",
                 ..ChromePointer::default()
             },
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs,
                 active_tab,
                 grabbed,
@@ -26940,6 +27177,8 @@ mod tests {",
                     ..ChromePointer::default()
                 },
                 ChromeContent {
+                    head_ink: HeadInk::default(),
+                    active_ink: TabInk::default(),
                     tabs: &tabs,
                     active_tab: 0,
                     grabbed: None,
@@ -27050,6 +27289,8 @@ mod tests {",
                     ..ChromePointer::default()
                 },
                 ChromeContent {
+                    head_ink: HeadInk::default(),
+                    active_ink: TabInk::default(),
                     tabs: &tabs,
                     // The stand-in went in ahead of the active tab, so the active
                     // tab is the one after it — which is exactly the shift
@@ -27279,6 +27520,8 @@ mod tests {",
             scale,
             pointer,
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs: &[TabContent {
                     flight: 0.0,
                     mark_kind: ChromeMark::ProfilePowerShell,
@@ -30202,6 +30445,8 @@ mod tests {",
             1.0,
             ChromePointer::default(),
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -30269,6 +30514,8 @@ mod tests {",
             1.0,
             pointer,
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -31071,6 +31318,8 @@ mod tests {",
             scale,
             ChromePointer::default(),
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab,
                 grabbed: None,
@@ -31346,6 +31595,8 @@ mod tests {",
                 ..ChromePointer::default()
             },
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs,
                 active_tab,
                 grabbed,
@@ -31605,6 +31856,8 @@ mod tests {",
             1.0,
             ChromePointer::default(),
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -31769,6 +32022,8 @@ mod tests {",
             1.0,
             ChromePointer::default(),
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -33118,6 +33373,8 @@ mod tests {",
                 ..ChromePointer::default()
             },
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs,
                 active_tab,
                 grabbed: None,
@@ -36016,6 +36273,8 @@ mod tests {",
             1.0,
             ChromePointer::default(),
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -37770,6 +38029,8 @@ mod tests {",
                 1.0,
                 ChromePointer::default(),
                 ChromeContent {
+                    head_ink: HeadInk::default(),
+                    active_ink: TabInk::default(),
                     tabs: &tabs,
                     active_tab: 0,
                     grabbed: None,
@@ -37907,6 +38168,8 @@ mod tests {",
             1.0,
             pointer,
             ChromeContent {
+                head_ink: HeadInk::default(),
+                active_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -39965,5 +40228,151 @@ mod drop_plan_tests {
         );
         assert_eq!(seats.terminals(), vec![SeatId(1)]);
         assert_eq!(seats.pane_count(), 1);
+    }
+}
+
+/// **The hover reveal and the tab handover, pinned where they are easy to
+/// unpick** (the animation slice's second half).
+///
+/// `settling` holds the rhythm and its own tests hold the curves. What these
+/// hold is the join — that an entry is a gain over a predicate and not a
+/// substitute for it, that no hit test ever asks how faded a control is, and
+/// that a colour changing hands never moves a box.
+#[cfg(test)]
+mod reveal_tests {
+    use super::*;
+
+    /// This file up to its own test module — the half the source-level gates
+    /// below read.
+    ///
+    /// Split at the test module rather than at the first `#[cfg(test)]`, for
+    /// `one_function_draws_every_inline_name_editors_caret`'s stated reason: this
+    /// file carries test-only helpers well above it, and a split there would read
+    /// a tenth of the file and call it the whole.
+    fn seats_source() -> &'static str {
+        include_str!("seats.rs")
+            .split(
+                "
+mod tests {",
+            )
+            .next()
+            .expect("a split always yields a first piece")
+    }
+
+    /// RED — **an entry in the reveal register is a gain over the predicate, and
+    /// never a substitute for it** (the animation slice's second half).
+    ///
+    /// The fallback is the whole safety of the mechanism: a caller with no clock
+    /// — a test, a window under reduced motion, a frame outside the ninety
+    /// milliseconds — draws the run exactly as the boolean says, so forgetting
+    /// to fill the register in cannot make a control disappear.
+    ///
+    /// Mutation: default `of` to `0.0` and every hover-revealed control in this
+    /// window vanishes for anybody who did not sample a clock.
+    #[test]
+    fn the_head_run_falls_back_to_the_predicate_when_no_clock_has_spoken() {
+        let empty = HeadInk::default();
+        assert_eq!(
+            empty.of(SeatId(1), true),
+            1.0,
+            "revealed, and nobody eased it"
+        );
+        assert_eq!(empty.of(SeatId(1), false), 0.0);
+        // And an entry overrides it in both directions: coming up while the
+        // predicate is already true, going down while it is already false.
+        let fades = [(SeatId(1), 0.25), (SeatId(2), 0.6)];
+        let ink = HeadInk::new(&fades);
+        assert_eq!(ink.of(SeatId(1), true), 0.25, "arriving");
+        assert_eq!(
+            ink.of(SeatId(2), false),
+            0.6,
+            "leaving: the picture outlives the hover, exactly as a menu's does"
+        );
+        assert_eq!(ink.of(SeatId(3), true), 1.0, "a seat nobody is easing");
+    }
+
+    /// RED — **the hit test never asks how faded a control is.**
+    ///
+    /// The rule the reveal is written under: a control answers a press from the
+    /// frame its reveal *begins* and stops answering on the frame the hand leaves
+    /// the pane — which is [`head_run_revealed`] on both counts, and is what the
+    /// paint's own gate used to be. A hit test that consulted the fade would make
+    /// every one of these buttons unpressable for the ninety milliseconds it is
+    /// arriving, which is the same broken promise as the invisible files head a
+    /// layout probe pressed on 2026-08-26, with the two halves swapped.
+    ///
+    /// Read off the source because the property is about *who asks what*, which
+    /// no rendered frame can show.
+    ///
+    /// Mutation: gate `hit_chrome`'s trailing run on `head_ink` and this names
+    /// it.
+    #[test]
+    fn the_hit_test_never_asks_how_faded_a_control_is() {
+        let source = seats_source();
+        let body = |name: &str| {
+            let at = source
+                .find(&format!("fn {name}("))
+                .unwrap_or_else(|| panic!("{name} is not in this file"));
+            let rest = &source[at..];
+            let end = rest.find("\n}\n").unwrap_or(rest.len());
+            &rest[..end]
+        };
+        for asker in ["hit_chrome", "head_run_revealed", "hit_files_root"] {
+            assert!(
+                !body(asker).contains("head_ink"),
+                "`{asker}` asks how faded a control is, and a hit test may not"
+            );
+        }
+        // And the predicate really is what both sides read: the paint's own gate
+        // is the fallback argument to `HeadInk::of`.
+        // Both halves of the paint's own gate, spelled apart so that `rustfmt`
+        // may wrap the call however it likes: the ink is asked *and* the
+        // predicate is what it is asked with.
+        let at = source
+            .find("let head_ink_here = head_ink.of(")
+            .expect("the paint's gate is in this file");
+        let gate = &source[at..at + 200];
+        assert!(
+            gate.contains("head_run_revealed(pointer.pane_hover, placement.id)"),
+            "the paint no longer asks the predicate, so the two have come apart"
+        );
+    }
+
+    /// RED — **a tab's chrome changes hands over the fast span, and its geometry
+    /// does not** (`bt_render::TAB_ACTIVATION`).
+    ///
+    /// The fallback is `HeadInk`'s and for its reason. The second half is the
+    /// rule: which tab keeps its `×` at the tight width tier is decided by
+    /// `active_tab` in [`tab_strip_geometry`], on the frame of the press, so no
+    /// rectangle is ever drawn where the hit test does not agree — and the tab's
+    /// *content* never cross-fades at all.
+    ///
+    /// Mutation: hand `tab_strip_geometry` the fraction instead of the index and
+    /// the strip's boxes wobble for a tenth of a second after every tab press.
+    #[test]
+    fn a_tab_handover_moves_colour_and_never_geometry() {
+        let empty = TabInk::default();
+        assert_eq!(empty.of(0, true), 1.0);
+        assert_eq!(empty.of(1, false), 0.0);
+        let fades = [(0usize, 0.3), (1usize, 0.7)];
+        let ink = TabInk::new(&fades);
+        assert_eq!(ink.of(0, true), 0.3, "arriving");
+        assert_eq!(
+            ink.of(1, false),
+            0.7,
+            "the tab that has just stopped being it"
+        );
+
+        let source = seats_source();
+        let at = source
+            .find("pub fn tab_strip_geometry(")
+            .expect("the geometry is in this file");
+        let rest = &source[at..];
+        let end = rest.find("\n}\n").unwrap_or(rest.len());
+        assert!(
+            !rest[..end].contains("active_ink"),
+            "the strip's geometry has learned about the handover, and boxes must \
+             not move while a colour changes"
+        );
     }
 }

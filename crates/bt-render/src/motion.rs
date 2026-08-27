@@ -244,17 +244,121 @@ pub const POPUP_ENTER: Duration = Duration::from_millis(POPUP_ENTER_MS);
 pub const POPUP_EXIT: Duration = Duration::from_millis(POPUP_EXIT_MS);
 
 /// `transition: width .16s ease, margin-left .16s ease` (line 341) — the pin's
-/// zero-width expansion. One continuous layout change, not a fade-in on top of
-/// a jump: the control widens *in* and the badge beside it slides aside.
+/// zero-width expansion. **The room**, not the ink: the control widens *in* and
+/// the badge beside it slides aside, which is a layout change and therefore one
+/// interaction.
 ///
-/// **Base**, with the fade below: the pair used to run at 160 and 120 so the ink
-/// arrived a touch ahead of the box. One span for both loses that grace note and
-/// keeps the thing it was decorating — a control that widens and fills at once
-/// still widens and fills, and a sixteenth of a second of offset is not what
-/// made it legible.
+/// **Base**, and the pair below it is now 140 and 90 rather than the mock-up's
+/// 160 and 120. See [`WINDOW_TAB_PIN_FADE_MS`] for why the two did not collapse
+/// onto one number after all.
 pub const WINDOW_TAB_PIN_REVEAL_MS: u64 = MOTION_BASE_MS;
 /// `opacity .12s ease` from the same declaration — the pin's ink.
-pub const WINDOW_TAB_PIN_FADE_MS: u64 = MOTION_BASE_MS;
+///
+/// **Fast, by the rule the whole window's hover-revealed chrome now keeps**
+/// (user ruling 2026-08-26, the animation block's second slice): *the ink of a
+/// control a hover reveals is fast; the room it needs to be revealed into is one
+/// interaction.* The pane head's `×`, the files head's chevron, the preview
+/// head's controls and the preview rail's tools are all pure ink — their head is
+/// already on screen and only the mark appears — so all of them are 90, and a
+/// pin whose ink ran at 140 while the identical marks two rows below ran at 90
+/// would be one rule with an exception nobody could see the reason for.
+///
+/// This overrides the previous slice's collapse of the pair onto a single span.
+/// That collapse read the two declarations as one gesture measured twice; the
+/// rule above reads them as *two* facts — a box making room, and ink arriving in
+/// it — which is also what the mock-up's own two numbers were saying before they
+/// were rounded to one. What is dropped is not the grace note but the mock-up's
+/// arbitrary sixteenth: the ink still lands ahead of the box, at a span this
+/// window uses everywhere else for exactly this.
+pub const WINDOW_TAB_PIN_FADE_MS: u64 = MOTION_FAST_MS;
+
+/// **Every control a hover reveals**, arriving and going: the pane head's run,
+/// the files head's chevron and its pill, the preview head's own furniture and
+/// the preview rail's tools.
+///
+/// **Fast**, and it is the span the fast rung was written for: this is chrome
+/// that is not the subject, its room is already on the glass, and what changes
+/// is one alpha. The rule it states — *ink is fast, room is one interaction* —
+/// is what decides [`WINDOW_TAB_PIN_FADE_MS`] against
+/// [`WINDOW_TAB_PIN_REVEAL_MS`] beside it.
+///
+/// **What it does not touch is the hit test.** A control is pressable from the
+/// frame its reveal *begins*, not from the frame it reaches full strength: a
+/// button that could be seen and not pressed for a sixteenth of a second is the
+/// same broken promise as one that could be pressed and not seen, which is the
+/// bug a layout probe found on a files head on 2026-08-26. Going the other way
+/// the promise reverses with the picture: a run whose pane the hand has left is
+/// ink on its way out and answers nothing, exactly as a departing menu does.
+pub const HOVER_CHROME_FADE_MS: u64 = MOTION_FAST_MS;
+/// [`HOVER_CHROME_FADE_MS`] as the type the samplers take.
+pub const HOVER_CHROME_FADE: Duration = Duration::from_millis(HOVER_CHROME_FADE_MS);
+
+/// **A tab's chrome changing hands** — the ground, the ring and the label of the
+/// tab that has just become the active one, and of the one that has just
+/// stopped being it.
+///
+/// **Fast**: three colours on furniture, which is precisely the fast rung's
+/// remit. It is the *colour* alone — see the note below on what stays hard.
+///
+/// **The content does not cross-fade, and that is a rule rather than an
+/// omission** (§7.18 ⑦, restated here where the colour now moves). What a tab
+/// press asks for is the other terminal, and the answer to that question is the
+/// other terminal — whole, on the first frame, at full contrast. Two grids of
+/// glyphs dissolved through one another for a tenth of a second is unreadable
+/// text pretending to be a transition, and a reader who pressed a tab to *read*
+/// something would be made to wait for the picture to stop lying. So the body
+/// switches in one frame and the furniture around it takes ninety milliseconds
+/// to say which tab is now the one you are in.
+pub const TAB_ACTIVATION_MS: u64 = MOTION_FAST_MS;
+/// [`TAB_ACTIVATION_MS`] as the type the samplers take.
+pub const TAB_ACTIVATION: Duration = Duration::from_millis(TAB_ACTIVATION_MS);
+
+/// **A row of the Git panel dimming while a write about it is in flight** —
+/// `git add` on one file, `git checkout` on one branch.
+///
+/// **Fast.** The row does not go anywhere and nothing appears; one opacity
+/// changes on a list that is still the truth. It was an instant jump to 0.45 and
+/// back, on a list that is otherwise perfectly still, which read as the row
+/// flickering rather than as the row waiting.
+pub const GIT_PENDING_FADE_MS: u64 = MOTION_FAST_MS;
+/// [`GIT_PENDING_FADE_MS`] as the type the samplers take.
+pub const GIT_PENDING_FADE_SPAN: Duration = Duration::from_millis(GIT_PENDING_FADE_MS);
+
+/// **A foot's receipt trading places with the fact it stands in front of** —
+/// `Revealed`, `Opened`, `Saved`, `140%`.
+///
+/// **Fast**, and a *cross*-fade rather than a swap: the two phrases share one
+/// box, so the outgoing one thins as the incoming one thickens and the strip is
+/// never blank. The hold in front of it is untouched — see the register's
+/// `FOOT_REVEAL_FEEDBACK`, which is 1300ms of standing still and is not this.
+pub const FOOT_RECEIPT_CROSSFADE_MS: u64 = MOTION_FAST_MS;
+/// [`FOOT_RECEIPT_CROSSFADE_MS`] as the type the samplers take.
+pub const FOOT_RECEIPT_CROSSFADE: Duration = Duration::from_millis(FOOT_RECEIPT_CROSSFADE_MS);
+
+/// **The ghost that hangs off the pointer once a drag has really begun.**
+///
+/// **Fast, and the opacity only.** The ghost's *position* is the pointer's, on
+/// every frame, with no easing of any kind — that is the red line the plan
+/// states and this constant must never be read as softening it: a picture of the
+/// thing in your hand that lagged the hand would be a picture of somebody else's
+/// hand. What fades is whether the ghost is there at all, over the frames after
+/// the pointer crosses the drag threshold, so the moment a press becomes a carry
+/// is a moment rather than a flicker.
+pub const DRAG_GHOST_FADE_MS: u64 = MOTION_FAST_MS;
+/// [`DRAG_GHOST_FADE_MS`] as the type the samplers take.
+pub const DRAG_GHOST_FADE: Duration = Duration::from_millis(DRAG_GHOST_FADE_MS);
+
+/// **The settings page's `Advanced` group opening and shutting** — the height
+/// its rows take, not their ink.
+///
+/// **Slow**, because it is the definition of the slow rung: rows below it move,
+/// the page's own height changes and the scroll bar re-solves. A *clip* reveal
+/// and not a spring — the group's rows stand still in their final places and the
+/// band they are cut to grows down over them, so nothing on the page is ever
+/// drawn at a position it is not also pressable at.
+pub const DISCLOSURE_REVEAL_MS: u64 = MOTION_SLOW_MS;
+/// [`DISCLOSURE_REVEAL_MS`] as the type the samplers take.
+pub const DISCLOSURE_REVEAL: Duration = Duration::from_millis(DISCLOSURE_REVEAL_MS);
 
 // ── the exemptions: spans that are not the span of one interaction ─────────
 
@@ -502,6 +606,30 @@ mod tests {
         assert!(complaints[0].contains("FLY_OPEN"));
     }
 
+    /// RED — **ink is fast and room is one interaction**, the rule the second
+    /// animation slice put every hover-revealed control in this window under.
+    ///
+    /// Mutation: put any of the ink spans back on the base rung and the window
+    /// draws two speeds of the same reveal — a pin filling at 140 beside a `×`
+    /// filling at 90 — which is the drift the archive exists to end. Mutation the
+    /// other way: pull the pin's *width* down to the fast rung and a layout
+    /// change is being drawn at chrome's speed.
+    #[test]
+    fn the_ink_a_hover_reveals_is_fast_and_the_room_it_needs_is_one_interaction() {
+        for (name, ms) in [
+            ("HOVER_CHROME_FADE_MS", HOVER_CHROME_FADE_MS),
+            ("WINDOW_TAB_PIN_FADE_MS", WINDOW_TAB_PIN_FADE_MS),
+            ("TAB_ACTIVATION_MS", TAB_ACTIVATION_MS),
+            ("GIT_PENDING_FADE_MS", GIT_PENDING_FADE_MS),
+            ("FOOT_RECEIPT_CROSSFADE_MS", FOOT_RECEIPT_CROSSFADE_MS),
+            ("DRAG_GHOST_FADE_MS", DRAG_GHOST_FADE_MS),
+        ] {
+            assert_eq!(ms, MOTION_FAST_MS, "{name} is ink and ink is fast");
+        }
+        assert_eq!(WINDOW_TAB_PIN_REVEAL_MS, MOTION_BASE_MS);
+        assert_eq!(DISCLOSURE_REVEAL_MS, MOTION_SLOW_MS);
+    }
+
     /// PIN — the named spans really are the tokens, not numbers that happen to
     /// agree with them today.
     #[test]
@@ -514,6 +642,12 @@ mod tests {
             ("POPUP_EXIT_MS", POPUP_EXIT_MS),
             ("WINDOW_TAB_PIN_REVEAL_MS", WINDOW_TAB_PIN_REVEAL_MS),
             ("WINDOW_TAB_PIN_FADE_MS", WINDOW_TAB_PIN_FADE_MS),
+            ("HOVER_CHROME_FADE_MS", HOVER_CHROME_FADE_MS),
+            ("TAB_ACTIVATION_MS", TAB_ACTIVATION_MS),
+            ("GIT_PENDING_FADE_MS", GIT_PENDING_FADE_MS),
+            ("FOOT_RECEIPT_CROSSFADE_MS", FOOT_RECEIPT_CROSSFADE_MS),
+            ("DRAG_GHOST_FADE_MS", DRAG_GHOST_FADE_MS),
+            ("DISCLOSURE_REVEAL_MS", DISCLOSURE_REVEAL_MS),
         ] {
             assert!(
                 MOTION_ARCHIVE_MS.contains(&ms),

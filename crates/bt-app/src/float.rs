@@ -1347,6 +1347,13 @@ impl FloatWin {
     /// `.closing`: it is on screen only because taking a window away in one frame
     /// looks like a fault, and something you cannot click is not a window any
     /// more — it is the memory of one.
+    /// **Which window this is**, for a caller that is sweeping a register keyed
+    /// by identity rather than looking one up.
+    #[must_use]
+    pub fn id(&self) -> FloatId {
+        self.epoch
+    }
+
     #[must_use]
     pub fn is_live(&self) -> bool {
         self.dismissed_at.is_none()
@@ -1862,6 +1869,14 @@ pub struct FloatChrome<'a> {
     /// (B24). The caption arrives from the caller, so this module holds no clock
     /// and no wording.
     pub revealed: bool,
+    /// **How far the foot's phrase has dissolved into the window's own ground**,
+    /// `0.0` at rest — `crate::seats::FootStrip::dissolved`, on the surface
+    /// that keeps the same strip in a window of its own.
+    ///
+    /// No clock here either, for `revealed`'s stated reason: the fraction arrives
+    /// from the caller, which is the one place that knows what the strip said
+    /// last.
+    pub dissolved: f32,
     /// Whether the reserved dot is **occupied** (P16/P47). Meaningless without
     /// [`FloatHeadTools::dirty`], which is what reserved the slot.
     pub dirty: bool,
@@ -1920,6 +1935,7 @@ pub fn build(
         dock_mark,
         hover,
         revealed,
+        dissolved,
         dirty,
         flip_to_source,
     } = *chrome;
@@ -2161,6 +2177,15 @@ pub fn build(
         } else {
             palette.dialog_muted_text
         };
+        // Mid-dissolve, mixed toward `--win`, which is the one thing under this
+        // strip. At `dissolved == 0.0` this is `ink_over(ground, ink, 1000)`,
+        // which is `ink` — so a resting foot is untouched and there is no second
+        // branch to keep in agreement with the first.
+        let foot_ink = bt_render::ink_over(
+            palette.dialog_surface,
+            foot_ink,
+            ((1.0 - dissolved) * 1000.0).round() as i32,
+        );
         sprites.push(ChromeSprite::new(
             if revealed {
                 ChromeMark::Check
@@ -2252,6 +2277,7 @@ mod tests {
     /// the chassis rather than about what is written on it.
     fn chrome(hover: Option<FloatPart>) -> FloatChrome<'static> {
         FloatChrome {
+            dissolved: 0.0,
             mode: FloatMode::Pinned,
             mark: ChromeMark::File,
             title: "notes.md",
@@ -2642,6 +2668,7 @@ mod tests {
         let layer = build(
             &geometry,
             &FloatChrome {
+                dissolved: 0.0,
                 mode: FloatMode::Pinned,
                 mark: ChromeMark::Folder,
                 title: "WEIYI",

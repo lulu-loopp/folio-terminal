@@ -86,6 +86,7 @@ mod search;
 mod seats;
 mod seed;
 mod settings;
+mod settling;
 mod shell_integration;
 mod shortcuts;
 mod storage_watch;
@@ -7355,6 +7356,60 @@ struct WindowRuntime {
     /// and the whole pixel a rectangle can move by, so a curve settling through
     /// its long tail stops owing presents once the picture has stopped changing.
     passages_drawn: Vec<(Layered, u8, i32, i32)>,
+    /// **Every value in this window that a fade is holding away from home** (the
+    /// animation slice's second half, 2026-08-26).
+    ///
+    /// [`Passages`](arrival::Passages)' opposite number, and the two are not
+    /// interchangeable: that register keeps *pictures* of surfaces whose state
+    /// has already died, this one keeps *numbers* about surfaces that are still
+    /// there. A pane head's run, a Git row waiting on a write, a tab's chrome
+    /// changing hands, the drag ghost, the settings page's Advanced group. See
+    /// [`settling`] for the home rule that keeps it empty when the window is
+    /// still, and for why nothing in it may ever reach a hit test.
+    settling: settling::Settling<Fading>,
+    /// What that register would have *painted* on the frame it last did —
+    /// [`Self::passages_drawn`]'s own question, asked about the fades.
+    settling_drawn: Vec<(Fading, u16)>,
+    /// **What each of this window's feet is saying, and the ninety milliseconds
+    /// it takes to change its mind** (the animation slice's second half).
+    ///
+    /// The receipts — `Revealed`, `Opened`, `Saved`, `140%` — stand for
+    /// [`FOOT_REVEAL_FEEDBACK`] and then the strip goes back to the fact
+    /// underneath them, which used to happen between two frames. This register
+    /// holds no clock of its own: it is told what each strip *wants* to say on
+    /// every frame and notices when the answer changes, so the hold and the
+    /// dissolve cannot disagree about when the word comes back.
+    foot_phrases: settling::Crossfade<FootSaying>,
+    /// What those dissolves would have painted on the frame they last did —
+    /// [`Self::settling_drawn`]'s question, asked about the phrases.
+    foot_phrases_drawn: Vec<(FootSaying, u16)>,
+    /// **One page's `Advanced` group, opening or shutting** (the animation
+    /// slice's second half, [`bt_render::DISCLOSURE_REVEAL`]).
+    ///
+    /// A field and not an entry in [`Self::settling`], because the one thing
+    /// that reads it — `settings_dialog` — is `&self`: a dialog's content is
+    /// re-derived from `settings.json` on every frame precisely so that no copy
+    /// of it can drift, and a register that had to be sampled mutably could not
+    /// be read there. A tween is `Copy` and samples with the instant it is given,
+    /// so it can.
+    ///
+    /// **One page at a time**, and the page rides with it: the dialog draws the
+    /// selected page and nothing else, so a second group easing behind a page
+    /// nobody is looking at would be a wake-up for a picture that is not on the
+    /// glass. Switching pages mid-fade therefore lands the group it left — which
+    /// is the honest answer: what a reader comes back to is a page in the state
+    /// they put it in.
+    advanced_reveal: Option<(settings::SettingsCategory, RevealTween)>,
+    /// What that group would have *drawn* on the frame it last did — the
+    /// frame-debt reading, quantised to a thousandth of the group's own height.
+    ///
+    /// It is owed for the same reason the popups' is, and the first draft went
+    /// without it and was caught on the glass: the deadline woke the loop
+    /// twelve times and every one of those turns found nothing that said the
+    /// picture had changed, so the group opened in **two** frames — the press
+    /// and whatever happened next — with two hundred milliseconds of nothing in
+    /// between. A wake-up nobody spends is not an animation.
+    advanced_reveal_drawn: Option<(settings::SettingsCategory, u16)>,
     /// Every notice this window is showing (user ruling, 2026-08-16).
     ///
     /// One host for the window, with each card carrying the surface it belongs
@@ -10802,6 +10857,7 @@ impl TabState {
                 seat,
                 (
                     seats::FilesTreeContent {
+                        foot_dissolved: 0.0,
                         rows: view.rows,
                         // Left empty and filled by the caller for a **fourth**
                         // reason, and it is a cost one: a badge changes no
@@ -16974,6 +17030,30 @@ mod motion_archive_tests {
                 "bt_render::WINDOW_TAB_PIN_FADE_MS",
                 bt_render::WINDOW_TAB_PIN_FADE_MS,
             ),
+            // The second slice's six, and every one of them is a span this
+            // window did not have at all before it: five fades that were step
+            // changes and one height that was an insertion.
+            archived(
+                "bt_render::HOVER_CHROME_FADE_MS",
+                bt_render::HOVER_CHROME_FADE_MS,
+            ),
+            archived("bt_render::TAB_ACTIVATION_MS", bt_render::TAB_ACTIVATION_MS),
+            archived(
+                "bt_render::GIT_PENDING_FADE_MS",
+                bt_render::GIT_PENDING_FADE_MS,
+            ),
+            archived(
+                "bt_render::FOOT_RECEIPT_CROSSFADE_MS",
+                bt_render::FOOT_RECEIPT_CROSSFADE_MS,
+            ),
+            archived(
+                "bt_render::DRAG_GHOST_FADE_MS",
+                bt_render::DRAG_GHOST_FADE_MS,
+            ),
+            archived(
+                "bt_render::DISCLOSURE_REVEAL_MS",
+                bt_render::DISCLOSURE_REVEAL_MS,
+            ),
             archived("main::CHEVRON_TURN", ms(CHEVRON_TURN)),
             archived("main::TAB_FLIP", ms(TAB_FLIP)),
             archived("main::TAB_LAND", ms(TAB_LAND)),
@@ -17036,7 +17116,8 @@ mod motion_archive_tests {
                 "cmdrail::JUMP_FLASH",
                 ms(crate::cmdrail::JUMP_FLASH),
                 "how long the row a jump landed on stays findable; shortened to a transition \
-                 it would be gone before the eye arrived",
+                 it would be gone before the eye arrived. Under reduced motion it is held \
+                 flat for the same span rather than eased away (2026-08-26)",
             ),
             // ── waits: intent, grace, dwell and life ───────────────────────
             wait(
@@ -23516,6 +23597,90 @@ enum ModalBand {
     Settings,
 }
 
+/// **Every value in this window a fade can hold away from home** — the keys of
+/// [`WindowRuntime::settling`].
+///
+/// [`Layered`]'s opposite number and written beside it for the contrast: that
+/// list is bands of *ink* whose state has already gone, this one is *numbers*
+/// about surfaces that are still perfectly real. Which is also why this one is
+/// not a fixed array with a gate on its length: a band that is not staged is a
+/// popup nobody drew, while a fade that is never asked for is simply a control
+/// nobody pointed at — the register's own home rule ([`settling`]) makes the
+/// absence correct rather than suspicious.
+///
+/// Not `Copy`, and that is a fact about Git: a row of that panel is identified
+/// by the path it names, and a hash of the path would be a row that can dim the
+/// wrong file. Everything else here is an id.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Fading {
+    /// One pane head's hover-revealed run — the `⌄`, the folder, the `×`, and,
+    /// on a preview seat, the tools along its head.
+    ///
+    /// Keyed by seat and not by control, and **one key for the whole head**: the
+    /// design's own requirement is that the run reveals *together* ("not
+    /// one-always, one-on-hover"), and the preview head's tools are gated on the
+    /// very same predicate ([`seats::head_run_revealed`]). One number is one
+    /// fewer way for the halves to come apart mid-fade.
+    ///
+    /// The preview *rail* under it is deliberately absent: that row is resident
+    /// by written ruling — "a row whose whole subject is 'where is this' is
+    /// furniture, and furniture that appears when you approach it cannot be aimed
+    /// at" — so it has no reveal to ease.
+    HeadRun(SeatId),
+    /// How far one tab's chrome has taken on the active colours.
+    ///
+    /// By [`TabId`] and never by index: a tab list that shifts under a fade
+    /// would hand the colour to whichever tab moved into the slot, which is the
+    /// same class of bug as a name landing on the wrong pane.
+    TabActive(TabId),
+    /// One Git panel row waiting on a write about it — `git add` on a file,
+    /// `git checkout` or `git branch -m` on a branch.
+    GitPending(SeatId, GitRowKey),
+    /// The ghost under a pointer that has begun to carry something.
+    ///
+    /// **Its opacity only.** The ghost's position is the pointer's, every frame,
+    /// with no easing — see [`bt_render::DRAG_GHOST_FADE`].
+    DragGhost,
+}
+
+/// **Which foot of this window is saying something** — the keys of
+/// [`WindowRuntime::foot_phrases`].
+///
+/// Four strips carry a receipt and they are four surfaces rather than four
+/// clocks: a docked files column's foot, a preview pane's foot, the bubble a
+/// page hangs in its own bottom-left corner, and the same two strips again
+/// inside a window that has been torn off. Keyed by the surface, because that is
+/// what a *box* is — what it says changes, where it is does not.
+///
+/// The glance card is deliberately absent: its lead is a fixed sentence and it
+/// has no receipt to trade places with (`file_peek::peek_foot_text`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FootSaying {
+    /// A docked files column's `.files-foot`.
+    Column(SeatId),
+    /// A preview pane's foot, by the buffer it is showing.
+    Preview(PreviewSurface),
+    /// The bubble a page hangs in its body's bottom-left corner (§7.7 ③).
+    PageTag(SeatId),
+    /// A torn-off tree's foot.
+    Float(float::FloatId),
+    /// A torn-off buffer's foot.
+    FloatPreview(float::FloatId),
+}
+
+/// **Which row of a Git panel a fade belongs to.**
+///
+/// The path and not the row's position: the list re-sorts under a write — a file
+/// staged moves from `CHANGES` to `STAGED` — and an index would carry the
+/// dimming to whichever row slid into the slot. The group rides along because a
+/// path can legitimately stand in two groups at once (R11: one file, two claims),
+/// and those are two rows with two independent writes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum GitRowKey {
+    Branch(String),
+    Change(git::GitGroup, String),
+}
+
 impl ModalBand {
     /// Which of [`Layered::MODAL_BANDS`] this frame is actually drawing, so the
     /// rest can be asked for their ghosts.
@@ -23775,7 +23940,7 @@ mod arrival_wiring_tests {
             "nothing wakes the loop for a menu that is still arriving"
         );
         assert!(
-            deadline.contains("|| passing)"),
+            deadline.contains("|| passing"),
             "the reading is taken and then dropped: the fold never asks for the frame"
         );
         let advance = fn_body("advance_strip_animation");
@@ -23787,6 +23952,95 @@ mod arrival_wiring_tests {
             advance.contains("passages_drawn = passing"),
             "the debt is never settled, so every wake-up owes a present forever"
         );
+    }
+
+    /// RED — **the second register is on the same schedule as the first** (the
+    /// animation slice's second half).
+    ///
+    /// `settling` holds the fades — a head run coming up, a Git row coming back,
+    /// a tab's chrome changing hands — and every one of them can be the *only*
+    /// thing moving in the window: the pointer has stopped, the press is over,
+    /// and ninety milliseconds of ink is all that is left. So it owes exactly
+    /// what `passages` owes and is folded in the same two places.
+    ///
+    /// Mutation: drop `fading` from the deadline and a run left behind by the
+    /// pointer freezes half lit until some unrelated event happens; drop the debt
+    /// and the woken frame returns without drawing.
+    #[test]
+    fn the_frame_schedule_knows_about_the_fades_as_well() {
+        let deadline = fn_body("strip_animation_deadline");
+        assert!(
+            deadline.contains("settling.moving(now, motion)"),
+            "nothing wakes the loop for a fade that is still running"
+        );
+        assert!(
+            deadline.contains("|| fading"),
+            "the reading is taken and then dropped: the fold never asks for the frame"
+        );
+        let advance = fn_body("advance_strip_animation");
+        assert!(
+            advance.contains("settling.drawn(now, motion)"),
+            "the woken frame does not ask what the fades would paint"
+        );
+        assert!(
+            advance.contains("settling_drawn = settling"),
+            "the debt is never settled, so every wake-up owes a present forever"
+        );
+    }
+
+    /// RED — **only the paint and the frame clock may read the fades.**
+    ///
+    /// `arrival`'s own gate says this about pictures and it is if anything
+    /// sharper here, because these numbers are attached to surfaces that really
+    /// are pressable: the day a hit test, a key ladder or a hover route learns to
+    /// ask "how faded is it?", a control becomes unpressable for the ninety
+    /// milliseconds it is arriving — the exact bug the reveal was written to
+    /// avoid ([`seats::HeadInk`], and the layout probe of 2026-08-26).
+    ///
+    /// Read off the source, like the register's own gate one function up,
+    /// because the property is about *who calls what* and no runtime assertion
+    /// can see that.
+    ///
+    /// Mutation: call `settled_head_ink` from `chrome_target_at` and this names
+    /// it.
+    #[test]
+    fn only_the_paint_and_the_frame_clock_can_read_the_settling_register() {
+        const ALLOWED: [&str; 7] = [
+            "settle_git_pending",
+            "settled_head_ink",
+            "settled_tab_ink",
+            "drag_ghost_layer",
+            "forget_the_ghost",
+            "advance_strip_animation",
+            "strip_animation_deadline",
+        ];
+        // Spelled in two halves for the register above's reason: this very line
+        // must not be one of the readings it is looking for.
+        let needle = concat!(".", "settling");
+        let mut seen: Vec<&str> = Vec::new();
+        for (at, _) in SOURCE.match_indices(needle) {
+            let head = SOURCE[..at]
+                .rfind("\n    fn ")
+                .expect("every reader is inside a method");
+            let name = SOURCE[head + "\n    fn ".len()..]
+                .split('(')
+                .next()
+                .expect("a method's name ends at its parameter list");
+            assert!(
+                ALLOWED.contains(&name),
+                "`{name}` reads the fade register, and only the paint and the \
+                 frame clock may — see this test's own note"
+            );
+            if !seen.contains(&name) {
+                seen.push(name);
+            }
+        }
+        for reader in ALLOWED {
+            assert!(
+                seen.contains(&reader),
+                "`{reader}` no longer reads the register — the wiring has moved"
+            );
+        }
     }
 }
 
@@ -26546,6 +26800,12 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         key_hint_drawn_opacity: None,
         passages: arrival::Passages::default(),
         passages_drawn: Vec::new(),
+        settling: settling::Settling::default(),
+        settling_drawn: Vec::new(),
+        advanced_reveal_drawn: None,
+        foot_phrases: settling::Crossfade::default(),
+        foot_phrases_drawn: Vec::new(),
+        advanced_reveal: None,
         toasts: toast::ToastHost::default(),
         toast_layouts: Vec::new(),
         toasts_drawn: Vec::new(),
@@ -29008,6 +29268,17 @@ impl Runtime<'_> {
         // map.
         let files_views = self.files_views(scale);
         let git_pages = self.git_pages(scale, &files_views);
+        // A column torn out of the tree takes its foot's memory with it — see
+        // [`Self::sweep_foot_phrases`], which is `sweep_command_rails`' own
+        // sentence one strip along.
+        self.sweep_foot_phrases();
+        // **The head run's ninety milliseconds**, settled here — before the
+        // borrows below — because it is the last thing in this pass that needs
+        // the window mutably. See [`Self::settled_head_ink`].
+        let head_ink = self.settled_head_ink(now);
+        // And the tab strip's own ninety, for the same reason and in the same
+        // place. See [`Self::settled_tab_ink`].
+        let active_ink = self.settled_tab_ink(now);
         // Kept for the hit test, which is `&self` by construction and cannot
         // measure a string — the same reason `files_name_widths` is a field. The
         // press then lands on the row that was drawn, because it *is* the row
@@ -29368,6 +29639,7 @@ impl Runtime<'_> {
                         path: &words.lead,
                         path_width: words.lead_width,
                         revealed: words.flashing,
+                        dissolved: words.dissolved,
                         notice: &words.notice,
                         notice_width: words.notice_width,
                         web: self.seat_holds_a_page(*seat),
@@ -29415,6 +29687,8 @@ impl Runtime<'_> {
             },
             seats::ChromeContent {
                 tabs: &tabs,
+                head_ink: seats::HeadInk::new(&head_ink),
+                active_ink: seats::TabInk::new(&active_ink),
                 active_tab,
                 grabbed,
                 strip_preview,
@@ -30589,6 +30863,7 @@ impl Runtime<'_> {
         let flash = self.window.command_flash.as_ref()?;
         let alpha = cmdrail::flash_alpha(
             Instant::now().saturating_duration_since(flash.started),
+            self.app.motion,
             |x| cubic_bezier(x, EASE),
         )?;
         let body = self.command_rail_body(flash.seat)?;
@@ -30620,12 +30895,21 @@ impl Runtime<'_> {
 
     /// While a flash is running, one frame at the animation's own rate; nothing at
     /// all otherwise.
+    ///
+    /// **Under reduced motion, one wake-up for the whole band and not sixty.**
+    /// The band holds one flat alpha for its 950ms ([`cmdrail::flash_alpha`]), so
+    /// the only frame it owes is the one that takes it away — asking for the
+    /// animation's rate would be paying for a picture that cannot change. This is
+    /// the same trade `Passages` makes by holding nothing at all: `Reduced` is a
+    /// genuinely idle window rather than a fast one.
     fn command_flash_deadline(&self, now: Instant) -> Option<Instant> {
-        self.window
-            .command_flash
-            .as_ref()
-            .filter(|flash| cmdrail::flash_is_running(now.saturating_duration_since(flash.started)))
-            .map(|_| now + STRIP_ANIMATION_FRAME)
+        let flash = self.window.command_flash.as_ref().filter(|flash| {
+            cmdrail::flash_is_running(now.saturating_duration_since(flash.started))
+        })?;
+        Some(match self.app.motion {
+            Motion::Reduced => flash.started + cmdrail::JUMP_FLASH,
+            Motion::Full => now + STRIP_ANIMATION_FRAME,
+        })
     }
 
     /// Pay the flash's frames, and let it go when it is over.
@@ -32873,6 +33157,16 @@ impl Runtime<'_> {
             profiles,
             scheme_files,
             advanced: self.advanced_open(),
+            // **`None` is "no clock"**, which is a window under reduced motion,
+            // a group that has finished moving, and every test in `settings`.
+            // The group is then simply open or shut exactly as `advanced` says,
+            // which is the picture this dialog drew before it could animate at
+            // all — the red line the whole block is written under, said in one
+            // `Option`.
+            advanced_reveal: self.window.advanced_reveal.and_then(|(page, tween)| {
+                let (reveal, moving) = tween.sample(Instant::now(), self.app.motion);
+                moving.then_some((page, reveal))
+            }),
             editor: self.editor_subject(),
             values,
         }
@@ -34040,6 +34334,7 @@ impl Runtime<'_> {
                     .as_ref()
                     .filter(|drag| drag.ghost_is_shown())
                 else {
+                    self.forget_the_ghost();
                     return Vec::new();
                 };
                 let (pointer, source) = (drag.pointer, drag.source.clone());
@@ -34047,6 +34342,7 @@ impl Runtime<'_> {
                 let Some((mark, mark_logical, mark_color, text)) =
                     self.drag_label(&source, palette)
                 else {
+                    self.forget_the_ghost();
                     return Vec::new();
                 };
                 (pointer, mark, mark_logical, mark_color, text)
@@ -34066,14 +34362,46 @@ impl Runtime<'_> {
             width,
             scale,
         );
-        vec![seats::build_drag_ghost(
+        // **The ghost fades in, and it does not fade out** (the animation slice's
+        // second half, `bt_render::DRAG_GHOST_FADE`).
+        //
+        // In, because the frame a press becomes a *carry* is a real event with
+        // nothing else to announce it: the pointer crosses the threshold and a
+        // card appears under it out of nothing. Ninety milliseconds makes that a
+        // moment instead of a flicker.
+        //
+        // Out, never: the ghost's whole job ends the instant the thing is let go
+        // of, and it is handed to the landing that is already animating in its
+        // place ([`DropLanding::shows_itself`], and the same `Vec::new()` above
+        // for a drag that ended). A ghost lingering over the slot the thing has
+        // already dropped into would be the picture disagreeing with the fact —
+        // `pane 关闭不为动画持尸` one surface along. So the way down is
+        // [`settling::Settling::forget`] and not a fade.
+        //
+        // And the *position* is untouched by any of this. It is the pointer's, on
+        // every frame, with no easing whatever — the plan's own red line.
+        let ink = self.window.settling.settle(
+            &Fading::DragGhost,
+            0.0,
+            settling::Toward::eased(1.0, bt_render::DRAG_GHOST_FADE),
+            Instant::now(),
+            self.app.motion,
+        );
+        let mut ghost = seats::build_drag_ghost(
             &layout,
             mark,
             mark_color,
             &text,
             scale,
             bt_render::chrome_palette(),
-        )]
+        );
+        ghost.opacity *= ink;
+        vec![ghost]
+    }
+
+    /// The ghost is gone, and it goes in one frame — see [`Self::drag_ghost_layer`].
+    fn forget_the_ghost(&mut self) {
+        self.window.settling.forget(&Fading::DragGhost);
     }
 
     /// What the ghost says — `dragLabel(d)`, mock-up 6734-6751.
@@ -35032,6 +35360,27 @@ impl Runtime<'_> {
     fn toggle_advanced_group(&mut self, category: settings::SettingsCategory) -> Result<()> {
         let mut open = self.advanced_open();
         open.toggle(category);
+        // **The group's own two hundred milliseconds** ([`bt_render::DISCLOSURE_REVEAL`]),
+        // aimed on the frame of the press. `GRAB_EASE` because a hand has just
+        // let go of this: it leaves at full speed, so the page answers the press
+        // on the first frame rather than a fortieth of a second later.
+        //
+        // A page other than the one this press was on loses its tween outright,
+        // and that is the field's own rule read back — there is one, and the
+        // dialog draws one page.
+        let now = Instant::now();
+        let motion = self.app.motion;
+        let target = f32::from(u8::from(open.is_open(category)));
+        let mut tween = match self.window.advanced_reveal {
+            Some((held, tween)) if held == category => tween,
+            _ => RevealTween::resting_on(
+                1.0 - target,
+                bt_render::DISCLOSURE_REVEAL,
+                bt_render::GRAB_EASE,
+            ),
+        };
+        tween.retarget(target, now, motion);
+        self.window.advanced_reveal = Some((category, tween));
         let mut settings = self.app.settings_store.loaded().clone();
         settings.advanced_open = open.keys();
         self.app.settings_store.store(settings);
@@ -41956,7 +42305,12 @@ impl Runtime<'_> {
                 .filter(|(shown, _)| *shown == RevealedFoot::Preview(seat))
                 .map(|(_, at)| at);
             let zoomed = self.web_on(seat).and_then(webhost::WebSeat::zoom_said);
-            let flash = page_foot_flash(zoomed, opened, now);
+            // The receipt, and the ninety milliseconds it takes to trade places
+            // with the hover line — see [`Self::foot_saying`]. The two clocks in
+            // front of it (`page_foot_flash`'s own) are untouched.
+            let wanted = page_foot_flash(zoomed, opened, now);
+            let (flash, dissolved) =
+                self.foot_saying(FootSaying::PageTag(seat), wanted.as_deref(), now);
             let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
             // **The tag's run and not the retired band's**: the cut has to be to
             // the room the thing that is drawn actually has, and a bubble
@@ -41976,6 +42330,7 @@ impl Runtime<'_> {
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             return Some(seats::dress_foot(
                 seats::FootDress {
+                    dissolved,
                     run,
                     lead: &lead,
                     // "Opened" is the same word the `Open in default app` card
@@ -42029,13 +42384,14 @@ impl Runtime<'_> {
         let railed = self.preview_rail_kind(surface) == Some(seats::PreviewRailKind::Crumbs);
         let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
         let saved = self.preview_save_notice(surface, now) == Some(preview::preview_saved_notice());
-        let flash = if revealed {
+        let wanted = if revealed {
             Some(foot_revealed_label())
         } else if saved {
             Some(preview::preview_saved_notice())
         } else {
             None
         };
+        let (flash, dissolved) = self.foot_saying(FootSaying::Preview(surface), wanted, now);
         let notice = self
             .preview_foot_notice(surface, now)
             .unwrap_or_default()
@@ -42047,9 +42403,10 @@ impl Runtime<'_> {
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(seats::dress_foot(
             seats::FootDress {
+                dissolved,
                 run,
                 lead: if railed { "" } else { &lead },
-                flash,
+                flash: flash.as_deref(),
                 notice: &notice,
                 // **Left-truncated** (P35): the ellipsis goes at the head so the
                 // file name — the part you actually care about — survives.
@@ -49130,7 +49487,254 @@ impl Runtime<'_> {
             content.scroll_px = healed;
             self.window.tabs[active].git_scroll.insert(*seat, healed);
         }
+        self.settle_git_pending(&mut pages, Instant::now());
         pages
+    }
+
+    /// **How far the Advanced group would be drawn open this frame**, quantised
+    /// — [`Self::drawn_focus_reveal`]'s opposite number for the disclosure.
+    ///
+    /// `None` whenever no clock is on a group, which is every frame of every
+    /// window that is not opening or shutting one, and every frame at all under
+    /// reduced motion.
+    fn drawn_advanced_reveal(&self, now: Instant) -> Option<(settings::SettingsCategory, u16)> {
+        let (page, tween) = self.window.advanced_reveal?;
+        let (reveal, moving) = tween.sample(now, self.app.motion);
+        moving.then(|| (page, (reveal.clamp(0.0, 1.0) * 1000.0).round() as u16))
+    }
+
+    /// **What one foot is saying this frame, and how far it has dissolved.**
+    ///
+    /// `wanted` is the receipt the window would print with no transition at all,
+    /// or `None` for the standing fact underneath it. What comes back is the same
+    /// thing except during the ninety milliseconds after it changes, when it is
+    /// briefly the *old* phrase on its way out — see
+    /// [`settling::Crossfade`] for why the two take turns in the box rather than
+    /// overlapping in it, and for why the hold in front of them is untouched.
+    ///
+    /// The second half of the answer is the *dissolve* rather than the ink,
+    /// spelled that way for the paint's benefit: it is zero at rest, so every
+    /// builder that never learned about this draws exactly the strip it drew
+    /// before ([`seats::FootStrip::dissolved`]).
+    fn foot_saying(
+        &mut self,
+        key: FootSaying,
+        wanted: Option<&str>,
+        now: Instant,
+    ) -> (Option<String>, f32) {
+        let motion = self.app.motion;
+        let (said, ink) = self.window.foot_phrases.say(&key, wanted, now, motion);
+        (said, 1.0 - ink)
+    }
+
+    /// **Forget the feet that are not there any more.**
+    ///
+    /// [`Self::sweep_command_rails`]' own sentence, one strip along: an entry
+    /// here is a *memory* of the last phrase and so cannot retire itself the way
+    /// a fade does, and a column torn out of the tree would otherwise leave one
+    /// behind for whatever seat id the solver hands out next.
+    fn sweep_foot_phrases(&mut self) {
+        // The seats that still exist, off the same solve everything else this
+        // frame is built from, and the float windows that are still live.
+        let columns: std::collections::BTreeSet<SeatId> = self
+            .seat_layout
+            .rects
+            .iter()
+            .map(|placement| placement.id)
+            .collect();
+        let floats: std::collections::BTreeSet<float::FloatId> = self
+            .window
+            .float
+            .live_windows()
+            .map(float::FloatWin::id)
+            .collect();
+        self.window.foot_phrases.retain(|key| match key {
+            FootSaying::Column(seat) | FootSaying::PageTag(seat) => columns.contains(seat),
+            // A leaf and a seat are the same number inside one tab, and this
+            // sweep is about the tab on screen — the same identity the foot was
+            // dressed under.
+            FootSaying::Preview(PreviewSurface::Seat(leaf)) => columns.contains(&leaf.seat),
+            FootSaying::Preview(_) => true,
+            FootSaying::Float(id) | FootSaying::FloatPreview(id) => floats.contains(id),
+        });
+    }
+
+    /// **How far each tab's chrome has changed hands this frame** — the ground,
+    /// the ring, the title and the small marks of the tab that has just become
+    /// the active one, and of the one that has just stopped being it
+    /// ([`bt_render::TAB_ACTIVATION`]).
+    ///
+    /// **Keyed by [`TabId`] inside and by index outside**, and the translation
+    /// happens here because this is the one place that can do it: a strip is a
+    /// list of positions and a fade belongs to a *tab*, so a register keyed by
+    /// index would hand the colour to whichever tab slid into the slot when one
+    /// was closed. The index is resolved from the same `self.window.tabs` the
+    /// chrome is about to be built from, on this frame, so the two cannot
+    /// disagree.
+    ///
+    /// **A tab that has been closed mid-handover is forgotten rather than
+    /// eased**: there is no row left on the glass for a fade home to be drawn
+    /// on, which is `settle_git_pending`'s argument one surface along.
+    fn settled_tab_ink(&mut self, now: Instant) -> Vec<(usize, f32)> {
+        let motion = self.app.motion;
+        let active = self
+            .window
+            .tabs
+            .get(self.window.active_tab)
+            .map(|tab| tab.id);
+        let places: BTreeMap<TabId, usize> = self
+            .window
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| (tab.id, index))
+            .collect();
+        let mut wanted: Vec<TabId> = self
+            .window
+            .settling
+            .held()
+            .into_iter()
+            .filter_map(|key| match key {
+                Fading::TabActive(tab) => Some(tab),
+                _ => None,
+            })
+            .collect();
+        for gone in wanted
+            .iter()
+            .copied()
+            .filter(|tab| !places.contains_key(tab))
+            .collect::<Vec<_>>()
+        {
+            self.window.settling.forget(&Fading::TabActive(gone));
+        }
+        wanted.retain(|tab| places.contains_key(tab));
+        if let Some(tab) = active
+            && !wanted.contains(&tab)
+        {
+            wanted.push(tab);
+        }
+        wanted
+            .into_iter()
+            .map(|tab| {
+                let ink = self.window.settling.settle(
+                    &Fading::TabActive(tab),
+                    0.0,
+                    settling::Toward::eased(
+                        f32::from(u8::from(active == Some(tab))),
+                        bt_render::TAB_ACTIVATION,
+                    ),
+                    now,
+                    motion,
+                );
+                (places[&tab], ink)
+            })
+            .collect()
+    }
+
+    /// **How solid each pane's hover-revealed head furniture is this frame** —
+    /// the `⌄`, the folder, the pop-out, the `×` and a preview head's tools.
+    ///
+    /// One number per seat, because the whole run reveals on one predicate
+    /// ([`seats::head_run_revealed`]) and the design's own requirement is that it
+    /// reveals *together*. Sent down as a slice; `seats` is given the predicate
+    /// as well and falls back to it, so a caller who forgets this map draws the
+    /// run exactly as it was drawn before there was a fade.
+    ///
+    /// **The list is the hovered pane plus whatever is still leaving.** A hand
+    /// crossing from one pane to the next leaves two entries for ninety
+    /// milliseconds — one coming up and one going down — which is why this is a
+    /// list at all and not the one seat under the pointer.
+    fn settled_head_ink(&mut self, now: Instant) -> Vec<(SeatId, f32)> {
+        let motion = self.app.motion;
+        let hovered = self.window.seat_pointer.pane_hover;
+        let mut seats: Vec<SeatId> = self
+            .window
+            .settling
+            .held()
+            .into_iter()
+            .filter_map(|key| match key {
+                Fading::HeadRun(seat) => Some(seat),
+                _ => None,
+            })
+            .collect();
+        if let Some(seat) = hovered
+            && !seats.contains(&seat)
+        {
+            seats.push(seat);
+        }
+        seats
+            .into_iter()
+            .map(|seat| {
+                let ink = self.window.settling.settle(
+                    &Fading::HeadRun(seat),
+                    0.0,
+                    settling::Toward::eased(
+                        f32::from(u8::from(hovered == Some(seat))),
+                        bt_render::HOVER_CHROME_FADE,
+                    ),
+                    now,
+                    motion,
+                );
+                (seat, ink)
+            })
+            .collect()
+    }
+
+    /// **A row waiting on a write dims into it rather than jumping** (the
+    /// animation slice's second half, `bt_render::GIT_PENDING_FADE_SPAN`).
+    ///
+    /// `git_panel` has already filled each row's `fade` with the still picture —
+    /// [`git_panel::GIT_PENDING_FADE`] or full strength — and this eases between
+    /// them. Which means the panel keeps the whole of the *state* and this owns
+    /// only the ninety milliseconds: under reduced motion the register answers
+    /// the target on the first frame and every row is exactly as dim as it always
+    /// was.
+    ///
+    /// **A row that has left the list is forgotten rather than eased.** Staging a
+    /// file moves it out of `CHANGES` and into `STAGED` — two different rows with
+    /// two different keys — so the row that was dimming is not coming back, and
+    /// there is nothing left on the glass for a fade home to be drawn on.
+    fn settle_git_pending(
+        &mut self,
+        pages: &mut BTreeMap<SeatId, git_panel::GitPanelContent>,
+        now: Instant,
+    ) {
+        let motion = self.app.motion;
+        let mut asked: Vec<Fading> = Vec::new();
+        for (seat, content) in pages.iter_mut() {
+            for row in &mut content.rows {
+                let (key, fade) = match row {
+                    git_panel::GitRow::Change(change) => (
+                        Fading::GitPending(
+                            *seat,
+                            GitRowKey::Change(change.group, change.path.clone()),
+                        ),
+                        &mut change.fade,
+                    ),
+                    git_panel::GitRow::Branch(branch) => (
+                        Fading::GitPending(*seat, GitRowKey::Branch(branch.name.clone())),
+                        &mut branch.fade,
+                    ),
+                    _ => continue,
+                };
+                // Full strength is home: a row is bright unless something is
+                // being done to it, which is the sentence `GIT_PENDING_FADE`
+                // makes about the repository read back as a resting value.
+                *fade = self.window.settling.settle(
+                    &key,
+                    1.0,
+                    settling::Toward::eased(*fade, bt_render::GIT_PENDING_FADE_SPAN),
+                    now,
+                    motion,
+                );
+                asked.push(key);
+            }
+        }
+        for key in self.window.settling.held() {
+            if matches!(key, Fading::GitPending(..)) && !asked.contains(&key) {
+                self.window.settling.forget(&key);
+            }
+        }
     }
 
     /// The rows as the hit test sees them: walked, never asked for.
@@ -49170,7 +49774,6 @@ impl Runtime<'_> {
                     && now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK
             });
             let root = self.window.tabs[active].files_state(*seat).root;
-            tree.foot_revealed = revealed;
             // An unrooted column has no path and nothing to reveal, so its strip
             // is a hairline and nothing else — the mock-up's foot with an empty
             // `${files.root}` in it.
@@ -49184,11 +49787,19 @@ impl Runtime<'_> {
             };
             let path_box = seats::files_pane_geometry(rect, scale, segmented).foot_path;
             let room = path_box[2] - path_box[0];
-            let text = if revealed {
-                foot_revealed_label().to_owned()
-            } else {
-                root
-            };
+            // **The strip trades one phrase for the other over ninety
+            // milliseconds** (the animation slice's second half). The receipt's
+            // 1300ms hold is untouched — `revealed` above is the same clock it
+            // always was; what this decides is only which of the two phrases is
+            // on the glass while they are changing places.
+            let (said, dissolved) = self.foot_saying(
+                FootSaying::Column(*seat),
+                revealed.then(foot_revealed_label),
+                now,
+            );
+            tree.foot_revealed = said.is_some();
+            tree.foot_dissolved = dissolved;
+            let text = said.unwrap_or(root);
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             tree.foot_path = settings::ellipsized_left(&text, room, font, &mut measure);
@@ -50496,6 +51107,7 @@ impl Runtime<'_> {
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             seats::dress_foot(
                 seats::FootDress {
+                    dissolved: 0.0,
                     run: file_peek::foot_run(&layout, scale),
                     lead: file_peek::peek_foot_text(),
                     flash: None,
@@ -57587,6 +58199,7 @@ impl Runtime<'_> {
                     })
                     .collect();
                 seats::FilesTreeContent {
+                    foot_dissolved: 0.0,
                     rows: view.rows,
                     // **None, and R2's surviving half is why.** A badge is
                     // subordinate to a page: it shows what an *open* Git page is
@@ -57656,11 +58269,14 @@ impl Runtime<'_> {
         // *filename* keeps its case (mock-up 698-699).
         let name = profiles::cwd_leaf(&root).to_uppercase();
         let revealed = self.foot_reveal_is_fresh(RevealedFoot::Float(id), now);
-        let root = if revealed {
-            foot_revealed_label().to_owned()
-        } else {
-            root
-        };
+        // The docked column's own sentence, in a window of its own.
+        let (said, foot_dissolved) = self.foot_saying(
+            FootSaying::Float(id),
+            revealed.then(foot_revealed_label),
+            now,
+        );
+        let revealed = said.is_some();
+        let root = said.unwrap_or(root);
         let (name, path) = {
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -57684,6 +58300,7 @@ impl Runtime<'_> {
         Some(float::build(
             &geometry,
             &float::FloatChrome {
+                dissolved: foot_dissolved,
                 mode,
                 // `#i-folder` and a left-hand dock panel: this window holds a
                 // tree, and P54's side-honesty puts the filled half where the
@@ -57959,13 +58576,14 @@ impl Runtime<'_> {
         // a float's went to the body strip that the ruling retired — so without
         // this the word would have had nowhere left to be printed at all.
         let saved = self.preview_save_notice(surface, now) == Some(preview::preview_saved_notice());
-        let flash = if revealed {
+        let wanted = if revealed {
             Some(foot_revealed_label())
         } else if saved {
             Some(preview::preview_saved_notice())
         } else {
             None
         };
+        let (flash, foot_dissolved) = self.foot_saying(FootSaying::FloatPreview(id), wanted, now);
         let notice = self
             .preview_foot_notice(surface, now)
             .unwrap_or_default()
@@ -58008,9 +58626,10 @@ impl Runtime<'_> {
                 ),
                 seats::dress_foot(
                     seats::FootDress {
+                        dissolved: foot_dissolved,
                         run,
                         lead: &path,
-                        flash,
+                        flash: flash.as_deref(),
                         notice: &notice,
                         // Left-truncated, exactly as the docked foot is (P35):
                         // the ellipsis goes at the head so the file name
@@ -58125,6 +58744,7 @@ impl Runtime<'_> {
         let mut layer = float::build(
             &geometry,
             &float::FloatChrome {
+                dissolved: foot_dissolved,
                 mode,
                 // `#i-file` and a right-hand dock panel: this window holds a
                 // buffer, and P54's side-honesty puts the filled half where the
@@ -60686,6 +61306,26 @@ impl Runtime<'_> {
             self.window.passages_drawn = passing;
             owes_frame = true;
         }
+        // **The fades' own debt** (the animation slice's second half), on exactly
+        // the same terms as the register above and with the same sharp case: a
+        // pane the hand has *left* is a run fading out with nothing else in the
+        // window moving — the pointer has already stopped, the layout has not
+        // changed, and the only thing still happening is ninety milliseconds of
+        // ink. Empty under reduced motion, so a window that asked for stillness
+        // settles this once and never again.
+        let settling = self.window.settling.drawn(now, motion);
+        if self.window.settling_drawn != settling {
+            self.window.settling_drawn = settling;
+            owes_frame = true;
+        }
+        // And the feet's, on the same terms and with the same sharp case: a
+        // receipt that has just run out is a strip dissolving with the pointer
+        // long since still and nothing else in the window moving.
+        let phrases = self.window.foot_phrases.drawn(now, motion);
+        if self.window.foot_phrases_drawn != phrases {
+            self.window.foot_phrases_drawn = phrases;
+            owes_frame = true;
+        }
         // **§7.1.6b′ F3 — the card column's entrance, settled on the same
         // terms.** Quantised to the whole physical pixel the slide can actually
         // move a rectangle by, for `drawn_rail`'s reason one paragraph up: a
@@ -60697,6 +61337,16 @@ impl Runtime<'_> {
         let arriving = self.drawn_focus_reveal(now);
         if self.window.last_drawn_focus_reveal != Some(arriving) {
             self.window.last_drawn_focus_reveal = Some(arriving);
+            owes_frame = true;
+        }
+        // The settings page's Advanced group, on the same terms: the frame its
+        // height last drew at, against the one it would draw at now. Quantised
+        // to a thousandth of the group's own height, which is finer than the
+        // pixel it can move a row by — `settling`'s own argument about which
+        // side of the glass to be wrong on.
+        let disclosed = self.drawn_advanced_reveal(now);
+        if self.window.advanced_reveal_drawn != disclosed {
+            self.window.advanced_reveal_drawn = disclosed;
             owes_frame = true;
         }
         // **U8 — the panes' own debt, settled as it is asked.**
@@ -60847,6 +61497,27 @@ impl Runtime<'_> {
         // window that asked for stillness is genuinely idle rather than quickly
         // animated.
         let passing = self.window.passages.moving(now, motion);
+        // The second half of the same argument, for the fades: a head run going
+        // out under a pointer that has already stopped, a Git row coming back to
+        // full after its write landed, a tab's chrome finishing the handover, the
+        // Advanced group still opening after the press that opened it. None of
+        // those has anything else in the window asking for the frame, and none of
+        // them is ever true under reduced motion.
+        let fading = self.window.settling.moving(now, motion);
+        // The feet's dissolves, and the same argument once more: a receipt going
+        // back to being a path is ninety milliseconds with nothing else in the
+        // window asking for a frame. Never true under reduced motion, where the
+        // word swaps between two frames the way it always did.
+        let saying = self.window.foot_phrases.moving(now, motion);
+        // The settings page's Advanced group, and the same argument once more:
+        // it runs for two hundred milliseconds after a press that moved no
+        // pointer, and nothing else in the dialog is moving while it does. `None`
+        // under reduced motion, where `RevealTween` reports the target and asks
+        // for nothing at all.
+        let disclosing = self
+            .window
+            .advanced_reveal
+            .is_some_and(|(_, tween)| tween.sample(now, motion).1);
         [
             (tabs_moving
                 || chevron_turning
@@ -60856,7 +61527,10 @@ impl Runtime<'_> {
                 || rail_moving
                 || files_turning
                 || page_loading
-                || passing)
+                || passing
+                || fading
+                || saying
+                || disclosing)
                 .then(|| now + STRIP_ANIMATION_FRAME),
             self.window.pane_motion.deadline(now, motion),
         ]
@@ -87159,6 +87833,7 @@ mod tests {
             profiles: &[],
             scheme_files: &[],
             advanced: settings::AdvancedOpen::default(),
+            advanced_reveal: None,
             editor: None,
             values: Box::leak(Box::new(settings::SettingsValues::sample())),
         });
@@ -102035,6 +102710,7 @@ mod tests {
         let gap = 12.0;
         let words = seats::dress_foot(
             seats::FootDress {
+                dissolved: 0.0,
                 run,
                 lead: r"C:\w\huge.txt",
                 flash: None,
@@ -102188,6 +102864,7 @@ mod tests {
         let long = r"C:\Users\somebody\Developer\BetterTerminal\crates\bt-app\src\main.rs";
         let words = seats::dress_foot(
             seats::FootDress {
+                dissolved: 0.0,
                 run,
                 lead: long,
                 flash: None,
@@ -102217,6 +102894,7 @@ mod tests {
         // is what makes the loss above the phrase's doing and not the run's.
         let alone = seats::dress_foot(
             seats::FootDress {
+                dissolved: 0.0,
                 run,
                 lead: long,
                 flash: None,
@@ -102258,6 +102936,7 @@ mod tests {
         for flash in [foot_revealed_label(), preview::preview_saved_notice()] {
             let words = seats::dress_foot(
                 seats::FootDress {
+                    dissolved: 0.0,
                     run,
                     lead: r"C:\w\huge.txt",
                     flash: Some(flash),
