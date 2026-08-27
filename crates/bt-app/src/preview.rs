@@ -32,6 +32,7 @@ use std::sync::mpsc;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
+use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
 use winit::event_loop::EventLoopProxy;
 use winit::window::WindowId;
 
@@ -901,13 +902,23 @@ pub enum MarkdownBlock {
 
 /// Split one line into its inline runs.
 ///
-/// **Four passes, and the order is the ruling.** Backticks first, which is the
-/// mock-up's order (4915-4917) and the one that makes `` `**not bold**` `` come
-/// out as literal code rather than as a bold run inside a code span; then
-/// mathematics, so that a formula's own `*`, `_` and `[` are the formula's and
-/// not this renderer's; then links, so a `**[bold link](url)**`'s brackets are
-/// gone before the asterisks are read; then asterisks over whatever is still
-/// plain.
+/// **Four scans and one ruling, and the order of the scans is itself a ruling.**
+/// Backticks first, which is the mock-up's order (4915-4917) and the one that
+/// makes `` `**not bold**` `` come out as literal code rather than as a bold run
+/// inside a code span; then mathematics, so that a formula's own `*`, `_` and `[`
+/// are the formula's and not this renderer's; then links, so a
+/// `**[bold link](url)**`'s brackets are gone before the asterisks are read; then
+/// the asterisks and underscores over whatever is still plain.
+///
+/// **What the fourth scan produces is candidates, not runs.** Each of the first
+/// three works on a *slice* and hands its leftovers to the next, so a line comes
+/// out of them in pieces — and emphasis does not live in a piece. It lives in the
+/// line: `**a `b` c**` has its opener in the first piece and its closer in the
+/// third, and a pass that read one piece at a time saw no pair in either and
+/// printed both pairs of asterisks (user report, 2026-08-28). So the scans
+/// deposit [`Piece`]s into one list for the whole line, and
+/// [`resolve_emphasis`] — CommonMark's delimiter stack, §6.2 — runs over that
+/// list once, at the end, which is where the specification puts it too.
 ///
 /// **The backtick pass standing in front of the mathematics pass is the whole of
 /// "a dollar inside code is a dollar"** — and of "a `\begin{align}` inside code
@@ -920,19 +931,137 @@ pub enum MarkdownBlock {
 /// `` `code` `` inside a table cell works without a line of its own: there is no
 /// second inline parser to teach.
 pub fn parse_inline(line: &str) -> Vec<Span> {
-    let mut spans = Vec::new();
+    let mut pieces = Vec::new();
+    let mut claimed = 0usize;
     let mut rest = line;
     while let Some(open) = rest.find('`') {
         // A backtick with no partner is a backtick, not the start of anything.
         let Some(close) = rest[open + 1..].find('`') else {
             break;
         };
-        push_math_runs(&rest[..open], &mut spans);
-        spans.push(Span::code(&rest[open + 1..open + 1 + close]));
-        rest = &rest[open + 1 + close + 1..];
+        push_math_runs(&rest[..open], claimed, line, &mut pieces);
+        pieces.push(Piece::Claimed(Span::code(
+            &rest[open + 1..open + 1 + close],
+        )));
+        let eaten = open + 1 + close + 1;
+        claimed += eaten;
+        rest = &rest[eaten..];
     }
-    push_math_runs(rest, &mut spans);
-    spans
+    push_math_runs(rest, claimed, line, &mut pieces);
+    resolve_emphasis(&mut pieces);
+    settle(pieces)
+}
+
+/// One thing the scanning passes found, before the emphasis pass has ruled.
+///
+/// **The reason this type exists is the last pass's reach.** The scanners each
+/// hand their leftovers to the next and each works on *a slice* — which was fine
+/// while emphasis was a `find("**")` inside one slice, and was exactly the bug
+/// reported on 2026-08-28: a bold run whose text contained a code span had its
+/// opener in one slice and its closer in another, so neither slice saw a pair
+/// and both printed their asterisks. Emphasis is not a property of a slice. It
+/// is a property of the line, so the scanners now deposit *pieces* into one list
+/// for the whole line and the emphasis pass runs over that list once, at the
+/// end — exactly where CommonMark puts it (§6.2: the delimiter stack is built
+/// during the scan and processed after it).
+#[derive(Debug)]
+enum Piece {
+    /// Text nothing has claimed. `strong` is the emphasis pass's answer.
+    Text { text: String, strong: bool },
+    /// A run already claimed by the code, mathematics or link pass.
+    ///
+    /// It stands *inside* an emphasis span perfectly well — it simply cannot
+    /// show it. [`Span`] is a flat model with one style per run, so a code span
+    /// inside a bold phrase is set in the code face and not in a bold code face.
+    /// That is a floor of the model rather than of this pass, and it is the same
+    /// floor [`push_link_runs`] already stands on.
+    Claimed(Span),
+    /// A run of `*` or `_`, and what the flanking rule said about it.
+    Delimiter(Delimiter),
+}
+
+/// A run of `*` or `_`, weighed by CommonMark's flanking rule.
+///
+/// **A "delimiter run" is the whole run, not one character** (§6.2): `***` is one
+/// run of three and the rules below are asked of it once. Splitting it into
+/// three would lose the length, and the length is what the multiple-of-3 rule
+/// and the two-versus-one choice are both written in terms of.
+#[derive(Debug)]
+struct Delimiter {
+    /// `b'*'` or `b'_'`.
+    marker: u8,
+    /// How many of the run's characters are still unspent. Whatever is left when
+    /// the pass finishes is literal text — `***a**` is one asterisk and a bold
+    /// run, because the pair uses the two nearest the text and the third was
+    /// never markup.
+    unspent: usize,
+    /// The run's length **as written**, which never changes.
+    ///
+    /// The multiple-of-3 rule (§6.2, rules 9 and 10) is stated over the lengths
+    /// of the *runs* the two delimiters came from and not over how much of them
+    /// is left, so this is a second field rather than the same one read twice.
+    length: usize,
+    can_open: bool,
+    can_close: bool,
+    /// Struck off the stack: matched, or shown to be unmatchable, or closed over
+    /// by a pair either side of it. It may still have characters left, and those
+    /// characters are text.
+    struck: bool,
+    /// Whatever is left of it stands inside an emphasis span.
+    strong: bool,
+}
+
+impl Delimiter {
+    /// Weigh one run against the characters either side of it.
+    ///
+    /// **CommonMark §6.2, and the reason it is worth quoting is the Chinese full
+    /// stop.** A run is *left-flanking* when it is not followed by whitespace and
+    /// either is not followed by punctuation or else is preceded by whitespace or
+    /// punctuation; *right-flanking* is the mirror of that. Both rules are
+    /// written over **Unicode** punctuation — the P and S general categories —
+    /// and a renderer that reads only ASCII punctuation gets a line of Chinese
+    /// prose wrong in both directions, because 。 、 and （） are punctuation to
+    /// the specification and letters to `u8::is_ascii_punctuation`.
+    ///
+    /// `None` for either neighbour is the start or the end of the line, which the
+    /// specification counts as whitespace.
+    fn weigh(marker: u8, length: usize, before: Option<char>, after: Option<char>) -> Self {
+        let before_space = before.is_none_or(char::is_whitespace);
+        let after_space = after.is_none_or(char::is_whitespace);
+        let before_mark = before.is_some_and(is_unicode_punctuation);
+        let after_mark = after.is_some_and(is_unicode_punctuation);
+        let left = !after_space && (!after_mark || before_space || before_mark);
+        let right = !before_space && (!before_mark || after_space || after_mark);
+        // `_` is the one that may not open or close inside a word, which is the
+        // whole of why `snake_case_name` is a name rather than a name with
+        // emphasis in the middle of it. `*` has no such rule: `a*b*c` is
+        // emphasis, and an author who wants a literal one writes `\*`.
+        let (can_open, can_close) = if marker == b'_' {
+            (
+                left && (!right || before_mark),
+                right && (!left || after_mark),
+            )
+        } else {
+            (left, right)
+        };
+        Self {
+            marker,
+            unspent: length,
+            length,
+            can_open,
+            can_close,
+            struck: false,
+            strong: false,
+        }
+    }
+}
+
+/// A character CommonMark calls punctuation: the Unicode P or S categories.
+fn is_unicode_punctuation(character: char) -> bool {
+    matches!(
+        character.general_category_group(),
+        GeneralCategoryGroup::Punctuation | GeneralCategoryGroup::Symbol
+    )
 }
 
 /// The second pass: mathematics inside whatever the backtick pass left plain.
@@ -964,14 +1093,16 @@ pub fn parse_inline(line: &str) -> Vec<Span> {
 /// renderer overruling the document about its own contents. What the two do
 /// share is the escape and the refusal to read `$$` as two delimiters, and those
 /// are shared by calling the same function rather than by writing it twice.
-fn push_math_runs(text: &str, spans: &mut Vec<Span>) {
+fn push_math_runs(text: &str, at: usize, line: &str, pieces: &mut Vec<Piece>) {
     let mut rest = text;
+    let mut at = at;
     while let Some((open, end)) = next_inline_math(rest) {
-        push_link_runs(&rest[..open], spans);
-        spans.push(Span::math(&rest[open..end]));
+        push_link_runs(&rest[..open], at, line, pieces);
+        pieces.push(Piece::Claimed(Span::math(&rest[open..end])));
+        at += end;
         rest = &rest[end..];
     }
-    push_link_runs(rest, spans);
+    push_link_runs(rest, at, line, pieces);
 }
 
 /// The byte range of the next inline formula, **delimiters included**.
@@ -1211,73 +1342,278 @@ fn environment_close(text: &str, name: &str, open: usize) -> Option<usize> {
 /// A label carrying its own emphasis (`[**a**](b)`) keeps the asterisks visible
 /// rather than nesting two styles in one run — a deliberate floor, because the
 /// alternative is a span model with a stack in it and the case is vanishing.
-fn push_link_runs(text: &str, spans: &mut Vec<Span>) {
+fn push_link_runs(text: &str, at: usize, line: &str, pieces: &mut Vec<Piece>) {
     let mut rest = text;
+    let mut at = at;
     while let Some(open) = rest.find('[') {
-        let Some(label_end) = rest[open..].find(']').map(|at| open + at) else {
+        let Some(label_end) = rest[open..].find(']').map(|found| open + found) else {
             break;
         };
         // The target has to follow the label immediately, which is what keeps
         // `[a] (b)` and a bare `[TODO]` out of this branch.
         if !rest[label_end + 1..].starts_with('(') {
-            push_bold_runs(&rest[..label_end + 1], spans);
+            push_delimiter_runs(&rest[..label_end + 1], at, line, pieces);
+            at += label_end + 1;
             rest = &rest[label_end + 1..];
             continue;
         }
         let target_open = label_end + 1;
-        let Some(target_end) = rest[target_open..].find(')').map(|at| target_open + at) else {
+        let Some(target_end) = rest[target_open..]
+            .find(')')
+            .map(|found| target_open + found)
+        else {
             break;
         };
         // `[]()` is punctuation, not an empty link.
         if label_end == open + 1 {
-            push_bold_runs(&rest[..target_end + 1], spans);
+            push_delimiter_runs(&rest[..target_end + 1], at, line, pieces);
+            at += target_end + 1;
             rest = &rest[target_end + 1..];
             continue;
         }
-        push_bold_runs(&rest[..open], spans);
-        spans.push(Span::link(
+        push_delimiter_runs(&rest[..open], at, line, pieces);
+        pieces.push(Piece::Claimed(Span::link(
             &rest[open + 1..label_end],
             rest[target_open + 1..target_end].trim(),
-        ));
+        )));
+        at += target_end + 1;
         rest = &rest[target_end + 1..];
     }
-    push_bold_runs(rest, spans);
+    push_delimiter_runs(rest, at, line, pieces);
 }
 
-/// The third pass: `**bold**` inside whatever the two above left plain.
-fn push_bold_runs(text: &str, spans: &mut Vec<Span>) {
-    let mut rest = text;
-    while let Some(open) = rest.find("**") {
-        let Some(close) = rest[open + 2..].find("**") else {
-            break;
-        };
-        // `****` is not an empty bold run, it is four asterisks — the mock-up's
-        // `[^*]+` refuses to match nothing, and so does this.
-        if close == 0 {
-            break;
-        }
-        push_plain(&rest[..open], spans);
-        spans.push(Span::bold(&rest[open + 2..open + 2 + close]));
-        rest = &rest[open + 2 + close + 2..];
-    }
-    push_plain(rest, spans);
-}
-
-/// Add plain text, **joined to the plain run before it if there is one**.
+/// The last scanning pass: cut what is left into text and delimiter runs.
 ///
-/// The three passes hand each other the text they did not claim, so a line the
-/// link pass looked at and left alone comes back in two or three pieces. Two
+/// It claims nothing and decides nothing — [`resolve_emphasis`] does that, once,
+/// over every piece of the line. What happens here is the reading of each run of
+/// `*` or `_` **in the context of the whole line**, because that is where its
+/// neighbours are: the character before a run that begins a chunk is the last
+/// character of the chunk before it, and the flanking rule wants the character
+/// rather than the chunk boundary.
+///
+/// A marker with an odd number of backslashes in front of it is the author's
+/// literal asterisk and never a delimiter — the same parity
+/// [`bt_detect::delimiter_is_escaped`] rules for the dollar, asked here so that
+/// the two markups agree about what an escape is.
+fn push_delimiter_runs(text: &str, at: usize, line: &str, pieces: &mut Vec<Piece>) {
+    let bytes = text.as_bytes();
+    let mut plain = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let marker = bytes[index];
+        // A `*` or a `_` is one byte and is never a continuation byte, so
+        // stepping by bytes reads the same positions stepping by characters
+        // would, and reads them without decoding the prose in between.
+        if (marker != b'*' && marker != b'_') || bt_detect::delimiter_is_escaped(line, at + index) {
+            index += 1;
+            continue;
+        }
+        let mut end = index;
+        while end < bytes.len() && bytes[end] == marker {
+            end += 1;
+        }
+        push_piece_text(&text[plain..index], pieces);
+        pieces.push(Piece::Delimiter(Delimiter::weigh(
+            marker,
+            end - index,
+            line[..at + index].chars().next_back(),
+            line[at + end..].chars().next(),
+        )));
+        plain = end;
+        index = end;
+    }
+    push_piece_text(&text[plain..], pieces);
+}
+
+/// Add text to the piece list, joined to the text piece before it if there is one.
+fn push_piece_text(text: &str, pieces: &mut Vec<Piece>) {
+    if text.is_empty() {
+        return;
+    }
+    match pieces.last_mut() {
+        Some(Piece::Text { text: last, .. }) => last.push_str(text),
+        _ => pieces.push(Piece::Text {
+            text: text.to_owned(),
+            strong: false,
+        }),
+    }
+}
+
+/// Match the delimiter runs into emphasis spans — CommonMark's *process
+/// emphasis* (§6.2), run once over the whole line.
+///
+/// **Walk forward to each closer; walk back from it to the nearest opener.** Two
+/// delimiters pair when they carry the same marker, when the later one can close
+/// and the earlier one can open, and when the multiple-of-3 rule does not forbid
+/// it. A pair spends two characters from each side if both have two to spend and
+/// one otherwise — strong emphasis is the greedy reading, which is why `**a**` is
+/// bold rather than emphasis inside emphasis. Everything between them is inside
+/// the span, and every delimiter between them is struck off: a pair that closed
+/// over a delimiter has made that delimiter's leftovers into text.
+///
+/// **`openers_bottom` is what keeps this linear.** A closer that found no opener
+/// has proved that no *later* closer of the same class can find one below where
+/// this one stopped, so the floor rises and the backward walk never re-treads
+/// ground. The class is the marker, the closer's run length modulo three and
+/// whether the closer could also have opened — the three things the matching
+/// rules read, so two closers that agree on all three are interchangeable.
+///
+/// **Every level of emphasis comes out bold, and that is a face this window does
+/// not own rather than a rule it does not know.** The renderer sets a run in one
+/// upright face at one weight or the other ([`bt_render::PreviewRun`]); there is
+/// no italic in the stack, so `*a*`, `**a**` and `***a***` are all set in the one
+/// emphatic face there is. Printing `*a*`'s asterisks instead — which is what
+/// this pass used to do — shows the reader markup where the author wrote
+/// emphasis, and that is the worse of the two losses.
+fn resolve_emphasis(pieces: &mut [Piece]) {
+    // [marker][closer run length % 3][the closer can open too]
+    let mut openers_bottom = [[[0usize; 2]; 3]; 2];
+    let mut closer = 0usize;
+    while closer < pieces.len() {
+        let Piece::Delimiter(run) = &pieces[closer] else {
+            closer += 1;
+            continue;
+        };
+        if run.struck || !run.can_close {
+            closer += 1;
+            continue;
+        }
+        let (marker, length, can_open) = (run.marker, run.length, run.can_open);
+        let class =
+            &mut openers_bottom[usize::from(marker == b'_')][length % 3][usize::from(can_open)];
+        let floor = *class;
+        let Some(opener) = find_opener(pieces, closer, floor, marker, length, can_open) else {
+            *class = closer;
+            // A run that closes nothing here and can never open is spent.
+            if !can_open {
+                strike(&mut pieces[closer]);
+            }
+            closer += 1;
+            continue;
+        };
+        close_emphasis(pieces, opener, closer);
+        let Piece::Delimiter(run) = &pieces[closer] else {
+            unreachable!("the closer was a delimiter one statement ago")
+        };
+        if run.struck {
+            closer += 1;
+        }
+    }
+}
+
+/// The nearest delimiter below `closer` that may open the span it closes.
+fn find_opener(
+    pieces: &[Piece],
+    closer: usize,
+    floor: usize,
+    marker: u8,
+    length: usize,
+    can_open: bool,
+) -> Option<usize> {
+    let mut index = closer;
+    while index > floor {
+        index -= 1;
+        let Piece::Delimiter(run) = &pieces[index] else {
+            continue;
+        };
+        if run.struck || run.marker != marker || !run.can_open {
+            continue;
+        }
+        // Rules 9 and 10: when either delimiter faces both ways, a pair whose two
+        // run lengths sum to a multiple of three is refused — unless both lengths
+        // are themselves multiples of three. It is the rule that makes
+        // `*foo**bar**baz*` one emphasis around two bold runs instead of the
+        // tangle the greedy reading gives.
+        let ambiguous = (run.can_close || can_open)
+            && (run.length + length).is_multiple_of(3)
+            && !(run.length.is_multiple_of(3) && length.is_multiple_of(3));
+        if ambiguous {
+            continue;
+        }
+        return Some(index);
+    }
+    None
+}
+
+/// Spend the pair, mark what it encloses, and strike what it closed over.
+fn close_emphasis(pieces: &mut [Piece], opener: usize, closer: usize) {
+    let (Piece::Delimiter(open), Piece::Delimiter(close)) = (&pieces[opener], &pieces[closer])
+    else {
+        unreachable!("both ends were delimiters when they were chosen")
+    };
+    let spent = if open.unspent >= 2 && close.unspent >= 2 {
+        2
+    } else {
+        1
+    };
+    for piece in &mut pieces[opener + 1..closer] {
+        match piece {
+            Piece::Text { strong, .. } => *strong = true,
+            Piece::Delimiter(run) => {
+                run.strong = true;
+                run.struck = true;
+            }
+            // A code span, a formula or a link keeps its own style inside an
+            // emphasis span — see [`Piece::Claimed`].
+            Piece::Claimed(_) => {}
+        }
+    }
+    for end in [opener, closer] {
+        let Piece::Delimiter(run) = &mut pieces[end] else {
+            unreachable!("both ends were delimiters when they were chosen")
+        };
+        run.unspent -= spent;
+        if run.unspent == 0 {
+            run.struck = true;
+        }
+    }
+}
+
+/// Take a delimiter off the stack without touching what is left of its text.
+fn strike(piece: &mut Piece) {
+    if let Piece::Delimiter(run) = piece {
+        run.struck = true;
+    }
+}
+
+/// Turn the ruled pieces into the runs the renderer draws.
+fn settle(pieces: Vec<Piece>) -> Vec<Span> {
+    let mut spans = Vec::new();
+    for piece in pieces {
+        match piece {
+            Piece::Text { text, strong } => push_text(&text, strong, &mut spans),
+            Piece::Claimed(span) => spans.push(span),
+            // Whatever a delimiter run did not spend is what the author typed.
+            Piece::Delimiter(run) => push_text(
+                &(run.marker as char).to_string().repeat(run.unspent),
+                run.strong,
+                &mut spans,
+            ),
+        }
+    }
+    spans
+}
+
+/// Add text, **joined to the run before it if that run is set the same way**.
+///
+/// The passes hand each other the text they did not claim, so a line the link
+/// pass looked at and left alone comes back in two or three pieces. Two
 /// adjacent plain runs shape and draw identically to one, but they are not one:
 /// the shaper is given a rich-text sequence and a break opportunity between two
 /// runs is not the same thing as one inside a run, so `a [TODO] note` split at
 /// the bracket could wrap where the text does not permit it.
-fn push_plain(text: &str, spans: &mut Vec<Span>) {
+fn push_text(text: &str, strong: bool, spans: &mut Vec<Span>) {
     if text.is_empty() {
         return;
     }
+    let span = if strong {
+        Span::bold(text)
+    } else {
+        Span::plain(text)
+    };
     match spans.last_mut() {
-        Some(last) if last.style == SpanStyle::Plain => last.text.push_str(text),
-        _ => spans.push(Span::plain(text)),
+        Some(last) if last.style == span.style => last.text.push_str(text),
+        _ => spans.push(span),
     }
 }
 
@@ -5827,6 +6163,190 @@ mod tests {
         );
         // A blank line is a separator, not a paragraph.
         assert_eq!(parse_markdown("\n\n"), vec![]);
+    }
+
+    /// PIN (user report, 2026-08-28: a paragraph of `docs/plans/release/clean-vm.md`
+    /// that GitHub sets in bold printed its own `**` in this window) — **a
+    /// delimiter run is matched against the whole line, code spans and all.**
+    ///
+    /// MUTATIONS: give each code-delimited chunk its own emphasis pass; refuse a
+    /// closer that follows a Unicode punctuation character.
+    #[test]
+    fn a_bold_run_closes_across_the_code_spans_it_contains() {
+        // The reporter's own line, joined over its fold the way a paragraph is.
+        assert_eq!(
+            parse_inline(
+                "**本次没做的事(明确说清):没有启动任何虚机、没有下载任何 ISO、没有改 \
+                 `.gitignore`、没有改任何 `.rs`。** 虚机由用户建,ISO 由用户下。"
+            ),
+            vec![
+                Span::bold("本次没做的事(明确说清):没有启动任何虚机、没有下载任何 ISO、没有改 "),
+                Span::code(".gitignore"),
+                Span::bold("、没有改任何 "),
+                Span::code(".rs"),
+                Span::bold("。"),
+                Span::plain(" 虚机由用户建,ISO 由用户下。"),
+            ]
+        );
+    }
+
+    /// PIN — **CommonMark's emphasis, checked against CommonMark's own examples.**
+    ///
+    /// One table, one row per case, and the left column is the specification's
+    /// input verbatim (§6.2, "Emphasis and strong emphasis", version 0.31.2).
+    /// The right column is that example's HTML read as *structure*: this window
+    /// has no italic face, so `<em>` and `<strong>` both arrive as
+    /// [`SpanStyle::Bold`] and the comparison is over where the spans begin and
+    /// end rather than over which of the two tags the specification wrote (see
+    /// [`resolve_emphasis`]). Every other property of the answer — which
+    /// delimiters were spent, which were left as text, and where the text broke —
+    /// is compared exactly.
+    ///
+    /// MUTATIONS, and each takes at least one row down: read only ASCII
+    /// punctuation in the flanking rule (the six Chinese rows); drop the `_`
+    /// word-internal restriction (`foo_bar_`, `5_6_78`, `foo__bar__`); drop the
+    /// multiple-of-3 rule (`*foo**bar*`, `*foo**bar**baz*`); spend one delimiter
+    /// where two are available (`**foo bar**`); spend two where one side has one
+    /// (`**foo*`); match a closer that is not right-flanking (`*foo bar *`);
+    /// match an opener that is not left-flanking (`a * foo bar*`); stop striking
+    /// the delimiters a pair closed over (`*foo**bar*`).
+    #[test]
+    fn emphasis_is_matched_by_the_specifications_flanking_rules() {
+        let cases: &[(&str, Vec<Span>)] = &[
+            // § the plain pair, either marker.
+            ("*foo bar*", vec![Span::bold("foo bar")]),
+            ("**foo bar**", vec![Span::bold("foo bar")]),
+            ("_foo bar_", vec![Span::bold("foo bar")]),
+            ("__foo bar__", vec![Span::bold("foo bar")]),
+            // § a run that whitespace makes non-flanking opens and closes nothing.
+            ("a * foo bar*", vec![Span::plain("a * foo bar*")]),
+            ("*foo bar *", vec![Span::plain("*foo bar *")]),
+            ("_ foo bar_", vec![Span::plain("_ foo bar_")]),
+            ("** foo bar**", vec![Span::plain("** foo bar**")]),
+            // § punctuation on one side and a letter on the other: `a*"foo"*` is
+            // the specification's own row, and the opener there is refused
+            // because it is followed by punctuation without being preceded by
+            // any.
+            ("a*\"foo\"*", vec![Span::plain("a*\"foo\"*")]),
+            ("*(*foo)", vec![Span::plain("*(*foo)")]),
+            // § `*` inside a word is emphasis and `_` inside a word is not.
+            ("foo*bar*", vec![Span::plain("foo"), Span::bold("bar")]),
+            (
+                "5*6*78",
+                vec![Span::plain("5"), Span::bold("6"), Span::plain("78")],
+            ),
+            ("foo_bar_", vec![Span::plain("foo_bar_")]),
+            ("5_6_78", vec![Span::plain("5_6_78")]),
+            ("foo__bar__", vec![Span::plain("foo__bar__")]),
+            // § the two markers never pair with each other.
+            ("_foo*", vec![Span::plain("_foo*")]),
+            // § nesting, and the leftovers of a run that spent part of itself.
+            ("*(*foo*)*", vec![Span::bold("(foo)")]),
+            ("***foo***", vec![Span::bold("foo")]),
+            ("*foo*bar", vec![Span::bold("foo"), Span::plain("bar")]),
+            ("**foo*", vec![Span::plain("*"), Span::bold("foo")]),
+            ("*foo**", vec![Span::bold("foo"), Span::plain("*")]),
+            ("__foo, __bar__, baz__", vec![Span::bold("foo, bar, baz")]),
+            // § the multiple-of-3 rule: the inner `**` of the first row cannot
+            // pair with either single `*`, so it stays as text inside the span
+            // the singles make; the second row is the same rule letting a real
+            // pair through.
+            ("*foo**bar*", vec![Span::bold("foo**bar")]),
+            ("*foo**bar**baz*", vec![Span::bold("foobarbaz")]),
+            // § Chinese punctuation is punctuation. Every row here flips if the
+            // flanking rule is asked of ASCII alone: 。 、 （ ） are the P
+            // categories the specification names, and a table that does not know
+            // them reads this prose as if the marks were letters.
+            ("**中文**。", vec![Span::bold("中文"), Span::plain("。")]),
+            (
+                "（**中文**）",
+                vec![Span::plain("（"), Span::bold("中文"), Span::plain("）")],
+            ),
+            // A closer preceded by punctuation and followed by a letter is not
+            // right-flanking, so this line has no bold in it at all.
+            ("**中文。**后面", vec![Span::plain("**中文。**后面")]),
+            // The mirror: an opener followed by punctuation and preceded by a
+            // letter is not left-flanking.
+            ("前面**（中文）**", vec![Span::plain("前面**（中文）**")]),
+            // And the case the report turns on: the same closer, followed by a
+            // space, is right-flanking and does close.
+            (
+                "**中文。** 后面",
+                vec![Span::bold("中文。"), Span::plain(" 后面")],
+            ),
+            // And the specification's own answer where a reader might want a
+            // different one: an opener that follows a Chinese character and
+            // precedes a bracket is not left-flanking, so this line has no bold
+            // in it — the same answer GitHub gives, for the same reason, and a
+            // renderer that "fixed" it would be disagreeing with every other
+            // renderer about what the document says.
+            (
+                "他说**「是」**,然后走了",
+                vec![Span::plain("他说**「是」**,然后走了")],
+            ),
+        ];
+        for (source, want) in cases {
+            assert_eq!(parse_inline(source), *want, "input: {source}");
+        }
+    }
+
+    /// PIN — **emphasis is read over the line, and the other three passes are
+    /// read first.**
+    ///
+    /// The rows above are prose and nothing else, which is the one shape the old
+    /// per-chunk pass got right. These are the shapes it got wrong, plus the
+    /// shapes it got right that the delimiter stack must not break.
+    ///
+    /// MUTATIONS: give each code-delimited chunk its own emphasis pass (rows 1
+    /// and 2); read a delimiter run's neighbours from its chunk rather than from
+    /// the line (row 3); let the emphasis pass see inside a code span, a formula
+    /// or a link target (rows 4 to 6); treat `\*` as a delimiter (row 7).
+    #[test]
+    fn emphasis_reaches_across_the_runs_the_other_passes_claimed() {
+        // A pair whose text contains a code span — the reported shape, in ASCII.
+        assert_eq!(
+            parse_inline("**a `b` c**"),
+            vec![Span::bold("a "), Span::code("b"), Span::bold(" c"),]
+        );
+        // A pair whose text contains a link, and a pair around one.
+        assert_eq!(
+            parse_inline("**see [docs](a.md) now**"),
+            vec![
+                Span::bold("see "),
+                Span::link("docs", "a.md"),
+                Span::bold(" now"),
+            ]
+        );
+        assert_eq!(
+            parse_inline("**[docs](a.md)**"),
+            vec![Span::link("docs", "a.md")]
+        );
+        // The character before a run that begins a chunk is the last character
+        // of the chunk before it: here that is a backtick, which is
+        // punctuation, so the run is right-flanking and closes.
+        assert_eq!(
+            parse_inline("**a `b`** c"),
+            vec![Span::bold("a "), Span::code("b"), Span::plain(" c")]
+        );
+        // Asterisks inside a code span, a formula and a link target are never
+        // delimiters — the three passes in front of this one claimed them.
+        assert_eq!(
+            parse_inline("`**not bold**`"),
+            vec![Span::code("**not bold**")]
+        );
+        assert_eq!(parse_inline("$a * b * c$"), vec![Span::math("$a * b * c$")]);
+        assert_eq!(parse_inline("[a](b*c*d)"), vec![Span::link("a", "b*c*d")]);
+        // A marker with a backslash in front of it is the author's own, the same
+        // parity the dollar is read with. The backslash stands, because this
+        // renderer does not process backslash escapes at all yet — the same
+        // answer `costs \$5 today` gives.
+        assert_eq!(
+            parse_inline("\\*not emphasis\\*"),
+            vec![Span::plain("\\*not emphasis\\*")]
+        );
+        // Nothing to match is nothing, and it is text.
+        assert_eq!(parse_inline("****"), vec![Span::plain("****")]);
+        assert_eq!(parse_inline("a * b"), vec![Span::plain("a * b")]);
     }
 
     /// PIN (user report, 2026-08-25: formulas in a `.md` file stood as literal

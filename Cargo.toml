@@ -151,7 +151,7 @@ typst-library = "=0.15.0"
 typst-svg = "=0.15.0"
 unicode-segmentation = "1"
 unicode-script = "0.5.8"
-unicode-properties = { version = "0.1", default-features = false, features = ["emoji"] }
+unicode-properties = { version = "0.1", default-features = false, features = ["emoji", "general-category"] }
 unicode-width = "0.2"
 vte = "0.15"
 wgpu = { version = "30.0.0", default-features = false, features = ["std", "dx12", "wgsl"] }
