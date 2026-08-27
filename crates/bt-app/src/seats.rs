@@ -2663,8 +2663,9 @@ pub enum ChromeTarget {
     /// is not membership in anything, and it was wearing the other two's word
     /// and the other two's glyph two hundred pixels from one of them. It is a
     /// padlock now, and it registers a tip — see [`crate::marks::ChromeMark`]'s
-    /// `Lock`, and [`crate::tooltip::TooltipAnchorId::PreviewLock`] for why a
-    /// padlock is the one thing in this head that has to say what it does.
+    /// `Lock`. **It is no longer the one thing in this head that says what it
+    /// does**: since 2026-08-27 every control in the run does, through
+    /// [`crate::tooltip::TooltipAnchorId::PreviewHeadTool`].
     PreviewLock(SeatId),
     /// `.preview-pane .files-foot` — the full path along the bottom of a preview
     /// pane, whose whole strip reveals the file in Explorer (P32-P35).
