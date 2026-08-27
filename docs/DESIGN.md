@@ -3374,3 +3374,17 @@ v1 Q1-Q4、v3 各决策（alt=停放、一 session 一可输入视口、折叠�
 - **既有 session 会有一次性的重解。** ratio 的含义从「整个槽的比例」收紧成「flex 空间的比例」，所以磁盘上那些**固定列被嵌在一侧**的树（用户当天的 `session.json` 就是 `row(577530, row(500000, files, term), term)`）恢复后中间那片会宽出约「固定列宽 × ratio 的补」这么多。这是把一个本来就名不副实的数字改回名副其实，不做迁移：迁移要把旧含义算回像素，而像素依赖窗口大小，写进 schema 就是把一次求解的**结果**当**意图**存盘（红线 L11 明令禁止）。
 - **钉死名。** `a_re_placed_pane_leaves_its_untouched_siblings_in_proportion`（不变量 ①，断言里就是实证那三个数）、`a_pane_let_go_where_it_was_moves_nothing_at_all`（不变量 ②，连 `F` 一起断言）、`a_pane_arriving_from_another_run_is_paid_for_by_the_pane_it_landed_beside`、`a_fixed_column_takes_pixels_wherever_it_sits_in_the_tree`。既有的 `the_plan_runs_the_edit_chain_the_drop_will_run` 被这条裁决翻案后改为对着 `MoveSeat` 断言，并当场断言三片的**次序变了、宽度逐值不变**。（份额是 ppm，`1/3 × 3/4` 这类换算会掉一个 ppm ——1600px 下 0.0016px——所以断言写在宽度上而不是写在 ppm 上。）
 - **与「最小值主权裁决」不冲突。** 这一片一个最小值都没动：`plan_fits` 仍然按 `Lawful` 判投放，手拖 divider 仍然按 `Sovereign` 放开。改的是「一次重放该改写哪些 ratio」，不是「最小值对谁说了算」。惟一要如实承认的边角：某片正压在自己的最小值上时，「哪个邻居替它垫」由槽位而非份额决定；同一条 run 内的重放因为骨架不重切所以连这一点也不变，跨 run 的重放则会随落点改变垫付人——那是让步链的事实，不是结算的事实。
+
+### 7.19 设置页的字是写给读者的：一页文案规范、一张禁语表、一道标点红门（2026-08-26 用户裁；`docs/plans/ui-style/copy-guide.md`、`crates/bt-app/src/{i18n,settings,psreadline,shortcuts}.rs`）
+
+**① 病在哪。** 用户验 next11 的原话：「设置里的文字到时候都要重写，你现在写的叫做注释，而不是面向用户的。」逐行读一遍就看得出这不是一句气话——`Terminal font` 的说明写着 *The face the grid is drawn in*，`Light scheme` 写着 *terminal and chrome alike*，`Focus card height` 写着 *Alt+wheel over a seat*。`face` / `grid` / `chrome` / `seat` 是这个代码库对自己说的四个精确的词，读者一个也没见过。中文那半边另有一种病：505 条里 18 条在汉字后面直接跟半角 `,` `;` `:`，同一页上一句松一句紧；「档案」和「配置文件」两个词指同一个对象，「集成」和「整合」也是，`ProfilesInherit` 的中文里还裸着一个英文 `pane`。
+
+**② 规范先立，再动串。** `docs/plans/ui-style/copy-guide.md`：行名是名词或动宾短语、英文 ≤3 词中文 ≤6 字、不加句号、说「它是什么」不说「它怎么实现」；说明一到两句，**第一句说打开时发生什么，第二句说关掉/另一档时发生什么、或它影响谁、或一个非知不可的前提**；不讲内部机制、不引代码名、不讲历史；文件路径只在读者真的要去找那个文件时才写（三个 hooks 安装行、`Dark scheme` 的配色文件夹，就这四处）；中文按中文习惯重写不逐字翻译、标点全角、专有名保留原文；说明三行以内；同族行同句式。**「为什么这样设计」不进屏幕——那是本文的事。**
+
+**③ 两道新红门，都是先红后绿。** `no_settings_sentence_uses_the_words_this_window_only_says_to_itself` 走 `Text::ALL` 的两列查禁语表（英文 11 个整词 + 9 个短语，中文 15 条）；单词按词边界匹配、短语按子串匹配，所以表上是 `the ground` 而不是 `ground`——`Background image` 是一个行名，必须留着。`chinese_sentences_are_punctuated_the_chinese_way` 查「汉字后面直接跟半角标点」，写成「汉字之后」而不是「任何位置」正是它安全的原因：这张表合法携带的半角标点永远在一个拉丁 token 内部（`https://`、`folio.ps1`），它左边站着的是字母不是汉字。**禁语表不是越长越好**：`Search engine`、`WebView2 Runtime`、`hook`、`profile`、`pane`、`tab` 全部不在表上——那些是读者在别的产品屏幕上天天读的词，禁掉它们只是为了改名而改名。
+
+**④ 顺手翻的一件事：抄文案的测试。** 五条行测试原来写 `labels.iter().any(|label| label.text == "Blocks taller than this scroll inside themselves")`，看着是在问「这一行画了它的句子吗」，实际问的是「这句文案今天还是一行放得下吗」——所以它们在**改文案**的那天集体变红，而不是在某一行不再画出自己句子的那天变红。改法是 `drawn_text(&labels)`：把一页画出来的 label 按绘制顺序接回一个串，再拿 `row.description(&values())` 去查包含。**文案的唯一出处是语言表**，测试里再抄一份就是第二个要维护的地方。逐字钉死的两条（`Default profile` 与 `Line wrapping` 的两句）留着——那两条钉的就是文案本身，改文案本来就该来这里改一次。
+
+**⑤ 实机双语截图查出两件测试查不到的事，两件都是文案的。** 第一件:快捷键页每一行的按钮在中文窗口里写着 `Record`。`RECORD_BUTTON_LABEL` / `RECORD_LISTENING_LABEL` / `RESTORE_ALL_LABEL` 三个 `&'static str` 常量从来没进过表——`ShortcutRecordPrompt` 的注释还写着「它们是这一页最后剩下的英文字面量」,而它说这句话的时候,这三个正躺在它上面十行的地方。**一个常量没法自己报告这件事**,只有把同一页用两种语言各拍一张才看得见,于是 `Text::ALL` 505 → **508**。第二件:设置行的换行**优先在半角空格处断**,只有一整个空格分隔的「词」放不下整行时才退回逐字断——中文里空格只出现在拉丁 token 两边,所以一句以短拉丁词开头的中文会把那个词单独留在第一行(`Agent` 一个人占一行),而超出一个字的中文会把句号单独留在第二行。六条中文因此二次改写:三个渲染块开关各收进一行、Agents 四行各是齐整的两行。**英文列一个字未动**——这是关于中文排版的事实,不是关于句子内容的。
+
+**⑥ 落地。** 80 条改动:74 条重写 + 3 条新入表 + 3 条实机复核后的中文再改(与前者有重叠,逐行账在 `docs/plans/ui-style/copy-rewrite-2026-08-26.md`,旧英/新英/旧中/新中/理由五列)。用户先前挂的三笔——`Card height`、`Minimum contrast`、`Codex notify` 的缩短版——按规范重写,随本片结清。
