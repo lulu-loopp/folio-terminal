@@ -685,7 +685,10 @@ files 列按**像素**参与布局（`FILES_W = 240` / `FILES_W_MIN = 170`），
 
 ### 11.9 已知未做，写在这里免得下一个人以为它做过
 
-- **目录 watcher**（`ReadDirectoryChangesW`）没有。今天的刷新手势是**重新展开那个目录**。
+- ~~**目录 watcher**（`ReadDirectoryChangesW`）没有~~ **已做**（2026-08-27，`crates/bt-app/src/files_watch.rs`）：
+  root 与**屏上每个已展开目录**各挂一个浅监视，通知 → 去抖 → 重读那个目录。
+  折叠/切 tab/换 root 即释放句柄；**展开仍然是一次刷新**，因为句柄一放开内核就不再说话，
+  这段没人听的时间只有重新展开能补上。详见 `docs/DESIGN.md` §7.24。
 - **UNC 枚举没有超时**：一个挂起的网络共享会占住那条 worker 线程。
 - **纯 files tab 不存在**：只剩文件列的 pane 顶不回标签条（`pane_can_become_a_tab` 仍是 `false`）。
   它卡在「tab 的身份来自终端」这条更早的法则上，需要先给 tab 一个不靠终端的身份层。

@@ -26,7 +26,7 @@
 //! to agree.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -242,8 +242,10 @@ pub enum DirNode {
 /// **Why collapsing does not evict.** A fold is a statement about what you want
 /// to look at, not about what you want forgotten, and re-opening a folder you
 /// just closed should not stutter. The cache lives until the column does; a
-/// re-open re-asks anyway (there is no watcher yet, so re-opening a folder is
-/// the manual refresh), and the fresh answer replaces the kept one.
+/// re-open re-asks anyway — the kernel stops speaking about a folder the moment
+/// it is folded ([`crate::files_watch`] drops the handle with the row), so the
+/// unfold is what covers whatever moved while nobody was watching — and the
+/// fresh answer replaces the kept one.
 #[derive(Clone, Debug, Default)]
 pub struct DirCache {
     dirs: BTreeMap<String, DirNode>,
@@ -337,14 +339,29 @@ impl DirCache {
         }
     }
 
-    /// Take an answer from the worker.
-    pub fn accept(&mut self, key: &str, outcome: DirOutcome) {
+    /// Take an answer from the worker, and say whether it changed anything.
+    ///
+    /// **An answer that says what the table already said is not a change**
+    /// (`files_watch`). A shallow watch speaks for a whole folder, so a single
+    /// `>> build.log` in a watched directory is a notification, a re-read, and a
+    /// listing identical to the one already here — the name did not appear, it
+    /// was already there, and a directory row shows neither a length nor a time.
+    /// Answering `false` there is what keeps a program writing in the folder a
+    /// column is rooted at from bumping the damage counter, healing selections
+    /// and asking for a frame every two seconds for as long as it runs. The cost
+    /// of the claim is one comparison of at most [`DIR_ENTRY_CAP`] names, against
+    /// a repaint of the window.
+    pub fn accept(&mut self, key: &str, outcome: DirOutcome) -> bool {
         let node = match outcome {
             DirOutcome::Listed(listing) => DirNode::Listed(listing),
             DirOutcome::Failed(fault) => DirNode::Failed(fault),
         };
+        if self.dirs.get(key) == Some(&node) {
+            return false;
+        }
         self.dirs.insert(key.to_owned(), node);
         self.revision = self.revision.wrapping_add(1);
+        true
     }
 
     /// **Put a row's triangle at its new angle without turning it** (user ruling
@@ -895,6 +912,56 @@ pub fn apply_tree_command(
 pub fn parent_key(key: &str) -> Option<String> {
     let cut = key.rfind('/')?;
     (cut > 0).then(|| key[..cut].to_owned())
+}
+
+/// **The directories this column is currently showing the contents of** — its
+/// root, and every folder it has unfolded whose ancestors are unfolded too.
+///
+/// This is the set [`crate::files_watch`] subscribes to, and it is the whole of
+/// the watcher's scope: a folder whose names are on the glass is a folder whose
+/// names can go out of date, and no other folder in the tree can. **Not the tree
+/// underneath** — a column rooted at a repository must not make this process
+/// listen to every object file a `cargo build` writes three levels down, which
+/// is the same sentence `DirWatch::start_shallow` was added for one lane over.
+///
+/// **Derived from [`FilesLeafState`] alone**, without the cache and without a
+/// walk. It is asked on every turn of the event loop, and `open` is keyed by the
+/// same stable ids the rows are: whether a folder's contents are *visible* is a
+/// question about that key's ancestors and nothing else. A folder inside a
+/// folded one is open in the sense that unfolding its parent will show it again,
+/// and on screen in no sense at all — so it is not watched, and the unfold is
+/// what re-asks for it.
+///
+/// The root is `""` and is always here, even before anything has read it: a
+/// directory that is not there is one a watch cannot open, which is the caller's
+/// ordinary "no handle" answer rather than a case to decide here. An unrooted
+/// column contributes nothing, because it is not pointed anywhere.
+#[must_use]
+pub fn visible_dirs(state: &FilesLeafState) -> Vec<String> {
+    if !root_is_addressable(&state.root) {
+        return Vec::new();
+    }
+    let mut dirs = vec![String::new()];
+    dirs.extend(
+        state
+            .open
+            .iter()
+            .filter(|key| ancestors_are_open(key, &state.open))
+            .cloned(),
+    );
+    dirs
+}
+
+/// Whether every folder between `key` and the root is unfolded.
+fn ancestors_are_open(key: &str, open: &BTreeSet<String>) -> bool {
+    let mut at = parent_key(key);
+    while let Some(parent) = at {
+        if !open.contains(&parent) {
+            return false;
+        }
+        at = parent_key(&parent);
+    }
+    true
 }
 
 /// Folders first, then names, each group case-insensitively alphabetical (Q4).
@@ -1965,5 +2032,107 @@ mod tests {
         assert!(!root_is_addressable("   "));
         assert!(root_is_addressable("C:\\Users\\me"));
         assert!(root_is_addressable("/home/me"));
+    }
+
+    /// PIN — **the watched set is the root plus every unfolded folder that is
+    /// actually on screen**, and folding one takes it back out.
+    ///
+    /// The scope rule of `files_watch` written where the rule lives: a folder
+    /// inside a folded one stays in `open` — that is what makes re-opening its
+    /// parent show it again — and is not a folder whose names anybody can see,
+    /// so it owes no kernel handle. Folding is therefore a release, with no
+    /// second bookkeeping anywhere: the set simply stops containing it.
+    ///
+    /// RED GATE: drop the `ancestors_are_open` filter — the column that has
+    /// folded `/a` still claims a watch on `/a/b`, which is a handle and a
+    /// blocked thread for a row nobody is looking at.
+    #[test]
+    fn the_watched_directories_are_the_root_and_what_is_unfolded_on_screen() {
+        assert_eq!(
+            visible_dirs(&state("D:\\work", &[], None)),
+            vec![String::new()],
+            "a column that has unfolded nothing still watches the folder it is rooted at"
+        );
+        assert_eq!(
+            visible_dirs(&state("D:\\work", &["/a", "/a/b"], None)),
+            vec![String::new(), "/a".to_owned(), "/a/b".to_owned()],
+            "the root, and both folders on the way down"
+        );
+        assert_eq!(
+            visible_dirs(&state("D:\\work", &["/a/b"], None)),
+            vec![String::new()],
+            "a folder inside a folded one is not on screen and is not watched"
+        );
+        assert_eq!(
+            visible_dirs(&state("D:\\work", &["/a", "/c"], None)),
+            vec![String::new(), "/a".to_owned(), "/c".to_owned()],
+            "two siblings are two subscriptions"
+        );
+        assert!(
+            visible_dirs(&state("", &["/a"], None)).is_empty(),
+            "a column that was never pointed anywhere watches nothing at all"
+        );
+    }
+
+    /// PIN — **a re-read that finds the same names changes nothing.**
+    ///
+    /// The other half of what makes a watched folder cheap. A shallow watch
+    /// speaks for every write to every file in the folder, and a program
+    /// appending to a log in the directory a column is rooted at would otherwise
+    /// bump the damage counter — and with it every card thumbnail keyed on it —
+    /// once per floor for as long as it ran.
+    ///
+    /// RED GATE: have [`DirCache::accept`] insert unconditionally — the third
+    /// assertion goes red and the revision climbs on an answer that said nothing.
+    #[test]
+    fn an_answer_that_repeats_the_one_already_here_is_not_a_change() {
+        let mut cache = DirCache::default();
+        cache.mark_pending("");
+        let asked = cache.revision();
+
+        assert!(
+            cache.accept(
+                "",
+                DirOutcome::Listed(DirListing {
+                    entries: vec![entry("notes.md", false)],
+                    omitted: 0,
+                    canonical: None,
+                }),
+            ),
+            "the first answer is what the column was waiting for"
+        );
+        let listed_at = cache.revision();
+        assert_ne!(listed_at, asked);
+
+        assert!(
+            !cache.accept(
+                "",
+                DirOutcome::Listed(DirListing {
+                    entries: vec![entry("notes.md", false)],
+                    omitted: 0,
+                    canonical: None,
+                }),
+            ),
+            "the same directory, read again, is not news"
+        );
+        assert_eq!(cache.revision(), listed_at, "and nothing was damaged");
+
+        assert!(
+            cache.accept(
+                "",
+                DirOutcome::Listed(DirListing {
+                    entries: vec![entry("notes.md", false), entry("pi-map-us.html", false)],
+                    omitted: 0,
+                    canonical: None,
+                }),
+            ),
+            "a name that was not there before is"
+        );
+        assert_ne!(cache.revision(), listed_at);
+
+        assert!(
+            cache.accept("", DirOutcome::Failed(DirFault::NotFound)),
+            "and so is the folder going away under it"
+        );
     }
 }

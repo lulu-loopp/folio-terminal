@@ -474,7 +474,7 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 - **平台交接**是逐座位的 `WebSeat::rehost`(F1a 的窄合同,这一片是它写明在案的调用方),也是唯一一段动了东西之后还能失败的。引擎拒绝交出的那张页由平台自己的补偿放回源窗(`RehostReport::SourceKept`),然后**本函数把已经过去的那几张按相反顺序送回来**,再拒绝。`Rebuilding` 不算失败:页内状态确实没了、报告如实说了,但地址已经是目标窗的,tab 必须跟着它走。
 - **model commit** 之后没有任何可失败的一步:剪 strip、搬两张按 pane 存放的窗级活状态(引擎与它们的最后一帧)、重绑唤醒、丢掉队列位置、一次记账。
 
-**七张表不用搬,因为 tab 就是那个结构体。** shell、文件列、读过的目录、仓库、Git 滚动位置、提交图、整个预览视图全都是 `TabState` 的字段,`Vec<TabState>` 一挪它们就到了。**预览 watcher 也不用安排**:`watched_preview_files` 走的是自己那扇窗的每一个 tab,所以目标窗下一轮自己把文件收进来、源窗自己把它们放掉——验证而不是安排,这是更好的那一种。**注意力券丢掉而不是带走**:一张券是**某一扇窗**队列里的位置,由那扇窗的序号铸出、意思是"在这里,它等了你多久";带进另一扇窗它就是一个比那扇窗发过的任何号都老的序号,会插到它刚加入的队伍前面去。响铃本身没动,所以还在等的 pane 下一轮由目标窗自己的计数器发一张新的——这是同一句"你还没答复它",用新窗自己的话说。
+**七张表不用搬,因为 tab 就是那个结构体。** shell、文件列、读过的目录、仓库、Git 滚动位置、提交图、整个预览视图全都是 `TabState` 的字段,`Vec<TabState>` 一挪它们就到了。**预览 watcher 也不用安排**:`watched_preview_files` 走的是自己那扇窗的每一个 tab,所以目标窗下一轮自己把文件收进来、源窗自己把它们放掉——验证而不是安排,这是更好的那一种。**files 列的 watcher(§7.24)同理**,只是它走的是自己那扇窗**屏上那个 tab**:源窗下一轮不再报出这些文件夹、句柄当场落地,目标窗把它们当作新挂上的来挂,于是那几个目录还欠一次重读——这正是 §7.24 ⑤ 那条规矩,它不知道有过一次移交,也不需要知道。**注意力券丢掉而不是带走**:一张券是**某一扇窗**队列里的位置,由那扇窗的序号铸出、意思是"在这里,它等了你多久";带进另一扇窗它就是一个比那扇窗发过的任何号都老的序号,会插到它刚加入的队伍前面去。响铃本身没动,所以还在等的 pane 下一轮由目标窗自己的计数器发一张新的——这是同一句"你还没答复它",用新窗自己的话说。
 
 **PTY 唤醒重绑,而失败模式是沉默不是错画(审阅 #9)。** reader 线程在 spawn 那一刻拿到它的 `OutputWake` 并终生持有;此前那是某一扇窗 `PtyWakeSignal` 的克隆。信号是一个位,由 drain 放下;一个 tab 已经搬进 B 窗的 shell 仍然举 A 窗的位,**而抽走最后一个 tab 的移交会把 A 窗关掉,一个关掉的窗再没有人替它放下那个位**——于是那之后第一次举起发出一条消息、之后每一次都在 `swap` 处返回,循环没有别的事可做就坐在 `ControlFlow::Wait` 里,而 B 窗里的 shell 正往一个没人读的环里打字。所以指向多加一层,粒度是**每片叶**(叶才是会动的东西:升格成 tab、移进别的 tab、随 tab 换窗):`LeafWake` 是 reader 线程闭包与 `LeafSession` 共同指名的那个格子,`rebind` 是它唯一的写者,跑在不许失败的 model commit 里。`PtyWakeSignal` 也因此不再发闭包——**一个 shell 劝不动的唤醒,正是让搬走的 shell 继续叫一扇它已经离开的窗的那个东西**。
 
@@ -1738,7 +1738,7 @@ else                       { Flash }    // 在这台屏上,但不在你眼前
 
 - **裁决四:字体 picker 的末项是 `Install fonts…`**。列表是 DirectWrite 报的每一个等宽字族,于是「我的字体不在里面」的诚实答案就是「去装一个」,而这个 picker 一直是沉默地结束的。它开系统自己的字体页(`ms-settings:fonts`),这是 **`ShellExecuteW` 的第四道门,也是头一道递 URI 的门**——而那正是这份代码在别处拒绝的事(`preview.rs` 只开 `http`/`https`);区别在于**这里没有任何东西是参数**,它能递出去的两条字符串都是本次构建的常量;协议没注册时回落到那一页所看的那个文件夹(`%WINDIR%\Fonts`,走 Explorer)。**产品不装也不删**:字体是整台机器的资源,装一个影响桌上每一个程序,而删掉一个别的程序正在用的字族,是一个终端从来没有资格做的决定。**列表在对话框重新打开时重扫,而不是开着的时候**:DirectWrite 的集合在 picker 构建时就快照了,要在开着的对话框背后换它就得作废集合并在指针下重建每一张开着的弹层;而把字体装上去的那个动作——离开 Folio、把文件拖到 Windows 的页上、再回来——本来就跨了一次关闭与一次打开。于是 `OnceLock` 换成一把**可重置键的槽**(就是 `SchemeLabelSlot` 早就解过的同一道题),而那句写在旁边的「一个会话中途装的字体、别的程序也只会叫你重启」随之作废——把人请出去装字体、再叫他重启终端,是最失礼的一种答法。
 
-- **裁决五:预览头上的名字就是文件的名字,所以可以改**。双击它开一个就地的输入框,Enter 把磁盘上的文件改名。**它是 tab 条那个编辑器,不是第二个**:一个 `RenameSubject` 枚举把「正在改什么」提出来,于是键盘归属(`KeyboardOwner::Rename`)、IME 的光标源(`ImeCaretSource::Field`,走同一个 `rename_caret_line`)、闪烁、按键路由、「开着时吞下一切」都只写一遍并且两边都算数;主题只决定**打开时播下什么、提交时写下什么**——而那恰好就是一次改名的两头。两处不同都来自名字底下是什么:tab 的名字是一层**覆盖**,所以框里只放你写的那个、占位符把底下那个露出来;文件的名字底下没有名字,所以框里放整个名字、**且只选中主干不选后缀**(打字替掉 `notes` 而留下 `.md`,这才是改文件名几乎总是在做的事;`.gitignore` 是个名字而不是空主干加后缀,所以全选;**`Ctrl+A` 全选整串**,是留给不想只改主干的那些次的一步——用户裁决 2026-08-20 保留选主干、补上这个手势,而在那之前这句话许诺的手势并不存在,`rename_key` 把每一个 Ctrl 和弦一律吞掉。它**不进 `shortcuts::BINDINGS`**:那张表是本窗**从 shell 手里认领**的和弦登记册,而编辑器开着时没有 shell 在听,与 graph 的六枚裸键、文件列的方向键同一条归属;**光标随选区走到末尾**,因为「有选区时 caret 就是选区的末端」是这个编辑器的不变量而不是它开门那一刻的巧合)。框**按草稿的宽度**而不是填满标题栏,否则脏点与工具会被推到最右再在提交时拖回来。**拒绝是沉默的**:空名、没改、带了 Windows 不收的那九个字符、或者同名文件已存在——名字弹回去,一句话不说,因为读者正盯着答案。**只有一种拒绝会说话:文件系统自己不放手**(别的程序抓着句柄)——小样自己就写了这个例外的形式(「会说话的那一种拒绝,是读者看不见的那一种」),而其余四种都是关于**草稿**的事实、就在那个框里看得见。**碰名自己判**而不交给 Windows:`std::fs::rename` 在本平台是 `MOVEFILE_REPLACE_EXISTING`,交给它就是默不作声地吃掉同名的文件;判断写成**忽略大小写地与旧路径比**,因为 `notes.md → Notes.md` 是一次真实的改名,而在不区分大小写的文件系统上它的目标「已存在」只因为目标就是源。**虚拟文档不提供这一手**(git diff 背后没有文件),**不是拒绝而是不存在**——与一页之外内置配色不显标记是同一句话。改完之后,**三张以 `PreviewSource` 为键的表一起跟着走**(缓冲池、每一个在看它的窗格、以及记得你读到哪里的那张表),文件列被告知重读那个目录(它至今没有 watcher,而本窗自己做的改名是少数几个能告诉它真相的时刻之一)。**配色的 watcher 一个字都没改**:从这个头上改名一份配色文件,动的是 `SchemeWatch` 订阅的那个文件夹,于是 `rescan_verdict` 的 renamed 规则原样跑一遍——**本窗做的改名不得是个特例**,因为那条跟随规则的全部意义就是它不关心是谁动的文件。
+- **裁决五:预览头上的名字就是文件的名字,所以可以改**。双击它开一个就地的输入框,Enter 把磁盘上的文件改名。**它是 tab 条那个编辑器,不是第二个**:一个 `RenameSubject` 枚举把「正在改什么」提出来,于是键盘归属(`KeyboardOwner::Rename`)、IME 的光标源(`ImeCaretSource::Field`,走同一个 `rename_caret_line`)、闪烁、按键路由、「开着时吞下一切」都只写一遍并且两边都算数;主题只决定**打开时播下什么、提交时写下什么**——而那恰好就是一次改名的两头。两处不同都来自名字底下是什么:tab 的名字是一层**覆盖**,所以框里只放你写的那个、占位符把底下那个露出来;文件的名字底下没有名字,所以框里放整个名字、**且只选中主干不选后缀**(打字替掉 `notes` 而留下 `.md`,这才是改文件名几乎总是在做的事;`.gitignore` 是个名字而不是空主干加后缀,所以全选;**`Ctrl+A` 全选整串**,是留给不想只改主干的那些次的一步——用户裁决 2026-08-20 保留选主干、补上这个手势,而在那之前这句话许诺的手势并不存在,`rename_key` 把每一个 Ctrl 和弦一律吞掉。它**不进 `shortcuts::BINDINGS`**:那张表是本窗**从 shell 手里认领**的和弦登记册,而编辑器开着时没有 shell 在听,与 graph 的六枚裸键、文件列的方向键同一条归属;**光标随选区走到末尾**,因为「有选区时 caret 就是选区的末端」是这个编辑器的不变量而不是它开门那一刻的巧合)。框**按草稿的宽度**而不是填满标题栏,否则脏点与工具会被推到最右再在提交时拖回来。**拒绝是沉默的**:空名、没改、带了 Windows 不收的那九个字符、或者同名文件已存在——名字弹回去,一句话不说,因为读者正盯着答案。**只有一种拒绝会说话:文件系统自己不放手**(别的程序抓着句柄)——小样自己就写了这个例外的形式(「会说话的那一种拒绝,是读者看不见的那一种」),而其余四种都是关于**草稿**的事实、就在那个框里看得见。**碰名自己判**而不交给 Windows:`std::fs::rename` 在本平台是 `MOVEFILE_REPLACE_EXISTING`,交给它就是默不作声地吃掉同名的文件;判断写成**忽略大小写地与旧路径比**,因为 `notes.md → Notes.md` 是一次真实的改名,而在不区分大小写的文件系统上它的目标「已存在」只因为目标就是源。**虚拟文档不提供这一手**(git diff 背后没有文件),**不是拒绝而是不存在**——与一页之外内置配色不显标记是同一句话。改完之后,**三张以 `PreviewSource` 为键的表一起跟着走**(缓冲池、每一个在看它的窗格、以及记得你读到哪里的那张表),文件列被告知重读那个目录(§7.24 给它长出 watcher 之后这一句仍然留着:本窗自己做的改名,这扇窗比内核的说法早整整一个安静窗口就知道真相,而一行在下一帧跟上它的文件与在三百毫秒后跟上不是同一件事;watcher 随后那次重读读到的列表已经是对的,`DirCache::accept` 答「不是新闻」,不会有第二次重画)。**配色的 watcher 一个字都没改**:从这个头上改名一份配色文件,动的是 `SchemeWatch` 订阅的那个文件夹,于是 `rescan_verdict` 的 renamed 规则原样跑一遍——**本窗做的改名不得是个特例**,因为那条跟随规则的全部意义就是它不关心是谁动的文件。
 
 **7.1.6d 瞬时通知 toast(用户裁决 2026-08-16,已落地;`crates/bt-app/src/toast.rs`)。** 立项由头是一次实测:Git 页拒绝一次 checkout,`fatal: 't1-tab-basics' is already used by worktree at …` 被切成四个词塞进列顶一条红横幅里。**两个毛病,只有一个是审美的**——审美的那个:240px 宽的列里,一句话说不完;结构的那个:**横幅是给一件已经发生完的事付永久像素**,它把下面所有行往下推,并且一直留到下一次尝试才被清掉,页面因此记仇。**通知是这两条的反面**:它**盖在**表面上而不是嵌进去(什么都不移动)、宽度随表面而不是随一行、并且自己会走。**它出现在注意力已经在的地方**(同日的第二次裁决,推翻了初稿的「窗口右下角」):卡片锚在**发起这次动作的那个表面的顶部**——`FilesColumn(seat)` 是发出该动词的那一列(哪怕它此刻翻回了 Files 页,通知仍在它头上;只有列**关掉**才算没了),`PreviewSeat(seat)` 是图上双击 checkout 的那个席位,`Window` 只作**兜底**(表面这一帧找不到 → 窗口右下角内缩 16),而锚是**每帧重解**的,所以列回来通知就回到列上。**几何**:内缩 8、宽 = 表面宽 − 16(下限 200,永不宽过表面),同一锚**向下**堆叠、间距 8、最新在下,**每锚上限 3**(第四张让该锚最老的一张立刻开始离场,不排队——排队会让通知讲一件你已经不在做的事)。**时序**:入场 120ms 淡入 + 8px 位移(锚在顶就往下落、兜底在底就往上升,位移只在入场——出场不往回缩,因为它不是要去哪儿,它是结束了)、失败驻留 6s / 确认与提示 4s、出场 90ms 淡出;**指针停在卡片上时钟停走**(读一遍不等于读完了),离开续走。**三色三记号**走既有状态墨:`Error`=`status_err`(见下条,现在是玫红)、`Info`=`accent`、`Ok`=`status_ok`,记号是该墨 15% 的圆底上一枚字形(与 Git 徽记同一配方),右上角 `×` 走 `.pv-tool` 那道三级显影梯(静止不在、卡片被指 0.7、按钮被指 1.0 带药丸)。**材质**没有新令牌:菜单的面、发丝线与阴影,与 tooltip、浮窗同一道 `push_float_window`。**z 序**在菜单之上、tooltip 之下——之上是因为卡片就挂在 pane body 顶部而 pane 菜单正好落在那里,之下是因为它自己的 `×` 也有 tooltip;**指针路由**则排在模态族之后(模态就是模态,画在它上面的两个表面都不可能与它同时存在),但**排在座位自身的命中之前**——卡片盖着一列带动词的文件行,漏过去的一次按下会去暂存你正伸手够的那张卡底下的文件。**红只归红**:持久读故障(没有 git、仓库打不开、问题超时)**不发通知**,它们六秒后不会变,通知讲完就走反而把唯一的报告拿走了——它们照旧是页面自己那句静音的话,站在本该是行的地方(`GitPanelContent::empty` / `GraphContent::empty`,`GitRow::Notice`),用的是次级墨不是红。
 
@@ -3626,6 +3626,71 @@ Reduced 那一轮是同一个进程:`SPI_SETCLIENTAREAANIMATION` 的值走 **`pv
 | `Ctrl+Shift+V` 不粘贴 | **是虫** | `is_paste_shortcut` 要求 `modifiers == CONTROL` **恰好相等**,于是这一半掉进编码器、shell 收到 `^V`(0x16)。`Ctrl+Shift+C` 一直能复制,而**半对儿比一对都没有更糟**:在 WT 上学会这一对的手会两个都按,而失败的那半看起来像剪贴板把字弄丢了,不像这扇窗不接这个和弦。判定改写成与它的搭档同形,而不是给它自己立一套修饰键政策 |
 | `Ctrl+Insert` 不复制 | **是虫** | Windows 两对剪贴板键里更老的那一对,这扇窗只答了它的粘贴那半(`Shift+Insert`),复制那半被直接编成 `\x1b[2;5~`,而这个词在全仓用户可见字符串里出现零次。它按 `Ctrl+C` 的条件答而不是 `Ctrl+Shift+C` 的:**有选区就复制,没有就仍归子程序**——`Insert` 是全屏程序会绑的键,而「复制一个空的」不是从它们手里拿走这个键的理由 |
 | `close-search`(裸 `Esc`)是装饰行 | **误判** | 「`lookup` 永远不会返回它」这个观察是对的:Esc 梯子在每一种宿主上都先答,页也不例外。漏掉的是**这一行的活是在按压成为按压之前干完的**——`webhost::claimable_chords` 读的正是这张表,用来告诉引擎哪些键要交回来。这行一撤,一张拿着键盘的页就把 `Esc` 留给自己,站在它上面的搜索胶囊没有任何办法关掉。`webhost::tests::the_page_gives_the_search_chord_back_to_the_window` 断言的正是这件事,撤行即红。**所以留着,而且留在快捷键页上**:它是一条读者能改、改了会看见效果的真和弦。理由已写在那一行的注释里,免得下一位读盘点的人再判一次 |
+### 7.23 视频有一张脸：首帧从 Media Foundation 来，能画的集合不等于能播的集合（视频预览片①，2026-08-27 用户裁；`crates/bt-platform/src/video.rs`(新)、`crates/bt-app/src/{preview,file_peek,main}.rs`、`test-assets/folio-video-test.mp4`(新)）
+
+**一句话：视频还是进不了页道（§7.16 一个字都没翻案），但它不再落在「这种文件类型没有预览」那张卡上——本窗自己长了一个解码器，悬停卡与预览 pane 都画它的首帧，并说它有多长、多大、多重。它不播；播是片②，路线已经裁好，写在 ④。**
+
+**① 先清一段自相矛盾的注释（零功能改动）。** `main.rs` 的 `path_opens_as_a_page` 头上留着 2026-08-25 那次「否决半片」的残段：*A `.mp4` is a page by the identical argument PDF is one … now opens a player with controls, a scrubber and a volume.* 那段话描述的是**被否掉的**那半片，与同文件的红门、与 `preview.rs` 的表注、与 §7.16 全篇矛盾——读它的人会得到与代码相反的结论。已改写成现状：视频不是页、四扇门都不给它页道、今天它的脸是首帧、播的路线在 ④。
+
+**② 准入表三个，`mov` 明确不进，而「能画」与「能播」是两张表。** `preview::VIDEO_EXTENSIONS = [mp4, m4v, webm]`，与 `PAGE_EXTENSIONS` 并排放，理由和它一样：一个类写两遍就会散（§7.10 ⑥ 的整笔账）。`path_names_a_video(&Path)` 是它的第二种读法，红门 `the_video_class_reads_the_same_from_a_name_and_from_a_path` 逐条断言真扩展名而非子串（`clip.mp4.txt` 是文本）、忽略大小写、整个名字叫 `.mp4` 的两边都不是视频，并断言这张表与页表**不相交**。
+
+表短是裁决而不是省事。这三个是 2026-08-25 在实机上量到**引擎肯在页里播**的三个（`canPlayType` 各答 `maybe`），而一张关于**画**的表照着一次关于**播**的测量来定，是因为本产品已经欠自己一个片②：那天到来时，能出脸的文件和能播的文件必须是同一批。`mov` 因此明确不进——Media Foundation 读得动它（`.mov` 与 `.mp4` 同属 MPEG-4 File Source），而引擎对 `video/quicktime` 答的是空串。收它等于今天买一张图、明天还一句道歉。
+
+**这个错位本身要写下来，两个方向都真实**：`.webm` 里的 VP9/AV1 在引擎里播得动，而一台出厂 Windows 未必有它们的 MF 解码器——所以它在表里，它的卡上却可能没有画面，那不是漏洞，是 `first_frame` 的 `None` 与降级卡（见 ⑤）。反过来，`mov`/`mkv`/`avi` 全在表外，全落原来那张「无法预览」。**这张表是关于本窗的承诺，不是关于平台的报告**：名字在表里意味着本窗为它备了一张脸，不保证某台机器的编解码器填得满。
+
+**③ 首帧从哪里来，在哪条线程上。** `bt-platform` 新增 `video.rs`：`first_frame(path, fit_w, fit_h) -> Option<VideoFrame>`，走 `IMFSourceReader` + `MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING`（微软自己给这个属性写的用例逐字就是 "to create a video thumbnail"），官方参考实现是 `VideoThumbnail` 示例。
+
+- **代价是一个 feature 不是一个包。** `windows` crate 加 `Win32_Media_MediaFoundation` 与 `Win32_System_Variant`（后者是 `SetCurrentPosition` / `GetPresentationAttribute` 的 `PROPVARIANT` 绑定的门）。**`Cargo.lock` 零行改动**——这是 §8 的准入线，也是 `hayro`、`serde_json` 走过的同一道门。
+- **线程模型：一次一条 MTA 线程。** MF 官方要求「Work queues always have multithreaded apartment (MTA) threads … 建议 `CoInitializeEx(COINIT_MULTITHREADED)`」，而本仓现有三处 `CoInitializeEx` 全是 GUI 线程上的 STA（任务栏、通知、文件选择器），装饰 worker 那条线程根本没有 apartment。所以 `first_frame` **不在调用它的线程上跑**：它开一条线程，那条线程进 MTA、`MFStartup`，干完 `MFShutdown` + `CoUninitialize`，**每条失败路径上都成对**。
+  - 为什么一次一条而不是养一条常驻的：常驻那条给不了调用方**放弃等待**的能力。`ReadSample` 是同步调用、一个畸形文件能把 demuxer 拖很远，而 `FIRST_FRAME_BUDGET = 3s` 是靠**接收端超时**兑现的——超时之后那条线程写进一个没人拿着的 channel、自行收尾。它不持任何锁，除了自己的 channel 什么都不写。
+  - 代价是每次问一遍 `MFStartup`。可以接受：一个文件只问一次（像素按路径进 `peek_cache`，与 `.png` 同一个缓存、同一把钥匙），所以那笔钱付在第一次悬停上。
+  - **超时是对「等」的界，不是对「做」的界**：没有受支持的办法中断一次 `ReadSample`，这一点如实写在常量头上而不是假装成硬中断。
+- **取哪一帧：片长的 1/10 处（`SEEK_FRACTION`）。** 不取 0.0 秒——大量视频开头是黑场（淡入、片头板、还没测光的镜头），取首帧会让一整个录屏文件夹的卡全是同样的黑矩形。`SetCurrentPosition` 不保证精确、通常落到目标之前最近的关键帧，而关键帧正是这里想要的。容器不报时长的就从头读——未知长度的十分之一不是一个位置。红门就压在这条上：把 `SEEK_FRACTION` 改成 `0.0`，`the_shipped_fixture_gives_up_a_frame` 的着墨断言当场红（实测 `0 lit pixels`），而尺寸与时长两条仍绿——这正是「我的片子全是黑的」这种缺陷会溜过去的样子。
+- **像素怎么出来。** 输出型先按 `contain(native, fit)` 要一次带尺寸的 RGB32，被拒就退回只要 subtype，然后**把实际生效的媒体型读回来**再按它的宽高走；缓冲优先 `IMF2DBuffer::Lock2D`（它直接给 scanline 0 与带符号 pitch，所以自下而上的 RGB32 是被**描述**出来的而不是被猜出来的），没有这个接口才退回平坦 `Lock` + `MF_MT_DEFAULT_STRIDE` 的符号。MF 的 `RGB32` 命名的是 DWORD 不是字节序，所以每个像素逐字节翻转、第四个字节写成实心 255——一帧视频没有透明度可带，而合成到终端底色上的那种「透出来」是这里最容易出的错。四条纯函数红门钉住这四件事（高低半字不换位、fit 只缩不放、自下而上翻正、行内 padding 不进画面）。
+- **`fit` 是请求也是上限，永不放大。** 320×240 的片子按 1280×720 去要，回来还是 320×240。`VideoFrame` 同时带**光栅的**宽高与**录像本身的** `native_*`：前者是卡与 pane 拿去 fit 的，后者是事实行里那个「宽×高」——把两者混起来说，就会拿本窗自己挑的缩略图尺寸去冒充录像的分辨率。解码尺寸的上限是一个常数 `VIDEO_FRAME_FIT_PX = 1920×1080`，而不是各面各自的盒子：`peek_cache` 按路径作键，各面各要一个尺寸就会互相驱逐。
+
+**④ 片②的明账（用户裁决 2026-08-27，本片不做）。**
+
+- **路线 A：页道 + 自铸壳页**（本窗铸一张 HTML，把视频当子资源交给 `<video controls>`）。它要回答 §7.16 ⑤ 那六问（地址栏显示什么、↗ 交出什么、`session.json` 存哪个、切换器那行叫什么、`Mint` 的反函数性质、壳页放哪谁清），外加三条本片摸底时新提的：`IsWebMessageEnabled` 要不要为进度条开一条缝、后台 tab 的音频、壳页形态（临时文件 vs `SetVirtualHostNameToFolderMapping`）。
+- **路线 B：Media Foundation Media Engine + DirectComposition**（`EnableWindowlessSwapchainMode` 的句柄进 `IDCompositionDevice::CreateSurfaceFromHandle`；这条配对官方**没有明写**，需要一次 spike）。**写成明账升级路，四条触发条件**：① 视频要成为文档（md 内嵌 / 一个 pane 多段 / 按滚动抽帧）；② WebView2 每 pane 一套引擎的内存扛不住；③ 要播 Chromium 不认的格式（`mov`）；④ 要完全自管后台音频与生命周期。**本片的 MF 首帧就是 B 的地基，A 不堵 B。**
+- **切走 tab 的音频：继续播，tab 上亮一只小喇叭**（`ICoreWebView2_8::IsDocumentPlayingAudio`），浏览器惯例。这一条落地时必须按 §7.1.5b 的状态点分类学接入，不能自造一个点。
+
+**⑤ 两张脸，一段字，一条降级路。**
+
+- **悬停卡** `PeekBody::Frame`：首帧 fit 进**页盒**（280×160，与 PDF 那一列同宽同高——因为它下面站着两行字，而图片盒是给下面什么都没有的身体准备的）+ 两行事实：**`时长 · 宽×高`** 与 **文件大小**。三样都是可选的、盒子从第一帧就是终值高度：解码在另一条线程上，身体等到东西来了才长高就是卡在手底下跳。红门 `a_video_card_shows_a_frame_over_two_lines` 连「它和 PDF 卡一样高」「它不是那张一行的拒绝卡」一起断言。
+- **预览 pane**：打开一个视频（files 列双击/回车、终端里裸路径点击、拖到 pane 上）走 `PreviewOpenLane::Video` → 首帧上**图片通道**（座位的 `set_preview_image`，浮窗的 mark 通道），**同两行事实**在 `.pv-meta` 那条带上用同一个 `preview::video_fact_lines` 写出来，中点连接。不播。**而且不缩放**：`picture_takes_zoom` 把图片道的 zoom 对视频整个关掉。理由是那句话而不是那张图——本窗的百分比意思是「文件自己的像素我看到了多少」，而一帧没有这个数可以做基数（它是按 `VIDEO_FRAME_FIT_PX` 解出来的，所以一段 4K 录像上的 `100%` 其实是一半），那会变成**缩略图的**放大倍数站在**录像的**分辨率旁边，两个都叫尺寸而含义不同；而一个改变了你所见却不告诉你改成了什么的手势，正是 `page_foot_flash` 那条裁决终结掉的东西。于是脸就是脸不是查看器：停在 Fit、滚轮在它上面花掉一格什么也不动、两行事实就是这块 pane 说的全部。「一边播一边缩放」是片②要的东西，那时它会自带读数。
+- **降级：读不出/损坏/超时 → `None`，卡与 pane 都变成「格式名 + 大小」。** 事实是在**看那一帧之前**就存下的（`VideoGlance.facts` 先于 `frame` 落账），所以一台没有 AV1 解码器的机器上，一段 `.webm` 仍然给出 `WEBM · 4 KB` 而不是崩、也不是回到「这种文件类型没有预览」。**而且它不写「预览失败」那句**：一个叫 `.png` 却不是的文件值得被告知，一个容器本机没装编解码器的视频是一个普通文件，pane 还有名字、长度和大小可说。红门压在 fallback 那一行上：删掉它，那张卡只剩一行大小，连这是个什么东西都不说。
+- **一个解码器，一扇门。** 卡与 pane 不各自读文件名挑解码器——两边都问 `request_peek_pixels`，它是 `PeekImage` 与 `PeekVideoFrame` 唯一被构造的地方，并且用的正是 `preview_open_lane` 分岔的那个谓词。红门 `one_door_decides_which_decoder_a_hover_and_a_pane_ask` 按**文本**断言这一点（钉的是「哪个函数造哪个请求」，没有任何值能表达这件事），并断言两个展示面自己不提任何一个解码器的名字。
+- **纹理身份带 mtime。** 图片的纹理名是自己字节的哈希；一帧不能这样命名——它来自一个本进程从未整份持有的容器。所以照 PDF 页的做法写成 `video-frame:{path}:{mtime}:{w}x{h}`，红门 `one_video_texture_is_one_file_at_one_version_at_one_size`：去掉版本那一段当场红，玻璃上就是一段被重录过的录屏还在画旧的那一帧。
+
+**⑥ §7.16 的两条红门都还在，只是断言的是它一直在主张的那件事。** `no_video_spelling_is_a_page_until_something_hosts_it_inside_one`（preview）一字未动，只在末尾把「视频落 `Unknown`」更新成「三个落 `Video`、其余落 `Unknown`，两者都不是 `Web`」——那个 `assert_ne!(…, Web)` 才是这条门。main 那条从 `a_video_takes_the_document_lane_at_every_door` 改名为 **`a_video_takes_no_page_lane_at_any_door`**：断言从「去处是文档道」收紧成「**不是页道**」，因为那才是那次测量得出的结论，而 2026-08-27 改的是另一条道的身份不是这条禁令。它的名单**故意比准入表宽**（`mov`/`mkv` 也在）——「不是页」是关于每一种视频拼法的主张。新的正门是 `a_video_has_a_face_of_its_own`，两半都钉：三个拼法拿到 lane / chip / 卡身体，而 `mov`/`mkv`/`avi` 与两个子串邻居一个都没动。
+
+**⑦ 三张脸没动，逐条带理由。** 地址栏对 `.mp4` 路径**照旧拒绝**（`webhost::judge_address` 问的是「是不是页」，视频不是页，所以那条路一个字都不用改，也不该改——视频不是页就不该出现在页的地址栏里）；终端里的裸路径**早就**是可点链接（`paths.rs` 的候选扫描没有任何扩展名白名单，画不画下划线只看 worker 问过磁盘），点它走 `open_preview_at`，于是今天它开出的就是这张脸；files 列的文件行菜单**不加行**（`profiles.rs` 的四张脸只按 subject 分，2026-08-25 刚立过「subject 之外的任何东西都不改变一张单子的长度」，`Open in default app` 已经是「交给系统播放器」那扇门）。图片的准入表（`bt_term::has_admissible_image_extension`）**一个字未动**：那是**内联图片探测器**的表，一段 shell 输出里印出的 `.mp4` 不该被画成内联图。视频对**预览面**是图片，对别的什么都不是。顺手修的一处：拖放那扇门（`open_preview_onto`）过去自己问 `path_is_previewable_image`，在只有两条道的年代与 `preview_open_lane` 同答，第三条道出现的那天就不是了——已改为问同一个函数。
+
+**⑧ 字一个没加。** `Text::ALL` 仍是 509 条：时长是 `m:ss`、分辨率是两个数、大小走既有的 `format_byte_size`、降级那行是文件自己的扩展名大写。这一片没有一句需要翻译的新话，也就没有一句会翻译得不一样的新话。
+
+**⑨ fixture。** `test-assets/folio-video-test.mp4`：2982 字节，160×120，5.0 秒，25 帧全 I 帧，前 0.4 秒纯黑其余橙色（这样 1/10 处一定在橙色里、第 0 帧一定是黑的，红门才咬得住）。由本仓机器上的 ffmpeg 从 `lavfi` 的两段纯色合成——没有第三方素材、没有许可问题，命令逐字为：`ffmpeg -f lavfi -i color=c=black:s=160x120:r=5:d=0.4 -f lavfi -i color=c=0xE07A2F:s=160x120:r=5:d=4.6 -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0[v]" -map "[v]" -c:v libx264 -preset veryslow -crf 28 -g 1 -pix_fmt yuv420p -movflags +faststart`。
+### 7.24 files 列自己看着那几个文件夹（目录 watcher 单，2026-08-27 用户实证，已落地；`crates/bt-app/src/files_watch.rs`(新)、`crates/bt-app/src/{files,main}.rs`）
+
+**实证。** 列的 root 是 `D:\Documents\SyncFolder\Application`，同一扇窗里的终端跑出来的程序在那个目录里写了一个 `pi-map-us.html`，列继续显示它几分钟前读到的那两个文件。原因不是判定误伤、也不是去抖吞了事件：**根本没有事件**。`DirWatch` 自 2026-08-17 起有三个用户（`git_watch` / `scheme_watch` / `storage_watch`），files 列不在其中；`docs/UI-UX.md` §11.9「目录 watcher 没有」与 `Runtime::refresh_files_dir` 自己的注释「展开一个目录就是刷新手势，而且是唯一的那个」都在说同一件事。本片是第四个用户，两句话一起退役。
+
+**① 监视范围 = 屏上那几个文件夹，不是那棵树。** `files::visible_dirs` 给出一列的 root 加**每一个祖先都展开着的已展开目录**——也就是「此刻有名字露在玻璃上」的那几个文件夹，一个都不多。每个挂一枚 `DirWatch::start_shallow`（`bWatchSubtree=false`），理由与预览 watcher 当初加这个参数的那句一模一样：一列 root 在仓库根上，递归监听就是让这个进程为 `target\debug` 里每一个 .obj 醒一次，而那些名字**没有一行在屏上**，醒了也无事可做。折叠着的目录不挂——它留在 `open` 里只是为了下次展开还能看见它，不是「在屏上」的意思。
+
+**② 判定只用 `FilesLeafState`，不走一遍树。** 这个集合每一轮事件循环都要问一次（鼠标移动也算一轮），而 `open` 与行用的是同一套稳定 id，「这个文件夹的内容是否可见」只是关于这个 key 的祖先链的问题，与缓存无关。所以它是纯算术，不是第二次 `tree_view`——第二次遍历既贵又会和屏上那一次产生分歧。
+
+**③ 去抖是已经有的那一份，不是第四份。** `watch_clock::WatchClock` 本人，`WATCH_QUIET` **300ms** 与 `WATCH_FLOOR` **2s** 原样。一次 `New-Item` 是写、改大小、动属性三条通知落在几毫秒内，必须是**一次**重读；而一个持续往这个文件夹里写的程序，代价被地板钉在两秒一次。`dir_news` 的头一句就是为防止这里出现第四个数字写的：一份去抖抄两遍，就是两个表面迟早对「它不动了」给出两个答案。
+
+**④ 释放 = 集合不再包含它，没有第二处判断。** 折叠一个目录、切走 tab、换 root、关掉一个浮窗，句柄都在那一刻被 drop（`DirWatch::drop` 是 `SetEvent` + join）。`FilesWatch::sync` 拿到的那个集合**就是**这扇门。同时被丢掉的还有那个文件夹在信箱里没读的那一条时间戳——它说的是折叠之前的事，而重新展开本身已经欠一次新读。
+
+**⑤ 刚挂上，就欠一次重读。** 内核不为「当时还没人在听」的那一段补发通知（CONVENTIONS 那条事故的另一面）。所以 `sync` 把**这一轮新挂上的文件夹**报回来，而对其中**这棵树已经有答案**的那些，当场再问一次——那份答案是在没人监听的时候取的。**没人问过的不问**：把它放上屏的那次遍历本来就要第一次去问它，而那次读在这次挂载的后面。这一条同时是「切回一个后台 tab」的全部答案，也是本片敢于**只监视屏上那个 tab**（与 `watched_preview_files` 跨 tab 的做法相反）的理由：一个预览缓冲是内容，回到那张 tab 时不会被重读，所以按可见性设门会让「切回去」成为唯一明知在看过期内容的地方；而一个目录列表回到那张 tab 时**会**被重挂、并因此被重问，于是可见性这道门在新鲜度上不花一分钱，却省下了「二十张 tab 曾经展开过的每一个文件夹各一枚句柄一条线程」。
+
+**⑥ 读回来一模一样，就不是新闻。** `DirCache::accept` 现在回答「这张表是否真的变了」，只有变了才推进 damage counter。浅监视为整个文件夹说话，所以列 root 目录里一句 `>> build.log` 就是一次通知、一次重读、和一份与手上完全相同的列表——那个名字本来就在，而目录行既不显示长度也不显示时间。没有这一条，一个在那个文件夹里写日志的程序就会每两秒推进一次 revision、连带作废每一张以它为键的卡片缩略图、再要一帧。代价是一次至多 `DIR_ENTRY_CAP` 个名字的比较，对面是一次全窗重画。
+
+**⑦ 重读不塌树。** 走的是 `refresh_files_dir` 那条老路：**不标 `Pending`**。展开状态与选中住在 `FilesLeafState` 上、不在缓存里，所以重读根本碰不到它们；而屏上的行在新答案落地之前一直是旧那份，于是刷新永远不闪。答案落地后 `heal_files_selections` 照常跑，一个真的被删掉的选中项才会被治掉。
+
+**红门。** 四枚钉子各自写了可执行的 RED GATE：拆掉祖先链过滤（折叠了 `/a` 的列仍然为 `/a/b` 要一枚句柄）、拆掉 `retain`（折叠不释放）、拆掉 `take_due`（每一轮循环都说「所有被监视的文件夹都动了」）、拆掉 `accept` 的比较（说了等于没说的答案照样推进 revision）。四条都当场变红。
+
+**实机。** 隔离 APPDATA 开窗、列 root 指向一个真目录，终端里 `New-Item` 一个文件 → 300ms 后那一行自己出现；`Remove-Item` 同验。
 
 ## 9. 里程碑
 
@@ -3680,47 +3745,3 @@ v1 Q1-Q4、v3 各决策（alt=停放、一 session 一可输入视口、折叠�
 
 **⑥ 落地。** 80 条改动:74 条重写 + 3 条新入表 + 3 条实机复核后的中文再改(与前者有重叠,逐行账在 `docs/plans/ui-style/copy-rewrite-2026-08-26.md`,旧英/新英/旧中/新中/理由五列)。用户先前挂的三笔——`Card height`、`Minimum contrast`、`Codex notify` 的缩短版——按规范重写,随本片结清。
 
-### 7.23 视频有一张脸：首帧从 Media Foundation 来，能画的集合不等于能播的集合（视频预览片①，2026-08-27 用户裁；`crates/bt-platform/src/video.rs`(新)、`crates/bt-app/src/{preview,file_peek,main}.rs`、`test-assets/folio-video-test.mp4`(新)）
-
-**一句话：视频还是进不了页道（§7.16 一个字都没翻案），但它不再落在「这种文件类型没有预览」那张卡上——本窗自己长了一个解码器，悬停卡与预览 pane 都画它的首帧，并说它有多长、多大、多重。它不播；播是片②，路线已经裁好，写在 ④。**
-
-**① 先清一段自相矛盾的注释（零功能改动）。** `main.rs` 的 `path_opens_as_a_page` 头上留着 2026-08-25 那次「否决半片」的残段：*A `.mp4` is a page by the identical argument PDF is one … now opens a player with controls, a scrubber and a volume.* 那段话描述的是**被否掉的**那半片，与同文件的红门、与 `preview.rs` 的表注、与 §7.16 全篇矛盾——读它的人会得到与代码相反的结论。已改写成现状：视频不是页、四扇门都不给它页道、今天它的脸是首帧、播的路线在 ④。
-
-**② 准入表三个，`mov` 明确不进，而「能画」与「能播」是两张表。** `preview::VIDEO_EXTENSIONS = [mp4, m4v, webm]`，与 `PAGE_EXTENSIONS` 并排放，理由和它一样：一个类写两遍就会散（§7.10 ⑥ 的整笔账）。`path_names_a_video(&Path)` 是它的第二种读法，红门 `the_video_class_reads_the_same_from_a_name_and_from_a_path` 逐条断言真扩展名而非子串（`clip.mp4.txt` 是文本）、忽略大小写、整个名字叫 `.mp4` 的两边都不是视频，并断言这张表与页表**不相交**。
-
-表短是裁决而不是省事。这三个是 2026-08-25 在实机上量到**引擎肯在页里播**的三个（`canPlayType` 各答 `maybe`），而一张关于**画**的表照着一次关于**播**的测量来定，是因为本产品已经欠自己一个片②：那天到来时，能出脸的文件和能播的文件必须是同一批。`mov` 因此明确不进——Media Foundation 读得动它（`.mov` 与 `.mp4` 同属 MPEG-4 File Source），而引擎对 `video/quicktime` 答的是空串。收它等于今天买一张图、明天还一句道歉。
-
-**这个错位本身要写下来，两个方向都真实**：`.webm` 里的 VP9/AV1 在引擎里播得动，而一台出厂 Windows 未必有它们的 MF 解码器——所以它在表里，它的卡上却可能没有画面，那不是漏洞，是 `first_frame` 的 `None` 与降级卡（见 ⑤）。反过来，`mov`/`mkv`/`avi` 全在表外，全落原来那张「无法预览」。**这张表是关于本窗的承诺，不是关于平台的报告**：名字在表里意味着本窗为它备了一张脸，不保证某台机器的编解码器填得满。
-
-**③ 首帧从哪里来，在哪条线程上。** `bt-platform` 新增 `video.rs`：`first_frame(path, fit_w, fit_h) -> Option<VideoFrame>`，走 `IMFSourceReader` + `MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING`（微软自己给这个属性写的用例逐字就是 "to create a video thumbnail"），官方参考实现是 `VideoThumbnail` 示例。
-
-- **代价是一个 feature 不是一个包。** `windows` crate 加 `Win32_Media_MediaFoundation` 与 `Win32_System_Variant`（后者是 `SetCurrentPosition` / `GetPresentationAttribute` 的 `PROPVARIANT` 绑定的门）。**`Cargo.lock` 零行改动**——这是 §8 的准入线，也是 `hayro`、`serde_json` 走过的同一道门。
-- **线程模型：一次一条 MTA 线程。** MF 官方要求「Work queues always have multithreaded apartment (MTA) threads … 建议 `CoInitializeEx(COINIT_MULTITHREADED)`」，而本仓现有三处 `CoInitializeEx` 全是 GUI 线程上的 STA（任务栏、通知、文件选择器），装饰 worker 那条线程根本没有 apartment。所以 `first_frame` **不在调用它的线程上跑**：它开一条线程，那条线程进 MTA、`MFStartup`，干完 `MFShutdown` + `CoUninitialize`，**每条失败路径上都成对**。
-  - 为什么一次一条而不是养一条常驻的：常驻那条给不了调用方**放弃等待**的能力。`ReadSample` 是同步调用、一个畸形文件能把 demuxer 拖很远，而 `FIRST_FRAME_BUDGET = 3s` 是靠**接收端超时**兑现的——超时之后那条线程写进一个没人拿着的 channel、自行收尾。它不持任何锁，除了自己的 channel 什么都不写。
-  - 代价是每次问一遍 `MFStartup`。可以接受：一个文件只问一次（像素按路径进 `peek_cache`，与 `.png` 同一个缓存、同一把钥匙），所以那笔钱付在第一次悬停上。
-  - **超时是对「等」的界，不是对「做」的界**：没有受支持的办法中断一次 `ReadSample`，这一点如实写在常量头上而不是假装成硬中断。
-- **取哪一帧：片长的 1/10 处（`SEEK_FRACTION`）。** 不取 0.0 秒——大量视频开头是黑场（淡入、片头板、还没测光的镜头），取首帧会让一整个录屏文件夹的卡全是同样的黑矩形。`SetCurrentPosition` 不保证精确、通常落到目标之前最近的关键帧，而关键帧正是这里想要的。容器不报时长的就从头读——未知长度的十分之一不是一个位置。红门就压在这条上：把 `SEEK_FRACTION` 改成 `0.0`，`the_shipped_fixture_gives_up_a_frame` 的着墨断言当场红（实测 `0 lit pixels`），而尺寸与时长两条仍绿——这正是「我的片子全是黑的」这种缺陷会溜过去的样子。
-- **像素怎么出来。** 输出型先按 `contain(native, fit)` 要一次带尺寸的 RGB32，被拒就退回只要 subtype，然后**把实际生效的媒体型读回来**再按它的宽高走；缓冲优先 `IMF2DBuffer::Lock2D`（它直接给 scanline 0 与带符号 pitch，所以自下而上的 RGB32 是被**描述**出来的而不是被猜出来的），没有这个接口才退回平坦 `Lock` + `MF_MT_DEFAULT_STRIDE` 的符号。MF 的 `RGB32` 命名的是 DWORD 不是字节序，所以每个像素逐字节翻转、第四个字节写成实心 255——一帧视频没有透明度可带，而合成到终端底色上的那种「透出来」是这里最容易出的错。四条纯函数红门钉住这四件事（高低半字不换位、fit 只缩不放、自下而上翻正、行内 padding 不进画面）。
-- **`fit` 是请求也是上限，永不放大。** 320×240 的片子按 1280×720 去要，回来还是 320×240。`VideoFrame` 同时带**光栅的**宽高与**录像本身的** `native_*`：前者是卡与 pane 拿去 fit 的，后者是事实行里那个「宽×高」——把两者混起来说，就会拿本窗自己挑的缩略图尺寸去冒充录像的分辨率。解码尺寸的上限是一个常数 `VIDEO_FRAME_FIT_PX = 1920×1080`，而不是各面各自的盒子：`peek_cache` 按路径作键，各面各要一个尺寸就会互相驱逐。
-
-**④ 片②的明账（用户裁决 2026-08-27，本片不做）。**
-
-- **路线 A：页道 + 自铸壳页**（本窗铸一张 HTML，把视频当子资源交给 `<video controls>`）。它要回答 §7.16 ⑤ 那六问（地址栏显示什么、↗ 交出什么、`session.json` 存哪个、切换器那行叫什么、`Mint` 的反函数性质、壳页放哪谁清），外加三条本片摸底时新提的：`IsWebMessageEnabled` 要不要为进度条开一条缝、后台 tab 的音频、壳页形态（临时文件 vs `SetVirtualHostNameToFolderMapping`）。
-- **路线 B：Media Foundation Media Engine + DirectComposition**（`EnableWindowlessSwapchainMode` 的句柄进 `IDCompositionDevice::CreateSurfaceFromHandle`；这条配对官方**没有明写**，需要一次 spike）。**写成明账升级路，四条触发条件**：① 视频要成为文档（md 内嵌 / 一个 pane 多段 / 按滚动抽帧）；② WebView2 每 pane 一套引擎的内存扛不住；③ 要播 Chromium 不认的格式（`mov`）；④ 要完全自管后台音频与生命周期。**本片的 MF 首帧就是 B 的地基，A 不堵 B。**
-- **切走 tab 的音频：继续播，tab 上亮一只小喇叭**（`ICoreWebView2_8::IsDocumentPlayingAudio`），浏览器惯例。这一条落地时必须按 §7.1.5b 的状态点分类学接入，不能自造一个点。
-
-**⑤ 两张脸，一段字，一条降级路。**
-
-- **悬停卡** `PeekBody::Frame`：首帧 fit 进**页盒**（280×160，与 PDF 那一列同宽同高——因为它下面站着两行字，而图片盒是给下面什么都没有的身体准备的）+ 两行事实：**`时长 · 宽×高`** 与 **文件大小**。三样都是可选的、盒子从第一帧就是终值高度：解码在另一条线程上，身体等到东西来了才长高就是卡在手底下跳。红门 `a_video_card_shows_a_frame_over_two_lines` 连「它和 PDF 卡一样高」「它不是那张一行的拒绝卡」一起断言。
-- **预览 pane**：打开一个视频（files 列双击/回车、终端里裸路径点击、拖到 pane 上）走 `PreviewOpenLane::Video` → 首帧上**图片通道**（座位的 `set_preview_image`，浮窗的 mark 通道），**同两行事实**在 `.pv-meta` 那条带上用同一个 `preview::video_fact_lines` 写出来，中点连接。不播。**而且不缩放**：`picture_takes_zoom` 把图片道的 zoom 对视频整个关掉。理由是那句话而不是那张图——本窗的百分比意思是「文件自己的像素我看到了多少」，而一帧没有这个数可以做基数（它是按 `VIDEO_FRAME_FIT_PX` 解出来的，所以一段 4K 录像上的 `100%` 其实是一半），那会变成**缩略图的**放大倍数站在**录像的**分辨率旁边，两个都叫尺寸而含义不同；而一个改变了你所见却不告诉你改成了什么的手势，正是 `page_foot_flash` 那条裁决终结掉的东西。于是脸就是脸不是查看器：停在 Fit、滚轮在它上面花掉一格什么也不动、两行事实就是这块 pane 说的全部。「一边播一边缩放」是片②要的东西，那时它会自带读数。
-- **降级：读不出/损坏/超时 → `None`，卡与 pane 都变成「格式名 + 大小」。** 事实是在**看那一帧之前**就存下的（`VideoGlance.facts` 先于 `frame` 落账），所以一台没有 AV1 解码器的机器上，一段 `.webm` 仍然给出 `WEBM · 4 KB` 而不是崩、也不是回到「这种文件类型没有预览」。**而且它不写「预览失败」那句**：一个叫 `.png` 却不是的文件值得被告知，一个容器本机没装编解码器的视频是一个普通文件，pane 还有名字、长度和大小可说。红门压在 fallback 那一行上：删掉它，那张卡只剩一行大小，连这是个什么东西都不说。
-- **一个解码器，一扇门。** 卡与 pane 不各自读文件名挑解码器——两边都问 `request_peek_pixels`，它是 `PeekImage` 与 `PeekVideoFrame` 唯一被构造的地方，并且用的正是 `preview_open_lane` 分岔的那个谓词。红门 `one_door_decides_which_decoder_a_hover_and_a_pane_ask` 按**文本**断言这一点（钉的是「哪个函数造哪个请求」，没有任何值能表达这件事），并断言两个展示面自己不提任何一个解码器的名字。
-- **纹理身份带 mtime。** 图片的纹理名是自己字节的哈希；一帧不能这样命名——它来自一个本进程从未整份持有的容器。所以照 PDF 页的做法写成 `video-frame:{path}:{mtime}:{w}x{h}`，红门 `one_video_texture_is_one_file_at_one_version_at_one_size`：去掉版本那一段当场红，玻璃上就是一段被重录过的录屏还在画旧的那一帧。
-
-**⑥ §7.16 的两条红门都还在，只是断言的是它一直在主张的那件事。** `no_video_spelling_is_a_page_until_something_hosts_it_inside_one`（preview）一字未动，只在末尾把「视频落 `Unknown`」更新成「三个落 `Video`、其余落 `Unknown`，两者都不是 `Web`」——那个 `assert_ne!(…, Web)` 才是这条门。main 那条从 `a_video_takes_the_document_lane_at_every_door` 改名为 **`a_video_takes_no_page_lane_at_any_door`**：断言从「去处是文档道」收紧成「**不是页道**」，因为那才是那次测量得出的结论，而 2026-08-27 改的是另一条道的身份不是这条禁令。它的名单**故意比准入表宽**（`mov`/`mkv` 也在）——「不是页」是关于每一种视频拼法的主张。新的正门是 `a_video_has_a_face_of_its_own`，两半都钉：三个拼法拿到 lane / chip / 卡身体，而 `mov`/`mkv`/`avi` 与两个子串邻居一个都没动。
-
-**⑦ 三张脸没动，逐条带理由。** 地址栏对 `.mp4` 路径**照旧拒绝**（`webhost::judge_address` 问的是「是不是页」，视频不是页，所以那条路一个字都不用改，也不该改——视频不是页就不该出现在页的地址栏里）；终端里的裸路径**早就**是可点链接（`paths.rs` 的候选扫描没有任何扩展名白名单，画不画下划线只看 worker 问过磁盘），点它走 `open_preview_at`，于是今天它开出的就是这张脸；files 列的文件行菜单**不加行**（`profiles.rs` 的四张脸只按 subject 分，2026-08-25 刚立过「subject 之外的任何东西都不改变一张单子的长度」，`Open in default app` 已经是「交给系统播放器」那扇门）。图片的准入表（`bt_term::has_admissible_image_extension`）**一个字未动**：那是**内联图片探测器**的表，一段 shell 输出里印出的 `.mp4` 不该被画成内联图。视频对**预览面**是图片，对别的什么都不是。顺手修的一处：拖放那扇门（`open_preview_onto`）过去自己问 `path_is_previewable_image`，在只有两条道的年代与 `preview_open_lane` 同答，第三条道出现的那天就不是了——已改为问同一个函数。
-
-**⑧ 字一个没加。** `Text::ALL` 仍是 509 条：时长是 `m:ss`、分辨率是两个数、大小走既有的 `format_byte_size`、降级那行是文件自己的扩展名大写。这一片没有一句需要翻译的新话，也就没有一句会翻译得不一样的新话。
-
-**⑨ fixture。** `test-assets/folio-video-test.mp4`：2982 字节，160×120，5.0 秒，25 帧全 I 帧，前 0.4 秒纯黑其余橙色（这样 1/10 处一定在橙色里、第 0 帧一定是黑的，红门才咬得住）。由本仓机器上的 ffmpeg 从 `lavfi` 的两段纯色合成——没有第三方素材、没有许可问题，命令逐字为：`ffmpeg -f lavfi -i color=c=black:s=160x120:r=5:d=0.4 -f lavfi -i color=c=0xE07A2F:s=160x120:r=5:d=4.6 -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0[v]" -map "[v]" -c:v libx264 -preset veryslow -crf 28 -g 1 -pix_fmt yuv420p -movflags +faststart`。
