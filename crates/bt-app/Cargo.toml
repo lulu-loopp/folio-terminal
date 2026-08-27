@@ -48,6 +48,14 @@ image.workspace = true
 pollster.workspace = true
 syntect.workspace = true
 two-face.workspace = true
+# **Which characters are punctuation**, and nothing else. CommonMark's
+# left-/right-flanking rule for `*` and `_` (§6.2) is written over the
+# Unicode P and S general categories, so a markdown line in Chinese — where
+# every full stop and every bracket is a character no ASCII table knows — is
+# read wrong by an emphasis pass that only classifies ASCII. The crate was
+# already in the lock file for `bt-render`'s emoji query; this adds its
+# second table.
+unicode-properties.workspace = true
 winit.workspace = true
 # **The attention block's two JSON documents, and neither of them is ours**
 # (`attention_hooks`, `attention_wire`). One is the user's own
