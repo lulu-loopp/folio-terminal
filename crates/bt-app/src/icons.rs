@@ -1022,11 +1022,21 @@ mod tests {
                 MarkSlot::CompactHead.mark_box_logical_px(ChromeMark::TabClose),
             ));
         }
-        bespoke(
-            "strip tab pin",
-            ChromeMark::Pin { filled: false },
-            crate::seats::WINDOW_TAB_PIN_GLYPH_LOGICAL_PX,
-        );
+        // The pin, on the two surfaces that wear it, at one drawing size: a
+        // card's slot is 16px against the strip's 17, near enough that a second
+        // cut would be two drawings of one control — and the card's own 11px,
+        // which the mock-up asked for, draws a 0.825px pen against a band of
+        // 0.95..=1.15. Both faces, because the fill axis is what carries the
+        // state.
+        for surface in ["strip tab pin", "focus card pin"] {
+            for filled in [false, true] {
+                bespoke(
+                    surface,
+                    ChromeMark::Pin { filled },
+                    crate::seats::WINDOW_TAB_PIN_GLYPH_LOGICAL_PX,
+                );
+            }
+        }
         bespoke(
             "strip tab mark",
             ChromeMark::File,
