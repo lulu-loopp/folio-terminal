@@ -855,7 +855,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 23,
+        SETTINGS_SCHEMA_VERSION, 24,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -880,7 +880,8 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          General page's own Search engine the v19-to-v20, and the Terminal page's \
          own Line wrapping the v20-to-v21, and the General page's own Shortcut \
          hints the v21-to-v22, and the Terminal page's own Turn finished the \
-         v22-to-v23 — one key on one day, thirteen times running"
+         v22-to-v23, and the Cards column's own first-arrival hint the v23-to-v24 \
+         — one key on one day, fourteen times running"
     );
     assert!(
         defaults.turn_end_notification,
@@ -888,6 +889,12 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          its three answers is the one that runs most of the time: nothing at all \
          while the reader is looking at the pane, a flash on a taskbar button \
          they are not, and a toast only when the window is not on any screen"
+    );
+    assert!(
+        defaults.cards_gesture_hint_offer,
+        "a reader who has never opened Cards has never been told that a card \
+         scrolls, and there is nowhere else in the window they could find out: \
+         `false` here would ship the one door to 丙1 already shut"
     );
     assert!(
         defaults.key_hints,
@@ -2343,5 +2350,70 @@ fn settings_v22_migrates_with_the_turn_end_lane_on_and_v23_keeps_the_silence_it_
     let (round_tripped, report) = read_settings(&path);
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(round_tripped, quiet);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PIN (`docs/DESIGN.md` §7.21, user ruling 2026-08-27) — a v23 settings file migrates to v24
+/// **still owing the Cards bubble**, and every older file crosses the whole ladder to the same
+/// answer.
+///
+/// The fourteenth one-key step, and the one where "carry the habit forward" and "this is new"
+/// give the *same* answer for once — which is why it is worth writing down which of the two is
+/// being said. A reader with a v23 file has been in Cards, possibly for months, and has never
+/// been told that a card scrolls, because until this build nothing told anybody. Migrating them
+/// in as `false` — already shown — would use a schema step to spend a debt that was never paid,
+/// and the readers it would spend it on are exactly the ones who have gone longest without the
+/// sentence.
+///
+/// The second half is the bit surviving the file, and it is the half that would bite the other
+/// way. A bubble that did not remember having been read is a bubble that greets a reader every
+/// single time they open Cards, which is the noise the whole "once" is for.
+///
+/// MUTATION: leave the key out of the migration and **every settings file on every machine that
+/// has ever run this product** falls back to defaults whole (`missing field
+/// cards_gesture_hint_offer`); write `false` instead of `true` and nobody who already has a
+/// settings file ever sees the hint.
+#[test]
+fn settings_v23_migrates_still_owing_the_cards_hint_and_v24_remembers_having_paid_it() {
+    let (migrated, report) = read_settings(&fixture_path("settings_v23_cards_height.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        migrated.cards_gesture_hint_offer,
+        "no build that could write a v23 file ever drew the bubble, so `false` would spend a \
+         debt that was never paid"
+    );
+    assert!(
+        !migrated.turn_end_notification,
+        "one key crosses; every sibling crosses untouched"
+    );
+    assert!(!migrated.key_hints);
+    assert_eq!(migrated.focus_card_height, 320);
+
+    // And the whole ladder, from a file twelve steps down.
+    let (from_v11, report) = read_settings(&fixture_path("settings_v11_advanced_open.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(from_v11.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(from_v11.cards_gesture_hint_offer);
+
+    let spent = SettingsV1 {
+        cards_gesture_hint_offer: false,
+        ..SettingsV1::default()
+    };
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v24-cards-hint-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &spent).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""cards_gesture_hint_offer": false"#),
+        "the answer is written as its own key: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, spent);
     std::fs::remove_dir_all(&dir).unwrap();
 }

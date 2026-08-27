@@ -137,7 +137,20 @@ use serde::{Deserialize, Serialize};
 /// way v17–v20 and v22 did rather than the way v13–v16, v19 and v21 did: no build before this one
 /// had a turn-end lane at all, so `true` is the product's default for a feature shipping new and
 /// not a habit being carried forward.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 23;
+/// **v24 carries `cards_gesture_hint_offer`**, whether entering Cards still owes the reader the
+/// one-time bubble that says `Alt`+wheel scrolls a card (`docs/DESIGN.md` §7.21, user ruling
+/// 2026-08-27). It lands the way v22 did, and for v22's own reason read across two surfaces:
+/// what is being defaulted on is an **offer**, and no build before this one made it.
+///
+/// It is the second bit in this file of `powershell_integration_offer`'s kind and it is written
+/// deliberately in that bit's shape — `true` means *still owed*, `false` means *spent* — because
+/// the two are one sentence about one file: a thing this window has to say once, and a record of
+/// whether it has said it. The difference between them is only how the debt is discharged: the
+/// PowerShell strip is dismissed by a reader who says "stop asking", and this one is spent by
+/// being read. It is cleared back to `true` by `Reset to defaults` on the Appearance page, which
+/// is the page Cards lives on — the one verb in this product that says "put this page back the
+/// way it shipped", and the reason this bit is in this file rather than in a record of its own.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 24;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -298,7 +311,8 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "focus_card_height": 160 | 240 | 320,
 ///   "line_wrapping": true | false,
 ///   "key_hints": true | false,
-///   "turn_end_notification": true | false
+///   "turn_end_notification": true | false,
+///   "cards_gesture_hint_offer": true | false
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -700,6 +714,30 @@ pub struct SettingsV1 {
     /// — see `settings::SettingsRow::selected_index`.
     #[serde(default = "default_focus_card_height")]
     pub focus_card_height: u32,
+    /// **Whether entering Cards still owes the reader the `Alt`+wheel bubble** — spent by the
+    /// bubble itself the first time it is shown, and given back by `Reset to defaults` on the
+    /// Appearance page, which is the page Cards lives on (`docs/DESIGN.md` §7.21, user ruling
+    /// 2026-08-27).
+    ///
+    /// **It has no row of its own, and that is the ruling rather than an omission.** A row would
+    /// be a switch for turning off something that has already happened once and will not happen
+    /// again, which is a control with no reader — and putting a new surface on the glass for one
+    /// gesture is the very trade this hint exists to stop being made.
+    ///
+    /// `true` is the default because the gesture it names has no other door. `Alt`+wheel over a
+    /// card scrolls that card's own window, and the 2026-08-26 audit filed it 丙1 — invented
+    /// here, and with not one clue on the glass: the column refuses tooltips, a card carries no
+    /// chevron, the wheel is not in the shortcut table, and the only sentence anywhere about it
+    /// is on the tail of a settings row about *height*. A feature that can only be found by
+    /// holding down a key nobody was told about does not exist.
+    ///
+    /// **A receipt and not a taste, and it lives here anyway.** A reader never sets this to
+    /// `false`; the window does, on the frame the bubble first appears. It is in this file rather
+    /// than in a record of its own because [`SettingsV1::powershell_integration_offer`] is the
+    /// same bit — *does this window still owe this reader this sentence* — and a second file for
+    /// the second one of them would be a second answer to one question.
+    #[serde(default = "default_cards_gesture_hint_offer")]
+    pub cards_gesture_hint_offer: bool,
     /// **Whether a line too long for the pane wraps onto the next row** — the Terminal page's
     /// `Line wrapping` row (`docs/plans/horizontal-scroll/plan.md`, ladder one).
     ///
@@ -790,6 +828,12 @@ fn default_powershell_integration_offer() -> bool {
     true
 }
 
+/// `true`, and the word in the field's name is what makes that readable: an *offer* defaults to
+/// being owed. See [`SettingsV1::cards_gesture_hint_offer`].
+fn default_cards_gesture_hint_offer() -> bool {
+    true
+}
+
 /// [`default_scrollback_lines`]'s reason exactly: a `u32`'s own default is `0`, and a card with
 /// no body at all is not a height anybody chose — it is the field having been dropped.
 fn default_focus_card_height() -> u32 {
@@ -871,6 +915,9 @@ impl Default for SettingsV1 {
             // stopped.
             key_hints: true,
             turn_end_notification: true,
+            // A reader who has never been in Cards is owed the one sentence that makes the
+            // gesture in it findable.
+            cards_gesture_hint_offer: true,
         }
     }
 }
