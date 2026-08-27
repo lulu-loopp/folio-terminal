@@ -1,20 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="316"
      viewBox="0 0 1200 316" role="img" aria-labelledby="folio-title folio-desc">
   <title id="folio-title">Folio</title>
-  <desc id="folio-desc">Folio, a Windows terminal built for coding agents: it says
-  which one is waiting for you. Beside the name, a terminal pane runs two commands;
-  a rule in the left margin marks how far each one reached, and the rule beside the
+  <desc id="folio-desc">Folio, the Windows terminal that renders math and says which
+  agent is waiting for you. Beside the name, a terminal pane runs two commands; a
+  rule in the left margin marks how far each one reached, and the rule beside the
   command that failed is drawn in the failure colour.</desc>
 
   <rect width="1200" height="316" rx="14" fill="#F1F0EE"/>
 
   <g id="title-block" font-family="-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, &quot;PingFang SC&quot;, Roboto, Arial, sans-serif">
     <text x="64" y="70" font-size="20" font-weight="600" letter-spacing="3.4"
-          fill="#8B8985">WINDOWS &#183; RUST &#183; GPU</text>
+          fill="#8B8985">WINDOWS &#183; TERMINAL &#183; WORKSPACE</text>
     <text x="64" y="154" font-size="76" font-weight="600" letter-spacing="-1.6"
           fill="#37352F">Folio</text>
-    <text x="64" y="202" font-size="26" fill="#37352F">A Windows terminal built for coding agents.</text>
-    <text x="64" y="236" font-size="26" fill="#37352F">It says which one is waiting for you.</text>
+    <text x="64" y="202" font-size="26" fill="#37352F">The Windows terminal that renders math.</text>
+    <text x="64" y="236" font-size="26" fill="#37352F">And says which agent is waiting for you.</text>
     <text x="64" y="278" font-family="ui-monospace, SFMono-Regular, &quot;Cascadia Mono&quot;, Consolas, &quot;JetBrains Mono&quot;, Menlo, monospace" font-size="19"
           fill="#8B8985">Windows 10 1809 or newer &#183; MIT or Apache-2.0</text>
   </g>
