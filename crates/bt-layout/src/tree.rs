@@ -109,6 +109,13 @@ impl Seat {
     ///
     /// §2.3: `max(fixed_extent, min_size(kind, Row))` — a fixed column is never
     /// narrower than its own honest minimum.
+    ///
+    /// **The one place a band becomes a number**, which is why the table's
+    /// reduction is applied here: a column the reader has dragged wider carries
+    /// its width on the seat and a column that has never been touched carries it
+    /// on the table, and a card has to shrink both by the same sixth or the two
+    /// disagree. Reducing before the clamp, because the clamp is against *this*
+    /// table's minimum and a card's minimum is a card's.
     #[must_use]
     pub fn fixed_width(&self, metrics: &SeatMetrics, axis: Axis) -> Option<LogicalPx> {
         if !metrics.extent_class(self.kind).is_fixed_along(axis) {
@@ -117,7 +124,11 @@ impl Seat {
         let want = self
             .fixed_extent
             .unwrap_or_else(|| metrics.default_fixed_extent(self.kind));
-        Some(want.max(metrics.min_size(self.kind, axis)))
+        Some(
+            metrics
+                .reduce_band(want)
+                .max(metrics.min_size(self.kind, axis)),
+        )
     }
 }
 

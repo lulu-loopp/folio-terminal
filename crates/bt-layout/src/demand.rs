@@ -6,7 +6,7 @@
 use crate::geom::Axis;
 use crate::metrics::SeatMetrics;
 use crate::tree::{LayoutNode, Ratio, Seat, SeatId, SeatKind, SplitId};
-use crate::{COLLAPSED_EXTENT, DIVIDER, LogicalPx, RATIO_DENOM_PPM};
+use crate::{COLLAPSED_EXTENT, LogicalPx, RATIO_DENOM_PPM};
 
 /// Fold a per-leaf valuation up the tree the way the allocator adds lengths:
 /// summed along the split's own axis (plus its divider), maxed across it.
@@ -18,14 +18,18 @@ use crate::{COLLAPSED_EXTENT, DIVIDER, LogicalPx, RATIO_DENOM_PPM};
 pub(crate) fn fold_demand(
     node: &LayoutNode,
     axis: Axis,
+    divider: LogicalPx,
     leaf: &impl Fn(&Seat) -> LogicalPx,
 ) -> LogicalPx {
     match node {
         LayoutNode::Seat(seat) => leaf(seat),
         LayoutNode::Split { dir, a, b, .. } => {
-            let (da, db) = (fold_demand(a, axis, leaf), fold_demand(b, axis, leaf));
+            let (da, db) = (
+                fold_demand(a, axis, divider, leaf),
+                fold_demand(b, axis, divider, leaf),
+            );
             if *dir == axis {
-                da + db + DIVIDER
+                da + db + divider
             } else {
                 da.max(db)
             }
@@ -39,7 +43,7 @@ pub(crate) fn fold_demand(
 /// width is what it is currently costing, and §2.6.5 sizes the window from it.
 #[must_use]
 pub fn demand(node: &LayoutNode, axis: Axis, metrics: &SeatMetrics) -> LogicalPx {
-    fold_demand(node, axis, &|seat: &Seat| {
+    fold_demand(node, axis, metrics.divider(), &|seat: &Seat| {
         seat.fixed_width(metrics, axis)
             .unwrap_or_else(|| metrics.min_size(seat.kind, axis))
     })
@@ -51,7 +55,9 @@ pub fn demand(node: &LayoutNode, axis: Axis, metrics: &SeatMetrics) -> LogicalPx
 /// This is the bound the L1 and L2 concessions descend toward.
 #[must_use]
 pub fn demand_at_min(node: &LayoutNode, axis: Axis, metrics: &SeatMetrics) -> LogicalPx {
-    fold_demand(node, axis, &|seat: &Seat| metrics.min_size(seat.kind, axis))
+    fold_demand(node, axis, metrics.divider(), &|seat: &Seat| {
+        metrics.min_size(seat.kind, axis)
+    })
 }
 
 /// The absolute floor: the focus seat keeps its own kind's honest minimum and
@@ -68,7 +74,7 @@ pub fn floor_demand(
     metrics: &SeatMetrics,
     focus: SeatId,
 ) -> LogicalPx {
-    fold_demand(node, axis, &|seat: &Seat| {
+    fold_demand(node, axis, metrics.divider(), &|seat: &Seat| {
         if seat.id == focus {
             metrics.min_size(seat.kind, axis)
         } else {
@@ -92,7 +98,7 @@ pub fn fixed_width(node: &LayoutNode, axis: Axis, metrics: &SeatMetrics) -> Opti
             let fa = fixed_width(a, axis, metrics)?;
             let fb = fixed_width(b, axis, metrics)?;
             Some(if *dir == axis {
-                fa + fb + DIVIDER
+                fa + fb + metrics.divider()
             } else {
                 fa.max(fb)
             })
