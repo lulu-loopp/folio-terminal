@@ -675,7 +675,19 @@ function Invoke-InstallStage {
 
     Write-Host ''
     Write-Host 'install'
-    Invoke-Vmrun -Step 'start' -Arguments @('start', $vmx, 'nogui') | Out-Null
+    # Resumable: the host side of this stage is only a poll, and the process
+    # running it can die (a closed terminal, a restart of the tool that launched
+    # it) while the guest carries on installing. `start` on a machine that is
+    # already powered on is an error, not a no-op, so a machine already in the
+    # running list is picked up where it is rather than started twice.
+    $alreadyRunning = -not $planning -and
+        ((& $vmrun -T ws list 2>&1 | Out-String) -split "`r?`n" | Where-Object { $_.Trim() -ieq $vmx })
+    if ($alreadyRunning) {
+        Write-Host "  start      already powered on - picking up the install in progress"
+    }
+    else {
+        Invoke-Vmrun -Step 'start' -Arguments @('start', $vmx, 'nogui') | Out-Null
+    }
 
     Write-Host "  wait       polling for $sentinel (VMware Tools answer it, so this covers both)"
     if (-not $planning) { Wait-ForSentinel }
