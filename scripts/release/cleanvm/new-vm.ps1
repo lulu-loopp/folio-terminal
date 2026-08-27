@@ -54,6 +54,50 @@
     Tools install as the thing to look at, because it is the only step between
     a working Setup and a silent guest.
 
+    ── Press any key to boot from CD or DVD ────────────────────────────────────
+
+    The first attempt at both machines spent two and a half hours never reaching
+    Setup, and `vmware.log` had said so from the first minute:
+
+        Guest: About to do EFI boot: EFI VMware Virtual SATA CDROM Drive (0.0)
+        Guest: Status upon boot failure: Time out
+        [msg.Backdoor.OsNotFound] No operating system was found.
+
+    Three seconds apart. Microsoft's installation ISO boots under EFI from
+    `efi\microsoft\boot\efisys.bin`, whose loader asks for a keystroke first;
+    unattended means nobody presses one. Beside it on the same disc is
+    `efisys_noprompt.bin`, the same image with a loader that does not ask.
+
+    So the `build` stage runs `new-install-iso.ps1` over the ISO first, and the
+    machine gets the remaster. That script does nothing when it is handed a disc
+    that already boots without a prompt, or when the remaster of this source is
+    already built, so it costs nothing to call it every time. `-Stage install
+    -Iso` runs the same thing and changes the disc in a machine already built —
+    which is how the two machines here were rescued rather than rebuilt.
+
+    ── The CD cannot come first ────────────────────────────────────────────────
+
+    The keystroke the loader above waits for is also what has always let a CD sit
+    at the front of the boot order without harm: the second time a machine boots,
+    nobody presses a key, the prompt times out, and the firmware falls through to
+    the disk Setup has just written. **Take the prompt away and that fall-through
+    goes with it.** With `bios.bootOrder = "cdrom,hdd"` and a disc that boots
+    without asking, the machine boots the disc every single time, and Windows
+    Setup's first reboot lands back in Setup:
+
+        Windows Setup
+        It looks like you started an upgrade and booted from installation media.
+
+    Observed on the Windows 11 machine on 2026-08-27: the image applied, the disk
+    reached fourteen gigabytes, the machine rebooted, and it sat on that dialog
+    for forty minutes.
+
+    So the order is **`hdd,cdrom`, at install time as well**. The first boot has
+    a blank disk, which answers `No Media`, and the firmware goes on to the CD by
+    itself — this host prints two `No Media` lines and then
+    `About to do EFI boot: … CDROM Drive`. Every boot after that has a Windows
+    Boot Manager on the disk, and the disk wins.
+
     ── The Windows 11 vTPM ─────────────────────────────────────────────────────
 
     Windows 11 Setup wants a TPM 2.0, and `docs/plans/release/clean-vm.md` §2.2
@@ -102,8 +146,11 @@
     name, and whether there is a network adapter.
 
 .PARAMETER Iso
-    The Microsoft installation ISO. Required by the `build` stage and ignored by
-    `install`.
+    The Microsoft installation ISO. Required by the `build` stage, where it is
+    remastered to boot without a prompt (see **Press any key** above) and the
+    remaster is what the machine gets. Optional in the `install` stage, where it
+    changes the disc in a machine that is already built: `sata0:0` is pointed at
+    it, reconnected at power on, and the boot order put back to the CD.
 
 .PARAMETER VmRoot
     Where the machines live. Each gets `<VmRoot>\folio-<name>`.
@@ -328,6 +375,11 @@ $machines = @{
 $machine = $machines[$Name]
 if ($VTpm -eq 'auto') { $VTpm = $machine.DefaultTpm }
 
+# What `sata0:0` ends up holding. `-Iso` is what a person names; this is that ISO
+# after `new-install-iso.ps1` has had a look at it, which is either a remaster
+# that boots without a prompt or the same path back again.
+$installMedia = $Iso
+
 $vmName = "folio-$Name"
 $vmDirectory = Join-Path $VmRoot $vmName
 $vmx = Join-Path $vmDirectory "$vmName.vmx"
@@ -410,12 +462,14 @@ function New-VmxText {
         # to be and there is no reason for the two machines to differ.
         'firmware'                                   = 'efi'
         'uefi.secureBoot.enabled'                    = 'TRUE'
-        # UNVERIFIED against Broadcom documentation: `bios.bootOrder` is the key
-        # every third-party reference names and it is spelled `bios.` under EFI
-        # too. It barely matters at install time — the disk is blank, so the
-        # firmware falls through to the CD on its own — and after the install it
-        # is flipped to `hdd,cdrom` along with the media being disconnected.
-        'bios.bootOrder'                             = if ($MediaConnected) { 'cdrom,hdd' } else { 'hdd,cdrom' }
+        # **The disk first, at install time too, and that is not a typo.** See
+        # **The CD cannot come first** in the description: this machine's disc
+        # boots without asking for a key, so a CD ahead of the disk is a CD that
+        # wins every reboot, and Windows Setup's second half never runs. The
+        # blank disk answers `No Media` and the firmware falls through to the CD
+        # on its own (verified on this host 2026-08-27: two `No Media` lines and
+        # then `About to do EFI boot: … CDROM Drive`).
+        'bios.bootOrder'                             = 'hdd,cdrom'
 
         'numvcpus'                                   = "$Cpus"
         'cpuid.coresPerSocket'                       = '1'
@@ -435,7 +489,7 @@ function New-VmxText {
         'sata0.present'                              = 'TRUE'
         'sata0:0.present'                            = 'TRUE'
         'sata0:0.deviceType'                         = 'cdrom-image'
-        'sata0:0.fileName'                           = $Iso
+        'sata0:0.fileName'                           = $installMedia
         'sata0:0.startConnected'                     = $connected
         'sata0:1.present'                            = 'TRUE'
         'sata0:1.deviceType'                         = 'cdrom-image'
@@ -552,6 +606,7 @@ to pick up the machine that is already there.
     if (Test-Path -LiteralPath $Iso -PathType Leaf) {
         $script:Iso = (Resolve-Path -LiteralPath $Iso).Path
         Write-Host "  installer  $Iso ($('{0:N0}' -f (Get-Item -LiteralPath $Iso).Length) bytes)"
+        Resolve-InstallMedia
         Test-InstallationImage
     }
     elseif ($planning) {
@@ -599,6 +654,26 @@ to pick up the machine that is already there.
     }
 }
 
+function Resolve-InstallMedia {
+    # The disc the machine actually boots from — see **Press any key** in the
+    # description. `new-install-iso.ps1` answers "this one already boots without a
+    # prompt" and "the remaster of this source is already built" by itself, so
+    # this is called on every run and does the work at most once. The path it
+    # decides on is the only thing it writes to the pipeline.
+    $builder = Join-Path $PSScriptRoot 'new-install-iso.ps1'
+    if (-not (Test-Path -LiteralPath $builder -PathType Leaf)) { throw "missing $builder" }
+
+    Write-Host "  media      new-install-iso.ps1 -Iso $Iso"
+    if ($planning) { $script:installMedia = $Iso; return }
+
+    $answer = & $builder -Iso $Iso | Select-Object -Last 1
+    if (-not $answer -or -not (Test-Path -LiteralPath $answer -PathType Leaf)) {
+        throw "new-install-iso.ps1 did not name an ISO to boot from"
+    }
+    $script:installMedia = (Resolve-Path -LiteralPath $answer).Path
+    Write-Host "             booting from $($script:installMedia)"
+}
+
 function Test-InstallationImage {
     # A boundary check, and the failure it exists to prevent is the expensive
     # one: an answer file naming an edition the ISO does not hold does not fail
@@ -616,7 +691,7 @@ function Test-InstallationImage {
     $editions = $null
     $mounted = $null
     try {
-        $mounted = Mount-DiskImage -ImagePath $Iso -PassThru -ErrorAction Stop
+        $mounted = Mount-DiskImage -ImagePath $installMedia -PassThru -ErrorAction Stop
         $letter = ($mounted | Get-Volume).DriveLetter
         $source = @("${letter}:\sources\install.wim", "${letter}:\sources\install.esd") |
             Where-Object { Test-Path -LiteralPath $_ } |
@@ -629,13 +704,13 @@ function Test-InstallationImage {
         Write-Host '             run elevated, or pass -SkipImageCheck to stop asking.'
     }
     finally {
-        if ($mounted) { Dismount-DiskImage -ImagePath $Iso -ErrorAction SilentlyContinue | Out-Null }
+        if ($mounted) { Dismount-DiskImage -ImagePath $installMedia -ErrorAction SilentlyContinue | Out-Null }
     }
 
     if ($null -eq $editions) { return }
     if ($editions -notcontains $wanted) {
         throw @"
-$([IO.Path]::GetFileName($Iso)) does not hold an edition called "$wanted".
+$([IO.Path]::GetFileName($installMedia)) does not hold an edition called "$wanted".
 It holds:
 $($editions | ForEach-Object { "  $_" } | Out-String)
 Change the /IMAGE/NAME value in scripts/release/cleanvm/$($machine.AnswerFile)
@@ -675,6 +750,17 @@ function Invoke-InstallStage {
 
     Write-Host ''
     Write-Host 'install'
+    # `-Iso` in this stage changes the disc rather than describing the one the
+    # machine was built with. It is how a machine that was built around an ISO
+    # that turned out not to boot is put right without being rebuilt.
+    if ($Iso) {
+        if (-not (Test-Path -LiteralPath $Iso -PathType Leaf) -and -not $planning) {
+            throw "no installation ISO at $Iso"
+        }
+        if (Test-Path -LiteralPath $Iso -PathType Leaf) { $script:Iso = (Resolve-Path -LiteralPath $Iso).Path }
+        Resolve-InstallMedia
+        Set-InstallMedia
+    }
     # Resumable: the host side of this stage is only a poll, and the process
     # running it can die (a closed terminal, a restart of the tool that launched
     # it) while the guest carries on installing. `start` on a machine that is
@@ -763,34 +849,60 @@ function Wait-ForPowerOff {
     }
 }
 
-function Disconnect-Media {
+function Set-VmxKeys {
     # An edit of the file rather than a rewrite of it. By now Workstation has
     # added the machine's UUIDs, its generated MAC address and whatever else it
     # decides a machine needs on first power-on, and rewriting the file from the
     # template would throw all of that away.
-    Write-Host '  media      disconnecting the three CD-ROM devices in the .vmx'
-    if ($planning) { return }
+    #
+    # **This works on the encrypted Windows 11 machine too, and that was checked
+    # rather than assumed.** `vmx.encryptionType = "partial"` leaves every key
+    # here in plain text beside two long `encryption.*` lines, and a copy of that
+    # machine with `sata0:0.fileName` rewritten by hand still answers
+    # `vmrun -T ws -vp <password> listSnapshots` — while the same command with a
+    # wrong password still answers `Incorrect password`, so the file is genuinely
+    # still being decrypted and not merely tolerated (verified 2026-08-27).
+    param([Parameter(Mandatory)] [hashtable] $Values)
 
-    $wanted = @{
-        'sata0:0.startConnected' = 'FALSE'
-        'sata0:1.startConnected' = 'FALSE'
-        'sata0:2.startConnected' = 'FALSE'
-        'bios.bootOrder'         = 'hdd,cdrom'
-    }
     $lines = [IO.File]::ReadAllLines($vmx)
     $seen = @{}
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ($lines[$i] -match '^\s*([^\s=]+)\s*=') {
             $key = $Matches[1]
-            if ($wanted.ContainsKey($key)) {
-                $lines[$i] = '{0} = "{1}"' -f $key, $wanted[$key]
+            if ($Values.ContainsKey($key)) {
+                $lines[$i] = '{0} = "{1}"' -f $key, $Values[$key]
                 $seen[$key] = $true
             }
         }
     }
-    $tail = @($wanted.Keys | Where-Object { -not $seen.ContainsKey($_) } |
-        ForEach-Object { '{0} = "{1}"' -f $_, $wanted[$_] })
+    $tail = @($Values.Keys | Where-Object { -not $seen.ContainsKey($_) } |
+        ForEach-Object { '{0} = "{1}"' -f $_, $Values[$_] })
     [IO.File]::WriteAllLines($vmx, ($lines + $tail), (New-Object Text.UTF8Encoding($false)))
+}
+
+function Set-InstallMedia {
+    # Changing the disc in a machine that is already built: the file, and the
+    # drive being plugged in at power on. **The boot order is not touched, and
+    # is `hdd,cdrom` here as it is everywhere else** — see **The CD cannot come
+    # first** in the description.
+    Write-Host "  disc       sata0:0 -> $installMedia"
+    if ($planning) { return }
+    Set-VmxKeys -Values @{
+        'sata0:0.fileName'       = $installMedia
+        'sata0:0.startConnected' = 'TRUE'
+        'bios.bootOrder'         = 'hdd,cdrom'
+    }
+}
+
+function Disconnect-Media {
+    Write-Host '  media      disconnecting the three CD-ROM devices in the .vmx'
+    if ($planning) { return }
+    Set-VmxKeys -Values @{
+        'sata0:0.startConnected' = 'FALSE'
+        'sata0:1.startConnected' = 'FALSE'
+        'sata0:2.startConnected' = 'FALSE'
+        'bios.bootOrder'         = 'hdd,cdrom'
+    }
 }
 
 # ── The run ──────────────────────────────────────────────────────────────────

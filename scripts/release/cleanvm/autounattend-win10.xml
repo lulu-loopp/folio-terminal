@@ -32,8 +32,10 @@
 
   Not a general-purpose answer file. It wipes disk 0 without asking.
 
-  UNVERIFIED: written from Microsoft's unattend reference, not yet run against
-  an ISO. Gate 5 is its first run.
+  First run against a real ISO: 2026-08-27, and it took two corrections to get
+  through — the empty <Key> below and the International-Core component in the
+  oobeSystem pass. Both are commented where they stand; the story is in
+  docs/plans/release/clean-vm.md §3.4.
 -->
 <unattend xmlns="urn:schemas-microsoft-com:unattend"
           xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
@@ -131,14 +133,30 @@
       <UserData>
         <AcceptEula>true</AcceptEula>
         <!--
-          No key. An unactivated Windows 10 installs, boots and runs a terminal
-          perfectly well — it nags about personalisation, which is not something
-          this gate measures. If a build of this VM ever stops at the key page
-          anyway, Microsoft publishes generic edition-selection keys ("KMS client
-          setup keys") for exactly this purpose; put one in a <Key> element here.
-          They select an edition and do not activate anything.
+          No key, and **the empty <Key> element is what says so.** Written
+          without one, this whole block reads to Setup as a setting it cannot
+          make sense of, and it stops on a message box saying exactly that:
+
+              Windows cannot read the <ProductKey> setting from the unattend
+              answer file.
+
+          Observed 2026-08-27 on this machine's first real install: Setup sat on
+          that dialog for half an hour with the disk untouched, because the
+          windowsPE pass never got as far as DiskConfiguration. The Windows 11
+          machine has the same block without a <Key> and does not stop, because
+          an evaluation image asks for no key in the first place — which is why
+          the two files differ here and should keep differing.
+
+          An unactivated Windows 10 installs, boots and runs a terminal
+          perfectly well; it nags about personalisation, which is not something
+          this gate measures. If a build ever stops at the key page even with
+          the empty element, Microsoft publishes generic edition-selection keys
+          ("KMS client setup keys") for exactly this purpose — the Windows 10 Pro
+          one is W269N-WFGWX-YVC9B-4J6C9-T83GX. They select an edition and
+          activate nothing.
         -->
         <ProductKey>
+          <Key></Key>
           <WillShowUI>Never</WillShowUI>
         </ProductKey>
       </UserData>
@@ -196,6 +214,30 @@
   </settings>
 
   <settings pass="oobeSystem">
+    <!--
+      **The region and keyboard pages of the out-of-box experience are not part
+      of <OOBE>.** They are answered by the International-Core component in this
+      pass, and with it missing both machines stopped dead on
+
+          Let's start with region. Is this right?          (Windows 10)
+          Is this the right country or region?             (Windows 11)
+
+      after a completely silent Setup — observed 2026-08-27, twice, half an hour
+      each. The near-identical component in the windowsPE pass above is
+      International-Core-**WinPE**, and it answers only for Setup itself; this
+      one answers for the machine that Setup produced.
+    -->
+    <component name="Microsoft-Windows-International-Core"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <InputLocale>0409:00000409</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+
     <component name="Microsoft-Windows-Shell-Setup"
                processorArchitecture="amd64"
                publicKeyToken="31bf3856ad364e35"
