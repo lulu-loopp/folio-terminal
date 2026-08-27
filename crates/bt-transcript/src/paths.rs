@@ -932,9 +932,16 @@ fn names_a_dos_device(path: &str) -> bool {
     let stem = name.split('.').next().unwrap_or(name);
     DEVICES.iter().any(|device| {
         stem.eq_ignore_ascii_case(device)
+            // Compared as bytes, never sliced as a string: a four-byte stem is
+            // as often `*⑥` — one ASCII byte and one three-byte character — as
+            // it is `COM1`, and `stem[..3]` on the former is a panic in the
+            // middle of the ⑥ (crash report 2026-08-27, four times in two
+            // minutes because the session restore re-printed the same line).
+            // A non-ASCII byte never equals an ASCII one, so the byte comparison
+            // answers the same question without asking where the characters are.
             || (matches!(*device, "COM" | "LPT")
                 && stem.len() == device.len() + 1
-                && stem[..device.len()].eq_ignore_ascii_case(device)
+                && stem.as_bytes()[..device.len()].eq_ignore_ascii_case(device.as_bytes())
                 && stem.as_bytes()[device.len()].is_ascii_digit()
                 && stem.as_bytes()[device.len()] != b'0')
     })
@@ -3229,6 +3236,26 @@ mod tests {
         ] {
             assert_eq!(spans(line), ["docs/a.md"], "{line} seams at its separator");
         }
+    }
+
+    /// The crash of 2026-08-27: `names_a_dos_device` sliced a four-byte stem at byte three to
+    /// compare it with `COM`/`LPT`, and a stem of one ASCII byte and one three-byte character —
+    /// `*⑥`, as an agent numbers its own list — is four bytes with no boundary at three. The
+    /// window panicked on the line being printed, and the session restore printed it again on
+    /// every start. The device question must be answerable for **any** spelling, so it is asked
+    /// of every four-byte shape that is not a device, and of the two that are.
+    #[test]
+    fn a_four_byte_stem_that_is_not_ascii_is_not_a_device_and_not_a_panic() {
+        for not_a_device in ["*⑥", "D:\\case\\*⑥", "docs\\⑥*", "D:\\case\\⑥.txt", "COM⑥"]
+        {
+            assert!(
+                !names_a_dos_device(not_a_device),
+                "{not_a_device} is not a device name and must not panic"
+            );
+        }
+        assert!(names_a_dos_device("D:\\case\\COM1"));
+        assert!(names_a_dos_device("lpt9.txt"));
+        assert!(!names_a_dos_device("COM0"));
     }
 
     /// §7.30, boundary table rows 42 and 43 — the two transitions that are **not** seams, kept
