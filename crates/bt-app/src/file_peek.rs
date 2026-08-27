@@ -359,30 +359,49 @@ pub fn life(row: [f32; 4], frame: [f32; 4], at: Option<[f32; 2]>, dragging: bool
 
 /// What a **left press** inside the card means.
 ///
-/// Two answers and no third, which is what keeps "read-only" true of a card the
-/// pointer can now reach. See [`Runtime::press_file_peek`] for the argument.
+/// Three answers and no fourth, which is what keeps "read-only" true of a card
+/// the pointer can now reach. See [`Runtime::press_file_peek`] for the argument.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Press {
     /// On the scroll thumb, this far into its own length.
     Thumb(f32),
+    /// **On the head** — the strip that names the file (user ruling 2026-08-27,
+    /// `docs/DESIGN.md` §7.27).
+    ///
+    /// A press here is not yet anything: it is six pixels of intent away from
+    /// being a carry and one release away from being [`Self::Open`]. The head is
+    /// the card's *handle*, and this arm is what lets one press mean both — the
+    /// same shape a float's own header press has had since 2026-08-12, where the
+    /// gesture is decided by whether the hand travels rather than by which
+    /// button was pressed.
+    Head,
     /// Anywhere else in the card: open the real preview pane.
     Open,
     /// Not the card's press at all.
     Elsewhere,
 }
 
-/// [`Press`] for a press at `at` on a card standing at `frame`, wearing `bar`.
+/// [`Press`] for a press at `at` on a card standing at `frame`, whose head is
+/// `head`, wearing `bar`.
 ///
 /// **The thumb is asked first**, for the reason a text editor asks it first: a
 /// bar drawn inside a scrolling region is still a bar, and a press on it means
-/// the bar rather than the words behind it.
+/// the bar rather than the words behind it. The head is asked next and the door
+/// last, which is the order they are stacked in: the head is a band across the
+/// top of a face that is otherwise all door.
 #[must_use]
-pub fn press_at(frame: [f32; 4], bar: Option<&crate::preview::ScrollBar>, at: [f32; 2]) -> Press {
+pub fn press_at(
+    frame: [f32; 4],
+    head: [f32; 4],
+    bar: Option<&crate::preview::ScrollBar>,
+    at: [f32; 2],
+) -> Press {
     if !contains(frame, at) {
         return Press::Elsewhere;
     }
     match bar.filter(|bar| contains(bar.grab, at)) {
         Some(bar) => Press::Thumb((at[1] - bar.thumb[1]).clamp(0.0, bar.thumb[3] - bar.thumb[1])),
+        None if contains(head, at) => Press::Head,
         None => Press::Open,
     }
 }
@@ -882,6 +901,17 @@ pub struct PeekContent {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PeekLayout {
     pub frame: [f32; 4],
+    /// **The whole head band**, hairline to body — the strip the mark, the name
+    /// and the type chip stand in, and the card's handle (user ruling
+    /// 2026-08-27).
+    ///
+    /// Derived here rather than reassembled by a hit test out of `mark`, `name`
+    /// and `ftype`, because those three are what is *drawn* in it and the band
+    /// is wider than all of them put together: the padding either side of the
+    /// name is head too, and a handle that stopped at the last glyph would be a
+    /// handle with holes in it. One derivation, two readers — the painter and
+    /// [`press_at`] — which is the same rule the frame itself is filed under.
+    pub head: [f32; 4],
     pub mark: [f32; 4],
     pub name: [f32; 4],
     /// `None` when the buffer is clean or is not in the pool at all.
@@ -997,6 +1027,12 @@ pub fn layout(
     ];
     PeekLayout {
         frame,
+        head: [
+            frame[0] + border,
+            frame[1] + border,
+            frame[2] - border,
+            body_top,
+        ],
         mark,
         name,
         dirty,
@@ -2898,7 +2934,12 @@ mod tests {
     /// ② drop the `contains(frame, at)` guard — a press out on the terminal
     ///    beside the card opens a file nobody clicked;
     /// ③ have `Press::Thumb` carry `0.0` instead of the distance into the thumb
-    ///    — the thumb jumps to put its own head under the pointer at the press.
+    ///    — the thumb jumps to put its own head under the pointer at the press;
+    /// ④ answer `Open` on the head — the handle goes back to being face, and
+    ///    six pixels of intent over the name open a pane instead of keeping a
+    ///    window (user ruling 2026-08-27, §7.27);
+    /// ⑤ let the head arm swallow the foot as well — a press on "Click to
+    ///    open" stops opening anything.
     #[test]
     fn a_press_in_the_card_is_the_door_to_the_pane_and_never_a_caret() {
         let row = [40.0, 300.0, 240.0, 320.0];
@@ -2918,25 +2959,67 @@ mod tests {
         let held = 4.0_f32;
         let on_thumb = [(bar.grab[0] + bar.grab[2]) / 2.0, bar.thumb[1] + held];
         assert_eq!(
-            press_at(card.frame, Some(&bar), on_thumb),
+            press_at(card.frame, card.head, Some(&bar), on_thumb),
             Press::Thumb(held)
         );
 
         // ② In the document beside it — the door, not a caret.
         let in_document = [card.body[0] + 20.0, (card.body[1] + card.body[3]) / 2.0];
-        assert_eq!(press_at(card.frame, Some(&bar), in_document), Press::Open);
-        // And the head and the foot are the card too: the whole face is one
-        // door, which is what "click the card" means.
         assert_eq!(
-            press_at(card.frame, Some(&bar), [card.name[0], card.name[1] + 1.0]),
+            press_at(card.frame, card.head, Some(&bar), in_document),
+            Press::Open
+        );
+        // And the foot is the card too: the face below the head is one door,
+        // which is what "click the card" means.
+        assert_eq!(
+            press_at(
+                card.frame,
+                card.head,
+                Some(&bar),
+                [card.foot[0] + 20.0, (card.foot[1] + card.foot[3]) / 2.0]
+            ),
             Press::Open
         );
 
-        // ③ Outside the card is nobody's press — the guard that keeps a click on
+        // ③ **The head is not face any more — it is the handle** (user ruling
+        //    2026-08-27, §7.27). The name stands in it, and so does the padding
+        //    either side of the name: a handle that stopped at the last glyph
+        //    would be a handle with holes in it.
+        assert_eq!(
+            press_at(
+                card.frame,
+                card.head,
+                Some(&bar),
+                [card.name[0], card.name[1] + 1.0]
+            ),
+            Press::Head
+        );
+        assert_eq!(
+            press_at(
+                card.frame,
+                card.head,
+                Some(&bar),
+                [(card.head[0] + card.head[2]) / 2.0, card.head[1] + 1.0]
+            ),
+            Press::Head
+        );
+        // And it stops where the body starts: one pixel lower is the door.
+        assert_eq!(
+            press_at(
+                card.frame,
+                card.head,
+                Some(&bar),
+                [card.body[0] + 20.0, card.body[1] + 1.0]
+            ),
+            Press::Open
+        );
+
+        // ④ Outside the card is nobody's press — the guard that keeps a click on
         //    the terminal beside the card from opening a file.
         assert_eq!(
             press_at(
                 card.frame,
+                card.head,
                 Some(&bar),
                 [card.frame[2] + 4.0, in_document[1]]
             ),
@@ -2945,14 +3028,15 @@ mod tests {
         assert_eq!(
             press_at(
                 card.frame,
+                card.head,
                 Some(&bar),
                 [in_document[0], card.frame[1] - 4.0]
             ),
             Press::Elsewhere
         );
 
-        // ④ With no bar at all — a card whose document fits — the same point on
+        // ⑤ With no bar at all — a card whose document fits — the same point on
         //    the edge is the door, because there is nothing there to hold.
-        assert_eq!(press_at(card.frame, None, on_thumb), Press::Open);
+        assert_eq!(press_at(card.frame, card.head, None, on_thumb), Press::Open);
     }
 }

@@ -8167,6 +8167,16 @@ struct WindowRuntime {
     /// is one pointer: "which row is being glanced at" is a singleton for the
     /// same reason "what is hovered" is.
     file_peek: Option<FilePeek>,
+    /// **A left press being held on the card's head** (user ruling 2026-08-27,
+    /// §7.27) — six pixels away from turning the card into a window.
+    ///
+    /// Beside the card rather than inside it, for [`FilePeek::thumb_grab`]'s
+    /// reason turned inside out: a thumb drag dies with the card it is
+    /// scrolling, and so does this — but this one *consumes* its card, so it has
+    /// to outlive the field by exactly the one statement that empties it. Kept
+    /// here and cleared by [`Runtime::hide_file_peek`], which is the one door
+    /// every way the card ends already goes through.
+    file_peek_press: Option<FilePeekPress>,
     /// The body the glance is reading, for a file the pool does not hold.
     ///
     /// **Not in the pool, and that is the whole reason it is a field.** The pool
@@ -12471,6 +12481,31 @@ impl FloatHeadPress {
     }
 }
 
+/// A left press being held on the **glance card's** head (user ruling
+/// 2026-08-27, §7.27).
+///
+/// [`FloatHeadPress`] with both of its fields taken away, and each absence is a
+/// sentence:
+///
+/// * **No window.** There is one card, it is in one slot, and the card that a
+///   promotion would consume is by definition the one that is up — a press that
+///   outlived its card is dropped whole by [`Runtime::hide_file_peek`] rather
+///   than surviving to be refused later by identity.
+/// * **No grab.** A peek float promotes to a window of its own size, so the
+///   offset measured at the press reproduces the frame exactly and the window
+///   never moves. A card promotes to a window that is *larger* than the card
+///   was, so there is no offset that could make both the top-left and the
+///   pointer land where they were. The choice is the top-left — the head is
+///   where the hand is, so keeping the head still is keeping the hand still —
+///   and the grab is therefore measured at the **promotion**, against the frame
+///   the window actually opens at, which is what leaves nothing to jump on the
+///   next move ([`Runtime::promote_file_peek`]).
+#[derive(Clone, Copy, Debug)]
+struct FilePeekPress {
+    /// The 6px, shared with every other press that can become a drag (J113).
+    latch: DragLatch,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PendingPtyResize {
     grid: GridSize,
@@ -16224,6 +16259,126 @@ fn hyperlink_activation(
         };
     }
     refused
+}
+
+/// **The card a reference printed in the terminal raises when a hand rests on
+/// it** (user ruling 2026-08-27, `docs/DESIGN.md` §7.27).
+///
+/// Two members, because this window has exactly two glance cards and always
+/// has: the file's — `.file-peek`, §7.10 — and the folder's, which is the files
+/// flyout standing in its peek slot (§7.1.2). What was missing was not a card
+/// but a *door* to them from the terminal, where until today a resting hand was
+/// answered by a picture and only by a picture.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ReferenceCard {
+    /// The glance card, over the file this reference names.
+    File(PathBuf),
+    /// The folder card, over the folder it names.
+    Folder(PathBuf),
+}
+
+/// A reference the pointer is standing on in a terminal pane, resolved —
+/// [`Runtime::terminal_reference_at`]'s answer.
+#[derive(Clone, Debug, PartialEq)]
+struct TerminalReference {
+    /// Which card this reference raises, and what it is about.
+    card: ReferenceCard,
+    /// Its identity for as long as it is on screen: the run's first cell and the
+    /// target it names. See [`Runtime::terminal_reference_at`] for why it takes
+    /// both.
+    key: String,
+    /// The run's box on the row the pointer is on — what a card is placed
+    /// against, and what a hand reaching back toward one counts as being on.
+    rect: [f32; 4],
+}
+
+/// [`ReferenceCard`] for the target `uri`, or `None` for a reference this window
+/// has no card for.
+///
+/// **It is [`hyperlink_activation`] read for a hand instead of for a click**,
+/// and that is the whole of the implementation on purpose. §7.1.5j ① already
+/// folded every shape the terminal can print a local file in — a bare path, a
+/// `file:` URI, an OSC 8 target — into one `file:` link fed to one routing
+/// table, and a *second* table here would be the thing that clause exists to
+/// forbid: a hover that decided for itself which references are files would
+/// drift from the click that opens them, and the first symptom would be a card
+/// over something a press does nothing to.
+///
+/// So the mapping is the plain half of that table, arm for arm:
+///
+/// * [`HyperlinkActivation::Preview`] — this window's own answer for a file, so
+///   the card is the one that shows a file. A share arrives down this arm too
+///   and is *meant* to: §7.1.3's network refusal is what the card then prints,
+///   the preview's judgement borrowed exactly as the files column borrows it.
+/// * [`HyperlinkActivation::FilesColumn`] — this window's own answer for a
+///   folder, so the card is the one that shows a folder.
+/// * everything else — **no card**, and each for the reason its own arm gives.
+///   `Browser` and `Blocked` are `Ctrl`'s answers and can never be reached with
+///   `control: false`; they are listed so that a future arm cannot be added
+///   without someone deciding what a hand resting on it should see. `None` is
+///   the plain half of a row that has no destination inside this window at all —
+///   a remote `http(s)` address, a `mailto:` — and a card over one would be this
+///   window offering to show something it cannot fetch.
+///
+/// `control` is deliberately not a parameter. A modifier held during a hover is
+/// not a request; the card is what this window has to say about the reference,
+/// and `Ctrl` changes where a *press* goes rather than what the thing is.
+fn reference_card(uri: &str, is_directory: &dyn Fn(&Path) -> bool) -> Option<ReferenceCard> {
+    match hyperlink_activation(false, true, uri, is_directory) {
+        HyperlinkActivation::Preview(path, _) => Some(ReferenceCard::File(path)),
+        HyperlinkActivation::FilesColumn(path) => Some(ReferenceCard::Folder(path)),
+        HyperlinkActivation::None
+        | HyperlinkActivation::Browser
+        | HyperlinkActivation::External(_)
+        | HyperlinkActivation::Reveal(_)
+        | HyperlinkActivation::Blocked => None,
+    }
+}
+
+/// **The box a reference's run occupies on one row of a pane's grid** — the
+/// rectangle a card raised over it is placed against.
+///
+/// `cells` is the segment's flat cell indices in reading order, exactly as
+/// [`bt_viewport::ViewportFrame::hyperlink_cells`] hands them over and exactly
+/// the set the underline is painted on, so the card stands beside what is lit
+/// rather than beside a second opinion about where the reference is.
+///
+/// **One row's worth, and the row is the pointer's.** A segment may cover the
+/// tail of one row and the head of the next — `hyperlink_cells`' own note says
+/// so — and a rectangle unioned across both would be a box with a hole in it
+/// spanning the whole pane's width. The row the hand is on is the row the hand
+/// is asking about, which is the same choice a wrapped file row in the tree
+/// makes by having only one.
+///
+/// `top` and `bottom` are that row's own drawn interval rather than a multiple
+/// of the cell height, because a pane with a math block in it has rows of
+/// unequal height and the frame is the only thing that knows theirs.
+fn reference_run_rect(
+    cells: &[u32],
+    columns: u32,
+    row: u32,
+    origin: [f32; 2],
+    cell_width: f32,
+    top: f32,
+    bottom: f32,
+) -> Option<[f32; 4]> {
+    let (mut first, mut last) = (u32::MAX, 0u32);
+    for &cell in cells {
+        if columns == 0 || cell / columns != row {
+            continue;
+        }
+        let column = cell % columns;
+        first = first.min(column);
+        last = last.max(column);
+    }
+    (first <= last).then(|| {
+        [
+            origin[0] + first as f32 * cell_width,
+            origin[1] + top,
+            origin[0] + (last + 1) as f32 * cell_width,
+            origin[1] + bottom,
+        ]
+    })
 }
 
 // `names_an_html_page` stood here from §7.1.5g (user ruling 2026-08-20) until
@@ -20654,13 +20809,62 @@ fn risen_frame(frame: [f32; 4], fade: float::FloatFade) -> [f32; 4] {
 /// pulled past its own floor — or a header carried until the pointer is over the
 /// body — keeps the shape it was grabbed by (K113).
 ///
-/// `pinned` gates the hover alone, and gates it for the mock-up's selector:
-/// `.float-win.pinned .fly-head`. It is a fact about **the window under the
-/// pointer** and not about the window at large — with several floats on screen
-/// (2026-08-12) a peek standing over a pinned window would otherwise wear the
-/// pinned one's grab hand. A peek cannot reach the grip branch anyway (it is
-/// drawn without one), and a drag cannot begin on one — `press_float` refuses to
-/// pick a moment up by its header.
+/// **Where the window a glance card becomes opens, and where the hand is holding
+/// it** (user ruling 2026-08-27, §7.27).
+///
+/// Two answers because they are one decision: the frame is chosen so that the
+/// *head* does not move, and the grab is then measured against the frame that
+/// was actually chosen — derived apart, they are a window that jumps on the
+/// first move after the one that opened it.
+///
+/// **The card's own top-left, and the window grows down and right from it.** A
+/// peek float promotes to a window of its own size and therefore does not move
+/// at all ([`FloatHeadPress`]); a card promotes to something larger, so some
+/// edge has to travel. The top-left is the edge that must not, because the head
+/// is at the top-left and the head is where the hand is: keeping it still is
+/// keeping the hand still, and every other choice slides the thing being carried
+/// out from under the finger carrying it.
+///
+/// **Then the viewport, which may overrule it.** A card standing near the bottom
+/// of the window promotes to something taller than the room under it, and
+/// [`float::clamp_pinned`] pulls that back inside — so the frame moves after all,
+/// once, on the frame it opens. The grab is measured **after** the clamp for
+/// exactly that reason: the one thing worse than a window that grows under the
+/// hand is a window that then drifts away from it on every subsequent move.
+fn file_peek_promotion(
+    card: [f32; 4],
+    size: [f32; 2],
+    pointer: [f32; 2],
+    viewport: [f32; 4],
+    scale: f32,
+) -> ([f32; 4], [f32; 2]) {
+    let placed = float::clamp_pinned(
+        [card[0], card[1], card[0] + size[0], card[1] + size[1]],
+        viewport,
+        scale,
+    );
+    (placed, [pointer[0] - placed[0], pointer[1] - placed[1]])
+}
+
+/// `pinned` gates **the grip and nothing else**, and it is a fact about the
+/// window under the pointer rather than about the window at large — with several
+/// floats on screen (2026-08-12) a peek standing over a pinned one would
+/// otherwise wear its neighbour's shape. A peek is drawn without a grip, so the
+/// gate is belt and braces there; a *pinned* window with no grip cannot exist,
+/// so it is the only thing the flag has left to say.
+///
+/// **改判 2026-08-27 — a head is a handle whether or not the window is kept**
+/// (user ruling; §7.27). This used to begin `if !pinned { return None }`, on the
+/// reading that a peek's header is not a handle: *"A peek is not a window you
+/// were told you had: its header is not a handle"*. That was true for exactly
+/// as long as it was — 2026-08-12 gave the peek's header the six pixels that
+/// keep it, and from that day the shape and the gesture disagreed: the one
+/// header in the product that turns a passing glimpse into a window you own was
+/// also the one header that advertised nothing at all. A gesture nobody can see
+/// is a gesture nobody uses, which is the whole of what §7.21 was written about.
+/// So the hand is offered wherever the carry can begin, and the sentence that
+/// used to stand here is kept above as the record of the day it stopped being
+/// true.
 fn float_grasp(
     drag: Option<FloatDragKind>,
     hover: Option<float::FloatPart>,
@@ -20672,11 +20876,8 @@ fn float_grasp(
             FloatDragKind::Move { .. } => FloatGrasp::Carrying,
         });
     }
-    if !pinned {
-        return None;
-    }
     match hover {
-        Some(float::FloatPart::Grip) => Some(FloatGrasp::Grip),
+        Some(float::FloatPart::Grip) if pinned => Some(FloatGrasp::Grip),
         Some(float::FloatPart::Head) => Some(FloatGrasp::Head),
         _ => None,
     }
@@ -22369,6 +22570,23 @@ enum RowHost {
     /// different rows, different geometry and different documents behind a row —
     /// which is exactly the confusion this enum exists to prevent.
     Git(SeatId),
+    /// **A terminal pane, whose "rows" are the file references printed in it**
+    /// (user ruling 2026-08-27, §7.27).
+    ///
+    /// A fourth home for the one gesture, and it is a home rather than a new
+    /// gesture because the ruling says so: *一个文件,不论从哪指向它,都是同一张
+    /// 卡*. A line of output naming a file this window has verified is a row
+    /// naming a file, and until today it was the only one of those that answered
+    /// a resting hand with nothing.
+    ///
+    /// The `usize` beside it in [`Runtime::row_under`]'s pair is **the flat cell
+    /// index under the pointer** — `row * columns + column` of that pane's own
+    /// last-drawn frame — rather than an ordinal in a list, because a terminal
+    /// has no list to be an ordinal in. Everything downstream treats it exactly
+    /// as it treats a tree's index: something to re-ask the live surface with,
+    /// never something to remember a rectangle from ([`Runtime::peek_row`],
+    /// [`Runtime::peek_row_rect`]).
+    Terminal(SeatId),
 }
 
 /// A left press being held on one row of a files tree (P81).
@@ -22432,6 +22650,15 @@ struct FilePeek {
     /// The document's box inside that frame — where a wheel notch lands and what
     /// the scroll is clamped against. Written beside [`Self::frame`].
     body: Option<[f32; 4]>,
+    /// **The head band inside that frame** — the strip that names the file, and
+    /// the card's handle (user ruling 2026-08-27, §7.27).
+    ///
+    /// Written beside [`Self::frame`] and for its reason exactly: the band is
+    /// [`file_peek::PeekLayout::head`]'s answer, and a hit test that rebuilt it
+    /// out of `frame` and `body` and a remembered border width would be the
+    /// second derivation that note is about — a handle tested where it is not
+    /// drawn.
+    head: Option<[f32; 4]>,
     /// **How far this card's column of pages can be wound**, in physical pixels
     /// — `None` for every card whose body is not one (user ruling 2026-08-26).
     ///
@@ -27601,6 +27828,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         pane_press: None,
         row_press: None,
         file_peek: None,
+        file_peek_press: None,
         peek_buffer: None,
         peek_pane: PreviewPane::default(),
         peek_picture: None,
@@ -51839,7 +52067,11 @@ impl Runtime<'_> {
             // one list, and answering `None` here rather than inventing a
             // geometry is what keeps a drag from starting on a page that has no
             // rows to drag.
-            RowHost::Git(_) => None,
+            // A terminal has no tree geometry either, and for the stronger
+            // reason: it has no rows. Its glance is anchored on the run under
+            // the pointer ([`Self::terminal_reference_at`]), which is the whole
+            // of what a reference has instead of a row rectangle.
+            RowHost::Git(_) | RowHost::Terminal(_) => None,
             RowHost::Column(seat) => {
                 let trees = self.files_trees(Instant::now());
                 let segmented = self.git_panel_on();
@@ -51875,7 +52107,7 @@ impl Runtime<'_> {
         match host {
             // The Git page's rows are not tree rows — see [`Self::peek_row`],
             // which is where the three hosts meet.
-            RowHost::Git(_) => None,
+            RowHost::Git(_) | RowHost::Terminal(_) => None,
             RowHost::Column(seat) => {
                 let root = self.files_state(seat).root;
                 let trees = self.files_trees(Instant::now());
@@ -52134,6 +52366,7 @@ impl Runtime<'_> {
             due: Some(now + Duration::from_millis(file_peek::PEEK_INTENT_MS)),
             frame: None,
             body: None,
+            head: None,
             column: None,
             closing_at: None,
             thumb_grab: None,
@@ -52144,16 +52377,39 @@ impl Runtime<'_> {
     /// **What a glance over this row would be about** — its identity, the name
     /// on the card's head, and the document behind it.
     ///
-    /// One function for all three hosts, because "which row is this and what is
+    /// One function for all four hosts, because "which row is this and what is
     /// it about" is one question however the row is drawn. `None` for every row
     /// that offers no glance: a directory, a notice, a branch, a commit, a
-    /// heading, a column pointed at nothing.
+    /// heading, a column pointed at nothing, a cell of a terminal with no
+    /// verified file named on it.
     fn peek_row(
         &mut self,
         host: RowHost,
         index: usize,
     ) -> Option<(String, String, preview::PreviewSource)> {
         match host {
+            // **A reference in the output is a row naming a file** (user ruling
+            // 2026-08-27, §7.27), and the three things this function owes are
+            // read off the one resolution the anchor is read off — so the card
+            // that comes up and the run it stands beside cannot be about two
+            // different references.
+            //
+            // A folder reaches here as `None` on purpose and not by omission:
+            // its card is a *window* rather than this card, opened on the
+            // float's own clock ([`Runtime::float_trigger_at`]), which is the
+            // same division the files column makes when it refuses a directory
+            // row a glance because the tree beneath it is already the answer.
+            RowHost::Terminal(seat) => {
+                let reference = self.terminal_reference_at(seat, u32::try_from(index).ok()?)?;
+                let ReferenceCard::File(path) = reference.card else {
+                    return None;
+                };
+                let name = path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                );
+                Some((reference.key, name, preview::PreviewSource::file(path)))
+            }
             RowHost::Column(_) | RowHost::Float(_) => {
                 let (root, rows) = self.host_rows(host)?;
                 if root.is_empty() {
@@ -52201,7 +52457,78 @@ impl Runtime<'_> {
                 let page = self.window.git_pages_shown.get(&seat)?;
                 Some(git_panel::git_panel_geometry(body, page, scale).row_rect(index))
             }
+            // The grid's own, through the one resolution [`Self::peek_row`] also
+            // goes through: the cells the underline is lit on, on the row the
+            // hand is on.
+            RowHost::Terminal(seat) => Some(
+                self.terminal_reference_at(seat, u32::try_from(index).ok()?)?
+                    .rect,
+            ),
         }
+    }
+
+    /// **The reference the pointer is standing on in a terminal pane**, resolved
+    /// from that pane's own last-drawn frame (user ruling 2026-08-27, §7.27).
+    ///
+    /// One resolution for the three things a glance needs — *which* card, *what*
+    /// it is about, and *where* it stands — because they are three readings of
+    /// one fact and a card placed beside a rectangle derived separately from the
+    /// path it shows is the class of bug [`Self::peek_row_rect`]'s own note is
+    /// about, one surface further out.
+    ///
+    /// **Nothing here decides what a reference is.** The cell either carries a
+    /// hyperlink or it does not, and it carries one only because §7.1.5j ①
+    /// folded every printed shape of a local file into a `file:` link and
+    /// `PrintedPathLinks` refused to emit one for a path no worker has verified.
+    /// So "existing file or folder" is not re-asked here — it was answered
+    /// before the cell was drawn, and asking again would be the second list that
+    /// clause exists to prevent.
+    ///
+    /// `cell` is the flat index [`RowHost::Terminal`] and
+    /// [`float::FloatTrigger::Reference`] both carry. `None` for a cell that is
+    /// off this frame, carries no link, or carries one this window has no card
+    /// for.
+    fn terminal_reference_at(&self, seat: SeatId, cell: u32) -> Option<TerminalReference> {
+        let frame = self.pane_frame(seat)?;
+        let columns = frame.columns.get();
+        let (row, column) = (cell / columns, cell % columns);
+        let hyperlink = frame.hyperlink_at(row, column)?;
+        let card = reference_card(&hyperlink.uri, &|path| path.is_dir())?;
+        let cells = frame.hyperlink_cells(&hyperlink);
+        // **Identity is the run's first cell and the target together.** The
+        // target alone would make one path printed twice one reference, so a
+        // hand moving from the first to the second would move no card; the cell
+        // alone would make one reference two the moment the pointer slid one
+        // column along it, and the 350ms would never mature. The first cell of
+        // the run is the one number both hands agree on.
+        let key = format!("{}|{}", cells.first()?, hyperlink.uri);
+        // The row's own drawn interval, from the frame that drew it — a pane
+        // holding a math block has rows of unequal height, and a multiple of the
+        // nominal cell height would place the card beside the wrong one.
+        let interval = frame
+            .selection_span_vertical_interval(&bt_viewport::SelectionSpan {
+                row,
+                start_column: column,
+                end_column: column,
+            })
+            .ok()?;
+        let metrics = self.window.renderer.metrics();
+        let scale = metrics.scale_factor as f32;
+        let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
+        let subpixels = |value: i64| value as f32 / bt_viewport::SUBPIXELS_PER_PX as f32;
+        let rect = reference_run_rect(
+            &cells,
+            columns,
+            row,
+            [
+                body.x as f32 + metrics.padding_px,
+                body.y as f32 + metrics.padding_px,
+            ],
+            metrics.cell_width_px,
+            subpixels(interval.start),
+            subpixels(interval.end),
+        )?;
+        Some(TerminalReference { card, key, rect })
     }
 
     /// **The pointer resting on another row while a card is up** (user ruling,
@@ -52422,7 +52749,7 @@ impl Runtime<'_> {
         let (source, name) = (peek.source.clone(), peek.name.clone());
         let git_seat = match peek.host {
             RowHost::Git(seat) => Some(seat),
-            RowHost::Column(_) | RowHost::Float(_) => None,
+            RowHost::Column(_) | RowHost::Float(_) | RowHost::Terminal(_) => None,
         };
         if let Some(peek) = self.window.file_peek.as_mut() {
             peek.due = None;
@@ -52516,6 +52843,10 @@ impl Runtime<'_> {
             .as_ref()
             .is_some_and(|peek| peek.due.is_none());
         self.window.file_peek = None;
+        // And the hand that was on its head. A press whose card has gone has
+        // nothing left to promote, and a promotion that fired afterwards would
+        // open a window over a file nobody is pointing at any more.
+        self.window.file_peek_press = None;
         self.window.peek_buffer = None;
         // And the parsed document with it: a card that is down is holding a
         // markdown layout for a file nobody is looking at.
@@ -53072,6 +53403,7 @@ impl Runtime<'_> {
         if let Some(peek) = self.window.file_peek.as_mut() {
             peek.frame = Some(layout.frame);
             peek.body = Some(layout.body);
+            peek.head = Some(layout.head);
             // And the column's reach, or the fact that this card has none — written
             // unconditionally, because a card that changed body without clearing it would
             // answer a wheel with the last document's number.
@@ -53189,8 +53521,33 @@ impl Runtime<'_> {
             .as_ref()
             .and_then(|peek| peek.frame)
             .unwrap_or_default();
-        match file_peek::press_at(frame, self.file_peek_bar().as_ref(), at) {
+        let head = self
+            .window
+            .file_peek
+            .as_ref()
+            .and_then(|peek| peek.head)
+            .unwrap_or_default();
+        match file_peek::press_at(frame, head, self.file_peek_bar().as_ref(), at) {
             file_peek::Press::Elsewhere => Ok(false),
+            // **The card's head is a handle, and this press is not yet anything**
+            // (user ruling 2026-08-27, §7.27). Six pixels of travel make it a
+            // carry ([`Self::promote_file_peek_press`]); a release without them
+            // makes it the door, which is what the rest of the face is and what
+            // the head was until today. Consuming the press is what buys the
+            // choice: an answer given on the way down cannot be taken back on
+            // the way up.
+            file_peek::Press::Head if self.file_peek_promotes() => {
+                self.window.file_peek_press = Some(FilePeekPress {
+                    latch: DragLatch::new(position),
+                });
+                Ok(true)
+            }
+            // **A card with no window to become keeps the head it always had**
+            // — see [`Self::file_peek_promotes`]. Nothing is armed, nothing is
+            // held back, and the press means on the way *down* exactly what a
+            // press on the rest of the face means, which is what it meant here
+            // yesterday.
+            file_peek::Press::Head => self.press_file_peek_door(),
             file_peek::Press::Thumb(grab) => {
                 if let Some(peek) = self.window.file_peek.as_mut() {
                     peek.thumb_grab = Some(grab);
@@ -53214,34 +53571,76 @@ impl Runtime<'_> {
                 if self.press_preview_block_thumb(position)? {
                     return Ok(true);
                 }
-                let Some((host, source, name)) = self
-                    .window
-                    .file_peek
-                    .as_ref()
-                    .map(|peek| (peek.host, peek.source.clone(), peek.name.clone()))
-                else {
-                    return Ok(false);
-                };
-                // Down before the pane opens rather than after: opening re-solves
-                // the layout, and a card left standing would be placed against a
-                // row that has just moved under it.
-                self.hide_file_peek();
-                // **The door leads where the row leads.** A glance over a file
-                // opens the file; a glance over a commit's file opens that
-                // commit's reading of it, through the very door the row itself
-                // uses — so pressing the card and pressing the row behind it
-                // arrive at one document and not at two.
-                match source.file_path().map(Path::to_path_buf) {
-                    Some(path) => self.open_preview(path)?,
-                    None => {
-                        if let RowHost::Git(seat) = host {
-                            self.open_git_document(seat, source, name, None)?;
-                        }
-                    }
-                }
-                Ok(true)
+                self.press_file_peek_door()
             }
         }
+    }
+
+    /// **The card is the door to the pane** — the answer the whole face gave
+    /// before the head became a handle, and still gives everywhere else.
+    ///
+    /// Its own function because two arms reach it now: the face, and a head that
+    /// has nothing to promote to ([`Self::file_peek_promotes`]). A second copy
+    /// would be a second opinion about where a card leads.
+    fn press_file_peek_door(&mut self) -> Result<bool> {
+        let Some((host, source, name)) = self
+            .window
+            .file_peek
+            .as_ref()
+            .map(|peek| (peek.host, peek.source.clone(), peek.name.clone()))
+        else {
+            return Ok(false);
+        };
+        // Down before the pane opens rather than after: opening re-solves the
+        // layout, and a card left standing would be placed against a row that
+        // has just moved under it.
+        self.hide_file_peek();
+        // **The door leads where the row leads.** A glance over a file opens the
+        // file; a glance over a commit's file opens that commit's reading of it,
+        // through the very door the row itself uses — so pressing the card and
+        // pressing the row behind it arrive at one document and not at two.
+        match source.file_path().map(Path::to_path_buf) {
+            Some(path) => self.open_preview(path)?,
+            None => {
+                if let RowHost::Git(seat) = host {
+                    self.open_git_document(seat, source, name, None)?;
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// **Whether this card has a window to become** — the one predicate the
+    /// head's cursor and the head's press both read (user ruling 2026-08-27,
+    /// §7.27).
+    ///
+    /// Two refusals, and each is a fact about what a *preview float* can hold
+    /// rather than a hedge:
+    ///
+    /// * **A composed document is on no disk.** A glance over a commit's reading
+    ///   of a file has no path, and the door a promotion goes through
+    ///   ([`Self::open_preview_onto`]) takes one. The repository's own answer
+    ///   for a window over a composed document is `open_float_git_document`, a
+    ///   different verb reached from a different place.
+    /// * **A page needs a seat, and a float is not one.** `.html` and `.pdf` go
+    ///   down the engine's lane, and an engine is placed on a **pane**
+    ///   ([`Self::open_minted_page_on`]'s own first refusal: *"Not a seat. A
+    ///   torn-off pane has no leaf to put an engine on"*). A float holds a page
+    ///   only by having had one **carried** into it with its pane
+    ///   (`pop_out_preview`, §7.14b) — and tearing the reader's pane out of
+    ///   their layout is not what dragging a hover card asked for. Opening a
+    ///   window that then had nothing in it would be worse than not opening one.
+    ///
+    /// The page class is asked through [`path_opens_as_a_page`], which is the
+    /// one place that class is written down (§7.16 ④) — so this refusal cannot
+    /// drift from the lane that causes it. **When a float can be given an engine
+    /// of its own, this arm goes and nothing else here changes.**
+    fn file_peek_promotes(&self) -> bool {
+        self.window
+            .file_peek
+            .as_ref()
+            .and_then(|peek| peek.source.file_path())
+            .is_some_and(|path| !path_opens_as_a_page(path))
     }
 
     /// The pointer travelling with the card's thumb in hand.
@@ -53274,6 +53673,145 @@ impl Runtime<'_> {
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
+        Ok(true)
+    }
+
+    /// **Six pixels, and the glance you were given is a window you keep** (user
+    /// ruling 2026-08-27, §7.27).
+    ///
+    /// The folder card has answered a head carried six pixels since 2026-08-12
+    /// (`FloatHost::promote`), and the ruling is that every card answers it: a
+    /// glance is a thing you were shown, and reaching for it with the whole hand
+    /// rather than the eye is the one gesture that says *keep this*. What the
+    /// two cards promote **to** differs because what they are differs — a folder
+    /// card is already a window in the peek slot and simply moves to the pinned
+    /// list, while a glance card is not a window at all and one has to be opened
+    /// for it — but the gesture, the threshold and the sentence are one.
+    ///
+    /// Answers whether the pointer has been spent, so the move that promoted
+    /// does not go on to be a hover as well.
+    fn promote_file_peek_press(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let scale = self.window.renderer.metrics().scale_factor;
+        let Some(press) = self.window.file_peek_press.as_mut() else {
+            return Ok(false);
+        };
+        if !press.latch.travelled(position, scale) {
+            // Still only a press: the hand has not said which gesture this is,
+            // and the card is being held rather than carried. It still owns the
+            // pointer, because a press that let go of it here would let the
+            // hover underneath re-arm a card that is about to be consumed.
+            return Ok(true);
+        }
+        self.window.file_peek_press = None;
+        self.promote_file_peek(position)?;
+        Ok(true)
+    }
+
+    /// The card, become a preview window — the promotion itself.
+    ///
+    /// **It is `pop_out_preview` with no pane to leave behind**, and every
+    /// sentence that function's own note makes holds here with one substitution:
+    /// there is no seat to close, no stand-in shell to spawn and no tree to
+    /// refuse to empty, because a card was never in the layout. What is left is
+    /// the half that matters — a pinned window on the preview chassis, wearing
+    /// the address rail its tenant asks for, appended to the pinned list where
+    /// windows on one root have been allowed to sit side by side since the
+    /// 同根去重 repeal of 2026-08-12.
+    ///
+    /// **The file is opened rather than carried.** A pop-out moves a *view*
+    /// because the view it moves was built at the pane's own width; a card's was
+    /// built at three hundred pixels, and a scroll offset measured in a column
+    /// that narrow means nothing in a window four times wider — a reflowed
+    /// document would land somewhere else and a page column somewhere else
+    /// again. So the window opens the file through
+    /// [`Self::open_preview_onto`], which is the same door a file dropped on a
+    /// preview goes through, and every lane a card can show comes with it: a
+    /// video's face, a picture, a page on the engine, a document in the pool.
+    /// **A video does not begin to play** — nothing in that door starts one, and
+    /// this ruling did not ask for one.
+    ///
+    /// **It opens where the card stood.** Not cascaded, deliberately: the
+    /// cascade exists so that a window landing unattended on top of another is
+    /// visibly a second window, and this one is landing in a hand — the hand
+    /// that is about to carry it somewhere. The grab is measured here rather
+    /// than at the press for [`FilePeekPress`]'s stated reason.
+    fn promote_file_peek(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
+        let Some(peek) = self.window.file_peek.as_ref() else {
+            return Ok(());
+        };
+        let (Some(frame), Some(path)) = (
+            peek.frame.filter(|_| peek.due.is_none()),
+            peek.source.file_path().map(Path::to_path_buf),
+        ) else {
+            return Ok(());
+        };
+        let body_height = peek.body.map_or(0.0, |body| body[3] - body[1]);
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let viewport = self.float_viewport();
+        // The window's own opening size, from the same door a pop-out asks:
+        // min(64vh, 520) around whatever body it is given. The card's body is
+        // what it is given, so a two-line file promotes to a small window and a
+        // long one to a tall one — the card's own shrink-wrap, kept.
+        let size = float::float_opening_size(
+            float::float_height_for_body(body_height, scale),
+            viewport,
+            scale,
+            float::FloatSizing::preview(),
+        );
+        let (placed, grab) = file_peek_promotion(
+            frame,
+            size,
+            [position.x as f32, position.y as f32],
+            viewport,
+            scale,
+        );
+        let tab = self.id;
+        // The card goes **before** the window opens, and not after: an opening
+        // re-solves and repaints, and a card left standing through that would be
+        // drawn once more against a row it no longer belongs to.
+        self.hide_file_peek();
+        let id = self.window.float.open(
+            float::FloatMode::Pinned,
+            // Torn off rather than summoned: there is no trigger to re-click and
+            // nothing to re-place it against — `pop_out_preview`'s own two
+            // `None`s, for its own reason.
+            None,
+            float::FloatTenant::Preview(float::FloatPreview { tab, page: None }),
+            placed,
+            None,
+            Instant::now(),
+        );
+        self.open_preview_onto(PreviewSurface::Float(id), path)?;
+        self.window.float_drag = Some(FloatDrag {
+            win: id,
+            kind: FloatDragKind::Move { grab },
+        });
+        self.forget_dead_float_gestures();
+        self.apply_pointer_cursor();
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// Letting go of the card's head without having carried it — the other half
+    /// of what that press could have meant (user ruling 2026-08-27, §7.27).
+    ///
+    /// The door, which is what the whole face of the card was before the head
+    /// became a handle and what the rest of it still is: pressing a glance opens
+    /// the file it is glancing at. Spending it on the release rather than on the
+    /// press is the price of the head being two gestures, and it is the price
+    /// every drag-or-click control pays.
+    ///
+    /// Answers whether the release was the head's, so the caller knows whether
+    /// anything else may still have it.
+    fn release_file_peek_press(&mut self) -> Result<bool> {
+        if self.window.file_peek_press.take().is_none() {
+            return Ok(false);
+        }
+        // The same door, and literally the same one: a head that decided it was
+        // a press and a face that never had a choice must arrive at one
+        // document, or the card would lead two places depending on where in it
+        // you happened to put the pointer.
+        self.press_file_peek_door()?;
         Ok(true)
     }
 
@@ -54690,8 +55228,49 @@ impl Runtime<'_> {
             | Some(seats::ChromeTarget::GitAct { seat, index, .. }) => {
                 Some((RowHost::Git(seat), index))
             }
-            _ => None,
+            // **And last, the output itself** (user ruling 2026-08-27, §7.27).
+            // Last because the chrome is drawn over the panes and a point inside
+            // a tree standing across a terminal belongs to the tree, which is
+            // the order the floats above already establish; a cell is what is
+            // left when nothing on the glass has claimed the point.
+            _ => self.terminal_reference_cell(),
         }
+    }
+
+    /// The cell of a terminal pane the pointer is standing on, when the
+    /// reference printed there is one this window has a *file* card for.
+    ///
+    /// Filtered to the file here rather than in [`Self::peek_row`], so that the
+    /// glance's intent is never armed over a folder at all: a folder's card is
+    /// the files flyout on the float's own clock, and two clocks counting
+    /// against one reference would race to put two different windows over it.
+    ///
+    /// **A pointer that belongs to something else arms nothing**, which is the
+    /// same pair of refusals the underline and the picture flyout make three
+    /// lines apart in [`Self::pointer_moved`]: a formula owns the cells it is
+    /// drawn over, and a route in flight — a selection being pulled, a button
+    /// being forwarded to the program, a block being dragged — owns the pointer
+    /// outright. Asked of `self` rather than handed in because both are facts
+    /// about this instant, and this is the only reader of them here.
+    fn terminal_reference_cell(&mut self) -> Option<(RowHost, usize)> {
+        if self.window.mouse_route.is_some() || self.math_hit().is_some() {
+            return None;
+        }
+        let (seat, hit) = self.pane_frame_hit()?;
+        let cell = self.reference_cell_index(seat, hit)?;
+        matches!(
+            self.terminal_reference_at(seat, cell)?.card,
+            ReferenceCard::File(_)
+        )
+        .then_some((RowHost::Terminal(seat), usize::try_from(cell).ok()?))
+    }
+
+    /// The flat index [`RowHost::Terminal`] carries, for a hit on `seat`'s own
+    /// frame — the one place `row * columns + column` is spelled, so the writer
+    /// and every reader of that number agree about which way round it goes.
+    fn reference_cell_index(&self, seat: SeatId, hit: bt_render::GridHit) -> Option<u32> {
+        let columns = self.pane_frame(seat)?.columns.get();
+        hit.row.checked_mul(columns)?.checked_add(hit.column)
     }
 
     /// The file menu's own level of the overlay stack, or nothing when none is
@@ -57544,8 +58123,40 @@ impl Runtime<'_> {
                 tab: self.window.tabs[self.window.active_tab].id,
                 seat,
             })),
-            _ => None,
+            // **And a folder named in the output** (user ruling 2026-08-27,
+            // §7.27). Last, for [`Self::row_under`]'s reason: the chrome is
+            // drawn over the panes, so a cell is what is left when nothing on
+            // the glass has claimed the point.
+            _ => self.folder_reference_trigger(),
         }
+    }
+
+    /// The trigger a folder printed under the pointer speaks for, when there is
+    /// one.
+    ///
+    /// [`Self::terminal_reference_cell`]'s opposite number, and the pair is
+    /// exhaustive by construction: one resolution
+    /// ([`Self::terminal_reference_at`]) answers both, each takes the arm of
+    /// [`ReferenceCard`] that is its own, and a reference is therefore never
+    /// both a glance and a flyout nor — which is the failure that matters —
+    /// neither because two readings of "is this a folder" disagreed.
+    fn folder_reference_trigger(&self) -> Option<float::FloatTrigger> {
+        if self.window.mouse_route.is_some() || self.math_hit().is_some() {
+            return None;
+        }
+        let (seat, hit) = self.pane_frame_hit()?;
+        let cell = self.reference_cell_index(seat, hit)?;
+        matches!(
+            self.terminal_reference_at(seat, cell)?.card,
+            ReferenceCard::Folder(_)
+        )
+        .then(|| float::FloatTrigger::Reference {
+            leaf: LeafId {
+                tab: self.window.tabs[self.window.active_tab].id,
+                seat,
+            },
+            cell,
+        })
     }
 
     /// **Both `⌄` clocks, told where the pointer is** (user ruling, 2026-08-16).
@@ -58988,7 +59599,7 @@ impl Runtime<'_> {
             // `file_row_under` only answers for the two tree hosts — and
             // answering it here rather than reaching for a tree it has not got
             // is what keeps that true if a third caller ever appears.
-            RowHost::Git(_) => return Ok(()),
+            RowHost::Git(_) | RowHost::Terminal(_) => return Ok(()),
             RowHost::Column(seat) => {
                 let trees = self.files_trees(now);
                 let Some(kind) = trees
@@ -59314,13 +59925,31 @@ impl Runtime<'_> {
                     | seats::ChromeTarget::PaneFiles(_)
                     | seats::ChromeTarget::FilesRoot(_)
             )
-        );
+        ) || self.pointer_is_on_the_peeks_reference(position);
         if reach.inside || on_trigger {
             self.window.float.hold();
         } else {
             self.window.float.release(reach.off_left, Instant::now());
         }
         Ok(())
+    }
+
+    /// Whether the pointer is on the run of cells that summoned the peek which
+    /// is up — the reference's half of "reaching for the thing that summoned it
+    /// is not leaving it".
+    ///
+    /// The *live* rectangle rather than the anchor the window was placed
+    /// against, for [`Self::trigger_rect`]'s reason: the run is on a grid that
+    /// scrolls, and a hand held still over a reference that has moved under it
+    /// is not on it any more.
+    fn pointer_is_on_the_peeks_reference(&self, position: PhysicalPosition<f64>) -> bool {
+        self.window
+            .float
+            .peek()
+            .and_then(|win| win.origin)
+            .filter(|origin| matches!(origin, float::FloatTrigger::Reference { .. }))
+            .and_then(|trigger| self.trigger_rect(trigger))
+            .is_some_and(|rect| file_peek::contains(rect, [position.x as f32, position.y as f32]))
     }
 
     /// The foot's confirmation has stood long enough: it goes back to saying
@@ -60424,7 +61053,7 @@ impl Runtime<'_> {
                 float::FloatTrigger::Tab(id) => {
                     self.window.tabs.iter().position(|tab| tab.id == id)
                 }
-                float::FloatTrigger::Pane(_) => None,
+                float::FloatTrigger::Pane(_) | float::FloatTrigger::Reference { .. } => None,
             })
             .collect();
         rows.sort_unstable();
@@ -61503,6 +62132,19 @@ impl Runtime<'_> {
                     self.window.search.seat(),
                 )
             }
+            // **The run the folder is printed on**, read back off the frame that
+            // is drawing it now — E60's own rule reaching the one trigger that
+            // is not a control at all. A reference that has scrolled away, been
+            // overwritten, or stopped being a folder answers `None`, which is
+            // how [`Self::advance_float`] learns that the peek hanging off it
+            // has nothing left to hang from.
+            float::FloatTrigger::Reference { leaf, cell } => {
+                if self.window.tabs[self.window.active_tab].id != leaf.tab {
+                    return None;
+                }
+                let reference = self.terminal_reference_at(leaf.seat, cell)?;
+                matches!(reference.card, ReferenceCard::Folder(_)).then_some(reference.rect)
+            }
         }
     }
 
@@ -61513,6 +62155,22 @@ impl Runtime<'_> {
     /// float then stays there. A tree that re-roots itself as you `cd` is, in
     /// this design's own words, 整个生态独立判定最惊吓的行为.
     fn trigger_root(&self, trigger: float::FloatTrigger) -> String {
+        // **A reference names its own folder**, so it does not go through the
+        // cwd below at all: the two buttons speak for a *terminal* and borrow
+        // the place that terminal is standing in, while this one speaks for a
+        // path that is written on the glass. Read back off the frame for
+        // `trigger_rect`'s reason, and the same `None` — a reference that has
+        // gone — falls through to the ordinary answer rather than inventing one,
+        // because by then the rectangle has already refused and no window will
+        // be opened with it.
+        if let float::FloatTrigger::Reference { leaf, cell } = trigger
+            && let Some(TerminalReference {
+                card: ReferenceCard::Folder(path),
+                ..
+            }) = self.terminal_reference_at(leaf.seat, cell)
+        {
+            return path.display().to_string();
+        }
         let seat = match trigger {
             float::FloatTrigger::Tab(id) => self
                 .window
@@ -61521,7 +62179,7 @@ impl Runtime<'_> {
                 .find(|tab| tab.id == id)
                 .filter(|tab| tab.seats.is_lone_terminal())
                 .map(|tab| (tab, tab.seats.identity())),
-            float::FloatTrigger::Pane(leaf) => self
+            float::FloatTrigger::Pane(leaf) | float::FloatTrigger::Reference { leaf, .. } => self
                 .window
                 .tabs
                 .iter()
@@ -64314,7 +64972,7 @@ impl Runtime<'_> {
     fn peeking_tab(&self) -> Option<usize> {
         match self.window.float.peek().and_then(|win| win.origin)? {
             float::FloatTrigger::Tab(id) => self.window.tabs.iter().position(|tab| tab.id == id),
-            float::FloatTrigger::Pane(_) => None,
+            float::FloatTrigger::Pane(_) | float::FloatTrigger::Reference { .. } => None,
         }
     }
 
@@ -64880,6 +65538,32 @@ impl Runtime<'_> {
     /// are not typing in came to be answered by a cell the pointer is nowhere near.
     fn peek_target(&self, hit: bt_render::GridHit) -> Option<(PeekSubject, SeatId)> {
         let (seat, leaf, _) = self.hovered_leaf()?;
+        // **The glance card goes first, and this flyout keeps what it does not
+        // take** (user ruling 2026-08-27, §7.27: *一个文件,不论从哪指向它,都是
+        // 同一张卡*).
+        //
+        // Before today a `.png` named in the output was the one file in this
+        // window with two different answers to a resting hand — a bare picture
+        // here, the card everywhere else — and the ruling is that there is one
+        // card. So a reference this window has verified now raises that card,
+        // and what is left for this surface is exactly the shape that has no
+        // file to raise one over: an OSC 1337 payload, whose bytes arrived in
+        // the stream and were never on a disk, and a printed path no worker has
+        // opened, which carries no link and therefore no card. Both keep the
+        // picture, and both keep it for the same reason — there is nothing else
+        // this window could put there.
+        //
+        // Asked of the cell rather than of the flyout's own state, so the two
+        // surfaces cannot both be up over one reference for the length of one
+        // clock: the card's own 350ms and this one's 300ms would otherwise race
+        // every time, and the picture would win.
+        if self
+            .reference_cell_index(seat, hit)
+            .and_then(|cell| self.terminal_reference_at(seat, cell))
+            .is_some()
+        {
+            return None;
+        }
         let anchor = leaf
             .last_presented_frame
             .as_ref()?
@@ -66376,6 +67060,14 @@ impl Runtime<'_> {
         // move land on one pointer event and the window never sits still for a
         // frame wondering what it is.
         self.promote_float_head_press(position);
+        // **And the glance card's head, on the same six pixels** (user ruling
+        // 2026-08-27, §7.27). Beside its twin rather than up beside the card's
+        // thumb, because what it turns into is the very drag the next line
+        // drives: the promotion and the first step of the carry land on one
+        // pointer event, which is what "拖动跟手" means when it is written down.
+        if self.promote_file_peek_press(position)? {
+            return Ok(());
+        }
         // A float being moved or resized owns the pointer outright, above the
         // divider for the reason it is a separate state at all: it is a window
         // over the layout, so while your hand is on it the layout underneath is
@@ -67167,7 +67859,17 @@ impl Runtime<'_> {
             self.window
                 .float_hover
                 .is_some_and(|(id, _)| self.window.float.is_pinned(id)),
-        );
+        )
+        // **And the glance card's head, which is a header this window draws
+        // without a float behind it** (user ruling 2026-08-27, §7.27).
+        //
+        // Second rather than first, and `or_else` rather than a fourth argument,
+        // because the card is *above* every float on the glass: when it is up
+        // and the pointer is on it, no float is under the pointer at all, so the
+        // two can never both answer. Where they could — a carry already in
+        // flight — the float's answer is the one that must win, and asking it
+        // first is what makes that true by construction.
+        .or_else(|| self.file_peek_head_grasp());
         let divider_axis = self
             .window
             .divider_drag
@@ -67205,6 +67907,23 @@ impl Runtime<'_> {
             self.window.command_rail_hover.is_some(),
             self.image_grasp(),
         ));
+    }
+
+    /// The shape the glance card's head offers, if the pointer is on it.
+    ///
+    /// A card whose head is pressed but not yet carried keeps the open hand
+    /// rather than swapping to the closed one, and that is [`float_grasp`]'s own
+    /// K113: a press that has not become a drag has not made anything happen,
+    /// and a cursor that changed there would say it had. The closed hand arrives
+    /// with the carry, through the float the promotion opens.
+    fn file_peek_head_grasp(&self) -> Option<FloatGrasp> {
+        if !self.file_peek_promotes() {
+            return None;
+        }
+        let at = self.window.pointer_position?;
+        let peek = self.window.file_peek.as_ref()?;
+        let head = peek.head.filter(|_| peek.due.is_none())?;
+        file_peek::contains(head, [at.x as f32, at.y as f32]).then_some(FloatGrasp::Head)
     }
 
     /// This window's inputs to [`terminal_link_answers_a_press`], read from the
@@ -70573,6 +71292,12 @@ impl Runtime<'_> {
         // waiting for one.
         if state == ElementState::Released {
             self.release_file_peek_thumb()?;
+            // The head's other meaning, and it *is* claimed: the press was
+            // consumed on the way down so that the hand could still choose, and
+            // the release is where the choice is spent.
+            if self.release_file_peek_press()? {
+                return Ok(());
+            }
         } else if self.press_file_peek(button)? {
             return Ok(());
         }
@@ -77468,6 +78193,49 @@ mod files_locate_door_tests {
         let rest = &SOURCE[start + signature.len()..];
         let end = rest.find("\n    fn ").unwrap_or(rest.len());
         &rest[..end]
+    }
+
+    /// PIN — **one predicate says whether a glance card has a window to become,
+    /// and the shape and the gesture both read it** (user ruling 2026-08-27,
+    /// §7.27).
+    ///
+    /// The failure this exists to prevent is the one §7.26 caught on a card head
+    /// two days earlier, one surface out: a control that *advertises* a verb it
+    /// cannot perform. Here it would read as an open hand over a `.pdf` card
+    /// whose head, carried, opens an empty window — because an engine goes on a
+    /// pane and a float is not one ([`Runtime::open_minted_page_on`]'s first
+    /// refusal). Two readers, one answer, so the cursor cannot promise what the
+    /// press will not do.
+    ///
+    /// The class itself is **not** re-spelled here: `file_peek_promotes` asks
+    /// `path_opens_as_a_page`, which is where the page class is written down
+    /// once (§7.16 ④). A card that refused `.pdf` by name would be the second
+    /// list that whole clause was written against.
+    ///
+    /// MUTATIONS that must turn it red: arm the head press without asking;
+    /// hand the cursor a grasp without asking; give `file_peek_promotes` its own
+    /// extension list instead of the page class's.
+    #[test]
+    fn one_predicate_says_whether_a_card_has_a_window_to_become() {
+        // Assembled, so the pin cannot match its own text.
+        let asks = ["file_peek", "_promotes()"].concat();
+        for signature in ["    fn press_file_peek(", "    fn file_peek_head_grasp("] {
+            assert!(
+                body(signature).contains(&asks),
+                "{signature} decides about the card's head without asking whether it has a window"
+            );
+        }
+        let predicate = body("    fn file_peek_promotes(");
+        assert!(
+            predicate.contains("path_opens_as_a_page"),
+            "the page class is asked at the one place it is written down"
+        );
+        for spelling in [".pdf", ".html", ".htm", "extension"] {
+            assert!(
+                !predicate.contains(spelling),
+                "and never re-spelled here — found {spelling}"
+            );
+        }
     }
 
     /// **Every function on the road from a double click to a document, and not
@@ -85194,6 +85962,265 @@ mod tests {
         // the sentence is git's, so the title has to say so rather than let a
         // paragraph of `fatal:` look like something this window decided.
         assert_eq!(git_panel::git_toast_title(), "Git");
+    }
+
+    // ── one file, one card, from wherever you point at it (2026-08-27) ─────
+
+    /// PIN — **a reference printed in the terminal raises the card the files
+    /// column raises, and a remote address raises nothing.**
+    ///
+    /// The ruling's first half as a table: *一个文件,不论从哪指向它,都是同一
+    /// 张卡*. What is being pinned is not really the mapping — it is that the
+    /// mapping is [`hyperlink_activation`]'s and not a second one: §7.1.5j ①
+    /// folded every printed shape of a local file into one `file:` link fed to
+    /// one routing table, and a hover that judged for itself which references
+    /// are files would drift from the click that opens them. The first symptom
+    /// of that drift is a card standing over something a press does nothing to.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① give the directory arm to the glance (`Preview` and `FilesColumn` both
+    ///    to [`ReferenceCard::File`]) — a folder gets a document card that can
+    ///    only refuse it, and the flyout that *is* a folder's card never opens;
+    /// ② answer a card for [`HyperlinkActivation::None`] — a remote address
+    ///    raises a card this window cannot fill. It is `None` and **not**
+    ///    `Browser` that has to stay silent, which is worth knowing: `Browser`
+    ///    is `Ctrl`'s answer and is unreachable at `control: false`, so a
+    ///    remote address arrives down the empty plain half. The arm is spelled
+    ///    out beside it rather than folded into a wildcard so that a future
+    ///    reader has to decide about it rather than inherit a `_`;
+    /// ③ pass `control: true` — the table's other half is the system's, so
+    ///    every local file stops raising a card the moment `Ctrl` is held down.
+    #[test]
+    fn a_reference_in_the_output_raises_the_card_the_files_column_raises() {
+        let file = |_: &Path| false;
+        let folder = |_: &Path| true;
+
+        // A file, however it was printed: §7.1.5j turns a bare path, a `file:`
+        // URI and an OSC 8 target into the same link, so one case covers all
+        // three by construction.
+        assert_eq!(
+            reference_card("file:///C:/Developer/notes.md", &file),
+            Some(ReferenceCard::File(PathBuf::from(r"C:\Developer\notes.md")))
+        );
+        // And every class the card has a body for arrives down that same arm —
+        // which is the point: the lane is chosen from the *path*, by the one
+        // reader ([`peek_body_kind`]) both hosts go through, and never here.
+        for name in ["report.pdf", "page.html", "shot.png", "clip.mp4", "a.bin"] {
+            let uri = format!("file:///C:/Developer/{name}");
+            assert!(
+                matches!(reference_card(&uri, &file), Some(ReferenceCard::File(_))),
+                "{name} is a file, and the card decides what to draw of it elsewhere"
+            );
+        }
+
+        // A folder — including one named like a page, because the directory
+        // question is asked before the page question and was settled first.
+        assert_eq!(
+            reference_card("file:///C:/Developer/src", &folder),
+            Some(ReferenceCard::Folder(PathBuf::from(r"C:\Developer\src")))
+        );
+        assert!(matches!(
+            reference_card("file:///C:/Developer/site.html", &folder),
+            Some(ReferenceCard::Folder(_))
+        ));
+
+        // A share is a file to this door, and the card it raises prints §7.1.3's
+        // refusal — the preview's judgement borrowed, exactly as the files
+        // column borrows it. The disk is never asked: `is_directory` would stall
+        // the loop on a cold server, and the arm above it returns first.
+        assert_eq!(
+            reference_card("file://server/share/notes.md", &|_| {
+                panic!("a share is answered without touching the network")
+            }),
+            Some(ReferenceCard::File(PathBuf::from(
+                r"\\server\share\notes.md"
+            )))
+        );
+
+        // **And nothing at all for what this window cannot show.** A remote
+        // address is the row whose plain half is empty by ruling; a scheme with
+        // no arm at all is refused the same way.
+        for uri in [
+            "https://example.com/report.pdf",
+            "http://example.com",
+            "mailto:someone@example.com",
+            "notascheme",
+        ] {
+            assert_eq!(
+                reference_card(uri, &file),
+                None,
+                "{uri} has no destination inside this window, so it has no card"
+            );
+        }
+    }
+
+    /// PIN — **the card over a reference stands beside the run the underline is
+    /// lit on, one row's worth, on the row the hand is on.**
+    ///
+    /// [`bt_viewport::ViewportFrame::hyperlink_cells`] hands over a segment that
+    /// may cover the tail of one row and the head of the next, and its own note
+    /// says a consumer "gets a row's worth at a time and must union or choose".
+    /// This chooses, and the choice is the pointer's row.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① drop the `cell / columns != row` filter — a wrapped reference is
+    ///    boxed from column 0 to the pane's last column and the card is placed
+    ///    against a rectangle with a hole in it;
+    /// ② use `last` instead of `last + 1` for the right edge — the card
+    ///    overlaps the reference's final character;
+    /// ③ take the row's height from the cell height instead of the frame's own
+    ///    interval — a pane with a formula in it places every card below the
+    ///    block against the wrong row.
+    #[test]
+    fn a_card_over_a_reference_stands_beside_the_run_the_underline_is_on() {
+        const COLUMNS: u32 = 80;
+        let origin = [12.0_f32, 40.0];
+        let cell_width = 9.0_f32;
+
+        // A run of six cells on row 3, columns 10..=15.
+        let run: Vec<u32> = (10..=15).map(|column| 3 * COLUMNS + column).collect();
+        let rect = reference_run_rect(&run, COLUMNS, 3, origin, cell_width, 60.0, 78.0)
+            .expect("the run is on the row asked about");
+        assert_eq!(
+            rect,
+            [
+                origin[0] + 10.0 * cell_width,
+                origin[1] + 60.0,
+                origin[0] + 16.0 * cell_width,
+                origin[1] + 78.0,
+            ],
+            "the whole run, its last cell included, and the row's own interval"
+        );
+
+        // **A wrapped reference is two boxes and this is the one under the
+        // hand.** The same segment, asked about each of its rows in turn.
+        let wrapped: Vec<u32> = (76..80)
+            .map(|column| 3 * COLUMNS + column)
+            .chain((0..4).map(|column| 4 * COLUMNS + column))
+            .collect();
+        let upper = reference_run_rect(&wrapped, COLUMNS, 3, origin, cell_width, 60.0, 78.0)
+            .expect("the tail of row three");
+        let lower = reference_run_rect(&wrapped, COLUMNS, 4, origin, cell_width, 78.0, 96.0)
+            .expect("the head of row four");
+        assert_eq!(
+            upper,
+            [
+                origin[0] + 76.0 * cell_width,
+                origin[1] + 60.0,
+                origin[0] + 80.0 * cell_width,
+                origin[1] + 78.0,
+            ]
+        );
+        assert_eq!(
+            lower,
+            [
+                origin[0],
+                origin[1] + 78.0,
+                origin[0] + 4.0 * cell_width,
+                origin[1] + 96.0,
+            ]
+        );
+        assert!(
+            upper[0] > lower[2],
+            "and they are not one rectangle: unioning them would box the whole pane"
+        );
+
+        // A row the run does not reach has no box, which is how a stale cell
+        // index answers nothing rather than answering the wrong thing.
+        assert_eq!(
+            reference_run_rect(&run, COLUMNS, 9, origin, cell_width, 0.0, 18.0),
+            None
+        );
+        assert_eq!(
+            reference_run_rect(&[], COLUMNS, 3, origin, cell_width, 60.0, 78.0),
+            None
+        );
+    }
+
+    /// PIN — **the window a card becomes opens with the card's own top-left,
+    /// held exactly where the hand is holding it.**
+    ///
+    /// The ruling's second half: *一张卡,不论它是什么,拖头就变浮窗*, and
+    /// "拖动跟手" is the clause this is about. A peek float keeps its own
+    /// frame and so cannot move; a glance card becomes something bigger than it
+    /// was, so the question is which edge stays — and it is the top-left,
+    /// because the head is there and the hand is on the head.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① measure the grab before the clamp — a card near the window's bottom
+    ///    edge promotes to a window that then drifts away from the pointer by
+    ///    however far the clamp moved it, on every move after the first;
+    /// ② centre the window on the card instead of sharing its corner — the
+    ///    thing being carried slides out from under the finger the moment it is
+    ///    picked up;
+    /// ③ drop the clamp — a card at the bottom of the window promotes to a
+    ///    window whose foot is off the glass.
+    #[test]
+    fn a_card_promoted_to_a_window_keeps_the_corner_the_hand_is_on() {
+        const SCALE: f32 = 1.0;
+        let viewport = [0.0_f32, 0.0, 1600.0, 900.0];
+        // A card of the module's own width, standing clear of every edge.
+        let card = [400.0_f32, 200.0, 700.0, 464.0];
+        let size = [520.0_f32, 480.0];
+        let pointer = [460.0_f32, 212.0];
+
+        let (placed, grab) = file_peek_promotion(card, size, pointer, viewport, SCALE);
+        assert_eq!(
+            [placed[0], placed[1]],
+            [card[0], card[1]],
+            "the head does not move, because the hand is on the head"
+        );
+        assert_eq!(
+            [placed[2] - placed[0], placed[3] - placed[1]],
+            size,
+            "and the window is the size it asked to be"
+        );
+        assert_eq!(
+            grab,
+            [60.0, 12.0],
+            "the offset inside the frame that opened"
+        );
+        assert_eq!(
+            float::float_dragged_to(placed, pointer, grab, viewport, SCALE),
+            placed,
+            "so the move that opened it moves it no further"
+        );
+
+        // **Near the bottom edge the clamp overrules the corner — once.** The
+        // grab is measured after it, so the window is held where it actually
+        // stands rather than where it asked to stand.
+        let low = [400.0_f32, 700.0, 700.0, 880.0];
+        let low_pointer = [460.0_f32, 712.0];
+        let (placed, grab) = file_peek_promotion(low, size, low_pointer, viewport, SCALE);
+        assert!(
+            placed[3] <= viewport[3],
+            "a window promoted at the bottom of the glass is still on the glass"
+        );
+        assert!(
+            placed[1] < low[1],
+            "which it can only be by having moved up"
+        );
+        assert_eq!(
+            float::float_dragged_to(placed, low_pointer, grab, viewport, SCALE),
+            placed,
+            "and it does not drift away from the hand on the next move"
+        );
+        // **And the move after that is the hand's alone.** Carried up into open
+        // ground it travels exactly as far as the hand did — not that plus the
+        // distance the clamp had already corrected. Asked out here rather than
+        // down against the edge, where the drag's own clamp would put a wrong
+        // frame back where the right one is and hide the difference entirely.
+        let carried = [low_pointer[0] - 40.0, low_pointer[1] - 300.0];
+        assert_eq!(
+            float::float_dragged_to(placed, carried, grab, viewport, SCALE),
+            [
+                placed[0] - 40.0,
+                placed[1] - 300.0,
+                placed[2] - 40.0,
+                placed[3] - 300.0,
+            ],
+            "the window follows the hand and never the clamp's own correction"
+        );
     }
 
     // ── dragging a peek's header keeps it (user ruling 2026-08-12) ──────────
@@ -102133,9 +103160,20 @@ mod tests {
             float_grasp(Some(FloatDragKind::Move { grab: [0.0, 0.0] }), None, true),
             Some(FloatGrasp::Carrying)
         );
-        // A peek is not a window you were told you had: its header is not a
-        // handle, and it is drawn without a grip at all.
-        assert_eq!(float_grasp(None, Some(FloatPart::Head), false), None);
+        // **A peek's header is a handle too** (user ruling 2026-08-27, §7.27).
+        // The sentence that stood here — "a peek is not a window you were told
+        // you had: its header is not a handle" — was overturned on the day the
+        // gesture it denied became the product's way of keeping a glance: since
+        // 2026-08-12 six pixels on that header promote the peek, and a header
+        // that does that while advertising nothing is §7.21's complaint exactly.
+        assert_eq!(
+            float_grasp(None, Some(FloatPart::Head), false),
+            Some(FloatGrasp::Head),
+            "the one header that turns a glimpse into a window must look like one"
+        );
+        // The grip is still the pinned window's alone, and a peek is drawn
+        // without one — so this is belt and braces rather than a rule with a
+        // surface behind it.
         assert_eq!(float_grasp(None, Some(FloatPart::Grip), false), None);
         // **But the carry a peek's header turns into wears the closed fist**
         // (rule ③, 2026-08-12). The gesture is asked before the hover and before
