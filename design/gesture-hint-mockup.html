@@ -1,0 +1,807 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Folio · Cards 手势示意 · A/B/C 小样</title>
+<style>
+  /* ══════════════════════════════════════════════════════════════════════════
+     Folio — Cards 模式「Alt + 滚轮」手势示意小样
+     只有 HTML/CSS/SVG，零外部资源，不进产品。
+
+     色板 / 字体 / 圆角 / 阴影 / 卡片几何 全部照抄 design/ui-mockup.html，
+     一个数都没有新造。节奏照抄 crates/bt-render/src/motion.rs：
+       进  140ms = POPUP_ENTER = MOTION_BASE_MS
+       停  4000ms = toast.rs TOAST_LIFE_QUIET
+       出   90ms = POPUP_EXIT = MOTION_FAST_MS
+       位移  4px = MOTION_TRAVEL_LOGICAL_PX  ← 只在**进场**用
+       缓动  cubic-bezier(.25,.1,.25,1) = motion.rs EASE
+     出场不带位移，这不是省事：keyhint.rs 写着「离开是没人在等的那一半」，
+     所以那一半是快的、而且它不旅行。
+     ══════════════════════════════════════════════════════════════════════════ */
+
+  /* ── 产品色板（ui-mockup.html 的 :root，逐行抄） ──────────────────────── */
+  :root {
+    --page: #F1F0EE;
+    --win: #FFFFFF;
+    --panel: #F7F7F5;
+    --border: rgba(0,0,0,.088);
+    --border-soft: rgba(0,0,0,.055);
+    --ink: #37352F;
+    --ink2: rgba(55,53,47,.65);
+    --ink3: rgba(55,53,47,.45);
+    --hover: rgba(55,53,47,.055);
+    --active: rgba(55,53,47,.09);
+    --accent: #3059D8;
+    --err: #e11d48;
+    --warn: #d9822b;
+    --ok: #1a7f37;
+    --termbg: #FFFFFF;
+    --shadow: 0 16px 48px rgba(0,0,0,.13), 0 2px 8px rgba(0,0,0,.06);
+    --menu: #FFFFFF;
+    --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+
+    /* ── 这一片是本小样唯一新增的量，全是变量，页面上有实时读数 ─────────── */
+    --hint-in:     140ms;                       /* POPUP_ENTER  = MOTION_BASE  */
+    --hint-dwell:  4000ms;                      /* TOAST_LIFE_QUIET            */
+    --hint-out:    90ms;                        /* POPUP_EXIT   = MOTION_FAST  */
+    --hint-travel: 4px;                         /* MOTION_TRAVEL_LOGICAL_PX    */
+    --ease: cubic-bezier(.25, .1, .25, 1);      /* motion.rs EASE              */
+
+    /* 自演示（方案 C）自己的钟，跟示意卡无关 */
+    --demo-dur:  1900ms;
+    --demo-lead: 300ms;
+    --demo-ease: cubic-bezier(.25, .1, .25, 1);
+    --demo-dist: 22px;
+
+    /* 产品几何 */
+    --fcard-body: 160px;   /* Appearance ▸ Focus card height 的默认值 */
+  }
+  body.dark {
+    --page: #141414;
+    --win: #202020;
+    --panel: #252525;
+    --border: rgba(255,255,255,.094);
+    --border-soft: rgba(255,255,255,.06);
+    --ink: rgba(255,255,255,.87);
+    --ink2: rgba(255,255,255,.55);
+    --ink3: rgba(255,255,255,.38);
+    --hover: rgba(255,255,255,.055);
+    --active: rgba(255,255,255,.09);
+    --accent: #7A99FF;
+    --termbg: #1B1B1B;
+    --ok: #57ab5a;
+    --err: #fb7185;
+    --shadow: 0 16px 48px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35);
+    --menu: #2A2A2A;
+  }
+
+  /* ── 红线：动画不得是唯一的状态载体 ──────────────────────────────────────
+     关掉动画，示意卡**单帧出现、单帧消失**，停留 4s 一秒不减，文案一字不改。
+     实现就是把三个时长变量清零 —— 卡片在不在从来不由补间承担，
+     所以这条规则在 CSS 里是三行，不是一套分支。 */
+  body.rm {
+    --hint-in: 1ms;
+    --hint-out: 1ms;
+    --hint-travel: 0px;
+    --demo-ease: steps(1, end);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :root { --hint-in: 1ms; --hint-out: 1ms; --hint-travel: 0px; --demo-ease: steps(1, end); }
+  }
+
+  /* ── 页面外壳（这一层不是产品，是给人看小样用的脚手架） ───────────────── */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--page); color: var(--ink);
+    font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", -apple-system, sans-serif;
+    font-size: 14px; padding: 28px 28px 64px;
+    transition: background .18s ease;
+  }
+  h1 { font-size: 19px; font-weight: 600; margin: 0 0 6px; letter-spacing: -.01em; }
+  .sub { color: var(--ink2); font-size: 13px; margin: 0 0 18px; line-height: 1.7; max-width: 1000px; }
+  .sub b { color: var(--ink); font-weight: 600; }
+  code { font-family: var(--mono); font-size: 12px; background: var(--hover);
+         padding: 1px 5px; border-radius: 3px; }
+
+  /* 控制条 */
+  .bar {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px;
+    padding: 10px 14px; margin-bottom: 8px;
+    background: var(--win); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .bar label { display: inline-flex; align-items: center; gap: 6px;
+               font-size: 13px; color: var(--ink2); cursor: pointer; user-select: none; }
+  .bar label:hover { color: var(--ink); }
+  .bar input { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; margin: 0; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 12px; font: inherit; font-size: 13px;
+    color: var(--ink); background: var(--win);
+    border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
+  }
+  .btn:hover { background: var(--hover); }
+  .btn:active { background: var(--active); }
+  .btn svg { width: 14px; height: 14px; }
+  .spacer { flex: 1; }
+
+  /* 时长读数 */
+  .readout { display: flex; flex-wrap: wrap; gap: 6px;
+             font-family: var(--mono); font-size: 11.5px; margin-bottom: 24px; }
+  .readout .tok {
+    display: inline-flex; align-items: baseline; gap: 6px;
+    padding: 4px 9px; border-radius: 5px;
+    background: var(--win); border: 1px solid var(--border-soft); color: var(--ink2);
+  }
+  .readout .tok b { color: var(--ink); font-weight: 600; }
+  .readout .tok.hot { border-color: var(--accent); }
+  .readout .tok.hot b { color: var(--accent); }
+  .readout .note { color: var(--ink3); align-self: center; padding-left: 4px; }
+
+  /* ── 三个方案并排 ───────────────────────────────────────────────────────── */
+  .row { display: flex; flex-wrap: wrap; gap: 22px; align-items: flex-start; }
+  .variant { width: 510px; flex: none; }
+  .vhead { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+  .vhead .k {
+    width: 20px; height: 20px; flex: none; border-radius: 5px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--ink); color: var(--win); font-size: 12px; font-weight: 600;
+  }
+  .vhead .t { font-size: 14px; font-weight: 600; }
+  .vhead .w { font-size: 12px; color: var(--ink3); }
+  .vnote { margin-top: 10px; font-size: 12.5px; line-height: 1.7; color: var(--ink2); }
+  .vnote .pro::before { content: "＋"; color: var(--ok); font-weight: 700; margin-right: 4px; }
+  .vnote .con::before { content: "－"; color: var(--err); font-weight: 700; margin-right: 4px; }
+  .vnote div + div { margin-top: 3px; }
+
+  /* ── 一扇 Folio 窗（小样场景） ──────────────────────────────────────────── */
+  .win {
+    position: relative; height: 452px; overflow: hidden;
+    background: var(--win); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: var(--shadow);
+  }
+  .titlebar {
+    height: 32px; display: flex; align-items: flex-end; gap: 1px;
+    padding: 0 10px; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .tab {
+    height: 25px; padding: 0 12px; display: flex; align-items: center; gap: 6px;
+    font-size: 11.5px; color: var(--ink3); border-radius: 7px 7px 0 0;
+  }
+  .tab.on { background: var(--win); color: var(--ink); }
+  .tab .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ink3); flex: none; }
+  .tab.on .dot { background: var(--accent); }
+  .wbody { display: flex; height: calc(100% - 32px); }
+
+  /* 左轨：Cards 的家。产品里 .window.focusmode .rail { width: 280px } */
+  .rail {
+    width: 244px; flex: none; overflow: hidden;
+    background: var(--panel); border-right: 1px solid var(--border);
+    padding: 4px 10px 10px 22px;
+  }
+  .focus-rail { display: flex; flex-direction: column; gap: 8px; }
+
+  /* 一张卡 = 一个 tab（.fcard，逐属性抄） */
+  .fcard {
+    position: relative; flex: none; overflow: hidden;
+    background: var(--menu); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 3px 12px rgba(0,0,0,.22);
+  }
+  body.dark .fcard { box-shadow: 0 3px 12px rgba(0,0,0,.4); }
+  .fcard.staged { border-color: var(--ink3); background: var(--active); }
+  .fcard.staged .fc-head { background: var(--active); color: var(--ink); }
+  .fc-head {
+    display: flex; align-items: center; gap: 6px; padding: 5px 8px;
+    font-size: 11px; color: var(--ink2); background: var(--hover);
+  }
+  .fc-head .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fc-head .n { color: var(--ink3); font-variant-numeric: tabular-nums; }
+  .fc-tab-mini {
+    height: var(--fcard-body); padding: 5px; display: flex; gap: 3px;
+    background: var(--termbg); overflow: hidden;
+  }
+  .fc-cell {
+    display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0;
+    overflow: hidden; border: 1px solid var(--border-soft); border-radius: 3px;
+    background: var(--termbg);
+  }
+  .fc-cell.focused { border-color: var(--ink3); }
+  /* 一个座位的正文：产品的 7.5px/1.45，顶端对齐（2026-08-21 裁决） */
+  .fc-mini {
+    flex: 1; min-height: 0; overflow: hidden; padding: 3px 4px 4px;
+    font: 7.5px/1.45 Consolas, "Cascadia Mono", monospace;
+    background: var(--termbg); color: var(--ink2); pointer-events: none;
+  }
+  .fc-mini.fc-files { font-size: 8px; line-height: 1.5; }
+  /* 一个座位投的是屏幕的**最后 N 行**，所以内容溢出时它停在尾巴上，
+     --seat-base 就是那个偏移；瞄在尾巴以上的座位这个值更小，并穿虚缝。 */
+  .fc-mini .sc { display: block; will-change: transform;
+                 transform: translateY(var(--seat-base, 0px)); }
+  .fc-mini .sc > div { white-space: nowrap; overflow: hidden; }
+  .fc-mini .p { color: var(--accent); }
+  .fc-mini .ok { color: var(--ok); }
+  .fc-mini .dim { color: var(--ink3); }
+  .fc-mini .cur { background: var(--ink); color: var(--termbg); }
+  /* 窗口瞄在尾巴以上的座位穿一道虚缝（.fc-cell.aimed::after，抄的） */
+  .fc-cell.aimed { position: relative; }
+  .fc-cell.aimed::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
+    background: repeating-linear-gradient(to right, currentColor 0 3px, transparent 3px 6px);
+    color: var(--ink2); opacity: .45;
+  }
+
+  /* 右边：正在台上的那个 tab */
+  .stage {
+    flex: 1; min-width: 0; background: var(--termbg);
+    padding: 10px 12px; overflow: hidden;
+    font: 11px/1.65 Consolas, "Cascadia Mono", monospace; color: var(--ink2);
+  }
+  .stage div { white-space: nowrap; overflow: hidden; }
+  .stage .p { color: var(--accent); }
+  .stage .ok { color: var(--ok); }
+  .stage .cur { background: var(--ink); color: var(--termbg); }
+
+  /* ══ 示意小卡本体 ══════════════════════════════════════════════════════════
+     盒子照 keyhint.rs / toast.rs：radius 8、border 1px var(--border)、
+     padding 10px 12px、和弦与名字之间 10px、离窗户地板 16px。 */
+  .hint {
+    position: absolute; z-index: 30;
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px;
+    background: var(--menu); border: 1px solid var(--border);
+    border-radius: 8px; box-shadow: var(--shadow);
+    opacity: 0;                     /* 静息态就是「不在」—— 动画只负责搬运 */
+    pointer-events: none;
+  }
+  /* 两段动画串起来，全部由变量驱动，一个写死的百分比都没有。
+     进：淡入 + 4px 位移。出：只淡出，不旅行。
+     出场的 delay 就地 calc，**不能**抽成 :root 上的一个 --hint-hold：
+     自定义属性里的 var() 是在它被声明的那个元素上代换的，抽到 :root 就意味着
+     body.rm 后来改的 --hint-in 再也进不去 —— 关掉动画后 delay 会停在 4.14s
+     而不是 4.001s。放在这里，它跟着 .hint 自己继承到的值走。 */
+  .hint.go, .badge.go {
+    animation:
+      hint-in  var(--hint-in)  var(--ease) forwards,
+      hint-out var(--hint-out) var(--ease)
+               calc(var(--hint-in) + var(--hint-dwell)) forwards;
+  }
+  @keyframes hint-in  { from { opacity: 0; transform: translateY(var(--hint-travel)); }
+                        to   { opacity: 1; transform: translateY(0); } }
+  @keyframes hint-out { from { opacity: 1; } to { opacity: 0; } }
+
+  .hint .cluster { display: flex; align-items: center; gap: 6px; flex: none; }
+  .hint .plus { font-size: 11px; color: var(--ink3); }
+  .hint .say { font-size: 12px; line-height: 1.5; color: var(--ink); max-width: 150px; }
+
+  /* 键帽 —— ui-mockup.html 的 .cap，一个数没改 */
+  .cap {
+    min-width: 20px; height: 20px; padding: 0 6px; flex: none;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: var(--hover); font-size: 11.5px; color: var(--ink);
+  }
+  /* 按下态：产品里「按住」就是 --active + 一条内影，键帽沉半像素。
+     不是新词 —— .btn:active 和菜单项按下穿的是同一层。 */
+  .cap.down {
+    background: var(--active); border-color: var(--ink3); color: var(--ink);
+    transform: translateY(.5px);
+    box-shadow: inset 0 1px 2px rgba(0,0,0,.10);
+  }
+  body.dark .cap.down { box-shadow: inset 0 1px 2px rgba(0,0,0,.35); }
+
+  /* 滚轮图形：16 格，1.2 描边，round cap，单色 currentColor */
+  .wheel { width: 16px; height: 16px; flex: none; color: var(--ink); display: block; }
+  .wheel .notch { transform-origin: 8px 5.75px; }
+  .go .wheel .notch { animation: wheel-roll 1.35s ease-in-out infinite; }
+  @keyframes wheel-roll {
+    0%, 100% { transform: translateY(1.15px); }
+    50%      { transform: translateY(-1.15px); }
+  }
+  body.rm .wheel .notch { animation: none !important; }
+  @media (prefers-reduced-motion: reduce) { .wheel .notch { animation: none !important; } }
+
+  /* ── A：浮签，窗口右下角，离地板 16px（toast / keyhint 的锚） ─────────── */
+  .hint.a { right: 16px; bottom: 16px; }
+
+  /* ── B：气泡，贴住第一张卡的右边，带一枚 6px 尖角 ─────────────────────── */
+  .hint.b { left: 252px; top: 44px; }
+  .hint.b::before {
+    content: ""; position: absolute; left: -6px; top: 21px;
+    width: 10px; height: 10px; transform: rotate(45deg);
+    background: var(--menu);
+    border-left: 1px solid var(--border); border-bottom: 1px solid var(--border);
+    border-radius: 0 0 0 3px;
+  }
+
+  /* ── C：自演示 —— 卡片自己滚一下，外加一枚无字徽标 ─────────────────────── */
+  .fc-mini.demo.go .sc {
+    animation: demo-scroll var(--demo-dur) var(--demo-ease) var(--demo-lead) both;
+  }
+  @keyframes demo-scroll {
+    0%,  16% { transform: translateY(var(--seat-base, 0px)); }
+    45%, 72% { transform: translateY(calc(var(--seat-base, 0px) + var(--demo-dist))); }
+    100%     { transform: translateY(var(--seat-base, 0px)); }
+  }
+  /* 徽标：没有句子，只有和弦。贴在卡的右下角内侧。 */
+  .badge {
+    position: absolute; right: 6px; bottom: 6px; z-index: 5;
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 6px; border-radius: 6px;
+    background: var(--menu); border: 1px solid var(--border);
+    box-shadow: 0 2px 6px rgba(0,0,0,.14);
+    opacity: 0; pointer-events: none;
+  }
+  .badge .cap { min-width: 17px; height: 16px; padding: 0 4px; font-size: 10px; border-radius: 3px; }
+  .badge .wheel { width: 13px; height: 13px; }
+
+  /* 底下拿来对比文案的静止示意卡：同一个盒子，只是不动 */
+  .hint.still { position: static; opacity: 1; }
+  .hint.still .say { max-width: none; white-space: nowrap; }
+  .swatches { display: flex; gap: 24px; flex-wrap: wrap; margin: 12px 0 4px; }
+  .swatches > div { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; }
+  .swatches .lab { font-family: var(--mono); font-size: 11px; color: var(--ink3); }
+
+  /* 场景脚注 */
+  .cap-line { margin-top: 7px; font-family: var(--mono); font-size: 11px;
+              color: var(--ink3); line-height: 1.6; }
+
+  /* 底部说明 */
+  .foot {
+    margin-top: 34px; padding-top: 18px; border-top: 1px solid var(--border);
+    font-size: 12.5px; line-height: 1.8; color: var(--ink2); max-width: 1000px;
+  }
+  .foot h2 { font-size: 13.5px; color: var(--ink); margin: 0 0 6px; font-weight: 600; }
+  .foot section + section { margin-top: 18px; }
+  .foot ul { margin: 4px 0 0; padding-left: 20px; }
+  .foot li { margin: 2px 0; }
+  .foot p { margin: 6px 0 0; }
+  .flag {
+    display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px;
+    background: color-mix(in srgb, var(--err) 12%, transparent);
+    color: var(--err); font-weight: 600;
+  }
+</style>
+</head>
+<body>
+
+<h1>Cards 模式 · 「Alt + 滚轮」首次示意</h1>
+<p class="sub">
+  一个自创、零线索的手势：卡片看着是静态缩略图，<b>按住 Alt 滚滚轮能滚它里面的内容</b>。
+  这一页是三个候选的并排小样 —— 只有 HTML/CSS/SVG，不进产品。
+  色板、字体、圆角、阴影、卡片几何全部取自 <code>design/ui-mockup.html</code>；
+  节奏取自 <code>bt-render/src/motion.rs</code> 与 <code>bt-app/src/{keyhint,toast}.rs</code>。
+  示意卡<b>只在首次进入 Cards 时出现一次</b>，之后不再打扰。
+</p>
+
+<div class="bar">
+  <button class="btn" id="replay">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M13.4 8a5.4 5.4 0 1 1-1.6-3.8"/><path d="M13.6 2.2v3h-3"/>
+    </svg>
+    <span data-en="Replay" data-zh="重播">重播</span>
+  </button>
+  <label><input type="checkbox" id="rm">
+    <span data-en="reduced motion" data-zh="reduced motion（关动画）">reduced motion（关动画）</span></label>
+  <label><input type="checkbox" id="en"> <span>English copy</span></label>
+  <label><input type="checkbox" id="dark">
+    <span data-en="dark" data-zh="深色">深色</span></label>
+  <span class="spacer"></span>
+  <span style="font-size:12px;color:var(--ink3)" id="autoline"></span>
+</div>
+
+<div class="readout" id="readout"></div>
+
+<div class="row">
+
+  <!-- ═══ A ═══════════════════════════════════════════════════════════════ -->
+  <div class="variant">
+    <div class="vhead">
+      <span class="k">A</span>
+      <span class="t" data-en="Floating chip · window bottom-right"
+                      data-zh="浮签 · 窗口右下角">浮签 · 窗口右下角</span>
+      <span class="w" data-en="line-art wheel" data-zh="线稿滚轮">线稿滚轮</span>
+    </div>
+    <div class="win" data-variant="a"></div>
+    <div class="cap-line">
+      inset 16px · toast / keyhint 的锚点 ·
+      <span data-en="stroked notch" data-zh="轮心=纯描边">轮心=纯描边</span>
+    </div>
+    <div class="vnote">
+      <div class="pro" data-en="Reuses furniture that already exists — same box, same anchor, same clock as a toast. Costs no new surface."
+                       data-zh="复用现成家具：跟 toast 同一个盒子、同一个锚、同一台钟，不新增任何表面。"></div>
+      <div class="pro" data-en="Never covers a card, so it can never be misread as part of one."
+                       data-zh="永远不盖住任何一张卡，也就永远不会被误读成卡的一部分。"></div>
+      <div class="con" data-en="It sits ~350px from the thing it talks about. The cards are in the left rail; the eye is there, the words are not."
+                       data-zh="它离自己谈论的东西约 350px。卡在左轨，眼睛在左轨，字在右下角。"></div>
+      <div class="con" data-en="A stroke-only notch breaks the icon law just ruled: the notch is a field inside a frame, and fields are filled."
+                       data-zh="纯描边的轮心违反刚立的图标法：轮心是框内的 field，而 field 该填实。"></div>
+    </div>
+  </div>
+
+  <!-- ═══ B ═══════════════════════════════════════════════════════════════ -->
+  <div class="variant">
+    <div class="vhead">
+      <span class="k">B</span>
+      <span class="t" data-en="Bubble · pinned to the first card"
+                      data-zh="气泡 · 贴住第一张卡">气泡 · 贴住第一张卡</span>
+      <span class="w" data-en="solid notch" data-zh="实心轮心">实心轮心</span>
+    </div>
+    <div class="win" data-variant="b"></div>
+    <div class="cap-line">
+      <span data-en="6px tail bites the card's edge" data-zh="6px 尖角咬住卡边">6px 尖角咬住卡边</span> ·
+      <span data-en="filled notch, stroked shell" data-zh="轮实心、壳描边">轮实心、壳描边</span>
+    </div>
+    <div class="vnote">
+      <div class="pro" data-en="Lands where the eye already is, and its tail names the subject: this sentence is about THAT card, not about the window."
+                       data-zh="落在眼睛已经在的地方；尖角替它指名道姓 —— 这句话说的是那张卡，不是这扇窗。"></div>
+      <div class="pro" data-en="Obeys the rule every menu in this house obeys: an explanation drops out of the thing it belongs to."
+                       data-zh="遵守房子里每个菜单都遵守的规矩：解释从它所属的那个东西上长出来。"></div>
+      <div class="con" data-en="It overhangs the staged tab. For four seconds it covers terminal output nobody asked to lose."
+                       data-zh="它探进台上的 tab，四秒内盖住读者没打算失去的终端输出。"></div>
+      <div class="con" data-en="The rail scrolls. Anchoring to card #1 means answering what happens when card #1 scrolls away."
+                       data-zh="轨会滚。锚在第一张卡上，就得回答「第一张卡滚走了怎么办」。"></div>
+    </div>
+  </div>
+
+  <!-- ═══ C ═══════════════════════════════════════════════════════════════ -->
+  <div class="variant">
+    <div class="vhead">
+      <span class="k">C</span>
+      <span class="t" data-en="Self-demo · the card scrolls itself"
+                      data-zh="自演示 · 卡片自己滚一下">自演示 · 卡片自己滚一下</span>
+      <span class="w" data-en="wordless badge" data-zh="无字徽标">无字徽标</span>
+    </div>
+    <div class="win" data-variant="c"></div>
+    <div class="cap-line">
+      <span data-en="content nudges 22px and returns" data-zh="内容位移 22px 再归位">内容位移 22px 再归位</span> ·
+      <span data-en="chord only, no sentence" data-zh="只有和弦，没有句子">只有和弦，没有句子</span>
+    </div>
+    <div class="vnote">
+      <div class="pro" data-en="It answers the exact disbelief the gesture meets — 'a thumbnail cannot scroll' — by scrolling. Nothing else here does that."
+                       data-zh="它正面回答了这个手势遇到的那个不信：「缩略图怎么可能滚」。别的方案都在说，只有它在做。"></div>
+      <div class="pro" data-en="No new surface floats over the window at all; the only occlusion is one badge, inside the card it is about."
+                       data-zh="没有任何新表面浮在窗上；唯一的遮挡是一枚徽标，而且就在它谈论的那张卡里面。"></div>
+      <div class="con" data-en="It shows THAT it scrolls and never says WHICH keys. The badge on its own is a rebus."
+                       data-zh="它演示了「会滚」，却从不说「按什么」。光一枚徽标就是一道字谜。"></div>
+      <div class="con"><span class="flag">红线</span>
+        <span data-en=" Under reduced motion the demo degenerates into one single-frame jump — the whole message was riding on the tween. Tick the box and watch it fail."
+              data-zh=" 开 reduced motion 后，演示退化成一次单帧跳变 —— 它的全部信息本来就挂在补间上。勾上复选框就能看见它失效。"></span></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="foot">
+  <section>
+    <h2>时长全是变量，页面上有实时读数</h2>
+    <ul>
+      <li><code>--hint-in: 140ms</code> — <code>POPUP_ENTER</code> = <code>MOTION_BASE_MS</code>，进场带 <code>--hint-travel: 4px</code>（<code>MOTION_TRAVEL_LOGICAL_PX</code>）。</li>
+      <li><code>--hint-dwell: 4000ms</code> — <code>toast.rs</code> 的 <code>TOAST_LIFE_QUIET</code>。一条不出事的通知在这扇窗里活四秒，示意卡没有理由活得更久。</li>
+      <li><code>--hint-out: 90ms</code> — <code>POPUP_EXIT</code> = <code>MOTION_FAST_MS</code>，<b>只淡出、不位移</b>。<code>keyhint.rs</code> 的原话：离开是没人在等的那一半，所以那一半是快的，而且它不旅行。</li>
+      <li><code>--ease: cubic-bezier(.25,.1,.25,1)</code> — <code>motion.rs</code> 的 <code>EASE</code>。</li>
+    </ul>
+    <p>
+      CSS 里是两段串起来的 animation，第二段的 delay 就地写作
+      <code>calc(var(--hint-in) + var(--hint-dwell))</code>，
+      所以整条命的百分比一个都没写死 —— 改一个变量，三段全对。
+      这个 calc <b>不能</b>抽成 <code>:root</code> 上的一条 <code>--hint-hold</code>：
+      自定义属性里的 <code>var()</code> 在它被声明的那个元素上就代换掉了，
+      抽上去之后 <code>body.rm</code> 改的 <code>--hint-in</code> 再也进不去，
+      关掉动画时 delay 会停在 4.14s 而不是 4.001s。
+    </p>
+  </section>
+
+  <section>
+    <h2>reduced motion 是怎么落的（这是红线，不是选项）</h2>
+    <p>
+      勾上复选框 = <code>body.rm { --hint-in: 1ms; --hint-out: 1ms; --hint-travel: 0 }</code>，
+      三行，没有第二套分支。示意卡<b>单帧出现、停满四秒、单帧消失</b>：
+      停留一秒不减，文案一字不改，位置一像素不动。
+      <code>@media (prefers-reduced-motion: reduce)</code> 走同一条路径，
+      所以系统设置和这个复选框说的是同一件事。
+      <br>
+      唯一在这条红线下站不住的是 <b>C</b>：它的信息全在补间里，动画一关就只剩一次跳变。
+      这不是 C 实现得差，是 C 这个形态本身把状态挂在了动画上。
+    </p>
+  </section>
+
+  <section>
+    <h2>图标</h2>
+    <p>
+      滚轮是新画的（产品里没有）：<code>viewBox="0 0 16 16"</code>、<code>stroke-width="1.2"</code>、
+      <code>stroke-linecap="round"</code>、单色 <code>currentColor</code>。
+      鼠标壳是描边（它是个框）；按刚立的规矩「框内的 field 该填实」，
+      <b>B/C 的实心轮心才是合法画法，A 的线稿轮心是违例</b>。
+      Alt 键帽照 <code>ui-mockup.html</code> 的 <code>.cap</code>
+      （20px 高、4px 圆角、<code>--hover</code> 底、11.5px），
+      按下态加 <code>--active</code> + 一条内影 + 沉 0.5px，
+      用的是产品里 <code>:active</code> 已有的那一层，不是新词。
+    </p>
+  </section>
+
+  <section>
+    <h2>文案的一处冗余（提请裁决）</h2>
+    <p>
+      按需求实现出来的这张卡，把和弦说了两遍：左边一枚 Alt 键帽加一枚滚轮，
+      右边的句子又原样拼了一次「Alt + 滚轮」。
+    </p>
+    <div class="swatches">
+      <div><div id="sw-spec"></div>
+        <span class="lab" data-en="as specified" data-zh="按需求">按需求</span></div>
+      <div><div id="sw-verb"></div>
+        <span class="lab" data-en="de-duplicated: glyphs say the chord, the sentence says the verb"
+                          data-zh="去重：图形说和弦，句子只说动词">去重：图形说和弦，句子只说动词</span></div>
+    </div>
+    <p>
+      右边这版是产品 <code>keyhint</code> 的排法 —— 一行里左边是键，
+      右边是这个键干什么（<code>KEY_HINT_CAP_GAP_LOGICAL_PX: 10</code>），键名从不在名字里再写一遍。
+      两版都在这儿，等一个裁决。
+    </p>
+  </section>
+
+  <section>
+    <h2>小样对产品的两处让步（画的时候记一笔）</h2>
+    <ul>
+      <li>左轨画成 244px，产品是 <code>.window.focusmode .rail { width: 280px }</code>；只为让三扇窗并排放得下，卡片本身的几何（头 5/8、体 <code>--fcard-body:160px</code>、座位 7.5px/1.45、虚缝 .45）一个数没动。</li>
+      <li>第三张卡被窗底裁掉，这是真的：轨会滚，三张 160px 的卡本来就装不进一屏。</li>
+    </ul>
+  </section>
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════════════════════════
+   场景是拼出来的，不是抄三遍 —— 三个方案共用同一批卡，差别只在示意的形态。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+var T = {
+  say:  { en: "Alt + scroll to scroll a card", zh: "Alt + 滚轮 滚动卡片内容" },
+  verb: { en: "scroll a card", zh: "滚动卡片内容" },
+  auto: { en: "shown once, on the first entry into Cards",
+          zh: "首次进入 Cards 时出现一次" }
+};
+
+/* 一张卡 = 一个 tab。seats 是它的分屏树摊平后的座位。 */
+var CARDS = [
+  {
+    name: "folio \u25B8 build", n: "2", staged: true,
+    seats: [{
+      focused: true, base: -22, lines: [
+        ['p',   "PS D:\\Developer\\BetterTerminal> cargo fmt"],
+        ['dim', "PS D:\\Developer\\BetterTerminal> cargo clippy"],
+        ['dim', "    Checking bt-render v0.1.0"],
+        ['dim', "    Checking bt-pty v0.1.0"],
+        ['p',   "PS D:\\Developer\\BetterTerminal> cargo build"],
+        ['',    "   Compiling bt-render v0.1.0"],
+        ['',    "   Compiling bt-pty v0.1.0"],
+        ['',    "   Compiling bt-app v0.1.0"],
+        ['',    "    Finished dev [unoptimized] in 41.20s"],
+        ['p',   "PS D:\\Developer\\BetterTerminal> cargo test"],
+        ['',    "     Running unittests src\\main.rs"],
+        ['ok',  "test keyhint::hold_then_stop_raises .. ok"],
+        ['ok',  "test focus_thumb::mini_rows_fit ..... ok"],
+        ['ok',  "test result: ok. 412 passed; 0 failed"],
+        ['cur', "PS D:\\Developer\\BetterTerminal> "]
+      ]
+    }]
+  },
+  {
+    name: "claude \u25B8 session", n: "3",
+    seats: [
+      /* \u8fd9\u4e2a\u5ea7\u4f4d\u7684\u7a97\u53e3\u7784\u5728\u5c3e\u5df4**\u4ee5\u4e0a** \u2014\u2014 \u5e95\u4e0b\u8fd8\u6709\u6ca1\u753b\u51fa\u6765\u7684\u884c\uff0c
+         \u6240\u4ee5\u5b83\u6309\u88c1\u51b3\u7a7f\u90a3\u9053\u865a\u7f1d\uff08.fc-cell.aimed\uff09\u3002 */
+      { aimed: true, base: -22, lines: [
+        ['dim', "> read docs/DESIGN.md"],
+        ['',    "  \u00a77.1.5e' keyhint"],
+        ['dim', "> read design/ui-mockup.html"],
+        ['',    "  15340 lines"],
+        ['dim', "> grep -n \"fcard\""],
+        ['',    "  3001: .fcard {"],
+        ['',    "  3032: .fc-head {"],
+        ['',    "  3052: .fc-mini {"],
+        ['',    "  3106: .fc-tab-mini {"],
+        ['dim', "> edit keyhint.rs"],
+        ['ok',  "  applied 2 hunks"],
+        ['dim', "> cargo clippy"],
+        ['ok',  "  0 warnings"],
+        ['dim', "> edit focus_thumb.rs"],
+        ['ok',  "  applied"],
+        ['',    "\u00b7 thinking"]
+      ]},
+      { files: true, base: 0, lines: [
+        ['',    "\u25BE crates/"],
+        ['',    "  \u25BE bt-app/"],
+        ['',    "      keyhint.rs"],
+        ['',    "      toast.rs"],
+        ['',    "      focus_thumb.rs"],
+        ['',    "  \u25B8 bt-render/"],
+        ['',    "\u25B8 design/"],
+        ['',    "\u25B8 docs/"]
+      ]}
+    ]
+  },
+  {
+    name: "notes \u25B8 scratch", n: "1",
+    seats: [{
+      base: 0, lines: [
+        ['p',   "PS C:\\Users\\Weiyi> git log --oneline -4"],
+        ['',    "5def7f5 the ledger points at folio-next11"],
+        ['',    "f95b34c merge ink-is-fast-room-is-base"],
+        ['',    "0c0a95f the ink a hover reveals is 90ms"],
+        ['',    "4984e6b merge icons-p2-a-fill-is-a-thing"],
+        ['cur', "PS C:\\Users\\Weiyi> "]
+      ]
+    }]
+  }
+];
+
+var STAGE = [
+  ['p',  "PS D:\\Developer\\BetterTerminal>"],
+  ['p',  "cargo build"],
+  ['',   "   Compiling bt-render v0.1.0"],
+  ['',   "   Compiling bt-pty v0.1.0"],
+  ['',   "   Compiling bt-app v0.1.0"],
+  ['',   "    Finished dev [unoptimized]"],
+  ['',   "    in 41.20s"],
+  ['p',  "PS D:\\Developer\\BetterTerminal>"],
+  ['p',  "cargo test -p bt-app"],
+  ['ok', "test result: ok. 412 passed"],
+  ['cur',"PS D:\\Developer\\BetterTerminal>"]
+];
+
+function esc(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/* 滚轮：16 格 / 1.2 描边 / round cap / currentColor。
+   solid=true 时轮心实心 —— 框内的 field 该填实。 */
+function wheelSVG(solid) {
+  var notch = solid
+    ? '<rect class="notch" x="7.25" y="4.2" width="1.5" height="3.1" rx=".75"'
+      + ' fill="currentColor" stroke="none"/>'
+    : '<path class="notch" d="M8 4.5v2.5" fill="none" stroke="currentColor"'
+      + ' stroke-width="1.2" stroke-linecap="round"/>';
+  return '<svg class="wheel" viewBox="0 0 16 16" aria-hidden="true">'
+       + '<rect x="3.6" y="1.8" width="8.8" height="12.4" rx="4.4" fill="none"'
+       + ' stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>'
+       + notch + '</svg>';
+}
+
+function linesHTML(seat) {
+  var out = '', i, cls, txt;
+  for (i = 0; i < seat.lines.length; i++) {
+    cls = seat.lines[i][0]; txt = esc(seat.lines[i][1]);
+    out += (cls === 'cur')
+      ? '<div>' + txt + '<span class="cur">&nbsp;</span></div>'
+      : '<div' + (cls ? ' class="' + cls + '"' : '') + '>' + txt + '</div>';
+  }
+  return out;
+}
+
+function seatHTML(seat, demo) {
+  var cls = 'fc-cell' + (seat.focused ? ' focused' : '') + (seat.aimed ? ' aimed' : '');
+  var mini = 'fc-mini' + (seat.files ? ' fc-files' : '') + (demo ? ' demo' : '');
+  return '<div class="' + cls + '"><div class="' + mini + '">'
+       + '<div class="sc" style="--seat-base:' + seat.base + 'px">'
+       + linesHTML(seat) + '</div></div></div>';
+}
+
+function badgeHTML() {
+  /* 和示意卡同序：先键，后轮 */
+  return '<div class="badge"><span class="cap down">Alt</span>'
+       + wheelSVG(true) + '</div>';
+}
+
+function cardHTML(card, demoSeat, badge) {
+  var body = '', i;
+  for (i = 0; i < card.seats.length; i++) body += seatHTML(card.seats[i], i === demoSeat);
+  return '<div class="fcard' + (card.staged ? ' staged' : '') + '">'
+       + '<div class="fc-head"><span class="name">' + esc(card.name) + '</span>'
+       + '<span class="n">' + card.n + '</span></div>'
+       + '<div class="fc-tab-mini">' + body + '</div>'
+       + (badge ? badgeHTML() : '')
+       + '</div>';
+}
+
+function hintHTML(kind, solid, text) {
+  return '<div class="hint ' + kind + '">'
+       + '<span class="cluster"><span class="cap down">Alt</span>'
+       + '<span class="plus">+</span>' + wheelSVG(solid) + '</span>'
+       + (text === undefined ? '<span class="say" data-say></span>'
+                             : '<span class="say">' + esc(text) + '</span>')
+       + '</div>';
+}
+
+function stageHTML() {
+  var out = '<div class="stage">', i, c, t;
+  for (i = 0; i < STAGE.length; i++) {
+    c = STAGE[i][0]; t = esc(STAGE[i][1]);
+    out += (c === 'cur')
+      ? '<div>' + t + '<span class="cur">&nbsp;</span></div>'
+      : '<div' + (c ? ' class="' + c + '"' : '') + '>' + t + '</div>';
+  }
+  return out + '</div>';
+}
+
+function buildScene(el, v) {
+  var cards = '', i;
+  for (i = 0; i < CARDS.length; i++) {
+    cards += cardHTML(CARDS[i], (v === 'c' && i === 0) ? 0 : -1, (v === 'c' && i === 0));
+  }
+  el.innerHTML =
+      '<div class="titlebar">'
+    +   '<div class="tab on"><span class="dot"></span>folio \u25B8 build</div>'
+    +   '<div class="tab"><span class="dot"></span>claude</div>'
+    +   '<div class="tab"><span class="dot"></span>notes</div>'
+    + '</div>'
+    + '<div class="wbody">'
+    +   '<div class="rail"><div class="focus-rail">' + cards + '</div></div>'
+    +   stageHTML()
+    + '</div>'
+    + (v === 'a' ? hintHTML('a', false) : '')
+    + (v === 'b' ? hintHTML('b', true)  : '');
+}
+
+var scenes = document.querySelectorAll('.win');
+for (var s = 0; s < scenes.length; s++) buildScene(scenes[s], scenes[s].getAttribute('data-variant'));
+
+/* ── 语言 ─────────────────────────────────────────────────────────────────── */
+function applyLang() {
+  var lang = document.getElementById('en').checked ? 'en' : 'zh';
+  document.documentElement.lang = (lang === 'en') ? 'en' : 'zh-CN';
+  var nodes = document.querySelectorAll('[data-en][data-zh]'), i;
+  for (i = 0; i < nodes.length; i++) nodes[i].textContent = nodes[i].getAttribute('data-' + lang);
+  var says = document.querySelectorAll('[data-say]');
+  for (i = 0; i < says.length; i++) says[i].textContent = T.say[lang];
+  document.getElementById('autoline').textContent = T.auto[lang];
+  document.getElementById('sw-spec').innerHTML = hintHTML('still', true, T.say[lang]);
+  document.getElementById('sw-verb').innerHTML = hintHTML('still', true, T.verb[lang]);
+}
+
+/* ── 时长读数：直接读 computed style，所以它永远说的是真话 ────────────────── */
+function readout() {
+  var cs = getComputedStyle(document.body);
+  var rm = document.body.classList.contains('rm')
+        || matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var rows = ['--hint-in', '--hint-travel', '--hint-dwell', '--hint-out', '--ease'];
+  var html = '', i, v, val, hot;
+  for (i = 0; i < rows.length; i++) {
+    v = rows[i]; val = cs.getPropertyValue(v).trim();
+    hot = rm && (v === '--hint-in' || v === '--hint-out' || v === '--hint-travel');
+    html += '<span class="tok' + (hot ? ' hot' : '') + '">' + v + ' <b>' + val + '</b></span>';
+  }
+  html += '<span class="note">' + (rm
+    ? '\u2190 reduced motion\uFF1A\u8fdb\u51fa\u6e05\u96f6\uFF0Cdwell \u4e00\u79d2\u4e0d\u51cf'
+    : 'POPUP_ENTER / MOTION_TRAVEL / TOAST_LIFE_QUIET / POPUP_EXIT / EASE') + '</span>';
+  document.getElementById('readout').innerHTML = html;
+}
+
+/* ── 重播 ─────────────────────────────────────────────────────────────────── */
+function play() {
+  /* .still 是底下用来比文案的静止卡，它不参加重播 */
+  var nodes = document.querySelectorAll('.hint:not(.still), .badge, .fc-mini.demo'), i, n;
+  for (i = 0; i < nodes.length; i++) {
+    n = nodes[i];
+    n.classList.remove('go');
+    void n.offsetWidth;      /* 强制回流，否则同帧「移除+添加」等于没发生过 */
+    n.classList.add('go');
+  }
+}
+
+document.getElementById('replay').addEventListener('click', play);
+document.getElementById('rm').addEventListener('change', function (e) {
+  document.body.classList.toggle('rm', e.target.checked);
+  readout(); play();
+});
+document.getElementById('dark').addEventListener('change', function (e) {
+  document.body.classList.toggle('dark', e.target.checked);
+});
+document.getElementById('en').addEventListener('change', function () { applyLang(); play(); });
+
+applyLang();
+readout();
+play();
+</script>
+</body>
+</html>
