@@ -3847,18 +3847,37 @@ impl GpuContext {
     /// also the honest statement of what this layer is — nothing here needs a
     /// surface except the choice of adapter, and a caller who has no surface has
     /// no choice to make.
+    ///
+    /// **A machine with no adapter at all gets the software one.**
+    ///
+    /// `force_fallback_adapter: false` asks for the best device present, which
+    /// is what every machine this product runs on has and what these tests want
+    /// to measure. It is also a request that *fails outright* on a machine with
+    /// no display adapter — a headless build agent — and that failure is not a
+    /// regression in anything: it is the absence of hardware.
+    ///
+    /// So the second ask, and only when the first found nothing: the same
+    /// request with the fallback allowed, which on Windows is WARP. Written as
+    /// a retry rather than as a switch a build sets, because "does this machine
+    /// have a GPU" is a question the machine can answer and an environment
+    /// variable can only be told. On a machine that has one, the second call
+    /// never happens and nothing about what these tests exercise changes.
     pub async fn headless(format: wgpu::TextureFormat) -> Result<Self, RenderError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let phase_started = Instant::now();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                compatible_surface: None,
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                ..Default::default()
-            })
-            .await
-            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        let options = |force_fallback_adapter| wgpu::RequestAdapterOptions {
+            compatible_surface: None,
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter,
+            ..Default::default()
+        };
+        let adapter = match instance.request_adapter(&options(false)).await {
+            Ok(adapter) => adapter,
+            Err(_) => instance
+                .request_adapter(&options(true))
+                .await
+                .map_err(|error| RenderError::Wgpu(error.to_string()))?,
+        };
         let adapter_time = phase_started.elapsed();
         let phase_started = Instant::now();
         let (device, queue) = adapter

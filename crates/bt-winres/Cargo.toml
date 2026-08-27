@@ -1,0 +1,20 @@
+[package]
+name = "bt-winres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# No dependencies, and that is the whole point of the crate existing. What it
+# does — turn an `.ico` and four numbers into the `.res` file `link.exe` embeds
+# in `folio.exe` — is otherwise bought with `embed-resource` or `winres`, which
+# between them add six packages to the lock file and, worse, make the build
+# depend on finding `rc.exe` on the machine. The RES container and the
+# `VS_VERSIONINFO` block are two documented layouts of about two hundred lines;
+# `docs/DESIGN.md` §8's bar says a dependency has to be worth more than the code
+# it replaces, and these are not.
+
+[dependencies]
+
+[lints]
+workspace = true

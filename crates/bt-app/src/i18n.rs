@@ -4821,6 +4821,14 @@ pub enum CliText<'a> {
     },
     /// A bare folder given alongside `--cwd`.
     PlaceAlreadyNamed(&'a str),
+    /// **The window went away and this is why.**
+    ///
+    /// Said in a message box, because `folio.exe` is a windows-subsystem binary
+    /// whose `stderr` is a log file by the time anything can panic: without this
+    /// sentence a crash is a window vanishing, and the report it produces is
+    /// "it closed". The path is the payload — a log file whose location is not
+    /// on the screen is a log file nobody attaches.
+    Crashed { log: &'a str },
 }
 
 impl CliText<'_> {
@@ -4840,14 +4848,16 @@ impl CliText<'_> {
                      \x20 --cwd <folder>    the first pane opens in that folder\n\
                      \x20 --profile <id>    the first pane's shell: {profile_ids}\n\
                      \x20 <path>            a folder opens a pane there; a file opens a preview\n\
-                     \x20 -h, --help        this text"
+                     \x20 -h, --help        this text\n\
+                     \x20 --version         which build this is"
                 ),
                 Lang::Chinese => format!(
                     "folio [--cwd <文件夹>] [--profile <id>] [<路径>]\n\n\
                      \x20 --cwd <文件夹>    第一个窗格在这个文件夹里打开\n\
                      \x20 --profile <id>    第一个窗格用哪种 shell：{profile_ids}\n\
                      \x20 <路径>            文件夹等同 --cwd，文件则打开预览\n\
-                     \x20 -h, --help        显示这段说明"
+                     \x20 -h, --help        显示这段说明\n\
+                     \x20 --version         显示这是哪一个构建"
                 ),
             },
             Self::MissingValue(flag) => match lang {
@@ -4899,6 +4909,16 @@ impl CliText<'_> {
                 }
                 Lang::Chinese => format!("--cwd 已经说了在哪里打开，{folder} 没有被采用。"),
             },
+            Self::Crashed { log } => match lang {
+                Lang::English => {
+                    format!(
+                        "Folio stopped because of a fault inside it.\n\nWhat it recorded is in:\n{log}"
+                    )
+                }
+                Lang::Chinese => {
+                    format!("Folio 因为自身的一个故障停了。\n\n它记下的东西在：\n{log}")
+                }
+            },
         }
     }
 
@@ -4913,7 +4933,7 @@ impl CliText<'_> {
     /// The samples deliberately contain no Han characters of their own, so that
     /// the Chinese column's own words are what the Han test finds.
     #[cfg(test)]
-    pub const SAMPLES: [Self; 10] = [
+    pub const SAMPLES: [Self; 11] = [
         Self::Usage {
             profile_ids: "pwsh, winps",
         },
@@ -4929,6 +4949,9 @@ impl CliText<'_> {
             folder: r"\\server\share",
         },
         Self::PlaceAlreadyNamed(r"D:\b"),
+        Self::Crashed {
+            log: r"C:\Temp\folio-panic.log",
+        },
     ];
 }
 
@@ -5875,7 +5898,8 @@ mod tests {
                 | CliText::NoSuchProfile(_)
                 | CliText::NoSuchPath(_)
                 | CliText::UnreachableFolder { .. }
-                | CliText::PlaceAlreadyNamed(_) => {}
+                | CliText::PlaceAlreadyNamed(_)
+                | CliText::Crashed { .. } => {}
             }
             let english = sample.in_lang(Lang::English);
             let chinese = sample.in_lang(Lang::Chinese);
@@ -5917,7 +5941,7 @@ mod tests {
             }
             .in_lang(lang);
             let lines: Vec<&str> = usage.lines().collect();
-            assert_eq!(lines.len(), 6, "{lang:?}: {usage}");
+            assert_eq!(lines.len(), 7, "{lang:?}: {usage}");
             assert!(lines[0].starts_with("folio [--cwd "), "{lang:?}");
             assert!(lines[1].is_empty(), "{lang:?}");
             for line in &lines[2..] {

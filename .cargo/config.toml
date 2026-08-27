@@ -1,0 +1,39 @@
+# **The C runtime goes inside `folio.exe`.**
+#
+# Without this line the binary imports `VCRUNTIME140.dll` and
+# `VCRUNTIME140_1.dll`, which are not part of Windows: they arrive with the
+# Visual C++ Redistributable, which arrives with some other program the user
+# happens to have installed. A portable archive whose executable refuses to
+# start on a clean machine, with a system dialog naming a DLL, is not portable —
+# and "install this other thing first" is not a preview anybody tries twice.
+#
+# Written here only after the experiment `docs/DESIGN.md` §12.5 records, because
+# the reason to be careful is real: `webview2-com-sys` links Microsoft's
+# `WebView2LoaderStatic.lib`, and a static CRT is exactly the configuration in
+# which a third-party static library can refuse to link. Three results, in
+# order:
+#
+#   1. it links — the whole workspace, release, from clean;
+#   2. the import table loses `VCRUNTIME140*.dll` **and** every
+#      `api-ms-win-crt-*` forwarder, leaving nothing but operating system DLLs;
+#   3. the binary starts, opens a window, spawns a shell on the sidecar ConPTY
+#      and closes when asked (`scripts/release/smoke.ps1`).
+#
+# It costs 237 KB on a 72.6 MB executable.
+#
+# `[build]` rather than `[target.x86_64-pc-windows-msvc]`, because that is the
+# configuration the three results above were obtained under: `RUSTFLAGS`
+# reaches build scripts and proc macros as well, and this workspace has both.
+# Narrowing it afterwards would be shipping a configuration nobody tested.
+#
+# **This file is the repository's, and it merges with the machine's rather than
+# replacing it.** Cargo merges configuration key by key, so `~/.cargo/config.toml`'s
+# `[build] jobs` — the user's standing ruling that a build leaves the machine
+# ~20% of itself — still applies. Do not add a `jobs` key here.
+#
+# Note for whoever merges this: `rustflags` is part of every unit's fingerprint,
+# so the commit that introduces it invalidates every existing `target/`
+# directory in every worktree. It is a one-time full rebuild, and it is worth
+# timing rather than discovering.
+[build]
+rustflags = ["-C", "target-feature=+crt-static"]

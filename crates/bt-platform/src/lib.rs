@@ -7201,12 +7201,22 @@ mod windows_impl {
     /// `false` before either call.
     #[must_use]
     pub fn std_error_is_console() -> bool {
-        use windows::Win32::Storage::FileSystem::{FILE_TYPE_CHAR, GetFileType};
-        use windows::Win32::System::Console::{
-            CONSOLE_MODE, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE,
-        };
+        use windows::Win32::System::Console::STD_ERROR_HANDLE;
 
-        let Ok(handle) = (unsafe { GetStdHandle(STD_ERROR_HANDLE) }) else {
+        std_handle_is_console(STD_ERROR_HANDLE)
+    }
+
+    /// The question above, asked of any of the three slots.
+    ///
+    /// [`write_to_console`] asks it of `stdout`, to tell a caller's redirection
+    /// from a console screen; the wrapper above asks it of `stderr` for the
+    /// diagnostics channel. One body, because the two-call reasoning in that
+    /// wrapper's note is the part worth not writing twice.
+    fn std_handle_is_console(slot: windows::Win32::System::Console::STD_HANDLE) -> bool {
+        use windows::Win32::Storage::FileSystem::{FILE_TYPE_CHAR, GetFileType};
+        use windows::Win32::System::Console::{CONSOLE_MODE, GetConsoleMode, GetStdHandle};
+
+        let Ok(handle) = (unsafe { GetStdHandle(slot) }) else {
             return false;
         };
         if handle.is_invalid() {
@@ -7268,6 +7278,37 @@ mod windows_impl {
     }
 
     pub fn write_to_console(text: &str) -> bool {
+        use windows::Win32::Storage::FileSystem::WriteFile;
+        use windows::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
+
+        // **A redirection the caller set up owns this text.**
+        //
+        // `folio --version > build.txt`, `folio --version | clip`, and every
+        // packaging script that wants to check what it just built are the whole
+        // reason: `CONOUT$` names the *screen*, so a front door that only ever
+        // wrote there answered those three by printing past the pipe and
+        // handing the caller an empty file. The screen is the right destination
+        // when there is nothing else — and only then.
+        //
+        // The test is what the handle *is* rather than what it was meant to be
+        // ([`std_handle_is_console`]), because `adopt_parent_console` has by
+        // now put `CONOUT$` in this same slot when a console was there to
+        // adopt: both cases arrive here as a valid handle and only its type
+        // tells them apart. UTF-8 bytes and the text's own newlines for a file
+        // or a pipe, which is what every tool on the other end of one expects;
+        // the CRLF and the UTF-16 below are a property of consoles.
+        if !std_handle_is_console(STD_OUTPUT_HANDLE)
+            && let Ok(handle) = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
+            && !handle.is_invalid()
+        {
+            let mut written = 0u32;
+            // SAFETY: the buffer outlives the synchronous call.
+            return unsafe {
+                WriteFile(handle, Some(text.as_bytes()), Some(&raw mut written), None)
+            }
+            .is_ok();
+        }
+
         let attached = unsafe { !GetConsoleWindow().is_invalid() }
             || unsafe { AttachConsole(ATTACH_PARENT_PROCESS) }.is_ok();
         if !attached {

@@ -104,6 +104,20 @@ impl CliRequest {
 pub enum CliFault {
     /// `--help`, `-h` or `/?`.
     HelpAsked,
+    /// `--version`.
+    ///
+    /// Beside `--help` and not beside the errors, for the reason the enum's own
+    /// note gives: what these two share is their whole tail — a block of text on
+    /// a console that may not exist, and an exit code that says nothing went
+    /// wrong. What they do not share is the text, which is why
+    /// [`refusal_text`] answers this one before it builds a usage block.
+    ///
+    /// It exists because a preview release is a thing people file bugs against.
+    /// Every other way of asking a Windows binary which build it is — the
+    /// Properties page, the file's own date — is a way of asking about the
+    /// *file*; this is the only one that asks the program, and it is the one a
+    /// person pastes into an issue.
+    VersionAsked,
     /// A flag that takes a value, given without one.
     MissingValue(&'static str),
     /// A flag this build does not know.
@@ -125,7 +139,7 @@ impl CliFault {
     #[must_use]
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::HelpAsked => 0,
+            Self::HelpAsked | Self::VersionAsked => 0,
             _ => 2,
         }
     }
@@ -138,7 +152,9 @@ impl CliFault {
     #[must_use]
     pub fn notice(&self) -> Option<String> {
         match self {
-            Self::HelpAsked => None,
+            // Neither of these is a mistake being reported. `--help` is answered
+            // by the usage block alone; `--version` is answered without one.
+            Self::HelpAsked | Self::VersionAsked => None,
             Self::MissingValue(flag) => Some(i18n::CliText::MissingValue(flag).text()),
             Self::UnknownFlag(flag) => Some(i18n::CliText::UnknownFlag(flag).text()),
             Self::Repeated(flag) => Some(i18n::CliText::RepeatedFlag(flag).text()),
@@ -155,6 +171,13 @@ impl CliFault {
 /// a property of how the process was started.
 #[must_use]
 pub fn refusal_text(fault: &CliFault) -> String {
+    // **Before the usage block is built**, because `--version` does not want
+    // one: a person asking which build this is has asked a one-line question,
+    // and answering it with a screen of grammar would bury the answer. It is
+    // also the one line here that is not translated — see `crate::version`.
+    if matches!(fault, CliFault::VersionAsked) {
+        return crate::version::banner();
+    }
     // The table and not the shipped five: `--profile` resolves through
     // `profiles::index_of_id`, so the ids `--help` prints have to be the ids
     // that door will answer to. Before the table is installed it *is* the
@@ -187,6 +210,7 @@ const PROFILE_FLAG: &str = "--profile";
 ///
 /// ```text
 /// folio [--cwd <folder>] [--profile <id>] [--] [<path>]
+/// folio --help | --version
 /// ```
 ///
 /// * `--flag value` and `--flag=value` both work. The second form is not
@@ -217,6 +241,11 @@ where
         match text {
             Some("--") => positional_only = true,
             Some("--help" | "-h" | "/?") => return Err(CliFault::HelpAsked),
+            // `-v` is deliberately **not** a spelling of this. It is the one
+            // short flag people expect to mean "verbose", and a build that
+            // silently printed a version instead of turning on a trace would be
+            // answering a different question than the one asked.
+            Some("--version") => return Err(CliFault::VersionAsked),
             // Case-insensitive, and both sigils, because this one is not typed
             // by a person: it is whatever the COM activation path on the machine
             // in front of us hands over, and `-Embedding` / `/Embedding` are
@@ -726,6 +755,42 @@ mod tests {
         // It is answered wherever it appears, because a caller who typed it has
         // stopped caring about the rest of the line.
         assert_eq!(refused(&["--cwd", r"D:\x", "--help"]), CliFault::HelpAsked);
+    }
+
+    /// PIN — **`--version` is one line, is not an error, and is not `-v`.**
+    ///
+    /// Red gate: leave it out and the flag falls into `UnknownFlag`, which
+    /// prints a usage block and exits `2` — a preview release whose users cannot
+    /// say which build they have, and a `--version` that a packaging script
+    /// reads as a failure.
+    #[test]
+    fn asking_which_build_this_is_is_answered_in_one_line_and_exits_clean() {
+        let fault = refused(&["--version"]);
+        assert_eq!(fault, CliFault::VersionAsked);
+        assert_eq!(fault.exit_code(), 0);
+        assert_eq!(fault.notice(), None, "nothing went wrong");
+
+        let text = refusal_text(&fault);
+        assert_eq!(text, crate::version::banner());
+        assert_eq!(text.lines().count(), 1, "one line: {text}");
+        assert!(text.contains(crate::version::VERSION), "{text}");
+        assert!(
+            !text.contains("--cwd"),
+            "a version is not answered with a usage block: {text}"
+        );
+        assert!(
+            text.contains(crate::APP_NAME),
+            "and it says what it is the version of: {text}"
+        );
+
+        assert_eq!(
+            refused(&["-v"]),
+            CliFault::UnknownFlag("-v".to_owned()),
+            "the short flag everyone means `verbose` by is not taken"
+        );
+        // The usage block offers it, because a person who runs `--help` to find
+        // out what this takes is exactly the person who needs it.
+        assert!(refusal_text(&CliFault::HelpAsked).contains("--version"));
     }
 
     /// PIN — every refusal that is an actual mistake exits `2`, and every one of

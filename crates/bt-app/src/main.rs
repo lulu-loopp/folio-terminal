@@ -97,6 +97,7 @@ mod text_field;
 mod toast;
 mod tooltip;
 mod trace;
+mod version;
 mod watch_clock;
 mod web_thumb;
 mod web_trace;
@@ -256,7 +257,13 @@ fn files_program_refused_notice() -> &'static str {
 /// second, so the sentence leaves on its own without anything having to be
 /// scheduled to remove it.
 const FILES_NOTICE_DWELL: Duration = Duration::from_millis(2600);
-const PANIC_LOG_FILENAME: &str = "bt-app-panic.log";
+/// **The file a crash leaves behind**, in `%TEMP%`.
+///
+/// Named after the product and not after the crate: this is the one diagnostic
+/// file whose name a user is ever asked to read out, because the message box a
+/// panic raises gives them its path. `bt-app-panic.log` named a package nobody
+/// outside this repository has heard of.
+const PANIC_LOG_FILENAME: &str = "folio-panic.log";
 
 #[derive(Clone, Copy, Debug)]
 enum AppEvent {
@@ -83191,6 +83198,17 @@ fn probe_input(value: Option<std::ffi::OsString>) -> Result<Option<Vec<u8>>> {
         .map(Some)
 }
 
+/// **A crash writes a file and then says so.**
+///
+/// The writing half was always here; the saying half is what a windows-subsystem
+/// binary owes its user. `folio.exe` is launched from Explorer as often as from
+/// a shell, and by the time anything in a resident run can panic its `stderr` is
+/// a log file (`diagnostics::enter_resident_run`) — so the default hook's
+/// message goes into that file and the person watching sees a window disappear.
+///
+/// The order is deliberate: write the report, let the previous hook have the
+/// event, and only then raise something that blocks. A message box pumps
+/// messages, so anything not yet written when it goes up might never be.
 fn install_panic_log_hook() {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -83199,17 +83217,79 @@ fn install_panic_log_hook() {
             .unwrap_or_default()
             .as_millis();
         let thread = std::thread::current();
-        let thread_name = thread.name().unwrap_or("unnamed");
-        let report = format!(
-            "unix_ms={timestamp_ms} thread={thread_name}\npanic: {info}\nbacktrace:\n{}\n",
-            Backtrace::force_capture()
+        let report = panic_report(
+            timestamp_ms,
+            thread.name().unwrap_or("unnamed"),
+            &info.to_string(),
+            &Backtrace::force_capture().to_string(),
         );
         let path = panic_log_path();
         if let Err(error) = append_panic_report(&path, &report) {
             eprintln!("failed to write panic report {}: {error}", path.display());
         }
         previous(info);
+        announce_panic(&path);
     }));
+}
+
+/// **One crash, one alert.**
+///
+/// A fault that takes out the window thread very often takes out a worker in the
+/// same second, and three modal boxes stacked on a dying process is worse than
+/// none: the user dismisses two of them without reading and the third is the one
+/// with the path in it. The file still records every panic — this bounds only
+/// what is *raised*.
+static PANIC_ANNOUNCED: AtomicBool = AtomicBool::new(false);
+
+/// Put the crash where the person who caused it will see it.
+///
+/// The same two destinations, in the same order, as [`report_at_the_front_door`]
+/// and for the same reason: a run that kept its console (a developer with
+/// `BT_…TRACE` set, or a launch that has not reached
+/// [`diagnostics::enter_resident_run`] yet) is a run being watched, and a modal
+/// box in front of a shell is worse than a line in it. Everything else — every
+/// double-click, every Explorer verb, every resident run — has no console at
+/// all, and that is exactly the case this exists for.
+///
+/// **The channel is asked before the write is attempted**, and that order is the
+/// whole correctness of this function. Once the front door has closed, this
+/// process's `stdout` is `diagnostics.log`; a write to it succeeds, reports
+/// success, and tells nobody — which would have made the box unreachable in
+/// precisely the resident run it exists for. See
+/// [`diagnostics::a_screen_is_watching`].
+fn announce_panic(path: &std::path::Path) {
+    if PANIC_ANNOUNCED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let text = panic_alert_text(path);
+    let said = diagnostics::a_screen_is_watching(diagnostics::resident_channel())
+        && bt_platform::write_to_console(&format!("{text}\n"));
+    if !said {
+        bt_platform::message_box(APP_NAME, &text);
+    }
+}
+
+/// What that alert says: which build this was, and where it wrote what it knows.
+fn panic_alert_text(path: &std::path::Path) -> String {
+    let log = path.display().to_string();
+    format!(
+        "{}\n\n{}",
+        i18n::CliText::Crashed { log: &log }.text(),
+        version::banner()
+    )
+}
+
+/// One panic, as the line the log keeps.
+///
+/// Pure, and taking the panic's words rather than the hook's own argument, so
+/// that what the file will contain is a thing a test can read. The build stamp
+/// is first because it is the field a reader of somebody else's log needs before
+/// any of the others mean anything.
+fn panic_report(unix_ms: u128, thread: &str, panic_text: &str, backtrace: &str) -> String {
+    format!(
+        "{}\nunix_ms={unix_ms} thread={thread}\npanic: {panic_text}\nbacktrace:\n{backtrace}\n",
+        version::banner()
+    )
 }
 
 /// Put a usage block where the caller of a launch that is about to exit will
@@ -97918,7 +97998,55 @@ mod tests {
     fn panic_log_uses_the_process_temp_directory_without_requiring_stderr() {
         assert_eq!(
             panic_log_path(),
-            std::env::temp_dir().join("bt-app-panic.log")
+            std::env::temp_dir().join("folio-panic.log"),
+            "the file a user is asked to send is named after the product"
+        );
+    }
+
+    /// PIN — **a crash that nobody can see is a crash that nobody reports.**
+    ///
+    /// `folio.exe` is a windows-subsystem binary and its `stderr` has been
+    /// redirected into a log file by the time anything can panic, so the default
+    /// hook's message reaches nobody: what a double-click user saw was the
+    /// window disappearing. The sentence raised in its place has to carry the
+    /// path, because a log file whose location is not on screen is a log file
+    /// nobody attaches.
+    #[test]
+    fn the_sentence_a_crash_raises_names_the_file_it_left() {
+        let path = std::env::temp_dir().join("folio-panic.log");
+        let text = panic_alert_text(&path);
+        assert!(
+            text.contains(&path.display().to_string()),
+            "the reader is told where the file is: {text}"
+        );
+        assert!(
+            text.contains(&version::banner()),
+            "and which build left it: {text}"
+        );
+
+        // **And it is raised, not filed.** Once the front door has closed this
+        // process's `stdout` is `diagnostics.log`, so "did the write succeed"
+        // is not the question — the write always succeeds and reaches nobody.
+        //
+        // MUTATION: return `true` for `Channel::Log` and the box stops
+        // appearing in exactly the case it was written for; the crash goes into
+        // the log twice and the user still watches the window vanish.
+        use diagnostics::Channel;
+        assert!(
+            !diagnostics::a_screen_is_watching(Some(Channel::Log)),
+            "a resident run's stdout is its own log file"
+        );
+        assert!(
+            !diagnostics::a_screen_is_watching(Some(Channel::Nowhere)),
+            "and a run with nowhere to write has nowhere to write"
+        );
+        assert!(
+            diagnostics::a_screen_is_watching(Some(Channel::Console)),
+            "a run that kept its console kept somebody looking at it"
+        );
+        assert!(
+            diagnostics::a_screen_is_watching(None),
+            "and before the front door closes, stdout is still the caller's"
         );
     }
 

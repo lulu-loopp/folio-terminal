@@ -3677,3 +3677,118 @@ v1 Q1-Q4、v3 各决策（alt=停放、一 session 一可输入视口、折叠�
 **⑤ 实机双语截图查出两件测试查不到的事，两件都是文案的。** 第一件:快捷键页每一行的按钮在中文窗口里写着 `Record`。`RECORD_BUTTON_LABEL` / `RECORD_LISTENING_LABEL` / `RESTORE_ALL_LABEL` 三个 `&'static str` 常量从来没进过表——`ShortcutRecordPrompt` 的注释还写着「它们是这一页最后剩下的英文字面量」,而它说这句话的时候,这三个正躺在它上面十行的地方。**一个常量没法自己报告这件事**,只有把同一页用两种语言各拍一张才看得见,于是 `Text::ALL` 505 → **508**。第二件:设置行的换行**优先在半角空格处断**,只有一整个空格分隔的「词」放不下整行时才退回逐字断——中文里空格只出现在拉丁 token 两边,所以一句以短拉丁词开头的中文会把那个词单独留在第一行(`Agent` 一个人占一行),而超出一个字的中文会把句号单独留在第二行。六条中文因此二次改写:三个渲染块开关各收进一行、Agents 四行各是齐整的两行。**英文列一个字未动**——这是关于中文排版的事实,不是关于句子内容的。
 
 **⑥ 落地。** 80 条改动:74 条重写 + 3 条新入表 + 3 条实机复核后的中文再改(与前者有重叠,逐行账在 `docs/plans/ui-style/copy-rewrite-2026-08-26.md`,旧英/新英/旧中/新中/理由五列)。用户先前挂的三笔——`Card height`、`Minimum contrast`、`Codex notify` 的缩短版——按规范重写,随本片结清。
+
+## 12. 发布工程
+
+一个能跑的 build 和一个能发的 build 之间隔着七件事,这一节是其中属于「构建与分发」和「CI」的那两件。写在这里而不是写在 workflow 的注释里,是因为其中每一条都是**裁决**:为什么版本只有一处、为什么 `.res` 是自己写的、为什么 `lto` 开或不开、为什么静态 CRT 没有采用——这些在一年后会被重新提起,而 YAML 不是回答它们的地方。
+
+### 12.1 版本:一处定,四处一致
+
+`0.1.0` 这四个字符在这个仓里**只出现一次**,在 `Cargo.toml` 的 `[workspace.package] version`。其余四个说得出版本的地方全是从它派生的:
+
+| 谁在说 | 怎么拿到的 |
+|---|---|
+| `folio --version` | `bt_app::version::VERSION` = `env!("CARGO_PKG_VERSION")` |
+| `folio.exe` 属性页的 `VERSIONINFO` | `crates/bt-app/build.rs` 把同一个 `CARGO_PKG_VERSION` 编进 PE 资源 |
+| `%TEMP%\folio-panic.log` 头 | `version::banner()` |
+| `diagnostics.log` 每次运行的头、每份 hang 报告的第一行 | 同上,同一句 |
+
+**同一句**是刻意的:`Folio 0.1.0 (0a1b2c3d4e)`,`--version` 印它,三类诊断文件的头也印它。读 bug 报告的人要做的是把附件里的那行和报告人打的那行对上,两种写法就得读两遍才看得出它们说的是一回事。
+
+commit 短哈希由 `build.rs` 从 git 读,并把 `HEAD`(以及 `HEAD` 指向的那个 ref 文件)登记为 rerun 触发,所以它不会在分支动了之后还停在旧值上;没有 git 可问时是 `unknown`——源码 tarball、导出树都是真实存在的状态,不是失败。
+
+红门是 `bt_app::version::tests::the_version_is_the_manifests_and_nothing_elses`:它读 `Cargo.toml` 的那一行、读 `banner()`、并**把 `build.rs` 刚写出来的那份 `.res` 用 `include_bytes!` 读进来**,比对里面的 UTF-16 字符串和 `VS_FIXEDFILEINFO` 的四个数。任何一处被人手写死,下一次改版本时这条测试红。
+
+### 12.2 PE 资源:为什么 `.res` 是自己写的
+
+`folio.exe` 需要两样只能以字节形式交给链接器的东西:应用图标(`bt_platform::context_menu_shape` 注册的 `folio.exe,0` 指的就是它),和 `VERSIONINFO`。
+
+crates.io 上做这件事的两个包——`winres` 与 `embed-resource`——都是**去机器上找 `rc.exe` 然后调它**,并为了找到它往 lock file 里加六个包。代价是两条:`docs/DESIGN.md` §8 的依赖政策,以及一条更硬的——release 构建从此依赖 Windows SDK 的一个组件在场且可定位。
+
+RES 容器是一串对齐的记录,`VS_VERSIONINFO` 是一棵对齐的块树,两者加起来是 `crates/bt-winres` 的两百行,不需要任何工具链。**它的正确性不是靠读文档保证的**:同一个 `.ico` 和同一组字符串分别交给 `rc.exe` 和这个 crate,产出的记录表、内存标志、每个字符串块的 `wLength` 逐字段相同(2026-08-27 在 Windows SDK 10.0.26100 的 `rc.exe` 上核过)。crate 自己的测试则把写出来的字节**读回去**——记录表走一遍、版本块的树走一遍——而不是比对一段十六进制:这个格式最容易出的错是某个长度字段写错,而十六进制比对只会说「有个字节动了」。
+
+### 12.3 图标
+
+`design/assets/app-icon/folio.ico`,九个尺寸(16/20/24/32/40/48/64/128/256),16–64 是经典 DIB、128 与 256 是 PNG。它由 `design/assets/app-icon/make-folio-ico.py` 画出来,只用标准库,几何写成单位正方形里的一组数——所以 16 像素那张和 256 像素那张是**同一张图在各自像素网格上解出来的**,而不是互相重采样的两张图。图形取 folio 一词的本义:对折一次的一张纸,两个半页、一道折缝,48 以上折缝旁多一个页码点。无 accent 色,这是字标选样留下的标准裁决(`design/assets/wordmark-r2/DECISION.md`)。
+
+> 这张图是**发布工程为了让 `folio.exe,0` 有东西可指**而画的最小可用件,风格线尚未过目;字标本身仍按 R2 的裁决留待宣传站开工时定妆。
+
+### 12.4 `[profile.release]`
+
+这个 workspace 在这之前**没有** `[profile.release]`,只有 `[profile.test]`。先量再定,三种配置各自完整重建一次(`-j 4`,同一棵树,同一台机器):
+
+| 配置 | `folio.exe` | 构建 | `--version` p50 | 起窗到 `background_visible` 中位 |
+|---|---:|---:|---:|---:|
+| A 默认 | 77,453,824 | 11m | 53.5ms | 6727ms |
+| B `lto="fat"` + `codegen-units=1` | 72,619,008 | 23m | — | — |
+| C = B + `strip="symbols"` | **72,619,008** | 20m | 57.0ms | 7154ms |
+
+三件事从这张表里读出来:
+
+**① 4.83 MB(−6.2%),换大约一倍的 release 构建时间。** 这笔账是一台机器每个 tag 付一次,换所有人下载时各付一次的那 4.8 MB。采纳。
+
+**② `strip` 在这个 target 上是零。** C 与 B **一个字节都不差**——MSVC 从来没把符号放进可执行文件,它们在 `folio.pdb`(6.06 MB)里,而归档不带那个文件。所以 profile 里**没有** `strip`:一个什么都不改的设置不是白拿的,它是下一位读者要花时间去证伪的一行。
+
+**③ 起窗时间量不出差别,而这正是要去量而不是去假设的那一项。** 直接看整窗启动的中位数(6727 vs 7154ms)会以为大的那个反而快,但同一个二进制单次之间就在 3.1s 到 9.5s 之间跳——这台机器上同时有别的 agent 在编译,噪声带远宽于两者之差。所以还量了一个不被那件事支配的量:`folio --version`,也就是加载器、静态初始化和前门,**恰好是一个更小的镜像唯一可能改变的那一段**。21 次交错测量,53.5ms 对 57.0ms。没有差别。
+
+`panic` 明写成 `unwind`——它本来就是默认值,写下来是因为它是一个**裁决**:`abort` 还能再省一点,代价是把 panic hook 一起省掉,而 `%TEMP%\folio-panic.log` 和那个告诉用户去哪里找它的对话框都跑在展开路径**里面**(§12.6)。崩溃悄无声息的 preview,比大一点的 preview 差。
+
+### 12.5 静态 CRT:实验与裁决
+
+审计原来的推理是「本树没有 C/C++ 依赖,所以 `+crt-static` 安全」。这个前提是假的:`webview2-com-sys` 0.39.1 的 build.rs 复制 `WebView2LoaderStatic.lib`,`src/lib.rs` 在 MSVC 下以 `kind="static"` 链它——而静态 CRT 恰恰是第三方静态库最容易拒绝链接的那种配置。所以这件事只能靠做,不能靠推。
+
+独立输出目录、`RUSTFLAGS=-C target-feature=+crt-static`、release、从干净开始,三步:
+
+| 步 | 结果 |
+|---|---|
+| ① 链得上吗 | 链得上。整个 workspace,20m04s,`folio.exe` 72,856,064 字节(比动态 CRT 大 237 KB) |
+| ② PE 导入表还有 `VCRUNTIME140*` 吗 | 没有了。`VCRUNTIME140.dll`、`VCRUNTIME140_1.dll` **以及全部 `api-ms-win-crt-*` 转发器**一起消失,剩下的全是操作系统自己的 DLL |
+| ③ 起得来吗 | 起得来。`scripts/release/smoke.ps1` 整套过:窗口、sidecar ConPTY、first text、DPI 一致、按 `WM_CLOSE` 干净退出 |
+
+三步都过,所以签入,在**仓内**的 `.cargo/config.toml`(不是 `~/.cargo/config.toml`——那里有用户关于 `jobs` 的裁决,cargo 逐键合并,两者互不覆盖)。
+
+对照组:同一棵树不带这一行时,导入表里有 `VCRUNTIME140.dll` 与 `VCRUNTIME140_1.dll`。那两个文件不是 Windows 的一部分,它们随 Visual C++ Redistributable 来,而 Redistributable 随用户碰巧装过的某个别的程序来。一个在干净机器上以一个点名 DLL 的系统对话框拒绝启动的便携归档,不是便携归档;而「先装另一个东西」不是任何人会试第二次的 preview。
+
+要记的一笔账:`rustflags` 进每一个 unit 的 fingerprint,所以引入这一行的那次提交会让**每个 worktree 现有的 `target/` 全部失效**,一次性全量重建。这件事值得排期,而不值得被撞见。
+
+### 12.6 崩溃要看得见
+
+`main.rs` 第一行是 `#![windows_subsystem = "windows"]`,而 `diagnostics::enter_resident_run` 在门关上时把 `stderr` 指向了日志文件。两件事叠起来的后果是:**默认 panic hook 的那段话谁也看不到**,双击启动的人看到的是窗口凭空消失。
+
+所以 hook 现在做三件事,顺序是定的:写报告、把事件交给旧 hook、再抬起一个会阻塞的东西。message box 会 pump 消息,它抬起来的时候还没落盘的东西可能就永远不落盘了。
+
+抬起来的**是什么**,和 `report_at_the_front_door` 是同一条规矩:这次运行还留着 console 的(开了 `BT_…TRACE` 的开发者,或还没走到 `enter_resident_run` 的启动),说明有人正看着,一行字比一个模态框强;其余一切——每一次双击、每一个 Explorer 动词、每一次常驻运行——根本没有 console,而那正是这件事存在的理由。一次进程只抬一个框:一个弄掉窗口线程的故障往往同一秒也弄掉一个 worker,三个叠起来的模态框比没有更糟。
+
+日志文件名从 `bt-app-panic.log` 改成 `folio-panic.log`。它是这个产品里**唯一一个会被念给用户听的文件名**,而旧名字念的是一个仓外没人听说过的包。
+
+### 12.7 归档:清单就是契约
+
+`scripts/release/package.ps1` 产出的 zip 是七个文件,其中两个是运行时契约而不是方便:`conpty.dll` 与 `OpenConsole.exe` 必须在 `folio.exe` **自己那一层**,因为 `vendor/conpty/portable-pty/src/win/psuedocon.rs` 只看 `current_exe()` 的父目录。NuGet 的 native-targets 布局还会把 `OpenConsole.exe` 镜像一份到 `x64\`——那条路径这个加载器从不读,带上就是 1.7 MiB 的第二份。
+
+脚本检查的是**产出的东西**而不是打算产出的东西:archive 里的名字集合必须与清单相等(多一个也红)、每个条目的字节数必须等于源文件、并且 `folio.exe` 自己 PE 资源里的版本必须等于 archive 名字上的版本——「一处定四处一致」这条规矩唯一能在成品上验的地方就是这里。
+
+它是一个脚本而不是一段 YAML,理由只有一条:**只能靠打 tag 才能跑一次的打包步骤,就是没有人跑过的打包步骤。**
+
+### 12.8 CI:四道门,加一道会自证的门
+
+| job | 它能因为什么而红 |
+|---|---|
+| `gates-can-fail` | 三道门自己:adapter 边界、lint、ignored 名单。每一道都是种一个违规、要求红、再把文件放回去 |
+| `logic` | fmt / clippy / 除 `bt-pty` 与 `bt-render` 外的全部测试 / ignored 名单 / 第三方声明漂移 |
+| `conpty` | `bt-pty` 真的起 `cmd.exe` 与 `powershell.exe`,失败时把输出存成 artifact |
+| `gpu` | `bt-render` 真的要一个 adapter。runner 没有,所以 `ci/install-warp.ps1` 先把 WARP 放到测试二进制旁边 |
+| `smoke` | `folio.exe` 真的被启动:前门的三个退出码、一次冷启动走到 first text、它到底加载了哪个 ConPTY、以及它和 Windows 对自己的 DPI 是否说同一个数 |
+
+`windows-latest` 改成 `windows-2025`:那个浮动标签在这个项目活着的期间从 Server 2022 挪到了 Server 2025,还会再挪;一个终端模拟器的 CI 是一句关于某个 Windows 版本的陈述,而一句会自己改变主语的陈述不是陈述。第三方 action 钉 commit 而不是 tag——tag 是它的主人可以重新指向的一个名字。
+
+**ignored 门重写成名单。** 旧门问 `cargo test -- --ignored --list` 要输出,看到 `0 tests, 0 benchmarks` 就放行——workspace 有好几个测试二进制,任何一个没有 ignored 测试的都会印出这句咒语,于是二十个 ignored 测试站着它也绿;而且它从不看 cargo 的退出码,编译失败同样印不出那句话,被读成「有 ignored 测试」并报出唯一一句不可能把人引向编译错误的话。政策本身也错了:这个仓**故意**留着二十个探针(`bt-pty` 十九个真 ConPTY 会话、`bt-app` 一个画图的),「禁止 ignored」意味着为了让门绿而删掉能用的诊断。所以现在是 `ci/ignored-tests.txt` 加双向 `Compare-Object`:开始被跳过的测试红,因为它不在名单上;不再存在的测试也红,因为名单点了一个已经没有的名字。
+
+`GpuContext::headless` 也改了一处:第一次 `request_adapter` 拿不到东西时,用允许 fallback 的同一个请求再问一次。写成重试而不是写成一个构建去设的开关,是因为「这台机器有没有 GPU」是机器能回答的问题,而环境变量只能被告知;有 GPU 的机器上第二次调用根本不会发生。
+
+### 12.9 SBOM
+
+`scripts/release/sbom.ps1`,CycloneDX 1.5,从 `cargo metadata --locked --filter-platform x86_64-pc-windows-msvc` 出。`--filter-platform` 是让它成为一份**关于实际发出去那个东西**的清单的原因:lock file 里带着每个平台要的每个 crate,一份列着 `nix` 和 `wayland-client` 的 Windows 归档描述的是一个不存在的构建。
+
+没有引 `cargo-sbom` 或 `cargo-cyclonedx`:那两个读的是同一份 `cargo metadata` 再重排一遍,买下这次重排的代价是在 release job 里 `cargo install` 一个未钉版本、依赖工具链的二进制——比下面六十行更重的一件要信的东西。哪天有它们答得了而这里答不了的需求(VEX、组件哈希、签名),那天带着需求去把依赖加上。
+
+除时间戳外确定:组件排序固定,文档的 serial number 由组件表推出——同一份 lock file 两次跑出同一个身份。
