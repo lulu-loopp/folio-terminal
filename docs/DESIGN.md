@@ -3759,3 +3759,29 @@ v1 Q1-Q4、v3 各决策（alt=停放、一 session 一可输入视口、折叠�
 
 **⑥ 落地。** 80 条改动:74 条重写 + 3 条新入表 + 3 条实机复核后的中文再改(与前者有重叠,逐行账在 `docs/plans/ui-style/copy-rewrite-2026-08-26.md`,旧英/新英/旧中/新中/理由五列)。用户先前挂的三笔——`Card height`、`Minimum contrast`、`Codex notify` 的缩短版——按规范重写,随本片结清。
 
+### 7.25 探测不许比 spawn 严一格——一次被推翻的「真 bug」,和一句写反了的注释（发布前审计缺口 B「成因 B」复核，2026-08-27；`crates/bt-pty/src/shell.rs`）
+
+**① 报上来的病。** `docs/plans/release/readiness-gaps-2026-08-27.md` §B1「成因 B」与 §B-b 判定为**真 bug**:Store 版 PowerShell 7 的 `pwsh.exe` 是一个 **AppExecLink**(`%LocalAppData%\Microsoft\WindowsApps\pwsh.exe`,长度 0、属性 `Archive, ReparsePoint`),而 `find_pwsh` 的三级探测全部落在 `ShellEnvironment::is_file` 上,`is_file` 就是 `Path::is_file()`。推理链是:`Path::is_file` → `fs::metadata` → `File::open` → `CreateFileW`,而 `CreateFileW` 对 AppExecLink 答 `ERROR_CANT_ACCESS_FILE (1920)`;「Rust std 只在 `ERROR_SHARING_VIOLATION` 时回退 `FindFirstFile`,1920 直接返回 `Err`」⇒ `is_file() == false` ⇒ picker 里 pwsh 那行变灰、探测顺序落到 `winps`。
+
+**② 实测把这条链在最后一环上截断。** 在**同一个进程**里,用 std 给 `metadata` 用的那套参数(`access=0`、`share=all`、`OPEN_EXISTING`、`FILE_FLAG_BACKUP_SEMANTICS`)直接调 `CreateFileW`,与调 `Path::is_file()`:
+
+```
+alias                 = C:\Users\Weiyi\AppData\Local\Microsoft\WindowsApps\pwsh.exe
+raw CreateFileW       = Err(1920)
+Path::is_file()       = true
+find_pwsh()           = Some(...\Microsoft.PowerShell_7.6.5.0_x64__8wekyb3d8bbwe\pwsh.exe)
+```
+
+**审计的低层事实为真,结论为假。** 1920 确实发生;`is_file()` 照样答 `true`。`std::fs::metadata` 把一次被拒的 open 当作**再问一次的理由**而不是答案,退到不开文件的那条路上去读目录项——证据就在读数本身:handle 一个也没开出来,属性(`0x420` = `ARCHIVE|REPARSE_POINT`)和长度(`0`)却回来了,它们只可能来自 find-data。而 AppExecLink 的 reparse tag 既不是 `IO_REPARSE_TAG_SYMLINK` 也不是 `IO_REPARSE_TAG_MOUNT_POINT`,于是 std 读它为「不是目录、不是符号链接」= 一个文件。审计那句「只在 `ERROR_SHARING_VIOLATION` 时回退」说的是更早的 std,不是 `rust-toolchain.toml` 钉住的 **1.94.1**。**「那更老的编译器上呢」也一并问掉了**:同一份探针用手上最老的一版 **1.85.1** 编出来,读数一个字不差——它比 `Cargo.toml` 的 `rust-version = "1.89"` 还低一档,所以这条事实覆盖了这个 workspace 允许被编译的每一版。
+
+**于是缺口 B「成因 B」不成立**:本机(正是那台只有 Store 版 pwsh 的机器)上 pwsh 那一行不灰,`resolve_powershell_seven` 答得出。**成因 A 是另一回事,本片一个字没动**——首启 `default_profile` 为空串一律落 `winps`,那是 2026-08-11 的裁决(`crates/bt-app/src/profiles.rs:2618`),不是探测的事。
+
+**③ 但那句注释确实写反了,而且两处都反。** 旧文是「Mirrors `Path::is_file`: true only for a real, **directly-openable** file. A directory or a dangling reparse point answers `false`, **exactly as a spawn attempt against it would fail**.」——AppExecLink 恰恰**不是** directly-openable 却答 `true`,而对它的 spawn **不会**失败。这不是措辞不当:它是一句**邀请**。任何一个照着这句话去「加固」探测的人——把它收紧成一次真正的 open——都会当场造出审计以为已经存在的那个 bug。所以注释改成事实,并把「不许收紧成一次 open」写在里面,连同它会带来的后果(每一台 Store 装机上 pwsh 变灰、默认 shell 掉回 5.1)。
+
+**④ 没有引入 `windows-sys` 去显式读 reparse tag,三条理由。** (a) 本仓 `unsafe_code = "deny"` 是 workspace 级的,`bt-platform` 是唯一那道窄门;为一次**不改变任何输入下的答案**的判定,把 `bt-pty` 挂上 unsafe 边界,是拿架构换零收益。(b) 一个只认 `IO_REPARSE_TAG_APPEXECLINK` 的白名单**比 std 现在做的更窄**:std 放行的是「非 symlink、非 junction 的一切 reparse tag」——OneDrive 占位文件、dedup、容器隔离的 WCI 都在内,而 `CreateProcess` 对它们同样跟随得了。把通用规则换成一张点名单,是把一个已经对的判断改小。(c) 这条事实现在由标准库负责维护;抄进本仓就是第二个要维护的地方。
+
+**⑤ 红门与钉子(`crates/bt-pty/src/shell.rs` 的 `mod tests`,新增三条)。** `an_app_exec_link_is_probed_as_a_startable_program` 直接问真机上的那个 alias;`a_store_only_install_of_powershell_seven_still_resolves` 把整条解析走完——**只命名 `LocalAppData`,不命名 `PATH` 与 `ProgramFiles`**(未设的变量整级跳过,这比指向某个「应该是空的」目录更不依赖运气),于是第三级 alias 是唯一可能的答案,断言 `resolve_default_shell` 回 `PowerShellCore` 且回那条 alias 路径。**红证**:把 `SystemShellEnvironment::is_file` 写成注释旧文所说的那次直接 open(`File::open(path).is_ok_and(…)`),这两条当场变红——`left: None / right: Some("…\WindowsApps\pwsh.exe")`,以及「the probe must not be stricter than the spawn it stands in for」;换回 `path.is_file()` 后 11 条全绿。第三条 `the_real_probe_still_refuses_a_directory_and_a_path_with_nothing_at_it` 钉的是反面:目录仍是 `false`、路径上什么都没有仍是 `false`、5.1 那个普通文件仍是 `true`——**宽在「怎么到达」,不宽在「到没到」**。
+
+两件测试基建也是必需而不是顺手:`store_pwsh_alias()` **双重把关**——没有 Store 装机时返回 `None`,测试按 `tests/shell_integration_osc133.rs` 已有的形状在 stderr 上说自己跳过了(CI 的 runner 就是这种机器);而路径上若坐着一个**普通** `pwsh.exe`,它同样返回 `None`,否则这两条会在一台证明不了任何事的机器上**空跑通过**。`NamedVarsRealFiles` 则是因为现有的两个环境都答不了这个问题:`FakeShellEnvironment` 的 `is_file` 来自测试自己填的集合,只能确认测试已经相信的事;`SystemShellEnvironment` 读的是**跑测试那个 shell** 的 `PATH`——而本片要复现的机器,恰恰是 `PATH` 与 `%ProgramFiles%` 两条路都不通、alias 是唯一那条的机器。变量由测试命名、文件由真机提供,才是那台机器。
+
+**⑥ 同族已核,没有第二处。** `wsl` / `gitbash` / `cmd` 三条内置档案的候选路径、`ProfilePrograms::probe`、`ProfilePrograms::candidate_path`、`search_path`、`find_git`——`crates/bt-app/src/profiles.rs` 里每一处可执行文件探测都落在**同一个** `ShellEnvironment::is_file` 上,所以本片对注释的加固对它们一次生效,也没有第二份需要同步的判定。`bt-app` 其余的 `is_file`/`exists` 全是数据文件(会话、日志、备份、配色、预览临时件),不是「这台机器能不能启动它」的问句。

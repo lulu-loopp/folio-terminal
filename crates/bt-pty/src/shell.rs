@@ -23,8 +23,26 @@ const WINDOWS_POWERSHELL_EXE: &str = "powershell.exe";
 pub trait ShellEnvironment {
     /// Mirrors `std::env::var_os`.
     fn var_os(&self, key: &str) -> Option<OsString>;
-    /// Mirrors `Path::is_file`: true only for a real, directly-openable file. A directory or a
-    /// dangling reparse point answers `false`, exactly as a spawn attempt against it would fail.
+    /// Whether `path` names a program this machine could start: `true` for a file that is there,
+    /// `false` for a directory, for nothing at all, and for a link that leads nowhere.
+    ///
+    /// **Not "can this file be opened".** The Microsoft Store installs PowerShell 7 as an *app
+    /// execution alias*: an `AppExecLink` reparse point at
+    /// `%LocalAppData%\Microsoft\WindowsApps\pwsh.exe`, zero bytes long, whose tag nothing in the
+    /// filesystem stack will follow for an ordinary `CreateFileW` — that call answers
+    /// `ERROR_CANT_ACCESS_FILE` (1920). `CreateProcess` **does** follow it, and starts the real
+    /// `pwsh.exe` out of the package directory. So a probe built on opening the file would be
+    /// *stricter than spawning*, and would report a perfectly startable PowerShell 7 missing on
+    /// every machine that got it from the Store — greying the row in the picker and dropping the
+    /// default shell to Windows PowerShell 5.1.
+    ///
+    /// `Path::is_file` is not such a probe, and this is why the implementation must stay spelled
+    /// that way: `std::fs::metadata` treats a refused open as a reason to ask again rather than an
+    /// answer, falling back to `FindFirstFileExW`, which reads the entry's attributes and reparse
+    /// tag without following anything. An `AppExecLink` comes back as a non-directory that is not
+    /// a symlink — a file — while a symlink into thin air still comes back as nothing, because
+    /// that path is followed and does not arrive. Pinned by
+    /// `an_app_exec_link_is_probed_as_a_startable_program`.
     fn is_file(&self, path: &Path) -> bool;
 }
 
@@ -38,6 +56,8 @@ impl ShellEnvironment for SystemShellEnvironment {
     }
 
     fn is_file(&self, path: &Path) -> bool {
+        // `Path::is_file` and deliberately nothing narrower — see the trait's doc for what a
+        // direct open does to a Store install of PowerShell 7.
         path.is_file()
     }
 }
@@ -202,9 +222,146 @@ impl ShellEnvironment for FakeShellEnvironment {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsStr;
+    use std::{ffi::OsStr, os::windows::fs::MetadataExt};
 
     use super::*;
+
+    /// `FILE_ATTRIBUTE_REPARSE_POINT`, named here rather than pulled in: this crate has no Win32
+    /// bindings and needs none for a bit that `std::os::windows::fs::MetadataExt` already hands
+    /// over as a `u32`.
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+    /// The Store's app execution alias for PowerShell 7 — but only when this machine really has
+    /// one, and only when the thing at that path really is a reparse point.
+    ///
+    /// Both halves matter. `None` on a machine with no Store install (which includes the CI
+    /// runner) lets the tests below say nothing rather than something false; and refusing a plain
+    /// file sitting at that path stops them passing *vacuously* on a machine where something else
+    /// put an ordinary `pwsh.exe` in `WindowsApps`, which would prove nothing about the case they
+    /// exist for.
+    fn store_pwsh_alias() -> Option<PathBuf> {
+        let candidate = Path::new(&env::var_os("LocalAppData")?)
+            .join("Microsoft")
+            .join("WindowsApps")
+            .join(PWSH_EXE);
+        let attributes = candidate.symlink_metadata().ok()?.file_attributes();
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0).then_some(candidate)
+    }
+
+    /// Skip-with-a-line, in the shape `tests/shell_integration_osc133.rs` already uses: a gate
+    /// that quietly passes when its subject is missing is not a gate, so it says so on stderr.
+    fn skipped_for_want_of_a_store_install(test: &str) {
+        eprintln!(
+            "BT_SHELL_PROBE skipped={test} reason=no-store-appexeclink \
+             (%LocalAppData%\\Microsoft\\WindowsApps\\pwsh.exe is not a reparse point here)"
+        );
+    }
+
+    /// Variables named by the test, files taken from the real machine.
+    ///
+    /// Neither `FakeShellEnvironment` nor `SystemShellEnvironment` can ask the question these two
+    /// tests ask. The fake answers `is_file` from a set the test filled in, so it can only confirm
+    /// what the test already believes; the real one reads `PATH` and `%ProgramFiles%` off this
+    /// process, so what it finds depends on the shell that launched the test run — and the
+    /// scenario under test is precisely a machine where *neither* of those two leads anywhere and
+    /// the Store alias is the only PowerShell 7 there is. Naming the variables and leaving the
+    /// filesystem real reproduces that machine without touching this process's environment.
+    struct NamedVarsRealFiles(Vec<(&'static str, OsString)>);
+
+    impl ShellEnvironment for NamedVarsRealFiles {
+        fn var_os(&self, key: &str) -> Option<OsString> {
+            self.0
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.clone())
+        }
+
+        fn is_file(&self, path: &Path) -> bool {
+            SystemShellEnvironment.is_file(path)
+        }
+    }
+
+    /// The probe answers for a program `CreateProcess` can start, and not for one `CreateFileW`
+    /// can open — those are two different questions and only the first is the one being asked.
+    ///
+    /// A Store install of PowerShell 7 is the case where they come apart: opening
+    /// `%LocalAppData%\Microsoft\WindowsApps\pwsh.exe` fails with `ERROR_CANT_ACCESS_FILE` (1920)
+    /// while spawning it works, so a probe that opens is stricter than the spawn it stands in for.
+    ///
+    /// **Red gate**: spell `SystemShellEnvironment::is_file` as the direct open its doc comment
+    /// used to claim it was — `File::open(path).is_ok_and(…)` — and this fails on any machine with
+    /// a Store install, taking `a_store_only_install_of_powershell_seven_still_resolves` with it.
+    #[test]
+    fn an_app_exec_link_is_probed_as_a_startable_program() {
+        let Some(alias) = store_pwsh_alias() else {
+            skipped_for_want_of_a_store_install(
+                "an_app_exec_link_is_probed_as_a_startable_program",
+            );
+            return;
+        };
+        assert!(
+            SystemShellEnvironment.is_file(&alias),
+            "{} is an AppExecLink that CreateProcess follows; the probe must not be stricter \
+             than the spawn it stands in for",
+            alias.display()
+        );
+    }
+
+    /// And the whole resolution lands on it: on a machine where `PATH` carries no PowerShell 7 and
+    /// no MSI put one under `%ProgramFiles%`, the Store alias is the third probe and the answer.
+    ///
+    /// This is the machine in `docs/plans/release/readiness-gaps-2026-08-27.md` §B1 — where the
+    /// persistent `PATH` that `folio.exe` inherits from Explorer names the `WindowsApps` alias
+    /// directory and nothing else, so the package directory holding the real `pwsh.exe` is
+    /// reachable only through the alias.
+    #[test]
+    fn a_store_only_install_of_powershell_seven_still_resolves() {
+        let Some(alias) = store_pwsh_alias() else {
+            skipped_for_want_of_a_store_install(
+                "a_store_only_install_of_powershell_seven_still_resolves",
+            );
+            return;
+        };
+        let local_app_data = env::var_os("LocalAppData").expect("`store_pwsh_alias` read it");
+        // `PATH` and `ProgramFiles` are left unnamed rather than pointed somewhere empty: an unset
+        // variable skips its probe outright, which is the same miss without depending on some
+        // directory staying free of a `pwsh.exe`.
+        let environment = NamedVarsRealFiles(vec![("LocalAppData", local_app_data)]);
+        assert_eq!(
+            resolve_powershell_seven(&environment),
+            Some(alias.clone().into_os_string())
+        );
+        let resolved = resolve_default_shell(&environment);
+        assert_eq!(resolved.choice, ShellChoice::PowerShellCore);
+        assert_eq!(resolved.program, alias.into_os_string());
+    }
+
+    /// The other side of the same contract, and the part that needs no Store install: the probe is
+    /// permissive about *how* a program is reached, not about whether it is there.
+    #[test]
+    fn the_real_probe_still_refuses_a_directory_and_a_path_with_nothing_at_it() {
+        let system_root = env::var_os("SystemRoot").expect("Windows always sets %SystemRoot%");
+        let directory = PathBuf::from(&system_root);
+        assert!(
+            !SystemShellEnvironment.is_file(&directory),
+            "a directory is not a program"
+        );
+        assert!(
+            SystemShellEnvironment.is_file(
+                &directory
+                    .join("System32")
+                    .join("WindowsPowerShell")
+                    .join("v1.0")
+                    .join(WINDOWS_POWERSHELL_EXE)
+            ),
+            "and an ordinary file still is — Windows PowerShell 5.1, the floor every fallback in \
+             this module is written against"
+        );
+        assert!(
+            !SystemShellEnvironment.is_file(&directory.join("no-such-program-lives-here.exe")),
+            "nothing at the path is nothing to start"
+        );
+    }
 
     fn path_var(directories: &[&str]) -> OsString {
         env::join_paths(directories.iter().map(PathBuf::from))
