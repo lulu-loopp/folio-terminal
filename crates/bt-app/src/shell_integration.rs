@@ -928,7 +928,8 @@ fn backup_path(profile: &Path, at: std::time::SystemTime) -> PathBuf {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Offer {
     /// Nothing to say. This pane is not a PowerShell, or its `$PROFILE` already
-    /// dot-sources the script, or the reader has ended the asking.
+    /// dot-sources the script, or the reader has ended the asking, or this run
+    /// has already asked somewhere else ([`offer_once_per_run`]).
     #[default]
     Silent,
     /// Owed, and this is the file it is about. Shown once the shell has spoken —
@@ -937,7 +938,9 @@ pub enum Offer {
     /// The line has been written into that file.
     Added,
     /// Dismissed with the `×` or with Esc. **Not** the same as [`Self::Silent`]:
-    /// nothing was decided, so the next PowerShell is asked again.
+    /// nothing was decided, so the next *run* asks again — which since the one
+    /// ask per run ([`offer_once_per_run`], user ruling 2026-08-27) is the whole
+    /// of what the distinction buys. It used to be the next PowerShell pane.
     Closed,
 }
 
@@ -1001,6 +1004,45 @@ pub fn offer_for(profile: &Path) -> Offer {
         // the case this offer was written for: a reader who has never had one.
         Ok(_) | Err(_) => Offer::Owed(profile.to_path_buf()),
     }
+}
+
+/// The same answer, spent against **this run's one ask** (user ruling
+/// 2026-08-27).
+///
+/// The strip was a per-leaf fact and nothing above it counted, so the question
+/// was put again at every launch *and* at every new PowerShell pane in a window
+/// that had already asked and been closed. `×` deliberately decides nothing
+/// ([`Offer::Closed`]) — the right answer to "did this reader say no?" and the
+/// wrong one to "how many times may this reader be asked?": somebody with four
+/// PowerShell panes was asked four times about one file, and closing each one
+/// bought them nothing.
+///
+/// So the counting lives one layer up, on the process. `asked` starts `false` at
+/// launch; the first pane that is actually **owed** a strip turns it true and
+/// keeps its offer, and every pane after it — any tab, any window — is given
+/// [`Offer::Silent`], which is the record that this pane is not being asked
+/// rather than a claim that it has nothing to be asked about.
+///
+/// **A pane that owes nothing spends nothing.** A `$PROFILE` that already
+/// dot-sources the script answers `Silent` and leaves the ask where it was, so a
+/// reader whose first PowerShell is integrated and whose second is not is still
+/// asked once — about the second.
+///
+/// **It is not written to disk, and that is the whole difference between this
+/// and `Don't show again`.** The flag dies with the process, so tomorrow's
+/// launch asks once more; the setting (`powershell_integration_offer`) is what
+/// ends the asking for good, and it is still the only thing that can.
+#[must_use]
+pub fn offer_once_per_run(profile: &Path, asked: &mut bool) -> Offer {
+    let offer = offer_for(profile);
+    if !matches!(offer, Offer::Owed(_)) {
+        return offer;
+    }
+    if *asked {
+        return Offer::Silent;
+    }
+    *asked = true;
+    offer
 }
 
 /// Write the line into `profile`, installing the script first if it is not on
@@ -1825,6 +1867,63 @@ mod tests {
             offer_for(&absent),
             Offer::Owed(absent.clone()),
             "a profile that is not there is a profile with no line in it"
+        );
+    }
+
+    /// PIN — **one ask per run, and the run is the process** (user ruling
+    /// 2026-08-27).
+    ///
+    /// Red gate for the whole of the ruling, and the four cases are the four
+    /// sentences it was given in. The failure it exists to stop is the one the
+    /// release audit reported: a reader with two PowerShell panes asked twice
+    /// about one file, and asked again at the next launch no matter how many
+    /// times they had closed it.
+    #[test]
+    fn one_powershell_is_asked_per_run_and_the_next_run_asks_again() {
+        let documents = temp_dir("once-per-run");
+        let first = documents.join("first.ps1");
+        let second = documents.join("second.ps1");
+
+        // One run. The first pane that owes a strip is the only pane asked.
+        let mut asked = false;
+        assert_eq!(
+            offer_once_per_run(&first, &mut asked),
+            Offer::Owed(first.clone())
+        );
+        assert!(asked, "the run has spent its ask");
+        assert_eq!(
+            offer_once_per_run(&second, &mut asked),
+            Offer::Silent,
+            "a second PowerShell pane in the same run is not asked, whatever \
+             tab or window it stands in"
+        );
+
+        // A new process starts over: the flag is not written down anywhere.
+        let mut next_run = false;
+        assert_eq!(
+            offer_once_per_run(&second, &mut next_run),
+            Offer::Owed(second.clone()),
+            "the next launch asks once more — `Don't show again` is the setting, \
+             and this is not it"
+        );
+
+        // And a pane that owes nothing does not spend the ask.
+        let installed = documents.join("installed.ps1");
+        std::fs::write(
+            &installed,
+            "\n. 'D:\\Developer\\folio-terminal\\scripts\\shell-integration\\folio.ps1'\n",
+        )
+        .unwrap();
+        let mut spent = false;
+        assert_eq!(offer_once_per_run(&installed, &mut spent), Offer::Silent);
+        assert!(
+            !spent,
+            "a shell that is already integrated asked nothing, so it spent nothing"
+        );
+        assert_eq!(
+            offer_once_per_run(&first, &mut spent),
+            Offer::Owed(first),
+            "and the pane that does owe one still gets it"
         );
     }
 
