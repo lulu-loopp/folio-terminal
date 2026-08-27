@@ -3228,8 +3228,8 @@ impl Text {
             Self::RowClaudeHooks => pick(lang, "Claude Code hooks", "Claude Code 钩子"),
             Self::DescClaudeHooks => pick(
                 lang,
-                "Adds hooks to your ~/.claude/settings.json, so Claude Code tells this window when it is waiting for you. Nothing is written into a project folder.",
-                "在你的 ~/.claude/settings.json 里加上 hooks，让 Claude Code 在等你回答时告诉这扇窗。不会写进任何项目文件夹。",
+                "Adds hooks to your ~/.claude/settings.json, or CLAUDE_CONFIG_DIR, so Claude Code tells this window when it is waiting for you. Nothing is written into a project folder.",
+                "在你的 ~/.claude/settings.json 或 CLAUDE_CONFIG_DIR 里加上 hooks，让 Claude Code 在等你回答时告诉这扇窗。不会写进任何项目文件夹。",
             ),
             Self::ClaudeHooksAddedToast => pick(
                 lang,
@@ -3370,8 +3370,8 @@ impl Text {
             Self::RowCodexNotify => pick(lang, "Codex notify", "Codex 通知程序"),
             Self::DescCodexNotify => pick(
                 lang,
-                "Adds a notify program to your ~/.codex/config.toml, so codex tells this window when a turn has ended. It does not report a codex waiting for you.",
-                "在你的 ~/.codex/config.toml 里加上 notify 程序，让 codex 在一个回合结束时告诉这扇窗。它不报告它在等你回答。",
+                "Adds a notify program to your ~/.codex/config.toml, or CODEX_HOME, so codex tells this window when a turn has ended. It does not report a codex waiting for you.",
+                "在你的 ~/.codex/config.toml 或 CODEX_HOME 里加上 notify 程序，让 codex 在一个回合结束时告诉这扇窗。它不报告它在等你回答。",
             ),
             Self::CodexNotifyAddedToast => pick(
                 lang,
@@ -3394,8 +3394,8 @@ impl Text {
             Self::RowCopilotHooks => pick(lang, "Copilot CLI hooks", "Copilot CLI 钩子"),
             Self::DescCopilotHooks => pick(
                 lang,
-                "Adds a hook file to your ~/.copilot/hooks/, so Copilot CLI tells this window when it is waiting for you. Nothing is written into a project folder.",
-                "在你的 ~/.copilot/hooks/ 里加上一个 hook 文件，让 Copilot CLI 在等你回答时告诉这扇窗。不会写进任何项目文件夹。",
+                "Adds a hook file to your ~/.copilot/hooks/, or COPILOT_HOME, so Copilot CLI tells this window when it is waiting for you. Nothing is written into a project folder.",
+                "在你的 ~/.copilot/hooks/ 或 COPILOT_HOME 里加上一个 hook 文件，让 Copilot CLI 在等你回答时告诉这扇窗。不会写进任何项目文件夹。",
             ),
             Self::DescCopilotHooksTooOld => pick(
                 lang,

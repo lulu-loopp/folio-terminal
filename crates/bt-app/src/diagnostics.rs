@@ -365,3 +365,173 @@ mod tests {
         assert_eq!(LOG_ROTATE_AT, 4 * 1024 * 1024);
     }
 }
+
+/// **`docs/BT-ENVIRONMENT.md` is the list, and this is what keeps it the list.**
+///
+/// Several `BT_*` switches write terminal content to a path the person running
+/// the program names, and a public build owes a complete account of them. A
+/// document is only an account while it is complete, and the way documents stop
+/// being complete is that somebody adds a switch. So the document is compared
+/// against the source, in both directions, on every run of the tests.
+#[cfg(test)]
+mod bt_environment_doc_tests {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    /// The document, read at compile time so a missing file is a build failure
+    /// rather than a skipped test.
+    const DOCUMENT: &str = include_str!("../../../docs/BT-ENVIRONMENT.md");
+
+    /// The repository root, from where this crate is rather than from where the
+    /// test happened to be started.
+    fn repository_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .expect("the repository root, two directories above this crate")
+    }
+
+    /// Every `.rs` file that can end up in `folio.exe`.
+    ///
+    /// `src/bin/` is left out because those are development binaries that no
+    /// release archive carries, and `tests/` because an integration test is not
+    /// the shipped program. Everything else under `crates/` and `vendor/` is
+    /// walked — **the walk is the point**: a list of files here would be a list
+    /// somebody has to remember to add to, which is the same failure as a list
+    /// of variables.
+    fn shipped_sources(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for top in ["crates", "vendor"] {
+            walk(&root.join(top), &mut found);
+        }
+        found.sort();
+        assert!(
+            found.len() > 50,
+            "the walk found {} files, which is not a source tree",
+            found.len()
+        );
+        found
+    }
+
+    fn walk(directory: &Path, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let name = entry.file_name();
+            if path.is_dir() {
+                if name != "bin" && name != "tests" && name != "target" {
+                    walk(&path, found);
+                }
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    /// Every `BT_…` name that appears in `text` as a **whole** string literal —
+    /// an opening quote, the name, a closing quote and nothing between.
+    ///
+    /// Whole rather than "contains", because that is exactly the line between a
+    /// name and a sentence that begins with one: `"BT_PERSIST moved {} to {}"`
+    /// is a diagnostic line and `"BT_PTY_DUMP"` is a variable, and no rule that
+    /// looked only at the prefix could tell them apart. A name is at least one
+    /// character past the underscore, so `starts_with("BT_")`'s own argument is
+    /// not a name either.
+    fn names_in_source(text: &str) -> BTreeSet<String> {
+        let mut found = BTreeSet::new();
+        for (index, _) in text.match_indices("\"BT_") {
+            let rest = &text[index + 1..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                .collect();
+            if name.len() > 3 && rest[name.len()..].starts_with('"') {
+                found.insert(name);
+            }
+        }
+        found
+    }
+
+    /// Every `BT_…` name the document spells as a code span of its own.
+    ///
+    /// A span has to be the whole name and nothing else, so a header line or a
+    /// shell fragment quoted in passing is prose rather than an entry.
+    fn names_in_document(text: &str) -> BTreeSet<String> {
+        text.split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|span| {
+                span.len() > 3
+                    && span.starts_with("BT_")
+                    && span
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            })
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    /// RED — **the document names every `BT_` the source does, and no others.**
+    ///
+    /// Release plan gate 4. RED GATE: add a whole `BT_ANYTHING` string literal
+    /// to any shipped source and this fails naming it; delete an entry from the
+    /// document and it fails the other way.
+    #[test]
+    fn every_bt_name_in_the_source_is_in_the_document_and_the_reverse() {
+        let root = repository_root();
+        let mut in_source = BTreeSet::new();
+        for file in shipped_sources(&root) {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            in_source.extend(names_in_source(&text));
+        }
+        let in_document = names_in_document(DOCUMENT);
+        let undocumented: Vec<&String> = in_source.difference(&in_document).collect();
+        assert!(
+            undocumented.is_empty(),
+            "these names are in the source and not in docs/BT-ENVIRONMENT.md: {undocumented:?}"
+        );
+        let stale: Vec<&String> = in_document.difference(&in_source).collect();
+        assert!(
+            stale.is_empty(),
+            "these names are in docs/BT-ENVIRONMENT.md and not in the source: {stale:?}"
+        );
+    }
+
+    /// The extractors themselves, because a gate that silently matched nothing
+    /// would pass for ever.
+    #[test]
+    fn a_name_is_a_whole_literal_and_a_sentence_that_starts_with_one_is_not() {
+        let source = names_in_source(
+            "let a = \"BT_PTY_DUMP\"; eprintln!(\"BT_PERSIST moved {}\"); \
+             name.starts_with(\"BT_\"); let b = \"BT_WEB_TRACE_V\";",
+        );
+        assert_eq!(
+            source,
+            ["BT_PTY_DUMP".to_owned(), "BT_WEB_TRACE_V".to_owned()]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+        let document = names_in_document(
+            "a `BT_PTY_DUMP` row, a `BT_MOUSE_TRACE_V1 elapsed_ms` header, `BT_`",
+        );
+        assert_eq!(
+            document,
+            ["BT_PTY_DUMP".to_owned()]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
+    /// The document is the one the release links to, so the two paths it promises
+    /// are spelled in it.
+    #[test]
+    fn the_document_names_both_directories_the_product_writes_under() {
+        assert!(DOCUMENT.contains(r"%APPDATA%\Folio"));
+        assert!(DOCUMENT.contains(r"%LOCALAPPDATA%\Folio\WebView2"));
+    }
+}

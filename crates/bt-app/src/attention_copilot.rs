@@ -508,29 +508,33 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
         if standing.as_ref() == Some(&written) {
             return Outcome::Unchanged;
         }
-        if let Some(existing) = &existing
-            && !existing.is_empty()
-        {
-            // **The name matters more here than it does beside the other two files.** Upstream
-            // loads every `*.json` in this directory, so a backup that kept the extension would be
-            // a second copy of these hooks that upstream also runs — every event fired twice, for
-            // as long as the file sat there. `folio.json.bak-<date>` is not a `*.json`.
-            let backup =
-                path.with_extension(format!("json.bak-{}", crate::attention_hooks::today()));
-            if !backup.exists() {
-                let _ = std::fs::write(&backup, existing);
-            }
-        }
-        if let Some(parent) = path.parent()
-            && std::fs::create_dir_all(parent).is_err()
-        {
-            return Outcome::Refused("the copilot hooks directory could not be created");
-        }
         let Ok(text) = serde_json::to_string_pretty(&written) else {
             return Outcome::Refused("the hook file could not be written back");
         };
-        if std::fs::write(&path, format!("{text}\n")).is_err() {
-            return Outcome::Refused("the copilot hook file could not be written");
+        // The atomic write, the backup that is a precondition and the link that is followed are all
+        // `attention_hooks::land`'s, said once for all three installers.
+        //
+        // **The backup's name matters more here than it does beside the other two files.** Upstream
+        // loads every `*.json` in this directory, so a backup that kept the extension would be a
+        // second copy of these hooks that upstream also runs — every event fired twice, for as long
+        // as the file sat there. `folio.json.bak-<date>` is not a `*.json`, which is what the
+        // `"json"` below produces.
+        match crate::attention_hooks::land(
+            &path,
+            existing.as_deref().unwrap_or_default(),
+            "json",
+            format!("{text}\n").as_bytes(),
+        ) {
+            crate::attention_hooks::Landing::Landed => {}
+            crate::attention_hooks::Landing::NoDirectory => {
+                return Outcome::Refused("the copilot hooks directory could not be created");
+            }
+            crate::attention_hooks::Landing::NoBackup => {
+                return Outcome::Refused(crate::attention_hooks::NO_BACKUP);
+            }
+            crate::attention_hooks::Landing::NotWritten => {
+                return Outcome::Refused("the copilot hook file could not be written");
+            }
         }
         Outcome::Installed
     } else {

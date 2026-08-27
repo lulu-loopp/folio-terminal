@@ -431,24 +431,29 @@ pub const INSERT_ABOVE_REFERENCE: bool = true;
 /// **The four switches a locally minted page is hosted behind** (W2 slice 5;
 /// `docs/plans/web-preview/plan.md` section 3, the controlled file entry).
 ///
-/// Source pins, and they have to be: three of the four are calls into a COM
-/// object that only exists once a browser is running, and the fourth is an
-/// argument this product deliberately never passes - there is no API anywhere
-/// that reports "no additional browser arguments were given". What a machine
-/// can hold is that the calls are in the file and spelled the way the ruling
-/// spells them, which is the same kind of claim
-/// `the_compositor_adds_the_web_visual_at_the_bottom_and_nowhere_else` makes
-/// one screen up and for the same reason.
+/// Two of the four are now a **value** rather than a spelling: the engine
+/// settings this host decides live in [`WEB_SETTINGS`], which
+/// [`WebHost::configure`] walks, so a test can hold them without a browser
+/// (release plan gate 4, 2026-08-27 — the same refactor that put the two
+/// autofill switches under the same roof; `webview::engine_settings_tests` holds
+/// the whole table). The other two stay source pins and have to: a permission
+/// handler's body is a COM callback that only exists once a browser is running,
+/// and the last is an argument this product deliberately never passes — there is
+/// no API anywhere that reports "no additional browser arguments were given".
+/// That is the same kind of claim
+/// `the_compositor_adds_the_web_visual_at_the_bottom_and_nowhere_else` makes one
+/// screen up and for the same reason.
 ///
 /// The switches are unconditional rather than thrown for `file:` pages: a
 /// setting that depends on where the page came from is a setting somebody has
 /// to remember to change, and this host has exactly one way to be configured.
 ///
-/// RED GATE: delete any of the four lines. `SetAreHostObjectsAllowed` was the
-/// one actually missing on 2026-08-22, which is what this test was written red
+/// RED GATE: delete any of the four. `SetAreHostObjectsAllowed` was the one
+/// actually missing on 2026-08-22, which is what this test was written red
 /// against.
 #[cfg(test)]
 mod web_security_tests {
+    use super::{WEB_SETTINGS, WebSetting};
     /// `webview.rs` with its whitespace removed, so that rustfmt's line breaks
     /// are not part of any claim below.
     fn source() -> String {
@@ -463,14 +468,17 @@ mod web_security_tests {
     #[test]
     fn the_page_gets_no_bridge_and_no_permissions() {
         let source = source();
-        for switch in [
-            concat!("SetIsWebMessage", "Enabled(false)"),
-            concat!("SetAreHostObjects", "Allowed(false)"),
-        ] {
+        for switch in [WebSetting::WebMessage, WebSetting::HostObjects] {
+            let rows: Vec<bool> = WEB_SETTINGS
+                .iter()
+                .filter(|(named, _)| *named == switch)
+                .map(|(_, value)| *value)
+                .collect();
             assert_eq!(
-                source.matches(switch).count(),
-                1,
-                "exactly one call throws this switch, and it throws it off: {switch}"
+                rows,
+                vec![false],
+                "exactly one row decides this switch, and it decides it off: {}",
+                switch.api()
             );
         }
         // The permission handler exists and its body is the denial. Written as
@@ -1511,9 +1519,10 @@ mod webview;
 
 #[cfg(windows)]
 pub use webview::{
-    REHOST_SEQUENCE, RehostCompensation, RehostOutcome, RehostSide, RehostStep, WebChord,
-    WebDpiOwnership, WebEvent, WebHost, WebKey, WebMouseEvent, WebNavigationVerdict,
-    forget_web_environment, rehost_compensation, web_mouse_buttons, webview2_runtime_version,
+    REHOST_SEQUENCE, RehostCompensation, RehostOutcome, RehostSide, RehostStep, WEB_SETTINGS,
+    WebChord, WebDpiOwnership, WebEvent, WebHost, WebKey, WebMouseEvent, WebNavigationVerdict,
+    WebSetting, forget_web_environment, rehost_compensation, web_mouse_buttons,
+    webview2_runtime_version,
 };
 
 #[cfg(windows)]

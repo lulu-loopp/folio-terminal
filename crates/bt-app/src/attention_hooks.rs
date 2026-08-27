@@ -352,29 +352,150 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
     if !changed {
         return Outcome::Unchanged;
     }
-    if !existing.is_empty() {
-        let backup = path.with_extension(format!("json.bak-{}", today()));
-        if !backup.exists() {
-            let _ = std::fs::write(&backup, &existing);
-        }
-    }
-    if let Some(parent) = path.parent()
-        && std::fs::create_dir_all(parent).is_err()
-    {
-        return Outcome::Refused("the user configuration directory could not be created");
-    }
     let text = match serde_json::to_string_pretty(&settings) {
         Ok(text) => text,
         Err(_) => return Outcome::Refused("the settings could not be written back"),
     };
-    if std::fs::write(&path, format!("{text}\n")).is_err() {
-        return Outcome::Refused("the settings file could not be written");
+    match land(&path, &existing, "json", format!("{text}\n").as_bytes()) {
+        Landing::Landed => {}
+        Landing::NoDirectory => {
+            return Outcome::Refused("the user configuration directory could not be created");
+        }
+        Landing::NoBackup => {
+            return Outcome::Refused(NO_BACKUP);
+        }
+        Landing::NotWritten => return Outcome::Refused("the settings file could not be written"),
     }
     if install {
         Outcome::Installed
     } else {
         Outcome::Removed
     }
+}
+
+/// The sentence all three installers say when the copy of the user's own file could not be kept.
+///
+/// One string because it is one ruling: **the copy is a precondition of the write, not a courtesy
+/// beside it.** See [`land`].
+pub(crate) const NO_BACKUP: &str =
+    "a copy of your own file could not be kept, so nothing was written";
+
+/// How far [`land`] got.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Landing {
+    /// The bytes are on disk, whole, under the target's own name.
+    Landed,
+    /// The directory the file lives in does not exist and could not be made.
+    NoDirectory,
+    /// There was a file there and a copy of it could not be kept. **Nothing was written.**
+    NoBackup,
+    /// The write itself failed. Whatever was there is still there, whole.
+    NotWritten,
+}
+
+/// **The one way all three installers put bytes into somebody else's configuration file.**
+///
+/// Three properties, and each of them is a ruling rather than an implementation detail:
+///
+/// ① **The write is atomic.** A sibling temporary in the target's own directory, `write_all`,
+/// `sync_all`, then a single-operation replace — `bt_persist::atomic_write`, the same writer
+/// `session.json` and `settings.json` go through (`docs/M2-persistence-schema-v1.md` §5.2). A
+/// `std::fs::write` stood here until the release audit and it has a window: the file is truncated
+/// first, so a process killed mid-write leaves the user's own Claude Code, Codex or Copilot
+/// configuration half a document — a file the upstream tool then cannot parse, damaged by a
+/// convenience it did not ask for. Nothing on this path is ours to lose.
+///
+/// ② **The copy is a precondition, not a courtesy.** The dated backup used to be written with its
+/// error dropped on the floor, which made the promise in every one of these modules' headers —
+/// "a build that could damage one had better be able to hand it back" — conditional on a write
+/// nobody checked. So a backup that cannot be kept is [`Landing::NoBackup`] and the target is not
+/// touched at all. Only the *first* copy of each day is kept: a second press on the same day would
+/// otherwise overwrite the copy of what was there before the first one, which is the one copy that
+/// matters.
+///
+/// ③ **A link is followed, and the file it names is what gets replaced.** `std::fs::write` follows
+/// a reparse point; an atomic replace does not, and would leave a regular file where the user had a
+/// symlink or a junction. A `~/.claude` kept in a dotfiles repository through a link is an ordinary
+/// setup and this must not break it — and refusing to install through one would refuse a legitimate
+/// machine while stopping nothing, because anything that could plant the link already runs as this
+/// user and could write the file directly (the same boundary
+/// [`bt_platform::attention_pipe`](../../bt-platform/src/attention_pipe.rs) draws, and `SECURITY.md`
+/// states). So the link is resolved, the real file is what is replaced, the backup lands beside the
+/// real file, and the resolution is written to `BT_ATTENTION_TRACE` when it changed the
+/// destination.
+///
+/// `extension` is the target's own extension — `settings.json` with `"json"` gives
+/// `settings.json.bak-20260827`. `existing` is what was read off the file, empty when there was
+/// nothing there.
+pub(crate) fn land(path: &Path, existing: &str, extension: &str, bytes: &[u8]) -> Landing {
+    let target = followed(path);
+    if target.as_path() != path {
+        crate::attention_trace::line(|| {
+            format!(
+                "install resolves target from={} to={}",
+                path.display(),
+                target.display()
+            )
+        });
+    }
+    if let Some(parent) = target.parent()
+        && !parent.as_os_str().is_empty()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return Landing::NoDirectory;
+    }
+    if !existing.is_empty() {
+        let backup = target.with_extension(format!("{extension}.bak-{}", today()));
+        // `is_file` rather than `exists`: today's copy is skipped because it is
+        // already a copy, and anything else standing under that name is not one.
+        // A directory there would make `exists` answer "kept" about a copy that
+        // was never written.
+        if !backup.is_file() && std::fs::write(&backup, existing).is_err() {
+            return Landing::NoBackup;
+        }
+    }
+    if bt_persist::atomic_write(&target, bytes).is_err() {
+        return Landing::NotWritten;
+    }
+    Landing::Landed
+}
+
+/// The file a path actually names, with any reparse point on the way resolved.
+///
+/// The path itself when there is nothing there yet — there is no link to follow to a file that does
+/// not exist, and a directory reparse point on the way is followed by the filesystem itself when the
+/// file is created inside it. See [`land`] ③.
+fn followed(path: &Path) -> PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(resolved) => plain(&resolved),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+/// `\\?\D:\x` said as `D:\x` — the same file, spelled the way the person who set the variable
+/// spelled it.
+///
+/// `canonicalize` always answers in Windows' verbatim form, so without this every ordinary file
+/// would look to [`land`] like a path that had been resolved to somewhere else, and the line it
+/// writes to the trace would be about spelling rather than about the file. A verbatim path that is
+/// not a drive path — a device path, a UNC share — keeps its prefix, because for those the prefix
+/// is not decoration.
+fn plain(path: &Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        let mut characters = rest.chars();
+        if characters.next().is_some_and(|c| c.is_ascii_alphabetic())
+            && characters.next() == Some(':')
+        {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
 }
 
 /// `YYYYMMDD` for the backup's name, from the wall clock and nothing else.
@@ -705,5 +826,236 @@ mod tests {
         } else {
             State::Absent
         }
+    }
+
+    /// A scratch directory of this test's own. Never anywhere near a real `~/.claude`.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "folio-land-{name}-{}-{}",
+            std::process::id(),
+            today()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        // Resolved once, here: `%TEMP%` on a real machine can be a short name or sit behind a
+        // link, and neither is what any of these tests is about.
+        followed(&dir)
+    }
+
+    /// RED — **the three installers write somebody else's configuration file whole or not at all.**
+    ///
+    /// Release audit 2026-08-27 (Codex 错 12): all three called `std::fs::write` on the target,
+    /// which truncates first. A process killed in that window leaves the user's own Claude Code,
+    /// Codex or Copilot configuration half a document. The write is now [`land`]'s — a sibling
+    /// temporary, `sync_all`, one replace — and this pins that there is no second way out.
+    ///
+    /// RED GATE: put `std::fs::write(&path, …)` back into any of the three `apply` functions and
+    /// this fails naming the file. The count is taken over the production half of each source
+    /// only, because a test may write whatever fixture it likes.
+    #[test]
+    fn a_landing_is_whole_or_it_is_nothing_at_all() {
+        // Spelled in halves so this assertion is not its own counter-example — the source these
+        // read is this file, and one whole spelling here would be found in the half it is looking
+        // at. `concat!` puts them back together at compile time.
+        let raw_write = concat!("fs::", "write(");
+        let atomic = concat!("bt_persist::", "atomic_write(");
+        let production = |source: &str| {
+            source
+                .split_once(concat!("#[cfg(", "test)]"))
+                .map_or(source, |(before, _)| before)
+                .to_owned()
+        };
+        // `land`'s own dated copy is the one raw write left on this path, and it is a write to a
+        // file nothing else has ever read — never to the target.
+        let hooks = production(include_str!("attention_hooks.rs"));
+        assert_eq!(
+            hooks.matches(raw_write).count(),
+            1,
+            "the only raw write left in this module is `land`'s dated copy"
+        );
+        assert_eq!(
+            hooks.matches(atomic).count(),
+            1,
+            "and the target is replaced through the one atomic writer"
+        );
+        for (name, source) in [
+            (
+                "attention_codex",
+                production(include_str!("attention_codex.rs")),
+            ),
+            (
+                "attention_copilot",
+                production(include_str!("attention_copilot.rs")),
+            ),
+        ] {
+            assert!(
+                !source.contains(raw_write),
+                "{name} writes a configuration file behind `land`'s back"
+            );
+            assert!(
+                source.contains(concat!("attention_hooks::", "land(")),
+                "{name} must land its bytes through the one writer"
+            );
+        }
+    }
+
+    /// RED — **a copy that cannot be kept refuses the install.**
+    ///
+    /// Release audit 2026-08-27 (Codex 错 12): the dated backup's error was dropped on the floor and
+    /// the target was overwritten anyway, which made every one of these modules' "a build that could
+    /// damage one had better be able to hand it back" conditional on a write nobody checked.
+    ///
+    /// RED GATE: change [`land`] to ignore the backup's result and the first assertion goes to
+    /// `Landed` while the second finds the user's file replaced.
+    #[test]
+    fn a_copy_that_cannot_be_kept_refuses_to_write() {
+        let dir = scratch("nobackup");
+        let target = dir.join("settings.json");
+        std::fs::write(&target, "{\"model\":\"opus\"}\n").expect("the user's own file");
+        let existing = std::fs::read_to_string(&target).expect("read back");
+        // A directory standing where the copy would go: the copy cannot be written and cannot be
+        // mistaken for one that already exists.
+        let blocked = target.with_extension(format!("json.bak-{}", today()));
+        std::fs::create_dir(&blocked).expect("a directory in the copy's place");
+
+        assert_eq!(
+            land(&target, &existing, "json", b"{}\n"),
+            Landing::NoBackup,
+            "a copy that cannot be kept is a refusal"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("still there"),
+            existing,
+            "and the user's own file is untouched by it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED — what lands is the whole file, under its own name, with nothing left beside it.
+    ///
+    /// The other half of [`a_landing_is_whole_or_it_is_nothing_at_all`]: the atomic writer leaves a
+    /// sibling temporary behind on any path that does not commit, and a reader who opened this
+    /// directory would find two files where the user has one.
+    #[test]
+    fn what_lands_is_the_file_and_nothing_beside_it() {
+        let dir = scratch("landed");
+        let target = dir.join("settings.json");
+        assert_eq!(land(&target, "", "json", b"first\n"), Landing::Landed);
+        assert_eq!(std::fs::read_to_string(&target).expect("read"), "first\n");
+        let names = |dir: &Path| {
+            let mut names: Vec<String> = std::fs::read_dir(dir)
+                .expect("read the directory")
+                .map(|entry| {
+                    entry
+                        .expect("entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            names(&dir),
+            vec!["settings.json".to_owned()],
+            "a first landing leaves one file: no copy of nothing, no temporary"
+        );
+
+        // A second landing over a file that was there keeps exactly one dated copy of it.
+        assert_eq!(
+            land(&target, "first\n", "json", b"second\n"),
+            Landing::Landed
+        );
+        assert_eq!(std::fs::read_to_string(&target).expect("read"), "second\n");
+        // Sorted, and `settings.json` sorts before the copy that extends its name.
+        let backup = format!("settings.json.bak-{}", today());
+        assert_eq!(
+            names(&dir),
+            vec!["settings.json".to_owned(), backup.clone()]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(&backup)).expect("the copy"),
+            "first\n"
+        );
+
+        // And a third keeps the *first* copy rather than a copy of the second, which is the one
+        // that is worth having: it is what was there before this build touched anything today.
+        assert_eq!(
+            land(&target, "second\n", "json", b"third\n"),
+            Landing::Landed
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(&backup)).expect("the copy"),
+            "first\n",
+            "the copy kept is of what was there before the first write of the day"
+        );
+        assert_eq!(names(&dir), vec!["settings.json".to_owned(), backup]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED — **a link is followed, and what is replaced is the file it names.**
+    ///
+    /// [`land`] ③. `std::fs::write` followed a reparse point; the atomic replace this now goes
+    /// through does not, so without [`followed`] an install through a `~/.claude` kept in a
+    /// dotfiles repository would leave a regular file where the user had a link.
+    ///
+    /// The property is asserted over [`followed`] rather than by making a symlink, because creating
+    /// one on Windows needs a privilege an ordinary test run does not have. What is pinned is that
+    /// a path that exists resolves to the same file and an absent one is handed back untouched —
+    /// which is the whole of the rule.
+    #[test]
+    fn a_path_that_exists_resolves_to_the_file_it_names() {
+        let dir = scratch("followed");
+        let absent = dir.join("not-here.json");
+        assert_eq!(
+            followed(&absent),
+            absent,
+            "there is no link to follow to a file that is not there"
+        );
+        let present = dir.join("settings.json");
+        std::fs::write(&present, "{}\n").expect("a file");
+        let resolved = followed(&present);
+        assert!(resolved.is_absolute());
+        assert_eq!(
+            std::fs::read_to_string(&resolved).expect("the same file"),
+            "{}\n"
+        );
+        // **And an ordinary file resolves to the path it was given.** RED GATE: drop [`plain`] and
+        // this fails — `canonicalize` answers `\\?\…` for every path on Windows, so `land` would
+        // report every install as one that had been sent somewhere else.
+        assert_eq!(
+            resolved, present,
+            "a file that is nothing but itself resolves to the name it was asked about"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED — the verbatim form and the plain form are the same file.
+    ///
+    /// Held on strings rather than on the filesystem, because what is being asserted is a spelling
+    /// rule and no file has to exist for it to be wrong.
+    #[test]
+    fn a_verbatim_path_is_the_drive_path_it_spells() {
+        assert_eq!(
+            plain(Path::new(r"\\?\D:\Users\someone\.claude\settings.json")),
+            PathBuf::from(r"D:\Users\someone\.claude\settings.json")
+        );
+        assert_eq!(
+            plain(Path::new(r"\\?\UNC\server\share\settings.json")),
+            PathBuf::from(r"\\server\share\settings.json")
+        );
+        // Not a drive path: the prefix is doing work and stays.
+        assert_eq!(
+            plain(Path::new(
+                r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x"
+            )),
+            PathBuf::from(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x")
+        );
+        // Nothing to strip.
+        assert_eq!(
+            plain(Path::new(r"D:\Users\someone\.claude\settings.json")),
+            PathBuf::from(r"D:\Users\someone\.claude\settings.json")
+        );
     }
 }
