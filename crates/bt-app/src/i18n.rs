@@ -528,6 +528,14 @@ pub enum Text {
     /// `</>` while the pane is showing a rendered document — press it for the
     /// source (user ruling 2026-08-25).
     PreviewFlipToSource,
+    /// **The one thing a `.mov`'s card has to say that its facts do not** (user
+    /// ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// A statement and not an apology: the file is a video, this window can draw
+    /// it, and the engine that would have to play it does not know the
+    /// container. It stands beside the size on the second line, where the rest
+    /// of what is true about the *file* stands.
+    VideoFormatCannotPlay,
     /// `</>` while the pane is showing the source — press it for the rendering.
     ///
     /// Two entries and not one, on [`Self::PreviewWebReload`]'s precedent: the
@@ -2318,6 +2326,9 @@ impl Text {
             Self::PreviewRailOpenTip => pick(lang, "Open and more", "打开等操作"),
             Self::PreviewCopyAddress => pick(lang, "Copy address", "复制地址"),
             Self::PreviewFlipToSource => pick(lang, "View source", "查看源码"),
+            Self::VideoFormatCannotPlay => {
+                pick(lang, "This format cannot be played", "此格式无法播放")
+            }
             Self::PreviewFlipToRendered => pick(lang, "View rendered", "查看渲染结果"),
             Self::PreviewFlipToPage => pick(lang, "View page", "查看页面"),
             Self::FileMenuCopyPath => pick(lang, "Copy path", "复制路径"),
@@ -3500,7 +3511,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 519] = [
+    pub const ALL: [Self; 520] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3602,6 +3613,7 @@ impl Text {
         Self::PreviewRailOpenTip,
         Self::PreviewCopyAddress,
         Self::PreviewFlipToSource,
+        Self::VideoFormatCannotPlay,
         Self::PreviewFlipToRendered,
         Self::PreviewFlipToPage,
         Self::FileMenuCopyPath,

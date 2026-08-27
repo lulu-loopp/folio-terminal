@@ -269,6 +269,47 @@ pub enum ChromeMark {
     /// [`HOUSE_INK_UNITS`] says, and the width follows the mock-up's own
     /// proportion so the mouse keeps its shape while it loses its extra height.
     MouseWheel,
+    /// `#i-play` — **the play button's solid triangle** (user ruling 2026-08-27;
+    /// `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// **Filled, and it is P2's fourth class rather than an exception to P2**:
+    /// a sign whose whole meaning is the solid. This registry's own note on
+    /// `#i-tri` says the case out loud from the other side — *"outlined at
+    /// fourteen pixels a 4.6-unit triangle is three hairlines meeting, and what
+    /// it reads as is a play button"* — so a play button that were outlined
+    /// would be reaching for the reading the outlined triangle already fails to
+    /// hold.
+    ///
+    /// **A second drawing and not `#i-tri` turned, and the difference is the
+    /// point.** The disclosure triangle is a *state* — a fold that is shut, on
+    /// its way round, or open — and its whole vocabulary is the turn. This is a
+    /// verb, it never turns, and it is cut to a different proportion for a
+    /// different reason: it stands alone in the middle of a body at three times
+    /// a menu row's size rather than in a column of rows, so it is cut on the
+    /// house's own ink band instead of on the disclosure's ten-unit box.
+    /// Reusing one would have put one shape under two meanings, which is the
+    /// thing `REUSED_SHAPES` exists to make somebody write down.
+    ///
+    /// **Set right of the geometric centre on purpose.** A right-pointing
+    /// triangle's mass is behind its tip, so a triangle centred by its bounding
+    /// box reads as leaning left inside a circle; the ink is placed by its
+    /// centroid instead, which is what every play button in the world does and
+    /// what nobody notices when it is done.
+    Play,
+    /// `#i-speaker` — **the mark on a tab whose page is making a sound** (user
+    /// ruling 2026-08-27; §7.23 ⑩).
+    ///
+    /// **Struck, not filled**, and that is P2 read straight: it is neither a
+    /// state with an off face (there is no silent speaker — the mark is simply
+    /// absent), nor an object, nor a field inside a frame, nor a sign whose
+    /// meaning is its solid. It is a verb — *go to the tab that is making this
+    /// noise* — and a verb is struck.
+    ///
+    /// One wave and not three. Three arcs at a tab row's thirteen pixels are
+    /// three hairlines a pen and a half apart, which at any real scale factor
+    /// resolves into a smudge beside the cone; one arc keeps the silhouette a
+    /// reader recognises and keeps the pen the house's.
+    Speaker,
     /// `#i-tri` — the disclosure triangle at some angle through its turn (C33).
     ///
     /// An angle and not a boolean for the reason [`Self::Chevron`] gives at
@@ -1111,6 +1152,8 @@ impl ChromeMark {
             Self::Folder => "i-folder",
             Self::FolderOpen => "i-folder-open",
             Self::MouseWheel => "i-wheel",
+            Self::Play => "i-play",
+            Self::Speaker => "i-speaker",
             // One id for every angle, on `Self::Chevron`'s precedent above.
             Self::TreeDisclosure { .. } => "i-tri",
             Self::Panel => "i-panel",
@@ -2726,6 +2769,8 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::Folder => 7,
         ChromeMark::FolderOpen => 15,
         ChromeMark::MouseWheel => 62,
+        ChromeMark::Play => 63,
+        ChromeMark::Speaker => 64,
         ChromeMark::TreeDisclosure { .. } => 16,
         ChromeMark::Panel => 8,
         ChromeMark::Chevron { .. } => 9,
@@ -2838,7 +2883,7 @@ pub fn preview_row_mark(is_page: bool, favicon: Option<crate::favicon::FaviconId
 
 const PROFILE_CHASSIS_VIEW_BOX: &str = "0 0 16 16";
 
-const SYMBOL_VIEW_BOX: [&str; 63] = [
+const SYMBOL_VIEW_BOX: [&str; 65] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -2969,11 +3014,13 @@ const SYMBOL_VIEW_BOX: [&str; 63] = [
     // the house's in the house's grid.
     "0 0 16 16", // #i-cross
     "0 0 16 16", // #i-wheel
+    "0 0 16 16", // #i-play
+    "0 0 16 16", // #i-speaker
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 63] = [
+const SYMBOL_BODY: [&str; 65] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min. The rule is pulled half a pen in from each edge so the round cap
@@ -3544,6 +3591,32 @@ const SYMBOL_BODY: [&str; 63] = [
     concat!(
         r#"<rect x="3.9" y="2.2" width="8.2" height="11.6" rx="4.1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
         r#"<rect x="7.3" y="4.45" width="1.4" height="2.9" rx="0.7" fill="currentColor"/>"#,
+    ),
+    // `#i-play` — the solid triangle, cut on the house's ink band and set by
+    // its **centroid** rather than by its bounding box.
+    //
+    // The ink runs `4.9 – 13.0` across and `2.9 – 13.1` down, so the centroid
+    // is `(4.9 + 4.9 + 13.0) / 3 = 7.6` — three quarters of a unit left of the
+    // grid's own eight, which is exactly the amount a right-pointing triangle
+    // has to be pushed **right** to stop reading as leaning back inside a
+    // circle.
+    //
+    // **Fill and nothing else**, exactly as `#i-tri` is: a solid that carried a
+    // stroke as well would be a mark with a pen, and a pen that is not the
+    // house's `1.2` is a mark the optical band would have to be told to skip.
+    // The corners stay as they are cut — at the size this stands at, a body's
+    // whole centre, a mitred point is a point and not a chip.
+    r#"<path d="M4.9 2.9L13 8 4.9 13.1z" fill="currentColor"/>"#,
+    // `#i-speaker` — the cone and one wave, both struck at the house's pen.
+    //
+    // The cone is one closed path so that the mouth, the throat and the back
+    // are one join rather than three strokes meeting; the wave is an open arc
+    // and takes the round cap every open path in this sheet takes. The gap
+    // between them is a pen and a half, which is the smallest gap that survives
+    // a 1.0× scale factor without the two touching.
+    concat!(
+        r#"<path d="M9.2 3.3L5.9 6.1H3.3v3.8h2.6l3.3 2.8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+        r#"<path d="M11.7 5.9a3 3 0 0 1 0 4.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
     ),
 ];
 

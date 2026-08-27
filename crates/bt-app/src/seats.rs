@@ -2607,6 +2607,12 @@ pub enum ChromeTarget {
     PreviewSave(SeatId),
     /// `.pv-tool.pv-md-flip` — rendered view ⇄ source (P28).
     PreviewFlip(SeatId),
+    /// **Stop the video this pane is playing and go back to its frame** (user
+    /// ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// A seat, like every other head tool, and for the play button's reason as
+    /// well: what it retires is an engine, and an engine stands on a leaf.
+    PreviewStop(SeatId),
     /// `.pv-tool.pv-browser` — "hand this page to your browser" (user ruling
     /// 2026-08-20, §7.1.5g).
     ///
@@ -2706,6 +2712,13 @@ pub enum ChromeTarget {
     ///
     /// [`PreviewFoot`]: Self::PreviewFoot
     PreviewRail(SeatId),
+    /// **The play button in the middle of a video's first frame** (user ruling
+    /// 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// A seat and not a surface, because the verb needs one: playing puts an
+    /// engine on this pane's leaf, and a pane torn off into a window has given
+    /// its leaf up.
+    PreviewPlay(SeatId),
     Settings,
     Minimize,
     Maximize,
@@ -2725,6 +2738,13 @@ pub enum ChromeTarget {
     /// strip or in the rail. One target for both axes, because it is one control
     /// built by one function (H109).
     TabFiles(usize),
+    /// **The speaker on a tab whose page is making a sound**, in the strip or in
+    /// the rail (user ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// One target for both axes, for [`Self::TabFiles`]'s reason: it is one
+    /// control built by one arrangement, and the two strips are two readings of
+    /// it rather than two controls.
+    TabSpeaker(usize),
     NewTab,
     /// `.newtab.chevbtn.nt-chev` — the profile picker that shares the `+`'s box
     /// and stands immediately beside it.
@@ -2782,6 +2802,10 @@ pub enum TabWidthTier {
 /// is the rule; two copies of the number could drift apart while every test that
 /// only checked the number still passed.
 const WINDOW_TAB_PIN_BOX_LOGICAL_PX: f32 = WINDOW_TAB_CLOSE_BOX_LOGICAL_PX;
+/// The speaker's box — the `×`'s own, for the pin's reason said once more: it
+/// stands in the same run, at the same height, and a third number here would be
+/// a third thing that can drift.
+const WINDOW_TAB_SPEAKER_BOX_LOGICAL_PX: f32 = WINDOW_TAB_CLOSE_BOX_LOGICAL_PX;
 const WINDOW_TAB_PIN_RADIUS_LOGICAL_PX: f32 = WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX;
 /// `.pinsvg { width: 13px; height: 13px }` (mock-up 365) — deliberately *not*
 /// the `×` mark's 8px, and the mock-up says why at 362-364: "the pin carries a
@@ -2840,6 +2864,31 @@ pub struct TabTrailer {
     /// active tab does **not** show it by default, because a fresh tab is active
     /// and it was flashing the icon on with no hover.
     pub files_lit: f32,
+    /// **Whether this tab's page is making a sound right now** (user ruling
+    /// 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// The engine's own `IsDocumentPlayingAudio`, aggregated over the tab's
+    /// pages the way every other tab-level fact is aggregated: any is enough,
+    /// because what the mark says is "the sound is in here" and one page is as
+    /// much in here as two.
+    ///
+    /// **It is not a [`crate::StatusClaim`] and it does not join the dot.**
+    /// §7.1.5b's ladder is seven readings of one question — *does this session
+    /// want you* — resolved by taking the loudest, and a sound is not an answer
+    /// to it: it is not about a session at all, it does not want anything, and
+    /// it is not more or less urgent than an unread exit code. Folding it into
+    /// the dot would mean choosing between them, and there is nothing to choose
+    /// — a tab can be both audible and awaiting a reply, and both are true at
+    /// once. So it is a second, independent channel with its own shape and its
+    /// own place in the row, exactly as the folder trigger is; the dot's own
+    /// discipline ("one dot, one assertion") is kept precisely by not putting a
+    /// second assertion on it.
+    ///
+    /// **Unlike the folder and the pin, it is not width-revealed**: a sound the
+    /// reader cannot see the source of is the whole problem the mark exists to
+    /// solve, and a mark that appeared only under the pointer would be findable
+    /// only by the reader who already knew where to point.
+    pub audible: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2862,6 +2911,15 @@ pub struct TabGeometry {
     /// { display: none }` — at that width summoning folder, pin and `×` together
     /// crushes the title to nothing).
     pub files: Option<[f32; 4]>,
+    /// **The speaker's box** — `Some` exactly while this tab's page is audible
+    /// and the tab has room for a mark at all (user ruling 2026-08-27; §7.23
+    /// ⑩).
+    ///
+    /// It stands to the left of whatever the trailing run already holds and
+    /// takes a slot of its own rather than sharing one: the pin and the `×` are
+    /// alternatives — a pinned tab has no `×` — and this is an alternative to
+    /// neither. A pinned tab that is playing a video wears both.
+    pub speaker: Option<[f32; 4]>,
     /// The trailer this geometry was built from, clamped.
     ///
     /// Kept because the trailing boundary cannot be read off the rectangles
@@ -2887,6 +2945,7 @@ impl TabGeometry {
             body: slide(self.body),
             close: self.close.map(slide),
             pin: self.pin.map(slide),
+            speaker: self.speaker.map(slide),
             ..*self
         }
     }
@@ -2996,6 +3055,7 @@ pub fn tab_strip_geometry(
                 reveal: trailer.reveal.clamp(0.0, 1.0),
                 files: trailer.files,
                 files_lit: trailer.files_lit.clamp(0.0, 1.0),
+                audible: trailer.audible,
             };
             let left = origin + index as f32 * (tab_width + gap);
             let right = left + tab_width;
@@ -3100,11 +3160,45 @@ pub fn tab_strip_geometry(
                     ])
                 }
             };
+            // **The speaker, at the head of the trailing run** (user ruling
+            // 2026-08-27; §7.23 ⑩). It anchors to whatever is already there
+            // — the folder, then the pin, then the `×` — so the run reads
+            // right to left in the order the row was built, and it is **not**
+            // multiplied by `reveal`: the folder and the pin open under the
+            // pointer because they are offers, and a sound that only appeared
+            // when you already knew where to look would be no help at all.
+            //
+            // It survives one tier further than they do. `Tight` takes the
+            // folder and the pin away to buy room for words; a squeezed tab has
+            // no words to buy room for, and a mark is all it is — so the
+            // speaker is drawn at `Full` and `Tight` and gives up only at
+            // `Squeezed`, where the tab is its centred profile mark and nothing
+            // else.
+            let speaker_box = (WINDOW_TAB_SPEAKER_BOX_LOGICAL_PX * scale).round();
+            let speaker = match tier {
+                _ if !trailer.audible => None,
+                TabWidthTier::Squeezed => None,
+                _ => {
+                    let anchor = files
+                        .map(|files| files[0])
+                        .or(pin.map(|pin| pin[0]))
+                        .or(close.map(|close| close[0]))
+                        .unwrap_or((right - close_pad).max(left));
+                    let speaker_right = (anchor - tighten).max(left);
+                    Some([
+                        (speaker_right - speaker_box).max(left),
+                        close_top,
+                        speaker_right,
+                        close_top + speaker_box,
+                    ])
+                }
+            };
             TabGeometry {
                 body: [left, tab_top, right, title],
                 close: close.filter(|rect| rect[2] > rect[0]),
                 pin: pin.filter(|rect| rect[2] > rect[0]),
                 files: files.filter(|rect| rect[2] > rect[0]),
+                speaker: speaker.filter(|rect| rect[2] > rect[0]),
                 trailer,
                 tier,
             }
@@ -3210,9 +3304,12 @@ fn tab_trailer_box(tab: &TabGeometry) -> Option<[f32; 4]> {
 /// was written for: "the two counts sat 4px apart".
 fn tab_trailing_edge(tab: &TabGeometry, scale: f32) -> f32 {
     trailing_edge_of(
-        tab.files,
-        tab.pin,
-        tab.close,
+        TrailerRun {
+            speaker: tab.speaker,
+            files: tab.files,
+            pin: tab.pin,
+            close: tab.close,
+        },
         // `.tab.tight .pin` / `.tab.squeezed .pin { display: none }` is the one
         // thing that takes the pin out of the flow, and with it the `.pin +
         // .close` pair whose -4px this function is about.
@@ -3236,21 +3333,55 @@ fn tab_trailing_edge(tab: &TabGeometry, scale: f32) -> f32 {
 /// `pin_in_flow` is "is there a `.pin` sibling at all", which on the strip is a
 /// width tier and in the rail is always true — rows never compress, so nothing
 /// there can take the pin out of the flow.
-fn trailing_edge_of(
+/// **The trailing cluster's four boxes**, in the order they stand in.
+///
+/// A struct rather than four parameters because they are one thing — the run —
+/// and because a fourth box arriving (the speaker, 2026-08-27) is exactly how a
+/// parameter list gets long enough that the next reader passes two of them the
+/// wrong way round. Every field is `Option` for the same reason: each of them
+/// comes and goes on its own rule, and the ladder below is a walk down whichever
+/// of them are there.
+#[derive(Clone, Copy, Debug, Default)]
+struct TrailerRun {
+    speaker: Option<[f32; 4]>,
     files: Option<[f32; 4]>,
     pin: Option<[f32; 4]>,
     close: Option<[f32; 4]>,
+}
+
+fn trailing_edge_of(
+    run: TrailerRun,
     pin_in_flow: bool,
     reveal: f32,
     bare_right: f32,
     scale: f32,
 ) -> f32 {
+    let TrailerRun {
+        speaker,
+        files,
+        pin,
+        close,
+    } = run;
     let gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
     let tightened = gap - WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX * scale;
     // A tab that carries the folder has it at the head of the run, so it — not
     // the pin — is what the badge docks against. Its own `margin-left` runs from
     // -8px to 0 exactly as the pin's does, so the gap before it has opened by the
     // reveal, and the three cases below go on describing what stands to its right.
+    // **The speaker leads the run when it is there** (user ruling 2026-08-27;
+    // `docs/DESIGN.md` §7.23 ⑩), and it is asked before the folder for the
+    // reason this function exists at all: what the badge docks against is
+    // whatever is *leftmost* in the trailing run, and leaving a control out of
+    // this ladder is how the badge comes to be drawn on top of it. Found on the
+    // machine that afternoon — the pane-count pill and the speaker were the same
+    // pixels.
+    //
+    // A full gap and not a revealed one, because unlike the folder and the pin
+    // this control does not open under the pointer: it is either there at its
+    // whole width or it is not there at all.
+    if let Some(speaker) = speaker {
+        return speaker[0] - gap;
+    }
     if let Some(files) = files {
         return files[0] - gap * reveal;
     }
@@ -3310,9 +3441,12 @@ pub fn tab_badge_rect(
 /// box does.
 fn rail_trailing_edge(row: &RailTabGeometry, scale: f32) -> f32 {
     trailing_edge_of(
-        row.files,
-        row.pin,
-        row.close,
+        TrailerRun {
+            speaker: row.speaker,
+            files: row.files,
+            pin: row.pin,
+            close: row.close,
+        },
         true,
         row.trailer.reveal,
         row.body[2],
@@ -3916,6 +4050,10 @@ pub struct RailTabGeometry {
     /// `.vtab .tab-files` — the same trigger the strip's tabs wear (H109), from
     /// the same declaration and the same builder.
     pub files: Option<[f32; 4]>,
+    /// **The speaker's box** — `Some` exactly while this tab's page is audible
+    /// (user ruling 2026-08-27; §7.23 ⑩). The strip's own field, said once
+    /// more for the axis that has no width tiers to take a mark away.
+    pub speaker: Option<[f32; 4]>,
     pub title: [f32; 2],
     pub trailer: TabTrailer,
 }
@@ -3942,6 +4080,7 @@ impl RailTabGeometry {
             mark: slide(self.mark),
             close: self.close.map(slide),
             pin: self.pin.map(slide),
+            speaker: self.speaker.map(slide),
             ..*self
         }
     }
@@ -4192,10 +4331,35 @@ pub fn rail_geometry(
             ]
         });
         let files = files.filter(|rect| rect[2] > rect[0]);
+        // **The speaker, at the head of the run** (user ruling 2026-08-27;
+        // §7.23 ⑩) — the strip's own arrangement said once more, because the
+        // trailing run is one declaration for both axes. It is not multiplied by
+        // `reveal`: a sound the reader cannot find is the problem the mark
+        // exists to solve, so it stands at full width whether or not the pointer
+        // is anywhere near the row.
+        let speaker_box = (WINDOW_TAB_SPEAKER_BOX_LOGICAL_PX * scale).round();
+        let speaker = trailer.audible.then(|| {
+            let anchor = files
+                .map(|files| files[0])
+                .or(pin.map(|pin| pin[0]))
+                .or(close.map(|close| close[0]))
+                .unwrap_or(content_right - pad_right);
+            let speaker_right = (anchor - tighten).max(title_left);
+            [
+                (speaker_right - speaker_box).max(title_left),
+                glyph_top,
+                speaker_right,
+                glyph_top + speaker_box,
+            ]
+        });
+        let speaker = speaker.filter(|rect| rect[2] > rect[0]);
         let trailing = trailing_edge_of(
-            files,
-            pin,
-            close,
+            TrailerRun {
+                speaker,
+                files,
+                pin,
+                close,
+            },
             // Nothing in the rail takes the pin out of the flow: rows are
             // `flex: none` at a fixed 30px and the list scrolls instead of
             // compressing, so there are no width tiers here to hide it.
@@ -4211,12 +4375,14 @@ pub fn rail_geometry(
             close,
             pin,
             files,
+            speaker,
             title: [title_left, title_right],
             trailer: TabTrailer {
                 pinned: trailer.pinned,
                 reveal: trailer.reveal.clamp(0.0, 1.0),
                 files: trailer.files,
                 files_lit: trailer.files_lit.clamp(0.0, 1.0),
+                audible: trailer.audible,
             },
         });
         row_top += row_height + gap;
@@ -4378,6 +4544,12 @@ pub fn hit_rail_chrome(
         // The folder joins the run at its head, and is asked first for the same
         // reason the pin is: smallest target first, the surface they stand on
         // last.
+        // The speaker joins the run ahead of the folder, and is asked first for
+        // the reason the folder is asked before the pin: smallest target first,
+        // the surface they stand on last (user ruling 2026-08-27; §7.23 ⑩).
+        if tab.speaker.is_some_and(|speaker| contains(speaker, x, y)) {
+            return Some(ChromeTarget::TabSpeaker(index));
+        }
         if tab.files.is_some_and(|files| contains(files, x, y)) {
             return Some(ChromeTarget::TabFiles(index));
         }
@@ -5160,6 +5332,12 @@ pub fn hit_tab_chrome(
         // The folder joins the run at its head, and is asked first for the same
         // reason the pin is: smallest target first, the surface they stand on
         // last.
+        // The speaker joins the run ahead of the folder, and is asked first for
+        // the reason the folder is asked before the pin: smallest target first,
+        // the surface they stand on last (user ruling 2026-08-27; §7.23 ⑩).
+        if tab.speaker.is_some_and(|speaker| contains(speaker, x, y)) {
+            return Some(ChromeTarget::TabSpeaker(index));
+        }
         if tab.files.is_some_and(|files| contains(files, x, y)) {
             return Some(ChromeTarget::TabFiles(index));
         }
@@ -10025,6 +10203,24 @@ fn window_tab_strip(
                     sprites.push(mark);
                 }
             }
+            // ── the speaker, at the head of the run ──
+            if let Some(speaker) = tab.speaker
+                && within_strip(viewport, speaker)
+            {
+                push_tab_speaker(
+                    pixel_snapped(speaker),
+                    hover == Some(ChromeTarget::TabSpeaker(index)),
+                    scale,
+                    wearing(
+                        palette.tab_close_glyph_on_active_tab,
+                        palette.tab_close_glyph_on_hovered_tab,
+                        palette.title_text_muted,
+                    ),
+                    palette.accent,
+                    1.0,
+                    sprites,
+                );
+            }
             // ── the pin, in the `×`'s own slot ──
             if let Some(pin) = tab.pin {
                 let pinned = tab.trailer.pinned;
@@ -11021,6 +11217,27 @@ fn rail_chrome(
                         (row.trailer.reveal * row.trailer.files_lit * text).clamp(0.0, 1.0);
                     sprites.push(mark);
                 }
+            }
+            if let Some(speaker) = row.speaker
+                && in_list(speaker)
+            {
+                push_tab_speaker(
+                    pixel_snapped(clip_to_list(speaker)),
+                    hover == Some(ChromeTarget::TabSpeaker(index)),
+                    scale,
+                    if active {
+                        palette.rail_glyph_on_active_tab
+                    } else if hovered {
+                        palette.tab_close_glyph_on_hovered_tab
+                    } else {
+                        palette.title_text_muted
+                    },
+                    palette.accent,
+                    // The rail's own word-fade, for the folder trigger's reason:
+                    // half a cluster fading is worse than all of it.
+                    text,
+                    sprites,
+                );
             }
             for (slot, is_pin) in [(row.pin, true), (row.close, false)] {
                 let Some(slot) = slot else {
@@ -13110,6 +13327,16 @@ pub struct PreviewHeadTools {
     /// draw — because a verb with no row to stand in would otherwise vanish with
     /// the row.
     pub flip: bool,
+    /// **This pane is playing a video** (user ruling 2026-08-27; `docs/DESIGN.md`
+    /// §7.23 ⑩), so the head carries the one verb that pane has: stop, and
+    /// go back to the frame.
+    ///
+    /// **It stands in [`Self::flip`]'s own slot and the two can never both be
+    /// true**, which is why it is not a second box on the run: a video has no
+    /// second face to flip to (the shell in the engine is this window's page,
+    /// not the reader's document), and nothing that has a second face can be
+    /// played. One per-type slot, and the content says which verb is in it.
+    pub stop: bool,
     /// **A page is on this seat** (§7.7 ②, W2 slice ④), so the head carries the
     /// developer-tools verb.
     ///
@@ -13164,6 +13391,10 @@ pub struct PreviewHeadGeometry {
     pub dirty: [f32; 4],
     pub save: Option<[f32; 4]>,
     pub flip: Option<[f32; 4]>,
+    /// `.pv-tool.pv-stop` — the player's own verb, in the flip's box (user
+    /// ruling 2026-08-27; §7.23 ⑩). Never `Some` at the same time as
+    /// [`Self::flip`]; see [`PreviewHeadTools::stop`].
+    pub stop: Option<[f32; 4]>,
     /// `.pv-tool.pv-devtools` — a hover tool, because a verb pressed twice a
     /// week does not get permanent pixels beside three pressed every minute.
     ///
@@ -13244,9 +13475,13 @@ pub fn preview_head_geometry(
     // survives them.
     let devtools = take_wide(tools.web, box_, box_);
     let flip = take_wide(tools.flip, box_, box_);
+    // The per-type slot's other occupant, taken next so that a playing pane's
+    // stop lands exactly where a document's flip would — one box, one place,
+    // whichever verb this content has.
+    let stop = take_wide(tools.stop, box_, box_);
     let save = take_wide(tools.save, box_, box_);
 
-    let run_left = [save, flip, devtools, popout, lock]
+    let run_left = [save, flip, stop, devtools, popout, lock]
         .into_iter()
         .flatten()
         .map(|box_| box_[0])
@@ -13325,6 +13560,7 @@ pub fn preview_head_geometry(
         ],
         save,
         flip,
+        stop,
         devtools,
         popout,
         lock,
@@ -15196,6 +15432,9 @@ pub fn hit_preview_head(
         if showing && hit(geometry.flip) {
             return Some(ChromeTarget::PreviewFlip(placement.id));
         }
+        if showing && hit(geometry.stop) {
+            return Some(ChromeTarget::PreviewStop(placement.id));
+        }
         // The hand-off arrow and a page's three navigation buttons used to be
         // asked here, between the flip and the developer tools. They are on the
         // rail since 2026-08-24 and [`hit_preview_rail`] answers for them — the
@@ -15884,6 +16123,21 @@ fn push_preview_head(
         } else {
             crate::icons::ActionIcon::ViewRendered.mark()
         },
+        false,
+    );
+    // The player's own verb, in the same box the flip would have had. The
+    // registry already draws this sign for `Stop navigating`, and it is the
+    // same sign for the same reason: a solid square is what ends a thing that
+    // is running.
+    tool(
+        sprites,
+        pointer,
+        ink,
+        scale,
+        palette,
+        geometry.stop,
+        ChromeTarget::PreviewStop(seat),
+        crate::icons::ActionIcon::StopNavigating.mark(),
         false,
     );
     // **A page's four have left this head** (user ruling 2026-08-24, second
@@ -17376,6 +17630,189 @@ pub fn preview_card_geometry(
 /// them to be off by the hairline.
 pub fn preview_body_rect(seats: &Seats, layout: &SeatLayout, scale: f32) -> Option<[f32; 4]> {
     preview_seat_body_rect(seats, layout, seats.preview()?, scale)
+}
+
+/// The play button's own pill, across (user ruling 2026-08-27; `docs/DESIGN.md`
+/// §7.23 ⑩).
+///
+/// Fifty-six, which is three and a bit times a menu row's mark and a little over
+/// three times the tab's `×`. It is the largest control this window draws and
+/// that is the ruling: it stands alone in the middle of a picture with nothing
+/// beside it to be measured against, so a control cut to a *row's* size would
+/// read as a speck on a screenshot of a four-thousand-pixel capture. Every other
+/// number in this file is a control's size **in a run**; this one is a control's
+/// size **on a field**, and the two scales are not the same scale.
+pub const PREVIEW_PLAY_BOX_LOGICAL_PX: f32 = 56.0;
+/// The triangle inside it — `#i-play` at three sevenths of its pill.
+///
+/// Written as a fraction of the box rather than as a second number, for the
+/// reason the pin's glyph is written as its own number and the `×`'s is not: a
+/// pill and the sign inside it are one drawing, and a button re-sized without
+/// its sign re-sized with it is a sign that drifts off its own centre.
+pub const PREVIEW_PLAY_GLYPH_RATIO: f32 = 3.0 / 7.0;
+/// The air a body must have around the pill before it is offered one.
+///
+/// Below this the button would be the body: a pane squeezed to sixty pixels
+/// would show a play control and no frame at all, which is a control with
+/// nothing behind it to be about. The frame is still there and the row menu's
+/// `Open in default app` is still the door — a control that vanishes when there
+/// is no room for it is this window's ordinary answer to a squeeze (see
+/// [`TabWidthTier`]) and not a capability that came and went.
+const PREVIEW_PLAY_MARGIN_LOGICAL_PX: f32 = 12.0;
+
+/// **Where a preview pane's play button stands**, given the body it stands in.
+///
+/// The centre of the body, and `None` when the body has no room for one. A pure
+/// function of a rectangle so that the painter and the hit test cannot disagree
+/// about a circle by a pixel — the same arrangement the graph's toolbar has, and
+/// for the reason written there.
+#[must_use]
+pub fn preview_play_button_box(body: [f32; 4], scale: f32) -> Option<[f32; 4]> {
+    let box_px = (PREVIEW_PLAY_BOX_LOGICAL_PX * scale).round().max(1.0);
+    let margin = PREVIEW_PLAY_MARGIN_LOGICAL_PX * scale;
+    let (width, height) = (body[2] - body[0], body[3] - body[1]);
+    if width < box_px + 2.0 * margin || height < box_px + 2.0 * margin {
+        return None;
+    }
+    let left = (body[0] + (width - box_px) / 2.0).round();
+    let top = (body[1] + (height - box_px) / 2.0).round();
+    Some([left, top, left + box_px, top + box_px])
+}
+
+/// The pill and the triangle, as two sprites for a pane's body.
+///
+/// **Two sprites and one opacity**, which is how this window has drawn a control
+/// that is present but quiet since `.pv-tool`: the button is always on the glass
+/// — §7.1.5 ⑤ forbids a way in that only a pointer can find — and the pointer
+/// only brings it up to full. Nothing moves, nothing grows, and nothing appears.
+///
+/// **They are handed back rather than pushed into the seats' own list**, and
+/// that is where this control differs from every other one in this module. The
+/// seat pass is drawn *under* the preview picture — measured on the machine,
+/// 2026-08-27: the button was built, resolved and drawn, and the decoded frame
+/// was painted straight over it, so a pane showing a 160×120 recording showed a
+/// bare rectangle. What draws after the picture is the document's own raster
+/// lane ([`bt_render::PreviewBody::rasters`]), whose whole definition is "a
+/// textured quad in whole-surface pixels, cropped to a box" — which is exactly
+/// what these two are. So the window resolves them and hangs them there; see
+/// [`crate::Runtime::play_button_rasters`].
+#[must_use]
+pub fn preview_play_button_sprites(
+    body: [f32; 4],
+    hovered: bool,
+    scale: f32,
+    palette: &ChromePalette,
+) -> Vec<crate::marks::ChromeSprite> {
+    let mut sprites = Vec::new();
+    let Some(pill) = preview_play_button_box(body, scale) else {
+        return sprites;
+    };
+    let opacity = if hovered { 1.0 } else { 0.82 };
+    let radius = ((pill[2] - pill[0]) / 2.0).round().max(1.0) as u32;
+    let mut ground = crate::marks::ChromeSprite::new(
+        ChromeMark::ControlPill { radius_px: radius },
+        pill,
+        palette.menu_surface,
+    );
+    ground.opacity = opacity;
+    sprites.push(ground);
+    let glyph_px = ((pill[2] - pill[0]) * PREVIEW_PLAY_GLYPH_RATIO)
+        .round()
+        .max(1.0);
+    let inset = ((pill[2] - pill[0]) - glyph_px) / 2.0;
+    let glyph = [
+        (pill[0] + inset).round(),
+        (pill[1] + inset).round(),
+        (pill[0] + inset).round() + glyph_px,
+        (pill[1] + inset).round() + glyph_px,
+    ];
+    let mut triangle = crate::marks::ChromeSprite::new(
+        crate::icons::ActionIcon::PlayVideo.mark(),
+        glyph,
+        palette.menu_item_text,
+    );
+    triangle.opacity = opacity;
+    sprites.push(triangle);
+    sprites
+}
+
+/// The speaker's glyph inside its box — twelve, between the `×`'s eight and the
+/// pin's thirteen.
+///
+/// A speaker is a silhouette rather than a rule: outlined at the `×`'s eight it
+/// is a cone two pens wide with an arc beside it, which resolves into a blot.
+/// It stops short of the pin's thirteen because the pin has to survive a
+/// forty-five degree turn and this never turns.
+const WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX: f32 = 12.0;
+
+/// **The speaker in one tab's row**, in either strip (user ruling 2026-08-27;
+/// `docs/DESIGN.md` §7.23 ⑩).
+///
+/// One function for both axes, exactly as the folder trigger is one: the two
+/// strips are two drawings of one row, and a mark drawn twice is a mark that
+/// gets re-cut once.
+///
+/// **No pill.** The `×`, the pin and the folder each wear one under the pointer
+/// because each of them is a *destructive or stateful* press standing in a run
+/// of them, and the pill is what says "the press lands here and not on the tab".
+/// This press is neither: it goes to the tab, which is where a press on the row
+/// goes anyway. What the pointer changes is the ink, and that is the whole of
+/// what it has to say.
+fn push_tab_speaker(
+    box_rect: [f32; 4],
+    hovered: bool,
+    scale: f32,
+    ink: [u8; 3],
+    accent: [u8; 3],
+    opacity: f32,
+    sprites: &mut Vec<ChromeSprite>,
+) {
+    let glyph = (WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    if box_rect[2] - box_rect[0] < glyph {
+        return;
+    }
+    let left = ((box_rect[0] + box_rect[2] - glyph) / 2.0).round();
+    let top = ((box_rect[1] + box_rect[3] - glyph) / 2.0).round();
+    let mut mark = ChromeSprite::new(
+        crate::icons::ActionIcon::GoToPlayingTab.mark(),
+        [left, top, left + glyph, top + glyph],
+        if hovered { accent } else { ink },
+    );
+    mark.opacity = opacity.clamp(0.0, 1.0);
+    sprites.push(mark);
+}
+
+/// **Is the pointer on a preview seat's play button** (user ruling 2026-08-27;
+/// §7.23 ⑩).
+///
+/// `video_faces` is the same set the painter draws from
+/// ([`crate::Runtime::play_button_rasters`]), so a press can only land
+/// on a button that was drawn — the arrangement `hit_git_graph` has, and the
+/// reason it has it: a hit test that re-derived "does this pane deserve a
+/// button" would be a second copy of a policy, and the frame in which the two
+/// copies disagreed is a frame in which a reader presses a picture and something
+/// happens.
+#[must_use]
+pub fn hit_preview_play(
+    seats: &Seats,
+    layout: &SeatLayout,
+    video_faces: &BTreeSet<SeatId>,
+    scale: f32,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    for seat in video_faces {
+        let Some(body) = preview_seat_body_rect(seats, layout, *seat, scale) else {
+            continue;
+        };
+        if preview_play_button_box(body, scale).is_some_and(|pill| contains(pill, x, y)) {
+            return Some(ChromeTarget::PreviewPlay(*seat));
+        }
+    }
+    None
 }
 
 /// The same, for a **named** preview seat.
@@ -19785,6 +20222,7 @@ mod tests {
                 tools: PreviewHeadTools {
                     save: true,
                     flip: true,
+                    stop: false,
                     ..plain.tools
                 },
                 ..plain
@@ -20526,6 +20964,7 @@ mod tests {
         let tools = PreviewHeadTools {
             save: true,
             flip: true,
+            stop: false,
             web: false,
             switcher: true,
             locked: false,
@@ -20623,6 +21062,7 @@ mod tests {
         let tools = PreviewHeadTools {
             save: true,
             flip: true,
+            stop: false,
             web: true,
             switcher: true,
             locked: false,
@@ -20763,6 +21203,7 @@ mod tests {
             PreviewHeadTools {
                 save: true,
                 flip: true,
+                stop: false,
                 ..page
             },
         );
@@ -21485,6 +21926,7 @@ mod tests {",
                     tools: PreviewHeadTools {
                         save: true,
                         flip: true,
+                        stop: false,
                         web: false,
                         switcher: true,
                         locked: false,
@@ -26412,6 +26854,120 @@ mod tests {",
     ///
     /// Red gate: drawing the pin *beside* a kept `×` — the obvious layout, and
     /// the one that hands a pinned tab a one-click close.
+    /// RED — **the play button is one circle the painter and the press agree
+    /// on** (user ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// One pure function of one rectangle, which is the whole arrangement: the
+    /// paint pass and [`hit_preview_play`] both call it, so a press cannot land a
+    /// pixel outside the circle a reader is looking at. The graph's toolbar is
+    /// laid out the same way and for the same stated reason.
+    ///
+    /// **And it declines a body it would swallow.** Below the pill plus its air
+    /// the control *is* the pane, which is a button with nothing behind it to be
+    /// about — so the frame keeps the whole body and the row menu's
+    /// `Open in default app` is still the door. A control that vanishes under a
+    /// squeeze is this window's ordinary answer to one.
+    ///
+    /// RED GATE ①: centre it by its left edge instead of its box and the first
+    /// block fails on both axes. RED GATE ②: drop the margin test and a
+    /// sixty-pixel pane draws a button larger than the picture it is on.
+    #[test]
+    fn the_play_button_is_one_circle_the_painter_and_the_press_agree_on() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let body = [100.0, 200.0, 900.0, 800.0];
+            let pill = preview_play_button_box(body, scale).expect("a body with room");
+            let box_px = (PREVIEW_PLAY_BOX_LOGICAL_PX * scale).round();
+            assert!(
+                (pill[2] - pill[0] - box_px).abs() <= 1.0
+                    && (pill[3] - pill[1] - box_px).abs() <= 1.0,
+                "scale {scale}: the pill is square at its own size, saw {pill:?}"
+            );
+            let centre = |rect: [f32; 4]| [(rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0];
+            let (want, got) = (centre(body), centre(pill));
+            assert!(
+                (want[0] - got[0]).abs() <= 1.0 && (want[1] - got[1]).abs() <= 1.0,
+                "scale {scale}: the pill stands in the body's centre, {want:?} against {got:?}"
+            );
+            // A body that cannot hold it plus its air is offered nothing.
+            let narrow = [0.0, 0.0, box_px + 4.0 * scale, 600.0];
+            assert_eq!(
+                preview_play_button_box(narrow, scale),
+                None,
+                "scale {scale}"
+            );
+            let short = [0.0, 0.0, 600.0, box_px + 4.0 * scale];
+            assert_eq!(preview_play_button_box(short, scale), None, "scale {scale}");
+        }
+    }
+
+    /// RED — **a tab making a sound wears a speaker, and it takes a slot of its
+    /// own** (user ruling 2026-08-27; §7.23 ⑩).
+    ///
+    /// The pin and the `×` are alternatives — a pinned tab has no `×` at all —
+    /// and this is an alternative to neither: a pinned tab playing a video wears
+    /// both, side by side and not on top of one another. That is the whole of
+    /// what "beside the pin" has to mean, and it is asserted as two rectangles
+    /// that do not overlap rather than as a number.
+    ///
+    /// **It is not multiplied by `reveal`.** The folder and the pin open under
+    /// the pointer because they are offers; a sound the reader cannot see the
+    /// source of is the problem this mark exists to solve, so it stands at full
+    /// width on a tab nobody is pointing at.
+    ///
+    /// RED GATE ①: give the speaker the pin's own slot and the overlap assertion
+    /// fails — one mark drawn on top of another, with one hit box swallowing the
+    /// other's press. RED GATE ②: multiply its width by `reveal` and the resting
+    /// assertion fails, which is a speaker only the reader who already knew where
+    /// to point can find.
+    #[test]
+    fn a_tab_making_a_sound_wears_a_speaker_beside_its_pin() {
+        let scale = 1.0_f32;
+        let trailers = [TabTrailer {
+            pinned: true,
+            reveal: 0.0,
+            files: false,
+            files_lit: 0.0,
+            audible: true,
+        }];
+        let geometry = tab_strip_geometry(1200.0, scale, &trailers, 0, 0.0);
+        let tab = geometry.tabs[0];
+        let pin = tab.pin.expect("a pinned tab wears its pin");
+        let speaker = tab
+            .speaker
+            .expect("an audible tab wears its speaker at rest");
+        assert!(
+            speaker[2] <= pin[0],
+            "the speaker stands to the left of the pin and not over it: {speaker:?} / {pin:?}"
+        );
+        assert!(
+            (speaker[2] - speaker[0]) >= (WINDOW_TAB_SPEAKER_BOX_LOGICAL_PX * scale) - 1.0,
+            "at full width with no pointer anywhere near it: {speaker:?}"
+        );
+        assert_eq!(
+            hit_tab_chrome(
+                1200.0,
+                scale,
+                &trailers,
+                0,
+                0.0,
+                f64::from((speaker[0] + speaker[2]) / 2.0),
+                f64::from((speaker[1] + speaker[3]) / 2.0),
+            ),
+            Some(ChromeTarget::TabSpeaker(0)),
+            "and a press in the middle of it is the speaker's"
+        );
+        // A silent tab has none, which is the other half of "the mark is the
+        // sound": there is no off face to be drawn.
+        let silent = [TabTrailer {
+            audible: false,
+            ..trailers[0]
+        }];
+        assert_eq!(
+            tab_strip_geometry(1200.0, scale, &silent, 0, 0.0).tabs[0].speaker,
+            None
+        );
+    }
+
     #[test]
     fn a_pinned_tab_wears_its_pin_in_the_slot_the_close_gave_up() {
         // The alias, not a second 17: "same box as `.close` because it stands in
@@ -38503,6 +39059,7 @@ mod tests {",
         let tools = PreviewHeadTools {
             save: true,
             flip: true,
+            stop: false,
             ..page_tools()
         };
         let mut offsets: Option<Vec<f32>> = None;

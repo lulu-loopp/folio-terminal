@@ -1275,6 +1275,16 @@ pub(crate) enum WebOutcome {
     HandOff(String),
     /// The find session's tally, on its way to the search capsule.
     FindMatches { count: i32, active: i32 },
+    /// **This seat's document started or stopped being audible** (user ruling
+    /// 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// **It carries nothing**, for [`Self::Committed`]'s reason exactly: the
+    /// level is already on the seat ([`WebSeat::playing_audio`]) and the tab
+    /// strip reads it from there, so an outcome carrying a copy would be a
+    /// second account of one bit travelling beside the first. What this is for
+    /// is the *repaint* — the strip is redrawn on change and not polled — and a
+    /// change is the only thing that has to travel.
+    PlayingAudioChanged,
     /// **A `CapturePreview` came back** (W2 slice ⑥) — the encoded PNG, or
     /// `None` if the engine refused, together with the viewport size it is a
     /// picture of.
@@ -1550,6 +1560,21 @@ pub(crate) struct WebSeat {
     /// icon, so any number of changes during one flight collapse into one more
     /// ask when it lands.
     favicon_changed_again: bool,
+    /// **Whether the document on this seat is making a sound** — the engine's
+    /// own `IsDocumentPlayingAudio`, as of the last time it said so (user ruling
+    /// 2026-08-27; §7.23 ⑩).
+    ///
+    /// Kept here rather than asked of the engine when the tab strip is drawn,
+    /// for the reason every other field beside it is kept here: the strip is
+    /// drawn on the frame's clock and a COM call per tab per frame would be a
+    /// question asked sixty times a second whose answer changes twice a minute.
+    /// The engine tells this window when it changes, which is exactly what
+    /// `DocumentPlayingAudioChanged` is for.
+    ///
+    /// **False on a rebuilt browser, and that is right**: a controller that has
+    /// just been born has said nothing, and a mark left standing from the
+    /// previous one would be a speaker on a tab that is silent.
+    playing_audio: bool,
     /// The magnification this seat last **moved** to, and when.
     ///
     /// A page's foot flashes it and then goes back to being the hover line
@@ -1649,6 +1674,7 @@ impl WebSeat {
             capturing: false,
             fetching_favicon: None,
             favicon_changed_again: false,
+            playing_audio: false,
             zoom_said: None,
         };
         let effect = web.machine.request(url);
@@ -1724,6 +1750,56 @@ impl WebSeat {
     /// [`WebOutcome::Committed`] for why there is no second account of it.
     pub(crate) fn identity(&self) -> Option<&str> {
         self.machine.recoverable_url()
+    }
+
+    /// **The recording this seat is playing**, and `None` for a seat that is on
+    /// a page (user ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// Read off [`Self::minted`] and not off the URL, because that is where the
+    /// answer is: the shell's URL names a page in a cache folder that no reader
+    /// asked for, and the note the host wrote when it asked for the navigation
+    /// is the only thing in this process that knows which recording it was
+    /// asked for. It survives a browser crash and a rebuild for the same reason
+    /// the mint does — the second navigation is as much the host's own as the
+    /// first was.
+    ///
+    /// **This one predicate is what every surface asks.** A playing video's pane
+    /// is not a page's pane: its rail is the file's breadcrumb and not an
+    /// address, `↗` hands over the recording, `</>` is not offered because the
+    /// shell is not the reader's document, and the frame this window decoded
+    /// stops being drawn because the engine is behind it. Seven readings of one
+    /// fact, and the day one of them re-derives it from a URL is the day a
+    /// reader is shown a cache path where their file's name should be.
+    ///
+    /// **A seat that has been told to close is not playing**, and that clause is
+    /// [`Self::is_closing`]'s own defect said again one lane over. The teardown
+    /// runs for as long as ten seconds while the browser process ends, and every
+    /// one of the readers above would spend those seconds believing a player is
+    /// on this pane: the frame would stay off the glass, the head would go on
+    /// offering to stop something that has already stopped, and the play button
+    /// would not come back. The engine is gone from the glass the moment
+    /// `close` is called; the map entry is bookkeeping about a process.
+    pub(crate) fn playing_video(&self) -> Option<&Path> {
+        if self.is_closing() {
+            return None;
+        }
+        self.minted.video_behind_the_shell()
+    }
+
+    /// **Whether this seat's document is making a sound right now**
+    /// (`ICoreWebView2_8::IsDocumentPlayingAudio`; user ruling 2026-08-27).
+    ///
+    /// The engine's own answer, kept as the engine last said it. It is not
+    /// derived from "is a video playing": a paused video is silent, a muted one
+    /// is silent, and a page that is not a video at all can be making a noise —
+    /// so the window asks the thing that knows rather than inferring from the
+    /// thing it happens to have opened.
+    pub(crate) fn playing_audio(&self) -> bool {
+        // And a closing seat is silent, for [`Self::playing_video`]'s reason:
+        // `close` takes the controller away and the engine has no way left to
+        // report the silence that follows. A speaker left burning through a
+        // ten-second teardown is a mark pointing at nothing.
+        !self.is_closing() && self.playing_audio
     }
 
     /// The chords the window takes back from a focused page.
@@ -1952,6 +2028,19 @@ impl WebSeat {
             }
             WebEvent::StatusBarTextChanged { text } => {
                 self.page.hover.clone_from(text);
+                WebEffect::Ignore
+            }
+            // **The engine's own reading, filed and announced once** (user
+            // ruling 2026-08-27; §7.23 ⑩). The guard is not an optimisation:
+            // a video fires this on every play and pause, the tab strip is
+            // rebuilt on the outcome, and a level that announced itself
+            // unchanged would rebuild the strip for a page saying the same
+            // thing twice.
+            WebEvent::PlayingAudioChanged { playing } => {
+                if self.playing_audio != *playing {
+                    self.playing_audio = *playing;
+                    outcomes.push(WebOutcome::PlayingAudioChanged);
+                }
                 WebEffect::Ignore
             }
             // **The download is already cancelled** — the engine could not be
@@ -2624,6 +2713,13 @@ impl WebSeat {
         self.presence = None;
         self.bounded = None;
         self.rastered = None;
+        // **And this window has been told nothing either** (user ruling
+        // 2026-08-27; §7.23 ⑩). The three fields above record what a controller
+        // was told; this one records what a controller *said*, and a controller
+        // that no longer exists has said nothing. A speaker left burning on a
+        // tab whose browser has just been rebuilt would be a mark pointing at a
+        // silence — and the only door out of it would be a second crash.
+        self.playing_audio = false;
     }
 
     /// Give the window being left a page that believes nothing is pressed and
@@ -3817,10 +3913,55 @@ mod rehost_address_tests {
             fault: None,
             refusal: Rc::new(RefCell::new(None)),
             capturing: false,
+            playing_audio: false,
             fetching_favicon: None,
             favicon_changed_again: false,
             zoom_said: None,
         }
+    }
+
+    /// RED — **a seat that has been told to close is neither playing nor
+    /// audible** (user ruling 2026-08-27, route A; `docs/DESIGN.md` §7.23 ⑩,
+    /// (i′)).
+    ///
+    /// `close` takes the controller away in the same frame; the entry in the
+    /// window's map survives until the browser *process* ends, which was
+    /// measured at up to ten seconds. Every reader of these two answers is a
+    /// surface — the frame that comes back on the glass, the head's stop tool,
+    /// the play button, the speaker in the tab's row — and a build that read the
+    /// map entry alone would leave all four in the state the page put them in,
+    /// pointing at an engine that is not there. This is the same defect
+    /// [`WebSeat::is_closing`] itself was added for, one lane over.
+    ///
+    /// RED GATE: drop the `is_closing` guard from either accessor and its half
+    /// of this test fails — which on the machine is "I pressed stop and the pane
+    /// went blank", and "the speaker stayed lit over a silence".
+    #[test]
+    fn a_closing_seat_is_neither_playing_nor_audible() {
+        let mut seat = detached(SeatAddress {
+            page: page(1, 1),
+            hwnd: hwnd(1),
+        });
+        seat.minted = Mint::VideoShell {
+            url: "file:///C:/cache/play-1.html".to_owned(),
+            video: PathBuf::from(r"D:\shots\clip.mp4"),
+        };
+        seat.playing_audio = true;
+        assert_eq!(
+            seat.playing_video(),
+            Some(Path::new(r"D:\shots\clip.mp4")),
+            "a live seat says which recording it is standing in for"
+        );
+        assert!(seat.playing_audio(), "and whether it is making a sound");
+        // The one line of the teardown this is about: the machine is told to go.
+        let _ = seat.machine.close();
+        assert!(seat.is_closing());
+        assert_eq!(
+            seat.playing_video(),
+            None,
+            "a closing seat is not playing, however long its process takes to end"
+        );
+        assert!(!seat.playing_audio(), "and it is silent");
     }
 
     /// PIN (F1b′) — **two panes of one window that both call themselves seat 1
