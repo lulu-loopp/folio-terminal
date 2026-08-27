@@ -6700,6 +6700,7 @@ pub fn build_chrome_with_preview(
             // The settled column: every geometry in this module is measured at
             // the end of the entrance, which is where it spends its whole life.
             focus_reveal: 1.0,
+            focus_card_nudge_rows: 0.0,
             focus_thumbnails: &[],
             preview_titles: &preview_titles,
             terminal_names: &NO_TERMINAL_NAMES,
@@ -6999,6 +7000,26 @@ pub struct ChromeContent<'a> {
     /// rather than a convenience: an animation that could reach a solver would
     /// be a third posture, and this mode is one bit.
     pub focus_reveal: f32,
+    /// **How far the staged card's terminal rows stand off their home**, in mini
+    /// rows, while the first-arrival bubble is up (§7.21).
+    ///
+    /// Beside [`Self::focus_reveal`] and under exactly its rule: **nothing else
+    /// in this module reads it**, it is applied to rows that have already been
+    /// solved, and no geometry, hit test or posture can be asked about it. A
+    /// nudge that could reach a solver would be a card whose *height* depended
+    /// on an animation, and a mini seat that is not a hit target on the frame it
+    /// is still would not be one on the frame it moves either.
+    ///
+    /// **Only the staged card, and only its transcript seats.** Those are the
+    /// two facts the gesture itself is true of — `Alt`+wheel answers a terminal
+    /// seat and nothing else ([`crate::main`]'s `aim_focus_card_window`), and
+    /// the bubble is bitten onto the staged card — so a demonstration wider than
+    /// that would be showing a reader something the gesture will not do.
+    ///
+    /// Zero at rest, and zero for the whole of a reduced-motion window's life:
+    /// see [`crate::cardhint::CardHintHost::nudge_rows`], which is the only
+    /// thing that ever writes it.
+    pub focus_card_nudge_rows: f32,
     /// **What each card's body has to show, this frame** (§7.1.6b′ F2) — one
     /// entry per tab, in [`Self::tabs`]'s order.
     ///
@@ -7486,6 +7507,7 @@ pub fn build_chrome_for_tabs(
         rail,
         rail_scroll,
         focus_reveal,
+        focus_card_nudge_rows,
         focus_thumbnails,
         preview_titles,
         float_shown,
@@ -8855,6 +8877,7 @@ pub fn build_chrome_for_tabs(
                 profile_menu_open,
                 chevron_turn,
                 reveal: focus_reveal,
+                nudge_rows: focus_card_nudge_rows,
             },
             palette,
             &mut rail_group,
@@ -11314,6 +11337,9 @@ struct FocusRail<'a> {
     /// How far into its entrance the column is, `0.0..=1.0` — see
     /// [`ChromeContent::focus_reveal`].
     reveal: f32,
+    /// How far the **staged** card's transcript rows stand off home, in mini
+    /// rows — see [`ChromeContent::focus_card_nudge_rows`].
+    nudge_rows: f32,
 }
 
 /// **The order the cards are laid down in: everyone else first, the card in hand
@@ -11370,6 +11396,7 @@ fn focus_rail_chrome(
         profile_menu_open,
         chevron_turn,
         reveal,
+        nudge_rows,
     } = rail;
     // §7.1.6e — the column keeps the panel's `+` and its `˅`, and it keeps the
     // rail's answer with them: this picker opens beside its button too.
@@ -11608,8 +11635,11 @@ fn focus_rail_chrome(
             scale,
             palette,
             [list_top, list_bottom],
-            (quads, labels, sprites),
-            images,
+            // **The staged card only**, which is the card the bubble's tail is
+            // biting. Every other card in the column is a picture of a tab
+            // nobody is being told anything about.
+            if staged { nudge_rows } else { 0.0 },
+            (quads, labels, sprites, images),
         );
 
         // ── the mark slot: the strip's machinery, unchanged ──
@@ -12004,14 +12034,19 @@ fn focus_card_mini_chrome(
     scale: f32,
     palette: ChromePalette,
     viewport: [f32; 2],
+    nudge_rows: f32,
+    // **One sink and not two**, which is what [`focus_mini_seat_content`] one
+    // screen down has always taken: a card's body writes into four channels of
+    // one group, and splitting the pictures off into a parameter of their own
+    // was a sink that had come apart for no reason a caller could name.
     output: (
         &mut Vec<ChromeQuad>,
         &mut Vec<ChromeLabel>,
         &mut Vec<ChromeSprite>,
+        &mut Vec<bt_render::ChromeIcon>,
     ),
-    images: &mut Vec<bt_render::ChromeIcon>,
 ) {
-    let (quads, labels, sprites) = output;
+    let (quads, labels, sprites, images) = output;
     let [list_top, list_bottom] = viewport;
     let in_list = |rect: [f32; 4]| rect[3] > list_top && rect[1] < list_bottom;
     let clip_to_list = |rect: [f32; 4]| {
@@ -12108,6 +12143,7 @@ fn focus_card_mini_chrome(
                 viewport,
                 scale,
                 palette,
+                nudge_rows,
                 (labels, sprites, images),
             );
         }
@@ -12168,6 +12204,7 @@ fn focus_mini_seat_content(
     viewport: [f32; 2],
     scale: f32,
     palette: ChromePalette,
+    nudge_rows: f32,
     output: (
         &mut Vec<ChromeLabel>,
         &mut Vec<ChromeSprite>,
@@ -12209,17 +12246,37 @@ fn focus_mini_seat_content(
             // moves to where the pane it is a picture of puts it.
             let metrics = MiniMetrics::TERM;
             let line = metrics.line_px(scale);
+            // **The nudge, in this seat's own line height** (§7.21) — the whole
+            // of the accompaniment, and it is one term added to a `top` that has
+            // already been solved. `nudge_rows` is a count of *rows*, so the
+            // conversion is the same multiplication the rows are laid out by;
+            // there is no second expression for how tall a row is.
+            //
+            // Downward, because the gesture's positive notch lifts the seat's
+            // window and the rows already drawn move away from the ones that
+            // would come in above them.
+            //
+            // Zero at rest and zero under reduced motion, so a window that is
+            // not being told anything lays this seat out to the pixel it always
+            // did — the term is `+ 0.0` and the rounding below is untouched.
+            let nudge = (nudge_rows * line).round();
             for (offset, text) in lines.iter().enumerate() {
-                let top = inner[1] + offset as f32 * line;
+                let top = inner[1] + offset as f32 * line + nudge;
                 let row = [inner[0], top, inner[2], top + line];
                 if row[1] >= inner[3] {
                     break;
+                }
+                // A row the nudge has pushed off the seat's ceiling is dropped
+                // rather than drawn against the hairline: the cell is a window
+                // onto a document, and a document does not print outside it.
+                if row[3] <= inner[1] {
+                    continue;
                 }
                 mini_row_label(
                     labels,
                     text.clone(),
                     row,
-                    clip_to_list([row[0], row[1], row[2], row[3].min(inner[3])]),
+                    clip_to_list([row[0], row[1].max(inner[1]), row[2], row[3].min(inner[3])]),
                     metrics.font_logical_px * scale,
                     palette.focus_mini_text,
                     metrics.mono,
@@ -19413,6 +19470,7 @@ mod tests {
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &titles,
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -19490,6 +19548,7 @@ mod tests {
                     // The settled column: every geometry in this module is measured at
                     // the end of the entrance, which is where it spends its whole life.
                     focus_reveal: 1.0,
+                    focus_card_nudge_rows: 0.0,
                     focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
@@ -22789,6 +22848,7 @@ mod tests {",
                     // The settled column: every geometry in this module is measured at
                     // the end of the entrance, which is where it spends its whole life.
                     focus_reveal: 1.0,
+                    focus_card_nudge_rows: 0.0,
                     focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
@@ -23014,6 +23074,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -23124,6 +23185,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -24846,6 +24908,7 @@ mod tests {",
                 rail,
                 rail_scroll: 0.0,
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -27177,6 +27240,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -27384,6 +27448,7 @@ mod tests {",
                     // The settled column: every geometry in this module is measured at
                     // the end of the entrance, which is where it spends its whole life.
                     focus_reveal: 1.0,
+                    focus_card_nudge_rows: 0.0,
                     focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
@@ -27499,6 +27564,7 @@ mod tests {",
                     // The settled column: every geometry in this module is measured at
                     // the end of the entrance, which is where it spends its whole life.
                     focus_reveal: 1.0,
+                    focus_card_nudge_rows: 0.0,
                     focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
@@ -27738,6 +27804,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -30787,6 +30854,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names,
@@ -30856,6 +30924,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -31660,6 +31729,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -31937,6 +32007,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -32198,6 +32269,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -32364,6 +32436,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -33657,7 +33730,10 @@ mod tests {",
             rail,
             hover,
             focus_thumbnails,
-            focus_reveal,
+            FocusFrame {
+                reveal: focus_reveal,
+                ..FocusFrame::SETTLED
+            },
         )
     }
 
@@ -33665,6 +33741,30 @@ mod tests {",
     /// there for its reason: the chrome the painter produces is clipped to the
     /// column's viewport, so a test about what a card *draws* needs a window that
     /// holds its cards.
+    /// **The two numbers the focus column is part-way through**, as one
+    /// argument.
+    ///
+    /// Both are [`ChromeContent`]'s paint-time animation values and neither
+    /// is geometry, so they arrive together and are read together — and the
+    /// fixture below stops growing a parameter every time the column learns
+    /// another tween.
+    #[derive(Clone, Copy, Debug)]
+    struct FocusFrame {
+        /// How far into its entrance the column is, `0.0..=1.0`.
+        reveal: f32,
+        /// How far the staged card's rows stand off home, in mini rows.
+        nudge_rows: f32,
+    }
+
+    impl FocusFrame {
+        /// The settled column with nothing moving in it — what every test
+        /// that is not about an animation wants.
+        const SETTLED: Self = Self {
+            reveal: 1.0,
+            nudge_rows: 0.0,
+        };
+    }
+
     fn window_chrome_with_thumbnails_in(
         height: f32,
         tabs: &[TabContent],
@@ -33672,8 +33772,12 @@ mod tests {",
         rail: RailState,
         hover: Option<ChromeTarget>,
         focus_thumbnails: &[Option<FocusThumbnail<'_>>],
-        focus_reveal: f32,
+        frame: FocusFrame,
     ) -> WindowChrome {
+        let FocusFrame {
+            reveal: focus_reveal,
+            nudge_rows: focus_card_nudge_rows,
+        } = frame;
         let metrics = seat_metrics(1_000);
         // **A split tree, so the stage has something in it.** A lone terminal
         // draws no chrome at all below the title bar, and a comparison of two
@@ -33713,6 +33817,7 @@ mod tests {",
                 rail,
                 rail_scroll: 0.0,
                 focus_reveal,
+                focus_card_nudge_rows,
                 focus_thumbnails,
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -35477,12 +35582,27 @@ mod tests {",
         (rows, cell)
     }
 
+    /// The same card with the first-arrival bubble's accompaniment running on
+    /// it — see [`ChromeContent::focus_card_nudge_rows`].
+    fn transcript_rows_nudged_by(lines: Vec<String>, nudge: f32) -> Vec<ChromeLabel> {
+        transcript_paint_with(lines, false, nudge).0
+    }
+
     /// The same card, with the seat's window said to be aimed above the tail or
     /// not, and the seam quads that land inside the body handed back beside the
     /// rows (user ruling 2026-08-21).
     fn transcript_paint_of(
         lines: Vec<String>,
         more_below: bool,
+    ) -> (Vec<ChromeLabel>, [f32; 4], Vec<ChromeQuad>) {
+        transcript_paint_with(lines, more_below, 0.0)
+    }
+
+    /// The same, with the accompaniment's offset said out loud.
+    fn transcript_paint_with(
+        lines: Vec<String>,
+        more_below: bool,
+        nudge: f32,
     ) -> (Vec<ChromeLabel>, [f32; 4], Vec<ChromeQuad>) {
         let tabs = vec![card_tab("shell", 1, TabMarkState::default(), false)];
         let tree = lone_seat_tree(SeatKind::Terminal);
@@ -35501,7 +35621,10 @@ mod tests {",
             state,
             None,
             &thumbnails,
-            1.0,
+            FocusFrame {
+                nudge_rows: nudge,
+                ..FocusFrame::SETTLED
+            },
         )
         .rail;
         let geometry = focus_of_in(TALL_FIXTURE_HEIGHT, state, tabs.len());
@@ -35602,6 +35725,65 @@ mod tests {",
     ///
     /// Red gate: draw the seam unconditionally and the second half goes red on
     /// a card that is looking at the tail.
+    /// RED (§7.21, user ruling 2026-08-27) — **the accompaniment moves a
+    /// terminal seat's rows by exactly the row height it lays them out at, and
+    /// nothing outside the cell is printed.**
+    ///
+    /// Three claims, and the third is the one that would rot silently. The rows
+    /// travel by `nudge × line`, the same expression they are stacked by, so
+    /// "one row" means one row and not "about a row at this scale factor"; a row
+    /// pushed off the cell's ceiling is dropped rather than drawn against the
+    /// hairline, because the cell is a window onto a document and a document
+    /// does not print outside it; and at rest the seat is laid out to the pixel
+    /// it always was, which is what makes this a term added to a solved layout
+    /// rather than a second layout.
+    ///
+    /// MUTATION: multiply the nudge by a constant instead of the seat's own
+    /// `line` and the demonstration stops being the gesture; drop the ceiling
+    /// guard and the row the nudge pushed out prints over the card's head.
+    #[test]
+    fn the_accompaniment_moves_a_seats_rows_by_its_own_line_and_prints_none_outside_the_cell() {
+        let lines: Vec<String> = (0..4).map(|row| format!("line {row}")).collect();
+        let line = crate::focus_thumb::MiniMetrics::TERM.line_px(1.0);
+        let home = transcript_rows_nudged_by(lines.clone(), 0.0);
+        let out = transcript_rows_nudged_by(lines.clone(), 1.0);
+        assert_eq!(home.len(), out.len(), "the same rows, one row lower");
+        for (resting, nudged) in home.iter().zip(&out) {
+            assert_eq!(nudged.text, resting.text);
+            assert_eq!(
+                nudged.rect[1] - resting.rect[1],
+                line.round(),
+                "one row is the seat's own line height",
+            );
+        }
+
+        // The ceiling: a nudge the other way pushes the top row out, and it is
+        // dropped rather than printed over the head above it.
+        let card =
+            focus_of_in(TALL_FIXTURE_HEIGHT, focus_rail(TabLayoutMode::Vertical), 1).cards[0];
+        let lifted = transcript_rows_nudged_by(lines.clone(), -1.0);
+        assert_eq!(
+            lifted.len(),
+            home.len() - 1,
+            "the row the nudge lifted off the ceiling is not drawn",
+        );
+        for row in &lifted {
+            assert!(
+                row.rect[1] >= card.mini[1] && row.rect[3] <= card.mini[3],
+                "every row the accompaniment leaves is inside the card's body",
+            );
+        }
+
+        // And at rest nothing has moved at all: this is a term on a solved
+        // layout, so `+ 0.0` is the layout the card has always had.
+        let (untouched, _) = transcript_rows_of(lines);
+        assert_eq!(untouched.len(), home.len());
+        for (before, after) in untouched.iter().zip(&home) {
+            assert_eq!(before.rect, after.rect);
+            assert_eq!(before.clip, after.clip);
+        }
+    }
+
     #[test]
     fn a_seat_aimed_above_the_tail_wears_a_seam_and_one_on_the_tail_does_not() {
         let lines: Vec<String> = (0..4).map(|row| format!("line {row}")).collect();
@@ -35727,7 +35909,7 @@ mod tests {",
             state,
             None,
             &thumbnails,
-            1.0,
+            FocusFrame::SETTLED,
         )
         .rail;
         let geometry = focus_of_in(TALL_FIXTURE_HEIGHT, state, tabs.len());
@@ -35857,7 +36039,7 @@ mod tests {",
                 focused: SeatId(1),
                 seats: &page,
             })],
-            1.0,
+            FocusFrame::SETTLED,
         )
         .rail;
         let [picture] = with_picture.images.as_slice() else {
@@ -35911,7 +36093,7 @@ mod tests {",
                 focused: SeatId(1),
                 seats: &face,
             })],
-            1.0,
+            FocusFrame::SETTLED,
         )
         .rail;
         assert!(
@@ -35987,7 +36169,7 @@ mod tests {",
             state,
             None,
             &thumbnails,
-            1.0,
+            FocusFrame::SETTLED,
         )
         .rail;
         let geometry = focus_of_in(TALL_FIXTURE_HEIGHT, state, tabs.len());
@@ -36244,7 +36426,7 @@ mod tests {",
             state,
             None,
             &thumbnails,
-            1.0,
+            FocusFrame::SETTLED,
         )
         .rail;
         let geometry = focus_of_in(TALL_FIXTURE_HEIGHT, state, tabs.len());
@@ -36617,6 +36799,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &names,
@@ -38369,6 +38552,7 @@ mod tests {",
                     rail: RailState::default(),
                     rail_scroll: 0.0,
                     focus_reveal: 1.0,
+                    focus_card_nudge_rows: 0.0,
                     focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
@@ -38508,6 +38692,7 @@ mod tests {",
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,

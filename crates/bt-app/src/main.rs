@@ -43,6 +43,7 @@ mod attention_hooks;
 mod attention_map;
 mod attention_trace;
 mod attention_wire;
+mod cardhint;
 mod cli;
 mod cmdrail;
 mod context_menu;
@@ -7446,6 +7447,12 @@ struct WindowRuntime {
     /// under the hands and there is one keyboard. It is a window's and not a
     /// pane's, because every row it can list is a row of the window's own table.
     key_hint: keyhint::KeyHintHost,
+    /// **The one-time bubble the Cards column owes a first-time reader**
+    /// (§7.21). Beside [`Self::key_hint`] because the two are the same kind of
+    /// surface — a sentence about a gesture, dismissed by its own clock — and
+    /// pointedly not folded into it: that card answers a hand that has stopped,
+    /// this one answers a reader who has arrived somewhere.
+    card_hint: cardhint::CardHintHost,
     /// The opacity the card was last *painted* at, or `None` when none was —
     /// [`Self::tooltip_drawn_opacity`]'s own frame-debt question, asked about
     /// this fade.
@@ -19706,6 +19713,26 @@ struct OverlayStack {
     /// so every chord the card would list does nothing — and a list of verbs that
     /// would not fire is the one thing this surface must never be.
     key_hint: Vec<marks::OverlayLayer>,
+    /// **The Cards column's first-arrival bubble** (§7.21).
+    ///
+    /// *Above the key hint*, and the two can only meet in one way: a reader who
+    /// has just entered Cards with `Ctrl+Shift+Z` may still be holding
+    /// `Ctrl+Shift` when the 800ms is up. Of the two cards on the glass at that
+    /// instant, this one is answering the arrival that just happened and the
+    /// other is answering a hand that has not moved since; and this one is the
+    /// only one of the pair that will never be offered again.
+    ///
+    /// *Below the tip*, on the tip's own standing rule, and above the notices
+    /// for the key hint's: what the window volunteers does not cover what the
+    /// reader is being taught once.
+    ///
+    /// **It shares the notices' corner in its fallback seat, and that is a
+    /// known trade rather than an oversight**: a bubble whose card has scrolled
+    /// out of the column takes the window's bottom-right, which is where a
+    /// window-anchored toast stands. It wins, for four seconds, because a
+    /// receipt that is covered can be read again by doing the thing again and
+    /// this sentence cannot.
+    card_hint: Vec<marks::OverlayLayer>,
     /// `.tip { z-index: 60 }` — the one surface in this window that is never
     /// covered, because it is the only one whose whole job is to explain what is
     /// under it.
@@ -19783,6 +19810,7 @@ impl OverlayStack {
             term_menu,
             toast,
             key_hint,
+            card_hint,
             tooltip,
             file_peek,
             drag_ghost,
@@ -19807,6 +19835,7 @@ impl OverlayStack {
             term_menu,
             toast,
             key_hint,
+            card_hint,
             tooltip,
             file_peek,
             drag_ghost,
@@ -23749,6 +23778,13 @@ enum Layered {
     /// and it is the surface whose own source said *"It has no exit fade at
     /// all"*, which this slice is the answer to.
     KeyHint,
+    /// The bubble the Cards column raises on a reader's first entry (§7.21).
+    ///
+    /// **Both halves, unlike the two above it** — it has no entrance of its own
+    /// to protect, so it takes the register's: `POPUP_ENTER` with four pixels of
+    /// travel from the direction of the card it grew out of, exactly like a menu
+    /// dropping out of the head it belongs to.
+    CardHint,
 }
 
 impl Layered {
@@ -23759,7 +23795,7 @@ impl Layered {
     /// arrangement `GitFilterMenuLayout::rows` keeps, and for its reason: a list
     /// the product walked would be a second way of deciding what is on the glass.
     #[allow(dead_code)]
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 16] = [
         Self::Popup(Popup::Profile),
         Self::Popup(Popup::Root),
         Self::Popup(Popup::File),
@@ -23775,6 +23811,7 @@ impl Layered {
         Self::Notice,
         Self::Tip,
         Self::KeyHint,
+        Self::CardHint,
     ];
 
     /// **The bands that share the modal level**, where one `else if` chain draws
@@ -24012,8 +24049,9 @@ mod arrival_wiring_tests {
         }
         assert_eq!(
             Layered::ALL.len(),
-            15,
-            "eight menus, two submenus, a scrim, a dialog, a notice, a tip and a card"
+            16,
+            "eight menus, two submenus, a scrim, a dialog, a notice, a tip, the card a \
+             held modifier raises and the bubble Cards raises on a first visit"
         );
         for band in Layered::MODAL_BANDS {
             assert!(
@@ -27019,6 +27057,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         tooltip_drawn_opacity: None,
         key_hint: keyhint::KeyHintHost::default(),
         key_hint_drawn_opacity: None,
+        card_hint: cardhint::CardHintHost::default(),
         passages: arrival::Passages::default(),
         passages_drawn: Vec::new(),
         settling: settling::Settling::default(),
@@ -29920,6 +29959,11 @@ impl Runtime<'_> {
                 rail: self.sampled_rail(now),
                 rail_scroll: self.window.rail_scroll,
                 focus_reveal: self.window.focus_reveal.sample(now, self.app.motion).0,
+                // Sampled here, on the frame it is drawn, beside the reveal it
+                // sits next to — and answered as `0.0` by the host itself for
+                // every window that is not being shown the bubble and every
+                // window whose reader asked for less motion.
+                focus_card_nudge_rows: self.window.card_hint.nudge_rows(now, self.app.motion),
                 focus_thumbnails: &focus_thumbnails,
                 preview_titles: &preview_titles,
                 float_shown: &float_shown,
@@ -34051,6 +34095,12 @@ impl Runtime<'_> {
         // of their own — and gain only the way out, which neither had.
         let key_hint = self.key_hint_layer();
         stack.key_hint = self.stage_departure(Layered::KeyHint, key_hint, now);
+        // And the Cards bubble takes **both** halves from the register, because
+        // it was written without either: it grows out of the card its tail bites,
+        // travelling from that direction, and leaves as a picture over the fast
+        // span like every other layer this window puts down.
+        let (card_hint, card_hint_travel) = self.card_hint_layer(now);
+        stack.card_hint = self.stage(Layered::CardHint, card_hint, card_hint_travel, now);
         let tooltip = self.tooltip_layer();
         stack.tooltip = self.stage_departure(Layered::Tip, tooltip, now);
         stack.file_peek = self.file_peek_layer();
@@ -34985,6 +35035,131 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// **The staged card's head, if the column is drawing it whole** (§7.21) —
+    /// what the bubble's tail is allowed to bite.
+    ///
+    /// The head and not the body, because the head is the part of a card that is
+    /// a *card*: it carries the tab's name and its mark, and it is the same
+    /// twenty-eight pixels whatever `Card height` is set to. A tail aimed at the
+    /// middle of a 320px body would point at a row of somebody's build log.
+    ///
+    /// **Whole, and that is the clip test rather than a margin.** The column's
+    /// viewport is the one rectangle every other question about this list is
+    /// asked against (`focus_thumb`'s gate two, `focus_rail_chrome`'s own clip),
+    /// and a head half cut off by it is a head whose middle is not where the
+    /// arithmetic thinks it is. `None` here is what sends the bubble to the
+    /// floor seat, which is [`cardhint::place`]'s own second answer.
+    fn staged_card_head(&self, now: Instant) -> Option<[f32; 4]> {
+        let geometry = self.focus_rail_geometry_now(now)?;
+        let card = geometry.cards.get(self.window.active_tab)?;
+        let [list_top, list_bottom] = geometry.viewport;
+        (card.head[1] >= list_top && card.head[3] <= list_bottom).then_some(card.head)
+    }
+
+    /// Paint the Cards bubble, and say which way it grew.
+    ///
+    /// The travel rides back with the layers rather than being asked for
+    /// separately, because it is a fact about *this* placement: the bubble that
+    /// bit a card grew away from that card, and the one that fell back to the
+    /// corner grew off the floor. A caller that had to ask twice could pair one
+    /// frame's box with another frame's direction.
+    fn card_hint_layer(&mut self, now: Instant) -> (Vec<marks::OverlayLayer>, Option<Travel>) {
+        if !self.window.card_hint.showing() {
+            return (Vec::new(), None);
+        }
+        let head = self.staged_card_head(now);
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let layout = cardhint::place(
+            head,
+            (width as f32, height as f32),
+            scale,
+            &mut |run, size| renderer.measure_chrome_text(gpu, run, size),
+        );
+        let palette = bt_render::chrome_palette();
+        let travel = cardhint::travel(&layout);
+        (cardhint::build(&layout, &palette, scale), Some(travel))
+    }
+
+    /// **Note whether this window is in Cards, and raise the bubble on the frame
+    /// it first is** (§7.21).
+    ///
+    /// Asked once a turn against `rail_posture()` — the very posture the column
+    /// is solved and painted from — rather than hooked onto the doors that turn
+    /// the mode on. There are three of those (a chord, a settings row, and a
+    /// window that opens straight into Cards because the file said so), the
+    /// third does not go through `set_focus_mode` at all, and a hook on each
+    /// would be three chances for a fourth to be added without one.
+    ///
+    /// **The offer is spent on the frame the bubble is raised, and written
+    /// through at once.** Not when it comes down: a window that is closed, or
+    /// that crashes, four seconds into a reader's first visit has still shown
+    /// them the sentence, and a debt that is only discharged on a clean exit is
+    /// a debt that greets them again tomorrow. The write is `settings.json`'s
+    /// ordinary undebounced one, which is what every other row in that file
+    /// takes.
+    fn note_card_hint(&mut self, now: Instant) -> Result<()> {
+        let in_cards = self.rail_posture().draws_focus_rail();
+        let offered = self.app.settings_store.loaded().cards_gesture_hint_offer;
+        let moved = match self.window.card_hint.observe(in_cards, offered, now) {
+            cardhint::CardHint::Unchanged => false,
+            cardhint::CardHint::Raised => {
+                let mut settings = self.app.settings_store.loaded().clone();
+                settings.cards_gesture_hint_offer = false;
+                let _ = self.app.settings_store.store(settings);
+                true
+            }
+            cardhint::CardHint::Lowered => true,
+        };
+        if moved {
+            self.repaint_card_hint()?;
+        }
+        Ok(())
+    }
+
+    /// Take the bubble down when its four seconds are up, and pay the nudge's
+    /// frames until the card it points at is home.
+    ///
+    /// The two are one function because they are one surface's clock, and they
+    /// are asked in this order because a bubble whose dwell has just ended has
+    /// nothing left to nudge.
+    fn advance_card_hint(&mut self, now: Instant) -> Result<()> {
+        let ended = self.window.card_hint.expire(now) != cardhint::CardHint::Unchanged;
+        let nudging = self.window.card_hint.nudge_moving(now, self.app.motion);
+        if ended || nudging {
+            self.repaint_card_hint()?;
+        }
+        Ok(())
+    }
+
+    /// **Both surfaces, because this hint is two things on two levels**: the
+    /// bubble is an overlay layer and the nudge is a card in the chrome, and a
+    /// frame that rebuilt one of them would move the caption without the
+    /// picture or the picture without the caption.
+    ///
+    /// Written once rather than at each of the three call sites, so the pairing
+    /// cannot come apart. The two `refresh_` calls are both made before either
+    /// answer is read — `||` would skip the second whenever the first said yes,
+    /// and the one it skipped is the one that would then be a frame behind.
+    fn repaint_card_hint(&mut self) -> Result<()> {
+        let chrome = self.refresh_chrome();
+        let overlay = self.refresh_overlay();
+        if chrome || overlay {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// When this window next has Cards-hint work: the nudge's frames while it is
+    /// moving, and the end of the four seconds. Nothing at all for a window
+    /// whose reader has already been told (§7.21).
+    fn card_hint_deadline(&self, now: Instant) -> Option<Instant> {
+        self.window
+            .card_hint
+            .deadline(now, self.app.motion, STRIP_ANIMATION_FRAME)
+    }
+
     /// The `˅`'s verb: show the profile list, or put away the one on screen.
     ///
     /// **E61's rule stated in both directions.** The root menu's opener has
@@ -35631,6 +35806,20 @@ impl Runtime<'_> {
     /// through, every choice in it is written the instant it is made, and what
     /// this discards is exactly the eight rows the reader is looking at while
     /// they press it.
+    ///
+    /// **And one thing that is not a row** (§7.21, user ruling 2026-08-27). The
+    /// Appearance page's verb also gives back the Cards column's first-arrival
+    /// bubble, which is a debt rather than a preference and therefore has no row
+    /// to be derived from. It is named here, once, and the alternative was
+    /// worse in both directions: a *row* for it would be a switch that turns off
+    /// something that has already happened and cannot happen again — a control
+    /// with no reader — while leaving it out of every reset at all would make
+    /// "shown once" mean "shown once per installation, with no way back", which
+    /// is the one thing a reader who missed a four-second card cannot fix.
+    ///
+    /// This page and not another, because this is the page Cards lives on
+    /// (`Cards` and `Card height` are two of its rows), and "put this page back
+    /// the way it shipped" is the only sentence in this dialog that covers it.
     fn reset_advanced_group(&mut self, category: settings::SettingsCategory) -> Result<()> {
         let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
         let advanced = self
@@ -35638,6 +35827,12 @@ impl Runtime<'_> {
             .advanced_rows(category);
         for row in advanced {
             self.reset_advanced_row(row)?;
+        }
+        if category == settings::SettingsCategory::Appearance {
+            let mut settings = self.app.settings_store.loaded().clone();
+            settings.cards_gesture_hint_offer =
+                bt_persist::SettingsV1::default().cards_gesture_hint_offer;
+            let _ = self.app.settings_store.store(settings);
         }
         self.toast(
             toast::ToastKind::Ok,
@@ -74192,6 +74387,13 @@ impl Runtime<'_> {
         // refused and takes down a card whose window has stopped offering.
         self.note_key_hint(now)?;
         self.advance_key_hint_if_due(now)?;
+        // The Cards column's own one-time bubble, beside the hint card because
+        // the two are the same kind of surface — and asked on every turn for the
+        // same reason: the thing that raises it is the *column being on screen*,
+        // which is a fact about the posture rather than an event, and a window
+        // that opened straight into Cards never sent one.
+        self.note_card_hint(now)?;
+        self.advance_card_hint(now)?;
         // The notices' three clocks, beside the tip's and after it: a card that
         // has just left frees the pixels the tip may be about to be laid over.
         self.advance_toasts(now)?;
@@ -74313,6 +74515,12 @@ impl Runtime<'_> {
             // whose hand has already pressed something — reports nothing and
             // costs no wake-ups at all (§7.1.5e′).
             self.key_hint_deadline(now),
+            // The Cards bubble's four seconds, and the nudge's frames while the
+            // card it points at is still travelling. A reader who has already
+            // been told — which is every reader from their second visit onwards
+            // — reports nothing, and under reduced motion even a window that is
+            // being told reports one instant and then sleeps through it (§7.21).
+            self.card_hint_deadline(now),
             // A notice's entrance landing, its life running out, its exit
             // finishing — and nothing at all while one is held under the pointer,
             // because a stopped clock owes no wake-ups (2026-08-16).
@@ -75230,6 +75438,115 @@ mod focus_mode_door_tests {
                 "the projection reached for {fetch}, which is it going looking"
             );
         }
+    }
+
+    /// RED (§7.21, user ruling 2026-08-27) — **the offer is written in exactly
+    /// two places: the frame it is spent, and the verb that gives it back.**
+    ///
+    /// This is the pin the whole "shown once" claim rests on, and both halves
+    /// would rot in opposite directions. A third writer is a third opinion about
+    /// when a reader has been told; *no* writer on the giving-back side is
+    /// "shown once per installation, with no way to see it again" — which is the
+    /// one thing a reader who blinked through a four-second card cannot fix for
+    /// themselves.
+    ///
+    /// The needle and the two lines it expects are assembled at run time, on
+    /// this module's own standing reason: a pin that scans the file it lives in
+    /// must not be able to match its own text.
+    ///
+    /// MUTATION: spend the offer anywhere else — on the frame the bubble comes
+    /// *down*, say — and this names the extra line, and a window closed four
+    /// seconds into a first visit shows the card again next launch; take the
+    /// restore out of `reset_advanced_group` and this names its absence.
+    #[test]
+    fn the_cards_offer_is_spent_in_one_place_and_given_back_in_one() {
+        let field = ["cards", "_gesture_hint_offer"].concat();
+        let needle = ["settings", ".", field.as_str(), " ="].concat();
+        let writes: Vec<&str> = SOURCE
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(needle.as_str()))
+            .collect();
+        assert_eq!(
+            writes,
+            [
+                // Spent on the frame the bubble is raised.
+                format!("{needle} false;"),
+                // And given back by `Reset to defaults` on the page Cards is on.
+                needle.clone(),
+            ],
+            "the offer has one spender and one restorer",
+        );
+
+        // The restore is on the Appearance page and no other: a reset of the
+        // Terminal page's ground has nothing to say about a column of cards.
+        let reset = body("    fn reset_advanced_group(");
+        assert!(
+            reset.contains(needle.as_str()),
+            "the restoring half lives in the reset verb",
+        );
+        let guard = reset
+            .find("SettingsCategory::Appearance")
+            .expect("the restore is guarded by the page Cards lives on");
+        let write = reset
+            .find(needle.as_str())
+            .expect("the restore is in this body");
+        assert!(
+            guard < write,
+            "the restore stands under the page guard, or every page gives it back",
+        );
+
+        // And the default it is restored to is read from the file's own
+        // defaults rather than written out here — a second copy of a default is
+        // the copy that goes stale.
+        assert!(
+            reset.contains("SettingsV1::default()"),
+            "the restored value is `SettingsV1`'s own, never a literal",
+        );
+    }
+
+    /// RED (§7.21) — **the bubble is a picture and not a control.**
+    ///
+    /// Nothing in the hit test knows it exists, and nothing in the module that
+    /// draws it names a hit target. That is what makes "it never takes a press"
+    /// structural rather than remembered: there is no path from a pointer to
+    /// this surface to be guarded, so no guard can be forgotten.
+    ///
+    /// It matters more here than for a menu, because of *where* it stands. The
+    /// bubble hangs over the stage, and the terminal underneath it is a surface
+    /// a reader selects text in — a card that swallowed a press would eat the
+    /// start of a drag-selection, four seconds into somebody's first visit, in
+    /// the one part of the product where a lost press is a lost selection.
+    ///
+    /// MUTATION: give the bubble a `ChromeTarget` and this names it.
+    #[test]
+    fn the_cards_bubble_is_drawn_and_never_pressed() {
+        // The code and not the prose: this module's own paragraphs are allowed
+        // to *say* the word "press", and a needle that could not tell the two
+        // apart would be a pin that fails on its own argument.
+        let module: String = include_str!("cardhint.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for reachable in [
+            "ChromeTarget",
+            "rect_holds",
+            "MouseButton",
+            "ElementState",
+            "pointer",
+        ] {
+            assert!(
+                !module.contains(reachable),
+                "the bubble's own module names {reachable}, which is it becoming pressable",
+            );
+        }
+        // And the window's one reading of what is under a pointer has never
+        // heard of it.
+        assert!(
+            !body("    fn chrome_target_at(").contains("card_hint"),
+            "the hit test knows the bubble exists, so a press can land on it",
+        );
     }
 }
 
@@ -80806,6 +81123,7 @@ mod floated_page_tests {
             term_menu: mark(0.16),
             toast: mark(0.17),
             key_hint: mark(0.18),
+            card_hint: mark(0.185),
             tooltip: mark(0.19),
             file_peek: mark(0.20),
             drag_ghost: mark(0.21),
@@ -82307,6 +82625,7 @@ mod tests {
             term_menu: mark(15),
             toast: mark(8),
             key_hint: mark(20),
+            card_hint: mark(22),
             tooltip: mark(9),
             file_peek: mark(10),
             drag_ghost: mark(11),
@@ -82320,11 +82639,11 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                0, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 8, 20, 9, 10, 11, 21
+                0, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 8, 20, 22, 9, 10, 11, 21
             ],
             "bottom to top: pane bars, terminal thumbs, command rails, rail, flight, ground, \
              search capsule, integration strips, download sheet, schematic, float, modal, file \
-             menu, git menu, terminal menu, notices, key hint, tip, glance, ghost"
+             menu, git menu, terminal menu, notices, key hint, Cards bubble, tip, glance, ghost"
         );
         let at = |tag: u8| {
             order

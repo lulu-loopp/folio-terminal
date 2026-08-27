@@ -58,6 +58,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (20, migrate_settings_v20_to_v21),
     (21, migrate_settings_v21_to_v22),
     (22, migrate_settings_v22_to_v23),
+    (23, migrate_settings_v23_to_v24),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -496,6 +497,22 @@ fn migrate_settings_v22_to_v23(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(23));
         object.insert("turn_end_notification".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// **v23 → v24.** Whether entering Cards still owes the reader the `Alt`+wheel bubble.
+///
+/// `true` for a file written before this build, and that is the step's one real decision: an
+/// existing reader has *not* been shown the sentence, because there was no sentence to be shown.
+/// Migrating them in as already-spent would use the schema step to hide the feature from exactly
+/// the readers who have been living without it longest.
+///
+/// See `SettingsV1::cards_gesture_hint_offer`.
+fn migrate_settings_v23_to_v24(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(24));
+        object.insert("cards_gesture_hint_offer".to_owned(), Value::from(true));
     }
     value
 }

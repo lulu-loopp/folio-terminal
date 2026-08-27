@@ -247,6 +247,28 @@ pub enum ChromeMark {
     /// See [`Self::Folder`] for the ruling, which is one ruling about one
     /// object and applies to both frames of it.
     FolderOpen,
+    /// `#i-wheel` — **a mouse seen from above, with its wheel**: not a verb, but
+    /// the half of a chord that has no key cap to be written on.
+    ///
+    /// It exists because `Alt`+wheel is the one gesture in this window that a
+    /// key cap cannot say by itself (`docs/DESIGN.md` §7.21). A cap reads
+    /// `Alt`; there is no cap that reads "and now turn the wheel", and spelling
+    /// it out in words is what the de-duplicated copy exists to stop — the
+    /// glyphs say the chord, the sentence says the verb.
+    ///
+    /// **The shell is struck and the wheel is filled**, which is P2's law read
+    /// straight off the drawing: the shell is a frame, and the wheel is a field
+    /// inside it. A wheel drawn as two strokes would be the one place in this
+    /// sheet where a field inside a frame is an outline, and at a menu row's
+    /// fourteen pixels it reads as a scratch rather than as a part.
+    ///
+    /// Cut to the house's own air rather than to the mock-up's box: the
+    /// small-sample drawing ran `1.2 – 14.8` down the grid, which is a mark
+    /// that stands taller than every other mark in the same column. Here the
+    /// ink runs `1.6 – 14.4` with half a pen on each side, exactly as
+    /// [`HOUSE_INK_UNITS`] says, and the width follows the mock-up's own
+    /// proportion so the mouse keeps its shape while it loses its extra height.
+    MouseWheel,
     /// `#i-tri` — the disclosure triangle at some angle through its turn (C33).
     ///
     /// An angle and not a boolean for the reason [`Self::Chevron`] gives at
@@ -636,6 +658,30 @@ pub enum ChromeMark {
     /// under a fill that is round — which is a ring visibly not belonging to the
     /// thing it is drawn around.
     ControlPillRing { radius_px: u32, stroke_px: u32 },
+    /// **The bite a bubble takes out of the thing it is about** — a triangle
+    /// filling its own box and pointing *left*, at whatever stands on that side
+    /// (`docs/DESIGN.md` §7.21).
+    ///
+    /// Generated rather than quoted, on [`Self::ControlPill`]'s footing: the
+    /// quoted family is `design/ui-mockup.html`'s own artwork copied across, and
+    /// this is not artwork at all — it is a box turned into a shape, at whatever
+    /// size the surface that grew it happens to be. A `viewBox` written from the
+    /// pixel box means the tail is exact at every scale factor with no
+    /// letterboxing to reason about, which a fixed-grid symbol in a 1:2 box
+    /// would have needed.
+    ///
+    /// **One direction and no parameter**, which is a fact about this window
+    /// rather than a shortcut: the only surface that grows one is the Cards
+    /// hint, the Cards column is on the left in both tab layouts, and a bubble
+    /// that stands on a card therefore stands to its right without exception. A
+    /// `pointing` field would be a second direction nothing can reach.
+    ///
+    /// It carries no hairline of its own. The surface draws it twice — once in
+    /// the border's ink, once in the face's a border further along — which is
+    /// [`crate::settings::push_cap`]'s own recipe, and the only one that leaves
+    /// the tail's *base* unstruck so it can sit over the bubble's edge without
+    /// drawing a line across the join.
+    HintTail,
     /// One corner of the floor showing around a rounded card: a `radius × radius`
     /// square with a quarter-disc bitten out of it, filled edge to edge.
     ///
@@ -1064,6 +1110,7 @@ impl ChromeMark {
             Self::Globe { .. } => "i-globe",
             Self::Folder => "i-folder",
             Self::FolderOpen => "i-folder-open",
+            Self::MouseWheel => "i-wheel",
             // One id for every angle, on `Self::Chevron`'s precedent above.
             Self::TreeDisclosure { .. } => "i-tri",
             Self::Panel => "i-panel",
@@ -1093,6 +1140,7 @@ impl ChromeMark {
             Self::ControlPill { .. } => "control-pill",
             Self::ControlPillFoot { .. } => "control-pill-foot",
             Self::ControlPillRing { .. } => "control-pill-ring",
+            Self::HintTail => "hint-tail",
             // One id for four orientations, like the chevron's one id for every
             // angle: `mark_key` adds the corner, so the four rasters are four
             // cache slots under one name.
@@ -1845,6 +1893,20 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 ),
             )
         }
+        // The box as a triangle with its apex on the left wall, halfway down.
+        //
+        // Written from the box and not from a grid, which is the whole reason
+        // this mark is generated: the tail is as tall as the surface that grew
+        // it says, as wide as it says, and both are already in physical pixels
+        // by the time they arrive here. There is no aspect ratio to preserve
+        // and nothing to letterbox.
+        ChromeMark::HintTail => (
+            format!("0 0 {width_px} {height_px}"),
+            format!(
+                r#"<path fill="currentColor" d="M{width_px} 0L0 {middle}L{width_px} {height_px}Z"/>"#,
+                middle = f64::from(height_px) / 2.0,
+            ),
+        ),
         ChromeMark::CardCorner { radius_px, corner } => {
             // The bite's centre is the card's own arc centre, which is `radius`
             // inside the box on each axis the card runs away along.
@@ -2357,6 +2419,7 @@ impl ChromeMark {
                 | Self::ControlPill { .. }
                 | Self::ControlPillFoot { .. }
                 | Self::ControlPillRing { .. }
+                | Self::HintTail
                 | Self::CardCorner { .. }
                 | Self::Fill
                 | Self::ProgressRing { .. }
@@ -2662,6 +2725,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::Globe { .. } => 41,
         ChromeMark::Folder => 7,
         ChromeMark::FolderOpen => 15,
+        ChromeMark::MouseWheel => 62,
         ChromeMark::TreeDisclosure { .. } => 16,
         ChromeMark::Panel => 8,
         ChromeMark::Chevron { .. } => 9,
@@ -2721,6 +2785,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::ControlPill { .. } => 8,
         ChromeMark::ControlPillFoot { .. } => 8,
         ChromeMark::ControlPillRing { .. } => 8,
+        ChromeMark::HintTail => 8,
         ChromeMark::CardCorner { .. } => 8,
         ChromeMark::Fill => 8,
         ChromeMark::ProgressRing { .. } => 8,
@@ -2773,7 +2838,7 @@ pub fn preview_row_mark(is_page: bool, favicon: Option<crate::favicon::FaviconId
 
 const PROFILE_CHASSIS_VIEW_BOX: &str = "0 0 16 16";
 
-const SYMBOL_VIEW_BOX: [&str; 62] = [
+const SYMBOL_VIEW_BOX: [&str; 63] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -2903,11 +2968,12 @@ const SYMBOL_VIEW_BOX: [&str; 62] = [
     // the re-cut buys is the house's pen at a smaller ink, and a pen is only
     // the house's in the house's grid.
     "0 0 16 16", // #i-cross
+    "0 0 16 16", // #i-wheel
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 62] = [
+const SYMBOL_BODY: [&str; 63] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min. The rule is pulled half a pen in from each edge so the round cap
@@ -3459,6 +3525,26 @@ const SYMBOL_BODY: [&str; 62] = [
     // draws `0.975` of pen where the ten-unit cross shrunk to the same picture
     // would have drawn `0.81`.
     r#"<path d="M3.6 3.6L12.4 12.4M12.4 3.6L3.6 12.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+    // `#i-wheel` — the mouse's shell, and the wheel in it.
+    //
+    // **A struck frame and a filled field**, which is the whole of P2's law in
+    // one drawing of two rectangles. The shell is a fully rounded rect — `rx`
+    // is half its own width, so both ends are semicircles and a mouse read at
+    // fourteen pixels is a mouse rather than a lozenge.
+    //
+    // The ink runs `1.6 – 14.4` down the grid with half a pen added on each
+    // side (`2.2 – 13.8` on the path), which is [`HOUSE_INK_UNITS`]'s own band;
+    // across it the mouse is narrower, because a mouse is. The width is the
+    // small sample's own proportion carried over — `8.8 / 12.4` of the height
+    // — so re-cutting it to the house's air changed its size and not its shape.
+    //
+    // The wheel sits in the upper third, where a wheel is, and is a filled
+    // capsule rather than a stroke: at this size a `1.2` stroke two units long
+    // is a scratch, and a field inside a frame is filled anyway.
+    concat!(
+        r#"<rect x="3.9" y="2.2" width="8.2" height="11.6" rx="4.1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+        r#"<rect x="7.3" y="4.45" width="1.4" height="2.9" rx="0.7" fill="currentColor"/>"#,
+    ),
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the

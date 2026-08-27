@@ -1522,6 +1522,24 @@ pub enum Text {
     /// row that goes stale the day they change tools.
     DescFocusCardHeight,
 
+    // ── the Cards column's first-arrival hint (§7.21, user ruling 2026-08-27) ──
+    //
+    // One contiguous block at the end, per this table's standing rule. **One
+    // entry**, and the count is the ruling: the bubble beside this sentence
+    // carries an `Alt` cap and a wheel, so the chord is already on the glass as
+    // a picture, and writing "Alt + wheel" into the words as well would be the
+    // card saying the same thing twice. `keyhint` has laid a row out this way
+    // since it was written — the key on the left, what it does on the right,
+    // and the key's name never repeated in the name of the verb.
+    /// **What `Alt` and the wheel do, and nothing else** — the whole of the
+    /// bubble's words.
+    ///
+    /// A verb phrase and not a sentence, because it is the right-hand half of a
+    /// row whose left-hand half is the chord: read across, the card says
+    /// "`Alt` + wheel — scroll a card", and read on its own the phrase would be
+    /// missing its subject in exactly the way a `keyhint` line's name is.
+    CardGestureHint,
+
     // ── the page's hand-off arrow (§7.1.5g, user ruling 2026-08-20) ─────────
     //
     // One contiguous block at the end, per this table's standing rule. **One
@@ -3198,6 +3216,10 @@ impl Text {
                 "How tall the picture of a tab stands inside its card. Alt+wheel over one of its panes scrolls that picture a row at a time.",
                 "每张卡片里那幅标签缩图有多高。在卡片中某个窗格上 Alt+滚轮，可以一行一行地滚动那幅图。",
             ),
+            // The verb alone. The chord is drawn beside it — a cap and a wheel
+            // — and a phrase that spelled `Alt` out again would be the one
+            // thing a chord notation must never do.
+            Self::CardGestureHint => pick(lang, "scroll a card", "滚动卡片内容"),
             // A fact and no more: where the page goes. Not "open this page in
             // your default browser" — "your default" is the machine's setting
             // and not something this button chose — and not a name, because
@@ -3380,7 +3402,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 509] = [
+    pub const ALL: [Self; 510] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3826,6 +3848,7 @@ impl Text {
         Self::ClaudeHooksFailedToast,
         Self::RowFocusCardHeight,
         Self::DescFocusCardHeight,
+        Self::CardGestureHint,
         Self::PreviewOpenInBrowser,
         Self::ShortcutWebAddress,
         Self::ShortcutWebDevTools,

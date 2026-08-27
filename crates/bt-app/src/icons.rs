@@ -423,12 +423,25 @@ pub enum ActionIcon {
     FileObject,
     /// A page, wherever a row stands for one and has no favicon of its own.
     PageObject,
+    /// **A mouse with a wheel** — the half of a chord that has no key cap
+    /// (`docs/DESIGN.md` §7.21).
+    ///
+    /// A thing and not an act, and the difference decides the drawing: this
+    /// entry never says *scroll*, it says *the wheel*, exactly as
+    /// [`Self::FileObject`] says *a file* rather than *open*. The verb it is
+    /// standing next to is written in words beside it, because the one thing a
+    /// chord notation must not do is say the same thing twice.
+    ///
+    /// It is nonetheless struck, and that is a fact about a mouse rather than
+    /// an exception to the fill policy: the shell is a frame, so the frame is
+    /// drawn, and the field inside it — the wheel — is filled.
+    MouseWheel,
 }
 
 impl ActionIcon {
     /// Every verb, for the reverse index to walk.
     #[cfg(test)]
-    pub const ALL: [Self; 86] = [
+    pub const ALL: [Self; 87] = [
         Self::OpenSettings,
         Self::MinimiseWindow,
         Self::MaximiseWindow,
@@ -515,6 +528,7 @@ impl ActionIcon {
         Self::OpenFolderObject,
         Self::FileObject,
         Self::PageObject,
+        Self::MouseWheel,
     ];
 
     /// The verb's own name, for a failing assertion to say.
@@ -608,6 +622,7 @@ impl ActionIcon {
             Self::OpenFolderObject => "OpenFolderObject",
             Self::FileObject => "FileObject",
             Self::PageObject => "PageObject",
+            Self::MouseWheel => "MouseWheel",
         }
     }
 
@@ -730,6 +745,7 @@ impl ActionIcon {
                 ChromeMark::File
             }
             Self::PageObject => ChromeMark::Globe { favicon: None },
+            Self::MouseWheel => ChromeMark::MouseWheel,
             Self::UnknownSeat => ChromeMark::Panel,
             Self::RenameFile | Self::RenameBranch | Self::EditRow => ChromeMark::Pencil,
             Self::CheckoutBranch => ChromeMark::GitBranch,
@@ -785,6 +801,7 @@ impl ActionIcon {
                 | Self::OpenFolderObject
                 | Self::FileObject
                 | Self::PageObject
+                | Self::MouseWheel
         )
     }
 
