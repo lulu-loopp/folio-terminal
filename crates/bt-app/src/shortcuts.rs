@@ -39,7 +39,7 @@ use std::fmt::Write as _;
 
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
-use crate::i18n::Text;
+use crate::i18n::{Lang, Text};
 
 /// Everything the window can be asked to do from the keyboard.
 ///
@@ -575,14 +575,24 @@ impl Binding {
     /// that answered only the first would be a row a user presses, sees nothing
     /// from, and concludes is broken (§7.1.5e: "存根行是真实的行").
     fn note(&self) -> Option<Cow<'static, str>> {
+        self.note_in(crate::i18n::current())
+    }
+
+    /// The same line in a named language.
+    ///
+    /// The language is a parameter and not the process's current one so that
+    /// `docs/shortcuts.md` can be written in both columns at once without a test
+    /// reaching for the global every other test reads — the same reason
+    /// [`Text::in_lang`] exists beside [`Text::text`].
+    fn note_in(&self, lang: Lang) -> Option<Cow<'static, str>> {
         // **Only a row that has a chord can say it is bound.** The
         // picture-in-picture slots are pending *and* unassigned, and printing
         // "Bound; the verb behind it is still to come" over a row reading
         // `Not set` would be the panel contradicting itself across four inches
         // of one line — which is exactly what the real window showed.
-        let pending =
-            (self.action.is_pending() && self.chord.is_some()).then(|| NOTE_MACHINE_PENDING.text());
-        match (self.scope.tag().map(Text::text), pending) {
+        let pending = (self.action.is_pending() && self.chord.is_some())
+            .then(|| NOTE_MACHINE_PENDING.in_lang(lang));
+        match (self.scope.tag().map(|tag| tag.in_lang(lang)), pending) {
             (None, None) => None,
             (Some(one), None) | (None, Some(one)) => Some(Cow::Borrowed(one)),
             (Some(scope), Some(pending)) => {
@@ -4632,5 +4642,119 @@ mod tests {
             None,
             "a chord the reader gave back to their shell is not a chord a menu may print"
         );
+    }
+
+    /// The workspace root, reached from the crate this test is compiled in.
+    fn repository_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .expect("this crate sits two directories below the workspace root")
+    }
+
+    /// `docs/shortcuts.md` as [`BINDINGS`] would have it, in both languages.
+    ///
+    /// One renderer with two readers: the gate below compares it against the
+    /// file in the tree, and `scripts/generate-shortcuts-table.ps1` writes the
+    /// file from the copy every run leaves in `target/`.
+    fn shortcuts_document() -> String {
+        let mut out = String::from(concat!(
+            "# Shortcuts\n",
+            "\n",
+            "<!-- Written from `BINDINGS` in `crates/bt-app/src/shortcuts.rs`, not by hand.\n",
+            "     `scripts/check-shortcuts-table.ps1` turns red when this file and that\n",
+            "     table disagree; `scripts/generate-shortcuts-table.ps1` writes it again. -->\n",
+        ));
+        for lang in Lang::ALL {
+            let (heading, lead, columns) = match lang {
+                Lang::English => (
+                    "## English",
+                    "Every key here can be changed on the Shortcuts page in Settings. \
+                     Changing one writes `%APPDATA%\\Folio\\keybindings.json`; the last \
+                     column is the name a row has in that file.",
+                    ["Key", "What it does", "Where it works", "Name in the file"],
+                ),
+                Lang::Chinese => (
+                    "## 中文",
+                    "下面每一组键都能在设置的快捷键页里改。改过之后写进 \
+                     `%APPDATA%\\Folio\\keybindings.json`，最后一列就是这一行在那个文件里的名字。",
+                    ["按键", "作用", "在哪里生效", "文件里的名字"],
+                ),
+            };
+            let _ = write!(out, "\n{heading}\n\n{lead}\n\n");
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} | {} |",
+                columns[0], columns[1], columns[2], columns[3]
+            );
+            let _ = writeln!(out, "| --- | --- | --- | --- |");
+            for binding in BINDINGS {
+                let key = binding.chord.as_ref().map_or_else(
+                    || Text::ShortcutUnbound.in_lang(lang).to_owned(),
+                    |chord| chord_caps(chord).join("+"),
+                );
+                let note = binding.note_in(lang).unwrap_or(Cow::Borrowed(""));
+                let _ = writeln!(
+                    out,
+                    "| {key} | {} | {note} | `{}` |",
+                    binding.title.in_lang(lang),
+                    binding.id
+                );
+            }
+        }
+        out
+    }
+
+    /// **The table in `docs/shortcuts.md` is this table.**
+    ///
+    /// The README sends a reader to that file, and a hand-kept copy of forty
+    /// rows is a copy that lies on the first row anybody adds — this repository
+    /// has already paid for one second list that agreed with the first only on
+    /// the day it was written. So the file is rendered from `BINDINGS` and this
+    /// gate holds the two together: add a row, retire one, or move a chord
+    /// without writing the file again and the workspace goes red.
+    ///
+    /// Every run also leaves the rendering in `target/shortcuts-table.md`, which
+    /// is the file `scripts/generate-shortcuts-table.ps1` copies over the
+    /// checked-in one.
+    #[test]
+    fn docs_shortcuts_md_is_the_bindings_table() {
+        let root = repository_root();
+        let rendered = shortcuts_document();
+        let generated = root.join("target").join("shortcuts-table.md");
+        if let Some(parent) = generated.parent() {
+            std::fs::create_dir_all(parent).expect("the workspace has a target directory");
+        }
+        std::fs::write(&generated, rendered.as_bytes()).expect("target/ is writable");
+        let checked_in = root.join("docs").join("shortcuts.md");
+        let held = std::fs::read_to_string(&checked_in)
+            .expect("docs/shortcuts.md is checked in")
+            .replace("\r\n", "\n");
+        // The first line that differs, and not both documents: a hundred-row
+        // table printed twice is a failure a reader scrolls past rather than
+        // reads, and the answer to "what drifted" is one line long.
+        if let Some((number, held_line, wanted)) = held
+            .lines()
+            .map(Some)
+            .chain(std::iter::repeat(None))
+            .zip(rendered.lines().map(Some).chain(std::iter::repeat(None)))
+            .take(held.lines().count().max(rendered.lines().count()))
+            .enumerate()
+            .find(|(_, (held_line, wanted))| held_line != wanted)
+            .map(|(index, (held_line, wanted))| {
+                (
+                    index + 1,
+                    held_line.unwrap_or("<end of file>"),
+                    wanted.unwrap_or("<end of file>"),
+                )
+            })
+        {
+            panic!(
+                "docs/shortcuts.md line {number} is not what BINDINGS says — \
+                 run scripts/generate-shortcuts-table.ps1\n  \
+                 the file:  {held_line}\n  the table: {wanted}"
+            );
+        }
     }
 }

@@ -27,6 +27,8 @@ dist/
 .tmp-repaint-capture/
 local-images/
 !docs/spikes/artifacts/win-landing/*.png
+# The README's own pictures, taken by hand. docs/screenshots/README.md is the list.
+!docs/screenshots/*.png
 
 # Agent state. `.claude/worktrees/` holds real git worktrees: ignoring the
 # directory does not detach them, and they were never tracked to begin with.
