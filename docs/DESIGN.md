@@ -571,6 +571,62 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 
 **欠账四笔,都记在这里。** ① **同号页的拒绝随那笔前置欠账一起走。** 这一片开工时 `web`/`web_thumbs` 还是按裸 `SeatId` 做键的(§2.10 欠账 ①),所以带着一张同号页的跨窗拖拽和菜单行一样,得到的是 `AmbiguousPage` 那句可见的拒绝;**网页块那条线已在同日把两张表连同 compositor 的 visual 表一起改成按 `LeafId` 做键,并把 `AmbiguousPage` 这一支整个退役**,这一片合进去时那条拒绝自然不在。**两边都不必为此改一行**:两扇门走的是同一个 `transfer_tab`,拒绝从头到尾只有一处,所以那条线撤掉它就是撤掉了全部——这正是「一个动词一处实现」买到的东西。带页跨窗的实机证据因此欠在这一片而不欠在那一片。② **缩略图那条规则是被验证的而不是被安排的**:`web_thumb` 的 `due` 从落地那天起就写着「一枚换了形状的座位当场欠一张新的」,而 `transfer_tab` 的 commit 搬的是整条 entry,所以「live 重挂且页面/viewport 未变 → 最后一帧随座位重址;目标 DPI/卡尺寸变 → 旧帧作占位并当场欠一张」在这两件既有的事实之下是**构造上成立**的,本片没有为它写第二套判断。③ **一扇只有一个 tab 的窗把那个 tab 拖到桌面上,会把窗关掉再开一扇新的**——`transfer_tab` 搬空源窗就关它,这与 F1c 的独 pane 走的是同一条规矩(§2.11),画面上是「这扇窗搬到了手松开的地方」,如实记着而不是另立一条拒绝。④ **拖到另一扇窗的正文上目前什么都不给**;方案在这一片明确要求把它定义下来,定义就是「没有落点」,而「跨窗把一枚 pane 落到另一扇窗的舞台上挑位置」是 §7.1.6k′ 在一扇窗内已经开掉的那扇门的跨窗版本——**未做,不是做不了**。
 
+**2026-08-27 用户实证两条,一条是真的,一条不是,两条都记在这里。**
+
+**① 撕出去的那扇新窗是「先开错、再改对」——三个缺陷共用一个次序(已修)。** 报的是「把 tab 拖出去成新窗时渲染会卡」,附图里那扇新窗停在半成品上:terminal pane 只画了一半、一条黑竖带、chrome 局部缺。逐条量出来的次序是这样的(隔离 `APPDATA`、`BT_PTY_DUMP`、`BT_DPI`、真输入走 `f2-drag-probe.ps1`):
+
+```
+BT_DPI stage=show          rect=147,147,2067,1347  swapchain_size=1920x1200
+BT_DPI stage=first-present rect=147,147,2067,1347  swapchain_size=1920x1200
+BT_TEAR_OUT pointer=1200,1400 ... rect=1008,980 1100x820
+BT_DPI stage=resized       rect=1008,980,2108,1800 swapchain_size=1100x820
+BT_TEAR_OUT_MS transfer=28.3 retire=2922.2
+BT_TEAR_OUT_MS door=185.6  settle=2960.9
+```
+
+- **窗先站在别处,再挪到手松开的地方。** `open_window` 只在**文件**点名这扇窗时才读保存的矩形,而撕出去的窗 `like` 总是有值,于是它拿产品默认尺寸、开在 winit 的默认角上——正压在读者刚拖出来的那扇窗上——被 `dress`、被 `show`、**被 present 两次**,然后才由 `settle_tear_out` 的 `set_window_outer_rect` 挪走。附图里那三样于是全是这一条的后果:落进新矩形的那一帧是照**旧**矩形解的,所以 pane 只画到旧宽度;新矩形比旧的大时,窗减去 swapchain 的那个 L 由 §7.1.6c-4b 的裙边按地面色补上——**那条「黑竖带」就是裙边**,它做的正是它该做的事,只是没人该让它在这里出现。
+- **`open_pending_window` 那句注释从写下那天起就是假的。** 它写着「窗站着且还没画过一帧,所以它开着时手里那个替身没人看得见」;`show_new_window` 在 28756/28776 present 了两次、中间 `set_visible(true)`,所以替身**每次**都被看见。
+- **替身是一台马上要被杀掉的 shell,那三秒就是它。** 收窗的 `retire_the_stand_in` 走 `shutdown_all_shells` → `PtySession::shutdown` → `child.kill()` + `child.wait()` + `reader.join()`,全在窗口线程上,对着一台两百毫秒前才 `CreateProcess` 出来、一眼都没被看过的 PowerShell。量到 **2922.2ms**。`PtySession::shutdown` 自己那段注释早就为 writer 线程写下了同一条论证(「一次 join 会把无界等待放回窗口线程,而那正是一扇窗最付不起的时刻」),只是 `child.wait()` 与 `reader.join()` 没跟着走。
+
+**修法三条,都是把次序摆正,一处 sleep 一处重试都没有加。**
+
+- **矩形是这扇窗的*开窗*矩形。** `tear_out_rect` 挪进 `open_window`,在 compositor 与 swapchain 之前落。窗此刻还是 `with_visible(false)` 的,所以 swapchain 从第一次配置起就是最终尺寸——**没有 resize,没有 L,没有裙边要盖的东西**。dpi 与 work area 照旧问**那个点**而不是问这扇窗(F5 原文),现在这条更是绕不过去了:窗还站在 winit 放它的地方。
+- **要接 tab 的窗不开 shell。** 替身改成一枚 `SeatKind::Placeholder`——这程序自己给「里面什么都没有的叶」起的名字(`LeafNodeV1::Unknown`)。`create_tab_state` 只对 `seats.terminals()` 开 session,占位不是其中之一,于是这个 tab **建它不要钱、拆它也不要钱**。`retire_the_stand_in` 里那句 `shutdown_all_shells` 留着:它管的是「任何一个被移走的 tab 都不许留下没人看得见的子进程」,对一支空舰队走一趟正是「没有什么要关」的诚实说法。**只有接 tab 那扇门这么开**,别的门开的窗读者是要在里面干活的。
+- **窗要等它的 tab 到了才亮相。** `show_new_window` 与 `revive_all_web_pages` 从 `open_window` 里退到 `settle_tear_out` 的 `Moved` 一支。中间那段窗一直是隐藏的,也就是 `with_visible(false)` 本来就把它放在的那个状态;而**被拒绝**的移交现在把窗关掉时,它一帧都没上过玻璃(以前是先亮出来再关)。
+
+修后同一台机器、同一条命令:
+
+```
+BT_TEAR_OUT pointer=2521,404 ... rect=1421,0 1100x820
+BT_DPI stage=show          rect=1421,0,2521,820 swapchain_size=1100x820
+BT_DPI stage=first-present rect=1421,0,2521,820 swapchain_size=1100x820
+BT_TEAR_OUT_MS door=84.1 settle=83.4
+```
+
+`BT_TEAR_OUT` 排在 `stage=show` **之前**,两者说的是同一个矩形,中间没有 `stage=resized`;整趟 **3146ms → 167ms**,那三秒的僵死没有了。截图里那扇新窗是完整的一扇:一个 tab、活的 shell、chrome 齐全、就站在手松开的地方。
+
+**`BT_TEAR_OUT_MS` 一行,和 `BT_TEAR_OUT` 同样的道理。** 一次卡顿的照片说不出是开窗那半段还是 tab 那半段停的钟,而这个答案已经搬过一次家了。只在真的撕出一扇窗时打,一次一行。
+
+**② 「跨窗落点恒为末尾」复现不出来,补上的是测试而不是修法。** 报的是「跨窗拖 tab 回到另一个窗的 tab 条,落点恒为末尾,不能落到任意位置」,并给出了修法(「跨窗 drop 复用同窗 strip 的落点判定,`DragHandover`/`transfer_tab` 带上目标索引」)——**那正是这一片当初落的东西**。实机四跑,横条与纵栏各两跑,`BT_MOUSE_TRACE` 上新加的三站(`foreign_strip_landing` 的 mids/raw/slot、`hand_over_across_windows` 的 verdict、`settle_arrival` 的 arrived_at/slot/to)逐跑对上:
+
+```
+foreign_strip_landing at=slot client=(230.0,45.0) axis=230.0 mids=[112.3, 311.0, 509.7] tabs=3 raw=1 slot=1
+hand_over_across_windows verdict=Into { window: .., landing: StripExtract { slot: 1 } }
+settle_arrival at=strip-extract arrived_at=3 slot=1 to=1 tabs=4
+```
+
+```
+foreign_strip_landing at=slot client=(200.0,152.0) axis=152.0 mids=[170.0, 232.0, 294.0] tabs=3 raw=0 slot=0
+hand_over_across_windows verdict=Into { window: .., landing: StripExtract { slot: 0 } }
+settle_arrival at=strip-extract arrived_at=3 slot=0 to=0 tabs=4
+```
+
+手还举着时替身就站在那个槽里(纵栏那跑的照片:替身在第一格,穿着 `tab-land` 的底与环),松手后 tab 就在那个槽里。**首位与中位两条边界、strip 与 rail 两张面,四跑全中。**
+
+**所以欠的是钉子。** 这个号从 `foreign_strip_landing` 铸出、搭 `BrokerAim` 与 `DragHandover` 过界、由 `settle_arrival` 花掉,三跳没有一跳有过一条算术测试——三条**形状钉**会在数字本身错掉时照样过。`a_tab_handed_to_another_window_lands_where_the_hand_named_on_either_axis` 把三跳的算术连起来走一遍(`insert_index_at` → `strip_insert_slot` → `partition_clamped`),两根轴各四个落点,外加 N158 那条唯一允许强扭手势的钳(钉住的正是「恒为末尾」的反面:钉子用 MUTATION 验过——把 `settle_arrival` 改成追加,每根轴上除末位以外全红)。**报告里的现象若还在,它一定不在这条算术上**,请把 `BT_MOUSE_TRACE` 的这三行带回来。
+
+**三门。** workspace 全绿,clippy `-D warnings` 与 fmt `--check` 干净。
+
 
 ## 3. 内容模型
 

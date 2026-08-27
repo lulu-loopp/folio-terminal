@@ -28494,9 +28494,69 @@ impl Runtime<'_> {
         // note at the first window's copy because there was nowhere else to put
         // the line; this is that somewhere.
         let opened_at = dpi_snapshot(&window)?;
+        // **F5, and it is the *opening* rectangle rather than a move afterwards**
+        // (user report 2026-08-27). This used to be stated in `settle_tear_out`,
+        // after the window had been dressed, shown and presented **twice** — so
+        // the reader watched a window of the product's default size appear at
+        // winit's default corner, on top of the window they had just dragged out
+        // of, and then jump. Measured on the machine: `BT_DPI stage=show
+        // rect=147,147,2067,1347 swapchain_size=1920x1200`, `stage=first-present`
+        // at the same rectangle, and only then `BT_TEAR_OUT … rect=1008,980
+        // 1100x820` followed by `stage=resized`.
+        //
+        // Two of the three things the reader reported follow from that ordering
+        // alone. The frame carried into the new rectangle was drawn for the old
+        // one, so the pane is solved for a stage that is no longer there; and
+        // when the tear-out rectangle is the **larger** of the two, the window
+        // minus the swapchain is §7.14's L, which the skirt fills with the
+        // ground colour — the dark band in the report.
+        //
+        // Said here, the whole sequence disappears rather than being smoothed
+        // over: the window is still hidden (`with_visible(false)`), the
+        // compositor and the swapchain are built two statements below, so they
+        // are built **at the size the window will keep**. Nothing moves, nothing
+        // is resized, and there is no L for a skirt to cover.
+        //
+        // Both the dpi and the work area are asked of the *point* and not of this
+        // window, which is F5's own rule and now literally unavoidable: the
+        // window is standing wherever winit put it, which on a two-monitor
+        // desktop is very often not the monitor the hand is over.
+        let standing = plan
+            .receives
+            .as_ref()
+            .and_then(|errand| errand.at)
+            .map(|(pointer, grip)| {
+                let dpi = bt_platform::dpi_at(pointer.0, pointer.1);
+                let work = bt_platform::work_area_at(pointer.0, pointer.1)
+                    .unwrap_or_else(|_| bt_platform::virtual_screen_rect());
+                let rect = tear_out_rect(pointer, grip, dpi, work);
+                // One line, on the same terms as `BT_DPI`'s: a tear-out's
+                // rectangle is a function of four things read off the machine,
+                // and a photograph of a window in the wrong place cannot say
+                // which of them was wrong. Printed only when a window is actually
+                // being placed, which is once per tear-out.
+                eprintln!(
+                    "BT_TEAR_OUT pointer={},{} grab={:?} size={:?} dpi={dpi} work={},{} {}x{} rect={},{} {}x{}",
+                    pointer.0,
+                    pointer.1,
+                    grip.grab_logical,
+                    grip.size_logical,
+                    work.left,
+                    work.top,
+                    work.right - work.left,
+                    work.bottom - work.top,
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                );
+                rect
+            });
         bt_platform::set_window_outer_rect(
             hwnd,
-            startup_window_rect(placement, opened_at.rect, opened_at.authoritative_scale),
+            standing.unwrap_or_else(|| {
+                startup_window_rect(placement, opened_at.rect, opened_at.authoritative_scale)
+            }),
         )
         .map_err(|error| anyhow!(error))
         .context("state the new window's outer rectangle")?;
@@ -28582,7 +28642,45 @@ impl Runtime<'_> {
             .map(|plan| plan.open.iter().map(revive_plan).collect())
             .unwrap_or_else(|| {
                 vec![(
-                    seats::Seats::lone_terminal(),
+                    // **A window opened to *receive* a tab opens no shell** (user
+                    // report 2026-08-27, and the whole of the stall in it).
+                    //
+                    // The stand-in is scaffolding: it exists because a window has
+                    // to hold a tab between being built and being handed the one
+                    // it was opened for, and `retire_the_stand_in` takes it away
+                    // in the same turn. Until now it was a *terminal*, so every
+                    // tear-out paid a `CreatePseudoConsole` + `CreateProcess` for
+                    // a shell nobody would ever look at, and then paid
+                    // `PtySession::shutdown` to kill it — `child.kill()`,
+                    // `child.wait()`, `reader.join()`, all three on the window
+                    // thread. Measured on the machine, one tear-out:
+                    // `spawn=31.4ms`, `transfer=28.3ms`, **`retire=2922.2ms`** —
+                    // three seconds of frozen loop for a shell that was two
+                    // hundred milliseconds old.
+                    //
+                    // `SeatKind::Placeholder` is this program's own word for a
+                    // leaf with nothing in it (`LeafNodeV1::Unknown`), and it is
+                    // the honest shape here: `create_tab_state` walks
+                    // `seats.terminals()` to open sessions, a placeholder is not
+                    // one, so the tab costs nothing to make and nothing to
+                    // destroy. Nobody ever sees it — the transfer and the
+                    // retirement both run before this window is shown (see
+                    // [`FolioApp::open_pending_window`]) — and if the transfer is
+                    // refused the window is closed without ever having been on
+                    // the glass.
+                    //
+                    // Only for a receiving plan: every other door opens a window
+                    // the reader is going to work in, and that window's first tab
+                    // is a shell.
+                    if plan.receives.is_some() {
+                        seats::Seats::lone_seat(&bt_layout::Seat::new(
+                            SeatId(1),
+                            bt_layout::SeatKind::Placeholder,
+                        ))
+                        .0
+                    } else {
+                        seats::Seats::lone_terminal()
+                    },
                     TabSeed::default(),
                     BTreeMap::new(),
                     BTreeMap::new(),
@@ -28682,12 +28780,31 @@ impl Runtime<'_> {
             window: &mut window,
         };
         runtime.dress_new_window(hwnd)?;
-        // Maximized only if the file said this window was: a window a verb asked
-        // for is one nobody has told to be.
-        runtime.show_new_window(maximized)?;
-        // The pages of the tabs this window opened holding, on the launch door's
-        // own terms and for its reason.
-        runtime.revive_all_web_pages()?;
+        // **A window that is about to be handed a tab is not shown holding the
+        // stand-in** (user report 2026-08-27).
+        //
+        // Showing is two presents and a `ShowWindow` ([`Runtime::show_new_window`]),
+        // and until now both presents happened here — with the scaffolding tab on
+        // the stage and, before the line above was written, at the wrong
+        // rectangle as well. What the reader saw was the wrong window, and then
+        // the right one; F1c's own note two doors up ("the window is standing and
+        // has not drawn a frame, so the stand-in tab it opened holding is never
+        // seen") had been false since the day it was written.
+        //
+        // So the receiving door shows the window itself, once the tab has
+        // arrived and the stand-in has gone — see
+        // [`FolioApp::open_pending_window`]. The window stays hidden in between,
+        // which is exactly the state `with_visible(false)` opened it in, and a
+        // transfer that is *refused* closes it without it ever having been on the
+        // glass.
+        if plan.receives.is_none() {
+            // Maximized only if the file said this window was: a window a verb
+            // asked for is one nobody has told to be.
+            runtime.show_new_window(maximized)?;
+            // The pages of the tabs this window opened holding, on the launch
+            // door's own terms and for its reason.
+            runtime.revive_all_web_pages()?;
+        }
         Ok((id, window))
     }
 
@@ -67908,9 +68025,32 @@ impl Runtime<'_> {
         cargo_tree: Option<&bt_layout::LayoutNode>,
         screen: (f64, f64),
     ) -> Option<DropLanding> {
-        let position = self.screen_to_client(screen)?;
-        let run = self.tab_run(Instant::now())?;
+        // **Four stations, because this answer has four ways to be nothing and a
+        // photograph can tell them apart from none of them** (user report
+        // 2026-08-27 ②, *"跨窗落点恒为末尾"*). A reader watching a tab land in the
+        // wrong slot is watching the end of a chain whose every hop is invisible:
+        // this window has no origin to subtract, or no run to ask, or the pointer
+        // is outside its band, or the walk answered a number. `BT_MOUSE_TRACE` is
+        // forensic apparatus and nothing else — see [`mouse_trace`] — and these
+        // are the three numbers the chain is made of: the midpoints, the raw walk
+        // and the clamped slot. The two stations further down the road
+        // ([`Runtime::hand_over_across_windows`],
+        // [`FolioApp::settle_arrival`]) complete it.
+        let Some(position) = self.screen_to_client(screen) else {
+            self.mouse_trace(|| "foreign_strip_landing at=no-client-origin".to_owned());
+            return None;
+        };
+        let Some(run) = self.tab_run(Instant::now()) else {
+            self.mouse_trace(|| "foreign_strip_landing at=no-run".to_owned());
+            return None;
+        };
         if !run.contains(position.x, position.y) {
+            self.mouse_trace(|| {
+                format!(
+                    "foreign_strip_landing at=outside-band client=({:.1},{:.1}) band={:?}",
+                    position.x, position.y, run.band
+                )
+            });
             return None;
         }
         let mids = run.mids();
@@ -67922,10 +68062,20 @@ impl Runtime<'_> {
             .collect::<Vec<_>>();
         // N158's clamp, on this window's own partition: the slot the visitor
         // watches is the slot the hand-over inserts at.
-        let slot = strip_insert_slot(
-            seats::insert_index_at(&mids, run.pos(position.x, position.y)),
-            &pinned,
-        );
+        let raw = seats::insert_index_at(&mids, run.pos(position.x, position.y));
+        let slot = strip_insert_slot(raw, &pinned);
+        self.mouse_trace(|| {
+            format!(
+                "foreign_strip_landing at=slot screen=({:.1},{:.1}) client=({:.1},{:.1}) \
+                 axis={:.1} mids={mids:?} tabs={} raw={raw} slot={slot}",
+                screen.0,
+                screen.1,
+                position.x,
+                position.y,
+                run.pos(position.x, position.y),
+                pinned.len()
+            )
+        });
         match cargo {
             // A whole tab has one offer here and it does not depend on the run's
             // pane bits: those say what a *pane* may do to a tab list, and a tab
@@ -67989,6 +68139,18 @@ impl Runtime<'_> {
             return Ok(false);
         }
         let verdict = broker_verdict(&broker.aim);
+        // The road's second station ([`Runtime::foreign_strip_landing`] is the
+        // first): **what the release decided, and off which aim**. Formatted
+        // ahead of the closure because a `Debug` of the aim is real work — the
+        // gate's own rule for the handful of stations that must compute a field
+        // rather than merely format one ([`mouse_trace::is_on`]).
+        let traced_aim = mouse_trace::is_on().then(|| format!("{:?}", broker.aim));
+        self.mouse_trace(|| {
+            format!(
+                "hand_over_across_windows verdict={verdict:?} aim={}",
+                traced_aim.unwrap_or_default()
+            )
+        });
         if verdict == BrokerRelease::Local {
             return Ok(false);
         }
@@ -76923,14 +77085,23 @@ impl Runtime<'_> {
     /// **Take away the tab a window opened holding, now that the tab it was
     /// opened for has arrived** (multiwindow slice F1c).
     ///
-    /// A window cannot be built holding nothing, so `Move pane to new window`
-    /// opens one holding the default profile's single tab and moves the reader's
-    /// tab in beside it. That first tab is scaffolding in the launch
-    /// placeholder's exact sense — "a stand-in for an answer we do not have yet"
-    /// — and this is the launch's own retirement of it, down to shutting the
-    /// shell it started: a tab removed with its child left running is a shell
-    /// nobody can see, which `let_go_of_this_window` calls the one outcome worse
-    /// than an error.
+    /// A window cannot be built holding nothing, so a window opened to *receive*
+    /// a tab opens holding one seat and moves the reader's tab in beside it.
+    /// That first tab is scaffolding in the launch placeholder's exact sense —
+    /// "a stand-in for an answer we do not have yet" — and this is the launch's
+    /// own retirement of it.
+    ///
+    /// **The shells are still told, and there are none to tell.** Since the
+    /// 2026-08-27 report the receiving door opens its stand-in on a
+    /// [`bt_layout::SeatKind::Placeholder`] rather than a terminal, precisely so
+    /// that this retirement costs nothing: `shutdown_all_shells` used to spend
+    /// **2.9 seconds** here killing a shell that was two hundred milliseconds
+    /// old and had never been looked at. The call stays because the rule it
+    /// enforces is about *any* tab being removed — a tab removed with its child
+    /// left running is a shell nobody can see, which `let_go_of_this_window`
+    /// calls the one outcome worse than an error — and a walk over an empty
+    /// fleet is the honest way to say "there is nothing to shut" rather than a
+    /// second door that assumes it.
     ///
     /// **Never the last tab.** The guard is not defensive — it is the invariant
     /// every window in this program stands on, and a stand-in that was somehow
@@ -79946,14 +80117,30 @@ impl FolioApp {
             let Some(app) = self.app.as_mut() else {
                 return Ok(());
             };
+            let opened_at = Instant::now();
             let (id, window) = Runtime::open_window(event_loop, app, &plan, like)?;
+            let door = opened_at.elapsed();
             self.windows.insert(id, window);
             // **The tear-out's second half, in the turn its first half ran in**
-            // (F1c). The window is standing and has not drawn a frame, so the
-            // stand-in tab it opened holding is never seen; what the reader sees
-            // is a window that opened with their pane in it.
+            // (F1c). The window is standing at the rectangle the hand named and
+            // **has not been shown**, so the stand-in tab it opened holding is
+            // never seen; what the reader sees is a window that opened with their
+            // pane in it. That sentence used to be a comment this code did not
+            // keep — `show_new_window` ran inside the door — and keeping it is
+            // the whole of the 2026-08-27 report.
             if let Some(errand) = plan.receives {
+                let settle = Instant::now();
                 self.settle_tear_out(errand, id)?;
+                // **The two halves, timed, and on `BT_TEAR_OUT`'s own terms**: a
+                // tear-out that stutters cannot say from a photograph whether the
+                // window door or the tab's journey was what stopped the loop, and
+                // the answer moved once already (`retire=2922.2ms` before the
+                // stand-in stopped opening a shell it would immediately kill).
+                eprintln!(
+                    "BT_TEAR_OUT_MS door={:.1} settle={:.1}",
+                    door.as_secs_f64() * 1000.0,
+                    settle.elapsed().as_secs_f64() * 1000.0,
+                );
                 continue;
             }
             // **Into the document the moment it exists**, measured rather than
@@ -79987,50 +80174,10 @@ impl FolioApp {
     ///   with no tabs files no seed into Recent, so nothing is remembered that
     ///   nobody ever had.
     fn settle_tear_out(&mut self, errand: TearOut, into: WindowId) -> Result<()> {
-        // **F5 — a window a hand let go of stands where the hand let go**
-        // (multiwindow slice F2). Before the transfer rather than after, so the
-        // tab arrives into the rectangle it will live in and the tree is solved
-        // once. `None` for the menu row, which named a verb and not a place.
-        if let Some((pointer, grip)) = errand.at
-            && let Some(window) = self.windows.get_mut(into)
-            && let Ok(hwnd) = window_hwnd(&window.window)
-        {
-            // Both asked of the *point*, not of the new window: the window is
-            // standing wherever it was created, which on a two-monitor desktop is
-            // very often not the monitor the hand is over — and it is that
-            // monitor's dpi and work area the plan names.
-            let dpi = bt_platform::dpi_at(pointer.0, pointer.1);
-            let work = bt_platform::work_area_at(pointer.0, pointer.1)
-                .unwrap_or_else(|_| bt_platform::virtual_screen_rect());
-            let rect = tear_out_rect(pointer, grip, dpi, work);
-            // One line, on the same terms as `BT_DPI`'s: a tear-out's rectangle
-            // is a function of four things read off the machine, and a
-            // photograph of a window in the wrong place cannot say which of them
-            // was wrong. Printed only when a window is actually being placed,
-            // which is once per tear-out.
-            eprintln!(
-                "BT_TEAR_OUT pointer={},{} grab={:?} size={:?} dpi={dpi} work={},{} {}x{} rect={},{} {}x{}",
-                pointer.0,
-                pointer.1,
-                grip.grab_logical,
-                grip.size_logical,
-                work.left,
-                work.top,
-                work.right - work.left,
-                work.bottom - work.top,
-                rect.left,
-                rect.top,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
-            );
-            if let Err(error) = bt_platform::set_window_outer_rect(hwnd, rect) {
-                // A window that could not be placed is still a window holding the
-                // reader's tab, so this is reported and not fatal — the same
-                // judgment `restore_window_placement` makes about a saved corner
-                // no monitor can see.
-                eprintln!("BT_TEAR_OUT place failed: {error}");
-            }
-        }
+        // **F5's rectangle is now the window's *opening* rectangle** and is
+        // stated in [`Runtime::open_window`], not here — see the note there for
+        // the three things the old ordering cost. What is left to this function
+        // is the tab's own half of the journey.
         let stand_in = self
             .windows
             .get_mut(into)
@@ -80043,6 +80190,14 @@ impl FolioApp {
                     && let Some(mut runtime) = self.runtime(into)
                 {
                     runtime.retire_the_stand_in(stand_in)?;
+                }
+                // **And only now is it shown** — the first frame of a torn-out
+                // window is the reader's own tab, in the rectangle their hand
+                // chose, at that monitor's scale. Deferred out of `open_window`
+                // rather than repeated: see the note at that function's tail.
+                if let Some(mut runtime) = self.runtime(into) {
+                    runtime.show_new_window(false)?;
+                    runtime.revive_all_web_pages()?;
                 }
             }
             TransferOutcome::Refused(refusal) => {
@@ -80342,6 +80497,19 @@ impl FolioApp {
                     .map(|tab| tab.pinned)
                     .collect::<Vec<_>>();
                 let to = partition_clamped(&pinned, index, slot.min(pinned.len() - 1));
+                // The road's last station: **where the transfer left the tab,
+                // what slot the hand named, and where it is going**. Three
+                // numbers, and the report they answer (2026-08-27 ②) is about
+                // the third — `arrived_at` is always the end of the run, which
+                // is exactly what "落点恒为末尾" would look like if this line
+                // were not moving it.
+                runtime.mouse_trace(|| {
+                    format!(
+                        "settle_arrival at=strip-extract arrived_at={index} slot={slot} to={to} \
+                         tabs={}",
+                        pinned.len()
+                    )
+                });
                 runtime.move_tab_with_flip(index, to, Instant::now(), None);
                 runtime.mark_session_dirty(Instant::now());
                 Ok(())
@@ -115236,7 +115404,7 @@ mod cross_window_drag_tests {
 
     use super::{
         BrokerAim, BrokerRelease, DragBroker, DragGuard, DropLanding, TabId, TearGrip, WindowId,
-        broker_verdict, profiles, tear_out_rect,
+        broker_verdict, partition_clamped, profiles, seats, strip_insert_slot, tear_out_rect,
     };
 
     const SOURCE: &str = include_str!("main.rs");
@@ -115625,6 +115793,226 @@ mod cross_window_drag_tests {
                 "the hand-over owes `{owed}`: {why}\n{body}"
             );
         }
+    }
+
+    /// A run with `count` equal slots of `pitch` along `axis`, starting at
+    /// `lead`.
+    ///
+    /// Rectangles rather than a geometry call, and that is the point of drawing
+    /// the boundary here: *where* a surface puts its slots is
+    /// [`seats::strip_run`]/[`seats::rail_run`]'s question and is measured in
+    /// `seats.rs` against the real solver; what this file owes is the journey
+    /// **from** a run **to** a slot in a strip, and that journey has to be the
+    /// same one whichever axis the run came in on.
+    fn run_of(axis: bt_layout::Axis, count: usize, lead: f32, pitch: f32) -> seats::TabRun {
+        let slots = (0..count)
+            .map(|index| {
+                let start = lead + pitch * index as f32;
+                match axis {
+                    bt_layout::Axis::Row => [start, 0.0, start + pitch, 40.0],
+                    bt_layout::Axis::Col => [0.0, start, 200.0, start + pitch],
+                }
+            })
+            .collect();
+        seats::TabRun {
+            axis,
+            slots,
+            viewport: [0.0, 4_000.0],
+            band: [0.0, 0.0, 4_000.0, 4_000.0],
+            pane_offers: seats::PaneOffers::BOTH,
+        }
+    }
+
+    /// The whole of the index's journey across a window boundary, as the three
+    /// functions that actually decide it, in the order they run.
+    ///
+    /// * the target surveys its own run under the visitor's pointer
+    ///   ([`Runtime::foreign_strip_landing`]'s two lines);
+    /// * [`FolioApp::transfer_tab`] pushes the arrival onto the **end** of the
+    ///   target's strip, which is where the ticket's report would stop;
+    /// * [`FolioApp::settle_arrival`] then moves it to the slot the stand-in was
+    ///   standing in.
+    ///
+    /// Answers where the tab ends up.
+    fn journey(run: &seats::TabRun, pointer: (f64, f64), pinned: &[bool]) -> usize {
+        let slot = strip_insert_slot(
+            seats::insert_index_at(&run.mids(), run.pos(pointer.0, pointer.1)),
+            pinned,
+        );
+        // The strip as `settle_arrival` finds it: everything that was there,
+        // plus the arrival on the end. Its pin is the arriving tab's own and
+        // takes no part in the clamp — `strip_insert_slot`'s standing note.
+        let mut after = pinned.to_vec();
+        after.push(false);
+        let arrived_at = after.len() - 1;
+        partition_clamped(&after, arrived_at, slot.min(after.len() - 1))
+    }
+
+    /// **A tab handed to another window lands in the slot the hand named, on
+    /// both surfaces** (user report 2026-08-27 ②: *"跨窗拖 tab 回到另一个窗的
+    /// tab 条,现在落点恒为末尾,不能落到任意位置"*).
+    ///
+    /// **The report did not reproduce**, and this test is what was owed instead.
+    /// Driven on the machine — two windows, `BT_MOUSE_TRACE` on, real input
+    /// through `scripts/dev/f2-drag-probe.ps1` — the strip answered
+    /// `raw=1 slot=1` under the pointer and `settle_arrival` answered
+    /// `arrived_at=3 slot=1 to=1`, and the photograph shows the tab second; the
+    /// rail answered `mids=[170, 232, 294] raw=0 slot=0` and
+    /// `arrived_at=3 slot=0 to=0`, and the photograph shows it first. So the
+    /// mechanism the ticket asked for is present and was already right.
+    ///
+    /// What was missing was any test of it. The slot is minted in
+    /// [`Runtime::foreign_strip_landing`], carried on [`BrokerAim`] and
+    /// [`DragHandover`], and spent in [`FolioApp::settle_arrival`] — three hops,
+    /// every one of which was covered only by a shape pin that would go on
+    /// passing if the number itself were wrong. This walks the arithmetic of all
+    /// three, on both axes, including the two boundaries the report names.
+    ///
+    /// Red gate (verified by MUTATION): make the last step of [`journey`] append
+    /// instead of moving — `partition_clamped(&after, arrived_at, after.len() -
+    /// 1)`, which is exactly the behaviour the report describes — and every row
+    /// but the last of each surface fails. That [`FolioApp::settle_arrival`] runs
+    /// *this* arithmetic and not one of its own is
+    /// [`a_pane_carried_into_another_window_is_promoted_and_then_transferred`]'s
+    /// half of the pair.
+    #[test]
+    fn a_tab_handed_to_another_window_lands_where_the_hand_named_on_either_axis() {
+        // Three tabs, 200 long, so the midpoints are 100, 300 and 500 and every
+        // "between which two" has an unambiguous pointer.
+        let none = [false, false, false];
+        for (axis, name) in [
+            (bt_layout::Axis::Row, "the strip"),
+            (bt_layout::Axis::Col, "the rail"),
+        ] {
+            let run = run_of(axis, 3, 0.0, 200.0);
+            let at = |along: f64| match axis {
+                bt_layout::Axis::Row => (along, 20.0),
+                bt_layout::Axis::Col => (100.0, along),
+            };
+            for (along, want, why) in [
+                (
+                    10.0,
+                    0,
+                    "before the first tab's centre is the head of the run",
+                ),
+                (
+                    150.0,
+                    1,
+                    "past the first centre is between the first and second",
+                ),
+                (
+                    350.0,
+                    2,
+                    "and past the second is between the second and third",
+                ),
+                (
+                    550.0,
+                    3,
+                    "past the last centre is the end, which is a landing \
+                            like any other and not the only one",
+                ),
+            ] {
+                assert_eq!(
+                    journey(&run, at(along), &none),
+                    want,
+                    "{name}: a visitor let go at {along} lands at {want} — {why}"
+                );
+            }
+        }
+
+        // **The one place the strip may overrule the hand, and it is N158's**:
+        // pinned tabs lead the run, so a slot inside the pinned lead is clamped
+        // to the seam rather than granted. The clamp is applied where the landing
+        // is minted, so the stand-in the reader watched stood at the same number.
+        let two_pinned = [true, true, false];
+        let run = run_of(bt_layout::Axis::Row, 3, 0.0, 200.0);
+        assert_eq!(
+            journey(&run, (10.0, 20.0), &two_pinned),
+            2,
+            "an unpinned arrival aimed into the pinned run lands at the head of \
+             the unpinned one"
+        );
+        assert_eq!(
+            journey(&run, (450.0, 20.0), &two_pinned),
+            2,
+            "and one aimed at the unpinned run's own head lands there untouched"
+        );
+
+        // And the arithmetic above is the arithmetic that actually runs: a
+        // transcription nobody ties to its original is a test of the
+        // transcription.
+        let arrival = fn_body("settle_arrival");
+        assert!(
+            arrival.contains("partition_clamped(&pinned, index, slot.min(pinned.len() - 1))"),
+            "the arrival is *moved* to the landing's slot, and the only thing \
+             allowed to overrule the hand there is the pinned partition:\n{arrival}"
+        );
+        let survey = fn_body("foreign_strip_landing");
+        assert!(
+            survey.contains("strip_insert_slot(raw, &pinned)")
+                && survey.contains("seats::insert_index_at(&mids, run.pos("),
+            "and the slot it is given is the run's own midpoint walk under the \
+             visitor's pointer, clamped once, where the stand-in was drawn from \
+             it:\n{survey}"
+        );
+    }
+
+    /// **A window torn off opens where the hand let go, holding nothing it will
+    /// have to kill, and is not shown until the tab has arrived** (user report
+    /// 2026-08-27 ①: *"把 tab 拖出去成新窗时,渲染会卡"*, with a photograph of a
+    /// half-drawn pane and a dark band).
+    ///
+    /// Three defects, one ordering, and the measurements are in `DESIGN.md`
+    /// §2.12. The window used to be created at the product's default size at
+    /// winit's default corner, **dressed, shown and presented twice** there, and
+    /// only then moved to the tear-out rectangle and handed the tab; and the tab
+    /// it opened holding was a real terminal, so every tear-out paid a
+    /// `CreateProcess` for a shell and then `PtySession::shutdown` to kill it —
+    /// `retire=2922.2ms` on the machine, against `door=84.1 settle=83.4` after.
+    ///
+    /// Red gate: put the placement back in `settle_tear_out` and the swapchain is
+    /// built for a rectangle the window is about to leave (first row); open the
+    /// stand-in on a terminal and the three seconds come back (second); show
+    /// inside the door and the reader watches the wrong window first (third).
+    #[test]
+    fn a_torn_out_window_opens_where_it_will_stand_and_is_shown_holding_its_tab() {
+        let door = fn_body("open_window");
+        let settle = fn_body("settle_tear_out");
+
+        assert!(
+            door.contains("tear_out_rect(pointer, grip, dpi, work)"),
+            "the tear-out's rectangle is the window's *opening* rectangle, \
+             stated before the compositor and the swapchain are built from \
+             it:\n{door}"
+        );
+        assert!(
+            !settle.contains("set_window_outer_rect"),
+            "and it is stated once — a second statement after the window is on \
+             the glass is the jump, the stale frame and the skirt's band all at \
+             once:\n{settle}"
+        );
+
+        assert!(
+            door.contains("bt_layout::SeatKind::Placeholder"),
+            "a window opened to receive a tab opens no shell: the stand-in is a \
+             seat with nothing in it, so retiring it costs nothing:\n{door}"
+        );
+        assert!(
+            door.contains("plan.receives.is_some()"),
+            "and only that door does — every other window's first tab is a \
+             shell:\n{door}"
+        );
+
+        assert!(
+            door.contains("if plan.receives.is_none()"),
+            "the receiving door does not show its window, because what it is \
+             holding at that moment is the scaffolding:\n{door}"
+        );
+        assert!(
+            settle.contains("show_new_window"),
+            "the tab's own half shows it, once the tab has arrived and the \
+             stand-in has gone:\n{settle}"
+        );
     }
 
     /// **The target draws the visitor's landing in the vocabulary its own tab
