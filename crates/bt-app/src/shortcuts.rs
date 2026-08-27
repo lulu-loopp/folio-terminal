@@ -3875,7 +3875,7 @@ mod tests {
         // kept its note after the machine landed would be the panel telling the
         // reader a working key does nothing.
         assert_eq!(
-            named("Jump to the longest waiting").note,
+            named("Jump to the longest waiting pane").note,
             None,
             "P1-8 landed, so the row is an ordinary window row"
         );

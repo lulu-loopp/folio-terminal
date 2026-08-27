@@ -316,8 +316,8 @@ static PROBE: OnceLock<Probe> = OnceLock::new();
 /// `Windows PowerShell` pane opening, and — since §7.1.6c-5 — the settings
 /// dialog showing the page the answer is written on. A user who only ever opens
 /// WSL still pays nothing; a user who never opens a 5.1 pane used to read
-/// "Checking this machine's PSReadLine" forever, because the row was drawn by a
-/// probe that had never been started. Calling it again is free.
+/// [`Text::PsReadLineProbing`] forever, because the row was drawn by a probe
+/// that had never been started. Calling it again is free.
 ///
 /// The window is woken through [`install_wake`] when the answer lands, and the
 /// wake belongs to the *process* rather than to whichever trigger happened to

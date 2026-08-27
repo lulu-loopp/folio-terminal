@@ -786,9 +786,13 @@ const DISCLOSURE_CHEVRON_HEIGHT_LOGICAL_PX: f32 = DISCLOSURE_CHEVRON_WIDTH_LOGIC
 
 /// The header, and the gear's own tooltip — [`Text::Settings`], which the gear
 /// reads too, because they are one word for one thing.
-const RECORD_BUTTON_LABEL: &str = "Record";
+fn record_button_label() -> &'static str {
+    Text::ShortcutRecord.text()
+}
 /// What the button says while it is listening.
-const RECORD_LISTENING_LABEL: &str = "Press…";
+fn record_listening_label() -> &'static str {
+    Text::ShortcutRecordListening.text()
+}
 /// What the muted line says while a row is listening.
 ///
 /// **Three verbs and no preamble**, because the button beside it already says
@@ -813,7 +817,9 @@ fn record_unusable_hint() -> &'static str {
 fn shortcut_undelivered_note() -> &'static str {
     Text::ShortcutUndelivered.text()
 }
-const RESTORE_ALL_LABEL: &str = "Restore all defaults";
+fn restore_all_label() -> &'static str {
+    Text::ShortcutRestoreAll.text()
+}
 
 // ── the one picker whose items carry a mark (mock-up 7647) ─────────────────
 /// `.profile-item .ticon { width: 14px }` (mock-up 1023) — the same column the
@@ -2716,8 +2722,9 @@ impl SettingsRow {
     /// The line under a row's title — **a function of the row's current value**.
     ///
     /// The mock-up varies two of these with the picker beside them: `wrap-desc`
-    /// says "Long lines fold at the pane's edge" on and "Long lines run on and
-    /// the pane scrolls sideways" off (2561, 7897), and `blockmax-desc` swaps
+    /// says one thing with wrapping on and names the two ways of following a
+    /// line that has run off the edge with it off (2561, 7897), and
+    /// `blockmax-desc` swaps
     /// between "Rendered blocks show in full" and "Blocks taller than this
     /// scroll inside themselves" (2576, 7904). A description that describes the
     /// *setting* rather than the *state* is the one line a user reads to find
@@ -11750,9 +11757,9 @@ fn push_shortcut_page(
                 &mut stack.labels,
                 record,
                 if listening {
-                    RECORD_LISTENING_LABEL
+                    record_listening_label()
                 } else {
-                    RECORD_BUTTON_LABEL
+                    record_button_label()
                 },
                 hover == Some(SettingsTarget::Record(placed.index)) || listening,
                 scale,
@@ -11825,7 +11832,7 @@ fn push_shortcut_page(
             &mut stack.quads,
             &mut stack.labels,
             restore_all,
-            RESTORE_ALL_LABEL,
+            restore_all_label(),
             hover == Some(SettingsTarget::RestoreAll),
             scale,
             border,
@@ -16220,6 +16227,28 @@ mod tests {
             .collect()
     }
 
+    /// Everything drawn on the page, put back into one string in drawing order.
+    ///
+    /// **A row's sentence is not a label** — it is as many labels as it needed
+    /// lines, and how many that is depends on the fonts this machine has and on
+    /// how long the sentence happens to be today. A test that wants to know
+    /// whether the sentence is *drawn* therefore asks this and not
+    /// `any(|label| label.text == sentence)`, which was quietly asking the
+    /// second question "did the copy fit on one line" — and which is why every
+    /// row test in this file went red the day the copy was rewritten
+    /// (2026-08-26) rather than the day a row stopped drawing its sentence.
+    ///
+    /// The lines are joined the way [`wrapped_description`] split them, so the
+    /// sentence comes back word for word — see the wrap test, which asserts
+    /// exactly that.
+    fn drawn_text(labels: &[ChromeLabel]) -> String {
+        labels
+            .iter()
+            .map(|label| label.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     fn sprites_of(
         placed: &SettingsLayout,
         hover: Option<SettingsTarget>,
@@ -17546,8 +17575,9 @@ mod tests {
         );
         assert_eq!(
             SettingsRow::DefaultProfile.description(&values()),
-            "What opens on a new tab, and when Folio starts",
-            "mock-up 2468, word for word but for the product's name"
+            "Which profile a new tab opens, and which one Folio starts with.",
+            "the copy ruling of 2026-08-26, which supersedes mock-up 2468's own \
+             wording — see docs/plans/ui-style/copy-guide.md"
         );
         assert_eq!(
             SettingsRow::DefaultProfile
@@ -17991,17 +18021,18 @@ mod tests {
             0.0,
         );
         let labels = labels_of(&placed, None, &values());
-        for text in [
-            "Display formulas",
-            "Typeset $$…$$ blocks; off shows the LaTeX source",
-            "On",
-            "Off",
-        ] {
+        for text in ["Display formulas", "On", "Off"] {
             assert!(
                 labels.iter().any(|label| label.text == text),
                 "{text:?} is part of the row and is not drawn"
             );
         }
+        let drawn = drawn_text(&labels);
+        let sentence = SettingsRow::Formulas.description(&values());
+        assert!(
+            drawn.contains(sentence),
+            "the row says what Off does, and it is not drawn: {sentence:?} in {drawn:?}"
+        );
         assert_eq!(SettingsRow::Formulas.option_count(), 2);
         assert_eq!(
             FORMULA_OPTIONS,
@@ -18023,12 +18054,12 @@ mod tests {
             0.0,
         );
         let labels = labels_of(&placed, None, &values());
-        for text in [
-            "Tables",
-            "Draw markdown tables in output; off shows the pipe text",
-            "On",
-            "Off",
-        ] {
+        let sentence = SettingsRow::Tables.description(&values());
+        assert!(
+            drawn_text(&labels).contains(sentence),
+            "the row says what Off does, and it is not drawn: {sentence:?}"
+        );
+        for text in ["Tables", "On", "Off"] {
             assert!(
                 labels.iter().any(|label| label.text == text),
                 "{text:?} is part of the row and is not drawn; drawn: {:?}",
@@ -18132,14 +18163,12 @@ mod tests {
             0.0,
         );
         let labels = labels_of(&placed, None, &values());
-        for text in [
-            "Maximum height",
-            "Blocks taller than this scroll inside themselves",
-            "No limit",
-            "120 px",
-            "240 px",
-            "480 px",
-        ] {
+        let sentence = SettingsRow::BlockMaxHeight.description(&values());
+        assert!(
+            drawn_text(&labels).contains(sentence),
+            "the row says what a cap does, and it is not drawn: {sentence:?}"
+        );
+        for text in ["Maximum height", "No limit", "120 px", "240 px", "480 px"] {
             assert!(
                 labels.iter().any(|label| label.text == text),
                 "{text:?} is part of the row and is not drawn; drawn: {:?}",
@@ -18255,14 +18284,12 @@ mod tests {
             0.0,
         );
         let labels = labels_of(&placed, None, &values());
-        for text in [
-            "Scrollback",
-            "Each pane keeps this many lines; the oldest go first",
-            "25,000",
-            "50,000",
-            "100,000",
-            "200,000",
-        ] {
+        let sentence = SettingsRow::Scrollback.description(&values());
+        assert!(
+            drawn_text(&labels).contains(sentence),
+            "the row says what the number buys, and it is not drawn: {sentence:?}"
+        );
+        for text in ["Scrollback", "25,000", "50,000", "100,000", "200,000"] {
             assert!(
                 labels.iter().any(|label| label.text == text),
                 "{text:?} is part of the row and is not drawn; drawn: {:?}",
@@ -18686,12 +18713,12 @@ mod tests {
         assert_eq!(SettingsRow::LineWrapping.selected_index(&off), Some(1));
         assert_eq!(
             SettingsRow::LineWrapping.description(&on),
-            "Long lines fold at the pane's edge."
+            "Lines longer than the pane fold at its edge."
         );
         assert_eq!(
             SettingsRow::LineWrapping.description(&off),
-            "Long lines run on and the pane scrolls sideways: Shift+wheel, or the \
-             bar along the pane's foot."
+            "Lines longer than the pane run on, and the pane scrolls sideways \
+             with Shift+wheel or the bar along its foot."
         );
         assert_ne!(
             SettingsRow::LineWrapping.description(&on),
@@ -19797,10 +19824,13 @@ mod tests {
         }
     }
 
-    /// The two new rows wear the mock-up's own words (lines 2358-2390), the
-    /// sidebar's second option among them: user ruling 2026-08-10 cut it from
-    /// "Icons, expand on hover" down to the mode's own name, and the mock-up
-    /// carries the same word.
+    /// The two rows draw their titles, their sentences and the sidebar's two
+    /// option names — the second of which is the one user ruling 2026-08-10 cut
+    /// from "Icons, expand on hover" down to the mode's own name.
+    ///
+    /// The sentences are read out of the rows rather than quoted here, which is
+    /// [`drawn_text`]'s own note: the copy is the language table's to say, and a
+    /// second copy of it in a test is a second thing to update.
     #[test]
     fn the_new_rows_wear_the_mock_ups_own_words() {
         // Two frames of the one page, because since the dialog's 600px cap a
@@ -19811,17 +19841,18 @@ mod tests {
         let at_sidebar = open_rows(1.0, Some(SettingsRow::Sidebar), TabLayoutMode::Vertical);
         let mut labels = labels_of(&at_rest, None, &values());
         labels.extend(labels_of(&at_sidebar, None, &values()));
-        for text in [
-            "Tab layout",
-            "Choose where tabs appear in the window",
-            "Sidebar",
-            "How the vertical tab sidebar rests",
-            "Expanded",
-            "Icons",
-        ] {
+        for text in ["Tab layout", "Sidebar", "Expanded", "Icons"] {
             assert!(
                 labels.iter().any(|label| label.text == text),
                 "{text:?} is the mock-up's own line and is not drawn"
+            );
+        }
+        let drawn = drawn_text(&labels);
+        for row in [SettingsRow::TabLayout, SettingsRow::Sidebar] {
+            let sentence = row.description(&values());
+            assert!(
+                drawn.contains(sentence),
+                "{row:?}: the row's sentence is not drawn: {sentence:?}"
             );
         }
         assert!(
@@ -21255,7 +21286,7 @@ mod tests {
         assert!(
             words(&page(at_rest.max_scroll()))
                 .iter()
-                .any(|label| label.text == RESTORE_ALL_LABEL),
+                .any(|label| label.text == restore_all_label()),
             "the page's own verb is drawn"
         );
     }
@@ -21541,7 +21572,7 @@ mod tests {
         assert!(
             labels
                 .iter()
-                .any(|label| label.text == RECORD_LISTENING_LABEL),
+                .any(|label| label.text == record_listening_label()),
             "and the button says it is listening"
         );
         for cap in &waiting {
@@ -21855,7 +21886,10 @@ mod tests {
         for text in [
             "class=\"cap\"",
             "class=\"sc-restore\"",
-            RESTORE_ALL_LABEL,
+            // The mock-up is an English document, so this one is quoted rather
+            // than read out of the table — a Chinese test run would otherwise
+            // look for 「全部恢复默认」 in a file that has never held it.
+            "Restore all defaults",
             "keybindings.json",
         ] {
             assert!(MOCKUP.contains(text), "the mock-up is missing {text:?}");
