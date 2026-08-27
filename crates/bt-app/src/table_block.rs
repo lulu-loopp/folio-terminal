@@ -107,6 +107,10 @@ pub fn build(
             links: &mut links,
             math_sites: &mut math_sites,
             region: None,
+            // A terminal block's table is not a document: its rows came off the
+            // wire, there is no block index to address a cell by, and the
+            // selection over this surface is the grid's own.
+            text: None,
         },
         &rows,
         &alignments,
