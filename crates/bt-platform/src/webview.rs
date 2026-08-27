@@ -446,6 +446,101 @@ pub enum RehostStep {
     NotifyPosition,
 }
 
+/// One switch this host decides for the engine rather than inheriting.
+///
+/// The names are the engine's own — [`WebSetting::api`] gives back the exact
+/// method, which is what a failure has to name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebSetting {
+    /// `ICoreWebView2Settings::IsWebMessageEnabled` — the page's way out to the
+    /// host.
+    WebMessage,
+    /// `ICoreWebView2Settings::AreHostObjectsAllowed` — the host's way in to the
+    /// page.
+    HostObjects,
+    /// `ICoreWebView2Settings::IsStatusBarEnabled`.
+    StatusBar,
+    /// `ICoreWebView2Settings::AreDevToolsEnabled`.
+    DevTools,
+    /// `ICoreWebView2Settings::AreDefaultContextMenusEnabled`.
+    DefaultContextMenus,
+    /// `ICoreWebView2Settings4::IsGeneralAutofillEnabled` — form data saved into
+    /// the profile directory.
+    GeneralAutofill,
+    /// `ICoreWebView2Settings4::IsPasswordAutosaveEnabled` — passwords saved into
+    /// the profile directory.
+    PasswordAutosave,
+}
+
+impl WebSetting {
+    /// The engine method this switch is set through, for the failure that names
+    /// it.
+    #[must_use]
+    pub const fn api(self) -> &'static str {
+        match self {
+            Self::WebMessage => "SetIsWebMessageEnabled",
+            Self::HostObjects => "SetAreHostObjectsAllowed",
+            Self::StatusBar => "SetIsStatusBarEnabled",
+            Self::DevTools => "SetAreDevToolsEnabled",
+            Self::DefaultContextMenus => "SetAreDefaultContextMenusEnabled",
+            Self::GeneralAutofill => "SetIsGeneralAutofillEnabled",
+            Self::PasswordAutosave => "SetIsPasswordAutosaveEnabled",
+        }
+    }
+}
+
+/// **Every engine switch this host decides, and the value it decides on.**
+/// [`WebHost::configure`] walks exactly this.
+///
+/// A table rather than a run of calls, because the thing that has to be right is
+/// the **set**. Each row is a value WebView2 has a default for, and every default
+/// this host does not overrule is a decision made by nobody — which is exactly
+/// how two autofill switches came to be on in a shipped build (release audit
+/// 2026-08-27, Codex 漏 10). So the set is a value a test can hold, and a switch
+/// added to the engine's API arrives here as a row somebody had to type on
+/// purpose.
+///
+/// The order is the order they are set in, and nothing depends on it.
+pub const WEB_SETTINGS: [(WebSetting, bool); 7] = [
+    // Slice ① hosts a page and offers it nothing. The bridge, the status bar and
+    // the developer tools are all slice ②'s and slice ④'s to decide about.
+    (WebSetting::WebMessage, false),
+    // **The other half of the bridge** (W2 slice 5, plan section 3's controlled
+    // file entry). `IsWebMessageEnabled` closes the page's way *out*; this closes
+    // the host's way *in*. Both are off for the same sentence: a local page
+    // opened out of the files column is read, and nothing in this product offers
+    // it an object, a method or a channel. Neither is conditional on where the
+    // page came from, because a switch that is only thrown for `file:` pages is a
+    // switch somebody has to remember to throw.
+    (WebSetting::HostObjects, false),
+    (WebSetting::StatusBar, false),
+    // **On since slice ④**, which is what a verb for it means: the head carries a
+    // `Developer tools` tool and `F12` is a row of the shortcut table, and
+    // neither can do anything against a controller that has the tools switched
+    // off. The window keeps the key — `webhost::claimable_chords` claims `F12`
+    // while a page has the focus — so the engine's own accelerator never reaches
+    // the page and there is still one door.
+    (WebSetting::DevTools, true),
+    (WebSetting::DefaultContextMenus, false),
+    // **Off, and the reason is the profile.** WebView2 defaults general autofill
+    // on, and this host runs a *persistent* user-data folder —
+    // `%LOCALAPPDATA%\Folio\WebView2`, `bt_app::webhost::user_data_folder` — so a
+    // default left alone would file names, addresses, phone numbers and card
+    // details typed into a previewed page into a profile directory on disk that
+    // outlives the window, the session and the reason the page was open. A
+    // terminal that shows a page is not a browser somebody chose to trust with
+    // that, and the preview has no verb for reviewing or clearing it. Off is the
+    // only value this host can honestly ship.
+    (WebSetting::GeneralAutofill, false),
+    // **Off, and set rather than inherited.** Password autosave's default has
+    // moved between runtime versions, and "whatever the engine on this machine
+    // happens to think" is not a privacy answer a release note can print. The
+    // same profile argument applies and applies harder: the one thing that must
+    // never end up in a directory this product creates behind a preview pane is
+    // somebody's password.
+    (WebSetting::PasswordAutosave, false),
+];
+
 /// The handoff, in order. [`WebHost::rehost`] walks exactly this.
 pub const REHOST_SEQUENCE: [RehostStep; 9] = [
     RehostStep::Hide,
@@ -1071,39 +1166,29 @@ impl WebHost {
             let settings = webview
                 .Settings()
                 .map_err(|error| failure("ICoreWebView2::Settings", &error))?;
-            // Slice ① hosts a page and offers it nothing. The bridge, the status
-            // bar and the developer tools are all slice ②'s and slice ④'s to
-            // decide about, and a default left on is a decision made by nobody.
-            settings
-                .SetIsWebMessageEnabled(false)
-                .map_err(|error| failure("SetIsWebMessageEnabled", &error))?;
-            // **The other half of the bridge** (W2 slice 5, plan section 3's
-            // controlled file entry). `IsWebMessageEnabled` closes the page's
-            // way *out*; this closes the host's way *in*. Both are off for the
-            // same sentence: a local page opened out of the files column is
-            // read, and nothing in this product offers it an object, a method
-            // or a channel. Neither is conditional on where the page came from,
-            // because a switch that is only thrown for `file:` pages is a
-            // switch somebody has to remember to throw.
-            settings
-                .SetAreHostObjectsAllowed(false)
-                .map_err(|error| failure("SetAreHostObjectsAllowed", &error))?;
-            settings
-                .SetIsStatusBarEnabled(false)
-                .map_err(|error| failure("SetIsStatusBarEnabled", &error))?;
-            // **On since slice ④**, which is what a verb for it means: the head
-            // carries a `Developer tools` tool and `F12` is a row of the
-            // shortcut table, and neither can do anything against a controller
-            // that has the tools switched off. The window keeps the key —
-            // `webhost::claimable_chords` claims `F12` while a page has the
-            // focus — so the engine's own accelerator never reaches the page and
-            // there is still one door.
-            settings
-                .SetAreDevToolsEnabled(true)
-                .map_err(|error| failure("SetAreDevToolsEnabled", &error))?;
-            settings
-                .SetAreDefaultContextMenusEnabled(false)
-                .map_err(|error| failure("SetAreDefaultContextMenusEnabled", &error))?;
+            // `_4` carries the two the profile would otherwise decide for us.
+            // Cast here rather than inside the loop, and failing rather than
+            // skipping, for the reason the `_15` and `_18` casts below are made
+            // where they are: a runtime too old to answer this must fail while
+            // the host is being configured — before the first navigation — and
+            // not quietly keep a form-filling profile nobody asked for.
+            let settings4: ICoreWebView2Settings4 = settings
+                .cast()
+                .map_err(|error| failure("ICoreWebView2Settings4", &error))?;
+            for (setting, value) in WEB_SETTINGS {
+                match setting {
+                    WebSetting::WebMessage => settings.SetIsWebMessageEnabled(value),
+                    WebSetting::HostObjects => settings.SetAreHostObjectsAllowed(value),
+                    WebSetting::StatusBar => settings.SetIsStatusBarEnabled(value),
+                    WebSetting::DevTools => settings.SetAreDevToolsEnabled(value),
+                    WebSetting::DefaultContextMenus => {
+                        settings.SetAreDefaultContextMenusEnabled(value)
+                    }
+                    WebSetting::GeneralAutofill => settings4.SetIsGeneralAutofillEnabled(value),
+                    WebSetting::PasswordAutosave => settings4.SetIsPasswordAutosaveEnabled(value),
+                }
+                .map_err(|error| failure(setting.api(), &error))?;
+            }
             let controller3: ICoreWebView2Controller3 = controller
                 .cast()
                 .map_err(|error| failure("ICoreWebView2Controller3", &error))?;
@@ -2153,6 +2238,82 @@ mod bounds_geometry_tests {
 /// into a visual belonging to a window it is no longer in — and it is exactly
 /// the thing a COM call cannot be asked about afterwards. So it is a value here,
 /// the executor walks it, and these tests hold it.
+/// **What this host decides for the engine, held without a browser.**
+///
+/// The set is the policy: a WebView2 default this host does not overrule is a
+/// decision nobody made, and it is not a thing a COM call can be asked about
+/// afterwards. So it is a value here, [`WebHost::configure`] walks it, and this
+/// holds it.
+#[cfg(test)]
+mod engine_settings_tests {
+    use super::*;
+
+    /// RED — **the switch set, and the two that were missing from it.**
+    ///
+    /// Release audit 2026-08-27 (Codex 漏 10): `rg 'IsGeneralAutofillEnabled|IsPasswordAutosaveEnabled'`
+    /// over this file returned nothing, so a persistent profile under
+    /// `%LOCALAPPDATA%\Folio\WebView2` was saving form data and whatever password
+    /// autosave defaulted to on that machine. Both are now decided here.
+    ///
+    /// MUTATIONS: drop either autofill row and this fails; flip `DevTools` off
+    /// and the `Developer tools` verb becomes a button that does nothing; flip
+    /// `WebMessage` or `HostObjects` on and slice ①'s "hosts a page and offers it
+    /// nothing" stops being true. Every one of those is a change somebody should
+    /// have to type twice.
+    #[test]
+    fn the_engine_is_configured_with_exactly_these_switches() {
+        assert_eq!(
+            WEB_SETTINGS,
+            [
+                (WebSetting::WebMessage, false),
+                (WebSetting::HostObjects, false),
+                (WebSetting::StatusBar, false),
+                (WebSetting::DevTools, true),
+                (WebSetting::DefaultContextMenus, false),
+                (WebSetting::GeneralAutofill, false),
+                (WebSetting::PasswordAutosave, false),
+            ]
+        );
+    }
+
+    /// RED — **nothing that saves what a person typed is left to a default.**
+    ///
+    /// The switch-set test above pins the whole table and would have to be
+    /// re-typed to change any of it; this one says the *reason* out loud, so a
+    /// future row added to the table cannot quietly be a saving one.
+    #[test]
+    fn no_switch_that_would_file_what_a_person_typed_is_on() {
+        for (setting, value) in WEB_SETTINGS {
+            if matches!(
+                setting,
+                WebSetting::GeneralAutofill | WebSetting::PasswordAutosave
+            ) {
+                assert!(
+                    !value,
+                    "{} would save into the persistent profile directory",
+                    setting.api()
+                );
+            }
+        }
+    }
+
+    /// Every switch names the engine method it is set through, and no two name
+    /// the same one — a failure that could not say which call refused would be a
+    /// failure nobody could act on.
+    #[test]
+    fn every_switch_names_one_engine_method_of_its_own() {
+        let mut named: Vec<&str> = WEB_SETTINGS
+            .iter()
+            .map(|(setting, _)| setting.api())
+            .collect();
+        assert!(named.iter().all(|api| api.starts_with("Set")));
+        named.sort_unstable();
+        let count = named.len();
+        named.dedup();
+        assert_eq!(named.len(), count, "two switches share one method name");
+    }
+}
+
 #[cfg(test)]
 mod rehost_contract_tests {
     use super::*;

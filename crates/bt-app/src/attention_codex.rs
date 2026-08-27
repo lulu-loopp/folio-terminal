@@ -265,19 +265,24 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
     if !changed {
         return Outcome::Unchanged;
     }
-    if !existing.is_empty() {
-        let backup = path.with_extension(format!("toml.bak-{}", crate::attention_hooks::today()));
-        if !backup.exists() {
-            let _ = std::fs::write(&backup, &existing);
+    // The atomic write, the backup that is a precondition and the link that is followed are all
+    // `attention_hooks::land`'s, said once for all three installers.
+    match crate::attention_hooks::land(
+        &path,
+        &existing,
+        "toml",
+        rendered(&document, &existing).as_bytes(),
+    ) {
+        crate::attention_hooks::Landing::Landed => {}
+        crate::attention_hooks::Landing::NoDirectory => {
+            return Outcome::Refused("the codex configuration directory could not be created");
         }
-    }
-    if let Some(parent) = path.parent()
-        && std::fs::create_dir_all(parent).is_err()
-    {
-        return Outcome::Refused("the codex configuration directory could not be created");
-    }
-    if std::fs::write(&path, rendered(&document, &existing)).is_err() {
-        return Outcome::Refused("the codex configuration file could not be written");
+        crate::attention_hooks::Landing::NoBackup => {
+            return Outcome::Refused(crate::attention_hooks::NO_BACKUP);
+        }
+        crate::attention_hooks::Landing::NotWritten => {
+            return Outcome::Refused("the codex configuration file could not be written");
+        }
     }
     if install {
         Outcome::Installed
