@@ -435,3 +435,7 @@ exe 77 MB → 说清即可;
 **一句话**:八个面里 **六个盘完、两个部分**(第 4 面的外部行情、第 6 面的三条首次体验细节)。
 两处缺口都已在正文里就地标了 `[未盘]` / `[未验证]`,没有一条是用推测补上的。
 建议把这两块作为独立一单交给 Codex 对审时一并补齐。
+
+## 用户裁决(2026-08-27)
+
+- **提交历史:选 ②**——建 remote 前一次 `git filter-repo`:去掉全部 `Claude-Session:` trailer、作者邮箱 `weiyishi@umich.edu` → `weiyishi024@gmail.com`;**时机=打磨期末、发布前一天、零在飞线**(hash 全变,所有 worktree/分支需先收完)。`Co-Authored-By` trailer 留(既有署名裁决)。
