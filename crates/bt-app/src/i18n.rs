@@ -534,6 +534,18 @@ pub enum Text {
     /// button changes, so a single word for both would be the row describing
     /// what it was a press ago.
     PreviewFlipToRendered,
+    /// `</>` while a **page** seat is showing that page's source — press it for
+    /// the page (user ruling 2026-08-26).
+    ///
+    /// A third entry rather than a second reading of
+    /// [`Self::PreviewFlipToRendered`], because that word is a claim this row
+    /// cannot make: what a press goes back to here is a live site drawn by a
+    /// browser, and calling it "the rendered" would make the markup underneath
+    /// sound like the thing it was rendered from — true of a markdown file, and
+    /// exactly the wrong sentence about a page that fetches, scripts and
+    /// navigates. The way *to* the source needs no third string: it is the same
+    /// file either way, which is the whole of the ruling.
+    PreviewFlipToPage,
 
     // ── the files tree ─────────────────────────────────────────────────────
     FilesLoading,
@@ -1510,6 +1522,24 @@ pub enum Text {
     /// row that goes stale the day they change tools.
     DescFocusCardHeight,
 
+    // ── the Cards column's first-arrival hint (§7.21, user ruling 2026-08-27) ──
+    //
+    // One contiguous block at the end, per this table's standing rule. **One
+    // entry**, and the count is the ruling: the bubble beside this sentence
+    // carries an `Alt` cap and a wheel, so the chord is already on the glass as
+    // a picture, and writing "Alt + wheel" into the words as well would be the
+    // card saying the same thing twice. `keyhint` has laid a row out this way
+    // since it was written — the key on the left, what it does on the right,
+    // and the key's name never repeated in the name of the verb.
+    /// **What `Alt` and the wheel do, and nothing else** — the whole of the
+    /// bubble's words.
+    ///
+    /// A verb phrase and not a sentence, because it is the right-hand half of a
+    /// row whose left-hand half is the chord: read across, the card says
+    /// "`Alt` + wheel — scroll a card", and read on its own the phrase would be
+    /// missing its subject in exactly the way a `keyhint` line's name is.
+    CardGestureHint,
+
     // ── the page's hand-off arrow (§7.1.5g, user ruling 2026-08-20) ─────────
     //
     // One contiguous block at the end, per this table's standing rule. **One
@@ -1919,6 +1949,30 @@ pub enum Text {
     TabMenuMoveToNewWindow,
     /// **`Close tab`** — the `×`'s verb, spelled.
     TabMenuClose,
+
+    // ── the three the sweep of 2026-08-26 found still in English ───────────
+    //
+    // The note above says the recorder's three lines "were the last English
+    // literals" on the Shortcuts page. They were not: `RECORD_BUTTON_LABEL`,
+    // `RECORD_LISTENING_LABEL` and `RESTORE_ALL_LABEL` sat beside them in
+    // `settings.rs` and went on drawing English into a Chinese dialog — the
+    // page's only three *controls* while every row around them turned over.
+    // Found by photographing the page in both languages, which is the one check
+    // a `&'static str` constant cannot fail on its own.
+    /// **The button that starts listening for a chord.**
+    ShortcutRecord,
+    /// **What that button says while it is listening** — the verb it is waiting
+    /// for, and not a second word for "recording": what the reader has to do
+    /// next is press a key.
+    ShortcutRecordListening,
+    /// **The Shortcuts page's foot verb**, which puts every row back on the
+    /// chord it shipped with.
+    ///
+    /// Its own entry rather than [`Self::ProfilesRestoreAll`]'s, though the two
+    /// carry the same English words: one page's defaults are keybindings and the
+    /// other's are a profile's fields, and a table that made them one entry
+    /// would be a table where translating one page's verb moved the other's.
+    ShortcutRestoreAll,
 }
 
 impl Text {
@@ -1945,7 +1999,7 @@ impl Text {
             // ── tab strip and rail ─────────────────────────────────────────
             Self::RailTabs => pick(lang, "Tabs", "标签"),
             Self::RailNewTab => pick(lang, "New tab", "新建标签"),
-            Self::ChooseProfile => pick(lang, "Choose a profile", "选择配置文件"),
+            Self::ChooseProfile => pick(lang, "Choose a profile", "选择档案"),
             Self::Pin => pick(lang, "Pin", "固定"),
             // Names the verb *and* the reason, because "Unpin" alone does not
             // explain where the close button went (mock-up 4204).
@@ -2000,11 +2054,11 @@ impl Text {
             Self::RowFormulas => pick(lang, "Display formulas", "行间公式"),
             Self::RowInlineFormulas => pick(lang, "Inline formulas", "行内公式"),
             Self::RowGitPanel => pick(lang, "Git panel", "Git 面板"),
-            Self::RowContextMenu => pick(lang, "Explorer context menu", "资源管理器右键菜单"),
+            Self::RowContextMenu => pick(lang, "Explorer context menu", "资源管理器菜单"),
             Self::RowTabLayout => pick(lang, "Tab layout", "标签布局"),
             Self::RowSidebar => pick(lang, "Sidebar", "侧栏"),
-            Self::RowSplitDirection => pick(lang, "Split direction", "分屏方向"),
-            Self::RowDefaultProfile => pick(lang, "Default profile", "默认配置文件"),
+            Self::RowSplitDirection => pick(lang, "Split direction", "拆分方向"),
+            Self::RowDefaultProfile => pick(lang, "Default profile", "默认档案"),
             Self::RowLanguage => pick(lang, "Language", "语言"),
             Self::RowTerminalFont => pick(lang, "Terminal font", "终端字体"),
             Self::RowFontSize => pick(lang, "Font size", "字号"),
@@ -2015,21 +2069,25 @@ impl Text {
                 "Light, dark, or follow your system setting",
                 "浅色、深色，或跟随系统设置",
             ),
-            Self::DescCursor => pick(lang, "Focused cursor shape", "聚焦时的光标形状"),
+            Self::DescCursor => pick(
+                lang,
+                "The shape the cursor takes in the pane you are typing in.",
+                "你正在输入的那个窗格里，光标是什么形状。",
+            ),
             Self::DescFormulas => pick(
                 lang,
-                "Typeset $$…$$ blocks; off shows the LaTeX source",
-                "排版 $$…$$ 块；关闭则显示 LaTeX 源码",
+                "Typesets $$…$$ blocks in command output. Off, the LaTeX source is shown as it was printed.",
+                "排版命令输出里的 $$…$$ 块。关闭时显示 LaTeX 源码原文。",
             ),
             Self::DescInlineFormulas => pick(
                 lang,
-                "Typeset $…$ in command output; off shows the source",
-                "排版命令输出里的 $…$；关闭则显示源码",
+                "Typesets $…$ in command output. Off, the source is shown as it was printed.",
+                "排版命令输出里的 $…$。关闭时显示源码原文。",
             ),
             Self::DescGitPanel => pick(
                 lang,
-                "A Git page beside the file tree; off reads no repository",
-                "文件树旁的 Git 页；关闭则不读取任何仓库",
+                "Adds a Git page to the files column. Off, Folio never reads a repository.",
+                "在文件列里加一页 Git。关闭时，Folio 不会读取任何仓库。",
             ),
             // **Two facts and no opinion about either.** What the entry says,
             // and where Windows 11 puts it — the second because it is the half a
@@ -2047,28 +2105,28 @@ impl Text {
             // that something is being added.
             Self::DescContextMenu => pick(
                 lang,
-                "Open Folio here, under Windows 11's Show more options",
-                "Open Folio here，在 Windows 11 的显示更多选项里",
+                "Adds Open Folio here to Explorer's right-click menu. Windows 11 files it under Show more options.",
+                "在资源管理器的右键菜单里加上「在 Folio 中打开」。Windows 11 把它收在「显示更多选项」下面。",
             ),
             Self::DescTabLayout => pick(
                 lang,
-                "Choose where tabs appear in the window",
-                "选择标签在窗口里的位置",
+                "Whether tabs run along the top of the window or down its side.",
+                "标签是横排在窗口顶部，还是竖排在侧边。",
             ),
             Self::DescSidebar => pick(
                 lang,
-                "How the vertical tab sidebar rests",
-                "竖向标签栏平时的形态",
+                "Expanded keeps the vertical tab strip open beside the terminal. Icons parks it as a narrow strip that opens over the terminal.",
+                "「展开」让竖排标签栏一直开在终端旁边；「图标」把它收成一条窄条，需要时覆盖在终端上打开。",
             ),
             Self::DescSplitDirection => pick(
                 lang,
-                "Where a split with no direction of its own puts the new pane",
-                "没有自带方向的分屏把新窗格放在哪边",
+                "Where a new pane lands when the split you asked for names no direction of its own.",
+                "拆分时没有指明方向的话，新窗格落在哪一边。",
             ),
             Self::DescDefaultProfile => pick(
                 lang,
-                "What opens on a new tab, and when Folio starts",
-                "新建标签时、以及 Folio 启动时打开什么",
+                "Which profile a new tab opens, and which one Folio starts with.",
+                "新建标签时打开哪个档案，以及 Folio 启动时用哪个。",
             ),
             // **It used to say when it took effect** — "Applies the next time
             // Folio starts" — because that was the one surprising thing about
@@ -2088,13 +2146,13 @@ impl Text {
             // otherwise.
             Self::DescTerminalFont => pick(
                 lang,
-                "The face the grid is drawn in; the window's own labels keep theirs",
-                "网格所用的字体；窗口自身的文字保持原样",
+                "The font terminal text is drawn in. Tabs, menus and this dialog keep their own.",
+                "终端文字使用的字体。标签、菜单和这个对话框保持各自的字体。",
             ),
             Self::DescFontSize => pick(
                 lang,
-                "How large grid text is drawn, before the display's scaling",
-                "网格文字画多大，尚未乘显示器的缩放",
+                "How large terminal text is, before your display's scaling is applied.",
+                "终端文字有多大，尚未计入显示器的缩放。",
             ),
             Self::RowLightScheme => pick(lang, "Light scheme", "浅色配色"),
             Self::RowDarkScheme => pick(lang, "Dark scheme", "深色配色"),
@@ -2104,13 +2162,13 @@ impl Text {
             // reads as two paths.
             Self::DescLightScheme => pick(
                 lang,
-                "The colours a Light window is drawn in, terminal and chrome alike",
-                "浅色窗口所用的颜色，终端与窗口自身同出一套",
+                "The palette a light window uses, for terminal text and for the window around it.",
+                "浅色窗口用的配色，终端与窗口本身共用一套。",
             ),
             Self::DescDarkScheme => pick(
                 lang,
-                "The same for a Dark window. Files: %APPDATA%\\Folio\\schemes",
-                "深色窗口同理。文件放在 %APPDATA%\\Folio\\schemes",
+                "The same for a dark window. Your own scheme files go in %APPDATA%\\Folio\\schemes.",
+                "深色窗口同理。你自己的配色文件放在 %APPDATA%\\Folio\\schemes。",
             ),
             Self::SchemeFileSkipped => pick(lang, "Colour scheme skipped", "配色文件已跳过"),
 
@@ -2123,43 +2181,43 @@ impl Text {
             Self::RowAlwaysOnTop => pick(lang, "Always on top", "总在最前"),
             Self::DescBackgroundImage => pick(
                 lang,
-                "Drawn once behind the window, beneath every pane",
-                "在整扇窗口背后画一次，位于每个窗格之下",
+                "A picture drawn behind the whole window, under every pane.",
+                "在整扇窗口背后画一张图片，位于所有窗格之下。",
             ),
             Self::DescImageFit => pick(
                 lang,
-                "How the picture meets a window that is not its shape",
-                "图片与形状不同的窗口如何相配",
+                "How the picture meets a window that is not its shape: stretched, filled or tiled.",
+                "图片与窗口形状不同时怎么铺开：拉伸、填充或平铺。",
             ),
             Self::DescImageOpacity => pick(
                 lang,
-                "How much of the picture reaches the window",
-                "图片有多少落到窗口上",
+                "How much of the picture you see. At 0 the window is drawn without it.",
+                "图片显示出多少。为 0 时窗口不画它。",
             ),
             Self::DescBackgroundOpacity => pick(
                 lang,
-                "Panes and the window ground; text and menus stay opaque",
-                "作用于窗格与窗口底色；文字与菜单保持不透明",
+                "How much of the desktop shows through panes and the window behind them. Text and menus stay solid.",
+                "桌面透过窗格和它们背后的窗口显出多少。文字与菜单保持不透明。",
             ),
             Self::DescAcrylic => pick(
                 lang,
-                "A Windows blur behind the ground. Visible only below full opacity",
-                "底色之后的 Windows 模糊。仅在不透明度低于 100% 时可见",
+                "Blurs whatever sits behind the window. Visible only when background opacity is below 100%.",
+                "把窗口背后的东西模糊掉。仅在背景不透明度低于 100% 时可见。",
             ),
             Self::DescAlwaysOnTop => pick(
                 lang,
-                "The window stays above other windows",
-                "窗口保持在其他窗口之上",
+                "This window stays above every other window.",
+                "这扇窗口保持在其他所有窗口之上。",
             ),
             Self::DescAcrylicUnavailable => pick(
                 lang,
-                "This Windows has no system backdrop to draw",
-                "此版本 Windows 没有可用的系统背景材质",
+                "This version of Windows does not offer the blur.",
+                "这个版本的 Windows 不提供这种模糊。",
             ),
             Self::DescBackgroundOpacityUnavailable => pick(
                 lang,
-                "This window is composited opaque",
-                "此窗口以不透明方式合成",
+                "This window is drawn opaque and cannot let the desktop through.",
+                "这扇窗口以不透明方式绘制，无法让桌面透过来。",
             ),
             Self::OptionImageNone => pick(lang, "None", "无"),
             Self::OptionImageChoose => pick(lang, "Choose…", "选择…"),
@@ -2185,8 +2243,8 @@ impl Text {
 
             Self::PsReadLineProbing => pick(
                 lang,
-                "Checking this machine's PSReadLine",
-                "正在检查本机的 PSReadLine",
+                "Checking which PSReadLine this machine has",
+                "正在检查本机装的是哪个 PSReadLine",
             ),
             Self::PsReadLineRowGone => pick(
                 lang,
@@ -2222,7 +2280,7 @@ impl Text {
             Self::ContextMenuAddedToast => pick(
                 lang,
                 "Open Folio here is in Explorer's menu, under Show more options",
-                "Open Folio here 已进入资源管理器菜单，在显示更多选项里",
+                "「在 Folio 中打开」已进入资源管理器菜单，在「显示更多选项」下面",
             ),
             Self::ContextMenuRemovedToast => pick(
                 lang,
@@ -2261,6 +2319,7 @@ impl Text {
             Self::PreviewCopyAddress => pick(lang, "Copy address", "复制地址"),
             Self::PreviewFlipToSource => pick(lang, "View source", "查看源码"),
             Self::PreviewFlipToRendered => pick(lang, "View rendered", "查看渲染结果"),
+            Self::PreviewFlipToPage => pick(lang, "View page", "查看页面"),
             Self::FileMenuCopyPath => pick(lang, "Copy path", "复制路径"),
             Self::FileMenuInsertPath => pick(lang, "Insert path into terminal", "把路径插入终端"),
 
@@ -2343,7 +2402,7 @@ impl Text {
             ),
             Self::PreviewFailedSeatTooSmall => pick(
                 lang,
-                "Preview failed: preview seat is too small",
+                "Preview failed: the preview pane is too small",
                 "预览失败：预览窗格太小",
             ),
 
@@ -2457,8 +2516,8 @@ impl Text {
             // printed as.
             Self::DescTables => pick(
                 lang,
-                "Draw markdown tables in output; off shows the pipe text",
-                "绘制输出里的 markdown 表格；关闭则显示管道符原文",
+                "Draws markdown tables in command output. Off, the pipe characters are shown as they were printed.",
+                "画出命令输出里的 markdown 表格。关闭时显示管道符原文。",
             ),
             // 「最大高度」is the row, and the sentence is the mock-up's own
             // (9941): it says what the cap *does* rather than what it forbids,
@@ -2469,8 +2528,8 @@ impl Text {
             Self::RowBlockMaxHeight => pick(lang, "Maximum height", "最大高度"),
             Self::DescBlockMaxHeight => pick(
                 lang,
-                "Blocks taller than this scroll inside themselves",
-                "更高的块在自己内部滚动",
+                "A rendered block taller than this scrolls inside itself instead of growing.",
+                "超过这个高度的渲染块会在自己内部滚动，而不是继续变高。",
             ),
             Self::OptionBlockHeightNone => pick(lang, "No limit", "不限"),
             // A verb, because that is what pressing `On` here does. 「更新」is
@@ -2488,28 +2547,28 @@ impl Text {
             Self::ProfilesRowName => pick(lang, "Name", "名称"),
             Self::ProfilesRowNameDesc => pick(
                 lang,
-                "What this profile is called on tabs, in the picker and in this list",
-                "标签、选择器与本列表上写的名字",
+                "What this profile is called on tabs, in the profile picker and in this list.",
+                "这个档案在标签、选择器和这份列表里显示的名字。",
             ),
             Self::ProfilesRowProgram => pick(lang, "Program", "程序"),
             Self::ProfilesRowProgramDesc => pick(
                 lang,
-                "The executable a new tab of this profile starts",
-                "该档案新建标签时启动的可执行文件",
+                "The program a new tab of this profile starts.",
+                "这个档案新建标签时启动的程序。",
             ),
             Self::ProfilesRowStartingDir => pick(lang, "Starting directory", "起始目录"),
             Self::ProfilesRowStartingDirDesc => pick(
                 lang,
-                "Where a new tab of this profile opens",
-                "该档案的新标签在哪里打开",
+                "The folder a new tab of this profile opens in.",
+                "这个档案的新标签在哪个文件夹里打开。",
             ),
             Self::ProfilesRowColour => pick(lang, "Colour", "颜色"),
             Self::ProfilesRowColourDesc => pick(
                 lang,
-                "The mark that names this profile across the window",
-                "窗口各处标示该档案的那个标记",
+                "The colour that marks this profile on tabs and in menus.",
+                "在标签和菜单里标示这个档案的颜色。",
             ),
-            Self::ProfilesInherit => pick(lang, "The current pane's folder", "当前 pane 的文件夹"),
+            Self::ProfilesInherit => pick(lang, "The current pane's folder", "当前窗格的文件夹"),
             Self::ProfilesHome => pick(lang, "Home", "主目录"),
             Self::ProfilesChooseFolder => pick(lang, "Choose a folder…", "选择文件夹…"),
             Self::ProfilesColourBlue => pick(lang, "Blue", "蓝"),
@@ -2525,20 +2584,20 @@ impl Text {
             Self::ProfilesRowArgs => pick(lang, "Arguments", "参数"),
             Self::ProfilesRowArgsDesc => pick(
                 lang,
-                "Passed to the program ahead of anything the shell reads · spaces separate, double quotes group",
-                "在 shell 读取任何东西之前传给程序 · 空格分词，双引号成组",
+                "Passed to the program before it reads anything of its own. Spaces separate; double quotes group.",
+                "在程序读取自己的任何内容之前传给它。空格分词，双引号成组。",
             ),
             Self::ProfilesRowEnv => pick(lang, "Environment", "环境变量"),
             Self::ProfilesRowEnvDesc => pick(
                 lang,
-                "Set for this profile's sessions, over what Folio sets",
-                "为该档案的会话设置,覆盖 Folio 设置的值",
+                "Set for every session this profile starts, over what Folio sets itself.",
+                "为这个档案启动的每个会话设置，覆盖 Folio 自己设的值。",
             ),
             Self::ProfilesRowHyperlink => pick(lang, "Force hyperlinks", "强制超链接"),
             Self::ProfilesRowHyperlinkDesc => pick(
                 lang,
-                "FORCE_HYPERLINK, the answer programs read before emitting a link",
-                "FORCE_HYPERLINK，程序发出链接前读的那个回答",
+                "Sets FORCE_HYPERLINK, which programs read before deciding to emit a link.",
+                "设置 FORCE_HYPERLINK，程序在决定是否输出链接前会读它。",
             ),
             Self::ProfilesRowIntegration => pick(lang, "Shell integration", "Shell 集成"),
             Self::ProfilesEnvAdd => pick(lang, "Add", "添加"),
@@ -2557,8 +2616,8 @@ impl Text {
             ),
             Self::ProfilesCannotHideFallback => pick(
                 lang,
-                "Every fallback lands on this profile",
-                "每一次降级都落在这个档案上",
+                "Folio falls back to this profile when another cannot start",
+                "别的档案起不来时，Folio 会退到这个档案",
             ),
             Self::ProfilesNameBlank => pick(lang, "A profile needs a name", "档案需要一个名字"),
             Self::ProfilesNameTaken => pick(
@@ -2578,22 +2637,22 @@ impl Text {
             Self::CapFullNoLinks => pick(
                 lang,
                 "Prompt marks, directory and exit codes; no hyperlinks",
-                "提示符标记、目录与退出码;没有超链接",
+                "提示符标记、目录与退出码；没有超链接",
             ),
             Self::CapPowerShellNoLinks => pick(
                 lang,
                 "Prompt marks, directory and exit codes with folio.ps1 dot-sourced; no hyperlinks",
-                "已点源 folio.ps1 时有提示符标记、目录与退出码;没有超链接",
+                "已点源 folio.ps1 时有提示符标记、目录与退出码；没有超链接",
             ),
             Self::CapWslBashNoLinks => pick(
                 lang,
                 "Prompt marks, directory and exit codes on a bash login only; no hyperlinks",
-                "仅 bash 登录时有提示符标记、目录与退出码;没有超链接",
+                "仅 bash 登录时有提示符标记、目录与退出码；没有超链接",
             ),
             Self::CapCmdNoLinks => pick(
                 lang,
                 "Directory; no prompt marks, no exit codes, no hyperlinks",
-                "目录;没有提示符标记,没有退出码,没有超链接",
+                "目录；没有提示符标记，没有退出码，没有超链接",
             ),
             // The mock-up's own wording for this row (`.pf-view[data-view=edit]`,
             // the `Shell integration` line), which says what is lost and then
@@ -2624,19 +2683,19 @@ impl Text {
             Self::ShortcutReopenClosed => {
                 pick(lang, "Reopen the last closed tab", "重新打开最近关闭的标签")
             }
-            Self::ShortcutJumpAttention => {
-                pick(lang, "Jump to the longest waiting", "跳到等待最久的那个")
-            }
+            Self::ShortcutJumpAttention => pick(
+                lang,
+                "Jump to the longest waiting pane",
+                "跳到等待最久的窗格",
+            ),
             Self::ShortcutCommandPalette => pick(lang, "Command palette", "命令面板"),
             Self::ShortcutSplitHorizontal => pick(lang, "Split horizontally", "横向拆分"),
-            Self::ShortcutSplitVertical => pick(lang, "Split vertically", "纵向拆分"),
-            Self::ShortcutDuplicatePaneSplit => pick(
-                lang,
-                "Duplicate pane into a split",
-                "把窗格复制到一个拆分里",
-            ),
+            Self::ShortcutSplitVertical => pick(lang, "Split vertically", "竖向拆分"),
+            Self::ShortcutDuplicatePaneSplit => {
+                pick(lang, "Duplicate pane into a split", "复制窗格到拆分里")
+            }
             Self::ShortcutFilesPane => pick(lang, "Files column", "文件列"),
-            Self::ShortcutGitPage => pick(lang, "Turn the files column to Git", "把文件列切到 Git"),
+            Self::ShortcutGitPage => pick(lang, "Turn the files column to Git", "文件列切到 Git"),
             Self::ShortcutSavePreview => pick(lang, "Save the open document", "保存打开的文档"),
             Self::ShortcutPrevCommandMark => pick(lang, "Previous command", "上一条命令"),
             Self::ShortcutNextCommandMark => pick(lang, "Next command", "下一条命令"),
@@ -2644,15 +2703,17 @@ impl Text {
             // the capsule has two hosts now (§7.7 ②) and a title naming one of
             // them would be a shortcut page telling a reader the key does not
             // work where it does. It names the surface both hosts are — a pane.
-            Self::ShortcutOpenSearch => pick(lang, "Find in this pane", "在这个窗格里查找"),
+            Self::ShortcutOpenSearch => pick(lang, "Find in this pane", "在本窗格中查找"),
             Self::ShortcutNextMatch => pick(lang, "Next match", "下一处匹配"),
             Self::ShortcutPrevMatch => pick(lang, "Previous match", "上一处匹配"),
-            Self::ShortcutSummonPip1 => pick(lang, "Summon PiP slot 1", "唤出 PiP 槽位 1"),
-            Self::ShortcutSummonPip2 => pick(lang, "Summon PiP slot 2", "唤出 PiP 槽位 2"),
-            Self::ShortcutSummonPip3 => pick(lang, "Summon PiP slot 3", "唤出 PiP 槽位 3"),
-            Self::ShortcutSummonPip4 => pick(lang, "Summon PiP slot 4", "唤出 PiP 槽位 4"),
+            Self::ShortcutSummonPip1 => pick(lang, "Summon picture in picture 1", "唤出画中画 1"),
+            Self::ShortcutSummonPip2 => pick(lang, "Summon picture in picture 2", "唤出画中画 2"),
+            Self::ShortcutSummonPip3 => pick(lang, "Summon picture in picture 3", "唤出画中画 3"),
+            Self::ShortcutSummonPip4 => pick(lang, "Summon picture in picture 4", "唤出画中画 4"),
             Self::ShortcutFamilyGotoTab => pick(lang, "Go to tab 1–9", "转到标签 1–9"),
-            Self::ShortcutFamilySummonPip => pick(lang, "Summon PiP slot 1–4", "唤出 PiP 槽位 1–4"),
+            Self::ShortcutFamilySummonPip => {
+                pick(lang, "Summon picture in picture 1–4", "唤出画中画 1–4")
+            }
             Self::ShortcutScopePreview => pick(lang, "In a preview", "在预览里"),
             Self::ShortcutScopeTerminalPrimary => {
                 pick(lang, "On a terminal's own scrollback", "在终端自己的回滚里")
@@ -2660,8 +2721,8 @@ impl Text {
             Self::ShortcutScopeSearchOpen => pick(lang, "While the search is open", "查找打开时"),
             Self::ShortcutNotePending => pick(
                 lang,
-                "Bound; the verb behind it is still to come",
-                "已绑定；它背后的功能还没有到",
+                "Bound, but the action behind it is not built yet",
+                "已绑定，但它背后的功能还没有做出来",
             ),
             Self::ShortcutNoteOnePerMember => pick(lang, "One chord for each", "每一个各有一组键"),
             Self::ShortcutNoteNoneAssigned => pick(
@@ -2972,9 +3033,8 @@ impl Text {
             Self::RowKeyHints => pick(lang, "Shortcut hints", "快捷键提示"),
             Self::DescKeyHints => pick(
                 lang,
-                "Holding a modifier for a moment lists the shortcuts it starts. \
-                 The card never takes a key.",
-                "按住修饰键片刻,列出以它开头的快捷键。这张卡片不吃任何按键。",
+                "Hold a modifier for a moment and this window lists the shortcuts that start with it. The list never takes a keystroke.",
+                "按住修饰键片刻，这扇窗会列出以它开头的快捷键。这个列表不会截走任何按键。",
             ),
             // ── the tree row's menu, completed (user ruling 2026-08-25) ────
             //
@@ -3007,8 +3067,8 @@ impl Text {
             // beside it do not.
             Self::DescScrollback => pick(
                 lang,
-                "Each pane keeps this many lines; the oldest go first",
-                "每个窗格保留这么多行,最旧的先走",
+                "How many lines each pane keeps. Past that, the oldest lines are dropped.",
+                "每个窗格保留多少行。超出之后，最旧的行会被丢掉。",
             ),
             // 「自动折行」and not 「换行」: 「换行」is what a newline in the
             // output is, and this row is about what the pane does to a line the
@@ -3021,16 +3081,16 @@ impl Text {
             // (2561, 7897) and this is that.
             Self::DescLineWrappingOn => pick(
                 lang,
-                "Long lines fold at the pane's edge.",
-                "长行在窗格边缘折行。",
+                "Lines longer than the pane fold at its edge.",
+                "比窗格宽的行在边缘折行。",
             ),
             // Two clauses: what happens to the line, and how to follow it. The
             // second is the row's whole reason for varying — see the variant.
             // It states the two ways and stops (copy ruling, 2026-08-17).
             Self::DescLineWrappingOff => pick(
                 lang,
-                "Long lines run on and the pane scrolls sideways: Shift+wheel, or the bar along the pane's foot.",
-                "长行一直延伸,窗格横向滚动:Shift+滚轮,或窗格底边那条横条。",
+                "Lines longer than the pane run on, and the pane scrolls sideways with Shift+wheel or the bar along its foot.",
+                "比窗格宽的行一直延伸，窗格可以横向滚动：Shift+滚轮，或底边那条横条。",
             ),
             // 「窗口」and not 「窗」: the settings page already says 「窗口」in
             // `CloseWindow`, and one product does not have two words for the
@@ -3075,8 +3135,8 @@ impl Text {
             // that says less.
             Self::DescFocusMode => pick(
                 lang,
-                "The tab strip becomes a column of cards, one per tab; the tab you pick fills the window whole, splits and all. Ctrl+Shift+Z turns this same setting",
-                "标签条变成一列卡片,一张卡一个标签;点中的那个标签整个占满窗口,分屏原样。Ctrl+Shift+Z 拨的是同一个开关",
+                "The tab strip becomes a column of cards, one per tab, and the tab you pick fills the window whole. Ctrl+Shift+Z turns this same setting.",
+                "标签条变成一列卡片，一张卡一个标签；选中的那个标签占满整扇窗口。Ctrl+Shift+Z 拨的是同一个开关。",
             ),
             // 「最小对比度」is the term of art both WCAG's Chinese translations
             // and VS Code's own Chinese locale use for this quantity, so the row
@@ -3094,8 +3154,8 @@ impl Text {
             // wearing.
             Self::DescMinimumContrast => pick(
                 lang,
-                "Lightens or darkens terminal text to meet this ratio against its cell. Backgrounds never change, nor does anything outside the grid. Above Off it overrides a program's colours",
-                "把终端文字提亮或压暗,直到与它所在格子的底色达到这个对比度。底色一律不动,网格以外的一切也不动。Off 以上的档位会覆盖程序指定的颜色",
+                "Lightens or darkens terminal text until it meets this ratio against the cell behind it. Backgrounds never change, and above Off this overrides the colours a program asked for.",
+                "把终端文字提亮或压暗，直到与它背后的单元格达到这个对比度。背景一律不动；Off 以上的档位会覆盖程序指定的颜色。",
             ),
             // 「通知」and not 「桌面通知」: Windows itself calls the surface
             // 「通知」in its own Settings, and the row's sentence says where it
@@ -3108,8 +3168,8 @@ impl Text {
             // question is no while the pane is in front of you.
             Self::DescNotifications => pick(
                 lang,
-                "Programs that ask can put a message on the desktop. Nothing arrives while the pane is on screen in a focused window",
-                "程序主动要求时,可以在桌面上放一条消息。窗格正在这扇窗里显示、而这扇窗又是聚焦的,就什么都不弹",
+                "A program that asks for one can put a message on your desktop. Nothing appears while its pane is on screen in the focused window.",
+                "程序主动请求时，可以在你的桌面上放一条消息。它所在的窗格正显示在聚焦的窗口里时，什么都不弹。",
             ),
             // ── the turn-end lane ──────────────────────────────────────────
             // 「回合结束」and not 「Agent 说完了」: the row is about a moment,
@@ -3122,8 +3182,8 @@ impl Text {
             // question a reader asks before switching it off.
             Self::DescTurnEndNotifications => pick(
                 lang,
-                "When an agent stops talking, flash this window's taskbar button, or put a message on the desktop if the window is minimised. The marks inside the window are unaffected",
-                "Agent 说完一个回合时,闪这扇窗的任务栏按钮;窗最小化了就在桌面上放一条消息。窗内的记号不受这一行影响",
+                "When an agent finishes a turn, this window's taskbar button flashes, or a message goes to your desktop if the window is minimised. Marks inside the window are unaffected.",
+                "一个回合结束时，闪动这扇窗的任务栏按钮；窗口最小化时改为在桌面上放一条消息。窗内的记号不受影响。",
             ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
             Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),
@@ -3157,21 +3217,19 @@ impl Text {
                 "Added to $PROFILE. Takes effect in a new shell.",
                 "已加进 $PROFILE。新开的 shell 生效。",
             ),
-            Self::RowPowerShellOffer => pick(
-                lang,
-                "Offer PowerShell integration",
-                "提示安装 PowerShell 整合",
-            ),
+            Self::RowPowerShellOffer => {
+                pick(lang, "Offer PowerShell integration", "PowerShell 集成提示")
+            }
             Self::DescPowerShellOffer => pick(
                 lang,
-                "A PowerShell pane whose $PROFILE does not load folio.ps1 shows one line offering to add it. Off stops the offer; a $PROFILE that already loads it is never asked about",
-                "PowerShell 窗格的 $PROFILE 没有加载 folio.ps1 时,在那个窗格里显示一行,提供加入的动作。关闭后不再提示;已经加载的 $PROFILE 本来就不会被问",
+                "A PowerShell pane whose $PROFILE does not load folio.ps1 offers to add it. Off, the offer never appears.",
+                "PowerShell 窗格的 $PROFILE 没有加载 folio.ps1 时，会提示把它加进去。关闭后不再提示。",
             ),
             Self::RowClaudeHooks => pick(lang, "Claude Code hooks", "Claude Code 钩子"),
             Self::DescClaudeHooks => pick(
                 lang,
-                "Adds hooks to your own ~/.claude/settings.json so Claude Code tells this window when it is waiting for you. Nothing is written into a folder or a repository",
-                "向你自己的 ~/.claude/settings.json 写入 hooks,Claude Code 在等你回答时会告诉这扇窗。不往任何文件夹或仓库里写",
+                "Adds hooks to your ~/.claude/settings.json, so Claude Code tells this window when it is waiting for you. Nothing is written into a project folder.",
+                "在你的 ~/.claude/settings.json 里加上 hooks，让 Claude Code 在等你回答时告诉这扇窗。不会写进任何项目文件夹。",
             ),
             Self::ClaudeHooksAddedToast => pick(
                 lang,
@@ -3222,9 +3280,13 @@ impl Text {
             // picture a row at a time — said in fewer words.
             Self::DescFocusCardHeight => pick(
                 lang,
-                "How tall each card's picture of its tab stands. At the default face a lone pane holds 12 rows at 160, 20 at 240, 27 at 320. Alt+wheel over a seat scrolls it a row per notch",
-                "每张卡片里那幅 tab 缩图的高度。默认字面下,单 pane 在 160 装得下 12 行、240 装 20 行、320 装 27 行。在格子上 Alt+滚轮滚动这幅图,一格一行",
+                "How tall the picture of a tab stands inside its card. Alt+wheel over one of its panes scrolls that picture a row at a time.",
+                "每张卡片里那幅标签缩图有多高。在卡片中某个窗格上 Alt+滚轮，可以一行一行地滚动那幅图。",
             ),
+            // The verb alone. The chord is drawn beside it — a cap and a wheel
+            // — and a phrase that spelled `Alt` out again would be the one
+            // thing a chord notation must never do.
+            Self::CardGestureHint => pick(lang, "scroll a card", "滚动卡片内容"),
             // A fact and no more: where the page goes. Not "open this page in
             // your default browser" — "your default" is the machine's setting
             // and not something this button chose — and not a name, because
@@ -3236,7 +3298,7 @@ impl Text {
             // "On a page" and not "In the web preview": every other tag in this
             // family names where the keyboard is standing, and the reader of
             // this line is looking for the state their hands are in.
-            Self::ShortcutScopeWebPage => pick(lang, "On a page", "键盘在网页里时"),
+            Self::ShortcutScopeWebPage => pick(lang, "On a page", "在网页里时"),
             // Names what is true of both hosts rather than listing them: a tag
             // reading "On a terminal's own scrollback or on a page" is a
             // sentence, and every other tag in this family is a place.
@@ -3308,8 +3370,8 @@ impl Text {
             Self::RowCodexNotify => pick(lang, "Codex notify", "Codex 通知程序"),
             Self::DescCodexNotify => pick(
                 lang,
-                "Adds a notify program to your own ~/.codex/config.toml so codex says when a turn has ended. It does not report a codex waiting for you, and writes nothing into a repository",
-                "向你自己的 ~/.codex/config.toml 写入 notify 程序,codex 结束一个回合时会说一声。它不报告 codex 在等你回答,也不往仓库里写",
+                "Adds a notify program to your ~/.codex/config.toml, so codex tells this window when a turn has ended. It does not report a codex waiting for you.",
+                "在你的 ~/.codex/config.toml 里加上 notify 程序，让 codex 在一个回合结束时告诉这扇窗。它不报告它在等你回答。",
             ),
             Self::CodexNotifyAddedToast => pick(
                 lang,
@@ -3332,18 +3394,18 @@ impl Text {
             Self::RowCopilotHooks => pick(lang, "Copilot CLI hooks", "Copilot CLI 钩子"),
             Self::DescCopilotHooks => pick(
                 lang,
-                "Adds a hook file to your own ~/.copilot/hooks/ so copilot CLI tells this window when it is waiting for you. Nothing is written into a folder or a repository",
-                "向你自己的 ~/.copilot/hooks/ 写入一个 hook 文件,copilot CLI 在等你回答时会告诉这扇窗。不往任何文件夹或仓库里写",
+                "Adds a hook file to your ~/.copilot/hooks/, so Copilot CLI tells this window when it is waiting for you. Nothing is written into a project folder.",
+                "在你的 ~/.copilot/hooks/ 里加上一个 hook 文件，让 Copilot CLI 在等你回答时告诉这扇窗。不会写进任何项目文件夹。",
             ),
             Self::DescCopilotHooksTooOld => pick(
                 lang,
-                "This machine's copilot CLI is older than 1.0.26, which is the first version that reports a permission prompt only when one was shown to you",
-                "这台机器上的 copilot CLI 早于 1.0.26,而 1.0.26 才是只在真的问了你时才报权限提示的第一个版本",
+                "This machine's Copilot CLI is older than 1.0.26. Earlier versions report permission prompts you were never shown.",
+                "本机的 Copilot CLI 早于 1.0.26。更早的版本会报告并没有真的问过你的权限提示。",
             ),
             Self::DescCopilotHooksDisabled => pick(
                 lang,
-                "Hooks are switched off in your own ~/.copilot/settings.json, so a hook file installed here would not run",
-                "你自己的 ~/.copilot/settings.json 里关掉了 hooks,装在这里的 hook 文件不会运行",
+                "Hooks are switched off in your ~/.copilot/settings.json, so a file installed here would not run.",
+                "你的 ~/.copilot/settings.json 里关掉了 hooks，装在这里的文件不会运行。",
             ),
             Self::CopilotHooksAddedToast => pick(
                 lang,
@@ -3367,13 +3429,15 @@ impl Text {
                 "Enter keeps it · Esc cancels · Del clears",
                 "Enter 留下 · Esc 取消 · Del 清空",
             ),
-            Self::ShortcutRecordUnusable => {
-                pick(lang, "That key cannot be written down", "这个键写不进文件")
-            }
+            Self::ShortcutRecordUnusable => pick(
+                lang,
+                "That combination cannot be saved",
+                "这个组合键无法保存",
+            ),
             Self::ShortcutUndelivered => pick(
                 lang,
-                "Windows does not hand every chord to a program; one that never appears in the box cannot be recorded here",
-                "Windows 不会把每一个和弦都交给程序;在框里始终不出现的和弦,这里录不到",
+                "Windows keeps some combinations for itself; one that never reaches the box cannot be recorded here",
+                "Windows 会自己截走一部分组合键；始终到不了框里的，这里录不到",
             ),
             Self::HyperlinkControlOpensExternally => pick(
                 lang,
@@ -3404,8 +3468,13 @@ impl Text {
             Self::DescCopyOnSelect => pick(
                 lang,
                 "Letting go of a selection in a pane writes it to the clipboard. There is no other sign that it happened",
-                "在窗格里松开一段选区,它就被写进剪贴板。除此之外没有别的提示",
+                "在窗格里松开一段选区，它就被写进剪贴板。除此之外没有别的提示",
             ),
+            Self::ShortcutRecord => pick(lang, "Record", "录制"),
+            // 「按键…」and not 「录制中…」: the ellipsis already says a clock is
+            // running, and what the reader has to supply is the press.
+            Self::ShortcutRecordListening => pick(lang, "Press…", "按键…"),
+            Self::ShortcutRestoreAll => pick(lang, "Restore all defaults", "全部恢复默认"),
             Self::RowSearchEngine => pick(lang, "Search engine", "搜索引擎"),
             // Names the field rather than the feature, because that is where a
             // reader meets it: they typed a word into the place an address goes
@@ -3413,8 +3482,8 @@ impl Text {
             // better — the three names are on the picker beside this line.
             Self::DescSearchEngine => pick(
                 lang,
-                "Where a web preview's address field sends text that is not an address",
-                "在网页预览的地址栏里打了一段不是地址的文字时,交给哪个搜索引擎",
+                "Where a web preview searches when what you type in its address bar is not an address.",
+                "在网页预览的地址栏里输入的不是地址时，交给哪个搜索引擎去搜。",
             ),
         }
     }
@@ -3431,7 +3500,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 514] = [
+    pub const ALL: [Self; 519] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3534,6 +3603,7 @@ impl Text {
         Self::PreviewCopyAddress,
         Self::PreviewFlipToSource,
         Self::PreviewFlipToRendered,
+        Self::PreviewFlipToPage,
         Self::FileMenuCopyPath,
         Self::FileMenuInsertPath,
         Self::FilesLoading,
@@ -3876,6 +3946,7 @@ impl Text {
         Self::ClaudeHooksFailedToast,
         Self::RowFocusCardHeight,
         Self::DescFocusCardHeight,
+        Self::CardGestureHint,
         Self::PreviewOpenInBrowser,
         Self::ShortcutWebAddress,
         Self::ShortcutWebDevTools,
@@ -3946,6 +4017,9 @@ impl Text {
         Self::TabMenuDuplicate,
         Self::TabMenuMoveToNewWindow,
         Self::TabMenuClose,
+        Self::ShortcutRecord,
+        Self::ShortcutRecordListening,
+        Self::ShortcutRestoreAll,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -4138,8 +4212,10 @@ pub fn psreadline_policy_reason(policy: &str) -> String {
 #[must_use]
 pub fn psreadline_row_outdated_in(lang: Lang, found: &str) -> String {
     match lang {
-        Lang::English => format!("{found} on this machine · the resize repair does nothing"),
-        Lang::Chinese => format!("本机为 {found} · 缩放修复不起作用"),
+        Lang::English => {
+            format!("{found} on this machine · resizing still misplaces the input line")
+        }
+        Lang::Chinese => format!("本机为 {found} · 缩放窗口时输入行仍会错位"),
     }
 }
 
@@ -4170,8 +4246,8 @@ pub fn psreadline_row_update_in(lang: Lang, installed: &str, available: &str) ->
 #[must_use]
 pub fn psreadline_row_current_in(lang: Lang, found: &str) -> String {
     match lang {
-        Lang::English => format!("{found} on this machine · already anchors itself"),
-        Lang::Chinese => format!("本机为 {found} · 已自带正确的锚点"),
+        Lang::English => format!("{found} on this machine · already keeps the input line in place"),
+        Lang::Chinese => format!("本机为 {found} · 已能自己守住输入行"),
     }
 }
 
@@ -4579,9 +4655,9 @@ pub fn fallback_banner_text(requested: &str, started: &str) -> String {
 pub fn unknown_profile_banner_text(unknown: &str, started: &str) -> String {
     match current() {
         Lang::English => {
-            format!("Profile {unknown:?} is not in this build; using {started} instead.")
+            format!("There is no profile {unknown:?}; using {started} instead.")
         }
-        Lang::Chinese => format!("这个版本里没有配置文件 {unknown:?}，改用 {started}。"),
+        Lang::Chinese => format!("没有名为 {unknown:?} 的档案，改用 {started}。"),
     }
 }
 
@@ -5988,6 +6064,139 @@ mod tests {
                     !chinese.contains(pronoun),
                     "{entry:?} says {pronoun} — {chinese:?}"
                 );
+            }
+        }
+    }
+
+    /// PIN (user ruling 2026-08-26) — **no line on screen is written in the
+    /// vocabulary this window only uses about itself.**
+    ///
+    /// The ruling that opened this pass was one sentence: *the settings copy is
+    /// a comment, not something written for a reader*. The mechanical half of
+    /// that — the half a test can hold — is the words. `chrome`, `seat`, `the
+    /// grid`, `the face`, `the ground` are five nouns this codebase uses
+    /// precisely and a reader has never met; `mock-up`, `slice`, `ruling`,
+    /// `schema` and `§` are the process leaking onto the glass. The other half —
+    /// whether the sentence says what pressing the control does — is a reading,
+    /// and the readings live in `docs/plans/ui-style/copy-guide.md` beside the
+    /// checklist they came from.
+    ///
+    /// Single words are matched on word boundaries and phrases as substrings,
+    /// which is why `the ground` is on the list and `ground` is not:
+    /// `Background image` is a row title and must stay one.
+    ///
+    /// **What is deliberately not forbidden** is the reader's own vocabulary:
+    /// `Search engine`, `WebView2 Runtime`, `hook`/`hooks`, `profile`, `pane`
+    /// and `tab` are words a person reads on the screen of some other product
+    /// every day, and a table that banned them would be renaming things for the
+    /// sake of the rename.
+    ///
+    /// Red gate: put `terminal and chrome alike` back on `DescLightScheme`, or
+    /// `在格子上` back on `DescFocusCardHeight`, and this goes red naming the
+    /// entry and the word.
+    #[test]
+    fn no_settings_sentence_uses_the_words_this_window_only_says_to_itself() {
+        // Matched whole, after the sentence is split on everything that is not a
+        // letter — `seats` is listed because a plural is a different word to a
+        // split like that, and `grid` is not because the phrase is what is
+        // forbidden.
+        const FORBIDDEN_ENGLISH_WORDS: [&str; 11] = [
+            "chrome", "seat", "seats", "slice", "ruling", "schema", "vendor", "pipeline", "buffer",
+            "widget", "mockup",
+        ];
+        // Matched as substrings, case-insensitively.
+        const FORBIDDEN_ENGLISH_PHRASES: [&str; 9] = [
+            "the grid",
+            "the face",
+            "the ground",
+            "mock-up",
+            "red gate",
+            "this build",
+            "the product",
+            "todo",
+            "fixme",
+        ];
+        const FORBIDDEN_CHINESE: [&str; 15] = [
+            "裁决",
+            "红线",
+            "本产品",
+            "座位",
+            "格子",
+            "字面",
+            "小样",
+            "钉子",
+            "切片",
+            "内核",
+            "管线",
+            "缓冲区",
+            "控件",
+            "chrome",
+            "§",
+        ];
+        for entry in Text::ALL {
+            let english = entry.in_lang(Lang::English);
+            let lower = english.to_ascii_lowercase();
+            for word in lower.split(|c: char| !c.is_ascii_alphabetic()) {
+                assert!(
+                    !FORBIDDEN_ENGLISH_WORDS.contains(&word),
+                    "{entry:?} says {word:?}, which is a word this window only \
+                     uses about itself: {english:?}"
+                );
+            }
+            for phrase in FORBIDDEN_ENGLISH_PHRASES {
+                assert!(
+                    !lower.contains(phrase),
+                    "{entry:?} says {phrase:?}, which belongs in the source and \
+                     not on the screen: {english:?}"
+                );
+            }
+            // `§` is a section sign wherever it appears, in either column.
+            assert!(
+                !english.contains('§'),
+                "{entry:?} quotes a section of the design document: {english:?}"
+            );
+            let chinese = entry.in_lang(Lang::Chinese);
+            for needle in FORBIDDEN_CHINESE {
+                assert!(
+                    !chinese.contains(needle),
+                    "{entry:?} says {needle} — {chinese:?}"
+                );
+            }
+        }
+    }
+
+    /// PIN (user ruling 2026-08-26) — **the Chinese column is punctuated the
+    /// Chinese way.**
+    ///
+    /// Half of this table was typed with ASCII commas and the other half with
+    /// `，`, which is visible on screen: a half-width comma after a Han
+    /// character sets tight against it and then leaves a hole, so one sentence
+    /// on a page reads looser than the sentence above it for no reason a reader
+    /// can name.
+    ///
+    /// **The rule is written as "after a Han character" rather than "anywhere",**
+    /// and that is what makes it safe: the ASCII punctuation this table
+    /// legitimately carries is always inside a Latin token — `https://`,
+    /// `folio.ps1`, `Enter keeps it · Esc cancels` — where what stands to the
+    /// left of it is a letter and not a Han character.
+    ///
+    /// Red gate: type `每个窗格保留这么多行,最旧的先走` and this goes red naming
+    /// the entry.
+    #[test]
+    fn chinese_sentences_are_punctuated_the_chinese_way() {
+        for entry in Text::ALL {
+            let chinese = entry.in_lang(Lang::Chinese);
+            let mut previous: Option<char> = None;
+            for character in chinese.chars() {
+                if matches!(character, ',' | ';' | ':' | '!' | '?')
+                    && previous.is_some_and(|before| ('\u{4e00}'..='\u{9fff}').contains(&before))
+                {
+                    panic!(
+                        "{entry:?} punctuates {character:?} the half-width way after a \
+                         Han character: {chinese:?}"
+                    );
+                }
+                previous = Some(character);
             }
         }
     }

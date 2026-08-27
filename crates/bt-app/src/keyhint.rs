@@ -494,7 +494,7 @@ pub fn place(
 
 /// How wide a key cap's box is for one word — the settings page's own
 /// arithmetic, so a cap on this card and a cap on that page are the same object.
-fn cap_box_width(
+pub(crate) fn cap_box_width(
     text: &str,
     font_size_px: f32,
     scale: f32,

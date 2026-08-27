@@ -165,20 +165,49 @@ pub enum ChromeMark {
     WindowMinimize,
     /// `#i-max`.
     WindowMaximize,
-    /// `#i-close`.
-    WindowClose,
-    /// The same `#i-close` source, at the tab control's smaller 8px size.
-    TabClose,
-    /// The same `#i-close` again, at the pane head's 8px
-    /// (`.panehead .pane-close svg`, mock-up 1657).
+    /// `#i-close` — **the platform's cross**, and after 裁2 (2026-08-26) only
+    /// the platform's.
     ///
-    /// A third name for one drawing, on the precedent [`Self::WindowClose`] and
-    /// [`Self::TabClose`] already set: they too share a symbol and differ only
-    /// in the box they are asked for. What makes them separate variants is that
-    /// `mark_key` keys the raster cache on [`ChromeMark::id`], so a control that
-    /// might one day be re-struck at another size — or given its own stroke
-    /// weight, which an 8px `×` inside a 17px box on a *caption* rather than on
-    /// a strip could well want — has a slot of its own to be re-struck in.
+    /// Ten units of ink corner to corner in a ten-unit box, at the hairline
+    /// `#i-min` and `#i-max` are drawn with, because Windows's caption controls
+    /// are ten and this house does not re-cut the platform's furniture. It is
+    /// therefore the *one* drawing on this sheet whose picture is its diagonal
+    /// and whose neighbours are drawn to match it.
+    WindowClose,
+    /// `#i-cross` — **the house's cross**, on a tab.
+    ///
+    /// The day the variant note below anticipated arrived. [`Self::PaneClose`]
+    /// carried a comment for eleven days saying these names existed so that
+    /// "a control that might one day be re-struck at another size — or given
+    /// its own stroke weight — has a slot of its own to be re-struck in"; the
+    /// 2026-08-26 acceptance reported the pane head's `✕` reading a size bigger
+    /// than the `⌄` beside it, and this is that re-cut. See [`Self::PaneClose`]
+    /// for the geometry and the reason it could not be done by moving a box.
+    TabClose,
+    /// `#i-cross` again, on a pane head, a preview head, a float, a toast, a
+    /// dialog — **every cross this house draws that is not the caption's**.
+    ///
+    /// **裁2, 2026-08-26: 「✕ 视觉上比 ⌄ 大」.** The optical band this crate
+    /// holds every mark to governs a mark's *pen* and its *ink width*, and
+    /// `#i-close` was inside it on both counts — its ink was exactly as wide as
+    /// the arrow's beside it (`10.40px` against `10.46px` at the compact head's
+    /// box). What a reader compares is neither of those. It is the **picture**
+    /// the ink makes, and a cross's ink runs corner to corner, so at equal
+    /// width its picture is `√2` of a flat arrow's: `14.71px` of diagonal
+    /// against `11.72px`, a quarter as big again, which is what the report saw.
+    ///
+    /// **No box could have closed it**, which is why this is a drawing and not
+    /// a slot: a box scales the ink and the pen together, so the `8.1px` box
+    /// that would have levelled the picture would also have thinned a `1.0`-unit
+    /// pen in a ten-unit box to `0.81` logical pixels — a third of a pen below
+    /// the band's floor. The cross is cut in the house's sixteen instead, where
+    /// the house's own `1.2` pen buys the smaller ink: **ten units of ink in a
+    /// sixteen-unit box**, centred, which is the side at which a square's
+    /// diagonal is the arrow's own picture (`14.31 / √2 = 10.12`).
+    ///
+    /// It keeps a name of its own from [`Self::TabClose`] for the reason both
+    /// always had one: `mark_key` keys the raster cache on [`ChromeMark::id`],
+    /// and two controls that may yet part company keep two slots to part into.
     PaneClose,
     /// `#i-plus` — the new-tab button.
     Plus,
@@ -210,19 +239,36 @@ pub enum ChromeMark {
     /// folder is a different silhouette with a different number of paths, and no
     /// rotation of the closed one produces it.
     ///
-    /// **The object's open folder**, on [`Self::Folder`]'s division: a file
-    /// menu's own head, a tree row that is open. What `Reveal in folder` wears
-    /// is [`Self::FolderOpenOutline`].
-    FolderOpen,
-    /// `#i-folder-open-line` — the act of opening a folder somewhere else, on
-    /// [`Self::FolderOutline`]'s division.
+    /// **The open folder, wherever a row is about one** — a file menu's own
+    /// head, a tree row that is open, `Reveal in folder`, `Browse…`.
     ///
-    /// The back plate becomes the shut folder's own top-left profile and the
-    /// front flap a struck quadrilateral, both landing on the same ink band the
-    /// filled pair does. The flap is *open at the top left*, which is the one
-    /// thing that tells this from [`Self::FolderOutline`] at a menu row's
-    /// fourteen pixels.
-    FolderOpenOutline,
+    /// P2 cut a struck rendition of this for the rows that are *acts*; the
+    /// 2026-08-26 acceptance sent it back (裁1, 2026-08-26 — *还是原来的好看*).
+    /// See [`Self::Folder`] for the ruling, which is one ruling about one
+    /// object and applies to both frames of it.
+    FolderOpen,
+    /// `#i-wheel` — **a mouse seen from above, with its wheel**: not a verb, but
+    /// the half of a chord that has no key cap to be written on.
+    ///
+    /// It exists because `Alt`+wheel is the one gesture in this window that a
+    /// key cap cannot say by itself (`docs/DESIGN.md` §7.21). A cap reads
+    /// `Alt`; there is no cap that reads "and now turn the wheel", and spelling
+    /// it out in words is what the de-duplicated copy exists to stop — the
+    /// glyphs say the chord, the sentence says the verb.
+    ///
+    /// **The shell is struck and the wheel is filled**, which is P2's law read
+    /// straight off the drawing: the shell is a frame, and the wheel is a field
+    /// inside it. A wheel drawn as two strokes would be the one place in this
+    /// sheet where a field inside a frame is an outline, and at a menu row's
+    /// fourteen pixels it reads as a scratch rather than as a part.
+    ///
+    /// Cut to the house's own air rather than to the mock-up's box: the
+    /// small-sample drawing ran `1.2 – 14.8` down the grid, which is a mark
+    /// that stands taller than every other mark in the same column. Here the
+    /// ink runs `1.6 – 14.4` with half a pen on each side, exactly as
+    /// [`HOUSE_INK_UNITS`] says, and the width follows the mock-up's own
+    /// proportion so the mouse keeps its shape while it loses its extra height.
+    MouseWheel,
     /// `#i-tri` — the disclosure triangle at some angle through its turn (C33).
     ///
     /// An angle and not a boolean for the reason [`Self::Chevron`] gives at
@@ -354,30 +400,21 @@ pub enum ChromeMark {
     Globe {
         favicon: Option<crate::favicon::FaviconId>,
     },
-    /// `#i-folder` — **the object.** A row that *is* a folder: a tree row, a
-    /// breadcrumb's chip, a seat's identity mark, a tab's.
+    /// `#i-folder` — **a folder, in every row that is about one**: a tree row,
+    /// a breadcrumb's chip, a seat's identity mark, a tab's, a head's button,
+    /// `Open files pane`, `New terminal in folder…`.
     ///
-    /// It is the one filled silhouette the mock-up hands this house, and P2
-    /// keeps it exactly where a fill belongs — see [`Self::FolderOutline`] for
-    /// where it does not, and `crate::icons`' fill policy for the rule the two
-    /// split along.
+    /// It is the one filled silhouette the mock-up hands this house, and it
+    /// keeps every row of it. **P2 cut a struck rendition — `#i-folder-line` —
+    /// for the rows that are acts, and the 2026-08-26 acceptance sent it back**
+    /// (裁1: *还是原来的好看*). The fill policy is not repealed by that; it is
+    /// told where its line runs. `crate::icons`' `FILLED_WITH_A_REASON` carries
+    /// the ruling in the class it belongs to: **a folder is an object**, and a
+    /// row about an object is a row about a thing however the sentence is
+    /// worded. `Open files pane` puts a folder beside a name for the same
+    /// reason a tree row does — to say *a folder* — and the solid is what this
+    /// drawing is.
     Folder,
-    /// `#i-folder-line` — **the act.** A menu row or a head button *about* a
-    /// folder: `Open files pane`, `New terminal in folder…`.
-    ///
-    /// The same silhouette to the digit — this drawing's path is
-    /// [`Self::Folder`]'s own edge, pulled in half a pen so the stroke's outer
-    /// edge lands exactly where the fill's did. Two drawings of one object,
-    /// which is what makes the split a *policy* rather than a second folder:
-    /// what tells them apart is whether the row is a thing or a verb, and the
-    /// two never appear in the same column.
-    ///
-    /// **The report this closes** (P1's own, 2026-08-26): the pane menu's ink
-    /// mass came into a `1.36×` band except for one row — the solid folder,
-    /// which stayed the column's outlier at more than twice its neighbours'
-    /// ink. A fill among outlines is not a heavier drawing, it is a different
-    /// *kind* of drawing, and no slot can level it.
-    FolderOutline,
     /// `#i-panel` — a pane whose kind this build cannot name.
     Panel,
     /// `#i-copy` — "put this row's path on the clipboard" (K143).
@@ -621,6 +658,30 @@ pub enum ChromeMark {
     /// under a fill that is round — which is a ring visibly not belonging to the
     /// thing it is drawn around.
     ControlPillRing { radius_px: u32, stroke_px: u32 },
+    /// **The bite a bubble takes out of the thing it is about** — a triangle
+    /// filling its own box and pointing *left*, at whatever stands on that side
+    /// (`docs/DESIGN.md` §7.21).
+    ///
+    /// Generated rather than quoted, on [`Self::ControlPill`]'s footing: the
+    /// quoted family is `design/ui-mockup.html`'s own artwork copied across, and
+    /// this is not artwork at all — it is a box turned into a shape, at whatever
+    /// size the surface that grew it happens to be. A `viewBox` written from the
+    /// pixel box means the tail is exact at every scale factor with no
+    /// letterboxing to reason about, which a fixed-grid symbol in a 1:2 box
+    /// would have needed.
+    ///
+    /// **One direction and no parameter**, which is a fact about this window
+    /// rather than a shortcut: the only surface that grows one is the Cards
+    /// hint, the Cards column is on the left in both tab layouts, and a bubble
+    /// that stands on a card therefore stands to its right without exception. A
+    /// `pointing` field would be a second direction nothing can reach.
+    ///
+    /// It carries no hairline of its own. The surface draws it twice — once in
+    /// the border's ink, once in the face's a border further along — which is
+    /// [`crate::settings::push_cap`]'s own recipe, and the only one that leaves
+    /// the tail's *base* unstruck so it can sit over the bubble's edge without
+    /// drawing a line across the join.
+    HintTail,
     /// One corner of the floor showing around a rounded card: a `radius × radius`
     /// square with a quarter-disc bitten out of it, filled edge to edge.
     ///
@@ -990,14 +1051,19 @@ pub enum ChromeMark {
 impl ChromeMark {
     /// **The drawing this mark is**, as the symbol sheet's own id.
     ///
-    /// [`Self::id`] answers with the *raster cache*'s name, and there are three
-    /// of those for one `×`: `WindowClose`, `TabClose` and `PaneClose` are one
-    /// `<symbol>` kept in three cache slots so a control that might one day be
+    /// [`Self::id`] answers with the *raster cache*'s name, and there are two
+    /// of those for one `×` since 裁2: `TabClose` and `PaneClose` are one
+    /// `<symbol>` kept in two cache slots so a control that might one day be
     /// re-struck has somewhere to be re-struck in. That is the right answer for
     /// a cache and the wrong one for the question
     /// `crate::icons::ActionIcon`'s reverse index asks — *how many verbs is this
-    /// one picture doing the work of* — where three names for one drawing would
+    /// one picture doing the work of* — where two names for one drawing would
     /// hide exactly the reuse the index exists to find.
+    ///
+    /// **`WindowClose` is off that pair now and is its own drawing**: the
+    /// caption's cross is the platform's ten and the house's is `#i-cross`, and
+    /// the whole point of this function is that the reverse index sees two
+    /// pictures where it used to see one.
     ///
     /// Every other family that has one drawing already has one id: every angle
     /// of the chevron, every angle of the triangle, all eight chassis colours.
@@ -1005,7 +1071,7 @@ impl ChromeMark {
     #[cfg(test)]
     pub(crate) fn drawing_id(self) -> &'static str {
         match self {
-            Self::TabClose | Self::PaneClose => Self::WindowClose.id(),
+            Self::TabClose | Self::PaneClose => "i-cross",
             other => other.id(),
         }
     }
@@ -1043,9 +1109,8 @@ impl ChromeMark {
             Self::File => "i-file",
             Self::Globe { .. } => "i-globe",
             Self::Folder => "i-folder",
-            Self::FolderOutline => "i-folder-line",
             Self::FolderOpen => "i-folder-open",
-            Self::FolderOpenOutline => "i-folder-open-line",
+            Self::MouseWheel => "i-wheel",
             // One id for every angle, on `Self::Chevron`'s precedent above.
             Self::TreeDisclosure { .. } => "i-tri",
             Self::Panel => "i-panel",
@@ -1075,6 +1140,7 @@ impl ChromeMark {
             Self::ControlPill { .. } => "control-pill",
             Self::ControlPillFoot { .. } => "control-pill-foot",
             Self::ControlPillRing { .. } => "control-pill-ring",
+            Self::HintTail => "hint-tail",
             // One id for four orientations, like the chevron's one id for every
             // angle: `mark_key` adds the corner, so the four rasters are four
             // cache slots under one name.
@@ -1827,6 +1893,20 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 ),
             )
         }
+        // The box as a triangle with its apex on the left wall, halfway down.
+        //
+        // Written from the box and not from a grid, which is the whole reason
+        // this mark is generated: the tail is as tall as the surface that grew
+        // it says, as wide as it says, and both are already in physical pixels
+        // by the time they arrive here. There is no aspect ratio to preserve
+        // and nothing to letterbox.
+        ChromeMark::HintTail => (
+            format!("0 0 {width_px} {height_px}"),
+            format!(
+                r#"<path fill="currentColor" d="M{width_px} 0L0 {middle}L{width_px} {height_px}Z"/>"#,
+                middle = f64::from(height_px) / 2.0,
+            ),
+        ),
         ChromeMark::CardCorner { radius_px, corner } => {
             // The bite's centre is the card's own arc centre, which is `radius`
             // inside the box on each axis the card runs away along.
@@ -2339,6 +2419,7 @@ impl ChromeMark {
                 | Self::ControlPill { .. }
                 | Self::ControlPillFoot { .. }
                 | Self::ControlPillRing { .. }
+                | Self::HintTail
                 | Self::CardCorner { .. }
                 | Self::Fill
                 | Self::ProgressRing { .. }
@@ -2482,15 +2563,20 @@ impl ChromeMark {
     ///   small inside its slot, so it takes the house's box and draws the small
     ///   arrow the design asked for. Sized as an edge-to-edge mark it would
     ///   have been shrunk twice.
+    ///
+    /// **裁2 (2026-08-26) took two more names off it the same way.**
+    /// `TabClose` and `PaneClose` were `#i-close` — the caption's ten — drawn
+    /// on a tab and a pane head, and being edge-to-edge is exactly what made
+    /// their picture a size bigger than the arrow beside them (see
+    /// [`Self::PaneClose`]). Re-cut as `#i-cross` in the house's sixteen they
+    /// carry more air than the house's own band, so the list is the caption's
+    /// three and nothing else — every glyph in this house that runs its ink to
+    /// its own wall is a glyph Windows drew first.
     #[must_use]
     pub fn draws_edge_to_edge(self) -> bool {
         matches!(
             self,
-            Self::WindowMinimize
-                | Self::WindowMaximize
-                | Self::WindowClose
-                | Self::TabClose
-                | Self::PaneClose
+            Self::WindowMinimize | Self::WindowMaximize | Self::WindowClose
         )
     }
 
@@ -2506,6 +2592,91 @@ impl ChromeMark {
         let [view_width, view_height] = self.view_box_units()?;
         let units = self.design_stroke_units()?;
         Some(units * (box_width / view_width).min(box_height / view_height))
+    }
+
+    /// **The bounding box of this drawing's own ink**, in its `viewBox`'s units
+    /// — `[across, down]`.
+    ///
+    /// Read off the *raster* and not off the path data, which is the only way
+    /// to read it honestly: a drawing's ink is its geometry plus half a pen on
+    /// every side plus whatever its caps and joins add, and a bounding box
+    /// computed from control points is a bounding box of the curve rather than
+    /// of the mark. This rasterizes the drawing once at `MEASURE_PX` on its
+    /// long side — big enough that a pixel is a fortieth of a unit — and reports
+    /// what actually landed.
+    ///
+    /// **What it is for** is the half of the optical band that
+    /// [`Self::optical_stroke_logical_px`] cannot see. That answers *how heavy*
+    /// a mark is drawn; this is the raw material for *how big it looks*, which
+    /// is a different question and the one 裁2 (2026-08-26) was filed about —
+    /// see [`crate::icons::OPTICAL_PICTURE_SPREAD`].
+    #[must_use]
+    #[cfg(test)]
+    pub fn ink_extent_units(self) -> Option<[f32; 2]> {
+        /// The long side of the raster this is measured on. A pixel is then
+        /// `1/16` of a unit at the house's grid, which is two orders finer than
+        /// the band it feeds.
+        const MEASURE_PX: f32 = 256.0;
+        /// Below this the pixel is the rasterizer's own antialiasing skirt
+        /// rather than the mark, and counting it would make every drawing a pen
+        /// wider than it is.
+        const INK_ALPHA_FLOOR: u8 = 8;
+
+        let [view_width, view_height] = self.view_box_units()?;
+        let long = view_width.max(view_height);
+        let width = (MEASURE_PX * view_width / long).round();
+        let height = (MEASURE_PX * view_height / long).round();
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(&[ChromeSprite::new(
+            self,
+            [0.0, 0.0, width, height],
+            [0xff, 0xff, 0xff],
+        )]);
+        let icon = icons.first()?;
+        let mut bounds: Option<[u32; 4]> = None;
+        for y in 0..icon.height_px {
+            for x in 0..icon.width_px {
+                let at = ((y * icon.width_px + x) * 4 + 3) as usize;
+                if icon.rgba[at] < INK_ALPHA_FLOOR {
+                    continue;
+                }
+                bounds = Some(match bounds {
+                    None => [x, y, x, y],
+                    Some([left, top, right, bottom]) => {
+                        [left.min(x), top.min(y), right.max(x), bottom.max(y)]
+                    }
+                });
+            }
+        }
+        let [left, top, right, bottom] = bounds?;
+        Some([
+            (right - left + 1) as f32 / width * view_width,
+            (bottom - top + 1) as f32 / height * view_height,
+        ])
+    }
+
+    /// **How big the picture this mark makes is**, drawn in a box this big — the
+    /// diagonal of its ink's bounding box, in logical pixels.
+    ///
+    /// One number for *the size of the thing on the row*, and the diagonal
+    /// rather than the width because the width is precisely what the 2026-08-26
+    /// report proved a reader does not compare. `#i-close` and `#i-chev` laid
+    /// the same `10.4px` of ink across a pane head and read a quarter apart,
+    /// because one of them is a flat arrow `5.3px` deep and the other is a
+    /// square: the box that contains the ink is what the eye takes the mark's
+    /// size from, and a box's size is its diagonal.
+    ///
+    /// `None` where [`Self::ink_extent_units`] is: the generated family, which
+    /// has no `viewBox` and no fixed picture — a pill is whatever box it is
+    /// given.
+    #[must_use]
+    #[cfg(test)]
+    pub fn optical_picture_logical_px(self, box_width: f32, box_height: f32) -> Option<f32> {
+        let [view_width, view_height] = self.view_box_units()?;
+        let [ink_across, ink_down] = self.ink_extent_units()?;
+        let scale = (box_width / view_width).min(box_height / view_height);
+        let (across, down) = (ink_across * scale, ink_down * scale);
+        Some(across.hypot(down))
     }
 }
 
@@ -2545,16 +2716,16 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::WindowMinimize => 1,
         ChromeMark::WindowMaximize => 2,
         ChromeMark::WindowClose => 3,
-        ChromeMark::TabClose => 3,
-        ChromeMark::PaneClose => 3,
+        // 裁2, 2026-08-26: the house's cross is its own drawing.
+        ChromeMark::TabClose => 61,
+        ChromeMark::PaneClose => 61,
         ChromeMark::Plus => 4,
         ChromeMark::ProfilePowerShell => 5,
         ChromeMark::File => 6,
         ChromeMark::Globe { .. } => 41,
         ChromeMark::Folder => 7,
-        ChromeMark::FolderOutline => 61,
         ChromeMark::FolderOpen => 15,
-        ChromeMark::FolderOpenOutline => 62,
+        ChromeMark::MouseWheel => 62,
         ChromeMark::TreeDisclosure { .. } => 16,
         ChromeMark::Panel => 8,
         ChromeMark::Chevron { .. } => 9,
@@ -2614,6 +2785,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::ControlPill { .. } => 8,
         ChromeMark::ControlPillFoot { .. } => 8,
         ChromeMark::ControlPillRing { .. } => 8,
+        ChromeMark::HintTail => 8,
         ChromeMark::CardCorner { .. } => 8,
         ChromeMark::Fill => 8,
         ChromeMark::ProgressRing { .. } => 8,
@@ -2792,11 +2964,11 @@ const SYMBOL_VIEW_BOX: [&str; 63] = [
     "0 0 16 16", // #i-search
     "0 0 16 16", // #i-more
     "0 0 16 16", // #i-history-restore
-    // **The two P2 struck**, and they are the house sixteen because they are
-    // the filled folders' own edges: a drawing that has to lie on top of
-    // another one to the digit cannot be cut in a second box.
-    "0 0 16 16", // #i-folder-line
-    "0 0 16 16", // #i-folder-open-line
+    // **The house's own cross** (裁2, 2026-08-26) — the sixteen, because what
+    // the re-cut buys is the house's pen at a smaller ink, and a pen is only
+    // the house's in the house's grid.
+    "0 0 16 16", // #i-cross
+    "0 0 16 16", // #i-wheel
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
@@ -3334,23 +3506,44 @@ const SYMBOL_BODY: [&str; 63] = [
         r#"<path d="M3.2 10.9 4.7 8 1.7 8z" fill="currentColor"/>"#,
         r#"<path d="M8 5.2V8l2.2 1.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
     ),
-    // `#i-folder-line` — `#i-folder`'s own edge, drawn.
+    // `#i-cross` — **the house's cross**, cut from `#i-close` for 裁2
+    // (2026-08-26: *`✕` 视觉上比 `⌄` 大*).
     //
-    // The path is the fill's silhouette pulled in half a pen on every side, so
-    // the stroke's outer edge lands exactly where the solid's did: ink `1.6 –
-    // 14.4` across and `3.1 – 13.4` down, the filled folder's to the digit. Two
-    // renditions of one object, on `#p-shell-line`'s precedent one family over.
-    r#"<path d="M2.2 4.3a.6.6 0 0 1 .6-.6h2.6l1.3 1.4h6.5a.6.6 0 0 1 .6.6v6.5a.6.6 0 0 1-.6.6H2.8a.6.6 0 0 1-.6-.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
-    // `#i-folder-open-line` — the same object with its flap open.
+    // Same two strokes, same round cap, and nothing about the drawing is
+    // re-invented; what moves is the grid it is cut in and therefore how much
+    // of its box its ink covers. `#i-close` runs ten units of ink corner to
+    // corner of a *ten*-unit box, so it has no air at all and its picture — the
+    // diagonal, which is what a cross's picture is — comes out `√2` of the ink
+    // width a slot levelled it by.
     //
-    // The back is the shut folder's top-left profile, stopping where the flap
-    // covers it; the flap is a quadrilateral leaning right, standing on the
-    // shut folder's own floor. Both land in the band the filled pair does, and
-    // the *opening at the top left* is what tells the two apart in a menu
-    // column at fourteen pixels — not a change of size and not a second colour.
+    // **Ten units of ink in the house's sixteen**, `3.0 – 13.0` with the cap
+    // counted, which is where the derivation lands rather than where a taste
+    // did: `#i-chev`'s ink is `12.8 × 6.4`, a picture of `14.31` units across
+    // its diagonal, and a square whose diagonal is that measures `14.31 / √2 =
+    // 10.12` on a side. The house's `1.2` pen comes with the house's grid, and
+    // it is what pays for the smaller ink — at the compact head's thirteen this
+    // draws `0.975` of pen where the ten-unit cross shrunk to the same picture
+    // would have drawn `0.81`.
+    r#"<path d="M3.6 3.6L12.4 12.4M12.4 3.6L3.6 12.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+    // `#i-wheel` — the mouse's shell, and the wheel in it.
+    //
+    // **A struck frame and a filled field**, which is the whole of P2's law in
+    // one drawing of two rectangles. The shell is a fully rounded rect — `rx`
+    // is half its own width, so both ends are semicircles and a mouse read at
+    // fourteen pixels is a mouse rather than a lozenge.
+    //
+    // The ink runs `1.6 – 14.4` down the grid with half a pen added on each
+    // side (`2.2 – 13.8` on the path), which is [`HOUSE_INK_UNITS`]'s own band;
+    // across it the mouse is narrower, because a mouse is. The width is the
+    // small sample's own proportion carried over — `8.8 / 12.4` of the height
+    // — so re-cutting it to the house's air changed its size and not its shape.
+    //
+    // The wheel sits in the upper third, where a wheel is, and is a filled
+    // capsule rather than a stroke: at this size a `1.2` stroke two units long
+    // is a scratch, and a field inside a frame is filled anyway.
     concat!(
-        r#"<path d="M2.2 11.5V4.3a.6.6 0 0 1 .6-.6h2.6l1.3 1.4h6.5a.6.6 0 0 1 .6.6v1.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
-        r#"<path d="M2.2 12.8l2.4-5.4h9.2l-2.4 5.4z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+        r#"<rect x="3.9" y="2.2" width="8.2" height="11.6" rx="4.1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+        r#"<rect x="7.3" y="4.45" width="1.4" height="2.9" rx="0.7" fill="currentColor"/>"#,
     ),
 ];
 

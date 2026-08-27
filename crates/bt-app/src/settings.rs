@@ -38,8 +38,8 @@ use bt_persist::{
 };
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX,
-    FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad,
-    WINDOW_CAPTION_GLYPH_LOGICAL_PX, chrome_palette, rounded_overlay_fill, rounded_overlay_shadow,
+    FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, chrome_palette,
+    rounded_overlay_fill, rounded_overlay_shadow,
 };
 
 use crate::i18n::Text;
@@ -643,15 +643,24 @@ const ENV_GHOSTS: [(&str, &str); 3] = [
 /// type — which is what it is: the editor's heading, wearing the heading's face.
 const CRUMB_MARGIN_TOP_LOGICAL_PX: f32 = 10.0;
 const CRUMB_MARGIN_BOTTOM_LOGICAL_PX: f32 = 2.0;
-/// `.pf-crumb { gap: 6px }`, between the way back, the separator and the name.
+/// `.pf-crumb { gap: 6px }`, between `‹ Profiles`, the `›` and the name.
 const CRUMB_GAP_LOGICAL_PX: f32 = 6.0;
-// The separator between the way back and where you are, and the arrow the way
-// back opens with, are `crate::seats::crumb_separator_mark` and
-// `crate::seats::crumb_back_mark` — one drawing at two quarter turns, which is
-// what makes the pair read as one direction rather than as two glyphs that
-// happen to point. They were `›` and `‹` in the dialog's own type until P1,
-// and the preview rail's own breadcrumb was retired in the same edit and to the
-// same two marks: two breadcrumbs in one window may not be two vocabularies.
+/// The separator the breadcrumb draws between the way back and where you are.
+///
+/// **裁3, 2026-08-26: 「原来的好看」.** P1 spent these two on
+/// `crate::marks::ChromeMark::Chevron` at two quarter turns, on `marks.rs`'s
+/// founding law about codepoints; the acceptance sent them back, and the reason
+/// it is right is that a breadcrumb is a **sentence**. `‹ Profiles › Windows
+/// PowerShell` is a line of type, the guillemets are its punctuation, and
+/// punctuation is measured, spaced, tracked and inked by the run it stands in.
+/// A mark in the middle of a phrase is a glyph the phrase's own metrics know
+/// nothing about. See `crate::seats::PREVIEW_CRUMB_SEPARATOR`, which is the
+/// other breadcrumb in this window and came back in the same edit — two
+/// breadcrumbs in one window may not be two vocabularies.
+const CRUMB_SEPARATOR: &str = "\u{203a}";
+/// And the guillemet `‹ Profiles` opens with — the same character turned, so
+/// the pair reads as one direction and not as two glyphs that happen to point.
+const CRUMB_BACK_PREFIX: &str = "\u{2039} ";
 // `.pf-more > button { width: 26px }` — the `⋯` trigger, which explicitly
 // undoes `.combo > button`'s 118px floor, its hairline and its space-between,
 // because every line of that recipe is wrong for a trigger one glyph wide. The
@@ -786,9 +795,13 @@ const DISCLOSURE_CHEVRON_HEIGHT_LOGICAL_PX: f32 = DISCLOSURE_CHEVRON_WIDTH_LOGIC
 
 /// The header, and the gear's own tooltip — [`Text::Settings`], which the gear
 /// reads too, because they are one word for one thing.
-const RECORD_BUTTON_LABEL: &str = "Record";
+fn record_button_label() -> &'static str {
+    Text::ShortcutRecord.text()
+}
 /// What the button says while it is listening.
-const RECORD_LISTENING_LABEL: &str = "Press…";
+fn record_listening_label() -> &'static str {
+    Text::ShortcutRecordListening.text()
+}
 /// What the muted line says while a row is listening.
 ///
 /// **Three verbs and no preamble**, because the button beside it already says
@@ -813,7 +826,9 @@ fn record_unusable_hint() -> &'static str {
 fn shortcut_undelivered_note() -> &'static str {
     Text::ShortcutUndelivered.text()
 }
-const RESTORE_ALL_LABEL: &str = "Restore all defaults";
+fn restore_all_label() -> &'static str {
+    Text::ShortcutRestoreAll.text()
+}
 
 // ── the one picker whose items carry a mark (mock-up 7647) ─────────────────
 /// `.profile-item .ticon { width: 14px }` (mock-up 1023) — the same column the
@@ -2741,8 +2756,9 @@ impl SettingsRow {
     /// The line under a row's title — **a function of the row's current value**.
     ///
     /// The mock-up varies two of these with the picker beside them: `wrap-desc`
-    /// says "Long lines fold at the pane's edge" on and "Long lines run on and
-    /// the pane scrolls sideways" off (2561, 7897), and `blockmax-desc` swaps
+    /// says one thing with wrapping on and names the two ways of following a
+    /// line that has run off the edge with it off (2561, 7897), and
+    /// `blockmax-desc` swaps
     /// between "Rendered blocks show in full" and "Blocks taller than this
     /// scroll inside themselves" (2576, 7904). A description that describes the
     /// *setting* rather than the *state* is the one line a user reads to find
@@ -6553,10 +6569,10 @@ pub struct EnvRowLayout {
 pub struct CrumbLayout {
     /// The whole line, which is what the heading's band would have been.
     pub band: [f32; 4],
-    /// `‹ Profiles`, the only way back that is a control.
+    /// `‹ Profiles`, the only way back that is a control — the guillemet
+    /// included, because since 裁3 it is a character in that phrase's own run
+    /// and not a mark standing in front of it.
     pub back: [f32; 4],
-    /// The arrow in front of the way back.
-    back_mark: [f32; 4],
     /// The separator's own cell.
     pub separator: [f32; 4],
     /// The profile's own name, which reports and is not a control.
@@ -8295,37 +8311,31 @@ pub fn layout_for_menus(
                 // label's face, and a width measured without the letter-spacing
                 // that face carries is a width one glyph short — which is exactly
                 // far enough for the `›` to sit on the last letter.
-                let back_word = Text::CategoryProfiles.text();
+                //
+                // The guillemet is measured *with* the word (裁3, 2026-08-26):
+                // `‹ Profiles` is one phrase in one run, so it is one string
+                // handed to one measurement, which is also what stops the arrow
+                // and the word drifting apart at a scale factor.
+                let back_word = format!("{CRUMB_BACK_PREFIX}{}", Text::CategoryProfiles.text());
                 let tracked = |text: &str, measure: &mut dyn FnMut(&str, f32) -> f32| {
                     measure(text, font)
                         + font * GROUP_LABEL_TRACKING_EM * text.chars().count() as f32
                 };
-                // The arrow's own box carries its air, so the word starts where
-                // the box ends and no gap is spent between them: the two are one
-                // phrase, and the gap is what separates *phrases*.
-                let back_mark_width = px(crate::seats::compact_head_glyph_box_logical_px(
-                    crate::seats::crumb_back_mark(),
-                )[0]);
-                let back_mark = [band[0], band[1], band[0] + back_mark_width, band[3]];
                 let back = [
                     band[0],
                     band[1],
-                    back_mark[2] + tracked(back_word, measure),
+                    band[0] + tracked(&back_word, measure),
                     band[3],
                 ];
-                let separator_width = px(crate::seats::compact_head_glyph_box_logical_px(
-                    crate::seats::crumb_separator_mark(),
-                )[0]);
                 let separator = [
                     back[2] + px(CRUMB_GAP_LOGICAL_PX),
                     band[1],
-                    back[2] + px(CRUMB_GAP_LOGICAL_PX) + separator_width,
+                    back[2] + px(CRUMB_GAP_LOGICAL_PX) + tracked(CRUMB_SEPARATOR, measure),
                     band[3],
                 ];
                 placed_crumb = Some(CrumbLayout {
                     band,
                     back,
-                    back_mark,
                     separator,
                     name: [
                         separator[2] + px(CRUMB_GAP_LOGICAL_PX),
@@ -10042,7 +10052,16 @@ pub fn build(
     if focus == Some(SettingsTarget::Close) {
         quads.extend(focus_ring(layout.close, scale, palette.accent));
     }
-    let glyph = px(WINDOW_CAPTION_GLYPH_LOGICAL_PX).round().max(1.0);
+    // **The house's box, since the house's cross** (裁2, 2026-08-26). This
+    // read `WINDOW_CAPTION_GLYPH_LOGICAL_PX` while the dialog's `✕` was the
+    // caption's own drawing; it is `#i-cross` now — cut in the house's sixteen,
+    // ten units of ink inside it — and a house drawing takes the slot table's
+    // box or it is the only mark in the window sized by hand.
+    let glyph = px(crate::seats::compact_head_glyph_logical_px(
+        crate::icons::ActionIcon::CloseDialog.mark(),
+    ))
+    .round()
+    .max(1.0);
     let glyph_left = ((layout.close[0] + layout.close[2]) / 2.0 - glyph / 2.0).round();
     let glyph_top = ((layout.close[1] + layout.close[3]) / 2.0 - glyph / 2.0).round();
     sprites.push(ChromeSprite::new(
@@ -11213,43 +11232,23 @@ fn push_editor_page(
     let Some(ink) = editor else { return };
     if let Some(crumb) = layout.crumb {
         let font = px(GROUP_LABEL_FONT_LOGICAL_PX);
-        // The way back wears the ink a control wears under the pointer; the
-        // separator and the name after it report and stay muted.
+        // `‹ Profiles` is the way back and wears the ink a control wears under
+        // the pointer; the `›` and the name after it report and stay muted.
+        //
+        // **Three runs of type and no marks** (裁3, 2026-08-26). The guillemets
+        // were a pair of house chevrons drawn as sprites from P1 until the
+        // acceptance; they are punctuation in this line's own face again, which
+        // is why the first of the three carries the arrow inside its own string
+        // rather than beside it.
         let lit = hover == Some(SettingsTarget::EditorBack);
-        for (mark, cell, ink) in [
-            (
-                crate::seats::crumb_back_mark(),
-                crumb.back_mark,
-                if lit {
-                    palette.dialog_title_text
-                } else {
-                    palette.dialog_muted_text
-                },
-            ),
-            (
-                crate::seats::crumb_separator_mark(),
-                crumb.separator,
-                palette.dialog_muted_text,
-            ),
-        ] {
-            stack.sprites.push(ChromeSprite::new(
-                mark,
-                crate::seats::crumb_punctuation_box(cell, mark, scale),
-                ink,
-            ));
-        }
         for (rect, text, muted, align_right) in [
             (
-                [
-                    crumb.back_mark[2],
-                    crumb.back[1],
-                    crumb.back[2],
-                    crumb.back[3],
-                ],
-                Text::CategoryProfiles.text().to_owned(),
+                crumb.back,
+                format!("{CRUMB_BACK_PREFIX}{}", Text::CategoryProfiles.text()),
                 !lit,
                 false,
             ),
+            (crumb.separator, CRUMB_SEPARATOR.to_owned(), true, false),
             (
                 crumb.name,
                 values
@@ -11804,9 +11803,9 @@ fn push_shortcut_page(
                 &mut stack.labels,
                 record,
                 if listening {
-                    RECORD_LISTENING_LABEL
+                    record_listening_label()
                 } else {
-                    RECORD_BUTTON_LABEL
+                    record_button_label()
                 },
                 hover == Some(SettingsTarget::Record(placed.index)) || listening,
                 scale,
@@ -11879,7 +11878,7 @@ fn push_shortcut_page(
             &mut stack.quads,
             &mut stack.labels,
             restore_all,
-            RESTORE_ALL_LABEL,
+            restore_all_label(),
             hover == Some(SettingsTarget::RestoreAll),
             scale,
             border,
@@ -16274,6 +16273,28 @@ mod tests {
             .collect()
     }
 
+    /// Everything drawn on the page, put back into one string in drawing order.
+    ///
+    /// **A row's sentence is not a label** — it is as many labels as it needed
+    /// lines, and how many that is depends on the fonts this machine has and on
+    /// how long the sentence happens to be today. A test that wants to know
+    /// whether the sentence is *drawn* therefore asks this and not
+    /// `any(|label| label.text == sentence)`, which was quietly asking the
+    /// second question "did the copy fit on one line" — and which is why every
+    /// row test in this file went red the day the copy was rewritten
+    /// (2026-08-26) rather than the day a row stopped drawing its sentence.
+    ///
+    /// The lines are joined the way [`wrapped_description`] split them, so the
+    /// sentence comes back word for word — see the wrap test, which asserts
+    /// exactly that.
+    fn drawn_text(labels: &[ChromeLabel]) -> String {
+        labels
+            .iter()
+            .map(|label| label.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     fn sprites_of(
         placed: &SettingsLayout,
         hover: Option<SettingsTarget>,
@@ -17600,8 +17621,9 @@ mod tests {
         );
         assert_eq!(
             SettingsRow::DefaultProfile.description(&values()),
-            "What opens on a new tab, and when Folio starts",
-            "mock-up 2468, word for word but for the product's name"
+            "Which profile a new tab opens, and which one Folio starts with.",
+            "the copy ruling of 2026-08-26, which supersedes mock-up 2468's own \
+             wording — see docs/plans/ui-style/copy-guide.md"
         );
         assert_eq!(
             SettingsRow::DefaultProfile
@@ -17882,8 +17904,14 @@ mod tests {
         }
     }
 
-    /// The dialog's close affordance is the mock-up's own `#i-close`, and it is
+    /// The dialog's close affordance is the house's own `#i-cross`, and it is
     /// the only mark the **header** draws.
+    ///
+    /// It was the mock-up's `#i-close` at the caption's ten until 裁2
+    /// (2026-08-26): the dialog is this house's surface and not Windows's, so
+    /// its cross is the house's, and a house drawing takes the compact head's
+    /// box — thirteen, with ten units of ink inside it, which is a *smaller*
+    /// picture than the ten-unit cross that filled its own box.
     ///
     /// "The only mark the overlay draws" until §7.1.6c-5, when the Advanced
     /// disclosure gave the scrolling stack one of its own — the house's
@@ -17897,20 +17925,25 @@ mod tests {
         let sprites = sprites_of(&placed, None, &values());
         let closes: Vec<_> = sprites
             .iter()
-            .filter(|sprite| sprite.mark == ChromeMark::WindowClose)
+            .filter(|sprite| sprite.mark == ChromeMark::TabClose)
             .collect();
         assert_eq!(closes.len(), 1, "one close, and only one");
         assert!(
             sprites.iter().all(|sprite| matches!(
                 sprite.mark,
-                ChromeMark::WindowClose | ChromeMark::Chevron { .. }
+                ChromeMark::TabClose | ChromeMark::Chevron { .. }
             )),
             "the overlay's marks are the close and the disclosure's chevron,              and nothing has quietly joined them: {:?}",
             sprites.iter().map(|sprite| sprite.mark).collect::<Vec<_>>()
         );
         let glyph = closes[0].rect;
-        assert_eq!(width(glyph), 10.0, "the close icon is 10px");
-        assert_eq!(height(glyph), 10.0);
+        assert_eq!(
+            width(glyph),
+            crate::seats::compact_head_glyph_logical_px(ChromeMark::TabClose),
+            "the close icon takes the compact head's box",
+        );
+        assert_eq!(width(glyph), 13.0);
+        assert_eq!(height(glyph), 13.0);
         assert!(
             (((glyph[0] + glyph[2]) / 2.0) - ((placed.close[0] + placed.close[2]) / 2.0)).abs()
                 <= 0.5,
@@ -18045,17 +18078,18 @@ mod tests {
             0.0,
         );
         let labels = labels_of(&placed, None, &values());
-        for text in [
-            "Display formulas",
-            "Typeset $$…$$ blocks; off shows the LaTeX source",
-            "On",
-            "Off",
-        ] {
+        for text in ["Display formulas", "On", "Off"] {
             assert!(
                 labels.iter().any(|label| label.text == text),
                 "{text:?} is part of the row and is not drawn"
             );
         }
+        let drawn = drawn_text(&labels);
+        let sentence = SettingsRow::Formulas.description(&values());
+        assert!(
+            drawn.contains(sentence),
+            "the row says what Off does, and it is not drawn: {sentence:?} in {drawn:?}"
+        );
         assert_eq!(SettingsRow::Formulas.option_count(), 2);
         assert_eq!(
             FORMULA_OPTIONS,
@@ -18077,12 +18111,12 @@ mod tests {
             0.0,
         );
         let labels = labels_of(&placed, None, &values());
-        for text in [
-            "Tables",
-            "Draw markdown tables in output; off shows the pipe text",
-            "On",
-            "Off",
-        ] {
+        let sentence = SettingsRow::Tables.description(&values());
+        assert!(
+            drawn_text(&labels).contains(sentence),
+            "the row says what Off does, and it is not drawn: {sentence:?}"
+        );
+        for text in ["Tables", "On", "Off"] {
             assert!(
                 labels.iter().any(|label| label.text == text),
                 "{text:?} is part of the row and is not drawn; drawn: {:?}",
@@ -18186,14 +18220,12 @@ mod tests {
             0.0,
         );
         let labels = labels_of(&placed, None, &values());
-        for text in [
-            "Maximum height",
-            "Blocks taller than this scroll inside themselves",
-            "No limit",
-            "120 px",
-            "240 px",
-            "480 px",
-        ] {
+        let sentence = SettingsRow::BlockMaxHeight.description(&values());
+        assert!(
+            drawn_text(&labels).contains(sentence),
+            "the row says what a cap does, and it is not drawn: {sentence:?}"
+        );
+        for text in ["Maximum height", "No limit", "120 px", "240 px", "480 px"] {
             assert!(
                 labels.iter().any(|label| label.text == text),
                 "{text:?} is part of the row and is not drawn; drawn: {:?}",
@@ -18309,14 +18341,12 @@ mod tests {
             0.0,
         );
         let labels = labels_of(&placed, None, &values());
-        for text in [
-            "Scrollback",
-            "Each pane keeps this many lines; the oldest go first",
-            "25,000",
-            "50,000",
-            "100,000",
-            "200,000",
-        ] {
+        let sentence = SettingsRow::Scrollback.description(&values());
+        assert!(
+            drawn_text(&labels).contains(sentence),
+            "the row says what the number buys, and it is not drawn: {sentence:?}"
+        );
+        for text in ["Scrollback", "25,000", "50,000", "100,000", "200,000"] {
             assert!(
                 labels.iter().any(|label| label.text == text),
                 "{text:?} is part of the row and is not drawn; drawn: {:?}",
@@ -18742,12 +18772,12 @@ mod tests {
         assert_eq!(SettingsRow::LineWrapping.selected_index(&off), Some(1));
         assert_eq!(
             SettingsRow::LineWrapping.description(&on),
-            "Long lines fold at the pane's edge."
+            "Lines longer than the pane fold at its edge."
         );
         assert_eq!(
             SettingsRow::LineWrapping.description(&off),
-            "Long lines run on and the pane scrolls sideways: Shift+wheel, or the \
-             bar along the pane's foot."
+            "Lines longer than the pane run on, and the pane scrolls sideways \
+             with Shift+wheel or the bar along its foot."
         );
         assert_ne!(
             SettingsRow::LineWrapping.description(&on),
@@ -19855,10 +19885,13 @@ mod tests {
         }
     }
 
-    /// The two new rows wear the mock-up's own words (lines 2358-2390), the
-    /// sidebar's second option among them: user ruling 2026-08-10 cut it from
-    /// "Icons, expand on hover" down to the mode's own name, and the mock-up
-    /// carries the same word.
+    /// The two rows draw their titles, their sentences and the sidebar's two
+    /// option names — the second of which is the one user ruling 2026-08-10 cut
+    /// from "Icons, expand on hover" down to the mode's own name.
+    ///
+    /// The sentences are read out of the rows rather than quoted here, which is
+    /// [`drawn_text`]'s own note: the copy is the language table's to say, and a
+    /// second copy of it in a test is a second thing to update.
     #[test]
     fn the_new_rows_wear_the_mock_ups_own_words() {
         // Two frames of the one page, because since the dialog's 600px cap a
@@ -19869,17 +19902,18 @@ mod tests {
         let at_sidebar = open_rows(1.0, Some(SettingsRow::Sidebar), TabLayoutMode::Vertical);
         let mut labels = labels_of(&at_rest, None, &values());
         labels.extend(labels_of(&at_sidebar, None, &values()));
-        for text in [
-            "Tab layout",
-            "Choose where tabs appear in the window",
-            "Sidebar",
-            "How the vertical tab sidebar rests",
-            "Expanded",
-            "Icons",
-        ] {
+        for text in ["Tab layout", "Sidebar", "Expanded", "Icons"] {
             assert!(
                 labels.iter().any(|label| label.text == text),
                 "{text:?} is the mock-up's own line and is not drawn"
+            );
+        }
+        let drawn = drawn_text(&labels);
+        for row in [SettingsRow::TabLayout, SettingsRow::Sidebar] {
+            let sentence = row.description(&values());
+            assert!(
+                drawn.contains(sentence),
+                "{row:?}: the row's sentence is not drawn: {sentence:?}"
             );
         }
         assert!(
@@ -21313,7 +21347,7 @@ mod tests {
         assert!(
             words(&page(at_rest.max_scroll()))
                 .iter()
-                .any(|label| label.text == RESTORE_ALL_LABEL),
+                .any(|label| label.text == restore_all_label()),
             "the page's own verb is drawn"
         );
     }
@@ -21599,7 +21633,7 @@ mod tests {
         assert!(
             labels
                 .iter()
-                .any(|label| label.text == RECORD_LISTENING_LABEL),
+                .any(|label| label.text == record_listening_label()),
             "and the button says it is listening"
         );
         for cap in &waiting {
@@ -21913,7 +21947,10 @@ mod tests {
         for text in [
             "class=\"cap\"",
             "class=\"sc-restore\"",
-            RESTORE_ALL_LABEL,
+            // The mock-up is an English document, so this one is quoted rather
+            // than read out of the table — a Chinese test run would otherwise
+            // look for 「全部恢复默认」 in a file that has never held it.
+            "Restore all defaults",
             "keybindings.json",
         ] {
             assert!(MOCKUP.contains(text), "the mock-up is missing {text:?}");

@@ -43,6 +43,7 @@ mod attention_hooks;
 mod attention_map;
 mod attention_trace;
 mod attention_wire;
+mod cardhint;
 mod cli;
 mod cmdrail;
 mod context_menu;
@@ -619,8 +620,8 @@ enum MathWorkerRequest {
     /// decoration record. The completion routes only to the app-side peek cache, so the band
     /// creation gates (cursor line, semantic input region) are never bypassed.
     PeekImage { leaf: ShellAddress, path: PathBuf },
-    /// **Raster the first page of a PDF the glance card is over** (user ruling 2026-08-25;
-    /// `docs/DESIGN.md` §7.10 ⑥).
+    /// **Raster one page of a PDF the glance card is over** (user rulings 2026-08-25 and
+    /// 2026-08-26; `docs/DESIGN.md` §7.10 ⑥, §7.7 ⑮).
     ///
     /// Here rather than on the preview worker because that thread's own note calls it *a disk*:
     /// every question on it is bytes at a path, answered in the time a read takes, and a page
@@ -629,11 +630,19 @@ enum MathWorkerRequest {
     /// lives — a formula through MiTeX and Typst, a wallpaper through the image decoder — and a
     /// page is the same shape of work asked by the same gesture.
     ///
-    /// `known` is the modification time the window's slot already holds pixels for, so the worker
-    /// can answer a re-hover with a `stat` instead of a render — see [`PeekPageOutcome`].
+    /// `known` is the modification time the window's cache already holds **this page's** pixels
+    /// for, so the worker can answer a re-hover with a `stat` instead of a render — see
+    /// [`PeekPageOutcome`]. `None` for a page this window has never drawn, which is every page the
+    /// first time a reader winds down to it.
+    ///
+    /// `page` is which page of the document, zero-based (user ruling 2026-08-26): the card's body
+    /// is a column the reader scrolls, so a request names the page it is about and the answer
+    /// carries that number home. A page the file does not have is answered with no raster rather
+    /// than refused — see [`pdf::page_raster`].
     PeekPage {
         leaf: ShellAddress,
         path: PathBuf,
+        page: u32,
         fit: (u32, u32),
         known: Option<SystemTime>,
     },
@@ -808,9 +817,10 @@ enum DecorationWorkerCompletion {
         path: PathBuf,
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
     },
-    /// One glance card's first page, or the news that it did not need drawing again.
+    /// One page of one glance card's column, or the news that it did not need drawing again.
     PeekPage {
         path: PathBuf,
+        page: u32,
         fit: (u32, u32),
         outcome: PeekPageOutcome,
     },
@@ -853,15 +863,20 @@ enum PeekPageOutcome {
     Unchanged,
     /// It has been — or the window was holding none — and this is what it looks like now. `raster`
     /// is `None` for a file this process will not draw, which is the card's whole degradation
-    /// path: an empty ground under two lines that are still true (`pdf::first_page`).
+    /// path: an empty ground under two lines that are still true (`pdf::page_raster`).
     Drawn {
         mtime: Option<SystemTime>,
         raster: Option<pdf::PageRaster>,
     },
 }
 
-/// [`PeekPageOutcome`] for one file, on the worker's own thread.
-fn raster_peek_page(path: &Path, fit: (u32, u32), known: Option<SystemTime>) -> PeekPageOutcome {
+/// [`PeekPageOutcome`] for one page of one file, on the worker's own thread.
+fn raster_peek_page(
+    path: &Path,
+    page: u32,
+    fit: (u32, u32),
+    known: Option<SystemTime>,
+) -> PeekPageOutcome {
     let mtime = std::fs::metadata(path)
         .and_then(|meta| meta.modified())
         .ok();
@@ -873,7 +888,7 @@ fn raster_peek_page(path: &Path, fit: (u32, u32), known: Option<SystemTime>) -> 
     }
     PeekPageOutcome::Drawn {
         mtime,
-        raster: pdf::first_page(path, fit.0, fit.1),
+        raster: pdf::page_raster(path, page, fit.0, fit.1),
     }
 }
 
@@ -1000,13 +1015,19 @@ impl MathWorker {
                         MathWorkerRequest::PeekPage {
                             leaf,
                             path,
+                            page,
                             fit,
                             known,
                         } => {
-                            let outcome = raster_peek_page(&path, fit, known);
+                            let outcome = raster_peek_page(&path, page, fit, known);
                             (
                                 leaf,
-                                DecorationWorkerCompletion::PeekPage { path, fit, outcome },
+                                DecorationWorkerCompletion::PeekPage {
+                                    path,
+                                    page,
+                                    fit,
+                                    outcome,
+                                },
                             )
                         }
                     };
@@ -1780,6 +1801,71 @@ struct PreviewPane {
     /// body, its dirty bit, its revision — so an edit made through the source
     /// face is still one edit, seen by both surfaces at once.
     md_source: bool,
+    /// **Which page's file this surface is reading the source of** (user ruling
+    /// 2026-08-26; DESIGN §7.7 ⑭) — `None` is the page itself.
+    ///
+    /// [`Self::md_source`]'s sentence about a browser, and per-surface for the
+    /// very same reason: the page is the tab's one browser and the way you are
+    /// looking at it is not.
+    ///
+    /// **A path and not a `bool`, and that is the whole of the state-keeping.**
+    /// A page navigates; a flag saying "showing source" would go on saying it
+    /// over a page whose file this no longer is, and something would then have
+    /// to be told to clear it — a hook on every commit, which is a hook that
+    /// gets forgotten. Written as the file being read, the question
+    /// [`Runtime::page_source_shown_on`] asks is a comparison with the file the
+    /// seat is *currently* on: go somewhere else and the pane is back on the
+    /// page's own face with nothing having been notified, come back and the
+    /// source is there again.
+    ///
+    /// **`pane.buffer` is untouched by the flip**, which is what keeps the
+    /// browser alive across it: [`a_page_was_replaced`] reads that field, sees
+    /// the page's own `PreviewSource::Web`, and the seat keeps its engine. What
+    /// changes is one boolean handed to [`a_page_is_off_the_glass`] — the page
+    /// goes invisible, it is not navigated and it is not closed, so flipping
+    /// back costs a `SetIsVisible(true)` and no load at all.
+    page_source: Option<PathBuf>,
+}
+
+impl PreviewPane {
+    /// **Every buffer this pane is reading**, which is one and is sometimes two
+    /// (user ruling 2026-08-26; DESIGN §7.7 ⑭).
+    ///
+    /// [`Self::buffer`] is what the pane is *on* — its identity, what a session
+    /// stores, what keeps a page's browser alive — and for every surface in this
+    /// window but one it is also the only thing being read. The exception is a
+    /// page turned to its source: the seat is still on the page and the bytes on
+    /// the glass are the file's, so both are true at once.
+    ///
+    /// **Both, rather than whichever face is up.** The two callers are a head
+    /// read landing (which owes the pane a frame) and the pool's eviction law
+    /// (which must not throw away a buffer that is on screen), and for each of
+    /// them the cost of naming one buffer too many is a spare repaint or a spare
+    /// kilobyte, while the cost of naming one too few is the defect this was
+    /// written out of: the source arrived and nothing drew it. `page_source`
+    /// only ever names a file the reader asked for by hand, so the extra name is
+    /// never a stranger's.
+    fn reading(&self) -> Vec<preview::PreviewSource> {
+        let mut sources: Vec<preview::PreviewSource> = self.buffer.iter().cloned().collect();
+        if let Some(path) = self.page_source.clone() {
+            let source = preview::PreviewSource::file(path);
+            if !sources.contains(&source) {
+                sources.push(source);
+            }
+        }
+        sources
+    }
+
+    /// Whether this pane is reading that buffer — [`Self::reading`] asked the
+    /// other way round, so a caller with one source in hand does not build a
+    /// list to look in.
+    fn is_reading(&self, source: &preview::PreviewSource) -> bool {
+        self.buffer.as_ref() == Some(source)
+            || self
+                .page_source
+                .as_deref()
+                .is_some_and(|path| source.file_path() == Some(path))
+    }
 }
 
 /// Every preview surface this tab has, and what each is showing.
@@ -1863,7 +1949,7 @@ impl PreviewPanes {
     fn showing(&self) -> Vec<preview::PreviewSource> {
         self.panes
             .iter()
-            .filter_map(|(_, pane)| pane.buffer.clone())
+            .flat_map(|(_, pane)| pane.reading())
             .collect()
     }
 }
@@ -4679,10 +4765,19 @@ fn preview_rail_tip_text(
     flip_to_source: bool,
 ) -> String {
     match tip {
+        // **The way back is named by what is on the other side of it**, and the
+        // two rails have two different things there (user ruling 2026-08-26): a
+        // markdown file's far face is a rendering this window made, a page's is
+        // the page itself. `View rendered` over a browser would be this row
+        // calling a live site a render of the file underneath it. The way *to*
+        // the source is one sentence on both, because it is one file.
         seats::PreviewRailTip::Flip => if flip_to_source {
             i18n::Text::PreviewFlipToSource
         } else {
-            i18n::Text::PreviewFlipToRendered
+            match kind {
+                seats::PreviewRailKind::Address => i18n::Text::PreviewFlipToPage,
+                seats::PreviewRailKind::Crumbs => i18n::Text::PreviewFlipToRendered,
+            }
         }
         .text()
         .to_owned(),
@@ -5088,8 +5183,25 @@ fn a_page_still_has_a_pane(floated: bool, seat_stands: bool, replaced: bool) -> 
 /// one. Written as its own clause rather than folded into the caller's `body`,
 /// because a page hidden for the wrong reason and a page with no rectangle look
 /// identical from the outside and are two different defects.
-fn a_page_is_off_the_glass(obstructed: bool, floated: bool, in_front: bool, carded: bool) -> bool {
-    obstructed || (!floated && !in_front) || carded
+/// **The fifth is the reader having asked to see the source instead** (user
+/// ruling 2026-08-26; DESIGN §7.7 ⑭). A page turned over with `</>` is drawn by
+/// nobody — the pane's own document pipeline is drawing that file's markup in
+/// the same rectangle — and a hole left punched over it would show a live
+/// browser through the text it is the source of.
+///
+/// It belongs here rather than in the caller's `body` for the reason written
+/// above about the third: this page **has** a rectangle and is entitled to it
+/// the moment the reader turns back, so the engine keeps being told its bounds
+/// and keeps its whole self. What it loses is one `SetIsVisible`, which is the
+/// only difference between a page that is hidden and a page that is gone.
+fn a_page_is_off_the_glass(
+    obstructed: bool,
+    floated: bool,
+    in_front: bool,
+    carded: bool,
+    sourced: bool,
+) -> bool {
+    obstructed || (!floated && !in_front) || carded || sourced
 }
 
 /// [`PreviewOpenLane`] for one path.
@@ -7379,6 +7491,12 @@ struct WindowRuntime {
     /// under the hands and there is one keyboard. It is a window's and not a
     /// pane's, because every row it can list is a row of the window's own table.
     key_hint: keyhint::KeyHintHost,
+    /// **The one-time bubble the Cards column owes a first-time reader**
+    /// (§7.21). Beside [`Self::key_hint`] because the two are the same kind of
+    /// surface — a sentence about a gesture, dismissed by its own clock — and
+    /// pointedly not folded into it: that card answers a hand that has stopped,
+    /// this one answers a reader who has arrived somewhere.
+    card_hint: cardhint::CardHintHost,
     /// The opacity the card was last *painted* at, or `None` when none was —
     /// [`Self::tooltip_drawn_opacity`]'s own frame-debt question, asked about
     /// this fade.
@@ -14493,55 +14611,120 @@ struct PeekFacts {
     answer: Option<preview::PageFacts>,
 }
 
-/// **The glance card's rastered first page, and whether the disk has been asked about it since the
-/// card came up** (user ruling 2026-08-25; [`file_peek::PeekBody::Facts`]).
+/// **How many drawn pages of one document the window keeps** (user ruling 2026-08-26).
 ///
-/// # Why the pixels outlive the card and the question does not
+/// Eight, and the number is a reach rather than a guess: the card's viewport is one page tall, so
+/// a wheel brings pages into view a couple at a time, and eight is several notches either side of
+/// wherever the hand stopped — far enough that winding back up a report costs nothing, near enough
+/// that the memory is a fact rather than a hope.
 ///
-/// `asked` is cleared when the card comes down and `raster` is not. That pair is the whole cache
+/// **It is also the whole of the memory bound, and that is deliberate.** A page is rastered into
+/// the card's own box ([`file_peek::PEEK_PAGE_W_LOGICAL_PX`] × `PEEK_PAGE_H_LOGICAL_PX`), so its
+/// pixels are `280 × 160 × 4` at 1× and about 1.6 MB at the largest display scale this window will
+/// meet; eight of those is a ceiling in the low tens of megabytes, reached only while a card is up
+/// over a long document. There is no second cap counted in bytes because there would be nothing
+/// for one to catch: [`pdf::MAX_RASTER_BYTES`] bounds the *file* a page may be read out of, and the
+/// box above bounds every raster that comes back, however large that file was.
+const PEEK_PAGE_CACHE: usize = 8;
+
+/// **The glance card's drawn pages, and which of them the disk has been asked about since the card
+/// came up** (user rulings 2026-08-25 and 2026-08-26; [`file_peek::PeekBody::Facts`]).
+///
+/// # Why the pixels outlive the card and the questions do not
+///
+/// `asked` is cleared when the card comes down and `pages` is not. That pair is the whole cache
 /// policy, and it buys both halves of what a hover owes:
 ///
-/// * A pointer returning to a row it just left finds its page **already drawn** — no empty ground,
-///   no second parse, nothing that flickers.
+/// * A pointer returning to a row it just left finds its pages **already drawn** — no blank
+///   sheets, no second parse, nothing that flickers.
 /// * And a question goes out anyway, so a file that has been rewritten since is noticed. It is
 ///   answered `PeekPageOutcome::Unchanged` in the ordinary case, which costs one `metadata` call on
 ///   a background thread and changes nothing on screen.
 ///
-/// # Why one slot and not a map
+/// # Why a run of pages of one document, and never a page of several
 ///
-/// A rastered page is a third of a megabyte and a session browsing a folder of reports would
-/// accumulate one per file, unbounded, for a card that shows one at a time. The single slot is
-/// `PeekThumbnail`'s policy — "a peek is transient and singular (one flyout at a time)" — restated
-/// about a costlier picture, and what it gives up is small: walking back and forth between two
-/// PDFs re-draws each of them, which costs a render this window can afford rather than memory it
-/// cannot bound.
+/// It held one page of one document until the card's body became a column the reader scrolls, and
+/// the reason for the second half has not changed at all: a rastered page is hundreds of kilobytes
+/// and a session browsing a folder of reports would accumulate one per file, unbounded, for a card
+/// that shows one document at a time. So the slot is still *this* file's — a card over another
+/// path replaces it whole — and what grew inside it is a run of pages bounded by
+/// [`PEEK_PAGE_CACHE`]. Walking back and forth between two PDFs still re-draws each of them, which
+/// costs a render this window can afford rather than memory it cannot bound.
 struct PeekPageSlot {
     path: PathBuf,
-    /// The box the page was fitted into, in physical pixels. A DPI change or a window moved to
-    /// another monitor makes it a different question, and the raster it already holds would be
+    /// The box each page was fitted into, in physical pixels. A DPI change or a window moved to
+    /// another monitor makes it a different question, and the rasters it already holds would be
     /// drawn soft.
     fit: (u32, u32),
-    /// When the file said it was last written, as the worker that drew this saw it. `None` for a
+    /// When the file said it was last written, as the worker that drew these saw it. `None` for a
     /// filesystem that does not report one, which is also why it can never answer "unchanged".
     mtime: Option<SystemTime>,
-    /// Whether a question about this file is out, or has already been answered, since the card
-    /// came up. Cleared by `TabState::hide_file_peek` so the next card asks once and only once.
-    asked: bool,
-    /// The pixels, or `None` for a file this process will not raster — see `pdf::first_page` for
-    /// the list, and `file_peek::PeekBody::Facts` for what the card draws instead.
-    raster: Option<PeekPageRaster>,
+    /// Which pages a question is out about, or has already been answered about, since the card
+    /// came up. Cleared by `TabState::hide_file_peek` so the next card asks once per page and no
+    /// more.
+    asked: BTreeSet<u32>,
+    /// The drawn pages, **least recently used first** — see [`PEEK_PAGE_CACHE`]. A page this
+    /// process will not raster is simply absent, which is what leaves a blank sheet in its slot
+    /// rather than a gap; see `pdf::page_raster` for the reasons and
+    /// `file_peek::PeekBody::Facts` for what the card then draws.
+    pages: Vec<(u32, PeekPageRaster)>,
 }
 
-/// **What the shared GPU cache calls one drawn page**: the file, when it was last written, and the
-/// size it was drawn at.
+impl PeekPageSlot {
+    /// This page's pixels **without** claiming a use — what the paint asks.
+    ///
+    /// A frame draws whatever is in view, and a frame is not a hand: letting the paint reorder the
+    /// cache would make the eviction order a fact about what is on screen this instant, which is
+    /// both noisier and less useful than what the request lane records at the one place a page is
+    /// actually reached for.
+    fn page(&self, index: u32) -> Option<&PeekPageRaster> {
+        self.pages
+            .iter()
+            .find(|(page, _)| *page == index)
+            .map(|(_, raster)| raster)
+    }
+
+    /// Whether this page is already drawn, **and say that it was wanted**.
+    ///
+    /// The request lane's own question, and it is the only place the eviction order is written:
+    /// what a reader has scrolled to is what was asked about, so a page that goes on being in view
+    /// goes on being the newest thing in the cache and the pages behind the hand are what leave.
+    fn wanted(&mut self, index: u32) -> bool {
+        let Some(at) = self.pages.iter().position(|(page, _)| *page == index) else {
+            return false;
+        };
+        let entry = self.pages.remove(at);
+        self.pages.push(entry);
+        true
+    }
+
+    /// Put one drawn page in, evicting the least recently used while the cache is over
+    /// [`PEEK_PAGE_CACHE`].
+    ///
+    /// A page that is already held is **replaced** rather than added beside: the same page drawn
+    /// again is the file having changed under it, and two entries for one index would let the
+    /// stale one be found first for ever.
+    fn keep(&mut self, index: u32, raster: PeekPageRaster) {
+        self.pages.retain(|(page, _)| *page != index);
+        self.pages.push((index, raster));
+        while self.pages.len() > PEEK_PAGE_CACHE {
+            self.pages.remove(0);
+        }
+    }
+}
+
+/// **What the shared GPU cache calls one drawn page**: the file, when it was last written, **which
+/// page it is**, and the size it was drawn at.
 ///
-/// All three, because all three can change while the string is still a valid name for something.
-/// Two files at one size are two pictures; one file rewritten is two pictures; one file at two
-/// DPIs is two rasters of the same picture, and a cache that served either for the other would put
-/// the wrong document, the stale document or a soft document on the card.
+/// All four, because all four can change while the string is still a valid name for something. Two
+/// files at one size are two pictures; one file rewritten is two pictures; one file at two DPIs is
+/// two rasters of the same picture; and two pages of one document are two pictures with everything
+/// else about them identical — which is the one the column added, and the one that would have put
+/// page 1 in every slot of the card (user ruling 2026-08-26).
 fn peek_page_texture_key(
     path: &Path,
     mtime: Option<SystemTime>,
+    page: u32,
     width: u32,
     height: u32,
 ) -> String {
@@ -14554,7 +14737,10 @@ fn peek_page_texture_key(
             || "?".to_owned(),
             |since| since.as_nanos().to_string(),
         );
-    format!("peek-page:{}:{stamp}:{width}x{height}", path.display())
+    format!(
+        "peek-page:{}:{stamp}:{page}:{width}x{height}",
+        path.display()
+    )
 }
 
 /// One drawn page, in the shape the renderer takes it.
@@ -15836,6 +16022,36 @@ fn preview_page_hand_off(source: &preview::PreviewSource) -> Option<PathBuf> {
         .file_path()
         .filter(|path| path_opens_as_a_page(path))
         .map(Path::to_path_buf)
+}
+
+/// **The file a page's `</>` would show you**, or `None` when that page has no
+/// second face (user ruling 2026-08-26; DESIGN §7.7 ⑭).
+///
+/// Two refusals, and each is a different sentence rather than two spellings of
+/// caution:
+///
+/// * **A remote page has no source on this disk.** `https://example.com/a.html`
+///   answers `None` because [`webnav::Mint::path_and_tail_of_file_url`] reads
+///   only the `file:` URLs this window minted itself, and what a server sent is
+///   not a file — the bytes the engine rendered were never on this machine to be
+///   opened. Fetching them again to show them would be this window running a
+///   second, weaker browser beside the one already on the seat.
+/// * **A `.pdf` has no text in it.** That is [`preview::PageGlance`]'s whole
+///   judgement and it is asked here rather than restated: the page class already
+///   carries a column saying which of its members this window can read, the
+///   glance card has been reading it since 2026-08-25, and a second table would
+///   be the defect §7.10 ⑥ was written out of.
+///
+/// The tail (`#section`, `?q=`) is dropped exactly as [`preview_page_hand_off`]
+/// drops it: what the reader asked for is the file, and a fragment is a place
+/// inside the *rendered* page rather than inside its bytes.
+///
+/// A free function of the URL, so that the whole of the offer can be read
+/// without a window: this is the predicate the rail's button set is drawn from
+/// and the one the flip verb consents to, and both must be the same sentence.
+fn page_source_file(url: &str) -> Option<PathBuf> {
+    let (path, _tail) = webnav::Mint::path_and_tail_of_file_url(url)?;
+    (preview::path_page_glance(&path) == Some(preview::PageGlance::Source)).then_some(path)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19673,6 +19889,26 @@ struct OverlayStack {
     /// so every chord the card would list does nothing — and a list of verbs that
     /// would not fire is the one thing this surface must never be.
     key_hint: Vec<marks::OverlayLayer>,
+    /// **The Cards column's first-arrival bubble** (§7.21).
+    ///
+    /// *Above the key hint*, and the two can only meet in one way: a reader who
+    /// has just entered Cards with `Ctrl+Shift+Z` may still be holding
+    /// `Ctrl+Shift` when the 800ms is up. Of the two cards on the glass at that
+    /// instant, this one is answering the arrival that just happened and the
+    /// other is answering a hand that has not moved since; and this one is the
+    /// only one of the pair that will never be offered again.
+    ///
+    /// *Below the tip*, on the tip's own standing rule, and above the notices
+    /// for the key hint's: what the window volunteers does not cover what the
+    /// reader is being taught once.
+    ///
+    /// **It shares the notices' corner in its fallback seat, and that is a
+    /// known trade rather than an oversight**: a bubble whose card has scrolled
+    /// out of the column takes the window's bottom-right, which is where a
+    /// window-anchored toast stands. It wins, for four seconds, because a
+    /// receipt that is covered can be read again by doing the thing again and
+    /// this sentence cannot.
+    card_hint: Vec<marks::OverlayLayer>,
     /// `.tip { z-index: 60 }` — the one surface in this window that is never
     /// covered, because it is the only one whose whole job is to explain what is
     /// under it.
@@ -19751,6 +19987,7 @@ impl OverlayStack {
             tab_menu,
             toast,
             key_hint,
+            card_hint,
             tooltip,
             file_peek,
             drag_ghost,
@@ -19776,6 +20013,7 @@ impl OverlayStack {
             tab_menu,
             toast,
             key_hint,
+            card_hint,
             tooltip,
             file_peek,
             drag_ghost,
@@ -21922,6 +22160,18 @@ struct FilePeek {
     /// The document's box inside that frame — where a wheel notch lands and what
     /// the scroll is clamped against. Written beside [`Self::frame`].
     body: Option<[f32; 4]>,
+    /// **How far this card's column of pages can be wound**, in physical pixels
+    /// — `None` for every card whose body is not one (user ruling 2026-08-26).
+    ///
+    /// Written beside [`Self::frame`] and read by [`Runtime::preview_max_scroll`],
+    /// for the reason the note above this one gives about the height that used
+    /// to live here in reverse: a page column's reach is *not* a property of the
+    /// card's pane. The pane's document is what a text body is measured from,
+    /// and a `.pdf` has none — its extent comes from a page **count** read off
+    /// the file's structure, which only the frame that assembled the body has in
+    /// hand. So the one copy of it is filed here, by the painter, exactly as the
+    /// two rectangles above are.
+    column: Option<f32>,
     // **A `content` height stood here** — how tall the document turned out,
     // filed by the painter for the hit test to read back. It went on 2026-08-14,
     // when the card's bar became the pane's: `Runtime::preview_surface_bar` asks
@@ -23716,6 +23966,13 @@ enum Layered {
     /// and it is the surface whose own source said *"It has no exit fade at
     /// all"*, which this slice is the answer to.
     KeyHint,
+    /// The bubble the Cards column raises on a reader's first entry (§7.21).
+    ///
+    /// **Both halves, unlike the two above it** — it has no entrance of its own
+    /// to protect, so it takes the register's: `POPUP_ENTER` with four pixels of
+    /// travel from the direction of the card it grew out of, exactly like a menu
+    /// dropping out of the head it belongs to.
+    CardHint,
 }
 
 impl Layered {
@@ -23726,7 +23983,7 @@ impl Layered {
     /// arrangement `GitFilterMenuLayout::rows` keeps, and for its reason: a list
     /// the product walked would be a second way of deciding what is on the glass.
     #[allow(dead_code)]
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 18] = [
         Self::Popup(Popup::Profile),
         Self::Popup(Popup::Root),
         Self::Popup(Popup::File),
@@ -23744,6 +24001,7 @@ impl Layered {
         Self::Notice,
         Self::Tip,
         Self::KeyHint,
+        Self::CardHint,
     ];
 
     /// **The bands that share the modal level**, where one `else if` chain draws
@@ -23981,8 +24239,9 @@ mod arrival_wiring_tests {
         }
         assert_eq!(
             Layered::ALL.len(),
-            17,
-            "nine menus, three submenus, a scrim, a dialog, a notice, a tip and a card"
+            18,
+            "nine menus, three submenus, a scrim, a dialog, a notice, a tip, the card a \
+             held modifier raises and the bubble Cards raises on a first visit"
         );
         for band in Layered::MODAL_BANDS {
             assert!(
@@ -27001,6 +27260,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         tooltip_drawn_opacity: None,
         key_hint: keyhint::KeyHintHost::default(),
         key_hint_drawn_opacity: None,
+        card_hint: cardhint::CardHintHost::default(),
         passages: arrival::Passages::default(),
         passages_drawn: Vec::new(),
         settling: settling::Settling::default(),
@@ -29939,6 +30199,11 @@ impl Runtime<'_> {
                 rail: self.sampled_rail(now),
                 rail_scroll: self.window.rail_scroll,
                 focus_reveal: self.window.focus_reveal.sample(now, self.app.motion).0,
+                // Sampled here, on the frame it is drawn, beside the reveal it
+                // sits next to — and answered as `0.0` by the host itself for
+                // every window that is not being shown the bubble and every
+                // window whose reader asked for less motion.
+                focus_card_nudge_rows: self.window.card_hint.nudge_rows(now, self.app.motion),
                 focus_thumbnails: &focus_thumbnails,
                 preview_titles: &preview_titles,
                 float_shown: &float_shown,
@@ -34080,6 +34345,12 @@ impl Runtime<'_> {
         // of their own — and gain only the way out, which neither had.
         let key_hint = self.key_hint_layer();
         stack.key_hint = self.stage_departure(Layered::KeyHint, key_hint, now);
+        // And the Cards bubble takes **both** halves from the register, because
+        // it was written without either: it grows out of the card its tail bites,
+        // travelling from that direction, and leaves as a picture over the fast
+        // span like every other layer this window puts down.
+        let (card_hint, card_hint_travel) = self.card_hint_layer(now);
+        stack.card_hint = self.stage(Layered::CardHint, card_hint, card_hint_travel, now);
         let tooltip = self.tooltip_layer();
         stack.tooltip = self.stage_departure(Layered::Tip, tooltip, now);
         stack.file_peek = self.file_peek_layer();
@@ -35030,6 +35301,131 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// **The staged card's head, if the column is drawing it whole** (§7.21) —
+    /// what the bubble's tail is allowed to bite.
+    ///
+    /// The head and not the body, because the head is the part of a card that is
+    /// a *card*: it carries the tab's name and its mark, and it is the same
+    /// twenty-eight pixels whatever `Card height` is set to. A tail aimed at the
+    /// middle of a 320px body would point at a row of somebody's build log.
+    ///
+    /// **Whole, and that is the clip test rather than a margin.** The column's
+    /// viewport is the one rectangle every other question about this list is
+    /// asked against (`focus_thumb`'s gate two, `focus_rail_chrome`'s own clip),
+    /// and a head half cut off by it is a head whose middle is not where the
+    /// arithmetic thinks it is. `None` here is what sends the bubble to the
+    /// floor seat, which is [`cardhint::place`]'s own second answer.
+    fn staged_card_head(&self, now: Instant) -> Option<[f32; 4]> {
+        let geometry = self.focus_rail_geometry_now(now)?;
+        let card = geometry.cards.get(self.window.active_tab)?;
+        let [list_top, list_bottom] = geometry.viewport;
+        (card.head[1] >= list_top && card.head[3] <= list_bottom).then_some(card.head)
+    }
+
+    /// Paint the Cards bubble, and say which way it grew.
+    ///
+    /// The travel rides back with the layers rather than being asked for
+    /// separately, because it is a fact about *this* placement: the bubble that
+    /// bit a card grew away from that card, and the one that fell back to the
+    /// corner grew off the floor. A caller that had to ask twice could pair one
+    /// frame's box with another frame's direction.
+    fn card_hint_layer(&mut self, now: Instant) -> (Vec<marks::OverlayLayer>, Option<Travel>) {
+        if !self.window.card_hint.showing() {
+            return (Vec::new(), None);
+        }
+        let head = self.staged_card_head(now);
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let layout = cardhint::place(
+            head,
+            (width as f32, height as f32),
+            scale,
+            &mut |run, size| renderer.measure_chrome_text(gpu, run, size),
+        );
+        let palette = bt_render::chrome_palette();
+        let travel = cardhint::travel(&layout);
+        (cardhint::build(&layout, &palette, scale), Some(travel))
+    }
+
+    /// **Note whether this window is in Cards, and raise the bubble on the frame
+    /// it first is** (§7.21).
+    ///
+    /// Asked once a turn against `rail_posture()` — the very posture the column
+    /// is solved and painted from — rather than hooked onto the doors that turn
+    /// the mode on. There are three of those (a chord, a settings row, and a
+    /// window that opens straight into Cards because the file said so), the
+    /// third does not go through `set_focus_mode` at all, and a hook on each
+    /// would be three chances for a fourth to be added without one.
+    ///
+    /// **The offer is spent on the frame the bubble is raised, and written
+    /// through at once.** Not when it comes down: a window that is closed, or
+    /// that crashes, four seconds into a reader's first visit has still shown
+    /// them the sentence, and a debt that is only discharged on a clean exit is
+    /// a debt that greets them again tomorrow. The write is `settings.json`'s
+    /// ordinary undebounced one, which is what every other row in that file
+    /// takes.
+    fn note_card_hint(&mut self, now: Instant) -> Result<()> {
+        let in_cards = self.rail_posture().draws_focus_rail();
+        let offered = self.app.settings_store.loaded().cards_gesture_hint_offer;
+        let moved = match self.window.card_hint.observe(in_cards, offered, now) {
+            cardhint::CardHint::Unchanged => false,
+            cardhint::CardHint::Raised => {
+                let mut settings = self.app.settings_store.loaded().clone();
+                settings.cards_gesture_hint_offer = false;
+                let _ = self.app.settings_store.store(settings);
+                true
+            }
+            cardhint::CardHint::Lowered => true,
+        };
+        if moved {
+            self.repaint_card_hint()?;
+        }
+        Ok(())
+    }
+
+    /// Take the bubble down when its four seconds are up, and pay the nudge's
+    /// frames until the card it points at is home.
+    ///
+    /// The two are one function because they are one surface's clock, and they
+    /// are asked in this order because a bubble whose dwell has just ended has
+    /// nothing left to nudge.
+    fn advance_card_hint(&mut self, now: Instant) -> Result<()> {
+        let ended = self.window.card_hint.expire(now) != cardhint::CardHint::Unchanged;
+        let nudging = self.window.card_hint.nudge_moving(now, self.app.motion);
+        if ended || nudging {
+            self.repaint_card_hint()?;
+        }
+        Ok(())
+    }
+
+    /// **Both surfaces, because this hint is two things on two levels**: the
+    /// bubble is an overlay layer and the nudge is a card in the chrome, and a
+    /// frame that rebuilt one of them would move the caption without the
+    /// picture or the picture without the caption.
+    ///
+    /// Written once rather than at each of the three call sites, so the pairing
+    /// cannot come apart. The two `refresh_` calls are both made before either
+    /// answer is read — `||` would skip the second whenever the first said yes,
+    /// and the one it skipped is the one that would then be a frame behind.
+    fn repaint_card_hint(&mut self) -> Result<()> {
+        let chrome = self.refresh_chrome();
+        let overlay = self.refresh_overlay();
+        if chrome || overlay {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// When this window next has Cards-hint work: the nudge's frames while it is
+    /// moving, and the end of the four seconds. Nothing at all for a window
+    /// whose reader has already been told (§7.21).
+    fn card_hint_deadline(&self, now: Instant) -> Option<Instant> {
+        self.window
+            .card_hint
+            .deadline(now, self.app.motion, STRIP_ANIMATION_FRAME)
+    }
+
     /// The `˅`'s verb: show the profile list, or put away the one on screen.
     ///
     /// **E61's rule stated in both directions.** The root menu's opener has
@@ -35687,6 +36083,20 @@ impl Runtime<'_> {
     /// through, every choice in it is written the instant it is made, and what
     /// this discards is exactly the eight rows the reader is looking at while
     /// they press it.
+    ///
+    /// **And one thing that is not a row** (§7.21, user ruling 2026-08-27). The
+    /// Appearance page's verb also gives back the Cards column's first-arrival
+    /// bubble, which is a debt rather than a preference and therefore has no row
+    /// to be derived from. It is named here, once, and the alternative was
+    /// worse in both directions: a *row* for it would be a switch that turns off
+    /// something that has already happened and cannot happen again — a control
+    /// with no reader — while leaving it out of every reset at all would make
+    /// "shown once" mean "shown once per installation, with no way back", which
+    /// is the one thing a reader who missed a four-second card cannot fix.
+    ///
+    /// This page and not another, because this is the page Cards lives on
+    /// (`Cards` and `Card height` are two of its rows), and "put this page back
+    /// the way it shipped" is the only sentence in this dialog that covers it.
     fn reset_advanced_group(&mut self, category: settings::SettingsCategory) -> Result<()> {
         let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
         let advanced = self
@@ -35694,6 +36104,12 @@ impl Runtime<'_> {
             .advanced_rows(category);
         for row in advanced {
             self.reset_advanced_row(row)?;
+        }
+        if category == settings::SettingsCategory::Appearance {
+            let mut settings = self.app.settings_store.loaded().clone();
+            settings.cards_gesture_hint_offer =
+                bt_persist::SettingsV1::default().cards_gesture_hint_offer;
+            let _ = self.app.settings_store.store(settings);
         }
         self.toast(
             toast::ToastKind::Ok,
@@ -41094,12 +41510,19 @@ impl Runtime<'_> {
         &mut self,
         surface: PreviewSurface,
     ) -> Option<&mut preview::PreviewBuffer> {
+        // The same fork [`Self::preview_buffer_on`] makes, for its own stated
+        // reason: the pool a surface edits is the pool it reads, and so is the
+        // *buffer*.
+        let flipped = self.page_source_shown_on(surface).map(Path::to_path_buf);
         let index = self.preview_tab_index(surface);
-        let source = self.window.tabs[index]
-            .preview_panes
-            .get(surface)?
-            .buffer
-            .clone()?;
+        let source = match flipped {
+            Some(path) => preview::PreviewSource::file(path),
+            None => self.window.tabs[index]
+                .preview_panes
+                .get(surface)?
+                .buffer
+                .clone()?,
+        };
         self.window.tabs[index].preview_pool.get_mut(&source)
     }
 
@@ -41118,7 +41541,18 @@ impl Runtime<'_> {
                     .filter(|buffer| &buffer.source == source)
             });
         }
+        // **A page turned to its source reads that file's buffer** (user ruling
+        // 2026-08-26). One fork, at the door every host asks its body, its view,
+        // its ftype and its facts through — so the flip is one sentence rather
+        // than a condition repeated at each of them. `pane.buffer` is *not*
+        // redirected and must not be: that field is which content this seat is
+        // on, the page is still what it is on, and it is what keeps the browser
+        // ([`a_page_was_replaced`]).
+        let path = self.page_source_shown_on(surface).map(Path::to_path_buf);
         let tab = self.preview_tab(surface)?;
+        if let Some(path) = path {
+            return tab.preview_pool.get(&preview::PreviewSource::file(path));
+        }
         tab.preview_pool
             .get(tab.preview_panes.get(surface)?.buffer.as_ref()?)
     }
@@ -41131,6 +41565,36 @@ impl Runtime<'_> {
     fn preview_md_source(&self, surface: PreviewSurface) -> bool {
         self.preview_pane(surface)
             .is_some_and(|pane| pane.md_source)
+    }
+
+    /// **The file whose source this surface's `</>` would turn to**, whichever
+    /// face it is showing right now (user ruling 2026-08-26; DESIGN §7.7 ⑭).
+    ///
+    /// [`page_source_file`] asked of the page this surface is standing on, and
+    /// the whole of what the rail's button set is drawn from: a rail carries
+    /// `</>` when this answers, and does not when it does not. Asked of the
+    /// *offer* rather than of the state, so the button does not vanish under the
+    /// hand that just pressed it.
+    fn preview_page_source_file(&self, surface: PreviewSurface) -> Option<PathBuf> {
+        page_source_file(&self.web_of(surface)?.page().url)
+    }
+
+    /// **The source file this surface is showing instead of its page**, or
+    /// `None` when it is showing the page (user ruling 2026-08-26).
+    ///
+    /// A comparison and not a flag, which is [`PreviewPane::page_source`]'s own
+    /// note: the pane remembers *which file* it was turned to, and this asks
+    /// whether that is still the file the seat is on. A page that has since
+    /// navigated somewhere else answers `None` with nothing having been cleared
+    /// — the reader is looking at the new page, which is what pressing an
+    /// address bar means — and a page that comes back answers again.
+    fn page_source_shown_on(&self, surface: PreviewSurface) -> Option<&Path> {
+        // Cheapest question first and on purpose: every surface in this window
+        // asks this on the way to its buffer, and all but a flipped page leave
+        // here without touching the web map or parsing a URL.
+        let reading = self.preview_pane(surface)?.page_source.as_deref()?;
+        let page = self.preview_page_source_file(surface)?;
+        (page == reading).then_some(reading)
     }
 
     /// **What paints this surface's body**, asked once, for every host.
@@ -41163,7 +41627,22 @@ impl Runtime<'_> {
     /// rendered page with nowhere to put a caret, the other is text. Every gate
     /// that used to ask the buffer alone asks through here, so two surfaces on
     /// one file can disagree about it and both be right.
+    ///
+    /// **A page's source is read and not written** (user ruling 2026-08-26;
+    /// DESIGN §7.7 ⑭). The buffer under it is an ordinary text buffer and would
+    /// answer yes on its own — that is the point of the promotion, and it is
+    /// what gets the markup a highlighter and a 64KB cap without a second reader
+    /// being written. What this seat is *on* is still the page, though: its row
+    /// is an address, its name is a title, and the browser drawing it a moment
+    /// ago has no idea a file was edited. So the far face is a reading, exactly
+    /// as the glance card's is, and the two questions a writer would raise —
+    /// what the live document on the glass does with a save, and what the head's
+    /// one verb slot holds when `Save` and `DevTools` both want it — are not
+    /// this ruling's to answer.
     fn preview_is_editable(&self, surface: PreviewSurface) -> bool {
+        if self.page_source_shown_on(surface).is_some() {
+            return false;
+        }
         let md_source = self.preview_md_source(surface);
         self.preview_buffer_on(surface)
             .is_some_and(|buffer| buffer.is_editable(md_source))
@@ -42353,6 +42832,17 @@ impl Runtime<'_> {
                     &frame.address,
                     font,
                 );
+                // **`</>` on a page's row too** (user ruling 2026-08-26; DESIGN
+                // §7.7 ⑭). The offer and the state are two questions and both
+                // are asked here: whether this page has a file on this disk that
+                // this window can read, and which of its two faces is up. The
+                // developer tools are untouched and stay on the head — a debugger
+                // and a reading are different errands, which is the ruling's own
+                // sentence.
+                frame.measure.flip = self.preview_page_source_file(surface).is_some();
+                // The glyph names the *destination*, exactly as it does one arm
+                // down.
+                frame.flip_to_source = self.page_source_shown_on(surface).is_none();
             }
             seats::PreviewRailKind::Crumbs => {
                 let path = self.preview_rail_path(surface)?;
@@ -43059,7 +43549,7 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// Turn a markdown page over — rendered view ⇄ source (P28).
+    /// Turn a preview over — the render ⇄ the source (P28).
     ///
     /// **The flip is a property of the view, not of the buffer** (ruling
     /// 2026-08-13, overturning the reading this carried until then). It followed
@@ -43071,16 +43561,23 @@ impl Runtime<'_> {
     /// editing the source in another is a legitimate thing to want, and it is
     /// ruling 8⑧'s line drawn one field further along: the file is shared, the
     /// way you are looking at it is not.
-    fn flip_preview_source(&mut self) -> Result<()> {
-        let Some(surface) = self.preview_keyboard_surface() else {
-            return Ok(());
-        };
-        self.flip_preview_source_on(surface)
-    }
-
-    /// The same, for a **named** surface — what a head's own flip button
-    /// presses. [`Self::save_preview_on`]'s argument, applied to the other verb.
+    ///
+    /// **A surface, and never "whichever one has the keyboard"** (real-machine
+    /// defect, 2026-08-26). There was a second door here that took no argument
+    /// and asked `preview_keyboard_surface`; it survived because pressing a
+    /// markdown pane's head is what gives that pane the keyboard, so the two
+    /// answers were usually the same one. A page's address row ended that — see
+    /// the `ChromeTarget::PreviewFlip` arm — and the door with no argument is
+    /// gone rather than left standing for the next caller to reach for.
     fn flip_preview_source_on(&mut self, surface: PreviewSurface) -> Result<()> {
+        // **A page's two faces are turned by the same button** (user ruling
+        // 2026-08-26; DESIGN §7.7 ⑭), and the arm is chosen by the seat rather
+        // than by the buffer: a page seat's buffer is its `PreviewSource::Web`,
+        // which has no ftype worth asking, and the offer is a property of the
+        // address the engine is standing on.
+        if let Some(path) = self.preview_page_source_file(surface) {
+            return self.flip_page_source_on(surface, path);
+        }
         // The *file* decides whether there is a face to turn — only markdown has
         // two — and the *surface* is what gets turned.
         if self
@@ -43099,6 +43596,77 @@ impl Runtime<'_> {
             self.preview_edit_focus = None;
         }
         self.repaint_preview()
+    }
+
+    /// **Turn a local page over — the page ⇄ its own source** (user ruling
+    /// 2026-08-26; DESIGN §7.7 ⑭).
+    ///
+    /// [`Self::flip_preview_source_on`]'s other arm, and the difference between
+    /// them is only who draws the far face: markdown's is a parser in this
+    /// process and a page's is a browser in another one. Everything the reader
+    /// can name is the same — the same button, the same glyph pair, the same
+    /// per-surface memory, the same tooltip rule that the word says where a
+    /// press *goes*.
+    ///
+    /// **Nothing here navigates and nothing here closes.** Turning to the source
+    /// writes one path onto the pane; turning back clears it. The engine learns
+    /// about it exactly once, a frame later, as [`a_page_is_off_the_glass`]'s
+    /// fifth reason — a `SetIsVisible(false)` and a hole not punched. The page
+    /// keeps its history, its scroll, its form fields and its process, because
+    /// none of them was asked a question. That is the whole of why this is not
+    /// "close the page and open the file", which is what a `pane.buffer` swap
+    /// would have been.
+    ///
+    /// **The source is read the way the glance reads it** — through the pool's
+    /// one door and then [`preview::PreviewBuffer::read_a_pages_bytes_as_text`],
+    /// which is the single place the "a page whose bytes are text is text" rule
+    /// lives. So it gets the same head read, the same 64KB cap, the same
+    /// highlighter an `.rs` file gets, and a second reader of `.html` has not
+    /// been written.
+    fn flip_page_source_on(&mut self, surface: PreviewSurface, path: PathBuf) -> Result<()> {
+        if self.page_source_shown_on(surface).is_some() {
+            self.preview_pane_mut(surface).page_source = None;
+        } else {
+            self.land_page_source_on(surface, path);
+        }
+        // The body's shape changed under a rectangle that did not, so the layout
+        // is re-asked before the chrome is dressed to it — the same order a
+        // buffer landing takes.
+        self.refresh_preview_for_layout();
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// Put this page's file in the pool as text and ask the disk for it — the
+    /// half of [`Self::flip_page_source_on`] that turns *to* the source.
+    ///
+    /// [`Self::land_preview_source_on`] with the two things a page must not do
+    /// taken out: it does not touch `pane.buffer` (the seat is still on its
+    /// page) and it does not file a view (the caret and the scroll it would
+    /// restore belong to a document this surface is not on). What is left is the
+    /// pool's own door, the promotion, and one question for the worker — asked
+    /// through `claim_head_read`, so a file already out with it, or already
+    /// read, costs nothing.
+    fn land_page_source_on(&mut self, surface: PreviewSurface, path: PathBuf) {
+        let name = files_row_display_name(&path);
+        let source = preview::PreviewSource::file(path.clone());
+        let tab = self.id;
+        let window = self.window_id();
+        let shown = self.preview_panes.showing();
+        let buffer = self.preview_pool.open(source.clone(), name, &shown);
+        buffer.read_a_pages_bytes_as_text();
+        let wants_read = buffer.claim_head_read();
+        self.preview_pane_mut(surface).page_source = Some(path);
+        if wants_read
+            && !self.app.preview_worker.request(preview::PreviewRequest {
+                window,
+                tab,
+                source,
+                want: preview::PreviewWant::Head,
+            })
+        {
+            self.disable_preview_worker();
+        }
     }
 
     /// Lock or unlock the preview pane (P30/P95).
@@ -44334,6 +44902,18 @@ impl Runtime<'_> {
     /// and markdown *wraps* to the pane, so a horizontal offset would be an
     /// offset into nothing.
     fn preview_max_scroll(&self, surface: PreviewSurface, body: [f32; 4], scale: f32) -> [f32; 2] {
+        // **A glance card over a page scrolls its column, not a document** (user
+        // ruling 2026-08-26). It is the one body in this window whose reach is
+        // not a layout of text: a `.pdf` has no document on the card's pane at
+        // all, and what it has instead is a page count and a slot per page. So
+        // the answer comes from the card, which is where the count was turned
+        // into a length — and everything downstream of this call, the wheel, the
+        // thumb, the clamp, is the same code the source of an `.html` uses.
+        if surface == PreviewSurface::Peek
+            && let Some(column) = self.window.file_peek.as_ref().and_then(|peek| peek.column)
+        {
+            return [0.0, column];
+        }
         let Some(pane) = self.preview_pane(surface) else {
             return [0.0, 0.0];
         };
@@ -47948,11 +48528,18 @@ impl Runtime<'_> {
                     // **Every surface on this buffer**, and there may be
                     // several: one file open in two panes is one buffer
                     // (§7.1.3) with two carets, and a body arriving under
-                    // one of them arrives under both.
+                    // one of them arrives under both. Asked through
+                    // `PreviewPane::is_reading`, because since 2026-08-26 a
+                    // pane can be reading a file it is not *on* — a page turned
+                    // to its source — and comparing `pane.buffer` alone left
+                    // that pane out of `showing`, which left `changed` false,
+                    // which is a body that arrived and was never drawn (found
+                    // on the machine, `BT_PREVIEW_TRACE`: `bytes=0 owed=1` at
+                    // the flip and no build line afterwards at all).
                     let showing: Vec<PreviewSurface> = tab
                         .preview_panes
                         .iter()
-                        .filter(|(_, pane)| pane.buffer.as_ref() == Some(&response.source))
+                        .filter(|(_, pane)| pane.is_reading(&response.source))
                         .map(|(surface, _)| surface)
                         .collect();
                     if let Some(content) = content {
@@ -49930,13 +50517,20 @@ impl Runtime<'_> {
     /// as well and falls back to it, so a caller who forgets this map draws the
     /// run exactly as it was drawn before there was a fade.
     ///
-    /// **The list is the hovered pane plus whatever is still leaving.** A hand
-    /// crossing from one pane to the next leaves two entries for ninety
+    /// **The list is every pane showing a run plus whatever is still leaving.**
+    /// A hand crossing from one pane to the next leaves two entries for ninety
     /// milliseconds — one coming up and one going down — which is why this is a
-    /// list at all and not the one seat under the pointer.
+    /// list at all and not the one seat under the pointer. Since 裁4 two can be
+    /// up at once for a second reason: a menu standing on one head while the
+    /// hand is in the pane beside it.
     fn settled_head_ink(&mut self, now: Instant) -> Vec<(SeatId, f32)> {
         let motion = self.app.motion;
-        let hovered = self.window.seat_pointer.pane_hover;
+        // **Both arms of the predicate** (裁4, 2026-08-26). The register eases
+        // toward whatever `seats::head_run_revealed` says, and it has to be the
+        // same sentence the paint and the hit test read — easing toward
+        // `pane_hover` alone would run the ninety-millisecond fade *out* the
+        // instant the hand reached the list the head had just opened.
+        let showing = self.head_run();
         let mut seats: Vec<SeatId> = self
             .window
             .settling
@@ -49947,10 +50541,10 @@ impl Runtime<'_> {
                 _ => None,
             })
             .collect();
-        if let Some(seat) = hovered
-            && !seats.contains(&seat)
-        {
-            seats.push(seat);
+        for seat in [showing.hovered, showing.menu].into_iter().flatten() {
+            if !seats.contains(&seat) {
+                seats.push(seat);
+            }
         }
         seats
             .into_iter()
@@ -49959,7 +50553,7 @@ impl Runtime<'_> {
                     &Fading::HeadRun(seat),
                     0.0,
                     settling::Toward::eased(
-                        f32::from(u8::from(hovered == Some(seat))),
+                        f32::from(u8::from(seats::head_run_revealed(showing, seat))),
                         bt_render::HOVER_CHROME_FADE,
                     ),
                     now,
@@ -49968,6 +50562,20 @@ impl Runtime<'_> {
                 (seat, ink)
             })
             .collect()
+    }
+
+    /// **The two facts a pane head's run is drawn and hit-tested by**, read off
+    /// this window once (裁4, 2026-08-26).
+    ///
+    /// One reader for the paint, the fade register and the hit test, on
+    /// [`seats::head_run_revealed`]'s own argument: the moment the three of them
+    /// assemble this pair for themselves is the moment one of them forgets the
+    /// second arm and a head goes dark under its own open menu.
+    fn head_run(&self) -> seats::HeadRun {
+        seats::HeadRun {
+            hovered: self.window.seat_pointer.pane_hover,
+            menu: self.window.pane_menu.as_ref().map(|menu| menu.seat),
+        }
     }
 
     /// **A row waiting on a write dims into it rather than jumping** (the
@@ -50591,6 +51199,7 @@ impl Runtime<'_> {
             due: Some(now + Duration::from_millis(file_peek::PEEK_INTENT_MS)),
             frame: None,
             body: None,
+            column: None,
             closing_at: None,
             thumb_grab: None,
             dwell: None,
@@ -50986,7 +51595,7 @@ impl Runtime<'_> {
         // asks the disk once more whether it is still that file. See
         // [`PeekPageSlot`].
         if let Some(slot) = self.window.peek_page.as_mut() {
-            slot.asked = false;
+            slot.asked.clear();
         }
         // And any hand that was on a block inside it. The card's surface is the
         // one the sweep deliberately never retires ([`Self::sweep_preview_panes`]),
@@ -51145,17 +51754,12 @@ impl Runtime<'_> {
     /// answered on the same one.** A page count is read off the file's structure
     /// ([`pdf::page_count`]) — a walk over as many bytes as the file has — and
     /// goes down the preview worker's lane, which is a disk. A raster
-    /// ([`pdf::first_page`]) is a parse and a rasterisation and goes to the
+    /// ([`pdf::page_raster`]) is a parse and a rasterisation and goes to the
     /// decoration worker, beside the formula engine; putting it in front of the
     /// disk's queue would make a preview pane's head read wait on a picture.
     /// Either one on the thread that draws is a hover over a large document
     /// freezing the window.
     fn file_peek_facts(&mut self, path: &Path, scale: f32) -> file_peek::PeekBody {
-        // **The page is asked for first and unconditionally.** It is the slower of the two by
-        // orders of magnitude, and the two answers land in the one body: filing its question
-        // behind the facts' would put the picture a whole page-count scan later than it needs to
-        // be, on a file whose size is the reason that scan is slow.
-        let page = self.file_peek_page(path, scale);
         let facts = match self
             .window
             .peek_facts
@@ -51180,23 +51784,43 @@ impl Runtime<'_> {
                 None
             }
         };
+        let pages = facts.and_then(|facts| facts.pages);
+        // **Clamped here, against the number this very line just read.** The
+        // reach grows the frame a page count lands and shrinks the frame a file
+        // turns out to be shorter than the one before it; both are answered by
+        // the count, so this is the one place that has the old offset and the new
+        // extent at once — which is `file_peek_layer`'s own rule about a
+        // document, applied to the body that has no document.
+        let column = file_peek::peek_page_column_max_scroll(pages.unwrap_or(1), scale);
+        self.window.peek_pane.scroll[1] = self.window.peek_pane.scroll[1].clamp(0.0, column);
+        // **The pages are asked for after the count and with it.** The count is what says how long
+        // the column is, and until it lands the column is one slot — so a request run filed before
+        // it would be a run that asked for exactly the cover and then never widened, because the
+        // set of pages already asked about does not shrink.
+        self.file_peek_pages(path, scale, pages.unwrap_or(1));
         file_peek::PeekBody::Facts {
-            page,
+            scroll: self.window.peek_pane.scroll[1],
             bytes: facts.and_then(|facts| facts.bytes),
-            pages: facts.and_then(|facts| facts.pages),
+            pages,
         }
     }
 
-    /// **The card's first page**: the size to draw it at once it is home, and the question that
-    /// puts it on its way (user ruling 2026-08-25).
+    /// **The pages this card is showing, put on their way** (user rulings 2026-08-25 and
+    /// 2026-08-26).
     ///
     /// Asked from the frame for [`Self::file_peek_picture`]'s reason and guarded the same way —
-    /// the card is rebuilt whenever the chrome is, so the question is filed against the file the
+    /// the card is rebuilt whenever the chrome is, so each question is filed against its page the
     /// moment it goes out and a frame that finds it already filed asks nothing. What is different
     /// is what happens when the pointer comes back: the pixels are still here, they are drawn on
     /// the first frame, and the disk is asked once more in the background whether they are still
     /// the file's. See [`PeekPageSlot`].
-    fn file_peek_page(&mut self, path: &Path, scale: f32) -> Option<[f32; 2]> {
+    ///
+    /// **Only what is in view is asked for** (`file_peek::peek_pages_in_view`). A hundred-page
+    /// report is a hundred rasters and tens of seconds of a worker's life, spent on pages nobody
+    /// has scrolled to; the column reserves their slots from the *count*, which is cheap, and buys
+    /// their pixels one wheel notch at a time. The same range decides what is drawn, so a page
+    /// this window is waiting for and a page it is showing a blank sheet for are the same page.
+    fn file_peek_pages(&mut self, path: &Path, scale: f32, count: u32) {
         let fit = |logical: f32| ((logical * scale).round() as u32).max(1);
         let fit = (
             fit(file_peek::PEEK_PAGE_W_LOGICAL_PX),
@@ -51215,23 +51839,33 @@ impl Runtime<'_> {
                 path: path.to_owned(),
                 fit,
                 mtime: None,
-                asked: false,
-                raster: None,
+                asked: BTreeSet::new(),
+                pages: Vec::new(),
             });
         }
-        let slot = self
-            .window
-            .peek_page
-            .as_mut()
-            .expect("the slot was just filled");
-        let known = slot.mtime;
-        let drawn = slot
-            .raster
-            .as_ref()
-            .map(|raster| [raster.width_px as f32, raster.height_px as f32]);
-        if !slot.asked && self.app.math_worker_running {
-            slot.asked = true;
-            let leaf = self.focused_shell_address();
+        if !self.app.math_worker_running {
+            return;
+        }
+        let scroll = self.window.peek_pane.scroll[1];
+        let leaf = self.focused_shell_address();
+        for index in file_peek::peek_pages_in_view(count, scroll, scale) {
+            let slot = self
+                .window
+                .peek_page
+                .as_mut()
+                .expect("the slot was just filled");
+            // **A page in view is a page wanted**, whether or not it has to be drawn: this is the
+            // one place the cache's eviction order is written, and recording it here rather than
+            // at the paint is what keeps the run of kept pages centred on the hand instead of on
+            // whichever frame ran last.
+            let held = slot.wanted(index);
+            if !slot.asked.insert(index) {
+                continue;
+            }
+            // `known` only for a page whose pixels are actually here. For any other, "unchanged"
+            // would be an answer about a picture this window does not have, and the page would
+            // stay blank for as long as the file went untouched.
+            let known = held.then_some(slot.mtime).flatten();
             if self
                 .app
                 .math_worker
@@ -51239,6 +51873,7 @@ impl Runtime<'_> {
                 .send(MathWorkerRequest::PeekPage {
                     leaf,
                     path: path.to_owned(),
+                    page: index,
                     fit,
                     known,
                 })
@@ -51247,10 +51882,9 @@ impl Runtime<'_> {
             {
                 // Nobody is going to answer, so nothing is out: leave the slot able to ask again
                 // rather than waiting for ever on a lane that has gone.
-                slot.asked = false;
+                slot.asked.remove(&index);
             }
         }
-        drawn
     }
 
     /// The 350ms is up — put the card on screen (P145).
@@ -51357,22 +51991,11 @@ impl Runtime<'_> {
             ftype_width,
             scale,
         );
-        // The one picture this card draws, whichever body it is wearing: a file's own image off
-        // the resample lane, or a page this window rastered for itself. They are two slots
-        // because they are two hovers over two different things, and one argument because the
-        // card draws exactly one of them.
+        // The file's own image off the resample lane, for the one body that wears one. A page
+        // card draws a *column* instead and takes it separately — they were one argument while
+        // both bodies drew exactly one picture, and the column ended that.
         let picture = match layout.body_kind {
-            file_peek::PeekBody::Facts { .. } => self
-                .window
-                .peek_page
-                .as_ref()
-                .and_then(|slot| slot.raster.as_ref())
-                .map(|raster| file_peek::PeekPicture {
-                    key: &raster.key,
-                    rgba: &raster.rgba,
-                    width_px: raster.width_px,
-                    height_px: raster.height_px,
-                }),
+            file_peek::PeekBody::Facts { .. } => None,
             _ => self
                 .window
                 .peek_picture
@@ -51383,6 +52006,33 @@ impl Runtime<'_> {
                     width_px: picture.width_px,
                     height_px: picture.height_px,
                 }),
+        };
+        // **The pages in view that have come home** — asked of the same range the request lane
+        // asks (`file_peek::peek_pages_in_view`), so that "drawn" and "asked for" cannot drift
+        // apart into a slot that stays blank because nobody ever wanted it. Borrowed, never
+        // cloned: each page is hundreds of kilobytes and this runs on every frame the card is up.
+        let pages: Vec<file_peek::PeekPage<'_>> = match layout.body_kind {
+            file_peek::PeekBody::Facts { pages, scroll, .. } => self
+                .window
+                .peek_page
+                .as_ref()
+                .map(|slot| {
+                    file_peek::peek_pages_in_view(pages.unwrap_or(1), scroll, scale)
+                        .filter_map(|index| {
+                            slot.page(index).map(|raster| file_peek::PeekPage {
+                                index,
+                                picture: file_peek::PeekPicture {
+                                    key: &raster.key,
+                                    rgba: &raster.rgba,
+                                    width_px: raster.width_px,
+                                    height_px: raster.height_px,
+                                },
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
         };
         // The foot's two halves, measured here for the reason the name and the
         // chip were: only something holding a font can say how wide a line is.
@@ -51412,7 +52062,8 @@ impl Runtime<'_> {
             )
         };
         let palette = bt_render::chrome_palette();
-        let mut layer = file_peek::build(&layout, &content, &foot, picture, &palette, scale);
+        let mut layer =
+            file_peek::build(&layout, &content, &foot, picture, &pages, &palette, scale);
         // **Where the card came to rest, filed before anything is drawn into
         // it** — every pointer question about the card reads these two, so a
         // frame that painted a card without recording it would be a card on
@@ -51422,6 +52073,40 @@ impl Runtime<'_> {
         if let Some(peek) = self.window.file_peek.as_mut() {
             peek.frame = Some(layout.frame);
             peek.body = Some(layout.body);
+            // And the column's reach, or the fact that this card has none — written
+            // unconditionally, because a card that changed body without clearing it would
+            // answer a wheel with the last document's number.
+            peek.column = match content.body {
+                file_peek::PeekBody::Facts { pages, .. } => Some(
+                    file_peek::peek_page_column_max_scroll(pages.unwrap_or(1), scale),
+                ),
+                _ => None,
+            };
+        }
+        // **A column of pages wears the same bar a document does**, over the window it is wound
+        // past rather than over the whole body: the two fact lines underneath do not move, and a
+        // rule beside them would be a bar claiming to measure them (user ruling 2026-08-26).
+        if let file_peek::PeekBody::Facts { pages, scroll, .. } = content.body {
+            let ground = file_peek::page_ground(layout.body, scale);
+            let Some(bar) = preview_body_bar(
+                ground,
+                preview::ScrollAxis::Vertical,
+                [0.0, scroll],
+                file_peek::peek_page_column_height(pages.unwrap_or(1), scale),
+                scale,
+            ) else {
+                return vec![layer];
+            };
+            let state = ScrollThumbState::of(
+                self.window
+                    .file_peek
+                    .as_ref()
+                    .is_some_and(|peek| peek.thumb_grab.is_some()),
+                self.window
+                    .pointer_position
+                    .is_some_and(|at| file_peek::contains(bar.grab, [at.x as f32, at.y as f32])),
+            );
+            return vec![layer, scroll_bar_layer(&bar, state, &palette)];
         }
         if !matches!(content.body, file_peek::PeekBody::Document(_)) {
             return vec![layer];
@@ -61326,8 +62011,13 @@ impl Runtime<'_> {
                 // **The glance card's page**, on the same reasoning and with one difference: unlike
                 // the flyout's decode it *is* drawn by the chrome, so a page that has arrived owes
                 // the overlay a rebuild. That is asked below rather than here.
-                DecorationWorkerCompletion::PeekPage { path, fit, outcome } => {
-                    self.complete_peek_page(&path, fit, outcome)?;
+                DecorationWorkerCompletion::PeekPage {
+                    path,
+                    page,
+                    fit,
+                    outcome,
+                } => {
+                    self.complete_peek_page(&path, page, fit, outcome)?;
                     false
                 }
                 // **Not gated on the asking tab either, and for the stronger
@@ -63383,6 +64073,7 @@ impl Runtime<'_> {
     fn complete_peek_page(
         &mut self,
         path: &Path,
+        page: u32,
         fit: (u32, u32),
         outcome: PeekPageOutcome,
     ) -> Result<()> {
@@ -63397,13 +64088,31 @@ impl Runtime<'_> {
         let PeekPageOutcome::Drawn { mtime, raster } = outcome else {
             return Ok(());
         };
+        // **A file that has been written is a different document, and the pages already drawn are
+        // of the old one** (user ruling 2026-08-26). The single-slot version could not meet this:
+        // it held one page, so replacing it *was* the whole cache. A run of pages can be half a
+        // report from before a save and half from after — a reader scrolling through would watch
+        // the document change under the hand, page by page, as each one happened to be re-asked.
+        // So the stamp is what the cache belongs to, and a new one empties it.
+        if slot.mtime != mtime && !slot.pages.is_empty() {
+            slot.pages.clear();
+            // And every page has to be asked again, including the ones a question is already out
+            // about — those answers are about the file this is no longer.
+            slot.asked.clear();
+            slot.asked.insert(page);
+        }
         slot.mtime = mtime;
-        slot.raster = raster.map(|raster| PeekPageRaster {
-            key: peek_page_texture_key(path, mtime, raster.width, raster.height),
-            rgba: Arc::from(raster.rgba.into_boxed_slice()),
-            width_px: raster.width,
-            height_px: raster.height,
-        });
+        if let Some(raster) = raster {
+            slot.keep(
+                page,
+                PeekPageRaster {
+                    key: peek_page_texture_key(path, mtime, page, raster.width, raster.height),
+                    rgba: Arc::from(raster.rgba.into_boxed_slice()),
+                    width_px: raster.width,
+                    height_px: raster.height,
+                },
+            );
+        }
         // The card is chrome, and a page that lands while it is up owes the frame that shows it —
         // nothing else is going to move the pointer.
         if self.refresh_overlay() {
@@ -65026,7 +65735,7 @@ impl Runtime<'_> {
                 &self.seat_layout,
                 scale,
                 &tools,
-                self.window.seat_pointer.pane_hover,
+                self.head_run(),
                 position.x,
                 position.y,
             )
@@ -65083,7 +65792,12 @@ impl Runtime<'_> {
                 // used: this is asked on the press as well as on the move, and
                 // on the press the only honest question is "what is the reader
                 // looking at".
-                self.window.seat_pointer.pane_hover,
+                //
+                // And since 裁4 (2026-08-26) it is the *pair*: a head whose own
+                // menu is standing is showing its run even though `pane_hover`
+                // was cleared the instant the hand reached the list, so the
+                // `✕` beside the `⌄` that opened it goes on taking a press.
+                self.head_run(),
                 position.x,
                 position.y,
             )
@@ -68018,10 +68732,21 @@ impl Runtime<'_> {
                 self.window.files_row_clicks.interrupt();
                 self.save_preview()?;
             }
-            seats::ChromeTarget::PreviewFlip(_) => {
-                self.window.tab_clicks.interrupt();
-                self.window.files_row_clicks.interrupt();
-                self.flip_preview_source()?;
+            // **The seat this button is drawn on, and not whichever pane holds
+            // the keyboard** (real-machine defect, 2026-08-26). It threw the id
+            // away and asked `preview_keyboard_surface`, which was survivable
+            // while `</>` lived on the head of a markdown pane — pressing a
+            // pane's head is what gives that pane the keyboard, so the two
+            // answers were the same one often enough. A page's row ends that:
+            // pressing a button on a browser's address row does not move the
+            // keyboard into that seat, so the flip landed on some other
+            // surface's pane while the row that was pressed went on drawing
+            // `</>`. Every other control on this row already asks
+            // `preview_here(seat)` — see `PreviewBrowser` and `PreviewDevTools`
+            // directly below — and this is that sentence finished.
+            seats::ChromeTarget::PreviewFlip(seat) => {
+                let surface = self.preview_here(seat);
+                self.press_preview_rail(surface, seats::PreviewRailPart::Flip)?;
             }
             seats::ChromeTarget::PreviewBrowser(seat) => {
                 let surface = self.preview_here(seat);
@@ -72577,6 +73302,16 @@ impl Runtime<'_> {
             // — that is what §7.1.2 made it for — so the page inside one is not
             // hidden by the tab behind it changing.
             let floated = self.float_holding_the_page(leaf);
+            // **And whether this pane is reading the page's source instead**
+            // (§7.7 ⑭). Asked of the surface the page is drawn on, which is the
+            // float when one is carrying it — the flip is the *view's*, and a
+            // page carried into a window keeps the face it was turned to.
+            let sourced = self
+                .page_source_shown_on(match floated {
+                    Some(id) => PreviewSurface::Float(id),
+                    None => PreviewSurface::Seat(leaf),
+                })
+                .is_some();
             let tab = &self.window.tabs[index];
             let body = match floated {
                 Some(id) => self.float_body_rect(id, scale),
@@ -72612,7 +73347,13 @@ impl Runtime<'_> {
             let rect = webhost::web_presence(body, false).bounds();
             let presence = webhost::web_presence(
                 body,
-                a_page_is_off_the_glass(obstructed, floated.is_some(), index == active, carded),
+                a_page_is_off_the_glass(
+                    obstructed,
+                    floated.is_some(),
+                    index == active,
+                    carded,
+                    sourced,
+                ),
             );
             // **And where in the stack the hole for it is punched** (§7.14c). A
             // float is not a surface standing *over* this page — it is the pane
@@ -72640,7 +73381,7 @@ impl Runtime<'_> {
                 web_trace::line(|| {
                     format!(
                         "place tab={} seat={} floated={} body={} presence={presence:?} \
-                         above={} obstructed={} carded={} front={}",
+                         above={} obstructed={} carded={} front={} sourced={}",
                         leaf.tab.0,
                         seat.0,
                         floated.map_or_else(|| String::from("-"), |id| id.to_string()),
@@ -72649,6 +73390,7 @@ impl Runtime<'_> {
                         u8::from(obstructed),
                         u8::from(carded),
                         u8::from(index == active),
+                        u8::from(sourced),
                     )
                 });
             }
@@ -74645,6 +75387,13 @@ impl Runtime<'_> {
         // refused and takes down a card whose window has stopped offering.
         self.note_key_hint(now)?;
         self.advance_key_hint_if_due(now)?;
+        // The Cards column's own one-time bubble, beside the hint card because
+        // the two are the same kind of surface — and asked on every turn for the
+        // same reason: the thing that raises it is the *column being on screen*,
+        // which is a fact about the posture rather than an event, and a window
+        // that opened straight into Cards never sent one.
+        self.note_card_hint(now)?;
+        self.advance_card_hint(now)?;
         // The notices' three clocks, beside the tip's and after it: a card that
         // has just left frees the pixels the tip may be about to be laid over.
         self.advance_toasts(now)?;
@@ -74766,6 +75515,12 @@ impl Runtime<'_> {
             // whose hand has already pressed something — reports nothing and
             // costs no wake-ups at all (§7.1.5e′).
             self.key_hint_deadline(now),
+            // The Cards bubble's four seconds, and the nudge's frames while the
+            // card it points at is still travelling. A reader who has already
+            // been told — which is every reader from their second visit onwards
+            // — reports nothing, and under reduced motion even a window that is
+            // being told reports one instant and then sleeps through it (§7.21).
+            self.card_hint_deadline(now),
             // A notice's entrance landing, its life running out, its exit
             // finishing — and nothing at all while one is held under the pointer,
             // because a stopped clock owes no wake-ups (2026-08-16).
@@ -75686,6 +76441,115 @@ mod focus_mode_door_tests {
                 "the projection reached for {fetch}, which is it going looking"
             );
         }
+    }
+
+    /// RED (§7.21, user ruling 2026-08-27) — **the offer is written in exactly
+    /// two places: the frame it is spent, and the verb that gives it back.**
+    ///
+    /// This is the pin the whole "shown once" claim rests on, and both halves
+    /// would rot in opposite directions. A third writer is a third opinion about
+    /// when a reader has been told; *no* writer on the giving-back side is
+    /// "shown once per installation, with no way to see it again" — which is the
+    /// one thing a reader who blinked through a four-second card cannot fix for
+    /// themselves.
+    ///
+    /// The needle and the two lines it expects are assembled at run time, on
+    /// this module's own standing reason: a pin that scans the file it lives in
+    /// must not be able to match its own text.
+    ///
+    /// MUTATION: spend the offer anywhere else — on the frame the bubble comes
+    /// *down*, say — and this names the extra line, and a window closed four
+    /// seconds into a first visit shows the card again next launch; take the
+    /// restore out of `reset_advanced_group` and this names its absence.
+    #[test]
+    fn the_cards_offer_is_spent_in_one_place_and_given_back_in_one() {
+        let field = ["cards", "_gesture_hint_offer"].concat();
+        let needle = ["settings", ".", field.as_str(), " ="].concat();
+        let writes: Vec<&str> = SOURCE
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(needle.as_str()))
+            .collect();
+        assert_eq!(
+            writes,
+            [
+                // Spent on the frame the bubble is raised.
+                format!("{needle} false;"),
+                // And given back by `Reset to defaults` on the page Cards is on.
+                needle.clone(),
+            ],
+            "the offer has one spender and one restorer",
+        );
+
+        // The restore is on the Appearance page and no other: a reset of the
+        // Terminal page's ground has nothing to say about a column of cards.
+        let reset = body("    fn reset_advanced_group(");
+        assert!(
+            reset.contains(needle.as_str()),
+            "the restoring half lives in the reset verb",
+        );
+        let guard = reset
+            .find("SettingsCategory::Appearance")
+            .expect("the restore is guarded by the page Cards lives on");
+        let write = reset
+            .find(needle.as_str())
+            .expect("the restore is in this body");
+        assert!(
+            guard < write,
+            "the restore stands under the page guard, or every page gives it back",
+        );
+
+        // And the default it is restored to is read from the file's own
+        // defaults rather than written out here — a second copy of a default is
+        // the copy that goes stale.
+        assert!(
+            reset.contains("SettingsV1::default()"),
+            "the restored value is `SettingsV1`'s own, never a literal",
+        );
+    }
+
+    /// RED (§7.21) — **the bubble is a picture and not a control.**
+    ///
+    /// Nothing in the hit test knows it exists, and nothing in the module that
+    /// draws it names a hit target. That is what makes "it never takes a press"
+    /// structural rather than remembered: there is no path from a pointer to
+    /// this surface to be guarded, so no guard can be forgotten.
+    ///
+    /// It matters more here than for a menu, because of *where* it stands. The
+    /// bubble hangs over the stage, and the terminal underneath it is a surface
+    /// a reader selects text in — a card that swallowed a press would eat the
+    /// start of a drag-selection, four seconds into somebody's first visit, in
+    /// the one part of the product where a lost press is a lost selection.
+    ///
+    /// MUTATION: give the bubble a `ChromeTarget` and this names it.
+    #[test]
+    fn the_cards_bubble_is_drawn_and_never_pressed() {
+        // The code and not the prose: this module's own paragraphs are allowed
+        // to *say* the word "press", and a needle that could not tell the two
+        // apart would be a pin that fails on its own argument.
+        let module: String = include_str!("cardhint.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for reachable in [
+            "ChromeTarget",
+            "rect_holds",
+            "MouseButton",
+            "ElementState",
+            "pointer",
+        ] {
+            assert!(
+                !module.contains(reachable),
+                "the bubble's own module names {reachable}, which is it becoming pressable",
+            );
+        }
+        // And the window's one reading of what is under a pointer has never
+        // heard of it.
+        assert!(
+            !body("    fn chrome_target_at(").contains("card_hint"),
+            "the hit test knows the bubble exists, so a press can land on it",
+        );
     }
 }
 
@@ -80971,20 +81835,180 @@ mod floated_page_tests {
     fn a_page_in_a_float_stays_on_the_glass_across_a_tab_switch() {
         use super::a_page_is_off_the_glass;
         assert!(
-            a_page_is_off_the_glass(false, false, false, false),
+            a_page_is_off_the_glass(false, false, false, false, false),
             "a docked page on a tab nobody is looking at comes off the glass"
         );
         assert!(
-            !a_page_is_off_the_glass(false, true, false, false),
+            !a_page_is_off_the_glass(false, true, false, false, false),
             "a floated page does not, because its window is still on the glass"
         );
         assert!(
-            a_page_is_off_the_glass(true, true, true, false),
+            a_page_is_off_the_glass(true, true, true, false, false),
             "a modal covers a float as it covers everything else"
         );
         assert!(
-            a_page_is_off_the_glass(false, true, true, true),
+            a_page_is_off_the_glass(false, true, true, true, false),
             "and a failure card replaces the page in a float too"
+        );
+    }
+
+    /// RED — **only a local page whose bytes this window can read is offered a
+    /// source face** (user ruling 2026-08-26; DESIGN §7.7 ⑭).
+    ///
+    /// [`page_source_file`] is the whole of the offer: it draws the `</>` onto a
+    /// rail and it is what the flip verb consents to, so the two cannot disagree
+    /// about which pages have two faces. Three refusals are pinned here because
+    /// each is a different sentence and only one of them is about HTML:
+    ///
+    /// * a **remote** page has no file on this disk, however its URL is spelled;
+    /// * a **`.pdf`** is on this disk and has nothing in it this window reads,
+    ///   which is [`preview::PageGlance`]'s own column;
+    /// * a **name that is not a page at all** never gets here, and answers `None`
+    ///   through the same door rather than through an extra guard.
+    ///
+    /// RED GATE ①: drop the [`preview::PageGlance::Source`] test and the `.pdf`
+    /// answers with a path — a rail that draws `</>` over a report, and a press
+    /// that would put an empty text buffer over a working PDF viewer. RED GATE
+    /// ②: reach for the URL's own tail instead of
+    /// [`webnav::Mint::path_and_tail_of_file_url`] (a `starts_with("file://")`
+    /// and a slice, say) and the `https` row goes green while `%20` comes back
+    /// as three characters.
+    #[test]
+    fn only_a_local_page_this_window_can_read_offers_its_source() {
+        use super::page_source_file;
+        use std::path::Path;
+        assert_eq!(
+            page_source_file("file:///D:/site/index.html").as_deref(),
+            Some(Path::new(r"D:\site\index.html")),
+            "a local page whose bytes are text has a source face"
+        );
+        assert_eq!(
+            page_source_file("file:///D:/site/INDEX.HTM").as_deref(),
+            Some(Path::new(r"D:\site\INDEX.HTM")),
+            "and the extension table ignores case here as it does everywhere"
+        );
+        assert_eq!(
+            page_source_file("file:///D:/my%20site/index.html").as_deref(),
+            Some(Path::new(r"D:\my site\index.html")),
+            "the mint's own escapes come back as the characters they stand for"
+        );
+        assert_eq!(
+            page_source_file("file:///D:/reports/report.pdf"),
+            None,
+            "a PDF is a page this window cannot read a word of"
+        );
+        assert_eq!(
+            page_source_file("https://example.com/index.html"),
+            None,
+            "a remote page's source is not on this disk"
+        );
+        assert_eq!(
+            page_source_file("file:///D:/notes.md"),
+            None,
+            "and a name that is not a page has no page face to turn away from"
+        );
+    }
+
+    /// RED — **a pane that is reading a page's source is on that file's list,
+    /// and the page it is standing on stays on it too** (real-machine defect,
+    /// 2026-08-26).
+    ///
+    /// The question two very different laws ask of a pane: *a head read landing*
+    /// asks it to decide whose frame is owed, and *the pool's eviction law* asks
+    /// it to decide what may not be thrown away. Both compared `pane.buffer`,
+    /// which is what the pane is **on**; the flip made "what the pane is
+    /// reading" a different question, and the machine reported the difference as
+    /// silence — `BT_PREVIEW_TRACE` showed `bytes=0 owed=1` at the flip and then
+    /// no build line at all, because the source arrived, `showing` came back
+    /// empty, `changed` stayed false, and nothing ever drew it.
+    ///
+    /// RED GATE ①: compare `pane.buffer` alone in
+    /// [`PreviewPane::is_reading`] and the first block fails — which on screen
+    /// is a source face that stays blank for ever. RED GATE ②: make
+    /// [`PreviewPane::reading`] answer the page-source *instead of* the buffer
+    /// rather than beside it, and the last block fails: the page the seat is
+    /// still on drops off `showing`, which is the pool being told it may evict a
+    /// buffer that is on the glass.
+    #[test]
+    fn a_pane_reading_a_pages_source_is_counted_on_both_files() {
+        use crate::PreviewPane;
+        use crate::preview::PreviewSource;
+        use std::path::PathBuf;
+        let url = "file:///D:/site/index.html";
+        let file = PreviewSource::file(PathBuf::from(r"D:\site\index.html"));
+        let page = PreviewSource::Web(url.to_owned());
+        let other = PreviewSource::file(PathBuf::from(r"D:\site\other.html"));
+
+        let plain = PreviewPane {
+            buffer: Some(file.clone()),
+            ..PreviewPane::default()
+        };
+        assert!(
+            plain.is_reading(&file),
+            "an ordinary pane reads what it is on"
+        );
+        assert!(!plain.is_reading(&page));
+        assert_eq!(plain.reading(), vec![file.clone()]);
+
+        let flipped = PreviewPane {
+            buffer: Some(page.clone()),
+            page_source: Some(PathBuf::from(r"D:\site\index.html")),
+            ..PreviewPane::default()
+        };
+        assert!(
+            flipped.is_reading(&file),
+            "a page turned to its source is reading that file, and owes it a frame"
+        );
+        assert!(
+            !flipped.is_reading(&other),
+            "and only that file — a name it was never turned to is a stranger"
+        );
+        assert!(
+            flipped.is_reading(&page),
+            "while still being on the page, which is what keeps its browser"
+        );
+        assert_eq!(
+            flipped.reading(),
+            vec![page, file],
+            "both, so the pool may evict neither while this pane stands"
+        );
+    }
+
+    /// RED — **turning a page over hides it; it does not close it** (user ruling
+    /// 2026-08-26; DESIGN §7.7 ⑭: 「翻回不重载」).
+    ///
+    /// The two predicates that decide a page's fate each frame, asked about the
+    /// one gesture, because the whole cost of the feature is which of them
+    /// answers. [`a_page_was_replaced`] reads `pane.buffer`, the flip does not
+    /// touch it, and so the seat keeps its engine, its history and its scroll;
+    /// [`a_page_is_off_the_glass`] reads the flip, and so the engine is told
+    /// `SetIsVisible(false)` and no hole is punched over the markup.
+    ///
+    /// RED GATE ①: drop `|| sourced` and a flipped page is drawn *over* its own
+    /// source — the first assertion fails and the screen shows a browser on top
+    /// of the text it was made from. RED GATE ②: land the flip by writing the
+    /// file onto `pane.buffer` instead of onto
+    /// [`PreviewPane::page_source`] — the last block fails, `advance_web_page`
+    /// retires the browser, and turning back pays a whole navigation.
+    #[test]
+    fn a_page_turned_to_its_source_comes_off_the_glass_and_keeps_its_pane() {
+        use super::{a_page_is_off_the_glass, a_page_still_has_a_pane, a_page_was_replaced};
+        assert!(
+            a_page_is_off_the_glass(false, false, true, false, true),
+            "a page whose pane is showing its source is not on the glass"
+        );
+        assert!(
+            !a_page_is_off_the_glass(false, false, true, false, false),
+            "and the very same page is, the moment it is turned back"
+        );
+        let page = crate::preview::PreviewSource::Web("file:///D:/site/index.html".to_owned());
+        assert!(
+            !a_page_was_replaced(false, Some(&page)),
+            "the flip leaves the pane on its page, so nothing has replaced it"
+        );
+        assert!(
+            a_page_still_has_a_pane(false, true, a_page_was_replaced(false, Some(&page))),
+            "so the browser is still the seat's and is not retired under the flip"
         );
     }
 
@@ -81114,6 +82138,7 @@ mod floated_page_tests {
             tab_menu: mark(0.165),
             toast: mark(0.17),
             key_hint: mark(0.18),
+            card_hint: mark(0.185),
             tooltip: mark(0.19),
             file_peek: mark(0.20),
             drag_ghost: mark(0.21),
@@ -82616,6 +83641,11 @@ mod tests {
             tab_menu: mark(22),
             toast: mark(8),
             key_hint: mark(20),
+            // 23 and not 22: the tab menu and the Cards bubble were written on
+            // two branches on the same day and both reached for the next free
+            // number. A marker shared by two families would make this whole
+            // assertion pass while the two swapped places.
+            card_hint: mark(23),
             tooltip: mark(9),
             file_peek: mark(10),
             drag_ghost: mark(11),
@@ -82629,12 +83659,13 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                0, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 8, 20, 9, 10, 11, 21
+                0, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 8, 20, 23, 9, 10, 11,
+                21
             ],
             "bottom to top: pane bars, terminal thumbs, command rails, rail, flight, ground, \
              search capsule, integration strips, download sheet, schematic, float, modal, file \
-             menu, pane menu, git menu, terminal menu, tab menu, notices, key hint, tip, glance, \
-             ghost, window ring"
+             menu, pane menu, git menu, terminal menu, tab menu, notices, key hint, Cards \
+             bubble, tip, glance, ghost, window ring"
         );
         let at = |tag: u8| {
             order
@@ -107570,7 +108601,7 @@ mod tests {
         .expect("the fixture is copied where it can be re-stamped");
         let fit = (280_u32, 160_u32);
 
-        let PeekPageOutcome::Drawn { mtime, raster } = raster_peek_page(&path, fit, None) else {
+        let PeekPageOutcome::Drawn { mtime, raster } = raster_peek_page(&path, 0, fit, None) else {
             panic!("a window holding no pixels is answered with pixels");
         };
         let first = raster.expect("and a real PDF draws");
@@ -107581,7 +108612,7 @@ mod tests {
         // the file's, and nothing is parsed, rendered or sent.
         assert!(
             matches!(
-                raster_peek_page(&path, fit, Some(mtime)),
+                raster_peek_page(&path, 0, fit, Some(mtime)),
                 PeekPageOutcome::Unchanged
             ),
             "a re-hover costs one metadata call"
@@ -107599,7 +108630,7 @@ mod tests {
         let PeekPageOutcome::Drawn {
             mtime: seen,
             raster,
-        } = raster_peek_page(&path, fit, Some(mtime))
+        } = raster_peek_page(&path, 0, fit, Some(mtime))
         else {
             panic!("a file written since the pixels were drawn is drawn again");
         };
@@ -107613,7 +108644,7 @@ mod tests {
         // than `Unchanged`: the card must lose the page it was showing, not keep
         // the previous file's.
         std::fs::remove_file(&path).expect("the scratch file goes");
-        let PeekPageOutcome::Drawn { mtime, raster } = raster_peek_page(&path, fit, Some(later))
+        let PeekPageOutcome::Drawn { mtime, raster } = raster_peek_page(&path, 0, fit, Some(later))
         else {
             panic!("a file that has gone is not 'unchanged'");
         };
@@ -107622,29 +108653,127 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// PIN — **the texture a page is cached under names the file, its version and
-    /// its size**, so the shared GPU cache can never serve one for another.
+    /// RED — **the texture a page is cached under names the file, its version,
+    /// which page it is, and its size**, so the shared GPU cache can never serve
+    /// one for another.
     ///
-    /// MUTATION: drop any one of the three from the key and the matching
+    /// MUTATION: drop any one of the four from the key and the matching
     /// assertion goes red — which on screen is the wrong document, yesterday's
-    /// document, or a page rastered for another monitor drawn soft on this one.
+    /// document, **page 1 in every slot of the column** (the one the 2026-08-26
+    /// ruling added), or a page rastered for another monitor drawn soft on this
+    /// one.
     #[test]
-    fn one_page_texture_is_one_file_at_one_version_at_one_size() {
+    fn one_page_texture_is_one_page_of_one_file_at_one_version_at_one_size() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
         let then = now + Duration::from_secs(1);
-        let key = |path: &str, mtime, w, h| peek_page_texture_key(Path::new(path), mtime, w, h);
-        let base = key(r"D:\reports\q3.pdf", Some(now), 124, 160);
-        assert_ne!(base, key(r"D:\reports\q4.pdf", Some(now), 124, 160));
-        assert_ne!(base, key(r"D:\reports\q3.pdf", Some(then), 124, 160));
-        assert_ne!(base, key(r"D:\reports\q3.pdf", Some(now), 248, 320));
-        assert_eq!(base, key(r"D:\reports\q3.pdf", Some(now), 124, 160));
+        let key = |path: &str, mtime, page, w, h| {
+            peek_page_texture_key(Path::new(path), mtime, page, w, h)
+        };
+        let base = key(r"D:\reports\q3.pdf", Some(now), 0, 124, 160);
+        assert_ne!(base, key(r"D:\reports\q4.pdf", Some(now), 0, 124, 160));
+        assert_ne!(base, key(r"D:\reports\q3.pdf", Some(then), 0, 124, 160));
+        assert_ne!(base, key(r"D:\reports\q3.pdf", Some(now), 0, 248, 320));
+        assert_ne!(
+            base,
+            key(r"D:\reports\q3.pdf", Some(now), 1, 124, 160),
+            "two pages of one document are two pictures"
+        );
+        assert_eq!(base, key(r"D:\reports\q3.pdf", Some(now), 0, 124, 160));
         // A filesystem that will not say when a file was written gets a name of
         // its own rather than one that could collide with a real stamp — such a
         // file is re-drawn on every question anyway.
-        assert_ne!(base, key(r"D:\reports\q3.pdf", None, 124, 160));
+        assert_ne!(base, key(r"D:\reports\q3.pdf", None, 0, 124, 160));
         assert_ne!(
-            key(r"D:\reports\q3.pdf", None, 124, 160),
-            key(r"D:\reports\q3.pdf", Some(SystemTime::UNIX_EPOCH), 124, 160)
+            key(r"D:\reports\q3.pdf", None, 0, 124, 160),
+            key(
+                r"D:\reports\q3.pdf",
+                Some(SystemTime::UNIX_EPOCH),
+                0,
+                124,
+                160
+            )
+        );
+    }
+
+    /// RED — **the card keeps the last few pages of the document it is over, and
+    /// keeps the ones the hand is nearest** (user ruling 2026-08-26;
+    /// [`PEEK_PAGE_CACHE`]).
+    ///
+    /// A rastered page is hundreds of kilobytes and a long report has hundreds of
+    /// pages, so the cache is bounded — and a bound is only useful if what it
+    /// throws away is what nobody is looking at. The order is written at one
+    /// place, [`PeekPageSlot::wanted`], which the request lane calls for every
+    /// page in view on every frame; that is what makes "least recently used"
+    /// mean "furthest from where the reader stopped" rather than "drawn longest
+    /// ago", and the two differ exactly when a reader winds back up a document.
+    ///
+    /// RED GATE ①: let [`PeekPageSlot::keep`] push without evicting and the
+    /// second block fails — the cache is unbounded, which for a two-hundred-page
+    /// report is a hover that costs a third of a gigabyte. RED GATE ②: make
+    /// `wanted` a plain lookup that does not reorder and the last block fails:
+    /// page 0, which the reader has just scrolled back to, is thrown away while
+    /// it is the one on screen.
+    #[test]
+    fn the_cards_page_cache_keeps_what_the_hand_is_nearest() {
+        let raster = |page: u32| PeekPageRaster {
+            key: format!("page-{page}"),
+            rgba: Arc::from(vec![0_u8; 4].into_boxed_slice()),
+            width_px: 1,
+            height_px: 1,
+        };
+        let mut slot = PeekPageSlot {
+            path: PathBuf::from(r"D:\reports\long.pdf"),
+            fit: (280, 160),
+            mtime: None,
+            asked: BTreeSet::new(),
+            pages: Vec::new(),
+        };
+        for page in 0..PEEK_PAGE_CACHE as u32 {
+            slot.keep(page, raster(page));
+        }
+        assert_eq!(slot.pages.len(), PEEK_PAGE_CACHE);
+        assert!(
+            (0..PEEK_PAGE_CACHE as u32).all(|page| slot.page(page).is_some()),
+            "everything asked for so far is still here"
+        );
+
+        // One more page than the cache holds, with nothing having been re-read:
+        // the oldest goes and only the oldest.
+        let past = PEEK_PAGE_CACHE as u32;
+        slot.keep(past, raster(past));
+        assert_eq!(slot.pages.len(), PEEK_PAGE_CACHE, "the bound is a bound");
+        assert!(slot.page(0).is_none(), "the page furthest behind is gone");
+        assert!(slot.page(past).is_some(), "and the newest one is here");
+        assert!(
+            slot.page(1).is_some(),
+            "and nothing else was thrown away with it"
+        );
+
+        // The same page drawn again replaces itself rather than joining the run
+        // twice — a second entry would let the stale one be found first for ever.
+        slot.keep(past, raster(past));
+        assert_eq!(slot.pages.len(), PEEK_PAGE_CACHE);
+        assert_eq!(
+            slot.pages.iter().filter(|(page, _)| *page == past).count(),
+            1
+        );
+
+        // **A page the reader has scrolled back to is not the oldest thing here,
+        // whenever it was drawn.** This is the whole of what `wanted` records.
+        assert!(
+            slot.wanted(1),
+            "page 1 is in the cache and is being looked at"
+        );
+        let next = past + 1;
+        slot.keep(next, raster(next));
+        assert!(
+            slot.page(1).is_some(),
+            "so the page under the pointer survived the eviction it was next in line for"
+        );
+        assert!(slot.page(2).is_none(), "and the one behind it left instead");
+        assert!(
+            !slot.wanted(0),
+            "a page that is not held is not made recent by being asked about"
         );
     }
 

@@ -5192,18 +5192,73 @@ pub fn tab_strip_contains(width: f32, scale: f32, tab_count: usize, x: f64, y: f
     x >= geometry.viewport[0] && x < geometry.viewport[1] && y >= 0.0 && y < title
 }
 
+/// **What is putting a pane head's run on screen this frame** — two facts, and
+/// a head is showing its run if either of them names it.
+///
+/// It was one fact until 裁4 (2026-08-26). See [`head_run_revealed`] for the
+/// question the pair answers and [`Self::menu`] for the arm the acceptance
+/// added.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeadRun {
+    /// **The pane the hand is standing in** — [`ChromePointer::pane_hover`],
+    /// and the whole of what `.pane:hover .pane-close { visibility: visible }`
+    /// says.
+    pub hovered: Option<SeatId>,
+    /// **The pane whose own menu is standing open** — the `⌄`'s list, which is
+    /// dropped under the button that raised it so the hand walks *off* the head
+    /// to reach it.
+    pub menu: Option<SeatId>,
+}
+
+impl HeadRun {
+    /// The hand is in this pane and no menu is up — what every reading of this
+    /// predicate meant before 裁4, and what a test that is not about menus
+    /// says.
+    ///
+    /// Test-only, and that is the honest shape: the one place the window builds
+    /// this pair for real (`Runtime::head_run`) has both facts to hand and must
+    /// pass both, so a constructor that quietly supplies `None` for the second
+    /// is a constructor production code has no business reaching for.
+    #[cfg(test)]
+    #[must_use]
+    pub const fn hovered(seat: SeatId) -> Self {
+        Self {
+            hovered: Some(seat),
+            menu: None,
+        }
+    }
+}
+
 /// Whether one pane head's hover-revealed run — the `×`, the `⌄`, the folder,
 /// the pop-out — is **on screen**, which is the one question the painter draws
 /// by and the hit test answers by.
 ///
-/// `revealed` is [`ChromePointer::pane_hover`]: the pane the hand is standing
-/// in, and the whole of what puts that run there
-/// (`.pane:hover .pane-close { visibility: visible }`). One function so the two
-/// sides read the same fact — see the note on [`hit_chrome`]'s own parameter for
-/// what it cost to have them read two.
+/// One function so the two sides read the same fact — see the note on
+/// [`hit_chrome`]'s own parameter for what it cost to have them read two.
+///
+/// **裁4, 2026-08-26: a menu is an extension of the surface that raised it.**
+/// The acceptance asked whether the row above stays visible while the pointer
+/// is down in the list, and ruled that the *whole run* does. It has to be
+/// ruled, because the plumbing says the opposite by default: the instant the
+/// hand crosses onto the pane menu, `drive_pane_menu_hover` claims the pointer
+/// and `update_chrome_hover_target(None)` clears
+/// [`ChromePointer::pane_hover`] — so the head that opened the list went dark
+/// under it, and its `×` stopped taking a press with it.
+///
+/// This is the icon rail's own rule one surface over
+/// (`Runtime::rail_zone_wants_open`, which is `inside || popup_from_the_rail`),
+/// and the lone pane's corner ghost has had the seat-wise half of it since E61
+/// — that chevron is lit by `hover == PaneMenu(seat) || pane_menu_seat ==
+/// seat`. What 裁4 adds is that the *run* obeys it and not just the one button
+/// in it: a `⌄` that stays lit beside a `×` that has faded out from under the
+/// pointer is a worse answer than either.
+///
+/// Two seats can be showing a run at once and that is not a bug: open a pane's
+/// menu, then walk into the pane beside it, and one head is lit because its
+/// list is standing while the other is lit because the hand is in it.
 #[must_use]
-pub fn head_run_revealed(revealed: Option<SeatId>, seat: SeatId) -> bool {
-    revealed == Some(seat)
+pub fn head_run_revealed(revealed: HeadRun, seat: SeatId) -> bool {
+    revealed.hovered == Some(seat) || revealed.menu == Some(seat)
 }
 
 /// What the pointer is over, in device pixels of the window.
@@ -5233,7 +5288,7 @@ pub fn hit_chrome(
     seats: &Seats,
     layout: &SeatLayout,
     scale: f32,
-    revealed: Option<SeatId>,
+    revealed: HeadRun,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
@@ -6653,6 +6708,7 @@ pub fn build_chrome_with_preview(
             // The settled column: every geometry in this module is measured at
             // the end of the entrance, which is where it spends its whole life.
             focus_reveal: 1.0,
+            focus_card_nudge_rows: 0.0,
             focus_thumbnails: &[],
             preview_titles: &preview_titles,
             terminal_names: &NO_TERMINAL_NAMES,
@@ -6952,6 +7008,26 @@ pub struct ChromeContent<'a> {
     /// rather than a convenience: an animation that could reach a solver would
     /// be a third posture, and this mode is one bit.
     pub focus_reveal: f32,
+    /// **How far the staged card's terminal rows stand off their home**, in mini
+    /// rows, while the first-arrival bubble is up (§7.21).
+    ///
+    /// Beside [`Self::focus_reveal`] and under exactly its rule: **nothing else
+    /// in this module reads it**, it is applied to rows that have already been
+    /// solved, and no geometry, hit test or posture can be asked about it. A
+    /// nudge that could reach a solver would be a card whose *height* depended
+    /// on an animation, and a mini seat that is not a hit target on the frame it
+    /// is still would not be one on the frame it moves either.
+    ///
+    /// **Only the staged card, and only its transcript seats.** Those are the
+    /// two facts the gesture itself is true of — `Alt`+wheel answers a terminal
+    /// seat and nothing else ([`crate::main`]'s `aim_focus_card_window`), and
+    /// the bubble is bitten onto the staged card — so a demonstration wider than
+    /// that would be showing a reader something the gesture will not do.
+    ///
+    /// Zero at rest, and zero for the whole of a reduced-motion window's life:
+    /// see [`crate::cardhint::CardHintHost::nudge_rows`], which is the only
+    /// thing that ever writes it.
+    pub focus_card_nudge_rows: f32,
     /// **What each card's body has to show, this frame** (§7.1.6b′ F2) — one
     /// entry per tab, in [`Self::tabs`]'s order.
     ///
@@ -7439,6 +7515,7 @@ pub fn build_chrome_for_tabs(
         rail,
         rail_scroll,
         focus_reveal,
+        focus_card_nudge_rows,
         focus_thumbnails,
         preview_titles,
         float_shown,
@@ -7840,7 +7917,13 @@ pub fn build_chrome_for_tabs(
                 // one number and cannot come apart mid-fade.
                 let head_ink_here = head_ink.of(
                     placement.id,
-                    head_run_revealed(pointer.pane_hover, placement.id),
+                    head_run_revealed(
+                        HeadRun {
+                            hovered: pointer.pane_hover,
+                            menu: pane_menu_seat,
+                        },
+                        placement.id,
+                    ),
                 );
                 let preview_head = (placement.kind == SeatKind::Preview)
                     .then(|| preview_head(placement.id))
@@ -8802,6 +8885,7 @@ pub fn build_chrome_for_tabs(
                 profile_menu_open,
                 chevron_turn,
                 reveal: focus_reveal,
+                nudge_rows: focus_card_nudge_rows,
             },
             palette,
             &mut rail_group,
@@ -11261,6 +11345,9 @@ struct FocusRail<'a> {
     /// How far into its entrance the column is, `0.0..=1.0` — see
     /// [`ChromeContent::focus_reveal`].
     reveal: f32,
+    /// How far the **staged** card's transcript rows stand off home, in mini
+    /// rows — see [`ChromeContent::focus_card_nudge_rows`].
+    nudge_rows: f32,
 }
 
 /// **The order the cards are laid down in: everyone else first, the card in hand
@@ -11317,6 +11404,7 @@ fn focus_rail_chrome(
         profile_menu_open,
         chevron_turn,
         reveal,
+        nudge_rows,
     } = rail;
     // §7.1.6e — the column keeps the panel's `+` and its `˅`, and it keeps the
     // rail's answer with them: this picker opens beside its button too.
@@ -11555,8 +11643,11 @@ fn focus_rail_chrome(
             scale,
             palette,
             [list_top, list_bottom],
-            (quads, labels, sprites),
-            images,
+            // **The staged card only**, which is the card the bubble's tail is
+            // biting. Every other card in the column is a picture of a tab
+            // nobody is being told anything about.
+            if staged { nudge_rows } else { 0.0 },
+            (quads, labels, sprites, images),
         );
 
         // ── the mark slot: the strip's machinery, unchanged ──
@@ -11951,14 +12042,19 @@ fn focus_card_mini_chrome(
     scale: f32,
     palette: ChromePalette,
     viewport: [f32; 2],
+    nudge_rows: f32,
+    // **One sink and not two**, which is what [`focus_mini_seat_content`] one
+    // screen down has always taken: a card's body writes into four channels of
+    // one group, and splitting the pictures off into a parameter of their own
+    // was a sink that had come apart for no reason a caller could name.
     output: (
         &mut Vec<ChromeQuad>,
         &mut Vec<ChromeLabel>,
         &mut Vec<ChromeSprite>,
+        &mut Vec<bt_render::ChromeIcon>,
     ),
-    images: &mut Vec<bt_render::ChromeIcon>,
 ) {
-    let (quads, labels, sprites) = output;
+    let (quads, labels, sprites, images) = output;
     let [list_top, list_bottom] = viewport;
     let in_list = |rect: [f32; 4]| rect[3] > list_top && rect[1] < list_bottom;
     let clip_to_list = |rect: [f32; 4]| {
@@ -12055,6 +12151,7 @@ fn focus_card_mini_chrome(
                 viewport,
                 scale,
                 palette,
+                nudge_rows,
                 (labels, sprites, images),
             );
         }
@@ -12115,6 +12212,7 @@ fn focus_mini_seat_content(
     viewport: [f32; 2],
     scale: f32,
     palette: ChromePalette,
+    nudge_rows: f32,
     output: (
         &mut Vec<ChromeLabel>,
         &mut Vec<ChromeSprite>,
@@ -12156,17 +12254,37 @@ fn focus_mini_seat_content(
             // moves to where the pane it is a picture of puts it.
             let metrics = MiniMetrics::TERM;
             let line = metrics.line_px(scale);
+            // **The nudge, in this seat's own line height** (§7.21) — the whole
+            // of the accompaniment, and it is one term added to a `top` that has
+            // already been solved. `nudge_rows` is a count of *rows*, so the
+            // conversion is the same multiplication the rows are laid out by;
+            // there is no second expression for how tall a row is.
+            //
+            // Downward, because the gesture's positive notch lifts the seat's
+            // window and the rows already drawn move away from the ones that
+            // would come in above them.
+            //
+            // Zero at rest and zero under reduced motion, so a window that is
+            // not being told anything lays this seat out to the pixel it always
+            // did — the term is `+ 0.0` and the rounding below is untouched.
+            let nudge = (nudge_rows * line).round();
             for (offset, text) in lines.iter().enumerate() {
-                let top = inner[1] + offset as f32 * line;
+                let top = inner[1] + offset as f32 * line + nudge;
                 let row = [inner[0], top, inner[2], top + line];
                 if row[1] >= inner[3] {
                     break;
+                }
+                // A row the nudge has pushed off the seat's ceiling is dropped
+                // rather than drawn against the hairline: the cell is a window
+                // onto a document, and a document does not print outside it.
+                if row[3] <= inner[1] {
+                    continue;
                 }
                 mini_row_label(
                     labels,
                     text.clone(),
                     row,
-                    clip_to_list([row[0], row[1], row[2], row[3].min(inner[3])]),
+                    clip_to_list([row[0], row[1].max(inner[1]), row[2], row[3].min(inner[3])]),
                     metrics.font_logical_px * scale,
                     palette.focus_mini_text,
                     metrics.mono,
@@ -13294,64 +13412,29 @@ pub const PREVIEW_CRUMB_RADIUS_LOGICAL_PX: f32 = 4.0;
 /// The cell the `›` between two segments is drawn in, centred.
 ///
 /// A fixed cell and not a measured one, deliberately: the separator is one
-/// mark this window chose and never changes, so measuring it would put a font
-/// on the path of a layout that has one possible answer. Since P1 that is
-/// true twice over — there is no font on the path at all.
+/// character this window chose and never changes, so measuring it would put a
+/// font on the path of a layout that has one possible answer.
 pub const PREVIEW_CRUMB_SEPARATOR_CELL_LOGICAL_PX: f32 = 11.0;
 /// And the cell the folded middle's `…` is drawn in.
 pub const PREVIEW_CRUMB_FOLD_CELL_LOGICAL_PX: f32 = 18.0;
-/// `›` — how a path reads **in a sentence**: the window's title, a
-/// tooltip's line, anywhere the crumb's segments are joined into running text.
+/// `›` — **the separator between two segments**, and how a path reads in a
+/// sentence: the window's title, a tooltip's line, anywhere the crumb's
+/// segments are joined into running text. One constant, because they are one
+/// thing.
 ///
-/// **It is no longer what the rail draws.** P1 retired the drawn character in
-/// favour of [`crate::marks::ChromeMark::Chevron`] at the crumb's own size,
-/// on `marks.rs`'s founding law: a codepoint is a fact about whichever
-/// typeface the machine happens to have, and the segments beside it are
-/// geometry. In a *sentence* it is a character again, and that is not the same
-/// question — the sentence is text all the way through.
+/// **裁3, 2026-08-26: 「原来的好看」.** P1 retired the drawn character in
+/// favour of `crate::marks::ChromeMark::Chevron` at the crumb's own size, on
+/// `marks.rs`'s founding law that a codepoint is a fact about whichever
+/// typeface the machine happens to have. The law stands and this is not an
+/// exception to it — it is the law being told what it is about. A breadcrumb
+/// is **a sentence**: `project › src › main.rs` is a line of type with its
+/// own punctuation in it, the `›` sits on the same baseline as the words
+/// either side and is measured, spaced and inked by the same run. Drawing it
+/// as a mark is what put a *glyph* in the middle of a phrase, at a box and a
+/// baseline no font metric knows about. The law's own sentence, which
+/// `crate::icons`' gate now carries as a class of its own: a codepoint may not
+/// stand in for a **mark** — and this is not one.
 pub const PREVIEW_CRUMB_SEPARATOR: &str = "\u{203a}";
-/// **The mark a breadcrumb spends where it used to spend a guillemet.**
-///
-/// One drawing at two quarter turns: east between two segments, west in front
-/// of the way back. `ChromeMark::chevron` is the house's disclosure arrow and
-/// this is deliberately it rather than the history arrow `ChromeMark::Arrow`
-/// — a crumb's punctuation is not a Back button, it is the sentence's own
-/// comma, and what it says is *and then, inside that*.
-#[must_use]
-pub fn crumb_separator_mark() -> ChromeMark {
-    ChromeMark::Chevron {
-        turned_degrees: 270,
-    }
-}
-
-/// The same arrow pointing the other way — what stands in front of a
-/// breadcrumb's way back.
-#[must_use]
-pub fn crumb_back_mark() -> ChromeMark {
-    ChromeMark::Chevron { turned_degrees: 90 }
-}
-
-/// **Where a crumb's punctuation is struck inside the cell the layout gave
-/// it**, in physical pixels.
-///
-/// The cell is the *advance* — how far the next segment starts — and the box
-/// is the compact head's, because a mark drawn smaller than that carries a pen
-/// below the band whatever else is true of it (see `crate::icons`). The two
-/// need not agree: a turned chevron's ink is a fifth of its box across, so a
-/// thirteen-pixel box centred on an eleven-pixel cell puts four and a half
-/// pixels of ink in the middle of it and nothing anywhere near either edge.
-#[must_use]
-pub fn crumb_punctuation_box(cell: [f32; 4], mark: ChromeMark, scale: f32) -> [f32; 4] {
-    let [width, height] = compact_head_glyph_box(mark, scale);
-    let left = f32::midpoint(cell[0], cell[2]) - width / 2.0;
-    let top = f32::midpoint(cell[1], cell[3]) - height / 2.0;
-    [
-        left.round(),
-        top.round(),
-        left.round() + width,
-        top.round() + height,
-    ]
-}
 
 /// `…` — what the folded middle of a long path is drawn as.
 pub const PREVIEW_CRUMB_FOLD: &str = "\u{2026}";
@@ -13401,8 +13484,21 @@ pub struct PreviewRailMeasure {
     pub address_width: f32,
     /// Each path segment's drawn width, root first and the file last.
     pub segments: Vec<f32>,
-    /// `flippable` (P28) — the buffer is markdown, so the rail carries `</>`.
-    /// The head carried it until this ruling moved it here.
+    /// `flippable` (P28) — this row's content has a **second face**, so the rail
+    /// carries `</>`. The head carried it until the 2026-08-24 ruling moved it
+    /// here.
+    ///
+    /// **Two kinds of content answer yes, and for one reason** (user ruling
+    /// 2026-08-26): a markdown file, whose render and whose source are two
+    /// readings of the same bytes, and a **local page whose bytes are text** —
+    /// `.html`, `.htm` — whose page and whose source are the same pair asked of
+    /// a browser instead of a parser. What the rail draws is identical in both
+    /// cases because the question is; who answers it is the host's business and
+    /// not this measurement's.
+    ///
+    /// Still `false` for everything with only one face: a remote page (its
+    /// source is not on this disk), a `.pdf` (there is no text in it to show),
+    /// a picture, a diff, a commit graph.
     pub flip: bool,
     /// The `Open` caption's drawn width.
     pub open_width: f32,
@@ -13579,6 +13675,15 @@ pub fn preview_rail_geometry_in(
             // by.
             geometry.external = take_right(box_);
             geometry.copy = take_right(box_);
+            // **And `</>` inboard of the copy, exactly where a file's rail keeps
+            // it** (user ruling 2026-08-26). A local page whose bytes are text
+            // has a source face, and the button that turns to it is the same
+            // button on the same side of the same neighbour on both rails — a
+            // flip that sat outboard of `⧉` here and inboard of it there would
+            // be two buttons wearing one glyph. Absent on every rail that
+            // [`PreviewRailMeasure::flip`] says has no second face: a remote
+            // page has no file on this disk, and a `.pdf` has no text in it.
+            geometry.flip = measure.flip.then(|| take_right(box_)).flatten();
             let room = (right - left).max(0.0);
             if room <= 0.0 {
                 return geometry;
@@ -15046,7 +15151,7 @@ pub fn hit_preview_head(
     layout: &SeatLayout,
     scale: f32,
     tools: &[(SeatId, PreviewHeadTools)],
-    revealed: Option<SeatId>,
+    revealed: HeadRun,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
@@ -16038,6 +16143,27 @@ pub(crate) fn push_preview_rail(
                 PREVIEW_RAIL_GLYPH_LOGICAL_PX,
                 true,
             );
+            // **The same two glyphs a file's rail flips between** (user ruling
+            // 2026-08-26), drawn from the same pair and switched by the same
+            // field: what a press turns *to* is what the button shows, which is
+            // the reload/stop precedent this row already keeps three buttons to
+            // the left. `None` when the page has no source face, and `button`
+            // draws nothing for a box that is not there.
+            button(
+                sprites,
+                hovered,
+                scale,
+                palette,
+                geometry.flip,
+                PreviewRailPart::Flip,
+                if content.flip_to_source {
+                    crate::icons::ActionIcon::ViewSource.mark()
+                } else {
+                    crate::icons::ActionIcon::ViewRendered.mark()
+                },
+                PREVIEW_RAIL_GLYPH_LOGICAL_PX,
+                true,
+            );
             button(
                 sprites,
                 hovered,
@@ -16177,22 +16303,32 @@ pub(crate) fn push_preview_rail(
                     clip: Some(fold),
                 });
             }
-            // **The house's own arrow, turned east** (P1, 字符退役). It was
-            // `›` U+203A in the rail's own type until this block, which put a
-            // third folded-arrow language on screen beside the chevron and the
-            // disclosure triangle — and put it there as a *codepoint*, whose
-            // width and weight are facts about the installed font rather than
-            // about this drawing.
+            // **The punctuation of a sentence, set in the sentence's own type**
+            // (裁3, 2026-08-26 — 「原来的好看」). P1 struck this as a house
+            // chevron and the acceptance sent it back: a crumb rail is a path
+            // read as a phrase, the `›` is its comma, and a comma belongs to
+            // the run of type it punctuates — same face, same baseline, same
+            // measurement — rather than to the box a control glyph is centred
+            // in. See `PREVIEW_CRUMB_SEPARATOR` for the line that draws between
+            // this and `marks.rs`'s founding law.
             //
             // The palest ink the row has: a separator is punctuation and not a
             // segment, and one drawn in the segments' own ink reads as a folder
             // called `›`.
             for seam in &geometry.separators {
-                sprites.push(ChromeSprite::new(
-                    crumb_separator_mark(),
-                    crumb_punctuation_box(*seam, crumb_separator_mark(), scale),
-                    palette.files_row_muted,
-                ));
+                labels.push(ChromeLabel {
+                    mono: false,
+                    text: PREVIEW_CRUMB_SEPARATOR.to_owned(),
+                    rect: *seam,
+                    font_size_px: font,
+                    color: palette.files_row_muted,
+                    align_right: false,
+                    align_center: true,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: Some(*seam),
+                });
             }
             for crumb in &geometry.crumbs {
                 let Some(text) = content.segments.get(crumb.depth) else {
@@ -18555,7 +18691,7 @@ mod tests {
             "the lone leaf wears its profile mark only in the window tab"
         );
         assert!(!quads.iter().any(|quad| quad.color == palette.pane_head));
-        assert!(hit_chrome(&seats, &layout, 1.0, None, 480.0, 300.0).is_none());
+        assert!(hit_chrome(&seats, &layout, 1.0, HeadRun::default(), 480.0, 300.0).is_none());
     }
 
     /// PIN (visual fidelity pass): the caption glyphs are the mock-up's own
@@ -19271,7 +19407,7 @@ mod tests {
                         &seats,
                         &layout,
                         scale,
-                        Some(placement.id),
+                        HeadRun::hovered(placement.id),
                         f64::from(rect.left as f32 + 1.0),
                         f64::from(top + bar - 1.0),
                     ),
@@ -19423,6 +19559,7 @@ mod tests {
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &titles,
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -19500,6 +19637,7 @@ mod tests {
                     // The settled column: every geometry in this module is measured at
                     // the end of the entrance, which is where it spends its whole life.
                     focus_reveal: 1.0,
+                    focus_card_nudge_rows: 0.0,
                     focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
@@ -20411,7 +20549,7 @@ mod tests {
         ] {
             let (x, y) = centre(box_.expect("a head this wide seats every control"));
             assert_eq!(
-                hit_preview_head(&layout, 1.0, &[(seat, tools)], Some(seat), x, y),
+                hit_preview_head(&layout, 1.0, &[(seat, tools)], HeadRun::hovered(seat), x, y),
                 Some(expected),
                 "{expected:?} answers for its own rectangle"
             );
@@ -20442,7 +20580,7 @@ mod tests {
         assert_eq!(alone.pill, None, "no switcher, no pill");
         let (x, y) = centre(alone.name);
         assert_eq!(
-            hit_preview_head(&layout, 1.0, &[(seat, lone)], Some(seat), x, y),
+            hit_preview_head(&layout, 1.0, &[(seat, lone)], HeadRun::hovered(seat), x, y),
             Some(ChromeTarget::PreviewName(seat)),
             "and the name answers for itself"
         );
@@ -20450,7 +20588,7 @@ mod tests {
         // so it answers at rest. The five tools beside it are the ones the
         // reveal gate is about.
         assert_eq!(
-            hit_preview_head(&layout, 1.0, &[(seat, lone)], None, x, y),
+            hit_preview_head(&layout, 1.0, &[(seat, lone)], HeadRun::default(), x, y),
             Some(ChromeTarget::PreviewName(seat)),
         );
     }
@@ -20510,7 +20648,7 @@ mod tests {
         ] {
             let (x, y) = centre(box_);
             assert_eq!(
-                hit_preview_head(&layout, 1.0, &[(seat, tools)], None, x, y),
+                hit_preview_head(&layout, 1.0, &[(seat, tools)], HeadRun::default(), x, y),
                 None,
                 "{name} is not on screen, so nothing in this head answers for it"
             );
@@ -20523,7 +20661,7 @@ mod tests {
         };
         let (x, y) = centre(preview_head_geometry(&head, 1.0, shut).lock);
         assert_eq!(
-            hit_preview_head(&layout, 1.0, &[(seat, shut)], None, x, y),
+            hit_preview_head(&layout, 1.0, &[(seat, shut)], HeadRun::default(), x, y),
             Some(ChromeTarget::PreviewLock(seat)),
             "`.pv-tool.pv-pin.on {{ opacity: 1 }}` — visible at rest, pressable at rest"
         );
@@ -20794,6 +20932,90 @@ mod tests {
                 preview_rail_geometry(rect, SCALE, &measure),
                 preview_rail_geometry_in(band, SCALE, &measure),
                 "one derivation, whichever host cut the band"
+            );
+        }
+    }
+
+    /// RED — **an address row carries `</>` when its page has a second face, and
+    /// carries it in the place a file's row keeps it** (user ruling 2026-08-26;
+    /// DESIGN §7.7 ⑭).
+    ///
+    /// The button set is the whole of what this pins, and it is two claims:
+    /// that the flip *appears* on an `Address` rail at all (it never did before
+    /// this ruling — a page's row was three navigation buttons, an address, a
+    /// copy and an arrow), and that it appears **inboard of `⧉`** so that the
+    /// two rails put the same glyph on the same side of the same neighbour. A
+    /// reader who has learnt where `</>` is on a markdown file must not have to
+    /// learn it again on a page.
+    ///
+    /// The `false` half is not a formality: it is the remote page and the
+    /// `.pdf`, which reach this function as a measurement with nothing to flip
+    /// to, and a row that drew the button anyway would be offering a press that
+    /// cannot be answered.
+    ///
+    /// RED GATE ①: delete the `geometry.flip` line from the `Address` arm and
+    /// the first block fails — a local page's row loses the button entirely.
+    /// RED GATE ②: take the flip *before* the copy and the ordering assertion
+    /// fails, which is the same glyph landing on either side of `⧉` depending
+    /// on what kind of thing the seat is holding.
+    #[test]
+    fn a_local_pages_row_carries_the_flip_where_a_files_row_keeps_it() {
+        const SCALE: f32 = 2.0;
+        let band = [0.0, 0.0, 900.0, 44.0];
+        let of = |flip: bool| {
+            preview_rail_geometry_in(
+                band,
+                SCALE,
+                &PreviewRailMeasure {
+                    kind: PreviewRailKind::Address,
+                    address_width: 260.0,
+                    flip,
+                    ..PreviewRailMeasure::default()
+                },
+            )
+        };
+        let offered = of(true);
+        let (flip, copy, external, address) = (
+            offered
+                .flip
+                .expect("a page with a source face carries `</>`"),
+            offered.copy.expect("the address row keeps its copy"),
+            offered.external.expect("and its way out to a browser"),
+            offered.address.expect("and the address itself"),
+        );
+        assert!(
+            flip[2] <= copy[0],
+            "`</>` stands inboard of `⧉`, which is where a file's row puts it: \
+             flip={flip:?} copy={copy:?}"
+        );
+        assert!(
+            copy[2] <= external[0],
+            "and `⧉` still stands inboard of `↗`, which this ruling did not move"
+        );
+        assert!(
+            address[2] <= flip[0],
+            "the field yields to the buttons rather than running under them"
+        );
+        assert_eq!(
+            of(false).flip,
+            None,
+            "a page with no source on this disk carries no flip at all"
+        );
+        // And the rest of the row is untouched by the new button's absence or
+        // presence — the three navigation buttons are the same rectangles, which
+        // is what keeps a `.pdf` page's row and an `.html` page's row the same
+        // furniture with one thing added.
+        for (with, without) in [
+            (offered.back, of(false).back),
+            (offered.forward, of(false).forward),
+            (offered.reload, of(false).reload),
+            (offered.external, of(false).external),
+            (offered.copy, of(false).copy),
+        ] {
+            assert_eq!(
+                with, without,
+                "the flip takes room from the field, not from \
+                 the buttons that were already there"
             );
         }
     }
@@ -22112,7 +22334,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                None,
+                HeadRun::default(),
                 f64::from((bar.left + bar.right) as i32) / 2.0,
                 f64::from((bar.top + bar.bottom) as i32) / 2.0,
             ),
@@ -22197,12 +22419,26 @@ mod tests {",
         );
 
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, None, divider.0, divider.1),
+            hit_chrome(
+                &seats,
+                &layout,
+                1.0,
+                HeadRun::default(),
+                divider.0,
+                divider.1
+            ),
             Some(ChromeTarget::Divider(slot.id)),
             "the first point really is a divider"
         );
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, Some(preview), seat.0, seat.1),
+            hit_chrome(
+                &seats,
+                &layout,
+                1.0,
+                HeadRun::hovered(preview),
+                seat.0,
+                seat.1
+            ),
             Some(ChromeTarget::PaneHeader(preview)),
             "the second point really is another seat's head"
         );
@@ -22701,6 +22937,7 @@ mod tests {",
                     // The settled column: every geometry in this module is measured at
                     // the end of the entrance, which is where it spends its whole life.
                     focus_reveal: 1.0,
+                    focus_card_nudge_rows: 0.0,
                     focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
@@ -22926,6 +23163,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -23036,6 +23274,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -23476,7 +23715,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(column),
+                HeadRun::hovered(column),
                 f64::from(cx),
                 f64::from(cy)
             ),
@@ -23894,9 +24133,9 @@ mod tests {",
             .iter()
             .find(|sprite| sprite.rect == geometry.foot_mark)
             .expect("the foot wears a mark");
-        // The struck rendition since P2: the foot's glyph is a *button* that
-        // opens File Explorer, not the folder it is standing in.
-        assert_eq!(mark.mark, ChromeMark::FolderOpenOutline);
+        // The folder, solid — 裁1 (2026-08-26) took the struck rendition off
+        // the sheet, so a button about a folder wears the folder.
+        assert_eq!(mark.mark, ChromeMark::FolderOpen);
         assert_eq!(mark.color, palette.files_row_muted, "`color: var(--ink3)`");
         let label = chrome
             .labels
@@ -24758,6 +24997,7 @@ mod tests {",
                 rail,
                 rail_scroll: 0.0,
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -26512,18 +26752,35 @@ mod tests {",
     /// The sizes are the mock-up's own argument, quoted at 362-364: "the pin
     /// carries a state and a glyph that has to survive a 45° turn, and both cost
     /// silhouette. It is not the close button's twin and sizing it like one made
-    /// it read as lint." So the assertion is not merely `== 13`; it is also
-    /// `!= the ×'s 8`.
+    /// it read as lint." So the assertion is not merely `== 13`.
+    ///
+    /// **What it compares is ink and no longer boxes** (裁2, 2026-08-26). The
+    /// cross is a house drawing now, so it takes the house's box like everything
+    /// else and the two rectangles are both thirteen; what keeps the pin from
+    /// being "the close button's twin" is the thing the mock-up was actually
+    /// arguing about — the pin fills the house's ink band and the cross sits ten
+    /// units inside it, so the pin's picture is a third bigger than the cross's.
     #[test]
     fn the_drawn_pin_is_thirteen_pixels_filled_for_a_state_and_outlined_for_an_offer() {
         let palette = chrome_palette();
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let glyph = (WINDOW_TAB_PIN_GLYPH_LOGICAL_PX * scale).round();
-            assert_ne!(
-                glyph,
-                (compact_head_glyph_logical_px(crate::icons::ActionIcon::CloseTab.mark()) * scale)
-                    .round(),
-                "scale {scale}: the pin is not the close button's twin"
+            let picture = |mark: ChromeMark, side: f32| {
+                mark.optical_picture_logical_px(side, side)
+                    .expect("a quoted symbol makes a picture")
+            };
+            let pin = picture(
+                ChromeMark::Pin { filled: false },
+                WINDOW_TAB_PIN_GLYPH_LOGICAL_PX,
+            );
+            let cross = picture(
+                crate::icons::ActionIcon::CloseTab.mark(),
+                compact_head_glyph_logical_px(crate::icons::ActionIcon::CloseTab.mark()),
+            );
+            assert!(
+                pin > cross * 1.2,
+                "scale {scale}: the pin makes a {pin:.2} picture beside the close \
+                 button's {cross:.2}, which is the close button's twin"
             );
             let pin_sprite = |sprites: &[ChromeSprite], filled: bool| {
                 sprites
@@ -27072,6 +27329,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -27279,6 +27537,7 @@ mod tests {",
                     // The settled column: every geometry in this module is measured at
                     // the end of the entrance, which is where it spends its whole life.
                     focus_reveal: 1.0,
+                    focus_card_nudge_rows: 0.0,
                     focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
@@ -27394,6 +27653,7 @@ mod tests {",
                     // The settled column: every geometry in this module is measured at
                     // the end of the entrance, which is where it spends its whole life.
                     focus_reveal: 1.0,
+                    focus_card_nudge_rows: 0.0,
                     focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
@@ -27633,6 +27893,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -27815,7 +28076,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from((close[0] + close[2]) / 2.0),
                 middle_y
             ),
@@ -27840,7 +28101,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from(close[0]) - 1.0,
                 middle_y
             ),
@@ -27851,7 +28112,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from(close[0]),
                 middle_y
             ),
@@ -27872,7 +28133,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from(files[0]) - 1.0,
                 middle_y
             ),
@@ -27884,7 +28145,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from(split[0]) - 1.0,
                 middle_y
             ),
@@ -27943,7 +28204,7 @@ mod tests {",
         for (name, box_) in [("the pop-out", float), ("the `×`", close)] {
             let (x, y) = centre(box_);
             assert_eq!(
-                hit_chrome(&seats, &layout, 1.0, None, x, y),
+                hit_chrome(&seats, &layout, 1.0, HeadRun::default(), x, y),
                 Some(ChromeTarget::PaneHeader(column)),
                 "{name} is not on screen, so the head answers for its own box"
             );
@@ -27952,18 +28213,18 @@ mod tests {",
         // one's: the reveal is per pane, exactly as `.pane:hover` is.
         let (x, y) = centre(float);
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, Some(terminal), x, y),
+            hit_chrome(&seats, &layout, 1.0, HeadRun::hovered(terminal), x, y),
             Some(ChromeTarget::PaneHeader(column)),
         );
 
         // ── and once the hand is in the pane, the run is there to be pressed ──
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, Some(column), x, y),
+            hit_chrome(&seats, &layout, 1.0, HeadRun::hovered(column), x, y),
             Some(ChromeTarget::PaneFloat(column)),
         );
         let (x, y) = centre(close);
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, Some(column), x, y),
+            hit_chrome(&seats, &layout, 1.0, HeadRun::hovered(column), x, y),
             Some(ChromeTarget::PaneClose(column)),
         );
 
@@ -27985,12 +28246,12 @@ mod tests {",
         ] {
             let (x, y) = centre(box_);
             assert_eq!(
-                hit_chrome(&seats, &layout, 1.0, None, x, y),
+                hit_chrome(&seats, &layout, 1.0, HeadRun::default(), x, y),
                 Some(ChromeTarget::PaneHeader(terminal)),
                 "{target:?} is hidden on an unhovered head"
             );
             assert_eq!(
-                hit_chrome(&seats, &layout, 1.0, Some(terminal), x, y),
+                hit_chrome(&seats, &layout, 1.0, HeadRun::hovered(terminal), x, y),
                 Some(target),
             );
         }
@@ -28023,6 +28284,142 @@ mod tests {",
                 .iter()
                 .any(|sprite| sprite.mark == ChromeMark::Float),
             "and the hovered column draws the pop-out the hit test just answered for"
+        );
+    }
+
+    /// RED (裁4, 2026-08-26) — **a head whose own menu is standing keeps its
+    /// whole run**, drawn and pressable, with the hand down in the list.
+    ///
+    /// The acceptance asked whether the icons above stay visible while the
+    /// pointer is in the drop-down, and ruled that the *run* does — not the `⌄`
+    /// alone. The plumbing says the opposite by default and that is the bug
+    /// this pins: `drive_pane_menu_hover` claims the pointer the instant it
+    /// crosses onto the menu and clears [`ChromePointer::pane_hover`], so the
+    /// head that raised the list went dark under it and its `×` stopped taking
+    /// a press — the run vanishing out from under a hand that had not left the
+    /// control it was using.
+    ///
+    /// It is the icon rail's own rule, seat-wise: a popup is an extension of
+    /// the surface that raised it (`Runtime::rail_zone_wants_open`), and E61
+    /// already lights the lone pane's corner ghost this way. What is new is
+    /// that the whole run obeys it, on one predicate, so the paint and the hit
+    /// test cannot disagree about it.
+    ///
+    /// MUTATION: drop [`HeadRun::menu`] from [`head_run_revealed`] and every
+    /// assertion in the first two blocks below answers `PaneHeader` off a head
+    /// that is drawing three buttons.
+    #[test]
+    fn a_head_keeps_its_run_while_its_own_menu_is_standing() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let terminal = layout.rects[0].id;
+        let column = layout
+            .rects
+            .iter()
+            .find(|placement| placement.kind == SeatKind::Files)
+            .expect("the second seat is the files column")
+            .id;
+        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        let centre = |box_: [f32; 4]| {
+            (
+                f64::from((box_[0] + box_[2]) / 2.0),
+                f64::from((box_[1] + box_[3]) / 2.0),
+            )
+        };
+        let run = [
+            (
+                ChromeTarget::PaneMenu(terminal),
+                head.chevron.expect("the `⌄`"),
+            ),
+            (
+                ChromeTarget::PaneFiles(terminal),
+                head.files.expect("the folder"),
+            ),
+            (
+                ChromeTarget::PaneClose(terminal),
+                head.close.expect("the `×`"),
+            ),
+        ];
+
+        // ── the hand is on the menu, so it is in no pane at all ──────────────
+        let standing = HeadRun {
+            hovered: None,
+            menu: Some(terminal),
+        };
+        assert!(head_run_revealed(standing, terminal));
+        for (target, box_) in run {
+            let (x, y) = centre(box_);
+            assert_eq!(
+                hit_chrome(&seats, &layout, 1.0, standing, x, y),
+                Some(target),
+                "{target:?} is on screen while its own menu is up, so it takes a press"
+            );
+        }
+
+        // ── and the menu lights its own head and nobody else's ───────────────
+        assert!(!head_run_revealed(standing, column));
+        let column_close =
+            pane_head_geometry(device_rect_of(&layout, column), SeatKind::Files, 1.0)
+                .close
+                .expect("a files head carries a `×`");
+        let (x, y) = centre(column_close);
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, standing, x, y),
+            Some(ChromeTarget::PaneHeader(column)),
+        );
+        // Both arms at once, which is a real frame: the list is standing on one
+        // head while the hand has walked into the pane beside it.
+        let both = HeadRun {
+            hovered: Some(column),
+            menu: Some(terminal),
+        };
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, both, x, y),
+            Some(ChromeTarget::PaneClose(column)),
+        );
+        let (x, y) = centre(head.close.expect("the `×`"));
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, both, x, y),
+            Some(ChromeTarget::PaneClose(terminal)),
+        );
+
+        // ── the menu shuts and the hand is outside: the run goes ─────────────
+        assert!(!head_run_revealed(HeadRun::default(), terminal));
+        for (target, box_) in run {
+            let (x, y) = centre(box_);
+            assert_eq!(
+                hit_chrome(&seats, &layout, 1.0, HeadRun::default(), x, y),
+                Some(ChromeTarget::PaneHeader(terminal)),
+                "{target:?} is gone once the list is shut and the hand is out"
+            );
+        }
+
+        // ── and the paint says the same thing, which is the whole claim ──────
+        let crosses = |menu: Option<SeatId>| {
+            let (_, _, sprites) = pane_chrome(
+                &seats,
+                &layout,
+                1.0,
+                ChromePointer::default(),
+                None,
+                (None, menu),
+            );
+            sprites
+                .iter()
+                .filter(|sprite| sprite.mark == ChromeMark::PaneClose)
+                .count()
+        };
+        assert_eq!(
+            crosses(Some(terminal)),
+            1,
+            "the head under the standing menu draws its `×`",
+        );
+        assert_eq!(
+            crosses(None),
+            0,
+            "and with no menu and no hand, no head draws one",
         );
     }
 
@@ -28124,7 +28521,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from((split[0] + split[2]) / 2.0),
                 middle_y
             ),
@@ -28135,7 +28532,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from(split[0]),
                 middle_y
             ),
@@ -28149,7 +28546,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from(split[0]) - 1.0,
                 middle_y
             ),
@@ -28162,7 +28559,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from(split[2]),
                 middle_y
             ),
@@ -28229,7 +28626,7 @@ mod tests {",
                 .map(|sprite| sprite.rect);
             (
                 find(ChromeMark::Chevron { turned_degrees: 0 }, head.chevron),
-                find(ChromeMark::FolderOutline, head.files),
+                find(ChromeMark::Folder, head.files),
                 pill,
             )
         };
@@ -28437,7 +28834,7 @@ mod tests {",
                 &split,
                 &split_layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from((chevron[0] + chevron[2]) / 2.0),
                 f64::from((chevron[1] + chevron[3]) / 2.0)
             ),
@@ -28793,7 +29190,7 @@ mod tests {",
                 })
                 .map(|sprite| (sprite.rect, sprite.color));
             (
-                pick(ChromeMark::FolderOutline),
+                pick(ChromeMark::Folder),
                 pick(ChromeMark::Chevron { turned_degrees: 0 }),
                 chip,
             )
@@ -29050,13 +29447,12 @@ mod tests {",
                 .iter()
                 // **The strip's folder, said out loud** (2026-08-25). This build
                 // draws the panes too, and since the corner ghost grew its own
-                // 🗀 there is a second `FolderOutline` in the frame — one that rests at
+                // 🗀 there is a second `Folder` in the frame — one that rests at
                 // `.45` and is not what this test is about. The layer is the
                 // difference and it is the honest filter: the strip is the title
                 // bar, the ghost is out over the terminal.
                 .find(|sprite| {
-                    sprite.mark == ChromeMark::FolderOutline
-                        && !in_the_pane_layer(sprite.rect, scale)
+                    sprite.mark == ChromeMark::Folder && !in_the_pane_layer(sprite.rect, scale)
                 })
                 .map(|sprite| sprite.opacity)
         };
@@ -30638,6 +31034,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names,
@@ -30707,6 +31104,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -31416,7 +31814,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                None,
+                HeadRun::default(),
                 f64::from((bar.left + bar.right) as i32) / 2.0,
                 f64::from((bar.top + bar.bottom) as i32) / 2.0,
             ),
@@ -31511,6 +31909,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -31788,6 +32187,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -32049,6 +32449,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -32215,6 +32616,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -33508,7 +33910,10 @@ mod tests {",
             rail,
             hover,
             focus_thumbnails,
-            focus_reveal,
+            FocusFrame {
+                reveal: focus_reveal,
+                ..FocusFrame::SETTLED
+            },
         )
     }
 
@@ -33516,6 +33921,30 @@ mod tests {",
     /// there for its reason: the chrome the painter produces is clipped to the
     /// column's viewport, so a test about what a card *draws* needs a window that
     /// holds its cards.
+    /// **The two numbers the focus column is part-way through**, as one
+    /// argument.
+    ///
+    /// Both are [`ChromeContent`]'s paint-time animation values and neither
+    /// is geometry, so they arrive together and are read together — and the
+    /// fixture below stops growing a parameter every time the column learns
+    /// another tween.
+    #[derive(Clone, Copy, Debug)]
+    struct FocusFrame {
+        /// How far into its entrance the column is, `0.0..=1.0`.
+        reveal: f32,
+        /// How far the staged card's rows stand off home, in mini rows.
+        nudge_rows: f32,
+    }
+
+    impl FocusFrame {
+        /// The settled column with nothing moving in it — what every test
+        /// that is not about an animation wants.
+        const SETTLED: Self = Self {
+            reveal: 1.0,
+            nudge_rows: 0.0,
+        };
+    }
+
     fn window_chrome_with_thumbnails_in(
         height: f32,
         tabs: &[TabContent],
@@ -33523,8 +33952,12 @@ mod tests {",
         rail: RailState,
         hover: Option<ChromeTarget>,
         focus_thumbnails: &[Option<FocusThumbnail<'_>>],
-        focus_reveal: f32,
+        frame: FocusFrame,
     ) -> WindowChrome {
+        let FocusFrame {
+            reveal: focus_reveal,
+            nudge_rows: focus_card_nudge_rows,
+        } = frame;
         let metrics = seat_metrics(1_000);
         // **A split tree, so the stage has something in it.** A lone terminal
         // draws no chrome at all below the title bar, and a comparison of two
@@ -33564,6 +33997,7 @@ mod tests {",
                 rail,
                 rail_scroll: 0.0,
                 focus_reveal,
+                focus_card_nudge_rows,
                 focus_thumbnails,
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -35328,12 +35762,27 @@ mod tests {",
         (rows, cell)
     }
 
+    /// The same card with the first-arrival bubble's accompaniment running on
+    /// it — see [`ChromeContent::focus_card_nudge_rows`].
+    fn transcript_rows_nudged_by(lines: Vec<String>, nudge: f32) -> Vec<ChromeLabel> {
+        transcript_paint_with(lines, false, nudge).0
+    }
+
     /// The same card, with the seat's window said to be aimed above the tail or
     /// not, and the seam quads that land inside the body handed back beside the
     /// rows (user ruling 2026-08-21).
     fn transcript_paint_of(
         lines: Vec<String>,
         more_below: bool,
+    ) -> (Vec<ChromeLabel>, [f32; 4], Vec<ChromeQuad>) {
+        transcript_paint_with(lines, more_below, 0.0)
+    }
+
+    /// The same, with the accompaniment's offset said out loud.
+    fn transcript_paint_with(
+        lines: Vec<String>,
+        more_below: bool,
+        nudge: f32,
     ) -> (Vec<ChromeLabel>, [f32; 4], Vec<ChromeQuad>) {
         let tabs = vec![card_tab("shell", 1, TabMarkState::default(), false)];
         let tree = lone_seat_tree(SeatKind::Terminal);
@@ -35352,7 +35801,10 @@ mod tests {",
             state,
             None,
             &thumbnails,
-            1.0,
+            FocusFrame {
+                nudge_rows: nudge,
+                ..FocusFrame::SETTLED
+            },
         )
         .rail;
         let geometry = focus_of_in(TALL_FIXTURE_HEIGHT, state, tabs.len());
@@ -35453,6 +35905,65 @@ mod tests {",
     ///
     /// Red gate: draw the seam unconditionally and the second half goes red on
     /// a card that is looking at the tail.
+    /// RED (§7.21, user ruling 2026-08-27) — **the accompaniment moves a
+    /// terminal seat's rows by exactly the row height it lays them out at, and
+    /// nothing outside the cell is printed.**
+    ///
+    /// Three claims, and the third is the one that would rot silently. The rows
+    /// travel by `nudge × line`, the same expression they are stacked by, so
+    /// "one row" means one row and not "about a row at this scale factor"; a row
+    /// pushed off the cell's ceiling is dropped rather than drawn against the
+    /// hairline, because the cell is a window onto a document and a document
+    /// does not print outside it; and at rest the seat is laid out to the pixel
+    /// it always was, which is what makes this a term added to a solved layout
+    /// rather than a second layout.
+    ///
+    /// MUTATION: multiply the nudge by a constant instead of the seat's own
+    /// `line` and the demonstration stops being the gesture; drop the ceiling
+    /// guard and the row the nudge pushed out prints over the card's head.
+    #[test]
+    fn the_accompaniment_moves_a_seats_rows_by_its_own_line_and_prints_none_outside_the_cell() {
+        let lines: Vec<String> = (0..4).map(|row| format!("line {row}")).collect();
+        let line = crate::focus_thumb::MiniMetrics::TERM.line_px(1.0);
+        let home = transcript_rows_nudged_by(lines.clone(), 0.0);
+        let out = transcript_rows_nudged_by(lines.clone(), 1.0);
+        assert_eq!(home.len(), out.len(), "the same rows, one row lower");
+        for (resting, nudged) in home.iter().zip(&out) {
+            assert_eq!(nudged.text, resting.text);
+            assert_eq!(
+                nudged.rect[1] - resting.rect[1],
+                line.round(),
+                "one row is the seat's own line height",
+            );
+        }
+
+        // The ceiling: a nudge the other way pushes the top row out, and it is
+        // dropped rather than printed over the head above it.
+        let card =
+            focus_of_in(TALL_FIXTURE_HEIGHT, focus_rail(TabLayoutMode::Vertical), 1).cards[0];
+        let lifted = transcript_rows_nudged_by(lines.clone(), -1.0);
+        assert_eq!(
+            lifted.len(),
+            home.len() - 1,
+            "the row the nudge lifted off the ceiling is not drawn",
+        );
+        for row in &lifted {
+            assert!(
+                row.rect[1] >= card.mini[1] && row.rect[3] <= card.mini[3],
+                "every row the accompaniment leaves is inside the card's body",
+            );
+        }
+
+        // And at rest nothing has moved at all: this is a term on a solved
+        // layout, so `+ 0.0` is the layout the card has always had.
+        let (untouched, _) = transcript_rows_of(lines);
+        assert_eq!(untouched.len(), home.len());
+        for (before, after) in untouched.iter().zip(&home) {
+            assert_eq!(before.rect, after.rect);
+            assert_eq!(before.clip, after.clip);
+        }
+    }
+
     #[test]
     fn a_seat_aimed_above_the_tail_wears_a_seam_and_one_on_the_tail_does_not() {
         let lines: Vec<String> = (0..4).map(|row| format!("line {row}")).collect();
@@ -35578,7 +36089,7 @@ mod tests {",
             state,
             None,
             &thumbnails,
-            1.0,
+            FocusFrame::SETTLED,
         )
         .rail;
         let geometry = focus_of_in(TALL_FIXTURE_HEIGHT, state, tabs.len());
@@ -35708,7 +36219,7 @@ mod tests {",
                 focused: SeatId(1),
                 seats: &page,
             })],
-            1.0,
+            FocusFrame::SETTLED,
         )
         .rail;
         let [picture] = with_picture.images.as_slice() else {
@@ -35762,7 +36273,7 @@ mod tests {",
                 focused: SeatId(1),
                 seats: &face,
             })],
-            1.0,
+            FocusFrame::SETTLED,
         )
         .rail;
         assert!(
@@ -35838,7 +36349,7 @@ mod tests {",
             state,
             None,
             &thumbnails,
-            1.0,
+            FocusFrame::SETTLED,
         )
         .rail;
         let geometry = focus_of_in(TALL_FIXTURE_HEIGHT, state, tabs.len());
@@ -36095,7 +36606,7 @@ mod tests {",
             state,
             None,
             &thumbnails,
-            1.0,
+            FocusFrame::SETTLED,
         )
         .rail;
         let geometry = focus_of_in(TALL_FIXTURE_HEIGHT, state, tabs.len());
@@ -36468,6 +36979,7 @@ mod tests {",
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &names,
@@ -38220,6 +38732,7 @@ mod tests {",
                     rail: RailState::default(),
                     rail_scroll: 0.0,
                     focus_reveal: 1.0,
+                    focus_card_nudge_rows: 0.0,
                     focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
@@ -38296,7 +38809,7 @@ mod tests {",
                 &layout,
                 1.0,
                 &[(seat, tools)],
-                Some(seat),
+                HeadRun::hovered(seat),
                 f64::from((box_[0] + box_[2]) / 2.0),
                 f64::from((box_[1] + box_[3]) / 2.0),
             ),
@@ -38359,6 +38872,7 @@ mod tests {",
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 focus_reveal: 1.0,
+                focus_card_nudge_rows: 0.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -40511,11 +41025,22 @@ mod tests {",
         let at = source
             .find("let head_ink_here = head_ink.of(")
             .expect("the paint's gate is in this file");
-        let gate = &source[at..at + 200];
+        let gate = &source[at..at + 300];
         assert!(
-            gate.contains("head_run_revealed(pointer.pane_hover, placement.id)"),
+            gate.contains("head_run_revealed("),
             "the paint no longer asks the predicate, so the two have come apart"
         );
+        // **And it asks it with both arms** (裁4, 2026-08-26): the hand's pane
+        // and the pane whose menu is standing. A paint that dropped the second
+        // would fade the run out from under an open list while the hit test
+        // went on answering for it — which is this rule's own failure, in the
+        // other direction.
+        for arm in ["hovered: pointer.pane_hover", "menu: pane_menu_seat"] {
+            assert!(
+                gate.contains(arm),
+                "the paint's gate has lost `{arm}`, so the two have come apart"
+            );
+        }
     }
 
     /// RED — **a tab's chrome changes hands over the fast span, and its geometry

@@ -4058,7 +4058,7 @@ mod tests {
             !layer
                 .sprites
                 .iter()
-                .any(|sprite| sprite.mark == ChromeMark::FolderOpenOutline),
+                .any(|sprite| sprite.mark == ChromeMark::FolderOpen),
             "no folder glyph survives the strip"
         );
         assert!(

@@ -17,7 +17,7 @@
   "background_opacity": 80,
   "acrylic": false,
   "always_on_top": false,
-  "schema_version": 23,
+  "schema_version": 24,
   "tables": true,
   "advanced_open": [
     "appearance"
@@ -30,6 +30,7 @@
   "focus_card_height": 320,
   "search_engine": "Google",
   "line_wrapping": false,
-  "key_hints": true,
-  "turn_end_notification": false
+  "key_hints": false,
+  "turn_end_notification": false,
+  "cards_gesture_hint_offer": false
 }
