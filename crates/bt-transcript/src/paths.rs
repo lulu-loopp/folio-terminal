@@ -12,6 +12,7 @@
 //! off the event thread.
 
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
@@ -192,6 +193,11 @@ fn is_windows_drive_absolute(text: &str) -> bool {
 /// at whitespace or a closing delimiter ([`is_path_terminator_char`]); quoted paths may contain
 /// whitespace and any delimiter, and must have a closing quote. Existence, file kind, size and
 /// content format are nobody's business here.
+///
+/// One unquoted token may come back as **several candidates sharing a start** — its whole self
+/// first, then one shorter reading for every prose seam it carries (§7.30). They are readings of
+/// one token and not several references: whoever goes to the disk asks about the longest of them
+/// first and stops at the first that is there.
 pub fn detect_absolute_path_candidates(text: &str) -> Vec<PrintedPathCandidate> {
     let bytes = text.as_bytes();
     let mut candidates = Vec::new();
@@ -220,22 +226,33 @@ pub fn detect_absolute_path_candidates(text: &str) -> Vec<PrintedPathCandidate> 
             cursor += 1;
             continue;
         };
-        // Quoting is a declaration of extent, so nothing inside quotes is prose to be released.
+        // Quoting is a declaration of extent, so nothing inside quotes is prose to be released —
+        // and, for the same reason, nothing inside them is prose to be cut at either (§7.30).
         let end = if quoted {
             token
         } else {
             release_prose_tail(text, start, token)
         };
-        let (path_length, location) = split_printed_location(&text[start..end]);
-        let path_byte_end = start + path_length;
-        if is_local_absolute_path(Path::new(&text[start..path_byte_end])) {
-            candidates.push(PrintedPathCandidate {
-                byte_start: start,
-                path_byte_end,
-                byte_end: end,
-                spelling: PrintedPathSpelling::Absolute,
-                location,
-            });
+        let token_text = &text[start..end];
+        // A seam is a transition **into** another script, so a token spelled entirely in ASCII has
+        // none — and neither has a quoted one, whose quotes declared its extent.
+        let seams = if quoted || token_text.is_ascii() {
+            Vec::new()
+        } else {
+            prose_seam_ends(token_text, token_text.len())
+        };
+        for form_end in std::iter::once(end).chain(seams.into_iter().map(|offset| start + offset)) {
+            let (path_length, location) = split_printed_location(&text[start..form_end]);
+            let path_byte_end = start + path_length;
+            if is_local_absolute_path(Path::new(&text[start..path_byte_end])) {
+                candidates.push(PrintedPathCandidate {
+                    byte_start: start,
+                    path_byte_end,
+                    byte_end: form_end,
+                    spelling: PrintedPathSpelling::Absolute,
+                    location,
+                });
+            }
         }
         cursor = if quoted {
             token.saturating_add(1)
@@ -259,6 +276,11 @@ pub fn detect_absolute_path_candidates(text: &str) -> Vec<PrintedPathCandidate> 
 /// text ever says so. The separator *is* that boundary — it is the only mark a bare reference
 /// carries that ordinary prose does not.
 ///
+/// One unquoted token may come back as **several candidates sharing a start**, longest first — see
+/// [`detect_absolute_path_candidates`] and §7.30. `accepted` is asked of each of them, which is the
+/// point: `local-images/图.png,这里是说明` offers a name a picture may be found under, and the
+/// whole token offers one it may not.
+///
 /// `accepted` is the caller's own reading of what counts as a reference — asked of the **path**,
 /// with any `:line[:col]` already split off, because an extension allowlist is a question about a
 /// file's name and `sunset.png:12` names `sunset.png`. It is a **parameter of
@@ -280,6 +302,11 @@ pub fn detect_relative_path_candidates(
     // candidate, and finding the same token's end once per opening would read the line once per
     // character. Reusing it reads each token once, whatever opens inside it.
     let mut token_end_seen = 0usize;
+    // Whether that token carries a character outside ASCII at all — cached beside its end for the
+    // same reason and read for one purpose: a seam is a transition **into** another script (§7.30),
+    // so a token spelled entirely in ASCII has none and needs no search. A screenful of ordinary
+    // program output is such a screen, and this is what keeps the seam free there.
+    let mut token_is_ascii = true;
     while cursor < bytes.len() {
         // A candidate opens on a character, so a cursor resting mid-character opens nothing. The
         // absolute scan is spared this test by its drive prefix, which is ASCII and proves the
@@ -306,6 +333,7 @@ pub fn detect_relative_path_candidates(
         } else {
             if start >= token_end_seen {
                 token_end_seen = token_end(text, start);
+                token_is_ascii = text[start..token_end_seen].is_ascii();
             }
             Some(token_end_seen)
         };
@@ -321,41 +349,62 @@ pub fn detect_relative_path_candidates(
         } else {
             release_prose_tail(text, start, token)
         };
-        let reference = &text[start..end];
-        let (path_length, location) = split_printed_location(reference);
-        let candidate = &reference[..path_length];
-        // What opened the candidate is asked before what it says, because the bare opening is the
-        // one test whose cost this loop can bound: it stops at the first character that is not a
-        // path character, and every opening has such a character in front of it, so no two
-        // openings can read the same stretch twice. Asking the whole candidate first — separators,
-        // colon, and whatever `accepted` reads — would read one long line without terminators once
-        // per character.
-        //
-        // Quoting is a declaration of extent: it says where the reference begins and ends, so it
-        // needs neither an anchor nor a pure run to be read as one.
-        let admitted = (quoted
-            || is_relative_prefix_at(bytes, start)
-            || bare_candidate_opens_at(text, start, candidate))
-            && is_relative_reference(candidate)
-            && accepted(candidate);
-        if admitted {
-            candidates.push(PrintedPathCandidate {
-                byte_start: start,
-                path_byte_end: start + path_length,
-                byte_end: end,
-                spelling: PrintedPathSpelling::Relative,
-                location,
-            });
+        // §7.30. Quoting is a declaration of extent, so a quoted token offers no shorter form. An
+        // anchored opening carries a mark of its own and is as rare as a drive prefix, so its whole
+        // token is searched. A **bare** opening is the one this loop must keep a bound on, and
+        // [`bare_form_limit`] is that bound — read it there for why nothing past it could be
+        // admitted anyway.
+        let seams = if quoted || token_is_ascii {
+            Vec::new()
+        } else {
+            let token_text = &text[start..end];
+            let limit = if is_relative_prefix_at(bytes, start) {
+                token_text.len()
+            } else {
+                bare_form_limit(token_text)
+            };
+            prose_seam_ends(token_text, limit)
+        };
+        // The longest admitted form, which is what this opening consumes.
+        let mut admitted = None;
+        for form_end in std::iter::once(end).chain(seams.into_iter().map(|offset| start + offset)) {
+            let reference = &text[start..form_end];
+            let (path_length, location) = split_printed_location(reference);
+            let candidate = &reference[..path_length];
+            // What opened the candidate is asked before what it says, because the bare opening is
+            // the one test whose cost this loop can bound: it stops at the first character that is
+            // not a path character, and every opening has such a character in front of it, so no
+            // two openings can read the same stretch twice. Asking the whole candidate first —
+            // separators, colon, and whatever `accepted` reads — would read one long line without
+            // terminators once per character.
+            //
+            // Quoting is a declaration of extent: it says where the reference begins and ends, so
+            // it needs neither an anchor nor a pure run to be read as one.
+            if (quoted
+                || is_relative_prefix_at(bytes, start)
+                || bare_candidate_opens_at(text, start, candidate))
+                && is_relative_reference(candidate)
+                && accepted(candidate)
+            {
+                candidates.push(PrintedPathCandidate {
+                    byte_start: start,
+                    path_byte_end: start + path_length,
+                    byte_end: form_end,
+                    spelling: PrintedPathSpelling::Relative,
+                    location,
+                });
+                admitted.get_or_insert(form_end);
+            }
         }
         // An admitted candidate consumes its text, so nothing is read out of the middle of one. A
         // refused one consumes a single character: whatever it was, the reference may still begin
         // one character later — behind the `：` in `路径：dir/a.png`, or at the quote in
         // `path="./a.png"` — and a refusal is never evidence about the text that follows it.
-        cursor = if admitted {
+        cursor = if let Some(admitted) = admitted {
             if quoted {
-                end.saturating_add(1)
+                admitted.saturating_add(1)
             } else {
-                end.max(cursor.saturating_add(1))
+                admitted.max(cursor.saturating_add(1))
             }
         } else {
             cursor.saturating_add(1)
@@ -605,6 +654,82 @@ fn release_prose_tail(text: &str, start: usize, end: usize) -> usize {
         end -= character.len_utf8();
     }
     end
+}
+
+/// The ASCII punctuation a sentence is separated with, and the only characters a **seam** may sit
+/// on — §7.30.
+///
+/// The ASCII full stop is deliberately absent: boundary table row 16 already settled that a
+/// trailing `.` is part of the reference because Windows eats it and the name is the same file.
+/// These five separate one thing from the next and are never eaten.
+const PROSE_SEPARATORS: [char; 5] = [',', ';', ':', '!', '?'];
+
+/// Where one unquoted token offers a **shorter form** of itself, longest first — §7.30.
+///
+/// A seam is one **character-class transition** and not a list of stops: an ASCII separator with a
+/// non-ASCII character glued straight onto it. That is a person writing another script through an
+/// ASCII keyboard — `docs/a.md,这里是操作顺序` — and the separator is the sentence's, not the
+/// name's. Both halves of the transition are load-bearing:
+///
+/// * ASCII → ASCII is **not** a seam. `D:\x\a.md,b` is one name; a comma is legal in a Windows
+///   filename and nothing on the line says this one is punctuation.
+/// * non-ASCII → anything is **not** a seam. A full-width stop is released whole by
+///   [`release_prose_tail`] (boundary table row 17), and `D:\资料\A、B.md` is somebody's filename
+///   read whole (row 19 stands unmoved).
+///
+/// The offsets are the separator's own, so the form ends **before** it, and they come back
+/// descending so a caller reads the longest form first. `limit` is the last offset a seam may sit
+/// on; a caller that can prove no longer form could ever be admitted passes it to keep this scan
+/// inside the bound its loop is read under.
+fn prose_seam_ends(token: &str, limit: usize) -> Vec<usize> {
+    let mut seams = Vec::new();
+    for (offset, character) in token.char_indices() {
+        if offset > limit {
+            break;
+        }
+        // `offset + 1` is a character boundary: every separator is one ASCII byte.
+        if PROSE_SEPARATORS.contains(&character)
+            && token[offset + 1..]
+                .chars()
+                .next()
+                .is_some_and(|next| !next.is_ascii())
+        {
+            seams.push(offset);
+        }
+    }
+    seams.reverse();
+    seams
+}
+
+/// How far a **bare** opening's forms can possibly reach, and therefore where its seam search may
+/// stop — the same bound [`bare_candidate_opens_at`] buys the scan that calls it.
+///
+/// A bare candidate's path must be a run of path characters ([`bare_candidate_opens_at`]), and the
+/// only thing that may follow that run is the `:line[:col]` [`split_printed_location`] takes off.
+/// So no form ending past this offset can ever be admitted: its path would have to carry the first
+/// non-path character of the token, and a form whose path carries one is refused. Reading the whole
+/// token for seams instead would cost this loop the bound that keeps a line without terminators
+/// from being read once per character.
+fn bare_form_limit(token: &str) -> usize {
+    let mut limit = token
+        .char_indices()
+        .find(|(_, character)| !is_path_tail_char(*character))
+        .map_or(token.len(), |(offset, _)| offset);
+    // At most a line and a column, which is the whole of the location syntax.
+    for _ in 0..2 {
+        let Some(tail) = token[limit..].strip_prefix(':') else {
+            break;
+        };
+        let digits = tail.len()
+            - tail
+                .trim_start_matches(|character: char| character.is_ascii_digit())
+                .len();
+        if digits == 0 {
+            break;
+        }
+        limit += 1 + digits;
+    }
+    limit
 }
 
 /// Whether a candidate at byte offset `start` opens a token rather than continuing one. The decision
@@ -1130,7 +1255,9 @@ impl PrintedPathLinks {
     /// Ranges come back in reading order and never overlap: the three spellings are held off each
     /// other by their own boundary rules (a URI's embedded `D:/…` and a native path's `\.\` are both
     /// preceded by a path character, and [`is_relative_reference`] refuses anything carrying a `:`),
-    /// so no two of them can claim the same text.
+    /// so no two of them can claim the same text. The several readings one seam-bearing token
+    /// offers (§7.30) do share text, and at most one of them ever becomes a link — which is what
+    /// the walk below is: one token, one answer.
     pub fn links_in(
         &self,
         text: &str,
@@ -1147,45 +1274,74 @@ impl PrintedPathLinks {
         }
         let candidates = self.candidates_in(text);
         let mut links = Vec::new();
-        for candidate in candidates {
-            // §7.1.5k ①, **in front of the ledger and in front of the probe queue**. A candidate
-            // that reaches the physical line's last visual cell may be the front half of a
-            // reference the application cut in two, and the front half of a cut path is exactly the
-            // kind of name that exists on the disk — so neither an answer already in the ledger nor
-            // one this frame could go and fetch is allowed to decide it. Pressing it down here is
-            // what keeps an old `yes` for `D:\WINDOWS\system` from lighting up a span that means
-            // `D:\WINDOWS\system32\…` (scenario 67).
-            if touches_line_end(candidate.byte_start, candidate.byte_end, edge) {
-                continue;
+        let mut index = 0usize;
+        while index < candidates.len() {
+            // One token's forms (§7.30), longest first. They share a start — nothing else does,
+            // because the three spellings are held off each other by their own boundary rules — so
+            // a run of equal starts is exactly one token's worth of readings, and the ruling is
+            // asked of that run as a whole rather than of each reading on its own.
+            let start = candidates[index].byte_start;
+            let mut forms = index;
+            while forms < candidates.len() && candidates[forms].byte_start == start {
+                forms += 1;
             }
-            let Some(path) = self.resolve(candidate.path_text(text), candidate.spelling) else {
-                continue;
-            };
-            // **The line is never part of what is asked about.** A reference to line 9999 of a real
-            // file is a reference to a real file, and a probe carrying `:9999` would be a question
-            // about a name no filesystem holds — permanently unanswerable, permanently unlinked.
-            match self.verdicts.get(&path) {
-                Some(true) => {
-                    let mut uri = local_path_to_file_uri(&path);
-                    if let Some(location) = candidate.location {
-                        uri.push('#');
-                        uri.push_str(&location.uri_fragment());
+            // Whether a **longer** form of this token is still waiting for the disk. Until it
+            // answers, a shorter form that already exists is not drawn: the ruling is longest
+            // first, and a frame that has not been told yet is a frame with nothing to promise.
+            let mut pending = false;
+            for candidate in &candidates[index..forms] {
+                // §7.1.5k ①, **in front of the ledger and in front of the probe queue**. A
+                // candidate that reaches the physical line's last visual cell may be the front half
+                // of a reference the application cut in two, and the front half of a cut path is
+                // exactly the kind of name that exists on the disk — so neither an answer already
+                // in the ledger nor one this frame could go and fetch is allowed to decide it.
+                // Pressing it down here is what keeps an old `yes` for `D:\WINDOWS\system` from
+                // lighting up a span that means `D:\WINDOWS\system32\…` (scenario 67).
+                //
+                // The gate is asked **per form**: a shorter form stops before the seam's own
+                // punctuation and the prose behind it, so it never touches the row's last cell, and
+                // that punctuation is itself the evidence that the name ended before any cut.
+                if touches_line_end(candidate.byte_start, candidate.byte_end, edge) {
+                    continue;
+                }
+                let Some(path) = self.resolve(candidate.path_text(text), candidate.spelling) else {
+                    continue;
+                };
+                // **The line is never part of what is asked about.** A reference to line 9999 of a
+                // real file is a reference to a real file, and a probe carrying `:9999` would be a
+                // question about a name no filesystem holds — permanently unanswerable,
+                // permanently unlinked.
+                match self.verdicts.get(&path) {
+                    Some(true) => {
+                        if !pending {
+                            let mut uri = local_path_to_file_uri(&path);
+                            if let Some(location) = candidate.location {
+                                uri.push('#');
+                                uri.push_str(&location.uri_fragment());
+                            }
+                            links.push((
+                                HyperlinkRange {
+                                    byte_start: candidate.byte_start,
+                                    byte_end: candidate.byte_end,
+                                },
+                                uri,
+                            ));
+                        }
+                        // Nothing shorter can be reached past a form the disk holds, answered or
+                        // not: this token's reading is settled here.
+                        break;
                     }
-                    links.push((
-                        HyperlinkRange {
-                            byte_start: candidate.byte_start,
-                            byte_end: candidate.byte_end,
-                        },
-                        uri,
-                    ));
-                }
-                // Answered "no": nothing to draw and, above all, nothing to ask again. This is the
-                // arm that keeps a repainting screen's question budget for the names that need it.
-                Some(false) => {}
-                None => {
-                    unknown.insert(path);
+                    // Answered "no": nothing to draw and, above all, nothing to ask again. This is
+                    // the arm that keeps a repainting screen's question budget for the names that
+                    // need it — and, for a seam, the arm that hands the token to its next form.
+                    Some(false) => {}
+                    None => {
+                        unknown.insert(path);
+                        pending = true;
+                    }
                 }
             }
+            index = forms;
         }
         links
     }
@@ -1226,9 +1382,10 @@ impl PrintedPathLinks {
     ) -> Option<RejoinedReference> {
         // Gate 1. Exactly one candidate may reach the row's end: two would mean the lexer cannot
         // say which of them the application cut.
-        let mut reaching = self
-            .candidates_in(upper)
-            .into_iter()
+        let upper_candidates = self.candidates_in(upper);
+        let mut reaching = upper_candidates
+            .iter()
+            .copied()
             .filter(|candidate| {
                 touches_line_end(candidate.byte_start, candidate.byte_end, Some(upper_edge))
             })
@@ -1240,16 +1397,24 @@ impl PrintedPathLinks {
         let lower_end = token_end(lower, 0);
         let lower_head = lower.get(..lower_end).filter(|head| !head.is_empty())?;
 
-        // Gate 3. One candidate, covering all of it.
+        // Gate 3. One candidate, covering all of it — one *token*, that is: the shorter forms a
+        // seam offers (§7.30) are readings of the same token and not a second reference, so what
+        // this gate refuses is a second **start**, exactly as it always did.
         let joined = format!("{upper_tail}{lower_head}");
-        let mut spelled = self.candidates_in(&joined);
-        let whole = spelled.pop().filter(|candidate| {
-            spelled.is_empty() && candidate.byte_start == 0 && candidate.byte_end == joined.len()
+        let spelled = self.candidates_in(&joined);
+        let whole = spelled.first().copied().filter(|candidate| {
+            candidate.byte_start == 0
+                && candidate.byte_end == joined.len()
+                && spelled.iter().all(|form| form.byte_start == 0)
         })?;
 
         // Gate 5, asked before the disk so a refusal costs nothing: a half that already names a
-        // file of its own is that file's reference and not the front of somebody else's.
-        if self.is_verified(&head, upper) {
+        // file of its own is that file's reference and not the front of somebody else's. **Any of
+        // its forms counts** — a seam that has already earned the upper half a link is that link's
+        // evidence, and rejoining would lay a second promise over text the first one covers.
+        if upper_candidates.iter().any(|candidate| {
+            candidate.byte_start == head.byte_start && self.is_verified(candidate, upper)
+        }) {
             return None;
         }
         if self
@@ -1312,7 +1477,12 @@ impl PrintedPathLinks {
         }
         let scheme_spans = crate::http_scheme_spans(text);
         candidates.retain(|candidate| is_promisable(text, candidate, &scheme_spans));
-        candidates.sort_by_key(|candidate| candidate.byte_start);
+        // Reading order, and inside one token the **longest form first** (§7.30): the forms of one
+        // seam-bearing token share a start, and the whole of the ruling is that the disk is asked
+        // about the longest of them before any shorter one may be promised. The six refusals above
+        // are asked of every form on its own — `docs/NUL,这里` is not a device name and
+        // `docs/NUL` is.
+        candidates.sort_by_key(|candidate| (candidate.byte_start, Reverse(candidate.byte_end)));
         candidates
     }
 
@@ -3030,6 +3200,240 @@ mod tests {
     fn an_ascii_full_stop_stays_inside_the_reference() {
         assert_eq!(spans("见 D:\\x\\a.md."), ["D:\\x\\a.md."]);
         assert_eq!(spans("see docs/a.md."), ["docs/a.md."]);
+    }
+
+    /// §7.30, boundary table rows 40 and 41 — the seam, read at the lexer: one ASCII separator with
+    /// a word of another script glued to it is where a name may have stopped, so the token offers a
+    /// shorter form as well as its whole self.
+    #[test]
+    fn an_ascii_separator_glued_to_a_cjk_word_offers_a_shorter_form() {
+        // The user's line, 2026-08-27. The whole token carries a `,`, which is not a path
+        // character, so it is not even a bare candidate — the seam is the only reason this line
+        // offers anything at all.
+        assert_eq!(
+            spans("docs/plans/release/clean-vm.md,这里是操作顺序"),
+            ["docs/plans/release/clean-vm.md"]
+        );
+        // A drive-rooted token *is* a candidate whole, so both forms are offered, longest first.
+        assert_eq!(
+            spans("见 D:\\x\\a.md,然后"),
+            ["D:\\x\\a.md,然后", "D:\\x\\a.md"]
+        );
+        // The whole group, one character class and not a list of stops.
+        for line in [
+            "docs/a.md,这里",
+            "docs/a.md;然后",
+            "docs/a.md:然后",
+            "docs/a.md!然后",
+            "docs/a.md?然后",
+        ] {
+            assert_eq!(spans(line), ["docs/a.md"], "{line} seams at its separator");
+        }
+    }
+
+    /// §7.30, boundary table rows 42 and 43 — the two transitions that are **not** seams, kept
+    /// beside the one that is: ASCII to ASCII is a filename's own punctuation (row 16's discipline
+    /// on a comma), and a non-ASCII stop is released whole by row 17 and cuts nothing.
+    #[test]
+    fn a_seam_is_one_character_class_transition_and_not_a_list_of_stops() {
+        // Row 42: `,b` is as much a name as `.md` is, so nothing is cut and the token stands whole.
+        assert_eq!(spans("见 D:\\x\\a.md,b"), ["D:\\x\\a.md,b"]);
+        // The bare spelling of the same text offers nothing at all, exactly as it did before this
+        // slice: a comma is not a path character, so the run rule refuses the opening.
+        assert!(spans("docs/a.md,b").is_empty());
+        // Row 43 is boundary table row 19 unmoved: a full-width comma is not an ASCII separator,
+        // so the sentence behind it stays welded to the token and the line offers no link.
+        assert_eq!(spans("见 D:\\x\\a.md，然后"), ["D:\\x\\a.md，然后"]);
+    }
+
+    /// §7.30, boundary table row 40 at the disk: the shorter form is a link the moment the disk
+    /// holds it, and the underline covers exactly that form.
+    #[test]
+    fn the_form_a_seam_cuts_is_the_link_and_the_underline_is_its_own() {
+        // The user's line as it was printed, closing bracket and colon and all.
+        let printed = ledger(
+            "D:\\case",
+            &[("D:\\case\\docs\\plans\\release\\clean-vm.md", true)],
+        );
+        assert_eq!(
+            linked(
+                &printed,
+                "docs/plans/release/clean-vm.md,这里是操作顺序):",
+                None
+            ),
+            [(
+                "docs/plans/release/clean-vm.md",
+                "file:///D:/case/docs/plans/release/clean-vm.md".to_owned()
+            )]
+        );
+        let links = ledger("D:\\case", &[("D:\\case\\docs\\a.md", true)]);
+        for line in [
+            "见 docs/plans/../a.md,这里是操作顺序",
+            "见 docs/a.md;然后",
+            "见 docs/a.md:然后",
+        ] {
+            let drawn = linked(&links, line, None);
+            assert_eq!(drawn.len(), 1, "{line} draws one link");
+            assert_eq!(
+                drawn[0].1, "file:///D:/case/docs/a.md",
+                "{line} points at the file the seam cut out"
+            );
+        }
+    }
+
+    /// §7.30, boundary table row 44 — **longest first, and the whole string wins when the disk
+    /// holds it.** A filename may really carry `,中文`, so the shorter form is only reached once
+    /// the disk has denied the longer one, and never before an answer for it exists.
+    #[test]
+    fn a_seam_is_asked_longest_first_and_a_name_that_really_carries_one_wins() {
+        // Frame one: nobody has looked at either form, so nothing is promised and both are asked.
+        let mut unknown = BTreeSet::new();
+        let asking = ledger("D:\\case", &[]);
+        assert_eq!(
+            asking.links_in("见 D:\\x\\a.md,然后", None, &mut unknown),
+            []
+        );
+        assert_eq!(
+            unknown.into_iter().collect::<Vec<_>>(),
+            [
+                PathBuf::from("D:\\x\\a.md"),
+                PathBuf::from("D:\\x\\a.md,然后")
+            ]
+        );
+        // Frame two, the ordinary answer: the long name is not there and the short one is.
+        let denied = ledger(
+            "D:\\case",
+            &[("D:\\x\\a.md", true), ("D:\\x\\a.md,然后", false)],
+        );
+        assert_eq!(
+            linked(&denied, "见 D:\\x\\a.md,然后", None),
+            [("D:\\x\\a.md", "file:///D:/x/a.md".to_owned())]
+        );
+        // Frame two, the other answer: the disk holds the whole string, so the whole string is the
+        // reference and the seam never comes into it.
+        let whole = ledger(
+            "D:\\case",
+            &[("D:\\x\\a.md", true), ("D:\\x\\a.md,然后", true)],
+        );
+        assert_eq!(
+            linked(&whole, "见 D:\\x\\a.md,然后", None),
+            [(
+                "D:\\x\\a.md,然后",
+                "file:///D:/x/a.md%2C%E7%84%B6%E5%90%8E".to_owned()
+            )]
+        );
+        // And a shorter form that exists is still not drawn while a longer one is unanswered: the
+        // frame that would draw it is the frame that has not been told yet.
+        let half = ledger("D:\\case", &[("D:\\x\\a.md", true)]);
+        assert_eq!(linked(&half, "见 D:\\x\\a.md,然后", None), []);
+    }
+
+    /// §7.30 and §7.1.5j ⑨ share one colon without fighting over it: `:` opens a seam only when
+    /// what follows it is not a decimal line number, and a located reference keeps its location
+    /// through the cut.
+    #[test]
+    fn a_seam_and_a_line_number_never_claim_the_same_colon() {
+        let links = ledger("D:\\case", &[("D:\\case\\docs\\a.md", true)]);
+        for (line, span, uri) in [
+            (
+                "docs/a.md:12",
+                "docs/a.md:12",
+                "file:///D:/case/docs/a.md#L12",
+            ),
+            ("docs/a.md:然后", "docs/a.md", "file:///D:/case/docs/a.md"),
+            (
+                "docs/a.md:12,这里",
+                "docs/a.md:12",
+                "file:///D:/case/docs/a.md#L12",
+            ),
+            (
+                "docs/a.md:12:3,这里",
+                "docs/a.md:12:3",
+                "file:///D:/case/docs/a.md#L12C3",
+            ),
+            (
+                "docs/a.md:12:这里",
+                "docs/a.md:12",
+                "file:///D:/case/docs/a.md#L12",
+            ),
+        ] {
+            assert_eq!(
+                linked(&links, line, None),
+                [(span, uri.to_owned())],
+                "{line} is read as {span}"
+            );
+        }
+    }
+
+    /// §7.30 under §7.1.5k ① — the gate is asked **per form**. The whole token reaches the row's
+    /// last cell and is pressed down; the shorter form stops well short of it, and the seam's own
+    /// punctuation standing between the two is the evidence that the name ended before the cut.
+    #[test]
+    fn the_truncation_gate_presses_the_whole_token_and_leaves_the_shorter_form_standing() {
+        let links = ledger("D:\\case", &[("D:\\case\\docs\\a.md", true)]);
+        let line = "docs/a.md,这里";
+        assert_eq!(
+            linked(&links, line, last_cell_of(line)),
+            [("docs/a.md", "file:///D:/case/docs/a.md".to_owned())]
+        );
+        // The same name with nothing behind it does reach the last cell, and is pressed down.
+        assert_eq!(linked(&links, "docs/a.md", last_cell_of("docs/a.md")), []);
+    }
+
+    /// §7.30's whole cost: one extra question, and only on a token that carries a seam.
+    #[test]
+    fn the_extra_question_a_seam_costs_is_asked_only_where_there_is_a_seam() {
+        let asked = |line: &str| {
+            let mut unknown = BTreeSet::new();
+            ledger("D:\\case", &[]).links_in(line, None, &mut unknown);
+            unknown.len()
+        };
+        assert_eq!(asked("docs/a.md"), 1);
+        assert_eq!(asked("D:\\x\\a.md"), 1);
+        assert_eq!(asked("D:\\x\\a.md,b"), 1);
+        assert_eq!(asked("D:\\x\\a.md,然后"), 2);
+        // The bare spelling costs nothing extra at all: the whole token was never a candidate.
+        assert_eq!(asked("docs/a.md,这里"), 1);
+    }
+
+    /// §7.30 does not reach the two shapes that are ASCII by construction, **because they have
+    /// carried the same ruling since they were written**: a URI token and a bare address both end
+    /// at the first non-ASCII byte and then release the ASCII stop behind them. A native path
+    /// cannot end that way — a filename is spelled in any script — which is the whole reason the
+    /// seam had to be spelled out for it.
+    #[test]
+    fn a_uri_and_an_address_have_stopped_at_the_first_non_ascii_byte_since_they_were_written() {
+        assert_eq!(spans("见 file:///D:/x/a.md,这里"), ["file:///D:/x/a.md"]);
+        let line = "见 https://host.invalid/a,这里";
+        assert_eq!(
+            inferred_url_ranges(line, None)
+                .into_iter()
+                .map(|range| &line[range.byte_start..range.byte_end])
+                .collect::<Vec<_>>(),
+            ["https://host.invalid/a"]
+        );
+    }
+
+    /// §7.1.5k ② gate ⑤ reads the seam too: a half that names a file **through one of its own
+    /// forms** is that file's reference, and rejoining it would put a second promise over text the
+    /// first one already covers.
+    #[test]
+    fn a_rejoin_is_refused_when_the_upper_half_is_verified_through_a_seam() {
+        let links = ledger(
+            "D:\\case",
+            &[
+                ("D:\\x\\a.md", true),
+                ("D:\\x\\a.md,然后", false),
+                ("D:\\x\\a.md,然后是", true),
+            ],
+        );
+        assert_eq!(rejoin(&links, "D:\\x\\a.md,然后", "是"), None);
+        // And the upper half keeps the link its own seam earned it.
+        let upper = "D:\\x\\a.md,然后";
+        assert_eq!(
+            linked(&links, upper, last_cell_of(upper)),
+            [("D:\\x\\a.md", "file:///D:/x/a.md".to_owned())]
+        );
     }
 
     /// A located reference is a link to the file, and the line rides in the target's fragment:
