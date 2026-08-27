@@ -49640,13 +49640,20 @@ impl Runtime<'_> {
     /// as well and falls back to it, so a caller who forgets this map draws the
     /// run exactly as it was drawn before there was a fade.
     ///
-    /// **The list is the hovered pane plus whatever is still leaving.** A hand
-    /// crossing from one pane to the next leaves two entries for ninety
+    /// **The list is every pane showing a run plus whatever is still leaving.**
+    /// A hand crossing from one pane to the next leaves two entries for ninety
     /// milliseconds — one coming up and one going down — which is why this is a
-    /// list at all and not the one seat under the pointer.
+    /// list at all and not the one seat under the pointer. Since 裁4 two can be
+    /// up at once for a second reason: a menu standing on one head while the
+    /// hand is in the pane beside it.
     fn settled_head_ink(&mut self, now: Instant) -> Vec<(SeatId, f32)> {
         let motion = self.app.motion;
-        let hovered = self.window.seat_pointer.pane_hover;
+        // **Both arms of the predicate** (裁4, 2026-08-26). The register eases
+        // toward whatever `seats::head_run_revealed` says, and it has to be the
+        // same sentence the paint and the hit test read — easing toward
+        // `pane_hover` alone would run the ninety-millisecond fade *out* the
+        // instant the hand reached the list the head had just opened.
+        let showing = self.head_run();
         let mut seats: Vec<SeatId> = self
             .window
             .settling
@@ -49657,10 +49664,10 @@ impl Runtime<'_> {
                 _ => None,
             })
             .collect();
-        if let Some(seat) = hovered
-            && !seats.contains(&seat)
-        {
-            seats.push(seat);
+        for seat in [showing.hovered, showing.menu].into_iter().flatten() {
+            if !seats.contains(&seat) {
+                seats.push(seat);
+            }
         }
         seats
             .into_iter()
@@ -49669,7 +49676,7 @@ impl Runtime<'_> {
                     &Fading::HeadRun(seat),
                     0.0,
                     settling::Toward::eased(
-                        f32::from(u8::from(hovered == Some(seat))),
+                        f32::from(u8::from(seats::head_run_revealed(showing, seat))),
                         bt_render::HOVER_CHROME_FADE,
                     ),
                     now,
@@ -49678,6 +49685,20 @@ impl Runtime<'_> {
                 (seat, ink)
             })
             .collect()
+    }
+
+    /// **The two facts a pane head's run is drawn and hit-tested by**, read off
+    /// this window once (裁4, 2026-08-26).
+    ///
+    /// One reader for the paint, the fade register and the hit test, on
+    /// [`seats::head_run_revealed`]'s own argument: the moment the three of them
+    /// assemble this pair for themselves is the moment one of them forgets the
+    /// second arm and a head goes dark under its own open menu.
+    fn head_run(&self) -> seats::HeadRun {
+        seats::HeadRun {
+            hovered: self.window.seat_pointer.pane_hover,
+            menu: self.window.pane_menu.as_ref().map(|menu| menu.seat),
+        }
     }
 
     /// **A row waiting on a write dims into it rather than jumping** (the
@@ -64137,7 +64158,7 @@ impl Runtime<'_> {
                 &self.seat_layout,
                 scale,
                 &tools,
-                self.window.seat_pointer.pane_hover,
+                self.head_run(),
                 position.x,
                 position.y,
             )
@@ -64194,7 +64215,12 @@ impl Runtime<'_> {
                 // used: this is asked on the press as well as on the move, and
                 // on the press the only honest question is "what is the reader
                 // looking at".
-                self.window.seat_pointer.pane_hover,
+                //
+                // And since 裁4 (2026-08-26) it is the *pair*: a head whose own
+                // menu is standing is showing its run even though `pane_hover`
+                // was cleared the instant the hand reached the list, so the
+                // `✕` beside the `⌄` that opened it goes on taking a press.
+                self.head_run(),
                 position.x,
                 position.y,
             )
