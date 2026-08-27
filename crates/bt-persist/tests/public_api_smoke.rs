@@ -63,6 +63,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         line_wrapping: false,
         key_hints: false,
         turn_end_notification: false,
+        copy_on_select: false,
     };
     write_settings_atomic(&path, &settings).unwrap();
 

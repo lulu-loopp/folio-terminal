@@ -2381,6 +2381,29 @@ pub enum SettingsRow {
     /// says so, because the horizontal bar only appears once there is already
     /// something the reader cannot see.
     LineWrapping,
+    /// **Whether letting go of a drag-selection writes it to the clipboard**
+    /// (gesture audit 2026-08-26, 丙4).
+    ///
+    /// The row exists because the behaviour had no name. Dragging across a line
+    /// and letting go has always overwritten the clipboard, silently: no toast,
+    /// no menu row, no chord, nothing on the glass at all. The audit filed it
+    /// apart from its six siblings for that reason — every other entry there is
+    /// a gesture nobody can find, and this is a *result* nobody is told about,
+    /// which is the worse half of the same problem because the reader is not
+    /// missing a feature, they are missing what happened to what they had.
+    ///
+    /// **On by default**, which is not the same choice `Notifications` made:
+    /// this is the behaviour every build so far has had and the row is the
+    /// first place it has ever been written down. Windows Terminal ships its
+    /// `copyOnSelect` off, and that is recorded here rather than followed —
+    /// changing what a reader's hands already do, on the day they are first
+    /// told what they do, would be two surprises instead of none.
+    ///
+    /// **Under [`Self::LineWrapping`] and above [`Self::Notifications`]**: the
+    /// page reads downwards as one pane's story, and this belongs with the two
+    /// rows that say what a pane does rather than with the one row whose answer
+    /// is visible outside this window.
+    CopyOnSelect,
     /// **Whether a program may put a message on the desktop** — the Terminal
     /// page's third row (§7.6, Windows landing slice 3, 2026-08-20).
     ///
@@ -2591,6 +2614,7 @@ impl SettingsRow {
             | Self::PowerShellOffer
             | Self::Scrollback
             | Self::LineWrapping
+            | Self::CopyOnSelect
             | Self::Notifications => SettingsCategory::Terminal,
             // **The rows about the program running in the pane** (user ruling
             // 2026-08-25). `Notifications` deliberately stayed on `Terminal`: it
@@ -2669,6 +2693,7 @@ impl SettingsRow {
             Self::BlockMaxHeight => Text::RowBlockMaxHeight.text(),
             Self::Scrollback => Text::RowScrollback.text(),
             Self::LineWrapping => Text::RowLineWrapping.text(),
+            Self::CopyOnSelect => Text::RowCopyOnSelect.text(),
             Self::Notifications => Text::RowNotifications.text(),
             Self::TurnEndNotifications => Text::RowTurnEndNotifications.text(),
             Self::PowerShellOffer => Text::RowPowerShellOffer.text(),
@@ -2788,6 +2813,7 @@ impl SettingsRow {
                 }
             }
             Self::Scrollback => Text::DescScrollback.text(),
+            Self::CopyOnSelect => Text::DescCopyOnSelect.text(),
             Self::Notifications => Text::DescNotifications.text(),
             Self::TurnEndNotifications => Text::DescTurnEndNotifications.text(),
             Self::PowerShellOffer => Text::DescPowerShellOffer.text(),
@@ -3051,6 +3077,7 @@ impl SettingsRow {
             | Self::CopilotHooks
             | Self::Scrollback
             | Self::LineWrapping
+            | Self::CopyOnSelect
             | Self::Notifications
             | Self::TurnEndNotifications
             // The everyday half of the editor, in the order somebody decides a
@@ -3145,6 +3172,7 @@ impl SettingsRow {
             | Self::KeyHints
             | Self::ContextMenu
             | Self::PsReadLine
+            | Self::CopyOnSelect
             | Self::Notifications
             | Self::TurnEndNotifications
             | Self::PowerShellOffer
@@ -3214,6 +3242,7 @@ impl SettingsRow {
             | Self::KeyHints
             | Self::ContextMenu
             | Self::PsReadLine
+            | Self::CopyOnSelect
             | Self::Notifications
             | Self::TurnEndNotifications
             | Self::PowerShellOffer
@@ -3525,6 +3554,9 @@ impl SettingsRow {
             Self::KeyHints => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.key_hints),
+            Self::CopyOnSelect => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.copy_on_select),
             Self::Notifications => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.terminal_notifications),
@@ -3775,6 +3807,12 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // One says how much of what has gone past the pane still holds, the other
     // says what the pane does with a line wider than itself.
     rows.push(SettingsRow::LineWrapping);
+    // **Under the two axes and above the desktop row.** `Line wrapping` says
+    // what a pane does with a line wider than itself; this says what a pane does
+    // with a line the reader has just dragged across. Both are the pane's own
+    // behaviour, and the row below is the only one on this page whose answer is
+    // visible outside this window.
+    rows.push(SettingsRow::CopyOnSelect);
     // **Last on its page**, the judgement `Explorer context menu` is filed under
     // in General: the two rows above say what a pane keeps and what one shell is
     // patched with, and this is the only row here whose answer shows up outside
@@ -4130,6 +4168,9 @@ pub struct SettingsValues {
     /// `bt_doc::LayoutKey`. It is also what the row's *sentence* is chosen by —
     /// see [`SettingsRow::LineWrapping`].
     pub line_wrapping: bool,
+    /// Whether letting go of a drag-selection writes it to the clipboard
+    /// (gesture audit 2026-08-26, 丙4).
+    pub copy_on_select: bool,
     /// Whether a program may put a message on the desktop (§7.6).
     pub terminal_notifications: bool,
     /// Whether the end of a turn may reach the desktop — a taskbar flash on a
@@ -4308,6 +4349,7 @@ impl SettingsValues {
             block_max_height: bt_persist::DEFAULT_BLOCK_MAX_HEIGHT,
             scrollback_lines: bt_persist::DEFAULT_SCROLLBACK_LINES,
             line_wrapping: true,
+            copy_on_select: true,
             terminal_notifications: true,
             turn_end_notification: true,
             powershell_integration_offer: true,
@@ -7191,6 +7233,18 @@ pub fn acrylic_requested(target: SettingsTarget) -> Option<bool> {
 pub fn always_on_top_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::AlwaysOnTop, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Whether a drag-selection is written to the clipboard, as a press on its
+/// picker (gesture audit 2026-08-26, 丙4).
+#[must_use]
+pub fn copy_on_select_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::CopyOnSelect, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -18298,6 +18352,7 @@ mod tests {
                 SettingsRow::PowerShellOffer,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
+                SettingsRow::CopyOnSelect,
                 SettingsRow::Notifications
             ],
             "the mock-up's order for this page, with the two PowerShell rows \n             together at the top: the row that reports a fact about the machine, \n             the row that offers what this one is missing, then the pane's two \n             axes — what it keeps of what has gone past, and what it does with a \n             line wider than itself — and last the only row on this page whose \n             answer shows up outside this window"
@@ -18384,6 +18439,7 @@ mod tests {
                 SettingsRow::PowerShellOffer,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
+                SettingsRow::CopyOnSelect,
                 SettingsRow::Notifications
             ],
             "the mock-up's order for this page"
@@ -19568,6 +19624,7 @@ mod tests {
                 SettingsRow::PowerShellOffer,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
+                SettingsRow::CopyOnSelect,
                 SettingsRow::Notifications,
                 SettingsRow::ClaudeHooks,
                 SettingsRow::CodexNotify,
@@ -19610,6 +19667,7 @@ mod tests {
                 SettingsRow::PowerShellOffer,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
+                SettingsRow::CopyOnSelect,
                 SettingsRow::Notifications,
                 SettingsRow::ClaudeHooks,
                 SettingsRow::CodexNotify,

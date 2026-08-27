@@ -855,7 +855,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 23,
+        SETTINGS_SCHEMA_VERSION, 24,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -880,7 +880,17 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          General page's own Search engine the v19-to-v20, and the Terminal page's \
          own Line wrapping the v20-to-v21, and the General page's own Shortcut \
          hints the v21-to-v22, and the Terminal page's own Turn finished the \
-         v22-to-v23 — one key on one day, thirteen times running"
+         v22-to-v23, and the terminal's own silent write to the clipboard on a \
+         dragged selection the v23-to-v24 — one key on one day, fourteen times \
+         running"
+    );
+    assert!(
+        defaults.copy_on_select,
+        "every build before this key existed already wrote a drag's selection to \
+         the clipboard the instant it was let go, invisibly — the 2026-08-26 \
+         gesture audit gave that write a name and a door, it did not choose it, \
+         and a default of `false` would take the habit away from every reader \
+         who never asked for that to happen"
     );
     assert!(
         defaults.turn_end_notification,
@@ -2343,5 +2353,67 @@ fn settings_v22_migrates_with_the_turn_end_lane_on_and_v23_keeps_the_silence_it_
     let (round_tripped, report) = read_settings(&path);
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(round_tripped, quiet);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PIN (`docs/plans/ui-style/invisible-gestures-2026-08-26.md` 丙4) — a v23 settings file migrates
+/// to v24 with `copy_on_select` **on**, and every older file crosses the whole ladder to the same
+/// answer.
+///
+/// The fourteenth one-key step, landing where the eleventh (`v20→v21`) landed and not where the
+/// thirteenth (`v22→v23`) did. The distinction is the one every step in this table is written
+/// under: this key has a habit to carry rather than only a default to choose. Dragging a selection
+/// in the terminal has written it to the clipboard since before there was a row to say so —
+/// invisibly, per the audit this migration is named for — so `false` would not preserve a status
+/// quo, it would end one nobody asked to have ended.
+///
+/// MUTATION: leave the key out of the migration and **every settings file on every machine that
+/// has ever run this product** falls back to defaults whole (`missing field copy_on_select`),
+/// which is the same failure the pins above describe one, two and three versions down.
+#[test]
+fn settings_v23_migrates_with_copy_on_select_on_and_v24_keeps_the_habit_it_always_had() {
+    let (migrated, report) =
+        read_settings(&fixture_path("settings_v23_turn_end_notification_off.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        migrated.copy_on_select,
+        "no build that could write a v23 file had a row to name the write, but every one of them \
+         made the write, so `false` would end a habit rather than preserve one"
+    );
+    assert!(
+        !migrated.turn_end_notification,
+        "one key crosses; every sibling crosses untouched"
+    );
+    assert!(migrated.key_hints);
+    assert!(!migrated.line_wrapping);
+    assert!(!migrated.terminal_notifications);
+
+    // And the whole ladder, from a file twelve steps down: a step that only worked from its own
+    // immediate predecessor would leave every reader who skipped a release behind.
+    let (from_v11, report) = read_settings(&fixture_path("settings_v11_advanced_open.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(from_v11.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(from_v11.copy_on_select);
+
+    let opted_out = SettingsV1 {
+        copy_on_select: false,
+        ..SettingsV1::default()
+    };
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v24-copy-on-select-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &opted_out).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""copy_on_select": false"#),
+        "the answer is written as its own key: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, opted_out);
     std::fs::remove_dir_all(&dir).unwrap();
 }

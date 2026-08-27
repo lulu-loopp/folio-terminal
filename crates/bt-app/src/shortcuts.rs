@@ -1039,6 +1039,18 @@ pub(crate) const BINDINGS: &[Binding] = &[
     //    about, and indistinguishable from "the page ate the first one";
     // ③ `Shift+Esc` for the page — it inverts what page code listens for, and
     //    on this very engine `Shift+Esc` is the browser's task manager.
+    //
+    // **Not a decorative row** — the 2026-08-26 gesture audit read it as one
+    // (「它在设置页里列着,是装饰行」) on the true observation that `lookup`
+    // never returns it: the ladder answers first on every host, page included.
+    // What that reading misses is that this row's work is done *before* the
+    // press is a press. `webhost::claimable_chords` reads this same table to
+    // tell the engine which keys to hand back, so with the row gone a focused
+    // page keeps `Escape` and the capsule over it has no way to close — see
+    // `webhost::tests::the_page_gives_the_search_chord_back_to_the_window`,
+    // which asserts exactly that and goes red if the row is withdrawn. The row
+    // stays, and it stays on the Shortcuts page, because it is a real chord a
+    // reader can rebind and the effect they will see is real.
     Binding::search_open(
         "close-search",
         Text::ShortcutCloseSearch,
@@ -1261,6 +1273,37 @@ impl Shortcuts {
     #[must_use]
     pub(crate) fn rows(&self) -> &[Binding] {
         &self.rows
+    }
+
+    /// **The chord a menu prints beside a row that is this verb** (gesture audit
+    /// 2026-08-26, 系统性发现 ②).
+    ///
+    /// The audit's finding was that this window has two doors onto a dozen
+    /// verbs and neither door mentions the other: the hint card
+    /// ([`crate::keyhint`]) is the keyboard's side and there was nothing at all
+    /// on the menus' side, so `Close pane` and `Ctrl+Shift+W`, `Zoom pane` and
+    /// `Ctrl+Shift+X`, `Find…` and `Ctrl+F` were each introduced to the reader
+    /// twice, as strangers. 「加一列 accel 是把十几条乙升级成『互相教』的最便宜
+    /// 的一次改动」.
+    ///
+    /// **The effective table and not [`BINDINGS`]**, on `claimable_chords`'
+    /// reasoning exactly: a menu that went on printing the factory chord after
+    /// somebody rebound one would be a shortcut table with two answers. A row
+    /// the reader has unbound has no chord, and the menu prints nothing rather
+    /// than the word for nothing — a menu is not the shortcuts page and has no
+    /// business reporting an absence nobody asked about.
+    ///
+    /// Joined with `+` rather than drawn as key caps: a menu row's trailing
+    /// annotation is small text on this platform and in every editor on it, and
+    /// caps in the row would be a second control-shaped thing beside a control
+    /// column that is already there.
+    #[must_use]
+    pub(crate) fn accelerator(&self, action: Action) -> Option<String> {
+        self.rows
+            .iter()
+            .find(|row| row.action == action)
+            .and_then(|row| row.chord.as_ref())
+            .map(|chord| chord_caps(chord).join("+"))
     }
 
     /// The table as this build ships it.
@@ -4534,5 +4577,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// RED (gesture audit 2026-08-26, 系统性发现 ②) — **a menu row can ask this
+    /// table what its verb's chord is, and gets the reader's own answer.**
+    ///
+    /// The audit's second systemic finding is that this window opens the door
+    /// between its two vocabularies from one side only: the hint card teaches
+    /// the keyboard's rows, and no menu anywhere prints a chord. This is the
+    /// lookup the menus use, and the two things it has to get right are that it
+    /// reads the **effective** table (so a rebound chord follows) and that an
+    /// unbound row prints nothing at all rather than the word for nothing.
+    ///
+    /// MUTATION: read [`BINDINGS`] instead of `self.rows` and the rebound
+    /// assertion goes red — a menu with the factory chord on it after a rebind
+    /// is a second answer to "what key is this".
+    #[test]
+    fn a_menu_row_reads_its_chord_off_the_effective_table() {
+        let table = Shortcuts::defaults();
+        assert_eq!(
+            table.accelerator(Action::ClosePane).as_deref(),
+            Some("Ctrl+Shift+W")
+        );
+        assert_eq!(
+            table.accelerator(Action::ZoomPane).as_deref(),
+            Some("Ctrl+Shift+X")
+        );
+        assert_eq!(
+            table.accelerator(Action::OpenSearch).as_deref(),
+            Some("Ctrl+F")
+        );
+        // A row that ships with no chord at all has nothing to print.
+        assert_eq!(table.accelerator(Action::SummonPip(1)), None);
+
+        // The reader's own table, and not this build's: a rebind follows, and an
+        // unbind takes the annotation away with it.
+        let mut rebound = Shortcuts::defaults();
+        rebound.apply_overrides(&[
+            Override {
+                id: "close-pane".to_owned(),
+                chord: Some("Ctrl+Shift+J".to_owned()),
+            },
+            Override {
+                id: "zoom-pane".to_owned(),
+                chord: None,
+            },
+        ]);
+        assert_eq!(
+            rebound.accelerator(Action::ClosePane).as_deref(),
+            Some("Ctrl+Shift+J")
+        );
+        assert_eq!(
+            rebound.accelerator(Action::ZoomPane),
+            None,
+            "a chord the reader gave back to their shell is not a chord a menu may print"
+        );
     }
 }

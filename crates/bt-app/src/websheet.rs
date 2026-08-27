@@ -17,6 +17,23 @@
 //! line of fact, one verb. Esc puts it away, and it is the only one of the five
 //! that has an Esc — taking any of the other four away would leave the hole.
 //!
+//! # And an `×`, since 2026-08-27
+//!
+//! The Esc used to be the only way out, and this header used to say so with
+//! some pride. The gesture audit (`docs/plans/ui-style/invisible-gestures-2026-08-26.md`
+//! 丙6) read the same fact off the other side of the glass: a reader who wants
+//! the card gone and does not want the verb has three habits — press the `×`,
+//! press outside, press the card — and all three did nothing, so the card read
+//! as a window that had stopped answering. The `×` is added and the two
+//! swallows are kept: pressing the scrim is still not a dismissal, because
+//! losing the only notice that a file did not arrive must stay something a
+//! reader *does* rather than something a stray click does to them.
+//!
+//! It is safe here for the same reason the Esc was, and it is safe **only**
+//! here: there is a page underneath to come back to. The other four failure
+//! states *are* the seat, and a close on one of those would leave the black
+//! hole a hidden WebView draws.
+//!
 //! # Why it is an overlay layer and the other four are not
 //!
 //! The page is composed *under* wgpu and is visible exactly where this surface
@@ -73,6 +90,18 @@ const VERB_RADIUS_LOGICAL_PX: f32 = 6.0;
 /// The line box a sentence or a fact gets, as a multiple of its size — the
 /// card's own `line-height: 1.5`.
 const LINE_HEIGHT: f32 = 1.5;
+/// The `×`'s box and its round — the notice strip's `.pn-x { width: 22px;
+/// height: 22px; border-radius: 6px }`, quoted rather than chosen so that a
+/// reader who has met one close in this window has met them all. The glyph
+/// inside it is not a number here: it comes from the slot table, like every
+/// other drawing this window puts in a box.
+const CLOSE_BOX_LOGICAL_PX: f32 = 22.0;
+const CLOSE_RADIUS_LOGICAL_PX: f32 = 6.0;
+/// How far the `×` sits in from the card's own corner. Less than the card's
+/// [`PADDING_LOGICAL_PX`], because the padding is the *text* column's inset and
+/// a corner control that honoured it would read as part of the sentence's block
+/// rather than as the card's own furniture.
+const CLOSE_INSET_LOGICAL_PX: f32 = 8.0;
 
 /// The size the verb's caption is measured at — the one number a caller needs
 /// before it can lay a sheet out, and the reason it is a function rather than a
@@ -116,6 +145,13 @@ pub struct SheetLayout {
     /// Empty (zero height) when the fault has no fact worth quoting.
     pub detail: [f32; 4],
     pub verb: [f32; 4],
+    /// The `×` in the card's top-right corner (丙6).
+    ///
+    /// It is laid out from the frame's corner and takes no room out of the
+    /// column, which is what keeps it from moving the sentence: the card is as
+    /// wide as it is allowed to be whatever this control does, and the mark
+    /// under it is centred on the card rather than on the space beside it.
+    pub close: [f32; 4],
     pub scale: f32,
 }
 
@@ -210,6 +246,13 @@ pub fn lay_out(
             centre_x + (verb_box_width / 2.0).round(),
             verb_top + verb_height,
         ],
+        close: {
+            let box_ = px(CLOSE_BOX_LOGICAL_PX).round().max(1.0);
+            let inset = px(CLOSE_INSET_LOGICAL_PX).round();
+            let right = (frame[2] - inset).round();
+            let top = (frame[1] + inset).round();
+            [right - box_, top, right, top + box_]
+        },
         scale,
     }
 }
@@ -223,6 +266,7 @@ pub struct SheetContent<'a> {
     pub detail: &'a str,
     pub verb: &'a str,
     pub verb_hovered: bool,
+    pub close_hovered: bool,
 }
 
 /// Draw one sheet as an overlay layer — scrim, card, and the one verb on it.
@@ -339,6 +383,33 @@ pub fn build(
         tabular_numerals: false,
         clip: Some(layout.verb),
     });
+    // **The `×`, in the corner every other close in this window is in** (丙6).
+    //
+    // Drawn last so it sits over the card's own ground, and drawn at rest
+    // rather than on hover: the notice strip's `×` is always on its bar, and a
+    // close that had to be found before it could be pressed would be the very
+    // thing this control was added to end.
+    if content.close_hovered {
+        quads.extend(rounded_overlay_fill(
+            layout.close,
+            px(CLOSE_RADIUS_LOGICAL_PX).round(),
+            palette.menu_item_hover,
+            1.0,
+        ));
+    }
+    let close_mark = crate::icons::ActionIcon::CloseTab.mark();
+    sprites.push(ChromeSprite::new(
+        close_mark,
+        centred_in(
+            layout.close,
+            px(crate::seats::compact_head_glyph_logical_px(close_mark)),
+        ),
+        if content.close_hovered {
+            palette.menu_item_text_selected
+        } else {
+            palette.menu_item_hint_text
+        },
+    ));
     OverlayLayer {
         quads,
         labels,
@@ -355,21 +426,30 @@ const SHADOW_SPREAD_LOGICAL_PX: u8 = 24;
 
 /// Which part of a sheet the pointer is on.
 ///
-/// Only the verb answers, and the sheet swallows everything else: a press on the
-/// scrim is **not** a dismissal, because the one thing a reader must not be able
-/// to do by accident is lose the only notice that says a file they asked for did
-/// not arrive. Esc is the way out, and it is the only one.
+/// **Two controls answer — the verb and the `×`** — and the sheet swallows
+/// everything else: a press on the scrim is still **not** a dismissal, because
+/// the one thing a reader must not be able to do by accident is lose the only
+/// notice that says a file they asked for did not arrive. The `×` is that
+/// dismissal done on purpose, and Escape remains the same door from the
+/// keyboard.
+///
+/// The `×` is asked first, on the house's smallest-target-first rule: it is the
+/// smaller box, and the two do not overlap anyway.
 #[must_use]
 pub fn hit(layout: &SheetLayout, seat: SeatId, x: f32, y: f32) -> Option<ChromeTarget> {
+    if inside(layout.close, x, y) {
+        return Some(ChromeTarget::PreviewSheetClose(seat));
+    }
     inside(layout.verb, x, y).then_some(ChromeTarget::PreviewFaultVerb(seat))
 }
 
-/// Whether a point is anywhere on the sheet — the verb, the card or the scrim.
+/// Whether a point is anywhere on the sheet — a control, the card or the scrim.
 ///
 /// The press router asks this and stops: a press on the scrim is **not** a
 /// dismissal, because the one thing a reader must not be able to do by accident
-/// is lose the only notice that says a file they asked for did not arrive. Esc
-/// is the way out and it is the only one.
+/// is lose the only notice that says a file they asked for did not arrive. The
+/// `×` and Escape are the two ways out, and both are things a reader does on
+/// purpose.
 #[must_use]
 pub fn covers(layout: &SheetLayout, x: f32, y: f32) -> bool {
     inside(layout.body, x, y)
@@ -377,6 +457,13 @@ pub fn covers(layout: &SheetLayout, x: f32, y: f32) -> bool {
 
 fn inside(box_: [f32; 4], x: f32, y: f32) -> bool {
     x >= box_[0] && x < box_[2] && y >= box_[1] && y < box_[3]
+}
+
+/// A square of `size` centred in `box_`, on integral pixels.
+fn centred_in(box_: [f32; 4], size: f32) -> [f32; 4] {
+    let x = (box_[0] + (box_[2] - box_[0] - size) / 2.0).round();
+    let y = (box_[1] + (box_[3] - box_[1] - size) / 2.0).round();
+    [x, y, x + size, y + size]
 }
 
 #[cfg(test)]
@@ -456,6 +543,50 @@ mod tests {
         assert!(covers(&laid, corner.0, corner.1));
         // And outside the seat's body it is nobody's.
         assert!(!covers(&laid, BODY[0] - 4.0, BODY[1] + 4.0));
+    }
+
+    /// RED (gesture audit 2026-08-26, 丙6) — **the card carries an `×`.**
+    ///
+    /// Every close a reader has met in this window — the toast's, the notice
+    /// strip's, a floating window's — is an `×` in a corner, and this card had
+    /// none: the three ways a reader would try to put it away (press the `×`,
+    /// press outside it, press the card) were all nothing, and the one that
+    /// works was a key nobody was told about. The module's own header said so
+    /// in as many words: *"Esc puts it away, and it is the only one."*
+    ///
+    /// It is safe here and nowhere else among the five failure states, and for
+    /// the reason the Escape was: there is a page underneath to come back to.
+    /// The other four *are* the seat, and a close on one of those would leave
+    /// the black hole a hidden WebView draws.
+    ///
+    /// MUTATION: put the `×` where the mark is and the last assertion goes red
+    /// — a close that covers the card's own drawing is a second verb.
+    #[test]
+    fn the_card_carries_a_close_in_its_corner() {
+        let laid = lay_out(BODY, 180.0, 2, true, 1.0);
+        let seat = SeatId(2);
+        let centre = |box_: [f32; 4]| ((box_[0] + box_[2]) / 2.0, (box_[1] + box_[3]) / 2.0);
+        // In the card, in its top-right corner, and clear of the card's edge.
+        assert!(laid.close[0] > laid.frame[0] && laid.close[2] < laid.frame[2]);
+        assert!(laid.close[1] > laid.frame[1] && laid.close[3] < laid.frame[3]);
+        assert!(laid.frame[2] - laid.close[2] < (laid.close[2] - laid.frame[0]) / 2.0);
+        // It answers, and the verb still answers for itself.
+        let (x, y) = centre(laid.close);
+        assert_eq!(
+            hit(&laid, seat, x, y),
+            Some(ChromeTarget::PreviewSheetClose(seat))
+        );
+        assert!(covers(&laid, x, y));
+        let (x, y) = centre(laid.verb);
+        assert_eq!(
+            hit(&laid, seat, x, y),
+            Some(ChromeTarget::PreviewFaultVerb(seat))
+        );
+        // And it stands beside the card's drawing rather than over it.
+        let overlaps =
+            |a: [f32; 4], b: [f32; 4]| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+        assert!(!overlaps(laid.close, laid.mark));
+        assert!(!overlaps(laid.close, laid.say[0]));
     }
 
     /// PIN — **the sentence is wrapped to the card's own column**, not to the

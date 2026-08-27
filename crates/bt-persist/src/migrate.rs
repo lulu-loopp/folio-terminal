@@ -58,6 +58,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (20, migrate_settings_v20_to_v21),
     (21, migrate_settings_v21_to_v22),
     (22, migrate_settings_v22_to_v23),
+    (23, migrate_settings_v23_to_v24),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -496,6 +497,27 @@ fn migrate_settings_v22_to_v23(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(23));
         object.insert("turn_end_notification".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// v23 -> v24: whether dragging a selection writes it to the clipboard, defaulted **on**
+/// (`docs/plans/ui-style/invisible-gestures-2026-08-26.md`, 丙4).
+///
+/// One key a fourteenth time, and it lands the way `migrate_settings_v20_to_v21` did rather than
+/// the way `migrate_settings_v22_to_v23` did. The distinction those steps are written under is
+/// whether there is a habit to carry or only a default to choose, and here there is a habit and
+/// nothing else: every build that could write a v23 file already wrote a drag's selection to the
+/// clipboard the instant it was let go — silently, and with no row to name it by. `false` here
+/// would not preserve a status quo, it would end one: every reader this step ever runs for has
+/// been living with the write since before the key existed, and taking it away on the strength of
+/// an upgrade would be the migration changing their terminal's behaviour rather than describing it.
+///
+/// See `SettingsV1::copy_on_select`.
+fn migrate_settings_v23_to_v24(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(24));
+        object.insert("copy_on_select".to_owned(), Value::from(true));
     }
     value
 }
@@ -1430,6 +1452,42 @@ mod tests {
         assert_eq!(migrated["scrollback_lines"], json!(25000));
         assert_eq!(
             migrated["line_wrapping"],
+            json!(false),
+            "the sibling added one version ago is the one a copy-paste of the \
+             step above would most plausibly reset"
+        );
+    }
+
+    /// PIN (`docs/plans/ui-style/invisible-gestures-2026-08-26.md` 丙4) — **v23 -> v24 turns
+    /// `copy_on_select` on for a file that predates it**, and leaves every one of its siblings
+    /// exactly as it found them (rule 3, "迁移函数只做结构升级").
+    ///
+    /// `true` written out as a literal, for the test above's reason: a constant compared with
+    /// itself proves nothing, and the word here is the second, independent statement that carrying
+    /// the habit forward is what this step decided. A step that wrote `false` would silently stop
+    /// copying a drag's selection for every reader who has ever run this product before today —
+    /// which is every reader — and this is the line that says so.
+    #[test]
+    fn real_settings_v23_to_v24_migration_turns_copy_on_select_on() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 23,
+                "theme_mode": "Light",
+                "turn_end_notification": false,
+                "scrollback_lines": 25000,
+                "search_engine": "Google"
+            }),
+            23,
+            24,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(24));
+        assert_eq!(migrated["copy_on_select"], json!(true));
+        assert_eq!(migrated["theme_mode"], json!("Light"));
+        assert_eq!(migrated["scrollback_lines"], json!(25000));
+        assert_eq!(
+            migrated["turn_end_notification"],
             json!(false),
             "the sibling added one version ago is the one a copy-paste of the \
              step above would most plausibly reset"

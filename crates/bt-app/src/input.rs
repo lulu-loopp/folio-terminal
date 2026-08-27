@@ -21,18 +21,51 @@ pub(crate) enum MouseProtocolEvent {
     Motion,
 }
 
+/// **`Ctrl+V` and `Ctrl+Shift+V`, and `Shift+Insert`.**
+///
+/// The shifted spelling is here because [`is_copy_shortcut`] has always carried
+/// its own (gesture audit 2026-08-26, 附 ①). This asked for `modifiers ==
+/// CONTROL` *exactly*, so a hand that pressed `Ctrl+Shift+C` to copy and
+/// `Ctrl+Shift+V` to paste — the pair Windows Terminal ships — got the copy and
+/// then handed the shell `^V` (0x16) for the paste. The predicate is written to
+/// mirror its partner rather than to a modifier policy of its own: the two
+/// answer the same question about the same hand, and a pair that disagrees
+/// about `Shift` is the bug this is fixing, not a second one to introduce.
 pub(crate) fn is_paste_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
-    let ctrl_v = modifiers == ModifiersState::CONTROL
+    let ctrl_v = modifiers.control_key()
         && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("v"));
     let shift_insert =
         modifiers == ModifiersState::SHIFT && matches!(key, Key::Named(NamedKey::Insert));
     ctrl_v || shift_insert
 }
 
+/// **`Ctrl+C`, `Ctrl+Shift+C`, and `Ctrl+Insert`.**
+///
+/// `Ctrl+Insert` is the older of the two Windows clipboard pairs and this window
+/// answered only its paste half — `Shift+Insert` — while the copy half was
+/// encoded straight through to the child as `\x1b[2;5~` (gesture audit
+/// 2026-08-26, 附 ②). It is matched on exact modifiers, the way `Shift+Insert`
+/// is: the `Insert` family has no `Shift`-forces-it spelling, and `Ctrl+Alt` on
+/// this key is AltGr ground.
+///
+/// Whether a press that *is* one of these actually copies is
+/// [`should_copy_selection`]'s question, not this one's.
 pub(crate) fn is_copy_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
-    modifiers.control_key() && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("c"))
+    let ctrl_c = modifiers.control_key()
+        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("c"));
+    let ctrl_insert =
+        modifiers == ModifiersState::CONTROL && matches!(key, Key::Named(NamedKey::Insert));
+    ctrl_c || ctrl_insert
 }
 
+/// Whether a clipboard-shaped press should copy rather than reach the child.
+///
+/// `Shift` forces the answer and a selection earns it. That is what splits
+/// `Ctrl+Shift+C` (always a copy) from `Ctrl+C` (an interrupt with nothing
+/// selected) — and it puts `Ctrl+Insert` on `Ctrl+C`'s side, because the
+/// `Insert` family has no shifted spelling of the copy: with a selection it
+/// copies, with none the key stays the child's, which is the same trade `^C`
+/// makes and the reason a full-screen program that binds `Insert` keeps it.
 pub(crate) fn should_copy_selection(
     key: &Key,
     modifiers: ModifiersState,
@@ -611,6 +644,70 @@ mod tests {
         assert_eq!(
             keyboard_bytes(&key, ModifiersState::CONTROL, false),
             Some(vec![0x03])
+        );
+    }
+
+    /// RED (gesture audit 2026-08-26, 附 ①) — **`Ctrl+Shift+V` pastes, because
+    /// `Ctrl+Shift+C` copies.**
+    ///
+    /// The predicate asked for `modifiers == CONTROL` *exactly*, so the shifted
+    /// half of the pair fell past it into the encoder and the child was handed
+    /// `^V` (0x16). Half a pair is worse than neither: a hand that learned both
+    /// on Windows Terminal presses both, and the failing half looks like a
+    /// clipboard that lost the text rather than like a chord this window does
+    /// not take.
+    ///
+    /// MUTATION: put the `==` back and the first assertion goes red.
+    #[test]
+    fn the_shifted_clipboard_pair_is_whole() {
+        let paste = Key::Character("v".into());
+        let copy = Key::Character("c".into());
+        let ctrl_shift = ModifiersState::CONTROL.union(ModifiersState::SHIFT);
+        assert!(is_paste_shortcut(&paste, ctrl_shift));
+        assert!(should_copy_selection(&copy, ctrl_shift, false));
+        // winit reports the shifted letter in upper case on most layouts.
+        assert!(is_paste_shortcut(&Key::Character("V".into()), ctrl_shift));
+        // And the shifted paste never reaches the child as `^V`.
+        assert_eq!(keyboard_bytes(&paste, ctrl_shift, false), None);
+        // The unshifted half is untouched.
+        assert!(is_paste_shortcut(&paste, ModifiersState::CONTROL));
+    }
+
+    /// RED (gesture audit 2026-08-26, 附 ②) — **`Ctrl+Insert` copies, because
+    /// `Shift+Insert` pastes.**
+    ///
+    /// The older of the two Windows clipboard pairs, and this window answered
+    /// only its paste half; `Ctrl+Insert` was encoded straight through as
+    /// `\x1b[2;5~` and the word appeared in no user-visible string in the
+    /// repository.
+    ///
+    /// It answers on `Ctrl+C`'s terms and not `Ctrl+Shift+C`'s: **with a
+    /// selection it copies, with none it stays the child's.** `Insert` is a key
+    /// full-screen programs bind, and a copy of nothing is not a reason to take
+    /// it from them — the same trade `Ctrl+C` makes with `^C`.
+    ///
+    /// MUTATION: drop the `Insert` arm of [`is_copy_shortcut`] and the first
+    /// assertion goes red.
+    #[test]
+    fn ctrl_insert_copies_a_selection_and_stays_the_child_s_otherwise() {
+        let insert = Key::Named(NamedKey::Insert);
+        assert!(should_copy_selection(
+            &insert,
+            ModifiersState::CONTROL,
+            true
+        ));
+        assert!(!should_copy_selection(
+            &insert,
+            ModifiersState::CONTROL,
+            false
+        ));
+        // It is a copy and never a paste — the pair's other half is Shift.
+        assert!(!is_paste_shortcut(&insert, ModifiersState::CONTROL));
+        assert!(is_paste_shortcut(&insert, ModifiersState::SHIFT));
+        assert_eq!(
+            keyboard_bytes(&insert, ModifiersState::CONTROL, false),
+            Some(b"\x1b[2;5~".to_vec()),
+            "with nothing selected the key is still the child's"
         );
     }
 }
