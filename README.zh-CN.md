@@ -1,4 +1,11 @@
-# Folio
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="assets/readme/hero-dark.svg">
+  <img src="assets/readme/hero-light.svg" width="100%"
+       alt="Folio——一个画在 GPU 上的 Windows 终端，文件、预览和 git 都在提示符旁边。
+       名字旁边是一个终端窗格，里面跑了两条命令；每条命令在左侧空白处各有一道竖线，
+       标出它走到哪里，失败的那条用失败色画。">
+</picture>
 
 一个 Windows 终端。用 Rust 写，画在 GPU 上，带文件列、文档预览、git 面板，还能让命令行里的
 agent 告诉你它在等你回话。
@@ -12,12 +19,26 @@ agent 告诉你它在等你回话。
 <!-- 截图在真机上拍，提交到 docs/screenshots/。要拍哪几张、怎么拍，见
      docs/screenshots/README.md。 -->
 
-![Folio 窗口：左边是文件列，中间两个终端窗格并排，右边的预览窗格里开着一份
-markdown 文档。](docs/screenshots/main-window-light.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/main-window-dark.png">
+  <img src="docs/screenshots/main-window-light.png" width="100%"
+       alt="Folio 窗口：左边是文件列，中间两个终端窗格并排，
+       右边的预览窗格里开着一份 markdown 文档。">
+</picture>
 
 ---
 
 ## 它有什么
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="assets/readme/surfaces-dark.png">
+  <img src="assets/readme/surfaces-light.png" width="100%"
+       alt="另外三个面。一扇窗把当前标签摊成了八张卡片，每张卡片是一个按自己大小画的
+       终端窗格；一份 markdown 文档排在预览窗格里，带一张表和一个独立成行的公式；
+       还有一个网页开在预览窗格里，上面是它的地址栏。">
+</picture>
 
 ### 终端
 
@@ -45,8 +66,13 @@ PowerShell 没有对应的办法，所以第一次见到 PowerShell 窗格时 Fo
 
 ### 预览
 
-![悬停在文件列的一个文件名上弹出的卡片，画着这份 PDF 的第一页，下面写着页数和
-大小。](docs/screenshots/preview-pdf-light.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/preview-pdf-dark.png">
+  <img src="docs/screenshots/preview-pdf-light.png" width="100%"
+       alt="悬停在文件列的一个文件名上弹出的卡片，画着这份 PDF 的第一页，
+       下面写着页数和大小。">
+</picture>
 
 从文件列打开、点终端里印出来的路径打开、或者从命令行带路径启动，文件都开在终端旁边，
 而不是交给另一个程序：
@@ -69,8 +95,13 @@ PowerShell 没有对应的办法，所以第一次见到 PowerShell 窗格时 Fo
 
 ### Agents
 
-![设置里的 Agents 页，三行安装开关分别对应 Claude Code、Codex 与 Copilot
-CLI。](docs/screenshots/settings-agents-light.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/settings-agents-dark.png">
+  <img src="docs/screenshots/settings-agents-light.png" width="100%"
+       alt="设置里的 Agents 页，三行安装开关分别对应 Claude Code、Codex 与
+       Copilot CLI。">
+</picture>
 
 命令行里的 agent 停下来问你话时，可以给自己所在的窗格做个记号，于是一扇开满窗格的窗会
 告诉你是哪一个在等。Claude Code、Codex 与 GitHub Copilot CLI 各在设置的 Agents 页上占一行

@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="1200" height="1215" viewBox="0 0 1200 1215"
+     role="img" aria-labelledby="surfaces-title surfaces-desc">
+  <title id="surfaces-title">Three more of Folio's surfaces</title>
+  <desc id="surfaces-desc">Three screenshots. A window whose tab has been laid out as
+  eight cards, each card a terminal pane at its own size; a markdown document typeset
+  in a preview pane, with a table and a display formula; and a web page in a preview
+  pane with its address field above it.</desc>
+
+  <defs>
+    <clipPath id="clip-cards"><rect x="20" y="62" width="1160" height="725" rx="8"/></clipPath>
+    <clipPath id="clip-md"><rect x="20" y="845" width="570" height="349" rx="8"/></clipPath>
+    <clipPath id="clip-web"><rect x="610" y="845" width="570" height="349" rx="8"/></clipPath>
+  </defs>
+
+  <rect width="1200" height="1215" fill="#141414"/>
+
+  <g id="labels" font-family="-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, &quot;PingFang SC&quot;, Roboto, Arial, sans-serif" font-size="21">
+      <text x="20" y="46" xml:space="preserve"><tspan font-weight="600" fill="#E0E0E0">Cards</tspan><tspan font-size="20" fill="#959595">&#160;&#160;&#160;every pane in the tab, at the size it would be on its own</tspan></text>
+      <text x="20" y="829" xml:space="preserve"><tspan font-weight="600" fill="#E0E0E0">Markdown preview</tspan><tspan font-size="20" fill="#959595">&#160;&#160;&#160;tables and formulas, typeset</tspan></text>
+      <text x="610" y="829" xml:space="preserve"><tspan font-weight="600" fill="#E0E0E0">Web preview</tspan><tspan font-size="20" fill="#959595">&#160;&#160;&#160;a local or remote page, in a pane</tspan></text>
+  </g>
+
+    <g clip-path="url(#clip-cards)">
+      <svg x="20" y="62" width="1160" height="725" viewBox="0 0 1600 1000"
+           preserveAspectRatio="xMidYMid slice">
+        <image href="../../../docs/screenshots/cards-dark.png" xlink:href="../../../docs/screenshots/cards-dark.png"
+               x="0" y="0" width="1600" height="1000"/>
+      </svg>
+    </g>
+    <rect x="20" y="62" width="1160" height="725" rx="8" fill="none"
+          stroke="#2A2A2A" stroke-width="1"/>
+    <g clip-path="url(#clip-md)">
+      <svg x="20" y="845" width="570" height="349" viewBox="560 40 1040 636"
+           preserveAspectRatio="xMidYMid slice">
+        <image href="../../../docs/screenshots/preview-markdown-dark.png" xlink:href="../../../docs/screenshots/preview-markdown-dark.png"
+               x="0" y="0" width="1600" height="1000"/>
+      </svg>
+    </g>
+    <rect x="20" y="845" width="570" height="349" rx="8" fill="none"
+          stroke="#2A2A2A" stroke-width="1"/>
+    <g clip-path="url(#clip-web)">
+      <svg x="610" y="845" width="570" height="349" viewBox="560 40 1040 636"
+           preserveAspectRatio="xMidYMid slice">
+        <image href="../../../docs/screenshots/preview-web-dark.png" xlink:href="../../../docs/screenshots/preview-web-dark.png"
+               x="0" y="0" width="1600" height="1000"/>
+      </svg>
+    </g>
+    <rect x="610" y="845" width="570" height="349" rx="8" fill="none"
+          stroke="#2A2A2A" stroke-width="1"/>
+</svg>
