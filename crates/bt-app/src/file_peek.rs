@@ -474,10 +474,34 @@ pub enum PeekBody {
     ///
     /// The second ruling is that a reader hovering a report wants to see the
     /// report. The card still has no *engine*; what it grew is a rasteriser of
-    /// its own ([`crate::pdf::first_page`]), which draws the first page at the
-    /// size the card will show it and nothing else. So the body is a page over
-    /// two lines: the picture that says which document this is, and the facts
-    /// that say how much of it there is.
+    /// its own ([`crate::pdf::page_raster`]). So the body is a page over two
+    /// lines: the picture that says which document this is, and the facts that
+    /// say how much of it there is.
+    ///
+    /// **And the picture is a *column* the reader can wind through** (user
+    /// ruling 2026-08-26). One page was the second ruling's whole scope and the
+    /// machine showed what that meant: a card over a three-page report drew page
+    /// one, showed a document three pages long in the line underneath, and
+    /// answered a wheel by doing nothing at all. The report was there and it
+    /// could not be read.
+    ///
+    /// **It is the card's own scroller and not a second one.** A wheel over the
+    /// card has gone down `Runtime::scroll_preview_body` since the 2026-08-14
+    /// ruling put a markdown glance on the pane's own door; a page column takes
+    /// the identical route, so the notch travel, the clamp and the thumb are one
+    /// implementation for both bodies. The source of an `.html` and the pages of
+    /// a `.pdf` scroll the same way because they scroll through the same code.
+    ///
+    /// **Every page gets the same slot, and that is what makes the reach
+    /// knowable before the pixels are.** The count is read off the file's
+    /// structure ([`crate::pdf::page_count`]) in the time a scan takes, while a
+    /// page is tens to hundreds of milliseconds of rasterisation each. So the
+    /// column is `pages` boxes of [`PEEK_PAGE_H_LOGICAL_PX`] with
+    /// [`PEEK_PAGE_GAP_LOGICAL_PX`] between them, reserved the moment the count
+    /// lands; a page that arrives is fitted inside its own box exactly as the
+    /// cover always was — its own proportions, centred — so a document of mixed
+    /// page sizes lays out correctly without the column ever changing length
+    /// underneath the hand that is scrolling it.
     ///
     /// **All three parts are optional and the box is not.** The picture is
     /// rastered on a worker and the facts are read on another, so both land a
@@ -489,10 +513,18 @@ pub enum PeekBody {
     /// feature's degradation: a file that will not raster leaves an empty ground
     /// with its size printed underneath.
     Facts {
-        /// The rastered first page's physical size, fitted inside
-        /// [`PEEK_PAGE_W_LOGICAL_PX`] × [`PEEK_PAGE_H_LOGICAL_PX`], or `None`
-        /// while the raster is out or after it came back with nothing.
-        page: Option<[f32; 2]>,
+        /// How far down the column of pages this card is wound, in physical
+        /// pixels — always between zero and
+        /// [`peek_page_column_max_scroll`].
+        ///
+        /// **State on a layout, deliberately.** Every other thing in this enum
+        /// is a size, and this is not one; it is here because the card's slot
+        /// rectangles are the *only* thing it changes, and a painter that had to
+        /// be handed the offset separately from the body it belongs to would be
+        /// a card whose pages and whose scroll bar could disagree by a frame.
+        /// The offset itself lives where every preview surface's does — on
+        /// `PreviewPane::scroll`, through `PreviewSurface::Peek`.
+        scroll: f32,
         bytes: Option<u64>,
         pages: Option<u32>,
     },
@@ -619,6 +651,19 @@ pub struct PeekPicture<'a> {
     pub height_px: u32,
 }
 
+/// One page of a [`PeekBody::Facts`] column, and **which page it is**.
+///
+/// The index rides with the pixels because the column is drawn from what has
+/// arrived rather than from what was asked for: pages come home in whatever
+/// order the worker finishes them, the cache holds the last few, and a picture
+/// that did not carry its own number would have to be placed by its position in
+/// a list — which is how page three ends up drawn in page two's slot the first
+/// time a scroll outruns the rasteriser.
+pub struct PeekPage<'a> {
+    pub index: u32,
+    pub picture: PeekPicture<'a>,
+}
+
 /// The ground something drawn stands on: a `width` × `height` frame hung under
 /// the body's own top padding, centred in the card and cut by it if the card is
 /// short.
@@ -649,9 +694,98 @@ fn picture_ground(body: [f32; 4], scale: f32) -> [f32; 4] {
 
 /// The ground a page stands on — the same frame, forty pixels taller, because a
 /// page is usually portrait ([`PEEK_PAGE_H_LOGICAL_PX`]).
+/// **The viewport the column of pages is wound through** — one page's box, in
+/// the place the cover always stood.
+///
+/// `pub` since the column exists (user ruling 2026-08-26): the scroll bar rides
+/// this rectangle rather than the card's whole body, because it is the reach of
+/// *this* scroller and a rule down the side of the fact lines underneath would
+/// be a bar claiming to measure two sentences that never move.
 #[must_use]
-fn page_ground(body: [f32; 4], scale: f32) -> [f32; 4] {
+pub fn page_ground(body: [f32; 4], scale: f32) -> [f32; 4] {
     fitted_ground(body, scale, PEEK_PAGE_W_LOGICAL_PX, PEEK_PAGE_H_LOGICAL_PX)
+}
+
+/// How far apart two pages' boxes start, in physical pixels — one page plus the
+/// air under it.
+#[must_use]
+fn page_pitch(scale: f32) -> f32 {
+    (PEEK_PAGE_H_LOGICAL_PX + PEEK_PAGE_GAP_LOGICAL_PX) * scale
+}
+
+/// **The whole column's height** for a document of `pages` pages, in physical
+/// pixels — what the scroll bar's thumb is a proportion of.
+///
+/// `n` boxes with `n − 1` gaps between them: the air *under* the last page is
+/// the air above the fact lines, which [`PeekBody::height`] already reserves, so
+/// counting it here would give the column one gap of reach that shows nothing.
+///
+/// A document whose count has not arrived (or that reports none) is one box
+/// tall, which is exactly the cover the card drew before this ruling — a
+/// scroller with nowhere to go, and the honest picture of "one page is all this
+/// window can say there is".
+#[must_use]
+pub fn peek_page_column_height(pages: u32, scale: f32) -> f32 {
+    let slots = pages.max(1) as f32;
+    slots * PEEK_PAGE_H_LOGICAL_PX * scale + (slots - 1.0) * PEEK_PAGE_GAP_LOGICAL_PX * scale
+}
+
+/// **How far the column can be wound**, in physical pixels.
+///
+/// The column less the one page's worth of it that is on screen — and the whole
+/// reason this is knowable from a page *count* is [`PeekBody::Facts`]'s uniform
+/// slot: no raster has to have arrived for the reach to be right, so a wheel
+/// works on the frame the count lands rather than on the frame the last page
+/// finishes drawing.
+#[must_use]
+pub fn peek_page_column_max_scroll(pages: u32, scale: f32) -> f32 {
+    (peek_page_column_height(pages, scale) - PEEK_PAGE_H_LOGICAL_PX * scale).max(0.0)
+}
+
+/// **Which pages a column wound to `scroll` is showing**, as a half-open range.
+///
+/// The question the request lane asks: a page nobody can see is a page nobody
+/// should be rastering, and a page one pixel of which is visible is a page whose
+/// absence the reader can see. So a slot counts as in view when it *overlaps*
+/// the viewport at all rather than when it is wholly inside it — the same test
+/// the drawing does, which is what keeps "asked for" and "drawn" the same set.
+///
+/// Clamped to the document, so an offset left over from a longer file cannot ask
+/// for pages that are not there.
+#[must_use]
+pub fn peek_pages_in_view(pages: u32, scroll: f32, scale: f32) -> std::ops::Range<u32> {
+    let count = pages.max(1);
+    let pitch = page_pitch(scale);
+    if pitch <= 0.0 {
+        return 0..count.min(1);
+    }
+    let scroll = scroll.max(0.0);
+    let first = (scroll / pitch).floor().max(0.0) as u32;
+    // The last slot whose top is above the viewport's bottom edge. The viewport
+    // is exactly one page tall, so this is `first + 1` unless the offset has
+    // stopped between two pages, in which case both are on screen.
+    let last = ((scroll + PEEK_PAGE_H_LOGICAL_PX * scale) / pitch)
+        .ceil()
+        .max(1.0) as u32;
+    first.min(count.saturating_sub(1))..last.min(count).max(first.min(count.saturating_sub(1)) + 1)
+}
+
+/// **Where page `index` stands** in a column wound to `scroll`, in the viewport
+/// `ground`.
+///
+/// Off the top or off the bottom is an ordinary answer: the caller draws it and
+/// the clip on the picture cuts it. One arithmetic for the request lane, the
+/// drawing and the tests, which is what keeps the page a reader sees and the
+/// page this window asked for the same page.
+#[must_use]
+pub fn peek_page_slot(ground: [f32; 4], index: u32, scroll: f32, scale: f32) -> [f32; 4] {
+    let top = (ground[1] + index as f32 * page_pitch(scale) - scroll).round();
+    [
+        ground[0],
+        top,
+        ground[2],
+        top + (PEEK_PAGE_H_LOGICAL_PX * scale).round(),
+    ]
 }
 
 /// Something already fitted, centred on the ground it was fitted to.
@@ -683,19 +817,19 @@ pub fn picture_rect(layout: &PeekLayout, scale: f32) -> Option<[f32; 4]> {
     centred_on(picture_ground(layout.body, scale), width, height)
 }
 
-/// Where the rastered first page goes: its own size, centred on its ground.
+/// Where one rastered page goes **inside the slot the column reserved for it**:
+/// its own size, centred.
 ///
-/// `None` on the same three occasions the picture's is — the raster has not come
-/// home yet, or it came home empty-handed, or this card is not about a page at
-/// all — and the card draws the ground either way, which is what keeps its
-/// height from depending on how the raster turned out.
+/// The slot rather than the ground, which is the whole difference the column
+/// made: every page keeps its own proportions in a box of one fixed height, so a
+/// report of mixed page sizes reads correctly and none of them moves the pages
+/// after it. `None` for a raster that has not come home, or came home
+/// empty-handed — the slot's ground is drawn either way, which is what makes a
+/// page still loading a blank sheet rather than a gap.
 #[must_use]
-pub fn page_rect(layout: &PeekLayout, scale: f32) -> Option<[f32; 4]> {
-    let PeekBody::Facts { page, .. } = layout.body_kind else {
-        return None;
-    };
-    let [width, height] = page?;
-    centred_on(page_ground(layout.body, scale), width, height)
+pub fn peek_page_rect(slot: [f32; 4], size: Option<[f32; 2]>) -> Option<[f32; 4]> {
+    let [width, height] = size?;
+    centred_on(slot, width, height)
 }
 
 /// Everything the card says, before it is placed.
@@ -848,6 +982,7 @@ pub fn build(
     content: &PeekContent,
     foot: &crate::seats::FootWords,
     picture: Option<PeekPicture<'_>>,
+    pages: &[PeekPage<'_>],
     palette: &ChromePalette,
     scale: f32,
 ) -> OverlayLayer {
@@ -984,33 +1119,74 @@ pub fn build(
                 palette.body_hint_text,
             ));
         }
-        // The page over the facts. The picture is drawn exactly as the image
-        // body's is — its own ground, its own fit — and the two sentences stand
-        // under it in the card's own voice, which is what that ink is for. A
-        // fact that has not arrived leaves its line empty rather than shifting
-        // the other one, and a page that has not arrived leaves its ground empty
-        // rather than moving the lines up — see [`PeekBody::Facts`].
-        PeekBody::Facts { bytes, pages, .. } => {
+        // The column of pages over the facts. The pages are drawn exactly as the
+        // image body's picture is — their own box, their own fit — and the two
+        // sentences stand under them in the card's own voice, which is what that
+        // ink is for. A fact that has not arrived leaves its line empty rather
+        // than shifting the other one, and a page that has not arrived leaves a
+        // blank sheet rather than moving anything — see [`PeekBody::Facts`].
+        PeekBody::Facts {
+            bytes,
+            pages: count,
+            scroll,
+        } => {
             let ground = page_ground(layout.body, scale);
             quads.extend(bt_render::rounded_overlay_fill(
                 ground,
                 px(PEEK_IMAGE_RADIUS_LOGICAL_PX),
-                // The same ground the picture stands on, for the same reason:
-                // whatever is behind the drawn thing is the terminal's own.
+                // **The gutter between the sheets**, and the window they are
+                // seen through: whatever is behind the drawn thing is the
+                // terminal's own. It is drawn once, for the whole viewport,
+                // rather than once per sheet — a rounded corner belongs to the
+                // window a column is wound past and not to a page that happens
+                // to be halfway out of it.
                 bt_render::background_rgb(),
                 1.0,
             ));
-            if let Some((rect, picture)) = page_rect(layout, scale).zip(picture) {
+            let total = count.unwrap_or(1);
+            for index in peek_pages_in_view(total, *scroll, scale) {
+                let slot = peek_page_slot(ground, index, *scroll, scale);
+                // **Every slot gets its paper before any of them gets its ink.**
+                // A page is rastered onto white ([`crate::pdf::PageRaster`]), so
+                // a white sheet is not a placeholder standing in for the page —
+                // it is the page, with nothing printed on it yet, and the raster
+                // landing changes no pixel that was not going to change. Flat
+                // and cropped, because a sheet scrolled halfway out of the
+                // window is cut by the window's edge.
+                let sheet = [
+                    slot[0],
+                    slot[1].max(ground[1]),
+                    slot[2],
+                    slot[3].min(ground[3]),
+                ];
+                if sheet[3] > sheet[1] {
+                    quads.push(OverlayQuad {
+                        rect: sheet,
+                        color: [255, 255, 255],
+                        alpha: 1.0,
+                    });
+                }
+                let Some(page) = pages.iter().find(|page| page.index == index) else {
+                    continue;
+                };
+                let Some(rect) = peek_page_rect(
+                    slot,
+                    Some([page.picture.width_px as f32, page.picture.height_px as f32]),
+                ) else {
+                    continue;
+                };
                 images.push(bt_render::ChromeIcon {
-                    key: picture.key.to_owned(),
+                    key: page.picture.key.to_owned(),
                     rect,
-                    rgba: std::sync::Arc::clone(picture.rgba),
-                    width_px: picture.width_px,
-                    height_px: picture.height_px,
+                    rgba: std::sync::Arc::clone(page.picture.rgba),
+                    width_px: page.picture.width_px,
+                    height_px: page.picture.height_px,
                     opacity: 1.0,
-                    // Fitted to its ground, so it is inside its own box by
-                    // construction — the same sentence the picture's clip says.
-                    clip: None,
+                    // **Cropped, unlike the cover it replaced.** That one was
+                    // fitted to a box it could never leave; these are wound past
+                    // a window, and the sheet at each end of the run is
+                    // deliberately half outside it.
+                    clip: Some(ground),
                 });
             }
             let left = layout.body[0] + px(PEEK_NONE_PADDING_X_LOGICAL_PX);
@@ -1019,7 +1195,7 @@ pub fn build(
             // landed in it: the lines stand where the last card put them.
             let top = ground[3] + px(PEEK_PAGE_GAP_LOGICAL_PX);
             let line = none_line(scale);
-            for (row, words) in facts_lines(*bytes, *pages).into_iter().enumerate() {
+            for (row, words) in facts_lines(*bytes, *count).into_iter().enumerate() {
                 let Some(words) = words else {
                     continue;
                 };
@@ -1238,6 +1414,7 @@ mod tests {
             &card,
             &dressed,
             None,
+            &[],
             &bt_render::chrome_palette(),
             SCALE,
         );
@@ -1467,6 +1644,7 @@ mod tests {
             &card,
             &foot(&layout, ""),
             None,
+            &[],
             &bt_render::chrome_palette(),
             SCALE,
         );
@@ -1535,7 +1713,7 @@ mod tests {
     fn a_page_card_states_the_two_facts_it_can_read() {
         let window = (1200.0, 900.0);
         let mut card = content(PeekBody::Facts {
-            page: None,
+            scroll: 0.0,
             bytes: Some(83_387),
             pages: Some(3),
         });
@@ -1548,6 +1726,7 @@ mod tests {
             &card,
             &foot(&stated, ""),
             None,
+            &[],
             &bt_render::chrome_palette(),
             SCALE,
         );
@@ -1587,7 +1766,7 @@ mod tests {
         // a worker one or two frames after the card is up, and a body that grew
         // when they landed would be a card that jumped under the pointer.
         let empty = content(PeekBody::Facts {
-            page: None,
+            scroll: 0.0,
             bytes: None,
             pages: None,
         });
@@ -1602,6 +1781,7 @@ mod tests {
             &empty,
             &foot(&pending, ""),
             None,
+            &[],
             &bt_render::chrome_palette(),
             SCALE,
         );
@@ -1615,7 +1795,7 @@ mod tests {
         // And a file the disk would not stat still says what it can: one fact is
         // better than none, and it stands where it always stands.
         let one = content(PeekBody::Facts {
-            page: None,
+            scroll: 0.0,
             bytes: None,
             pages: Some(12),
         });
@@ -1625,6 +1805,7 @@ mod tests {
             &one,
             &foot(&single, ""),
             None,
+            &[],
             &bt_render::chrome_palette(),
             SCALE,
         );
@@ -1641,7 +1822,7 @@ mod tests {
         // The other way round: with only the size known, the size does **not**
         // climb into the page count's line.
         let other = content(PeekBody::Facts {
-            page: None,
+            scroll: 0.0,
             bytes: Some(83_387),
             pages: None,
         });
@@ -1651,6 +1832,7 @@ mod tests {
             &other,
             &foot(&sized, ""),
             None,
+            &[],
             &bt_render::chrome_palette(),
             SCALE,
         );
@@ -1665,110 +1847,255 @@ mod tests {
         );
     }
 
-    /// PIN (user ruling 2026-08-25) — **the page card draws the first page over
-    /// its two facts, and reserves the box for it before the raster is home.**
+    /// RED (user rulings 2026-08-25 and 2026-08-26) — **the page card draws a
+    /// column of pages over its two facts, scrolls it, and reserves the box for
+    /// it before any raster is home.**
     ///
     /// The card's founding sentence was *there is no engine on a hover card*, and
     /// it stayed true of the pane's engine and stopped being true of the card the
-    /// day this window grew a rasteriser ([`crate::pdf::first_page`]). What this
-    /// pins is the arrangement the ruling asks for and the two properties that
-    /// keep it from flickering: the picture is above the words, and the body is
-    /// the same height whether or not it has arrived.
+    /// day this window grew a rasteriser ([`crate::pdf::page_raster`]). The
+    /// 2026-08-25 ruling put one page there; this pins what the 2026-08-26 ruling
+    /// made of it, which is the report the user filed with a screenshot: a card
+    /// over a three-page document that drew page one, said `3 pages` underneath,
+    /// and answered a wheel by doing nothing.
     ///
-    /// RED GATE ①: leave the page out of [`PeekBody::height`] and the card that is
-    /// waiting for its raster is 160 pixels shorter than the one that has it —
-    /// which on screen is a card growing under a stationary pointer.
-    /// RED GATE ②: draw the facts from `layout.body[1]` as they were drawn before
-    /// the ruling and the first line lands on top of the page.
+    /// Four properties, and each is a way the column could be wrong:
+    ///
+    /// * the pages are **above the words**, which the single page already was;
+    /// * the card is the **same height** at every offset and every page count, so
+    ///   nothing moves under a stationary pointer;
+    /// * **winding it moves the pages and nothing else** — the facts underneath
+    ///   are the card speaking and do not scroll;
+    /// * a page arrives **in its own slot**, found by its index rather than by
+    ///   its place in the run that happened to be home.
+    ///
+    /// RED GATE ①: draw every arrived page at `page_ground` instead of at its own
+    /// [`peek_page_slot`] and the second page lands on the first — the offset
+    /// assertion fails. RED GATE ②: leave the column out of [`PeekBody::height`]
+    /// and the card waiting for its rasters is 160 pixels shorter than the one
+    /// that has them, which on screen is a card growing under a stationary
+    /// pointer. RED GATE ③: place a picture by its position in `pages` rather
+    /// than by `PeekPage::index` and the last block fails with page 2 drawn in
+    /// page 1's slot, which is what a scroll that outruns the rasteriser
+    /// produces.
     #[test]
-    fn a_page_card_draws_its_first_page_above_the_facts() {
+    fn a_page_card_draws_a_column_of_pages_over_the_facts() {
         let window = (1200.0, 900.0);
         let row = [40.0, 300.0, 240.0, 320.0];
+        let card = |scroll: f32| {
+            content(PeekBody::Facts {
+                scroll,
+                bytes: Some(83_387),
+                pages: Some(3),
+            })
+        };
+        let rested = card(0.0);
+        let at_rest = layout(&rested, row, window, 120.0, 24.0, SCALE);
+        let wound_card = card(peek_page_column_max_scroll(3, SCALE));
+        let wound = layout(&wound_card, row, window, 120.0, 24.0, SCALE);
+        assert_eq!(
+            at_rest.frame, wound.frame,
+            "the card is the same card wherever the column is wound to"
+        );
+
         // A US Letter page fitted into 280×160 by height, which is the shape
         // nearly every hovered `.pdf` produces.
-        let drawn = content(PeekBody::Facts {
-            page: Some([124.0, 160.0]),
-            bytes: Some(83_387),
-            pages: Some(3),
-        });
-        let waiting = content(PeekBody::Facts {
-            page: None,
-            bytes: Some(83_387),
-            pages: Some(3),
-        });
-        let with = layout(&drawn, row, window, 120.0, 24.0, SCALE);
-        let without = layout(&waiting, row, window, 120.0, 24.0, SCALE);
-        assert_eq!(
-            with.frame, without.frame,
-            "the card is the same card before and after its page arrives"
-        );
-
-        let rect = page_rect(&with, SCALE).expect("the page has somewhere to go");
-        assert!(
-            (rect[2] - rect[0] - 124.0).abs() < 0.5 && (rect[3] - rect[1] - 160.0).abs() < 0.5,
-            "drawn at the size the rasteriser fitted it to: {rect:?}"
-        );
-        assert!(
-            rect[1] >= with.body[1] && rect[3] <= with.body[3],
-            "and inside the body: {rect:?} in {:?}",
-            with.body
-        );
-        assert_eq!(
-            page_rect(&without, SCALE),
-            None,
-            "and nothing at all is drawn while the raster is out"
-        );
-
-        let picture: std::sync::Arc<[u8]> =
+        let pixels: std::sync::Arc<[u8]> =
             std::sync::Arc::from(vec![0_u8; 124 * 160 * 4].into_boxed_slice());
-        let layer = build(
-            &with,
-            &drawn,
-            &foot(&with, ""),
-            Some(PeekPicture {
-                key: "peek-page:test",
-                rgba: &picture,
+        let page = |index: u32, key: &'static str| PeekPage {
+            index,
+            picture: PeekPicture {
+                key,
+                rgba: &pixels,
                 width_px: 124,
                 height_px: 160,
-            }),
-            &bt_render::chrome_palette(),
-            SCALE,
-        );
-        let page = layer
+            },
+        };
+        let drawn = |laid: &PeekLayout, card: &PeekContent, pages: &[PeekPage<'_>]| {
+            build(
+                laid,
+                card,
+                &foot(laid, ""),
+                None,
+                pages,
+                &bt_render::chrome_palette(),
+                SCALE,
+            )
+        };
+
+        let layer = drawn(&at_rest, &rested, &[page(0, "peek-page:1")]);
+        let first = layer
             .images
             .iter()
-            .find(|icon| icon.key == "peek-page:test")
-            .expect("the page reaches the renderer");
-        assert_eq!(page.rect, rect);
-        let said = |text: &str| {
+            .find(|icon| icon.key == "peek-page:1")
+            .expect("the page that has arrived reaches the renderer");
+        assert!(
+            (first.rect[2] - first.rect[0] - 124.0).abs() < 0.5
+                && (first.rect[3] - first.rect[1] - 160.0).abs() < 0.5,
+            "drawn at the size the rasteriser fitted it to: {:?}",
+            first.rect
+        );
+        let said = |layer: &crate::marks::OverlayLayer, text: &str| {
             layer
                 .labels
                 .iter()
                 .find(|label| label.text == text)
                 .unwrap_or_else(|| panic!("the card says {text}"))
+                .rect
         };
         assert!(
-            page.rect[3] <= said("3 pages").rect[1],
-            "the page stands above the facts: {:?} vs {:?}",
-            page.rect,
-            said("3 pages").rect
+            first.rect[3] <= said(&layer, "3 pages")[1],
+            "the column stands above the facts: {:?} vs {:?}",
+            first.rect,
+            said(&layer, "3 pages")
         );
+
+        // **The pages move and the sentences do not.** Half a slot of the column,
+        // which is the offset that puts two pages in the window at once — the
+        // first one wound off the top and cut by it, the second arriving from
+        // below — while `3 pages` has not shifted a pixel.
+        let one_slot = (PEEK_PAGE_H_LOGICAL_PX + PEEK_PAGE_GAP_LOGICAL_PX) * SCALE;
+        let half = (one_slot / 2.0).round();
+        let notched_card = card(half);
+        let notched = layout(&notched_card, row, window, 120.0, 24.0, SCALE);
+        let after = drawn(
+            &notched,
+            &notched_card,
+            &[page(0, "peek-page:1"), page(1, "peek-page:2")],
+        );
+        let moved = after
+            .images
+            .iter()
+            .find(|icon| icon.key == "peek-page:1")
+            .expect("the page wound off the top is still drawn, and clipped");
         assert!(
-            said("3 pages").rect[3] <= said("81 KB").rect[1] + 0.5,
-            "and the facts are still in the order the ruling put them"
+            (first.rect[1] - moved.rect[1] - half).abs() < 1.5,
+            "the wheel moved page 1 by exactly what it was wound: {:?} then {:?}",
+            first.rect,
+            moved.rect
+        );
+        assert_eq!(
+            said(&layer, "3 pages"),
+            said(&after, "3 pages"),
+            "and the facts underneath did not move at all"
+        );
+        let second = after
+            .images
+            .iter()
+            .find(|icon| icon.key == "peek-page:2")
+            .expect("and page 2 is on the glass now that it is in view");
+        assert!(
+            (second.rect[1] - moved.rect[1] - one_slot).abs() < 1.5,
+            "page 2 stands one slot below page 1: {:?} then {:?}",
+            moved.rect,
+            second.rect
+        );
+        for icon in [moved, second] {
+            assert_eq!(
+                icon.clip,
+                Some(page_ground(notched.body, SCALE)),
+                "a wound page is cut by the window it is wound past"
+            );
+        }
+
+        // **A page is placed by its number and never by its turn.** Hand the
+        // painter only page 2 — which is what a scroll that outran the rasteriser
+        // leaves in the cache — and it must land where page 2 goes.
+        let alone = drawn(&notched, &notched_card, &[page(1, "peek-page:2")]);
+        assert_eq!(
+            alone
+                .images
+                .iter()
+                .find(|icon| icon.key == "peek-page:2")
+                .expect("the one page that is home is drawn")
+                .rect,
+            second.rect,
+            "page 2 is drawn in page 2's slot whoever else is missing"
         );
 
         // The whole arrangement fits the card's own cap, which is what decides
         // how tall the page box may be — see [`PEEK_PAGE_H_LOGICAL_PX`].
         assert!(
-            with.frame[3] - with.frame[1] <= PEEK_MAX_HEIGHT_LOGICAL_PX,
+            at_rest.frame[3] - at_rest.frame[1] <= PEEK_MAX_HEIGHT_LOGICAL_PX,
             "the card is inside its cap: {}",
-            with.frame[3] - with.frame[1]
+            at_rest.frame[3] - at_rest.frame[1]
         );
         assert!(
-            with.foot[1] >= with.body[3],
-            "so nothing is cut off the bottom: {with:?}"
+            at_rest.foot[1] >= at_rest.body[3],
+            "so nothing is cut off the bottom: {at_rest:?}"
         );
+    }
+
+    /// RED (user ruling 2026-08-26) — **how far a column of pages reaches, and
+    /// which of them are on screen.**
+    ///
+    /// The arithmetic the whole feature rests on, pinned on its own because three
+    /// separate things read it and must read it identically: the wheel's clamp
+    /// (through `Runtime::preview_max_scroll`), the request lane that decides
+    /// which pages to raster, and the paint that decides which to draw. A reach
+    /// that disagreed with the drawing is a document with pages the reader can
+    /// see and cannot get to; a range that disagreed with the requests is a slot
+    /// that stays a blank sheet for ever because nobody asked for it.
+    ///
+    /// RED GATE ①: count the gap *under* the last page in
+    /// [`peek_page_column_height`] and the reach gains a slot of air the reader
+    /// can wind into and find nothing in. RED GATE ②: make
+    /// [`peek_pages_in_view`] answer only the page that is wholly on screen and
+    /// the second block fails — mid-scroll, the half-page at the bottom of the
+    /// window is never asked for, so it is a blank sheet exactly while a reader
+    /// is looking at it.
+    #[test]
+    fn a_page_columns_reach_is_its_page_count_and_its_view_is_what_overlaps() {
+        for scale in [1.0_f32, 2.0] {
+            let slot = PEEK_PAGE_H_LOGICAL_PX * scale;
+            let pitch = (PEEK_PAGE_H_LOGICAL_PX + PEEK_PAGE_GAP_LOGICAL_PX) * scale;
+            assert_eq!(
+                peek_page_column_height(3, scale),
+                slot * 3.0 + PEEK_PAGE_GAP_LOGICAL_PX * scale * 2.0,
+                "three pages and the two gaps between them, at {scale}×"
+            );
+            assert_eq!(
+                peek_page_column_max_scroll(3, scale),
+                pitch * 2.0,
+                "so the reach is two whole slots, at {scale}×"
+            );
+            assert_eq!(
+                peek_page_column_max_scroll(1, scale),
+                0.0,
+                "a one-page document does not scroll"
+            );
+            assert_eq!(
+                peek_page_column_max_scroll(0, scale),
+                0.0,
+                "and neither does one whose count never arrived"
+            );
+
+            assert_eq!(
+                peek_pages_in_view(3, 0.0, scale),
+                0..1,
+                "at rest the window holds exactly the first page"
+            );
+            assert_eq!(
+                peek_pages_in_view(3, pitch, scale),
+                1..2,
+                "one whole slot down it holds exactly the second"
+            );
+            assert_eq!(
+                peek_pages_in_view(3, pitch / 2.0, scale),
+                0..2,
+                "and stopped between them it holds both — which is what has to be asked for"
+            );
+            assert_eq!(
+                peek_pages_in_view(3, pitch * 2.0, scale),
+                2..3,
+                "at the end of the reach it holds the last page and nothing past it"
+            );
+            assert_eq!(
+                peek_pages_in_view(1, 0.0, scale),
+                0..1,
+                "a one-page document is one page in view"
+            );
+        }
     }
 
     /// PIN — **a page card reserves its page box and both of its lines, and
@@ -1790,12 +2117,12 @@ mod tests {
         let window = (1200.0, 900.0);
         let row = [40.0, 300.0, 240.0, 320.0];
         let refusal = layout(&content(PeekBody::Refused), row, window, 60.0, 24.0, SCALE);
-        let facts = |page| {
+        let facts = |pages, scroll| {
             layout(
                 &content(PeekBody::Facts {
-                    page,
+                    scroll,
                     bytes: Some(1),
-                    pages: Some(1),
+                    pages,
                 }),
                 row,
                 window,
@@ -1805,7 +2132,7 @@ mod tests {
             )
         };
         let line = (PEEK_NONE_FONT_LOGICAL_PX * 1.4).round();
-        let waiting = facts(None);
+        let waiting = facts(Some(1), 0.0);
         let body = waiting.body[3] - waiting.body[1];
         assert_eq!(
             body,
@@ -1816,13 +2143,23 @@ mod tests {
                 + PEEK_BODY_PADDING_BOTTOM_LOGICAL_PX,
             "the page's whole box and two lines, before either has arrived"
         );
-        // A short page and a tall one are the same card: the box is the box.
-        for page in [[280.0, 40.0], [124.0, 160.0], [1.0, 1.0]] {
-            let drawn = facts(Some(page));
+        // **A one-page document and a two-hundred-page one are the same card, at
+        // any offset**: the box is a window and the column is what moves behind
+        // it (user ruling 2026-08-26). A body that grew with the page count would
+        // be a card whose height changed the moment a count landed, and one that
+        // grew with the offset would be a card that changed shape under a wheel.
+        for (pages, scroll) in [
+            (Some(1), 0.0),
+            (Some(3), 0.0),
+            (Some(3), 336.0),
+            (Some(200), 900.0),
+            (None, 0.0),
+        ] {
+            let drawn = facts(pages, scroll);
             assert_eq!(
                 drawn.body[3] - drawn.body[1],
                 body,
-                "a {page:?} page did not change the body"
+                "{pages:?} pages wound to {scroll} changed the body"
             );
         }
         assert!(
@@ -1902,6 +2239,7 @@ mod tests {
                 width_px: fit_w,
                 height_px: fit_h,
             }),
+            &[],
             &bt_render::chrome_palette(),
             SCALE,
         );

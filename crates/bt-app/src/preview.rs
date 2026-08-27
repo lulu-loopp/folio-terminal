@@ -2597,13 +2597,18 @@ impl PreviewBuffer {
     /// file has, so the same head read fetches it, the same [`preview_view`]
     /// draws it and the same 64KB cap applies.
     ///
-    /// **Why the glance and not the pane.** The pane opens a page *as a page* —
+    /// **Why the glance and not the pane** — *and why the pane now asks too.*
+    /// The pane opens a page *as a page*:
     /// [`crate::Runtime::open_preview_source_on`] turns a page-named path onto
-    /// the engine's lane before a document buffer is ever made — so a pane that
-    /// held one of these would be the page lane having failed, and the refusal it
-    /// files is the sentence that seat owes. The card has no engine and never
-    /// will; source is not a lesser rendering of the page for it, it is the only
-    /// true thing it can show.
+    /// the engine's lane before a document buffer is ever made, so a pane that
+    /// held one of these **by that door** would be the page lane having failed,
+    /// and the refusal it files is the sentence that seat owes. That is still
+    /// true and nothing below has changed it. What the 2026-08-26 ruling added
+    /// is a **second door with a hand on it**: the `</>` on a local page's
+    /// address row, which is not the page lane failing but a reader asking for
+    /// the other face of a file the seat is already standing on. The card has no
+    /// engine and never will; the pane has one and keeps it — see
+    /// [`Self::read_a_pages_bytes_as_text`], which both doors go through.
     ///
     /// **The chip still says `web`.** What the head prints is the *name's*
     /// judgement ([`preview_ftype`], asked by `Runtime::file_peek_subject`), and
@@ -2617,19 +2622,37 @@ impl PreviewBuffer {
     /// exactly as [`Self::new`] made it.
     pub fn glancing(source: PreviewSource, name: String) -> Self {
         let mut buffer = Self::new(source, name);
-        let reads_as_text = match &buffer.source {
+        buffer.read_a_pages_bytes_as_text();
+        buffer
+    }
+
+    /// **A page whose bytes are text is read as text** — the rule itself, with
+    /// no opinion about who asked for it.
+    ///
+    /// It was the whole body of [`Self::glancing`] until the pane grew a second
+    /// reader (user ruling 2026-08-26: the `</>` on a local page's address row).
+    /// A hover and a press now ask the same question of the same file, and the
+    /// answer is one sentence in one place — two copies of it are two lanes that
+    /// come apart the first time [`PAGE_EXTENSIONS`] grows a row, which is the
+    /// lesson §7.10 ⑥ was written out of.
+    ///
+    /// **`Pending` is the guard and not a formality.** It is the load a
+    /// page-named file lands in and the one a text file waits in, so asking it
+    /// here keeps a network share's `Refused(NetworkPath)` card exactly where it
+    /// was: this promotes a buffer that was going to sit empty, and never one
+    /// that already has its answer.
+    ///
+    /// Idempotent, because the pane's door may run it over a buffer the pool
+    /// already holds: a second call finds `PreviewFtype::Text` and changes
+    /// nothing.
+    pub fn read_a_pages_bytes_as_text(&mut self) {
+        let reads_as_text = match &self.source {
             PreviewSource::File(path) => path_page_glance(path) == Some(PageGlance::Source),
             _ => false,
         };
-        // `Pending` is the load a page-named file lands in and the one a text
-        // file waits in, so asking it here is what keeps a network share's
-        // `Refused(NetworkPath)` card exactly where it was: this promotes a
-        // buffer that was going to sit empty, and never one that already has its
-        // answer.
-        if reads_as_text && buffer.load == PreviewLoad::Pending {
-            buffer.ftype = PreviewFtype::Text;
+        if reads_as_text && self.load == PreviewLoad::Pending {
+            self.ftype = PreviewFtype::Text;
         }
-        buffer
     }
 
     /// Whether this buffer is still waiting on a head read.

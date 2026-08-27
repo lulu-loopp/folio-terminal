@@ -534,6 +534,18 @@ pub enum Text {
     /// button changes, so a single word for both would be the row describing
     /// what it was a press ago.
     PreviewFlipToRendered,
+    /// `</>` while a **page** seat is showing that page's source — press it for
+    /// the page (user ruling 2026-08-26).
+    ///
+    /// A third entry rather than a second reading of
+    /// [`Self::PreviewFlipToRendered`], because that word is a claim this row
+    /// cannot make: what a press goes back to here is a live site drawn by a
+    /// browser, and calling it "the rendered" would make the markup underneath
+    /// sound like the thing it was rendered from — true of a markdown file, and
+    /// exactly the wrong sentence about a page that fetches, scripts and
+    /// navigates. The way *to* the source needs no third string: it is the same
+    /// file either way, which is the whole of the ruling.
+    PreviewFlipToPage,
 
     // ── the files tree ─────────────────────────────────────────────────────
     FilesLoading,
@@ -2222,6 +2234,7 @@ impl Text {
             Self::PreviewCopyAddress => pick(lang, "Copy address", "复制地址"),
             Self::PreviewFlipToSource => pick(lang, "View source", "查看源码"),
             Self::PreviewFlipToRendered => pick(lang, "View rendered", "查看渲染结果"),
+            Self::PreviewFlipToPage => pick(lang, "View page", "查看页面"),
             Self::FileMenuCopyPath => pick(lang, "Copy path", "复制路径"),
             Self::FileMenuInsertPath => pick(lang, "Insert path into terminal", "把路径插入终端"),
 
@@ -3367,7 +3380,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 508] = [
+    pub const ALL: [Self; 509] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3470,6 +3483,7 @@ impl Text {
         Self::PreviewCopyAddress,
         Self::PreviewFlipToSource,
         Self::PreviewFlipToRendered,
+        Self::PreviewFlipToPage,
         Self::FileMenuCopyPath,
         Self::FileMenuInsertPath,
         Self::FilesLoading,
