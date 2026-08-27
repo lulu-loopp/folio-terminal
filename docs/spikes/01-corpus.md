@@ -23,15 +23,32 @@ caveat 是 recorder 仍不是完整终端前端：当前自动回答 DSR 6n，�
 
 | 文件 | bytes | 来源 / 覆盖 |
 |---|---:|---|
-| `pwsh-daily.btcr` | 427 | PowerShell cwd、目录、日期、普通输出 |
-| `cargo-build-flood.btcr` | 15,525 | 本 workspace 的 verbose cargo build 洪水 |
+| `pwsh-daily.btcr` | 427 | PowerShell cwd、目录、日期、普通输出（2026-08-27 已脱敏） |
+| `cargo-build-flood.btcr` | 15,525 | 本 workspace 的 verbose cargo build 洪水（2026-08-27 已脱敏） |
 | `editor-alt-screen.btcr` | 526 | 本机无 vim，使用明确标注的 alt-screen 编辑/退出脚本替代，含 `?1049h/l` |
 | `tui-redraw.btcr` | 8,568 | 本机无 htop/top，使用明确标注的全屏与底部状态区持续重绘脚本替代 |
-| `claude-code-session.btcr` | **226,262** | Claude Code 2.1.210 真实交互 TUI：alt-screen、输入、思考动画、Glob 工具活动、两次 resize、正常退出 |
+| `claude-code-session.btcr` | **226,262** | Claude Code 2.1.210 真实交互 TUI：alt-screen、输入、思考动画、Glob 工具活动、两次 resize、正常退出（2026-08-27 已脱敏） |
 | `shell-dollars.btcr` | 3,629 | `$PATH`、awk `$1/$2`、80 行 `$$` / 美元符号密集输出 |
 | `resize-sequence.btcr` | 21,129 | 全屏重绘期间四次 resize，最终 90×22 |
 
 `claude-code-session.btcr` 已替换首次审核指出的 209-byte `claude -p` 固定输出。新语料由 `claude` 交互程序直接录制，包含可断言的 `Claude Code v2.1.210`、用户消息 `Now revise steps 4 and 9`、`Searching for 2 patterns`、alt-screen 控制序列和 2 个 resize marker。定时计划的第一条输入在 TUI 完成初始化前发送，未被应用接受；第二条输入被接受并触发真实模型/工具活动。这一事实不影响它作为持续重绘交互语料的覆盖价值。
+
+## 脱敏（2026-08-27）
+
+录制当时没有做任何环境替换。这些是真实机器上真实程序的原始 ConPTY 字节流，因此 `claude-code-session.btcr`、
+`cargo-build-flood.btcr`、`pwsh-daily.btcr` 三份把录制账户的名字、邮箱地址、组织标签、Windows 家目录和仓库
+父目录一起写进了仓库。2026-08-27 发布就绪复核（`docs/plans/release/readiness-review-codex-2026-08-27.md` 错 1）
+点出这一点后，三份录制已就地脱敏；另外四份逐字节扫描后不含任何身份，未改动。
+
+替换是**等长**的：BTCR 的每个 output payload 前有 `u32` 长度前缀，录制里又带着 ConPTY 烘死的换行
+（CR LF + CUP 回末列 + 重画该格字符，会把一个名字或路径劈成两段），所以替换必须既保住字节数又保住列对齐。
+实际改动是三份文件里共 4,705 个单字节替换（`cargo-build-flood` 664、`claude-code-session` 4,032、
+`pwsh-daily` 9），全部是可打印 ASCII 换可打印 ASCII，文件长度、事件数、时间戳、长度前缀与全部控制序列
+一字未动；回放得到的 live grid 与原始录制逐行相同，只是那几处字母不同。
+
+替换的类别与逐份清单记在 `corpus/PROVENANCE.md`（不写原值）。回归门是
+`crates/bt-corpus/tests/corpus_privacy.rs::no_recording_carries_a_person`：它扫描 `corpus/` 下**全部**
+`.btcr`，既扫原始字节，也扫把 ConPTY 换行还原后的逻辑字节流，任何身份重新出现都判红。
 
 ## 支撑数据
 
