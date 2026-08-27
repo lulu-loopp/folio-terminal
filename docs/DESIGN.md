@@ -4028,6 +4028,49 @@ test result: FAILED. 0 passed; 2 failed
 
 **日期:2026-08-27。**
 
+### 7.28 浮在正文上的小签只穿一套衣服:一张面、一根发丝线、一支读得出来的墨(亮色链接签缺陷,2026-08-27 用户实证,已落地;`crates/bt-render/src/{theme,lib}.rs`、`crates/bt-app/src/{seats,schemes}.rs`)
+
+**一句话:一枚浮签的底、边、墨是**一个**函数的三个字段(`ChromePalette::float_tag()`),常量给不了主题,所以浮签族里最后两个还写着常量的成员——终端状态签与公式块工具按钮——不是「换个常量」而是「不许再有常量」。**
+
+**① 报上来的病。** 亮色主题下悬停终端里的一条路径,pane 顶上出现一条**纯黑长条**,字看不见(用户实证)。深色下正常。
+
+**② 因。** 那条签的底是 `theme.rs` 里的 `DEFAULT_STATUS_BACKGROUND_RGB = [0x33,0x33,0x33]` —— 一个**裸常量**,既不是 `ChromePalette` 的字段,也不属于终端自己的 ANSI/scheme 表;而它上面的字是 `CapturedCell::plain`,也就是 `Named(16)`/`Named(17)`(「配色的默认墨、画在配色的默认纸上」)。**纸那一半是假话**:字底下不是画布,是一块签,而那块签是硬写死的深灰。于是 `resolve_colors` 拿**终端背景**去挑一支读得出来的墨,再把它印在**别的东西**上。深色画布上两者碰巧靠得够近,亮色画布上配色的近黑墨落在近黑板子上——就是那条看不见字的黑条。连 `Minimum contrast` 那一档都救不了它:对比度地板也是按画布算的,而画布不是签。
+
+**③ 修法不是第二个常量。** 常量没法被给一个主题,所以答案是**一个地方回答「一枚浮签穿什么」**,由在场的调色板导出,全族都问它:
+
+```
+ChromePalette::float_tag() -> FloatTagInk { face, edge, ink }
+  face = menu_surface                                   // `--menu`,全族同一张面
+  edge = menu_border 按 menu_border_alpha 预混在 face 上  // 不透明,理由同 tab_close_pill_on_content
+  ink  = raise_against(menu_item_text_selected, face, 4.5)
+```
+
+**发丝线不是装饰。** 本仓自带的**四套亮色配色**(Folio Light / Gruvbox Light / One Half Light / Solarized Light)里 `--menu` 与 `--termbg` 是**同一个颜色**,没有边的签就是一块谁也看不见的形状,字像是浮在终端自己身上。
+
+**墨要抬,而且抬是规矩不是补丁。** 配色是**用户给的一对颜色**,所以没有哪个固定调色板项能承诺一个比值:十套内置配色量出来,`--ink` 压在 `--menu` 上从 12.26:1(Folio Light)一路到 **3.98:1**(Solarized Dark)——Solarized 的低对比是 Solarized 的**本意**,但那是给**终端正文**的。chrome 一律按屋子里的地板走(和玫瑰红、七支语法墨同一个 4.5,见 `the_error_rose_reads_on_both_canvases`),而 `contrast::raise_against` 就是 `Minimum contrast` 那一行已经在用的解算器——**一个对比度权威,不是两个**。八套本来就过线的,它原样返回。
+
+**④ 同族全查的结论。** 「浮在正文上的小签/卡」逐个查过底与墨的来路:tooltip、toast、keyhint、Cards 气泡(cardhint)、拖拽 ghost(`build_drag_ghost`)、PowerShell 提示条(notice)、peek 飞出条(peek_strip)、文件 peek(file_peek)——**全部已经走调色板**(`menu_surface` + `menu_border`/alpha + `menu_item_*`),一条不用动。两个例外都是**渲染器**画的而不是 chrome 画的,也正是共用那一个常量的两处:**终端状态签**(悬停链接的目标 + `· Ctrl+click …`,以及 `N rows above` 那条)与**公式块工具按钮**(眼睛与复制,底是同一个常量、墨是 `foreground_rgb()` —— 同一个病的第二处)。两处都改成问 `float_tag()`。
+
+角落签(`seats::push_corner_tag`:页面 hover 行、`Saved`/`Revealed`)的底与墨**本来就**来自调色板,所以第一条判定它是干净的;但第二条把它抓了出来——它把地址写在 `pane_title`(`--ink3` 压 `--termbg`)上,压在 `--menu` 上量得深色 2.98:1、亮色 2.49:1,**两边都在文字地板之下**,而这是本窗里唯一一块「存在的意义就是被读」的面。它现在也问 `float_tag()`,并且多了那根发丝线。
+
+**⑤ 常量整个删掉,它最后一个用户改判为 `modal_scrim`。** `DEFAULT_STATUS_BACKGROUND_RGB` 的第三个用户是公式块的**变暗罩**。罩不是签:签是一张有字的面,罩是**一张面的缺席**——这正是 `modal_scrim`(`[0x0f,0x0f,0x0f]`,两套画布共用一个值)被写成调色板里唯一一个 scrim 的理由。顺带修好一句本来就假的注释:`math_block_dim_is_drawn` 上写着「这层罩把块**压暗**」,而 `#333333` 在 `--termbg #1B1B1B` 上是**更亮**的。
+
+**⑥ 状态签的字现在两头都指名。** 单元格的 `foreground` 是签的墨,`background` 是签的**面**——所以下游那道对比度地板(读者自己的 `Minimum contrast` 行)终于拿到了**玻璃上真正的那一对**,而不是一支墨配一张它没站在上面的纸。
+
+**红门三条。**
+
+- `bt-render::tests::every_chip_the_renderer_floats_over_a_body_is_struck_from_the_palette`:签的面 = `menu_surface`、边 ≠ 面、墨压面 ≥ 4.5;`status_overlay_cells` 每一格的前景/背景都是 `Rgb(ink)`/`Rgb(face)`;五块矩形依次是面、边、边、边、边,且没有一块是 `#333333`;源码里 `float_tag_rects(` 恰好 3 处(一个定义、两个调用方)。
+- `bt-app::schemes::tests::every_bundled_scheme_gives_a_floating_tag_a_face_a_hairline_and_an_ink_that_reads`:**十套内置配色**逐套验上面三条,再把 `push_corner_tag` 画出来的东西数一遍(两枚 sprite = 面 + 环、一条 label = 墨);最后一条把病本身留成算术——每一套**亮色**配色里,退役的那一对(配色自己的默认墨 × `#333333`)都在 3:1 以下。
+- `bt-app::seats::tests::one_corner_tag_is_struck_wherever_a_surface_raises_one`:一枚 `ControlPill` 加一枚 `ControlPillRing`,两者同一个盒。
+
+**红证原文。** 把三处画法各自退回旧写法,门当场变红:`left: Named(16) / right: Rgb(227,227,227)`(状态签的字没有指名墨)、`left: [51,51,51] / right: [42,42,42]`(签底还是那个常量)、`Folio Dark: 一面一环 left: 1 / right: 2`(没有发丝线)、`Folio Dark: the ink left: [114,114,114] / right: [227,227,227]`(角落签还写在 `pane_title` 上)。
+
+**实机(隔离 APPDATA、`BT_PTY_DUMP`、`BT_PROBE_INPUT` 打一条真路径)。** 亮色悬停链接:修前是那条看不见字的黑板子,修后整句 `file:///D:/…/README.md · Ctrl+click opens in default app` 在白签上读得清清楚楚;深色同一张图确认没有回归(浅墨压深签,发丝线在)。
+
+**挂账一笔(不在本片,给用户裁)。** `menu_item_text`(`--ink2` 压 `--menu`,即每一行菜单、tooltip 正文、toast 正文的墨)压在自己的面上,量出来 Folio Light 4.18:1、Gruvbox Light 3.82:1、One Half Light 3.94:1、Nord 4.06:1、**Solarized Light 2.33:1 / Solarized Dark 2.46:1**。这不是「颜色不来自调色板」——它来自调色板,是**这一层调色板选的档位**;把它抬到 4.5 会改掉全产品每一行菜单的墨,超出本片授权,所以只报不动。
+
+**日期:2026-08-27 用户实证,当日落地。**
+
 ## 12. 发布工程
 
 一个能跑的 build 和一个能发的 build 之间隔着七件事,这一节是其中属于「构建与分发」和「CI」的那两件。写在这里而不是写在 workflow 的注释里,是因为其中每一条都是**裁决**:为什么版本只有一处、为什么 `.res` 是自己写的、为什么 `lto` 开或不开、为什么静态 CRT 没有采用——这些在一年后会被重新提起,而 YAML 不是回答它们的地方。

@@ -1494,4 +1494,81 @@ mod tests {
         assert_eq!(palette.accent, solarized.accent);
         assert_ne!(palette.title_bar, bt_render::DARK_CHROME.title_bar);
     }
+
+    /// PIN (light-canvas link-tag defect, 2026-08-27) — **a floating tag has a
+    /// face, a hairline and an ink; all three come out of the palette this
+    /// scheme derives, and the ink reads on the face, on every scheme this
+    /// build ships.**
+    ///
+    /// The tag family is every small card this window draws *over* a body: the
+    /// terminal's status overlay (a hovered link's target and its `Ctrl+click`
+    /// clause), a page's hover tag, the `Saved`/`Revealed` corner confirmation,
+    /// a formula block's toolbar buttons. Ten schemes and not two canvases,
+    /// because a scheme is a pair of colours a **user** supplies: `DARK_CHROME`
+    /// and `LIGHT_CHROME` are what Folio's own two derive to, and a rule proved
+    /// only on those is a rule about the default install.
+    ///
+    /// The last clause is the defect itself, kept as arithmetic rather than as
+    /// a paragraph: on every light scheme, the retired pair — the scheme's own
+    /// default ink on the hard-coded `#333333` chip — is below 3:1, which is
+    /// the "the words are gone" the report was filed about.
+    #[test]
+    fn every_bundled_scheme_gives_a_floating_tag_a_face_a_hairline_and_an_ink_that_reads() {
+        let catalogue = Catalogue::build(bundled_sources());
+        assert_eq!(catalogue.entries().len(), BUNDLED.len());
+        for entry in catalogue.entries() {
+            let name = &entry.name;
+            let palette = bt_render::ChromePalette::derive(&entry.scheme);
+            let tag = palette.float_tag();
+
+            // ① Face and hairline are the palette's own two, and there *is* a
+            //    hairline: on four of the ten, `--menu` and `--termbg` are the
+            //    same colour, so an edgeless chip is a chip nobody can see.
+            assert_eq!(
+                tag.face, palette.menu_surface,
+                "{name}: a tag's face is `--menu`"
+            );
+            assert_ne!(tag.edge, tag.face, "{name}: a tag with no hairline");
+
+            // ② The ink reads on the face it is actually printed on. Measured
+            //    before the raise, `--ink` over `--menu` runs from 12.26:1 down
+            //    to 3.98:1 across these ten, so this is a floor the palette
+            //    cannot promise on its own and the solver has to.
+            let ratio = bt_render::contrast_ratio(tag.ink, tag.face);
+            assert!(
+                ratio >= bt_render::FLOAT_TAG_MINIMUM_CONTRAST,
+                "{name}: a tag's ink over its own face is {ratio:.2}:1"
+            );
+
+            // ③ The one tag drawn from chrome rather than from the renderer,
+            //    as it comes out: a face, a hairline round it, and one run of
+            //    words — nothing else, and no colour from anywhere else.
+            let mut sprites = Vec::new();
+            let mut labels = Vec::new();
+            crate::seats::push_corner_tag(
+                [0.0, 0.0, 600.0, 400.0],
+                "file:///C:/notes/readme.md · Ctrl+click opens in default app",
+                320.0,
+                1.0,
+                &palette,
+                (&mut sprites, &mut labels),
+            );
+            assert_eq!(sprites.len(), 2, "{name}: a face and its hairline");
+            assert_eq!(sprites[0].color, tag.face, "{name}: the face");
+            assert_eq!(sprites[1].color, tag.edge, "{name}: the hairline");
+            assert_eq!(labels.len(), 1, "{name}: one run of words");
+            assert_eq!(labels[0].color, tag.ink, "{name}: the ink");
+
+            // ④ Why this gate exists, in numbers.
+            if bt_render::background_is_light(entry.scheme.background) {
+                let retired =
+                    bt_render::contrast_ratio(entry.scheme.foreground, [0x33, 0x33, 0x33]);
+                assert!(
+                    retired < 3.0,
+                    "{name}: the retired chip was legible at {retired:.2}:1, so this \
+                     gate is measuring something other than the reported defect"
+                );
+            }
+        }
+    }
 }

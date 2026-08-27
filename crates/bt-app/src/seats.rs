@@ -15356,6 +15356,14 @@ pub fn page_hover_tag_box(body: [f32; 4], scale: f32, text_width: f32) -> Option
 /// Silent when the body has no room for the whole chip, which is
 /// [`page_hover_tag_box`]'s own answer and the rule every control in a head
 /// follows: half a tag is worse than none.
+///
+/// **Its three colours come from [`bt_render::ChromePalette::float_tag`]**
+/// (2026-08-27) and not from three field reads of this function's own choosing.
+/// It used to write the address in `pane_title` — `--ink3` over `--termbg`,
+/// measured at 2.98:1 over `--menu` on the dark canvas and 2.49:1 on the light
+/// one, i.e. below the text floor on both, on the one surface in this window
+/// whose entire job is to be read. And it drew the face with no hairline, which
+/// on every light scheme this product ships is a white chip on a white canvas.
 pub fn push_corner_tag(
     body: [f32; 4],
     text: &str,
@@ -15367,13 +15375,21 @@ pub fn push_corner_tag(
     let Some(tag) = page_hover_tag_box(body, scale, text_width) else {
         return;
     };
+    let ink = palette.float_tag();
+    let radius_px = (PAGE_HOVER_TAG_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
     let (sprites, labels) = out;
     sprites.push(ChromeSprite::new(
-        ChromeMark::ControlPill {
-            radius_px: (PAGE_HOVER_TAG_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32,
+        ChromeMark::ControlPill { radius_px },
+        tag,
+        ink.face,
+    ));
+    sprites.push(ChromeSprite::new(
+        ChromeMark::ControlPillRing {
+            radius_px,
+            stroke_px: scale.round().max(1.0) as u32,
         },
         tag,
-        palette.menu_surface,
+        ink.edge,
     ));
     let pad = (PAGE_HOVER_TAG_PAD_X_LOGICAL_PX * scale).round();
     let run = [
@@ -15387,7 +15403,7 @@ pub fn push_corner_tag(
         text: text.to_owned(),
         rect: run,
         font_size_px: PAGE_HOVER_TAG_FONT_LOGICAL_PX * scale,
-        color: palette.pane_title,
+        color: ink.ink,
         align_right: false,
         align_center: false,
         letter_spacing_em: 0.0,
@@ -21351,11 +21367,19 @@ mod tests {
             (&mut sprites, &mut labels),
         );
         let tag = page_hover_tag_box(body, 1.0, 60.0).expect("a body this size seats a tag");
-        assert_eq!(sprites.len(), 1, "one chip");
+        assert_eq!(sprites.len(), 2, "one chip and the hairline round it");
         assert_eq!(sprites[0].rect, tag, "struck exactly where it was measured");
+        assert_eq!(
+            sprites[1].rect, tag,
+            "and the hairline follows the same box"
+        );
         assert!(
             matches!(sprites[0].mark, ChromeMark::ControlPill { .. }),
             "and it is the rounded chip of the menu's own surface"
+        );
+        assert!(
+            matches!(sprites[1].mark, ChromeMark::ControlPillRing { .. }),
+            "with the family's own edge drawn inside it"
         );
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0].text, "Saved");
