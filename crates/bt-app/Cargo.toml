@@ -15,6 +15,11 @@ rust-version.workspace = true
 name = "folio"
 path = "src/main.rs"
 
+# The icon and the `VERSIONINFO` block, plus the commit hash the diagnostic files
+# carry. See `build.rs`.
+[build-dependencies]
+bt-winres = { path = "../bt-winres" }
+
 [dependencies]
 anyhow.workspace = true
 bt-detect = { path = "../bt-detect" }

@@ -1,0 +1,125 @@
+name: Release
+
+# A tag, and nothing else. The archive a person downloads has to be traceable to
+# one commit that somebody named, which a workflow that also ran on pushes could
+# not promise.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  archive:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    permissions:
+      # The one thing this job may do beyond reading: file the draft release.
+      contents: write
+    steps:
+      # A clean checkout, and no build cache anywhere in this job. What is being
+      # produced is the artefact people will run; a cache is a set of files from
+      # another run that nothing here verifies.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, read 2026-08-27
+        with:
+          # rust-toolchain.toml is the single source of truth for the compiler,
+          # exactly as in CI.
+          toolchain: none
+
+      # **The tag and the manifest are one claim or this stops here.** `v0.1.0`
+      # over a tree that says `0.1.1` would produce an archive whose name, whose
+      # `folio.exe --version` and whose Properties page disagree — and the first
+      # two are the only ones most people ever read.
+      - name: the tag names the version in the manifest
+        shell: pwsh
+        run: |
+          $manifest = Get-Content -LiteralPath Cargo.toml -Raw
+          if ($manifest -notmatch '(?ms)^\[workspace\.package\](.*?)^\[') {
+            throw "Cargo.toml has no [workspace.package] table"
+          }
+          if ($Matches[1] -notmatch '(?m)^\s*version\s*=\s*"([^"]+)"') {
+            throw "[workspace.package] declares no version"
+          }
+          $version = $Matches[1]
+          $tag = "${{ github.ref_name }}"
+          if ($tag -ne "v$version") {
+            throw "the tag is $tag and the workspace version is $version"
+          }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "building $tag"
+
+      - name: build
+        run: cargo build --release --locked
+
+      # Before the archive, so that `SHA256SUMS.txt` — written last, over
+      # everything in the output directory — covers it.
+      - name: bill of materials
+        shell: pwsh
+        run: ./scripts/release/sbom.ps1
+
+      - name: archive
+        shell: pwsh
+        run: ./scripts/release/package.ps1
+
+      # The same run of the same script CI runs, against the release binary this
+      # job just built. An archive that has never been started is an archive
+      # nobody has tested.
+      - name: install WARP
+        shell: pwsh
+        run: ./ci/install-warp.ps1 -TargetDir target/release
+
+      - name: start what was built
+        shell: pwsh
+        run: ./scripts/release/smoke.ps1 -Exe target/release/folio.exe -Artifacts target/smoke -TimeoutSeconds 300
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: folio-${{ env.VERSION }}
+          path: target/release-package
+          if-no-files-found: error
+
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-smoke
+          path: target/smoke
+          if-no-files-found: warn
+
+      # A draft, never a publish. Somebody reads the notes, checks the archive
+      # and presses the button; a release that appears without a person in the
+      # loop is a release nobody has looked at.
+      #
+      # `gh` and not a third-party action: it is on the image, it takes the
+      # job's own token, and it is one fewer piece of code with write access to
+      # this repository's releases.
+      - name: draft the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = @(
+            Get-ChildItem -LiteralPath target/release-package -File |
+              Sort-Object Name |
+              ForEach-Object { $_.FullName }
+          )
+          if ($assets.Count -eq 0) { throw "there is nothing to publish" }
+          $assets | Write-Host
+          # Built as one list and splatted through the call operator rather than
+          # written out on a line: `gh` is a native command, and an assets array
+          # interpolated into one takes its own view of quoting the day a path
+          # has a space in it.
+          $arguments = @('release', 'create', '${{ github.ref_name }}') + $assets + @(
+            '--draft',
+            '--title', 'Folio ${{ env.VERSION }}',
+            '--notes', 'Windows x64 preview. SHA256SUMS.txt lists every asset, and folio.exe carries the same version in its own resources.'
+          )
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) { throw "gh release create exited $LASTEXITCODE" }

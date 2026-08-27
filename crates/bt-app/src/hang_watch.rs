@@ -733,6 +733,11 @@ pub fn render_report(facts: &ReportFacts<'_>) -> String {
          nothing here killed, restarted or unwedged anything. If there is no `healed` line\n\
          at the end of this file, the pump never came back before the process ended.\n\n",
     );
+    // First of the facts, because every line under it — a module name, an
+    // offset, a station — is only meaningful against the build it was taken
+    // from. The same sentence `--version` prints (`crate::version`), so a report
+    // and the person's own answer can be compared without translation.
+    let _ = writeln!(out, "build          : {}", crate::version::banner());
     let _ = writeln!(out, "written        : {} (UTC)", facts.written_at);
     let _ = writeln!(
         out,
@@ -1766,6 +1771,10 @@ mod tests {
                 ..bt_render::SurfaceFailureTally::default()
             },
         });
+        assert!(
+            report.contains(&crate::version::banner()),
+            "a report is attributable to the build that wrote it, {report}"
+        );
         assert!(report.contains("pid 4242, ui thread 91"), "{report}");
         assert!(
             report.contains("pump silent for: 10.300s (threshold 5.000s)"),

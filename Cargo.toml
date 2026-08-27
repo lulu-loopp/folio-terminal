@@ -17,12 +17,21 @@ members = [
     "crates/bt-persist",
     "crates/bt-unicode",
     "crates/bt-render",
+    "crates/bt-winres",
     "crates/bt-app",
     "vendor/alacritty_terminal",
 ]
 
 [workspace.package]
-version = "0.0.0"
+# **The version, and the only place it is written.** Four surfaces have to agree
+# about it — `folio --version`, the `VERSIONINFO` block Explorer reads off
+# `folio.exe`, the header of every panic log, and the header of `diagnostics.log`
+# and each hang report — and all four derive from this line rather than repeating
+# it: cargo turns it into `CARGO_PKG_VERSION`, `crates/bt-app/build.rs` turns
+# that into the PE resource, and `bt_app::version` is the one module the other
+# three read. `a_release_is_one_version_in_four_places` in that module is the
+# gate; a second literal anywhere fails it.
+version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.89"
@@ -150,6 +159,35 @@ winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
 [profile.test]
 opt-level = 1
+
+# **The build people download.** Measured before it was written; the numbers are
+# in `docs/DESIGN.md` §12.4 and the short version is here, because a profile
+# table is exactly the place somebody adds a setting because it sounded good.
+[profile.release]
+# 77.45 MB → 72.62 MB, which is 4.8 MB off what a person waits for on a
+# preview download, for about twice the release build time (11 → 20 minutes at
+# `-j 4`). Paid once per tag by a machine; the download is paid by everybody.
+#
+# It costs nothing at startup, which is the thing worth checking rather than
+# assuming: `folio --version` — the loader, the static initialisers and the
+# front door, which is the whole of what a smaller image could have changed —
+# is 53.5ms against 57.0ms at the median of 21 interleaved runs, and a whole
+# window up is the same to within a noise band far wider than the difference.
+lto = "fat"
+codegen-units = 1
+# **Deliberately no `strip`.** It was measured too, and on this target it is a
+# no-op: `strip = "symbols"` produced a `folio.exe` of *exactly* the same size,
+# because MSVC never put the symbols in the executable — they are in
+# `folio.pdb` (6.06 MB), which the archive does not carry. A setting that
+# changes nothing is not free; it is a line the next reader has to disprove.
+#
+# **And `panic` stays `unwind`**, which is the default and is written down
+# because it is a decision. `abort` would save a little more, and it would take
+# the panic hook with it — the log in `%TEMP%\folio-panic.log` and the message
+# box that tells a user where to find it (`bt_app::version`, `docs/DESIGN.md`
+# §12.6) both run *inside* the unwinding path. A preview whose crashes are
+# silent is worse than a preview that is slightly larger.
+panic = "unwind"
 
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }

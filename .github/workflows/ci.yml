@@ -9,17 +9,44 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # A build here is a fresh one every time; incremental artefacts are pure cost
+  # in a job whose target directory arrives from a cache and leaves with it.
+  CARGO_INCREMENTAL: 0
+
+# `windows-2025` and not `windows-latest`. The floating label moved from Server
+# 2022 to Server 2025 during this project's life and will move again; a terminal
+# emulator's CI is a statement about a Windows version, and a statement that
+# silently changes what it is about is not one.
+#
+# Third-party actions are pinned to a commit, not a tag: a tag is a name its
+# owner can repoint, and these actions run with the checkout of this repository
+# in front of them.
 
 jobs:
-  adapter-boundary:
-    runs-on: windows-latest
-    timeout-minutes: 5
+  # ── the three gates that prove themselves ──────────────────────────────────
+  #
+  # Both of these plant a violation, demand red, and put the file back. This
+  # repository has shipped a gate that could not fail, plus a comment that lied
+  # about it, plus a lint table that inherited into nothing; a green run means
+  # nothing until the red one has been seen.
+  gates-can-fail:
+    runs-on: windows-2025
+    # The ignored-test probe has to build the whole workspace before it can ask
+    # the harness anything, which is why this is not the five minutes the
+    # adapter-boundary check alone would need.
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, read 2026-08-27
+        with:
+          # no toolchain given: rust-toolchain.toml is the single source of
+          # truth. Naming a channel here would silently win over it.
+          toolchain: none
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # adapter.rs/cell_capture.rs are the vendor compatibility seam. Their job is to report
       # terminal facts; importing document, detection, or viewport policy here recreates the
-      # layering bug Task 00b removed. Prove this gate fires before trusting the green run.
+      # layering bug Task 00b removed.
       - name: the adapter boundary gate can actually fail
         shell: pwsh
         run: |
@@ -40,21 +67,59 @@ jobs:
             [IO.File]::WriteAllText($file, $original)
           }
 
+      - name: the lint gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-doc/src/lib.rs"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "`nfn _lint_gate_probe() { todo!() }`n")
+            cargo clippy -p bt-doc --locked -- -D warnings 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+              throw "clippy passed a planted todo!() - workspace lints are not reaching this crate ([lints] workspace = true missing?)"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+
+      # A newly ignored test has to be a newly listed test. Planting one proves
+      # the comparison is two-way and that the exit code is read before the
+      # output — the two things the phrase-matching gate this replaced got
+      # wrong. See `ci/check-ignored-tests.ps1`.
+      - name: the ignored-test gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-doc/src/lib.rs"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "`n#[test]`n#[ignore = `"planted`"]`nfn _ignored_gate_probe() {}`n")
+            $failed = $false
+            try {
+              & ./ci/check-ignored-tests.ps1
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) {
+              throw "the allowlist accepted a test that is not on it"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+
+  # ── everything that is decided by reading, not by hardware ────────────────
+  logic:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, read 2026-08-27
+        with:
+          toolchain: none
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
       - name: adapter modules do not import policy crates
         shell: pwsh
         run: ./scripts/check-adapter-boundary.ps1
-
-  check:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      # no toolchain given: rust-toolchain.toml is the single source of truth.
-      # Naming a channel here would silently win over it.
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: none
-      - uses: Swatinem/rust-cache@v2
 
       # vendor/alacritty_terminal must stay a workspace member: its own upstream
       # suite is our regression line against our patches breaking VT semantics,
@@ -79,45 +144,162 @@ jobs:
           }
           if ($pkg.version -ne "0.26.0") { throw "vendored alacritty is $($pkg.version), expected 0.26.0" }
 
-      # first-party only: vendor is upstream's code in upstream's format, and
-      # reformatting it would bury our patches in 300 lines of whitespace diff
+      # First-party only: vendor is upstream's code in upstream's format, and
+      # reformatting it would bury our patches in 300 lines of whitespace diff.
+      # Every first-party package, because a crate left off this list is a crate
+      # whose formatting nothing checks.
       - name: fmt
         run: >
           cargo fmt
           --package bt-term --package bt-transcript --package bt-doc
           --package bt-viewport --package bt-detect --package bt-corpus
+          --package bt-layout --package bt-math --package bt-pty
+          --package bt-platform --package bt-persist --package bt-unicode
+          --package bt-render --package bt-winres --package bt-app
           -- --check
-
-      # A gate that cannot fail is the same thing as an assertion that cannot fail
-      # — and this repo has shipped one of those, plus a comment that lied, plus a
-      # lint table that inherited into nothing. Prove the gate fires before
-      # trusting a green one: plant a violation, demand red, put the file back.
-      - name: the lint gate can actually fail
-        shell: pwsh
-        run: |
-          $file = "crates/bt-doc/src/lib.rs"
-          $original = [IO.File]::ReadAllText($file)
-          try {
-            [IO.File]::AppendAllText($file, "`nfn _lint_gate_probe() { todo!() }`n")
-            cargo clippy -p bt-doc --locked -- -D warnings 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-              throw "clippy passed a planted todo!() - workspace lints are not reaching this crate ([lints] workspace = true missing?)"
-            }
-          } finally {
-            [IO.File]::WriteAllText($file, $original)
-          }
 
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      # ours and alacritty's upstream suite in one go, because vendor is a member
+      # Ours and alacritty's upstream suite in one go, because vendor is a
+      # member — minus the two crates whose tests are about hardware. `bt-pty`
+      # starts real ConPTY sessions and `bt-render` asks for a real adapter;
+      # each has a job of its own below, where the machine it needs is set up
+      # and where a failure means something specific.
       - name: test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render
 
-      # asks the harness what it will skip, rather than grepping for the attribute
-      # and missing `#[ignore = "..."]` or matching it inside a string
-      - name: no ignored tests
+      - name: the ignored tests are exactly the ones on the list
+        shell: pwsh
+        run: ./ci/check-ignored-tests.ps1
+
+      # `check-vendor-notices.ps1` reads upstream alacritty 0.26.0 out of the
+      # registry to diff it against `vendor/`, so the sources have to be there.
+      # A no-op after the build above; named anyway, because a job that only
+      # works because of what a previous step happened to leave behind is a job
+      # that breaks when the steps are reordered.
+      - name: fetch the sources the notices gates read
+        run: cargo fetch --locked
+
+      # The three gates the licensing line owns: the generated third-party
+      # notices still match the lock file, no machine path or personal name is
+      # tracked, and every modified vendored file carries its Apache-2.0 §4(b)
+      # notice. Each says so and is skipped when it is not in the tree — this
+      # branch and that one land separately, and a missing file is not a
+      # violation.
+      - name: the licensing line's gates
         shell: pwsh
         run: |
-          $out = cargo test --workspace --locked -- --ignored --list 2>&1 | Out-String
-          if ($out -notmatch '0 tests, 0 benchmarks') { $out; throw "ignored tests are not allowed" }
+          $gates = @(
+            "scripts/check-notices.ps1",
+            "scripts/check-machine-paths.ps1",
+            "scripts/check-vendor-notices.ps1"
+          )
+          $ran = 0
+          foreach ($gate in $gates) {
+            if (-not (Test-Path -LiteralPath $gate)) {
+              Write-Warning "$gate is not in the tree yet - it did not run"
+              continue
+            }
+            Write-Host "== $gate"
+            pwsh -NoLogo -NoProfile -File $gate
+            if ($LASTEXITCODE -ne 0) { throw "$gate failed with exit $LASTEXITCODE" }
+            $ran++
+          }
+          Write-Host "$ran of $($gates.Count) licensing gates ran."
+
+  # ── real ConPTY, real child processes ─────────────────────────────────────
+  conpty:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, read 2026-08-27
+        with:
+          toolchain: none
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      # These spawn cmd.exe and powershell.exe through the sidecar ConPTY that
+      # `crates/bt-pty/build.rs` extracts, and read what comes back. They are
+      # the only tests in this workspace that can fail because of what the
+      # operating system did.
+      - name: test bt-pty against real child processes
+        shell: pwsh
+        run: |
+          cargo test -p bt-pty --locked 2>&1 | Tee-Object -FilePath conpty-tests.log
+          if ($LASTEXITCODE -ne 0) { throw "bt-pty tests failed" }
+
+      - name: the sidecar is the one that was extracted
+        shell: pwsh
+        run: |
+          foreach ($name in @("conpty.dll", "OpenConsole.exe")) {
+            $path = "target/debug/$name"
+            if (-not (Test-Path -LiteralPath $path)) { throw "$path was not extracted" }
+            "{0,12:N0}  {1}" -f (Get-Item $path).Length, $path | Write-Host
+          }
+
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: conpty-failure
+          path: conpty-tests.log
+          if-no-files-found: ignore
+
+  # ── a real adapter, which a runner does not have until one is installed ────
+  gpu:
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, read 2026-08-27
+        with:
+          toolchain: none
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      # The test binaries have to exist before WARP can be put beside them:
+      # DXGI prefers a `d3d10warp.dll` in the loading binary's own directory,
+      # which is `target/debug/deps`.
+      - name: build the render tests
+        run: cargo test -p bt-render --locked --no-run
+
+      - name: install WARP
+        shell: pwsh
+        run: ./ci/install-warp.ps1 -TargetDir target/debug
+
+      - name: test bt-render on a real device
+        run: cargo test -p bt-render --locked
+
+  # ── the executable, started ───────────────────────────────────────────────
+  #
+  # Every gate above runs against a library. This one runs `folio.exe`: the
+  # front door's exit codes, a cold launch that opens a window and gets text
+  # onto it, the ConPTY it actually loaded, and whether it agrees with Windows
+  # about its own DPI. A runner has no WebView2 Runtime, which makes it exactly
+  # the machine the preview's degrade path has to be right on.
+  smoke:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, read 2026-08-27
+        with:
+          toolchain: none
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: build folio.exe
+        run: cargo build -p bt-app --locked
+
+      - name: install WARP
+        shell: pwsh
+        run: ./ci/install-warp.ps1 -TargetDir target/debug
+
+      - name: start it
+        shell: pwsh
+        run: ./scripts/release/smoke.ps1 -Exe target/debug/folio.exe -Artifacts target/smoke -TimeoutSeconds 300
+
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: smoke
+          path: target/smoke
+          if-no-files-found: warn

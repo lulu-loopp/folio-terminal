@@ -178,6 +178,25 @@ pub fn log_path(storage: &Path) -> PathBuf {
     storage.join(LOG_FILENAME)
 }
 
+/// **The line a run writes before its first diagnostic.**
+///
+/// This file is appended to across runs and kept across one rotation, so what
+/// arrives attached to a bug report is a stack of runs with no seam between
+/// them. The header is that seam, and it carries the two facts that make
+/// everything under it usable: which build wrote the lines that follow
+/// (`crate::version`, the same sentence `--version` prints and the panic log
+/// opens with) and which process, for a machine that had two windows open.
+///
+/// Pure, and taking the clock rather than reading it, so the shape of the line
+/// is a thing a test can state.
+#[must_use]
+pub fn run_header(now: &str, process_id: u32) -> String {
+    format!(
+        "── {} — run started {now}, pid {process_id} ──",
+        crate::version::banner()
+    )
+}
+
 /// **The front door closes here.**
 ///
 /// Called once, from `main`, after the command line has been answered and
@@ -189,6 +208,29 @@ pub fn log_path(storage: &Path) -> PathBuf {
 /// Answers which channel the rest of the run has, which is worth one line in a
 /// startup trace and nothing else.
 pub fn enter_resident_run(storage: &Path) -> Channel {
+    let channel = choose_resident_channel(storage);
+    // Remembered, and this is not bookkeeping: after this call `stdout` is very
+    // often *this product's own log file*, and a later caller who asks "is
+    // there a screen I can write on" by looking at the handle would be told yes
+    // by the file it is already writing to. The panic hook asks exactly that.
+    let _ = RESIDENT_CHANNEL.set(channel);
+    channel
+}
+
+/// **Where the rest of this run's diagnostics can be found**, or `None` while
+/// the front door is still open.
+///
+/// A `OnceLock` and not a parameter, because the one caller that needs it is a
+/// panic hook: it can fire on any thread at any moment, including before the
+/// front door has closed, and there is nothing to thread the answer through.
+#[must_use]
+pub fn resident_channel() -> Option<Channel> {
+    RESIDENT_CHANNEL.get().copied()
+}
+
+static RESIDENT_CHANNEL: std::sync::OnceLock<Channel> = std::sync::OnceLock::new();
+
+fn choose_resident_channel(storage: &Path) -> Channel {
     if console_was_asked_for(std::env::vars_os().map(|(name, _)| name)) {
         // The console was named by this run. Keep it, keep the group membership
         // that comes with it, and rely on the control handler installed at the
@@ -210,7 +252,37 @@ pub fn enter_resident_run(storage: &Path) -> Channel {
     // **After the streams have somewhere else to be**, so that nothing written
     // between the two calls could still reach the console.
     bt_platform::detach_console();
+    if channel == Channel::Log {
+        // The file's header and not the run's: a run that kept its console was
+        // started by somebody who is looking at it and already knows which build
+        // they just built. What needs a stamp is the file that will be attached
+        // to a bug report by somebody who does not.
+        eprintln!(
+            "{}",
+            run_header(
+                &crate::hang_watch::utc_timestamp(std::time::SystemTime::now()),
+                std::process::id()
+            )
+        );
+    }
     channel
+}
+
+/// **Is there a screen a fault could be printed on?**
+///
+/// Asked by the panic hook, which has one decision to make: say it in text, or
+/// raise a box. Two of the three resident channels answer no, and the reason is
+/// the same for both — `stdout` no longer goes anywhere a person is looking.
+/// Writing a crash into `diagnostics.log` is writing it into the file that is
+/// already being written; writing it nowhere is worse. In both cases the box is
+/// the only thing that reaches anybody.
+///
+/// `None` — the front door has not closed — is **yes**, because up there
+/// `stdout` is still whatever the caller gave this process: their console,
+/// their redirection, or nothing at all, and the write itself reports which.
+#[must_use]
+pub fn a_screen_is_watching(channel: Option<Channel>) -> bool {
+    !matches!(channel, Some(Channel::Log | Channel::Nowhere))
 }
 
 #[cfg(test)]
