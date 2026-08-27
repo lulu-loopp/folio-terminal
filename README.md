@@ -1,4 +1,13 @@
-# Folio
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="assets/readme/hero-dark.svg">
+  <img src="assets/readme/hero-light.svg" width="100%"
+       alt="Folio — a terminal for Windows, drawn on the GPU, with files,
+       previews and git beside the prompt. Beside the name, a terminal pane
+       runs two commands; a rule in the left margin marks how far each one
+       reached, and the rule beside the command that failed is drawn in the
+       failure colour.">
+</picture>
 
 A terminal for Windows, written in Rust and drawn on the GPU, with a files
 column, a document preview, a git panel and a way for command-line agents to say
@@ -13,13 +22,29 @@ they are waiting for you.
 <!-- Screenshots are taken on a real machine and committed under docs/screenshots/.
      docs/screenshots/README.md is the list of shots and how to take them. -->
 
-![The Folio window: a files column on the left, two terminal panes side by side,
-and a markdown document open in a preview pane on the
-right.](docs/screenshots/main-window-light.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/main-window-dark.png">
+  <img src="docs/screenshots/main-window-light.png" width="100%"
+       alt="The Folio window: a files column on the left, two terminal panes
+       side by side, and a markdown document open in a preview pane on the
+       right.">
+</picture>
 
 ---
 
 ## What is in it
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="assets/readme/surfaces-dark.png">
+  <img src="assets/readme/surfaces-light.png" width="100%"
+       alt="Three more of Folio's surfaces. A window whose tab has been laid
+       out as eight cards, each card a terminal pane at its own size; a
+       markdown document typeset in a preview pane, with a table and a display
+       formula; and a web page in a preview pane with its address field above
+       it.">
+</picture>
 
 ### A terminal
 
@@ -52,8 +77,13 @@ renamed, revealed in Explorer, or opened as a new pane rooted there.
 
 ### A preview
 
-![A hover card over a file name in the files column, showing the first page of a
-PDF above its page count and size.](docs/screenshots/preview-pdf-light.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/preview-pdf-dark.png">
+  <img src="docs/screenshots/preview-pdf-light.png" width="100%"
+       alt="A hover card over a file name in the files column, showing the
+       first page of a PDF above its page count and size.">
+</picture>
 
 A file opened from the files column, from a path printed in the terminal, or from
 the command line opens beside the terminal rather than in another application:
@@ -79,8 +109,13 @@ selected file in the preview.
 
 ### Agents
 
-![The Agents page in Settings, with three installer rows for Claude Code, Codex
-and Copilot CLI.](docs/screenshots/settings-agents-light.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/settings-agents-dark.png">
+  <img src="docs/screenshots/settings-agents-light.png" width="100%"
+       alt="The Agents page in Settings, with three installer rows for Claude
+       Code, Codex and Copilot CLI.">
+</picture>
 
 A command-line agent that has stopped to ask you something can mark its own pane,
 so a window full of panes says which one is waiting. Claude Code, Codex and
