@@ -3020,6 +3020,8 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **③ 这是一个钉着的「否」，不是一处空白。** `no_video_spelling_is_a_page_until_something_hosts_it_inside_one`（preview）与 `a_video_takes_the_document_lane_at_every_door`（main，四扇门各一条断言：双击、头上的 ↗、缓冲池自己那扇门、悬停卡）。两条测试的头上写着测量本身，所以下一个想「引擎能播为什么不进」的人，读到的是已经量过的答案而不是一处看起来像遗漏的空白。
 
+> **2026-08-27 补注（见 §7.21）。** 这个「否」一个字都没翻案，翻的是**另一条道**：视频现在有自己的类、自己的 lane 和自己的脸（Media Foundation 出的首帧 + 时长/分辨率/大小），所以「无法预览」那张卡不再是它的去处。两条红门都还在，main 那条改名为 `a_video_takes_no_page_lane_at_any_door`，断言从「去处是文档道」收紧成「**不是页道**」——那才是本节量出来的结论。⑤ 那六问与 ⑥ 的挂账依旧全部开着，片②的路线裁决写在 §7.21 ④。
+
 **④ 真正落地的那一半：页类只写一遍。** §7.10 ⑥ 的由头是「一个类两张表」——`preview_ftype` 的表与 `path_opens_as_a_page` 手写的 `html || htm || pdf`；同日第二裁只让 ↗ 改问后者，**两张表还在**，只是暂时一致。本片把它们并成一张：`preview::PAGE_EXTENSIONS` 是唯一写下来的地方，新增 `preview::path_names_a_page(&Path)` 按**路径的真扩展名**问同一张表，而 `main::path_opens_as_a_page` 就是它。`names_an_html_page` 因此退役——它回答的是「这是不是 HTML」，在只有 html/htm 上引擎道的年代那与「这是不是页」同问；今天不是了，所以窄的那个谓词**删掉**而不是留在那里当第二个可以伸手去够的东西。它的两条论据搬到了新谓词上：真扩展名而非子串（`index.htmlx` / `report.html.txt` 仍是文档），以及忽略大小写。整个名字就叫 `.html` 的那种文件两边都不是页，而且**两边都不需要为它写一句**：`Path::extension` 说它没有扩展名，`preview_ftype` 的 dotfile 臂排在页臂前面——两次阅读、一个答案、互相不知道对方存在。红门 `every_member_of_the_page_class_is_a_page_to_both_readings`：给 `path_opens_as_a_page` 重新写一张自己的表，它当场红。**这一半的价值正是被否掉的那一半留下的**：将来若要让视频进来，改的是一张表里的一行，而不是两处需要保持同步的判断。
 
 **⑤ 唯一还开着的路，以及它为什么需要裁决。** 视频**在页里**播得很好，所以能走通的形态只有一个：本窗自己铸一张托管页（`<video controls src=…>`），把文件当**子资源**交给它。这不是一行类型路由，它要动的正是 §7.10 ③ 立起来的那套身份：地址栏显示什么（托管页还是那份文件）、头上的 ↗ 把什么交给系统（必须是视频本身，不是壳）、`session.json` / `pins.json` 存哪一个、切换器那一行叫什么名字、`Mint::path_and_tail_of_file_url` 作为编码器精确反函数这条性质还成不成立、以及壳页放在盘上什么地方、谁来清。**六个问题都要用户裁**，所以本片不替它作答，把它作为下一张单交出去。
@@ -3422,3 +3424,48 @@ v1 Q1-Q4、v3 各决策（alt=停放、一 session 一可输入视口、折叠�
 **⑤ 实机双语截图查出两件测试查不到的事，两件都是文案的。** 第一件:快捷键页每一行的按钮在中文窗口里写着 `Record`。`RECORD_BUTTON_LABEL` / `RECORD_LISTENING_LABEL` / `RESTORE_ALL_LABEL` 三个 `&'static str` 常量从来没进过表——`ShortcutRecordPrompt` 的注释还写着「它们是这一页最后剩下的英文字面量」,而它说这句话的时候,这三个正躺在它上面十行的地方。**一个常量没法自己报告这件事**,只有把同一页用两种语言各拍一张才看得见,于是 `Text::ALL` 505 → **508**。第二件:设置行的换行**优先在半角空格处断**,只有一整个空格分隔的「词」放不下整行时才退回逐字断——中文里空格只出现在拉丁 token 两边,所以一句以短拉丁词开头的中文会把那个词单独留在第一行(`Agent` 一个人占一行),而超出一个字的中文会把句号单独留在第二行。六条中文因此二次改写:三个渲染块开关各收进一行、Agents 四行各是齐整的两行。**英文列一个字未动**——这是关于中文排版的事实,不是关于句子内容的。
 
 **⑥ 落地。** 80 条改动:74 条重写 + 3 条新入表 + 3 条实机复核后的中文再改(与前者有重叠,逐行账在 `docs/plans/ui-style/copy-rewrite-2026-08-26.md`,旧英/新英/旧中/新中/理由五列)。用户先前挂的三笔——`Card height`、`Minimum contrast`、`Codex notify` 的缩短版——按规范重写,随本片结清。
+
+### 7.21 视频有一张脸：首帧从 Media Foundation 来，能画的集合不等于能播的集合（视频预览片①，2026-08-27 用户裁；`crates/bt-platform/src/video.rs`(新)、`crates/bt-app/src/{preview,file_peek,main}.rs`、`test-assets/folio-video-test.mp4`(新)）
+
+**一句话：视频还是进不了页道（§7.16 一个字都没翻案），但它不再落在「这种文件类型没有预览」那张卡上——本窗自己长了一个解码器，悬停卡与预览 pane 都画它的首帧，并说它有多长、多大、多重。它不播；播是片②，路线已经裁好，写在 ④。**
+
+**① 先清一段自相矛盾的注释（零功能改动）。** `main.rs` 的 `path_opens_as_a_page` 头上留着 2026-08-25 那次「否决半片」的残段：*A `.mp4` is a page by the identical argument PDF is one … now opens a player with controls, a scrubber and a volume.* 那段话描述的是**被否掉的**那半片，与同文件的红门、与 `preview.rs` 的表注、与 §7.16 全篇矛盾——读它的人会得到与代码相反的结论。已改写成现状：视频不是页、四扇门都不给它页道、今天它的脸是首帧、播的路线在 ④。
+
+**② 准入表三个，`mov` 明确不进，而「能画」与「能播」是两张表。** `preview::VIDEO_EXTENSIONS = [mp4, m4v, webm]`，与 `PAGE_EXTENSIONS` 并排放，理由和它一样：一个类写两遍就会散（§7.10 ⑥ 的整笔账）。`path_names_a_video(&Path)` 是它的第二种读法，红门 `the_video_class_reads_the_same_from_a_name_and_from_a_path` 逐条断言真扩展名而非子串（`clip.mp4.txt` 是文本）、忽略大小写、整个名字叫 `.mp4` 的两边都不是视频，并断言这张表与页表**不相交**。
+
+表短是裁决而不是省事。这三个是 2026-08-25 在实机上量到**引擎肯在页里播**的三个（`canPlayType` 各答 `maybe`），而一张关于**画**的表照着一次关于**播**的测量来定，是因为本产品已经欠自己一个片②：那天到来时，能出脸的文件和能播的文件必须是同一批。`mov` 因此明确不进——Media Foundation 读得动它（`.mov` 与 `.mp4` 同属 MPEG-4 File Source），而引擎对 `video/quicktime` 答的是空串。收它等于今天买一张图、明天还一句道歉。
+
+**这个错位本身要写下来，两个方向都真实**：`.webm` 里的 VP9/AV1 在引擎里播得动，而一台出厂 Windows 未必有它们的 MF 解码器——所以它在表里，它的卡上却可能没有画面，那不是漏洞，是 `first_frame` 的 `None` 与降级卡（见 ⑤）。反过来，`mov`/`mkv`/`avi` 全在表外，全落原来那张「无法预览」。**这张表是关于本窗的承诺，不是关于平台的报告**：名字在表里意味着本窗为它备了一张脸，不保证某台机器的编解码器填得满。
+
+**③ 首帧从哪里来，在哪条线程上。** `bt-platform` 新增 `video.rs`：`first_frame(path, fit_w, fit_h) -> Option<VideoFrame>`，走 `IMFSourceReader` + `MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING`（微软自己给这个属性写的用例逐字就是 "to create a video thumbnail"），官方参考实现是 `VideoThumbnail` 示例。
+
+- **代价是一个 feature 不是一个包。** `windows` crate 加 `Win32_Media_MediaFoundation` 与 `Win32_System_Variant`（后者是 `SetCurrentPosition` / `GetPresentationAttribute` 的 `PROPVARIANT` 绑定的门）。**`Cargo.lock` 零行改动**——这是 §8 的准入线，也是 `hayro`、`serde_json` 走过的同一道门。
+- **线程模型：一次一条 MTA 线程。** MF 官方要求「Work queues always have multithreaded apartment (MTA) threads … 建议 `CoInitializeEx(COINIT_MULTITHREADED)`」，而本仓现有三处 `CoInitializeEx` 全是 GUI 线程上的 STA（任务栏、通知、文件选择器），装饰 worker 那条线程根本没有 apartment。所以 `first_frame` **不在调用它的线程上跑**：它开一条线程，那条线程进 MTA、`MFStartup`，干完 `MFShutdown` + `CoUninitialize`，**每条失败路径上都成对**。
+  - 为什么一次一条而不是养一条常驻的：常驻那条给不了调用方**放弃等待**的能力。`ReadSample` 是同步调用、一个畸形文件能把 demuxer 拖很远，而 `FIRST_FRAME_BUDGET = 3s` 是靠**接收端超时**兑现的——超时之后那条线程写进一个没人拿着的 channel、自行收尾。它不持任何锁，除了自己的 channel 什么都不写。
+  - 代价是每次问一遍 `MFStartup`。可以接受：一个文件只问一次（像素按路径进 `peek_cache`，与 `.png` 同一个缓存、同一把钥匙），所以那笔钱付在第一次悬停上。
+  - **超时是对「等」的界，不是对「做」的界**：没有受支持的办法中断一次 `ReadSample`，这一点如实写在常量头上而不是假装成硬中断。
+- **取哪一帧：片长的 1/10 处（`SEEK_FRACTION`）。** 不取 0.0 秒——大量视频开头是黑场（淡入、片头板、还没测光的镜头），取首帧会让一整个录屏文件夹的卡全是同样的黑矩形。`SetCurrentPosition` 不保证精确、通常落到目标之前最近的关键帧，而关键帧正是这里想要的。容器不报时长的就从头读——未知长度的十分之一不是一个位置。红门就压在这条上：把 `SEEK_FRACTION` 改成 `0.0`，`the_shipped_fixture_gives_up_a_frame` 的着墨断言当场红（实测 `0 lit pixels`），而尺寸与时长两条仍绿——这正是「我的片子全是黑的」这种缺陷会溜过去的样子。
+- **像素怎么出来。** 输出型先按 `contain(native, fit)` 要一次带尺寸的 RGB32，被拒就退回只要 subtype，然后**把实际生效的媒体型读回来**再按它的宽高走；缓冲优先 `IMF2DBuffer::Lock2D`（它直接给 scanline 0 与带符号 pitch，所以自下而上的 RGB32 是被**描述**出来的而不是被猜出来的），没有这个接口才退回平坦 `Lock` + `MF_MT_DEFAULT_STRIDE` 的符号。MF 的 `RGB32` 命名的是 DWORD 不是字节序，所以每个像素逐字节翻转、第四个字节写成实心 255——一帧视频没有透明度可带，而合成到终端底色上的那种「透出来」是这里最容易出的错。四条纯函数红门钉住这四件事（高低半字不换位、fit 只缩不放、自下而上翻正、行内 padding 不进画面）。
+- **`fit` 是请求也是上限，永不放大。** 320×240 的片子按 1280×720 去要，回来还是 320×240。`VideoFrame` 同时带**光栅的**宽高与**录像本身的** `native_*`：前者是卡与 pane 拿去 fit 的，后者是事实行里那个「宽×高」——把两者混起来说，就会拿本窗自己挑的缩略图尺寸去冒充录像的分辨率。解码尺寸的上限是一个常数 `VIDEO_FRAME_FIT_PX = 1920×1080`，而不是各面各自的盒子：`peek_cache` 按路径作键，各面各要一个尺寸就会互相驱逐。
+
+**④ 片②的明账（用户裁决 2026-08-27，本片不做）。**
+
+- **路线 A：页道 + 自铸壳页**（本窗铸一张 HTML，把视频当子资源交给 `<video controls>`）。它要回答 §7.16 ⑤ 那六问（地址栏显示什么、↗ 交出什么、`session.json` 存哪个、切换器那行叫什么、`Mint` 的反函数性质、壳页放哪谁清），外加三条本片摸底时新提的：`IsWebMessageEnabled` 要不要为进度条开一条缝、后台 tab 的音频、壳页形态（临时文件 vs `SetVirtualHostNameToFolderMapping`）。
+- **路线 B：Media Foundation Media Engine + DirectComposition**（`EnableWindowlessSwapchainMode` 的句柄进 `IDCompositionDevice::CreateSurfaceFromHandle`；这条配对官方**没有明写**，需要一次 spike）。**写成明账升级路，四条触发条件**：① 视频要成为文档（md 内嵌 / 一个 pane 多段 / 按滚动抽帧）；② WebView2 每 pane 一套引擎的内存扛不住；③ 要播 Chromium 不认的格式（`mov`）；④ 要完全自管后台音频与生命周期。**本片的 MF 首帧就是 B 的地基，A 不堵 B。**
+- **切走 tab 的音频：继续播，tab 上亮一只小喇叭**（`ICoreWebView2_8::IsDocumentPlayingAudio`），浏览器惯例。这一条落地时必须按 §7.1.5b 的状态点分类学接入，不能自造一个点。
+
+**⑤ 两张脸，一段字，一条降级路。**
+
+- **悬停卡** `PeekBody::Frame`：首帧 fit 进**页盒**（280×160，与 PDF 那一列同宽同高——因为它下面站着两行字，而图片盒是给下面什么都没有的身体准备的）+ 两行事实：**`时长 · 宽×高`** 与 **文件大小**。三样都是可选的、盒子从第一帧就是终值高度：解码在另一条线程上，身体等到东西来了才长高就是卡在手底下跳。红门 `a_video_card_shows_a_frame_over_two_lines` 连「它和 PDF 卡一样高」「它不是那张一行的拒绝卡」一起断言。
+- **预览 pane**：打开一个视频（files 列双击/回车、终端里裸路径点击、拖到 pane 上）走 `PreviewOpenLane::Video` → 首帧上**图片通道**（座位的 `set_preview_image`，浮窗的 mark 通道），**同两行事实**在 `.pv-meta` 那条带上用同一个 `preview::video_fact_lines` 写出来，中点连接。不播。**而且不缩放**：`picture_takes_zoom` 把图片道的 zoom 对视频整个关掉。理由是那句话而不是那张图——本窗的百分比意思是「文件自己的像素我看到了多少」，而一帧没有这个数可以做基数（它是按 `VIDEO_FRAME_FIT_PX` 解出来的，所以一段 4K 录像上的 `100%` 其实是一半），那会变成**缩略图的**放大倍数站在**录像的**分辨率旁边，两个都叫尺寸而含义不同；而一个改变了你所见却不告诉你改成了什么的手势，正是 `page_foot_flash` 那条裁决终结掉的东西。于是脸就是脸不是查看器：停在 Fit、滚轮在它上面花掉一格什么也不动、两行事实就是这块 pane 说的全部。「一边播一边缩放」是片②要的东西，那时它会自带读数。
+- **降级：读不出/损坏/超时 → `None`，卡与 pane 都变成「格式名 + 大小」。** 事实是在**看那一帧之前**就存下的（`VideoGlance.facts` 先于 `frame` 落账），所以一台没有 AV1 解码器的机器上，一段 `.webm` 仍然给出 `WEBM · 4 KB` 而不是崩、也不是回到「这种文件类型没有预览」。**而且它不写「预览失败」那句**：一个叫 `.png` 却不是的文件值得被告知，一个容器本机没装编解码器的视频是一个普通文件，pane 还有名字、长度和大小可说。红门压在 fallback 那一行上：删掉它，那张卡只剩一行大小，连这是个什么东西都不说。
+- **一个解码器，一扇门。** 卡与 pane 不各自读文件名挑解码器——两边都问 `request_peek_pixels`，它是 `PeekImage` 与 `PeekVideoFrame` 唯一被构造的地方，并且用的正是 `preview_open_lane` 分岔的那个谓词。红门 `one_door_decides_which_decoder_a_hover_and_a_pane_ask` 按**文本**断言这一点（钉的是「哪个函数造哪个请求」，没有任何值能表达这件事），并断言两个展示面自己不提任何一个解码器的名字。
+- **纹理身份带 mtime。** 图片的纹理名是自己字节的哈希；一帧不能这样命名——它来自一个本进程从未整份持有的容器。所以照 PDF 页的做法写成 `video-frame:{path}:{mtime}:{w}x{h}`，红门 `one_video_texture_is_one_file_at_one_version_at_one_size`：去掉版本那一段当场红，玻璃上就是一段被重录过的录屏还在画旧的那一帧。
+
+**⑥ §7.16 的两条红门都还在，只是断言的是它一直在主张的那件事。** `no_video_spelling_is_a_page_until_something_hosts_it_inside_one`（preview）一字未动，只在末尾把「视频落 `Unknown`」更新成「三个落 `Video`、其余落 `Unknown`，两者都不是 `Web`」——那个 `assert_ne!(…, Web)` 才是这条门。main 那条从 `a_video_takes_the_document_lane_at_every_door` 改名为 **`a_video_takes_no_page_lane_at_any_door`**：断言从「去处是文档道」收紧成「**不是页道**」，因为那才是那次测量得出的结论，而 2026-08-27 改的是另一条道的身份不是这条禁令。它的名单**故意比准入表宽**（`mov`/`mkv` 也在）——「不是页」是关于每一种视频拼法的主张。新的正门是 `a_video_has_a_face_of_its_own`，两半都钉：三个拼法拿到 lane / chip / 卡身体，而 `mov`/`mkv`/`avi` 与两个子串邻居一个都没动。
+
+**⑦ 三张脸没动，逐条带理由。** 地址栏对 `.mp4` 路径**照旧拒绝**（`webhost::judge_address` 问的是「是不是页」，视频不是页，所以那条路一个字都不用改，也不该改——视频不是页就不该出现在页的地址栏里）；终端里的裸路径**早就**是可点链接（`paths.rs` 的候选扫描没有任何扩展名白名单，画不画下划线只看 worker 问过磁盘），点它走 `open_preview_at`，于是今天它开出的就是这张脸；files 列的文件行菜单**不加行**（`profiles.rs` 的四张脸只按 subject 分，2026-08-25 刚立过「subject 之外的任何东西都不改变一张单子的长度」，`Open in default app` 已经是「交给系统播放器」那扇门）。图片的准入表（`bt_term::has_admissible_image_extension`）**一个字未动**：那是**内联图片探测器**的表，一段 shell 输出里印出的 `.mp4` 不该被画成内联图。视频对**预览面**是图片，对别的什么都不是。顺手修的一处：拖放那扇门（`open_preview_onto`）过去自己问 `path_is_previewable_image`，在只有两条道的年代与 `preview_open_lane` 同答，第三条道出现的那天就不是了——已改为问同一个函数。
+
+**⑧ 字一个没加。** `Text::ALL` 仍是 509 条：时长是 `m:ss`、分辨率是两个数、大小走既有的 `format_byte_size`、降级那行是文件自己的扩展名大写。这一片没有一句需要翻译的新话，也就没有一句会翻译得不一样的新话。
+
+**⑨ fixture。** `test-assets/folio-video-test.mp4`：2982 字节，160×120，5.0 秒，25 帧全 I 帧，前 0.4 秒纯黑其余橙色（这样 1/10 处一定在橙色里、第 0 帧一定是黑的，红门才咬得住）。由本仓机器上的 ffmpeg 从 `lavfi` 的两段纯色合成——没有第三方素材、没有许可问题，命令逐字为：`ffmpeg -f lavfi -i color=c=black:s=160x120:r=5:d=0.4 -f lavfi -i color=c=0xE07A2F:s=160x120:r=5:d=4.6 -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0[v]" -map "[v]" -c:v libx264 -preset veryslow -crf 28 -g 1 -pix_fmt yuv420p -movflags +faststart`。

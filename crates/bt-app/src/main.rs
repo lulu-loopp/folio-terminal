@@ -584,6 +584,9 @@ impl MathWorkerResult {
     fn owner(&self) -> AnswerOwner {
         match self.completion {
             DecorationWorkerCompletion::PeekImage { .. }
+            // A video's frame lands in the same window-wide decode cache a picture's does, and
+            // is claimed by whoever is showing that file rather than by whoever asked.
+            | DecorationWorkerCompletion::PeekVideoFrame { .. }
             | DecorationWorkerCompletion::PeekScaledImage { .. }
             // A glance card's page is the window's on the same terms: one slot per window, keyed
             // by the file it was drawn from, and no pane owns it.
@@ -619,6 +622,27 @@ enum MathWorkerRequest {
     /// decoration record. The completion routes only to the app-side peek cache, so the band
     /// creation gates (cursor line, semantic input region) are never bypassed.
     PeekImage { leaf: ShellAddress, path: PathBuf },
+    /// **Decode one frame of a video** (user ruling 2026-08-27; `docs/DESIGN.md` §7.21).
+    ///
+    /// [`Self::PeekImage`]'s twin in every respect that matters downstream: it is addressed by
+    /// path, it answers into the window's one decode cache, and both surfaces that show a video —
+    /// the glance card and the preview pane — read it from there. What differs is only the
+    /// decoder, and that is the whole of why it is a second request rather than a flag on the
+    /// first: `bt_term`'s decoder is handed the bytes of a picture file, and this one is handed a
+    /// path to `bt_platform::video::first_frame`, which opens a container on an apartment of its
+    /// own. A file cannot be both, and asking the wrong one produces the same `None` for entirely
+    /// the wrong reason.
+    ///
+    /// **The size it is decoded at is [`VIDEO_FRAME_FIT_PX`] and not the asker's box**, because
+    /// the cache this fills is keyed by path alone: a second surface asking for the same file at
+    /// another size would otherwise evict the first one's pixels and be evicted back. So the
+    /// frame is decoded once, near enough to native to be worth magnifying, and each surface fits
+    /// what it got — which is exactly the arrangement a `.png` is already under.
+    ///
+    /// No `known` modification time, unlike the page lane beside it. A video is answered out of
+    /// the decode cache, and that cache's own entry is what a re-hover finds; the freshness
+    /// question the page lane asks is one the picture lane has never asked either.
+    PeekVideoFrame { leaf: ShellAddress, path: PathBuf },
     /// **Raster one page of a PDF the glance card is over** (user rulings 2026-08-25 and
     /// 2026-08-26; `docs/DESIGN.md` §7.10 ⑥, §7.7 ⑮).
     ///
@@ -816,6 +840,11 @@ enum DecorationWorkerCompletion {
         path: PathBuf,
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
     },
+    /// One video's frame and the facts that came out of the same open — see [`VideoGlance`].
+    PeekVideoFrame {
+        path: PathBuf,
+        glance: VideoGlance,
+    },
     /// One page of one glance card's column, or the news that it did not need drawing again.
     PeekPage {
         path: PathBuf,
@@ -889,6 +918,85 @@ fn raster_peek_page(
         mtime,
         raster: pdf::page_raster(path, page, fit.0, fit.1),
     }
+}
+
+/// **The box a video's frame is decoded into** (user ruling 2026-08-27; §7.21).
+///
+/// One number for every surface, because [`WindowRuntime::peek_cache`] is keyed by path and a
+/// per-surface size would make two surfaces over one file fight over one entry. It is a **cap** and
+/// not a target: `bt_platform::video::first_frame` never enlarges, so a 320×240 clip is decoded at
+/// 320×240 and this changes nothing about it.
+///
+/// 1920×1080 is where a frame stops being worth more pixels. It is 8 MiB of RGBA — the size of an
+/// ordinary photograph, and comfortably inside the same texture budget a `.png` is already
+/// admitted under — and it is one-to-one on the largest preview pane anybody has on a 1080p
+/// display and a magnification of about two on a 4K one, which is what a still frame is worth. A
+/// pane larger than this draws it soft, exactly as it draws a small `.png` soft, and the sentence
+/// under it still says what the recording's real size is.
+const VIDEO_FRAME_FIT_PX: (u32, u32) = (1920, 1080);
+
+/// **What one open of a video came back with**: its picture, if this machine could decode one, and
+/// the facts, which do not depend on that.
+///
+/// The two are carried together because they came from **one open**. The duration and the frame
+/// size are read off the same `IMFSourceReader` that produced the pixels, so a second lane for
+/// them would be a second parse of the same container for facts the first one had already seen —
+/// and the file's own size is a `metadata` call this worker hop is making anyway.
+///
+/// **`facts` survives a `frame` of `None`, and that is the degradation path.** A `.webm` carrying
+/// AV1 on a machine with no AV1 decoder gives up no picture at all; what it still gives up is how
+/// large the file is, and that is the line the card then prints beside its format
+/// (`preview::video_fact_lines`).
+struct VideoGlance {
+    frame: Option<bt_platform::video::VideoFrame>,
+    facts: preview::VideoFacts,
+    /// When the file said it was last written, as the worker that decoded it saw it — the third
+    /// field of the texture's own name ([`video_frame_texture_key`]) and nothing else. `None` for
+    /// a filesystem that will not say, which simply never matches a real timestamp.
+    mtime: Option<SystemTime>,
+}
+
+/// [`VideoGlance`] for one file, on the worker's own thread.
+///
+/// The `metadata` call comes first and stands whatever the decoder does: a file this platform has
+/// no source for still has a size, and the card that says only its size is the honest one rather
+/// than the refusal it replaced.
+fn read_video_glance(path: &Path) -> VideoGlance {
+    let metadata = std::fs::metadata(path).ok();
+    let bytes = metadata.as_ref().map(std::fs::Metadata::len);
+    let mtime = metadata.and_then(|meta| meta.modified().ok());
+    let frame = bt_platform::video::first_frame(path, VIDEO_FRAME_FIT_PX.0, VIDEO_FRAME_FIT_PX.1);
+    VideoGlance {
+        facts: preview::VideoFacts {
+            duration_ms: frame.as_ref().and_then(|frame| frame.duration_ms),
+            native: frame
+                .as_ref()
+                .map(|frame| (frame.native_width, frame.native_height)),
+            bytes,
+        },
+        frame,
+        mtime,
+    }
+}
+
+/// **What the shared GPU cache calls one decoded video frame**: the file, when it was last
+/// written, and the size it came back at.
+///
+/// [`peek_page_texture_key`]'s twin, and for its reasons: two files are two pictures, one file
+/// rewritten is two pictures, and one file decoded into two boxes is two rasters of the same
+/// picture. A picture file needs none of this — its texture is named by a hash of its own bytes —
+/// and a frame cannot be, because the bytes it was decoded from are a container this process
+/// never held whole.
+fn video_frame_texture_key(
+    path: &Path,
+    mtime: Option<SystemTime>,
+    width: u32,
+    height: u32,
+) -> String {
+    let stamp = mtime
+        .and_then(|mtime| mtime.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map_or_else(|| "?".to_owned(), |since| since.as_nanos().to_string());
+    format!("video-frame:{}:{stamp}:{width}x{height}", path.display())
 }
 
 struct MathWorker {
@@ -1010,6 +1118,13 @@ impl MathWorker {
                                 source: bt_term::InlineImageSource::LocalPath(path.clone()),
                             });
                             (leaf, DecorationWorkerCompletion::PeekImage { path, result })
+                        }
+                        MathWorkerRequest::PeekVideoFrame { leaf, path } => {
+                            let glance = read_video_glance(&path);
+                            (
+                                leaf,
+                                DecorationWorkerCompletion::PeekVideoFrame { path, glance },
+                            )
                         }
                         MathWorkerRequest::PeekPage {
                             leaf,
@@ -5035,14 +5150,23 @@ fn path_is_previewable_image(path: &Path) -> bool {
 /// none. A PDF-shaped surface of any kind would be a second answer to a
 /// question the engine has already answered.
 ///
-/// **And the whole of video** (user ruling 2026-08-25). A `.mp4` is a page by
-/// the identical argument PDF is one: the engine already on this seat plays it
-/// and this window has no decoder of its own, so the row that used to draw the
-/// "no preview for this file type" card now opens a player with controls, a
-/// scrubber and a volume. Which spellings the engine can actually play is
-/// [`preview::PAGE_EXTENSIONS`]'s own note; a container it cannot play is not on
-/// the list and still gets the card, because a lane that opened a download
-/// dialog would be worse than the refusal it replaced.
+/// **And no part of video** (measured 2026-08-25, `docs/DESIGN.md` §7.16; still
+/// true after 2026-08-27's §7.21). The argument that made PDF a member was
+/// offered for `.mp4` on the same morning and the machine refused it: WebView2
+/// ships a PDF reader and has **no viewer for a top-level media response**, so
+/// `file:///…/clip.mp4` becomes a download, the platform bridge cancels every
+/// download, and the navigation ends `ConnectionAborted` under the 「did not
+/// respond」 card. A video on this lane would replace an honest refusal with a
+/// browser error.
+///
+/// So a video is not a page here and is not one anywhere else either — the four
+/// doors are pinned by [`a_video_takes_no_page_lane_at_any_door`]. What a video
+/// *is* since 2026-08-27 is a class of its own with a face of its own
+/// ([`preview::PreviewFtype::Video`]): the hover card and the preview pane draw
+/// its first frame, decoded by this process through Media Foundation, and say
+/// how long it is. That is a picture, not a player; **nothing in this build
+/// plays anything**, and the route by which something one day might is written
+/// down in §7.21 ④ rather than left to be rediscovered.
 ///
 /// **This is where the page class is written down — once**, in
 /// [`preview::PAGE_EXTENSIONS`], and this function is
@@ -5067,14 +5191,31 @@ fn path_opens_as_a_page(path: &Path) -> bool {
 ///
 /// The fork `Runtime::open_preview` has always had, lifted out so that it can be
 /// asked without a window - it is a claim about names and about one policy, and
-/// both halves are answerable on their own. Three lanes and no fourth: pixels
-/// through the decoder, a page through the engine, and everything else through
-/// the tab's pool, which is where the "no preview for this file type" card is
-/// drawn for the things none of the three can read.
+/// both halves are answerable on their own. Pixels through the decoder, a page
+/// through the engine, and everything else through the tab's pool, which is
+/// where the "no preview for this file type" card is drawn for the things none
+/// of the others can read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PreviewOpenLane {
     /// A picture, down the decode lane.
     Picture,
+    /// **A video, down the same decode lane, one frame of it** (user ruling
+    /// 2026-08-27; §7.21).
+    ///
+    /// Its own arm rather than [`Self::Picture`], and the distinction is the
+    /// thing this fork exists to keep straight. What decides `Picture` is
+    /// [`bt_term::has_admissible_image_extension`] — the *inline image
+    /// detector's* own list — because a reference printed in the terminal and a
+    /// row in the tree must not disagree about whether a name is a picture, and
+    /// a `.mp4` drawn inline in a shell's output is not something anybody asked
+    /// for. A video is a picture to the *preview surfaces* and to nothing else,
+    /// so it is answered here, off [`preview::path_names_a_video`], and the
+    /// detector's list is left alone.
+    ///
+    /// **It is not a page and this arm is not a step towards one.** Where it
+    /// lands is a still frame on the picture channel; a video that could be
+    /// played would be a fourth lane and a ruling, not this one growing.
+    Video,
     /// A page, minted from this path and hosted by the engine.
     Page,
     /// A document, through the tab's shared pool.
@@ -5174,6 +5315,16 @@ fn preview_open_lane(path: &Path) -> PreviewOpenLane {
     if path_is_previewable_image(path) {
         return PreviewOpenLane::Picture;
     }
+    // **Before the page question, and it costs nothing that the order is
+    // arbitrary.** The two tables cannot overlap — a video spelling inside
+    // `preview::PAGE_EXTENSIONS` is exactly what §7.16's pinned refusal is
+    // there to catch — so this could stand on either side of the mint and
+    // answer the same. It reads first because it is the cheaper question and
+    // because a reader walking this ladder meets the classes in the order they
+    // are cheap to decide.
+    if preview::path_names_a_video(path) {
+        return PreviewOpenLane::Video;
+    }
     if path_opens_as_a_page(path) && webnav::Mint::file(path).is_ok() {
         return PreviewOpenLane::Page;
     }
@@ -5228,6 +5379,14 @@ enum PeekBodyKind {
     /// **What the card can state about a page it cannot render** — how large the
     /// file is and how many pages it holds (user ruling 2026-08-25).
     Facts,
+    /// **One frame of a video and the two lines under it** (user ruling
+    /// 2026-08-27; §7.21) — see [`file_peek::PeekBody::Frame`].
+    ///
+    /// A sibling of [`Self::Picture`] and not a case of it, for the same reason
+    /// [`Self::Facts`] is not a case of [`Self::Document`]: the pixels take one
+    /// route and the *body* is a different shape, because a video's card owes
+    /// two sentences a photograph's does not.
+    Frame,
     /// The preview pane's own body, laid out at the card's width.
     Document,
 }
@@ -5270,7 +5429,18 @@ fn peek_body_kind(
 ) -> PeekBodyKind {
     match (ftype, path) {
         (preview::PreviewFtype::Image, Some(_)) => PeekBodyKind::Picture,
-        (preview::PreviewFtype::Image | preview::PreviewFtype::Unknown, _) => PeekBodyKind::Refused,
+        // **A video, and the same two-part shape the picture arm has**: a body
+        // that needs a file has one, and a composed document that merely spells
+        // a video's name — a git diff of `clip.mp4` is a reading of a repository
+        // — has nothing to decode and falls to the refusal, exactly as a
+        // composed `.png` does one line up.
+        (preview::PreviewFtype::Video, Some(_)) => PeekBodyKind::Frame,
+        (
+            preview::PreviewFtype::Image
+            | preview::PreviewFtype::Video
+            | preview::PreviewFtype::Unknown,
+            _,
+        ) => PeekBodyKind::Refused,
         (preview::PreviewFtype::Web, Some(path))
             if preview_open_lane(path) == PreviewOpenLane::Page =>
         {
@@ -7937,6 +8107,23 @@ struct WindowRuntime {
     /// the read that refreshes it costs one worker hop the next hover pays
     /// anyway.
     peek_facts: Option<PeekFacts>,
+    /// **How long each video this window has opened runs, and how large its picture is** (user
+    /// ruling 2026-08-27; §7.21) — keyed exactly as [`Self::peek_cache`] is.
+    ///
+    /// A map beside the picture's slot above rather than a slot of its own, and the asymmetry is
+    /// the difference between a sentence and a texture. The card's page facts are one glance's and
+    /// are dropped with the card; these are read by **two** surfaces at once — a card over one row
+    /// while a pane stands on another file — and they are three numbers rather than megabytes, so
+    /// there is nothing here for a cap to save.
+    ///
+    /// It is keyed by `bt_term::normalized_local_image_path_key` so that a lookup beside a
+    /// `peek_cache` lookup is the same lookup: the pixels and the sentence about them arrive from
+    /// one worker answer and must never be found for two different files.
+    ///
+    /// **An entry survives the pixels being evicted**, which is what makes the degraded card work:
+    /// a video this machine cannot decode has no entry in `peek_cache` that is anything but
+    /// `Failed`, and still has its size here.
+    video_facts: BTreeMap<String, preview::VideoFacts>,
     /// **The first page the glance card is drawing** (user ruling 2026-08-25) — see
     /// [`PeekPageSlot`].
     ///
@@ -11065,8 +11252,11 @@ impl TabState {
             // A rendered page: prose, in the window's face, at the files size.
             preview::PreviewView::Markdown => Some(false),
             // A page is the fourth: what is on the glass is the engine's, and
-            // this window has no lines of it to quote at any size.
+            // this window has no lines of it to quote at any size. A video is
+            // the fifth and is the picture's own answer said again — a frame is
+            // pixels, and pixels are not rows.
             preview::PreviewView::Image
+            | preview::PreviewView::Video
             | preview::PreviewView::Graph
             | preview::PreviewView::Web
             | preview::PreviewView::None => None,
@@ -14620,6 +14810,24 @@ struct PreviewImageState {
     /// this picture" — and it is the same discipline
     /// [`image_destination`]'s own doc comment states: one rectangle, one author.
     drawn: Option<[f32; 4]>,
+    /// **How large the thing in this file really is, when that is not how large
+    /// the pixels are** (user ruling 2026-08-27; §7.21).
+    ///
+    /// `None` for a picture, and it is `None` for a picture because for a
+    /// picture there is no difference: [`Self::native`] is the decode, and the
+    /// decode is the file.
+    ///
+    /// A **video** parts the two. Its pixels are one frame decoded into
+    /// [`VIDEO_FRAME_FIT_PX`], so `native` is at most 1920×1080 however large the
+    /// recording is — and the number a reader wants over the head of a 4K
+    /// capture is 3840×2160. Both numbers are true and they answer different
+    /// questions, so the surface says the one that is about the *file* and the
+    /// arithmetic goes on using the one that is about the pixels.
+    ///
+    /// It is a field rather than a lookup at each of the three places the head
+    /// is built, because those three are far apart and the fourth would be
+    /// written without it.
+    stated_size: Option<(u32, u32)>,
 }
 
 impl PreviewImageState {
@@ -14633,6 +14841,7 @@ impl PreviewImageState {
             bytes: None,
             scale_settle_deadline: None,
             drawn: None,
+            stated_size: None,
         }
     }
 
@@ -14644,9 +14853,13 @@ impl PreviewImageState {
             .unwrap_or_else(|| self.path.to_string_lossy().into_owned())
     }
 
+    /// The head's own sentence: the file's name and how large what is in it is.
+    ///
+    /// [`Self::stated_size`] first, because when the two differ it is the one
+    /// about the file — see that field.
     fn title(&self) -> String {
         let name = self.file_name();
-        match self.native {
+        match self.stated_size.or(self.native) {
             Some((width, height)) => i18n::image_preview_title(&name, width, height),
             None => name,
         }
@@ -27079,6 +27292,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         peek_picture: None,
         peek_card_pending: None,
         peek_facts: None,
+        video_facts: BTreeMap::new(),
         peek_page: None,
         drag: None,
         foreign: None,
@@ -41623,10 +41837,22 @@ impl Runtime<'_> {
     /// down the decode lane and everything else goes through the tab's pool,
     /// exactly as they do for a double-click, and the surface is the caller's.
     fn open_preview_onto(&mut self, surface: PreviewSurface, path: PathBuf) -> Result<()> {
-        if path_is_previewable_image(&path) {
-            self.open_preview_image_on(surface, path)
-        } else {
-            self.open_preview_file_on(surface, path)
+        // **Through [`preview_open_lane`] and not through a second reading of the
+        // name** (§7.10 ⑥). This door used to ask `path_is_previewable_image`
+        // directly, which was the same answer while there were two lanes and
+        // stopped being one the day a video became a third: a dropped `.mp4`
+        // would have gone to the pool and drawn nothing, because the pool's
+        // buffer for it says "picture" and the pane it landed on has no picture.
+        match preview_open_lane(&path) {
+            PreviewOpenLane::Picture | PreviewOpenLane::Video => {
+                self.open_preview_image_on(surface, path)
+            }
+            // The page arm is the pool door's own, one call further in — see
+            // [`Self::open_preview_source_on`], which is where every document
+            // that is really a page turns around.
+            PreviewOpenLane::Page | PreviewOpenLane::Document => {
+                self.open_preview_file_on(surface, path)
+            }
         }
     }
 
@@ -45403,7 +45629,7 @@ impl Runtime<'_> {
         let Some((surface, _)) = self.preview_surface_at(position) else {
             return Ok(false);
         };
-        if !surface_takes_image_zoom(surface) || self.preview_image_geometry(surface).is_none() {
+        if !self.picture_takes_zoom(surface) || self.preview_image_geometry(surface).is_none() {
             return Ok(false);
         }
         let point = [position.x as f32, position.y as f32];
@@ -45785,7 +46011,13 @@ impl Runtime<'_> {
             // the pixels are the engine's, composed *under* this surface and seen
             // through the hole punched in it (DESIGN.md 7.8 (2)), so anything put
             // here would be put over a browser.
+            // A video is the image's arrangement exactly: a frame on the picture
+            // channel, and the two fact lines under it written by the same
+            // `preview_image_meta` that writes a picture's — which is a
+            // `PreviewBody` built beside this one and not a document parsed into
+            // it.
             preview::PreviewView::Image
+            | preview::PreviewView::Video
             | preview::PreviewView::Graph
             | preview::PreviewView::Web
             | preview::PreviewView::None => PreviewDocument::Empty,
@@ -46535,6 +46767,42 @@ impl Runtime<'_> {
         scale: f32,
     ) -> Option<bt_render::PreviewBody> {
         let zoom = self.preview_image_zoom(surface);
+        // **A video says the two lines its card says, and says them here** (user ruling
+        // 2026-08-27; §7.21). It is the same file read the same way — how long it runs, how large
+        // its picture is, how large the file is — so the sentence is built by the same function,
+        // and the two surfaces cannot come to disagree about one recording.
+        //
+        // **Joined into one line rather than stacked into two**, and that is not a compromise:
+        // this strip *is* the pane's fact line, it has always joined its fields with a middle dot,
+        // and the card stacks only because a card is 280 pixels wide. The facts are the same
+        // facts in the same order.
+        //
+        // The zoom is not among them, and it is not among them because there is no zoom: a
+        // video's frame stands at Fit and the wheel over it moves nothing
+        // ([`Self::picture_takes_zoom`], where the whole argument is written). A sentence that
+        // said `Fit` under a picture that cannot be anything else would be a field with no
+        // question behind it.
+        let path = self.preview_pane(surface)?.image.as_ref()?.path.clone();
+        if preview::path_names_a_video(&path) {
+            let facts = self.video_facts_of(&path);
+            let extension = path.extension().and_then(std::ffi::OsStr::to_str);
+            let sentence = preview::video_fact_lines(extension, facts)
+                .into_iter()
+                .flatten()
+                .collect::<Vec<String>>()
+                .join(" \u{b7} ");
+            if sentence.is_empty() {
+                return None;
+            }
+            // **The drawn frame's extent and not the recording's**, which is the one place these
+            // two sizes must not be confused: the sentence stands under the picture on screen,
+            // and the picture on screen is the frame this window decoded — see
+            // [`VIDEO_FRAME_FIT_PX`], which is why the two differ at all.
+            let drawn = self
+                .preview_picture(surface)
+                .and_then(|picture| picture.native);
+            return Some(self.preview_meta_body(body, scale, sentence, drawn, zoom));
+        }
         let image = self.preview_pane(surface)?.image.as_ref()?;
         let extension = image
             .path
@@ -46553,6 +46821,29 @@ impl Runtime<'_> {
             image.bytes,
             caption.as_deref(),
         )?;
+        let native = image.native;
+        Some(self.preview_meta_body(body, scale, sentence, native, zoom))
+    }
+
+    /// **One sentence under whatever picture this surface is drawing** — where it stands, and in
+    /// what ink.
+    ///
+    /// Lifted out of [`Self::preview_image_meta`] when a video's frame arrived beside a picture
+    /// (user ruling 2026-08-27; §7.21): the two differ entirely in *what* they say and not at all
+    /// in where it goes, and a second copy of this placement is a second thing to get wrong the
+    /// next time a zoom changes what "under" means.
+    ///
+    /// `drawn` is the size of the pixels actually on screen — a picture's decode or a video's
+    /// frame — and `None` for a surface still waiting on them, which falls back to the fit
+    /// fraction the empty body reserves.
+    fn preview_meta_body(
+        &self,
+        body: [f32; 4],
+        scale: f32,
+        sentence: String,
+        drawn: Option<(u32, u32)>,
+        zoom: ImageZoom,
+    ) -> bt_render::PreviewBody {
         let palette = bt_render::chrome_palette();
         let font_size = PREVIEW_META_FONT_LOGICAL_PX * scale;
         let line_height = (font_size * 1.4).round().max(1.0);
@@ -46573,7 +46864,7 @@ impl Runtime<'_> {
         // pane's height has no "under" left: the line then rests on the body's
         // last row, over the picture, which is what every viewer with an info
         // bar does and the only alternative to it being nowhere at all.
-        let drawn_height = match image.native {
+        let drawn_height = match drawn {
             Some((width, height)) if width > 0 && height > 0 => {
                 let rect = image_destination(body, [width, height], zoom);
                 rect[3] - rect[1]
@@ -46581,7 +46872,7 @@ impl Runtime<'_> {
             _ => (body[3] - body[1]) * PREVIEW_IMAGE_FIT_HEIGHT_FRACTION,
         };
         let top = ((body[1] + body[3] + drawn_height) / 2.0 + gap).min(body[3] - line_height);
-        Some(bt_render::PreviewBody {
+        bt_render::PreviewBody {
             clip: body,
             quads: Vec::new(),
             blocks: Vec::new(),
@@ -46603,7 +46894,7 @@ impl Runtime<'_> {
                 align_right: false,
                 align_center: true,
             }],
-        })
+        }
     }
 
     /// How one surface is looking at its picture (ticket #60).
@@ -46612,11 +46903,40 @@ impl Runtime<'_> {
     /// [`surface_takes_image_zoom`] is the whole of that rule and this is one of
     /// its two readers, the other being the door below that declines to write.
     fn preview_image_zoom(&self, surface: PreviewSurface) -> ImageZoom {
-        if !surface_takes_image_zoom(surface) {
+        if !self.picture_takes_zoom(surface) {
             return ImageZoom::FIT;
         }
         self.preview_pane(surface)
             .map_or(ImageZoom::FIT, |pane| pane.zoom)
+    }
+
+    /// **Whether the picture on this surface may be zoomed** — the surface's own
+    /// rule ([`surface_takes_image_zoom`]) and the *content's*.
+    ///
+    /// **A video's frame does not zoom** (user ruling 2026-08-27; §7.21), and the
+    /// reason is the sentence under it rather than the picture itself. A
+    /// percentage on this window means "how many of the file's own pixels am I
+    /// seeing", and a frame has no such number to be a multiple of: it was
+    /// decoded into [`VIDEO_FRAME_FIT_PX`], so `100%` over a 4K capture would be
+    /// half of it — a magnification of the *thumbnail* printed beside the
+    /// recording's real resolution, two numbers about size meaning different
+    /// things. And a gesture that changes what a reader is looking at without
+    /// telling them what it changed it to is the one thing `page_foot_flash`
+    /// exists to have ended.
+    ///
+    /// So the frame is a face and not a viewer: it stands at Fit, the wheel over
+    /// it spends a notch on nothing, and the two fact lines are the whole of what
+    /// the pane says. Zooming a video is a thing to want *while it plays*, which
+    /// is §7.21 ④'s slice and will bring its own readout.
+    ///
+    /// Said here rather than at each of the five gestures for the reason its
+    /// surface half is said once: one of them would eventually be written
+    /// without it.
+    fn picture_takes_zoom(&self, surface: PreviewSurface) -> bool {
+        surface_takes_image_zoom(surface)
+            && !self
+                .preview_picture(surface)
+                .is_some_and(|picture| preview::path_names_a_video(&picture.path))
     }
 
     /// Put a new zoom on a surface and repaint if it moved.
@@ -46644,7 +46964,7 @@ impl Runtime<'_> {
     /// one and there is nothing to settle.
     fn set_preview_image_zoom(&mut self, surface: PreviewSurface, zoom: ImageZoom) -> Result<bool> {
         let held = self.preview_image_zoom(surface);
-        if !surface_takes_image_zoom(surface) || held == zoom {
+        if !self.picture_takes_zoom(surface) || held == zoom {
             return Ok(false);
         }
         if image_zoom_settles(held, zoom) {
@@ -46732,6 +47052,35 @@ impl Runtime<'_> {
                     .is_some_and(|pane| pane.image.is_some())
             })
             .collect()
+    }
+
+    /// **Ask the decoration worker for one file's native pixels**, down whichever of the two
+    /// decoders can read it (user ruling 2026-08-27; §7.21).
+    ///
+    /// One door for both surfaces that show pixels — the preview pane and the glance card — and
+    /// therefore the one place the fork between the picture decoder and the video decoder is
+    /// written. Both fill the same cache under the same key, so the callers below this line do not
+    /// know which of them answered and must not: what they asked for is "this file's pixels", and
+    /// a second reading of the name at the *delivery* end is how a `.png` and a `.mp4` would come
+    /// to disagree about who owns an entry.
+    ///
+    /// The name is read with [`preview::path_names_a_video`], which is the very predicate
+    /// [`preview_open_lane`] forks on, so a file that opened as a video is decoded as one.
+    ///
+    /// Answers whether the question went out. `false` is a worker that has stopped or a channel
+    /// that has closed, which each caller turns into its own kind of silence.
+    fn request_peek_pixels(&self, path: &Path) -> bool {
+        if !self.app.math_worker_running {
+            return false;
+        }
+        let leaf = self.focused_shell_address();
+        let path = path.to_owned();
+        let request = if preview::path_names_a_video(&path) {
+            MathWorkerRequest::PeekVideoFrame { leaf, path }
+        } else {
+            MathWorkerRequest::PeekImage { leaf, path }
+        };
+        self.app.math_worker.tasks.send(request).is_ok()
     }
 
     /// The picture one surface is showing, if it is showing one.
@@ -46930,7 +47279,17 @@ impl Runtime<'_> {
                 return;
             }
             Some(PeekCacheEntry::Failed) => {
-                if let Some(picture) = self.preview_picture_mut(surface) {
+                // **A video that would not decode is not a failure of this pane** (user ruling
+                // 2026-08-27; §7.21). A file called `.png` that no decoder can read is something
+                // the reader should be told about, because there is nothing else to say about it;
+                // a `.webm` in a codec this machine has not got is an ordinary file, and the pane
+                // still has its length, its size and its name to state. So the sentence is
+                // withheld and the two fact lines carry the surface — see
+                // [`Self::preview_image_meta`], whose degraded form exists for exactly this
+                // frame.
+                if !preview::path_names_a_video(&path)
+                    && let Some(picture) = self.preview_picture_mut(surface)
+                {
                     picture.failure.get_or_insert_with(|| {
                         i18n::Text::PreviewFailedImageLoad.text().to_owned()
                     });
@@ -46940,10 +47299,17 @@ impl Runtime<'_> {
             }
             None => None,
         };
+        // **What the recording is, when the pixels are only a frame of it** — see
+        // [`PreviewImageState::stated_size`]. Read before the borrow below because it is a
+        // lookup on the window, and `None` for everything that is not a video.
+        let stated = preview::path_names_a_video(&path)
+            .then(|| self.video_facts_of(&path).native)
+            .flatten();
         if let (Some(picture), Some((_, _, native_width, native_height))) =
             (self.preview_picture_mut(surface), decoded.as_ref())
         {
             picture.native = Some((*native_width, *native_height));
+            picture.stated_size = stated;
         }
         let Some((content_key, rgba, native_width, native_height)) = decoded else {
             self.hide_preview_picture(surface);
@@ -46953,16 +47319,7 @@ impl Runtime<'_> {
                 }
                 return;
             }
-            if self
-                .app
-                .math_worker
-                .tasks
-                .send(MathWorkerRequest::PeekImage {
-                    leaf: self.focused_shell_address(),
-                    path,
-                })
-                .is_ok()
-            {
+            if self.request_peek_pixels(&path) {
                 self.window
                     .peek_cache
                     .insert(cache_key, PeekCacheEntry::Pending);
@@ -51159,10 +51516,84 @@ impl Runtime<'_> {
     /// one lookup once it is warm, and the two `pending` guards below mean a
     /// question already in flight is never asked twice.
     fn file_peek_picture(&mut self, path: &Path, scale: f32) -> file_peek::PeekBody {
-        let empty = file_peek::PeekBody::Image {
-            width: 0.0,
-            height: 0.0,
-        };
+        let (width, height) = self
+            .file_peek_fitted_pixels(
+                path,
+                scale,
+                (
+                    file_peek::PEEK_IMAGE_W_LOGICAL_PX,
+                    file_peek::PEEK_IMAGE_H_LOGICAL_PX,
+                ),
+            )
+            .unwrap_or((0.0, 0.0));
+        file_peek::PeekBody::Image { width, height }
+    }
+
+    /// **The card's whole body over a video**: one frame of it, and the two lines that say what it
+    /// is (user ruling 2026-08-27; §7.21).
+    ///
+    /// [`Self::file_peek_facts`]'s opposite number and [`Self::file_peek_picture`]'s twin — which
+    /// is the point of it being neither of them written twice. The picture comes down the picture
+    /// lane, byte for byte the same way a `.png`'s does, because by the time the card sees it a
+    /// frame **is** a picture; the two lines come from the facts the same decode filed
+    /// ([`WindowRuntime::video_facts`]), which is why they are still there for a container this
+    /// machine cannot decode at all.
+    ///
+    /// It is fitted into the **page** box rather than the picture box, and the difference is a
+    /// judgement about what is being looked at: a picture's box leaves the card short because a
+    /// photograph is the whole answer, and a video's card carries two lines under the frame, so it
+    /// takes the taller ground a PDF's page column already established at the same width.
+    fn file_peek_frame(&mut self, path: &Path, scale: f32) -> file_peek::PeekBody {
+        let (width, height) = self
+            .file_peek_fitted_pixels(
+                path,
+                scale,
+                (
+                    file_peek::PEEK_PAGE_W_LOGICAL_PX,
+                    file_peek::PEEK_PAGE_H_LOGICAL_PX,
+                ),
+            )
+            .unwrap_or((0.0, 0.0));
+        file_peek::PeekBody::Frame {
+            width,
+            height,
+            facts: self.video_facts_of(path),
+        }
+    }
+
+    /// **What this window knows about the video at `path`** — three optional numbers, and the
+    /// default when nothing has come back yet.
+    ///
+    /// One reader for both surfaces, keyed exactly as the pixels beside it are, so the card and
+    /// the pane cannot end up printing two different sentences about one file. A file nothing has
+    /// been asked about yet answers `VideoFacts::default()`, which is three `None`s — the same
+    /// answer a file whose decode has not landed gives, and the same one a file that never decodes
+    /// keeps for its length and its resolution.
+    fn video_facts_of(&self, path: &Path) -> preview::VideoFacts {
+        self.window
+            .video_facts
+            .get(&normalized_local_image_path_key(path))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// **This file's pixels, resampled into `fit`** — or `None` while there are none on the card.
+    ///
+    /// The shared half of the two bodies above, and every sentence on
+    /// [`Self::file_peek_picture`] is about this: the path-keyed native decode in
+    /// [`WindowRuntime::peek_cache`] and the one resample lane behind it, asked by the frame,
+    /// guarded so that a question already in flight is never asked twice.
+    ///
+    /// `None` is "draw the ground and no picture" and it is deliberately one word for four
+    /// situations — the decode is out, the decode failed, the resample is out, the box has no
+    /// extent. There is no "loading" among them for the same reason there is none in the document:
+    /// a word that appears for two frames and is replaced is worse than the space it occupied.
+    fn file_peek_fitted_pixels(
+        &mut self,
+        path: &Path,
+        scale: f32,
+        fit: (f32, f32),
+    ) -> Option<(f32, f32)> {
         let key = normalized_local_image_path_key(path);
         let (content_key, rgba, native_width, native_height) =
             match self.window.peek_cache.get(&key) {
@@ -51172,39 +51603,20 @@ impl Runtime<'_> {
                     width_px,
                     height_px,
                 }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
-                // A decode in flight, or one that failed: the card shows the ground
-                // and no picture. There is no "loading" word here for the same reason
-                // there is none in the document — see [`file_peek::PeekBody`].
-                Some(PeekCacheEntry::Pending | PeekCacheEntry::Failed) => return empty,
+                Some(PeekCacheEntry::Pending | PeekCacheEntry::Failed) => return None,
                 None => {
-                    if self.app.math_worker_running
-                        && self
-                            .app
-                            .math_worker
-                            .tasks
-                            .send(MathWorkerRequest::PeekImage {
-                                leaf: self.focused_shell_address(),
-                                path: path.to_owned(),
-                            })
-                            .is_ok()
-                    {
+                    if self.request_peek_pixels(path) {
                         self.window.peek_cache.insert(key, PeekCacheEntry::Pending);
                     }
-                    return empty;
+                    return None;
                 }
             };
         // The frame the mock-up gives the picture, in whole physical pixels.
-        let fit_width = ((file_peek::PEEK_IMAGE_W_LOGICAL_PX * scale).round() as u32).max(1);
-        let fit_height = ((file_peek::PEEK_IMAGE_H_LOGICAL_PX * scale).round() as u32).max(1);
-        let Some((display_width, display_height)) =
-            bt_render::preview_image_extent(fit_width, fit_height, native_width, native_height)
-        else {
-            return empty;
-        };
-        let fitted = file_peek::PeekBody::Image {
-            width: display_width as f32,
-            height: display_height as f32,
-        };
+        let fit_width = ((fit.0 * scale).round() as u32).max(1);
+        let fit_height = ((fit.1 * scale).round() as u32).max(1);
+        let (display_width, display_height) =
+            bt_render::preview_image_extent(fit_width, fit_height, native_width, native_height)?;
+        let fitted = (display_width as f32, display_height as f32);
         let target: PeekThumbnailTarget = (content_key, display_width, display_height);
         if self
             .window
@@ -51212,11 +51624,11 @@ impl Runtime<'_> {
             .as_ref()
             .is_some_and(|picture| picture.matches(&target))
         {
-            return fitted;
+            return Some(fitted);
         }
         if self.window.peek_card_pending.as_ref() == Some(&target) || !self.app.math_worker_running
         {
-            return empty;
+            return None;
         }
         if self
             .app
@@ -51230,7 +51642,7 @@ impl Runtime<'_> {
         {
             self.window.peek_card_pending = Some(target);
         }
-        empty
+        None
     }
 
     /// **The card's whole body over a page**: its first page and its two facts,
@@ -51444,6 +51856,15 @@ impl Runtime<'_> {
                         .clone()
                         .expect("a facts body is only chosen for a file");
                     self.file_peek_facts(&path, scale)
+                }
+                // One frame of a video and the two lines under it. Like a
+                // picture's, they are a *file's* — see [`Self::file_peek_frame`].
+                PeekBodyKind::Frame => {
+                    let path = subject
+                        .path
+                        .clone()
+                        .expect("a frame body is only chosen for a file");
+                    self.file_peek_frame(&path, scale)
                 }
                 PeekBodyKind::Document => {
                     let probe = [
@@ -60276,7 +60697,11 @@ impl Runtime<'_> {
         at: Option<bt_transcript::paths::PrintedPathLocation>,
     ) -> Result<()> {
         match preview_open_lane(&path) {
-            PreviewOpenLane::Picture => return self.open_preview_image(path),
+            // A video's frame has no lines either, so `at` is spent on it the
+            // way it is spent on a picture and on a page.
+            PreviewOpenLane::Picture | PreviewOpenLane::Video => {
+                return self.open_preview_image(path);
+            }
             // A page has no lines of this window's either, so `at` is spent the
             // way it is spent on a picture: the reference opens the thing it
             // names and the coordinate belongs to a space that does not exist.
@@ -60919,6 +61344,13 @@ impl Runtime<'_> {
                 DecorationWorkerCompletion::PeekImage { path, result } => {
                     self.complete_peek_image(path, result)?;
                     // Peek state never enters frames, so no republish is needed.
+                    false
+                }
+                // **A video's frame**, on exactly the terms above: it lands in the same cache, is
+                // claimed by the same file rather than by the same asker, and moves no frame of
+                // its own — see [`Self::complete_peek_video_frame`].
+                DecorationWorkerCompletion::PeekVideoFrame { path, glance } => {
+                    self.complete_peek_video_frame(path, glance)?;
                     false
                 }
                 // **The glance card's page**, on the same reasoning and with one difference: unlike
@@ -62961,6 +63393,61 @@ impl Runtime<'_> {
         // ground while the decode was out. Nothing else will move the pointer to
         // rebuild the chrome, so the frame is owed here — and the rebuild is what
         // asks for the resample, which is the next step of the same errand.
+        if self.window.file_peek.as_ref().is_some_and(|peek| {
+            peek.source
+                .file_path()
+                .is_some_and(|path| normalized_local_image_path_key(path) == cache_key)
+        }) && self.refresh_overlay()
+        {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **Take delivery of one video's frame and the facts that came with it** (user ruling
+    /// 2026-08-27; §7.21).
+    ///
+    /// [`Self::complete_peek_image`]'s twin, and the parts that are the same are the same on
+    /// purpose: the pixels go into the window's one decode cache under the file's own key, every
+    /// surface showing that file is asked to lay out again, and a glance card standing over it is
+    /// owed a rebuild because nothing else will move the pointer to ask for one.
+    ///
+    /// **What differs is that a failure is not a failure.** A picture that will not decode puts a
+    /// sentence on the pane — "Preview failed: image could not be loaded" — because a file called
+    /// `.png` that is not one is a thing the reader should be told about. A video that will not
+    /// decode is very often an ordinary file in a container this machine has no codec for, and the
+    /// card and the pane have something true to draw either way: the format and the size. So the
+    /// facts are filed **before** the frame is looked at, and the cache is marked `Failed` without
+    /// anybody's failure line being written.
+    fn complete_peek_video_frame(&mut self, path: PathBuf, glance: VideoGlance) -> Result<()> {
+        let cache_key = normalized_local_image_path_key(&path);
+        // Filed first and unconditionally: these outlive the pixels and are the whole of the
+        // degraded card — see [`WindowRuntime::video_facts`].
+        self.window
+            .video_facts
+            .insert(cache_key.clone(), glance.facts);
+        let entry = match glance.frame {
+            Some(frame) => PeekCacheEntry::Ready {
+                key: video_frame_texture_key(&path, glance.mtime, frame.width, frame.height),
+                rgba: Arc::from(frame.rgba.into_boxed_slice()),
+                width_px: frame.width,
+                height_px: frame.height,
+            },
+            None => PeekCacheEntry::Failed,
+        };
+        self.window.peek_cache.insert(cache_key.clone(), entry);
+        // Every surface standing on this file, for `complete_peek_image`'s reason: a decode is
+        // addressed by path and the answer is the same pixels for a pane, for a window torn off
+        // it, or for both at once.
+        let waiting = self.preview_picture_hosts().into_iter().any(|surface| {
+            self.preview_picture(surface)
+                .is_some_and(|picture| normalized_local_image_path_key(&picture.path) == cache_key)
+        });
+        if waiting {
+            self.refresh_preview_for_layout();
+            self.refresh_chrome();
+            self.present_chrome_change()?;
+        }
         if self.window.file_peek.as_ref().is_some_and(|peek| {
             peek.source
                 .file_path()
@@ -92059,6 +92546,50 @@ mod tests {
         );
     }
 
+    /// RED — **every zoom gesture asks the door that knows a video from a
+    /// picture** (user ruling 2026-08-27; §7.21).
+    ///
+    /// `surface_takes_image_zoom` answers about the *surface* and is now half of
+    /// the rule: the other half is the content, because a frame decoded into
+    /// `VIDEO_FRAME_FIT_PX` has no "the file's own pixels" for a percentage to be
+    /// a multiple of. `Runtime::picture_takes_zoom` is both halves, and what has
+    /// to be true is that no gesture reaches past it to the surface half alone —
+    /// which is a claim about *which function a call site names*, so it is
+    /// asserted as text for `files_locate_door_tests`' reason.
+    ///
+    /// RED GATE: put `surface_takes_image_zoom` back at the wheel's gate and this
+    /// names the file and the count — on the machine, a bare wheel over a video
+    /// magnifies it and the fact line underneath never mentions that it did.
+    #[test]
+    fn no_zoom_gesture_reaches_past_the_door_that_knows_a_video() {
+        const SOURCE: &str = include_str!("main.rs");
+        // Built at run time so this test's own text is not one of the sites it
+        // is counting. One: inside `picture_takes_zoom`, which is the one place
+        // the surface half is asked and then AND-ed with the content's.
+        let surface_half = format!("surface_takes_image_zoom{}", "(surface)");
+        assert_eq!(
+            SOURCE.matches(&surface_half).count(),
+            1,
+            "a zoom gesture is asking the surface half alone — it must ask \
+             `picture_takes_zoom`, which is the surface half AND the content's"
+        );
+        for gate in [
+            "fn press_preview_image(",
+            "fn preview_image_zoom(",
+            "fn set_preview_image_zoom(",
+        ] {
+            let start = SOURCE
+                .find(gate)
+                .unwrap_or_else(|| panic!("{gate} is declared in this file"));
+            let rest = &SOURCE[start + gate.len()..];
+            let body = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+            assert!(
+                body.contains("self.picture_takes_zoom(surface)"),
+                "{gate} must ask the content-aware door"
+            );
+        }
+    }
+
     #[test]
     fn the_glance_card_mirrors_at_fit_and_cannot_be_zoomed() {
         assert!(!surface_takes_image_zoom(PreviewSurface::Peek));
@@ -106876,6 +107407,7 @@ mod tests {
                 MathWorkerRequest::Math { leaf, .. }
                 | MathWorkerRequest::InlineImage { leaf, .. }
                 | MathWorkerRequest::PeekImage { leaf, .. }
+                | MathWorkerRequest::PeekVideoFrame { leaf, .. }
                 | MathWorkerRequest::PeekPage { leaf, .. }
                 | MathWorkerRequest::PreviewMath { leaf, .. }
                 | MathWorkerRequest::VerifyPath { leaf, .. } => leaf,
@@ -107018,6 +107550,115 @@ mod tests {
                 124,
                 160
             )
+        );
+    }
+
+    /// RED — **the texture a video's frame is cached under names the file, its
+    /// version and its size** (user ruling 2026-08-27; §7.21).
+    ///
+    /// A picture file's texture is named by a hash of its own bytes, and a frame
+    /// cannot be: the bytes it came from are a container this process never held
+    /// whole, and re-decoding a hundred megabytes to name the eight it produced
+    /// would be the read the cache exists to avoid. So it is named the way a
+    /// PDF's page is — by the file, by when the file was last written, and by
+    /// the box it came back in.
+    ///
+    /// **The modification time is the load-bearing field.** The window keeps a
+    /// video's pixels for as long as its decode cache holds them; a key without
+    /// a version would go on naming the same texture after the file underneath
+    /// had been re-recorded, and the GPU cache would serve yesterday's frame for
+    /// a clip that no longer contains it.
+    ///
+    /// RED GATE: drop the stamp from [`video_frame_texture_key`] and the second
+    /// assertion goes red — on screen, a capture overwritten while the window
+    /// was open goes on showing the frame it used to have.
+    #[test]
+    fn one_video_texture_is_one_file_at_one_version_at_one_size() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let then = now + Duration::from_secs(1);
+        let key = |path: &str, mtime, w, h| video_frame_texture_key(Path::new(path), mtime, w, h);
+        let base = key(r"D:\shots\clip.mp4", Some(now), 1920, 1080);
+        assert_ne!(base, key(r"D:\shots\other.mp4", Some(now), 1920, 1080));
+        assert_ne!(
+            base,
+            key(r"D:\shots\clip.mp4", Some(then), 1920, 1080),
+            "a capture re-recorded under the window is a different picture"
+        );
+        assert_ne!(base, key(r"D:\shots\clip.mp4", Some(now), 960, 540));
+        assert_eq!(base, key(r"D:\shots\clip.mp4", Some(now), 1920, 1080));
+        // A filesystem that will not say gets a name of its own rather than one
+        // that could collide with a real stamp.
+        assert_ne!(base, key(r"D:\shots\clip.mp4", None, 1920, 1080));
+        // And it cannot collide with a page's, which shares the cache.
+        assert!(base.starts_with("video-frame:"));
+        assert!(
+            peek_page_texture_key(Path::new(r"D:\shots\clip.mp4"), Some(now), 0, 1920, 1080)
+                != base
+        );
+    }
+
+    /// RED — **the frame under a hover card and the frame in the preview pane
+    /// come out of one decoder, asked through one door** (user ruling
+    /// 2026-08-27; §7.21).
+    ///
+    /// The whole of §7.10 ⑥ said about a *lane* rather than about a name: a
+    /// glance card and a pane over the same file must show the same picture, and
+    /// the only way that is true by construction is that both ask
+    /// [`WindowRuntime::request_peek_pixels`] and neither reads the file's name
+    /// for itself. The two surfaces are hundreds of lines apart and each has its
+    /// own cache guard, so a second `MathWorkerRequest::PeekVideoFrame` built at
+    /// one of them would compile, would work, and would be the place the two
+    /// drift the day the fork grows a third arm.
+    ///
+    /// Asserted as text for [`files_locate_door_tests`]' reason exactly: what is
+    /// being pinned is *which function builds which request*, and no value any
+    /// assertion can read says that.
+    ///
+    /// RED GATE: inline the fork back into `refit_preview_picture` — that
+    /// function starts naming a decoder and this names the function and the
+    /// lane it named.
+    #[test]
+    fn one_door_decides_which_decoder_a_hover_and_a_pane_ask() {
+        const SOURCE: &str = include_str!("main.rs");
+        /// One method's text, from its signature to the next method's.
+        fn body(signature: &str) -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        }
+        // Built at run time so that this test's own text is not one of the
+        // sites it is counting.
+        let lane = |variant: &str| format!("MathWorkerRequest::{variant} {{");
+        let door = body("fn request_peek_pixels(");
+        for variant in ["PeekImage", "PeekVideoFrame"] {
+            assert!(
+                door.contains(&lane(variant)),
+                "the door does not build {variant}:\n{door}"
+            );
+        }
+        // And the two surfaces that show pixels name neither: what they ask for
+        // is "this file's pixels", and a second reading of the name at either of
+        // them is where the card and the pane come to disagree.
+        for surface in ["fn refit_preview_picture(", "fn file_peek_fitted_pixels("] {
+            let text = body(surface);
+            for variant in ["PeekImage", "PeekVideoFrame"] {
+                assert!(
+                    !text.contains(&lane(variant)),
+                    "{surface} chooses a decoder for itself: it names {variant}"
+                );
+            }
+            assert!(
+                text.contains("self.request_peek_pixels("),
+                "{surface} must ask through the one door"
+            );
+        }
+        // The door reads the class through the same predicate the open lane
+        // forks on, so a file that *opened* as a video is decoded as one.
+        assert!(
+            door.contains("preview::path_names_a_video("),
+            "the door must ask the class's own predicate:\n{door}"
         );
     }
 
@@ -110861,16 +111502,15 @@ mod tests {
         }
     }
 
-    /// PIN — **a video takes the document lane, and every door agrees**
-    /// (measured 2026-08-25; `docs/DESIGN.md` §7.16).
+    /// PIN — **no video takes the page lane, at any door** (measured
+    /// 2026-08-25; `docs/DESIGN.md` §7.16, still standing under §7.21).
     ///
     /// The negative half of the same measurement `preview`'s own pin carries:
     /// WebView2 has no viewer for a top-level media response, so it turns one
     /// into a download and the platform bridge cancels every download — the
     /// navigation completes `ConnectionAborted` and the seat draws 「did not
-    /// respond」. Put video on the page lane and that browser error replaces the
-    /// honest "no preview for this file type" card, which is worse than the
-    /// refusal it replaced.
+    /// respond」. Put video on the page lane and that browser error replaces
+    /// whatever honest thing the seat was showing.
     ///
     /// **It is asserted at every door and not only at the double click**,
     /// because that is the shape §7.10 ⑥ exists to protect: the head's `↗` and
@@ -110878,10 +111518,23 @@ mod tests {
     /// from all three or present in all three. The day something hosts a video
     /// inside a page, these are the lines that say what changes.
     ///
+    /// **What 2026-08-27 changed, and what it did not.** It did not change this:
+    /// a video is still not a page and the three page doors still answer
+    /// nothing. What it changed is what the *other* lane is — a video now has a
+    /// class and a lane of its own ([`a_video_has_a_face_of_its_own`]) instead
+    /// of falling through to the pool's refusal — so this test asserts the
+    /// exclusion rather than the destination, which is the claim that was always
+    /// being made.
+    ///
+    /// The list is deliberately wider than `preview::VIDEO_EXTENSIONS`: `.mov`
+    /// and `.mkv` are not in that table, they are ordinary documents, and they
+    /// are here because "not a page" is a claim about every video spelling and
+    /// not only about the three this window drew a face for.
+    ///
     /// RED GATE: add `mp4` to `preview::PAGE_EXTENSIONS` and every assertion
     /// here fails, each naming the door it stands at.
     #[test]
-    fn a_video_takes_the_document_lane_at_every_door() {
+    fn a_video_takes_no_page_lane_at_any_door() {
         for video in [
             r"D:\shots\clip.mp4",
             r"D:\shots\CLIP.MP4",
@@ -110890,9 +111543,9 @@ mod tests {
             r"D:\shots\clip.mov",
             r"D:\shots\clip.mkv",
         ] {
-            assert_eq!(
+            assert_ne!(
                 preview_open_lane(Path::new(video)),
-                PreviewOpenLane::Document,
+                PreviewOpenLane::Page,
                 "the double click: {video}"
             );
             assert_eq!(
@@ -110905,21 +111558,87 @@ mod tests {
                 None,
                 "the pool's own door: {video}"
             );
+        }
+    }
+
+    /// RED — **a video has a face of its own, and every door draws it** (user
+    /// ruling 2026-08-27; §7.21).
+    ///
+    /// The positive half, and the thing the slice is: until it, all six
+    /// spellings above answered `Document` at the door and `Refused` on the
+    /// card, which on the machine was "No preview for this file type" under a
+    /// pointer and the same sentence larger under a double click. Three of them
+    /// now answer with a lane and a body that show the file.
+    ///
+    /// **Both halves have to be here.** The first group is the promise: the
+    /// three spellings in `preview::VIDEO_EXTENSIONS` take the video lane, are
+    /// classed `video`, and earn the frame body on the card. The second is the
+    /// bound on it: `.mov`, `.mkv` and a name that merely *contains* a video
+    /// extension are untouched, still documents, still refused — because a class
+    /// that quietly widened would be a face promised over files this window
+    /// cannot open.
+    ///
+    /// RED GATE ①: revert `preview_open_lane`'s video arm and the lane assertion
+    /// fails for all three, which is the double click going back to the refusal
+    /// card. RED GATE ②: send `PreviewFtype::Video` to `PeekBodyKind::Refused`
+    /// and the card assertion fails while the lane one stays green — the pane
+    /// showing a frame while the card over the same row says there is no
+    /// preview, which is exactly the contradiction §7.10 ⑥ exists to forbid.
+    #[test]
+    fn a_video_has_a_face_of_its_own() {
+        let ftype_of = |path: &str| {
+            preview::preview_ftype(
+                Path::new(path)
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .expect("a name"),
+            )
+        };
+        for video in [
+            r"D:\shots\clip.mp4",
+            r"D:\shots\CLIP.MP4",
+            r"D:\shots\trailer.m4v",
+            r"D:\shots\screencast.webm",
+        ] {
             assert_eq!(
-                peek_body_kind(
-                    preview::preview_ftype(
-                        Path::new(video)
-                            .file_name()
-                            .and_then(std::ffi::OsStr::to_str)
-                            .expect("a name")
-                    ),
-                    Some(Path::new(video)),
-                    false,
-                ),
-                PeekBodyKind::Refused,
-                "and the glance card says the same thing the door does: {video}"
+                preview_open_lane(Path::new(video)),
+                PreviewOpenLane::Video,
+                "the double click opens the frame: {video}"
+            );
+            assert_eq!(
+                ftype_of(video),
+                preview::PreviewFtype::Video,
+                "and the chip says so: {video}"
+            );
+            assert_eq!(
+                peek_body_kind(ftype_of(video), Some(Path::new(video)), false),
+                PeekBodyKind::Frame,
+                "and the glance card shows the same thing the door opens: {video}"
             );
         }
+        for document in [
+            // Measured not to play in the engine, so deliberately outside the
+            // class — see `preview::VIDEO_EXTENSIONS`.
+            r"D:\shots\clip.mov",
+            r"D:\shots\clip.mkv",
+            r"D:\shots\clip.avi",
+            // And the two neighbours a substring reading would sweep up.
+            r"D:\shots\clip.mp4.txt",
+            r"D:\shots\clip.webmx",
+        ] {
+            assert_eq!(
+                preview_open_lane(Path::new(document)),
+                PreviewOpenLane::Document,
+                "outside the class is untouched: {document}"
+            );
+        }
+        // A composed document that merely spells a video's name has nothing to
+        // decode: a git diff of `clip.mp4` is a reading of a repository.
+        assert_eq!(
+            peek_body_kind(preview::PreviewFtype::Video, None, false),
+            PeekBodyKind::Refused,
+            "a body with no file behind it is not a frame"
+        );
     }
 
     /// PIN (user ruling 2026-08-23, 「一个名字只该有一个含义」;
