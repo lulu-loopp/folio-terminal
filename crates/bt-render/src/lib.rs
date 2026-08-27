@@ -13,6 +13,7 @@ use std::{
     hash::{Hash, Hasher},
     mem::size_of,
     num::{NonZeroI64, NonZeroU16, NonZeroU32},
+    ops::Range,
     sync::Arc,
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
     time::{Duration, Instant},
@@ -33,7 +34,7 @@ use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, PrepareError, Resolution, Shaping,
     Stretch, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
     Wrap,
-    cosmic_text::{Fallback, FeatureTag, FontFeatures},
+    cosmic_text::{Cursor, Fallback, FeatureTag, FontFeatures},
 };
 use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
@@ -4814,6 +4815,33 @@ impl WindowRenderer {
         preview_run_boxes(&mut gpu.font_system, paragraph)
     }
 
+    /// **Which byte of a paragraph a point stands on** — see [`preview_hit`].
+    ///
+    /// [`Self::measure_preview_run_boxes`]'s fourth sibling, and the one a
+    /// *selection* asks: a run is what answers a click on a link, and a byte is
+    /// what answers a drag through prose. Offsets are into
+    /// [`preview_paragraph_text`].
+    pub fn measure_preview_hit(
+        &mut self,
+        gpu: &mut GpuContext,
+        paragraph: &PreviewParagraph,
+        x: f32,
+        y: f32,
+    ) -> usize {
+        preview_hit(&mut gpu.font_system, paragraph, x, y)
+    }
+
+    /// **The bands a selected byte range draws over a paragraph** — see
+    /// [`preview_highlight`].
+    pub fn measure_preview_highlight(
+        &mut self,
+        gpu: &mut GpuContext,
+        paragraph: &PreviewParagraph,
+        range: Range<usize>,
+    ) -> Vec<[f32; 4]> {
+        preview_highlight(&mut gpu.font_system, paragraph, range)
+    }
+
     /// How wide one cell of the monospace face is at `font_size_px`.
     ///
     /// Measured over a run of cells and divided rather than asked of one: a
@@ -8241,25 +8269,7 @@ fn preview_run_boxes(
     font_system: &mut FontSystem,
     paragraph: &PreviewParagraph,
 ) -> Vec<PreviewRunBox> {
-    let mut buffer = Buffer::new(
-        font_system,
-        Metrics::new(paragraph.font_size_px, paragraph.line_height_px),
-    );
-    if paragraph.wrap {
-        buffer.set_wrap(Wrap::WordOrGlyph);
-        buffer.set_size(Some((paragraph.rect[2] - paragraph.rect[0]).max(1.0)), None);
-    } else {
-        buffer.set_wrap(Wrap::None);
-        buffer.set_size(None, Some(paragraph.line_height_px));
-    }
-    set_preview_runs(
-        font_system,
-        &mut buffer,
-        &paragraph.runs,
-        paragraph.letter_spacing_em,
-        Metrics::new(paragraph.font_size_px, paragraph.line_height_px),
-    );
-    buffer.shape_until_scroll(font_system, false);
+    let buffer = shape_preview_paragraph(font_system, paragraph);
     let left = preview_paragraph_left(paragraph, &buffer);
     let top = paragraph.rect[1];
     // The runs are concatenated into one line before shaping, so a glyph
@@ -8302,6 +8312,129 @@ fn preview_run_boxes(
     boxes
 }
 
+/// One preview paragraph, shaped exactly the way it is drawn.
+///
+/// **One builder and not four.** Four passes now ask the shaper about the same
+/// paragraph — where its runs came to rest, where a pointer fell inside it,
+/// which band a selection draws over it, and the glyphs themselves — and a
+/// paragraph shaped even slightly differently by one of them is a hit test that
+/// answers about text in another place than the letters. The wrap, the size and
+/// the metrics are the whole of what makes those four agree, so they are written
+/// once.
+fn shape_preview_paragraph(font_system: &mut FontSystem, paragraph: &PreviewParagraph) -> Buffer {
+    let metrics = Metrics::new(paragraph.font_size_px, paragraph.line_height_px);
+    let mut buffer = Buffer::new(font_system, metrics);
+    if paragraph.wrap {
+        buffer.set_wrap(Wrap::WordOrGlyph);
+        buffer.set_size(Some((paragraph.rect[2] - paragraph.rect[0]).max(1.0)), None);
+    } else {
+        buffer.set_wrap(Wrap::None);
+        buffer.set_size(None, Some(paragraph.line_height_px));
+    }
+    set_preview_runs(
+        font_system,
+        &mut buffer,
+        &paragraph.runs,
+        paragraph.letter_spacing_em,
+        metrics,
+    );
+    buffer.shape_until_scroll(font_system, false);
+    buffer
+}
+
+/// Every byte of a paragraph the shaper is given — the string
+/// [`preview_hit`] and [`preview_highlight`] count offsets in.
+///
+/// [`preview_run_text`] per run and concatenated, which is what
+/// [`set_preview_runs`] hands the buffer: an inline box contributes its one
+/// placeholder here exactly as it does there, so an offset from the shaper and
+/// an offset into this string are the same number.
+#[must_use]
+pub fn preview_paragraph_text(paragraph: &PreviewParagraph) -> String {
+    paragraph.runs.iter().map(preview_run_text).collect()
+}
+
+/// **Which byte of a shaped paragraph a point lands on.**
+///
+/// The pointer's answer to [`preview_run_boxes`]'s question, and the same buffer
+/// answers both. `x` and `y` are whole-surface physical pixels, exactly as
+/// [`PreviewParagraph::rect`] is.
+///
+/// A point above the paragraph is its beginning and a point below is its end,
+/// rather than no answer at all: a drag that leaves the top of a block on its
+/// way to the block above must go on selecting to the edge of what it left, and
+/// a gap between two paragraphs belongs to one of them. The horizontal axis is
+/// the shaper's own: past the end of a line is the end of that line.
+fn preview_hit(
+    font_system: &mut FontSystem,
+    paragraph: &PreviewParagraph,
+    x: f32,
+    y: f32,
+) -> usize {
+    let buffer = shape_preview_paragraph(font_system, paragraph);
+    let left = preview_paragraph_left(paragraph, &buffer);
+    let top = paragraph.rect[1];
+    let text = preview_paragraph_text(paragraph);
+    match buffer.hit(x - left, y - top) {
+        Some(cursor) => cursor.index.min(text.len()),
+        // `Buffer::hit` declines a `y` that is above the first row *and* to the
+        // left of nothing, and a paragraph with no glyphs at all has no row to
+        // be inside. Both are "before the first byte" except when the point is
+        // frankly below the text, which is after the last.
+        None if y >= top + shaped_height(&buffer, paragraph) => text.len(),
+        None => 0,
+    }
+}
+
+/// How tall the rows of a shaped paragraph actually came out.
+fn shaped_height(buffer: &Buffer, paragraph: &PreviewParagraph) -> f32 {
+    buffer
+        .layout_runs()
+        .map(|run| run.line_top + run.line_height)
+        .fold(0.0_f32, f32::max)
+        .max(paragraph.line_height_px)
+}
+
+/// **The bands a selection of `range` draws over one shaped paragraph**, in
+/// whole-surface physical pixels.
+///
+/// One rectangle per visual row the range touches — and more than one on a row
+/// whose runs are bidirectional, because a logical range there is not one
+/// contiguous stretch of glass. The band is the row's own line box, so two
+/// selected rows of one wrapped paragraph meet with no seam between them.
+///
+/// Half-open, in the byte space [`preview_paragraph_text`] describes. An empty
+/// or inverted range draws nothing, which is what a collapsed selection is.
+fn preview_highlight(
+    font_system: &mut FontSystem,
+    paragraph: &PreviewParagraph,
+    range: Range<usize>,
+) -> Vec<[f32; 4]> {
+    if range.start >= range.end {
+        return Vec::new();
+    }
+    let buffer = shape_preview_paragraph(font_system, paragraph);
+    let left = preview_paragraph_left(paragraph, &buffer);
+    let top = paragraph.rect[1];
+    let mut bands = Vec::new();
+    for line in buffer.layout_runs() {
+        // The runs are one shaped line — `set_rich_text` concatenates them — so
+        // every visual row carries the same `line_i` and the cursors are the
+        // range's own bytes against it.
+        let start = Cursor::new(line.line_i, range.start);
+        let end = Cursor::new(line.line_i, range.end);
+        for (x, width) in line.highlight(start, end) {
+            bands.push([
+                left + x,
+                top + line.line_top,
+                left + x + width,
+                top + line.line_top + paragraph.line_height_px,
+            ]);
+        }
+    }
+    bands
+}
+
 /// The one glyph an inline box is made of: non-breaking, and inkless in every
 /// face that has it. See [`PreviewRun::inline_box_px`].
 const INLINE_BOX_PLACEHOLDER: &str = "\u{00A0}";
@@ -8313,7 +8446,8 @@ const INLINE_BOX_PLACEHOLDER: &str = "\u{00A0}";
 /// bytes ([`preview_run_boxes`]). A box run whose byte count were taken from
 /// [`PreviewRun::text`] in one pass and from the placeholder in the other would
 /// report every run after it against the wrong run.
-fn preview_run_text(run: &PreviewRun) -> &str {
+#[must_use]
+pub fn preview_run_text(run: &PreviewRun) -> &str {
     if run.inline_box_px.is_some() {
         INLINE_BOX_PLACEHOLDER
     } else {
@@ -8493,26 +8627,7 @@ fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<C
         // all, and the glyphs land wherever the arithmetic put them.
         .filter_map(|(paragraph, clip)| crop_to(paragraph.rect, clip).map(|c| (paragraph, c)))
         .map(|(paragraph, clip)| {
-            let width = (paragraph.rect[2] - paragraph.rect[0]).max(1.0);
-            let mut buffer = Buffer::new(
-                font_system,
-                Metrics::new(paragraph.font_size_px, paragraph.line_height_px),
-            );
-            if paragraph.wrap {
-                buffer.set_wrap(Wrap::WordOrGlyph);
-                buffer.set_size(Some(width), None);
-            } else {
-                buffer.set_wrap(Wrap::None);
-                buffer.set_size(None, Some(paragraph.line_height_px));
-            }
-            set_preview_runs(
-                font_system,
-                &mut buffer,
-                &paragraph.runs,
-                paragraph.letter_spacing_em,
-                Metrics::new(paragraph.font_size_px, paragraph.line_height_px),
-            );
-            buffer.shape_until_scroll(font_system, false);
+            let buffer = shape_preview_paragraph(font_system, paragraph);
             let left = preview_paragraph_left(paragraph, &buffer);
             let [r, g, b] = paragraph.runs.first().map_or([0, 0, 0], |run| run.color);
             ChromeTextLayout {
@@ -16733,6 +16848,168 @@ mod tests {
                 "and the line it stands on is exactly as tall as it was without it"
             );
         }
+    }
+
+    /// **A pointer put on a paragraph names the byte it is standing on, and a
+    /// pointer put off one names an end** (user report 2026-08-28: 「渲染后的 md
+    /// 文字无法选中」).
+    ///
+    /// The whole of what a rendered page's selection is anchored on. The
+    /// paragraph is proportional and has already wrapped, so where a letter is
+    /// on screen is not something a caller can add up — and a hit measured
+    /// against a differently built buffer would be a hit about text in another
+    /// place than the glyphs, which is why [`shape_preview_paragraph`] is one
+    /// function.
+    ///
+    /// MUTATIONS: drop the `left` origin and every hit on a centred caption is
+    /// half a paragraph out; return `0` for a point below the text and a drag
+    /// that runs off the bottom of a block stops at its first word.
+    #[test]
+    fn a_point_on_a_shaped_paragraph_names_the_byte_it_stands_on() {
+        let mut font_system = terminal_font_system();
+        let text = "alpha beta gamma";
+        let paragraph = PreviewParagraph {
+            runs: vec![PreviewRun {
+                text: text.to_owned(),
+                color: [0, 0, 0],
+                mono: false,
+                bold: false,
+                font_scale: 1.0,
+                inline_box_px: None,
+            }],
+            rect: [100.0, 200.0, 500.0, 224.0],
+            font_size_px: 15.0,
+            line_height_px: 24.0,
+            wrap: true,
+            letter_spacing_em: 0.0,
+            align_right: false,
+            align_center: false,
+        };
+        assert_eq!(
+            preview_paragraph_text(&paragraph),
+            text,
+            "the string offsets are counted in is the one the shaper is given",
+        );
+        // Before the first glyph and past the last, in the paragraph's own
+        // coordinates: the two ends.
+        assert_eq!(preview_hit(&mut font_system, &paragraph, 100.0, 205.0), 0);
+        assert_eq!(
+            preview_hit(&mut font_system, &paragraph, 499.0, 205.0),
+            text.len(),
+            "past the end of the line is the end of the line",
+        );
+        // Above the paragraph and below it — a drag leaving a block by either
+        // edge has to keep growing towards that edge.
+        assert_eq!(preview_hit(&mut font_system, &paragraph, 300.0, 0.0), 0);
+        assert_eq!(
+            preview_hit(&mut font_system, &paragraph, 300.0, 900.0),
+            text.len(),
+        );
+        // And a walk across the line answers in order, once per character at
+        // most — which is what makes a drag through it grow one letter at a time.
+        let mut last = 0usize;
+        let mut seen = Vec::new();
+        for step in 0..40 {
+            #[allow(clippy::cast_precision_loss)]
+            let at = preview_hit(
+                &mut font_system,
+                &paragraph,
+                100.0 + step as f32 * 3.0,
+                205.0,
+            );
+            assert!(
+                at >= last,
+                "the walk never goes backwards: {at} after {last}"
+            );
+            assert!(text.is_char_boundary(at), "and always lands on a boundary");
+            last = at;
+            seen.push(at);
+        }
+        assert!(
+            seen.last().copied().unwrap_or(0) > 5,
+            "a hundred and twenty pixels of a fifteen-point line is well past its \
+             first word: {seen:?}",
+        );
+    }
+
+    /// **A selected range of a wrapped paragraph draws one band per row it
+    /// touches**, and nothing at all when it is empty.
+    ///
+    /// The band is the row's own line box, so two rows of one folded paragraph
+    /// meet with no seam — which is what a highlight has to do to read as one
+    /// selection rather than as a stack of stripes.
+    ///
+    /// MUTATIONS: measure the band from the paragraph's rect instead of the
+    /// shaped line's top and a folded paragraph's second row is banded over its
+    /// first; return a band for an inverted range and a drag that doubles back
+    /// paints the row it left.
+    #[test]
+    fn a_selected_range_bands_every_row_it_touches_and_no_empty_one() {
+        let mut font_system = terminal_font_system();
+        let text = "a paragraph long enough that it has to fold at least once inside this box";
+        let paragraph = PreviewParagraph {
+            runs: vec![PreviewRun {
+                text: text.to_owned(),
+                color: [0, 0, 0],
+                mono: false,
+                bold: false,
+                font_scale: 1.0,
+                inline_box_px: None,
+            }],
+            rect: [10.0, 40.0, 210.0, 136.0],
+            font_size_px: 15.0,
+            line_height_px: 24.0,
+            wrap: true,
+            letter_spacing_em: 0.0,
+            align_right: false,
+            align_center: false,
+        };
+        assert!(
+            preview_highlight(&mut font_system, &paragraph, 5..5).is_empty(),
+            "a collapsed selection is not a band",
+        );
+        // Written through a variable because a literal `9..4` is a lint: an
+        // inverted range is exactly what this arm is about, and it arrives here
+        // from two places whose *values* crossed — a drag that doubled back
+        // through its own origin, and a piece clamped from both ends at once.
+        let inverted = Range {
+            start: 9,
+            end: 4_usize,
+        };
+        assert!(
+            preview_highlight(&mut font_system, &paragraph, inverted).is_empty(),
+            "and neither is an inverted one",
+        );
+        let bands = preview_highlight(&mut font_system, &paragraph, 0..text.len());
+        assert!(
+            bands.len() > 1,
+            "a paragraph that folds is banded once per row: {bands:?}",
+        );
+        for band in &bands {
+            assert!(band[2] > band[0], "every band has width: {band:?}");
+            assert!(
+                (band[3] - band[1] - paragraph.line_height_px).abs() < 0.51,
+                "and is one line box tall: {band:?}",
+            );
+            assert!(
+                band[0] >= paragraph.rect[0] - 0.51,
+                "and starts at or after the pen: {band:?}",
+            );
+        }
+        // The rows are stacked a line height apart and meet without a gap.
+        let mut tops: Vec<f32> = bands.iter().map(|band| band[1]).collect();
+        tops.sort_by(|one, two| one.partial_cmp(two).unwrap_or(std::cmp::Ordering::Equal));
+        tops.dedup_by(|one, two| (*one - *two).abs() < 0.51);
+        for pair in tops.windows(2) {
+            assert!(
+                (pair[1] - pair[0] - paragraph.line_height_px).abs() < 0.51,
+                "consecutive rows are one line height apart: {tops:?}",
+            );
+        }
+        // A range inside one word is one band, narrower than the whole row.
+        let word = preview_highlight(&mut font_system, &paragraph, 2..11);
+        assert_eq!(word.len(), 1, "one row, one band: {word:?}");
+        assert!(word[0][2] - word[0][0] < bands[0][2] - bands[0][0]);
     }
 
     /// The multiwindow block's slice A2 (= the web preview block's slice 1).

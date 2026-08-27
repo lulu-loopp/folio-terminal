@@ -7202,6 +7202,46 @@ pub const TERM_MENU_ROWS: [TermMenuRow; 7] = [
 /// from a `destroys()` predicate would be a second list agreeing with this one.
 pub const TERM_MENU_SEPARATOR_AFTER: usize = 3;
 
+/// **What the pane under a right press turns out to be.**
+///
+/// The gesture is one gesture — a right click inside a pane is the door this
+/// operating system has already taught every hand — and what is under it is not
+/// always a shell. A preview seat showing a rendered markdown page is a page of
+/// *text*, its words can be picked up (`preview_select`), and a hand that has
+/// learned where `Copy` lives will look for it there.
+///
+/// **One menu and two lists, rather than a second menu.** Everything a context
+/// menu is made of below the row list — where it lands against the window edge,
+/// how a row lights, what `Esc` and the arrows do, how it fades in and out — is
+/// the same on both, and a second copy of it would be a second place for the
+/// house's own menu behaviour to drift. What genuinely differs is which verbs
+/// there are, and that is exactly what this decides.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TermMenuPane {
+    /// A terminal: [`TERM_MENU_ROWS`], and the lone pane's own segment under it.
+    #[default]
+    Shell,
+    /// **A rendered page**: the two verbs that are about its words, and nothing
+    /// else.
+    ///
+    /// `Paste` is not among them because there is nothing here to type into —
+    /// the source face is where a `.md` is edited, and it is a different face of
+    /// the same buffer. `Find…`, `Clear screen`, `Clear scrollback…` and
+    /// `Restart shell…` all name a shell that is not there. And the lone pane's
+    /// verb segment is not carried either: those are the *pane's* verbs, they
+    /// live in the head this seat always wears, and §7.1.6i's floor was written
+    /// for the surface that has no head to wear them.
+    Page,
+}
+
+/// The verbs a rendered page's right click carries.
+///
+/// [`TermMenuRow`] values and not two new ones, on [`TERM_MENU_LONE_PANE_ROWS`]'
+/// own argument: `Copy` here and `Copy` in a terminal are one word for one idea
+/// — put what is selected on the clipboard — and two spellings of it is a rename
+/// that lands on one of them.
+pub const TERM_PAGE_MENU_ROWS: [TermMenuRow; 2] = [TermMenuRow::Copy, TermMenuRow::SelectAll];
+
 // ── §7.1.6i's floor: the lone pane's pane-verb segment ─────────────────────
 //
 // **`docs/DESIGN.md` §7.1.6i, 「两案共同、且不随选型摇摆的一件」.** The corner
@@ -7337,7 +7377,15 @@ impl TermMenuRow {
 /// two menus is one fact about the tree and a list that repeated the seven would
 /// be a second place for the seven to change.
 #[must_use]
-pub fn term_menu_entries(lone: bool) -> Vec<TermMenuEntry> {
+pub fn term_menu_entries(pane: TermMenuPane, lone: bool) -> Vec<TermMenuEntry> {
+    if pane == TermMenuPane::Page {
+        // A page has no segment and no rule: two verbs about its own words, and
+        // nothing this menu could say about a shell that is not under it.
+        return TERM_PAGE_MENU_ROWS
+            .into_iter()
+            .map(TermMenuEntry::Term)
+            .collect();
+    }
     let mut entries: Vec<TermMenuEntry> = TERM_MENU_ROWS
         .into_iter()
         .map(TermMenuEntry::Term)
@@ -7458,9 +7506,10 @@ pub fn term_menu_step(
     current: Option<TermMenuEntry>,
     subject: TermMenuSubject,
     forwards: bool,
+    pane: TermMenuPane,
     lone: bool,
 ) -> Option<TermMenuEntry> {
-    let walkable: Vec<TermMenuEntry> = term_menu_entries(lone)
+    let walkable: Vec<TermMenuEntry> = term_menu_entries(pane, lone)
         .into_iter()
         .filter(|entry| term_menu_entry_available(*entry, subject))
         .collect();
@@ -7552,6 +7601,9 @@ pub enum TermMenuHit {
 /// Everything the terminal menu needs to lay itself out and draw.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TermMenuLook {
+    /// **What is under the menu** — see [`TermMenuPane`]. It decides the row
+    /// list, and through it the rule and the segment.
+    pub pane: TermMenuPane,
     pub subject: TermMenuSubject,
     pub hover: Option<TermMenuHover>,
     /// Whether the pane this menu was raised on is the only one in its tab —
@@ -7576,7 +7628,9 @@ pub struct TermMenuLayout {
     /// column reserved in it, so the painter must draw the very strings that
     /// were measured.
     accels: Vec<Option<(String, f32)>>,
-    separator: [f32; 4],
+    /// The one rule, or `None` on a list too short to reach it — a rendered
+    /// page's two verbs are one subject and have nothing to divide.
+    separator: Option<[f32; 4]>,
     /// The second rule — the one §7.1.6i's segment brings with it — or `None` on
     /// a pane with a sibling, which has no segment to divide off.
     lone_separator: Option<[f32; 4]>,
@@ -7692,7 +7746,7 @@ pub fn term_menu_layout(
     let separator_block = 2.0 * separator_margin + separator_thickness;
     let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
 
-    let entries = term_menu_entries(look.lone);
+    let entries = term_menu_entries(look.pane, look.lone);
     // The `▸` claims the same slot the profile picker's `default` hint claims,
     // and it is reserved on **every** row of a menu that has a submenu at all
     // rather than on the one that wears it — `pane_menu_layout`'s own rule, for
@@ -7735,8 +7789,13 @@ pub fn term_menu_layout(
     let rows_height = entries.len() as f32 * item_height;
     // One block per rule that is actually drawn: the segment brings its own, and
     // a height that counted a rule the walk below does not lay out would be a
-    // menu with a stripe of window at its foot.
-    let separator_blocks: f32 = if look.lone { 2.0 } else { 1.0 };
+    // menu with a stripe of window at its foot. A page's two verbs never reach
+    // [`TERM_MENU_SEPARATOR_AFTER`], so they draw no rule and reserve none.
+    let separator_blocks: f32 = match (look.pane, look.lone) {
+        (TermMenuPane::Page, _) => 0.0,
+        (TermMenuPane::Shell, true) => 2.0,
+        (TermMenuPane::Shell, false) => 1.0,
+    };
     let height = 2.0f32
         .mul_add(
             border + padding,
@@ -7758,7 +7817,7 @@ pub fn term_menu_layout(
     let mut cursor = frame[1] + border + padding;
 
     let mut items = Vec::with_capacity(entries.len());
-    let mut separator = [0.0_f32; 4];
+    let mut separator = None;
     let mut lone_separator = None;
     let mut heading = None;
     for (at, entry) in entries.iter().enumerate() {
@@ -7786,12 +7845,12 @@ pub fn term_menu_layout(
         });
         cursor += item_height;
         if at == TERM_MENU_SEPARATOR_AFTER {
-            separator = [
+            separator = Some([
                 content_left,
                 cursor + separator_margin,
                 content_right,
                 cursor + separator_margin + separator_thickness,
-            ];
+            ]);
             cursor += separator_block;
         }
     }
@@ -7945,7 +8004,7 @@ pub fn term_menu_build(
             ));
         }
     }
-    for rule in std::iter::once(layout.separator).chain(layout.lone_separator) {
+    for rule in layout.separator.into_iter().chain(layout.lone_separator) {
         quads.push(OverlayQuad {
             rect: rule,
             color: palette.menu_border,
@@ -18800,18 +18859,27 @@ mod tests {
         use TermMenuRow as R;
         let row = TermMenuEntry::Term;
         let idle = TermMenuSubject::default();
-        assert_eq!(term_menu_step(None, idle, true, false), Some(row(R::Paste)));
         assert_eq!(
-            term_menu_step(None, idle, false, false),
+            term_menu_step(None, idle, true, TermMenuPane::Shell, false),
+            Some(row(R::Paste))
+        );
+        assert_eq!(
+            term_menu_step(None, idle, false, TermMenuPane::Shell, false),
             Some(row(R::RestartShell))
         );
         assert_eq!(
-            term_menu_step(Some(row(R::Paste)), idle, false, false),
+            term_menu_step(Some(row(R::Paste)), idle, false, TermMenuPane::Shell, false),
             Some(row(R::Paste)),
             "the top of the walk is the top of what is walkable"
         );
         assert_eq!(
-            term_menu_step(Some(row(R::RestartShell)), idle, true, false),
+            term_menu_step(
+                Some(row(R::RestartShell)),
+                idle,
+                true,
+                TermMenuPane::Shell,
+                false
+            ),
             Some(row(R::RestartShell)),
             "and the bottom clamps rather than wrapping"
         );
@@ -18822,16 +18890,22 @@ mod tests {
             ..idle
         };
         assert_eq!(
-            term_menu_step(None, mid_restart, true, false),
+            term_menu_step(None, mid_restart, true, TermMenuPane::Shell, false),
             Some(row(R::Copy))
         );
         assert_eq!(
-            term_menu_step(Some(row(R::ClearScrollback)), mid_restart, true, false),
+            term_menu_step(
+                Some(row(R::ClearScrollback)),
+                mid_restart,
+                true,
+                TermMenuPane::Shell,
+                false
+            ),
             Some(row(R::ClearScrollback)),
             "a restart in flight makes Clear scrollback the last walkable row"
         );
         assert_eq!(
-            term_menu_step(None, mid_restart, false, false),
+            term_menu_step(None, mid_restart, false, TermMenuPane::Shell, false),
             Some(row(R::ClearScrollback))
         );
     }
@@ -18906,7 +18980,7 @@ mod tests {
         };
         let find = row(TermMenuRow::Find);
         let clear = row(TermMenuRow::ClearScreen);
-        let rule = layout.separator;
+        let rule = layout.separator.expect("a shell's list reaches its rule");
         assert!(
             find.rect[3] <= rule[1] && rule[3] <= clear.rect[1],
             "the rule stands in the gap between the two halves"
@@ -18955,6 +19029,88 @@ mod tests {
         );
     }
 
+    /// **A rendered page's right click is two verbs about its words, and no
+    /// rule** (user report 2026-08-28).
+    ///
+    /// The list is short because the rest of this menu names a shell that is not
+    /// under it: there is nothing to paste into, nothing to find in, no screen to
+    /// clear and no shell to restart. `Copy` is greyed with nothing selected,
+    /// which is the terminal row's own question asked of another surface's
+    /// selection.
+    ///
+    /// MUTATIONS: give a page the lone-pane segment and the second assertion
+    /// goes red; leave `separator_blocks` at one for a page and the frame
+    /// reserves a stripe of window nothing is drawn in.
+    #[test]
+    fn a_rendered_pages_menu_is_two_verbs_about_its_words_and_no_rule() {
+        use TermMenuEntry as E;
+        assert_eq!(
+            term_menu_entries(TermMenuPane::Page, false),
+            vec![E::Term(TermMenuRow::Copy), E::Term(TermMenuRow::SelectAll)],
+        );
+        assert_eq!(
+            term_menu_entries(TermMenuPane::Page, true),
+            term_menu_entries(TermMenuPane::Page, false),
+            "a page's seat always wears the head its pane verbs live in, so the \
+             lone-pane segment is not carried onto it",
+        );
+        let mut measure = |text: &str, size: f32| text.chars().count() as f32 * size * 0.5;
+        let look = |has_selection: bool| TermMenuLook {
+            pane: TermMenuPane::Page,
+            subject: TermMenuSubject {
+                has_selection,
+                ..TermMenuSubject::default()
+            },
+            hover: None,
+            lone: false,
+            submenu_open: false,
+        };
+        let shortcuts = crate::shortcuts::Shortcuts::default();
+        let layout = term_menu_layout(
+            [100.0, 100.0],
+            (1600.0, 900.0),
+            1.0,
+            &look(true),
+            &shortcuts,
+            &mut measure,
+        );
+        assert_eq!(layout.items.len(), 2);
+        assert!(
+            layout.separator.is_none() && layout.lone_separator.is_none(),
+            "two verbs about one subject have nothing to divide",
+        );
+        assert!(
+            layout.items.iter().all(|item| item.available),
+            "with a selection standing, both verbs answer",
+        );
+        // The frame ends where the second row ends, plus the chrome — a menu
+        // that had reserved a rule's block would carry a stripe of empty window.
+        let below = layout.frame[3] - layout.items[1].rect[3];
+        let above = layout.items[0].rect[1] - layout.frame[1];
+        assert!(
+            (below - above).abs() < 0.51,
+            "the padding under the last row is the padding over the first: \
+             {below} vs {above}",
+        );
+        let greyed = term_menu_layout(
+            [100.0, 100.0],
+            (1600.0, 900.0),
+            1.0,
+            &look(false),
+            &shortcuts,
+            &mut measure,
+        );
+        assert_eq!(
+            greyed
+                .items
+                .iter()
+                .map(|item| item.available)
+                .collect::<Vec<_>>(),
+            vec![false, true],
+            "nothing selected, so Copy cannot answer and Select all still can",
+        );
+    }
+
     // ── §7.1.6i's floor: the lone pane's pane-verb segment ──────────────────
 
     /// PIN (§7.1.6i, 「两案共同、且不随选型摇摆的一件」) — **a lone pane's right
@@ -18976,7 +19132,7 @@ mod tests {
     fn a_lone_panes_terminal_menu_carries_the_pane_verbs_and_a_split_one_does_not() {
         use PaneMenuRow as P;
         use TermMenuEntry as E;
-        let lone = term_menu_entries(true);
+        let lone = term_menu_entries(TermMenuPane::Shell, true);
         assert_eq!(
             lone,
             TERM_MENU_ROWS
@@ -18993,7 +19149,7 @@ mod tests {
              and the one exit a lone pane can spend, in the pane menu's own order"
         );
         assert_eq!(
-            term_menu_entries(false),
+            term_menu_entries(TermMenuPane::Shell, false),
             TERM_MENU_ROWS.into_iter().map(E::Term).collect::<Vec<_>>(),
             "a pane with a sibling has its head eighteen pixels away, and a menu \
              that repeats it is where two lists start to disagree"
@@ -19067,7 +19223,7 @@ mod tests {
             "the second rule stands between the shell's verbs and the pane's"
         );
         assert!(
-            rule[1] > layout.separator[1],
+            rule[1] > layout.separator.expect("the first rule is still there")[1],
             "and below the first, which is still where it always was"
         );
 
@@ -19123,32 +19279,56 @@ mod tests {
         use TermMenuEntry as E;
         let idle = TermMenuSubject::default();
         assert_eq!(
-            term_menu_step(None, idle, false, false),
+            term_menu_step(None, idle, false, TermMenuPane::Shell, false),
             Some(E::Term(TermMenuRow::RestartShell)),
             "with no segment the walk still ends where it always did"
         );
         assert_eq!(
-            term_menu_step(None, idle, false, true),
+            term_menu_step(None, idle, false, TermMenuPane::Shell, true),
             Some(E::Pane(P::MoveToNewWindow)),
             "and with one it ends at the segment's last row"
         );
         assert_eq!(
-            term_menu_step(Some(E::Term(TermMenuRow::RestartShell)), idle, true, true),
+            term_menu_step(
+                Some(E::Term(TermMenuRow::RestartShell)),
+                idle,
+                true,
+                TermMenuPane::Shell,
+                true
+            ),
             Some(E::Pane(P::SplitWith)),
             "the rule is not a stop — the walk crosses it"
         );
         assert_eq!(
-            term_menu_step(Some(E::Pane(P::Duplicate)), idle, true, true),
+            term_menu_step(
+                Some(E::Pane(P::Duplicate)),
+                idle,
+                true,
+                TermMenuPane::Shell,
+                true
+            ),
             Some(E::Pane(P::MoveToNewWindow)),
             "and the row F1c added is one more step down, not a stop"
         );
         assert_eq!(
-            term_menu_step(Some(E::Pane(P::MoveToNewWindow)), idle, true, true),
+            term_menu_step(
+                Some(E::Pane(P::MoveToNewWindow)),
+                idle,
+                true,
+                TermMenuPane::Shell,
+                true
+            ),
             Some(E::Pane(P::MoveToNewWindow)),
             "and clamps at the bottom rather than wrapping"
         );
         assert_eq!(
-            term_menu_step(Some(E::Pane(P::SplitWith)), idle, false, true),
+            term_menu_step(
+                Some(E::Pane(P::SplitWith)),
+                idle,
+                false,
+                TermMenuPane::Shell,
+                true
+            ),
             Some(E::Term(TermMenuRow::RestartShell)),
             "back across the rule the same way"
         );

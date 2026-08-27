@@ -23,7 +23,7 @@ use std::{
     fs::OpenOptions,
     io::Write,
     num::{NonZeroI64, NonZeroU32, NonZeroUsize},
-    ops::{Deref, DerefMut},
+    ops::{Deref, DerefMut, Range},
     panic,
     path::{Path, PathBuf},
     rc::Rc,
@@ -77,6 +77,7 @@ mod pins;
 mod player;
 mod preview;
 mod preview_edit;
+mod preview_select;
 mod preview_trace;
 mod preview_watch;
 mod profiles;
@@ -1903,6 +1904,26 @@ struct PreviewPane {
     /// Every markdown link on screen, boxed where it was drawn — a paint
     /// artifact rather than state, rebuilt with the body.
     links: Vec<PreviewLink>,
+    /// **What is selected on this surface's rendered page**, in the document's
+    /// own terms (user report 2026-08-28).
+    ///
+    /// [`Self::caret`]'s opposite number, and the split is the same one
+    /// [`Self::md_source`] draws: that is the *source* face's caret, indexing
+    /// one flat string, and this is the *rendered* face's selection, addressing
+    /// blocks and pieces. A surface shows one face at a time and the other's
+    /// state stands by; both are the surface's rather than the buffer's, for
+    /// ruling 8⑧'s reason — the file is shared, the way you are looking at it is
+    /// not.
+    ///
+    /// It survives a scroll because a [`preview_select::Place`] names the
+    /// document rather than the glass, and it does **not** survive a re-parse:
+    /// see [`Self::show_document`].
+    md_select: Option<preview_select::Selection>,
+    /// Every piece of the rendered page on screen, boxed where it was drawn — a
+    /// paint artifact rather than state, rebuilt with the body exactly as
+    /// [`Self::links`] is, and read by the pointer that arrives between two
+    /// frames.
+    md_text: Vec<PreviewTextBox>,
     /// Where the caret is in this surface's buffer, and what it has selected.
     caret: preview_edit::EditCaret,
     /// The sentence this surface's body owes about its last save, and when it
@@ -1962,6 +1983,37 @@ struct PreviewPane {
 }
 
 impl PreviewPane {
+    /// **Put a freshly parsed document on this surface**, and let go of
+    /// anything selected in the last one.
+    ///
+    /// One door rather than an assignment, because the two writes must not be
+    /// able to come apart: a [`preview_select::Place`] is an offset into a piece
+    /// of a *particular* parse, and the commonest reason a parse is replaced is
+    /// that the file changed under it — a save from another editor, or this
+    /// surface's own source face. A selection left standing over that is a
+    /// highlight drawn on somebody else's sentence, and a `Copy` that took it
+    /// would put those bytes on the clipboard.
+    ///
+    /// The boxes go with it for a plainer reason: they are where the *last*
+    /// document was drawn, and nothing has drawn this one yet.
+    fn show_document(&mut self, doc: PreviewDocument) {
+        self.doc = doc;
+        self.md_select = None;
+        self.md_text = Vec::new();
+    }
+
+    /// **The same document, laid out again** — a pane that changed width, or a
+    /// formula whose picture has landed.
+    ///
+    /// [`Self::show_document`]'s other half, and a door of its own precisely so
+    /// that the difference between them is stated rather than implied: the parse
+    /// has not changed, so every place a selection names still names the same
+    /// words, and dropping it would mean a reader lost their highlight to a
+    /// window drag or to a picture arriving while they read.
+    fn reflow_document(&mut self, doc: PreviewDocument) {
+        self.doc = doc;
+    }
+
     /// **Every buffer this pane is reading**, which is one and is sometimes two
     /// (user ruling 2026-08-26; DESIGN §7.7 ⑭).
     ///
@@ -2328,6 +2380,166 @@ struct PreviewLinkSite {
     target: String,
 }
 
+/// **A run of a paragraph whose shaped text is not the document's own.**
+///
+/// One tenant: an inline formula whose picture has arrived. The shaper is
+/// handed one placeholder where the document has `$x$`
+/// (`bt_render::PreviewRun::inline_box_px`), so at that run the two byte spaces
+/// part company and rejoin after it.
+///
+/// It exists because a selection is anchored in the *document* and measured on
+/// the *glass*, and those are the only bytes where the two disagree. Nothing is
+/// recorded for a paragraph that holds no such run, so a page of prose carries
+/// an empty `Vec` and allocates nothing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PreviewTextAtom {
+    shaped: (usize, usize),
+    doc: (usize, usize),
+}
+
+/// **What one paragraph of a rendered document is, in the document's own
+/// terms** — which piece it sets, how long that piece is, and how its bytes
+/// line up with the shaper's.
+///
+/// The bridge between [`preview_select`], which speaks in pieces and offsets a
+/// scroll cannot move, and `bt_render`, which speaks in shaped bytes of one
+/// laid-out paragraph. Every hit test and every highlight band crosses it, and
+/// it is one type so that they cross it the same way.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct PreviewTextPiece {
+    /// The document place this paragraph's text begins at.
+    at: preview_select::Place,
+    /// The document's own byte length of the piece.
+    len: usize,
+    /// Shaped bytes in front of the document's own text.
+    ///
+    /// A list item's marker, and nothing else: it rides the item's paragraph as
+    /// a run of its own so the shaper can wrap the item as one line, and it is
+    /// not text a pointer may stand in (see [`preview_select::Piece::prefix`]).
+    lead: usize,
+    atoms: Vec<PreviewTextAtom>,
+    /// The piece cannot be split — see [`preview_select::Piece::atomic`]. Every
+    /// paragraph of an atom carries this, which is what makes a formula printed
+    /// as four lines of source still one thing to select.
+    atomic: bool,
+}
+
+impl PreviewTextPiece {
+    /// **A shaped offset, read as an offset into the document's own piece.**
+    fn doc_offset(&self, shaped: usize) -> usize {
+        if self.atomic {
+            return 0;
+        }
+        let shaped = shaped.saturating_sub(self.lead);
+        let mut doc = shaped;
+        for atom in &self.atoms {
+            if shaped >= atom.shaped.1 {
+                // Past this run entirely: carry however much the two spaces
+                // differ by from here on.
+                doc = doc + atom.doc.1 - atom.doc.0 + atom.shaped.0 - atom.shaped.1;
+            } else if shaped > atom.shaped.0 {
+                // **Inside the placeholder, which has no inside.** The shaper
+                // never puts an offset here — one glyph is one cluster, and a
+                // hit on either half of it comes back as one of its two edges —
+                // so this arm exists for the arithmetic to be total rather than
+                // for a case anybody meets, and it answers with the formula's
+                // own beginning.
+                return atom.doc.0;
+            } else {
+                break;
+            }
+        }
+        doc.min(self.len)
+    }
+
+    /// **A range of the document's piece, read as the shaped bytes it covers.**
+    ///
+    /// [`Self::doc_offset`] backwards, and an atom's range is the whole of the
+    /// shaped text: what stands on the glass for a formula is one placeholder or
+    /// a picture, and either way a band over part of it would be a band over
+    /// nothing.
+    fn shaped_range(&self, range: Range<usize>, shaped_len: usize) -> Range<usize> {
+        if self.atomic {
+            return if range.start < range.end {
+                0..shaped_len
+            } else {
+                0..0
+            };
+        }
+        let map = |doc: usize, upper: bool| {
+            let mut shaped = doc;
+            for atom in &self.atoms {
+                if doc >= atom.doc.1 {
+                    shaped = shaped + atom.shaped.1 - atom.shaped.0 + atom.doc.0 - atom.doc.1;
+                } else if doc > atom.doc.0 {
+                    // A cut inside a formula falls outside it, on the side that
+                    // keeps the formula whole.
+                    return self.lead + if upper { atom.shaped.1 } else { atom.shaped.0 };
+                } else {
+                    break;
+                }
+            }
+            self.lead + shaped
+        };
+        let start = map(range.start, false).min(shaped_len);
+        let end = map(range.end, true).min(shaped_len);
+        start..end.max(start)
+    }
+}
+
+/// **Where one piece of a rendered document was set**, before anyone has
+/// measured it.
+///
+/// [`PreviewLinkSite`]'s sibling and written down at the same moment for the
+/// same reason: the builder knows which paragraph it just pushed and what
+/// document text went into it, and nothing later can work that out from the
+/// paragraph alone.
+#[derive(Clone, Debug)]
+struct PreviewTextSite {
+    /// The scrolling block it stands in, or `None` for the page itself.
+    block: Option<usize>,
+    what: PreviewTextWhere,
+    piece: PreviewTextPiece,
+}
+
+/// **What was put on the glass for one piece of a document.**
+///
+/// Two answers and not one, because a display formula has no letters: what
+/// stands for it is a raster, and a rectangle is the whole of what a selection
+/// can say about it. An `Option<usize>` beside an `Option<[f32; 4]>` would be
+/// two fields that can both be `None`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PreviewTextWhere {
+    /// Index into its region's `paragraphs`.
+    Paragraph(usize),
+    /// The box a picture was drawn in, in whole-surface pixels.
+    Picture([f32; 4]),
+}
+
+/// **One piece of a rendered document, boxed where it was actually drawn.**
+///
+/// [`PreviewLink`]'s sibling: a paint artifact rather than state, rebuilt with
+/// the body, and kept on the pane because the next thing to ask about it is a
+/// pointer that arrives between two frames.
+///
+/// It carries the paragraph itself and not a rectangle, which is the one thing
+/// that separates it from a link's box: a link answers "was this press inside
+/// you", and a selection answers "**which letter** of you", which only the
+/// shaper knows and only from the paragraph it shaped.
+#[derive(Clone, Debug, PartialEq)]
+struct PreviewTextBox {
+    piece: PreviewTextPiece,
+    /// The box it was drawn in — the paragraph's own, or a picture's.
+    rect: [f32; 4],
+    /// The window it may be seen through: the body's clip, already narrowed to
+    /// its block's when it stands in one.
+    clip: [f32; 4],
+    /// The paragraph, for the shaper to answer about. `None` for a piece that
+    /// is a **picture** — a display formula whose raster has arrived — which is
+    /// an atom and has no letters to stand between.
+    paragraph: Option<bt_render::PreviewParagraph>,
+}
+
 /// A markdown link, boxed where it was actually drawn.
 #[derive(Clone, Debug, PartialEq)]
 struct PreviewLink {
@@ -2351,6 +2563,13 @@ struct BuiltMarkdown {
     /// formula is *not* here — a block stands where its block stands, and the
     /// builder already knows that.
     math: Vec<PreviewMathSite>,
+    /// **Every piece of the document this pass set**, addressed in the
+    /// document's own terms — see [`PreviewTextSite`].
+    ///
+    /// Beside the body for the links' reason, and it is the same reason a third
+    /// time: what a reader may select is not something to draw, and "these
+    /// letters are the third cell of that table" is what the *window* knows.
+    text: Vec<PreviewTextSite>,
 }
 
 /// One inline formula the builder laid a gap for, before anyone has measured
@@ -2437,6 +2656,89 @@ fn note_link_sites(
             target: target.clone(),
         })
     }));
+}
+
+/// **Note the piece of the document a paragraph of spans is about to set.**
+///
+/// [`note_link_sites`]'s twin, called at the same moment and taking the same
+/// subscript, because the two answer the same shape of question about the same
+/// paragraph: a link is "this run points somewhere" and this is "these runs are
+/// that piece of the file".
+///
+/// `runs` is the paragraph's own, already built, and the pair is walked rather
+/// than assumed: what the shaper is given for a run and what the document wrote
+/// are the same bytes for every span but one — an inline formula whose picture
+/// has arrived is a placeholder on the glass and a whole `$x$` in the file — and
+/// that one is exactly what [`PreviewTextAtom`] records.
+fn note_text_site(
+    sites: &mut Vec<PreviewTextSite>,
+    spans: &[preview::Span],
+    runs: &[bt_render::PreviewRun],
+    (block, paragraph, first_run): (Option<usize>, usize, usize),
+    at: preview_select::Place,
+) {
+    let lead: usize = runs
+        .iter()
+        .take(first_run)
+        .map(|run| bt_render::preview_run_text(run).len())
+        .sum();
+    let mut atoms = Vec::new();
+    let (mut shaped, mut doc) = (0usize, 0usize);
+    for (run, span) in runs.iter().skip(first_run).zip(spans) {
+        let drawn = bt_render::preview_run_text(run).len();
+        let written = span.text.len();
+        if drawn != written {
+            atoms.push(PreviewTextAtom {
+                shaped: (shaped, shaped + drawn),
+                doc: (doc, doc + written),
+            });
+        }
+        shaped += drawn;
+        doc += written;
+    }
+    sites.push(PreviewTextSite {
+        block,
+        what: PreviewTextWhere::Paragraph(paragraph),
+        piece: PreviewTextPiece {
+            at,
+            len: doc,
+            lead,
+            atoms,
+            atomic: false,
+        },
+    });
+}
+
+/// **Note a paragraph that is a line rather than a sentence** — a fence's row,
+/// or the source of a formula that has no picture yet.
+///
+/// [`note_text_site`] for the blocks that have no spans: what is on the glass is
+/// what the document wrote, so the two byte spaces are the same one and there is
+/// nothing to record but where it is. `len` is the *piece's* length and not this
+/// line's, which is the whole of what `atomic` means — several paragraphs, one
+/// thing to select.
+fn note_text_line(
+    sites: &mut Vec<PreviewTextSite>,
+    runs: &[bt_render::PreviewRun],
+    (block, paragraph): (Option<usize>, usize),
+    at: preview_select::Place,
+    piece_len: Option<usize>,
+) {
+    let drawn: usize = runs
+        .iter()
+        .map(|run| bt_render::preview_run_text(run).len())
+        .sum();
+    sites.push(PreviewTextSite {
+        block,
+        what: PreviewTextWhere::Paragraph(paragraph),
+        piece: PreviewTextPiece {
+            at,
+            len: piece_len.unwrap_or(drawn),
+            lead: 0,
+            atoms: Vec::new(),
+            atomic: piece_len.is_some(),
+        },
+    });
 }
 
 /// Note every inline formula that has a picture, against the paragraph about to
@@ -3037,6 +3339,7 @@ fn build_preview_markdown_body(
     } = bars;
     let mut links: Vec<PreviewLinkSite> = Vec::new();
     let mut math_sites: Vec<PreviewMathSite> = Vec::new();
+    let mut text_sites: Vec<PreviewTextSite> = Vec::new();
     // The intrinsics travel with the blocks now, and for one reason: a fence's
     // syntax highlighting is width-free, so it was measured with the rest of
     // what a block is worth whatever the pane does (#49).
@@ -3141,6 +3444,12 @@ fn build_preview_markdown_body(
         };
         // Which list of paragraphs the sites below are counting into.
         let region = into.checked_sub(1);
+        // Which block of the *document* this is — the first half of every
+        // selectable place on it. Named apart from `index` because three of the
+        // arms below shadow that name with a row counter of their own, and a
+        // place built from the wrong one of the two is a selection that copies
+        // somebody else's paragraph.
+        let block_index = index;
         match block {
             preview::MarkdownBlock::Heading { level, spans } => {
                 note_link_sites(&mut links, spans, (region, paragraphs.len(), 0));
@@ -3168,8 +3477,16 @@ fn build_preview_markdown_body(
                         color: palette.preview_grid_line,
                     });
                 }
+                let runs = markdown_runs(spans, palette, true, math, metrics.heading_font(*level));
+                note_text_site(
+                    &mut text_sites,
+                    spans,
+                    &runs,
+                    (region, paragraphs.len(), 0),
+                    preview_select::Place::new(block_index, 0, 0),
+                );
                 paragraphs.push(bt_render::PreviewParagraph {
-                    runs: markdown_runs(spans, palette, true, math, metrics.heading_font(*level)),
+                    runs,
                     rect: [left, top, right, top + height - rule],
                     font_size_px: metrics.heading_font(*level),
                     line_height_px: metrics.heading_line_height(*level),
@@ -3188,8 +3505,16 @@ fn build_preview_markdown_body(
                     metrics.font_size,
                     (region, paragraphs.len(), 0),
                 );
+                let runs = markdown_runs(spans, palette, false, math, metrics.font_size);
+                note_text_site(
+                    &mut text_sites,
+                    spans,
+                    &runs,
+                    (region, paragraphs.len(), 0),
+                    preview_select::Place::new(block_index, 0, 0),
+                );
                 paragraphs.push(bt_render::PreviewParagraph {
-                    runs: markdown_runs(spans, palette, false, math, metrics.font_size),
+                    runs,
                     rect: [left, top, right, top + height],
                     font_size_px: metrics.font_size,
                     line_height_px: metrics.line_height,
@@ -3229,15 +3554,23 @@ fn build_preview_markdown_body(
                     } else {
                         metrics.list_item_gap
                     };
+                    let runs = markdown_item_runs(
+                        spans,
+                        *ordered,
+                        index,
+                        palette,
+                        math,
+                        metrics.font_size,
+                    );
+                    note_text_site(
+                        &mut text_sites,
+                        spans,
+                        &runs,
+                        (region, paragraphs.len(), 1),
+                        preview_select::Place::new(block_index, index, 0),
+                    );
                     paragraphs.push(bt_render::PreviewParagraph {
-                        runs: markdown_item_runs(
-                            spans,
-                            *ordered,
-                            index,
-                            palette,
-                            math,
-                            metrics.font_size,
-                        ),
+                        runs,
                         rect: [
                             left + metrics.list_indent,
                             item_top + gap,
@@ -3296,6 +3629,13 @@ fn build_preview_markdown_body(
                             run.color = palette.files_row_muted;
                         }
                     }
+                    note_text_site(
+                        &mut text_sites,
+                        spans,
+                        &runs,
+                        (region, paragraphs.len(), 0),
+                        preview_select::Place::new(block_index, index, 0),
+                    );
                     paragraphs.push(bt_render::PreviewParagraph {
                         runs,
                         rect: [
@@ -3328,6 +3668,7 @@ fn build_preview_markdown_body(
                         links: &mut links,
                         math_sites: &mut math_sites,
                         region,
+                        text: Some((&mut text_sites, block_index)),
                     },
                     rows,
                     alignments,
@@ -3370,8 +3711,16 @@ fn build_preview_markdown_body(
                 for (row, line) in text.lines().enumerate() {
                     let drawn = preview::expand_tabs(line);
                     let columns = bt_unicode::text_width(&drawn);
+                    let runs = highlight.runs(row, &drawn, (0, columns), ink);
+                    note_text_line(
+                        &mut text_sites,
+                        &runs,
+                        (region, paragraphs.len()),
+                        preview_select::Place::new(block_index, row, 0),
+                        None,
+                    );
                     paragraphs.push(bt_render::PreviewParagraph {
-                        runs: highlight.runs(row, &drawn, (0, columns), ink),
+                        runs,
                         rect: [
                             fence[0] + metrics.code_border + metrics.code_padding_x,
                             line_top,
@@ -3427,6 +3776,11 @@ fn build_preview_markdown_body(
                 // table does: centring something that does not fit would put its
                 // beginning off the left edge, and the beginning is where a
                 // formula is read from.
+                // What copies for a formula is its own source between the
+                // delimiters a display block dropped — `preview_select::pieces`
+                // is the one place that sentence is written, and this is its
+                // length said the same way.
+                let piece_len = source.len() + "$$$$".len();
                 match math.picture(source, MathMode::Display, metrics.font_size) {
                     Some(picture) => {
                         let width = picture.width_px as f32;
@@ -3437,6 +3791,17 @@ fn build_preview_markdown_body(
                             left + inset + width,
                             top + picture.height_px as f32,
                         ];
+                        text_sites.push(PreviewTextSite {
+                            block: region,
+                            what: PreviewTextWhere::Picture(rect),
+                            piece: PreviewTextPiece {
+                                at: preview_select::Place::new(block_index, 0, 0),
+                                len: piece_len,
+                                lead: 0,
+                                atoms: Vec::new(),
+                                atomic: true,
+                            },
+                        });
                         rasters.push(bt_render::ChromeIcon {
                             key: picture.key.clone(),
                             rect,
@@ -3451,15 +3816,27 @@ fn build_preview_markdown_body(
                     None => {
                         let mut line_top = top;
                         for line in source.lines() {
+                            let runs = vec![bt_render::PreviewRun {
+                                text: line.to_owned(),
+                                color: palette.files_row_text,
+                                mono: false,
+                                bold: false,
+                                font_scale: 1.0,
+                                inline_box_px: None,
+                            }];
+                            // Every line of a formula's source is the *same*
+                            // piece: what is standing here is one thing that
+                            // happens to need several rows, and half of it is
+                            // not half a formula.
+                            note_text_line(
+                                &mut text_sites,
+                                &runs,
+                                (region, paragraphs.len()),
+                                preview_select::Place::new(block_index, 0, 0),
+                                Some(piece_len),
+                            );
                             paragraphs.push(bt_render::PreviewParagraph {
-                                runs: vec![bt_render::PreviewRun {
-                                    text: line.to_owned(),
-                                    color: palette.files_row_text,
-                                    mono: false,
-                                    bold: false,
-                                    font_scale: 1.0,
-                                    inline_box_px: None,
-                                }],
+                                runs,
                                 rect: [left, line_top, right, line_top + metrics.line_height],
                                 font_size_px: metrics.font_size,
                                 line_height_px: metrics.line_height,
@@ -3489,7 +3866,222 @@ fn build_preview_markdown_body(
         },
         links,
         math: math_sites,
+        text: text_sites,
     }
+}
+
+/// **Every piece of a built document, boxed where it was drawn.**
+///
+/// The one place the builder's subscripts are turned into geometry, so that the
+/// hit test and the highlight are looking at the same boxes cropped to the same
+/// windows. A site whose paragraph is not in the body is dropped rather than
+/// guessed at: the body and the sites are built in one pass, so that cannot
+/// happen, and a box invented for a paragraph that is not there would answer a
+/// pointer about text nobody can see.
+fn preview_text_boxes(
+    body: &bt_render::PreviewBody,
+    sites: &[PreviewTextSite],
+) -> Vec<PreviewTextBox> {
+    sites
+        .iter()
+        .filter_map(|site| {
+            // A scrolling block's contents are seen through the block's own
+            // window *and* the page's — the same pair `preview_body_rect_instances`
+            // crops its fills to, said here so a band and the letters under it
+            // are cut at the same edge.
+            let (paragraphs, window) = match site.block {
+                None => (&body.paragraphs, body.clip),
+                Some(block) => {
+                    let block = body.blocks.get(block)?;
+                    (
+                        &block.paragraphs,
+                        bt_render::crop_to(block.clip, body.clip)?,
+                    )
+                }
+            };
+            let (rect, paragraph) = match site.what {
+                PreviewTextWhere::Paragraph(at) => {
+                    let paragraph = paragraphs.get(at)?;
+                    (paragraph.rect, Some(paragraph.clone()))
+                }
+                PreviewTextWhere::Picture(rect) => (rect, None),
+            };
+            Some(PreviewTextBox {
+                piece: site.piece.clone(),
+                rect,
+                clip: window,
+                paragraph,
+            })
+        })
+        .collect()
+}
+
+/// **Which piece of a rendered document a point stands on.**
+///
+/// Never `None` for a page with any text on it at all, and that is the whole of
+/// what it is for: a drag leaves the column of prose it started in — out into
+/// the margin, above the first block, below the last — and every one of those
+/// has to be an answer or the selection stops growing at the edge of the text.
+/// The terminal's own drag does the same thing by clamping a row and a column;
+/// this clamps to the nearest piece in document order.
+///
+/// Boxes are in document order because the sites are, so "the nearest" can be
+/// decided by walking them once.
+fn preview_text_box_at(boxes: &[PreviewTextBox], x: f32, y: f32) -> Option<usize> {
+    if boxes.is_empty() {
+        return None;
+    }
+    // On the letters, which is the ordinary answer.
+    if let Some(at) = boxes
+        .iter()
+        .position(|hit| y >= hit.rect[1] && y < hit.rect[3] && x >= hit.rect[0] && x < hit.rect[2])
+    {
+        return Some(at);
+    }
+    // On the row but not on the letters — the margin either side of a
+    // paragraph, or the gap between two cells of a table row. The nearest box
+    // *on that row*, because a table row is several side by side and the gap
+    // between two cells belongs to the one it is nearer to; the shaper then puts
+    // a point past the end of a line at the end of that line.
+    if let Some((at, _)) = boxes
+        .iter()
+        .enumerate()
+        .filter(|(_, hit)| y >= hit.rect[1] && y < hit.rect[3])
+        .min_by(|(_, one), (_, two)| {
+            horizontal_distance(one.rect, x)
+                .partial_cmp(&horizontal_distance(two.rect, x))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    {
+        return Some(at);
+    }
+    // Off the text entirely: the piece whose box is nearest vertically, and the
+    // earlier of two equally near ones — which is what makes the gap between
+    // two blocks belong to the block below it only once the pointer is nearer to
+    // it than to the block above.
+    boxes
+        .iter()
+        .enumerate()
+        .min_by(|(_, one), (_, two)| {
+            vertical_distance(one.rect, y)
+                .partial_cmp(&vertical_distance(two.rect, y))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(at, _)| at)
+}
+
+/// How far a point is from a box, left or right. Zero inside it.
+fn horizontal_distance(rect: [f32; 4], x: f32) -> f32 {
+    if x < rect[0] {
+        rect[0] - x
+    } else if x > rect[2] {
+        x - rect[2]
+    } else {
+        0.0
+    }
+}
+
+/// How far a point is from a box, up or down. Zero inside it.
+fn vertical_distance(rect: [f32; 4], y: f32) -> f32 {
+    if y < rect[1] {
+        rect[1] - y
+    } else if y > rect[3] {
+        y - rect[3]
+    } else {
+        0.0
+    }
+}
+
+/// **Ask the shaper which glass a range of one paragraph covers.**
+///
+/// [`bt_render::WindowRenderer::measure_preview_highlight`] at the one real call
+/// site; a parameter so that the arithmetic [`preview_selection_bands`] *is*
+/// about — which bytes of which piece — can be asked with no GPU in the room.
+type PreviewHighlightMeasure<'a> =
+    dyn FnMut(&bt_render::PreviewParagraph, Range<usize>) -> Vec<[f32; 4]> + 'a;
+
+/// **The bands a selection draws over one built document.**
+///
+/// The bands go out in whole-surface pixels, already cropped to the window each
+/// piece is seen through.
+fn preview_selection_bands(
+    boxes: &[PreviewTextBox],
+    start: preview_select::Place,
+    end: preview_select::Place,
+    measure: &mut PreviewHighlightMeasure<'_>,
+) -> Vec<[f32; 4]> {
+    let mut bands = Vec::new();
+    for hit in boxes {
+        let piece = &hit.piece;
+        let at = preview_select::Place::new(piece.at.block, piece.at.piece, 0);
+        if at < preview_select::Place::new(start.block, start.piece, 0)
+            || at > preview_select::Place::new(end.block, end.piece, 0)
+        {
+            continue;
+        }
+        let from = if at.block == start.block && at.piece == start.piece {
+            start.offset.min(piece.len)
+        } else {
+            0
+        };
+        let to = if at.block == end.block && at.piece == end.piece {
+            end.offset.min(piece.len)
+        } else {
+            piece.len
+        };
+        if from >= to && !piece.atomic {
+            continue;
+        }
+        let Some(paragraph) = hit.paragraph.as_ref() else {
+            // A picture has no letters to band between: the box it was drawn in
+            // is the whole of the answer, which is [`preview_select::Piece::atomic`]
+            // seen from the paint's side.
+            bands.extend(bt_render::crop_to(hit.rect, hit.clip));
+            continue;
+        };
+        let shaped_len = bt_render::preview_paragraph_text(paragraph).len();
+        let range = piece.shaped_range(from..to, shaped_len);
+        if range.start >= range.end {
+            continue;
+        }
+        bands.extend(
+            measure(paragraph, range)
+                .into_iter()
+                .filter_map(|band| bt_render::crop_to(band, hit.clip)),
+        );
+    }
+    bands
+}
+
+/// **Whether letting go of a gesture over a rendered page writes it to the
+/// clipboard** — `Copy on select`, on this surface.
+///
+/// The switch is the Terminal page's and its sentence is 「选中即复制」, which
+/// is a sentence about a *selection*: a reader who has been taught that
+/// highlighting text puts it on the clipboard has not been taught that it works
+/// in one pane and not the one beside it. So the same answer governs both.
+///
+/// **Asked of the bytes and not of the gesture**, which is the one place this
+/// reads differently from [`should_copy_on_select_release`] next door. That one
+/// carries a `!single_click` guard so that focusing a pane never blanks the
+/// clipboard; here the same guard is already spent, because a click that
+/// selected nothing leaves nothing to write and a click that selected a *word* —
+/// a double click, which is a click — is exactly the gesture the reader means by
+/// 「选中」. Requiring travel would make this the one surface in the window where
+/// double-clicking a word does not copy it.
+fn preview_copies_on_select(copy_on_select: bool, selected: bool) -> bool {
+    copy_on_select && selected
+}
+
+/// **Whether a press that began on a markdown link is still the link's when the
+/// button comes up** (user ruling: 点=留窗内; a drag is not a click).
+///
+/// The same six logical pixels every other press on this desk is measured
+/// against ([`DragLatch`]) and the same shape as the terminal's own
+/// `click_no_drag`: a hand that held still asked for the link, and a hand that
+/// travelled was selecting the sentence it happens to sit in.
+fn preview_press_opens_its_link(latch: &DragLatch) -> bool {
+    !latch.begun
 }
 
 /// Ask the shaper where each link actually landed.
@@ -3958,6 +4550,15 @@ pub(crate) struct MarkdownSink<'a> {
     pub(crate) quads: &'a mut Vec<bt_render::PreviewQuad>,
     pub(crate) paragraphs: &'a mut Vec<bt_render::PreviewParagraph>,
     pub(crate) links: &'a mut Vec<PreviewLinkSite>,
+    /// **Which piece of which block each cell is**, or `None` for a table that
+    /// is not standing in a document at all.
+    ///
+    /// A terminal block's table is drawn by this very function
+    /// ([`crate::table_block`]) and there is no markdown document behind it —
+    /// its rows came off the wire — so there is no block index to address a
+    /// cell by and nothing on that surface to select. The option is that
+    /// difference, said once, rather than a second painter for the same picture.
+    pub(crate) text: Option<(&'a mut Vec<PreviewTextSite>, usize)>,
     /// A cell's formulas land here on the terms a paragraph's do — a table cell
     /// comes through the one inline parser like every other run of text, so it
     /// can hold a formula and there is no second rule to teach.
@@ -4005,7 +4606,18 @@ pub(crate) fn push_markdown_table(
         links,
         math_sites,
         region,
+        text,
     } = sink;
+    let (mut text, cell_pieces) = match text {
+        Some((sites, block)) => (Some(sites), Some(block)),
+        None => (None, None),
+    };
+    // The cells are numbered over the **rows' own** lengths and not over the
+    // column count, because those two differ in both directions: a row short of
+    // a cell is drawn with a gap, and a row longer than the heading has columns
+    // nothing measured. Numbering by the column count would push every cell
+    // after such a row against a neighbour's text.
+    let mut row_base = 0usize;
     let border = metrics.table_border;
     let width: f32 = placed.columns.iter().sum::<f32>() + border;
     let mut row_top = origin[1];
@@ -4064,6 +4676,15 @@ pub(crate) fn push_markdown_table(
                     (region, paragraphs.len(), 0),
                 );
                 let mut runs = markdown_runs(cell, palette, index == 0, math, metrics.font_size);
+                if let (Some(sites), Some(block)) = (text.as_deref_mut(), cell_pieces) {
+                    note_text_site(
+                        sites,
+                        cell,
+                        &runs,
+                        (region, paragraphs.len(), 0),
+                        preview_select::Place::new(block, row_base + column, 0),
+                    );
+                }
                 if index == 0 {
                     // A heading cell is set in the heading ink whatever its own
                     // spans said, which is `th`'s own rule and the reason the
@@ -4107,6 +4728,7 @@ pub(crate) fn push_markdown_table(
             }
             cell_left += outer;
         }
+        row_base += row.len();
         row_top = bottom;
     }
 }
@@ -4520,6 +5142,12 @@ struct TermMenuState {
     /// the left button), so a menu that ran its verbs on `focused_leaf` would
     /// clear the scrollback of the pane next door.
     seat: SeatId,
+    /// **What the pane under it turned out to be** — see
+    /// [`profiles::TermMenuPane`]. Snapshotted beside `subject` and for its
+    /// reason: a preview seat can be flipped to its source face while the menu
+    /// stands, and a menu whose rows changed under a descending hand would be
+    /// worse than one that ran a verb on a face that has just turned over.
+    pane: profiles::TermMenuPane,
     /// What the pane could answer for when the menu was raised.
     subject: profiles::TermMenuSubject,
     hover: Option<profiles::TermMenuHover>,
@@ -6374,6 +7002,15 @@ struct TabState {
     preview_views: PreviewViewStore,
     /// Which surface the pointer is drawing a selection across.
     preview_selecting: Option<PreviewSurface>,
+    /// **The same thing on a rendered page**, and its own slot because it is its
+    /// own gesture: the quick edit's selection is a caret being dragged through
+    /// a monospace grid, and this is a range of a *document* being drawn out
+    /// across paragraphs, tables and pictures. It also carries a press that may
+    /// still turn out to have been a click on a link.
+    preview_text_drag: Option<PreviewTextDrag>,
+    /// How many presses in a row have landed in the same few pixels of the same
+    /// page — one for a caret, two for a word, three for a paragraph.
+    preview_text_clicks: PreviewTextClicks,
     /// The picture in the hand, and the press that may still become a double
     /// click on one (ticket #60). Beside the drags above and singletons for
     /// their reason: there is one pointer.
@@ -15742,6 +16379,107 @@ impl ImageClicks {
         });
         self.last = (!doubled).then_some((surface, point, now));
         doubled
+    }
+}
+
+/// **A selection being drawn across a rendered page**, and the press it began
+/// as.
+///
+/// The latch is the whole of what makes a link and a selection able to share one
+/// press: until six logical pixels have gone by, the gesture is still a click and
+/// the link it landed on is still going to answer; after them it is a drag and
+/// the link is not. It is the same latch and the same six pixels every other
+/// press on this desk is measured against, and the same shape as the terminal's
+/// `click_no_drag` — see [`preview_press_opens_its_link`].
+#[derive(Clone, Debug)]
+struct PreviewTextDrag {
+    /// The gesture's own surface, not the one under the pointer: a selection
+    /// belongs to the page it began on however far the hand has since gone.
+    surface: PreviewSurface,
+    latch: DragLatch,
+    /// The markdown link the press landed on, if it landed on one.
+    link: Option<String>,
+}
+
+/// The press that may still turn out to be the second or third of a run.
+///
+/// [`ImageClicks`] with a count instead of a flag, keyed the same way and for
+/// the same reason: a rendered page has no grid to name a repeat in, so the
+/// question is "the same surface, within a few pixels, soon enough". Counting to
+/// three and wrapping is the terminal's own [`ClickTracker`] — a fourth press in
+/// one place goes back to placing a caret, so a hand resting on the button does
+/// not select the page.
+#[derive(Default)]
+struct PreviewTextClicks {
+    last: Option<(PreviewSurface, [f32; 2], Instant)>,
+    count: u8,
+}
+
+impl PreviewTextClicks {
+    fn register(&mut self, surface: PreviewSurface, point: [f32; 2], now: Instant) -> u8 {
+        let again = self.last.is_some_and(|(at, was, when)| {
+            at == surface
+                && now.saturating_duration_since(when) <= MULTI_CLICK_INTERVAL
+                && (point[0] - was[0]).abs() <= IMAGE_DOUBLE_CLICK_SLOP_PX
+                && (point[1] - was[1]).abs() <= IMAGE_DOUBLE_CLICK_SLOP_PX
+        });
+        self.count = if again { self.count % 3 + 1 } else { 1 };
+        self.last = Some((surface, point, now));
+        self.count
+    }
+
+    /// A press that travelled is not half of a double click — J99's rule, which
+    /// this window already applies at its pane heads.
+    fn interrupt(&mut self) {
+        self.last = None;
+        self.count = 0;
+    }
+}
+
+/// **How much of the page one press asks for.**
+fn preview_text_grain(clicks: u8) -> preview_select::Grain {
+    match clicks {
+        2 => preview_select::Grain::Word,
+        3 => preview_select::Grain::Piece,
+        _ => preview_select::Grain::Character,
+    }
+}
+
+/// **What one key means to a rendered page's selection.**
+///
+/// Three verbs, and the list is short on purpose. `Shift`+arrow — extending a
+/// selection from the keyboard — is deliberately **not** here: moving a caret
+/// through a rendered page needs a caret, and a caret in a page you cannot type
+/// into is the beginning of the block-level editing slice rather than the end of
+/// this one. The arrows go on scrolling, which is what a focused preview has
+/// always done with them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreviewTextCommand {
+    Copy,
+    SelectAll,
+    /// Let go of what is selected — `Esc`, and the click on blank glass.
+    Clear,
+}
+
+/// Which of the three a key is, if it is one.
+///
+/// `Ctrl+C` and `Ctrl+Shift+C` both copy, unlike in the terminal where the
+/// unshifted one has to reach a shell when nothing is selected: there is no
+/// shell under a rendered page, so there is nothing for it to fall through to.
+fn preview_text_command(key: &Key, modifiers: ModifiersState) -> Option<PreviewTextCommand> {
+    if let Key::Named(NamedKey::Escape) = key {
+        return Some(PreviewTextCommand::Clear);
+    }
+    if !modifiers.control_key() || modifiers.alt_key() {
+        return None;
+    }
+    let Key::Character(text) = key else {
+        return None;
+    };
+    match text.as_str() {
+        "c" | "C" => Some(PreviewTextCommand::Copy),
+        "a" | "A" => Some(PreviewTextCommand::SelectAll),
+        _ => None,
     }
 }
 
@@ -25960,6 +26698,8 @@ fn assemble_tab_state(
         preview_selecting: None,
         preview_image_drag: None,
         preview_image_clicks: ImageClicks::default(),
+        preview_text_drag: None,
+        preview_text_clicks: PreviewTextClicks::default(),
         preview_block_drag: None,
         preview_block_hover: None,
         preview_body_drag: None,
@@ -42278,6 +43018,13 @@ impl Runtime<'_> {
         {
             self.preview_selecting = None;
         }
+        if self
+            .preview_text_drag
+            .as_ref()
+            .is_some_and(|drag| !alive.contains(&drag.surface))
+        {
+            self.preview_text_drag = None;
+        }
         // **The card is not in `alive` and must not be swept out by its
         // absence.** [`PreviewSurface::Peek`] is not in the tree and not in the
         // float host — that is the same sentence the `Peek` arm above answers
@@ -43015,7 +43762,7 @@ impl Runtime<'_> {
             };
             pane.caret = preview_edit::EditCaret::default();
             pane.scroll = [0.0, 0.0];
-            pane.doc = PreviewDocument::Empty;
+            pane.show_document(PreviewDocument::Empty);
             pane.doc_key = None;
             // The block offsets this document was scrolled by mean nothing to
             // the next one.
@@ -43039,6 +43786,15 @@ impl Runtime<'_> {
         }
         if self.preview_selecting == Some(surface) {
             self.preview_selecting = None;
+        }
+        // A selection being drawn across a page that has just been swapped out
+        // is a selection of a document nobody is looking at any more.
+        if self
+            .preview_text_drag
+            .as_ref()
+            .is_some_and(|drag| drag.surface == surface)
+        {
+            self.preview_text_drag = None;
         }
         // A thumb held over the swap would be dragging a block that is not there
         // any more.
@@ -45296,19 +46052,18 @@ impl Runtime<'_> {
         Some((surface, link))
     }
 
-    /// A press on a markdown link (user ruling, 2026-08-13).
+    /// **Go where a markdown link points** (user ruling, 2026-08-13).
     ///
-    /// Returns whether the press was the link's. Asked before the block thumbs
-    /// and before the edit surface for the reason the thumb is asked before the
-    /// text: a link is a control standing *in* the content, and a press on a
-    /// control was never a press on what it is standing on.
-    fn press_preview_link(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some((surface, target)) = self
-            .preview_link_at(position)
-            .map(|(surface, link)| (surface, link.target.clone()))
-        else {
-            return Ok(false);
-        };
+    /// Reached from the **release** and not from the press (user report
+    /// 2026-08-28). It used to be a press, on the argument that a link is a
+    /// control standing in the content and a press on a control was never a
+    /// press on what it stands on — which was true for as long as the prose
+    /// underneath answered nothing. Now it answers a drag, and the two verbs
+    /// have to share one button: a press that held still is the link's and a
+    /// press that travelled is the selection's, which is exactly the
+    /// `click_no_drag` gate the terminal's own hyperlinks are opened through
+    /// ([`hyperlink_activation`]). See [`preview_press_opens_its_link`].
+    fn open_preview_link(&mut self, surface: PreviewSurface, target: &str) -> Result<bool> {
         // A relative link is resolved against the document's **own folder**, so
         // a document that is not in a folder cannot resolve one.
         let Some(document) = self
@@ -45318,7 +46073,7 @@ impl Runtime<'_> {
         else {
             return Ok(false);
         };
-        match preview::link_action(&target, &document) {
+        match preview::link_action(target, &document) {
             // §7.1.3's one door, the same one the tree's Enter and the file
             // menu's first row go through — so a file reached by pointing at it
             // in prose lands exactly where a file reached any other way does,
@@ -45342,6 +46097,270 @@ impl Runtime<'_> {
             preview::LinkAction::Nowhere => Ok(()),
         }
         .map(|()| true)
+    }
+
+    /// **Which byte of a rendered page a point names**, in the document's own
+    /// terms.
+    ///
+    /// `preview_offset_at`'s opposite number on the other face of the same
+    /// surface, and the difference between them is the whole reason this
+    /// feature needed writing: that one divides by a cell width, because the
+    /// source face is a monospace grid; a rendered page is proportional text
+    /// that has already wrapped, so where a letter is on screen is a question
+    /// only the shaper can answer — the same shaper that drew it.
+    fn preview_place_at(
+        &mut self,
+        surface: PreviewSurface,
+        position: PhysicalPosition<f64>,
+    ) -> Option<preview_select::Place> {
+        let (x, y) = (position.x as f32, position.y as f32);
+        // Cloned out so the pane's borrow ends before the shaper's begins. One
+        // paragraph per pointer event, which is nothing beside the shaping the
+        // same event's repaint is about to do.
+        let hit = {
+            let boxes = &self.preview_pane(surface)?.md_text;
+            let at = preview_text_box_at(boxes, x, y)?;
+            boxes[at].clone()
+        };
+        let Some(paragraph) = hit.paragraph else {
+            // A picture: there are no letters to stand between, and the piece is
+            // an atom anyway.
+            return Some(hit.piece.at);
+        };
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let shaped = renderer.measure_preview_hit(gpu, &paragraph, x, y);
+        Some(preview_select::Place {
+            offset: hit.piece.doc_offset(shaped),
+            ..hit.piece.at
+        })
+    }
+
+    /// The rendered page under the pointer, if the pointer is over one.
+    ///
+    /// A *rendered* page and not merely a preview surface: the source face has
+    /// its own selection ([`preview_edit::EditCaret`]) and a picture has none,
+    /// so this is the question "is there a document on the glass here whose
+    /// words can be picked up".
+    fn preview_rendered_surface_at(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<PreviewSurface> {
+        let (surface, _) = self.preview_surface_at(position)?;
+        matches!(
+            self.preview_pane(surface)?.doc,
+            PreviewDocument::Markdown { .. }
+        )
+        .then_some(surface)
+    }
+
+    /// **A press inside a rendered page** (user report 2026-08-28: 「渲染后的
+    /// md 文字无法选中」).
+    ///
+    /// It takes the press whole, and it takes the press a link landed on too —
+    /// see [`Self::open_preview_link`] for why the link now answers at the
+    /// release instead. What it does *not* take is a press on any of the
+    /// furniture standing over the page: the body's bar, a wide block's bar and
+    /// a picture are all asked before it, exactly as they were before there was
+    /// anything under them to select.
+    fn press_preview_text(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(surface) = self.preview_rendered_surface_at(position) else {
+            return Ok(false);
+        };
+        let Some(place) = self.preview_place_at(surface, position) else {
+            return Ok(false);
+        };
+        let point = [position.x as f32, position.y as f32];
+        let clicks = self
+            .preview_text_clicks
+            .register(surface, point, Instant::now());
+        let grain = preview_text_grain(clicks);
+        // Shift-click extends from wherever the selection already was, which is
+        // the quick edit's own gesture and the one that makes a long selection
+        // possible without a drag that outruns the pane.
+        let standing = self
+            .preview_pane(surface)
+            .and_then(|pane| pane.md_select)
+            .filter(|_| self.window.modifiers.shift_key());
+        let selection = match standing {
+            Some(was) => preview_select::Selection { head: place, ..was },
+            None => preview_select::Selection::collapsed(place, grain),
+        };
+        self.preview_pane_mut(surface).md_select = Some(selection);
+        let link = self
+            .preview_link_at(position)
+            .map(|(_, link)| link.target.clone());
+        self.preview_text_drag = Some(PreviewTextDrag {
+            surface,
+            // A shift-click has already extended the selection and must not have
+            // to travel to keep it; the latch is what decides whether the *link*
+            // answers, and a shift-click on one is not asking for the link.
+            latch: DragLatch::new(position),
+            link: link.filter(|_| standing.is_none()),
+        });
+        self.repaint_preview()?;
+        Ok(true)
+    }
+
+    /// The pointer travelling with the button down, drawing across a page.
+    ///
+    /// It owns the pointer **outside** the page it began on, for the reason the
+    /// quick edit's own drag does: a selection that stopped extending the moment
+    /// the hand left the pane would make selecting the last line a matter of aim.
+    fn drag_preview_text(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let scale = self.window.renderer.metrics().scale_factor;
+        let Some(drag) = self.preview_text_drag.as_mut() else {
+            return Ok(false);
+        };
+        let surface = drag.surface;
+        let crossed = drag.latch.travelled(position, scale);
+        let begun = drag.latch.begun;
+        if crossed {
+            // A press that travelled is not half of a double click — J99's rule,
+            // at this window's third double-click surface.
+            self.preview_text_clicks.interrupt();
+        }
+        if !begun {
+            // Still a click. Nothing has been selected yet, so nothing is drawn
+            // — the six pixels are what keep a press meant for a link from
+            // flashing a character of highlight under the hand.
+            return Ok(true);
+        }
+        let Some(place) = self.preview_place_at(surface, position) else {
+            return Ok(true);
+        };
+        let was = self.preview_pane(surface).and_then(|pane| pane.md_select);
+        let Some(selection) = was else {
+            return Ok(true);
+        };
+        if selection.head == place {
+            return Ok(true);
+        }
+        self.preview_pane_mut(surface).md_select = Some(preview_select::Selection {
+            head: place,
+            ..selection
+        });
+        self.repaint_preview()?;
+        Ok(true)
+    }
+
+    /// **The button coming up on a rendered page.**
+    ///
+    /// Three outcomes and one gate between them: a press that never travelled is
+    /// a click — it opens the link it landed on, if it landed on one, and lets
+    /// go of whatever was selected either way — and a press that travelled is a
+    /// selection, which `Copy on select` may put on the clipboard.
+    fn release_preview_text(&mut self, _position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(drag) = self.preview_text_drag.take() else {
+            return Ok(false);
+        };
+        // Asked of the *bytes* and not of the gesture, which is what keeps the
+        // two presses that select without travelling: a double click has taken a
+        // word and a shift-click has taken a stretch, and neither of them let go
+        // of it by finishing.
+        let selected = self.preview_selected_text(drag.surface).is_some();
+        if preview_press_opens_its_link(&drag.latch) {
+            // **A click on blank glass lets go of the selection**, which is what
+            // every reader expects of a click in a page of text — and the same
+            // click on a link is still the link's.
+            if !selected {
+                self.preview_pane_mut(drag.surface).md_select = None;
+            }
+            self.repaint_preview()?;
+            if let Some(target) = drag.link {
+                self.open_preview_link(drag.surface, &target)?;
+                // A press that has just been spent on a link is not a selection
+                // to write, whatever it was standing over.
+                return Ok(true);
+            }
+        }
+        if preview_copies_on_select(self.app.settings_store.loaded().copy_on_select, selected) {
+            // **The selection stays standing**, which is copy-on-select's own
+            // rule next door: the reader has not asked for it to go away, and a
+            // highlight that vanished the instant the button came up would be a
+            // highlight nobody could check.
+            self.copy_preview_text_selection(drag.surface);
+        }
+        Ok(true)
+    }
+
+    /// **What a rendered page's selection would put on the clipboard**, or
+    /// `None` when that is nothing.
+    ///
+    /// The same question the terminal's menu asks before it offers `Copy`, asked
+    /// of the same thing: not "is there a pair of places" but "are there bytes
+    /// between them". A bare click has places and no bytes.
+    fn preview_selected_text(&self, surface: PreviewSurface) -> Option<String> {
+        let pane = self.preview_pane(surface)?;
+        let selection = pane.md_select?;
+        let PreviewDocument::Markdown { blocks, .. } = &pane.doc else {
+            return None;
+        };
+        let pieces = preview_select::pieces(blocks);
+        let (start, end) = selection.range(&pieces);
+        let text = preview_select::copy_text(&pieces, start, end);
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Put a rendered page's selection on the clipboard, through the door the
+    /// terminal's own copy already uses.
+    fn copy_preview_text_selection(&mut self, surface: PreviewSurface) -> bool {
+        let Some(text) = self.preview_selected_text(surface) else {
+            return false;
+        };
+        if let Err(error) = write_terminal_clipboard_text(&self.window.window, &text) {
+            // Recoverable, on `recoverable_clipboard_write`'s own terms: the
+            // selection stays standing so the reader can try again.
+            eprintln!("recoverable preview copy failure: {error:#}");
+            return false;
+        }
+        true
+    }
+
+    /// **One key aimed at a rendered page's selection**, or `false` if it was
+    /// not one of the three.
+    fn preview_text_key(&mut self, surface: PreviewSurface, event: &KeyEvent) -> Result<bool> {
+        if !matches!(
+            self.preview_pane(surface).map(|pane| &pane.doc),
+            Some(PreviewDocument::Markdown { .. })
+        ) {
+            return Ok(false);
+        }
+        let Some(command) = preview_text_command(&event.logical_key, self.window.modifiers) else {
+            return Ok(false);
+        };
+        match command {
+            PreviewTextCommand::Copy => {
+                self.copy_preview_text_selection(surface);
+            }
+            PreviewTextCommand::SelectAll => {
+                let selection = match &self.preview_pane(surface).map(|pane| &pane.doc) {
+                    Some(PreviewDocument::Markdown { blocks, .. }) => {
+                        preview_select::select_all(&preview_select::pieces(blocks))
+                    }
+                    _ => None,
+                };
+                if selection.is_none() {
+                    // A page with no words in it: the key is still the page's,
+                    // and there is simply nothing to take.
+                    return Ok(true);
+                }
+                self.preview_pane_mut(surface).md_select = selection;
+                self.repaint_preview()?;
+            }
+            PreviewTextCommand::Clear => {
+                if self
+                    .preview_pane(surface)
+                    .is_none_or(|pane| pane.md_select.is_none())
+                {
+                    // Nothing to let go of — `Esc` falls through to whatever
+                    // else on this surface wants it.
+                    return Ok(false);
+                }
+                self.preview_pane_mut(surface).md_select = None;
+                self.repaint_preview()?;
+            }
+        }
+        Ok(true)
     }
 
     /// Light the link under the pointer, or put the last one out.
@@ -45972,6 +46991,15 @@ impl Runtime<'_> {
         // unrecognised character fall through to the list under it would be a
         // field you could type `j` into and watch the graph scroll.
         if self.graph_search_focused(surface) && self.graph_search_key(surface, event)? {
+            return Ok(true);
+        }
+        // **A rendered page's three verbs** — `Ctrl+C`, `Ctrl+A` and `Esc`
+        // (user report 2026-08-28). Asked before the scroll below for the
+        // graph's reason: what those keys mean on this surface is about the
+        // *words*, not about twenty pixels — and `Esc` with nothing selected
+        // falls back through to whatever else wants it, exactly as the graph's
+        // does.
+        if self.preview_text_key(surface, event)? {
             return Ok(true);
         }
         if self.window.git_graphs_shown.contains_key(&surface)
@@ -46814,12 +47842,13 @@ impl Runtime<'_> {
                 intrinsic
             };
             let layout = self.lay_markdown_out(&blocks, &intrinsic, width, metrics, &math);
-            self.preview_pane_mut(surface).doc = PreviewDocument::Markdown {
-                blocks,
-                intrinsic,
-                layout,
-                math,
-            };
+            self.preview_pane_mut(surface)
+                .reflow_document(PreviewDocument::Markdown {
+                    blocks,
+                    intrinsic,
+                    layout,
+                    math,
+                });
             return;
         }
         let Some((view, content, name)) = self.preview_buffer_on(surface).map(|buffer| {
@@ -46829,7 +47858,8 @@ impl Runtime<'_> {
                 buffer.name.clone(),
             )
         }) else {
-            self.preview_pane_mut(surface).doc = PreviewDocument::Empty;
+            self.preview_pane_mut(surface)
+                .show_document(PreviewDocument::Empty);
             return;
         };
         let text_metrics = seats::preview_text_metrics(scale);
@@ -46943,7 +47973,7 @@ impl Runtime<'_> {
             | preview::PreviewView::Web
             | preview::PreviewView::None => PreviewDocument::Empty,
         };
-        self.preview_pane_mut(surface).doc = doc;
+        self.preview_pane_mut(surface).show_document(doc);
     }
 
     /// Everything about a document that a pane's width cannot change.
@@ -47513,6 +48543,7 @@ impl Runtime<'_> {
         let (rows_height, columns) = self.preview_content_extent(surface, scale);
         let mut sites = Vec::new();
         let mut math_sites: Vec<PreviewMathSite> = Vec::new();
+        let mut text_sites: Vec<PreviewTextSite> = Vec::new();
         let mut built = match &self.preview_pane(surface)?.doc {
             PreviewDocument::Text {
                 lines,
@@ -47583,6 +48614,7 @@ impl Runtime<'_> {
                 );
                 sites = rendered.links;
                 math_sites = rendered.math;
+                text_sites = rendered.text;
                 rendered.body
             }
             PreviewDocument::Empty => bt_render::PreviewBody {
@@ -47622,6 +48654,44 @@ impl Runtime<'_> {
             &mut built,
             &math_sites,
         );
+        // **The selection before the links, because it is under them**: the
+        // bands are fills and go out in the pass that draws every fill, and the
+        // one thing that must be over them is the rule under a hovered link.
+        //
+        // Pushed here rather than inside the builder for the reason the links
+        // are measured here: which glass a range of a document covers is a
+        // question only the shaper answers, and the builder holds no shaper.
+        let text_boxes = preview_text_boxes(&built, &text_sites);
+        // The range is read while the pane is borrowed and the shaper is asked
+        // after: `range_in` builds only the two blocks the ends stand in, which
+        // is what makes a highlight on a 64KB page cost two blocks a frame
+        // rather than every string in the file.
+        let range = self.preview_pane(surface).and_then(|pane| {
+            let selection = pane.md_select?;
+            let PreviewDocument::Markdown { blocks, .. } = &pane.doc else {
+                return None;
+            };
+            Some(selection.range_in(blocks))
+        });
+        if let Some((start, end)) = range {
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let bands =
+                preview_selection_bands(&text_boxes, start, end, &mut |paragraph, range| {
+                    renderer.measure_preview_highlight(gpu, paragraph, range)
+                });
+            built.quads.extend(bands.into_iter().map(|rect| {
+                bt_render::PreviewQuad {
+                    rect,
+                    // **The terminal's own selection blue** — the fill
+                    // `preview_selection` was minted to lend the quick edit, and
+                    // lent to a second surface here for its own stated reason:
+                    // two blues on one screen for one idea would be the window
+                    // disagreeing with itself.
+                    color: palette.preview_selection,
+                }
+            }));
+        }
+        self.preview_pane_mut(surface).md_text = text_boxes;
         let links =
             measure_preview_links(&mut self.app.gpu, &mut self.window.renderer, &built, &sites);
         if let Some((hovered_surface, hovered)) = self.preview_link_hover
@@ -56031,9 +57101,43 @@ impl Runtime<'_> {
         self.window.term_menu = Some(TermMenuState {
             point: [position.x as f32, position.y as f32],
             seat,
+            pane: profiles::TermMenuPane::Shell,
             subject: self.term_menu_subject(seat),
             hover: None,
             lone,
+            submenu_open: false,
+            pointer_was: None,
+            submenu_hold_until: None,
+        });
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **The same menu, raised on a rendered page** (user report 2026-08-28).
+    ///
+    /// [`Self::open_term_menu_at`]'s twin and deliberately not a second machine:
+    /// what differs between the two is the row list and the two verbs behind it,
+    /// which is exactly what [`profiles::TermMenuPane`] carries. The segment is
+    /// off — those are the pane's verbs and this seat always wears the head that
+    /// holds them — and `Copy` is greyed unless there are bytes to write, which
+    /// is the terminal's own question asked of this surface's own selection.
+    fn open_page_menu_at(&mut self, seat: SeatId, position: PhysicalPosition<f64>) -> Result<()> {
+        self.close_popups_except(Popup::TermMenu);
+        let has_selection = self
+            .preview_selected_text(self.preview_here(seat))
+            .is_some();
+        self.window.term_menu = Some(TermMenuState {
+            point: [position.x as f32, position.y as f32],
+            seat,
+            pane: profiles::TermMenuPane::Page,
+            subject: profiles::TermMenuSubject {
+                has_selection,
+                ..profiles::TermMenuSubject::default()
+            },
+            hover: None,
+            lone: false,
             submenu_open: false,
             pointer_was: None,
             submenu_hold_until: None,
@@ -56055,6 +57159,7 @@ impl Runtime<'_> {
         let (point, look) = (
             menu.point,
             profiles::TermMenuLook {
+                pane: menu.pane,
                 subject: menu.subject,
                 hover: menu.hover,
                 lone: menu.lone,
@@ -56086,6 +57191,7 @@ impl Runtime<'_> {
         let Some((look, seat)) = self.window.term_menu.as_ref().map(|menu| {
             (
                 profiles::TermMenuLook {
+                    pane: menu.pane,
                     subject: menu.subject,
                     hover: menu.hover,
                     lone: menu.lone,
@@ -56188,6 +57294,38 @@ impl Runtime<'_> {
             }
             profiles::TermMenuHit::Surface => return Ok(()),
         };
+        // **A page's two verbs answer about the page**, not about a shell that
+        // is not under this menu. Split here rather than by a second runner, so
+        // that everything above — the take, the frame, the segment's door — is
+        // said once for both.
+        if menu.pane == profiles::TermMenuPane::Page {
+            let surface = self.preview_here(seat);
+            return match row {
+                // The clipboard door copy-on-select uses, so the menu and the
+                // drag write the same bytes and both leave the selection
+                // standing — the terminal's row's own rule, one surface over.
+                profiles::TermMenuRow::Copy => {
+                    self.copy_preview_text_selection(surface);
+                    Ok(())
+                }
+                profiles::TermMenuRow::SelectAll => {
+                    let selection = match &self.preview_pane(surface).map(|pane| &pane.doc) {
+                        Some(PreviewDocument::Markdown { blocks, .. }) => {
+                            preview_select::select_all(&preview_select::pieces(blocks))
+                        }
+                        _ => None,
+                    };
+                    if selection.is_some() {
+                        self.preview_pane_mut(surface).md_select = selection;
+                        self.repaint_preview()?;
+                    }
+                    Ok(())
+                }
+                // Nothing else is on a page's list — see
+                // [`profiles::TermMenuPane::Page`].
+                _ => Ok(()),
+            };
+        }
         match row {
             // **Copy-on-select's own door**, so that the menu and the drag put
             // the same bytes on the clipboard and both leave the selection
@@ -56400,9 +57538,14 @@ impl Runtime<'_> {
                         Some(profiles::TermMenuHover::Row(entry)) => Some(entry),
                         Some(profiles::TermMenuHover::Submenu(_)) | None => None,
                     };
-                    menu.hover =
-                        profiles::term_menu_step(current, menu.subject, forwards, menu.lone)
-                            .map(profiles::TermMenuHover::Row);
+                    menu.hover = profiles::term_menu_step(
+                        current,
+                        menu.subject,
+                        forwards,
+                        menu.pane,
+                        menu.lone,
+                    )
+                    .map(profiles::TermMenuHover::Row);
                 }
                 if self.refresh_overlay() {
                     self.present_chrome_change()?;
@@ -66245,6 +67388,11 @@ impl Runtime<'_> {
         if self.drag_preview_selection(position)? {
             return Ok(());
         }
+        // A selection being drawn across a **rendered** page owns the pointer on
+        // exactly those terms, and outside its own body for the same reason.
+        if self.drag_preview_text(position)? {
+            return Ok(());
+        }
         // A picture in hand owns the pointer on exactly the same terms, and
         // outside its own body for the same reason: a pan that stopped the
         // moment the hand crossed the pane's edge would make the last corner of
@@ -69615,6 +70763,13 @@ impl Runtime<'_> {
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-preview-selecting state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
+            // **And one drawn across a rendered page**, on the same terms and
+            // with one more decision to make: a press that never travelled was a
+            // click, and a click is the link's or nobody's.
+            if self.release_preview_text(position)? {
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-preview-text state={state:?} button={button:?} target={traced_target:?}"));
+                return Ok(true);
+            }
             // Ahead of the press: a gesture that has become a drag answers with
             // its drop, and the press that started it is no longer a click.
             if self.release_drag()? {
@@ -69870,12 +71025,6 @@ impl Runtime<'_> {
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-terminal-column-thumb state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
-            // A link is a control standing in the prose and answers before the
-            // prose does.
-            if self.press_preview_link(position)? {
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-link state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
             // The bar under a wide block is a scrollbar and answers first: it
             // stands over the block it scrolls, so a press on it was never a
             // press in the content beneath.
@@ -69896,6 +71045,20 @@ impl Runtime<'_> {
             // chord.
             if self.press_preview_body(position)? {
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-body state={state:?} button={button:?} target={traced_target:?}"));
+                return Ok(true);
+            }
+            // **And a press inside a rendered page draws a selection across it**
+            // (user report 2026-08-28). Below the edit surface because the two
+            // are alternatives on one body — a buffer shows its source or its
+            // render, never both — and below the picture and the bars for their
+            // own reason: everything above this is furniture standing over the
+            // document, and a press on furniture was never a press on the words.
+            //
+            // A markdown **link** is answered from here now rather than from a
+            // press of its own three arms up, because a link and the prose it
+            // stands in share one button: see [`Self::open_preview_link`].
+            if self.press_preview_text(position)? {
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-text state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             return Ok(press_reaches_no_grid(
@@ -71242,6 +72405,24 @@ impl Runtime<'_> {
             && let Some(MouseRoute::Local(drag)) = self.window.mouse_route.as_ref().cloned()
         {
             return self.finish_local_selection(*drag);
+        }
+        // **A rendered page's own context menu** (user report 2026-08-28),
+        // asked before the cell lookup below because a preview seat has no cells
+        // and the lookup is where a press on one dies.
+        //
+        // It is the *terminal's* menu with a page's row list in it
+        // ([`profiles::TermMenuPane`]): a right click inside a pane is one
+        // gesture, and a second menu machine for two verbs would be a second
+        // place for this house's own menu behaviour to drift.
+        if state == ElementState::Pressed
+            && button == MouseButton::Right
+            && let Some(position) = self.window.pointer_position
+            && let Some(seat) = seats::pane_at(&self.seat_layout, position.x, position.y)
+            && self
+                .preview_rendered_surface_at(position)
+                .is_some_and(|surface| surface == self.preview_here(seat))
+        {
+            return self.open_page_menu_at(seat, position);
         }
         let Some((hit_seat, hit)) = self.pane_frame_hit() else {
             // No cell under the pointer at all — the router is out of surfaces
@@ -77607,7 +78788,7 @@ mod mouse_trace_station_tests {
         // Twenty-four once the two 2026-08-24/25 lines met: the address row's
         // press takes the event whole exactly as the name's double click does,
         // and it joins the exits the other line had already counted to 23.
-        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 24);
+        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 25);
     }
 
     /// Both `None`s here are silent by construction — the callers turn them into
@@ -105216,6 +106397,477 @@ mod tests {
                 "and never prints where it points"
             );
         }
+    }
+
+    /// **The document hands out every piece it drew, addressed in the
+    /// document's own terms** (user report 2026-08-28: 「渲染后的 md 文字无法
+    /// 选中」).
+    ///
+    /// The anti-drift pin for the whole feature. A selection is anchored to
+    /// `(block, piece, offset)` and the painter numbers those pieces by walking
+    /// the blocks; [`preview_select::pieces`] numbers them a second time, by
+    /// walking the same blocks, because building every string of a thousand-block
+    /// document on every frame to hand back indices the painter is already
+    /// counting would be paying a great deal for an agreement a test can hold.
+    /// So this is the test that holds it.
+    ///
+    /// MUTATIONS: number a table's cells by the *column count* rather than by
+    /// the row's own length, and a short row puts every cell after it against
+    /// the wrong text; note a list item's site with `first_run` at zero and its
+    /// bullet becomes selectable text.
+    #[test]
+    fn a_document_hands_out_every_piece_it_drew_in_the_documents_own_terms() {
+        let palette = bt_render::chrome_palette();
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let body = [0.0, 0.0, 600.0, 900.0];
+        let cell = |text: &str| vec![preview::Span::plain(text)];
+        let blocks = [
+            preview::MarkdownBlock::Heading {
+                level: 2,
+                spans: vec![preview::Span::plain("Title")],
+            },
+            preview::MarkdownBlock::Paragraph(vec![
+                preview::Span::plain("see "),
+                preview::Span::bold("this"),
+            ]),
+            preview::MarkdownBlock::List {
+                ordered: None,
+                items: vec![cell("one"), cell("two")],
+            },
+            preview::MarkdownBlock::Quote(vec![cell("quoted")]),
+            preview::MarkdownBlock::Rule,
+            preview::MarkdownBlock::Table {
+                rows: vec![
+                    vec![cell("name"), cell("size")],
+                    vec![cell("a.txt"), cell("12")],
+                ],
+                alignments: vec![bt_detect::table::ColumnAlignment::None; 2],
+            },
+            preview::MarkdownBlock::Code {
+                lang: Some("rust".to_owned()),
+                text: "fn main() {}\nlet x = 1;".to_owned(),
+            },
+        ];
+        let row = metrics.line_height;
+        let layout: Vec<MarkdownBlockLayout> = vec![
+            MarkdownBlockLayout {
+                top: 0.0,
+                ..MarkdownBlockLayout::solid(row)
+            },
+            MarkdownBlockLayout {
+                top: row,
+                ..MarkdownBlockLayout::solid(row)
+            },
+            MarkdownBlockLayout {
+                top: 2.0 * row,
+                ..MarkdownBlockLayout::rows(vec![row, row], 0.0)
+            },
+            MarkdownBlockLayout {
+                top: 4.0 * row,
+                ..MarkdownBlockLayout::rows(vec![row], 2.0 * metrics.quote_padding_y)
+            },
+            MarkdownBlockLayout {
+                top: 6.0 * row,
+                ..MarkdownBlockLayout::solid(metrics.rule_thickness)
+            },
+            MarkdownBlockLayout {
+                top: 7.0 * row,
+                columns: vec![120.0, 120.0],
+                width: 240.0,
+                ..MarkdownBlockLayout::rows(vec![row, row], metrics.table_border)
+            },
+            MarkdownBlockLayout {
+                top: 10.0 * row,
+                ..MarkdownBlockLayout::solid(
+                    2.0 * metrics.code_border
+                        + 2.0 * metrics.code_padding_y
+                        + 2.0 * metrics.code_line_height,
+                )
+            },
+        ];
+        let rendered = build_preview_markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (&blocks, &[], &layout),
+            &palette,
+            &DocumentMath::default(),
+        );
+        let pieces = preview_select::pieces(&blocks);
+        assert_eq!(
+            rendered
+                .text
+                .iter()
+                .map(|site| site.piece.at)
+                .collect::<Vec<_>>(),
+            pieces.iter().map(|piece| piece.at).collect::<Vec<_>>(),
+            "every piece of the document is set once, in the order it is read in",
+        );
+        for site in &rendered.text {
+            let piece =
+                preview_select::piece_at(&pieces, site.piece.at).expect("a piece of the document");
+            assert_eq!(
+                site.piece.len,
+                piece.text.len(),
+                "the painter and the model agree how long {:?} is",
+                site.piece.at,
+            );
+            let PreviewTextWhere::Paragraph(at) = site.what else {
+                panic!("nothing in this document is a picture");
+            };
+            let paragraph = match site.block {
+                None => &rendered.body.paragraphs[at],
+                Some(block) => &rendered.body.blocks[block].paragraphs[at],
+            };
+            let shaped = bt_render::preview_paragraph_text(paragraph);
+            assert_eq!(
+                &shaped[site.piece.lead..],
+                piece.text,
+                "and the glass carries exactly the bytes the model says it does",
+            );
+        }
+        // The bullet is in front of the item's own text and is none of it: a
+        // pointer cannot stand in a mark the document did not write.
+        let item = rendered
+            .text
+            .iter()
+            .find(|site| site.piece.at == preview_select::Place::new(2, 0, 0))
+            .expect("the first list item");
+        assert!(
+            item.piece.lead > 0,
+            "a list item's marker is lead the selection begins after",
+        );
+    }
+
+    /// **A drag through a table and the paragraph under it bands every piece
+    /// between them, and only the parts of them it reached.**
+    ///
+    /// The bands are the shaper's, so what is under test here is the arithmetic
+    /// that decides *which* bytes of each piece to ask about — the first piece
+    /// from the offset the drag began at, the last up to where it is now, and
+    /// every piece in between whole.
+    ///
+    /// MUTATION: clamp a middle piece to the head's offset instead of its own
+    /// length and the table's second row loses its tail.
+    #[test]
+    fn a_drag_bands_the_first_piece_from_its_offset_and_the_ones_between_whole() {
+        let boxes = vec![
+            text_box(preview_select::Place::new(0, 0, 0), 5, "alpha"),
+            text_box(preview_select::Place::new(0, 1, 0), 4, "beta"),
+            text_box(preview_select::Place::new(1, 0, 0), 5, "gamma"),
+        ];
+        let mut asked: Vec<(String, Range<usize>)> = Vec::new();
+        let bands = preview_selection_bands(
+            &boxes,
+            preview_select::Place::new(0, 0, 2),
+            preview_select::Place::new(1, 0, 3),
+            &mut |paragraph, range| {
+                asked.push((bt_render::preview_paragraph_text(paragraph), range.clone()));
+                vec![[range.start as f32, 0.0, range.end as f32, 1.0]]
+            },
+        );
+        assert_eq!(
+            asked,
+            vec![
+                ("alpha".to_owned(), 2..5),
+                ("beta".to_owned(), 0..4),
+                ("gamma".to_owned(), 0..3),
+            ],
+            "the head's piece from where the hand went down, the tail's up to \
+             where it is, and everything between whole",
+        );
+        assert_eq!(bands.len(), 3);
+    }
+
+    /// **A formula is one band whatever of it was touched** (the atom rule).
+    ///
+    /// MUTATION: drop the `atomic` arm of `PreviewTextPiece::shaped_range` and a
+    /// drag that clips a formula's corner bands two characters of a picture.
+    #[test]
+    fn a_formula_is_banded_whole_however_little_of_it_was_touched() {
+        let mut formula = text_box(preview_select::Place::new(1, 0, 0), 13, "$$a+b$$");
+        formula.piece.atomic = true;
+        let boxes = vec![
+            text_box(preview_select::Place::new(0, 0, 0), 5, "alpha"),
+            formula,
+        ];
+        let mut asked: Vec<Range<usize>> = Vec::new();
+        preview_selection_bands(
+            &boxes,
+            preview_select::Place::new(0, 0, 5),
+            preview_select::Place::new(1, 0, 1),
+            &mut |_, range| {
+                asked.push(range);
+                Vec::new()
+            },
+        );
+        assert_eq!(
+            asked,
+            vec![0..7],
+            "one byte of the formula asked for takes the whole of what is drawn \
+             for it, and the piece before it contributed nothing",
+        );
+    }
+
+    /// **A picture standing for a formula bands as its own rectangle**, because
+    /// there is no paragraph under it to ask the shaper about.
+    #[test]
+    fn a_rendered_formulas_picture_bands_as_the_box_it_was_drawn_in() {
+        let picture = PreviewTextBox {
+            piece: PreviewTextPiece {
+                at: preview_select::Place::new(0, 0, 0),
+                len: 9,
+                lead: 0,
+                atoms: Vec::new(),
+                atomic: true,
+            },
+            rect: [10.0, 20.0, 130.0, 60.0],
+            clip: [0.0, 0.0, 400.0, 400.0],
+            paragraph: None,
+        };
+        let bands = preview_selection_bands(
+            &[picture],
+            preview_select::Place::new(0, 0, 0),
+            preview_select::Place::new(0, 0, 9),
+            &mut |_, _| panic!("a picture has no paragraph to shape"),
+        );
+        assert_eq!(bands, vec![[10.0, 20.0, 130.0, 60.0]]);
+    }
+
+    /// **A band is cropped to the window its piece is seen through**, so a table
+    /// scrolled sideways inside itself does not paint a highlight over the prose
+    /// beside it.
+    #[test]
+    fn a_band_is_cropped_to_the_window_its_own_block_is_seen_through() {
+        let mut cell = text_box(preview_select::Place::new(0, 0, 0), 5, "alpha");
+        cell.clip = [100.0, 0.0, 200.0, 50.0];
+        let bands = preview_selection_bands(
+            &[cell],
+            preview_select::Place::new(0, 0, 0),
+            preview_select::Place::new(0, 0, 5),
+            &mut |_, _| vec![[50.0, 10.0, 150.0, 30.0]],
+        );
+        assert_eq!(
+            bands,
+            vec![[100.0, 10.0, 150.0, 30.0]],
+            "the half of the band outside the block's window is not drawn",
+        );
+    }
+
+    /// **Where a pointer lands when it is not on any letter at all.**
+    ///
+    /// A drag does not stay inside the column of prose it started in: it goes
+    /// out into the margin, above the first block and below the last, and every
+    /// one of those has to be an answer or the selection stops growing at the
+    /// edge of the text.
+    ///
+    /// MUTATION: return `None` for a point outside every rectangle and a drag
+    /// out of the pane freezes.
+    #[test]
+    fn a_point_off_the_text_lands_on_the_piece_it_is_nearest_to() {
+        let boxes = vec![
+            row_box(preview_select::Place::new(0, 0, 0), 5, "alpha", 0.0, 20.0),
+            row_box(preview_select::Place::new(1, 0, 0), 4, "beta", 40.0, 60.0),
+        ];
+        assert_eq!(preview_text_box_at(&boxes, 30.0, 10.0), Some(0), "on it");
+        assert_eq!(
+            preview_text_box_at(&boxes, 300.0, 10.0),
+            Some(0),
+            "out in the margin beside it",
+        );
+        assert_eq!(
+            preview_text_box_at(&boxes, 30.0, -50.0),
+            Some(0),
+            "above the whole page",
+        );
+        assert_eq!(
+            preview_text_box_at(&boxes, 30.0, 500.0),
+            Some(1),
+            "below the whole page",
+        );
+        assert_eq!(
+            preview_text_box_at(&boxes, 30.0, 31.0),
+            Some(1),
+            "in the gap between two blocks, on the nearer one",
+        );
+        assert_eq!(preview_text_box_at(&[], 0.0, 0.0), None, "an empty page");
+        // Two cells side by side on one row: the gap between them belongs to the
+        // one it is nearer to, not to whichever was laid out first.
+        let mut left = row_box(preview_select::Place::new(2, 0, 0), 4, "name", 0.0, 20.0);
+        left.rect = [0.0, 0.0, 100.0, 20.0];
+        let mut right = row_box(preview_select::Place::new(2, 1, 0), 4, "size", 0.0, 20.0);
+        right.rect = [140.0, 0.0, 240.0, 20.0];
+        let row = vec![left, right];
+        assert_eq!(preview_text_box_at(&row, 110.0, 10.0), Some(0));
+        assert_eq!(preview_text_box_at(&row, 135.0, 10.0), Some(1));
+        assert_eq!(preview_text_box_at(&row, 400.0, 10.0), Some(1));
+    }
+
+    /// **`Copy on select` governs the rendered page too** (the switch's own
+    /// sentence is 「选中即复制」, which is a sentence about a selection).
+    ///
+    /// MUTATION: add a `travelled` term and double-clicking a word stops
+    /// copying it on the one surface in this window where that is the whole
+    /// gesture.
+    #[test]
+    fn copy_on_select_governs_a_rendered_page_on_the_terminals_own_terms() {
+        assert!(
+            preview_copies_on_select(true, true),
+            "a drag, and equally a double click: both left bytes standing",
+        );
+        assert!(
+            !preview_copies_on_select(true, false),
+            "a click that selected nothing has nothing to write, which is the \
+             terminal's `!single_click` guard said in this surface's own terms",
+        );
+        assert!(
+            !preview_copies_on_select(false, true),
+            "with the switch off, only Ctrl+C and the menu row write",
+        );
+    }
+
+    /// **A press on a link that never travelled opens it; one that travelled is
+    /// a selection** (user ruling: 点=留窗内, and a drag is not a click).
+    ///
+    /// The same six logical pixels every other press on this desk is measured
+    /// against ([`DragLatch`]), and the same `click_no_drag` shape the terminal's
+    /// own hyperlinks are activated through.
+    ///
+    /// MUTATION: activate the link at the press and a drag that begins on one
+    /// opens a file instead of selecting a sentence.
+    #[test]
+    fn a_press_on_a_link_opens_it_only_if_the_hand_held_still() {
+        let origin = PhysicalPosition::new(100.0, 100.0);
+        let mut still = DragLatch::new(origin);
+        assert!(!still.travelled(PhysicalPosition::new(102.0, 101.0), 1.0));
+        assert!(
+            preview_press_opens_its_link(&still),
+            "two pixels is a hand holding still, and the link answers",
+        );
+        let mut dragged = DragLatch::new(origin);
+        assert!(dragged.travelled(PhysicalPosition::new(120.0, 100.0), 1.0));
+        assert!(
+            !preview_press_opens_its_link(&dragged),
+            "twenty is a drag, and the drag is the selection's",
+        );
+    }
+
+    /// **A document that has been re-read leaves no selection standing** (the
+    /// file changed on disk; the offsets are about text that is gone).
+    ///
+    /// MUTATION: assign `pane.doc` directly at the refresh and a selection made
+    /// before a save goes on being drawn over whatever replaced it.
+    #[test]
+    fn a_freshly_parsed_document_leaves_no_selection_standing() {
+        let mut pane = PreviewPane {
+            md_select: Some(preview_select::Selection::collapsed(
+                preview_select::Place::new(3, 1, 4),
+                preview_select::Grain::Character,
+            )),
+            md_text: vec![text_box(
+                preview_select::Place::new(3, 1, 0),
+                9,
+                "somewhere",
+            )],
+            ..PreviewPane::default()
+        };
+        pane.show_document(PreviewDocument::Markdown {
+            blocks: vec![preview::MarkdownBlock::Paragraph(vec![
+                preview::Span::plain("new"),
+            ])],
+            intrinsic: Vec::new(),
+            layout: Vec::new(),
+            math: DocumentMath::default(),
+        });
+        assert_eq!(pane.md_select, None, "the selection went with the document");
+        assert!(
+            pane.md_text.is_empty(),
+            "and so did the boxes it was drawn in"
+        );
+    }
+
+    /// One piece of a rendered document, boxed on a page 400px wide.
+    fn text_box(at: preview_select::Place, len: usize, text: &str) -> PreviewTextBox {
+        row_box(at, len, text, 0.0, 20.0)
+    }
+
+    /// The same, standing between two given rows of the page.
+    fn row_box(
+        at: preview_select::Place,
+        len: usize,
+        text: &str,
+        top: f32,
+        bottom: f32,
+    ) -> PreviewTextBox {
+        PreviewTextBox {
+            piece: PreviewTextPiece {
+                at,
+                len,
+                lead: 0,
+                atoms: Vec::new(),
+                atomic: false,
+            },
+            rect: [0.0, top, 200.0, bottom],
+            clip: [0.0, 0.0, 400.0, 400.0],
+            paragraph: Some(bt_render::PreviewParagraph {
+                runs: vec![bt_render::PreviewRun {
+                    text: text.to_owned(),
+                    color: [0, 0, 0],
+                    mono: false,
+                    bold: false,
+                    font_scale: 1.0,
+                    inline_box_px: None,
+                }],
+                rect: [0.0, top, 200.0, bottom],
+                font_size_px: 14.0,
+                line_height_px: 20.0,
+                wrap: true,
+                letter_spacing_em: 0.0,
+                align_right: false,
+                align_center: false,
+            }),
+        }
+    }
+
+    /// **An inline formula's placeholder is one thing to the shaper and a
+    /// whole `$x$` to the document**, and the two byte spaces rejoin after it.
+    ///
+    /// MUTATION: carry the difference forwards with the wrong sign and every
+    /// word after a formula in the same paragraph selects the word beside it.
+    #[test]
+    fn an_inline_formulas_placeholder_stands_for_the_whole_of_its_source() {
+        // `see $x^2$ there` — the middle run is drawn as a picture, so the
+        // shaper is handed one non-breaking space where the document has six
+        // bytes.
+        let piece = PreviewTextPiece {
+            at: preview_select::Place::new(0, 0, 0),
+            len: "see $x^2$ there".len(),
+            lead: 0,
+            atoms: vec![PreviewTextAtom {
+                shaped: (4, 6),
+                doc: (4, 9),
+            }],
+            atomic: false,
+        };
+        assert_eq!(piece.doc_offset(0), 0, "before it, the two agree");
+        assert_eq!(piece.doc_offset(4), 4, "and at its own first byte");
+        assert_eq!(piece.doc_offset(6), 9, "past it, the document has run on");
+        assert_eq!(
+            piece.doc_offset(8),
+            11,
+            "and every byte after it keeps that distance",
+        );
+        assert_eq!(
+            piece.doc_offset(5),
+            4,
+            "an offset the shaper cannot return — inside the one placeholder \
+             glyph — is the formula's own beginning rather than a byte of it",
+        );
+        // Backwards: a range that cuts into the formula covers all of it.
+        assert_eq!(piece.shaped_range(0..6, 12), 0..6);
+        assert_eq!(piece.shaped_range(0..11, 12), 0..8);
+        assert_eq!(piece.shaped_range(9..15, 12), 6..12);
     }
 
     /// PIN (user report, 2026-08-13) — **a block is built at its own full width
