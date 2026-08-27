@@ -6,9 +6,9 @@
 //! physical enforcement CONVENTIONS §three asks of the gate tests.
 
 use bt_layout::{
-    Axis, AxisSet, COLLAPSED_EXTENT, DIVIDER, Edit, EditError, FILES_W, FILES_W_MIN, Landing,
-    LayoutError, LayoutMode, LayoutNode, LogicalPx, LogicalRect, LogicalSize, MIN_PANE_H,
-    MIN_PANE_W, MIN_PREVIEW_W, Presentation, Ratio, Seat, SeatId, SeatKind, SeatLayout,
+    Axis, AxisSet, COLLAPSED_EXTENT, DIVIDER, Edit, EditError, ExtentClass, FILES_W, FILES_W_MIN,
+    KindMetrics, Landing, LayoutError, LayoutMode, LayoutNode, LogicalPx, LogicalRect, LogicalSize,
+    MIN_PANE_H, MIN_PANE_W, MIN_PREVIEW_W, Presentation, Ratio, Seat, SeatId, SeatKind, SeatLayout,
     SeatMetrics, SizePolicy, SplitId, WorkAreaHint, apply, collapse_order, demand, floor_demand,
     in_order_index, members, necessity_holds, path_to_seat, run_demand, run_root_path_of_seat,
     run_split_ids, share_ppm, solve, tree_distance, window_min_inner_size,
@@ -1754,5 +1754,94 @@ fn a_pane_arriving_from_another_run_is_paid_for_by_the_pane_it_landed_beside() {
         widths[3], was[2],
         "the column the traveller stood in keeps the width it had — it was a \
          stack, so the two of them shared it rather than divided it"
+    );
+}
+
+/// **The same allocator answers at a card's size** (§7.1.6b′ F2; the card half
+/// of §7.14d, user evidence 2026-08-27).
+///
+/// A card's mini tree is not a second walk with a second set of formulas — it is
+/// this function, handed a card's field and a card's table: no floors, a
+/// three-pixel seam, and every band brought down by a stated reduction. What has
+/// to come out of that is the *same shape of answer* the window gets, and the
+/// two claims below are exactly the two §2.3 makes:
+///
+/// - a fixed column takes its (reduced) band and no share of the run;
+/// - three columns therefore come out at three widths whichever way the tree
+///   leans, which is the invariant a re-placed pane exposed on the stage and a
+///   card body exposed again a fortnight later.
+#[test]
+fn a_card_sized_table_solves_the_same_shape_of_answer_as_a_window() {
+    // A sixth, which is what a 253px card body is of a pane area worth carding.
+    const REDUCTION_PPM: u32 = 166_667;
+    let card = m()
+        .with_divider(LogicalPx::px(3))
+        .with_band_reduction_ppm(REDUCTION_PPM)
+        .with_kind(
+            SeatKind::Terminal,
+            KindMetrics {
+                min_row: LogicalPx::ZERO,
+                min_col: LogicalPx::ZERO,
+                extent: ExtentClass::Flex,
+                default_fixed_extent: LogicalPx::ZERO,
+            },
+        )
+        .with_kind(
+            SeatKind::Files,
+            KindMetrics {
+                min_row: LogicalPx::ZERO,
+                min_col: LogicalPx::ZERO,
+                extent: ExtentClass::FixedAlongRow,
+                default_fixed_extent: FILES_W,
+            },
+        );
+    let body = viewport(251, 150);
+    let widths = |tree: &LayoutNode| {
+        row_widths(
+            &solve(
+                tree,
+                body,
+                &card,
+                SeatId(2),
+                LayoutMode::Parallel,
+                SizePolicy::Sovereign,
+            )
+            .expect("a card's rectangle is the reader's and is never refused"),
+        )
+    };
+
+    // The same three columns, written the two ways a binary tree can write them.
+    let leaning_right = row(1, files(1), row(2, term(2), term(3)));
+    let leaning_left = row(1, row(2, files(1), term(2)), term(3));
+    assert_eq!(
+        widths(&leaning_right),
+        widths(&leaning_left),
+        "one set of columns is one set of widths, however the tree leans"
+    );
+
+    let shape = widths(&leaning_right);
+    assert_eq!(
+        shape[0], 40,
+        "the column spends a sixth of the band it spends on the stage"
+    );
+    assert!(
+        (shape[1] - shape[2]).abs() <= 1,
+        "and the two shells divide what it left: {shape:?}"
+    );
+
+    // A column the reader dragged wider comes down by the same sixth — the
+    // reduction lands on what the seat is actually costing, not only on the
+    // table's opening width.
+    let dragged_wide = row(
+        1,
+        LayoutNode::seat(
+            Seat::new(SeatId(1), SeatKind::Files).with_fixed_extent(LogicalPx::px(480)),
+        ),
+        row(2, term(2), term(3)),
+    );
+    assert_eq!(
+        widths(&dragged_wide)[0],
+        80,
+        "twice the band on the stage is twice the band on the card"
     );
 }

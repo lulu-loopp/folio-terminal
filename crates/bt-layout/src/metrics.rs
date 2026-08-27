@@ -2,7 +2,10 @@
 
 use crate::geom::Axis;
 use crate::tree::{ExtentClass, SeatKind};
-use crate::{FILES_W, FILES_W_MIN, LogicalPx, MIN_PANE_H, MIN_PANE_W, MIN_PREVIEW_W};
+use crate::{
+    DIVIDER, FILES_W, FILES_W_MIN, LogicalPx, MIN_PANE_H, MIN_PANE_W, MIN_PREVIEW_W,
+    RATIO_DENOM_PPM,
+};
 
 /// Everything the solver knows about one kind of seat.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -17,12 +20,21 @@ pub struct KindMetrics {
     pub default_fixed_extent: LogicalPx,
 }
 
-/// The per-kind table plus the device scale.
+/// The per-kind table plus the three lengths that are not per kind: the device
+/// scale, the divider, and the reduction a band is drawn at.
 ///
 /// §2.1: the three row minima are three independent lines, not one line reused —
 /// 260 is "a screen of readable command output", 170 is "a column of filenames",
 /// 360 is "a line of code that does not wrap". They are policy: overturning one
 /// edits this table and nothing else.
+///
+/// **Every length the solver measures with is in here** — that is what lets one
+/// solver answer at two sizes (§7.1.6b′). A card's mini tree is the same tree,
+/// the same ratios and the same §2.3 arithmetic at a reduction: its seam is
+/// three pixels rather than one because that is what reads as a division at
+/// 253px, and its files column spends a sixth of the band it spends on the
+/// stage. Nothing about the *shape* of the answer changes, which is the whole
+/// reason the card may not have a second walk of its own.
 ///
 /// Keyed by a sorted `Vec` rather than a hash map: red line L8 keeps hash
 /// iteration order out of every geometric decision.
@@ -30,6 +42,8 @@ pub struct KindMetrics {
 pub struct SeatMetrics {
     table: Vec<(SeatKind, KindMetrics)>,
     scale_ppm: u32,
+    divider: LogicalPx,
+    band_reduction_ppm: u32,
 }
 
 impl SeatMetrics {
@@ -68,6 +82,8 @@ impl SeatMetrics {
                 (SeatKind::Placeholder, flex(MIN_PANE_W)),
             ],
             scale_ppm,
+            divider: DIVIDER,
+            band_reduction_ppm: RATIO_DENOM_PPM,
         }
     }
 
@@ -102,6 +118,61 @@ impl SeatMetrics {
     #[must_use]
     pub fn scale_ppm(&self) -> u32 {
         self.scale_ppm
+    }
+
+    /// The same table with a divider of a stated width.
+    ///
+    /// [`DIVIDER`](crate::DIVIDER) everywhere a window is being solved. It is a
+    /// parameter rather than a constant read at the point of use for one
+    /// reason: a card's mini tree is solved by *this* solver, and three physical
+    /// pixels of the card's own ground is what reads as a division between two
+    /// seats 60px wide. Handing that seam in keeps the card's picture and the
+    /// window's picture one piece of arithmetic (D4).
+    #[must_use]
+    pub fn with_divider(mut self, divider: LogicalPx) -> Self {
+        self.divider = divider;
+        self
+    }
+
+    /// The space a divider occupies in the allocation, in this table.
+    #[must_use]
+    pub fn divider(&self) -> LogicalPx {
+        self.divider
+    }
+
+    /// The same table with every fixed column's *band* reduced by `ppm`.
+    ///
+    /// [`RATIO_DENOM_PPM`](crate::RATIO_DENOM_PPM) — no reduction at all —
+    /// whenever a window is being solved, and red line L5 keeps it that way:
+    /// the device scale may not touch a band, and neither may anything else a
+    /// window does.
+    ///
+    /// It exists because a *reduction* is a different transform from a scale. A
+    /// card body is 253 logical px standing in for a pane area around six times
+    /// that, and the one length in this crate that is a pixel count rather than
+    /// a share — a fixed column's width — has to come down with the picture or
+    /// it eats a share of the card that it never had of the window. The ratios
+    /// are untouched: a ratio is a ratio at every size, which is exactly why
+    /// only the bands are named here.
+    #[must_use]
+    pub fn with_band_reduction_ppm(mut self, ppm: u32) -> Self {
+        self.band_reduction_ppm = ppm;
+        self
+    }
+
+    /// `band` brought down by [`Self::with_band_reduction_ppm`].
+    ///
+    /// Integer throughout (D3), and the one place the reduction is applied, so a
+    /// declared width and a hand-dragged one cannot be reduced by two different
+    /// roundings.
+    #[must_use]
+    pub(crate) fn reduce_band(&self, band: LogicalPx) -> LogicalPx {
+        if self.band_reduction_ppm == RATIO_DENOM_PPM {
+            return band;
+        }
+        let scaled = i128::from(band.subpixels()) * i128::from(self.band_reduction_ppm)
+            / i128::from(RATIO_DENOM_PPM);
+        LogicalPx::from_subpixels(scaled as i64)
     }
 
     fn get(&self, kind: SeatKind) -> KindMetrics {

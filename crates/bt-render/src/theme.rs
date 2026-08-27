@@ -2613,6 +2613,22 @@ pub const FOCUS_MINI_PADDING_LOGICAL_PX: f32 = 5.0;
 /// physical pixels of the card's own ground between two seats reads as a
 /// division, and a hairline inside three pixels reads as dirt.
 pub const FOCUS_MINI_GAP_LOGICAL_PX: f32 = 3.0;
+/// How much smaller a card's body is than the window it stands for, in parts
+/// per million — the reduction the second projection applies to a **band**.
+///
+/// A card body leaves a field 253 logical px wide, and the pane area of a window
+/// anybody puts into cards is around six times that. So a files column is the
+/// same sixth of the card that it is of the window: the 240px band becomes 40,
+/// and a column the reader has dragged wider comes down with it.
+///
+/// **Only a band is reduced**, and that is the whole content of this number. A
+/// ratio is a ratio at every size, so the shares are untouched; the seam is
+/// [`FOCUS_MINI_GAP_LOGICAL_PX`] rather than a reduced divider because three
+/// physical pixels is what reads as a division here and a sixth of one is
+/// nothing. Without the reduction a card spends a whole window's 240px band
+/// inside a 253px body, and the two shells beside a files column come out one
+/// twice the other — the report of 2026-08-27.
+pub const FOCUS_MINI_BAND_REDUCTION_PPM: u32 = 166_667;
 /// `.fc-cell { border: 1px solid var(--border-soft) }`.
 pub const FOCUS_MINI_BORDER_LOGICAL_PX: f32 = 1.0;
 /// `.fc-cell { border-radius: 3px }`.

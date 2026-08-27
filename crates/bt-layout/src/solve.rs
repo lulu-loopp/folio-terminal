@@ -4,7 +4,7 @@ use crate::demand::{collapse_order, demand, demand_at_min, fold_demand};
 use crate::geom::{Axis, AxisSet, DeviceRect, LogicalRect, snap_boundary};
 use crate::metrics::SeatMetrics;
 use crate::tree::{LayoutNode, Seat, SeatId, SeatKind};
-use crate::{COLLAPSED_EXTENT, DIVIDER, LogicalPx, RATIO_DENOM_PPM};
+use crate::{COLLAPSED_EXTENT, LogicalPx, RATIO_DENOM_PPM};
 
 /// Whose hand chose the rectangle the seats are being fitted into.
 ///
@@ -216,7 +216,7 @@ impl AxisPlan {
 
     /// What a subtree needs along the plan's axis, given the concessions in force.
     fn subtree_demand(&self, node: &LayoutNode, metrics: &SeatMetrics) -> LogicalPx {
-        fold_demand(node, self.axis, &|seat: &Seat| {
+        fold_demand(node, self.axis, metrics.divider(), &|seat: &Seat| {
             self.leaf_demand(seat, metrics)
         })
     }
@@ -242,7 +242,7 @@ impl AxisPlan {
                 let fa = self.fixed_extent(a, metrics)?;
                 let fb = self.fixed_extent(b, metrics)?;
                 Some(if *dir == self.axis {
-                    fa + fb + DIVIDER
+                    fa + fb + metrics.divider()
                 } else {
                     fa.max(fb)
                 })
@@ -269,7 +269,7 @@ impl AxisPlan {
     fn reserved(&self, node: &LayoutNode, metrics: &SeatMetrics) -> LogicalPx {
         match node {
             LayoutNode::Split { dir, a, b, .. } if *dir == self.axis => {
-                self.reserved(a, metrics) + self.reserved(b, metrics) + DIVIDER
+                self.reserved(a, metrics) + self.reserved(b, metrics) + metrics.divider()
             }
             // A leaf, or a cross-direction subtree — one column of this run,
             // and reserved only if the whole of it is a band of pixels.
@@ -560,7 +560,7 @@ fn allocate(
             dir, ratio, a, b, ..
         } => {
             let plan = if *dir == Axis::Row { row } else { col };
-            let avail = rect.extent(*dir) - DIVIDER;
+            let avail = rect.extent(*dir) - metrics.divider();
             // §2.3, stated once and for every shape: the pixels nobody has a
             // share of come off the top, and the ratio divides what is left.
             let (res_a, res_b) = (plan.reserved(a, metrics), plan.reserved(b, metrics));
@@ -606,7 +606,7 @@ fn allocate(
             // The divider takes its full logical pixel out of the room, and what
             // is left over — nothing, in the degenerate case above — is the
             // trailing side's.
-            let resume = (cut + DIVIDER).min(far);
+            let resume = (cut + metrics.divider()).min(far);
             let (rect_a, rect_b) = match dir {
                 Axis::Row => (
                     LogicalRect::new(rect.left, rect.top, cut, rect.bottom),

@@ -403,6 +403,15 @@ pub struct SeatLayout {
 pub enum Presentation { Full, Collapsed }   // §2.6.3;让步等级本身不外泄,只外泄结果
 ```
 
+**`SeatMetrics` 里装的是求解器量东西的全部尺子**，而不只是那张按 kind 的表。除 `scale_ppm`
+外，它还带着 **divider 的宽度**（`with_divider`；窗口上永远是 `DIVIDER`）与**带宽的缩减**
+（`with_band_reduction_ppm`；窗口上永远是 `RATIO_DENOM_PPM`，即不缩）。这两个旋钮存在的唯一
+理由是**一个求解器要在两种尺度上回答**：DESIGN §7.1.6b′ 的卡片缩略图走的就是 `solve` 本人，
+只是手里拿的是卡片自己那张表（无地板、缝 3px、带宽缩到六分之一）。**比例一字不动**，所以 L5
+原样成立：设备缩放仍然不许碰任何一个 ratio 或带宽，只有调用方显式交一张别的表时才变。带宽的缩减
+只在 `Seat::fixed_width` 一处落地——那是「声明宽度」与「手拖宽度」合流的唯一漏斗，两者必须
+按同一个舍入缩。钉子：`a_card_sized_table_solves_the_same_shape_of_answer_as_a_window`。
+
 **纯函数**:无 IO、无时间、无随机、无全局状态、无内部缓存。复杂度 `O(叶子数)`,`n` 在
 本产品的量级是几十(聚焦态更是硬上限 4+1+1),因此**允许每帧调用**(§4.4)。
 

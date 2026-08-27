@@ -21,9 +21,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bt_layout::{
-    Axis, DIVIDER, Edit, EditError, FILES_W, Landing, LayoutMode, LayoutNode, LogicalPx,
-    LogicalRect, LogicalSize, Presentation, Ratio, SUBPIXELS_PER_PX, Seat, SeatId, SeatKind,
-    SeatLayout, SeatMetrics, SizePolicy, SplitId, WorkAreaHint, apply, solve,
+    Axis, DIVIDER, Edit, EditError, ExtentClass, FILES_W, KindMetrics, Landing, LayoutMode,
+    LayoutNode, LogicalPx, LogicalRect, LogicalSize, Presentation, Ratio, SUBPIXELS_PER_PX, Seat,
+    SeatId, SeatKind, SeatLayout, SeatMetrics, SizePolicy, SplitId, WorkAreaHint, apply, solve,
     window_min_inner_size,
 };
 use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
@@ -34,26 +34,27 @@ use bt_render::{
     FOCUS_CARD_FONT_LOGICAL_PX, FOCUS_CARD_GAP_LOGICAL_PX, FOCUS_CARD_HEAD_GAP_LOGICAL_PX,
     FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX, FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX,
     FOCUS_CARD_PIN_BOX_LOGICAL_PX, FOCUS_CARD_RADIUS_LOGICAL_PX, FOCUS_CARD_WAIT_HALO_LOGICAL_PX,
-    FOCUS_CARD_WAIT_HALO_OPACITY, FOCUS_COLUMN_WIDTH_LOGICAL_PX, FOCUS_MINI_BORDER_LOGICAL_PX,
-    FOCUS_MINI_FILES_FONT_LOGICAL_PX, FOCUS_MINI_FILES_ICON_LOGICAL_PX,
-    FOCUS_MINI_FILES_INDENT_LOGICAL_PX, FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX,
-    FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_PADDING_LOGICAL_PX, FOCUS_MINI_RADIUS_LOGICAL_PX,
-    FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX,
-    FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, FOCUS_MINI_SEAM_LOGICAL_PX, OverlayQuad,
-    PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
-    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
-    RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
-    RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
-    RAIL_NEW_CHEVRON_BOX_LOGICAL_PX, RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX,
-    RAIL_NEW_MARGIN_TOP_LOGICAL_PX, RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX,
-    RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX,
-    RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX,
-    RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX,
-    RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
-    RAIL_TAB_PADDING_RIGHT_LOGICAL_PX, RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX,
-    RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX,
-    SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX, SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX,
-    SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX,
+    FOCUS_CARD_WAIT_HALO_OPACITY, FOCUS_COLUMN_WIDTH_LOGICAL_PX, FOCUS_MINI_BAND_REDUCTION_PPM,
+    FOCUS_MINI_BORDER_LOGICAL_PX, FOCUS_MINI_FILES_FONT_LOGICAL_PX,
+    FOCUS_MINI_FILES_ICON_LOGICAL_PX, FOCUS_MINI_FILES_INDENT_LOGICAL_PX,
+    FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX, FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_PADDING_LOGICAL_PX,
+    FOCUS_MINI_RADIUS_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX,
+    FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX,
+    FOCUS_MINI_SEAM_LOGICAL_PX, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
+    PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX,
+    RAIL_GAP_LOGICAL_PX, RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX,
+    RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX, RAIL_LABEL_PADDING_TOP_LOGICAL_PX,
+    RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM, RAIL_NEW_CHEVRON_BOX_LOGICAL_PX,
+    RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX, RAIL_NEW_MARGIN_TOP_LOGICAL_PX,
+    RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_TOP_LOGICAL_PX,
+    RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX, RAIL_SEAM_INSET_X_LOGICAL_PX,
+    RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX, RAIL_SHADE_WIDTH_LOGICAL_PX,
+    RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX, RAIL_TAB_HEIGHT_LOGICAL_PX,
+    RAIL_TAB_PADDING_LEFT_LOGICAL_PX, RAIL_TAB_PADDING_RIGHT_LOGICAL_PX,
+    RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX, RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
+    SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX,
     SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX, SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX,
     SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX,
     SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
@@ -4823,16 +4824,23 @@ impl MiniSeatBox {
     }
 }
 
-/// The tab's own tree, walked into the card's body.
+/// The tab's own tree, solved into the card's body.
 ///
-/// **The same ratios the stage is solved with, and no solver.** `bt-layout`'s
-/// allocator is where minimum sizes, fixed columns and the collapse ladder live,
-/// and every one of those is a statement about a pane somebody has to work in —
-/// asking it for a 263-pixel window would get back a column of collapsed bars,
-/// which is a true answer to the wrong question. A thumbnail is a *picture of the
-/// structure*: two children of a split get the split's ratio, always, however
-/// small the result. That is also why nothing here consults [`SeatMetrics`] —
-/// the mock-up's `miniNode` walks the same way, and for the same reason.
+/// **One solver, two sizes.** This is `bt_layout::solve` — the very function
+/// the stage runs — handed the card's field and the card's own table of
+/// lengths, and that is the only difference between the two pictures. The card
+/// therefore inherits §2.3 for nothing: a fixed column's band comes off the top
+/// and the ratio divides what is left, so three columns come out at three widths
+/// whichever way the tree happens to lean, exactly as they do on the window.
+///
+/// Before 2026-08-27 the card walked its own ratio arithmetic instead, on the
+/// argument that a 253-pixel window is below every minimum `bt-layout` knows and
+/// would come back a column of collapsed bars. That was true of the *window's*
+/// table and never of the solver: a card's table is a card's, and
+/// [`focus_mini_metrics`] states it. Once §2.3 tightened on the stage (§7.14d)
+/// the copied arithmetic was a second geometry that had drifted — it spent a
+/// whole ratio on the files column and charged it to the shell beside it, which
+/// drew two equal shells one twice the width of the other.
 ///
 /// In-order, which is [`LayoutNode::seats_in_order`]'s order and therefore D2's:
 /// what is drawn first is a fact about the tree and never about an iteration.
@@ -4843,62 +4851,103 @@ pub fn focus_mini_seats(
     scale: f32,
 ) -> Vec<MiniSeatBox> {
     let pad = (FOCUS_MINI_PADDING_LOGICAL_PX * scale).round();
-    let field = [
-        mini[0] + pad,
-        mini[1] + pad,
-        (mini[2] - pad).max(mini[0] + pad),
-        (mini[3] - pad).max(mini[1] + pad),
-    ];
-    let mut out = Vec::with_capacity(tree.seat_count());
-    walk_mini(
+    let field = LogicalRect::new(
+        mini_px(mini[0] + pad),
+        mini_px(mini[1] + pad),
+        mini_px((mini[2] - pad).max(mini[0] + pad)),
+        mini_px((mini[3] - pad).max(mini[1] + pad)),
+    );
+    // **Which seat is focused cannot change this picture**, and that is why the
+    // first one in order will do: the focus is read at L3, the rung that turns
+    // seats into collapsed bars, and `Sovereign` returns before it — the reader
+    // set the card's height, so the card's minima are advice (user ruling
+    // 2026-08-08) and its seats keep dividing the room however small it gets.
+    let focus = tree.seats_in_order()[0].id;
+    let layout = solve(
         tree,
         field,
-        (FOCUS_MINI_GAP_LOGICAL_PX * scale).round(),
-        &mut out,
-    );
-    out
+        &focus_mini_metrics(scale),
+        focus,
+        LayoutMode::Parallel,
+        SizePolicy::Sovereign,
+    )
+    .expect("a sovereign rectangle is never refused and the focus came out of this tree");
+    layout
+        .rects
+        .iter()
+        .map(|placement| {
+            let rect = placement
+                .device_rect
+                .expect("parallel mode presents every seat");
+            MiniSeatBox {
+                id: placement.id,
+                kind: placement.kind,
+                rect: [
+                    rect.left as f32,
+                    rect.top as f32,
+                    rect.right as f32,
+                    rect.bottom as f32,
+                ],
+            }
+        })
+        .collect()
 }
 
-fn walk_mini(node: &bt_layout::LayoutNode, rect: [f32; 4], gap: f32, out: &mut Vec<MiniSeatBox>) {
-    match node {
-        bt_layout::LayoutNode::Seat(seat) => out.push(MiniSeatBox {
-            id: seat.id,
-            kind: seat.kind,
-            rect,
-        }),
-        bt_layout::LayoutNode::Split {
-            dir, ratio, a, b, ..
-        } => {
-            let (start, end) = match dir {
-                bt_layout::Axis::Row => (rect[0], rect[2]),
-                bt_layout::Axis::Col => (rect[1], rect[3]),
-            };
-            // The gap comes out of the run before the ratio is applied, exactly
-            // as a divider does on the stage: two halves of a split field are
-            // equal, and a gap taken afterwards would make the first child wider
-            // than the second by the width of the divider.
-            let span = (end - start - gap).max(0.0);
-            let cut = (start + (span * ratio_fraction(*ratio)).round()).min(end);
-            let second = (cut + gap).min(end);
-            let (first_rect, second_rect) = match dir {
-                bt_layout::Axis::Row => (
-                    [rect[0], rect[1], cut, rect[3]],
-                    [second, rect[1], rect[2], rect[3]],
-                ),
-                bt_layout::Axis::Col => (
-                    [rect[0], rect[1], rect[2], cut],
-                    [rect[0], second, rect[2], rect[3]],
-                ),
-            };
-            walk_mini(a, first_rect, gap, out);
-            walk_mini(b, second_rect, gap, out);
-        }
-    }
+/// The card's own table of lengths (§7.1.6b′ F2).
+///
+/// Three sentences, and each is a *card* saying what the window says at its own
+/// size:
+///
+/// - **No floors.** A minimum size is a statement about a pane somebody has to
+///   work in, and nobody works in a card. Two children of a split get the
+///   split's ratio, always, however small the result — which is what the mock-up
+///   draws and what a picture of a tree has to do.
+/// - **The seam is [`FOCUS_MINI_GAP_LOGICAL_PX`]**, three physical pixels of the
+///   card's own ground, because that is what reads as a division between two
+///   seats sixty pixels wide.
+/// - **A band is reduced by [`FOCUS_MINI_BAND_REDUCTION_PPM`] and then put on
+///   the card's grid**, so the files column spends the same sixth of the card
+///   that it spends of the window — including a column the reader has dragged
+///   wider, because the reduction lands on whatever width the seat is actually
+///   costing rather than on the table's opening number.
+///
+/// **The device scale rides in the reduction, and it has to.** Every length
+/// handed in here is a card *physical* pixel — that is what `card.mini` is
+/// measured in — while a band is a logical one, on the table and on the seat
+/// alike. Folding `scale` into the divider alone left a 200% window drawing its
+/// files column at half the share it holds, which the stage's own scanline
+/// caught: 40 physical where 80 was owed. One reduction covers both widths,
+/// which is why there is no second multiply anywhere below.
+///
+/// The table's own scale is therefore 1:1: the numbers are already device
+/// pixels, and what comes back out is [`SeatPlacement::device_rect`], whose
+/// boundary rounding (§2.5, red line L6) keeps two neighbouring hairlines on one
+/// edge instead of a pixel apart.
+///
+/// [`SeatPlacement::device_rect`]: bt_layout::SeatPlacement::device_rect
+fn focus_mini_metrics(scale: f32) -> SeatMetrics {
+    let floorless = |extent: ExtentClass, band: LogicalPx| KindMetrics {
+        min_row: LogicalPx::ZERO,
+        min_col: LogicalPx::ZERO,
+        extent,
+        default_fixed_extent: band,
+    };
+    let flex = floorless(ExtentClass::Flex, LogicalPx::ZERO);
+    SeatMetrics::ruled_at_unit_scale()
+        .with_divider(mini_px((FOCUS_MINI_GAP_LOGICAL_PX * scale).round()))
+        .with_band_reduction_ppm((FOCUS_MINI_BAND_REDUCTION_PPM as f32 * scale).round() as u32)
+        .with_kind(SeatKind::Terminal, flex)
+        .with_kind(SeatKind::Preview, flex)
+        .with_kind(SeatKind::Placeholder, flex)
+        .with_kind(
+            SeatKind::Files,
+            floorless(ExtentClass::FixedAlongRow, FILES_W),
+        )
 }
 
-/// A split's share as a fraction, from the parts-per-million the tree stores.
-fn ratio_fraction(ratio: bt_layout::Ratio) -> f32 {
-    ratio.ppm() as f32 / bt_layout::RATIO_DENOM_PPM as f32
+/// A length the card measured in physical pixels, as the solver's own unit.
+fn mini_px(value: f32) -> LogicalPx {
+    LogicalPx::from_subpixels((value * SUBPIXELS_PER_PX as f32).round() as i64)
 }
 
 /// One row of a files column, shrunk onto a card.
@@ -35694,26 +35743,160 @@ mod tests {",
         );
     }
 
-    /// The mini tree is the tab's tree at the tab's own ratios — not a solve, and
-    /// not a guess.
+    /// **The card divides what the fixed column left, exactly as the stage does**
+    /// (user evidence 2026-08-27; the card half of §7.14d).
+    ///
+    /// Three columns — a files column and two shells — written the two ways a
+    /// binary tree can write them: the column hanging off the root, and the
+    /// column nested beside the first shell. §2.3 makes the stage draw the same
+    /// three widths either way, because the column's band comes off the top
+    /// before any ratio divides anything. **A card is a picture of that tab**, so
+    /// it has to say the same two things: the two shells are equal, and which
+    /// way the tree leans is not something the reader can see.
+    ///
+    /// Red gate before the fix: the card walked the ratio over the *whole* run,
+    /// so the nested shape drew the left shell at half the right one — which is
+    /// the screenshot the report came with.
+    #[test]
+    fn a_card_subtracts_a_fixed_columns_band_before_the_ratio_divides() {
+        let files = || LayoutNode::seat(Seat::new(SeatId(1), SeatKind::Files));
+        let mid = || LayoutNode::seat(Seat::new(SeatId(2), SeatKind::Terminal));
+        let right = || LayoutNode::seat(Seat::new(SeatId(3), SeatKind::Terminal));
+        let half = Ratio::clamped_from_ppm(500_000);
+        // `row(files, row(mid, right))` — the column hangs off the root.
+        let leaning_right = LayoutNode::split_at(
+            SplitId(1),
+            Axis::Row,
+            half,
+            files(),
+            LayoutNode::split_at(SplitId(2), Axis::Row, half, mid(), right()),
+        );
+        // `row(row(files, mid), right)` — the same three columns, nested the
+        // other way, which is what a re-placed pane leaves behind.
+        let leaning_left = LayoutNode::split_at(
+            SplitId(1),
+            Axis::Row,
+            half,
+            LayoutNode::split_at(SplitId(2), Axis::Row, half, files(), mid()),
+            right(),
+        );
+
+        let stage = |tree: &LayoutNode| {
+            let layout = solve(
+                tree,
+                LogicalRect::from_px(1600, 900),
+                &SeatMetrics::ruled_at_unit_scale(),
+                SeatId(2),
+                LayoutMode::Parallel,
+                SizePolicy::Lawful,
+            )
+            .expect("1600x900 fits a files column and two shells");
+            layout
+                .rects
+                .iter()
+                .map(|placement| {
+                    placement
+                        .rect
+                        .expect("every seat is presented in parallel mode")
+                        .extent(Axis::Row)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            stage(&leaning_right),
+            stage(&leaning_left),
+            "the stage draws one set of widths for one set of columns"
+        );
+        assert_eq!(
+            stage(&leaning_right)[1],
+            stage(&leaning_right)[2],
+            "and the two shells in it are equal"
+        );
+
+        let card = &focus_of(focus_rail(TabLayoutMode::Vertical), 1).cards[0];
+        let mini = |tree: &LayoutNode, scale: f32| {
+            focus_mini_seats(tree, card.mini, scale)
+                .into_iter()
+                .map(|seat| (seat.id, seat.kind, seat.rect[2] - seat.rect[0]))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            mini(&leaning_right, 1.0),
+            mini(&leaning_left, 1.0),
+            "and so does the card, however the tree leans"
+        );
+        let band = |scale: f32| {
+            (FILES_W.floor_px() as f32 * FOCUS_MINI_BAND_REDUCTION_PPM as f32 / 1e6 * scale).round()
+        };
+        let widths = mini(&leaning_right, 1.0);
+        assert_eq!(
+            widths[0].2,
+            band(1.0),
+            "the column took its band and not a share of the run: {widths:?}"
+        );
+        // To the device pixel, which is as equal as a run of 205 physical pixels
+        // can be cut in two: the two logical halves are 102.5 apiece and the grid
+        // has no such place to put an edge. Before the fix the same two came out
+        // 60 and 124.
+        assert!(
+            (widths[1].2 - widths[2].2).abs() <= 1.0,
+            "the two shells are the same width on the card: {widths:?}"
+        );
+
+        // **And the band is a band on a 200% screen too** — every number the
+        // walk is handed is a device pixel, so a reduction that forgot the scale
+        // drew the column at half its share and handed the difference to the
+        // shell beside it. Caught on the glass rather than here: 40 physical
+        // pixels of column where the stage's own scanline said 80 were owed.
+        let doubled = focus_mini_seats(
+            &leaning_right,
+            [
+                card.mini[0] * 2.0,
+                card.mini[1] * 2.0,
+                card.mini[2] * 2.0,
+                card.mini[3] * 2.0,
+            ],
+            2.0,
+        );
+        assert_eq!(
+            doubled[0].rect[2] - doubled[0].rect[0],
+            band(2.0),
+            "twice the pixels is twice the band"
+        );
+        assert!(
+            ((doubled[1].rect[2] - doubled[1].rect[0]) - (doubled[2].rect[2] - doubled[2].rect[0]))
+                .abs()
+                <= 1.0,
+            "and the two shells are still equal at 200%"
+        );
+    }
+
+    /// The mini tree is the tab's tree at the tab's own ratios — the card's own
+    /// solve of it, and not a guess.
     ///
     /// A 70/30 split of a card body 263 wide comes out 70/30 of the run left
-    /// after the padding and the 3px gap, in that order, because that is what the
-    /// stage does with the same numbers.
+    /// after the padding and the 3px seam, in that order, because that is what
+    /// the stage does with the same numbers.
     ///
-    /// Red gate: send the mini walk through `bt_layout`'s allocator and this goes
-    /// red at once — a 263px window is below every minimum it knows, so what
-    /// comes back is a column of collapsed bars rather than a picture.
+    /// Both children are flex here on purpose: this is the half of §2.3 that says
+    /// what a *share* does, and
+    /// [`a_card_subtracts_a_fixed_columns_band_before_the_ratio_divides`] is the
+    /// half that says what a band does. The old form of this test put a files
+    /// column on the second side and asserted it took three tenths of the run,
+    /// which was the copied arithmetic's answer and never the stage's.
+    ///
+    /// [`a_card_subtracts_a_fixed_columns_band_before_the_ratio_divides`]:
+    ///     Self::a_card_subtracts_a_fixed_columns_band_before_the_ratio_divides
     #[test]
     fn a_cards_body_carries_the_tabs_own_split_at_the_tabs_own_ratio() {
         let state = focus_rail(TabLayoutMode::Vertical);
         let geometry = focus_of(state, 1);
         let card = &geometry.cards[0];
-        let tree = split_tree(SeatKind::Terminal, SeatKind::Files, 700_000);
+        let tree = split_tree(SeatKind::Terminal, SeatKind::Preview, 700_000);
         let seats = focus_mini_seats(&tree, card.mini, 1.0);
         assert_eq!(seats.len(), 2, "both seats of the tab are in the picture");
         assert_eq!(seats[0].id, SeatId(1), "in the tree's own in-order");
-        assert_eq!(seats[1].kind, SeatKind::Files);
+        assert_eq!(seats[1].kind, SeatKind::Preview);
 
         let pad = FOCUS_MINI_PADDING_LOGICAL_PX;
         let gap = FOCUS_MINI_GAP_LOGICAL_PX;
@@ -35721,12 +35904,12 @@ mod tests {",
         assert_eq!(
             seats[0].rect[2] - seats[0].rect[0],
             ((field - gap) * 0.7).round(),
-            "the first child takes seven tenths of what the divider left"
+            "the first child takes seven tenths of what the seam left"
         );
         assert_eq!(
             seats[1].rect[0] - seats[0].rect[2],
             gap,
-            "and the divider between them is the mock-up's three pixels"
+            "and the seam between them is the mock-up's three pixels"
         );
         assert_eq!(
             seats[1].rect[2],
