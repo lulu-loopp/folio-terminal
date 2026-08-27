@@ -695,6 +695,19 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 同 v3（LaTeX 默认块级强定界；CommonMark 真解析；overlay 裁剪+pointer-transparent+相交让位原文+无障碍暴露原文）。测试新增：反复 resize 抖动与人类节奏多手势 coalescing、vendor-tail 单 owner、收割 hard boundary、无焊接/无真实输出丢失/每手势有界干净重复、全平面矩形门禁、坏 frame 的 publish/selection/render 可恢复错误、trace 确定性回放、收割后滚轮上翻直达 renderer，以及配额淘汰、RIS/DECCOLM、alt、最后一行等生命周期矩阵项（对齐 G1）。
 
+#### 4.4a 墙钟不是代价：确定性代价钉（清尾束 2026-08-26 立规，视频/转录两只 2026-08-27 续记）
+
+**一条规矩：一颗钉子断言的必须是一件在任何机器上都一样的事。** 这台机器有 24 个核、常有三四个 worktree 同时在编译或跑测试，而一条被并行兄弟测试挤过的墙钟量的是**调度器**，不是被测的代码。清尾束（`e2233419`）已经按这条把四只改掉：`dir_watch` 的浅监听改数发给 `ReadDirectoryChangesW` 的读次数、`a_pathological_dollar_screen…` 改数武装问题（`arming_ledger`）、`g1_primary_tui_explicit_scroll_repaint…` 改数分配（`#[global_allocator]`）、跑不完的 git 子进程改成一条**永远不结束**的 ping。**墙钟仍然印，只是不再由它下结论**——它是人想知道「这东西是不是变慢了」时读的那一行。
+
+**续记两只（2026-08-27）。**
+
+| 钉 | 原来断言什么 | 现在断言什么 | 红证 |
+|---|---|---|---|
+| `bt-term` `session::tests::finalized_line_ingest_stays_linear_without_live_handoffs` | 32k 与 1k 两条墙钟相除 ≤ 64×（「32× 真实增长 + 2× 主机抖动」） | 每冻结一行的**堆账**：1k / 16k / 32k 三条臂逐字相同的 **15 次分配、3,501–3,506 字节**，加两条绝对预算（各约 12% 余量） | 满载（`cargo test --workspace` + 十几份同一测试二进制并跑）下十次比值 27.1–57.0，第十一次 **89.93 翻红**：`32k/1k finalized ingest ratio 89.93 exceeds the 64x linearity ceiling: [14.7672ms, 592.4654ms, 1.3280579s]`。空载同一探针 13–47 |
+| `bt-platform` `video::tests::the_shipped_fixture_gives_up_a_frame` | 一次真解码要在 `FIRST_FRAME_BUDGET = 3s` 的**超时**里跑完（钟藏在被测函数里） | 改调不带钟的 `decode_first_frame`：**断言一张图，不断言一个时长**；超时另立一钉 `a_question_that_cannot_finish_is_given_up_on`，喂 `within_budget` 一份做不完的活 | 同一条测试单跑，空载 0.16–0.26 s、满载 1.86 s（进程墙钟 0.38 s → 4.25 s），**同一份代码十一倍散布**，而门是 3 s。今日 40 次未真红——它是一枚还没掷到的硬币，不是一条稳的界 |
+
+**这一条与 §1b「先看堆账再看墙钟」是同一条规矩的两个方向**：那边是量新东西时的次序，这边是老钉子该用什么货币。两只的具体数字与 RED GATE 都写在各自的测试头上（`crates/bt-term/src/session.rs`、`crates/bt-platform/src/video.rs`），`bt-term` 那只的计数器 `session::heap_ledger` 是 `#[cfg(test)]` 的第二本账，与 `arming_ledger` 并排——一个数一种问题，一个数全部分配，因为它服务的断言是一个**形状**而不是一次调用。
+
 ### 4.5 Markdown 表格块（md-tables 片，2026-08-18，已落地）
 
 **一条管线,两个渲染器,只有一个字段不同。** Claude Code 一天写几十张 GFM 管道表,它们此前是几十行竖线。这一片让它们变成块——**不是第二套装饰机制**:检测记录、双状态机四版本、`Maximum height` 封顶与内部滚动、occlusion 清行、选择/拷贝、alt 屏规则,全部原样复用。新增的只有 `bt_doc::BlockKind { Math, Table }`,挂在 `MathOccurrence` 与 `PlaceholderArtifact` 上,worker 分派与两个开关各读一次。表格刻意携带 `MathMode::Display` 而不是自己的 mode,因为「display」问的是**呈现**问题(独占若干行,而不是行内一段),表格的答案与 `$$` 一致——于是每一条已经写成 `mode == Display` 的规则,表格是**构造上**遵守而不是靠第二个 match 分支遵守。
@@ -3649,10 +3662,21 @@ Reduced 那一轮是同一个进程:`SPI_SETCLIENTAREAANIMATION` 的值走 **`pv
 **③ 首帧从哪里来，在哪条线程上。** `bt-platform` 新增 `video.rs`：`first_frame(path, fit_w, fit_h) -> Option<VideoFrame>`，走 `IMFSourceReader` + `MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING`（微软自己给这个属性写的用例逐字就是 "to create a video thumbnail"），官方参考实现是 `VideoThumbnail` 示例。
 
 - **代价是一个 feature 不是一个包。** `windows` crate 加 `Win32_Media_MediaFoundation` 与 `Win32_System_Variant`（后者是 `SetCurrentPosition` / `GetPresentationAttribute` 的 `PROPVARIANT` 绑定的门）。**`Cargo.lock` 零行改动**——这是 §8 的准入线，也是 `hayro`、`serde_json` 走过的同一道门。
-- **线程模型：一次一条 MTA 线程。** MF 官方要求「Work queues always have multithreaded apartment (MTA) threads … 建议 `CoInitializeEx(COINIT_MULTITHREADED)`」，而本仓现有三处 `CoInitializeEx` 全是 GUI 线程上的 STA（任务栏、通知、文件选择器），装饰 worker 那条线程根本没有 apartment。所以 `first_frame` **不在调用它的线程上跑**：它开一条线程，那条线程进 MTA、`MFStartup`，干完 `MFShutdown` + `CoUninitialize`，**每条失败路径上都成对**。
-  - 为什么一次一条而不是养一条常驻的：常驻那条给不了调用方**放弃等待**的能力。`ReadSample` 是同步调用、一个畸形文件能把 demuxer 拖很远，而 `FIRST_FRAME_BUDGET = 3s` 是靠**接收端超时**兑现的——超时之后那条线程写进一个没人拿着的 channel、自行收尾。它不持任何锁，除了自己的 channel 什么都不写。
-  - 代价是每次问一遍 `MFStartup`。可以接受：一个文件只问一次（像素按路径进 `peek_cache`，与 `.png` 同一个缓存、同一把钥匙），所以那笔钱付在第一次悬停上。
-  - **超时是对「等」的界，不是对「做」的界**：没有受支持的办法中断一次 `ReadSample`，这一点如实写在常量头上而不是假装成硬中断。
+- **两条寿命：会话归进程，问题归线程（2026-08-27 修订，替换首版的「一次一条 MTA 线程」）。** MF 官方要求「Work queues always have multithreaded apartment (MTA) threads … 建议 `CoInitializeEx(COINIT_MULTITHREADED)`」，而本仓现有三处 `CoInitializeEx` 全是 GUI 线程上的 STA（任务栏、通知、文件选择器），装饰 worker 那条线程根本没有 apartment。
+  - **首版把 `MFStartup`/`MFShutdown` 关进了每一次提问里，本日撤回。** 那是把「For every call to **MFStartup** … must call **MFShutdown**」这条**进程级**配对读成了函数级。分段实测（同一进程连问三次，2,982 字节的 160×120 fixture，debug 构建）：
+
+    | | `MFStartup` | open | 输出型 | seek | `ReadSample` | copy | `MFShutdown`+`CoUninitialize` |
+    |---|---|---|---|---|---|---|---|
+    | 第一次 | 0.41 ms | 36.8 ms | 126.1 ms | 0.70 ms | 154.5 ms | 0.09 ms | 7.0 ms |
+    | 第二次 | 0.18 ms | 24.0 ms | 60.9 ms | 0.93 ms | 52.0 ms | 0.05 ms | 5.1 ms |
+    | 第三次 | 0.18 ms | 23.9 ms | 51.2 ms | 0.56 ms | 22.4 ms | 0.04 ms | 4.9 ms |
+
+    **贵的不是这两句调用**——`MFStartup` 是零点几毫秒，`MFShutdown` 是几毫秒。贵的是被 `MFShutdown` 扔掉的**平台学到的东西**：source resolver 的处理器注册表、MFT 枚举、绑好的 H.264 解码器与 video processor。所以第三次提问为 2,982 字节仍要 101.7 ms，而且**永远收敛不下去**。
+  - **改法：会话常驻。** `media_session()` 在一个 `OnceLock` 里做两件事——`CoIncrementMTAUsage`（官方那条「没有 MTA 线程站着也把 MTA 留住」的路；这里唯一进 MTA 的只有一次性的问题线程，不留住就等于每问一次拆建一次 apartment）与 `MFStartup`，**两样都不在进程结束前交还**。同一天同一 fixture 实测：**进程内第一次 210 ms，之后每次 7.6–12 ms**，对老形态的每次 100–330 ms。`prewarm()` 把那 210 ms 挪到启动时的后台线程上，于是第一次悬停付 8 ms 而不是 210 ms。
+  - **接线点（本片未接，`main.rs` 有并行片在动，留给合并方）**：`bt-app/src/main.rs` 里建第一扇窗之前一行 `bt_platform::video::prewarm();`，事件循环返回之后一行 `bt_platform::video::shutdown_media_session();`。两行都可选——不接则第一次悬停付 210 ms、进程退出时不还平台，别的什么都不变。
+  - **问题仍然一次一条线程**，因为一条常驻线程给不了调用方**放弃等待**的能力。`ReadSample` 是同步调用、一个畸形文件能把 demuxer 拖很远，而 `FIRST_FRAME_BUDGET = 3s` 是靠**接收端超时**兑现的——超时之后那条线程写进一个没人拿着的 channel、自行收尾。它不持任何锁，除了自己的 channel 什么都不写。`CoInitializeEx` 仍是每条线程一次，但 MTA 已经站着，所以它是一次引用计数而不是一次 apartment 建造。
+  - **超时是对「等」的界，不是对「做」的界**：没有受支持的办法中断一次 `ReadSample`，这一点如实写在常量头上而不是假装成硬中断。而 `read_first_frame` 内部那道 deadline **从函数开头挪到了 `ReadSample` 循环之前**——它防的是「既不给样本也不报结束」的死循环，不是一台慢机器；把开容器与 seek 也圈进去，等于让一台满载的机器把一份好文件判成拒绝。
+  - **两半各自可调、各自受测。** `decode_first_frame(path, fit)` 是整段对话、头上没有钟；`within_budget(budget, work)` 是那句「不等了」、底下没有解码器。fixture 红门因此断言一张图而从不断言一个时长，超时红门则喂给它一份**做不完**的活。理由见 4.4a。
 - **取哪一帧：片长的 1/10 处（`SEEK_FRACTION`）。** 不取 0.0 秒——大量视频开头是黑场（淡入、片头板、还没测光的镜头），取首帧会让一整个录屏文件夹的卡全是同样的黑矩形。`SetCurrentPosition` 不保证精确、通常落到目标之前最近的关键帧，而关键帧正是这里想要的。容器不报时长的就从头读——未知长度的十分之一不是一个位置。红门就压在这条上：把 `SEEK_FRACTION` 改成 `0.0`，`the_shipped_fixture_gives_up_a_frame` 的着墨断言当场红（实测 `0 lit pixels`），而尺寸与时长两条仍绿——这正是「我的片子全是黑的」这种缺陷会溜过去的样子。
 - **像素怎么出来。** 输出型先按 `contain(native, fit)` 要一次带尺寸的 RGB32，被拒就退回只要 subtype，然后**把实际生效的媒体型读回来**再按它的宽高走；缓冲优先 `IMF2DBuffer::Lock2D`（它直接给 scanline 0 与带符号 pitch，所以自下而上的 RGB32 是被**描述**出来的而不是被猜出来的），没有这个接口才退回平坦 `Lock` + `MF_MT_DEFAULT_STRIDE` 的符号。MF 的 `RGB32` 命名的是 DWORD 不是字节序，所以每个像素逐字节翻转、第四个字节写成实心 255——一帧视频没有透明度可带，而合成到终端底色上的那种「透出来」是这里最容易出的错。四条纯函数红门钉住这四件事（高低半字不换位、fit 只缩不放、自下而上翻正、行内 padding 不进画面）。
 - **`fit` 是请求也是上限，永不放大。** 320×240 的片子按 1280×720 去要，回来还是 320×240。`VideoFrame` 同时带**光栅的**宽高与**录像本身的** `native_*`：前者是卡与 pane 拿去 fit 的，后者是事实行里那个「宽×高」——把两者混起来说，就会拿本窗自己挑的缩略图尺寸去冒充录像的分辨率。解码尺寸的上限是一个常数 `VIDEO_FRAME_FIT_PX = 1920×1080`，而不是各面各自的盒子：`peek_cache` 按路径作键，各面各要一个尺寸就会互相驱逐。

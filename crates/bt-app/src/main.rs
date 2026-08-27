@@ -84003,13 +84003,20 @@ fn main() -> Result<()> {
     // allowed to pay for the one-time relocation `storage_dir` performs. A
     // healthy run never writes a byte — see `hang_watch` for the whole bill.
     hang_watch::start(storage.join(hang_watch::REPORTS_DIRECTORY));
+    // The one-time media-session warm-up (§7.23) is paid here, off the first
+    // hover: the process-resident session costs ~210ms cold and ~10ms warm.
+    bt_platform::video::prewarm();
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .context("create winit event loop")?;
     let mut application = FolioApp::new(event_loop.create_proxy(), request);
-    event_loop
+    let outcome = event_loop
         .run_app(&mut application)
-        .map_err(|error| anyhow!(error))
+        .map_err(|error| anyhow!(error));
+    // The session that outlived every question is released once the loop has
+    // returned, never before a question could still be in flight.
+    bt_platform::video::shutdown_media_session();
+    outcome
 }
 
 #[cfg(test)]
