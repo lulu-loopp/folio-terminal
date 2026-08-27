@@ -493,28 +493,53 @@ mod web_security_tests {
         );
     }
 
-    /// **No additional browser arguments at all**, which is how
-    /// `--allow-file-access-from-files` is not passed.
+    /// **One browser argument, named here, and no second one** (user ruling
+    /// 2026-08-27, route A; `docs/DESIGN.md` §7.23 ⑩).
     ///
-    /// The stronger claim than "that one flag is absent", and the reason it is
-    /// worth making: the environment is created with no
-    /// `ICoreWebView2EnvironmentOptions`, so there is no place for *any*
-    /// command line to be added. A future slice that needs one has to come
-    /// through here and past this test.
+    /// This test used to say *none at all*, and it said so on purpose: the
+    /// environment was created with no `ICoreWebView2EnvironmentOptions`, so
+    /// there was no place for any command line to be added, and the note ended
+    /// "a future slice that needs one has to come through here and past this
+    /// test". That slice arrived. It came through here, and what it changed is
+    /// the claim rather than the discipline: the strong form was never "the
+    /// number is zero", it was **"the list is written down where a reader will
+    /// see it"** — an argument nobody had to declare is an argument nobody has
+    /// to justify.
+    ///
+    /// So the list is one line long and it is asserted verbatim. What it buys is
+    /// written where it is passed: Chromium will not let a page start audible
+    /// playback until somebody has interacted with *that page*, and the press
+    /// that asks for playback here lands on this window's own play button, which
+    /// no page can see.
+    ///
+    /// **`--allow-file-access-from-files` stays pinned absent**, and it is the
+    /// flag this test was originally written about: it would let one `file:`
+    /// document read another, which is a different thing entirely from letting
+    /// one start playing. The `count()` on the arguments string is what keeps a
+    /// second flag from arriving beside the first without a second reading of
+    /// this comment.
     #[test]
-    fn the_environment_is_created_with_no_browser_arguments() {
+    fn the_environment_is_created_with_one_named_browser_argument() {
         let source = source();
+        assert_eq!(
+            source
+                .matches(concat!("set_additional_browser", "_arguments("))
+                .count(),
+            1,
+            "exactly one place writes the browser's command line"
+        );
         assert!(
-            source.contains(concat!("None::<&ICoreWebView2", "EnvironmentOptions>,")),
-            "the environment takes no options, so it takes no command line"
+            source.contains(concat!("--autoplay-policy=", "no-user-gesture-required")),
+            "and this is the argument it writes"
         );
         for absent in [
-            concat!("Additional", "BrowserArguments"),
             concat!("allow-file-access", "-from-files"),
+            concat!("disable-web", "-security"),
+            concat!("remote-debugging", "-port"),
         ] {
             assert!(
                 !source.contains(absent),
-                "this host does not pass browser arguments: {absent}"
+                "this host does not pass this argument: {absent}"
             );
         }
     }

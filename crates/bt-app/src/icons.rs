@@ -436,12 +436,28 @@ pub enum ActionIcon {
     /// an exception to the fill policy: the shell is a frame, so the frame is
     /// drawn, and the field inside it — the wheel — is filled.
     MouseWheel,
+    // ── the player (user ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩) ──
+    /// **Play this recording** — the button standing in the middle of a video's
+    /// first frame.
+    ///
+    /// An act, and it is filled anyway: [`marks::ChromeMark::Play`] is the
+    /// fourth of the fill policy's four classes, a sign whose whole meaning is
+    /// its solid, which is why it is written down in [`FILLED_WITH_A_REASON`]
+    /// rather than left to be found by the gate.
+    PlayVideo,
+    /// **Go to the tab that is making this noise** — the speaker in a tab's own
+    /// row while its page is audible.
+    ///
+    /// A verb and not a status dot, which is the reason it is in this registry
+    /// at all: a dot is a thing the eye reads and the hand cannot press, and
+    /// this is pressed. It is struck, like every other act.
+    GoToPlayingTab,
 }
 
 impl ActionIcon {
     /// Every verb, for the reverse index to walk.
     #[cfg(test)]
-    pub const ALL: [Self; 87] = [
+    pub const ALL: [Self; 89] = [
         Self::OpenSettings,
         Self::MinimiseWindow,
         Self::MaximiseWindow,
@@ -529,6 +545,8 @@ impl ActionIcon {
         Self::FileObject,
         Self::PageObject,
         Self::MouseWheel,
+        Self::PlayVideo,
+        Self::GoToPlayingTab,
     ];
 
     /// The verb's own name, for a failing assertion to say.
@@ -623,6 +641,8 @@ impl ActionIcon {
             Self::FileObject => "FileObject",
             Self::PageObject => "PageObject",
             Self::MouseWheel => "MouseWheel",
+            Self::PlayVideo => "PlayVideo",
+            Self::GoToPlayingTab => "GoToPlayingTab",
         }
     }
 
@@ -759,6 +779,8 @@ impl ActionIcon {
             }
             Self::PageObject => ChromeMark::Globe { favicon: None },
             Self::MouseWheel => ChromeMark::MouseWheel,
+            Self::PlayVideo => ChromeMark::Play,
+            Self::GoToPlayingTab => ChromeMark::Speaker,
             Self::UnknownSeat => ChromeMark::Panel,
             Self::RenameFile | Self::RenameBranch | Self::EditRow => ChromeMark::Pencil,
             Self::CheckoutBranch => ChromeMark::GitBranch,
@@ -2091,6 +2113,15 @@ mod tests {
              triangle stays filled in the files tree and on a submenu row. \
              Outlined at fourteen pixels a 4.6-unit triangle is three hairlines \
              meeting, and what it reads as is a play button",
+        ),
+        (
+            "i-play",
+            "class 4 — the transport control's own solid, and `#i-tri`'s entry \
+             two rows up is this one argued from the other side: an outlined \
+             triangle at any small size *reads as* a play button and fails to \
+             be one. It stands alone in the middle of a video's first frame \
+             (user ruling 2026-08-27, §7.23 ⑩), where a shape made of three \
+             hairlines would disappear into the picture behind it",
         ),
         (
             "i-stop",

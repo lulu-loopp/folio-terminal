@@ -249,44 +249,110 @@ pub fn path_page_glance(path: &std::path::Path) -> Option<PageGlance> {
         .map(|(_, glance)| *glance)
 }
 
+/// **Whether a member of the video class can be played here**, or only drawn
+/// (user ruling 2026-08-27, the second of that day; `docs/DESIGN.md` §7.23 ⑩).
+///
+/// The second column of [`VIDEO_EXTENSIONS`], and it is a column rather than a
+/// second table for [`PAGE_EXTENSIONS`]'s reason said again: one class, one
+/// list, and the thing that differs between its members written **beside** them
+/// where nobody can add a row to one half and forget the other.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VideoPlayback {
+    /// **Measured to play**, inside a page, on the engine this product already
+    /// hosts: `canPlayType` answered `maybe` for `video/mp4`, `video/webm` and
+    /// `video/x-m4v` on 2026-08-25 (§7.16 ①), and the play verb was measured
+    /// end to end on 2026-08-27 (§7.23 ⑩).
+    Plays,
+    /// **A face and no player.** This window's decoder reads the container and
+    /// the engine that would have to play it does not.
+    FaceOnly,
+}
+
 /// Extensions that name a **video** — [`PreviewFtype::Video`] asked of a name
 /// (user ruling 2026-08-27; `docs/DESIGN.md` §7.23).
 ///
-/// **Three spellings, and the shortness of the list is the ruling.** They are
-/// the three the engine on the preview seat was measured to accept inside a page
-/// (`canPlayType` answered `maybe` for `video/mp4`, `video/webm` and
-/// `video/x-m4v` on 2026-08-25), and the reason a list about *pictures* is drawn
-/// from a measurement about *playing* is that this window has promised itself a
-/// second slice: the day a video can be played, the file that shows a face and
-/// the file that plays must be the same file. A class that admitted more than
-/// could ever be played would spend that day being cut back, and cutting a class
-/// back is how a reader learns that a face is not a promise.
+/// **Four spellings and two columns, and the second column is the ruling.**
+/// Three of them play: they are the three the engine on the preview seat was
+/// measured to accept inside a page (`canPlayType` answered `maybe` for
+/// `video/mp4`, `video/webm` and `video/x-m4v` on 2026-08-25). The fourth,
+/// `mov`, has a face and no player — Media Foundation reads it (`.mov` is the
+/// same MPEG-4 File Source as `.mp4`) and the engine answers
+/// `canPlayType('video/quicktime')` with the empty string, which is the
+/// strongest "no" that API has.
 ///
-/// **`mov` is the one deliberate absence, and it is not an oversight.** Media
-/// Foundation reads it — `.mov` is the same MPEG-4 File Source as `.mp4`, so the
-/// decoder under this window could draw its first frame today — and the engine
-/// that would have to play it answers `canPlayType('video/quicktime')` with the
-/// empty string, which is the strongest "no" that API has. Admitting it would
-/// buy one picture now and owe an apology later.
+/// **`mov` was outside this table until the play verb arrived, and the reason it
+/// is inside it now is the reason it was outside it then.** The first cut of
+/// this list refused `mov` on the argument that "the day a video can be played,
+/// the file that shows a face and the file that plays must be the same file" —
+/// a class that promised a face and then could not play would be cut back on
+/// that day. That day is here, and it settled the question the other way round:
+/// the two sets are **not** the same set, they were never going to be, and the
+/// honest form of that is one class whose members say which of them they are —
+/// not a class trimmed until the difference disappears. A `.mov` this window can
+/// draw is a `.mov` a reader can recognise, and a pane that draws it and says
+/// [`crate::i18n::Text::VideoFormatCannotPlay`] under it has told the whole
+/// truth. Refusing to draw it never made it playable; it only made it
+/// unrecognisable.
 ///
-/// # The set that can be drawn is not the set that is listed
+/// # The set that can be drawn is not the set that is listed, either
 ///
-/// Both directions, and both are real:
+/// Both directions are real and neither is a hole:
 ///
 /// * A `.webm` carrying VP9 or AV1 plays in that engine, which ships its own
 ///   decoders for both, and may have **no** Media Foundation decoder on a stock
-///   machine — so it is in this table and its card may still have no picture on
-///   it. That is not a bug and it is not a hole in the table: it is
-///   [`bt_platform::video::first_frame`]'s ordinary `None`, and the card states
-///   the facts it has instead.
-/// * A `.mov`, a `.mkv`, an `.avi` — the first draws in Media Foundation and the
-///   last two do not — are **all** outside this table, and all get the same "no
-///   preview for this file type" card they have always had.
+///   machine — so it is [`VideoPlayback::Plays`] and its card may still have no
+///   picture on it. That is [`bt_platform::video::first_frame`]'s ordinary
+///   `None`, and the card states the facts it has instead.
+/// * A `.mkv`, an `.avi` — neither of which this window's decoder reads — are
+///   outside this table altogether and get the same "no preview for this file
+///   type" card they have always had.
 ///
-/// The rule that resolves the two is that *this table is a promise about the
+/// The rule that resolves all of it is that *this table is a promise about the
 /// window*, not a report about the platform: a name in it is a name this window
-/// has a face for, whether or not a given machine's codecs can fill that face in.
-const VIDEO_EXTENSIONS: [&str; 3] = ["mp4", "m4v", "webm"];
+/// has a face for, and its column says whether that face has a play button.
+const VIDEO_EXTENSIONS: [(&str, VideoPlayback); 4] = [
+    ("mp4", VideoPlayback::Plays),
+    ("m4v", VideoPlayback::Plays),
+    ("webm", VideoPlayback::Plays),
+    ("mov", VideoPlayback::FaceOnly),
+];
+
+/// **Which column of [`VIDEO_EXTENSIONS`] a name is in**, and `None` for a name
+/// that is not in it at all.
+///
+/// [`preview_ftype`]'s own reading of the table, lifted out so that the two
+/// questions a video raises — "is this one" and "can it play" — are one lookup
+/// in one list. A caller that asked the first and then re-spelled the second
+/// would be the drift §7.10 ⑥ paid for.
+#[must_use]
+fn video_playback_of_extension(extension: &str) -> Option<VideoPlayback> {
+    VIDEO_EXTENSIONS
+        .iter()
+        .find(|(video, _)| extension.eq_ignore_ascii_case(video))
+        .map(|(_, playback)| *playback)
+}
+
+/// **Whether the video a path names can be played on a preview seat** — the
+/// second column of [`VIDEO_EXTENSIONS`] asked of a `Path`.
+///
+/// `None` for anything that is not a video at all, so a caller cannot mistake
+/// "not a video" for "a video that will not play": the first has no face and the
+/// second has one.
+#[must_use]
+pub fn video_playback(path: &std::path::Path) -> Option<VideoPlayback> {
+    video_playback_of_extension(path.extension()?.to_str()?)
+}
+
+/// **Whether the video this path names is one the play verb is offered for.**
+///
+/// The one predicate the button, the verb and the red gate all read, so that a
+/// frame with a play button over it and a seat that would accept a play cannot
+/// come apart — see [`crate::Runtime::play_video_on`], which refuses the same
+/// way this answers.
+#[must_use]
+pub fn path_names_a_playable_video(path: &std::path::Path) -> bool {
+    video_playback(path) == Some(VideoPlayback::Plays)
+}
 
 /// **Whether a path's real extension names a video** — [`VIDEO_EXTENSIONS`]
 /// asked of a `Path` rather than of a name.
@@ -299,11 +365,7 @@ const VIDEO_EXTENSIONS: [&str; 3] = ["mp4", "m4v", "webm"];
 /// at all and is therefore not a video (§7.1.5j ⑦(e)).
 #[must_use]
 pub fn path_names_a_video(path: &std::path::Path) -> bool {
-    path.extension().is_some_and(|extension| {
-        VIDEO_EXTENSIONS
-            .iter()
-            .any(|video| extension.eq_ignore_ascii_case(video))
-    })
+    video_playback(path).is_some()
 }
 
 /// Extensions that name something this window can show as text (3093).
@@ -368,7 +430,7 @@ pub fn preview_ftype(name: &str) -> PreviewFtype {
     // pinned refusal exists to catch — so the order between them is a
     // formality, and it is written this way round because that refusal is the
     // older claim and reads first.
-    if VIDEO_EXTENSIONS.contains(&ext.as_str()) {
+    if video_playback_of_extension(&ext).is_some() {
         return PreviewFtype::Video;
     }
     PreviewFtype::Unknown
@@ -2241,9 +2303,31 @@ pub fn video_fact_lines(extension: Option<&str>, facts: VideoFacts) -> [Option<S
                 .filter(|extension| !extension.is_empty()),
         );
     }
+    // **The second line says what the file is, and for one column of the class
+    // that includes saying it cannot be played** (user ruling 2026-08-27; §7.23
+    // ⑩).
+    //
+    // On the size's line and not on a third one, because the card has two lines
+    // and a third would be a card that changed shape for one kind of file
+    // (`a_video_card_shows_a_frame_over_two_lines`); and on the *second* rather
+    // than the first because the first line is about the recording — how long it
+    // runs, how large its picture is — while this is about the container it is
+    // in, which is the same thing the size is about.
+    //
+    // Read off the extension that is already here rather than taken as a second
+    // argument: the playable column is a property of the spelling, this function
+    // has the spelling, and a caller that had to pass the answer in would be a
+    // second place the table is read.
+    let mut second: Vec<String> = Vec::new();
+    second.extend(facts.bytes.map(format_byte_size));
+    if extension.is_some_and(|extension| {
+        video_playback_of_extension(extension) == Some(VideoPlayback::FaceOnly)
+    }) {
+        second.push(crate::i18n::Text::VideoFormatCannotPlay.text().to_owned());
+    }
     [
         (!first.is_empty()).then(|| first.join(" \u{b7} ")),
-        facts.bytes.map(format_byte_size),
+        (!second.is_empty()).then(|| second.join(" \u{b7} ")),
     ]
 }
 
@@ -5045,6 +5129,23 @@ mod tests {
     /// it is until something hosts the file inside a page, and this test is what
     /// tells whoever builds that where the one line is.
     ///
+    /// # Something now does host one inside a page, and the line did not move
+    ///
+    /// 2026-08-27's second ruling built exactly the thing this name was reserving
+    /// room for: the play verb writes a shell page and hands the recording to the
+    /// `<video controls>` inside it (§7.23 ⑩). **And [`PAGE_EXTENSIONS`] did not
+    /// gain a row**, which is the whole shape of that answer. What is on the page
+    /// lane is the *shell* — a `.html` this window wrote, already a member of this
+    /// class by its own spelling — and the recording is a **subresource**, which
+    /// is not a lane at all. A video is still not a page: no door opens one as
+    /// one, the address bar still refuses one, and the seat's rail still spells
+    /// the recording rather than the shell.
+    ///
+    /// So the exception this test's name anticipated has arrived and this test is
+    /// unchanged, because it was always asserting the right thing. What would
+    /// make it red is what would have made it red on the day it was written: a
+    /// build that tried to play a video by navigating **to** it.
+    ///
     /// RED GATE: put `mp4` (or `webm`, or `m4v`) into [`PAGE_EXTENSIONS`] on the
     /// argument that the engine can play it, and this goes red with the reason
     /// written on it.
@@ -5079,7 +5180,12 @@ mod tests {
         // somewhere a reader of the ruling would not find them.
         assert_eq!(preview_ftype("clip.mp4"), PreviewFtype::Video);
         assert_eq!(preview_ftype("screencast.webm"), PreviewFtype::Video);
-        assert_eq!(preview_ftype("clip.mov"), PreviewFtype::Unknown);
+        // **And `.mov` since the play verb arrived** (user ruling 2026-08-27,
+        // the second of that day; §7.23 ⑩). It is a video with a face and no
+        // player, which is a column of [`VIDEO_EXTENSIONS`] and not a class of
+        // its own — and it is still not a page, which is what this test is
+        // about.
+        assert_eq!(preview_ftype("clip.mov"), PreviewFtype::Video);
         assert_eq!(preview_ftype("clip.mkv"), PreviewFtype::Unknown);
     }
 
@@ -5100,7 +5206,13 @@ mod tests {
     /// the two halves of this test disagree on exactly that name.
     #[test]
     fn the_video_class_reads_the_same_from_a_name_and_from_a_path() {
-        for name in ["clip.mp4", "CLIP.MP4", "trailer.m4v", "screencast.WebM"] {
+        for name in [
+            "clip.mp4",
+            "CLIP.MP4",
+            "trailer.m4v",
+            "screencast.WebM",
+            "capture.MOV",
+        ] {
             assert_eq!(preview_ftype(name), PreviewFtype::Video, "{name}");
             assert!(
                 path_names_a_video(std::path::Path::new(&format!(r"D:\shots\{name}"))),
@@ -5109,7 +5221,6 @@ mod tests {
         }
         for name in [
             // Outside the class by measurement, not by omission.
-            "clip.mov",
             "clip.mkv",
             "clip.avi",
             // The two neighbours a substring reading would sweep up.
@@ -5130,11 +5241,56 @@ mod tests {
         // And the class is disjoint from the page's, which is what makes the
         // order of the two questions in `preview_ftype` a formality rather than
         // a rule somebody could get wrong.
-        for video in VIDEO_EXTENSIONS {
+        for (video, _) in VIDEO_EXTENSIONS {
             assert!(
                 !PAGE_EXTENSIONS.iter().any(|(page, _)| *page == video),
                 "{video} cannot be both a video and a page"
             );
+        }
+    }
+
+    /// RED — **the class has a face for every member and a player for only
+    /// three of them** (user ruling 2026-08-27, the second of that day; §7.23
+    /// ⑩).
+    ///
+    /// The two columns of one table, asserted as two claims about the same four
+    /// names, because the whole of this ruling is that they are *different*
+    /// sets and that saying so out loud is better than trimming the class until
+    /// they agree. The three that play are the three the engine was measured
+    /// with; `.mov` has a face and no player and is the reason the column
+    /// exists.
+    ///
+    /// RED GATE ①: give `mov` [`VideoPlayback::Plays`] and the second half
+    /// fails — which is what a build that offered a play button over a
+    /// `canPlayType('video/quicktime') == ""` file would be doing.
+    /// RED GATE ②: take `mov` back out of the table and the first half fails on
+    /// its face, because a name outside the table has no face at all and this
+    /// test would be reading the same `None` for both questions.
+    #[test]
+    fn every_video_has_a_face_and_only_the_measured_three_have_a_player() {
+        let path = |name: &str| std::path::PathBuf::from(format!(r"D:\shots\{name}"));
+        for name in ["clip.mp4", "trailer.m4v", "screencast.webm"] {
+            assert_eq!(
+                video_playback(&path(name)),
+                Some(VideoPlayback::Plays),
+                "{name}"
+            );
+            assert!(path_names_a_playable_video(&path(name)), "{name}");
+        }
+        for name in ["capture.mov", "CAPTURE.MOV"] {
+            assert_eq!(
+                video_playback(&path(name)),
+                Some(VideoPlayback::FaceOnly),
+                "{name}"
+            );
+            assert!(!path_names_a_playable_video(&path(name)), "{name}");
+            // It has a face, and that is the half a reader loses if the row is
+            // deleted rather than marked.
+            assert_eq!(preview_ftype(name), PreviewFtype::Video, "{name}");
+        }
+        for name in ["clip.mkv", "notes.md", "report.html"] {
+            assert_eq!(video_playback(&path(name)), None, "{name}");
+            assert!(!path_names_a_playable_video(&path(name)), "{name}");
         }
     }
 

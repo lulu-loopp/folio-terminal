@@ -43,16 +43,18 @@ use webview2_com::Microsoft::Web::WebView2::Win32::*;
 // this file mean something else.
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, BrowserProcessExitedEventHandler,
-    CapturePreviewCompletedHandler, CreateCoreWebView2CompositionControllerCompletedHandler,
+    CapturePreviewCompletedHandler, CoreWebView2EnvironmentOptions,
+    CreateCoreWebView2CompositionControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, CursorChangedEventHandler,
     DocumentTitleChangedEventHandler, DownloadStartingEventHandler, FaviconChangedEventHandler,
     FindActiveMatchIndexChangedEventHandler, FindMatchCountChangedEventHandler,
     FindStartCompletedHandler, FocusChangedEventHandler, GetFaviconCompletedHandler,
-    HistoryChangedEventHandler, LaunchingExternalUriSchemeEventHandler,
-    MoveFocusRequestedEventHandler, NavigationCompletedEventHandler,
-    NavigationStartingEventHandler, NewBrowserVersionAvailableEventHandler,
-    NewWindowRequestedEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
-    SourceChangedEventHandler, StatusBarTextChangedEventHandler, take_pwstr,
+    HistoryChangedEventHandler, IsDocumentPlayingAudioChangedEventHandler,
+    LaunchingExternalUriSchemeEventHandler, MoveFocusRequestedEventHandler,
+    NavigationCompletedEventHandler, NavigationStartingEventHandler,
+    NewBrowserVersionAvailableEventHandler, NewWindowRequestedEventHandler,
+    PermissionRequestedEventHandler, ProcessFailedEventHandler, SourceChangedEventHandler,
+    StatusBarTextChangedEventHandler, take_pwstr,
 };
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::core::{BOOL, HSTRING, IUnknown, Interface as _, PCWSTR, PWSTR};
@@ -262,6 +264,24 @@ pub enum WebEvent {
     /// which is that the seat goes on wearing what it already wore.
     Favicon {
         png: Option<Vec<u8>>,
+    },
+    /// **The document on this seat started or stopped making a sound**
+    /// (`ICoreWebView2_8::DocumentPlayingAudioChanged`; user ruling 2026-08-27,
+    /// `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// The engine's own reading of its document, forwarded rather than inferred:
+    /// a host that concluded "a video was opened, therefore there is a sound"
+    /// would put a mark on a tab whose video is paused, is muted, or has run to
+    /// its end, and would miss a page that makes a noise without this window
+    /// having opened a video at all.
+    ///
+    /// **A level and not an edge.** The engine fires the change and the boolean
+    /// travels with it, so a caller never has to keep a count of how many times
+    /// it has been told — the last thing it heard is the truth, which is what
+    /// makes a rebuilt browser's silence correct without anybody resetting
+    /// anything.
+    PlayingAudioChanged {
+        playing: bool,
     },
 }
 
@@ -841,11 +861,46 @@ impl WebHost {
             },
         ));
         let folder = HSTRING::from(folder.as_os_str());
+        // **One browser argument, and it is about a gesture this host already
+        // has** (user ruling 2026-08-27, route A; `docs/DESIGN.md` §7.23 ⑩).
+        //
+        // Chromium's desktop default is `document-user-activation-required`: a
+        // page may not start audible playback until somebody has interacted with
+        // *it*. Measured on this build, that is exactly what happened — the
+        // player shell came up with the engine's own controls and the recording
+        // paused on its first frame, because the press that asked for it landed
+        // on **this window's** play button and a page cannot see a press its
+        // host received. A reader who has already said "play" being asked to say
+        // it again, in a second control they did not know was there, is the
+        // gesture arriving nowhere.
+        //
+        // **What this widens, exactly.** The policy governs pages this window
+        // opens, which are local files a reader chose out of the files column
+        // and the shells this process wrote itself; there is no third party
+        // here, no ad frame and no site that arrived by itself. It is a
+        // *policy*, not a capability: nothing that could not already play can
+        // play, and the four switches that matter — no message bridge, no host
+        // objects, no default context menus, every download cancelled — are
+        // untouched, as is the navigation gate every URL still passes.
+        //
+        // Written as `AdditionalBrowserArguments` and not as a per-page setting
+        // because the runtime has no per-page spelling of it: it is a command
+        // line to the browser process, and the browser process is made once.
+        let options = CoreWebView2EnvironmentOptions::default();
+        // SAFETY: `set_additional_browser_arguments` writes the `UnsafeCell`
+        // the COM object reads, and this write happens before the object is
+        // handed to anybody — the interface below is the first reader.
+        unsafe {
+            options.set_additional_browser_arguments(String::from(
+                "--autoplay-policy=no-user-gesture-required",
+            ));
+        }
+        let options: ICoreWebView2EnvironmentOptions = options.into();
         unsafe {
             CreateCoreWebView2EnvironmentWithOptions(
                 PCWSTR::null(),
                 PCWSTR(folder.as_ptr()),
-                None::<&ICoreWebView2EnvironmentOptions>,
+                Some(&options),
                 &handler,
             )
         }
@@ -1368,6 +1423,49 @@ impl WebHost {
                     &mut token,
                 )
                 .map_err(|error| failure("add_StatusBarTextChanged", &error))?;
+
+            // **Whether this document is making a sound** (user ruling
+            // 2026-08-27; `docs/DESIGN.md` §7.23 ⑩). A tab switched away from
+            // is hidden and not stopped — `SetIsVisible(false)` makes the page
+            // stop *rendering* and says nothing about its audio — so a video
+            // goes on playing behind a tab nobody is looking at, which is the
+            // browser convention the ruling adopted. What it owes the reader in
+            // exchange is a way to find the sound, and this is the only signal
+            // in the engine that tells the truth about one: not "a video was
+            // opened" but "this document is audible now".
+            //
+            // Cast rather than assumed: `ICoreWebView2_8` has been in the
+            // runtime since 1.0.1072.54, and a machine older than that gets a
+            // window with no speaker on its tabs rather than no window at all.
+            let shared = Rc::clone(&self.shared);
+            if let Ok(audio) = webview.cast::<ICoreWebView2_8>() {
+                audio
+                    .add_IsDocumentPlayingAudioChanged(
+                        &IsDocumentPlayingAudioChangedEventHandler::create(Box::new(
+                            move |view, _| {
+                                // The event says only *that* it changed, so the
+                                // level is read back off the same interface —
+                                // the shape `StatusBarTextChanged` above uses,
+                                // and for its reason: the handler is handed the
+                                // base interface and the fact lives on the
+                                // versioned one.
+                                let playing = match view
+                                    .as_ref()
+                                    .and_then(|view| view.cast::<ICoreWebView2_8>().ok())
+                                {
+                                    Some(view8) => {
+                                        read_bool(|out| view8.IsDocumentPlayingAudio(out))
+                                    }
+                                    None => false,
+                                };
+                                shared.push(WebEvent::PlayingAudioChanged { playing });
+                                Ok(())
+                            },
+                        )),
+                        &mut token,
+                    )
+                    .map_err(|error| failure("add_IsDocumentPlayingAudioChanged", &error))?;
+            }
 
             // ── the doors slice ② will widen, shut for now ────────────────
             //

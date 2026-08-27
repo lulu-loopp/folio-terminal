@@ -1104,4 +1104,46 @@ mod tests {
             "the platform is the process's, so every question after the first finds it standing"
         );
     }
+
+    /// RED — **the shipped `.mov` gives up a frame too, which is the whole
+    /// reason it is in the class** (user ruling 2026-08-27, the second of that
+    /// day; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// This decoder reads QuickTime — `.mov` is the same MPEG-4 File Source as
+    /// `.mp4` — and the engine that would have to *play* it answers
+    /// `canPlayType('video/quicktime')` with the empty string. Those two facts
+    /// together are the argument for a class with two columns rather than a
+    /// class trimmed until they agree, and this is the half of that argument
+    /// that lives on the platform. The other half is
+    /// `preview::every_video_has_a_face_and_only_the_measured_three_have_a_player`.
+    ///
+    /// RED GATE: this file's own reason for existing is that somebody will one
+    /// day propose deleting `mov` from `preview::VIDEO_EXTENSIONS` again. If the
+    /// decoder ever stops reading it, this goes red and that proposal becomes
+    /// correct — which is the only circumstance in which it is.
+    #[test]
+    fn the_shipped_mov_fixture_gives_up_a_frame_it_will_never_play() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-assets/folio-video-test.mov");
+        let frame = first_frame(&fixture, 280, 160).expect("a real mov gives up a frame");
+        assert_eq!(
+            (frame.native_width, frame.native_height),
+            (160, 120),
+            "the native size is the video's own"
+        );
+        let ink = frame
+            .rgba
+            .chunks_exact(4)
+            .filter(|pixel| pixel[..3] != [0, 0, 0])
+            .count();
+        assert!(
+            ink > frame.rgba.len() / 8,
+            "a tenth of the way in is past the black opening: {ink} lit pixels"
+        );
+        let duration_ms = frame.duration_ms.expect("the container declares a length");
+        assert!(
+            (2_800..=3_200).contains(&duration_ms),
+            "a three-second fixture: {duration_ms}ms"
+        );
+    }
 }

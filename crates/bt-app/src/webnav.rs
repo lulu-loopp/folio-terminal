@@ -134,6 +134,30 @@ pub enum Mint {
     /// The one `file:` URL the controlled file entry minted from a
     /// canonicalised path.
     File(String),
+    /// **The player shell this window wrote, standing in front of one local
+    /// video** (user ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// A [`Self::File`] in every way the gate cares about — the target is one
+    /// `file:` URL this door minted, and [`Self::admits`] compares it exactly as
+    /// it compares any other — and a different thing in the one way the *window*
+    /// cares about: the URL names a page nobody asked for, while the file the
+    /// reader opened is `video`. Every surface that spells an identity reads the
+    /// second field and no surface at all reads the first, which is why the two
+    /// travel together rather than one being derived from the other.
+    ///
+    /// **The video path is carried and never parsed back out of the shell's
+    /// URL**, on [`Self::path_and_tail_of_file_url`]'s own principle one variant
+    /// up: a mint is a note the host wrote about its own intention, and a rule
+    /// that read a video's name off a shell's file name would turn that note
+    /// back into a property of a string.
+    VideoShell {
+        /// The `file:` URL of the shell page — what the engine navigates to and
+        /// the only thing the gate ever compares.
+        url: String,
+        /// The recording the shell was written for — what every surface that
+        /// names this seat's content says, and what `↗` hands the system.
+        video: PathBuf,
+    },
 }
 
 impl Mint {
@@ -225,7 +249,22 @@ impl Mint {
         match self {
             Self::Nothing => None,
             Self::Blank => Some(BLANK_PAGE),
-            Self::File(url) => Some(url),
+            Self::File(url) | Self::VideoShell { url, .. } => Some(url),
+        }
+    }
+
+    /// **The recording a player shell was written for**, and `None` for every
+    /// other mint (user ruling 2026-08-27; §7.23 ⑩).
+    ///
+    /// The one reader of [`Self::VideoShell`]'s second field, so that the six or
+    /// seven surfaces that have to tell a playing video from a page ask one
+    /// question — see [`crate::webhost::WebSeat::playing_video`], which is this
+    /// asked of a seat.
+    #[must_use]
+    pub fn video_behind_the_shell(&self) -> Option<&Path> {
+        match self {
+            Self::VideoShell { video, .. } => Some(video),
+            Self::Nothing | Self::Blank | Self::File(_) => None,
         }
     }
 
@@ -243,7 +282,15 @@ impl Mint {
             Self::Blank => candidate
                 .eq_ignore_ascii_case(BLANK_PAGE)
                 .then(|| BLANK_PAGE.to_owned()),
-            Self::File(minted) => {
+            // **The shell is admitted by the same clause and not by a second
+            // one.** What the gate is being asked is "did this window mint this
+            // URL", and the answer for a shell is yes in exactly the sense it is
+            // yes for a document — one `file:` URL, compared whole. The video
+            // this shell is *for* is not a navigation target and is deliberately
+            // not consulted here: the engine never navigates to it, it loads it
+            // as a subresource, and a subresource does not come through this
+            // door.
+            Self::File(minted) | Self::VideoShell { url: minted, .. } => {
                 let without_tail = candidate.split(['?', '#']).next().unwrap_or(candidate);
                 minted
                     .eq_ignore_ascii_case(without_tail)

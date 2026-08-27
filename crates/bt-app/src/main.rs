@@ -74,6 +74,7 @@ mod pdf;
 mod peek_strip;
 mod persist;
 mod pins;
+mod player;
 mod preview;
 mod preview_edit;
 mod preview_trace;
@@ -5300,8 +5301,36 @@ enum PreviewOpenLane {
 /// A predicate rather than a condition written into the retirement loop,
 /// because it is a claim about content that is worth being able to ask on its
 /// own, and because the loop that consumes it is walking two maps at once.
-fn a_page_was_replaced(showing_picture: bool, buffer: Option<&preview::PreviewSource>) -> bool {
-    showing_picture || buffer.is_some_and(|source| source.web_url().is_none())
+fn a_page_was_replaced(
+    picture: Option<&Path>,
+    buffer: Option<&preview::PreviewSource>,
+    playing: Option<&Path>,
+) -> bool {
+    // **A player is not a second thing on the pane; it is the first thing,
+    // playing** (user ruling 2026-08-27; §7.23 ⑩).
+    //
+    // Route A puts an engine on a video's pane without making the video a page,
+    // and everything about that arrangement rests on this line. The pane goes on
+    // pointing at the recording — that is what keeps the breadcrumb, the tab
+    // name, `session.json`, the switcher row and `↗` all naming the file the
+    // reader opened rather than a shell in a cache folder — so the ordinary
+    // reading of "one seat shows one thing" would look at that pane, see a file
+    // that is not a URL, and close the browser inside a frame of it opening.
+    //
+    // The exception is exactly as wide as the claim: the recording the shell was
+    // written for, and no other file. Open something else on this pane and the
+    // paths part company, this answers `true`, the browser retires, and the
+    // sound stops — which is not a special case for stopping playback but the
+    // general rule finally arriving at the right pane.
+    //
+    // **The picture and not the buffer is what is compared**, because a video's
+    // pane has no buffer at all: the decode lane files a `PreviewImageState` and
+    // leaves the pool alone, exactly as a `.png`'s pane does. The recording's
+    // path is on that state and nowhere else.
+    if let Some(playing) = playing {
+        return picture != Some(playing);
+    }
+    picture.is_some() || buffer.is_some_and(|source| source.web_url().is_none())
 }
 
 /// **Whether this page still has a pane to be drawn on** — the rule
@@ -29735,6 +29764,9 @@ impl Runtime<'_> {
                 .map(|(leaf, web)| (*leaf, favicons.of_url(&web.page().url)))
                 .collect()
         };
+        // Which tabs are making a sound (§7.23 ⑩) — one walk of the page map
+        // for the whole strip, beside the one that reads their icons.
+        let audible = self.audible_tabs();
         let grabbed = self.window.drag.as_ref().and_then(|drag| {
             let tab = drag.tab()?;
             self.window
@@ -29790,6 +29822,7 @@ impl Runtime<'_> {
                         reveal: tab.pin_reveal.sample(now, self.app.motion).0,
                         files: tab.seats.is_lone_terminal(),
                         files_lit: tab.files_lit.sample(now, self.app.motion).0,
+                        audible: audible.contains(&tab.id),
                     },
                     tab.drawn_offset(
                         now,
@@ -42473,20 +42506,155 @@ impl Runtime<'_> {
     /// [`Self::open_preview_web_file`], and the one door a minted target leaves
     /// by.
     fn open_minted_page(&mut self, mint: webnav::Mint) -> Result<()> {
+        let Some(url) = self.gated_minted_target(&mint) else {
+            return Ok(());
+        };
+        self.open_web_page_with(&url, mint)
+    }
+
+    /// The same, on a pane the caller has already named (user ruling
+    /// 2026-08-27; §7.23 ⑩).
+    ///
+    /// [`Self::open_minted_page`]'s split, and it is
+    /// [`Self::open_preview_image_on`]'s split for the same reason: the play
+    /// verb knows exactly which pane it was pressed on, and letting
+    /// [`Self::open_web_page_with`] choose — which asks the tab for *its* page
+    /// seat — would put a player on a pane in the corner of the tab that
+    /// happened to be showing a `.html`.
+    fn open_minted_page_on(&mut self, leaf: LeafId, mint: webnav::Mint) -> Result<()> {
+        let Some(url) = self.gated_minted_target(&mint) else {
+            return Ok(());
+        };
+        self.open_web_page_on(leaf, &url, mint)
+    }
+
+    /// **The URL a mint stands for, put through the door on the way out.**
+    ///
+    /// Lifted out of [`Self::open_minted_page`] when the play verb needed the
+    /// same three lines: every navigation this product starts has been through
+    /// `webnav::check`, and a second door written beside the first is how one of
+    /// them stops being checked.
+    fn gated_minted_target(&self, mint: &webnav::Mint) -> Option<String> {
         let asked = mint
             .target()
             .expect("a mint made by `Mint::file` names the URL it minted")
             .to_owned();
-        let webnav::Decision::Navigate(url) =
-            webnav::check(&asked, webnav::Origin::HostMinted(&mint))
-        else {
+        match webnav::check(&asked, webnav::Origin::HostMinted(mint)) {
+            webnav::Decision::Navigate(url) => Some(url),
             // Unreachable by construction and reported rather than asserted: the
             // gate is the thing being relied on, and a gate that can only be
             // observed by a panic is a gate nobody would dare move.
-            eprintln!("BT_WEB refused a target it minted itself: {asked}");
+            _ => {
+                eprintln!("BT_WEB refused a target it minted itself: {asked}");
+                None
+            }
+        }
+    }
+
+    /// **Play the video this pane is showing** (user ruling 2026-08-27, route A;
+    /// `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// The one verb that puts an engine on a video's pane, and the only door on
+    /// to the page lane a video has: [`preview_open_lane`] refuses every one of
+    /// them ([`a_video_takes_no_page_lane_at_any_door`]), which is §7.16's
+    /// measurement and is not being reopened — what is navigated to here is a
+    /// **shell this window wrote**, and the recording is a subresource inside it.
+    /// A top-level navigation to the recording itself would still become a
+    /// download and still end `ConnectionAborted`.
+    ///
+    /// Four ways it declines, and all four are silent because all four are
+    /// states in which the button was not drawn:
+    ///
+    /// 1. **Not a seat.** A torn-off pane has no leaf to put an engine on.
+    /// 2. **No video on it**, or one whose spelling is in the face-only column
+    ///    ([`preview::path_names_a_playable_video`]). This is the *same*
+    ///    predicate [`Self::seats_wearing_a_play_button`] draws by, so a button
+    ///    that exists is a button that works.
+    /// 3. **The disk does not have it.** Canonicalised first, exactly as
+    ///    [`Self::open_preview_web_file`] canonicalises: the URL inside the shell
+    ///    has to be the path the disk agrees on, or `↗` and the player would be
+    ///    naming two different files.
+    /// 4. **The shell could not be written**, which is a full disk or a
+    ///    `%LOCALAPPDATA%` that is not there.
+    fn play_video_on(&mut self, surface: PreviewSurface) -> Result<()> {
+        let PreviewSurface::Seat(leaf) = surface else {
             return Ok(());
         };
-        self.open_web_page_with(&url, mint)
+        let Some(path) = self
+            .preview_picture(surface)
+            .map(|picture| picture.path.clone())
+        else {
+            return Ok(());
+        };
+        if !preview::path_names_a_playable_video(&path) {
+            return Ok(());
+        }
+        let canonical = match std::fs::canonicalize(&path) {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                self.mouse_trace(|| format!("play_video_on leave=no-disk error={error}"));
+                return Ok(());
+            }
+        };
+        // **The window's own ground, at the moment the shell is written.** The
+        // bars beside a recording that is not this pane's shape are the only
+        // part of the page a theme can reach, and the page cannot be told about
+        // a later one — see [`player::shell_html`].
+        let ground = bt_render::chrome_palette().seat_body;
+        // **The pane's own spelling and the disk's, both** — see
+        // [`player::mint_player_shell`], where the frame this cost is written
+        // down. The URL goes to the engine; the name goes to every surface that
+        // has to recognise this pane again.
+        let mint = match player::mint_player_shell(&path, &canonical, ground) {
+            Ok(mint) => mint,
+            Err(refusal) => {
+                self.mouse_trace(|| format!("play_video_on leave=no-shell {refusal:?}"));
+                return Ok(());
+            }
+        };
+        self.open_minted_page_on(leaf, mint)?;
+        self.focus_seat(leaf.seat)
+    }
+
+    /// **Stop the video this pane is playing and put its frame back** (user
+    /// ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// [`Self::play_video_on`]'s exact undo, and it is one line because route A
+    /// was built so that it would be: the pane never stopped being the
+    /// recording's pane, so there is nothing to restore. The
+    /// `PreviewImageState` is where it was, the decoded frame is still in the
+    /// window's cache under the same key, the breadcrumb never changed and the
+    /// buffer was never left. All that is here is a browser, and closing a
+    /// browser is what `WebSeat::close` does.
+    ///
+    /// **The engine is closed and not hidden**, which is the whole difference
+    /// between this and switching tabs: a hidden page goes on making a sound by
+    /// design (the ruling's own choice, and the reason the tab strip grew a
+    /// speaker), and a stopped one has no process left to make one with. The
+    /// same door the orphan rule uses, so a pane that stops and a pane that is
+    /// closed retire a browser the same way.
+    ///
+    /// Silent on a surface with no engine: the tool is only drawn over one that
+    /// has one, and a stop pressed twice is a stop.
+    fn stop_video_on(&mut self, surface: PreviewSurface) -> Result<()> {
+        if !self.surface_is_playing_a_video(surface) {
+            return Ok(());
+        }
+        let PreviewSurface::Seat(leaf) = surface else {
+            return Ok(());
+        };
+        let window = &mut *self.window;
+        let Some(web) = window.web.get_mut(&leaf) else {
+            return Ok(());
+        };
+        let outcomes = web.close(&window.compositor);
+        self.apply_web_outcomes(leaf, outcomes)?;
+        // The frame comes back on the next fit, which is this frame: the pixels
+        // never left the cache and `refit_preview_picture`'s refusal is lifted
+        // by the same predicate that put it there.
+        self.refresh_preview_for_layout();
+        self.refresh_chrome();
+        self.present_chrome_change()
     }
 
     /// [`Self::open_preview_file`] on a surface the caller has already chosen —
@@ -42813,10 +42981,24 @@ impl Runtime<'_> {
                 // is the row below saying it; and a seat whose one navigation
                 // was refused has neither, which is the state the card in its
                 // body is already about.
-                page.title.clone(),
+                // **A player's head says the recording and not the shell**
+                // (user ruling 2026-08-27; §7.23 ⑩ — found on the machine,
+                // where the head over a playing video read `Folio player`).
+                // The document's title is the shell's, and the shell is this
+                // window's page rather than the reader's document: the file
+                // they opened is the recording, and this is the one cell that
+                // says what this seat is about.
+                match self.video_playing_on(surface) {
+                    Some(video) => files_row_display_name(video),
+                    None => page.title.clone(),
+                },
                 seats::PreviewHeadTools {
                     save: false,
                     flip: false,
+                    // The per-type slot's other occupant — see
+                    // [`Self::preview_head_tools`], which is what the hit test
+                    // reads and which this must agree with to the pixel.
+                    stop: self.surface_is_playing_a_video(surface),
                     // **The developer tools, and nothing else of a page's four**
                     // (user ruling 2026-08-24, second round). The hand-off arrow
                     // that this comment used to defend went down to the address
@@ -42927,12 +43109,39 @@ impl Runtime<'_> {
     /// is the address that the reader is navigating with — the path is still one
     /// press away, in the `Open ⌄` the address row does not carry, which is the
     /// trade the ruling made when it said a page's row is its address.
+    /// **A player is not a page here, and this is the line that says so** (user
+    /// ruling 2026-08-27; §7.23 ⑩). The engine on a playing video's pane is
+    /// hosting a shell this window wrote into a cache folder — a document nobody
+    /// asked for, at a path nobody would recognise — and the file the reader
+    /// opened is the recording. So the row it wears is the recording's
+    /// breadcrumb, exactly as it was a moment before the play button was
+    /// pressed, and pressing play does not change what this pane is *about*.
+    ///
+    /// Said here rather than in [`Self::rail_page`], which every placement,
+    /// keyboard and retirement question in this file also asks: the engine is
+    /// genuinely on this pane and every one of those must go on knowing it. What
+    /// changes is only what the pane *says it is*.
     fn preview_rail_kind(&self, surface: PreviewSurface) -> Option<seats::PreviewRailKind> {
-        if self.rail_page(surface).is_some() {
+        if self.rail_page(surface).is_some() && !self.surface_is_playing_a_video(surface) {
             return Some(seats::PreviewRailKind::Address);
         }
         self.preview_rail_path(surface)
             .map(|_| seats::PreviewRailKind::Crumbs)
+    }
+
+    /// **The recording a surface's engine is playing**, and `None` for a surface
+    /// with no engine or an engine on a page (user ruling 2026-08-27; §7.23 ⑩).
+    ///
+    /// [`webhost::WebSeat::playing_video`] asked of a *surface*, which is the
+    /// form every caller in this file wants: the rail, the frame, `↗` and the
+    /// press are all about a pane and none of them holds a leaf.
+    fn video_playing_on(&self, surface: PreviewSurface) -> Option<&Path> {
+        self.web_of(surface)?.playing_video()
+    }
+
+    /// The same as a yes or no, for the callers that only need the fork.
+    fn surface_is_playing_a_video(&self, surface: PreviewSurface) -> bool {
+        self.video_playing_on(surface).is_some()
     }
 
     /// **Which live page one preview surface is showing**, docked or torn off
@@ -43293,6 +43502,12 @@ impl Runtime<'_> {
             // reserve a box for it (user ruling 2026-08-24).
             flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown)
                 && self.preview_rail_kind(surface).is_none(),
+            // **This pane is playing** (user ruling 2026-08-27; §7.23 ⑩), so
+            // the per-type slot holds a stop instead of a flip. Asked of the
+            // seat's mint through the one predicate every surface asks, so a
+            // head that offers to stop something is a head over something that
+            // is running.
+            stop: self.surface_is_playing_a_video(surface),
             // **A page on this seat** (§7.7 ②). The seam slice ③ moves: today a
             // window has one page and it names its own seat, and when the
             // preview pool learns about pages this becomes a question about the
@@ -46950,6 +47165,37 @@ impl Runtime<'_> {
         preview_document_height(&pane.doc, body, scale, advance, rows_height, columns)
     }
 
+    /// **The play button, rasterised, for the lane that draws over a picture**
+    /// (user ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// Empty for every surface that is not a docked seat showing a playable
+    /// video with nothing already on it — the same set
+    /// [`Self::seats_wearing_a_play_button`] answers, asked of one surface, so
+    /// the control that is drawn and the press that is accepted cannot come
+    /// apart.
+    ///
+    /// The two sprites are cut by [`seats::preview_play_button_sprites`], which
+    /// is the one place the circle's geometry is written and the very function
+    /// [`seats::hit_preview_play`] measures the press against.
+    fn play_button_rasters(
+        &mut self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        scale: f32,
+    ) -> Vec<bt_render::ChromeIcon> {
+        let PreviewSurface::Seat(leaf) = surface else {
+            return Vec::new();
+        };
+        if leaf.tab != self.id || !self.seats_wearing_a_play_button().contains(&leaf.seat) {
+            return Vec::new();
+        }
+        let hovered =
+            self.window.seat_pointer.hover == Some(seats::ChromeTarget::PreviewPlay(leaf.seat));
+        let sprites =
+            seats::preview_play_button_sprites(body, hovered, scale, &bt_render::chrome_palette());
+        self.window.chrome_marks.resolve(&sprites)
+    }
+
     /// Hand the renderer the body of every preview **seat** this tab has.
     ///
     /// One list rather than one slot, because the content plane is plural: two
@@ -47017,7 +47263,30 @@ impl Runtime<'_> {
             preview_trace::emit(preview_trace::global(), || {
                 format!("built {surface:?} leave=picture")
             });
-            return self.preview_image_meta(surface, body, scale);
+            let mut built = self.preview_image_meta(surface, body, scale);
+            // **The play button rides here and not with the seat's own chrome**
+            // (user ruling 2026-08-27; §7.23 ⑩), and the reason was measured on
+            // the machine that afternoon: the seats' sprite pass is issued
+            // *before* the preview picture, so the first build drew a pill and a
+            // triangle and then painted the decoded frame straight over them —
+            // a video's pane with a bare rectangle where its play button was.
+            // This lane is the one drawn immediately after the picture, and its
+            // own definition is a textured quad in whole-surface pixels cropped
+            // to a box, which is exactly what these two are.
+            let rasters = self.play_button_rasters(surface, body, scale);
+            if !rasters.is_empty() {
+                built
+                    .get_or_insert_with(|| bt_render::PreviewBody {
+                        clip: body,
+                        quads: Vec::new(),
+                        paragraphs: Vec::new(),
+                        blocks: Vec::new(),
+                        rasters: Vec::new(),
+                    })
+                    .rasters
+                    .extend(rasters);
+            }
+            return built;
         }
         // **The inputs, before the document is built out of them**
         // (`BT_PREVIEW_TRACE`): a body laid out at a scale of zero or into a
@@ -47738,6 +48007,23 @@ impl Runtime<'_> {
     /// its meta line and showed nothing at all, and the request it had left in
     /// flight was then answered to nobody.
     fn refit_preview_picture(&mut self, surface: PreviewSurface) {
+        // **A frame is not drawn over the thing it was a picture of** (user
+        // ruling 2026-08-27; §7.23 ⑩). Once the play verb has put an engine on
+        // this pane, the pane's body is a hole with a browser composed under it,
+        // and the still frame this window decoded is a rectangle of pixels that
+        // would be painted straight over the moving one. The first refusal in a
+        // function whose whole shape is refusals, and it is the same refusal:
+        // this surface's picture is not on screen this frame.
+        //
+        // **The `PreviewImageState` is kept**, which is the reason this is a
+        // refusal here and not a clearing at the play verb: it is the pane's
+        // account of which recording this is, it is what the stop verb puts back
+        // on the glass without a second decode, and it costs one comparison a
+        // frame to leave it alone.
+        if self.surface_is_playing_a_video(surface) {
+            self.hide_preview_picture(surface);
+            return;
+        }
         let scale = self.window.renderer.metrics().scale_factor as f32;
         // **U8 — a seat's box travels with its pane's tween**, and carries the
         // crop a FLIP needs; a float's is its window's body, which does not
@@ -63882,6 +64168,7 @@ impl Runtime<'_> {
     /// about what time it is, and a reveal is a function of time.
     fn tab_trailers(&self, now: Instant) -> Vec<seats::TabTrailer> {
         let motion = self.app.motion;
+        let audible = self.audible_tabs();
         // **F57 asked at the one place both axes read the run.** The strip and
         // the rail are two drawings of `self.tabs` and both are built from here,
         // so a partition broken by any write path — including one written after
@@ -63906,6 +64193,84 @@ impl Runtime<'_> {
                 // layout is the only thing entitled to answer it.
                 files: tab.seats.is_lone_terminal(),
                 files_lit: tab.files_lit.sample(now, motion).0,
+                audible: audible.contains(&tab.id),
+            })
+            .collect()
+    }
+
+    /// **Which tabs of this window have a page making a sound** (user ruling
+    /// 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// Built once per strip rather than asked per tab, because `window.web` is
+    /// keyed by leaf and a per-tab question would walk the whole map once for
+    /// every tab — and because the two strips are two drawings of one answer,
+    /// exactly as [`Self::tab_trailers`] is one builder for both.
+    ///
+    /// **Any page is enough.** A tab is a container, the mark says the sound is
+    /// inside it, and one page is as much inside it as two.
+    fn audible_tabs(&self) -> std::collections::BTreeSet<TabId> {
+        self.window
+            .web
+            .iter()
+            .filter(|(_, web)| web.playing_audio())
+            .map(|(leaf, _)| leaf.tab)
+            .collect()
+    }
+
+    /// **Which of this tab's preview seats wear a play button** (user ruling
+    /// 2026-08-27; §7.23 ⑩).
+    ///
+    /// Three facts, settled here so that the painter and the hit test are handed
+    /// one answer rather than each deriving a policy
+    /// ([`Self::play_button_rasters`] draws by it and
+    /// [`seats::hit_preview_play`] presses by it):
+    ///
+    /// 1. **The pane is showing a video whose spelling can be played** —
+    ///    [`preview::path_names_a_playable_video`], which is the playable column
+    ///    of the one table. A `.mov` has a face and no player, and what it wears
+    ///    instead is a sentence in its fact line, not a button that would refuse.
+    /// 2. **Nothing is already on that seat.** A pane that is playing has an
+    ///    engine on it, and a play button over a playing video would be a
+    ///    control offering what is already happening.
+    /// 3. **It is a seat and not a float**, because the verb needs a leaf to put
+    ///    an engine on and `pop_out_preview` closes the leaf it tore off.
+    ///
+    /// **The decoded frame is deliberately not one of them.** A `.webm` carrying
+    /// AV1 plays in that engine on a machine whose Media Foundation cannot draw
+    /// its first frame (§7.23 ②), and a button gated on the picture would be
+    /// missing on exactly the files that most need it — the ones whose pane has
+    /// nothing to show until it plays.
+    fn seats_wearing_a_play_button(&self) -> std::collections::BTreeSet<SeatId> {
+        let tab = match self.window.tabs.iter().find(|tab| tab.id == self.id) {
+            Some(tab) => tab,
+            None => return std::collections::BTreeSet::new(),
+        };
+        tab.seats
+            .preview_seats()
+            .into_iter()
+            .filter(|seat| {
+                let leaf = LeafId {
+                    tab: self.id,
+                    seat: *seat,
+                };
+                // **A seat whose browser is on its way out is a seat with
+                // nothing on it**, which is `WebSeat::is_closing`'s own reason:
+                // the engine leaves the glass when `close` is called and the map
+                // entry survives for as long as the process takes to end. Reading
+                // the entry alone would leave a stopped video with no button for
+                // most of a second, and sometimes for ten.
+                if self
+                    .window
+                    .web
+                    .get(&leaf)
+                    .is_some_and(|web| !web.is_closing())
+                {
+                    return false;
+                }
+                tab.preview_panes
+                    .get(PreviewSurface::Seat(leaf))
+                    .and_then(|pane| pane.image.as_ref())
+                    .is_some_and(|image| preview::path_names_a_playable_video(&image.path))
             })
             .collect()
     }
@@ -66630,6 +66995,27 @@ impl Runtime<'_> {
                 position.y,
             )
         })
+        // **The play button, in the preview seat's own body** (user ruling
+        // 2026-08-27; §7.23 ⑩) — asked here for the graph's own reason one
+        // rung down, and asked *before* it because the two cannot both be on
+        // one pane and the cheaper question reads first: a set membership
+        // against a solved rectangle.
+        //
+        // Answering here rather than in `chrome_mouse_input`'s fallback ladder
+        // is the ruling: this pane's body is a picture, and every rung of that
+        // ladder — the body thumb, a link, a block's scrollbar, the picture's
+        // own pan — is a gesture *on* the picture. A control standing on it
+        // out-ranks all of them, exactly as the graph's toolbar does.
+        .or_else(|| {
+            seats::hit_preview_play(
+                &self.seats,
+                &self.seat_layout,
+                &self.seats_wearing_a_play_button(),
+                scale,
+                position.x,
+                position.y,
+            )
+        })
         // The graph, in the preview seat's own body. Asked here rather than
         // among the preview pane's controls because it *is* the body: nothing
         // else claims that rectangle while a graph is on it, and the document
@@ -66736,8 +67122,21 @@ impl Runtime<'_> {
         if self.window.seat_pointer.hover == hover && self.window.seat_pointer.pane_hover == pane {
             return Ok(());
         }
+        // **The play button is not in the chrome pass**, so the ordinary
+        // repaint below does not reach it (§7.23 ⑩). It is the one control this
+        // window draws in the preview body's own raster lane, and that lane is
+        // rebuilt by `refresh_preview_body` — asked here only when the pointer
+        // actually crossed this button, because rebuilding every pane's document
+        // on every pointer move is the cost that lane exists to avoid.
+        let crossed_the_play_button = [self.window.seat_pointer.hover, hover]
+            .into_iter()
+            .flatten()
+            .any(|target| matches!(target, seats::ChromeTarget::PreviewPlay(_)));
         self.window.seat_pointer.hover = hover;
         self.window.seat_pointer.pane_hover = pane;
+        if crossed_the_play_button {
+            self.refresh_preview_body();
+        }
         self.apply_pointer_cursor();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -69519,6 +69918,11 @@ impl Runtime<'_> {
             // `</>`. Every other control on this row already asks
             // `preview_here(seat)` — see `PreviewBrowser` and `PreviewDevTools`
             // directly below — and this is that sentence finished.
+            // **Stop, and put the frame back** (user ruling 2026-08-27; §7.23
+            // ⑩). See [`Self::stop_video_on`].
+            seats::ChromeTarget::PreviewStop(seat) => {
+                self.stop_video_on(PreviewSurface::Seat(self.leaf_here(seat)))?;
+            }
             seats::ChromeTarget::PreviewFlip(seat) => {
                 let surface = self.preview_here(seat);
                 self.press_preview_rail(surface, seats::PreviewRailPart::Flip)?;
@@ -69691,6 +70095,28 @@ impl Runtime<'_> {
             seats::ChromeTarget::TabPin(index) => {
                 self.window.tab_clicks.interrupt();
                 self.toggle_pin(index)?;
+            }
+            // **The speaker takes you to the sound and does not silence it**
+            // (user ruling 2026-08-27; §7.23 ⑩). A mute here would be a
+            // second, invisible piece of state — a tab that is playing and
+            // muted looks exactly like a tab that is paused, and the only way
+            // back is to find the same small glyph again. What the reader wants
+            // when they hear something they did not expect is to *see* it, and
+            // the controls that stop it are the ones under the video, where
+            // they have been all along.
+            //
+            // `interrupt()` for the pin's own reason (J99): two presses on a
+            // button in a tab's row are two button presses and never half a
+            // rename.
+            seats::ChromeTarget::TabSpeaker(index) => {
+                self.window.tab_clicks.interrupt();
+                self.activate_tab(index, false)?;
+            }
+            // **The play button, in the middle of a video's first frame**
+            // (§7.23 ⑩) — see [`Self::play_video_on`], which is where every
+            // reason it can decline is written down.
+            seats::ChromeTarget::PreviewPlay(seat) => {
+                self.play_video_on(PreviewSurface::Seat(self.leaf_here(seat)))?;
             }
             // H77: the click tears the peek off into a pinned window. **H78 is
             // the `interrupt()`** — the mock-up spells it out at 5800-5802:
@@ -74373,6 +74799,16 @@ impl Runtime<'_> {
                     self.window.web_cursor = Some(id);
                     self.apply_pointer_cursor();
                 }
+                // **A sound started or stopped, so the strip is drawn again**
+                // (user ruling 2026-08-27; §7.23 ⑩). The bit itself is already
+                // on the seat and the strip reads it there — what travels is the
+                // change, because a mark that appeared only on the next frame
+                // something else happened to repaint would be a mark that
+                // sometimes arrived a minute late.
+                webhost::WebOutcome::PlayingAudioChanged => {
+                    self.refresh_chrome();
+                    self.present_chrome_change()?;
+                }
                 // **The engine took the keyboard; whether it may keep it is this
                 // window's answer, not its own** (§7.7 W2 片④ ⑧, user report
                 // 2026-08-24). A controller focuses itself on its own account —
@@ -74521,6 +74957,17 @@ impl Runtime<'_> {
                     Some(id) => PreviewSurface::Float(id),
                     None => PreviewSurface::Seat(*leaf),
                 };
+                // **What this engine was put there to play**, asked of the seat
+                // and not of the pane (user ruling 2026-08-27; §7.23 ⑩) — the
+                // mint is the note the host wrote, and it is the only thing in
+                // this process that knows a page in a cache folder is standing
+                // in for a recording.
+                let playing = self
+                    .window
+                    .web
+                    .get(leaf)
+                    .and_then(webhost::WebSeat::playing_video)
+                    .map(Path::to_path_buf);
                 !self
                     .window
                     .tabs
@@ -74531,7 +74978,11 @@ impl Runtime<'_> {
                             floated.is_some(),
                             tab.seats.preview_seats().contains(&leaf.seat),
                             tab.preview_panes.get(surface).is_some_and(|pane| {
-                                a_page_was_replaced(pane.image.is_some(), pane.buffer.as_ref())
+                                a_page_was_replaced(
+                                    pane.image.as_ref().map(|image| image.path.as_path()),
+                                    pane.buffer.as_ref(),
+                                    playing.as_deref(),
+                                )
                             }),
                         )
                     })
@@ -74675,6 +75126,8 @@ impl Runtime<'_> {
         }
         let hwnd = window_hwnd(&self.window.window)?;
         let proxy = self.app.event_proxy.clone();
+        // Read before the mint is handed to the seat, which takes it.
+        let plays_a_video = matches!(minted, webnav::Mint::VideoShell { .. });
         match webhost::WebSeat::open(
             bt_platform::PageVisual {
                 tab: leaf.tab.0,
@@ -74727,7 +75180,19 @@ impl Runtime<'_> {
                 if !showing_a_page {
                     self.leave_preview_buffer_in(index, surface);
                 }
-                self.clear_preview_image_in(index, surface);
+                // **Except the frame of the recording this engine is here to
+                // play** (user ruling 2026-08-27; §7.23 ⑩). Every other page
+                // replaces what the pane was showing; a player does not, because
+                // what the pane was showing is the very thing it is playing. The
+                // `PreviewImageState` is the pane's whole account of that file —
+                // its path, its facts, its decoded frame — and it is what the
+                // breadcrumb, `↗` and the stop verb all read. Clearing it here
+                // would leave a pane with a browser on it and nothing at all to
+                // say about what was in the browser, and the orphan rule two
+                // screens up would close that browser on the next turn.
+                if !plays_a_video {
+                    self.clear_preview_image_in(index, surface);
+                }
             }
             Err(error) => eprintln!("BT_WEB {error}"),
         }
@@ -82791,11 +83256,11 @@ mod floated_page_tests {
         );
         let page = crate::preview::PreviewSource::Web("file:///D:/site/index.html".to_owned());
         assert!(
-            !a_page_was_replaced(false, Some(&page)),
+            !a_page_was_replaced(None, Some(&page), None),
             "the flip leaves the pane on its page, so nothing has replaced it"
         );
         assert!(
-            a_page_still_has_a_pane(false, true, a_page_was_replaced(false, Some(&page))),
+            a_page_still_has_a_pane(false, true, a_page_was_replaced(None, Some(&page), None)),
             "so the browser is still the seat's and is not retired under the flip"
         );
     }
@@ -113518,8 +113983,29 @@ mod tests {
     /// are here because "not a page" is a claim about every video spelling and
     /// not only about the three this window drew a face for.
     ///
-    /// RED GATE: add `mp4` to `preview::PAGE_EXTENSIONS` and every assertion
-    /// here fails, each naming the door it stands at.
+    /// **What 2026-08-27's second ruling changed, and what it did not.** Route
+    /// A gave this window a play verb, and a played video **is** on the engine
+    /// — so the claim this test makes had to become exact. It is exact and it
+    /// is unchanged in substance: **no door opens a video as a page.** The four
+    /// doors below are the four ways a *name* reaches a lane, and all four still
+    /// answer no. The play verb is not one of them: it is a press on a control
+    /// this window drew, it does not consult [`preview_open_lane`], and what it
+    /// navigates to is **not the video** but a shell page this window wrote with
+    /// the video inside it ([`crate::player`]). §7.16's measurement stands
+    /// exactly as measured — a top-level navigation to a `.mp4` is still a
+    /// download, still cancelled, still `ConnectionAborted` — and this slice
+    /// did not test it again because it did not change it.
+    ///
+    /// The last assertion is where that distinction is nailed down: the play
+    /// verb's mint carries a URL that is **not** the recording's own, so a build
+    /// that "simplified" the player by minting the video directly fails here
+    /// rather than on somebody's machine.
+    ///
+    /// RED GATE ①: add `mp4` to `preview::PAGE_EXTENSIONS` and every assertion
+    /// in the loop fails, each naming the door it stands at. RED GATE ②: make
+    /// [`crate::player::mint_player_shell`] hand back `Mint::file(video)` and
+    /// the last block fails — which is the build that plays nothing and shows
+    /// 「did not respond」.
     #[test]
     fn a_video_takes_no_page_lane_at_any_door() {
         for video in [
@@ -113546,6 +114032,32 @@ mod tests {
                 "the pool's own door: {video}"
             );
         }
+        // **And the one door that does put an engine on a video's pane sends a
+        // shell, never the recording** (user ruling 2026-08-27, route A).
+        let video = std::env::temp_dir().join("folio-play-gate.mp4");
+        std::fs::write(&video, b"not a real recording, and it does not have to be")
+            .expect("a temp file");
+        let mint = crate::player::mint_player_shell(&video, &video, [0x1b, 0x1b, 0x1b])
+            .expect("a drive path mints a shell");
+        let shell = mint.target().expect("a shell mint names its URL");
+        assert!(
+            shell.ends_with(".html"),
+            "the engine is navigated to a page: {shell}"
+        );
+        let recording = match webnav::Mint::file(&video) {
+            Ok(webnav::Mint::File(url)) => url,
+            other => unreachable!("Mint::file answers File, saw {other:?}"),
+        };
+        assert_ne!(
+            shell, recording,
+            "and never to the recording itself, which is what §7.16 measured as a download"
+        );
+        assert_eq!(
+            mint.video_behind_the_shell(),
+            Some(video.as_path()),
+            "while the window goes on knowing which recording it is standing in for"
+        );
+        let _ = std::fs::remove_file(&video);
     }
 
     /// RED — **a video has a face of its own, and every door draws it** (user
@@ -113586,6 +114098,15 @@ mod tests {
             r"D:\shots\CLIP.MP4",
             r"D:\shots\trailer.m4v",
             r"D:\shots\screencast.webm",
+            // **And `.mov` since the play verb arrived** (user ruling
+            // 2026-08-27, the second of that day). It joined the class the day
+            // the class stopped being one column: it has a face and no player,
+            // it says so on its own card, and the first cut of this list left it
+            // out on the argument that the two sets would one day have to be one
+            // set. They are not one set and were never going to be — see
+            // `preview::VIDEO_EXTENSIONS`, where that argument is settled the
+            // other way.
+            r"D:\shots\capture.mov",
         ] {
             assert_eq!(
                 preview_open_lane(Path::new(video)),
@@ -113604,9 +114125,9 @@ mod tests {
             );
         }
         for document in [
-            // Measured not to play in the engine, so deliberately outside the
-            // class — see `preview::VIDEO_EXTENSIONS`.
-            r"D:\shots\clip.mov",
+            // Nothing under this window reads these containers at all, so there
+            // is no face to promise — see `preview::VIDEO_EXTENSIONS`, and note
+            // that `.mov` has left this list rather than been forgotten from it.
             r"D:\shots\clip.mkv",
             r"D:\shots\clip.avi",
             // And the two neighbours a substring reading would sweep up.
@@ -113626,6 +114147,257 @@ mod tests {
             PeekBodyKind::Refused,
             "a body with no file behind it is not a frame"
         );
+    }
+
+    /// RED — **only a video that can be played is offered a play button, and the
+    /// one that cannot says so instead** (user ruling 2026-08-27, the second of
+    /// that day; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// The two halves of the second column of one table, asserted where a reader
+    /// of the *window* will find them rather than only down in `preview`. A
+    /// `.mov` has a face — it is in the class, it takes the video lane, its card
+    /// draws its frame — and pressing play on it would navigate to a shell whose
+    /// `<video>` the engine answers with nothing at all. So it is not offered
+    /// one, and the reason stands on its own card in words.
+    ///
+    /// **The sentence is on the second line and the card still has two**, which
+    /// is the constraint that decided where it went: the card's shape is pinned
+    /// elsewhere, so a third line would have been a card that changes shape for
+    /// one kind of file.
+    ///
+    /// RED GATE ①: give `mov` `VideoPlayback::Plays` and the first block fails —
+    /// a build that draws a button which navigates to a page that plays nothing.
+    /// RED GATE ②: drop the sentence from `preview::video_fact_lines` and the
+    /// second block fails — a `.mov` whose card is identical to a `.mp4`'s, so
+    /// the only way to learn it will not play is to press the button that is not
+    /// there.
+    #[test]
+    fn only_a_playable_video_is_offered_a_play_button() {
+        for playable in [
+            r"D:\shots\clip.mp4",
+            r"D:\shots\trailer.m4v",
+            r"D:\shots\screencast.webm",
+        ] {
+            assert!(
+                preview::path_names_a_playable_video(Path::new(playable)),
+                "{playable}"
+            );
+        }
+        for face_only in [r"D:\shots\capture.mov", r"D:\shots\CAPTURE.MOV"] {
+            assert!(
+                !preview::path_names_a_playable_video(Path::new(face_only)),
+                "{face_only}"
+            );
+            // …and it is still a video, which is the half that would be lost by
+            // taking the row out of the table instead of marking it.
+            assert!(
+                preview::path_names_a_video(Path::new(face_only)),
+                "{face_only}"
+            );
+        }
+        let facts = preview::VideoFacts {
+            duration_ms: Some(3_000),
+            native: Some((160, 120)),
+            bytes: Some(2_371),
+        };
+        let lines = preview::video_fact_lines(Some("mov"), facts);
+        let said = lines[1]
+            .clone()
+            .expect("the second line says what the file is");
+        assert!(
+            said.contains(i18n::Text::VideoFormatCannotPlay.text()),
+            "a face-only video says why there is no button: {said}"
+        );
+        assert!(
+            said.contains('B'),
+            "and it still says how large the file is: {said}"
+        );
+        let plays = preview::video_fact_lines(Some("mp4"), facts)[1]
+            .clone()
+            .expect("a playable video still says its size");
+        assert!(
+            !plays.contains(i18n::Text::VideoFormatCannotPlay.text()),
+            "and a video that plays says nothing of the kind: {plays}"
+        );
+        assert_eq!(
+            lines[0],
+            preview::video_fact_lines(Some("mp4"), facts)[0],
+            "the recording's own line is the same sentence for both"
+        );
+    }
+
+    /// RED — **a playing pane keeps its browser, and a pane that went somewhere
+    /// else does not** (user ruling 2026-08-27, route A; §7.23 ⑩).
+    ///
+    /// The line route A rests on. Every other page on a seat replaces what the
+    /// pane was showing, and the ordinary reading of "one seat shows one thing"
+    /// is written to notice that: a pane pointing at a *file* under a browser is
+    /// a pane something landed on, and the browser retires. A player is the one
+    /// arrangement where that reading is wrong — the file the pane points at is
+    /// the very thing the browser is playing — and this is where the exception is
+    /// bounded.
+    ///
+    /// It is bounded at exactly one file. Open something else on that pane and
+    /// the two paths part, this answers `true`, and the browser goes. That is not
+    /// a special case for stopping playback; it is the general rule finally
+    /// arriving at the right pane, and it is why closing a pane, replacing its
+    /// file and quitting all stop the sound without any of them being taught
+    /// about video.
+    ///
+    /// RED GATE ①: drop the `playing` arm and the first block fails — a video
+    /// that stops within one turn of the play button being pressed. RED GATE ②:
+    /// answer `false` whenever `playing.is_some()` and the third block fails — a
+    /// browser left running under a pane showing a different file, which is a
+    /// sound with no visible source anywhere in the window.
+    #[test]
+    fn a_playing_pane_keeps_its_browser_and_a_replaced_one_does_not() {
+        let clip = Path::new(r"D:\shots\clip.mp4");
+        let other = Path::new(r"D:\shots\other.mp4");
+        assert!(
+            !a_page_was_replaced(Some(clip), None, Some(clip)),
+            "the pane is showing the recording its browser is playing"
+        );
+        assert!(
+            a_page_still_has_a_pane(
+                false,
+                true,
+                a_page_was_replaced(Some(clip), None, Some(clip))
+            ),
+            "so the browser is not retired under the player"
+        );
+        assert!(
+            a_page_was_replaced(Some(other), None, Some(clip)),
+            "another file landed on the pane, so the player is over"
+        );
+        assert!(
+            a_page_was_replaced(None, None, Some(clip)),
+            "and a pane showing no picture at all is not showing the recording"
+        );
+        // And the reading for every other page is exactly what it was.
+        assert!(
+            !a_page_was_replaced(
+                None,
+                Some(&preview::PreviewSource::Web(
+                    "http://localhost:5173/app".into()
+                )),
+                None
+            ),
+            "a page on a page's pane is untouched by any of this"
+        );
+        assert!(
+            a_page_was_replaced(Some(clip), None, None),
+            "and a picture under a page with no player is still a replacement"
+        );
+    }
+
+    /// RED — **a playing video is a file to every surface that names it, and the
+    /// shell is nobody's document** (user ruling 2026-08-27, route A; §7.23 ⑩).
+    ///
+    /// Route A's whole cost is identity, and this is where it is paid. What the
+    /// engine is on is a page in a cache folder called `play-3f2c….html`; what
+    /// the reader opened is `D:\shots\clip.mp4`. Every surface that spells this
+    /// pane's identity must spell the recording — so they all ask one predicate,
+    /// and this asserts that they do rather than asserting a handful of strings.
+    ///
+    /// Read out of the source because there is no value that expresses "the rail
+    /// asks the seat what it is playing": a rail's kind is computed from a window
+    /// with a browser on it, and standing one up in a unit test is standing up
+    /// WebView2.
+    ///
+    /// RED GATE ①: drop the `!self.surface_is_playing_a_video(surface)` from
+    /// `preview_rail_kind` and the first assertion fails — the pane grows an
+    /// address bar printing a cache path where its breadcrumb was. RED GATE ②:
+    /// derive the recording from the shell's file name instead of carrying it on
+    /// the mint and the fourth assertion fails.
+    #[test]
+    fn a_playing_video_is_spelled_as_the_file_it_is() {
+        const SOURCE: &str = include_str!("main.rs");
+        fn body(signature: &str) -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        }
+        let playing = concat!("surface_is_playing", "_a_video(surface)");
+        assert!(
+            body("fn preview_rail_kind(").contains(playing),
+            "a playing pane must wear its file's breadcrumb and not an address bar"
+        );
+        assert!(
+            body("fn refit_preview_picture(").contains(playing),
+            "and the decoded frame must come off the glass while the engine is behind it"
+        );
+        assert!(
+            body("fn preview_head_tools(").contains(playing),
+            "and the head's per-type slot must hold the stop rather than a flip"
+        );
+        // The one place the recording is known, and it is carried rather than
+        // parsed back out of a shell's name.
+        assert!(
+            body("fn video_playing_on(").contains("playing_video()"),
+            "the window asks the seat, and the seat asks its mint"
+        );
+        // And `↗` is untouched, because the buffer was never left: the pane is
+        // still on the file, so the hand-off door has nothing new to learn.
+        assert!(
+            !body("fn preview_page_hand_off(").contains("VideoShell"),
+            "the hand-off must not have grown a case for the player"
+        );
+    }
+
+    /// RED — **the speaker is a second channel and not a sixth claim** (user
+    /// ruling 2026-08-27; §7.23 ⑩, under §7.1.5b's taxonomy).
+    ///
+    /// §7.1.5b's ladder is seven readings of one question — *does this session
+    /// want you* — resolved by taking the loudest, and the whole discipline of the
+    /// dot is that one dot carries one assertion. A sound is not an answer to that
+    /// question: it is not about a session, it wants nothing, and it is neither
+    /// more nor less urgent than an unread exit code. A tab can be audible *and*
+    /// awaiting a reply, and both are true at once — so folding audio into
+    /// [`StatusClaim`] would mean choosing between two things that do not compete.
+    ///
+    /// So the mark is a control in the trailing run, beside the pin and the `×`,
+    /// with its own shape and its own press; and the dot's discipline is kept
+    /// precisely by leaving it alone. This asserts both: the ladder is the five it
+    /// was, and the press goes to the tab.
+    ///
+    /// **The press does not mute**, and that is a ruling rather than an omission.
+    /// A muted tab looks exactly like a paused one, and the only way back is to
+    /// find the same small glyph again — while the controls that actually stop the
+    /// sound are under the video, where they have been all along. What a reader
+    /// wants when they hear something unexpected is to *see* it.
+    ///
+    /// RED GATE ①: add an audible variant to [`StatusClaim`] and the first block
+    /// fails. RED GATE ②: make the speaker's arm mute instead of switching and the
+    /// last block fails.
+    #[test]
+    fn the_speaker_is_a_second_channel_and_takes_you_to_the_sound() {
+        assert_eq!(
+            loudest_claim([StatusClaim::Awaiting, StatusClaim::Unread]),
+            StatusClaim::Awaiting,
+            "the ladder still resolves by loudness"
+        );
+        assert_eq!(
+            loudest_claim([StatusClaim::Silent]),
+            StatusClaim::Silent,
+            "and a silent session still makes no claim, however loud its page is"
+        );
+        const SOURCE: &str = include_str!("main.rs");
+        let start = SOURCE
+            .find(concat!("ChromeTarget::TabSpeaker", "(index) => {"))
+            .expect("the speaker has a press");
+        let arm = &SOURCE[start..start + 200];
+        assert!(
+            arm.contains("self.activate_tab("),
+            "the speaker takes you to the tab that is making the sound:\n{arm}"
+        );
+        for silencer in ["SetIsMuted", "put_IsMuted", "set_muted"] {
+            assert!(
+                !arm.contains(silencer),
+                "the speaker does not silence anything: it names {silencer}"
+            );
+        }
     }
 
     /// PIN (user ruling 2026-08-23, 「一个名字只该有一个含义」;
@@ -113925,22 +114697,30 @@ mod tests {
     #[test]
     fn a_page_leaves_the_seat_that_stopped_showing_it() {
         assert!(
-            !a_page_was_replaced(false, None),
+            !a_page_was_replaced(None, None, None),
             "a page that has been asked for and has not committed yet is not a \
              page somebody replaced"
         );
         assert!(!a_page_was_replaced(
-            false,
+            None,
             Some(&preview::PreviewSource::Web(
                 "http://localhost:5173/app".into()
-            ))
+            )),
+            None
         ));
         assert!(
-            a_page_was_replaced(false, Some(&preview::PreviewSource::file(r"D:\notes\a.md"))),
+            a_page_was_replaced(
+                None,
+                Some(&preview::PreviewSource::file(
+                    r"D:
+otes.md"
+                )),
+                None
+            ),
             "a document landed on the seat"
         );
         assert!(
-            a_page_was_replaced(true, None),
+            a_page_was_replaced(Some(Path::new(r"D:\shots.png")), None, None),
             "and so did a picture, which has no buffer to be found by"
         );
     }
