@@ -2556,6 +2556,19 @@ mod tests {
             vec!["图片/日落.png".to_owned()],
             "one candidate, opened after the full-width colon and not at 路"
         );
+        // §7.30, and it costs this scan nothing because the allowlist is a **parameter** of it: a
+        // half-width separator with a word of another script glued onto it is a seam, and the
+        // shorter reading is the one whose name ends in an extension a picture may be found under.
+        // The whole token ends in `png,这里是说明` and is refused, so one token still grows one
+        // band.
+        assert_eq!(
+            detect_relative_image_path_candidates("图片/日落.png,这里是说明")
+                .into_iter()
+                .map(|candidate| candidate.path)
+                .collect::<Vec<_>>(),
+            vec!["图片/日落.png".to_owned()],
+            "the seam cuts the sentence off the name, and nothing else is admitted"
+        );
         // A quoted reference keeps its spaces; a quoted region that is prose is re-read from
         // inside, so a reference sitting in it is still found.
         assert_eq!(
