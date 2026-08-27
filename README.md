@@ -315,11 +315,12 @@ vulnerability.
   your machine, and a stock Windows may have no VP9 or AV1 decoder. The length and
   size are still shown.
 - **The first window is not centred**, and opens at 960 × 600.
-- **Mixed-DPI and multi-monitor setups are thinly tested.** The window asks
-  Windows for its own scale per monitor and re-rasterises on a move, but the
-  machine this was written on has one display. A report of a window drawing half
-  black was traced to something else and is not a DPI defect; the paths
-  themselves have simply not been exercised on real hardware.
+- **A window was once reported drawing its top half black** after being moved to
+  a second monitor, and it has not been reproduced. Mixed-DPI use across two
+  monitors is otherwise measured on real hardware — two displays at 200% and
+  150%, with the window dragged, moved, maximised and sized past the screen in
+  both directions. If you hit it, attach `%APPDATA%\Folio\diagnostics.log`: it
+  carries a `BT_DPI` line at every stage, which is what a report of this needs.
 - **Some formulas fail to render live.** `\hbar` and its relatives fall back to
   showing the source as it was printed.
 - **Cards fit fewer columns in a wider font.** The number of terminal columns a
