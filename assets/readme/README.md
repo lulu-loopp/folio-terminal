@@ -20,8 +20,15 @@ window are the same paper.
 rendered from. Each tile is a nested `<svg>` whose `viewBox` crops a committed
 screenshot in `docs/screenshots/`; no pixels are redrawn, only framed and
 labelled. To remake a board, edit the layout, open it in a browser through an
-`<object>` sized `1600 × 1632` — four thirds of the `1200 × 1224` canvas, so the
-1600-pixel screenshots land near their own scale — and save that box as the PNG.
+`<object>` sized `3200 × 3240` and save that box as the PNG.
+
+**Both boards are `3200 × 3240`**, twice over the `1600 × 1620` they used to be,
+because the screenshots behind them are now `3200 × 2000` — 1600 × 1000 logical
+at 200%, as `docs/screenshots/README.md` sets out. Nothing in the SVGs changed
+when the shots doubled: the layout is in the canvas's own units and the tiles
+simply have twice the pixels to draw with, so raising the size the board is
+rasterized at is the whole of the work. Run `oxipng -o 4 --strip safe` over the
+result, as the screenshots get.
 
 The SVGs reference the screenshots relatively, so they only render from inside
 this checkout. That is why the published asset is the PNG.

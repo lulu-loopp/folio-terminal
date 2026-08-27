@@ -10,11 +10,13 @@ exactly the picture JPEG is worst at.
 
 ## What every shot has in common
 
-- **1600 × 1000 logical pixels at 100% scale.** Size the window to that, take the
-  shot on a 100% display, and do not scale the file afterwards — a resampled
-  screenshot of a terminal is a screenshot of the resampler. On a machine that is
-  only 150% or 200%, take it at that scale and say so in the file name
-  (`…@200.png`); do not shrink it.
+- **1600 × 1000 logical pixels at 200%, so 3200 × 2000 in the file.** The window
+  is sized to 1600 × 1000 logical and photographed on a 3840 × 2160 display the
+  machine already keeps at 200%, and the file is what came off the glass — two
+  device pixels to the logical one, nothing resampled. A README is read on a
+  screen that is mostly not 100%, and a picture with a pixel per pixel to give is
+  the one that stays sharp there. Do not scale the file afterwards; a resampled
+  screenshot of a terminal is a screenshot of the resampler.
 - **Light and dark, one each.** Switch the scheme in Settings between the two
   shots and change nothing else, so the pair differs only in the palette.
 - **The default font, the default scheme.** A reader is looking at what they will
@@ -25,11 +27,17 @@ exactly the picture JPEG is worst at.
   is on you.
 - **The window is the whole picture.** No desktop, no wallpaper, no taskbar.
   Include the window's own shadow only if it is a clean edge.
+- **Every file goes through `oxipng -o 4 --strip safe` before it is committed.**
+  Lossless, and it takes about a fifth off. Doubling the pixels quadrupled what
+  every reader has to fetch, so the cheapest bytes are the ones nobody had to
+  send.
 
 ## The list
 
 | File | Scene |
 | --- | --- |
+| `terminal-math-light.png` | One terminal pane and nothing else open, showing a command whose output was typeset where it was printed: a sentence with an inline formula inside it and a display formula on its own line. Nothing else competes for the eye — the picture says only that mathematics in command output is mathematics. |
+| `terminal-math-dark.png` | The same, dark. |
 | `main-window-light.png` | The three-column window: a files column on the left, two terminal panes side by side in the middle, a markdown document open in a preview pane on the right. Something real in the terminal — a build running, a directory listing — not an empty prompt. |
 | `main-window-dark.png` | The same window, dark scheme, same content. |
 | `cards-light.png` | Cards (`Ctrl+Shift+Z`) with six to eight panes, each showing different content, so the point of the layout is visible at a glance. |
@@ -51,22 +59,27 @@ can be told from one that was retaken on purpose.
 
 | File | Size | Taken | SHA-256 |
 | --- | --- | --- | --- |
-| `main-window-light.png` | 1600 x 1000 | 2026-08-27 | `710bb79eb5f1a1dc1c52c5f8da3fdb44582f67338904da974cdf73a922d27d31` |
-| `main-window-dark.png` | 1600 x 1000 | 2026-08-27 | `25ebb1b1ee04c8a87531855e91d7f9252da04af757542cf53d69f2c0897a2861` |
-| `cards-light.png` | 1600 x 1000 | 2026-08-27 | `102b8d961fa52691e4c58e1c7aad32db865a3d51429f2affaffd50d60c57d2e3` |
-| `cards-dark.png` | 1600 x 1000 | 2026-08-27 | `dd7a2e5ca1812bc1d698c9243dac932c4e589598b413ce54b9bb627770ae2175` |
-| `preview-markdown-light.png` | 1600 x 1000 | 2026-08-27 | `346148f9950be45287da6f9619e4403989f0bba6422a597a17fcd8d3447eeba9` |
-| `preview-markdown-dark.png` | 1600 x 1000 | 2026-08-27 | `579ed8bc99e8033cd2ac9b16c8eb29a3a50538f44f309962d494b5d6db486209` |
-| `preview-pdf-light.png` | 1600 x 1000 | 2026-08-27 | `38f7d681c41f0bf7a261244c5608124d2a938b289866feffe24f8b6e6b7891dd` |
-| `preview-pdf-dark.png` | 1600 x 1000 | 2026-08-27 | `41dd52d59ee9ed08427387ccc9fceccbf925e0fd357b6277a4f0a583ea913076` |
-| `preview-web-light.png` | 1600 x 1000 | 2026-08-27 | `6fdedcce35b82dc0d90b366f92d95e7c4575484c5d7a277df8a25f216246a0a4` |
-| `preview-web-dark.png` | 1600 x 1000 | 2026-08-27 | `da3bc0079b9ff6e161e371913e0a55aba042a1a26672e082f9164e5282f0e1df` |
-| `settings-agents-light.png` | 1600 x 1000 | 2026-08-27 | `1d992bb544d1fe46cb20191aacc532ee3cb201dc2c74465d56755395b7972c1e` |
-| `settings-agents-dark.png` | 1600 x 1000 | 2026-08-27 | `e4d77a5e92392813a8f5187b85a147c4c3b5d7faa75a3e9481beee73e920d375` |
+| `terminal-math-light.png` | 3200 x 2000 | 2026-08-27 | `7be66a3300b359fb2403213a94d827f5cc5cea605160e6f4a467b63116c8d19c` |
+| `terminal-math-dark.png` | 3200 x 2000 | 2026-08-27 | `04c164a11bb6ae1e3d2f39ec84a4dd3ddfc2959e101da1985718615602150a20` |
+| `main-window-light.png` | 3200 x 2000 | 2026-08-27 | `fa04896cdfe71d4146a93cab47357d7065eabe3343733c4beb58849642490281` |
+| `main-window-dark.png` | 3200 x 2000 | 2026-08-27 | `4bd254d57be67731b0490c2e5832d87fb4448362db66a273acfcf22917fad7db` |
+| `cards-light.png` | 3200 x 2000 | 2026-08-27 | `90037e34d3531f81d7180f769f1ffa26f37c8dfbd85b87b2e61034f3d25e0601` |
+| `cards-dark.png` | 3200 x 2000 | 2026-08-27 | `d2cc09af06856121085d45d2012ff9bc0534fcca7a2400a5d4df170bf4d79fa1` |
+| `preview-markdown-light.png` | 3200 x 2000 | 2026-08-27 | `a073da69f6df9e86913d14a1f71d121c36be109bd026f5c3f09f2e0d95411110` |
+| `preview-markdown-dark.png` | 3200 x 2000 | 2026-08-27 | `abd8dde82c59bbaa7554936342c39923bace31cfc8d5f943a3918bcf530dfeac` |
+| `preview-pdf-light.png` | 3200 x 2000 | 2026-08-27 | `8a2222bea07019b1ef4bcffff2cc852cd822bae9b0ff72c4d7953da07167dd4e` |
+| `preview-pdf-dark.png` | 3200 x 2000 | 2026-08-27 | `e1bf4ed856e86911e581c5ad5af822a67cf95a5c3a9cb4d4fb69cc8181278f51` |
+| `preview-web-light.png` | 3200 x 2000 | 2026-08-27 | `ba0e133569ddc2c4989d8efc75559eaf2d1bfb5c69bfdb37ef8774dd15e6366c` |
+| `preview-web-dark.png` | 3200 x 2000 | 2026-08-27 | `f9849ed8813c683d5ff94c434527b46de6878d6a2d8503b87f305263c4615810` |
+| `settings-agents-light.png` | 3200 x 2000 | 2026-08-27 | `12a9d1968d7a979f6d8796cf7a8054c68f4a640c916ac6402c0c774b482768bd` |
+| `settings-agents-dark.png` | 3200 x 2000 | 2026-08-27 | `ceba5a7e1f8d3b4040b5fcb4a97cc958102bd03dcfe023b705b316952c2ed01d` |
+
+The fourteen come to 2.45 MiB after `oxipng`; `docs/plans/release/large-files.md`
+carries that number beside everything else a clone has to fetch.
 
 ## What was in front of the camera
 
-The twelve committed here were taken from `target\release\folio.exe` against a
+The fourteen committed here were taken from `target\release\folio.exe` against a
 throwaway project — `C:\Projects\aurora`, a small library with a five-commit
 history, a README with a table and a display formula in it, a PDF and a page —
 and through an `%APPDATA%` and `%LOCALAPPDATA%` of their own, so the machine's
@@ -75,16 +88,31 @@ a shell profile whose command line runs one command and then leaves an ordinary
 prompt; `-NoProfile` is deliberate, because a machine's own PowerShell profile
 prints a machine's own directories.
 
-**The 100% display was made, not found.** The machine these were taken on has no
-monitor at 100% — 2880 × 1800 at 200%, 1920 × 1080 at 150%, 3840 × 2160 at 200%
-— and a per-monitor-DPI-aware program draws at whatever scale the monitor it is
-on is set to. There is no way to ask such a program for 100% on a 150% monitor:
-the number belongs to the monitor. Making the process DPI-*unaware* does not
-help either, because Windows then draws it at 1600 × 1000 and stretches the
-result, and a stretched screenshot is the one thing the size rule above exists
-to prevent. So the second display was set to 100% for the length of the run and
-put back afterwards, and the window was parked at exactly 1600 × 1000 physical
-pixels on it with `SetWindowPos` and `GetDpiForWindow` checked to read 96.
+**`terminal-math-*` is the one whose command is not run by its profile**, and it
+is worth saying why, because the next person to retake it will otherwise take a
+picture with half its subject missing. An inline `$…$` is read as mathematics
+only between OSC 133;C and 133;D — `bt_detect::InlineMathSite`, whose
+`Ineligible` arm says as much in its own words: a primary screen with no shell
+integration renders no inline mathematics, ever. A command line handed to
+`-Command` runs before the interactive loop and sits inside no such region, so
+that shot's command has to be submitted at a real prompt, with
+`scripts\shell-integration\folio.ps1` dot-sourced by the profile the way an
+installed reader has it. Typing it is what a machine with a Chinese IME loaded
+will not allow — the IME owns every unmodified printable key and the line arrives
+as candidate text — so it goes in through the clipboard and `Ctrl+V`, which is a
+modified key the IME does not take. Its folder is `C:\Projects\notebook`, one
+file and no repository, so that the other thirteen see a project that has not
+grown a directory for this one's sake.
+
+**Two device pixels to the logical one, and no display is touched.** The window
+is parked at exactly 3200 × 2000 physical pixels with `SetWindowPos`, on the
+3840 × 2160 panel this machine already runs at 200%, and `GetDpiForWindow` is
+checked to read 192 before any shutter opens. An earlier pass at 100% had to
+*make* a display it could not find — no monitor here is at 100% — by setting a
+second one to 100% for the length of the run and putting it back afterwards.
+Photographing the scale a display already has is both truer and one moving part
+fewer, and the file that comes out has a pixel per pixel to give on the screens
+a README is actually read on.
 
 ## Alt text
 
