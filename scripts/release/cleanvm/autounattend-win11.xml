@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Unattended install for the Windows 11 clean-machine VM (release plan gate 5).
+
+  What this file is for: producing a machine that has never had a compiler, a
+  Visual C++ redistributable or anything else a developer leaves behind, so that
+  the only thing between the release archive and a running window is Windows
+  itself. Every setting below is either "skip a page" or "do not fetch anything
+  from the internet"; nothing here installs software.
+
+  Not a general-purpose answer file. It wipes disk 0 without asking.
+
+  Placeholders substituted by new-answer-iso.ps1 before the ISO is built:
+    @@PASSWORD@@      the local account's password
+    @@COMPUTERNAME@@  the machine name
+    @@TIMEZONE@@      a Windows time-zone id (tzutil /l lists them)
+  The password is a placeholder rather than a literal so that no tracked file in
+  this repository carries a credential, however throwaway it is.
+
+  The image name below is what the Windows 11 Enterprise evaluation ISO calls
+  its only edition. Running
+    dism /Get-ImageInfo /ImageFile:<mounted>:\sources\install.wim
+  prints the names an ISO actually holds; if it disagrees with the value here,
+  that is the field to change and the only one.
+
+  UNVERIFIED: written from Microsoft's unattend reference, not yet run against
+  an ISO. Gate 5 is its first run.
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+
+  <settings pass="windowsPE">
+    <component name="Microsoft-Windows-International-Core-WinPE"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <SetupUILanguage>
+        <UILanguage>en-US</UILanguage>
+      </SetupUILanguage>
+      <InputLocale>0409:00000409</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+
+    <component name="Microsoft-Windows-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+
+      <!--
+        UEFI/GPT, because the VM boots UEFI with Secure Boot on and a vTPM
+        attached. An MBR layout here would produce a machine that does not
+        represent what a Windows 11 user runs.
+      -->
+      <DiskConfiguration>
+        <WillShowUI>OnError</WillShowUI>
+        <Disk wcm:action="add">
+          <DiskID>0</DiskID>
+          <WillWipeDisk>true</WillWipeDisk>
+          <CreatePartitions>
+            <CreatePartition wcm:action="add">
+              <Order>1</Order>
+              <Type>EFI</Type>
+              <Size>260</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>2</Order>
+              <Type>MSR</Type>
+              <Size>16</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>3</Order>
+              <Type>Primary</Type>
+              <Extend>true</Extend>
+            </CreatePartition>
+          </CreatePartitions>
+          <ModifyPartitions>
+            <ModifyPartition wcm:action="add">
+              <Order>1</Order>
+              <PartitionID>1</PartitionID>
+              <Label>System</Label>
+              <Format>FAT32</Format>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>2</Order>
+              <PartitionID>2</PartitionID>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>3</Order>
+              <PartitionID>3</PartitionID>
+              <Label>Windows</Label>
+              <Format>NTFS</Format>
+              <Letter>C</Letter>
+            </ModifyPartition>
+          </ModifyPartitions>
+        </Disk>
+      </DiskConfiguration>
+
+      <ImageInstall>
+        <OSImage>
+          <InstallFrom>
+            <MetaData wcm:action="add">
+              <Key>/IMAGE/NAME</Key>
+              <Value>Windows 11 Enterprise Evaluation</Value>
+            </MetaData>
+          </InstallFrom>
+          <InstallTo>
+            <DiskID>0</DiskID>
+            <PartitionID>3</PartitionID>
+          </InstallTo>
+          <WillShowUI>OnError</WillShowUI>
+        </OSImage>
+      </ImageInstall>
+
+      <UserData>
+        <AcceptEula>true</AcceptEula>
+        <!--
+          The evaluation edition needs no key: it installs and runs for 90 days
+          unactivated. WillShowUI Never is what removes the key page, rather
+          than any key value.
+        -->
+        <ProductKey>
+          <WillShowUI>Never</WillShowUI>
+        </ProductKey>
+      </UserData>
+    </component>
+  </settings>
+
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <ComputerName>@@COMPUTERNAME@@</ComputerName>
+      <TimeZone>@@TIMEZONE@@</TimeZone>
+    </component>
+
+    <component name="Microsoft-Windows-Deployment"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <RunSynchronous>
+        <!--
+          No updates. A clean machine that patches itself overnight is a machine
+          whose state nobody can describe two days later, and on the Windows 10
+          side an update is exactly what would install the WebView2 runtime that
+          the absent-engine card exists to prove missing.
+        -->
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Do not install updates automatically</Description>
+          <Path>reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" /v NoAutoUpdate /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Description>Do not reach Windows Update on the internet</Description>
+          <Path>reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /v DoNotConnectToWindowsUpdateInternetLocations /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <!--
+          Edge Update is the other channel that installs a WebView2 runtime.
+          Blocking it keeps the two machines' engine state a decision rather
+          than a race with a background service. The value name is the runtime's
+          own app id; docs/plans/release/clean-vm.md carries the source.
+        -->
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Description>Block Edge Update from installing the WebView2 runtime</Description>
+          <Path>reg add "HKLM\SOFTWARE\Policies\Microsoft\EdgeUpdate" /v "Install{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /t REG_DWORD /d 0 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>4</Order>
+          <Description>Where the release archive and the results go</Description>
+          <Path>cmd /c md C:\folio-vm</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+
+      <!--
+        Every page of the out-of-box experience that would otherwise stand
+        between a fresh disk and a desktop. HideOnlineAccountScreens is the one
+        that keeps the account local: with a local account declared below there
+        is no sign-in page left to answer.
+      -->
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <NetworkLocation>Work</NetworkLocation>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Name>folio</Name>
+            <Group>Administrators</Group>
+            <DisplayName>folio</DisplayName>
+            <Password>
+              <Value>@@PASSWORD@@</Value>
+              <PlainText>true</PlainText>
+            </Password>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
+
+      <!--
+        Automatic logon, because vmrun runProgramInGuest -interactive needs a
+        session with a desktop in it: the checks open a window and photograph it.
+      -->
+      <AutoLogon>
+        <Enabled>true</Enabled>
+        <Username>folio</Username>
+        <LogonCount>999</LogonCount>
+        <Password>
+          <Value>@@PASSWORD@@</Value>
+          <PlainText>true</PlainText>
+        </Password>
+      </AutoLogon>
+
+      <FirstLogonCommands>
+        <!--
+          File extensions visible. The gate photographs folio.exe in Explorer to
+          show the icon and the version resource, and a shot in which the file is
+          called "folio" proves less than one in which it is called "folio.exe".
+        -->
+        <SynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Show file extensions in Explorer</Description>
+          <CommandLine>reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v HideFileExt /t REG_DWORD /d 0 /f</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Description>Let the host drive PowerShell in this guest</Description>
+          <CommandLine>powershell -NoProfile -Command "Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned -Force"</CommandLine>
+        </SynchronousCommand>
+      </FirstLogonCommands>
+    </component>
+  </settings>
+</unattend>
