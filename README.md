@@ -3,9 +3,10 @@
           srcset="assets/readme/hero-dark.svg">
   <img src="assets/readme/hero-light.svg" width="100%"
        alt="Folio — the Windows terminal that renders math, and says which agent
-       is waiting for you. Beside the name, a terminal pane runs two commands; a
-       rule in the left margin marks how far each one reached, and the rule beside
-       the command that failed is drawn in the failure colour.">
+       is waiting for you. Beside the name, a terminal pane has run a command that
+       printed a file, and the display formula in that file — the integral of e to
+       the minus x squared over the whole real line, equal to the square root of pi
+       — stands typeset in the output, above the next prompt.">
 </picture>
 
 A Windows terminal that typesets the mathematics a command prints, previews the

@@ -6,8 +6,39 @@ languages point at the same files; each is a light/dark pair chosen by
 
 | File | What it is |
 | --- | --- |
-| `hero-light.svg`, `hero-dark.svg` | The title: the name, the two lines of promise, and a terminal pane where two commands are marked in the left margin — the second one as having failed. Hand-editable; no fonts are loaded, only asked for. |
+| `hero-light.svg`, `hero-dark.svg` | The title: the name, the two lines of promise, and a terminal pane where a command has printed a file and the display formula inside it stands typeset in the output. Hand-editable; no fonts are loaded, only asked for. |
 | `surfaces-light.png`, `surfaces-dark.png` | Cards, the markdown preview and the web preview, framed together. These three are the surfaces neither README pictures anywhere else. |
+
+## How the formula in the hero is drawn
+
+The panel is labelled `TYPESET IN PLACE` and shows the one thing the README opens
+on: a command printed a file, and the `$$…$$` in it came out set rather than
+spelled. The equation is the Gaussian integral.
+
+It is drawn the way the rest of this file is drawn — no bitmap, no linked font,
+nothing fetched:
+
+* **The letters, digits and symbols are `<text>`**, on a maths-serif fallback
+  stack (`Latin Modern Math`, `Cambria Math`, `STIX Two Math`, Cambria, Times New
+  Roman, Georgia, serif). Every character in it is either ASCII or one of three
+  that are in effectively every font shipped with an operating system: `∞`,
+  `−` and `π`. Nothing rare is asked for, so nothing has to be embedded.
+* **The two shapes a font cannot be trusted to place are `<path>` strokes** — the
+  integral sign and the radical with its overbar. A `∫` glyph is sized by
+  whatever font answers and a `√` glyph's bar does not stretch over its
+  radicand, so both are stroked here instead and are identical on every machine.
+* **The limits, the exponent and the radicand are positioned by hand**, in a
+  `<g>` with its own origin at the equation's baseline. To move the whole
+  equation, move that one `translate`.
+
+Both files carry the same geometry; only the six colour tokens differ, so
+`hero-dark.svg` can be regenerated from `hero-light.svg` by substituting them.
+There is no separate source for the hero — these two files are the source, which
+is what "hand-editable" in the table above is protecting. `src/` holds the boards
+only.
+
+Check a change by rendering it, not by reading it: serve this directory and open
+the file in a real browser, or `chrome --headless --screenshot --window-size=1200,316`.
 
 ## The hero's words, and why there is only one of them
 

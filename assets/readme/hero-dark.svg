@@ -2,9 +2,10 @@
      viewBox="0 0 1200 316" role="img" aria-labelledby="folio-title folio-desc">
   <title id="folio-title">Folio</title>
   <desc id="folio-desc">Folio, the Windows terminal that renders math and says which
-  agent is waiting for you. Beside the name, a terminal pane runs two commands; a
-  rule in the left margin marks how far each one reached, and the rule beside the
-  command that failed is drawn in the failure colour.</desc>
+  agent is waiting for you. Beside the name, a terminal pane has run a command that
+  printed a file, and the display formula in that file — the Gaussian integral of
+  e to the minus x squared, equal to the square root of pi — has been typeset in
+  place, in the output, above the next prompt.</desc>
 
   <rect width="1200" height="316" rx="14" fill="#141414"/>
 
@@ -19,22 +20,34 @@
           fill="#959595">Windows 10 1809 or newer &#183; MIT or Apache-2.0</text>
   </g>
 
-  <g id="command-marks" font-family="ui-monospace, SFMono-Regular, &quot;Cascadia Mono&quot;, Consolas, &quot;JetBrains Mono&quot;, Menlo, monospace" font-size="19">
+  <g id="typeset-in-place" font-family="ui-monospace, SFMono-Regular, &quot;Cascadia Mono&quot;, Consolas, &quot;JetBrains Mono&quot;, Menlo, monospace" font-size="19">
     <text x="656" y="70" font-family="-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, &quot;PingFang SC&quot;, Roboto, Arial, sans-serif" font-size="20" font-weight="600"
-          letter-spacing="3.4" fill="#959595">COMMAND MARKS</text>
+          letter-spacing="3.4" fill="#959595">TYPESET IN PLACE</text>
 
     <rect x="656" y="88" width="480" height="188" rx="10"
           fill="#1B1B1B" stroke="#2E2E2E" stroke-width="1"/>
 
-    <rect x="674" y="116" width="3" height="49" rx="1.5"
-          fill="#767676"/>
-    <rect x="674" y="172" width="3" height="49" rx="1.5"
-          fill="#FB7185"/>
+    <text x="690" y="131" xml:space="preserve"><tspan fill="#A8A8A8">PS </tspan><tspan fill="#E0E0E0" text-decoration="underline">C:\Projects\aurora&gt;</tspan><tspan fill="#E0E0E0"> cat notes.md</tspan></text>
+    <text x="690" y="159" fill="#A8A8A8" xml:space="preserve">A Gaussian integral:</text>
 
-    <text x="690" y="131" xml:space="preserve"><tspan fill="#A8A8A8">PS </tspan><tspan fill="#E0E0E0" text-decoration="underline">C:\Projects\aurora&gt;</tspan><tspan fill="#E0E0E0"> cargo build</tspan></text>
-    <text x="690" y="159" fill="#A8A8A8" xml:space="preserve">    Finished `release` profile</text>
-    <text x="690" y="187" xml:space="preserve"><tspan fill="#A8A8A8">PS </tspan><tspan fill="#E0E0E0" text-decoration="underline">C:\Projects\aurora&gt;</tspan><tspan fill="#E0E0E0"> cargo test</tspan></text>
-    <text x="690" y="215" fill="#FB7185">error: test failed</text>
+    <g transform="translate(813 207)" fill="#E0E0E0"
+       font-family="&quot;Latin Modern Math&quot;, &quot;Cambria Math&quot;, &quot;STIX Two Math&quot;, Cambria, &quot;Times New Roman&quot;, Georgia, serif">
+      <path d="M 8,-26 C 8,-30 5,-31 3,-31 C 0,-31 -1,-28 -1,-24 L -1,4 C -1,8 -2,11 -5,11 C -7,11 -10,10 -10,6"
+            transform="translate(10 0)"
+            fill="none" stroke="#E0E0E0" stroke-width="2.3"
+            stroke-linecap="round"/>
+      <text x="15" y="-25" font-size="12">&#8734;</text>
+      <text x="11" y="21" font-size="12">&#8722;&#8734;</text>
+      <text x="38" y="0" font-size="26" font-style="italic">e</text>
+      <text x="50" y="-13" font-size="15" font-style="italic">&#8722;x&#178;</text>
+      <text x="82" y="0" font-size="26" font-style="italic">dx</text>
+      <text x="118" y="0" font-size="26">=</text>
+      <path d="M 143,-7 L 147,-1 L 152,-25 L 168,-25"
+            fill="none" stroke="#E0E0E0" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="154" y="0" font-size="25" font-style="italic">&#960;</text>
+    </g>
+
     <text x="690" y="243" xml:space="preserve"><tspan fill="#A8A8A8">PS </tspan><tspan fill="#E0E0E0" text-decoration="underline">C:\Projects\aurora&gt;</tspan></text>
     <rect x="952.2" y="228" width="2.5" height="20" fill="#D4D4D4"/>
   </g>

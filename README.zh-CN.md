@@ -3,8 +3,9 @@
           srcset="assets/readme/hero-dark.svg">
   <img src="assets/readme/hero-light.svg" width="100%"
        alt="Folio——会把数学排出来的 Windows 终端，还会告诉你哪个 agent 在等你。
-       名字旁边是一个终端窗格，里面跑了两条命令；每条命令在左侧空白处各有一道竖线，
-       标出它走到哪里，失败的那条用失败色画。">
+       名字旁边是一个终端窗格：一条命令把一个文件打印了出来，文件里那个
+       独立成行的公式——e 的负 x 平方在全实轴上的积分等于根号 π——就排在
+       输出里，排在下一个提示符上面。">
 </picture>
 
 一个 Windows 终端：命令打印出来的公式就地排版，它点到的文件就在旁边预览，哪个 agent
