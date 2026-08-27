@@ -3306,6 +3306,25 @@ pub struct ChromeIcon {
     /// two are the same picture: a crop of the geometry with the matching crop of
     /// the sample rectangle is what a scissor does, computed once on the CPU.
     pub clip: Option<[f32; 4]>,
+    /// **Drawn after this pass's letters instead of before them.**
+    ///
+    /// The chrome pass is four stacked draws — grounds, flat ink, marks, text —
+    /// and the order is a ruling of its own: the active tab's silhouette is a
+    /// mark and has to land over the title bar's fill and under the tab's
+    /// title. Every mark in the window wanted that until the pane head's run
+    /// stopped reserving room for itself: a `⌄ 🗀 ✕` that *covers* the tail of a
+    /// title has to be drawn on top of the letters it covers, and so does the
+    /// scrim underneath it, or the name prints straight through the buttons.
+    ///
+    /// A flag on the mark rather than a second channel on the renderer, because
+    /// what it states is a fact about one drawing — this one is over the type —
+    /// and a surface that wants both (the pane head does: its seat mark is
+    /// under the title, its run is over it) would otherwise have to split its
+    /// list in two and keep the halves in step.
+    ///
+    /// `false` for every mark but that run, and that is the honest default: a
+    /// mark laid out in a box of its own has nothing to be over.
+    pub above_text: bool,
 }
 
 /// One flat fill of the modal overlay, in physical pixels of the whole surface.
@@ -3657,6 +3676,10 @@ impl PartialEq for ChromeIcon {
             // Left out, every frame of a breath compares equal to the last and
             // the chrome is never rebuilt.
             && self.opacity == other.opacity
+            // Which side of the letters it lands on is placement too — the same
+            // raster in the same box over the type is a different picture from
+            // the same raster under it.
+            && self.above_text == other.above_text
     }
 }
 
@@ -5518,8 +5541,18 @@ impl WindowRenderer {
                 })
         });
         let chrome_icons = std::mem::take(&mut self.chrome_icons);
+        // Two lists and one pass: the marks that stand under this pass's letters
+        // and the run that covers them — see [`ChromeIcon::above_text`]. The
+        // partition is done here rather than by the caller because the caller
+        // hands one chrome and the order is this pass's own business.
+        let (chrome_under, chrome_over): (Vec<ChromeIcon>, Vec<ChromeIcon>) = chrome_icons
+            .iter()
+            .cloned()
+            .partition(|icon| !icon.above_text);
         let (chrome_icon_draws, chrome_icon_vertices) =
-            self.prepare_chrome_icon_draws(gpu, &chrome_icons);
+            self.prepare_chrome_icon_draws(gpu, &chrome_under);
+        let (chrome_over_draws, chrome_over_vertices) =
+            self.prepare_chrome_icon_draws(gpu, &chrome_over);
         self.chrome_icons = chrome_icons;
         // The documents' own pictures — a rendered formula and nothing else
         // today. Down the same textured-quad path the marks above just went, and
@@ -5553,6 +5586,14 @@ impl WindowRenderer {
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("chrome mark vertices"),
                     contents: bytemuck::cast_slice(chrome_icon_vertices.as_slice()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let chrome_over_buffer = (!chrome_over_vertices.is_empty()).then(|| {
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("chrome mark vertices over the type"),
+                    contents: bytemuck::cast_slice(chrome_over_vertices.as_slice()),
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
@@ -5995,6 +6036,7 @@ impl WindowRenderer {
             if chrome_ground_rect_buffer.is_some()
                 || chrome_rect_buffer.is_some()
                 || chrome_icon_buffer.is_some()
+                || chrome_over_buffer.is_some()
                 || chrome_prepared
             {
                 pass.set_viewport(
@@ -6039,6 +6081,23 @@ impl WindowRenderer {
                     self.chrome_text_renderer
                         .render(&gpu.atlas, &self.chrome_viewport, &mut pass)
                         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                }
+                // And the one class of mark that is *over* the letters: a pane
+                // head's hover-revealed run, with the scrim it stands on. The
+                // title beneath it runs the whole row now, so the run covers its
+                // tail instead of the row keeping a hole for the run to stand in
+                // — see [`ChromeIcon::above_text`].
+                if let Some(buffer) = chrome_over_buffer.as_ref() {
+                    pass.set_pipeline(&gpu.math_pipeline);
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    for draw in &chrome_over_draws {
+                        if let Some(texture) = gpu.math_textures.get(&draw.key)
+                            && let Some(tile) = texture.tiles.get(draw.tile_index)
+                        {
+                            pass.set_bind_group(0, &tile.bind_group, &[]);
+                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                        }
+                    }
                 }
             }
             // Preview content is above that seat's body chrome, but its viewport excludes the title
@@ -15218,6 +15277,7 @@ mod tests {
             height_px: 26,
             opacity,
             clip: None,
+            above_text: false,
         };
         assert_ne!(
             icon(1.0),
@@ -16055,6 +16115,7 @@ mod tests {
                 height_px: 1,
                 opacity: 0.5,
                 clip: None,
+                above_text: false,
             }],
             opacity: 0.25,
             body: None,
@@ -16114,6 +16175,7 @@ mod tests {
             height_px: 1,
             opacity: 1.0,
             clip,
+            above_text: false,
         };
         let card = [0.0, 0.0, 300.0, 264.0];
         let block = [8.0, 40.0, 292.0, 120.0];

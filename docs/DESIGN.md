@@ -3295,6 +3295,59 @@ pane head: i-close makes a 14.708 picture beside i-chev's 11.718 — 25.5% apart
 - **编辑页面包屑**:`❮ PROFILES ❯` 两枚粗几何 chevron → `‹ PROFILES ›` 两枚排在标题自己那行里的引号。
 - **裁4 的三帧**:单子开着、指针停在 `New terminal in folder…` 上时,修前那个头**一枚不剩**(量到的 run 墨 = 0),修后 `⌄ 🗀 ✕` 三枚俱在;单子关掉、指针移到 tab 条上,两片都退干净。
 
+————
+
+**验收回修二续写（图标统一块 · 二次验收 + pane 头标题，2026-08-27 用户验后两裁，已落地；`crates/bt-app/src/{marks,icons,profiles,seats,float,main,peek_strip,file_peek}.rs`、`crates/bt-render/src/lib.rs`）**
+
+**一句话：上一片按「文件夹好看」把两张描边画删了，这一片按「文件夹站在哪一列」把它们请回来——规矩不是「实心」也不是「描边」，是**动作列里描边、对象位上实心**；顺带把 pane 头那条常驻空白填掉：标题静息用满整行，悬停的那排盖在它尾巴上。**
+
+**① 裁一（覆盖 2026-08-26 的「全实心」）：文件夹在动作列里描边，在对象位上实心。**
+
+用户原话:**「这个菜单里所有的都是描边的,突然出现一个实心就会怪怪的」**。这句话和上一片那句「还是原来的好看」不矛盾——它们看的不是同一样东西:上一片看的是**那枚画**,这一片看的是**那枚画站的那一列**。一枚实心站在一列描边里不是「重一点的画」,是**另一种画**,而那正是 P2 当初切这两张画的原话与实测(`1.36×` 的墨量异常值)。所以 P2 的线是对的,上一片撤错了。
+
+**落法是把 `#i-folder-line` / `#i-folder-open-line` 从 `4984e6b`(P2)原样恢复**——不重画,一个字节都没改,只是索引从 P2 的 `61/62` 变成今天的 `63/64`(中间 `#i-cross` 与 `#i-wheel` 已经占了位)。注册表回到 P2 的分法:
+
+| `ActionIcon` | 画 | 为什么 |
+|---|---|---|
+| `FolderObject` / `FilesSeat` | `#i-folder` | 对象:树行、面包屑、tab 标、席位标、restore 行 |
+| `OpenFilesPane` / `NewTerminalInFolder` | `#i-folder-line` | 动作:菜单行,以及站在 `⌄` 和 `✕` 之间的头按钮 |
+| `OpenFolderObject` | `#i-folder-open` | 对象:开着的树行、文件菜单的头、**两处脚栏** |
+| `RevealInFolder` / `BrowseForFolder` | `#i-folder-open-line` | 动作:`Reveal in Explorer`、`Browse…` |
+
+**② 而这一片真正修的那处缺陷,是 P2 把脚栏判在了错的一边。** 用户报的是 files 列**底部脚栏**(那行写着根路径)的文件夹。P2 读它是「一个打开资源管理器的按钮」——它确实是按钮——于是给了动作的描边;但读者在那里遇到的是**一行说「你在哪」的话**,旁边只有一条路径,**没有一列动词让一枚实心显得突兀**。所以脚栏是对象位:`seats::push_files_foot` 与 `float.rs` 的浮窗脚栏都从 `RevealInFolder` 改成 `OpenFolderObject`。这条是本片唯一一处**画面真的变了而不是变回去**的地方。
+
+**③ 红门:两条,一条问表一条问绘制点。**
+
+- `icons.rs` `a_folder_is_struck_in_a_column_of_verbs_and_solid_where_it_is_a_place`——遍历注册表每一个穿文件夹族的条目,按 `ActionIcon::is_an_object()` 分两半,**两半都断言**,并且断言两半都非空。**两个方向一起钉是本片的教训**:这扇窗在两天里把同一个错犯了两遍,一次朝描边(P2 连脚栏一起struck了),一次朝实心(回修连菜单一起填实了),**只知道一个方向的红门两次都会是绿的**。
+- `icons.rs` `a_path_strip_wears_the_folder_it_is_standing_in`——只读 `push_files_foot` 与浮窗脚栏那一段的源码,断言它们点名对象而不是动作。范围切到函数体,因为同一个文件里别处的菜单行**本来就该**用动作的画。
+- P2 那条读绘制结果的 `a_folder_in_a_column_of_verbs_is_struck_and_a_folder_that_is_a_place_is_solid`(profile 菜单一枚实心都不许有;root 菜单 cwd 行实心、`Browse…` 描边)**原名原断言恢复**。
+
+**④ 裁二:pane 头标题静息用满整行,悬停控件覆盖而非预留。**
+
+**红证(用户截图,2026-08-27)**:终端 pane 头写着 `批2进度 · D:\Documents\SyncFolder\Developer\WorldQuant\user_pa…`,而它右边是一段**常驻空白**。空的原因是 `pane_head_geometry` 把 `⌄ 🗀 ✕` 那一排的宽度从标题框里减掉了——**不管那排在不在屏上**,而那排是**悬停才显形**的。于是静息态的名字被切短,让出的地方给了三枚不存在的按钮。
+
+**修法是把「让位」换成「覆盖」。**
+
+- **`title` 现在是整行**:从席位标之后一直到头自己的 `padding-right: 6px`。
+- **`title` 原来的那个右边缘改名 `control_limit` 并留在原地**——这是本片最要紧的一句:**能钻到控件底下的只有字**。zoom 标、files 头的 root 按钮这些**控件**照旧停在 `control_limit`,因为一个能看见一半、按不到的控件正是这扇窗修过两次的那个 bug(`hit_chrome` 自己的注释写着那一次)。
+- **`run` 与 `scrim` 两个新字段**:`run` 是那一排的合框(命中盒读的就是这几个字段,**一像素没动**),`scrim` 是 `run` 往左长出**一个字宽**、往右到头的边缘。
+- **渐变底是一枚生成形** `ChromeMark::HeadRunScrim { fade_px }`:头自己的底色,透过一张 `black → white` 的 mask 从无到有地爬完那一个字宽,之后一路实到底(`spreadMethod` 默认 `pad`,所以不需要第三个 stop)。用 mask 而不是带 `stop-opacity` 的渐变,是**为了不破 P2 那条「body 里不许写裸 opacity」的红门**:mask 的 stop 是黑白两个**形**,不是两个透明度。
+- **「一个字宽」写成 `SEAT_TITLE_FONT_LOGICAL_PX` 而不是一个数字**:一个字的宽度是关于**这行字**的事实,字号改了它跟着改。
+
+**⑤ 为此渲染器多了一层,而且只多了一层。** chrome 那一趟画的顺序是 ground → 实心 → 形 → 字,**字在最上面**——这在这扇窗里一直是对的(活动 tab 的剪影是一枚形,它必须压在标题栏的底色上、压在 tab 标题下面)。标题一旦用满整行,那排按钮就必须画在**字之上**,否则名字会从 `✕` 里穿过去。所以 `bt_render::ChromeIcon` 添一个 `above_text: bool`,`render` 把 chrome 的形分成两批,第二批在 `chrome_text_renderer.render` 之后发。
+
+**这是一个字段而不是第二条通道**,因为它陈述的是**一枚画自己**的事实(这枚在字上面),而 pane 头两样都要:它的席位标在字下面,它的那排在字上面。分成两条通道的话,任何一个表面都得自己把清单劈成两半并保持同步。
+
+**淡入照旧走动画二片的 90ms 墨**:`head_ink_here` 一个数同时喂给渐变底与三枚按钮的 `opacity`,所以底和站在底上的东西同来同走——底若不淡入,读者会看到一块灰条先落在名字尾巴上。
+
+**⑥ 一条写下来的边界:预览头保留它的预留,而且不是漏做。** 预览头也有一排悬停才显形的工具,但它那段空白里站着的是**「未保存」那枚点**——那是一个**状态**,读者必须看得见,而一个状态不能被按钮盖掉。点跟着名字走,所以名字也不能钻到那排底下。要让预览头也用满整行,`preview_head_geometry` 得知道「这一刻有没有那枚点」,而它今天不知道(命中测试那一侧也拿不到),硬塞进去会让画与命中读两份事实——那正是 `PaneHeadGeometry` 存在的理由。**列在这里而不是悄悄跳过,是范围与窟窿的区别**(⑥ 这句话是 P2 自己写的,原样再用一次)。浮窗头同理:它的控件是常驻的,没有预留可言。
+
+**⑦ 红门(`seats.rs`)。**
+
+- `a_head_at_rest_gives_its_name_the_whole_row`——四个 scale 上断言:`title[2]` 恰是 `rect[2] − 6px`(整行)、`title[2] > run[0]`(名字确实钻到那排底下)、`control_limit ≤ run[0]`(控件没有)、那排的三个盒子与两处接缝**逐像素不变**(这就是「命中盒不变」,因为 `hit_chrome` 读的就是这些字段)、渐变底左沿恰是 `run[0] − 一个字宽`、右沿到头的边缘。外加一个窄到放不下 `✕` 的头:没有 run 就没有底,`control_limit` 退回 `title[2]`。
+- `a_heads_run_is_drawn_over_the_name_it_covers`——从 `build_chrome` 的真实产物里读:名字的框确实盖过 `run[0]`;渐变底在 `above_text` 那一批的**第一个**(所以按钮压在它上面);`PaneClose` 与 `#i-folder-line` 都在那批里;**那批里没有任何一枚站在 scrim 左沿以外**;而一个没人靠近的头**一枚都不画**。
+- 原来那条 `head.title[2] <= close[0]`(C29「标题让位,控件不让」)翻面成两条:`title[2] > close[0]` 且 `control_limit <= close[0]`。C29 没有被推翻,它被拆成了两句——**让位的是名字,不让的是控件**,原来这两件事共用一个数。
+
 ### 7.18 motion 令牌:三档、一段位移、两条曲线,和一张不许出现第四档的登记表（动画块前置片 丙12，2026-08-26 用户裁；`crates/bt-render/src/{motion(新),theme,lib}.rs`、`crates/bt-app/src/{main,toast,tooltip,keyhint,seats,cmdrail,termscroll,float,profiles,files}.rs`、`crates/bt-platform/src/lib.rs`）
 
 **一句话:这扇窗的节奏第一次是一处决定,而不是九处各自都说得通的数字。**

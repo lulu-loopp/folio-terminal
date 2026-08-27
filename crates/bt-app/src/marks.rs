@@ -239,14 +239,26 @@ pub enum ChromeMark {
     /// folder is a different silhouette with a different number of paths, and no
     /// rotation of the closed one produces it.
     ///
-    /// **The open folder, wherever a row is about one** — a file menu's own
-    /// head, a tree row that is open, `Reveal in folder`, `Browse…`.
+    /// **The object's open folder**, on [`Self::Folder`]'s division: a file
+    /// menu's own head, a tree row that is open, and the path strip at the foot
+    /// of a files column or of a floating one — the row that says *this is
+    /// where you are*. What `Reveal in folder` and `Browse…` wear is
+    /// [`Self::FolderOpenOutline`].
     ///
-    /// P2 cut a struck rendition of this for the rows that are *acts*; the
-    /// 2026-08-26 acceptance sent it back (裁1, 2026-08-26 — *还是原来的好看*).
-    /// See [`Self::Folder`] for the ruling, which is one ruling about one
-    /// object and applies to both frames of it.
+    /// **The two renditions were deleted on 2026-08-26 and restored on
+    /// 2026-08-27**, and the second ruling is the one that stands: see
+    /// [`Self::Folder`] for the line, which is one line drawn once and applied
+    /// to both frames of the object.
     FolderOpen,
+    /// `#i-folder-open-line` — the act of opening a folder somewhere else, on
+    /// [`Self::FolderOutline`]'s division.
+    ///
+    /// The back plate becomes the shut folder's own top-left profile and the
+    /// front flap a struck quadrilateral, both landing on the same ink band the
+    /// filled pair does. The flap is *open at the top left*, which is the one
+    /// thing that tells this from [`Self::FolderOutline`] at a menu row's
+    /// fourteen pixels.
+    FolderOpenOutline,
     /// `#i-wheel` — **a mouse seen from above, with its wheel**: not a verb, but
     /// the half of a chord that has no key cap to be written on.
     ///
@@ -400,21 +412,41 @@ pub enum ChromeMark {
     Globe {
         favicon: Option<crate::favicon::FaviconId>,
     },
-    /// `#i-folder` — **a folder, in every row that is about one**: a tree row,
-    /// a breadcrumb's chip, a seat's identity mark, a tab's, a head's button,
-    /// `Open files pane`, `New terminal in folder…`.
+    /// `#i-folder` — **the object.** A row that *is* a folder: a tree row, a
+    /// breadcrumb's chip, a seat's identity mark, a tab's, a restore row's.
     ///
-    /// It is the one filled silhouette the mock-up hands this house, and it
-    /// keeps every row of it. **P2 cut a struck rendition — `#i-folder-line` —
-    /// for the rows that are acts, and the 2026-08-26 acceptance sent it back**
-    /// (裁1: *还是原来的好看*). The fill policy is not repealed by that; it is
-    /// told where its line runs. `crate::icons`' `FILLED_WITH_A_REASON` carries
-    /// the ruling in the class it belongs to: **a folder is an object**, and a
-    /// row about an object is a row about a thing however the sentence is
-    /// worded. `Open files pane` puts a folder beside a name for the same
-    /// reason a tree row does — to say *a folder* — and the solid is what this
-    /// drawing is.
+    /// It is the one filled silhouette the mock-up hands this house, and P2
+    /// keeps it exactly where a fill belongs — see [`Self::FolderOutline`] for
+    /// where it does not, and `crate::icons`' fill policy for the rule the two
+    /// split along.
+    ///
+    /// **The two-day round trip, and where it landed** (the ruling this comment
+    /// is now written from). P2 cut the struck pair on 2026-08-26; a first
+    /// acceptance the same day read the pane menu's solid folder as the nicer
+    /// drawing and the pair was deleted, which made every folder in the window
+    /// solid; the 2026-08-27 acceptance looked at that menu and said what the
+    /// first one had not — 「这个菜单里所有的都是描边的,突然出现一个实心就会
+    /// 怪怪的」. So the line is neither "always solid" nor "always struck": **a
+    /// folder is struck in a column of verbs and solid where it is a place**,
+    /// and the two renditions are back to say so.
     Folder,
+    /// `#i-folder-line` — **the act.** A menu row or a head button *about* a
+    /// folder: `Open files pane`, `New terminal in folder…`.
+    ///
+    /// The same silhouette to the digit — this drawing's path is
+    /// [`Self::Folder`]'s own edge, pulled in half a pen so the stroke's outer
+    /// edge lands exactly where the fill's did. Two drawings of one object,
+    /// which is what makes the split a *policy* rather than a second folder:
+    /// what tells them apart is whether the row is a thing or a verb, and the
+    /// two never appear in the same column.
+    ///
+    /// **The report this closes** (P1's own, 2026-08-26, and the 2026-08-27
+    /// acceptance in the same words): the pane menu's ink mass came into a
+    /// `1.36×` band except for one row — the solid folder, which stayed the
+    /// column's outlier at more than twice its neighbours' ink. A fill among
+    /// outlines is not a heavier drawing, it is a different *kind* of drawing,
+    /// and no slot can level it.
+    FolderOutline,
     /// `#i-panel` — a pane whose kind this build cannot name.
     Panel,
     /// `#i-copy` — "put this row's path on the clipboard" (K143).
@@ -682,6 +714,30 @@ pub enum ChromeMark {
     /// the tail's *base* unstruck so it can sit over the bubble's edge without
     /// drawing a line across the join.
     HintTail,
+    /// **The ground a pane head's hover-revealed run stands on**, so the title
+    /// it covers dissolves into the head instead of being cut off at a wall
+    /// (user ruling, 2026-08-27).
+    ///
+    /// The head's own ground colour, laid over the letters at
+    /// [`ChromeSprite::above_text`] — a rectangle that is opaque under the run
+    /// itself and ramps to nothing over the `fade_px` at its left edge. What
+    /// the ruling asks for is that the title now runs the *whole* row and the
+    /// buttons cover its tail; a hard edge there would read as a second wall a
+    /// pixel from the first, which is the shape the reserved gap already was.
+    ///
+    /// Generated rather than quoted, on [`Self::ControlPill`]'s footing: it is
+    /// whatever box the run's own geometry says, in physical pixels by the time
+    /// it arrives, and there is no grid to letterbox it into. `fade_px` is a
+    /// parameter and not a proportion because the ramp is *one character of the
+    /// title's own type* — a fact about the type, which does not scale with how
+    /// many buttons the head is showing.
+    ///
+    /// The ramp is cut with a mask rather than with a gradient carrying
+    /// `stop-opacity`, and that is the module's own rule kept rather than
+    /// dodged: no body in this file writes an alpha that is not a
+    /// [`MarkLayer`]. A mask's stops are black and white — a *shape*, not a
+    /// translucency — and the alpha it produces is the shape's coverage.
+    HeadRunScrim { fade_px: u32 },
     /// One corner of the floor showing around a rounded card: a `radius × radius`
     /// square with a quarter-disc bitten out of it, filled edge to edge.
     ///
@@ -1109,7 +1165,9 @@ impl ChromeMark {
             Self::File => "i-file",
             Self::Globe { .. } => "i-globe",
             Self::Folder => "i-folder",
+            Self::FolderOutline => "i-folder-line",
             Self::FolderOpen => "i-folder-open",
+            Self::FolderOpenOutline => "i-folder-open-line",
             Self::MouseWheel => "i-wheel",
             // One id for every angle, on `Self::Chevron`'s precedent above.
             Self::TreeDisclosure { .. } => "i-tri",
@@ -1137,6 +1195,7 @@ impl ChromeMark {
             Self::ActiveTab { .. } => "tab",
             Self::TabBody { .. } => "tab-body",
             Self::TabBodyRing { .. } => "tab-body-ring",
+            Self::HeadRunScrim { .. } => "head-run-scrim",
             Self::ControlPill { .. } => "control-pill",
             Self::ControlPillFoot { .. } => "control-pill-foot",
             Self::ControlPillRing { .. } => "control-pill-ring",
@@ -1360,6 +1419,15 @@ pub struct ChromeSprite {
     /// because the mark it exists for is the profile mark, which carries
     /// colours of its own that no palette entry can stand in for.
     pub grayscale: bool,
+    /// **This mark is drawn over the chrome's letters** — see
+    /// [`bt_render::ChromeIcon::above_text`], which is where the ordering
+    /// actually happens and where the reason is written.
+    ///
+    /// One class of mark wants it: a pane head's hover-revealed run and the
+    /// scrim it stands on, because since 2026-08-27 the title under them runs
+    /// the whole row and the run covers its tail instead of a hole being kept
+    /// for the run to stand in.
+    pub above_text: bool,
 }
 
 impl ChromeSprite {
@@ -1372,6 +1440,17 @@ impl ChromeSprite {
             color,
             opacity: 1.0,
             grayscale: false,
+            above_text: false,
+        }
+    }
+
+    /// The same mark, drawn after the chrome's letters instead of before them —
+    /// [`Self::above_text`].
+    #[must_use]
+    pub fn above_text(self) -> Self {
+        Self {
+            above_text: true,
+            ..self
         }
     }
 
@@ -1675,6 +1754,7 @@ impl ChromeMarkRasters {
                     height_px: raster.height_px,
                     opacity: sprite.opacity,
                     clip: None,
+                    above_text: sprite.above_text,
                 });
                 continue;
             }
@@ -1707,6 +1787,7 @@ impl ChromeMarkRasters {
                 // is nothing for it to be cropped by — see
                 // [`bt_render::ChromeIcon::clip`], whose one caller is a picture.
                 clip: None,
+                above_text: sprite.above_text,
             });
             kept.insert(key, raster);
         }
@@ -1732,6 +1813,11 @@ fn mark_key(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> String {
     // all eight and would collapse them into one cache slot.
     if let ChromeMark::ProfileGeneric { colour } = sprite.mark {
         let _ = write!(key, ":{}", colour.wire());
+    }
+    // The ramp is the only thing that tells one scrim from another: one id, one
+    // colour, and a box that is already in the key below.
+    if let ChromeMark::HeadRunScrim { fade_px } = sprite.mark {
+        let _ = write!(key, ":f{fade_px}");
     }
     // The corner is the only thing that tells one card corner from another —
     // one id, one box, one colour, four different bites.
@@ -1907,6 +1993,36 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 middle = f64::from(height_px) / 2.0,
             ),
         ),
+        // The box, filled flat in the head's own ground, seen through a mask
+        // that ramps from nothing to everything over its first `fade_px` and
+        // stays at everything for the rest of the run.
+        //
+        // `spreadMethod` is left at its default `pad`, which is what makes the
+        // second half of that sentence true without a third stop: the gradient
+        // is placed in user space from `0` to `fade_px`, and every pixel past
+        // it takes the last stop.
+        //
+        // A degenerate ramp — `fade_px` of zero — would be an invalid gradient,
+        // so it is clamped to one pixel: a scrim with no fade is still a scrim,
+        // and the caller that asks for one is a head drawn at a scale where a
+        // character is less than a pixel wide.
+        ChromeMark::HeadRunScrim { fade_px } => {
+            let fade = fade_px.max(1).min(width_px.max(1));
+            (
+                format!("0 0 {width_px} {height_px}"),
+                format!(
+                    concat!(
+                        r##"<defs><linearGradient id="ramp" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="{fade}" y2="0">"##,
+                        r##"<stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/></linearGradient>"##,
+                        r##"<mask id="run"><rect x="0" y="0" width="{width_px}" height="{height_px}" fill="url(#ramp)"/></mask></defs>"##,
+                        r##"<rect x="0" y="0" width="{width_px}" height="{height_px}" fill="currentColor" mask="url(#run)"/>"##,
+                    ),
+                    fade = fade,
+                    width_px = width_px,
+                    height_px = height_px,
+                ),
+            )
+        }
         ChromeMark::CardCorner { radius_px, corner } => {
             // The bite's centre is the card's own arc centre, which is `radius`
             // inside the box on each axis the card runs away along.
@@ -2426,6 +2542,7 @@ impl ChromeMark {
                 | Self::GraphCurve { .. }
                 | Self::ProfileGeneric { .. }
                 | Self::ProfileLine(_)
+                | Self::HeadRunScrim { .. }
         )
     }
 
@@ -2724,7 +2841,12 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::File => 6,
         ChromeMark::Globe { .. } => 41,
         ChromeMark::Folder => 7,
+        // The pair 2026-08-27 restored, appended rather than slotted back where
+        // P2 had them: an index is a position in the sheet and the sheet has
+        // grown a cross since.
+        ChromeMark::FolderOutline => 63,
         ChromeMark::FolderOpen => 15,
+        ChromeMark::FolderOpenOutline => 64,
         ChromeMark::MouseWheel => 62,
         ChromeMark::TreeDisclosure { .. } => 16,
         ChromeMark::Panel => 8,
@@ -2782,6 +2904,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::ActiveTab { .. } => 8,
         ChromeMark::TabBody { .. } => 8,
         ChromeMark::TabBodyRing { .. } => 8,
+        ChromeMark::HeadRunScrim { .. } => 8,
         ChromeMark::ControlPill { .. } => 8,
         ChromeMark::ControlPillFoot { .. } => 8,
         ChromeMark::ControlPillRing { .. } => 8,
@@ -2838,7 +2961,7 @@ pub fn preview_row_mark(is_page: bool, favicon: Option<crate::favicon::FaviconId
 
 const PROFILE_CHASSIS_VIEW_BOX: &str = "0 0 16 16";
 
-const SYMBOL_VIEW_BOX: [&str; 63] = [
+const SYMBOL_VIEW_BOX: [&str; 65] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -2969,11 +3092,17 @@ const SYMBOL_VIEW_BOX: [&str; 63] = [
     // the house's in the house's grid.
     "0 0 16 16", // #i-cross
     "0 0 16 16", // #i-wheel
+    // **The two P2 struck and 2026-08-27 restored**, and they are the house
+    // sixteen because they are the filled folders' own edges: a drawing that
+    // has to lie on top of another one to the digit cannot be cut in a second
+    // box.
+    "0 0 16 16", // #i-folder-line
+    "0 0 16 16", // #i-folder-open-line
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 63] = [
+const SYMBOL_BODY: [&str; 65] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min. The rule is pulled half a pen in from each edge so the round cap
@@ -3544,6 +3673,24 @@ const SYMBOL_BODY: [&str; 63] = [
     concat!(
         r#"<rect x="3.9" y="2.2" width="8.2" height="11.6" rx="4.1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
         r#"<rect x="7.3" y="4.45" width="1.4" height="2.9" rx="0.7" fill="currentColor"/>"#,
+    ),
+    // `#i-folder-line` — `#i-folder`'s own edge, drawn.
+    //
+    // The path is the fill's silhouette pulled in half a pen on every side, so
+    // the stroke's outer edge lands exactly where the solid's did: ink `1.6 –
+    // 14.4` across and `3.1 – 13.4` down, the filled folder's to the digit. Two
+    // renditions of one object, on `#p-shell-line`'s precedent one family over.
+    r#"<path d="M2.2 4.3a.6.6 0 0 1 .6-.6h2.6l1.3 1.4h6.5a.6.6 0 0 1 .6.6v6.5a.6.6 0 0 1-.6.6H2.8a.6.6 0 0 1-.6-.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+    // `#i-folder-open-line` — the same object with its flap open.
+    //
+    // The back is the shut folder's top-left profile, stopping where the flap
+    // covers it; the flap is a quadrilateral leaning right, standing on the
+    // shut folder's own floor. Both land in the band the filled pair does, and
+    // the *opening at the top left* is what tells the two apart in a menu
+    // column at fourteen pixels — not a change of size and not a second colour.
+    concat!(
+        r#"<path d="M2.2 11.5V4.3a.6.6 0 0 1 .6-.6h2.6l1.3 1.4h6.5a.6.6 0 0 1 .6.6v1.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+        r#"<path d="M2.2 12.8l2.4-5.4h9.2l-2.4 5.4z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
     ),
 ];
 

@@ -691,21 +691,34 @@ impl ActionIcon {
             Self::GoToParentCommit | Self::MoveRowUp => ChromeMark::Arrow {
                 turned_degrees: 270,
             },
-            // **A folder, once** (裁1, 2026-08-26 — *还是原来的好看*). P2 gave
-            // the object a solid and the act a struck rendition of the same
-            // silhouette; the acceptance sent the struck pair back and the two
-            // drawings are gone. What survives of P2 here is the *reason* the
-            // ruling is not an exception to the fill policy: a folder is an
-            // object, and a row about an object is a row about a thing however
-            // its sentence is worded — which is the entry the fill gate's
-            // `FILLED_WITH_A_REASON` now carries under its second class.
-            Self::FolderObject
-            | Self::FilesSeat
-            | Self::OpenFilesPane
-            | Self::NewTerminalInFolder => ChromeMark::Folder,
-            Self::OpenFolderObject | Self::RevealInFolder | Self::BrowseForFolder => {
-                ChromeMark::FolderOpen
-            }
+            // **A folder twice, and which one a row gets is a fact about the
+            // company the row keeps** (user ruling, 2026-08-27):「这个菜单里所
+            // 有的都是描边的,突然出现一个实心就会怪怪的」.
+            //
+            // P2 cut the struck pair for exactly this reason and measured it —
+            // a menu column of outlines with one solid in it reads as a badge
+            // somebody pasted in. A first acceptance on 2026-08-26 looked at
+            // the folder alone, liked the solid better, and the pair was
+            // deleted; the second looked at the folder *in its column* and put
+            // the line back where P2 had drawn it. So the rule is neither
+            // "always solid" nor "always struck":
+            //
+            // * **A column of verbs is struck.** `Open files pane`, `New
+            //   terminal in folder…`, `Reveal in folder`, `Browse…` — rows the
+            //   reader meets in a run of outlines, and the head buttons that
+            //   are the same verbs standing beside a `⌄` and a `✕`.
+            // * **A place is solid.** A tree row, a breadcrumb's chip, a seat's
+            //   identity mark, a tab's, a restore row's, and the path strip at
+            //   the foot of a files column — rows that say *where you are*
+            //   rather than *do this*.
+            //
+            // [`Self::is_an_object`] is that line and this table is read
+            // against it — see `a_folder_is_struck_in_a_column_of_verbs_and_
+            // solid_where_it_is_a_place`.
+            Self::FolderObject | Self::FilesSeat => ChromeMark::Folder,
+            Self::OpenFilesPane | Self::NewTerminalInFolder => ChromeMark::FolderOutline,
+            Self::OpenFolderObject => ChromeMark::FolderOpen,
+            Self::RevealInFolder | Self::BrowseForFolder => ChromeMark::FolderOpenOutline,
             // **One gesture, four containers.** The frame says which one, which
             // is the whole of the 裁2 quarrel: a pane pops out into a float, or
             // leaves for a tab, or for a window of its own, or for one already
@@ -780,15 +793,16 @@ impl ActionIcon {
     ///   rather than beside a verb, and a solid is how a small identity mark
     ///   survives being small.
     ///
-    /// **裁1 (2026-08-26) moved the folder across that line rather than moving
-    /// the line.** P2 read `Reveal in folder` as an act and struck it; the
-    /// acceptance's answer was *还是原来的好看*, and the reason the ruling is
-    /// right is that a folder row is not saying *reveal* with a picture, it is
-    /// saying *a folder* beside the word `Reveal`. The four folder rows are
-    /// therefore filled with the reason a thing is filled — see
-    /// `FILLED_WITH_A_REASON`'s second class, which is where an entry that is a
-    /// *verb* wearing an object's drawing has to argue for itself. This
-    /// function stays the list of entries that name nothing but the thing.
+    /// **The folder tested that line twice and did not move it** (2026-08-26,
+    /// then 2026-08-27). A first acceptance read `Reveal in folder` as a row
+    /// *about* a folder and made every folder in the window solid; the second
+    /// read the same row where it actually stands — in a column of struck verbs
+    /// — and sent the struck rendition back. What the round trip settled is
+    /// that the question this function asks is the right one and the answer for
+    /// `Reveal in folder` is *no*: the row's subject is the act, and the folder
+    /// in it is the act's object drawn as the act's picture. This function
+    /// stays the list of entries that name nothing but the thing, and it is now
+    /// also the line the folder's two renditions are chosen by.
     #[must_use]
     #[cfg(test)]
     pub fn is_an_object(self) -> bool {
@@ -871,10 +885,10 @@ mod tests {
         }
         for mark in [
             ChromeMark::chevron(0.0),
-            // The head's `🗀` is the solid again since 裁1 — see this module's
-            // fill policy, which is now a policy with one argued exception in
-            // it rather than a second folder.
-            ChromeMark::Folder,
+            // The head's `🗀` is a *button* standing between a `⌄` and a `✕`,
+            // so it is the struck rendition — see this module's fill policy and
+            // the 2026-08-27 ruling it is drawn along.
+            ChromeMark::FolderOutline,
             ChromeMark::PaneClose,
         ] {
             sites.push((
@@ -924,9 +938,13 @@ mod tests {
             ChromeMark::File,
             crate::seats::FILES_ROW_ICON_LOGICAL_PX,
         );
+        // The strip at the foot of a files column says *where you are*, so what
+        // it wears is the object's open folder — `ActionIcon::OpenFolderObject`,
+        // named here rather than repeated so the site and the drawing cannot
+        // drift apart.
         bespoke(
             "files foot",
-            ChromeMark::Folder,
+            ActionIcon::OpenFolderObject.mark(),
             crate::seats::FILES_FOOT_MARK_LOGICAL_PX,
         );
         bespoke(
@@ -1350,7 +1368,7 @@ mod tests {
             }
         };
         let chevron = ink(ChromeMark::chevron(0.0));
-        let folder = ink(ChromeMark::Folder);
+        let folder = ink(ChromeMark::FolderOutline);
         assert!(
             (chevron - folder).abs() < 0.01,
             "the pane head's run draws {chevron:.2} and {folder:.2} of ink",
@@ -1378,7 +1396,7 @@ mod tests {
             "pane head",
             vec![
                 ChromeMark::chevron(0.0),
-                ChromeMark::Folder,
+                ChromeMark::FolderOutline,
                 ChromeMark::PaneClose,
             ],
         )]
@@ -1682,31 +1700,32 @@ mod tests {
         // that a tree row and a seat's mark both say so with one drawing is the
         // drawing doing its job.
         //
-        // **P2 split the rendition and 裁1 put it back** (2026-08-26): the four
-        // rows below are a tree row, a seat's mark, a head's button and a menu
-        // row, and all four are about a folder. That the acts sit on this list
-        // beside the objects is the ruling written where a reader of the table
-        // meets it.
+        // **P2 took the two acts off this list**, not by splitting the meaning
+        // but by splitting the *rendition*: `Open files pane` and `New terminal
+        // in folder…` are still about a folder, and they wear the same
+        // silhouette struck instead of filled, because they stand in a column
+        // of verbs. `#i-folder-open`'s pair split the same way and came out
+        // with one verb each, so neither is on this list at all.
+        //
+        // A first acceptance on 2026-08-26 collapsed the four rows back onto
+        // two drawings; the 2026-08-27 acceptance restored the split, and this
+        // is the shape of the table that ruling names.
         (
             "i-folder",
-            &[
-                ActionIcon::FolderObject,
-                ActionIcon::FilesSeat,
-                ActionIcon::OpenFilesPane,
-                ActionIcon::NewTerminalInFolder,
-            ],
+            &[ActionIcon::FolderObject, ActionIcon::FilesSeat],
             false,
         ),
-        // The open folder: a row that is one, and the two rows that go and look
-        // at one somewhere outside this window — File Explorer, or the system's
-        // own picker.
         (
-            "i-folder-open",
-            &[
-                ActionIcon::OpenFolderObject,
-                ActionIcon::RevealInFolder,
-                ActionIcon::BrowseForFolder,
-            ],
+            "i-folder-line",
+            &[ActionIcon::OpenFilesPane, ActionIcon::NewTerminalInFolder],
+            false,
+        ),
+        // Going and looking at a folder somewhere outside this window — in File
+        // Explorer, or in the system's own picker. One act aimed at two ways of
+        // naming the folder, which is what this list is for.
+        (
+            "i-folder-open-line",
+            &[ActionIcon::RevealInFolder, ActionIcon::BrowseForFolder],
             false,
         ),
         (
@@ -2039,20 +2058,17 @@ mod tests {
     const FILLED_WITH_A_REASON: &[(&str, &str)] = &[
         (
             "i-folder",
-            "class 2, and a user ruling with it (裁1, 2026-08-26): *还是原来的\
-             好看*. P2 struck the folder for the rows that are acts and the \
-             acceptance sent the struck rendition back — a folder is an object, \
-             and `Open files pane` puts one beside a name for the same reason a \
-             tree row does. What the class costs is written down beside it: the \
-             solid is `1.36×` its column's ink where every struck neighbour is \
-             level, and that is the price of the ruling rather than an \
-             oversight",
+            "class 2, and only class 2 (user ruling, 2026-08-27): a tree row, a \
+             breadcrumb's chip, a seat's identity mark, a tab's, a restore \
+             row's. The verbs that wear a folder wear `#i-folder-line`, which \
+             is on no list here because it is struck like every other act",
         ),
         (
             "i-folder-open",
-            "class 2, 裁1 again and the same object: `Reveal in folder` and \
-             `Browse…` wear the open folder solid because the row is about a \
-             folder. One ruling about one object covers both of its frames",
+            "class 2, the same object with its flap open: a tree row that is \
+             open, a file menu's own head, and the path strip at the foot of a \
+             files column, which says where you are. `Reveal in folder` and \
+             `Browse…` are acts and wear `#i-folder-open-line`",
         ),
         (
             "i-gear",
@@ -2088,17 +2104,15 @@ mod tests {
     /// came into a `1.36×` ink band *except* the solid folder, which stayed the
     /// outlier at more than twice its neighbours' ink.
     ///
-    /// **The acceptance ruled that this is a price and not a fault** (裁1,
-    /// 2026-08-26 — *还是原来的好看*), so the gate no longer reads the two
-    /// folders as owing a stroke; it reads them as a class-2 entry on
-    /// [`FILLED_WITH_A_REASON`] with the `1.36×` written into the entry. That
-    /// is the whole difference between a policy with an argued exception and a
-    /// policy with a hole: the measurement is still on the page.
+    /// A fill among outlines is not a heavier drawing but a different kind of
+    /// drawing, and no slot levels it — which is why the answer was a second
+    /// rendition rather than a smaller box, both when P2 cut it and when the
+    /// 2026-08-27 acceptance restored it in the reporter's own words:
+    ///「这个菜单里所有的都是描边的,突然出现一个实心就会怪怪的」.
     ///
-    /// MUTATION: take `i-folder` off [`FILLED_WITH_A_REASON`] and this goes red
-    /// naming the four folder rows; point any other verb at a drawing with no
-    /// pen — `ClearScreen` at `ChromeMark::Pin { filled: true }`, say — and it
-    /// goes red naming that.
+    /// MUTATION: point `OpenFilesPane` back at `ChromeMark::Folder` and this
+    /// goes red naming it; move `FolderObject` off
+    /// [`ActionIcon::is_an_object`] and it goes red naming that instead.
     #[test]
     fn an_act_is_struck_and_only_a_thing_is_filled() {
         let mut unstruck = Vec::new();
@@ -2128,15 +2142,19 @@ mod tests {
     /// list instead of leaving it there as folklore.
     ///
     /// This is `REUSED_SHAPES`' own discipline applied to the other list. The
-    /// two folders are the case in point in both directions: P2 wrote them down
-    /// as *struck*, and had 裁1 not also deleted the struck renditions an entry
-    /// saying so would have outlived the drawing.
+    /// two folders are the case in point: had P2 struck `#i-folder` itself
+    /// rather than adding a rendition, an entry saying "the folder is filled"
+    /// would have outlived the fill.
     #[test]
     fn nothing_is_written_down_as_filled_that_is_not() {
         let filled: Vec<&str> = ActionIcon::ALL
             .iter()
             .map(|icon| icon.mark())
-            .chain([marks::tree_disclosure(0.0)])
+            .chain([
+                marks::ChromeMark::Folder,
+                marks::ChromeMark::FolderOpen,
+                marks::tree_disclosure(0.0),
+            ])
             .filter(|mark| !mark.is_struck())
             .map(marks::ChromeMark::drawing_id)
             .collect();
@@ -2146,13 +2164,128 @@ mod tests {
                 "{shape} is written down as filled ({why}) and is struck",
             );
         }
-        // And the object has one rendition again: 裁1 took the struck pair off
-        // the sheet, so there is no second folder for a drawing point to reach
-        // for. That is the compiler's fact now rather than a convention — the
-        // two variants are gone from `marks::ChromeMark` — and what is left to
-        // check here is that the one that survived is the solid.
+        // And the two renditions are two drawings of one object: the object's
+        // is solid, the act's is struck, and they are not the same shape.
         assert!(!marks::ChromeMark::Folder.is_struck());
+        assert!(marks::ChromeMark::FolderOutline.is_struck());
         assert!(!marks::ChromeMark::FolderOpen.is_struck());
+        assert!(marks::ChromeMark::FolderOpenOutline.is_struck());
+    }
+
+    /// **A folder is struck in a column of verbs and solid where it is a
+    /// place** — the 2026-08-27 ruling, over every entry of the registry and
+    /// both of the drawing's renditions.
+    ///
+    /// RED EVIDENCE (2026-08-27, at `dc4df3d`, which had deleted the struck
+    /// pair): every folder-bearing entry answered a fill, so the four verbs —
+    /// `Open files pane`, `New terminal in folder…`, `Reveal in folder`,
+    /// `Browse…` — were red here. The report that filed it is about the pane
+    /// menu, where the reader meets three of them:「这个菜单里所有的都是描边
+    /// 的,突然出现一个实心就会怪怪的」.
+    ///
+    /// **Both halves are asserted, and that is the point of one test rather
+    /// than two.** The failure this window has actually shipped twice is a
+    /// *swing*: P2 struck the acts and took the files column's foot with them,
+    /// the repair filled the acts and took the pane menu with them. A gate that
+    /// only knew one direction would have been green through both.
+    ///
+    /// MUTATION: point `RevealInFolder` at `ChromeMark::FolderOpen` and this
+    /// goes red naming it as a verb wearing a fill; point `FolderObject` at
+    /// `ChromeMark::FolderOutline` and it goes red naming it as a place wearing
+    /// a stroke.
+    #[test]
+    fn a_folder_is_struck_in_a_column_of_verbs_and_solid_where_it_is_a_place() {
+        /// Every rendition of the object, so an entry cannot leave the rule by
+        /// being pointed at a folder this list has not heard of: a new folder
+        /// drawing has to be named here before it can be worn.
+        const FOLDER_SHAPES: &[&str] = &[
+            "i-folder",
+            "i-folder-line",
+            "i-folder-open",
+            "i-folder-open-line",
+        ];
+        let mut wrong = Vec::new();
+        let (mut places, mut verbs) = (0_usize, 0_usize);
+        for icon in ActionIcon::ALL {
+            let mark = icon.mark();
+            let shape = mark.drawing_id();
+            if !FOLDER_SHAPES.contains(&shape) {
+                continue;
+            }
+            if icon.is_an_object() {
+                places += 1;
+                if mark.is_struck() {
+                    wrong.push(format!(
+                        "{} is a place and wears the struck {shape}",
+                        icon.name(),
+                    ));
+                }
+            } else {
+                verbs += 1;
+                if !mark.is_struck() {
+                    wrong.push(format!(
+                        "{} stands in a column of verbs and wears the solid {shape}",
+                        icon.name(),
+                    ));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "a folder is struck in a column of verbs and solid where it is a \
+             place:\n{}",
+            wrong.join("\n"),
+        );
+        // And the registry really does hold both kinds, so neither half of the
+        // rule can go green by having nothing to say.
+        assert!(places >= 3, "only {places} folder entries name a place");
+        assert!(verbs >= 4, "only {verbs} folder entries name an act");
+    }
+
+    /// **And the drawing points that are places reach for the entries that
+    /// are** — the surface half of the ruling above, which the registry alone
+    /// cannot state.
+    ///
+    /// RED EVIDENCE (2026-08-27, the report): the strip at the foot of a files
+    /// column showed the *struck* open folder under `D:\Developer\
+    /// BetterTerminal`, because P2 had read that mark as the button it also is
+    /// — "opens File Explorer" — and reached for `RevealInFolder`. It is a
+    /// button, and it is not in a column of verbs: it is a row that says where
+    /// this column is rooted, met beside a path and nothing else. Both feet —
+    /// the docked column's and the floating window's, which are two functions
+    /// by C39's split — now name the object.
+    ///
+    /// MUTATION: point either foot back at `ActionIcon::RevealInFolder` and
+    /// this goes red naming that file.
+    #[test]
+    fn a_path_strip_wears_the_folder_it_is_standing_in() {
+        // The strip's own drawing point and nothing else in the file: a menu
+        // row elsewhere in either module is welcome to the act's folder, and a
+        // gate that read the whole source would forbid it.
+        for (name, source, opens_at) in [
+            ("seats.rs", include_str!("seats.rs"), "fn push_files_foot("),
+            (
+                "float.rs",
+                include_str!("float.rs"),
+                "if geometry.wears_a_foot()",
+            ),
+        ] {
+            let at = source
+                .find(opens_at)
+                .unwrap_or_else(|| panic!("{name} still has a foot to draw"));
+            let body = &source[at..source[at..]
+                .find("\n}\n")
+                .map_or(source.len(), |end| at + end)];
+            assert!(
+                body.contains("ActionIcon::OpenFolderObject.mark()"),
+                "{name}'s foot no longer names the object's folder",
+            );
+            assert!(
+                !body.contains("ActionIcon::RevealInFolder.mark()"),
+                "{name}'s foot reaches for the act's folder where it stands in \
+                 a place",
+            );
+        }
     }
 
     /// **No body carries a bare alpha** — the 2026-08-25 specification's last

@@ -3437,6 +3437,7 @@ fn build_preview_markdown_body(
                             height_px: picture.height_px,
                             opacity: 1.0,
                             clip: Some(window),
+                            above_text: false,
                         });
                     }
                     None => {
@@ -3597,6 +3598,7 @@ fn place_preview_math(
                     height_px: picture.height_px,
                     opacity: 1.0,
                     clip: Some(window),
+                    above_text: false,
                 },
             ));
         }
@@ -61033,6 +61035,7 @@ impl Runtime<'_> {
                 height_px: raster.height_px,
                 opacity: 1.0,
                 clip: Some(geometry.body),
+                above_text: false,
             });
         }
         Some(layer)
