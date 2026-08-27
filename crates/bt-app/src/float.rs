@@ -1510,13 +1510,37 @@ impl FloatHost {
 
     /// Hand the keyboard bit to one window and take it from the others.
     ///
-    /// Nothing reads it yet — a float's tree answers no keys (see `float_layer`'s
-    /// `focus_ring: false`) — but there is one keyboard, and a field that said
-    /// three windows had it would be a lie waiting for the reader that arrives.
+    /// A float's tree answers no keys (see `float_layer`'s `focus_ring: false`),
+    /// but a float *carrying a page* very much does — `page_with_the_keyboard`
+    /// reads this bit through `focused_preview_float` — and there is one
+    /// keyboard, so a field that said three windows had it would be a lie
+    /// waiting for the reader that arrives.
     fn focus_only(&mut self, id: FloatId) {
         for win in self.pinned.iter_mut().chain(self.peek.iter_mut()) {
             win.focused = win.epoch == id && win.mode == FloatMode::Pinned;
         }
+    }
+
+    /// **Take the keyboard back from every float** (§7.34, user ruling
+    /// 2026-08-27).
+    ///
+    /// The other half of [`Self::focus_only`], and the half that was missing:
+    /// this bit was written by three doors and cleared by none, so one preview
+    /// float anywhere made `preview_keyboard_surface` answer `Some` for the rest
+    /// of the session — and `KeyboardOwner::preview` is read off that, so every
+    /// key in the window went to a document instead of to the shell the reader
+    /// was looking at. It is the files column's own sentence
+    /// (`set_files_keyboard(files.then_some(seat), …)`) said for the other
+    /// surface that can borrow the keyboard: a press on a pane takes it back.
+    ///
+    /// Returns whether anything changed, because a frame is owed only when it
+    /// did.
+    pub fn blur(&mut self) -> bool {
+        let mut changed = false;
+        for win in self.pinned.iter_mut().chain(self.peek.iter_mut()) {
+            changed |= std::mem::replace(&mut win.focused, false);
+        }
+        changed
     }
 
     /// Whether a *transient* peek is up — **the dismissal grace's own question,
@@ -1639,7 +1663,15 @@ impl FloatHost {
             origin,
             tenant,
             frame,
-            focused: mode == FloatMode::Pinned,
+            // **A window is born without the keyboard** (§7.34, user ruling
+            // 2026-08-27: 「浮窗建立不夺键盘」). Every way a pinned window comes
+            // to exist is a gesture that happened somewhere *else* — a card's
+            // head dragged six pixels out of the terminal, a pane popped out of
+            // the layout — and the hand that made it is still where it was. The
+            // one door onto a float's keyboard is a press inside the float
+            // ([`Self::raise`]), which is the same door a page has had since
+            // §7.14c.
+            focused: false,
             epoch: self.epoch,
             anchor,
             self_sizing: true,
@@ -1659,7 +1691,12 @@ impl FloatHost {
                     self.closing_at = None;
                 }
                 self.pinned.push(win);
-                self.focus_only(self.epoch);
+                // **And it takes it from nobody, because it has not taken it.**
+                // One keyboard: a window opening in front of a window that was
+                // pressed into does not inherit its keys, and the sister behind
+                // it does not go on holding keys the reader can no longer see
+                // where they land.
+                self.blur();
             }
         }
         self.epoch
@@ -3634,6 +3671,83 @@ mod tests {
         let mut host = FloatHost::default();
         let peek = open_peek(&mut host, TAB, now);
         assert!(!host.live(peek).expect("open").focused);
+    }
+
+    /// RED — **a window torn out of the terminal does not take the terminal's
+    /// keyboard with it**, and a press on a pane takes it back (§7.34, user
+    /// report 2026-08-27: 「视频卡拖成浮窗之后,终端打不了字」).
+    ///
+    /// The bit this holds is not decoration: `focused_preview_float` reads it,
+    /// `preview_keyboard_surface` answers `Some` on the strength of it, and
+    /// `KeyboardOwner::preview` is that answer — so a float that keeps it keeps
+    /// every keystroke in the window, and the shell under the reader's hand
+    /// receives nothing. Before this ticket the bit was written by three doors
+    /// (`open`, `raise`, `promote`) and cleared by none.
+    ///
+    /// MUTATIONS (each measured red on its own build, then restored):
+    /// ① `open`'s **whole** old arm back — `focused: mode == FloatMode::Pinned`
+    ///    *and* `focus_only(self.epoch)` — and the first assertion goes red: a
+    ///    card dragged out of the terminal has the keys before the hand has left
+    ///    the terminal. **Putting only the field back leaves this green**,
+    ///    because the `blur()` beside it clears the field on the same statement;
+    ///    the two lines are one sentence and the mutation has to be the whole
+    ///    sentence.
+    /// ② make [`FloatHost::blur`] a no-op returning `false` — the third goes
+    ///    red, and no press anywhere ever gives the keyboard back.
+    #[test]
+    fn a_float_holds_the_keyboard_only_while_a_press_inside_it_says_so() {
+        let now = Instant::now();
+        let mut host = FloatHost::default();
+        let torn = host.open(
+            FloatMode::Pinned,
+            None,
+            files_tenant("C:/x"),
+            frame(100.0, 100.0, 400.0, 300.0),
+            None,
+            now,
+        );
+        assert!(
+            !host.live(torn).expect("open").focused,
+            "a window is born without the keyboard: the gesture that made it \
+             happened in the terminal, and the hand is still there"
+        );
+
+        // A press inside it. `raise` answers whether the *order* changed, which
+        // for the only window there is is `false` — the keyboard is the other
+        // half of what it does, and the half this test is about.
+        host.raise(torn);
+        assert!(
+            host.live(torn).expect("open").focused,
+            "and a press inside it is the one door onto its keyboard"
+        );
+
+        assert!(host.blur(), "a press on a pane takes the keyboard back");
+        assert!(
+            !host.live(torn).expect("open").focused,
+            "so the shell the reader pressed on receives the keys again"
+        );
+        assert!(
+            !host.blur(),
+            "and a second press owes no frame, because nothing changed"
+        );
+
+        // A second window opening in front of it inherits nothing and leaves
+        // nothing behind: one keyboard, and neither of them has been pressed.
+        host.raise(torn);
+        let second = host.open(
+            FloatMode::Pinned,
+            None,
+            files_tenant("C:/y"),
+            frame(200.0, 200.0, 400.0, 300.0),
+            None,
+            now,
+        );
+        assert!(!host.live(second).expect("open").focused);
+        assert!(
+            !host.live(torn).expect("open").focused,
+            "and the window behind it does not go on holding keys the reader \
+             can no longer see landing"
+        );
     }
 
     /// G78: a dismissed float stays on screen for its exit but stops answering
