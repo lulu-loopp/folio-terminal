@@ -13393,8 +13393,21 @@ pub struct PreviewRailMeasure {
     pub address_width: f32,
     /// Each path segment's drawn width, root first and the file last.
     pub segments: Vec<f32>,
-    /// `flippable` (P28) — the buffer is markdown, so the rail carries `</>`.
-    /// The head carried it until this ruling moved it here.
+    /// `flippable` (P28) — this row's content has a **second face**, so the rail
+    /// carries `</>`. The head carried it until the 2026-08-24 ruling moved it
+    /// here.
+    ///
+    /// **Two kinds of content answer yes, and for one reason** (user ruling
+    /// 2026-08-26): a markdown file, whose render and whose source are two
+    /// readings of the same bytes, and a **local page whose bytes are text** —
+    /// `.html`, `.htm` — whose page and whose source are the same pair asked of
+    /// a browser instead of a parser. What the rail draws is identical in both
+    /// cases because the question is; who answers it is the host's business and
+    /// not this measurement's.
+    ///
+    /// Still `false` for everything with only one face: a remote page (its
+    /// source is not on this disk), a `.pdf` (there is no text in it to show),
+    /// a picture, a diff, a commit graph.
     pub flip: bool,
     /// The `Open` caption's drawn width.
     pub open_width: f32,
@@ -13571,6 +13584,15 @@ pub fn preview_rail_geometry_in(
             // by.
             geometry.external = take_right(box_);
             geometry.copy = take_right(box_);
+            // **And `</>` inboard of the copy, exactly where a file's rail keeps
+            // it** (user ruling 2026-08-26). A local page whose bytes are text
+            // has a source face, and the button that turns to it is the same
+            // button on the same side of the same neighbour on both rails — a
+            // flip that sat outboard of `⧉` here and inboard of it there would
+            // be two buttons wearing one glyph. Absent on every rail that
+            // [`PreviewRailMeasure::flip`] says has no second face: a remote
+            // page has no file on this disk, and a `.pdf` has no text in it.
+            geometry.flip = measure.flip.then(|| take_right(box_)).flatten();
             let room = (right - left).max(0.0);
             if room <= 0.0 {
                 return geometry;
@@ -16027,6 +16049,27 @@ pub(crate) fn push_preview_rail(
                 geometry.copy,
                 PreviewRailPart::Copy,
                 crate::icons::ActionIcon::CopyAddress.mark(),
+                PREVIEW_RAIL_GLYPH_LOGICAL_PX,
+                true,
+            );
+            // **The same two glyphs a file's rail flips between** (user ruling
+            // 2026-08-26), drawn from the same pair and switched by the same
+            // field: what a press turns *to* is what the button shows, which is
+            // the reload/stop precedent this row already keeps three buttons to
+            // the left. `None` when the page has no source face, and `button`
+            // draws nothing for a box that is not there.
+            button(
+                sprites,
+                hovered,
+                scale,
+                palette,
+                geometry.flip,
+                PreviewRailPart::Flip,
+                if content.flip_to_source {
+                    crate::icons::ActionIcon::ViewSource.mark()
+                } else {
+                    crate::icons::ActionIcon::ViewRendered.mark()
+                },
                 PREVIEW_RAIL_GLYPH_LOGICAL_PX,
                 true,
             );
@@ -20705,6 +20748,90 @@ mod tests {
                 preview_rail_geometry(rect, SCALE, &measure),
                 preview_rail_geometry_in(band, SCALE, &measure),
                 "one derivation, whichever host cut the band"
+            );
+        }
+    }
+
+    /// RED — **an address row carries `</>` when its page has a second face, and
+    /// carries it in the place a file's row keeps it** (user ruling 2026-08-26;
+    /// DESIGN §7.7 ⑭).
+    ///
+    /// The button set is the whole of what this pins, and it is two claims:
+    /// that the flip *appears* on an `Address` rail at all (it never did before
+    /// this ruling — a page's row was three navigation buttons, an address, a
+    /// copy and an arrow), and that it appears **inboard of `⧉`** so that the
+    /// two rails put the same glyph on the same side of the same neighbour. A
+    /// reader who has learnt where `</>` is on a markdown file must not have to
+    /// learn it again on a page.
+    ///
+    /// The `false` half is not a formality: it is the remote page and the
+    /// `.pdf`, which reach this function as a measurement with nothing to flip
+    /// to, and a row that drew the button anyway would be offering a press that
+    /// cannot be answered.
+    ///
+    /// RED GATE ①: delete the `geometry.flip` line from the `Address` arm and
+    /// the first block fails — a local page's row loses the button entirely.
+    /// RED GATE ②: take the flip *before* the copy and the ordering assertion
+    /// fails, which is the same glyph landing on either side of `⧉` depending
+    /// on what kind of thing the seat is holding.
+    #[test]
+    fn a_local_pages_row_carries_the_flip_where_a_files_row_keeps_it() {
+        const SCALE: f32 = 2.0;
+        let band = [0.0, 0.0, 900.0, 44.0];
+        let of = |flip: bool| {
+            preview_rail_geometry_in(
+                band,
+                SCALE,
+                &PreviewRailMeasure {
+                    kind: PreviewRailKind::Address,
+                    address_width: 260.0,
+                    flip,
+                    ..PreviewRailMeasure::default()
+                },
+            )
+        };
+        let offered = of(true);
+        let (flip, copy, external, address) = (
+            offered
+                .flip
+                .expect("a page with a source face carries `</>`"),
+            offered.copy.expect("the address row keeps its copy"),
+            offered.external.expect("and its way out to a browser"),
+            offered.address.expect("and the address itself"),
+        );
+        assert!(
+            flip[2] <= copy[0],
+            "`</>` stands inboard of `⧉`, which is where a file's row puts it: \
+             flip={flip:?} copy={copy:?}"
+        );
+        assert!(
+            copy[2] <= external[0],
+            "and `⧉` still stands inboard of `↗`, which this ruling did not move"
+        );
+        assert!(
+            address[2] <= flip[0],
+            "the field yields to the buttons rather than running under them"
+        );
+        assert_eq!(
+            of(false).flip,
+            None,
+            "a page with no source on this disk carries no flip at all"
+        );
+        // And the rest of the row is untouched by the new button's absence or
+        // presence — the three navigation buttons are the same rectangles, which
+        // is what keeps a `.pdf` page's row and an `.html` page's row the same
+        // furniture with one thing added.
+        for (with, without) in [
+            (offered.back, of(false).back),
+            (offered.forward, of(false).forward),
+            (offered.reload, of(false).reload),
+            (offered.external, of(false).external),
+            (offered.copy, of(false).copy),
+        ] {
+            assert_eq!(
+                with, without,
+                "the flip takes room from the field, not from \
+                 the buttons that were already there"
             );
         }
     }
