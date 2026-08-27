@@ -55,7 +55,7 @@ Win10 1809+ 与 Win11 各一台无 VS/VC redist/WebView2 的 VM,从 zip 开始:`
 README(中英:是什么、截图/GIF、下载、SmartScreen 说明、隐私节、快捷键表自 `BINDINGS` 生成、已知问题含跨 DPI 未复现)、SECURITY.md、CHANGELOG、CONTRIBUTING(三门纪律);内部中文规划文档保留公开(透明)但门 0 已清路径。
 
 ## 可后延
-winget(需 CRT 门过)、scoop(main bucket 进不去,自建 bucket)、GitHub Pages 单页、v0.2 签名、SBOM 深化。
+winget(需 CRT 门过)、scoop(main bucket 进不去,自建 bucket)、GitHub Pages 单页、v0.2 签名、SBOM 深化。**Windows 11 顶层右键菜单**(「Open Folio here」现只在「显示更多选项」经典层;顶层需带包身份的稀疏 MSIX + `IExplorerCommand` COM 服务器 + 签名——排在 v0.2 签名之后)。
 
 ## 发布判据(条件,非日期)
 门 0–5 全绿 + 门 6 两裁决落地 + 目标仓一次绿灯 + 历史重写完成 + 干净机截图入库。
