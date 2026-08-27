@@ -779,6 +779,11 @@ docs/plans/release/clean-vm-evidence/
 
 ---
 
+### 3.4a 进客户机的脚本必须带 UTF-8 BOM(2026-08-27 门 5 首跑事故)
+
+客户机里跑 `smoke.ps1` 与 `in-guest.ps1` 的是 **Windows PowerShell 5.1**,它读无 BOM 的文件按 ANSI 代码页解;两份脚本都有非 ASCII 文本(一处消息里的破折号就够了),按 ANSI 读进去的字节把一个带引号的字符串拆坏,连带整个 `switch` 解析失败——首跑在 `unpack` 阶段以「Guest program exited with non-zero exit code: 1」结束,宿主上看不到原因,把 `-Phase unpack` 的输出重定向到文件再 `copyFileFromGuestToHost` 回来才见到 `Unexpected token`。现在两份脚本带 BOM,`run-smoke-in-vm.ps1` 在复制之前先验 BOM,缺就在宿主上拒绝。宿主侧脚本跑在 pwsh 7(默认 UTF-8),不受影响。
+
+
 ## 8. 已知空白与未验证项(一处列全)
 
 | 项 | 状态 |

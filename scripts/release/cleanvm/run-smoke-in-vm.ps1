@@ -229,6 +229,25 @@ function Invoke-GuestPowerShell {
             '-NoProfile', '-ExecutionPolicy', 'Bypass') + $PowerShellArguments)
 }
 
+# ── What goes into the guest must be readable by Windows PowerShell 5.1 ──────
+#
+# The guest runs `smoke.ps1` and `in-guest.ps1` under Windows PowerShell 5.1,
+# which reads a file with no byte-order mark in the machine's ANSI code page.
+# Both scripts carry non-ASCII text (an em dash in a message was enough), and
+# read as ANSI those bytes broke a quoted string and took a whole `switch` with
+# it — gate 5's first smoke on 2026-08-27 died in `unpack` with parse errors
+# nobody on the host could see. A UTF-8 BOM is the one spelling both editions
+# read the same way, so a guest-bound script without one is refused here, on
+# the host, before anything is copied.
+foreach ($guestBound in @(
+        (Join-Path $root 'scripts\release\smoke.ps1'),
+        (Join-Path $root 'scripts\release\cleanvm\in-guest.ps1'))) {
+    $head = [byte[]](Get-Content -LiteralPath $guestBound -AsByteStream -TotalCount 3)
+    if (-not ($head.Count -eq 3 -and $head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF)) {
+        throw "$guestBound has no UTF-8 byte-order mark; Windows PowerShell 5.1 in the guest would read it as ANSI"
+    }
+}
+
 # ── What has to be on the host before any of it means anything ───────────────
 
 if (-not $Zip) {

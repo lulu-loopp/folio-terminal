@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     The half of the clean-machine gate that runs inside the virtual machine.
 

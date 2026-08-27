@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Start the built `folio.exe` for real and check the six things a build can be
     green and still be broken about.
