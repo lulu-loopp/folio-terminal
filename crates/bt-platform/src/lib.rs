@@ -1500,6 +1500,12 @@ pub mod hang;
 #[cfg(windows)]
 pub mod attention_pipe;
 
+/// The first frame of a video, out of Media Foundation — see the module's own
+/// note for the apartment it runs in and for why the set of files it can draw is
+/// not the set that could be played.
+#[cfg(windows)]
+pub mod video;
+
 #[cfg(windows)]
 mod webview;
 

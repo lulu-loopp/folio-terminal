@@ -95,6 +95,26 @@ pub enum PreviewFtype {
     /// card said "no preview" while a double-click opened the page. A class is
     /// what a name *means*, and a name cannot mean two things at once.
     Web,
+    /// **A video** (user ruling 2026-08-27; `docs/DESIGN.md` §7.23) — a name in
+    /// [`VIDEO_EXTENSIONS`].
+    ///
+    /// It is **not** a page and this class is the record of that. §7.16's two
+    /// pinned refusals stand exactly as they were measured: a top-level media
+    /// response has no viewer in the engine on the preview seat, so a video sent
+    /// down the page lane draws a browser error where an honest card used to be.
+    /// What changed on 2026-08-27 is not where a video opens but what is *in* the
+    /// thing it opens: this window grew a decoder of its own
+    /// ([`bt_platform::video::first_frame`]), so the surface that used to say "no
+    /// preview for this file type" now shows the video's own picture and says how
+    /// long it is.
+    ///
+    /// So this class means one thing and only one: **a name this window can put a
+    /// face on.** It does not mean the file will play — nothing in this build
+    /// plays anything — and it does not even promise a picture, because the set
+    /// of containers Media Foundation reads is not the set this table lists. See
+    /// [`VIDEO_EXTENSIONS`] for that mismatch, which is deliberate and written
+    /// down rather than smoothed over.
+    Video,
     /// No reader in this window. The "no preview" card, by name alone.
     Unknown,
 }
@@ -104,7 +124,7 @@ impl PreviewFtype {
     ///
     /// The mock-up interpolates the ftype string itself into `.fpeek-type`, so
     /// the chip says exactly what the classifier calls the file and there is no
-    /// second, prettier vocabulary to keep in step with it. These are those five
+    /// second, prettier vocabulary to keep in step with it. These are those
     /// strings.
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -114,6 +134,7 @@ impl PreviewFtype {
             Self::Table => "table",
             Self::Text => "text",
             Self::Web => "web",
+            Self::Video => "video",
             Self::Unknown => "unknown",
         }
     }
@@ -228,6 +249,63 @@ pub fn path_page_glance(path: &std::path::Path) -> Option<PageGlance> {
         .map(|(_, glance)| *glance)
 }
 
+/// Extensions that name a **video** — [`PreviewFtype::Video`] asked of a name
+/// (user ruling 2026-08-27; `docs/DESIGN.md` §7.23).
+///
+/// **Three spellings, and the shortness of the list is the ruling.** They are
+/// the three the engine on the preview seat was measured to accept inside a page
+/// (`canPlayType` answered `maybe` for `video/mp4`, `video/webm` and
+/// `video/x-m4v` on 2026-08-25), and the reason a list about *pictures* is drawn
+/// from a measurement about *playing* is that this window has promised itself a
+/// second slice: the day a video can be played, the file that shows a face and
+/// the file that plays must be the same file. A class that admitted more than
+/// could ever be played would spend that day being cut back, and cutting a class
+/// back is how a reader learns that a face is not a promise.
+///
+/// **`mov` is the one deliberate absence, and it is not an oversight.** Media
+/// Foundation reads it — `.mov` is the same MPEG-4 File Source as `.mp4`, so the
+/// decoder under this window could draw its first frame today — and the engine
+/// that would have to play it answers `canPlayType('video/quicktime')` with the
+/// empty string, which is the strongest "no" that API has. Admitting it would
+/// buy one picture now and owe an apology later.
+///
+/// # The set that can be drawn is not the set that is listed
+///
+/// Both directions, and both are real:
+///
+/// * A `.webm` carrying VP9 or AV1 plays in that engine, which ships its own
+///   decoders for both, and may have **no** Media Foundation decoder on a stock
+///   machine — so it is in this table and its card may still have no picture on
+///   it. That is not a bug and it is not a hole in the table: it is
+///   [`bt_platform::video::first_frame`]'s ordinary `None`, and the card states
+///   the facts it has instead.
+/// * A `.mov`, a `.mkv`, an `.avi` — the first draws in Media Foundation and the
+///   last two do not — are **all** outside this table, and all get the same "no
+///   preview for this file type" card they have always had.
+///
+/// The rule that resolves the two is that *this table is a promise about the
+/// window*, not a report about the platform: a name in it is a name this window
+/// has a face for, whether or not a given machine's codecs can fill that face in.
+const VIDEO_EXTENSIONS: [&str; 3] = ["mp4", "m4v", "webm"];
+
+/// **Whether a path's real extension names a video** — [`VIDEO_EXTENSIONS`]
+/// asked of a `Path` rather than of a name.
+///
+/// [`path_names_a_page`]'s twin, and deliberately the same shape down to the
+/// last clause, so every rule already written on that function holds here
+/// without being restated: the **real** extension and never a substring of the
+/// name (`clip.mp4.txt` is a text file that spells a video in the middle of
+/// itself), case ignored, and a file whose whole name is `.mp4` has no extension
+/// at all and is therefore not a video (§7.1.5j ⑦(e)).
+#[must_use]
+pub fn path_names_a_video(path: &std::path::Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        VIDEO_EXTENSIONS
+            .iter()
+            .any(|video| extension.eq_ignore_ascii_case(video))
+    })
+}
+
 /// Extensions that name something this window can show as text (3093).
 ///
 /// **`html` and `htm` are not here** (user ruling 2026-08-23): they moved to
@@ -283,6 +361,15 @@ pub fn preview_ftype(name: &str) -> PreviewFtype {
     // is the thing this ruling exists to end.
     if PAGE_EXTENSIONS.iter().any(|(page, _)| *page == ext) {
         return PreviewFtype::Web;
+    }
+    // **After the page question and before `Unknown`**, which is where a class
+    // that is not a page and is not nothing belongs. The two tables cannot
+    // overlap — a video spelling in [`PAGE_EXTENSIONS`] is the thing §7.16's
+    // pinned refusal exists to catch — so the order between them is a
+    // formality, and it is written this way round because that refusal is the
+    // older claim and reads first.
+    if VIDEO_EXTENSIONS.contains(&ext.as_str()) {
+        return PreviewFtype::Video;
     }
     PreviewFtype::Unknown
 }
@@ -362,10 +449,13 @@ pub fn is_editable(name: &str, ftype: PreviewFtype, md_source: bool) -> bool {
         PreviewFtype::Markdown => md_source,
         // A page has no text of this window's to put a caret in: what is on the
         // glass belongs to the engine, and the one place typing goes is inside
-        // the page itself.
-        PreviewFtype::Image | PreviewFtype::Table | PreviewFtype::Web | PreviewFtype::Unknown => {
-            false
-        }
+        // the page itself. A video is a picture here, and for the same reason a
+        // `.png` is not editable — there is nothing on the surface that is text.
+        PreviewFtype::Image
+        | PreviewFtype::Table
+        | PreviewFtype::Web
+        | PreviewFtype::Video
+        | PreviewFtype::Unknown => false,
     }
 }
 
@@ -405,6 +495,21 @@ pub enum PreviewView {
     /// truth, and that no host quietly draws a "no preview" card over a live
     /// browser.
     Web,
+    /// **One video, standing still** (user ruling 2026-08-27; §7.23).
+    ///
+    /// Its own answer rather than [`Self::Image`], and the difference is what it
+    /// is a view *of*. The pixels take the same channel a decoded picture takes
+    /// — they are one frame of RGBA and the host that draws a `.png` draws them
+    /// without knowing — but a picture's meta line says how many pixels the file
+    /// has and a video's says **how long it is**, and a view is precisely the
+    /// thing that decides which sentence a surface writes.
+    ///
+    /// **It does not play, and that is this slice's whole boundary.** The frame
+    /// is a face: it says which clip this is, how long, how large. Playing is a
+    /// second slice with a route already ruled on (a page hosting a `<video>`;
+    /// `docs/DESIGN.md` §7.23 ④), and it will arrive as a different view rather
+    /// than as this one growing controls.
+    Video,
     /// The "no preview" card.
     None,
 }
@@ -432,7 +537,14 @@ impl PreviewView {
             // Pixels, on the host's own image channel: a seat spends the
             // renderer's one `set_preview_image` slot, a float and the glance
             // card ride their layer.
-            Self::Image => PreviewChrome::Picture,
+            //
+            // **A video's frame is on that channel too**, and joining it rather
+            // than growing a fifth arrangement is the whole reason the frame is
+            // handed back as RGBA: a still is a picture, whatever produced it,
+            // and a second painter for the same shape of pixels would be a
+            // second place for a float to be forgotten in (which is exactly how
+            // [`Self::Graph`] arrived as an empty window in 2026-08-20).
+            Self::Image | Self::Video => PreviewChrome::Picture,
             // Marks in the body rectangle, pushed by
             // [`crate::git_graph::push_graph`] — see [`Self::Graph`] for why the
             // picture is chrome and the document is empty.
@@ -469,6 +581,9 @@ pub enum PreviewChrome {
 pub fn preview_view(name: &str, ftype: PreviewFtype, md_source: bool) -> PreviewView {
     if ftype == PreviewFtype::Image {
         return PreviewView::Image;
+    }
+    if ftype == PreviewFtype::Video {
+        return PreviewView::Video;
     }
     if ftype == PreviewFtype::Markdown && !md_source {
         return PreviewView::Markdown;
@@ -2038,6 +2153,100 @@ pub fn format_byte_size(bytes: u64) -> String {
     }
 }
 
+/// **What one open of a video learned besides its picture** (user ruling
+/// 2026-08-27; §7.23).
+///
+/// Three optional facts and no picture, because the picture and the facts have
+/// different lifetimes on the surfaces that draw them: pixels are held in the
+/// window's decode cache and evicted like any other picture's, while these are a
+/// sentence, cost nothing to keep, and are still true of a file whose frame this
+/// machine has no decoder for. That last case is the whole reason they are a
+/// type of their own — see [`video_fact_lines`], whose degraded form is written
+/// entirely out of a `Self::default()` and a file name.
+///
+/// **`native` is the video's own size and not the frame's.** The two differ
+/// whenever the decoder honoured the fit it was asked for, and the sentence a
+/// reader wants is about the recording rather than about the thumbnail this
+/// window happened to request.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VideoFacts {
+    /// How long it runs, in milliseconds. `None` for a container that declares
+    /// no duration — a stream still being written, a capture with no index.
+    pub duration_ms: Option<u64>,
+    /// The recording's own pixel dimensions.
+    pub native: Option<(u32, u32)>,
+    /// How large the file is. Read by the same worker hop that opened it, so a
+    /// file whose frame will not decode still has this one.
+    pub bytes: Option<u64>,
+}
+
+/// A duration the way a player's counter says it: `m:ss`, and `h:mm:ss` once
+/// there is an hour to say.
+///
+/// Minutes are **not** zero-padded and seconds always are, which is the shape
+/// every media counter in the world has and the reason a reader can tell this
+/// field from the resolution beside it without a label. Seconds are truncated
+/// rather than rounded: a clip of 59.6 seconds says `0:59`, because a counter
+/// that said `1:00` would be naming a moment the file does not reach.
+#[must_use]
+pub fn format_duration(milliseconds: u64) -> String {
+    let total = milliseconds / 1000;
+    let (hours, minutes, seconds) = (total / 3600, (total / 60) % 60, total % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// **The two lines a video's card and a video's pane both print** (user ruling
+/// 2026-08-27; §7.23).
+///
+/// One function for both surfaces, because they are one sentence said at two
+/// sizes — the glance card and the preview pane are two readings of one file,
+/// and the day they were written separately is the day one of them would start
+/// saying something the other does not.
+///
+/// * **First, what the recording is**: how long it runs and how large its
+///   picture is, joined by the same middle dot the picture's meta line uses.
+/// * **Then, what the file is**: its size on disk.
+///
+/// # The degraded line, which is the point of the first argument
+///
+/// A machine with no decoder for this container answers the frame with nothing,
+/// and then "how long" and "how large" are both unknown — but the reader is
+/// still hovering a file and still owed an answer. So the first line falls back
+/// to the **format**, spelled the way the meta line under a picture spells one:
+/// the extension, upper-cased. `MP4` and a size is a poorer card than a frame
+/// and a running time, and it is a card rather than the "no preview for this
+/// file type" refusal this class was invented to stop showing.
+///
+/// Nothing is ever replaced by a placeholder and nothing moves up to fill a gap:
+/// a duration that never arrives leaves the resolution standing alone, exactly
+/// as [`crate::file_peek::facts_lines`] leaves a size standing alone under a PDF
+/// whose page count could not be read.
+#[must_use]
+pub fn video_fact_lines(extension: Option<&str>, facts: VideoFacts) -> [Option<String>; 2] {
+    let mut first: Vec<String> = Vec::new();
+    if let Some(duration_ms) = facts.duration_ms {
+        first.push(format_duration(duration_ms));
+    }
+    if let Some((width, height)) = facts.native {
+        first.push(format!("{width} \u{00d7} {height}"));
+    }
+    if first.is_empty() {
+        first.extend(
+            extension
+                .map(str::to_uppercase)
+                .filter(|extension| !extension.is_empty()),
+        );
+    }
+    [
+        (!first.is_empty()).then(|| first.join(" \u{b7} ")),
+        facts.bytes.map(format_byte_size),
+    ]
+}
+
 /// Whether a path names a share on another machine.
 ///
 /// §7.1.3, with §3.4's attachment discipline behind it: **a network path is not
@@ -2524,7 +2733,14 @@ impl PreviewBuffer {
                         // A picture's pixels come down the decode lane that
                         // already exists, so its buffer is complete the moment
                         // it is made.
-                        PreviewFtype::Image => PreviewLoad::Ready,
+                        // A video's frame comes down that same decode lane, so
+                        // its buffer is complete on the same terms — see
+                        // [`PreviewFtype::Video`]. It is `Ready` rather than
+                        // `Refused(Type)` because the type is no longer the
+                        // problem: this window has a face for it, and a buffer
+                        // that said otherwise would be the 2026-08-23 defect
+                        // over again with a different extension.
+                        PreviewFtype::Image | PreviewFtype::Video => PreviewLoad::Ready,
                         // **A page-named file in the document pool is a page the
                         // page lane could not open**, and its card must say
                         // which disk answer that was — not `Refused(Type)`,
@@ -4853,9 +5069,153 @@ mod tests {
                  lane would replace the honest refusal card with a browser error"
             );
         }
-        // And they land where a name this window cannot read has always landed:
-        // the "no preview for this file type" card.
-        assert_eq!(preview_ftype("clip.mp4"), PreviewFtype::Unknown);
+        // **Where they land instead** (user ruling 2026-08-27; §7.23). Until
+        // that day the answer was `Unknown` for every one of them and the card
+        // was the "no preview for this file type" refusal. Now three of the
+        // spellings above have a class of their own — a face this window can
+        // draw without an engine — and the rest are still the refusal. Neither
+        // half is [`PreviewFtype::Web`], which is the whole of what this test
+        // is about and the reason both halves are asserted here rather than
+        // somewhere a reader of the ruling would not find them.
+        assert_eq!(preview_ftype("clip.mp4"), PreviewFtype::Video);
+        assert_eq!(preview_ftype("screencast.webm"), PreviewFtype::Video);
+        assert_eq!(preview_ftype("clip.mov"), PreviewFtype::Unknown);
+        assert_eq!(preview_ftype("clip.mkv"), PreviewFtype::Unknown);
+    }
+
+    /// RED — **the video class has one list, and the two readings of it agree on
+    /// every entry** (user ruling 2026-08-27; §7.23).
+    ///
+    /// The page class's own pin said one file down, and it is here for the
+    /// identical reason: [`preview_ftype`] asks the table of a *name* and
+    /// [`path_names_a_video`] asks it of a *path*, and while a class has two
+    /// readings one of them can drift — which is the whole account §7.10 ⑥
+    /// pays. Every rule that governs the page reading governs this one, and each
+    /// is asserted rather than assumed: the real extension and never a
+    /// substring, case ignored, and a whole name of `.mp4` is a dotfile with no
+    /// extension at all.
+    ///
+    /// RED GATE: spell the class again anywhere — a `matches!(ext, "mp4" |
+    /// "m4v" | "webm")` beside the table — and drop one spelling from the copy;
+    /// the two halves of this test disagree on exactly that name.
+    #[test]
+    fn the_video_class_reads_the_same_from_a_name_and_from_a_path() {
+        for name in ["clip.mp4", "CLIP.MP4", "trailer.m4v", "screencast.WebM"] {
+            assert_eq!(preview_ftype(name), PreviewFtype::Video, "{name}");
+            assert!(
+                path_names_a_video(std::path::Path::new(&format!(r"D:\shots\{name}"))),
+                "{name}"
+            );
+        }
+        for name in [
+            // Outside the class by measurement, not by omission.
+            "clip.mov",
+            "clip.mkv",
+            "clip.avi",
+            // The two neighbours a substring reading would sweep up.
+            "clip.mp4.txt",
+            "clip.webmx",
+            // A whole name of `.mp4` has no extension at all (§7.1.5j ⑦(e)),
+            // and the dotfile arm above this one in `preview_ftype` says so
+            // first — which is the same answer the path reading gives without
+            // either knowing about the other.
+            ".mp4",
+        ] {
+            assert_ne!(preview_ftype(name), PreviewFtype::Video, "{name}");
+            assert!(
+                !path_names_a_video(std::path::Path::new(&format!(r"D:\shots\{name}"))),
+                "{name}"
+            );
+        }
+        // And the class is disjoint from the page's, which is what makes the
+        // order of the two questions in `preview_ftype` a formality rather than
+        // a rule somebody could get wrong.
+        for video in VIDEO_EXTENSIONS {
+            assert!(
+                !PAGE_EXTENSIONS.iter().any(|(page, _)| *page == video),
+                "{video} cannot be both a video and a page"
+            );
+        }
+    }
+
+    /// PIN — **the counter under a video reads like a counter.**
+    ///
+    /// MUTATION: zero-pad the minutes and `0:06` becomes `00:06`, which is a
+    /// duration nobody writes; drop the seconds' padding and `1:05` becomes
+    /// `1:5`.
+    #[test]
+    fn a_length_is_said_the_way_a_player_says_it() {
+        assert_eq!(format_duration(0), "0:00");
+        assert_eq!(format_duration(6_200), "0:06");
+        assert_eq!(format_duration(65_000), "1:05");
+        assert_eq!(format_duration(600_000), "10:00");
+        assert_eq!(format_duration(3_600_000), "1:00:00");
+        assert_eq!(format_duration(7_384_000), "2:03:04");
+        // Truncated and never rounded: a clip does not reach the second it has
+        // not got to.
+        assert_eq!(format_duration(59_600), "0:59");
+    }
+
+    /// RED — **the two lines a video prints, and the one it falls back to**
+    /// (user ruling 2026-08-27; §7.23).
+    ///
+    /// One function for the glance card and for the preview pane, so the whole
+    /// of what either surface says about a recording is asserted in one place.
+    ///
+    /// The last case is the slice's degradation path and the reason the ruling
+    /// asked for a fallback at all: a container this machine has no decoder for
+    /// gives up no frame, no length and no resolution, and the card must still
+    /// be a card. What is left is the format and the size — which is poorer than
+    /// a picture and is not the "No preview for this file type" refusal this
+    /// class was invented to stop showing.
+    ///
+    /// RED GATE: delete the `first.is_empty()` fallback and a video whose frame
+    /// would not decode goes back to a card with one line on it — the size, and
+    /// nothing that says what the file even is.
+    #[test]
+    fn a_video_says_how_long_how_large_and_how_big() {
+        assert_eq!(
+            video_fact_lines(
+                Some("mp4"),
+                VideoFacts {
+                    duration_ms: Some(6_200),
+                    native: Some((1920, 1080)),
+                    bytes: Some(12_582_912),
+                },
+            ),
+            [
+                Some("0:06 \u{b7} 1920 \u{d7} 1080".to_owned()),
+                Some("12.0 MB".to_owned())
+            ]
+        );
+        // A fact that never arrives is left unsaid and nothing moves up to fill
+        // its place: the length alone still reads as a length.
+        assert_eq!(
+            video_fact_lines(
+                Some("webm"),
+                VideoFacts {
+                    duration_ms: None,
+                    native: Some((640, 480)),
+                    bytes: None,
+                },
+            ),
+            [Some("640 \u{d7} 480".to_owned()), None]
+        );
+        // Nothing decoded at all: the format, upper-cased, and the size.
+        assert_eq!(
+            video_fact_lines(
+                Some("webm"),
+                VideoFacts {
+                    duration_ms: None,
+                    native: None,
+                    bytes: Some(4_096),
+                },
+            ),
+            [Some("WEBM".to_owned()), Some("4 KB".to_owned())]
+        );
+        // And a file with no extension and no answer says nothing rather than
+        // printing an empty chip where a format would be.
+        assert_eq!(video_fact_lines(None, VideoFacts::default()), [None, None]);
     }
 
     /// PIN — **the page class has one list, and the two readings of it agree on

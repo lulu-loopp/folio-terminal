@@ -26,6 +26,13 @@ windows = { version = "0.62.2", features = [
     "UI_Notifications",
     "Win32_Foundation",
     "Win32_Globalization",
+    # `IMFSourceReader` and the platform under it: the first frame of a video,
+    # for the hover card and the preview pane (`src/video.rs`, DESIGN §7.23).
+    # This is a **feature**, not a package — `windows` is already in the lock
+    # file, so turning the namespace on adds not one line to it, which is
+    # `docs/DESIGN.md` §8's bar and the same door `hayro` and `serde_json` came
+    # through. What it costs is a batch of generated bindings at compile time.
+    "Win32_Media_MediaFoundation",
     # The four that let the composition device rasterize **one** thing: the
     # 1×1 premultiplied surface every web pane's ground is scaled out of
     # (`page_ground`). A composition device built on a null rendering device
@@ -91,6 +98,13 @@ windows = { version = "0.62.2", features = [
     # and nothing here ever passes.
     "Win32_System_Registry",
     "Win32_System_Threading",
+    # The `PROPVARIANT` conversions `IMFSourceReader::GetPresentationAttribute`
+    # and `SetCurrentPosition` are typed in terms of: a video's declared length
+    # comes back as one and its seek target goes in as one. The generated
+    # bindings for both methods are gated on this namespace *and* on
+    # `Win32_System_Com_StructuredStorage` above, which was already here for the
+    # memory stream a page's thumbnail is captured into.
+    "Win32_System_Variant",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",

@@ -528,6 +528,35 @@ pub enum PeekBody {
         bytes: Option<u64>,
         pages: Option<u32>,
     },
+    /// **One frame of a video, and the two lines that say what it is** (user
+    /// ruling 2026-08-27; `docs/DESIGN.md` §7.23).
+    ///
+    /// [`Self::Facts`] with the column taken out of it, and every sentence about
+    /// that body holds here: the box is reserved from the first frame whether or
+    /// not anything has filled it, all three parts are optional, and what never
+    /// arrives is simply not drawn. It takes the **page's** ground rather than
+    /// the picture's for the same reason a PDF does — there are two lines under
+    /// it, and the picture's box is sized for a body with nothing underneath.
+    ///
+    /// **There is no column, and that is the difference.** A PDF has pages and a
+    /// reader winds through them; a video has *time*, and the frame this card
+    /// shows is one moment of it chosen by
+    /// [`bt_platform::video::SEEK_FRACTION`]. Winding a video is playing it, and
+    /// playing it is not what this build does — so the body is one sheet, the
+    /// card has no scroller over it, and the wheel does what it does over any
+    /// other unscrollable card.
+    ///
+    /// **`width`/`height` are the frame's own, already fitted**, exactly as
+    /// [`Self::Image`]'s are; zero while the decode and the resample are in
+    /// flight, which draws the ground and no picture.
+    Frame {
+        width: f32,
+        height: f32,
+        /// What the same open of the file learned besides its picture. Rendered
+        /// through [`crate::preview::video_fact_lines`], which is the one place
+        /// those two sentences are written for either surface that shows them.
+        facts: crate::preview::VideoFacts,
+    },
 }
 
 impl PeekBody {
@@ -562,7 +591,11 @@ impl PeekBody {
             // [`Self::Facts`] for why none of the three waits to learn whether
             // it has anything in it. The frame around the page is the picture's
             // (2 above, 8 below the lot), because that is what it is.
-            Self::Facts { .. } => {
+            //
+            // **And a video's frame is that same box**, one sheet instead of a
+            // column: it is a picture with two lines under it, which is the
+            // shape this arm already describes.
+            Self::Facts { .. } | Self::Frame { .. } => {
                 px(PEEK_BODY_PADDING_TOP_LOGICAL_PX)
                     + px(PEEK_PAGE_H_LOGICAL_PX)
                     + px(PEEK_PAGE_GAP_LOGICAL_PX)
@@ -1208,6 +1241,69 @@ pub fn build(
                 ));
             }
         }
+        // One frame over two lines. The ground, the fit and the ink are the two
+        // bodies above put together — a picture's rounded window onto the
+        // terminal's own background, the page box's taller shape because there
+        // are sentences underneath, and the card's own voice for them. What is
+        // deliberately *not* here is a sheet: a PDF's slot is drawn white
+        // because a page is printed on paper and a blank sheet is the page with
+        // nothing on it yet, while a video frame that has not arrived is not a
+        // white rectangle of anything — so its ground stays the window's, which
+        // is the same silence [`PeekBody::Image`] keeps.
+        PeekBody::Frame {
+            width,
+            height,
+            facts,
+        } => {
+            let ground = page_ground(layout.body, scale);
+            quads.extend(bt_render::rounded_overlay_fill(
+                ground,
+                px(PEEK_IMAGE_RADIUS_LOGICAL_PX),
+                bt_render::background_rgb(),
+                1.0,
+            ));
+            if let Some((rect, picture)) = centred_on(ground, *width, *height).zip(picture) {
+                images.push(bt_render::ChromeIcon {
+                    key: picture.key.to_owned(),
+                    rect,
+                    rgba: std::sync::Arc::clone(picture.rgba),
+                    width_px: picture.width_px,
+                    height_px: picture.height_px,
+                    opacity: 1.0,
+                    // Fitted to its ground by construction, exactly as the
+                    // picture body's is — nothing here is wound past a window.
+                    clip: None,
+                });
+            }
+            let left = layout.body[0] + px(PEEK_NONE_PADDING_X_LOGICAL_PX);
+            let right = layout.body[2] - px(PEEK_NONE_PADDING_X_LOGICAL_PX);
+            // Under the frame's whole box rather than under the frame that
+            // landed in it: the lines stand where the last card put them.
+            let top = ground[3] + px(PEEK_PAGE_GAP_LOGICAL_PX);
+            let line = none_line(scale);
+            // **The extension comes off the card's own name**, which is the one
+            // spelling of this file the card already has. It is what
+            // `video_fact_lines` falls back to when the frame did not decode and
+            // there is no length or resolution to print.
+            let extension = std::path::Path::new(&content.name)
+                .extension()
+                .and_then(std::ffi::OsStr::to_str);
+            for (row, words) in crate::preview::video_fact_lines(extension, *facts)
+                .into_iter()
+                .enumerate()
+            {
+                let Some(words) = words else {
+                    continue;
+                };
+                let top = top + line * row as f32;
+                labels.push(label(
+                    &words,
+                    [left, top, right, (top + line).min(layout.body[3])],
+                    px(PEEK_NONE_FONT_LOGICAL_PX),
+                    palette.body_hint_text,
+                ));
+            }
+        }
     }
 
     // `border-top: 1px solid var(--border-soft)` over the foot.
@@ -1685,6 +1781,153 @@ mod tests {
             (layout.body[3] - layout.body[1] - LINE_HEIGHT * 6.0).abs() <= 1.0,
             "the body box is as tall as the document said: {:?}",
             layout.body
+        );
+    }
+
+    /// RED (user ruling 2026-08-27; `docs/DESIGN.md` §7.23) — **the card over a
+    /// video shows the video, says how long it is, and does not jump when either
+    /// arrives.**
+    ///
+    /// Until this ruling a `.mp4` row drew one line — "No preview for this file
+    /// type" — under a pointer, and the same sentence larger under a double
+    /// click. What this asserts is the whole of what replaced it: a frame in the
+    /// page's ground, two lines under it in the card's own voice, and a box that
+    /// was already that size before any of it landed.
+    ///
+    /// **The last of those is not decoration.** The frame comes off a decoder on
+    /// another thread and the facts come with it; a body that grew when they
+    /// arrived would be a card jumping under a resting pointer, which is the one
+    /// thing a glance may never do. So the empty card is measured against the
+    /// full one and they are the same height.
+    ///
+    /// RED GATE ①: fold [`PeekBody::Frame`] into the `Refused | Page` height arm
+    /// and the empty-versus-full assertion still passes while the *first* one
+    /// fails — the card shrinks to one line and the frame is drawn over the
+    /// foot. RED GATE ②: draw the frame through the `Image` arm and the two fact
+    /// lines vanish, which is a card that shows a picture and cannot say what it
+    /// is a picture of.
+    #[test]
+    fn a_video_card_shows_a_frame_over_two_lines() {
+        let window = (1200.0, 900.0);
+        let mut card = content(PeekBody::Frame {
+            width: 280.0,
+            height: 158.0,
+            facts: crate::preview::VideoFacts {
+                duration_ms: Some(6_200),
+                native: Some((1920, 1080)),
+                bytes: Some(12_582_912),
+            },
+        });
+        card.name = "clip.mp4".to_owned();
+        card.ftype = "video".to_owned();
+        let row = [40.0, 300.0, 240.0, 320.0];
+        let stated = layout(&card, row, window, 120.0, 24.0, SCALE);
+        let picture: std::sync::Arc<[u8]> = std::sync::Arc::from(vec![0_u8; 4].into_boxed_slice());
+        let layer = build(
+            &stated,
+            &card,
+            &foot(&stated, ""),
+            Some(PeekPicture {
+                key: "video-frame:clip",
+                rgba: &picture,
+                width_px: 280,
+                height_px: 158,
+            }),
+            &[],
+            &bt_render::chrome_palette(),
+            SCALE,
+        );
+        // **The box is a frame's box and not a sentence's**: the page's ground
+        // plus the gap plus two lines, which is exactly what a PDF's card
+        // reserves — and three times what the refusal it replaced took.
+        assert_eq!(
+            PeekBody::Frame {
+                width: 280.0,
+                height: 158.0,
+                facts: crate::preview::VideoFacts::default(),
+            }
+            .height(SCALE),
+            PeekBody::Facts {
+                scroll: 0.0,
+                bytes: None,
+                pages: None,
+            }
+            .height(SCALE),
+            "a frame over two lines is the same box a page over two lines is"
+        );
+        assert!(
+            PeekBody::Frame {
+                width: 0.0,
+                height: 0.0,
+                facts: crate::preview::VideoFacts::default(),
+            }
+            .height(SCALE)
+                > PeekBody::Refused.height(SCALE) * 2.0,
+            "and it is not the one-line box the refusal used"
+        );
+        let said = |text: &str| layer.labels.iter().find(|label| label.text == text);
+        let what =
+            said("0:06 \u{b7} 1920 \u{d7} 1080").expect("the card says how long and how big");
+        let size = said("12.0 MB").expect("and how large the file is");
+        assert!(
+            what.rect[1] < size.rect[1],
+            "the recording's fact stands above the file's: {:?} vs {:?}",
+            what.rect,
+            size.rect
+        );
+        let frame = layer
+            .images
+            .iter()
+            .find(|image| image.key == "video-frame:clip")
+            .expect("the frame is drawn");
+        let ground = page_ground(stated.body, SCALE);
+        assert!(
+            frame.rect[1] >= ground[1] - 0.5 && frame.rect[3] <= ground[3] + 0.5,
+            "the frame stands inside the ground it was fitted to: {:?} in {:?}",
+            frame.rect,
+            ground
+        );
+        assert!(
+            frame.rect[3] <= what.rect[1] + 0.5,
+            "and the lines stand under it, not over it"
+        );
+        assert!(
+            said(peek_unknown_text()).is_none(),
+            "the refusal this ruling abolished is gone"
+        );
+        assert!(said("clip.mp4").is_some(), "the head names the file");
+        assert!(said("video").is_some(), "and the chip calls it a video");
+
+        // **The box does not wait to learn what is in it**, which is the same
+        // sentence the facts body makes and for the same reason: a decoder
+        // answers a frame or two after the card is up.
+        let empty = content(PeekBody::Frame {
+            width: 0.0,
+            height: 0.0,
+            facts: crate::preview::VideoFacts::default(),
+        });
+        let pending = layout(&empty, row, window, 120.0, 24.0, SCALE);
+        assert_eq!(
+            pending.body[3] - pending.body[1],
+            stated.body[3] - stated.body[1],
+            "the frame's box is the same height before the frame arrives"
+        );
+        let blank = build(
+            &pending,
+            &empty,
+            &foot(&pending, ""),
+            None,
+            &[],
+            &bt_render::chrome_palette(),
+            SCALE,
+        );
+        assert!(
+            blank.images.is_empty(),
+            "a frame that has not arrived draws no picture"
+        );
+        assert!(
+            !blank.quads.is_empty(),
+            "and the ground it will land in is there from the first frame"
         );
     }
 
