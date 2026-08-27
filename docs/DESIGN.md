@@ -4432,6 +4432,59 @@ a pane head's ClosePane has no words
 - 它答的是 `seats::PaneLayer { seat, door }` 而不是一个 seat:**一件事一个值**,因为两个读者要的是同一句话的两种粒度——头上那一排按 `seat` 显形,而独 pane 的角落**只点亮举着东西的那一扇门**(两扇一起亮,是角落在说有两件事正在发生,而只有一件)。
 
 红门 `a_head_stays_lit_while_the_float_it_raised_is_open` 两半都要:命中与绘制这一半用 `HeadRun`/`pane_chrome` 真的量(浮窗开着时那顶头画不画得出 `✕`、角落哪一扇门带着自己的底),推导那一半读源码——**因为报告里坏掉的正是「喂进谓词的那个事实」,谓词本身当时是对的**,一个只测谓词的门在坏掉的版本上会全绿。
+### 7.34 一扇被关掉的窗要先离开屏幕,一扇浮窗只在有人按进去时才拿着键盘(输入法坏掉与浮窗吞键两条用户实证,2026-08-27,已落地;`crates/bt-app/src/{main,float}.rs`)
+
+**两条报告,两条互不相干的成因,但同一句话:一个不该再收键盘的东西,还收着键盘。**
+
+#### ① 关掉旧 folio、打开新 folio 之后打不出中文,而且每按一个键系统响一声
+
+**这不是输入法的事,是一扇尸体窗的事。** 实测(`dist\folio-next13.exe`,隔离 `APPDATA`,50ms 采样):
+
+| | 关窗到 `HWND` 被销毁 | 关窗到进程退出 | 关窗到被 Windows 判定无响应 |
+|---|---|---|---|
+| 窗里开过一张页(WebView2) | **六十秒内从未销毁** | 0.20s | **5.03s** |
+| 窗里没开过页 | 0.13s | 0.13s | 从未 |
+
+进程 0.2 秒就走了,窗口留在屏幕上。**五秒是 Windows 的 ghost 阈值**,于是 `dwm.exe` 在这具尸体前面立一扇 `Ghost` 窗(类名就叫 `Ghost`,标题是「… (Not Responding)」),而那扇 ghost **拿走前台与键盘焦点**——用户刚刚启动的新 folio 窗站在它后面。ghost 窗**没有输入上下文**(`ImmGetDefaultIMEWnd` 返回 0),所以:中文根本组不起来,而每一个按键都落在一扇不接受输入的窗上,由系统敲一声 `MessageBeep`。**用户报告的两个症状是同一扇窗**。
+
+复现记录(事件序列,时间戳为实测):
+
+```
+16:36:51.738  WM_CLOSE -> 旧窗
+16:36:51.957  新 folio 启动(用户的手势:关掉再开)
+16:36:57.609  新窗出现
+16:36:57.638  前台 = cls='Ghost' title='PowerShell 7 (Not Responding)' ime=0x0
+16:36:57.640  旧进程其实早已退出,而它的 HWND 仍然 IsWindow=True
+```
+
+对照组(旧窗没开过页)全程没有 ghost,新窗正常拿到前台,`nihao` 组出候选框、行内出预编辑——两组都用同一段 SendInput 扫描码注入 + 截屏判读,与人工无关。
+
+**为什么 `HWND` 不死,不是这条修复要回答的问题。** 试过并排除了一条:把这个 folio 起的五个 `msedgewebview2.exe` 全部杀掉,那扇窗**依然**是窗。所以这条修复不建立在「等浏览器走」上——那正是它不该建立的地方。
+
+**修法是一句生命周期规矩:一扇被关掉的窗,先离开屏幕,再谈别的。** `set_visible(false)` 从 `retire_window` 挪进 `let_go_of_this_window`——**每一条终结一扇窗的路都在这里汇合**:普通关窗、退出事务的第四相、winit 的 `exiting` 兜底、失败停机。不在屏幕上的窗不会被 ghost,也拿不走前台,**无论后面那条 drop 链有没有走到、浏览器有没有走、句柄为什么活着**。
+
+**退出事务早就知道这件事,只是把理由写小了。** `retire_window` 原本就先隐藏再放手,理由写的是「a reader must not be looking at three dead terminals」——那是关于读者耐心的句子;实测说它其实是关于**窗口寿命**的句子。所以 `Ctrl+Shift+Q` 从来没有这条缺陷,而每一次普通关窗都有。挪下来之后 `retire_window` 只剩一句 `let_go_of_this_window()`,隐藏只有一处可以忘记。
+
+**没修的两件,写下来免得下次当成新虫。** (a) **那个 `HWND` 为什么不死仍未解**——它是一个真实的句柄泄漏,只是这条报告的症状不再依赖它;顺带记下:一个 folio 起的五个 `msedgewebview2.exe` 会在 folio 走后继续活着(实测),而把它们全杀掉**并不会**让那扇窗死掉,所以「等浏览器走」不是这条的解。(b) **panic 退出这条路仍然会留窗**:`panic = "unwind"`,一次走出 `main` 的 panic 以 101 退出,谁也没来得及隐藏窗口。要堵它得让 panic 钩子够得着这些窗,那是另一件事。
+
+红门 `a_window_that_is_shut_leaves_the_screen_before_the_process_does` 两头钉着:放手那条路上必须有 `set_visible(false)`,而 `retire_window` 里**不许**再有第二句(说两遍就是两个可以忘的地方)。
+
+#### ② 视频卡拖成浮窗之后,终端打不了字
+
+**成因是一个只被写、从不被清的位。** `float::FloatWin::focused` 有三扇门写它(`open`、`raise`、`promote`),一扇门都没有清它。而它不是装饰:`focused_preview_float` 读它 → `preview_keyboard_surface` 因此答 `Some` → `KeyboardOwner::preview` 就是这个答案。于是**只要这一整个 session 里出现过一扇预览浮窗**,窗里每一个按键都进 `preview_browse_key`,读者手下的那台 shell 一个字节也收不到。视频卡只是最容易撞上的那张卡,`.png`、`.md`、撕出去的页,任何一扇 `FloatTenant::Preview` 浮窗都一样。
+
+**裁决(用户原话):浮窗建立不夺键盘——它是从终端里拖出来的,手还在终端里;点回 pane 键盘必回来;页要键盘,得用户点进页里。** 落成两句:
+
+- **`open` 不再在出生时给键盘**(`focused: false`),并且顺手 `blur()` 一次:一扇开在别人前面的窗不继承别人的键,身后那扇也不再拿着读者已经看不见落点的键。**`raise` 是浮窗键盘唯一的一扇门**,而 `raise` 只有按在窗里才会被叫到——这与 §7.14c 给页定的那扇门逐字相同。
+- **`focus_pane_at` 里 `float.blur()`**,就站在 files 列那句 `set_files_keyboard(files.then_some(seat), …)` 旁边:那本来就是「按在一个 pane 上就把键盘收回来」这句话,只是当初只对能借键盘的两种表面里的一种说了。位置是**在 `pane_at` 那道门之后**:按在标题栏上不是按在 pane 上。这一处能代表「所有浮窗之外的按下」,是因为 `press_float` 与浮窗自己那条页臂都在 chrome 路由**之上**就 return 了。
+
+**`promote` 一字未改。** 它是「把这一瞥留下来」——peek 转 pinned,而 peek 只有文件夹树一种租户,`focused_preview_float` 根本不看它;写在这里是为了下一个人不必再判断一次。
+
+**红门两道。** `a_float_holds_the_keyboard_only_while_a_press_inside_it_says_so`(float.rs 内,真跑状态机:出生无键 → 按进去有键 → blur 收回 → 再 blur 不欠帧 → 新窗不继承也不留下)与 `a_press_on_a_pane_takes_the_keyboard_back_from_every_float`(源码门,并且钉住它**站在 files 列那句之后**)。变异实验(逐条实测,每次单独一版):①把 `open` **整段**还原(`focused: mode == FloatMode::Pinned` **加** `focus_only(self.epoch)`)——第一条断言红(`MUTC_EXIT=101`);②把 `blur` 掏空成恒 `false`——第三条红(「a press on a pane takes the keyboard back」);③删掉 `focus_pane_at` 里那句——源码门红(「a press on a pane never blurs the floats」)。**变异①第一版只改 `focused` 那一行,全绿**:`open` 的 Pinned 臂里那句 `blur()` 把它当场清掉了。这不是门不灵,是这两句本来就是同一句话的两半——记在这里,免得下一个人以为 `focused: false` 那一行可以随便改。
+
+**一句共同的话。** 这两条都是「谁拿着键盘」这一个问题的两半:第 ① 条是一扇**已经不存在的窗**还拿着系统的键盘焦点,第 ② 条是一扇**还在的窗**拿着本窗的键盘不放。产品里每一种能借走键盘的表面都必须有一句还回去的规矩,而这两处正是当时只写了借、没写还的两处。
+
+**日期:2026-08-27 用户实证,当日复现、定因、落地。**
 
 ## 12. 发布工程
 

@@ -42863,6 +42863,29 @@ impl Runtime<'_> {
         if self.set_files_keyboard(files.then_some(seat), FilesFocusArrival::Pointer) {
             self.refresh_chrome();
         }
+        // **And a press on a pane takes the keyboard back from every float**
+        // (§7.34, user ruling 2026-08-27: 「点回 pane 键盘必回来」). The line
+        // above is the same sentence for the other surface that borrows the
+        // keyboard, and this one was missing: `float::FloatHost`'s focus bit was
+        // written by three doors and cleared by none, so a single preview float
+        // — a video card dragged out by its head, a page popped out of the
+        // layout — made `preview_keyboard_surface` answer `Some` for ever after,
+        // and `KeyboardOwner::preview` is read off that. Every key in the window
+        // then went to `preview_browse_key` and the shell under the reader's
+        // hand received nothing at all.
+        //
+        // Reached only for a press the floats did not take: `press_float` and
+        // the float's own page arm both return from `mouse_input` above the
+        // chrome router this runs in, so "a press that got here" and "a press
+        // outside every float" are the same press.
+        //
+        // A frame is owed when it changes something, on `raise`'s own terms: the
+        // bit is not drawn (`focus_ring: false`), but the *caret* is — a shell
+        // that has the keyboard back blinks again, which is `keyboard_owner`
+        // reading this same answer one rung further out.
+        if self.window.float.blur() && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
         self.settle_focus_on(seat)
     }
 
@@ -56082,7 +56105,6 @@ impl Runtime<'_> {
     /// ([`Self::advance_retirement`]), and a reader must not be looking at three
     /// dead terminals while it does.
     fn retire_window(&mut self) -> Result<()> {
-        self.window.window.set_visible(false);
         self.let_go_of_this_window()
     }
 
@@ -79319,6 +79341,31 @@ impl Runtime<'_> {
     /// can see — the one outcome worse than an error, and the reason `fail`'s
     /// own comment says so about windows.
     fn let_go_of_this_window(&mut self) -> Result<()> {
+        // **Off the screen first, and on every road that ends a window**
+        // (§7.34, user report 2026-08-27: 关掉旧 folio 再开新的,输入法就坏了).
+        //
+        // Measured on the machine: a window that had hosted a page is **never
+        // destroyed** — the process leaves in 200ms and the `HWND` is still a
+        // window a minute later, with the browser tree it started still running.
+        // Five seconds is Windows' ghosting threshold, so `dwm.exe` puts a
+        // `Ghost` window over the corpse, and that ghost takes the foreground
+        // and the keyboard focus from the window the reader has just launched.
+        // A ghost has **no input context** (`ImmGetDefaultIMEWnd` = 0): Chinese
+        // cannot be composed at all and every key rings `MessageBeep`. That is
+        // the whole of the report, and the two symptoms are one window.
+        //
+        // The quit's phase ④ already knew this — [`Self::retire_window`] hid the
+        // window before letting go, and said why: 「a reader must not be looking
+        // at three dead terminals」. What it did not know is that the sentence is
+        // not about the reader's patience but about the window's *lifetime*: an
+        // ordinary shut relied on the drop chain to destroy the `HWND`, and the
+        // drop chain does not always get to. Hiding does not depend on anything
+        // getting round to it, on the browser going, or on why the handle
+        // survives: a window that is not on the screen cannot be ghosted and
+        // cannot hold the foreground. So the hide moves down here, where every
+        // road that ends a window already meets — the ordinary close, the quit's
+        // retirement, `exiting`, and the failure stop.
+        self.window.window.set_visible(false);
         self.window.ime_system_caret.destroy();
         // **The page's controller is closed here, beside the children.** A
         // controller merely dropped leaves a browser process nobody points at
@@ -85938,6 +85985,84 @@ mod floated_page_tests {
             "a press inside a float's page does not bring that float forward \
              before the engine takes the keyboard, so the window carrying the \
              page is never the focused preview surface:\n{press}"
+        );
+    }
+
+    /// RED — **and the float gives the keyboard back when the hand goes back to
+    /// a pane** (§7.34, user report 2026-08-27: 「视频卡拖成浮窗之后,终端打不了
+    /// 字」).
+    ///
+    /// The test above holds the *taking*; this one holds the giving back, which
+    /// is the half that did not exist. `float::FloatHost`'s focus bit was
+    /// written by three doors and cleared by none, so one preview float anywhere
+    /// made [`Runtime::preview_keyboard_surface`] answer `Some` for the rest of
+    /// the session — and `KeyboardOwner::preview` is read straight off that, so
+    /// every key went to `preview_browse_key` and the shell under the reader's
+    /// hand received nothing at all. Measured on the machine: a `.mp4` card
+    /// dragged out by its head, then a click on the terminal, then typing —
+    /// nothing arrived.
+    ///
+    /// Read off the file for this module's standing reason: what a press does to
+    /// a window's keyboard is a `Runtime`, a layout and a pointer, and none of
+    /// those stand up in this process. What can be held is which sentence the
+    /// press makes.
+    ///
+    /// MUTATIONS: drop the `float.blur()` call and this goes red; move it above
+    /// the `pane_at` guard and it still passes here but starts taking the
+    /// keyboard back on presses that landed on no pane at all — which is why the
+    /// second assertion pins it *after* the files column's own line, the
+    /// sentence it is a copy of.
+    #[test]
+    fn a_press_on_a_pane_takes_the_keyboard_back_from_every_float() {
+        let focus = fn_body(concat!("    fn ", "focus_pane_at("));
+        let blur = focus
+            .find("self.window.float.blur()")
+            .unwrap_or_else(|| panic!("a press on a pane never blurs the floats:\n{focus}"));
+        let files = focus
+            .find("self.set_files_keyboard(")
+            .expect("the files column's own half of this sentence is still here");
+        assert!(
+            files < blur,
+            "the float's half of 「a press on a pane takes the keyboard back」 \
+             does not stand beside the files column's:\n{focus}"
+        );
+    }
+
+    /// RED — **a window that has been shut leaves the screen before the process
+    /// does** (§7.34, user report 2026-08-27: 关掉旧 folio、打开新 folio 后输入法
+    /// 坏了,每按键一声警告音).
+    ///
+    /// Measured on the machine with `folio-next13`: close a window that has
+    /// hosted a page and the process is gone in 0.20s while its `HWND` is still
+    /// a window sixty seconds later. At five seconds — Windows' ghosting
+    /// threshold — `dwm.exe` puts a `Ghost` over the corpse, and the ghost holds
+    /// the foreground and the keyboard focus while the newly launched window
+    /// stands behind it. A ghost has no input context at all
+    /// (`ImmGetDefaultIMEWnd` = 0), so Chinese cannot be composed and every key
+    /// rings `MessageBeep`. Without a page: destroyed in 0.13s, no ghost, ever.
+    ///
+    /// The hide is what makes the difference, and it must be on the *shared*
+    /// road: the quit's retirement already hid its windows, so a quit never had
+    /// this defect and an ordinary close always did.
+    ///
+    /// MUTATIONS: move `set_visible(false)` back into `retire_window` and the
+    /// first assertion goes red (the ordinary close stops hiding); leave a copy
+    /// in both and the second goes red (two places to forget it).
+    #[test]
+    fn a_window_that_is_shut_leaves_the_screen_before_the_process_does() {
+        let letting_go = fn_body(concat!("    fn ", "let_go_of_this_window("));
+        assert!(
+            letting_go.contains("self.window.window.set_visible(false)"),
+            "a shut window is left on the screen for Windows to ghost:\n{letting_go}"
+        );
+        let retire = fn_body(concat!("    fn ", "retire_window("));
+        assert!(
+            !retire.contains("set_visible"),
+            "the hide is said twice, so there are two places to forget it:\n{retire}"
+        );
+        assert!(
+            retire.contains("self.let_go_of_this_window()"),
+            "the quit's retirement no longer travels the road the hide is on:\n{retire}"
         );
     }
 
