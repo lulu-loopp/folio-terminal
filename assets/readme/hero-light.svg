@@ -27,10 +27,10 @@
     <rect x="656" y="88" width="480" height="188" rx="10"
           fill="#FFFFFF" stroke="#E8E7E5" stroke-width="1"/>
 
-    <text x="690" y="131" xml:space="preserve"><tspan fill="#83827E">PS </tspan><tspan fill="#37352F" text-decoration="underline">C:\Projects\aurora&gt;</tspan><tspan fill="#37352F"> cat notes.md</tspan></text>
+    <text x="690" y="131" xml:space="preserve"><tspan fill="#83827E">PS </tspan><tspan fill="#37352F" text-decoration="underline">C:\Projects\aurora</tspan><tspan fill="#37352F">&gt;</tspan><tspan fill="#37352F"> cat notes.md</tspan></text>
     <text x="690" y="159" fill="#83827E" xml:space="preserve">A Gaussian integral:</text>
 
-    <g transform="translate(813 207)" fill="#37352F"
+    <g transform="translate(813 204)" fill="#37352F"
        font-family="&quot;Latin Modern Math&quot;, &quot;Cambria Math&quot;, &quot;STIX Two Math&quot;, Cambria, &quot;Times New Roman&quot;, Georgia, serif">
       <path d="M 8,-26 C 8,-30 5,-31 3,-31 C 0,-31 -1,-28 -1,-24 L -1,4 C -1,8 -2,11 -5,11 C -7,11 -10,10 -10,6"
             transform="translate(10 0)"
@@ -48,7 +48,7 @@
       <text x="154" y="0" font-size="25" font-style="italic">&#960;</text>
     </g>
 
-    <text x="690" y="243" xml:space="preserve"><tspan fill="#83827E">PS </tspan><tspan fill="#37352F" text-decoration="underline">C:\Projects\aurora&gt;</tspan></text>
-    <rect x="952.2" y="228" width="2.5" height="20" fill="#37352F"/>
+    <text x="690" y="249" xml:space="preserve"><tspan fill="#83827E">PS </tspan><tspan fill="#37352F" text-decoration="underline">C:\Projects\aurora</tspan><tspan fill="#37352F">&gt;</tspan></text>
+    <rect x="952.2" y="234" width="2.5" height="20" fill="#37352F"/>
   </g>
 </svg>
