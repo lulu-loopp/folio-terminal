@@ -206,10 +206,17 @@ param(
   [switch]$ResizeFirst,
   [int]$ToW = 0,
   [int]$ToH = 0,
+  # launch: which binary to start. Empty means the release build of this very
+  # checkout — the repository root is two levels above this script, so the probe
+  # works from any clone on any machine rather than from one hard-coded path.
+  [string]$ExePath = "",
   [switch]$TraceDpi
 )
 
 $ErrorActionPreference = "Stop"
+
+$RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not $ExePath) { $ExePath = Join-Path $RepoRoot "target\release\folio.exe" }
 
 Add-Type @'
 using System;
@@ -669,7 +676,8 @@ switch ($Cmd) {
   "launch" {
     if ($TraceDpi) { $env:BT_STARTUP_TRACE = "1" }
     $err = "$env:TEMP\ui-probe-stderr.txt"
-    $p = Start-Process -FilePath "D:\Developer\BetterTerminal\target\release\folio.exe" -RedirectStandardError $err -PassThru
+    if (-not (Test-Path $ExePath)) { throw "no binary at $ExePath — build it, or pass -ExePath" }
+    $p = Start-Process -FilePath $ExePath -RedirectStandardError $err -PassThru
     Start-Sleep -Seconds $WaitSeconds
     $h = Get-AppWindow $p.Id
     "pid=$($p.Id) hwnd=$h stderr=$err"

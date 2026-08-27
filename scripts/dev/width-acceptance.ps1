@@ -1,5 +1,5 @@
 ﻿# M1 ConPTY 端到端验收；宽度视觉正确性请改用 width-probe-input.vt。
-# 在 bt-app 中运行：& D:\Developer\BetterTerminal\scripts\dev\width-acceptance.ps1
+# 在 bt-app 中运行（路径相对仓库根）：& .\scripts\dev\width-acceptance.ps1
 # 此处的竖线错位/间隙可能来自 ConPTY 的独立列记账，不作为网格宽度 FAIL。
 
 $e = [char]27

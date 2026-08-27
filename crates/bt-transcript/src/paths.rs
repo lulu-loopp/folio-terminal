@@ -932,13 +932,13 @@ pub enum TrailingSlash {
 /// flow is a **reference this terminal may open**, and opening happens through Windows, so it has to
 /// be drive-rooted or it is nothing. An OSC 7 report is a **statement about where the shell that
 /// sent it is standing**, and that shell may not be a Windows process at all — the same window can
-/// hold a `pwsh` in `D:\src` and a WSL `bash` in `/home/weiyi/src`, and only one of those two
+/// hold a `pwsh` in `D:\src` and a WSL `bash` in `/home/alice/src`, and only one of those two
 /// sentences can be spelled with a drive letter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Rooting {
     /// `D:\…` and nothing else.
     DriveOnly,
-    /// `D:\…`, or a POSIX absolute path (`/home/weiyi`, `/mnt/d/src`).
+    /// `D:\…`, or a POSIX absolute path (`/home/alice`, `/mnt/d/src`).
     DriveOrPosixRoot,
 }
 
@@ -1380,12 +1380,12 @@ mod tests {
     #[test]
     fn a_drive_rooted_path_is_read_whole_in_either_slash() {
         assert_eq!(
-            spans("D:\\Developer\\BetterTerminal\\README.md"),
-            ["D:\\Developer\\BetterTerminal\\README.md"]
+            spans("D:\\Developer\\folio-terminal\\README.md"),
+            ["D:\\Developer\\folio-terminal\\README.md"]
         );
         assert_eq!(
-            spans("D:/Developer/BetterTerminal/README.md"),
-            ["D:/Developer/BetterTerminal/README.md"]
+            spans("D:/Developer/folio-terminal/README.md"),
+            ["D:/Developer/folio-terminal/README.md"]
         );
     }
 
@@ -1490,9 +1490,9 @@ mod tests {
     #[test]
     fn a_printed_file_uri_is_one_candidate_of_its_own_spelling() {
         assert_eq!(
-            candidates("file:///D:/Developer/BetterTerminal/test.md"),
+            candidates("file:///D:/Developer/folio-terminal/test.md"),
             [(
-                "file:///D:/Developer/BetterTerminal/test.md",
+                "file:///D:/Developer/folio-terminal/test.md",
                 PrintedPathSpelling::Uri
             )]
         );
@@ -1515,7 +1515,7 @@ mod tests {
     #[test]
     fn the_uri_a_path_is_folded_into_decodes_back_to_it() {
         for path in [
-            "D:\\Developer\\BetterTerminal\\README.md",
+            "D:\\Developer\\folio-terminal\\README.md",
             "D:\\a b\\c.md",
             "D:\\文档\\说明.md",
             "D:\\p#q\\r%s.md",
@@ -1737,13 +1737,13 @@ mod tests {
     /// The three rows of the user's 2026-08-25 `[file]` chip, taken apart into the two things the
     /// application's layout puts around the path: a left **gutter** in front of every row, and a
     /// size **column** behind the ones that have room for it.
-    const CHIP_HEAD: &str = "C:\\Users\\Weiyi\\AppData\\Local\\Temp\\claude\\D--Developer-Bett";
+    const CHIP_HEAD: &str = "C:\\Users\\Alice\\AppData\\Local\\Temp\\claude\\D--Developer-Bett";
     const CHIP_TAIL: &str =
         "erTerminal\\ccea9546-63d0-4a20-ba77-75caa4e8533c\\scratchpad\\folio-pdf-test.pdf";
-    const CHIP_TARGET: &str = "C:\\Users\\Weiyi\\AppData\\Local\\Temp\\claude\\\
+    const CHIP_TARGET: &str = "C:\\Users\\Alice\\AppData\\Local\\Temp\\claude\\\
         D--Developer-BetterTerminal\\ccea9546-63d0-4a20-ba77-75caa4e8533c\\scratchpad\\\
         folio-pdf-test.pdf";
-    const CHIP_URI: &str = "file:///C:/Users/Weiyi/AppData/Local/Temp/claude/\
+    const CHIP_URI: &str = "file:///C:/Users/Alice/AppData/Local/Temp/claude/\
         D--Developer-BetterTerminal/ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/\
         folio-pdf-test.pdf";
 
@@ -2295,8 +2295,8 @@ mod tests {
         let links = ledger(
             "D:\\case",
             &[
-                ("D:\\Developer\\BetterTerminal\\README.md", true),
-                ("D:\\Developer\\BetterTerminal\\test.md", true),
+                ("D:\\Developer\\folio-terminal\\README.md", true),
+                ("D:\\Developer\\folio-terminal\\test.md", true),
                 ("D:\\case\\docs\\HANDOFF-2026-08-20.md", true),
                 ("D:\\case\\test.md", true),
                 ("D:\\x\\a.md", true),
@@ -2310,11 +2310,11 @@ mod tests {
         // Rows 1, 2, 10, 11, 13, 15, 16, 18, 20 and 23: the reference runs to the end of the line,
         // so at the edge it is pressed down and inside the row it is untouched.
         for line in [
-            "D:\\Developer\\BetterTerminal\\README.md",
-            "D:/Developer/BetterTerminal/README.md",
+            "D:\\Developer\\folio-terminal\\README.md",
+            "D:/Developer/folio-terminal/README.md",
             "docs/HANDOFF-2026-08-20.md",
             "./test.md",
-            "file:///D:/Developer/BetterTerminal/test.md",
+            "file:///D:/Developer/folio-terminal/test.md",
             "file://localhost/D:/x/a.md",
             "见 D:\\x\\a.md.",
             "docs/a.md:13",
@@ -2454,7 +2454,7 @@ mod tests {
     /// layer's contract is unchanged, it answers whichever ledger it is handed.
     ///
     /// **The conflict was not hypothetical, and 2026-08-25 is the day it was photographed.** The
-    /// reader reported that `D:\Developer\BetterTerminal\test-assets\folio-pdf-test.pdf` — an
+    /// reader reported that `D:\Developer\folio-terminal\test-assets\folio-pdf-test.pdf` — an
     /// indented, unadorned, drive-rooted path to a file that exists — carried no underline at all.
     /// Reproduced in a fresh pane the same line lights on the first frame, so nothing lexical or
     /// geometric was refusing it. What refused it was this arm: minutes earlier the same screen had

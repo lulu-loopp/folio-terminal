@@ -437,8 +437,8 @@ pub enum Origin {
 /// process does — as a working directory handed to `CreateProcess`. WSL's shell
 /// does not: `wsl.exe` is a *launcher*, its working directory is a Windows path
 /// that the distribution sees through `/mnt`, and the Linux home it should open
-/// in has no Windows spelling at all. Handing `C:\Users\Weiyi` to a WSL tab lands
-/// it in `/mnt/c/Users/Weiyi` — a real directory, and not the one a shell opens
+/// in has no Windows spelling at all. Handing `C:\Users\Alice` to a WSL tab lands
+/// it in `/mnt/c/Users/Alice` — a real directory, and not the one a shell opens
 /// in when you start it yourself.
 ///
 /// So the enum carries the *form* the answer takes rather than a path. That is
@@ -456,7 +456,7 @@ pub enum StartingDir {
     /// because the shell does not stand where the launcher does.
     ///
     /// `wsl.exe --cd <place>` is the whole of it, and it is the documented flag
-    /// rather than a trick: verified on this machine to answer `/home/weiyi`
+    /// rather than a trick: verified on this machine to answer `/home/alice`
     /// from a process standing in `D:\` when handed `~`, and `/mnt/d/Developer`
     /// when handed `/mnt/d/Developer`, where the same launcher with no flag
     /// answers `/mnt/d`.
@@ -2888,22 +2888,22 @@ fn compose_title(profile: &Profile, qualifier: Option<&str>) -> String {
 /// profiles are Windows processes whose working directory is a Win32 directory,
 /// and they say so in drive letters. WSL's shell lives inside the distribution's
 /// own filesystem, where this machine's `D:\Developer` is `/mnt/d/Developer` and
-/// `/home/weiyi` is a place a drive letter cannot reach at all.
+/// `/home/alice` is a place a drive letter cannot reach at all.
 ///
 /// The field exists because a directory travelling between two panes is only
 /// meaningful with the namespace it was written in attached, and the pane
 /// already carries the one thing that knows it: its profile. Without this,
-/// `C:\Users\Weiyi` inherited into a WSL tab is a string that names nothing, and
+/// `C:\Users\Alice` inherited into a WSL tab is a string that names nothing, and
 /// the pane opens in a place nobody chose while looking as though it worked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathNamespace {
     /// `D:\Developer` — a Win32 path, drive-rooted.
     Windows,
-    /// `/mnt/d/Developer`, `/home/weiyi` — the distribution's own filesystem.
+    /// `/mnt/d/Developer`, `/home/alice` — the distribution's own filesystem.
     Wsl,
 }
 
-/// `C:\Users\Weiyi` → `/mnt/c/Users/Weiyi`, or `None` when this path names
+/// `C:\Users\Alice` → `/mnt/c/Users/Alice`, or `None` when this path names
 /// nothing a WSL shell can stand in.
 ///
 /// The drive map is WSL's own and it is a documented, stable mount rule rather
@@ -2951,13 +2951,13 @@ pub fn windows_to_wsl(path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(translated))
 }
 
-/// `/mnt/c/Users/Weiyi` → `C:\Users\Weiyi`, or `None` when Windows has no name
+/// `/mnt/c/Users/Alice` → `C:\Users\Alice`, or `None` when Windows has no name
 /// for this place.
 ///
 /// The inverse is **not total**, and that asymmetry is the whole reason a
-/// translation can fail. `/home/weiyi` is a directory inside the distribution's
+/// translation can fail. `/home/alice` is a directory inside the distribution's
 /// own root filesystem; the only Windows spelling of it is the
-/// `\\wsl.localhost\<distro>\home\weiyi` share, which is a network path to a
+/// `\\wsl.localhost\<distro>\home\alice` share, which is a network path to a
 /// service rather than a directory — it needs the distribution running, it is
 /// not what `cd` in that shell means, and it is precisely the authority a
 /// `file://` report is obliged to reject as remote. So the honest answer is that
@@ -13098,7 +13098,7 @@ mod tests {
     #[test]
     fn a_row_is_tipped_with_what_its_caption_left_out_and_nothing_else() {
         let scale = 1.0;
-        let vault = [term(r"D:\Developer\BetterTerminal\crates", None, 30)];
+        let vault = [term(r"D:\Developer\folio-terminal\crates", None, 30)];
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
@@ -13167,7 +13167,7 @@ mod tests {
             vec![(
                 MenuRow::Recent(0),
                 layout.recent[0],
-                r"D:\Developer\BetterTerminal\crates".to_owned()
+                r"D:\Developer\folio-terminal\crates".to_owned()
             )],
         );
         assert_eq!(
@@ -13322,10 +13322,10 @@ mod tests {
     #[test]
     fn the_drive_map_translates_what_it_can_and_refuses_the_rest() {
         for (windows, wsl) in [
-            (r"C:\Users\Weiyi", "/mnt/c/Users/Weiyi"),
+            (r"C:\Users\Alice", "/mnt/c/Users/Alice"),
             (
-                r"D:\Developer\BetterTerminal",
-                "/mnt/d/Developer/BetterTerminal",
+                r"D:\Developer\folio-terminal",
+                "/mnt/d/Developer/folio-terminal",
             ),
             // The letter is lower-cased going out and upper-cased coming back:
             // `/mnt/C` is not one of WSL's mounts, and `c:\` is not how Windows
@@ -13346,7 +13346,7 @@ mod tests {
         // forward slashes are canonical going out, so coming back is checked on
         // its own inputs.
         for (wsl, windows) in [
-            ("/mnt/c/Users/Weiyi", r"C:\Users\Weiyi"),
+            ("/mnt/c/Users/Alice", r"C:\Users\Alice"),
             ("/mnt/d/Developer", r"D:\Developer"),
             ("/mnt/c", r"C:\"),
             ("/mnt/c/", r"C:\"),
@@ -13361,7 +13361,7 @@ mod tests {
             // The UNC shapes, including the one `wslpath -w` answers for a Linux
             // home — a share, not a mount.
             r"\\server\share\src",
-            r"\\wsl.localhost\Ubuntu-24.04\home\weiyi",
+            r"\\wsl.localhost\Ubuntu-24.04\home\alice",
             r"\\?\UNC\server\share",
             // Not rooted: nobody said where from.
             r"src\a",
@@ -13386,7 +13386,7 @@ mod tests {
             // The distribution's own root filesystem. Windows can only reach it
             // through the `\\wsl.localhost` share, which is a service and not a
             // directory — the ruling is that this has no answer.
-            "/home/weiyi",
+            "/home/alice",
             "/",
             "/usr/local/bin",
             // A directory somebody made under `/mnt`, which is not a drive.
@@ -13416,9 +13416,9 @@ mod tests {
     /// at is standing" — quietly not kept for three quarters of the table.
     #[test]
     fn a_new_tab_inherits_a_folder_whenever_the_shell_it_starts_can_name_it() {
-        let windows = Path::new(r"D:\Developer\BetterTerminal");
-        let mounted = Path::new("/mnt/d/Developer/BetterTerminal");
-        let inside = Path::new("/home/weiyi/src");
+        let windows = Path::new(r"D:\Developer\folio-terminal");
+        let mounted = Path::new("/mnt/d/Developer/folio-terminal");
+        let inside = Path::new("/home/alice/src");
         for (source, profile) in shipped_five().iter().enumerate() {
             for (target, other) in shipped_five().iter().enumerate() {
                 let (standing, expected) = match (profile.paths, other.paths) {
@@ -13480,7 +13480,7 @@ mod tests {
             );
         }
         let wsl = index_of_id("wsl");
-        for inside in ["/home/weiyi/src", "/mnt/d/Developer"] {
+        for inside in ["/home/alice/src", "/mnt/d/Developer"] {
             assert_eq!(
                 revived_cwd(wsl, Path::new(inside)).as_deref(),
                 Some(Path::new(inside)),
@@ -14699,23 +14699,23 @@ mod tests {
     /// split leaves behind a trailing separator.
     #[test]
     fn a_recent_row_wears_your_name_for_it_or_the_folder_it_stood_in() {
-        assert_eq!(cwd_leaf("C:\\Users\\Weiyi\\repo"), "repo");
-        assert_eq!(cwd_leaf("C:\\Users\\Weiyi\\repo\\"), "repo");
+        assert_eq!(cwd_leaf("C:\\Users\\Alice\\repo"), "repo");
+        assert_eq!(cwd_leaf("C:\\Users\\Alice\\repo\\"), "repo");
         assert_eq!(cwd_leaf("C:\\"), "C:", "a drive root names its drive");
         assert_eq!(cwd_leaf("C:"), "C:");
         assert_eq!(
-            cwd_leaf("/home/weiyi/src"),
+            cwd_leaf("/home/alice/src"),
             "src",
             "and forward slashes too"
         );
 
         let vault = [
-            term("C:\\Users\\Weiyi\\repo", Some("build"), 0),
-            term("C:\\Users\\Weiyi\\notes", None, 60),
+            term("C:\\Users\\Alice\\repo", Some("build"), 0),
+            term("C:\\Users\\Alice\\notes", None, 60),
             // `||` in the mock-up falls through an empty string: a row captioned
             // with nothing is a row you cannot tell from the one above it.
-            term("C:\\Users\\Weiyi\\empty", Some(""), 120),
-            files("D:\\Developer\\BetterTerminal\\", 180),
+            term("C:\\Users\\Alice\\empty", Some(""), 120),
+            files("D:\\Developer\\folio-terminal\\", 180),
         ];
         let layout = layout(
             anchor(1.0),
@@ -14741,7 +14741,7 @@ mod tests {
             .iter()
             .map(|label| label.text.as_str())
             .collect();
-        for name in ["build", "notes", "empty", "BetterTerminal"] {
+        for name in ["build", "notes", "empty", "folio-terminal"] {
             assert!(drawn.contains(&name), "{name} is missing from {drawn:?}");
         }
     }

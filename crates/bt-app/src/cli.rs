@@ -10,7 +10,7 @@
 //! that makes the flag load-bearing rather than decorative:
 //!
 //! ```text
-//! ARGV argv=["…\shell-probe.exe", "argv", "--cwd", "D:\\Developer\\BetterTerminal\\crates"]
+//! ARGV argv=["…\shell-probe.exe", "argv", "--cwd", "D:\\Developer\\folio-terminal\\crates"]
 //!      cwd="…\probes\target\debug"   elevated=false
 //! ```
 //!

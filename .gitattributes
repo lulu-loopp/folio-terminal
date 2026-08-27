@@ -6,3 +6,11 @@
 # ending: eight of them were committed with their CRs stripped, and the ref tests
 # failed on every fresh checkout while the tree they were normalised in kept passing.
 *.recording binary
+
+# The corpus recordings are the same kind of file and the same failure waiting to
+# happen. Git currently treats them as binary only because it happens to find a NUL
+# byte in the first 8000 of them — a guess, not a rule, and a recording that begins
+# with 8000 bytes of printable output would be normalised and silently corrupted.
+# Saying it outright also keeps `git grep` honest about them: a file Git calls
+# binary is a file `git grep` skips, and these are the ones worth searching.
+*.btcr binary

@@ -14807,7 +14807,7 @@ mod tests {
         for scale_factor in [1.0, 1.25, 1.5, 1.75, 2.0] {
             let mut font_system = terminal_font_system();
             let metrics = CellMetrics::measure(&mut font_system, scale_factor).unwrap();
-            let mut cells = "PS D:\\Developer\\BetterTerminal> carg"
+            let mut cells = "PS D:\\Developer\\folio-terminal> carg"
                 .chars()
                 .map(|character| CapturedCell::plain(character.to_string()))
                 .collect::<Vec<_>>();

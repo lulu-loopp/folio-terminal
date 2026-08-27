@@ -1,3 +1,11 @@
+// MODIFIED BY THE FOLIO CONTRIBUTORS — not the upstream
+// alacritty_terminal 0.26.0 file of the same name.
+// Change: `Grid::take_history` and `Grid::restore_history`, so a resize
+// transaction can lift the native scrollback out and put it back; the rest is
+// this repository's rustfmt settings.
+// Index: vendor/alacritty_terminal/CHANGES-FOLIO.md
+// Notice given under section 4(b) of the Apache License, Version 2.0.
+
 //! A specialized 2D grid implementation optimized for use in a terminal.
 
 use std::cmp::{max, min};

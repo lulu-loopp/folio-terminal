@@ -23,7 +23,7 @@
         "children": [
           {
             "kind": "files",
-            "root": "D:\\Developer\\BetterTerminal",
+            "root": "D:\\Developer\\folio-terminal",
             "open": [
               "crates"
             ],
@@ -33,7 +33,7 @@
           {
             "kind": "term",
             "profile_id": "pwsh",
-            "cwd": "D:\\Developer\\BetterTerminal",
+            "cwd": "D:\\Developer\\folio-terminal",
             "manual_name": null
           }
         ]

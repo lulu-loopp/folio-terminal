@@ -106,8 +106,8 @@ __bt_encode() {
 #     `CreateProcess` was handed, what Explorer opens, and what every other pane
 #     in the window speaks.
 #   * Everywhere else — WSL, or a Linux box over ssh — `$PWD` is the answer, and
-#     `/home/weiyi/src` is a real directory with no Windows spelling at all.
-#     (`wslpath -w` would answer `\\wsl.localhost\<distro>\home\weiyi`, a UNC
+#     `/home/user/src` is a real directory with no Windows spelling at all.
+#     (`wslpath -w` would answer `\\wsl.localhost\<distro>\home\user`, a UNC
 #     whose authority the receiving end is obliged to reject as a remote share.)
 #
 # The style is decided once, here, by asking rather than by sniffing the OS.

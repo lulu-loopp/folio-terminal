@@ -1,0 +1,62 @@
+# cargo-about configuration for THIRD-PARTY-NOTICES.md.
+#
+#   ./scripts/generate-notices.ps1   rewrites THIRD-PARTY-NOTICES.md
+#   ./scripts/check-notices.ps1      fails if the checked-in copy has drifted
+#
+# `accepted` is not decoration: `cargo about generate --fail` errors on any
+# package whose licence expression cannot be satisfied from this list, so a
+# dependency that arrives under terms this product cannot ship turns the gate
+# red instead of arriving quietly. For an `OR` expression cargo-about takes the
+# first entry below that satisfies it, which is why MIT and Apache-2.0 lead.
+
+accepted = [
+    # This product's own terms, and what the overwhelming majority of the tree
+    # offers.
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+
+    # Permissive, chosen where a package offers nothing more familiar.
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "Unlicense",
+    "0BSD",
+    "CC0-1.0",
+
+    # The ICU4X family. Its obligation is a notice, and licenses/Unicode-LICENSE-v3.txt
+    # carries it in full.
+    "Unicode-3.0",
+
+    # option-ext, reached through dirs -> dirs-sys. File-level copyleft: it does
+    # not reach this product's own source, but it obliges us to offer the source
+    # of the covered files. THIRD-PARTY-NOTICES.md does, pinned by SHA-256.
+    "MPL-2.0",
+]
+
+# Deliberately absent, and each absence is the point:
+#   GPL-*, AGPL-*, LGPL-*  — `self_cell` offers `Apache-2.0 OR GPL-2.0-only` and
+#                            `r-efi` offers `... OR LGPL-2.1-or-later`; leaving the
+#                            copyleft side out is how we record that we take the
+#                            other one. If a package ever arrives with *only* a
+#                            copyleft option, this gate is what says so.
+
+# No `targets` key at all, which is cargo-about's "do not filter by platform".
+# A notice file that is right for x86_64-pc-windows-msvc and silent about the
+# rest is a file whose correctness depends on who ran it.
+
+# The lock file is the subject. Dev- and build-dependencies are in it, so they
+# are here: over-inclusion in a notice file costs a reader some scrolling, and
+# the alternative costs an attribution.
+ignore-build-dependencies = false
+ignore-dev-dependencies = false
+ignore-transitive-dependencies = false
+
+# Workspace crates and the vendored `alacritty_terminal` are not published to any
+# registry, so cargo-about skips them. That is correct here: Folio's own code is
+# covered by LICENSE-MIT and LICENSE-APACHE at the root, and the vendored copy is
+# covered by hand in licenses/bundled-assets.md, which has to say more about it
+# than a licence name (the §4(b) modification index).
+private = { ignore = true }

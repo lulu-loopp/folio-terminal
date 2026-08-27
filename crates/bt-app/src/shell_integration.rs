@@ -91,7 +91,7 @@ const CMD_DEFAULT_PROMPT: &str = "$P$G";
 /// both terminators are accepted (`osc_7_reports_its_working_directory_uri_…`).
 ///
 /// **The URI is Win32-spelled, and that is forced rather than chosen.** `$P`
-/// expands to `D:\Developer\BetterTerminal`, and `PROMPT` has no substitution,
+/// expands to `D:\Developer\folio-terminal`, and `PROMPT` has no substitution,
 /// no loop and no escape hatch that could turn those separators into `/` or
 /// percent-encode a space — measured, not assumed: `cmd.exe` under ConPTY puts
 /// `file:///C:\Program Files` on the wire for a directory with a space in it. So
@@ -1816,7 +1816,7 @@ mod tests {
         std::fs::write(
             &profile,
             "\n# Folio OSC 133 shell integration (opt-in)\n. \
-             'D:\\Developer\\BetterTerminal\\scripts\\shell-integration\\folio.ps1'\n",
+             'D:\\Developer\\folio-terminal\\scripts\\shell-integration\\folio.ps1'\n",
         )
         .unwrap();
         assert_eq!(offer_for(&profile), Offer::Silent);
@@ -1883,7 +1883,7 @@ mod tests {
         ));
         assert!(
             profile_declares_integration(
-                ". 'D:\\Developer\\BetterTerminal\\scripts\\shell-integration\\FOLIO.PS1'\n"
+                ". 'D:\\Developer\\folio-terminal\\scripts\\shell-integration\\FOLIO.PS1'\n"
             ),
             "the machine is case-insensitive about file names and so is this"
         );

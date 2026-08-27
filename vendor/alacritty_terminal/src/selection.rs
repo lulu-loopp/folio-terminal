@@ -1,3 +1,9 @@
+// MODIFIED BY THE FOLIO CONTRIBUTORS — not the upstream
+// alacritty_terminal 0.26.0 file of the same name.
+// Change: reformatted to this repository's rustfmt settings, and nothing else.
+// Index: vendor/alacritty_terminal/CHANGES-FOLIO.md
+// Notice given under section 4(b) of the Apache License, Version 2.0.
+
 //! State management for a selection in the grid.
 //!
 //! A selection should start when the mouse is clicked, and it should be

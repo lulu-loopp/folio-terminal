@@ -1102,9 +1102,9 @@ pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
 /// honour a hostname at all pass `None`.
 ///
 /// **This one accepts a POSIX root as well as a drive letter**, and that is what an OSC 7 report
-/// from a shell running inside WSL looks like: `file:///home/weiyi/src`. The directory a shell is
+/// from a shell running inside WSL looks like: `file:///home/alice/src`. The directory a shell is
 /// standing in is a fact about *that shell's* filesystem, and a Linux shell on this machine has no
-/// drive letter to offer — `wslpath -w` would answer `\\wsl.localhost\<distro>\home\weiyi`, a UNC
+/// drive letter to offer — `wslpath -w` would answer `\\wsl.localhost\<distro>\home\alice`, a UNC
 /// whose authority this very function is obliged to reject as a remote share. Refusing the POSIX
 /// spelling therefore does not keep a foreign path out; it only makes the most common directory in
 /// WSL unnameable, so a WSL pane could never say where it is.
@@ -2090,9 +2090,9 @@ mod tests {
     #[test]
     fn local_path_candidate_boundaries_are_conservative_and_cc_exact() {
         assert_eq!(
-            detect_local_image_path_candidates(r#"[Image: source: C:\Users\weiyi\Pictures\1.png]"#),
+            detect_local_image_path_candidates(r#"[Image: source: C:\Users\alice\Pictures\1.png]"#),
             vec![LocalImagePathCandidate {
-                path: r"C:\Users\weiyi\Pictures\1.png".to_owned(),
+                path: r"C:\Users\alice\Pictures\1.png".to_owned(),
                 byte_start: 16,
                 byte_end: 45,
                 shape: ImageReferenceShape::Native,
@@ -2100,10 +2100,10 @@ mod tests {
         );
         assert_eq!(
             detect_local_image_path_candidates(
-                r#"[Image: source: "C:\Users\weiyi\My Pictures\one two.WEBP"]"#
+                r#"[Image: source: "C:\Users\alice\My Pictures\one two.WEBP"]"#
             )[0]
             .path,
-            r"C:\Users\weiyi\My Pictures\one two.WEBP"
+            r"C:\Users\alice\My Pictures\one two.WEBP"
         );
         assert_eq!(
             detect_local_image_path_candidates(r"source=C:/tmp/picture.jpeg]ignored.png")[0].path,
@@ -2136,16 +2136,16 @@ mod tests {
     #[test]
     fn path_candidates_open_after_any_non_token_character_and_close_at_any_closing_delimiter() {
         for accepted in [
-            "（D:\\Developer\\BetterTerminal\\layout-preview.png）",
-            "见图（D:\\Developer\\BetterTerminal\\layout-preview.png）",
-            "「D:\\Developer\\BetterTerminal\\layout-preview.png」",
-            "【D:\\Developer\\BetterTerminal\\layout-preview.png】",
-            "路径：D:\\Developer\\BetterTerminal\\layout-preview.png",
-            "(D:\\Developer\\BetterTerminal\\layout-preview.png)",
-            "<D:\\Developer\\BetterTerminal\\layout-preview.png>",
-            "《D:\\Developer\\BetterTerminal\\layout-preview.png》",
-            "“D:\\Developer\\BetterTerminal\\layout-preview.png”",
-            "图\u{3000}D:\\Developer\\BetterTerminal\\layout-preview.png",
+            "（D:\\Developer\\folio-terminal\\layout-preview.png）",
+            "见图（D:\\Developer\\folio-terminal\\layout-preview.png）",
+            "「D:\\Developer\\folio-terminal\\layout-preview.png」",
+            "【D:\\Developer\\folio-terminal\\layout-preview.png】",
+            "路径：D:\\Developer\\folio-terminal\\layout-preview.png",
+            "(D:\\Developer\\folio-terminal\\layout-preview.png)",
+            "<D:\\Developer\\folio-terminal\\layout-preview.png>",
+            "《D:\\Developer\\folio-terminal\\layout-preview.png》",
+            "“D:\\Developer\\folio-terminal\\layout-preview.png”",
+            "图\u{3000}D:\\Developer\\folio-terminal\\layout-preview.png",
         ] {
             let candidates = detect_local_image_path_candidates(accepted);
             assert_eq!(
@@ -2153,7 +2153,7 @@ mod tests {
                     .iter()
                     .map(|candidate| candidate.path.as_str())
                     .collect::<Vec<_>>(),
-                vec![r"D:\Developer\BetterTerminal\layout-preview.png"],
+                vec![r"D:\Developer\folio-terminal\layout-preview.png"],
                 "a path in {accepted:?} must be seen whole"
             );
             assert_eq!(
@@ -2165,7 +2165,7 @@ mod tests {
         for rejected in [
             // A drive prefix that continues a token is a suffix of that token, never a path. The
             // `/` case is load-bearing: it is what keeps a `file://` URI out of the native scan.
-            "file:///D:/Developer/BetterTerminal/layout-preview.png",
+            "file:///D:/Developer/folio-terminal/layout-preview.png",
             "见D:\\a\\b.png",
             "v1.D:\\a\\b.png",
             "x-D:\\a\\b.png",
@@ -2193,8 +2193,8 @@ mod tests {
     fn file_uris_resolve_to_local_image_paths_under_the_same_admission_gates() {
         for (uri, expected) in [
             (
-                "file:///D:/Developer/BetterTerminal/layout-preview.png",
-                r"D:\Developer\BetterTerminal\layout-preview.png",
+                "file:///D:/Developer/folio-terminal/layout-preview.png",
+                r"D:\Developer\folio-terminal\layout-preview.png",
             ),
             ("file:///D:/x%20y.png", r"D:\x y.png"),
             ("file:///D:/%E5%9B%BE%E7%89%87.PNG", r"D:\图片.PNG"),
@@ -2332,8 +2332,8 @@ mod tests {
     fn working_directory_uris_decode_without_the_image_extension_gate() {
         for (uri, expected) in [
             (
-                "file:///D:/Developer/BetterTerminal",
-                r"D:\Developer\BetterTerminal",
+                "file:///D:/Developer/folio-terminal",
+                r"D:\Developer\folio-terminal",
             ),
             // A trailing slash is how a URI names a directory, not an empty final segment.
             ("file:///D:/Developer/", r"D:\Developer"),
@@ -2402,11 +2402,11 @@ mod tests {
     #[test]
     fn a_working_directory_may_be_spelled_the_way_a_windows_shell_can_spell_it() {
         for (uri, expected) in [
-            // `$e]7;file:///$P$e\` at `D:\Developer\BetterTerminal`, measured off a real
+            // `$e]7;file:///$P$e\` at `D:\Developer\folio-terminal`, measured off a real
             // pseudoconsole rather than composed here.
             (
-                r"file:///D:\Developer\BetterTerminal",
-                r"D:\Developer\BetterTerminal",
+                r"file:///D:\Developer\folio-terminal",
+                r"D:\Developer\folio-terminal",
             ),
             // …and in a directory whose name has a space, which `PROMPT` cannot encode.
             (r"file:///C:\Program Files", r"C:\Program Files"),
@@ -2415,8 +2415,8 @@ mod tests {
             (r"file:///C:\", r"C:\"),
             // Mixed, because nothing forbids it and a path is a path.
             (
-                r"file:///D:\Developer/BetterTerminal",
-                r"D:\Developer\BetterTerminal",
+                r"file:///D:\Developer/folio-terminal",
+                r"D:\Developer\folio-terminal",
             ),
         ] {
             assert_eq!(
@@ -2448,10 +2448,10 @@ mod tests {
     #[test]
     fn a_working_directory_may_be_posix_rooted_while_an_image_reference_may_not() {
         for (uri, expected) in [
-            ("file:///home/weiyi/src", "/home/weiyi/src"),
+            ("file:///home/alice/src", "/home/alice/src"),
             (
-                "file:///mnt/d/Developer/BetterTerminal",
-                "/mnt/d/Developer/BetterTerminal",
+                "file:///mnt/d/Developer/folio-terminal",
+                "/mnt/d/Developer/folio-terminal",
             ),
             // The trailing-slash and percent-decoding rules are the decoder's, not the drive's.
             ("file:///mnt/d/Developer/", "/mnt/d/Developer"),
@@ -2467,8 +2467,8 @@ mod tests {
         // Every other gate still stands in front of it. A POSIX root buys no authority, no interior
         // empty segment and no broken escape.
         for rejected in [
-            "file://server/home/weiyi",
-            "file:///home//weiyi",
+            "file://server/home/alice",
+            "file:///home//alice",
             "file:///home/%zz",
         ] {
             assert_eq!(file_uri_to_local_path(rejected, None), None, "{rejected:?}");

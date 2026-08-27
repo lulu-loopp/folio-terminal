@@ -7158,13 +7158,13 @@ mod tests {
     /// fragment's own printed text.
     #[test]
     fn a_file_link_wrapped_mid_path_is_one_link_carrying_the_whole_target() {
-        const URI: &str = "file:///C:/Users/Weiyi/AppData/Local/Temp/claude/\
+        const URI: &str = "file:///C:/Users/Alice/AppData/Local/Temp/claude/\
             D--Developer-BetterTerminal/cafff1bf-5221-42c8-997c-a57c9d1ae041/scratchpad/\
             attention-status.md";
         const COLUMNS: usize = 71;
         let fragments = [
             (
-                "C:\\Users\\Weiyi\\AppData\\Local\\Temp\\claude\\D--Developer-BetterTer",
+                "C:\\Users\\Alice\\AppData\\Local\\Temp\\claude\\D--Developer-BetterTer",
                 "",
             ),
             (
@@ -7221,7 +7221,7 @@ mod tests {
     /// something the target is not and the whole thing comes apart into three.
     #[test]
     fn a_wrapped_file_link_behind_the_applications_own_gutter_is_still_one_link() {
-        const URI: &str = "file:///C:/Users/Weiyi/AppData/Local/Temp/claude/\
+        const URI: &str = "file:///C:/Users/Alice/AppData/Local/Temp/claude/\
             D--Developer-BetterTerminal/ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/\
             folio-pdf-test.pdf";
         const COLUMNS: usize = 71;
@@ -7229,7 +7229,7 @@ mod tests {
         let fragments = [
             (
                 ">      ",
-                "C:\\Users\\Weiyi\\AppData\\Local\\Temp\\claude\\D--Developer-Bett",
+                "C:\\Users\\Alice\\AppData\\Local\\Temp\\claude\\D--Developer-Bett",
                 "(58.2K",
             ),
             (

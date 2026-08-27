@@ -50652,7 +50652,7 @@ impl Runtime<'_> {
     ///
     /// **The cut lives here** because the strip's width and the font are both
     /// here, and it is `settings::ellipsized_left` — the same cut the float's
-    /// foot takes, from the *front*, so `…ers\Weiyi\Developer\BetterTerminal`
+    /// foot takes, from the *front*, so `…ers\Alice\Developer\folio-terminal`
     /// keeps the segment that answers "where am I" (B23). The mock-up reaches it
     /// with `direction: rtl` and a `<bdi>` around the path; we draw our own text,
     /// so we simply cut the string and lay it out left to right, and the bidi
@@ -62544,7 +62544,7 @@ impl Runtime<'_> {
         // itself the last such event that value is the empty string, because the
         // save ran before the shell had said anything, and no later save
         // corrected it. Measured: a Command Prompt tab opened, left alone and
-        // then closed persisted `"cwd": ""` while its own strip read `Weiyi`.
+        // then closed persisted `"cwd": ""` while its own strip read `Alice`.
         //
         // This is §5.1's "有意义的变更" by its plain sense — the field is in the
         // file — and the debounce that ruling exists to provide is what makes a
@@ -80602,9 +80602,9 @@ const TITLE_MAX_CHARS: usize = 40;
 /// of thing. Forty characters is a sane cap on a *name*: a name is something a
 /// person or a program chose to be read at a glance, and forty of them is a
 /// generous glance. It is a nonsensical cap on a *path*, because nearly every
-/// real working directory is longer — `D:\Developer\BetterTerminal\crates\bt-app`
+/// real working directory is longer — `D:\Developer\folio-terminal\crates\bt-app`
 /// is already forty-one — so capping the head's cwd layer at `TITLE_MAX` would
-/// print `D:\Developer\BetterTerminal\crates\bt-ap` and stop, which defeats the
+/// print `D:\Developer\folio-terminal\crates\bt-ap` and stop, which defeats the
 /// exact thing C28 puts a whole path in a head for. A head that answers "where
 /// is this" with a path cut off before its last segment has answered nothing,
 /// and has done it while looking like a complete answer.
@@ -86228,8 +86228,8 @@ mod tests {
     /// `PowerShell · D:\…` on every head in the window, which is the bug.**
     #[test]
     fn a_pane_head_says_where_it_is_and_a_program_speaks_only_in_front_of_it() {
-        let cwd = Path::new(r"D:\Developer\BetterTerminal\crates\bt-app");
-        let whole = r"D:\Developer\BetterTerminal\crates\bt-app".to_owned();
+        let cwd = Path::new(r"D:\Developer\folio-terminal\crates\bt-app");
+        let whole = r"D:\Developer\folio-terminal\crates\bt-app".to_owned();
         let profile = profiles::title(profiles::fallback_profile());
 
         // THE BUG. `scripts/shell-integration/folio.ps1` ends by
@@ -86395,7 +86395,7 @@ mod tests {
     #[test]
     fn a_pane_heads_folder_is_capped_at_max_path_and_not_at_a_names_forty() {
         let profile = profiles::title(profiles::fallback_profile());
-        let ordinary = Path::new(r"D:\Developer\BetterTerminal\crates\bt-app\src");
+        let ordinary = Path::new(r"D:\Developer\folio-terminal\crates\bt-app\src");
         let ordinary_text = ordinary.to_str().expect("a test path is UTF-8");
         assert!(
             ordinary_text.chars().count() > TITLE_MAX_CHARS,
@@ -86495,8 +86495,8 @@ mod tests {
     /// to their last segment.
     #[test]
     fn a_tabs_terminal_names_are_the_whole_folders_its_shells_reported() {
-        let left_path = r"D:\Developer\BetterTerminal\crates\bt-app";
-        let right_path = r"D:\Developer\BetterTerminal\crates\bt-term";
+        let left_path = r"D:\Developer\folio-terminal\crates\bt-app";
+        let right_path = r"D:\Developer\folio-terminal\crates\bt-term";
         let profile = profiles::title(profiles::fallback_profile());
         // Both shells say exactly what the shipped integration makes them say:
         // the profile's own title, then where they stand. This is the pane pair
@@ -90358,7 +90358,7 @@ mod tests {
     #[test]
     fn only_a_page_with_a_file_behind_it_is_handed_over_to_a_browser() {
         for name in [
-            r"D:\Developer\BetterTerminal\design\ui-mockup.html",
+            r"D:\Developer\folio-terminal\design\ui-mockup.html",
             r"C:\Users\me\TIMELINE.HTM",
             r"D:\中文\页.html",
             r"D:\reports\report.pdf",
@@ -90378,8 +90378,8 @@ mod tests {
         // that is not a local file has nothing to hand anybody.
         for (url, path) in [
             (
-                "file:///D:/Developer/BetterTerminal/design/ui-mockup.html",
-                r"D:\Developer\BetterTerminal\design\ui-mockup.html",
+                "file:///D:/Developer/folio-terminal/design/ui-mockup.html",
+                r"D:\Developer\folio-terminal\design\ui-mockup.html",
             ),
             (
                 "file:///C:/Program%20Files/report.htm",
@@ -93743,7 +93743,7 @@ mod tests {
     /// own report to the profile.
     #[test]
     fn a_tab_name_takes_the_most_specific_layer_that_actually_spoke() {
-        let cwd = Path::new(r"D:\Developer\BetterTerminal");
+        let cwd = Path::new(r"D:\Developer\folio-terminal");
         assert_eq!(
             display_title(
                 Some("我的构建"),
@@ -93771,7 +93771,7 @@ mod tests {
                 Some(cwd),
                 profiles::title(profiles::fallback_profile())
             ),
-            "BetterTerminal",
+            "folio-terminal",
             "then where the shell says it is standing"
         );
         assert_eq!(
@@ -93791,7 +93791,7 @@ mod tests {
     /// fall-through, which a second copy of the precedence rules would lose.
     #[test]
     fn the_tip_names_the_layer_that_actually_named_the_tab() {
-        let cwd = Path::new(r"D:\Developer\BetterTerminal");
+        let cwd = Path::new(r"D:\Developer\folio-terminal");
         assert_eq!(
             resolve_title(
                 Some("build"),
@@ -93851,7 +93851,7 @@ mod tests {
     /// the full path rather than the leaf the first line already carries.
     #[test]
     fn a_tabs_tip_is_the_name_then_its_provenance_then_its_promise() {
-        let cwd = Path::new(r"D:\Developer\BetterTerminal");
+        let cwd = Path::new(r"D:\Developer\folio-terminal");
         let (name, source) = resolve_title(
             None,
             None,
@@ -93861,14 +93861,14 @@ mod tests {
         let path = cwd.to_string_lossy().into_owned();
         assert_eq!(
             tooltip::tab_tip(&name, source, Some(&path), false),
-            format!("BetterTerminal\nWorking folder · {path}")
+            format!("folio-terminal\nWorking folder · {path}")
         );
         assert_eq!(
             tooltip::tab_tip(&name, source, Some(&path), true),
-            format!("BetterTerminal\nWorking folder · {path}\nPinned — restored next launch")
+            format!("folio-terminal\nWorking folder · {path}\nPinned — restored next launch")
         );
         // The full path, not the leaf the first line already carries.
-        assert!(path.ends_with(r"Developer\BetterTerminal"));
+        assert!(path.ends_with(r"Developer\folio-terminal"));
     }
 
     /// I87: the `+` names the profile it would start, so the button says what it
@@ -94339,7 +94339,7 @@ mod tests {
     fn a_tab_opened_in_a_chosen_folder_stands_there_and_not_where_the_pane_was() {
         let pwsh = profiles::index_of_id("pwsh");
         let wsl = profiles::index_of_id("wsl");
-        let chosen = PathBuf::from(r"D:\Developer\BetterTerminal");
+        let chosen = PathBuf::from(r"D:\Developer\folio-terminal");
         let pane = PathBuf::from(r"C:\Users\dev\elsewhere");
 
         assert_eq!(
@@ -94352,7 +94352,7 @@ mod tests {
         // the same journey `StartAt::Fixed` makes at spawn.
         assert_eq!(
             new_tab_cwd(wsl, Some(&chosen), pwsh, Some(&pane)),
-            Some(PathBuf::from("/mnt/d/Developer/BetterTerminal")),
+            Some(PathBuf::from("/mnt/d/Developer/folio-terminal")),
         );
         // Nobody said: the pane answers, exactly as it did before this row
         // existed.
@@ -94527,12 +94527,12 @@ mod tests {
     #[test]
     fn the_cwd_layer_names_the_folder_you_are_standing_in() {
         for (path, leaf) in [
-            (r"D:\Developer\BetterTerminal", "BetterTerminal"),
-            (r"D:\Developer\BetterTerminal\", "BetterTerminal"),
-            (r"D:\Developer\BetterTerminal\\", "BetterTerminal"),
+            (r"D:\Developer\folio-terminal", "folio-terminal"),
+            (r"D:\Developer\folio-terminal\", "folio-terminal"),
+            (r"D:\Developer\folio-terminal\\", "folio-terminal"),
             (r"C:\", "C:"),
             (r"\\server\share\work", "work"),
-            ("/home/weiyi/src", "src"),
+            ("/home/alice/src", "src"),
         ] {
             assert_eq!(
                 display_title(
@@ -97464,7 +97464,7 @@ mod tests {
             .feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
             .unwrap();
         session
-            .feed(b"\x1b]8;;file:///D:/Developer/BetterTerminal/test.md\x1b\\test.md\x1b]8;;\x1b\\")
+            .feed(b"\x1b]8;;file:///D:/Developer/folio-terminal/test.md\x1b\\test.md\x1b]8;;\x1b\\")
             .unwrap();
         let modes = session.terminal_modes();
         assert!(modes.alternate_screen);
@@ -97476,7 +97476,7 @@ mod tests {
         let link = frame
             .hyperlink_at(hit.row, hit.column)
             .expect("the alternate screen is scanned, so the label is a link there");
-        assert_eq!(link.uri, "file:///D:/Developer/BetterTerminal/test.md");
+        assert_eq!(link.uri, "file:///D:/Developer/folio-terminal/test.md");
 
         // Same reading `pressed_cell_target` makes of that cell, and the press
         // that follows from it.
@@ -97766,7 +97766,7 @@ mod tests {
     #[test]
     fn a_restart_carries_the_seats_own_profile_and_its_last_reported_folder() {
         let profile = profiles::index_of_id("gitbash");
-        let reported = PathBuf::from(r"D:\Developer\BetterTerminal");
+        let reported = PathBuf::from(r"D:\Developer\folio-terminal");
 
         let seed = restart_seed(profile, Some(reported.as_path()));
         assert_eq!(
@@ -105216,7 +105216,7 @@ mod tests {
     fn a_long_path_is_cut_and_the_phrase_beside_it_is_not() {
         let run = [0.0, 0.0, 300.0, 28.0];
         let gap = 12.0;
-        let long = r"C:\Users\somebody\Developer\BetterTerminal\crates\bt-app\src\main.rs";
+        let long = r"C:\Users\somebody\Developer\folio-terminal\crates\bt-app\src\main.rs";
         let words = seats::dress_foot(
             seats::FootDress {
                 dissolved: 0.0,
@@ -106134,13 +106134,13 @@ mod tests {
         // still first, and it is the only one anybody actually *said*.
         let reported = tab_holding(LeafSession {
             spawn_place: Some(started_in.clone()),
-            ..leaf_saying("\u{1b}]7;file://localhost/D:/Developer/BetterTerminal\u{7}")
+            ..leaf_saying("\u{1b}]7;file://localhost/D:/Developer/folio-terminal\u{7}")
         });
         assert_eq!(
             reported.seed(),
             Some(seed::Seed::Term {
                 profile_id: profiles::id(profiles::fallback_profile()),
-                cwd: r"D:\Developer\BetterTerminal".to_owned(),
+                cwd: r"D:\Developer\folio-terminal".to_owned(),
                 manual_name: None,
             }),
         );
@@ -106436,7 +106436,7 @@ mod tests {
     /// folder from another.
     #[test]
     fn the_folded_levels_read_from_the_deepest_towards_the_root() {
-        let path = Path::new(r"D:\Developer\BetterTerminal\test-assets\huge.txt");
+        let path = Path::new(r"D:\Developer\folio-terminal\test-assets\huge.txt");
         // What `preview_rail_geometry` folds: the middle, nearest the root
         // first.
         let levels = folded_levels(path, &[1, 2, 3]);
@@ -106445,7 +106445,7 @@ mod tests {
                 .iter()
                 .map(|level| level.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["test-assets", "BetterTerminal", "Developer"],
+            vec!["test-assets", "folio-terminal", "Developer"],
         );
         assert_eq!(
             levels
@@ -106453,8 +106453,8 @@ mod tests {
                 .map(|level| level.folder.clone())
                 .collect::<Vec<_>>(),
             vec![
-                PathBuf::from(r"D:\Developer\BetterTerminal\test-assets"),
-                PathBuf::from(r"D:\Developer\BetterTerminal"),
+                PathBuf::from(r"D:\Developer\folio-terminal\test-assets"),
+                PathBuf::from(r"D:\Developer\folio-terminal"),
                 PathBuf::from(r"D:\Developer"),
             ],
             "every row goes to the place it names"
@@ -106480,7 +106480,7 @@ mod tests {
     /// wording for both rows; turn the fold's tip round.
     #[test]
     fn the_breadcrumb_rows_controls_each_say_what_they_are() {
-        let path = PathBuf::from(r"D:\Developer\BetterTerminal\test-assets\huge.txt");
+        let path = PathBuf::from(r"D:\Developer\folio-terminal\test-assets\huge.txt");
         let segments = crumb_segments(&path);
         let folded = [1, 2, 3];
         let tip =
@@ -106491,7 +106491,7 @@ mod tests {
                 seats::PreviewRailKind::Crumbs,
                 false
             ),
-            r"D:\Developer\BetterTerminal",
+            r"D:\Developer\folio-terminal",
             "a segment names the whole place, not the word drawn in it"
         );
         assert_eq!(
@@ -106501,7 +106501,7 @@ mod tests {
                 false
             ),
             format!(
-                "Developer {sep} BetterTerminal {sep} test-assets",
+                "Developer {sep} folio-terminal {sep} test-assets",
                 sep = seats::PREVIEW_CRUMB_SEPARATOR
             ),
             "and the chip names the run it stands for, the way the row reads"
