@@ -2632,6 +2632,14 @@ pub enum ChromeTarget {
     /// a target per card would be five ways of asking the same seat the same
     /// question.
     PreviewFaultVerb(SeatId),
+    /// The `×` on the download sheet — the one failure card of the five that
+    /// stands *over* a page rather than instead of one, and therefore the one
+    /// that may be closed at all (§7.7 ④, gesture audit 2026-08-26 丙6).
+    ///
+    /// Only the sheet raises it. The four cards that *are* a seat have no such
+    /// target, and that is the whole distinction: closing one of those would
+    /// leave the black hole a hidden WebView draws.
+    PreviewSheetClose(SeatId),
     /// `.pv-tool.pv-popout` — "pop out to a floating window" (P29/P60).
     ///
     /// **It moves the presentation, not the buffer.** The buffer stays in its
@@ -17502,13 +17510,56 @@ pub(crate) struct DragGhostLayout {
     pub mark: [f32; 4],
     /// The name's line box, vertically centred on the same row.
     pub label: [f32; 4],
+    /// The `new window` badge's square, after the name — present only while the
+    /// hand is off every glass of ours (丙2). See [`TearOutGhost`].
+    pub badge: Option<[f32; 4]>,
 }
+
+/// **What the ghost becomes once the hand has left this window's glass**
+/// (gesture audit 2026-08-26, 丙2).
+///
+/// Two changes and no third: the box is kept whole inside `surface`, and it
+/// gains a badge saying what letting go here would do. What does **not** change
+/// is the thing the reader is carrying — the payload's own mark and name stay
+/// where they were, because the answer to "what am I holding" did not change
+/// when the hand crossed the edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TearOutGhost {
+    /// This window's surface in physical pixels, to keep the box inside.
+    pub surface: [f32; 2],
+}
+
+/// The badge the tear-out ghost wears — the drawing the pane menu's
+/// `Move to new window` row already wears, so the gesture and the menu row that
+/// does the same thing are introduced by the same picture.
+pub(crate) const TEAR_OUT_BADGE: ChromeMark = ChromeMark::WindowNew;
+
+/// How far the ghost's ink is taken down once it is no longer under the hand.
+///
+/// It stays legible and stops claiming to be at the pointer: the box is against
+/// this window's edge and the hand is somewhere out on the desktop, so drawing
+/// it at full strength would be the surface asserting a position it has not got.
+pub(crate) const TEAR_OUT_GHOST_OPACITY: f32 = 0.7;
 
 /// Hang the ghost off the pointer (J115).
 ///
 /// `pointer` is the hotspot in physical pixels and the box goes down-and-right of
 /// it by [`bt_render::DRAG_GHOST_POINTER_OFFSET_LOGICAL_PX`] — deliberately
-/// unclamped, for the reason recorded on that constant.
+/// unclamped **while the hand is on this glass**, for the reason recorded on
+/// that constant: a box that stopped at the edge would be reporting a pointer
+/// position that is not where the pointer is.
+///
+/// `tearing_out` is the one state where that reason runs out (丙2). Once the
+/// hand is off every glass of ours there is no pointer on this surface to
+/// report, and the choice is between a box clipped away to nothing and a box
+/// held at the edge nearest the hand. The audit's finding is that the first
+/// leaves the gesture with no projection at all, so the second is taken — and
+/// it is taken together with the badge, so a reader is never shown a ghost that
+/// has stopped following the pointer without being told why it stopped.
+///
+/// Position is still recomputed from the live pointer every frame and is never
+/// eased: the clamp is a `min`/`max` on this frame's own answer, not a spring
+/// chasing it.
 ///
 /// The row's height is the taller of its two items rather than the mark's or the
 /// text's alone: `align-items: center` on a flex row makes the line box as tall
@@ -17521,6 +17572,7 @@ pub(crate) fn drag_ghost_layout(
     mark_logical: f32,
     label_width: f32,
     scale: f32,
+    tearing_out: Option<TearOutGhost>,
 ) -> DragGhostLayout {
     let px = |logical: f32| logical * scale;
     let border = px(bt_render::DRAG_GHOST_BORDER_LOGICAL_PX);
@@ -17531,10 +17583,23 @@ pub(crate) fn drag_ghost_layout(
     let line = (px(bt_render::DRAG_GHOST_FONT_LOGICAL_PX) * CHROME_LINE_HEIGHT).round();
     let row = mark.max(line);
 
-    let left = (pointer[0] + px(bt_render::DRAG_GHOST_POINTER_OFFSET_LOGICAL_PX[0])).round();
-    let top = (pointer[1] + px(bt_render::DRAG_GHOST_POINTER_OFFSET_LOGICAL_PX[1])).round();
-    let width = (2.0 * (border + pad_x) + mark + gap + label_width).round();
+    let badge = tearing_out.map(|_| px(compact_head_glyph_logical_px(TEAR_OUT_BADGE)).round());
+    let badge_claim = badge.map_or(0.0, |badge| gap + badge);
+    let inset = [
+        px(bt_render::DRAG_GHOST_POINTER_OFFSET_LOGICAL_PX[0]),
+        px(bt_render::DRAG_GHOST_POINTER_OFFSET_LOGICAL_PX[1]),
+    ];
+    let width = (2.0 * (border + pad_x) + mark + gap + label_width + badge_claim).round();
     let height = (2.0 * (border + pad_y) + row).round();
+    let mut left = (pointer[0] + inset[0]).round();
+    let mut top = (pointer[1] + inset[1]).round();
+    if let Some(tear) = tearing_out {
+        // The same inset off the far edges as off the pointer, so a held ghost
+        // sits in the window rather than flush against the frame. `max` last, so
+        // a surface narrower than the box shows its left edge and not its right.
+        left = left.min(tear.surface[0] - width - inset[0]).max(inset[0]);
+        top = top.min(tear.surface[1] - height - inset[1]).max(inset[1]);
+    }
     let frame = [left, top, left + width, top + height];
 
     let centre = (frame[1] + frame[3]) / 2.0;
@@ -17542,15 +17607,25 @@ pub(crate) fn drag_ghost_layout(
     let mark_top = (centre - mark / 2.0).round();
     let label_left = mark_left + mark + gap;
     let label_top = (centre - line / 2.0).round();
+    let content_right = frame[2] - border - pad_x;
     DragGhostLayout {
         frame,
         mark: [mark_left, mark_top, mark_left + mark, mark_top + mark],
         label: [
             label_left,
             label_top,
-            frame[2] - border - pad_x,
+            content_right - badge_claim,
             label_top + line,
         ],
+        badge: badge.map(|badge| {
+            let badge_top = (centre - badge / 2.0).round();
+            [
+                content_right - badge,
+                badge_top,
+                content_right,
+                badge_top + badge,
+            ]
+        }),
     }
 }
 
@@ -17607,7 +17682,21 @@ pub(crate) fn build_drag_ghost(
             tabular_numerals: false,
             clip: None,
         }],
-        sprites: vec![ChromeSprite::new(mark, layout.mark, mark_color)],
+        sprites: {
+            let mut sprites = vec![ChromeSprite::new(mark, layout.mark, mark_color)];
+            // The badge is the payload's *destination* and the mark beside the
+            // name is the payload itself, so it is drawn in the muted ink the
+            // menus give a trailing annotation rather than in the payload's own
+            // colour — two inks for two kinds of fact.
+            if let Some(badge) = layout.badge {
+                sprites.push(ChromeSprite::new(
+                    TEAR_OUT_BADGE,
+                    badge,
+                    palette.menu_item_hint_text,
+                ));
+            }
+            sprites
+        },
         ..crate::marks::OverlayLayer::default()
     }
 }
@@ -30470,7 +30559,7 @@ mod tests {",
     /// Each of the four assertions below fails on exactly one of them.
     #[test]
     fn the_ghost_shrink_wraps_its_mark_and_its_name_inside_the_mockups_padding() {
-        let ghost = drag_ghost_layout([100.0, 200.0], 15.0, 60.0, 1.0);
+        let ghost = drag_ghost_layout([100.0, 200.0], 15.0, 60.0, 1.0, None);
         // 12 + 1 either side, 15 of mark, 7 of gap, 60 of text.
         assert_eq!(
             ghost.frame[2] - ghost.frame[0],
@@ -30519,7 +30608,7 @@ mod tests {",
     fn the_ghost_hangs_below_and_right_of_the_hand_by_the_same_logical_amount() {
         for scale in [1.0_f32, 1.5, 2.0] {
             let pointer = [400.0_f32, 300.0];
-            let ghost = drag_ghost_layout(pointer, 15.0, 60.0, scale);
+            let ghost = drag_ghost_layout(pointer, 15.0, 60.0, scale, None);
             assert_eq!(
                 ghost.frame[0] - pointer[0],
                 (10.0 * scale).round(),
@@ -30536,14 +30625,105 @@ mod tests {",
     /// The ghost is not clamped to the window, and that is the mock-up's own
     /// `position: fixed` with no bound (1717).
     ///
-    /// Red gate: add a clamp and the ghost stops reporting where the pointer is
-    /// the moment the pointer nears an edge — which is exactly when a drag is
-    /// most likely to be aiming at something.
+    /// Red gate: clamp it **while the hand is on this glass** and the ghost
+    /// stops reporting where the pointer is the moment the pointer nears an
+    /// edge — which is exactly when a drag is most likely to be aiming at
+    /// something. The one state where the clamp is right is the one where there
+    /// is no pointer on this surface left to report; see
+    /// [`the_torn_out_ghost_is_held_inside_the_surface_and_wears_a_badge`].
     #[test]
     fn the_ghost_follows_the_hand_past_the_edge_rather_than_stopping_at_it() {
-        let ghost = drag_ghost_layout([1919.0, 1079.0], 15.0, 60.0, 1.0);
+        let ghost = drag_ghost_layout([1919.0, 1079.0], 15.0, 60.0, 1.0, None);
         assert_eq!(ghost.frame[0], 1929.0);
         assert_eq!(ghost.frame[1], 1087.0);
+    }
+
+    /// RED (gesture audit 2026-08-26, 丙2) — **once the hand is off every glass
+    /// of ours, the ghost is held whole on this surface and says what letting go
+    /// out there would do.**
+    ///
+    /// The audit's words for the state this fixes: 「手势全程屏幕上一点反馈都没
+    /// 有」. Three channels exist and all three were switched off at the window
+    /// edge — the landing frame is forced empty off-glass, the cursor is
+    /// `Default` for the whole of every drag, and the ghost hangs off an
+    /// unbounded `pointer + offset` and so leaves with the hand. For a tab this
+    /// is the *only* door the verb has.
+    ///
+    /// MUTATIONS: ① drop the clamp and the first assertion goes red with the
+    /// box off the surface again; ② clamp unconditionally and the previous test
+    /// goes red — a ghost that stops at the edge while the hand is still on the
+    /// glass is lying about where the hand is; ③ hold the badge back and the
+    /// reader is shown a ghost that has stopped following the pointer with
+    /// nothing to say why.
+    #[test]
+    fn the_torn_out_ghost_is_held_inside_the_surface_and_wears_a_badge() {
+        let surface = [1920.0, 1080.0];
+        let tear = TearOutGhost { surface };
+        // Carried off the bottom-right corner: kept whole, on this glass.
+        let held = drag_ghost_layout([1919.0, 1079.0], 15.0, 60.0, 1.0, Some(tear));
+        assert!(
+            held.frame[0] >= 0.0
+                && held.frame[1] >= 0.0
+                && held.frame[2] <= surface[0]
+                && held.frame[3] <= surface[1],
+            "a payload still in the air has to be somewhere a reader can see it"
+        );
+        let badge = held
+            .badge
+            .expect("the ghost says where letting go would put it");
+        assert!(badge[0] >= held.label[2], "after the name, never over it");
+        assert!(badge[2] <= held.frame[2], "and inside the box");
+
+        // Well inside the surface it still tracks the hand exactly: the clamp is
+        // a bound on this frame's own answer and never an easing chasing it.
+        let tracking = drag_ghost_layout([300.0, 400.0], 15.0, 60.0, 1.0, Some(tear));
+        assert_eq!(tracking.frame[0], 310.0);
+        assert_eq!(tracking.frame[1], 408.0);
+
+        // The badge widens the box rather than squeezing the name out of it, so
+        // the answer to "what am I holding" is unchanged by the answer to
+        // "where would it go".
+        let plain = drag_ghost_layout([300.0, 400.0], 15.0, 60.0, 1.0, None);
+        assert_eq!(plain.badge, None);
+        assert_eq!(tracking.label[0], plain.label[0]);
+        assert_eq!(tracking.mark, plain.mark);
+        assert!(tracking.frame[2] - tracking.frame[0] > plain.frame[2] - plain.frame[0]);
+    }
+
+    /// RED (丙2) — **the badge is a second sprite in the same one layer.**
+    #[test]
+    fn the_torn_out_ghost_paints_the_new_window_mark_beside_the_payloads_own() {
+        let palette = bt_render::chrome_palette();
+        let surface = [1920.0, 1080.0];
+        let layout = drag_ghost_layout(
+            [300.0, 400.0],
+            15.0,
+            60.0,
+            1.0,
+            Some(TearOutGhost { surface }),
+        );
+        let layer = build_drag_ghost(
+            &layout,
+            ChromeMark::ProfilePowerShell,
+            palette.accent,
+            "bt-app",
+            1.0,
+            palette,
+        );
+        assert!(
+            layer
+                .sprites
+                .iter()
+                .any(|sprite| sprite.mark == TEAR_OUT_BADGE),
+            "the drawing the `Move to new window` row wears, on the gesture that does the same thing"
+        );
+        assert!(
+            layer
+                .sprites
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::ProfilePowerShell),
+            "and the payload's own mark is still there"
+        );
     }
 
     /// One layer, and everything the mock-up puts in it: a floating box, the
@@ -30555,7 +30735,7 @@ mod tests {",
     #[test]
     fn the_ghost_paints_one_floating_box_carrying_a_mark_and_one_name() {
         let palette = bt_render::chrome_palette();
-        let layout = drag_ghost_layout([100.0, 100.0], 15.0, 60.0, 1.0);
+        let layout = drag_ghost_layout([100.0, 100.0], 15.0, 60.0, 1.0, None);
         let layer = build_drag_ghost(
             &layout,
             ChromeMark::ProfilePowerShell,

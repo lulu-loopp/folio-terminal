@@ -150,7 +150,23 @@ use serde::{Deserialize, Serialize};
 /// being read. It is cleared back to `true` by `Reset to defaults` on the Appearance page, which
 /// is the page Cards lives on — the one verb in this product that says "put this page back the
 /// way it shipped", and the reason this bit is in this file rather than in a record of its own.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 24;
+///
+/// **v25 carries `copy_on_select`**, whether dragging a selection in the terminal writes it to the
+/// clipboard the moment the drag lets go. The 2026-08-26 gesture audit
+/// (`docs/plans/ui-style/invisible-gestures-2026-08-26.md`, 丙4) judged the write invisible: nothing
+/// on screen says the clipboard was just overwritten, and Windows Terminal's own `copyOnSelect`
+/// ships `false`, so a reader arriving from that product carries no muscle memory for it either.
+/// The row exists so the behaviour has a name and a door to be shown out of — it does not exist to
+/// choose the behaviour, which was chosen long before this row was. It lands the way v13–v16, v19
+/// and v21 did rather than the way v17–v20 and v22–v24 did: every build before this one already
+/// copied a drag's selection the instant it was let go, so `true` is a habit being carried forward,
+/// unlike the two notes above it, which each chose a default for something that had never existed.
+///
+/// **It was written as v24 and became v25 on 2026-08-27**, when the Cards bubble's key reached
+/// `main` first. Two keys cannot share a rung — `SETTINGS_MIGRATIONS` is the only map of the road
+/// from an old file to this one — so the later slice takes the later number, which is a rule and
+/// not a judgement about which key mattered more.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 25;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -278,10 +294,10 @@ pub const DEFAULT_SCROLLBACK_LINES: u32 = 100_000;
 /// not depend on the renderer, and the two are held together by the test that reads them both.
 pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 
-/// `settings.json` v22 — docs/M2-persistence-schema-v1.md §2:
+/// `settings.json` v25 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 22,
+///   "schema_version": 25,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
@@ -312,7 +328,8 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "line_wrapping": true | false,
 ///   "key_hints": true | false,
 ///   "turn_end_notification": true | false,
-///   "cards_gesture_hint_offer": true | false
+///   "cards_gesture_hint_offer": true | false,
+///   "copy_on_select": true | false
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -798,6 +815,25 @@ pub struct SettingsV1 {
     /// learn they have.
     #[serde(default = "default_turn_end_notification")]
     pub turn_end_notification: bool,
+    /// **Whether dragging a selection in the terminal writes it to the clipboard the moment the
+    /// drag lets go** — no row of its own until the 2026-08-26 gesture audit gave it one
+    /// (`docs/plans/ui-style/invisible-gestures-2026-08-26.md`, 丙4).
+    ///
+    /// The audit's whole complaint is that the write is **invisible**: a hand drags across three
+    /// lines, lets go, and the clipboard now holds those three lines with nothing on screen having
+    /// said so — no flash, no toast, no mark on the selection. A person who then presses `Ctrl+C`
+    /// expecting the interrupt they always get, or pastes somewhere else expecting whatever they
+    /// copied last, finds out the clipboard moved only by what comes out of the paste. Windows
+    /// Terminal's own `copyOnSelect` ships `false` for the same reason, so a reader arriving from
+    /// that product carries no muscle memory that would make the write expected either.
+    ///
+    /// `true` is the default anyway, and it is not this row choosing the behaviour — see
+    /// [`SETTINGS_SCHEMA_VERSION`]'s v24 note. Every build before this key existed already copied a
+    /// drag's selection the instant it was let go; the key exists so that behaviour has a name and
+    /// a door, and a reader who wants the interrupt back on a plain drag now has one press that
+    /// closes it.
+    #[serde(default = "default_copy_on_select")]
+    pub copy_on_select: bool,
 }
 
 /// `serde`'s door for a v14 key that is missing from a file this build is reading.
@@ -867,6 +903,16 @@ fn default_turn_end_notification() -> bool {
     true
 }
 
+/// `serde`'s door for a v24 key missing from a file this build is reading.
+///
+/// [`default_line_wrapping`]'s reason exactly, and it is the same *kind* of key: a `bool`'s own
+/// default is `false`, and a file that had lost this one would come back as a pane that had
+/// stopped copying a drag's selection — a habit every build before this key existed actually had,
+/// silently broken on the strength of an absent line.
+fn default_copy_on_select() -> bool {
+    true
+}
+
 impl Default for SettingsV1 {
     fn default() -> Self {
         Self {
@@ -918,6 +964,9 @@ impl Default for SettingsV1 {
             // A reader who has never been in Cards is owed the one sentence that makes the
             // gesture in it findable.
             cards_gesture_hint_offer: true,
+            // A drag that lets go of a selection has always written it to the clipboard; the row
+            // gives that habit a name rather than choosing it.
+            copy_on_select: true,
         }
     }
 }

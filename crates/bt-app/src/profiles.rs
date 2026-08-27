@@ -3449,6 +3449,19 @@ pub struct ProfileMenuLayout {
     scale: f32,
     /// The menu's border box.
     frame: [f32; 4],
+    /// **The chord on the `Files pane` row**, measured — the one row of this
+    /// menu that is also a row of the shortcut table (系统性发现 ②).
+    ///
+    /// It is the same verb and not merely a similar one: the row calls
+    /// `Runtime::toggle_files_pane`, which is exactly what
+    /// `shortcuts::Action::FilesPane` dispatches to, and the press arm in
+    /// `main.rs` says so in its own comment — 「this one gives the tab you are
+    /// in a pane, through the same verb `Ctrl+Shift+B` reaches」.
+    ///
+    /// Carried on [`PaneMenuLayout::accels`]' reasoning: the frame is measured
+    /// with this column reserved in it, so the painter must draw the very string
+    /// that was measured.
+    files_pane_accel: Option<(String, f32)>,
     /// One row per **offered** profile, top to bottom.
     items: Vec<[f32; 4]>,
     /// Which table row each of [`Self::items`] draws.
@@ -3619,6 +3632,7 @@ pub fn layout(
     surface: (f32, f32),
     scale: f32,
     recent: &[RecentEntry],
+    shortcuts: &crate::shortcuts::Shortcuts,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> ProfileMenuLayout {
     let px = |value: f32| value * scale;
@@ -3669,6 +3683,19 @@ pub fn layout(
     // Measured before the closure below borrows `measure` for the rest of the
     // function, not because the order matters to the layout.
     let files_hint = measure(files_pane_hint_text(), px(HINT_FONT_LOGICAL_PX));
+    // The one chord this menu prints, measured before the row it sits on is
+    // (系统性发现 ②). Reserved out of the `Files pane` row's own content rather
+    // than out of every row: the rows above it are profiles, whose width is the
+    // reader's own shell names, and a chord column across all of them would
+    // widen the picker on every machine to annotate one line.
+    let files_pane_accel = accelerator_of(
+        Some(crate::shortcuts::Action::FilesPane),
+        false,
+        shortcuts,
+        scale,
+        measure,
+    );
+    let files_accel_claim = accelerator_claim(std::slice::from_ref(&files_pane_accel), scale);
     let mut row_content = |name: &str, font: f32, annotation: f32| {
         px(ITEM_ICON_COLUMN_LOGICAL_PX)
             + px(ITEM_GAP_LOGICAL_PX)
@@ -3700,9 +3727,16 @@ pub fn layout(
     // with a hint, and this one opens a tab too, so there is no difference for a
     // hint to be about. Its ellipsis is what it has to say, and the caption
     // already says it.
-    let files_row = row_content(files_pane_text(), px(ITEM_FONT_LOGICAL_PX), files_hint).max(
-        row_content(new_in_folder_text(), px(ITEM_FONT_LOGICAL_PX), 0.0),
-    );
+    let files_row = row_content(
+        files_pane_text(),
+        px(ITEM_FONT_LOGICAL_PX),
+        files_hint + files_accel_claim,
+    )
+    .max(row_content(
+        new_in_folder_text(),
+        px(ITEM_FONT_LOGICAL_PX),
+        0.0,
+    ));
     let offered = table().offered();
     let content = offered
         .iter()
@@ -3796,6 +3830,7 @@ pub fn layout(
     ProfileMenuLayout {
         scale,
         frame,
+        files_pane_accel,
         items,
         profiles: offered,
         files_separator,
@@ -3980,6 +4015,8 @@ pub fn build(
                 } else {
                     Some(hint(unavailable_hint_text().to_owned()))
                 },
+                // No row of this menu is a row of the shortcut table (系统性发现 ②).
+                accel: None,
                 dirty: false,
                 hovered: hover == Some(MenuRow::Profile(index)),
                 available,
@@ -4013,6 +4050,11 @@ pub fn build(
             mark: Some(ActionIcon::OpenFilesPane.mark()),
             name: files_pane_text(),
             hint: Some(hint(files_pane_hint_text().to_owned())),
+            // **The one row of this menu that is also a row of the shortcut
+            // table** — see [`ProfileMenuLayout::files_pane_accel`]. Every row
+            // above it names a profile and every row below names a folder or a
+            // recent tab; none of those is a verb the table carries.
+            accel: layout.files_pane_accel.clone(),
             dirty: false,
             hovered: hover == Some(MenuRow::FilesPane),
             // A files column needs no program behind it, so there is nothing
@@ -4037,6 +4079,8 @@ pub fn build(
             mark: Some(ActionIcon::NewTerminalInFolder.mark()),
             name: new_in_folder_text(),
             hint: None,
+            // A system chooser is not a verb the shortcut table carries.
+            accel: None,
             dirty: false,
             hovered: hover == Some(MenuRow::NewInFolder),
             available: true,
@@ -4072,6 +4116,8 @@ pub fn build(
                 // "can you", and losing the timestamp would cost the row the
                 // only thing that orders it against its neighbours.
                 hint: Some(hint(ago_label(entry.at, now))),
+                // No row of this menu is a row of the shortcut table (系统性发现 ②).
+                accel: None,
                 dirty: false,
                 hovered: hover == Some(MenuRow::Recent(index)),
                 available: recent_is_available(&entry.seed, programs),
@@ -4199,6 +4245,30 @@ struct Row<'a> {
     /// once: the hint is right-aligned into it and the name's box ends where it
     /// begins.
     hint: Option<(String, f32)>,
+    /// **The chord this row's verb also answers to, and its measured width**
+    /// (gesture audit 2026-08-26, 系统性发现 ②).
+    ///
+    /// The audit's second systemic finding was that this window has two doors
+    /// onto a dozen verbs and neither door mentions the other: the hint card is
+    /// the keyboard's side of it, and `profiles.rs` had no accelerator column
+    /// anywhere, so `Close pane` and `Ctrl+Shift+W` were introduced to a reader
+    /// twice, as strangers.
+    ///
+    /// Small right-aligned text and not key caps, which is what Windows and
+    /// every editor on it draws in this slot — a cap here would be a second
+    /// control-shaped thing in a row that already has a control column. The ink
+    /// is the hint's, and for the hint's stated reason: an accelerator
+    /// **reports**, it does not offer.
+    ///
+    /// The width travels with the words for [`Self::hint`]'s reason exactly: it
+    /// is measured once, where the menu is laid out, and both the reservation
+    /// and the drawing read that one number.
+    ///
+    /// `None` on a row whose verb is not a row of the shortcut table, and on
+    /// every row wearing a `▸` — see [`accelerator_claim`]. A menu is not the
+    /// shortcuts page, so a row with no chord prints nothing rather than the
+    /// word for nothing.
+    accel: Option<(String, f32)>,
     /// **Unsaved edits — the dot at the row's trailing edge.**
     ///
     /// A fact and not a string, since P1. It reached this row as `●` in the
@@ -4218,6 +4288,49 @@ struct Row<'a> {
     /// context-menu verb — and those rows lose no width to a control they do not
     /// have.
     pin: Option<RowPin>,
+}
+
+/// **What one menu reserves for its accelerator column**, in physical pixels.
+///
+/// The widest chord any of `rows` carries, plus the flex row's own gap — or
+/// nothing at all when not one of them has a chord, which is most menus in this
+/// window and is a fact about the verbs rather than a gap in this mechanism
+/// (see [`Row::accel`]).
+///
+/// **Reserved on every row and not on the ones that wear it**, which is the
+/// argument the `▸` indicator has carried since it was written: a menu whose
+/// width depended on which rows happened to have chords would change width the
+/// day a second row grew one.
+fn accelerator_claim(accels: &[Option<(String, f32)>], scale: f32) -> f32 {
+    let widest = accels
+        .iter()
+        .filter_map(|accel| accel.as_ref().map(|(_, width)| *width))
+        .fold(0.0_f32, f32::max);
+    if widest <= 0.0 {
+        return 0.0;
+    }
+    widest + ITEM_GAP_LOGICAL_PX * scale
+}
+
+/// The chord a row's verb answers to, measured, or `None`.
+///
+/// **A row wearing a `▸` never gets one**, and that is a ruling rather than an
+/// omission: the trailing slot holds one thing, and a submenu heading is not a
+/// verb a chord could run — it is a question about where, and the chord would
+/// be describing the row below it.
+fn accelerator_of(
+    action: Option<crate::shortcuts::Action>,
+    has_submenu: bool,
+    shortcuts: &crate::shortcuts::Shortcuts,
+    scale: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> Option<(String, f32)> {
+    if has_submenu {
+        return None;
+    }
+    let text = shortcuts.accelerator(action?)?;
+    let width = measure(&text, HINT_FONT_LOGICAL_PX * scale);
+    Some((text, width))
 }
 
 fn push_row(
@@ -4274,6 +4387,15 @@ fn push_row(
     // own measured width, and the `gap: 10px` between two flex items. A row with
     // nothing to add gives the name the whole span, which is what every row did
     // before any of them had a hint long enough to collide.
+    // The accelerator sits outside the hint, which is the order Windows draws
+    // them in: the chord is the row's own trailing annotation and a hint is a
+    // second fact about the row's *subject*, so the chord is the further out of
+    // the two. They co-occur on no row this build ships; the order is written
+    // down so the day they do, the two do not land on each other.
+    let accel_claim = row
+        .accel
+        .as_ref()
+        .map_or(0.0, |(_, width)| width + px(ITEM_GAP_LOGICAL_PX));
     let hint_claim = row
         .hint
         .as_ref()
@@ -4290,7 +4412,7 @@ fn push_row(
         rect: [
             column_right + px(ITEM_GAP_LOGICAL_PX),
             item[1],
-            item[2] - px(ITEM_PADDING_X_LOGICAL_PX) - pin_claim - hint_claim,
+            item[2] - px(ITEM_PADDING_X_LOGICAL_PX) - pin_claim - accel_claim - hint_claim,
             item[3],
         ],
         font_size_px: px(ITEM_FONT_LOGICAL_PX),
@@ -4314,6 +4436,34 @@ fn push_row(
         tabular_numerals: false,
         clip: None,
     });
+    // **The chord, in the row's trailing padding** (系统性发现 ②). Right-aligned
+    // into the whole row the way the hint is, so the two are one idiom and not
+    // two, and drawn before the hint so that the further-out claim is the one
+    // measured from the row's own edge.
+    if let Some((accel, _)) = &row.accel {
+        labels.push(ChromeLabel {
+            mono: false,
+            text: accel.clone(),
+            rect: [
+                item[0],
+                item[1],
+                item[2] - px(ITEM_PADDING_X_LOGICAL_PX) - pin_claim,
+                item[3],
+            ],
+            font_size_px: px(HINT_FONT_LOGICAL_PX),
+            // The hint's ink, on the hint's own written rule: this reports what
+            // else runs this verb, it does not offer anything. It stays the
+            // quiet ink under the pointer too — a chord that lit with the row
+            // would read as a second thing being offered.
+            color: palette.menu_item_hint_text,
+            align_right: true,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+    }
     if let Some((hint, _)) = &row.hint {
         labels.push(ChromeLabel {
             mono: false,
@@ -4321,7 +4471,7 @@ fn push_row(
             rect: [
                 item[0],
                 item[1],
-                item[2] - px(ITEM_PADDING_X_LOGICAL_PX) - pin_claim,
+                item[2] - px(ITEM_PADDING_X_LOGICAL_PX) - pin_claim - accel_claim,
                 item[3],
             ],
             font_size_px: px(HINT_FONT_LOGICAL_PX),
@@ -5122,6 +5272,8 @@ pub fn root_menu_build(
                 }),
                 name: &cwd_leaf_or_path(&choice.path),
                 hint: Some((note, width)),
+                // No row of this menu is a row of the shortcut table (系统性发现 ②).
+                accel: None,
                 dirty: false,
                 hovered: hover.map(RootMenuHit::row) == Some(row),
                 available: true,
@@ -5169,6 +5321,8 @@ pub fn root_menu_build(
             // offered because nothing else was, and a hint saying so would be the
             // menu apologising for itself.
             hint: None,
+            // No row of this menu is a row of the shortcut table (系统性发现 ②).
+            accel: None,
             dirty: false,
             hovered: hover == Some(RootMenuHit::Row(RootMenuRow::Browse)),
             // The system always has a folder picker; there is no machine on which
@@ -5877,6 +6031,8 @@ pub fn file_menu_build(
                 mark: Some(item.row.mark(look)),
                 name: item.row.text(look),
                 hint: None,
+                // No row of this menu is a row of the shortcut table (系统性发现 ②).
+                accel: None,
                 dirty: false,
                 hovered: hover == Some(item.row),
                 // Every verb here acts on a path this process enumerated. There
@@ -6807,6 +6963,8 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
                 mark: item.row.mark(),
                 name: item.row.text(),
                 hint: None,
+                // No row of this menu is a row of the shortcut table (系统性发现 ②).
+                accel: None,
                 dirty: false,
                 hovered: look.hover == Some(item.row) && item.available,
                 available: item.available,
@@ -7030,6 +7188,49 @@ impl TermMenuEntry {
     #[must_use]
     pub fn has_submenu(self) -> bool {
         matches!(self, Self::Pane(row) if row.has_submenu())
+    }
+
+    /// **The shortcut row that is this same verb**, or `None` (系统性发现 ②).
+    ///
+    /// Each arm's own row, asked — the same shape [`Self::text`] and
+    /// [`Self::mark`] have, and for the same reason: the pane half of this menu
+    /// *is* the pane menu, so its chords are the pane menu's chords and cannot
+    /// be a second opinion about them.
+    fn accelerator(self) -> Option<crate::shortcuts::Action> {
+        match self {
+            Self::Term(row) => row.accelerator(),
+            Self::Pane(row) => row.accelerator(),
+        }
+    }
+}
+
+impl TermMenuRow {
+    /// **The shortcut row that is this same verb**, or `None` (系统性发现 ②).
+    ///
+    /// **One of the seven**, and the six silences are each a fact rather than an
+    /// oversight. `Copy` and `Paste` are the interesting pair: the reader's
+    /// hands know `Ctrl+Shift+C` and `Ctrl+Shift+V`, and this column stays empty
+    /// beside those two rows because those chords are **not rows of the shortcut
+    /// table** — they are decided in `input::should_copy_selection` and
+    /// `input::is_paste_shortcut`, above the table, so that a terminal never
+    /// loses its clipboard to a rebind. A menu that printed them would be
+    /// reporting a table row that does not exist and that the Shortcuts page
+    /// cannot edit; the honest answer is the empty slot, and the debt is the
+    /// clipboard chords not being editable, not this column not printing them.
+    ///
+    /// `Select all`, the two `Clear`s and `Restart shell` have no chord at all —
+    /// the audit says so of `Select all` in as many words (`Ctrl+A` in a
+    /// terminal is the child's `0x01` and must stay so).
+    fn accelerator(self) -> Option<crate::shortcuts::Action> {
+        match self {
+            Self::Find => Some(crate::shortcuts::Action::OpenSearch),
+            Self::Copy
+            | Self::Paste
+            | Self::SelectAll
+            | Self::ClearScreen
+            | Self::ClearScrollback
+            | Self::RestartShell => None,
+        }
     }
 }
 
@@ -7270,6 +7471,14 @@ pub struct TermMenuLayout {
     scale: f32,
     frame: [f32; 4],
     items: Vec<TermMenuItem>,
+    /// One accelerator per entry of [`Self::items`], in that order (系统性发现 ②).
+    ///
+    /// Beside the items rather than inside them, because [`TermMenuItem`] is
+    /// `Copy` and a `String` is not — and because the reason for carrying them
+    /// at all is [`PaneMenuLayout::accels`]': the frame was measured with this
+    /// column reserved in it, so the painter must draw the very strings that
+    /// were measured.
+    accels: Vec<Option<(String, f32)>>,
     separator: [f32; 4],
     /// The second rule — the one §7.1.6i's segment brings with it — or `None` on
     /// a pane with a sibling, which has no segment to divide off.
@@ -7374,6 +7583,7 @@ pub fn term_menu_layout(
     surface: (f32, f32),
     scale: f32,
     look: &TermMenuLook,
+    shortcuts: &crate::shortcuts::Shortcuts,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> TermMenuLayout {
     let px = |value: f32| value * scale;
@@ -7398,11 +7608,27 @@ pub fn term_menu_layout(
     } else {
         0.0
     };
+    // The chord column, on `indicator`'s own rule one slot further out: measured
+    // over every entry, reserved on every row (系统性发现 ②).
+    let accels: Vec<Option<(String, f32)>> = entries
+        .iter()
+        .map(|entry| {
+            accelerator_of(
+                entry.accelerator(),
+                entry.has_submenu(),
+                shortcuts,
+                scale,
+                measure,
+            )
+        })
+        .collect();
+    let accel_claim = accelerator_claim(&accels, scale);
     let row_width = |entry: TermMenuEntry, measure: &mut dyn FnMut(&str, f32) -> f32| {
         px(ITEM_ICON_COLUMN_LOGICAL_PX)
             + px(ITEM_GAP_LOGICAL_PX)
             + measure(entry.text(), px(ITEM_FONT_LOGICAL_PX))
             + indicator
+            + accel_claim
     };
     let content = entries.iter().fold(
         px(TERM_MENU_MIN_WIDTH_LOGICAL_PX) - chrome,
@@ -7496,10 +7722,12 @@ pub fn term_menu_layout(
             measure,
         )
     });
+    debug_assert_eq!(accels.len(), items.len());
     TermMenuLayout {
         scale,
         frame,
         items,
+        accels,
         separator,
         lone_separator,
         submenu,
@@ -7575,7 +7803,7 @@ pub fn term_menu_build(
         palette.menu_border,
         alpha(palette.menu_border_alpha),
     );
-    for item in &layout.items {
+    for (item, accel) in layout.items.iter().zip(layout.accels.iter()) {
         let hovered = look.hover == Some(TermMenuHover::Row(item.entry)) && item.available;
         push_row(
             &Row {
@@ -7583,6 +7811,9 @@ pub fn term_menu_build(
                 mark: item.entry.mark(),
                 name: item.entry.text(),
                 hint: None,
+                // The very string the frame was measured around — see
+                // [`TermMenuLayout::accels`].
+                accel: accel.clone(),
                 dirty: false,
                 hovered,
                 available: item.available,
@@ -8197,6 +8428,36 @@ impl PaneMenuRow {
     pub fn has_submenu(self) -> bool {
         matches!(self, Self::SplitWith | Self::MoveToWindow)
     }
+
+    /// **The shortcut row that is this same verb**, or `None` (系统性发现 ②).
+    ///
+    /// Three of the nine, and that is the honest count rather than a shortfall:
+    /// this menu and the chord table overlap where they overlap. `New terminal
+    /// in folder…` opens a system chooser, the two `Move to` rows and
+    /// `Split with ▸` are places rather than chords, and the picker is a
+    /// drawing — none of them is a row of [`crate::shortcuts::BINDINGS`], so
+    /// none of them prints anything here.
+    ///
+    /// Named exhaustively rather than swept into a `_`, on this file's standing
+    /// rule for row tables: a row added tomorrow must be *decided* about, not
+    /// silently given no chord.
+    fn accelerator(self) -> Option<crate::shortcuts::Action> {
+        use crate::shortcuts::Action;
+        match self {
+            Self::ZoomPane => Some(Action::ZoomPane),
+            // `Duplicate pane` is `SplitSeed::Inherit` wearing a name, and
+            // `DuplicatePaneSplit` is the chord for that same verb — the seed's
+            // own doc comment says so in as many words.
+            Self::Duplicate => Some(Action::DuplicatePaneSplit),
+            Self::ClosePane => Some(Action::ClosePane),
+            Self::Picker
+            | Self::SplitWith
+            | Self::NewInFolder
+            | Self::MoveToNewTab
+            | Self::MoveToNewWindow
+            | Self::MoveToWindow => None,
+        }
+    }
 }
 
 /// The submenu heading. The `▸` is drawn rather than written: see
@@ -8485,6 +8746,14 @@ pub struct PaneMenuLayout {
     /// One rectangle per entry of [`Self::rows`], in that order. The picker's is
     /// its whole block.
     items: Vec<[f32; 4]>,
+    /// One accelerator per entry of [`Self::rows`], in that order (系统性发现 ②).
+    ///
+    /// Carried on [`Self::rows`]' own reasoning, one step further: the frame was
+    /// measured with a column this wide reserved in it, so the painter must draw
+    /// the very strings that were measured. Re-deriving them at paint time would
+    /// be a second reading of the shortcut table, and the two would disagree on
+    /// exactly the frame where somebody rebound a chord with this menu open.
+    accels: Vec<Option<(String, f32)>>,
     /// The pane at the middle of the picker's diagram.
     picker_pane: [f32; 4],
     /// The four slabs as they are **drawn**, in [`SplitZone::ALL`] order.
@@ -8742,6 +9011,12 @@ impl PaneMenuLayout {
 /// `windows` decides **how many rows there are** as well as how wide the child
 /// is (user ruling 2026-08-25): with nowhere to go, `Move to window ▸` is not
 /// drawn at all. See [`PaneMenuRow::rows`].
+// Eight, and the eighth is the shortcut table (系统性发现 ②). The seven before
+// it were already this list, and the honest fix for the count is the `look`
+// struct `term_menu_layout` and `git_menu_layout` carry — a refactor of every
+// caller for no change on the glass, which is not what this slice is. The allow
+// is the same one `push_caps` and `push_button` carry two screens up.
+#[allow(clippy::too_many_arguments)]
 pub fn pane_menu_layout(
     point: [f32; 2],
     surface: (f32, f32),
@@ -8749,6 +9024,7 @@ pub fn pane_menu_layout(
     submenu: Option<PaneMenuRow>,
     zoomed: bool,
     windows: &[String],
+    shortcuts: &crate::shortcuts::Shortcuts,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> PaneMenuLayout {
     let px = |value: f32| value * scale;
@@ -8769,6 +9045,22 @@ pub fn pane_menu_layout(
     // **The rows this menu is showing**, which is the one list the width, the
     // height, the boxes, the paint and the hit test are all built from.
     let rows = PaneMenuRow::rows(!windows.is_empty());
+    // **And the chord each of them also answers to** (系统性发现 ②), measured
+    // here because this is where the font is and carried on the layout because
+    // the frame is about to be measured around them.
+    let accels: Vec<Option<(String, f32)>> = rows
+        .iter()
+        .map(|row| {
+            accelerator_of(
+                row.accelerator(),
+                row.has_submenu(),
+                shortcuts,
+                scale,
+                measure,
+            )
+        })
+        .collect();
+    let accel_claim = accelerator_claim(&accels, scale);
     let text_rows = rows.len() - 1;
     let content = rows
         .iter()
@@ -8778,6 +9070,7 @@ pub fn pane_menu_layout(
                 + px(ITEM_GAP_LOGICAL_PX)
                 + measure(row.text_when(zoomed), px(ITEM_FONT_LOGICAL_PX))
                 + indicator
+                + accel_claim
         })
         // The diagram is content too, and on a narrow menu it is the widest
         // content there is: a frame that clipped its own picker would be a
@@ -8830,6 +9123,7 @@ pub fn pane_menu_layout(
         cursor += height;
     }
     let picker = items[0];
+    debug_assert_eq!(accels.len(), rows.len());
 
     // The diagram, centred in the picker's block.
     let diagram_width = px(picker_diagram_width_logical_px());
@@ -8936,6 +9230,7 @@ pub fn pane_menu_layout(
         frame,
         rows,
         items,
+        accels,
         picker_pane,
         zones,
         zone_hits,
@@ -9193,7 +9488,12 @@ pub fn pane_menu_build(
     // draws every caption one row out of place the next time the order changes.
     // Since 2026-08-25 the list is not even a constant: a session with one
     // window shows no `Move to window ▸`.
-    for (row, rect) in layout.rows.iter().zip(layout.items.iter()) {
+    for ((row, rect), accel) in layout
+        .rows
+        .iter()
+        .zip(layout.items.iter())
+        .zip(layout.accels.iter())
+    {
         if *row == PaneMenuRow::Picker {
             continue;
         }
@@ -9205,6 +9505,9 @@ pub fn pane_menu_build(
                 mark: row.mark_when(layout.zoomed),
                 name: row.text_when(layout.zoomed),
                 hint: None,
+                // The very string the frame was measured around — see
+                // [`PaneMenuLayout::accels`].
+                accel: accel.clone(),
                 dirty: false,
                 hovered: hover == Some(PaneMenuHover::Row(*row)),
                 // A split the solver has no room for is refused *by the solver*,
@@ -9415,6 +9718,8 @@ fn push_submenu(
                     mark: None,
                     name: windows.get(of).map_or("", String::as_str),
                     hint: None,
+                    // No row of this menu is a row of the shortcut table (系统性发现 ②).
+                    accel: None,
                     dirty: false,
                     hovered,
                     available: true,
@@ -9439,6 +9744,8 @@ fn push_submenu(
                         mark: Some(mark(of)),
                         name: title(of),
                         hint,
+                        // No row of this menu is a row of the shortcut table (系统性发现 ②).
+                        accel: None,
                         dirty: false,
                         hovered,
                         // The picker's own rule, and the same fact: a profile
@@ -9463,6 +9770,773 @@ fn push_submenu(
         sprites,
         ..Default::default()
     }]
+}
+
+// ── a tab's own context menu (丙2, the invisible-gestures audit 2026-08-26) ──
+//
+// **The ninth menu family, and the first one whose subject is a tab.**
+//
+// The audit counted eighty-seven gestures in this product and found seven with
+// no clue anywhere on the glass. Three of the seven were the **only** door their
+// verb has, and 丙2 is the worst of those three: dragging a tab past the window's
+// own edge tears it into a window of its own, and `ChromeTarget::Tab` had
+// exactly one press arm in the whole program — an activation — so there was no
+// list, no tip and no row anywhere that said the verb exists. A pane has carried
+// `Move pane to new window` in its `⌄` since F1c; a tab had nothing at all,
+// because this product had no tab context menu at all.
+//
+// **The prescription was a menu and not a hint**, and the audit's own reason is
+// the one this window keeps arriving at: there is no first-run mechanism here —
+// no `first_run`, no `onboarding`, no `seen_once` anywhere in the repository —
+// so the whole teaching surface is tooltips, menu rows, tip cards and five
+// sentences in Settings. A verb with no row behind it can therefore only be
+// taught by accident. One list a right click reaches turns 丙2 from
+// 「自创且无线索」 into 「菜单里有同义行」, and carries the rest of a tab's verbs
+// with it.
+//
+// **It is the pane menu's family, down to the geometry**, and deliberately not a
+// second mechanism: the same [`Row`] and [`push_row`], the same item height,
+// icon column, padding and indicator, the same [`pane_submenu_layout`] for the
+// child, the same [`safe_triangle_holds`] on the way to it. What is new is only
+// what a menu is allowed to differ in — how many rows, which words, which marks,
+// where the rule falls — which is the ruling `#pane-menu` made first and every
+// menu in this file has been cloned rather than generalised under since.
+
+/// One row of a tab's context menu.
+///
+/// Closed rather than a list of words, on [`PaneMenuRow`]'s argument: a menu
+/// whose entries are an enum is a menu whose keyboard walk cannot land on a row
+/// that is not on the glass. Two things vary and both are asked of a subject
+/// rather than of the window — which rows are *shown* ([`Self::rows`]) and which
+/// of them can *answer* ([`Self::available`]) — because everything this menu
+/// knows was true at the moment it was raised.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TabMenuRow {
+    /// **The name, opened for editing** — the editor a double click on the tab
+    /// body already opens, through the same `Runtime::open_rename`.
+    ///
+    /// It leads the list because it is the one verb here that changes nothing
+    /// but the words: everything below it moves the tab somewhere or ends it,
+    /// and a reader scanning down meets the harmless entry first. §7.1.6e's rule
+    /// applies to it exactly as it does to the four below — one verb, two doors,
+    /// never two implementations — and the door it shares is a *gesture*, which
+    /// is why this row is owed at all: a double click is not a thing a list can
+    /// tell you about.
+    Rename,
+    /// **One row with two faces**, [`PaneMenuRow::ZoomPane`]'s arrangement: over
+    /// an ordinary tab it offers the pin, over a pinned one it offers the way
+    /// back. See [`Self::text_when`] and [`Self::mark_when`], which turn
+    /// together — the `Lock` ruling (§7.1.6c-8) says why they may never turn
+    /// apart.
+    Pin,
+    /// **A tab seeded from this one** — its profile and its folder.
+    ///
+    /// The `+` opens the default profile wherever the pane you were looking at
+    /// is standing; this opens *this tab's* shell where *this tab's* shell is,
+    /// which is the same relationship `Duplicate pane` has to a bare split. The
+    /// two facts come off one leaf, which is the rule [`new_tab_cwd`] already
+    /// states: a profile taken from one pane and a folder from another describes
+    /// a pane that does not exist.
+    Duplicate,
+    /// **The tab leaves this window and becomes a window of its own** — the row
+    /// this whole menu was built for (丙2).
+    ///
+    /// It is `Move pane to new window` read one container up, and it is *shorter*
+    /// than that verb rather than longer: a pane has to be promoted to a tab
+    /// before it can move, and a tab is already a tab. So this row is the second
+    /// half of that journey with the first half deleted, which is why it can
+    /// push `NewWindowPlan::receiving` directly and needs no promotion recorded
+    /// in the errand it writes.
+    MoveToNewWindow,
+    /// **Move this tab into a window that is already open** — the same third
+    /// exit the pane menu grew on 2026-08-25, and a submenu for that row's
+    /// reason: a new window is a place this verb *makes*, so there is nothing to
+    /// choose between; an open window is a place that already exists, and which
+    /// one is the whole of what the row is asking.
+    MoveToWindow,
+    /// The same verb the tab's own `×` has, and the one this menu puts a rule
+    /// above.
+    Close,
+}
+
+/// What the tab under the menu can answer for.
+///
+/// Two facts and no tab, [`TermMenuSubject`]'s arrangement and for its reason:
+/// this menu is laid out and drawn from a snapshot taken when it was raised, so
+/// that a strip reordering under an open menu — or the shell in the tab it is
+/// about exiting — cannot rewrite a row under a hand already moving toward it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TabMenuSubject {
+    /// Whether this tab is pinned, which is the face [`TabMenuRow::Pin`] wears.
+    pub pinned: bool,
+    /// **Whether this tab has a shell to copy.**
+    ///
+    /// False on a folder tab and on a file tab (§7.1.6h): a tab's `sessions` map
+    /// may legitimately be empty, and a tab identified by a path on disk has
+    /// neither a profile nor a working directory for a duplicate to be seeded
+    /// from. The row is drawn **unavailable** rather than hidden, on
+    /// [`term_menu_row_available`]'s own rule — a menu whose shape moves under
+    /// the hand is a menu nobody can learn the shape of — and unavailable rather
+    /// than arbitrary, because the only other answer available to this verb is
+    /// "open a default shell somewhere", which is a tab nobody asked for wearing
+    /// the name of a row that promised a copy.
+    pub can_duplicate: bool,
+}
+
+impl Default for TabMenuSubject {
+    /// **An ordinary tab**: not pinned, and with a shell behind it.
+    ///
+    /// Written out rather than derived, for [`TermMenuSubject`]'s reason: one of
+    /// these two facts is good news and `bool::default()` is `false`, so a
+    /// derived default would describe a folder tab — the rare shape — and every
+    /// caller reaching for `..Default::default()` would silently be talking
+    /// about one.
+    fn default() -> Self {
+        Self {
+            pinned: false,
+            can_duplicate: true,
+        }
+    }
+}
+
+impl TabMenuRow {
+    /// Every entry, top to bottom — the order they are laid out in and the order
+    /// a keyboard walks them.
+    ///
+    /// **Every verb here is a verb about this tab.** The rule is the one
+    /// [`PaneMenuRow::ALL`] states about panes, and it is what keeps `New tab`,
+    /// `Close window` and the tab layout out of a list whose every other line
+    /// names the thing under the pointer.
+    pub const ALL: [Self; 6] = [
+        Self::Rename,
+        Self::Pin,
+        Self::Duplicate,
+        Self::MoveToNewWindow,
+        Self::MoveToWindow,
+        Self::Close,
+    ];
+
+    /// **The rows one menu actually shows** — [`Self::ALL`] less the one row
+    /// that can have nowhere to go.
+    ///
+    /// [`PaneMenuRow::rows`]'s judgement, and it transfers whole because the row
+    /// is the same row: `Move to window ▸` hangs a list of the other windows off
+    /// itself, and on a session with one window that list is empty. A disclosure
+    /// arrow over nothing is worse than a missing row — the arrow says "there is
+    /// more this way" and there is not — and nothing is lost by its going,
+    /// because `Move tab to new window` directly above is the verb for exactly
+    /// the case where there is no second window.
+    ///
+    /// A `Vec` and not a second `const`, for [`term_menu_entries`]'s reason: two
+    /// lists that share five entries are two places for those five to change.
+    #[must_use]
+    pub fn rows(other_windows: bool) -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|row| other_windows || *row != Self::MoveToWindow)
+            .collect()
+    }
+
+    /// Whether this row hangs a submenu off itself.
+    #[must_use]
+    pub fn has_submenu(self) -> bool {
+        matches!(self, Self::MoveToWindow)
+    }
+
+    /// **Whether this row can do what it says**, on this tab.
+    ///
+    /// One row turns on the subject and the other five do not, and the five are
+    /// always answerable: every tab has a name to edit, a pin to flip, a window
+    /// to leave for and a way to be closed. A pinned tab included — the strip
+    /// withholds the `×` from one (F61) and this row deliberately does not,
+    /// because the row that would then be greyed stands directly under the row
+    /// that ungreys it, and a reader who has just read `Unpin` is a reader who
+    /// knows what to press.
+    #[must_use]
+    pub fn available(self, subject: TabMenuSubject) -> bool {
+        match self {
+            Self::Duplicate => subject.can_duplicate,
+            Self::Rename | Self::Pin | Self::MoveToNewWindow | Self::MoveToWindow | Self::Close => {
+                true
+            }
+        }
+    }
+
+    /// **The words on this row, told what the tab under the menu is.**
+    ///
+    /// Five of the six read the same whatever the tab is doing. [`Self::Pin`] is
+    /// the sixth, and it is the one place in this menu where the state is a
+    /// *word* rather than a greying — [`PaneMenuRow::text_when`]'s seam, on this
+    /// menu's own one row with two faces.
+    #[must_use]
+    pub fn text_when(self, subject: TabMenuSubject) -> &'static str {
+        match self {
+            Self::Rename => tab_menu_rename_text(),
+            Self::Pin if subject.pinned => tab_menu_unpin_text(),
+            Self::Pin => tab_menu_pin_text(),
+            Self::Duplicate => tab_menu_duplicate_text(),
+            Self::MoveToNewWindow => tab_menu_move_to_new_window_text(),
+            // **The pane menu's own string** and not a second one that happens
+            // to read the same: the row opens a list of windows, which is the
+            // same sentence about the same destinations whichever thing is being
+            // moved into them. Two literals here is how two menus come to
+            // disagree about what a window is called.
+            Self::MoveToWindow => move_to_window_text(),
+            Self::Close => tab_menu_close_text(),
+        }
+    }
+
+    /// **The mark on this row, told the same thing** — and it turns with the
+    /// word, never on its own (§7.1.6c-8: change only the word and the drawing
+    /// goes on lying; change only the drawing and the reader has to decide which
+    /// half to believe).
+    ///
+    /// Five of the six are the registry's, asked by name. The pin is the sixth
+    /// and it is `ChromeMark::Pin { filled }` directly, which is what the tab
+    /// strip's own pin draws and what [`RowPin`] draws: state rides on the fill
+    /// and never on a different glyph, so there is one drawing with two faces
+    /// rather than two drawings. [`PaneMenuRow::mark_when`] reaches past the
+    /// registry for `ChromeMark::PaneZoom { zoomed }` in exactly the same way and
+    /// for exactly this reason — a *face* is not a verb, and the registry indexes
+    /// verbs.
+    #[must_use]
+    pub fn mark_when(self, subject: TabMenuSubject) -> ChromeMark {
+        match self {
+            // The pencil, which three verbs in this window already share —
+            // `Rename`, `Rename branch` and a settings row's `Edit`. The
+            // registry's variant is named for the surface the pencil was first
+            // needed on; what it indexes is the act, and renaming a tab is that
+            // act.
+            Self::Rename => ActionIcon::RenameFile.mark(),
+            Self::Pin => ChromeMark::Pin {
+                filled: subject.pinned,
+            },
+            // `#i-duplicate` on the same terms: one drawing for "another one of
+            // this, seeded from this", which is what the row says one container
+            // up from the pane it was struck for.
+            Self::Duplicate => ActionIcon::DuplicatePane.mark(),
+            // **The bare arrow and the window it points out of** — the pair the
+            // pane menu's two exits already wear, and the pair is the whole of
+            // the distinction: one names a window this verb makes, the other a
+            // window that is already there.
+            Self::MoveToNewWindow => ActionIcon::MoveToNewWindow.mark(),
+            Self::MoveToWindow => ActionIcon::MoveToWindow.mark(),
+            // **The tab's own `×` and not the pane's** — the two are one
+            // `<symbol>` under two names, and this row closes a *tab*.
+            Self::Close => ActionIcon::CloseTab.mark(),
+        }
+    }
+}
+
+/// **`Rename tab`** — the tab menu's first row.
+#[must_use]
+pub fn tab_menu_rename_text() -> &'static str {
+    crate::i18n::Text::TabMenuRename.text()
+}
+/// The pin row's unpinned face — **the tab strip's own word**, reused rather
+/// than restated: there is one pin verb in this product (the preview head's
+/// control is a *lock*, §7.7 ⑧), so the strip's tip and this row say the same
+/// thing because they are the same thing.
+#[must_use]
+pub fn tab_menu_pin_text() -> &'static str {
+    crate::i18n::Text::Pin.text()
+}
+/// The pin row's pinned face.
+///
+/// **Not `Text::Unpin`**, and the reason is geometric rather than editorial:
+/// that string is a *tip*, and it carries its own second clause — "a pinned tab
+/// closes only after unpinning" — because a tip is where the mock-up (4204) put
+/// the explanation of where the `×` went. A menu's width is the widest row it
+/// holds, so a sentence in this slot would be a menu three times as wide as its
+/// other five rows, on the one row that is a state rather than an errand.
+#[must_use]
+pub fn tab_menu_unpin_text() -> &'static str {
+    crate::i18n::Text::TabMenuUnpin.text()
+}
+#[must_use]
+pub fn tab_menu_duplicate_text() -> &'static str {
+    crate::i18n::Text::TabMenuDuplicate.text()
+}
+/// One word apart from the pane menu's own exit, and the word is the thing being
+/// moved.
+#[must_use]
+pub fn tab_menu_move_to_new_window_text() -> &'static str {
+    crate::i18n::Text::TabMenuMoveToNewWindow.text()
+}
+/// The `×`'s verb, spelled — a menu row has room for the word the button does
+/// not.
+#[must_use]
+pub fn tab_menu_close_text() -> &'static str {
+    crate::i18n::Text::TabMenuClose.text()
+}
+
+/// What a point in one of the tab menu's two surfaces is over.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TabMenuHit {
+    /// A row that can answer. A greyed one is **not** reported: the pointer
+    /// falls through it onto the menu's own body, so it neither lights nor
+    /// answers a press.
+    Row(TabMenuRow),
+    /// A row of the open window list, by its place on the glass.
+    Submenu(usize),
+    /// Inside one of the two surfaces but on no control: the padding, the rule
+    /// above `Close tab`, a greyed row.
+    Surface,
+}
+
+/// What is lit — the pointer's hover and the keyboard's cursor, which are one
+/// thing in a menu ([`PaneMenuHover`]'s own sentence).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TabMenuHover {
+    /// A row of the menu proper.
+    Row(TabMenuRow),
+    /// A row of the open window list.
+    Submenu(usize),
+}
+
+/// One laid-out row of the tab menu.
+///
+/// Its own type rather than a triple, for [`TermMenuItem`]'s reason: the three
+/// facts are read together at every call site, and a tuple of a row, a rectangle
+/// and a `bool` is a shape two of whose members can be swapped silently.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabMenuItem {
+    pub row: TabMenuRow,
+    pub rect: [f32; 4],
+    pub available: bool,
+}
+
+/// Every rectangle the tab's context menu draws and hit-tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabMenuLayout {
+    scale: f32,
+    frame: [f32; 4],
+    /// One entry per row this menu is showing, top to bottom — the one list the
+    /// paint, the hit test and the keyboard walk are all built from.
+    ///
+    /// [`PaneMenuLayout::rows`]' ruling, and the same failure behind it: the
+    /// width and the height were measured against *this* list, so a painter or a
+    /// walk that worked the list out again would be a second opinion about a
+    /// thing the layout already knows — and the two would disagree on exactly
+    /// the frame where a second window opened or the last one closed.
+    items: Vec<TabMenuItem>,
+    /// The rule above `Close tab`, which separates the four verbs that name or
+    /// move a tab from the one that ends it — the pane menu's own written rule:
+    /// the rule falls where the sentence changes.
+    separator: [f32; 4],
+    /// **What the tab was when this menu was raised** — carried on the layout
+    /// rather than passed to the painter a second time, so the words the frame
+    /// was measured against are the words drawn into it. `PaneMenuLayout`'s
+    /// `zoomed` exactly: `Pin` and `Unpin` are not the same width, and a menu
+    /// laid out for one and drawn with the other would clip its own second row
+    /// at whichever language made it wider.
+    subject: TabMenuSubject,
+    /// The window list's frame and rows, when it is open.
+    ///
+    /// [`PaneSubmenuLayout`] itself, laid out by [`pane_submenu_layout`]: the
+    /// child hanging off this menu's heading is the *same* child that hangs off
+    /// the pane menu's `Move to window ▸`, down to the seam it meets its parent
+    /// on and the rows it draws, so it is the same type placed by the same
+    /// function.
+    submenu: Option<PaneSubmenuLayout>,
+    /// Which way it grew — [`ProfileMenuLayout::travel`]'s field.
+    travel: Travel,
+}
+
+impl TabMenuLayout {
+    /// Which way this menu grew out of the press that raised it.
+    #[must_use]
+    pub fn travel(&self) -> Travel {
+        self.travel
+    }
+
+    /// Which way the child hanging off its heading grew, when one is up.
+    #[must_use]
+    pub fn submenu_travel(&self) -> Option<Travel> {
+        self.submenu.as_ref().map(PaneSubmenuLayout::travel)
+    }
+
+    /// **What this menu is showing**, top to bottom — the walk the keyboard
+    /// takes ([`tab_menu_step`]) and the list a pin asks the length of.
+    #[must_use]
+    pub fn items(&self) -> &[TabMenuItem] {
+        &self.items
+    }
+
+    /// The child's border box, when one is up — the safety triangle's base, and
+    /// the second rectangle a press has to miss.
+    #[must_use]
+    pub fn submenu_frame(&self) -> Option<[f32; 4]> {
+        self.submenu.as_ref().map(|submenu| submenu.frame)
+    }
+
+    /// The child's row boxes, when one is up — read by the pins about the
+    /// child's geometry and by nothing in the window, which reaches its rows
+    /// through [`tab_menu_hit`]. [`PaneMenuLayout::submenu_rows`]' arrangement
+    /// and its reason: a pin about the strip *between* the frame and the first
+    /// row has to know where both of them are, and deriving the second from the
+    /// padding constants would be a pin that agreed with the layout by
+    /// arithmetic rather than by reading it.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn submenu_rows(&self) -> Option<&[[f32; 4]]> {
+        self.submenu
+            .as_ref()
+            .map(|submenu| submenu.items.as_slice())
+    }
+
+    /// **Which window the child's `at`th row is about** —
+    /// [`PaneMenuLayout::submenu_row`] on this menu's child, and for that
+    /// method's reason: a hit counts rows on the glass, and only the lookup
+    /// wants the identity.
+    #[must_use]
+    pub fn submenu_row(&self, at: usize) -> Option<usize> {
+        self.submenu
+            .as_ref()
+            .and_then(|submenu| submenu.rows.get(at).copied())
+    }
+
+    /// **Whether this point is on the child at all** — its rows, its padding,
+    /// its border. [`PaneMenuLayout::on_submenu`]'s reason verbatim: the hit
+    /// answers `Surface` for both surfaces' padding, so the safety triangle
+    /// cannot tell "on the child" from "not on the child" out of the hit alone,
+    /// and reading it that way is what shut a child under the pointer that had
+    /// just landed on it.
+    #[must_use]
+    pub fn on_submenu(&self, x: f32, y: f32) -> bool {
+        self.submenu
+            .as_ref()
+            .is_some_and(|submenu| contains(submenu.frame, x, y))
+    }
+}
+
+/// Lay a tab's context menu out under the point it was raised at.
+///
+/// **A point, not a tab** — [`term_menu_layout`]'s ruling, and it matters here
+/// for a reason of its own: the strip under this menu can be scrolled,
+/// re-ordered, widened by a tab arriving or narrowed by one leaving while the
+/// menu stands, and a menu that re-found its tab every frame would walk across
+/// the window while the reader was reading it.
+///
+/// `subject` decides **what one of the rows says and whether another can
+/// answer**, and it is here rather than only in the painter because the frame is
+/// measured against the words it is about to hold. `windows` decides **how many
+/// rows there are** as well as how wide the child is: with nowhere to go,
+/// `Move to window ▸` is not drawn at all — see [`TabMenuRow::rows`].
+#[must_use]
+pub fn tab_menu_layout(
+    point: [f32; 2],
+    surface: (f32, f32),
+    scale: f32,
+    subject: TabMenuSubject,
+    submenu_open: bool,
+    windows: &[String],
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> TabMenuLayout {
+    let px = |value: f32| value * scale;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let padding = px(MENU_PADDING_LOGICAL_PX);
+    let item_height = px(ITEM_HEIGHT_LOGICAL_PX).round();
+    let separator_thickness = (SEPARATOR_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
+    let separator_margin = px(SEPARATOR_MARGIN_Y_LOGICAL_PX).round();
+    let separator_block = 2.0 * separator_margin + separator_thickness;
+    let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
+
+    // **The rows this menu is showing**, which is the one list the width, the
+    // height, the boxes, the paint and the hit test are all built from.
+    let rows = TabMenuRow::rows(!windows.is_empty());
+    // The `▸` claims the same slot the profile picker's `default` hint claims,
+    // and it is reserved on **every** row of a menu that has a submenu at all —
+    // [`pane_menu_layout`]'s rule, so that a menu whose width depended on which
+    // rows had children could not change width the day a second row grew one. A
+    // menu with no `Move to window ▸` in it has no child anywhere and reserves
+    // nothing, which is [`term_menu_layout`]'s own qualification of that rule.
+    let indicator = if rows.iter().any(|row| row.has_submenu()) {
+        px(SUBMENU_INDICATOR_LOGICAL_PX) + px(ITEM_GAP_LOGICAL_PX)
+    } else {
+        0.0
+    };
+    let content = rows.iter().fold(0.0_f32, |wide, row| {
+        wide.max(
+            px(ITEM_ICON_COLUMN_LOGICAL_PX)
+                + px(ITEM_GAP_LOGICAL_PX)
+                + measure(row.text_when(subject), px(ITEM_FONT_LOGICAL_PX))
+                + indicator,
+        )
+    });
+    let width = (chrome + content)
+        .max(px(FILE_MENU_MIN_WIDTH_LOGICAL_PX))
+        .round();
+    let height =
+        (2.0 * (border + padding) + rows.len() as f32 * item_height + separator_block).round();
+
+    let (surface_width, surface_height) = surface;
+    let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
+    // Clamped on both axes, [`file_menu_layout`]'s own discipline: the strip runs
+    // along the top of the window and the rail down its left edge, so a menu
+    // raised on the last tab of a tall rail drops straight through the floor
+    // without this.
+    let left = point[0].min(surface_width - width - edge).max(edge).round();
+    let top = point[1]
+        .min(surface_height - height - edge)
+        .max(edge)
+        .round();
+    let frame = [left, top, left + width, top + height];
+
+    let content_left = frame[0] + border + padding;
+    let content_right = frame[2] - border - padding;
+    let mut cursor = frame[1] + border + padding;
+    let mut items = Vec::with_capacity(rows.len());
+    let mut separator = [0.0_f32; 4];
+    let mut heading = None;
+    for row in &rows {
+        // The rule falls where the sentence changes: the verbs that name a tab
+        // or move one, then the one that ends it. Struck at the row it stands
+        // **above** rather than after the one it happens to follow, because the
+        // row above it can be missing.
+        if *row == TabMenuRow::Close {
+            separator = [
+                content_left,
+                cursor + separator_margin,
+                content_right,
+                cursor + separator_margin + separator_thickness,
+            ];
+            cursor += separator_block;
+        }
+        let rect = [content_left, cursor, content_right, cursor + item_height];
+        if row.has_submenu() {
+            heading = Some(rect);
+        }
+        items.push(TabMenuItem {
+            row: *row,
+            rect,
+            available: row.available(subject),
+        });
+        cursor += item_height;
+    }
+
+    // **The child hangs off the row that opened it**, placed by
+    // [`pane_submenu_layout`] and not by a second copy of it: the list of
+    // windows this menu hangs out is the same list the pane menu hangs out, so
+    // the seam it meets its parent on, the side it flips to and the rows it
+    // holds are one derivation. Only the parent it is measured against differs,
+    // which is the argument that function already takes.
+    let submenu = heading
+        .filter(|_| submenu_open)
+        .map(|heading| {
+            pane_submenu_layout(
+                frame,
+                heading,
+                PaneMenuRow::MoveToWindow,
+                windows,
+                surface,
+                scale,
+                border,
+                padding,
+                item_height,
+                measure,
+            )
+        })
+        // A list with nothing in it is not a list: a child frame drawn around no
+        // rows is an empty box the pointer can get lost in.
+        .filter(|child| !child.items.is_empty());
+
+    TabMenuLayout {
+        scale,
+        frame,
+        items,
+        separator,
+        subject,
+        submenu,
+        travel: Travel::away_from(pressed_at(point), frame),
+    }
+}
+
+/// What a point is over, with the same answers every other menu here gives: a
+/// row, the menu's own padding, or nothing at all.
+///
+/// **The child is asked first**, because it is drawn over the parent and
+/// overlaps it: a point in the strip where the two frames cross belongs to the
+/// child, exactly as the topmost window owns a point everywhere else in this
+/// program.
+///
+/// A row that cannot do what it says is **not** offered — the pointer falls
+/// through it onto the menu's body, which is [`term_menu_hit`]'s rule and the
+/// one that makes `available` a refusal rather than a colour.
+#[must_use]
+pub fn tab_menu_hit(layout: &TabMenuLayout, x: f64, y: f64) -> Option<TabMenuHit> {
+    let (x, y) = (x as f32, y as f32);
+    if let Some(submenu) = layout.submenu.as_ref()
+        && contains(submenu.frame, x, y)
+    {
+        for (row, rect) in submenu.items.iter().enumerate() {
+            if contains(*rect, x, y) {
+                return Some(TabMenuHit::Submenu(row));
+            }
+        }
+        return Some(TabMenuHit::Surface);
+    }
+    for item in &layout.items {
+        if item.available && contains(item.rect, x, y) {
+            return Some(TabMenuHit::Row(item.row));
+        }
+    }
+    contains(layout.frame, x, y).then_some(TabMenuHit::Surface)
+}
+
+/// The row a keyboard step lands on, **skipping the ones that answer nothing** —
+/// [`term_menu_step`]'s rule and [`file_menu_step`]'s clamp, on this list.
+///
+/// The rule above `Close tab` is not a stop: the walk crosses it, because a
+/// separator is punctuation and a keyboard that halted at one would make the
+/// destructive row reachable by pointer only.
+///
+/// `rows` is **the picture**, not the vocabulary (the ruling of 2026-08-25): a
+/// walk over [`TabMenuRow::ALL`] would stop the highlight on a
+/// `Move to window ▸` that this session has no second window for.
+#[must_use]
+pub fn tab_menu_step(
+    current: Option<TabMenuRow>,
+    forwards: bool,
+    rows: &[TabMenuItem],
+) -> Option<TabMenuRow> {
+    let walkable: Vec<TabMenuRow> = rows
+        .iter()
+        .filter(|item| item.available)
+        .map(|item| item.row)
+        .collect();
+    // A menu with no answerable row in it has nowhere for a highlight to go —
+    // answered rather than asserted, because this is a walk and a walk that
+    // panicked would take the window with it.
+    if walkable.is_empty() {
+        return None;
+    }
+    let Some(at) = current.and_then(|row| walkable.iter().position(|found| *found == row)) else {
+        return Some(if forwards {
+            walkable[0]
+        } else {
+            walkable[walkable.len() - 1]
+        });
+    };
+    let next = if forwards {
+        (at + 1).min(walkable.len() - 1)
+    } else {
+        at.saturating_sub(1)
+    };
+    Some(walkable[next])
+}
+
+/// The tab menu, and its window list when one is up, as overlay layers.
+///
+/// `programs` is the child's and is taken whether or not one is open, for
+/// [`term_menu_build`]'s reason read the other way round: the child is placed
+/// and drawn by the *pane* menu's own functions, which serve two kinds of list,
+/// and this menu only ever hangs out the one of them that has no profiles in it.
+/// Handing the argument through is what keeps that one drawing rather than two —
+/// exactly as `term_menu_build` hands `&[]` through for the window list it has no
+/// row for.
+#[must_use]
+pub fn tab_menu_build(
+    layout: &TabMenuLayout,
+    hover: Option<TabMenuHover>,
+    windows: &[String],
+    programs: &ProfilePrograms,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> Vec<OverlayLayer> {
+    let palette = chrome_palette();
+    let scale = layout.scale;
+    let px = |value: f32| value * scale;
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let mut quads = Vec::new();
+    let mut labels = Vec::new();
+    let mut sprites = Vec::new();
+
+    push_float_window(
+        &mut quads,
+        layout.frame,
+        px(MENU_RADIUS_LOGICAL_PX),
+        border,
+        px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
+        palette.menu_surface,
+        palette.menu_shadow,
+        alpha(palette.menu_popup_shadow_inner_alpha),
+        alpha(palette.menu_popup_shadow_outer_alpha),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+    );
+    for item in &layout.items {
+        let hovered = hover == Some(TabMenuHover::Row(item.row)) && item.available;
+        push_row(
+            &Row {
+                rect: item.rect,
+                // Both from the layout's own snapshot, so the word and the mark
+                // cannot come from two different readings of the state.
+                mark: Some(item.row.mark_when(layout.subject)),
+                name: item.row.text_when(layout.subject),
+                hint: None,
+                // No row of this menu is a row of the shortcut table (系统性发现 ②).
+                accel: None,
+                dirty: false,
+                hovered,
+                available: item.available,
+                // **The pin is in the mark column here and not at the trailing
+                // edge.** [`RowPin`] is the control a row wears when the row
+                // names something *else* that can be pinned — a folder in a list
+                // of folders — and it is an offer that appears with the hand.
+                // This row's whole subject is the pin, so the pin is its glyph.
+                pin: None,
+            },
+            scale,
+            palette,
+            &mut quads,
+            &mut labels,
+            &mut sprites,
+        );
+        if item.row.has_submenu() {
+            // The `▸`, which is `#i-tri` at rest — asked of the registry, in the
+            // row's trailing padding, lit with the row. Three lines, the same
+            // three the two menus above draw it with.
+            let size = px(SUBMENU_INDICATOR_LOGICAL_PX).round().max(1.0);
+            let right = item.rect[2] - px(ITEM_PADDING_X_LOGICAL_PX);
+            let top = ((item.rect[1] + item.rect[3] - size) / 2.0).round();
+            sprites.push(ChromeSprite::new(
+                ActionIcon::OpenSubmenu.mark(),
+                [right - size, top, right, top + size],
+                if hovered {
+                    palette.menu_item_text_selected
+                } else {
+                    palette.menu_item_hint_text
+                },
+            ));
+        }
+    }
+    quads.push(OverlayQuad {
+        rect: layout.separator,
+        color: palette.menu_border,
+        alpha: separator_alpha(palette.menu_border),
+    });
+
+    let mut layers = vec![OverlayLayer {
+        quads,
+        labels,
+        sprites,
+        ..Default::default()
+    }];
+    if let Some(submenu) = layout.submenu.as_ref() {
+        // The pane menu's own child, drawn by the pane menu's own function. The
+        // hover is translated at the boundary rather than shared as a type: what
+        // is lit on *this* menu is this menu's fact, and the child only ever
+        // needs the one arm of it that names one of its rows.
+        let hover = match hover {
+            Some(TabMenuHover::Submenu(index)) => Some(PaneMenuHover::Submenu(index)),
+            _ => None,
+        };
+        layers.extend(push_submenu(
+            submenu, scale, hover, None, programs, windows, measure,
+        ));
+    }
+    layers
 }
 
 // ── the commit graph's branch filter (T2/T3, v2 ③) ──────────────────────────
@@ -9754,6 +10828,8 @@ pub fn git_filter_menu_build(
                 mark: git_filter_mark(row, on),
                 name: git_filter_text(row),
                 hint: None,
+                // No row of this menu is a row of the shortcut table (系统性发现 ②).
+                accel: None,
                 dirty: false,
                 hovered: hover == Some(row),
                 // Every row here is a setting, and a setting can always be set.
@@ -10204,6 +11280,8 @@ pub fn preview_menu_build(
                 // box has to end in the same place down the whole list, dot or
                 // no dot — see the reservation in [`preview_menu_layout`].
                 hint: Some((String::new(), dot_width)),
+                // No row of this menu is a row of the shortcut table (系统性发现 ②).
+                accel: None,
                 dirty: item.dirty,
                 // `.tm-item.cur { background: var(--hover) }` is the same fill
                 // the pointer draws, which is what the mock-up asks for: the row
@@ -10249,6 +11327,16 @@ const FILE_MENU_MIN_WIDTH_LOGICAL_PX: f32 = 172.0;
 
 #[cfg(test)]
 mod tests {
+    /// **The chord table a menu prints its accelerator column from**
+    /// (gesture audit 2026-08-26, 系统性发现 ②).
+    ///
+    /// The shipped defaults, because that is what these pins are about: the
+    /// column a reader who has edited nothing sees. The one pin that is about a
+    /// *rebound* chord lays its own overrides on, and says so where it does it.
+    fn chord_table() -> crate::shortcuts::Shortcuts {
+        crate::shortcuts::Shortcuts::defaults()
+    }
+
     /// The shipped five, as the `const` array this module's cases were written
     /// against.
     ///
@@ -10975,6 +12063,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &chord_table(),
             &mut fake_measure,
         );
         let layer = one_layer(build(
@@ -11478,6 +12567,7 @@ mod tests {
                 (960.0 * scale, 600.0),
                 scale,
                 NO_RECENT,
+                &chord_table(),
                 &mut fake_measure,
             );
             let frame = layout.frame;
@@ -11556,6 +12646,7 @@ mod tests {
             (1400.0, 900.0),
             scale,
             NO_RECENT,
+            &chord_table(),
             &mut fake_measure,
         );
         assert_eq!(
@@ -11574,6 +12665,7 @@ mod tests {
             (1400.0, 900.0),
             scale,
             NO_RECENT,
+            &chord_table(),
             &mut fake_measure,
         );
         assert_eq!(
@@ -11589,6 +12681,7 @@ mod tests {
             (1400.0, 900.0),
             scale,
             NO_RECENT,
+            &chord_table(),
             &mut fake_measure,
         );
         assert_eq!(strip.frame[0], chevron[0].round());
@@ -11609,6 +12702,7 @@ mod tests {
             surface,
             scale,
             NO_RECENT,
+            &chord_table(),
             &mut fake_measure,
         );
         assert!(
@@ -11885,6 +12979,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             NO_RECENT,
+            &chord_table(),
             &mut fake_measure,
         );
         for (chosen, profile) in shipped_five().iter().enumerate() {
@@ -11945,6 +13040,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &chord_table(),
             &mut fake_measure,
         );
         // Every profile as the default in turn, so the longest name carrying the
@@ -12009,6 +13105,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &chord_table(),
             &mut fake_measure,
         );
 
@@ -12583,6 +13680,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             NO_RECENT,
+            &chord_table(),
             &mut fake_measure,
         );
         assert_eq!(
@@ -12698,6 +13796,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &chord_table(),
             &mut fake_measure,
         );
         let programs = bare();
@@ -12772,6 +13871,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             NO_RECENT,
+            &chord_table(),
             &mut fake_measure,
         );
         let frame = layout.frame;
@@ -12831,6 +13931,7 @@ mod tests {
             (4_000.0, 600.0),
             scale,
             NO_RECENT,
+            &chord_table(),
             &mut fake_measure,
         );
         let menu_width = roomy.frame[2] - roomy.frame[0];
@@ -12843,6 +13944,7 @@ mod tests {
             (surface, 600.0),
             scale,
             NO_RECENT,
+            &chord_table(),
             &mut fake_measure,
         );
         let frame = layout.frame;
@@ -12893,6 +13995,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             NO_RECENT,
+            &chord_table(),
             &mut fake_measure,
         );
         let palette = chrome_palette();
@@ -13019,6 +14122,7 @@ mod tests {
                 (960.0 * scale, 600.0),
                 scale,
                 NO_RECENT,
+                &chord_table(),
                 &mut fake_measure,
             );
             let item = layout.items[0];
@@ -13055,6 +14159,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             NO_RECENT,
+            &chord_table(),
             &mut fake_measure,
         );
         let palette = chrome_palette();
@@ -13129,6 +14234,7 @@ mod tests {
                 (960.0 * scale, 600.0),
                 scale,
                 NO_RECENT,
+                &chord_table(),
                 &mut fake_measure,
             );
             let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
@@ -13196,6 +14302,7 @@ mod tests {
                 (960.0 * scale, 600.0),
                 scale,
                 NO_RECENT,
+                &chord_table(),
                 &mut fake_measure,
             );
 
@@ -13236,6 +14343,7 @@ mod tests {
                 (960.0 * scale, 600.0),
                 scale,
                 &vault,
+                &chord_table(),
                 &mut fake_measure,
             );
             let rule = full.separator.expect("a filled vault is separated");
@@ -13279,6 +14387,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &chord_table(),
             &mut fake_measure,
         );
         let centre = |rect: [f32; 4]| {
@@ -13321,6 +14430,7 @@ mod tests {
                 (960.0 * scale, 600.0),
                 scale,
                 NO_RECENT,
+                &chord_table(),
                 &mut fake_measure,
             );
             let full = layout(
@@ -13329,6 +14439,7 @@ mod tests {
                 (960.0 * scale, 600.0),
                 scale,
                 &vault,
+                &chord_table(),
                 &mut fake_measure,
             );
             assert_eq!(
@@ -13414,6 +14525,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &chord_table(),
             &mut fake_measure,
         );
         let centre = |rect: [f32; 4]| {
@@ -13464,6 +14576,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &chord_table(),
             &mut fake_measure,
         );
         assert_eq!(RECENT_CAPACITY, 8, "the vault's own cap, not a second one");
@@ -13518,6 +14631,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &chord_table(),
             &mut fake_measure,
         );
         let palette = chrome_palette();
@@ -13609,6 +14723,7 @@ mod tests {
             (960.0, 600.0),
             1.0,
             &vault,
+            &chord_table(),
             &mut fake_measure,
         );
         let layer = one_layer(build(
@@ -13644,6 +14759,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &chord_table(),
             &mut fake_measure,
         );
         let palette = chrome_palette();
@@ -13723,6 +14839,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &chord_table(),
             &mut fake_measure,
         );
         let palette = chrome_palette();
@@ -14584,6 +15701,150 @@ mod tests {
             .collect()
     }
 
+    /// RED (gesture audit 2026-08-26, 系统性发现 ②) — **a menu row prints the
+    /// chord that runs the same verb, and prints the reader's own.**
+    ///
+    /// The audit's second systemic finding: `profiles.rs` had no accelerator
+    /// column anywhere, so `Close pane` and `Ctrl+Shift+W` were introduced to a
+    /// reader twice, as strangers — the hint card teaches the keyboard's side
+    /// and nothing taught the menus'. 「加一列 accel 是把十几条乙升级成『互相
+    /// 教』的最便宜的一次改动」.
+    ///
+    /// Four claims, and the last two are the ones worth the test:
+    ///
+    /// ① the rows that *are* table rows print their chord;
+    /// ② a row wearing a `▸` prints none — one trailing slot, one thing in it,
+    ///    and a chord beside a submenu heading would be describing the row
+    ///    below it;
+    /// ③ the column is read off the **effective** table, so a rebind follows
+    ///    and an unbind takes the annotation away with it;
+    /// ④ the frame is measured **with the column in it** — a menu that drew a
+    ///    chord it had not reserved room for would print it over the name.
+    ///
+    /// MUTATIONS: drop `accel_claim` from `content` and ④ goes red; read
+    /// `BINDINGS` instead of the effective table in
+    /// [`crate::shortcuts::Shortcuts::accelerator`] and ③ goes red; drop the
+    /// `has_submenu` guard in [`accelerator_of`] and ② goes red.
+    #[test]
+    fn a_menu_row_prints_the_chord_that_runs_the_same_verb() {
+        let with_chords = pane_menu(false);
+        let chord_of = |layout: &PaneMenuLayout, row: PaneMenuRow| {
+            layout
+                .rows
+                .iter()
+                .position(|it| *it == row)
+                .and_then(|at| layout.accels[at].clone())
+                .map(|(text, _)| text)
+        };
+        assert_eq!(
+            chord_of(&with_chords, PaneMenuRow::ClosePane).as_deref(),
+            Some("Ctrl+Shift+W")
+        );
+        assert_eq!(
+            chord_of(&with_chords, PaneMenuRow::ZoomPane).as_deref(),
+            Some("Ctrl+Shift+X")
+        );
+        assert_eq!(
+            chord_of(&with_chords, PaneMenuRow::Duplicate).as_deref(),
+            Some("Ctrl+Shift+D")
+        );
+        // ② The two headings, and the drawing.
+        assert_eq!(chord_of(&with_chords, PaneMenuRow::SplitWith), None);
+        assert_eq!(chord_of(&with_chords, PaneMenuRow::MoveToWindow), None);
+        assert_eq!(chord_of(&with_chords, PaneMenuRow::Picker), None);
+        // And a row that simply is not a table row.
+        assert_eq!(chord_of(&with_chords, PaneMenuRow::MoveToNewWindow), None);
+
+        // ③ The reader's table and not this build's.
+        let mut rebound = crate::shortcuts::Shortcuts::defaults();
+        rebound.apply_overrides(&[
+            crate::shortcuts::Override {
+                id: "close-pane".to_owned(),
+                chord: Some("Ctrl+Shift+J".to_owned()),
+            },
+            crate::shortcuts::Override {
+                id: "zoom-pane".to_owned(),
+                chord: None,
+            },
+        ]);
+        let edited = pane_menu_layout(
+            [300.0, 120.0],
+            (960.0, 600.0),
+            1.0,
+            None,
+            false,
+            &other_windows(),
+            &rebound,
+            &mut fake_measure,
+        );
+        assert_eq!(
+            chord_of(&edited, PaneMenuRow::ClosePane).as_deref(),
+            Some("Ctrl+Shift+J")
+        );
+        assert_eq!(
+            chord_of(&edited, PaneMenuRow::ZoomPane),
+            None,
+            "a chord the reader gave back to their shell is not one a menu may print"
+        );
+
+        // ④ The column is paid for out of the frame, not out of the name.
+        let bare = {
+            let mut table = crate::shortcuts::Shortcuts::defaults();
+            table.apply_overrides(&[
+                crate::shortcuts::Override {
+                    id: "close-pane".to_owned(),
+                    chord: None,
+                },
+                crate::shortcuts::Override {
+                    id: "zoom-pane".to_owned(),
+                    chord: None,
+                },
+                crate::shortcuts::Override {
+                    id: "duplicate-pane-split".to_owned(),
+                    chord: None,
+                },
+            ]);
+            pane_menu_layout(
+                [300.0, 120.0],
+                (960.0, 600.0),
+                1.0,
+                None,
+                false,
+                &other_windows(),
+                &table,
+                &mut fake_measure,
+            )
+        };
+        assert!(
+            bare.rows.iter().all(|row| chord_of(&bare, *row).is_none()),
+            "a table with these three unbound has nothing to print"
+        );
+        let width = |layout: &PaneMenuLayout| layout.frame[2] - layout.frame[0];
+        assert!(
+            width(&with_chords) > width(&bare),
+            "the chord column is reserved in the frame, not drawn over the names"
+        );
+
+        // **And the third family that has anything to print**: the profile
+        // picker's `Files pane`, which calls the very function
+        // `Action::FilesPane` dispatches to. The other five menu families carry
+        // no row that is a table row at all, so their column is empty by fact
+        // rather than by omission — the audit's own reading, not a shortfall.
+        let picker = layout(
+            [0.0, 0.0, 100.0, 30.0],
+            MenuSide::Below,
+            (960.0, 600.0),
+            1.0,
+            &[],
+            &chord_table(),
+            &mut fake_measure,
+        );
+        assert_eq!(
+            picker.files_pane_accel.map(|(text, _)| text).as_deref(),
+            Some("Ctrl+Shift+B")
+        );
+    }
+
     fn pane_menu(submenu_open: bool) -> PaneMenuLayout {
         pane_menu_layout(
             [300.0, 120.0],
@@ -14596,6 +15857,7 @@ mod tests {
             // the zoom row's second face has a pin of its own.
             false,
             &other_windows(),
+            &chord_table(),
             &mut fake_measure,
         )
     }
@@ -14629,6 +15891,7 @@ mod tests {
             None,
             false,
             &other_windows(),
+            &chord_table(),
             &mut fake_measure,
         );
         assert_eq!(
@@ -14651,6 +15914,7 @@ mod tests {
             Some(PaneMenuRow::SplitWith),
             false,
             &other_windows(),
+            &chord_table(),
             &mut fake_measure,
         );
         assert_eq!(cornered.submenu_travel(), Some(Travel::Left));
@@ -14724,15 +15988,25 @@ mod tests {
             vec![
                 picker_caption_text(),
                 zoom_pane_text(),
+                // **And the chord that runs the same verb** (gesture audit
+                // 2026-08-26, 系统性发现 ②), drawn straight after the row it
+                // belongs to. Three of the eight carry one; the other five are
+                // not rows of the shortcut table — see
+                // [`PaneMenuRow::accelerator`], which names all eight.
+                "Ctrl+Shift+X",
                 split_with_text(),
                 new_in_folder_text(),
                 duplicate_pane_text(),
+                "Ctrl+Shift+D",
                 move_to_new_tab_text(),
                 move_to_new_window_text(),
+                // `Move to window ▸` wears a chevron, and a row with a chevron
+                // never wears a chord — one trailing slot, one thing in it.
                 move_to_window_text(),
                 close_pane_text(),
+                "Ctrl+Shift+W",
             ],
-            "the caption under the diagram, then eight rows, and no heading over them"
+            "the caption under the diagram, then eight rows with their chords,              and no heading over them"
         );
         assert_ne!(
             move_to_new_tab_text(),
@@ -14813,6 +16087,7 @@ mod tests {
             Some(PaneMenuRow::MoveToWindow),
             false,
             &windows,
+            &chord_table(),
             &mut fake_measure,
         );
         assert_eq!(layout.submenu_kind(), Some(PaneMenuRow::MoveToWindow));
@@ -14845,6 +16120,7 @@ mod tests {
             Some(PaneMenuRow::MoveToWindow),
             false,
             &[],
+            &chord_table(),
             &mut fake_measure,
         );
         assert!(
@@ -14896,6 +16172,7 @@ mod tests {
                 None,
                 false,
                 windows,
+                &chord_table(),
                 &mut fake_measure,
             )
         };
@@ -15030,6 +16307,7 @@ mod tests {
                 None,
                 zoomed,
                 &[],
+                &chord_table(),
                 &mut fake_measure,
             );
             let layer = one_layer(pane_menu_build(
@@ -15319,6 +16597,7 @@ mod tests {
             None,
             false,
             &[],
+            &chord_table(),
             &mut fake_measure,
         );
         assert!(
@@ -15488,6 +16767,7 @@ mod tests {
             Some(PaneMenuRow::SplitWith),
             false,
             &[],
+            &chord_table(),
             &mut fake_measure,
         );
         let parent = roomy.frame;
@@ -15516,6 +16796,7 @@ mod tests {
             Some(PaneMenuRow::SplitWith),
             false,
             &[],
+            &chord_table(),
             &mut fake_measure,
         );
         let parent = cramped.frame;
@@ -15555,6 +16836,7 @@ mod tests {
                 Some(PaneMenuRow::SplitWith),
                 false,
                 &[],
+                &chord_table(),
                 &mut fake_measure,
             );
             let parent = layout.frame;
@@ -15609,6 +16891,7 @@ mod tests {
             Some(PaneMenuRow::SplitWith),
             false,
             &[],
+            &chord_table(),
             &mut fake_measure,
         );
         let child = layout.submenu_frame().expect("an open submenu has a frame");
@@ -15653,6 +16936,7 @@ mod tests {
             None,
             false,
             &[],
+            &chord_table(),
             &mut fake_measure,
         );
         assert!(!alone.on_submenu(child[0] + 4.0, inside_y));
@@ -15681,6 +16965,7 @@ mod tests {
             Some(PaneMenuRow::SplitWith),
             false,
             &[],
+            &chord_table(),
             &mut fake_measure,
         );
         let parent = layout.frame;
@@ -15983,6 +17268,430 @@ mod tests {
             centre(cross),
             centre(folder),
         );
+    }
+
+    // ── a tab's own context menu (丙2) ──────────────────────────────────────
+
+    /// The other windows this menu's third exit has to choose between.
+    ///
+    /// **Two of them, and not none**, on the pane menu's own reasoning: with no
+    /// second window there is no `Move to window ▸` row at all, and a pin about
+    /// the menu's shape that quietly stood on the *shorter* menu would stop
+    /// saying anything about the longer one. The short menu has a pin of its own.
+    fn tab_menu_windows() -> Vec<String> {
+        vec![
+            "Window 2 · 3 tabs".to_owned(),
+            "Window 3 · 1 tab".to_owned(),
+        ]
+    }
+
+    /// A tab menu in a 960x600 window at 1x, raised well clear of every edge so
+    /// that nothing below is a claim about the clamp.
+    fn tab_menu(subject: TabMenuSubject, submenu_open: bool, windows: &[String]) -> TabMenuLayout {
+        tab_menu_layout(
+            [300.0, 120.0],
+            (960.0, 600.0),
+            1.0,
+            subject,
+            submenu_open,
+            windows,
+            &mut fake_measure,
+        )
+    }
+
+    /// Where one row landed, **by name**.
+    ///
+    /// `SettingsLayout::row`'s arrangement, for that function's reason: a pin
+    /// that indexed the item list directly would be a pin that silently moved to
+    /// the row below the day a verb was inserted above it.
+    fn tab_menu_box(layout: &TabMenuLayout, row: TabMenuRow) -> [f32; 4] {
+        layout
+            .items()
+            .iter()
+            .find(|item| item.row == row)
+            .expect("every row this menu is showing has a box")
+            .rect
+    }
+
+    /// The middle of a rectangle, as a hit test is asked about it.
+    fn tab_menu_point(rect: [f32; 4]) -> (f64, f64) {
+        (
+            f64::from((rect[0] + rect[2]) / 2.0),
+            f64::from((rect[1] + rect[3]) / 2.0),
+        )
+    }
+
+    /// The words a menu actually draws, in the order it draws them.
+    fn tab_menu_captions(layout: &TabMenuLayout, windows: &[String]) -> Vec<String> {
+        one_layer(tab_menu_build(
+            layout,
+            None,
+            windows,
+            &equipped(),
+            &mut fake_measure,
+        ))
+        .labels
+        .iter()
+        .map(|label| label.text.clone())
+        .collect()
+    }
+
+    /// PIN (丙2, the gesture audit of 2026-08-26) — **the tab menu is six verbs
+    /// about one tab, in this order, with a rule above the one that ends it.**
+    ///
+    /// The order is an argument rather than a habit. `Rename` leads because it
+    /// is the only entry that changes nothing but the words, so a reader scanning
+    /// down meets the harmless row first. The three that follow make or move a
+    /// tab, in the order of how far they move it — nowhere, into a window that
+    /// does not exist yet, into one that does — which is the same sentence at
+    /// three lengths the pane menu's own exits are read at. `Close tab` is last
+    /// and behind the rule, because it is where the sentence changes.
+    ///
+    /// **`Move to window ▸` is the pane menu's own string**, asserted here rather
+    /// than merely reused in the source: two literals reading `Move to window`
+    /// would be two menus that can come to call a window two different things,
+    /// and nothing but a test would notice the day one of them was edited.
+    ///
+    /// Mutations: reorder `TabMenuRow::ALL` and the first two assertions
+    /// disagree; strike the rule after `Close` instead of above it, or key it to
+    /// the row above, and the third goes red on the menu that has no
+    /// `Move to window ▸`.
+    #[test]
+    fn the_tab_menu_is_six_verbs_about_one_tab_with_a_rule_above_the_close() {
+        assert_eq!(
+            TabMenuRow::ALL,
+            [
+                TabMenuRow::Rename,
+                TabMenuRow::Pin,
+                TabMenuRow::Duplicate,
+                TabMenuRow::MoveToNewWindow,
+                TabMenuRow::MoveToWindow,
+                TabMenuRow::Close,
+            ]
+        );
+        let windows = tab_menu_windows();
+        let layout = tab_menu(TabMenuSubject::default(), false, &windows);
+        assert_eq!(
+            tab_menu_captions(&layout, &windows),
+            vec![
+                tab_menu_rename_text(),
+                tab_menu_pin_text(),
+                tab_menu_duplicate_text(),
+                tab_menu_move_to_new_window_text(),
+                move_to_window_text(),
+                tab_menu_close_text(),
+            ],
+            "six rows, in the order the enum lists them, and no heading over them"
+        );
+        assert_eq!(
+            move_to_window_text(),
+            crate::i18n::Text::PaneMenuMoveToWindow.text(),
+            "the third exit borrows the pane menu's own words for the same list \
+             of the same windows"
+        );
+        assert_ne!(
+            tab_menu_move_to_new_window_text(),
+            move_to_window_text(),
+            "and the two exits differ by the window they name — including by not \
+             being the same string"
+        );
+
+        // The rule falls between the last constructive verb and `Close tab`, on
+        // the long menu and on the short one, which is the whole point of
+        // striking it at the row it stands *above*.
+        for windows in [tab_menu_windows(), Vec::new()] {
+            let layout = tab_menu(TabMenuSubject::default(), false, &windows);
+            let close = tab_menu_box(&layout, TabMenuRow::Close);
+            let above = layout
+                .items()
+                .iter()
+                .rev()
+                .nth(1)
+                .expect("a menu with a `Close tab` has a row above it")
+                .rect;
+            assert!(
+                layout.separator[1] >= above[3] && layout.separator[3] <= close[1],
+                "{} window(s): the rule lies between the last constructive verb \
+                 and `Close tab`",
+                windows.len()
+            );
+            assert_eq!(
+                layout.items()[0].rect[1],
+                layout.frame[1] + FLOAT_WINDOW_BORDER_LOGICAL_PX.max(1.0) + MENU_PADDING_LOGICAL_PX,
+                "and the first row sits directly under the menu's own padding"
+            );
+        }
+    }
+
+    /// PIN (丙2; the pane menu's ruling of 2026-08-25, read on a tab) — **with
+    /// nowhere to go, `Move to window ▸` is not in the menu at all.**
+    ///
+    /// A disclosure arrow over nothing is the one refusal this window may not
+    /// make: the arrow's whole sentence is "there is more this way", and on a
+    /// session with one window there is not. Nothing is lost by its going —
+    /// `Move tab to new window` directly above is the verb for exactly that case,
+    /// and this row was added beside it rather than instead of it.
+    ///
+    /// Asserted four ways over, because a row can be absent from a list and still
+    /// be on the glass: the list, the drawn captions, the frame's own height —
+    /// which is the one that catches a row left out of the walk but still paid
+    /// for in pixels — and the child, which must not be hung off a heading that
+    /// is not there.
+    ///
+    /// Mutations: return `ALL` unconditionally from `TabMenuRow::rows` and the
+    /// first three assertions go red; drop the `rows.contains` filter on the
+    /// child and the fourth hangs a list off nothing.
+    #[test]
+    fn a_lone_window_offers_no_row_for_moving_a_tab_into_another() {
+        let alone = tab_menu(TabMenuSubject::default(), false, &[]);
+        let rows: Vec<TabMenuRow> = alone.items().iter().map(|item| item.row).collect();
+        assert_eq!(
+            rows,
+            vec![
+                TabMenuRow::Rename,
+                TabMenuRow::Pin,
+                TabMenuRow::Duplicate,
+                TabMenuRow::MoveToNewWindow,
+                TabMenuRow::Close,
+            ],
+            "a lone window draws no row for moving a tab into another one"
+        );
+        assert!(
+            !tab_menu_captions(&alone, &[]).contains(&move_to_window_text().to_owned()),
+            "and it is not drawn either"
+        );
+
+        let windows = tab_menu_windows();
+        let crowd = tab_menu(TabMenuSubject::default(), false, &windows);
+        assert!(
+            crowd
+                .items()
+                .iter()
+                .any(|item| item.row == TabMenuRow::MoveToWindow),
+            "with somewhere to go the row is back"
+        );
+        assert!(
+            alone.frame[3] - alone.frame[1] < crowd.frame[3] - crowd.frame[1],
+            "and the shorter menu is shorter — a row left out of the walk but \
+             still paid for in pixels is a menu with a stripe of window in it"
+        );
+
+        // A child asked for on a menu with no such row is no child: the state
+        // that says the list is open outlives one frame, so a window closing
+        // while it stood open must not leave this reaching for a box that is not
+        // there.
+        let asked = tab_menu(TabMenuSubject::default(), true, &[]);
+        assert!(
+            asked.submenu_rows().is_none_or(<[[f32; 4]]>::is_empty),
+            "a list of nowhere to go is not a list"
+        );
+        let open = tab_menu(TabMenuSubject::default(), true, &windows);
+        let child = open.submenu_rows().expect("the child is up");
+        assert_eq!(child.len(), windows.len(), "one row per other window");
+        assert!(
+            child[0][1] <= tab_menu_box(&open, TabMenuRow::MoveToWindow)[3],
+            "and it hangs off its own heading"
+        );
+    }
+
+    /// PIN (丙2) — **the hit test answers each row's own box, and refuses the row
+    /// that cannot do what it says.**
+    ///
+    /// The refusal is the half worth pinning. `Duplicate tab` on a tab made of a
+    /// folder or a file (§7.1.6h) has nothing to copy — no profile, no working
+    /// folder — so the row is drawn and *not offered*: the pointer falls through
+    /// it onto the menu's own body, and the keyboard steps over it. A row that
+    /// lit under the hand and then did nothing would be worse than one that says
+    /// so, and a row that vanished would be a menu whose shape moves.
+    ///
+    /// Mutations: drop `item.available &&` from [`tab_menu_hit`] and the greyed
+    /// row starts answering presses; drop the filter from [`tab_menu_step`] and
+    /// the walk stops on it.
+    #[test]
+    fn the_tab_menu_answers_each_row_and_refuses_the_one_that_cannot() {
+        let windows = tab_menu_windows();
+        let layout = tab_menu(TabMenuSubject::default(), false, &windows);
+        for item in layout.items() {
+            let (x, y) = tab_menu_point(item.rect);
+            assert_eq!(
+                tab_menu_hit(&layout, x, y),
+                Some(TabMenuHit::Row(item.row)),
+                "{:?} answers a press in its own box",
+                item.row
+            );
+        }
+        assert_eq!(
+            tab_menu_hit(
+                &layout,
+                f64::from(layout.frame[0] + 1.0),
+                f64::from(layout.frame[1] + 1.0)
+            ),
+            Some(TabMenuHit::Surface),
+            "the menu's own padding swallows"
+        );
+        assert_eq!(
+            tab_menu_hit(
+                &layout,
+                f64::from(layout.frame[0] - 4.0),
+                f64::from(layout.frame[1] - 4.0)
+            ),
+            None,
+            "and a point outside it is not this menu's at all"
+        );
+
+        // A tab with no shell behind it.
+        let folder = tab_menu(
+            TabMenuSubject {
+                can_duplicate: false,
+                ..TabMenuSubject::default()
+            },
+            false,
+            &windows,
+        );
+        let greyed = tab_menu_box(&folder, TabMenuRow::Duplicate);
+        let (x, y) = tab_menu_point(greyed);
+        assert_eq!(
+            tab_menu_hit(&folder, x, y),
+            Some(TabMenuHit::Surface),
+            "a tab with no shell has nothing to duplicate, and the row does not \
+             answer"
+        );
+        assert!(
+            folder
+                .items()
+                .iter()
+                .any(|item| item.row == TabMenuRow::Duplicate && !item.available),
+            "it is drawn, and drawn as unavailable"
+        );
+        assert_eq!(
+            tab_menu_step(Some(TabMenuRow::Pin), true, folder.items()),
+            Some(TabMenuRow::MoveToNewWindow),
+            "and the keyboard steps over it rather than landing on it"
+        );
+        assert_eq!(
+            tab_menu_step(Some(TabMenuRow::Pin), true, layout.items()),
+            Some(TabMenuRow::Duplicate),
+            "while on a tab that has a shell it is the very next row"
+        );
+        assert_eq!(
+            tab_menu_step(None, false, layout.items()),
+            Some(TabMenuRow::Close),
+            "an empty highlight enters the list at whichever end the key names"
+        );
+        assert_eq!(
+            tab_menu_step(Some(TabMenuRow::Close), true, layout.items()),
+            Some(TabMenuRow::Close),
+            "and the walk clamps at its ends"
+        );
+
+        // The child's rows answer by their place on the glass, which is what
+        // `submenu_row` turns back into a window.
+        let open = tab_menu(TabMenuSubject::default(), true, &windows);
+        let child = open.submenu_rows().expect("the child is up").to_vec();
+        let (x, y) = tab_menu_point(child[1]);
+        assert_eq!(
+            tab_menu_hit(&open, x, y),
+            Some(TabMenuHit::Submenu(1)),
+            "a press on a child row answers with its place in the list it was \
+             drawn from"
+        );
+        assert_eq!(open.submenu_row(1), Some(1));
+    }
+
+    /// PIN (丙2; the `Lock` ruling, §7.1.6c-8) — **the pin row's word and its
+    /// drawing turn together, and nothing else in the menu turns at all.**
+    ///
+    /// Change only the word and the drawing goes on lying; change only the
+    /// drawing and the reader has to decide which half to believe. The row is
+    /// [`PaneMenuRow::ZoomPane`]'s arrangement on this menu's own subject, and
+    /// the fill is where the state rides — `ChromeMark::Pin`'s standing rule,
+    /// which is the tab strip's rule and now this row's.
+    ///
+    /// Both halves are asserted on the *glass* as well as on the enum, because a
+    /// `mark_when` that answered correctly while the painter reached for
+    /// `ActionIcon`'s stateless face would pass the first half and draw the
+    /// wrong pin.
+    ///
+    /// Mutations: return the unpinned mark from both arms and the sprite counts
+    /// go red; make any other row consult the subject and the loop names it.
+    #[test]
+    fn the_tab_menus_pin_row_changes_its_word_and_its_mark_together() {
+        let unpinned = TabMenuSubject::default();
+        let pinned = TabMenuSubject {
+            pinned: true,
+            ..TabMenuSubject::default()
+        };
+        assert_eq!(TabMenuRow::Pin.text_when(unpinned), tab_menu_pin_text());
+        assert_eq!(TabMenuRow::Pin.text_when(pinned), tab_menu_unpin_text());
+        assert_ne!(
+            tab_menu_pin_text(),
+            tab_menu_unpin_text(),
+            "two faces, two words"
+        );
+        assert_eq!(
+            TabMenuRow::Pin.mark_when(unpinned),
+            ChromeMark::Pin { filled: false }
+        );
+        assert_eq!(
+            TabMenuRow::Pin.mark_when(pinned),
+            ChromeMark::Pin { filled: true }
+        );
+        for row in TabMenuRow::ALL {
+            if row == TabMenuRow::Pin {
+                continue;
+            }
+            assert_eq!(
+                row.text_when(unpinned),
+                row.text_when(pinned),
+                "{row:?} says the same thing whatever the tab is"
+            );
+            assert_eq!(
+                row.mark_when(unpinned),
+                row.mark_when(pinned),
+                "{row:?} draws the same thing whatever the tab is"
+            );
+        }
+
+        let windows = tab_menu_windows();
+        for subject in [unpinned, pinned] {
+            let layout = tab_menu(subject, false, &windows);
+            let layer = one_layer(tab_menu_build(
+                &layout,
+                None,
+                &windows,
+                &equipped(),
+                &mut fake_measure,
+            ));
+            assert!(
+                layer
+                    .labels
+                    .iter()
+                    .any(|label| label.text == TabMenuRow::Pin.text_when(subject)),
+                "pinned={}: the word on the glass is the face the subject names",
+                subject.pinned
+            );
+            assert_eq!(
+                layer
+                    .sprites
+                    .iter()
+                    .filter(|sprite| sprite.mark
+                        == ChromeMark::Pin {
+                            filled: subject.pinned
+                        })
+                    .count(),
+                1,
+                "pinned={}: and so is the drawing",
+                subject.pinned
+            );
+            assert!(
+                !layer.sprites.iter().any(|sprite| sprite.mark
+                    == ChromeMark::Pin {
+                        filled: !subject.pinned
+                    }),
+                "pinned={}: with no second pin anywhere in the list",
+                subject.pinned
+            );
+        }
     }
 
     // ── the commit graph's branch filter (T2/T3, v2 ③) ─────────────────────
@@ -16966,7 +18675,14 @@ mod tests {
     fn a_terminal_menu_raised_in_the_corner_is_pulled_back_inside_on_both_axes() {
         let surface = (960.0, 600.0);
         let look = TermMenuLook::default();
-        let layout = term_menu_layout([958.0, 599.0], surface, 1.0, &look, &mut fake_measure);
+        let layout = term_menu_layout(
+            [958.0, 599.0],
+            surface,
+            1.0,
+            &look,
+            &chord_table(),
+            &mut fake_measure,
+        );
         let frame = layout.frame;
         assert!(frame[2] <= surface.0 - MENU_EDGE_MARGIN_LOGICAL_PX);
         assert!(frame[3] <= surface.1 - MENU_EDGE_MARGIN_LOGICAL_PX);
@@ -17006,6 +18722,7 @@ mod tests {
             (960.0, 600.0),
             1.0,
             &look,
+            &chord_table(),
             &mut fake_measure,
         );
         let row = |wanted: TermMenuRow| {
@@ -17044,10 +18761,25 @@ mod tests {
         // one label per entry, whatever each of them can answer.
         let layers = term_menu_build(&layout, &look, None, &equipped(), &mut fake_measure);
         assert_eq!(layers.len(), 1);
+        let names: Vec<&str> = layers[0]
+            .labels
+            .iter()
+            .map(|label| label.text.as_str())
+            .collect();
         assert_eq!(
-            layers[0].labels.len(),
+            names.iter().filter(|name| **name != "Ctrl+F").count(),
             TERM_MENU_ROWS.len(),
             "every row is painted, including the ones that cannot answer"
+        );
+        // **And one of the seven carries a chord** (gesture audit 2026-08-26,
+        // 系统性发现 ②). `Find…` is the row of this menu that is also a row of
+        // the shortcut table; `Copy` and `Paste` are decided above that table,
+        // in `input`, so this column has nothing true to print beside them —
+        // see [`TermMenuRow::accelerator`], which names all seven.
+        assert_eq!(
+            names.iter().filter(|name| **name == "Ctrl+F").count(),
+            1,
+            "`Find…` prints the chord that raises the same capsule"
         );
     }
 
@@ -17143,6 +18875,7 @@ mod tests {
             (960.0, 600.0),
             1.0,
             &look,
+            &chord_table(),
             &mut fake_measure,
         );
         let entry = |wanted: TermMenuEntry| {

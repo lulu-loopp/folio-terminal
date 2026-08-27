@@ -4535,6 +4535,50 @@ struct PaneMenuState {
     submenu_hold_until: Option<Instant>,
 }
 
+/// **A tab's context menu while it is up** (丙2, the gesture audit of
+/// 2026-08-26).
+///
+/// [`TermMenuState`]'s shape with a [`TabId`] where that one holds a seat, and
+/// it holds an **id** rather than a place in the strip for the reason
+/// [`PaneMenuState`] holds a seat rather than an index, sharpened by what this
+/// particular subject does: tabs move. A drag reorders the strip, a pin
+/// re-partitions it, a tab arriving from another window lands in it, and every
+/// one of those can happen while this menu stands. A menu holding `2` would run
+/// its verb on whatever is second by the time the hand gets down the list.
+///
+/// A `TabId` is minted once per process and never reused, so an id that stops
+/// naming a tab simply names nothing — and every verb here resolves it through
+/// `Runtime::tab_slot_of` at the moment it runs and does nothing when the answer
+/// is `None`.
+struct TabMenuState {
+    /// Where it was raised, in physical pixels of the surface.
+    ///
+    /// At the pointer, which is where a menu belonging to a *surface* hangs —
+    /// the file row's and the terminal's own menus do the same, and unlike the
+    /// two `⌄` menus there is no button here for it to drop out of.
+    point: [f32; 2],
+    /// **The tab the verbs are about — not whichever tab is active.**
+    ///
+    /// A right press does not move the focus and does not activate anything
+    /// (`chrome_mouse_input` answers only the left button), which is the ruling
+    /// [`TermMenuState::seat`] states one surface over. A menu that ran its rows
+    /// on `active_tab` would close the tab you were looking at rather than the
+    /// one you pointed at.
+    tab: TabId,
+    /// What that tab could answer for when the menu came up — snapshotted for
+    /// [`profiles::TabMenuSubject`]'s own reason.
+    subject: profiles::TabMenuSubject,
+    hover: Option<profiles::TabMenuHover>,
+    /// Whether the `Move to window ▸` child is up.
+    submenu_open: bool,
+    /// **The safety triangle's two facts** (#53), which this menu owes for
+    /// [`PaneMenuState`]'s reason: it has a child, so what the highlight does
+    /// when the pointer leaves a row is no longer "the new row takes it" but
+    /// "the new row takes it unless the hand is on its way to the child".
+    pointer_was: Option<[f32; 2]>,
+    submenu_hold_until: Option<Instant>,
+}
+
 /// **Both chevrons' clocks, and the one place their policy is applied** (user
 /// ruling, 2026-08-16).
 ///
@@ -7979,6 +8023,25 @@ struct WindowRuntime {
     /// second copy of the gesture: nothing here can be left behind, because
     /// nothing here is remembered.
     foreign: Option<ForeignDrag>,
+    /// **This window is holding a gesture whose hand has left every window of
+    /// ours** (gesture audit 2026-08-26, 丙2), so letting go here tears a new
+    /// window out at the pointer.
+    ///
+    /// The audit's finding was that this state had no projection at all: the
+    /// landing frame is forced empty the moment the pointer leaves the glass,
+    /// the cursor is `Default` for the whole of every drag, and the ghost is
+    /// drawn at `pointer + offset` with no bound, so it goes off the surface
+    /// with the hand and there is nothing on the screen to say the payload is
+    /// still in the air — 「手势全程屏幕上一点反馈都没有」. For a **tab** this
+    /// is also the only door the verb has.
+    ///
+    /// [`Self::foreign`]'s sibling in every respect: written only by
+    /// [`FolioApp::drive_drag_broker`], rebuilt from the broker every turn, and
+    /// never remembered. It is `true` on the **source** window and nowhere
+    /// else, and only for [`BrokerAim::Away`] — over another Folio window the
+    /// answer is that window's to give, and saying "new window" there would be
+    /// promising the wrong thing.
+    tearing_out: bool,
     /// The dock drawing on screen — U6's whole state (M144-M155).
     ///
     /// Beside the drag rather than inside it, and for a reason the type system
@@ -8121,6 +8184,9 @@ struct WindowRuntime {
     git_menu: Option<GitMenuState>,
     /// A terminal pane's own context menu (`#term-menu`, ticket #62).
     term_menu: Option<TermMenuState>,
+    /// **A tab's own context menu** (丙2, the gesture audit of 2026-08-26) — the
+    /// ninth popup, and the first one about something in the tab list.
+    tab_menu: Option<TabMenuState>,
     /// **The seat whose shell is being replaced**, for as long as it is.
     ///
     /// One at a time by construction — a restart is asked for from a menu, and
@@ -10035,6 +10101,15 @@ struct {name} {{
     /// opens a tab does not owe this, and leaving it listed would have this test
     /// demanding a mint nobody spends.
     ///
+    /// **`new_tab_with_profile` left it on 2026-08-26** (丙2), and for the same
+    /// kind of reason read the other way: it is a *wrapper* now, over
+    /// `new_tab_seeded_from`, whose whole content is which leaf the new tab is
+    /// seeded from. The mint moved into the core with everything else that makes
+    /// a tab, and listing the wrapper would be this test asking a function that
+    /// makes nothing to mint something. `Duplicate tab` is the second caller of
+    /// that core and is therefore covered by the same line rather than by one of
+    /// its own — which is the point of there being a core at all.
+    ///
     /// MUTATION: mint one of them from a literal or from `tabs.len() + 1` and the
     /// door is named here.
     #[test]
@@ -10045,8 +10120,10 @@ struct {name} {{
             // A second window — `Ctrl+Shift+M`, a Recent window seed, a restored
             // window that was not the one the process opened with.
             "open_window",
-            // A new tab.
-            "new_tab_with_profile",
+            // A new tab — the `+`, a picker row, `New terminal in folder…`
+            // and the tab menu's `Duplicate tab`, which are one function taking
+            // one seed (丙2).
+            "new_tab_seeded_from",
             // Undo-close and the Recent list.
             "reopen_recent",
             // The restore card's "yes".
@@ -12813,8 +12890,23 @@ enum SelectionDragMode {
     Line,
 }
 
-fn should_copy_on_select_release(route: Option<&MouseRoute>, single_click: bool) -> bool {
-    !single_click && matches!(route, Some(MouseRoute::Local(_)))
+/// Whether letting go of a drag-selection writes it to the clipboard.
+///
+/// `copy_on_select` is the reader's own answer, and it is a parameter rather
+/// than a guard at the call site so that the whole policy is one function a
+/// test can ask (gesture audit 2026-08-26, 丙4). The audit's finding about this
+/// gesture is unlike the other six: the reader **can** perform it — they do,
+/// constantly — they simply are not told that they did, and what they were not
+/// told is that their clipboard is gone. Windows Terminal's `copyOnSelect`
+/// ships **off**, so it is not muscle memory arriving with the reader either.
+/// The switch is what gives the behaviour a name; it stays on by default
+/// because that is what every build of this window has done.
+fn should_copy_on_select_release(
+    route: Option<&MouseRoute>,
+    single_click: bool,
+    copy_on_select: bool,
+) -> bool {
+    copy_on_select && !single_click && matches!(route, Some(MouseRoute::Local(_)))
 }
 
 /// Whether a press that hit no chrome target reaches no terminal grid, and so is
@@ -14146,12 +14238,63 @@ fn rename_key(editor: &mut TabRename, key: &Key, modifiers: ModifiersState) -> R
     RenameVerdict::Held
 }
 
+/// **What `Ctrl` would do with a settled link, when that is worth a sentence**
+/// (gesture audit 2026-08-26, 丙3).
+///
+/// A web address already tells the reader that `Ctrl` changes the answer: the
+/// finger cursor lights only with the key down, which was designed that way. A
+/// printed **file** path does not — [`terminal_link_answers_a_press`] says yes
+/// with or without `Ctrl`, so the same finger stands over two destinations and
+/// the difference between "opens here" and "leaves for the system" has no
+/// projection anywhere on the glass. This is that projection, and it is one
+/// clause on a status line that was already being drawn.
+///
+/// Derived from [`hyperlink_activation`] rather than written beside it, so the
+/// sentence cannot drift from the destination: a URI whose `Ctrl` answer is
+/// neither of these two — a web address, a network path that previews either
+/// way, a scheme this window refuses — says nothing at all.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControlClickHint {
+    /// `file:` at a readable file — `Ctrl` hands it to the system's handler.
+    DefaultApp,
+    /// `file:` at a folder — `Ctrl` shows it in Explorer instead.
+    Explorer,
+}
+
+impl ControlClickHint {
+    fn of(uri: &str, is_directory: &dyn Fn(&Path) -> bool) -> Option<Self> {
+        match hyperlink_activation(true, true, uri, is_directory) {
+            HyperlinkActivation::External(_) => Some(Self::DefaultApp),
+            HyperlinkActivation::Reveal(_) => Some(Self::Explorer),
+            HyperlinkActivation::None
+            | HyperlinkActivation::Browser
+            | HyperlinkActivation::Preview(_, _)
+            | HyperlinkActivation::FilesColumn(_)
+            | HyperlinkActivation::Blocked => None,
+        }
+    }
+
+    fn text(self) -> &'static str {
+        match self {
+            Self::DefaultApp => i18n::Text::HyperlinkControlOpensExternally.text(),
+            Self::Explorer => i18n::Text::HyperlinkControlReveals.text(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct HyperlinkHover {
     candidate: Option<HyperlinkHit>,
     show_at: Option<Instant>,
     active: Option<HyperlinkHit>,
     blocked: bool,
+    /// Filled once, when the hover settles — see [`ControlClickHint`].
+    ///
+    /// Once and not per frame, because deciding it asks the filesystem whether
+    /// the path is a folder: the status line is repainted on every frame the
+    /// pane owes and the hover settles exactly once, so this is the only clock
+    /// the question may be asked on.
+    hands_on: Option<ControlClickHint>,
 }
 
 impl HyperlinkHover {
@@ -14166,6 +14309,7 @@ impl HyperlinkHover {
         }
         let active_changed = self.active.take().is_some();
         self.blocked = false;
+        self.hands_on = None;
         // The underline is the affordance and follows the candidate immediately; only the status
         // tooltip waits out the hover delay. A candidate change therefore needs a republish too.
         let candidate_changed = self.candidate.is_some() || hit.is_some();
@@ -14180,13 +14324,23 @@ impl HyperlinkHover {
         self.active.as_ref().or(self.candidate.as_ref())
     }
 
-    fn activate_if_due(&mut self, now: Instant) -> bool {
+    /// Settle the hover, and while settling it decide what `Ctrl` would do.
+    ///
+    /// `is_directory` is handed in rather than reached for, on this file's
+    /// standing division: the answer is a fact about the disk and this type
+    /// holds none. It is asked here and nowhere else, which is what keeps one
+    /// filesystem question off the frame clock.
+    fn activate_if_due(&mut self, now: Instant, is_directory: &dyn Fn(&Path) -> bool) -> bool {
         if self.show_at.is_none_or(|deadline| now < deadline) {
             return false;
         }
         self.show_at = None;
         self.active = self.candidate.take();
         self.blocked = false;
+        self.hands_on = self
+            .active
+            .as_ref()
+            .and_then(|hit| ControlClickHint::of(&hit.uri, is_directory));
         self.active.is_some()
     }
 
@@ -14195,12 +14349,17 @@ impl HyperlinkHover {
         self.show_at = None;
         self.active = Some(hyperlink);
         self.blocked = true;
+        // A refusal is the answer to the very press the sentence was offering;
+        // printing the offer beside the refusal would be the line arguing with
+        // itself.
+        self.hands_on = None;
     }
 
     fn clear(&mut self) -> bool {
         self.candidate = None;
         self.show_at = None;
         self.blocked = false;
+        self.hands_on = None;
         self.active.take().is_some()
     }
 
@@ -14224,7 +14383,17 @@ impl HyperlinkHover {
         let suffix = if self.blocked {
             i18n::Text::HyperlinkBlockedSuffix.text()
         } else {
-            ""
+            // **The aside about `Ctrl` is printed only when it costs the target
+            // nothing** (丙3). A verdict is the answer to a press somebody
+            // made and is worth cutting the address short for; this is a thing
+            // worth knowing that nobody asked for, so it is printed whole when
+            // the whole address is already on the line and dropped whole when
+            // it is not. A path truncated to make room for a lesson would lose
+            // the one fact the line exists to carry.
+            self.hands_on
+                .map(ControlClickHint::text)
+                .filter(|hint| uri.len() + hint.chars().count() <= columns)
+                .unwrap_or("")
         };
         let suffix_len = suffix.chars().count();
         if columns <= suffix_len {
@@ -19673,6 +19842,13 @@ struct OverlayStack {
     /// that pane. [`Popup::ALL`] keeps it from ever being up beside the three
     /// above it, so its place among them is bookkeeping.
     term_menu: Vec<marks::OverlayLayer>,
+    /// **A tab's own context menu** (丙2), on the same level and by the same
+    /// argument a fourth time: it is raised over a tab and is about that tab.
+    /// It is the one menu in this family drawn over the *strip* rather than over
+    /// the stage, which changes nothing about where it sits — a menu is above
+    /// everything it is about — and [`Popup::ALL`] keeps it from ever being up
+    /// beside the four above it.
+    tab_menu: Vec<marks::OverlayLayer>,
     /// The notices (user ruling, 2026-08-16) — **above every menu and below the
     /// tip.**
     ///
@@ -19808,6 +19984,7 @@ impl OverlayStack {
             pane_menu,
             git_menu,
             term_menu,
+            tab_menu,
             toast,
             key_hint,
             card_hint,
@@ -19833,6 +20010,7 @@ impl OverlayStack {
             pane_menu,
             git_menu,
             term_menu,
+            tab_menu,
             toast,
             key_hint,
             card_hint,
@@ -23716,10 +23894,19 @@ enum Popup {
     /// every other popup in this window is drawn over, so without a line here it
     /// would be the one menu that could come up underneath an open one.
     TermMenu,
+    /// **A tab's own context menu** (丙2, the gesture audit of 2026-08-26).
+    ///
+    /// The ninth name on this list and the first one raised on the *tab list*
+    /// rather than on the stage, which is why it is also the second entry of
+    /// [`popup_owner`] that answers [`PopupOwner::Tabs`]: it is an extension of
+    /// the surface that grew it, and a sidebar that retracted out from under a
+    /// menu standing beside it is the 2026-08-25 report with a different list in
+    /// it.
+    Tab,
 }
 
 impl Popup {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Profile,
         Self::Root,
         Self::File,
@@ -23728,6 +23915,7 @@ impl Popup {
         Self::Preview,
         Self::GitMenu,
         Self::TermMenu,
+        Self::Tab,
     ];
 
     /// What one opener has to put away: **every other popup, always.**
@@ -23751,13 +23939,13 @@ impl Popup {
 /// picture. See that module for why that is the only shape a menu's departure
 /// can take.
 ///
-/// **[`Self::ALL`] names all eight popups one at a time** rather than folding
-/// over [`Popup::ALL`], and the repetition is the point: a ninth popup is a
+/// **[`Self::ALL`] names all nine popups one at a time** rather than folding
+/// over [`Popup::ALL`], and the repetition is the point: a tenth popup is a
 /// menu that would otherwise go on hard-cutting while every other one breathes,
 /// and the gate below is what says so out loud.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Layered {
-    /// One of the eight menus.
+    /// One of the nine menus.
     Popup(Popup),
     /// **The list one of that menu's own rows hangs out**, keyed by the menu it
     /// belongs to. Its own band because it is its own gesture: the parent came
@@ -23795,7 +23983,7 @@ impl Layered {
     /// arrangement `GitFilterMenuLayout::rows` keeps, and for its reason: a list
     /// the product walked would be a second way of deciding what is on the glass.
     #[allow(dead_code)]
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 18] = [
         Self::Popup(Popup::Profile),
         Self::Popup(Popup::Root),
         Self::Popup(Popup::File),
@@ -23804,8 +23992,10 @@ impl Layered {
         Self::Popup(Popup::Preview),
         Self::Popup(Popup::GitMenu),
         Self::Popup(Popup::TermMenu),
+        Self::Popup(Popup::Tab),
         Self::Submenu(Popup::Pane),
         Self::Submenu(Popup::TermMenu),
+        Self::Submenu(Popup::Tab),
         Self::SettingsScrim,
         Self::SettingsDialog,
         Self::Notice,
@@ -24030,9 +24220,9 @@ mod arrival_wiring_tests {
         &SOURCE[start..end]
     }
 
-    /// RED GATE — **every one of the eight popups arrives and leaves.**
+    /// RED GATE — **every one of the nine popups arrives and leaves.**
     ///
-    /// The ninth popup's gate, and the animation slice's half of the one
+    /// The tenth popup's gate, and the animation slice's half of the one
     /// [`super::PopupsUp::holds`] and [`super::popup_owner`] already keep: a menu
     /// added without a line here is a menu that hard-cuts while every other one
     /// in the window breathes, which is exactly the state the 2026-08-25 audits
@@ -24040,7 +24230,7 @@ mod arrival_wiring_tests {
     ///
     /// Mutation: drop any popup from `Layered::ALL` and it names the one missing.
     #[test]
-    fn all_eight_popups_are_on_the_list_of_bands_that_pass() {
+    fn all_nine_popups_are_on_the_list_of_bands_that_pass() {
         for popup in Popup::ALL {
             assert!(
                 Layered::ALL.contains(&Layered::Popup(popup)),
@@ -24049,8 +24239,8 @@ mod arrival_wiring_tests {
         }
         assert_eq!(
             Layered::ALL.len(),
-            16,
-            "eight menus, two submenus, a scrim, a dialog, a notice, a tip, the card a \
+            18,
+            "nine menus, three submenus, a scrim, a dialog, a notice, a tip, the card a \
              held modifier raises and the bubble Cards raises on a first visit"
         );
         for band in Layered::MODAL_BANDS {
@@ -24083,6 +24273,7 @@ mod arrival_wiring_tests {
             "self.stage_menu(Popup::Pane",
             "self.stage_menu(Popup::GitMenu",
             "self.stage_menu(Popup::TermMenu",
+            "self.stage_menu(Popup::Tab",
             "Layered::Notice",
             "Layered::KeyHint",
             "Layered::Tip",
@@ -24092,7 +24283,7 @@ mod arrival_wiring_tests {
                 "`refresh_overlay` no longer stages `{spelling}`"
             );
         }
-        // And the two submenus, which are staged by the one door the four
+        // And the three submenus, which are staged by the one door the five
         // own-band menus go through.
         assert!(
             fn_body("stage_menu").contains("Layered::Submenu(popup)"),
@@ -24334,6 +24525,7 @@ struct PopupsUp {
     preview: bool,
     git_menu: bool,
     term_menu: bool,
+    tab_menu: bool,
 }
 
 impl PopupsUp {
@@ -24352,6 +24544,7 @@ impl PopupsUp {
             Popup::Preview => up.preview = true,
             Popup::GitMenu => up.git_menu = true,
             Popup::TermMenu => up.term_menu = true,
+            Popup::Tab => up.tab_menu = true,
         }
         up
     }
@@ -24366,6 +24559,7 @@ impl PopupsUp {
             Popup::Preview => self.preview,
             Popup::GitMenu => self.git_menu,
             Popup::TermMenu => self.term_menu,
+            Popup::Tab => self.tab_menu,
         }
     }
 
@@ -24421,8 +24615,9 @@ enum TabSurface {
 /// `rail_zone_wants_open` was already having to special-case for the flyout a
 /// rail row hangs out (G102). What closes it generally is the popup saying
 /// where it came from, which is a fact this window already holds for every one
-/// of them: [`Popup::Profile`] hangs off whichever surface carries the `+`
-/// ([`tab_surface`]), and the other seven are raised inside the stage.
+/// of them: [`Popup::Profile`] hangs off whichever surface carries the `+` and
+/// [`Popup::Tab`] off the row a right press landed on — both [`tab_surface`]'s
+/// answer — and the other seven are raised inside the stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PopupOwner {
     /// The tab list's own surface, whichever of the three it currently is.
@@ -24450,6 +24645,14 @@ fn popup_owner(popup: Popup, tabs: TabSurface) -> PopupOwner {
         // answer, so the menu and its owner can never name two different
         // buttons.
         Popup::Profile => PopupOwner::Tabs(tabs),
+        // **And the menu a right press on a tab raises** (丙2), for the same
+        // reason and by the same derivation: it is raised *on the tab list*,
+        // wherever that list is being drawn, so a hand that has reached it has
+        // not left the rail — and a rail that read the menu beside it as "the
+        // pointer has gone" would retract out from under the very list it just
+        // grew. That is the 2026-08-25 report exactly, and this line is why it
+        // cannot happen a second time.
+        Popup::Tab => PopupOwner::Tabs(tabs),
         // Everything else is raised by a press somewhere in the panes: a files
         // column's root button and its rows, a pane head's `⌄`, the commit
         // graph's branch filter, a preview head's switcher, a repository row,
@@ -27121,6 +27324,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         peek_page: None,
         drag: None,
         foreign: None,
+        tearing_out: false,
         drop_preview: None,
         last_drawn_dock_reveal: None,
         seat_viewport,
@@ -27141,6 +27345,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         files_locate: BTreeMap::new(),
         git_menu: None,
         term_menu: None,
+        tab_menu: None,
         restarting: None,
         pane_menu: None,
         chevrons: ChevronGates::default(),
@@ -28330,23 +28535,58 @@ impl Runtime<'_> {
     /// path it cannot read, which is `cwd_for_spawn`'s own rule and not a second
     /// one: it then starts where a fresh tab of that profile starts.
     fn new_tab_with_profile(&mut self, profile: usize, place: Option<PathBuf>) -> Result<()> {
+        // **Both facts are read off the *same* leaf** — the focused session,
+        // which is also what `working_directory()` is asked of. A profile taken
+        // from one pane and a directory from another would be the exact mismatch
+        // the rule exists to prevent. A tab with no shell reports no folder
+        // (§7.1.6h), which `cwd_for_spawn` already has an answer for: a new tab
+        // opened from a folder tab starts where a fresh one would.
+        //
+        // This wrapper is the whole of what "the pane you are looking at" means,
+        // and it is the only thing that separates every existing door from the
+        // one 丙2 added — see [`Self::new_tab_seeded_from`].
+        let source_cwd = self
+            .focused()
+            .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf));
+        self.new_tab_seeded_from(profile, place, self.session_profile(), source_cwd)
+    }
+
+    /// **A tab, seeded from a leaf the caller names** (丙2, `Duplicate tab`).
+    ///
+    /// Every door onto a new tab used to be [`Self::new_tab_with_profile`], and
+    /// that function took its seed from *the pane you are looking at* — which is
+    /// the right question for the `+`, for a picker row and for
+    /// `New terminal in folder…`, because all three are asked from where the
+    /// reader is standing. `Duplicate tab` is asked about a tab that is very
+    /// often **not** the one on screen: a right press on a tab does not activate
+    /// it (that is the ruling this menu is built on), so the seed has to travel
+    /// with the subject rather than be re-derived from the focus.
+    ///
+    /// So the seeding source is a parameter and the old signature is a wrapper
+    /// that supplies the focused leaf — one implementation of "make a tab",
+    /// which is §7.1.6e's rule, rather than a second one that would drift the
+    /// day the seed grows a third field.
+    ///
+    /// **The pair travels together and is taken from one leaf**, which is the
+    /// rule [`new_tab_cwd`] already states: a profile from one pane and a folder
+    /// from another describes a pane that does not exist.
+    fn new_tab_seeded_from(
+        &mut self,
+        profile: usize,
+        place: Option<PathBuf>,
+        source_profile: usize,
+        source_cwd: Option<PathBuf>,
+    ) -> Result<()> {
         debug_assert!(profile < profiles::count());
         let render_physical =
             presentation_physical_size(self.window.renderer.presentation_geometry());
         let wake = &self.window.pty_wake;
         let id = self.app.tab_ids.mint();
-        // Both facts are read off the *same* leaf — the focused session, which is
-        // also what `working_directory()` is asked of. A profile taken from one
-        // pane and a directory from another would be the exact mismatch the rule
-        // exists to prevent. A tab with no shell reports no folder (§7.1.6h),
-        // which `cwd_for_spawn` already has an answer for: a new tab opened from
-        // a folder tab starts where a fresh one would.
         let cwd = new_tab_cwd(
             profile,
             place.as_deref(),
-            self.session_profile(),
-            self.focused()
-                .and_then(|leaf| leaf.session.working_directory()),
+            source_profile,
+            source_cwd.as_deref(),
         );
         // A lone terminal is `Seats::lone_terminal`'s own seat id, so the map is
         // that one entry — or empty, when the shell you are looking at has never
@@ -32673,6 +32913,8 @@ impl Runtime<'_> {
                 verb: &verb,
                 verb_hovered: self.window.seat_pointer.hover
                     == Some(seats::ChromeTarget::PreviewFaultVerb(seat)),
+                close_hovered: self.window.seat_pointer.hover
+                    == Some(seats::ChromeTarget::PreviewSheetClose(seat)),
             },
             &palette,
         );
@@ -33201,6 +33443,10 @@ impl Runtime<'_> {
         // The menu is content-sized, so laying it out is a measuring job — the
         // same renderer, the same font, the same call `build` makes when it
         // draws the strings this width was computed from.
+        // The effective table, for the one row of this menu that is also a row
+        // of it — see `ProfileMenuLayout::files_pane_accel`.
+        let shortcuts = &self.app.shortcuts;
+        let recent = self.app.recent.entries();
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::layout(
@@ -33208,7 +33454,8 @@ impl Runtime<'_> {
             side,
             (width as f32, height as f32),
             scale,
-            self.app.recent.entries(),
+            recent,
+            shortcuts,
             &mut measure,
         ))
     }
@@ -33554,6 +33801,7 @@ impl Runtime<'_> {
             focus_card_height: self.app.settings_store.loaded().focus_card_height,
             scrollback_lines: self.app.settings_store.loaded().scrollback_lines,
             line_wrapping: self.app.settings_store.loaded().line_wrapping,
+            copy_on_select: self.app.settings_store.loaded().copy_on_select,
             terminal_notifications: self.app.settings_store.loaded().terminal_notifications,
             turn_end_notification: self.app.settings_store.loaded().turn_end_notification,
             powershell_integration_offer: self
@@ -33720,11 +33968,11 @@ impl Runtime<'_> {
             .stage_departure(band, layers, now, motion)
     }
 
-    /// **One of the four menus that has a level to itself**, through its own
+    /// **One of the five menus that has a level to itself**, through its own
     /// passage and its child's.
     ///
-    /// Exhaustive on the four rather than taking a closure, because which
-    /// builder draws which menu is the one thing that differs and a fifth menu
+    /// Exhaustive on the five rather than taking a closure, because which
+    /// builder draws which menu is the one thing that differs and a sixth menu
     /// with a band of its own must not be able to reach this without saying so.
     fn stage_menu(&mut self, popup: Popup, now: Instant) -> Vec<marks::OverlayLayer> {
         let paint = match popup {
@@ -33732,6 +33980,7 @@ impl Runtime<'_> {
             Popup::Pane => self.pane_menu_layer(),
             Popup::GitMenu => self.git_menu_layer(),
             Popup::TermMenu => self.term_menu_layer(),
+            Popup::Tab => self.tab_menu_layer(),
             // The other four are drawn by the modal chain, which passes them
             // itself: see [`ModalBand`].
             Popup::Profile | Popup::Root | Popup::GraphFilter | Popup::Preview => MenuPaint::none(),
@@ -34082,7 +34331,7 @@ impl Runtime<'_> {
         // are the same statement.
         let below_floats = stack.below_the_floats();
         stack.float = self.float_layer(now, below_floats);
-        // The four menus with bands of their own, each through its own passage —
+        // The five menus with bands of their own, each through its own passage —
         // and each with the child it may be holding out through a second, for
         // [`Layered::Submenu`]'s reason. A band handed in empty is a menu that
         // has closed, which is the whole of what starts a departure.
@@ -34090,6 +34339,7 @@ impl Runtime<'_> {
         stack.pane_menu = self.stage_menu(Popup::Pane, now);
         stack.git_menu = self.stage_menu(Popup::GitMenu, now);
         stack.term_menu = self.stage_menu(Popup::TermMenu, now);
+        stack.tab_menu = self.stage_menu(Popup::Tab, now);
         stack.toast = self.toast_layer();
         // The card and the tip keep the entrances they were written with — 90ms
         // of their own — and gain only the way out, which neither had.
@@ -34627,11 +34877,21 @@ impl Runtime<'_> {
             &text,
             bt_render::DRAG_GHOST_FONT_LOGICAL_PX * scale,
         );
+        // **And whether the hand has left every glass of ours** (丙2). The
+        // visitor's ghost is never this: a window drawing somebody else's
+        // payload is by definition a window the hand is over.
+        let tearing_out = (self.window.foreign.is_none() && self.window.tearing_out).then(|| {
+            let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+            seats::TearOutGhost {
+                surface: [width as f32, height as f32],
+            }
+        });
         let layout = seats::drag_ghost_layout(
             [pointer.x as f32, pointer.y as f32],
             mark_logical,
             width,
             scale,
+            tearing_out,
         );
         // **The ghost fades in, and it does not fade out** (the animation slice's
         // second half, `bt_render::DRAG_GHOST_FADE`).
@@ -34667,6 +34927,12 @@ impl Runtime<'_> {
             bt_render::chrome_palette(),
         );
         ghost.opacity *= ink;
+        // Off the glass the ghost is held at this window's edge rather than at
+        // the hand, so it is drawn back a little to stop it asserting a position
+        // it has not got — [`seats::TEAR_OUT_GHOST_OPACITY`].
+        if tearing_out.is_some() {
+            ghost.opacity *= seats::TEAR_OUT_GHOST_OPACITY;
+        }
         vec![ghost]
     }
 
@@ -35234,6 +35500,7 @@ impl Runtime<'_> {
             Popup::GraphFilter => self.window.graph_filter_menu = None,
             Popup::GitMenu => self.window.git_menu = None,
             Popup::TermMenu => self.window.term_menu = None,
+            Popup::Tab => self.window.tab_menu = None,
             Popup::Preview => {
                 self.window.preview_menu.close();
             }
@@ -35324,6 +35591,13 @@ impl Runtime<'_> {
             preview: self.preview_menu_seat().is_some(),
             git_menu: self.window.git_menu.is_some(),
             term_menu: self.window.term_menu.is_some(),
+            // **Not scoped to a tab that still exists**, unlike the three above
+            // it. A tab menu holds a `TabId` and is anchored at a point, so it
+            // goes on drawing — and goes on taking the keyboard — even after the
+            // tab it names has been moved to another window under it. That is
+            // the honest state: the reader is still looking at a list, and every
+            // verb in it already answers "that tab is gone" by doing nothing.
+            tab_menu: self.window.tab_menu.is_some(),
         }
     }
 
@@ -35611,6 +35885,9 @@ impl Runtime<'_> {
         }
         if let Some(enabled) = settings::key_hints_requested(target) {
             self.apply_key_hints(enabled)?;
+        }
+        if let Some(enabled) = settings::copy_on_select_requested(target) {
+            self.apply_copy_on_select(enabled);
         }
         if let Some(enabled) = settings::terminal_notifications_requested(target) {
             self.apply_terminal_notifications(enabled);
@@ -35922,6 +36199,7 @@ impl Runtime<'_> {
             | Row::PsReadLine
             | Row::Scrollback
             | Row::LineWrapping
+            | Row::CopyOnSelect
             | Row::Notifications
             | Row::TurnEndNotifications
             | Row::PowerShellOffer
@@ -40189,6 +40467,18 @@ impl Runtime<'_> {
     /// *No state to clear*, because a notification never made any. The tab's dot, the bell latch
     /// and the unread ledger are untouched on both sides of this row, which is the sentence
     /// §7.6 is written under: this is an outlet for the ledger, never a second copy of it.
+    /// Store the reader's answer about copy-on-select (丙4).
+    ///
+    /// Nothing else to do: [`should_copy_on_select_release`] reads the loaded
+    /// settings at the moment a drag is let go, so the next release after this
+    /// write already answers the new way — the same shape
+    /// [`Self::apply_terminal_notifications`] has, and for the same reason.
+    fn apply_copy_on_select(&mut self, enabled: bool) {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.copy_on_select = enabled;
+        self.app.settings_store.store(settings);
+    }
+
     fn apply_terminal_notifications(&mut self, enabled: bool) {
         let mut settings = self.app.settings_store.loaded().clone();
         settings.terminal_notifications = enabled;
@@ -54604,6 +54894,12 @@ impl Runtime<'_> {
         );
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        // **The effective table**, so a rebound chord follows into the menu the
+        // same frame it follows into the hint card (gesture audit 2026-08-26,
+        // 系统性发现 ②). Borrowed beside the GPU rather than through it: the two
+        // are separate fields of `app` and the split borrow is what lets the
+        // menu be measured and read from the same expression.
+        let shortcuts = &self.app.shortcuts;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::term_menu_layout(
@@ -54611,6 +54907,7 @@ impl Runtime<'_> {
             (width as f32, height as f32),
             scale,
             &look,
+            shortcuts,
             &mut measure,
         ))
     }
@@ -54966,6 +55263,578 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    // ── a tab's own context menu (丙2, the gesture audit of 2026-08-26) ─────
+
+    /// What the tab under the menu can answer for, as of now.
+    ///
+    /// Read once, when the menu is raised, and carried in [`TabMenuState`] from
+    /// then on — see [`TermMenuState`] for why a snapshot rather than a live
+    /// read. It is sharper here than it is there: the strip *reorders itself*
+    /// while a menu stands over it (a drag, a pin, a tab arriving from another
+    /// window), and a row that changed its word or its greying under a
+    /// descending hand would be this menu rewriting the sentence the reader is
+    /// halfway through answering.
+    fn tab_menu_subject(&self, tab: TabId) -> profiles::TabMenuSubject {
+        let state = self.tab_state(tab);
+        profiles::TabMenuSubject {
+            pinned: state.is_some_and(|state| state.pinned),
+            // **The same question `Duplicate tab` will ask when it runs**, asked
+            // of the same map: a tab made of a folder or a file has no shell
+            // behind it (§7.1.6h), so there is no profile and no working folder
+            // for a copy to be seeded from. One door, so a greyed row and a
+            // declined verb can never disagree about which tabs can be copied.
+            can_duplicate: state.is_some_and(|state| state.focused().is_some()),
+        }
+    }
+
+    /// Raise the menu a right press on a tab asked for.
+    ///
+    /// E61 first: the opener closes every other popup. **And nothing else** —
+    /// in particular the tab is neither focused nor activated, which is the
+    /// whole of what makes the menu's subject worth carrying. A right press is
+    /// not a way of choosing a tab; it is a way of asking about one.
+    ///
+    /// A tab that is not in this window's strip raises nothing. The gesture
+    /// cannot produce one today — the target came from a hit test over the strip
+    /// this window is drawing — and it is refused here rather than trusted,
+    /// because everything downstream is written against an id that may stop
+    /// naming a tab at any moment and this is the one place that can say the
+    /// menu never should have opened at all.
+    fn open_tab_menu_at(&mut self, tab: TabId, position: PhysicalPosition<f64>) -> Result<()> {
+        if self.tab_slot_of(tab).is_none() {
+            return Ok(());
+        }
+        self.close_popups_except(Popup::Tab);
+        self.window.tab_menu = Some(TabMenuState {
+            point: [position.x as f32, position.y as f32],
+            tab,
+            subject: self.tab_menu_subject(tab),
+            hover: None,
+            submenu_open: false,
+            pointer_was: None,
+            submenu_hold_until: None,
+        });
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Where the tab menu is, if one is up.
+    ///
+    /// [`Runtime::term_menu_layout`]'s twin, anchored the same way: at the point
+    /// the pointer was at, which no re-layout, no strip scroll and no reorder can
+    /// move or destroy.
+    fn tab_menu_layout(&mut self) -> Option<profiles::TabMenuLayout> {
+        let menu = self.window.tab_menu.as_ref()?;
+        let (point, subject, submenu_open) = (menu.point, menu.subject, menu.submenu_open);
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let windows = self.other_window_rows();
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
+        Some(profiles::tab_menu_layout(
+            point,
+            (width as f32, height as f32),
+            scale,
+            subject,
+            submenu_open,
+            &windows,
+            &mut measure,
+        ))
+    }
+
+    /// The tab menu's own level of the overlay stack, or nothing when none is
+    /// up.
+    fn tab_menu_layer(&mut self) -> MenuPaint {
+        let Some(layout) = self.tab_menu_layout() else {
+            return MenuPaint::none();
+        };
+        let Some(hover) = self.window.tab_menu.as_ref().map(|menu| menu.hover) else {
+            return MenuPaint::none();
+        };
+        let travel = layout.travel();
+        // The child's own direction, or the parent's for the frames where there
+        // is no child to have one — an empty band reads neither.
+        let child_travel = layout.submenu_travel().unwrap_or(Travel::Right);
+        let windows = self.other_window_rows();
+        let programs = &self.app.profile_programs;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
+        let mut layers = profiles::tab_menu_build(&layout, hover, &windows, programs, &mut measure);
+        // `push_submenu`'s seam again: the menu on the first layer, the child on
+        // the ones after it. Splitting there is what gives the two their own
+        // clocks.
+        let child = layers.split_off(1);
+        MenuPaint {
+            menu: layers,
+            travel,
+            child: Some((child, child_travel)),
+        }
+    }
+
+    fn close_tab_menu(&mut self) -> Result<bool> {
+        if self.window.tab_menu.take().is_none() {
+            return Ok(false);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Open or shut this menu's window list, and report whether anything moved.
+    ///
+    /// [`Runtime::set_term_submenu`]'s twin on the third door, with that
+    /// function's own guard against opening a child the parent has no heading
+    /// for: with no other window there is no `Move to window ▸` row at all
+    /// (`profiles::TabMenuRow::rows`), so a `→` that opened one anyway would hang
+    /// a list off a row that is not on the glass.
+    fn set_tab_submenu(&mut self, open: bool) -> Result<bool> {
+        let elsewhere = !self.other_window_ids().is_empty();
+        let Some(menu) = self.window.tab_menu.as_mut() else {
+            return Ok(false);
+        };
+        if menu.submenu_open == open || (open && !elsewhere) {
+            return Ok(false);
+        }
+        menu.submenu_open = open;
+        menu.submenu_hold_until = None;
+        // The highlight follows the surface it is on: opening lands on the first
+        // window, closing takes it back to the heading it came from, so `←`
+        // leaves the keyboard somewhere rather than nowhere.
+        menu.hover = Some(if open {
+            profiles::TabMenuHover::Submenu(0)
+        } else {
+            profiles::TabMenuHover::Row(profiles::TabMenuRow::MoveToWindow)
+        });
+        // **The ring goes out with the list** (B9): a highlighted window with no
+        // menu naming it is a window wearing a mark nobody can explain. Armed
+        // again by the first hover inside the list that has just opened.
+        self.aim_at_window(None);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// **The tab menu's hover, with the safety triangle in it** (#53) — the pane
+    /// menu's own four steps, on the third door, and with B9's ring on top of
+    /// them.
+    fn drive_tab_menu_hover(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(layout) = self.tab_menu_layout() else {
+            return Ok(false);
+        };
+        let hit = profiles::tab_menu_hit(&layout, position.x, position.y);
+        let submenu = layout.submenu_frame();
+        let to = [position.x as f32, position.y as f32];
+        let now = Instant::now();
+        let heading = profiles::TabMenuHit::Row(profiles::TabMenuRow::MoveToWindow);
+        let Some(menu) = self.window.tab_menu.as_mut() else {
+            return Ok(false);
+        };
+        // **On the child at all**, which is a question about its frame and not
+        // about its rows — `profiles::TabMenuLayout::on_submenu` carries the
+        // 2026-08-19 report that made it one. The heading keeps its place beside
+        // it: a hand back on the row the child hangs from has not left the child
+        // either.
+        let hovering_child = layout.on_submenu(to[0], to[1]) || hit == Some(heading);
+        let was_open = menu.submenu_open;
+        let mut held = false;
+        if let Some(submenu) = submenu
+            && !hovering_child
+        {
+            let from = menu.pointer_was.unwrap_or(to);
+            if profiles::safe_triangle_holds(from, to, submenu) {
+                let until = *menu
+                    .submenu_hold_until
+                    .get_or_insert(now + profiles::SUBMENU_SAFE_HOLD);
+                held = now < until;
+            }
+            if !held {
+                menu.submenu_open = false;
+                menu.submenu_hold_until = None;
+            }
+        } else {
+            menu.submenu_hold_until = None;
+        }
+        // The apex only moves when the triangle is not holding — a triangle
+        // re-drawn from each intermediate position narrows to nothing and the
+        // whole rule evaporates halfway across.
+        if !held {
+            menu.pointer_was = Some(to);
+        }
+        let hovered = match hit {
+            Some(profiles::TabMenuHit::Row(row)) => Some(profiles::TabMenuHover::Row(row)),
+            Some(profiles::TabMenuHit::Submenu(index)) => {
+                Some(profiles::TabMenuHover::Submenu(index))
+            }
+            // The padding, the rule, a greyed row, and everywhere outside:
+            // nothing is lit. A menu whose last-hovered row stayed lit while the
+            // pointer sat in its own margin would be a menu Enter could fire from
+            // a place that looks idle.
+            Some(profiles::TabMenuHit::Surface) | None => None,
+        };
+        let mut changed = menu.submenu_open != was_open;
+        if !held && menu.hover != hovered {
+            menu.hover = hovered;
+            changed = true;
+        }
+        // Resting on the heading opens the child, on the same 250ms every `⌄` in
+        // the house takes. Armed here and matured in `advance_tab_menu`.
+        if hit == Some(heading) && !menu.submenu_open {
+            menu.submenu_hold_until
+                .get_or_insert(now + profiles::CHEVRON_HOVER_OPEN_DELAY);
+        }
+        // **The ring is the hover, seen from the other window** (B9). Read off
+        // the highlight rather than off the hit, so the keyboard's walk lights
+        // the same window the pointer's would.
+        let ring = match menu.hover {
+            Some(profiles::TabMenuHover::Submenu(at)) => Some(at),
+            _ => None,
+        };
+        let inside = hit.is_some();
+        let aim = ring.and_then(|at| self.other_window_ids().get(at).copied());
+        self.aim_at_window(aim);
+        if changed && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(inside)
+    }
+
+    /// The tab menu's own clocks, matured — [`Runtime::advance_term_menu`]'s
+    /// twin, and two clocks in one slot for its reason: a menu cannot be both
+    /// waiting to open its child and holding it open against the rows.
+    fn advance_tab_menu(&mut self, now: Instant) -> Result<()> {
+        let Some(menu) = self.window.tab_menu.as_ref() else {
+            return Ok(());
+        };
+        let Some(due) = menu.submenu_hold_until else {
+            return Ok(());
+        };
+        if now < due {
+            return Ok(());
+        }
+        if menu.submenu_open {
+            // The cap ran out with the hand still short of the child. The
+            // highlight is then owed to whatever the pointer is actually over,
+            // which is asked of the geometry rather than remembered, because the
+            // hold was deliberately keeping the answer stale.
+            self.set_tab_submenu(false)?;
+            if let Some(position) = self.window.pointer_position {
+                self.drive_tab_menu_hover(position)?;
+            }
+            return Ok(());
+        }
+        self.set_tab_submenu(true)?;
+        Ok(())
+    }
+
+    /// The tab menu's next wake-up, for the loop's set.
+    fn tab_menu_deadline(&self) -> Option<Instant> {
+        self.window.tab_menu.as_ref()?.submenu_hold_until
+    }
+
+    /// Do what one entry of the tab menu says, and put the menu away.
+    ///
+    /// The menu closes *first*, on [`Runtime::run_pane_menu_row`]'s order and
+    /// for a sharper version of its reason: one of these verbs opens a text
+    /// editor over the very tab the menu is standing on, two of them take the
+    /// tab out of this window, and one destroys it.
+    ///
+    /// **The subject is an id and it is resolved here**, at the instant the verb
+    /// runs — never at the instant the menu opened. Between the press that raised
+    /// this and the one that ran it the strip can have been dragged into a new
+    /// order, re-partitioned by a pin, or joined by a tab from another window; an
+    /// index taken at raise time would by then name whatever had slid into that
+    /// slot. A tab that has gone in the meantime is not a fault: nothing happens,
+    /// which is the same answer `run_pane_verb` gives for a seat whose shell has
+    /// exited.
+    fn run_tab_menu_row(&mut self, hit: profiles::TabMenuHit) -> Result<()> {
+        // The menu's own padding, the rule, a greyed row. A press there is the
+        // menu swallowing it — decided in `mouse_input` — so there is nothing to
+        // spend and, in particular, no menu to take away.
+        if hit == profiles::TabMenuHit::Surface {
+            return Ok(());
+        }
+        // **The child's row is resolved while the child still exists** (B9): a
+        // `Submenu` hit counts rows on the glass, and what those rows are about
+        // is a fact about the layout — which is built out of the menu state the
+        // take below removes. Resolved *before* the take for the second half of
+        // the same reason, so `other_window_ids` reads the same directory the
+        // list was drawn from.
+        let bound_for = match hit {
+            profiles::TabMenuHit::Submenu(at) => {
+                let of = self
+                    .tab_menu_layout()
+                    .and_then(|layout| layout.submenu_row(at));
+                match of {
+                    Some(of) => Some(self.other_window_ids().get(of).copied()),
+                    // A press on a child that is no longer there — the ordinary
+                    // case rather than a fault.
+                    None => return Ok(()),
+                }
+            }
+            _ => None,
+        };
+        let Some(menu) = self.window.tab_menu.take() else {
+            return Ok(());
+        };
+        let tab = menu.tab;
+        // **The ring goes with the menu**, wherever the press lands: a window
+        // still wearing the mark after the list that put it there has gone is a
+        // window claiming to be a destination nobody is choosing.
+        self.aim_at_window(None);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        if let Some(window) = bound_for {
+            let Some(window) = window else {
+                return Ok(());
+            };
+            return self.move_tab_to_window(tab, window);
+        }
+        match hit {
+            profiles::TabMenuHit::Row(row) => match row {
+                // The same editor a double click on the tab body opens, through
+                // the same door — §7.1.6e's rule, and the reason this row is
+                // owed at all: a double click is not something a list can tell
+                // you about.
+                profiles::TabMenuRow::Rename => self.open_rename(tab),
+                // Both faces of the one row run the one verb: `toggle_pin` is
+                // the `.pin` button's own door, so the row and the button can
+                // never disagree about what pinning does or about where the
+                // strip's partition is enforced.
+                profiles::TabMenuRow::Pin => {
+                    let Some(index) = self.tab_slot_of(tab) else {
+                        return Ok(());
+                    };
+                    self.toggle_pin(index)
+                }
+                profiles::TabMenuRow::Duplicate => self.duplicate_tab(tab),
+                profiles::TabMenuRow::MoveToNewWindow => self.move_tab_to_new_window(tab),
+                // The heading is not a verb: pressing it opens the window list,
+                // and that press never reaches here. Listed so the match is
+                // exhaustive over a closed set rather than over a wildcard that
+                // would silently swallow a row added later.
+                profiles::TabMenuRow::MoveToWindow => Ok(()),
+                // The `×`'s own verb, reached through the `×`'s own door — so
+                // the dirty gate a destruction has to pass is passed once and
+                // not twice.
+                profiles::TabMenuRow::Close => {
+                    let Some(index) = self.tab_slot_of(tab) else {
+                        return Ok(());
+                    };
+                    self.close_tab(index)
+                }
+            },
+            // Both already answered above.
+            profiles::TabMenuHit::Submenu(_) | profiles::TabMenuHit::Surface => Ok(()),
+        }
+    }
+
+    /// **`Duplicate tab`** — a tab seeded from *this* tab's own active pane.
+    ///
+    /// The profile and the folder come off one leaf and that leaf is **this
+    /// tab's**, not the focused window's: a tab menu is very often raised on a
+    /// tab that is not on screen (a right press does not activate anything), and
+    /// a duplicate seeded from whatever happened to be in front would be a copy
+    /// of a different tab wearing this one's row. `TabState` carries its own
+    /// `sessions` and its own `focused_leaf`, so a background tab's active pane
+    /// is reachable without activating it, and [`TabState::focused`] is the one
+    /// reader that pairs them.
+    ///
+    /// **A tab with no shell is refused here as well as greyed there.** The row
+    /// is drawn unavailable (`profiles::TabMenuSubject::can_duplicate`) and the
+    /// hit test refuses it, so this early return is unreachable through the menu;
+    /// it is stated anyway, because the guard in the geometry is about a
+    /// *snapshot* and the tab can have lost its shell since — and "duplicate a
+    /// tab that has nothing to duplicate" has no honest answer, only arbitrary
+    /// ones.
+    ///
+    /// It goes through [`Self::new_tab_seeded_from`] rather than through anything
+    /// of its own, which is what keeps `Duplicate tab` and every other door onto
+    /// a new tab one implementation.
+    fn duplicate_tab(&mut self, tab: TabId) -> Result<()> {
+        let Some(state) = self.tab_state(tab) else {
+            return Ok(());
+        };
+        let Some(leaf) = state.focused() else {
+            return Ok(());
+        };
+        let profile = leaf.profile;
+        let cwd = leaf.session.working_directory().map(Path::to_path_buf);
+        // The source profile *is* the target profile, so `cwd_for_spawn` has no
+        // namespace to cross and the folder arrives exactly as the shell reported
+        // it. That is the sentence this row promises — the same shell, in the
+        // same place — said in the one function that knows how to say it.
+        self.new_tab_seeded_from(profile, None, profile, cwd)
+    }
+
+    /// **`Move tab to new window`** — the row 丙2 exists for.
+    ///
+    /// The tear-out onto the desktop and this row are one verb behind two doors,
+    /// and until this menu the drag was the *only* door: a tab dragged past this
+    /// window's glass becomes a window of its own, with no landing box, no
+    /// visible ghost and no cursor change to say so. The audit's own prescription
+    /// was a menu row with the same name, and this is it.
+    ///
+    /// **It is [`Runtime::move_pane_to_new_window`] with the first half deleted.**
+    /// That verb promotes a pane to a tab and then hands the tab over; a tab is
+    /// already a tab, so there is nothing to promote — which is also why the
+    /// errand's `promoted` is `false` rather than a flag this row has to
+    /// remember: nothing was made here that a refusal would have to report.
+    ///
+    /// **The window has to exist before the tab can move into it**, and only the
+    /// loop's own door may create one, so the errand is written down here and
+    /// spent in [`FolioApp::open_pending_window`] — in the same turn, before any
+    /// frame is drawn. [`App::pending_new_windows`]'s standing shape and its
+    /// standing reason.
+    fn move_tab_to_new_window(&mut self, tab: TabId) -> Result<()> {
+        if self.tab_slot_of(tab).is_none() {
+            return Ok(());
+        }
+        let errand = TearOut {
+            tab,
+            from: self.window_id(),
+            promoted: false,
+            // A menu row names no place — see [`TearOut::at`]. The window opens
+            // where every other new window opens, because a reader who pressed a
+            // *verb* pointed at a verb and not at a rectangle.
+            at: None,
+        };
+        let like = self.window_id();
+        self.app
+            .pending_new_windows
+            .push(NewWindowPlan::receiving(like, errand));
+        Ok(())
+    }
+
+    /// **Move this tab into a window that is already open** — the third exit's
+    /// submenu, and [`Runtime::move_pane_to_window`] with the promotion dropped.
+    ///
+    /// It writes the *drag's* errand rather than reaching for the transfer
+    /// itself, which is that function's own ruling and the reason it holds here
+    /// too: only [`FolioApp`] can see two windows at once, a menu row arrives at
+    /// one `Runtime` that can see neither, and `settle_drag_handover` is where
+    /// the transfer, the refusal card and the landing already live. A
+    /// [`DragSource::Tab`] is exactly what that road takes for cargo that is
+    /// already a tab.
+    ///
+    /// The landing is the end of the target's strip. A drag lands where the hand
+    /// let go and this row has no hand over that window at all — so the honest
+    /// answer is the one every append in this program gives.
+    fn move_tab_to_window(&mut self, tab: TabId, window: WindowId) -> Result<()> {
+        if window == self.window_id() || self.tab_slot_of(tab).is_none() {
+            return Ok(());
+        }
+        let slot = self
+            .app
+            .windows_open
+            .iter()
+            .find(|open| open.id == window)
+            .map_or(0, |open| open.tabs);
+        self.app.pending_handover = Some(DragHandover {
+            cargo: DragSource::Tab(tab),
+            from: self.window_id(),
+            into: HandoverInto::Window {
+                window,
+                landing: DropLanding::StripExtract { slot },
+            },
+        });
+        Ok(())
+    }
+
+    /// One key, with the tab menu holding the keyboard.
+    ///
+    /// [`Runtime::term_menu_key`]'s four rules verbatim — Esc unwinds one layer,
+    /// the arrows walk, Enter/Space run, everything else is swallowed — because
+    /// §7.1.3's 「可键盘化」 is a promise about context menus rather than about
+    /// any particular one, and a menu that could not be walked would be the one
+    /// list in this window reachable only by a pointer. Which would be a poor
+    /// joke on a menu that exists because a *gesture* was unreachable.
+    fn tab_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                // One press, one layer — §7.1.5's ladder read inside a single
+                // popup. A key that closed both would make the child unclosable
+                // without also losing the parent.
+                if !event.repeat && !self.set_tab_submenu(false)? {
+                    self.close_tab_menu()?;
+                }
+            }
+            Key::Named(NamedKey::ArrowRight)
+                if matches!(
+                    self.window.tab_menu.as_ref().and_then(|menu| menu.hover),
+                    Some(profiles::TabMenuHover::Row(row)) if row.has_submenu()
+                ) =>
+            {
+                self.set_tab_submenu(true)?;
+            }
+            Key::Named(NamedKey::ArrowLeft)
+                if matches!(
+                    self.window.tab_menu.as_ref().and_then(|menu| menu.hover),
+                    Some(profiles::TabMenuHover::Submenu(_))
+                ) =>
+            {
+                self.set_tab_submenu(false)?;
+            }
+            // Repeats on the travel keys and nowhere else: holding an arrow down
+            // is one continuous "further", and holding Enter is not one
+            // continuous "again".
+            //
+            // **The walk stays on the parent while the child is up**, which is
+            // the terminal menu's own arrangement: the window list is a pointer
+            // surface with an `←` out of it, and that is the same promise this
+            // menu's other rows keep.
+            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
+                let forwards = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
+                // **The rows this menu is showing**, read off the picture rather
+                // than off the enum (the ruling of 2026-08-25), so the walk
+                // cannot stop on a `Move to window ▸` this session has no second
+                // window for — nor on a `Duplicate tab` greyed on a folder tab.
+                let shown: Vec<profiles::TabMenuItem> = self
+                    .tab_menu_layout()
+                    .map(|layout| layout.items().to_vec())
+                    .unwrap_or_default();
+                if let Some(menu) = self.window.tab_menu.as_mut() {
+                    let current = match menu.hover {
+                        Some(profiles::TabMenuHover::Row(row)) => Some(row),
+                        Some(profiles::TabMenuHover::Submenu(_)) | None => None,
+                    };
+                    menu.hover = profiles::tab_menu_step(current, forwards, &shown)
+                        .map(profiles::TabMenuHover::Row);
+                }
+                if self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
+            }
+            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
+                if !event.repeat
+                    && let Some(hover) = self.window.tab_menu.as_ref().and_then(|menu| menu.hover)
+                {
+                    match hover {
+                        // The heading opens its child rather than running, which
+                        // is what `→` does and what a click does.
+                        profiles::TabMenuHover::Row(row) if row.has_submenu() => {
+                            self.set_tab_submenu(true)?;
+                        }
+                        profiles::TabMenuHover::Row(row) => {
+                            self.run_tab_menu_row(profiles::TabMenuHit::Row(row))?;
+                        }
+                        profiles::TabMenuHover::Submenu(index) => {
+                            self.run_tab_menu_row(profiles::TabMenuHit::Submenu(index))?;
+                        }
+                    }
+                }
+            }
+            // Everything else is swallowed rather than passed down. With a menu
+            // on screen there is nothing to type into.
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// `Select all` — **every plane this pane has**, not the screenful in front
     /// of you.
     ///
@@ -55133,6 +56002,7 @@ impl Runtime<'_> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let windows = self.other_window_rows();
+        let shortcuts = &self.app.shortcuts;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::pane_menu_layout(
@@ -55142,6 +56012,7 @@ impl Runtime<'_> {
             submenu,
             zoomed,
             &windows,
+            shortcuts,
             &mut measure,
         ))
     }
@@ -63330,7 +64201,16 @@ impl Runtime<'_> {
     }
 
     fn activate_hyperlink_hover_if_due(&mut self, now: Instant) -> Result<()> {
-        if self.window.hyperlink_hover.activate_if_due(now) {
+        // The disk is asked here, on the settle, and the settle happens once
+        // per link — [`HyperlinkHover::activate_if_due`]'s own note. It is the
+        // same question [`Self::activate_hyperlink`] asks on the press, so the
+        // sentence the reader is shown and the door the press opens are one
+        // answer read twice.
+        if self
+            .window
+            .hyperlink_hover
+            .activate_if_due(now, &|path| path.is_dir())
+        {
             self.repaint_hovered_pane()?;
         }
         Ok(())
@@ -64334,6 +65214,15 @@ impl Runtime<'_> {
             self.update_chrome_hover_target(None)?;
             return Ok(());
         }
+        // And a tab's own menu (丙2), on the same level and by the same
+        // argument: it is the fourth popup here with a *child*, so what the
+        // highlight does when the pointer leaves a row is "the new row takes it
+        // unless the hand is on its way to the window list".
+        if self.drive_tab_menu_hover(position)? {
+            self.note_tooltip(None)?;
+            self.update_chrome_hover_target(None)?;
+            return Ok(());
+        }
         // A peek's header, pressed and now travelling: the window is kept and the
         // same gesture becomes the carry (user ruling 2026-08-12). Immediately
         // above the drag it turns into, so the promotion and the first step of the
@@ -65023,7 +65912,24 @@ impl Runtime<'_> {
         // changes what the pointer is over, and asking in the other order would
         // light up a row one frame after the panel that holds it.
         self.drive_rail_zone(Some(position));
-        let hover = self.chrome_target_at(position);
+        // **The download sheet answers the hover before the window does**, in
+        // the order it is drawn and for the reason its press is claimed above
+        // the whole chrome router: it is an overlay standing on one seat's
+        // body, so nothing the router can name is in front of it there.
+        //
+        // Asked here and not inside [`Self::chrome_target_at`] because only the
+        // hover is the sheet's to answer this way — the press is
+        // [`Self::press_web_sheet`]'s, which swallows the card and the scrim
+        // whole, and a router that also returned the sheet's controls would be
+        // two doors onto one press.
+        let hover = self
+            .window
+            .web_sheet_layout
+            .as_ref()
+            .and_then(|(seat, layout)| {
+                websheet::hit(layout, *seat, position.x as f32, position.y as f32)
+            })
+            .or_else(|| self.chrome_target_at(position));
         // `.pane:hover` is a second question about the same pointer, and it has
         // to be asked here rather than derived from `hover`: over a terminal's
         // body `hover` is `None`, because a terminal is not chrome, and that is
@@ -67874,6 +68780,13 @@ impl Runtime<'_> {
                 self.window.files_row_clicks.interrupt();
                 self.run_web_fault_verb(seat)?;
             }
+            // **The download sheet's `×` never arrives here**, and the arm is
+            // written to say so rather than to route it: the sheet claims every
+            // press inside itself in [`Self::press_web_sheet`], which runs
+            // above this router, and the target reaches the window only as a
+            // hover. Routing it a second time from here would be the two-doors-
+            // onto-one-press this module keeps out.
+            seats::ChromeTarget::PreviewSheetClose(_) => {}
             seats::ChromeTarget::PreviewLock(seat) => {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
@@ -68363,6 +69276,44 @@ impl Runtime<'_> {
                 }
             }
         }
+        // A tab's own menu (丙2), by the pane menu's three rules with none of
+        // its exceptions: a row runs on a left press, the menu's own padding
+        // swallows, and a press outside puts it away and then goes on being the
+        // press it always was — including a second right press, which is how a
+        // context menu is moved from one tab to another.
+        //
+        // There is no opener to spare here the way the pane menu spares its `⌄`:
+        // this menu has no button, only a gesture, so every press that misses it
+        // really is outside.
+        if let (Some(layout), Some(position)) =
+            (self.tab_menu_layout(), self.window.pointer_position)
+        {
+            match profiles::tab_menu_hit(&layout, position.x, position.y) {
+                Some(hit) => {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        // The submenu heading is the one entry whose press is not
+                        // a verb: it opens the window list, which is the `→`
+                        // key's job through the same door.
+                        if matches!(hit, profiles::TabMenuHit::Row(row) if row.has_submenu()) {
+                            let open = self
+                                .window
+                                .tab_menu
+                                .as_ref()
+                                .is_some_and(|menu| menu.submenu_open);
+                            self.set_tab_submenu(!open)?;
+                        } else {
+                            self.run_tab_menu_row(hit)?;
+                        }
+                    }
+                    return Ok(());
+                }
+                None => {
+                    if state == ElementState::Pressed {
+                        self.close_tab_menu()?;
+                    }
+                }
+            }
+        }
         // The graph's branch filter, by the same three rules, with one change:
         // a row does *not* put it away. It is a list of settings and picking two
         // branches means picking one and then the other — see
@@ -68415,6 +69366,35 @@ impl Runtime<'_> {
         if state == ElementState::Released {
             self.release_file_peek_thumb()?;
         } else if self.press_file_peek(button)? {
+            return Ok(());
+        }
+        // **The right press that raises a tab's own menu** (丙2, the gesture
+        // audit of 2026-08-26).
+        //
+        // First of the right-press openers, because the tab list is the first
+        // thing `chrome_target_at` asks and for that hit test's own reason
+        // (Q179): an open icon rail lies *over* the panes, so a right press on a
+        // rail row is over a files column as often as not, and an opener that
+        // let the column answer first would raise a file row's menu on a press
+        // that landed on a tab.
+        //
+        // **The target reaches here from all three tab surfaces** — the
+        // horizontal strip, the vertical rail and focus mode's column of cards —
+        // because all three answer `ChromeTarget::Tab(index)` through the one
+        // `chrome_target_at`, which is what makes "right-clicking a tab" one
+        // sentence rather than three handlers.
+        //
+        // **And it moves nothing.** The chrome router below answers only the
+        // left button, so this press neither focuses nor activates the tab: the
+        // menu's subject is the tab that was pointed at, whichever tab is in
+        // front.
+        if state == ElementState::Pressed
+            && button == MouseButton::Right
+            && let Some(position) = self.window.pointer_position
+            && let Some(seats::ChromeTarget::Tab(index)) = self.chrome_target_at(position)
+            && let Some(tab) = self.window.tabs.get(index).map(|tab| tab.id)
+        {
+            self.open_tab_menu_at(tab, position)?;
             return Ok(());
         }
         // The right press that raises it (K143/K146). Both hosts, float first
@@ -69018,8 +69998,11 @@ impl Runtime<'_> {
                 local_image_action,
             )
         });
-        let copy_on_select =
-            should_copy_on_select_release(self.window.mouse_route.as_ref(), single_click);
+        let copy_on_select = should_copy_on_select_release(
+            self.window.mouse_route.as_ref(),
+            single_click,
+            self.app.settings_store.loaded().copy_on_select,
+        );
         self.window.mouse_route = None;
         if single_click {
             self.clear_pane_selection(seat);
@@ -71283,6 +72266,15 @@ impl Runtime<'_> {
             }
             return Ok(());
         }
+        // **A tab's own menu owns the keyboard on the same terms** (丙2), and on
+        // the pane menu's rung because it is the same kind of surface: a popup
+        // with a child, walked with the same four rules and unwound with the
+        // same one-layer Esc. The two are never up together (E61: the opener
+        // closes the others), so which of them is asked first is bookkeeping.
+        if self.window.tab_menu.is_some() {
+            self.tab_menu_key(event)?;
+            return Ok(());
+        }
         // **The download sheet's rung** (§7.7 ④, W2 slice ④). Above the pane
         // menu and below the modals, which is where the ruling puts it: 「Esc 梯
         // 子里排在 pane 菜单之上,顶层优先」. It is the one failure card with a
@@ -73406,8 +74398,12 @@ impl Runtime<'_> {
         if !websheet::covers(&layout, x, y) {
             return Ok(false);
         }
-        if websheet::hit(&layout, seat, x, y).is_some() {
-            self.run_web_fault_verb(seat)?;
+        match websheet::hit(&layout, seat, x, y) {
+            Some(seats::ChromeTarget::PreviewSheetClose(_)) => {
+                self.dismiss_web_sheet()?;
+            }
+            Some(_) => self.run_web_fault_verb(seat)?,
+            None => {}
         }
         Ok(true)
     }
@@ -74364,6 +75360,10 @@ impl Runtime<'_> {
         // the opener closes the others), so this is a second reader of the same
         // rule rather than a second rule.
         self.advance_term_menu(now)?;
+        // And a tab menu's, which owns the same two clocks in the same one slot
+        // for the same reason. A third reader of one rule rather than a third
+        // rule.
+        self.advance_tab_menu(now)?;
         // And the drag's own rest, beside them because it is the same shape and
         // the same quarter second (§7.1.6k). Below them rather than above: a
         // spring takes a whole tab off the screen, and the two menus above have
@@ -74591,6 +75591,9 @@ impl Runtime<'_> {
             // And the terminal menu's, which is the same clock on the same
             // heading behind the second door (§7.1.6i).
             self.term_menu_deadline(),
+            // And a tab menu's, which is that same clock on that same heading
+            // behind the third door (丙2).
+            self.tab_menu_deadline(),
             // And the spring's 250 (§7.1.6k) — the one clock in this window that
             // fires under a hand that has deliberately stopped moving. Absent for
             // every drag that is not resting a pane on somebody else's tab, which
@@ -77837,7 +78840,9 @@ impl FolioApp {
             let Some(mut runtime) = self.runtime_at(index) else {
                 continue;
             };
-            if runtime.window.foreign.take().is_some() && runtime.refresh_chrome() {
+            let tearing_out = std::mem::replace(&mut runtime.window.tearing_out, false);
+            if (runtime.window.foreign.take().is_some() || tearing_out) && runtime.refresh_chrome()
+            {
                 runtime.present_chrome_change()?;
             }
         }
@@ -77954,9 +78959,18 @@ impl FolioApp {
                     }),
                 _ => None,
             };
-            let was = runtime.window.foreign.is_some();
+            // **And the source window learns that the hand has left every glass
+            // of ours** (丙2), on exactly [`WindowRuntime::foreign`]'s terms: one
+            // window is told, every other window is untold, and the fact is
+            // rebuilt from the broker rather than kept in step. `Away` and not
+            // "not `Home`", because over another Folio window what happens on
+            // release is that window's answer and not a new window at all.
+            let tearing_out = id == source && matches!(aim, BrokerAim::Away);
+            let was = runtime.window.foreign.is_some() || runtime.window.tearing_out;
             runtime.window.foreign = visit;
-            if (was || runtime.window.foreign.is_some()) && runtime.refresh_chrome() {
+            runtime.window.tearing_out = tearing_out;
+            if (was || runtime.window.foreign.is_some() || tearing_out) && runtime.refresh_chrome()
+            {
                 runtime.present_chrome_change()?;
             }
         }
@@ -81121,6 +82135,7 @@ mod floated_page_tests {
             pane_menu: mark(0.14),
             git_menu: mark(0.15),
             term_menu: mark(0.16),
+            tab_menu: mark(0.165),
             toast: mark(0.17),
             key_hint: mark(0.18),
             card_hint: mark(0.185),
@@ -82623,9 +83638,14 @@ mod tests {
             pane_menu: mark(7),
             git_menu: mark(12),
             term_menu: mark(15),
+            tab_menu: mark(22),
             toast: mark(8),
             key_hint: mark(20),
-            card_hint: mark(22),
+            // 23 and not 22: the tab menu and the Cards bubble were written on
+            // two branches on the same day and both reached for the next free
+            // number. A marker shared by two families would make this whole
+            // assertion pass while the two swapped places.
+            card_hint: mark(23),
             tooltip: mark(9),
             file_peek: mark(10),
             drag_ghost: mark(11),
@@ -82639,11 +83659,13 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                0, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 8, 20, 22, 9, 10, 11, 21
+                0, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 8, 20, 23, 9, 10, 11,
+                21
             ],
             "bottom to top: pane bars, terminal thumbs, command rails, rail, flight, ground, \
              search capsule, integration strips, download sheet, schematic, float, modal, file \
-             menu, git menu, terminal menu, notices, key hint, Cards bubble, tip, glance, ghost"
+             menu, pane menu, git menu, terminal menu, tab menu, notices, key hint, Cards \
+             bubble, tip, glance, ghost, window ring"
         );
         let at = |tag: u8| {
             order
@@ -88887,17 +89909,45 @@ mod tests {
             SelectionDragMode::Line,
         ] {
             let route = local_selection_route(mode);
-            assert!(should_copy_on_select_release(Some(&route), false));
+            assert!(should_copy_on_select_release(Some(&route), false, true));
         }
 
         let click = local_selection_route(SelectionDragMode::Linear);
-        assert!(!should_copy_on_select_release(Some(&click), true));
+        assert!(!should_copy_on_select_release(Some(&click), true, true));
         let forwarded = MouseRoute::Forward {
             button: input::MouseProtocolButton::Left,
             sgr: true,
         };
-        assert!(!should_copy_on_select_release(Some(&forwarded), false));
-        assert!(!should_copy_on_select_release(None, false));
+        assert!(!should_copy_on_select_release(
+            Some(&forwarded),
+            false,
+            true
+        ));
+        assert!(!should_copy_on_select_release(None, false, true));
+    }
+
+    /// RED (gesture audit 2026-08-26, 丙4) — **`Copy on select` is a switch, and
+    /// turning it off stops the write.**
+    ///
+    /// This gesture is the odd one of the audit's seven: the reader can do it
+    /// and does, every time they drag across a line. What is invisible is the
+    /// *result* — the clipboard they had is gone and nothing said so. Windows
+    /// Terminal ships `copyOnSelect` off, so it is not a habit arriving with
+    /// the reader; a toast per drag would be noise; so the row on the Terminal
+    /// page is what names the behaviour, and this is the assertion that the
+    /// name is attached to something.
+    ///
+    /// MUTATION: drop the flag from the conjunction and the second assertion
+    /// goes red — a switch that changes nothing is a worse answer than no
+    /// switch, because it says the reader was heard.
+    #[test]
+    fn copy_on_select_is_the_readers_answer_and_off_means_off() {
+        let route = local_selection_route(SelectionDragMode::Linear);
+        assert!(should_copy_on_select_release(Some(&route), false, true));
+        assert!(!should_copy_on_select_release(Some(&route), false, false));
+        // Off does not turn a single click into a copy either — the two
+        // conditions are independent and both still have to hold.
+        assert!(!should_copy_on_select_release(Some(&route), true, false));
     }
 
     /// Nothing on the disk is a directory, for the arms that must not ask.
@@ -89461,8 +90511,8 @@ mod tests {
         assert!(hover.observe(Some(link.clone()), start));
         assert_eq!(hover.underline_target(), Some(&link));
         assert!(hover.active.is_none(), "tooltip must not appear instantly");
-        assert!(!hover.activate_if_due(start + Duration::from_millis(299)));
-        assert!(hover.activate_if_due(start + Duration::from_millis(300)));
+        assert!(!hover.activate_if_due(start + Duration::from_millis(299), &no_directories));
+        assert!(hover.activate_if_due(start + Duration::from_millis(300), &no_directories));
         assert_eq!(
             hover.status_text(80).as_deref(),
             Some("file:///actual-target")
@@ -89481,6 +90531,73 @@ mod tests {
             hover.status_text(20).as_deref(),
             Some("file:///a… · blocked"),
             "narrow chrome keeps the real target prefix and the blocked verdict visible"
+        );
+    }
+
+    /// RED (gesture audit 2026-08-26, 丙3) — **the hover line says where `Ctrl`
+    /// would send a printed local path.**
+    ///
+    /// The audit's finding, in its own words: over a readable file or folder,
+    /// `terminal_link_answers_a_press` answers yes *with or without* `Ctrl`, so
+    /// the finger cursor is identical either way and 「`Ctrl` 只是静悄悄换了目的
+    /// 地」. The status line was already being drawn under that same pointer and
+    /// was printing the address and nothing else. This is the clause that makes
+    /// the second destination visible, and the reason it is a clause and not a
+    /// new surface is that the surface was already there.
+    ///
+    /// A **web** address is deliberately silent: `Ctrl` lights its finger and
+    /// bare clicks do not, which is a projection this window already has.
+    ///
+    /// MUTATIONS: ① fold the folder into the file's sentence and the second
+    /// assertion goes red — a folder does not open in a default app, it is
+    /// shown in Explorer; ② print the aside unconditionally and the narrow
+    /// assertion goes red with the address truncated to fit a lesson.
+    #[test]
+    fn the_hover_line_says_where_control_would_send_a_local_path() {
+        fn settled(uri: &str, directory: bool) -> HyperlinkHover {
+            let start = Instant::now();
+            let mut hover = HyperlinkHover::default();
+            hover.observe(Some(hyperlink_hit(uri)), start);
+            assert!(
+                hover.activate_if_due(start + Duration::from_millis(300), &|_: &Path| directory)
+            );
+            hover
+        }
+
+        assert_eq!(
+            settled("file:///C:/notes/readme.md", false)
+                .status_text(120)
+                .as_deref(),
+            Some("file:///C:/notes/readme.md · Ctrl+click opens in default app")
+        );
+        assert_eq!(
+            settled("file:///C:/notes", true)
+                .status_text(120)
+                .as_deref(),
+            Some("file:///C:/notes · Ctrl+click shows it in Explorer"),
+            "a folder is shown in Explorer and the line says the verb that runs"
+        );
+        assert_eq!(
+            settled("https://example.test/page", false)
+                .status_text(120)
+                .as_deref(),
+            Some("https://example.test/page"),
+            "a web address already lights its own finger under Ctrl"
+        );
+        assert_eq!(
+            settled("file:///C:/notes/readme.md", false)
+                .status_text(30)
+                .as_deref(),
+            Some("file:///C:/notes/readme.md"),
+            "an address cut short to make room for an aside is the wrong trade"
+        );
+        // And a refusal is an answer to the very press the aside was offering,
+        // so the two are never printed together.
+        let mut refused = settled("file:///C:/notes/readme.md", false);
+        refused.show_blocked(hyperlink_hit("file:///C:/notes/readme.md"));
+        assert_eq!(
+            refused.status_text(120).as_deref(),
+            Some("file:///C:/notes/readme.md · blocked")
         );
     }
 
@@ -93852,25 +94969,39 @@ mod tests {
         ));
     }
 
-    /// **PIN — every popup says which surface it grew out of, and only the `˅`
-    /// can name the sidebar.**
+    /// **PIN — every popup says which surface it grew out of, and only the two
+    /// the tab list itself raises can name the sidebar.**
     ///
-    /// The other seven are raised by a press somewhere in the panes. If any of
-    /// them ever answered [`PopupOwner::Tabs`] the rail would be held open by a
+    /// Two, since 丙2: the `˅`'s profile list hangs off whichever surface carries
+    /// the `+`, and a tab's context menu hangs off the row a right press landed
+    /// on — which is the same surface, by the same [`tab_surface`] answer. The
+    /// other seven are raised by a press somewhere in the panes, and if any of
+    /// *them* ever answered [`PopupOwner::Tabs`] the rail would be held open by a
     /// menu standing in the middle of the stage — the 2026-08-15 flyout report
     /// with a different panel in it.
     ///
-    /// Mutation: move any arm of [`popup_owner`] onto the `Profile` line and the
-    /// loop goes red at that popup on all three surfaces.
+    /// Both directions matter and the loop below is what keeps them apart: drop
+    /// `Popup::Tab` back onto the `Stage` line and the sidebar retracts out from
+    /// under a menu it is still drawing (the 2026-08-25 report); move any of the
+    /// seven onto the `Tabs` line and the rail is held open by a pane's `⌄`.
+    ///
+    /// Mutation: either move, and the loop goes red at that popup on all three
+    /// surfaces.
     #[test]
-    fn only_the_new_tab_chevrons_menu_belongs_to_a_tab_surface() {
+    fn only_the_two_menus_the_tab_list_raises_belong_to_a_tab_surface() {
+        const OF_THE_TAB_LIST: [Popup; 2] = [Popup::Profile, Popup::Tab];
         for surface in [TabSurface::Strip, TabSurface::Rail, TabSurface::FocusColumn] {
-            assert_eq!(
-                popup_owner(Popup::Profile, surface),
-                PopupOwner::Tabs(surface),
-                "the `˅`'s list hangs off whichever surface carries the `+`"
-            );
-            for popup in Popup::ALL.into_iter().filter(|p| *p != Popup::Profile) {
+            for popup in OF_THE_TAB_LIST {
+                assert_eq!(
+                    popup_owner(popup, surface),
+                    PopupOwner::Tabs(surface),
+                    "{popup:?} is raised on whichever surface carries the tabs"
+                );
+            }
+            for popup in Popup::ALL
+                .into_iter()
+                .filter(|popup| !OF_THE_TAB_LIST.contains(popup))
+            {
                 assert_eq!(
                     popup_owner(popup, surface),
                     PopupOwner::Stage,
@@ -93879,6 +95010,204 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// RED GATE (丙2, the gesture audit of 2026-08-26) — **a right press on a
+    /// tab raises that tab's menu, and moves nothing.**
+    ///
+    /// Two claims, and the second is the one the whole menu rests on. A right
+    /// press is a way of *asking about* a tab, not of choosing one: the menu's
+    /// subject is the tab under the pointer whichever tab is in front, and a
+    /// press that activated the tab on its way would tear the reader's view away
+    /// from what they were doing in order to answer a question about somewhere
+    /// else. `TermMenuState::seat` states the same ruling one surface over,
+    /// where it reads "a right press does not move the focus
+    /// (`chrome_mouse_input` answers only the left button)".
+    ///
+    /// **What makes it true is a structure rather than a promise**, and that is
+    /// what is read here: the opener sits in `mouse_input`, above the chrome
+    /// router, and returns; the chrome router — which owns `press_tab`,
+    /// `activate_tab` and the click chain — takes nothing but `Left` and
+    /// `Middle`. So there is no arrangement of these two functions in which a
+    /// right press reaches an activation.
+    ///
+    /// It is read off the source because the alternative does not exist: raising
+    /// this menu needs a `Runtime`, and a `Runtime` needs a GPU device, a
+    /// swapchain and a live window. `a_tab_switch_leaves_no_menu_standing` reads
+    /// the source for exactly that reason, in exactly this shape.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① route the opener through `press_tab`, or add an `activate_tab` beside
+    ///    it — the second assertion names it;
+    /// ② let `chrome_mouse_input` fall through on the right button — the third;
+    /// ③ move the opener below the chrome router, where the strip would have
+    ///    already answered — the fourth.
+    #[test]
+    fn a_right_press_on_a_tab_raises_its_menu_and_leaves_the_active_tab_alone() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body = |signature: &str| -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        };
+
+        let router = body("    fn mouse_input(");
+        let opener = router
+            .find("self.open_tab_menu_at(tab, position)?;")
+            .expect("a right press on a tab raises the tab's own menu");
+        // ① it is a right press on a tab, and nothing else opens it.
+        let arm = &router[router[..opener]
+            .rfind("if state == ElementState::Pressed")
+            .expect("the opener is guarded by a press")..opener];
+        assert!(
+            arm.contains("button == MouseButton::Right"),
+            "the tab menu is raised by a right press: {arm}"
+        );
+        assert!(
+            arm.contains("seats::ChromeTarget::Tab(index)"),
+            "on the target the tab list answers with — the one `chrome_target_at` \
+             raises from the strip, the rail and the focus column alike: {arm}"
+        );
+        // ② and the arm does nothing else.
+        for moved in ["activate_tab", "press_tab", "focus", "tab_clicks"] {
+            assert!(
+                !arm.contains(moved),
+                "the arm that raises a tab's menu also calls `{moved}` — a right \
+                 press asks about a tab and must not choose one"
+            );
+        }
+        // ③ the router that owns activation never sees the right button at all.
+        let chrome = body("    fn chrome_mouse_input(");
+        assert!(
+            chrome.contains(
+                "if button != MouseButton::Left {\n            return Ok(false);\n        }"
+            ),
+            "`chrome_mouse_input` still turns every non-left button away before \
+             it reaches `press_tab`"
+        );
+        // ④ and the opener runs before that router is ever asked.
+        let router_call = router
+            .find("self.chrome_mouse_input(state, button, position)?")
+            .expect("`mouse_input` hands presses to the chrome router");
+        assert!(
+            opener < router_call,
+            "the tab menu's opener stands above the chrome router, where an open \
+             rail lies over the panes (Q179) and the tab list is what
+             `chrome_target_at` answers first"
+        );
+    }
+
+    /// RED GATE (丙2) — **the tab menu holds an id, and resolves it at the
+    /// moment a verb runs.**
+    ///
+    /// A menu is a question the reader takes several seconds to answer, and the
+    /// strip does not hold still for them: a drag reorders it, a pin
+    /// re-partitions it, a tab arriving from another window lands in it, a tab
+    /// closing leaves it. A menu that had written down "the third tab" when it
+    /// opened would run its verb on whatever had slid into the third slot — and
+    /// `Close tab` is on this menu, so the failure is not cosmetic.
+    ///
+    /// [`TabId`] is minted once per process and never reused, so an id that stops
+    /// naming a tab names nothing at all; every verb here asks
+    /// [`Runtime::tab_slot_of`] or [`Runtime::tab_state`] for the tab and does
+    /// nothing when the answer is `None`. That is the same discipline
+    /// [`PaneMenuState`] keeps with a seat and [`FileMenuTreeRow`] with a key,
+    /// written down here because this is the one subject in the window that is
+    /// *routinely* re-ordered under an open menu.
+    ///
+    /// Read off the source for `a_right_press_on_a_tab_raises_its_menu_and_leaves_the_active_tab_alone`'s
+    /// reason: the failure is a *shape*, and the shape is what is asserted.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① give [`TabMenuState`] an index instead of an id — the first assertion;
+    /// ② resolve the index once, at raise time, and carry it — the second and
+    ///    third, which count the resolutions inside the runner;
+    /// ③ let any verb reach for `active_tab` — the fourth.
+    #[test]
+    fn the_tab_menus_subject_is_an_id_resolved_when_the_verb_runs() {
+        const SOURCE: &str = include_str!("main.rs");
+        let between = |from: &str, to: &str| -> &'static str {
+            let start = SOURCE
+                .find(from)
+                .unwrap_or_else(|| panic!("{from} is declared in this file"));
+            let rest = &SOURCE[start + from.len()..];
+            &rest[..rest.find(to).unwrap_or(rest.len())]
+        };
+        let body = |signature: &str| between(signature, "\n    fn ");
+
+        // ① the state carries the identity and not the place.
+        let state = between("struct TabMenuState {", "\n}\n");
+        assert!(
+            state.contains("tab: TabId,"),
+            "the menu's subject is the tab's identity"
+        );
+        assert!(
+            !state.contains("index") && !state.contains("slot"),
+            "and nowhere in it is a place in the strip: {state}"
+        );
+
+        // ② every verb that needs a place asks for one, at the moment it runs.
+        let runner = body("    fn run_tab_menu_row(");
+        assert_eq!(
+            runner.matches("self.tab_slot_of(tab)").count(),
+            2,
+            "`Pin` and `Close tab` are the two rows that need a slot, and each \
+             asks for its own — a slot resolved once and shared would be the \
+             index this menu refuses to carry"
+        );
+        assert!(
+            runner.contains("let Some(index) = self.tab_slot_of(tab) else {"),
+            "and a tab that has gone answers nothing rather than panicking"
+        );
+
+        // ③ so do the three verbs the runner hands the id straight to.
+        for (door, lookup) in [
+            ("    fn duplicate_tab(", "self.tab_state(tab)"),
+            (
+                "    fn move_tab_to_new_window(",
+                "self.tab_slot_of(tab).is_none()",
+            ),
+            (
+                "    fn move_tab_to_window(",
+                "self.tab_slot_of(tab).is_none()",
+            ),
+        ] {
+            assert!(
+                body(door).contains(lookup),
+                "`{door}` resolves its subject by id, through `{lookup}`"
+            );
+        }
+
+        // ④ and nothing in the family reaches for whichever tab is in front.
+        for door in [
+            "    fn run_tab_menu_row(",
+            "    fn duplicate_tab(",
+            "    fn move_tab_to_new_window(",
+            "    fn move_tab_to_window(",
+            "    fn open_tab_menu_at(",
+        ] {
+            assert!(
+                !body(door).contains("active_tab"),
+                "`{door}` names the active tab — the menu's subject is the tab \
+                 that was pointed at, whichever tab is in front"
+            );
+        }
+
+        // And the duplicate is seeded from *that* tab's own leaf, through the one
+        // door every other new tab goes through.
+        let duplicate = body("    fn duplicate_tab(");
+        assert!(
+            duplicate.contains("state.focused()")
+                && duplicate.contains("leaf.profile")
+                && duplicate.contains("leaf.session.working_directory()"),
+            "both facts come off one leaf of the tab the menu names"
+        );
+        assert!(
+            duplicate.contains("self.new_tab_seeded_from("),
+            "and the tab is made by the one function that makes tabs"
+        );
     }
 
     /// **PIN — which surface the `+` stands on, and the one place that decides.**
@@ -108702,8 +110031,8 @@ mod tests {
     fn opening_any_popup_closes_every_other_one() {
         assert_eq!(
             Popup::ALL.len(),
-            8,
-            "eight popups, and this list is the rule"
+            9,
+            "nine popups, and this list is the rule"
         );
         for keep in Popup::ALL {
             let closed: Vec<Popup> = keep.others().collect();
@@ -108738,6 +110067,11 @@ mod tests {
         // over, and therefore the one that could otherwise have come up
         // underneath an open menu rather than on top of it.
         assert!(Popup::ALL.contains(&Popup::TermMenu));
+        // And a tab's own menu (丙2), which is the one raised *on the tab list* —
+        // the surface the profile picker's own list hangs beside — and therefore
+        // the one that could otherwise have come up next to an open picker
+        // rather than instead of it.
+        assert!(Popup::ALL.contains(&Popup::Tab));
     }
 
     /// PIN (user report, 2026-08-19) — **one hover panel at a time: while any of

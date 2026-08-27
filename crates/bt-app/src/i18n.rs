@@ -1882,6 +1882,73 @@ pub enum Text {
     /// it is one line, and it is already spoken for by the refusal a press
     /// earns.
     ShortcutUndelivered,
+    // ── where Ctrl would send a printed path (gesture audit 2026-08-26, 丙3) ──
+    //
+    // One contiguous block at the end, per this table's standing rule. **Two
+    // entries**, because `Ctrl` has two answers for a local reference and they
+    // are different verbs: a file goes to whatever program the machine opens
+    // that kind with, a folder is shown in Explorer. One string for both would
+    // have to say the true half and the untrue half at once.
+    //
+    // Both open with the ` · ` the blocked verdict opens with, because both are
+    // a second clause on a line whose first clause is the address itself.
+    /// Appended to the hover status line over a printed **file** path.
+    HyperlinkControlOpensExternally,
+    /// Appended to the hover status line over a printed **folder** path.
+    HyperlinkControlReveals,
+    // ── copy on select (gesture audit 2026-08-26, 丙4) ──
+    //
+    // One contiguous block at the end, per this table's standing rule. **Two
+    // entries**, the row and its sentence.
+    //
+    // The sentence carries the one fact a reader cannot infer from the words
+    // `Copy on select` — that it is the *letting go* that writes, and that
+    // nothing else is shown when it does. That is the whole of what was
+    // invisible: the gesture was never hard to perform, only impossible to
+    // notice, and a row that only named it would leave the reader to find out
+    // by losing something.
+    /// `Terminal ▸ Copy on select` — the row.
+    RowCopyOnSelect,
+    /// Its sentence.
+    DescCopyOnSelect,
+
+    // ── a tab's own context menu (gesture audit 2026-08-26, 丙２) ──
+    //
+    // One contiguous block at the end, per this table's standing rule. **Five
+    // entries for six rows**, and the two absences are the content:
+    //
+    // * `Move to window` is the *pane* menu's own string, because the row opens
+    //   the same list of the same windows and two literals for one destination
+    //   is how two menus come to call a window two things;
+    // * the pin row's unpinned face is `Pin`, the word the tab strip's own
+    //   control already carries — there is one pin verb in this product
+    //   (§7.7 ⑧ gave the preview head's control the word `Lock` precisely so
+    //   that there would be), and a second `Pin` here would be that ruling
+    //   undone in the table it was won in.
+    //
+    // Its pinned face is *not* `Unpin`, and that one is not a duplicate but a
+    // difference of surface: `Text::Unpin` is a tip and carries its own second
+    // clause about where the `×` went (mock-up 4204). A menu is as wide as its
+    // widest row, so that sentence in this slot would treble the width of a
+    // six-row list on the one row that is a state rather than an errand.
+    //
+    // The four that name the tab do so because each of their verbs already
+    // exists in this window aimed at something else — a file is renamed, a pane
+    // is duplicated and moved to a new window, a pane and a window and a search
+    // are closed — and a row that said only `Close` in a list reachable from
+    // three different surfaces would be the one word in the menu a reader has to
+    // guess the object of.
+    /// **`Rename tab`** — the same editor a double click on the tab opens.
+    TabMenuRename,
+    /// **`Unpin`** — the pin row's pinned face.
+    TabMenuUnpin,
+    /// **`Duplicate tab`** — a tab seeded from this one's own shell.
+    TabMenuDuplicate,
+    /// **`Move tab to new window`** — the row 丙２ exists for: the menu door
+    /// onto the tear-out that had none.
+    TabMenuMoveToNewWindow,
+    /// **`Close tab`** — the `×`'s verb, spelled.
+    TabMenuClose,
 
     // ── the three the sweep of 2026-08-26 found still in English ───────────
     //
@@ -3372,6 +3439,37 @@ impl Text {
                 "Windows keeps some combinations for itself; one that never reaches the box cannot be recorded here",
                 "Windows 会自己截走一部分组合键；始终到不了框里的，这里录不到",
             ),
+            Self::HyperlinkControlOpensExternally => pick(
+                lang,
+                " · Ctrl+click opens in default app",
+                " · Ctrl+点击用默认程序打开",
+            ),
+            Self::HyperlinkControlReveals => pick(
+                lang,
+                " · Ctrl+click shows it in Explorer",
+                " · Ctrl+点击在资源管理器中显示",
+            ),
+            Self::RowCopyOnSelect => pick(lang, "Copy on select", "选中即复制"),
+
+            // ── a tab's own context menu (丙2) ───────────────────────
+            Self::TabMenuRename => pick(lang, "Rename tab", "重命名标签"),
+            // Bare, and its unpinned twin is `Text::Pin`: a menu row is a verb
+            // and this one has room for nothing else. The reason a pinned tab
+            // has no `×` is on the strip's own tip, which is where a reader who
+            // wants it is already pointing.
+            Self::TabMenuUnpin => pick(lang, "Unpin", "取消固定"),
+            Self::TabMenuDuplicate => pick(lang, "Duplicate tab", "复制标签"),
+            // One word apart from `Move pane to new window`, and the word is the
+            // thing being moved.
+            Self::TabMenuMoveToNewWindow => {
+                pick(lang, "Move tab to new window", "把标签移到新窗口")
+            }
+            Self::TabMenuClose => pick(lang, "Close tab", "关闭标签"),
+            Self::DescCopyOnSelect => pick(
+                lang,
+                "Letting go of a selection in a pane writes it to the clipboard. There is no other sign that it happened",
+                "在窗格里松开一段选区，它就被写进剪贴板。除此之外没有别的提示",
+            ),
             Self::ShortcutRecord => pick(lang, "Record", "录制"),
             // 「按键…」and not 「录制中…」: the ellipsis already says a clock is
             // running, and what the reader has to supply is the press.
@@ -3402,7 +3500,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 510] = [
+    pub const ALL: [Self; 519] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3910,6 +4008,15 @@ impl Text {
         Self::ShortcutRecordPrompt,
         Self::ShortcutRecordUnusable,
         Self::ShortcutUndelivered,
+        Self::HyperlinkControlOpensExternally,
+        Self::HyperlinkControlReveals,
+        Self::RowCopyOnSelect,
+        Self::DescCopyOnSelect,
+        Self::TabMenuRename,
+        Self::TabMenuUnpin,
+        Self::TabMenuDuplicate,
+        Self::TabMenuMoveToNewWindow,
+        Self::TabMenuClose,
         Self::ShortcutRecord,
         Self::ShortcutRecordListening,
         Self::ShortcutRestoreAll,
