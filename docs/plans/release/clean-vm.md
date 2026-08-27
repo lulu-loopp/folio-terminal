@@ -11,11 +11,12 @@ panic 的可见提示;有 WebView2 的 VM 验顶层 gate 与四个拒绝面。�
 | `autounattend-win11.xml` | Win11 无人值守应答文件(模板,带占位符) |
 | `autounattend-win10.xml` | Win10 无人值守应答文件(模板,带占位符) |
 | `new-answer-iso.ps1` | 把应答文件做成一张只装一个文件的小 ISO |
+| `new-vm.ps1` | **建机**:写 `.vmx`、建盘、装 Windows、打 `clean` 快照(§3.5) |
 | `run-smoke-in-vm.ps1` | 宿主端驱动:回快照 → 开机 → 拷进去 → 跑 → 拷回来 → 关机 |
 | `in-guest.ps1` | 客户机端五个阶段:unpack / smoke / web / notice / explorer |
 
 **本次没做的事(明确说清):没有启动任何虚机、没有下载任何 ISO、没有改 `.gitignore`、没有改任何
-`.rs`。** 虚机由用户建,ISO 由用户下。
+`.rs`。** ISO 由用户下,**虚机由 `new-vm.ps1` 建**(Win11 的 vTPM 除外,见 §2.2a)。
 
 ---
 
@@ -103,14 +104,14 @@ C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe
 | 客户机操作系统 | Windows 11 x64 | Windows 10 x64 |
 | 虚拟机名 / 目录名 | `folio-win11` | `folio-win10` |
 | 处理器 | 2 核(给得起就 4) | 2 核 |
-| 内存 | 6 GB(下限 4) | 4 GB |
+| 内存 | 8 GB(`new-vm.ps1` 默认;下限 4) | 4 GB(`-Memory 4096`) |
 | 磁盘 | 64 GB,拆分成多个文件,**不**预分配 | 60 GB,同上 |
 | 固件 | **UEFI + Secure Boot** | UEFI(Secure Boot 开关随意) |
-| TPM | **加 vTPM(见 2.2)** | 不加 |
+| TPM | **加 vTPM(见 2.2、2.2a)** | 不加 |
 | 显示 | 关掉「自动调整客户机分辨率」,固定 **1920×1080**,缩放 100% | 同 |
-| 网络 | NAT,**连接**(要验「有引擎」路径) | NAT,**断开连接**(见 2.4) |
+| 网络 | NAT,**连接**(要验「有引擎」路径) | **没有网卡**(`ethernet0.present = "FALSE"`,见 2.4) |
 | 声卡 / 打印机 / USB | 全部移除 | 全部移除 |
-| VMware Tools | **必装**(见 2.3) | **必装** |
+| VMware Tools | **必装**(应答文件自己装,见 2.3、3.5.4) | **必装**(同) |
 | 快照名 | `clean` | `clean` |
 
 磁盘不预分配是为了别在宿主上白占 124 GB;拆分文件是为了将来复制/删除快。
@@ -138,14 +139,53 @@ C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe
    靠改注册表骗过检查装出来的 Windows 11,和用户手里那台不是同一种机器,拿它做的结论也就不是同一个
    结论。花五分钟点两下加密,比给证据留一个「这机器不合法」的注脚划算。
 
-Workstation 17 的「快速加密」只加密支撑 TPM 所需的部分文件,性能影响可忽略(VMware 17 发布说明,
-2026-08-27 经检索确认该选项存在;**具体性能数字未验证**)。
+Workstation 17 的「快速加密」只加密支撑 TPM 所需的部分文件,性能影响可忽略(Broadcom 官方文档
+<https://techdocs.broadcom.com/us/en/vmware-cis/desktop-hypervisors/workstation-pro/17-0/using-vmware-workstation-pro/configuring-and-managing-virtual-machines/encrypting-and-restricting-virtual-machines-ws-guide.html>,
+2026-08-27 抓取原文:两个选项分别是「Fast VM Encryption (Only the files needed to support a TPM are
+encrypted)」与全盘加密,并写着「Workstation Pro does not provide a way to retrieve the passwords if
+you lose them」;**具体性能数字未验证**)。
+
+### 2.2a 免加密 vTPM(`managedvm.autoAddVTPM`)核实结果:**不走这条路**
+
+网上流传的一行 `managedvm.autoAddVTPM = "software"` 号称能免整机加密拿到 vTPM。**2026-08-27 逐条
+核实,结论是本门不用它,默认不写。** 核实结果:
+
+| 问的是什么 | 结果 | 来源(2026-08-27 抓取) |
+| --- | --- | --- |
+| 键名与值 | `managedvm.autoAddVTPM = "software"`,拼写属实 | <https://www.vimalin.com/blog/what-you-should-know-about-vmwares-experimental-vtpm/> |
+| 最低版本 | Workstation **16.2** / Fusion 12.2 起 | 同上 |
+| **官方文档有没有这个键** | **没有**。Workstation Pro 17 的加密文档整页不提 vTPM,也不提这个键 | 上面那条 Broadcom 加密文档 |
+| 是否真的「免加密」 | 否。磁盘不加密,但 `.vmsd` / `.nvram` / `.vmsn` / `.vmss` / `.vmem` / vmdk 描述符都被加密,**口令是 Workstation 自己生成的,机主没有** | vimalin 同上 |
+| **`vmrun` 能不能开这台机** | **报告说不能**:`vmrun -T ws start` 答 `The operation is not supported`;VM 被标成 encrypted 而口令没人知道,`-vp` 也就无从谈起 | <https://communities.vmware.com/t5/VMware-Workstation-Pro/How-to-1-click-start-VMs-with-16-2-TPM/m-p/2927197>(经检索确认该线程内容,页面本身已 301 到 community.broadcom.com);vimalin 同上 |
+| 加密后 `-vp` 走正常口令能不能开 | 能:`vmrun -vp <口令> start <vmx> nogui` | <https://communities.vmware.com/t5/VMware-Workstation-Pro/Issue-vmrun-Running-with-vp-encryptedVirtualMachinePassword/td-p/2893108> |
+
+**最后一行是判决理由。** 门 5 从头到尾是 `vmrun`:回快照、开机、拷文件、跑五个阶段、拷回来。一台
+`vmrun` 开不了的机器不是这道门能用的机器。所以:
+
+- **默认(`-VTpm encrypted`,Win11 自动选中)**:走 §2.2 的正路 —— 自选口令加密 + 加 TPM 设备,
+  `run-smoke-in-vm.ps1 -VmPassword` 早就是为它写的。代价是加密和加设备**没有命令行**(本机
+  `vmcli` 的模块只有 Chipset / ConfigParams / Disk / Ethernet / Guest / HGFS / MKS / Nvme / Power /
+  Sata / Serial / Snapshot / Tools / VM / VMTemplate / VProbes,没有一个碰加密),于是 Win11 机在
+  建完 `.vmx` 之后停一次,让人点三下,再 `-Stage install` 接上。
+- **`-VTpm software`**:照写那一行,给愿意在 17.6.4 上亲自验一次「`vmrun start` 是不是还坏」的人
+  留的。**本机没有验过**——本次任务不建真虚机。
+- **`-VTpm none`**:不加任何 TPM。Win11 Setup 会拒,留着是为了别人想验别的东西时不必改脚本。
+
+> 上面那条 vimalin 还提到一件跟本门无关但值得记的事:加这个 vTPM 前会做一次「磁盘剩余空间够不够
+> 整个虚拟盘大小」的检查,空间不够时 vTPM 只加了一半,虚机就坏了。**未验证**。
 
 ### 2.3 VMware Tools 必须装,而且它是唯一允许装的东西
 
 `vmrun` 的 **guest 操作全部依赖 Tools**:`copyFileFromHostToGuest`、`copyFileFromGuestToHost`、
-`runProgramInGuest`、`checkToolsState`、`captureScreen` 都是发给虚机内 Tools 服务的请求。没有 Tools,
-这套脚本只能开机关机,别的一件都干不成。
+`runProgramInGuest`、`fileExistsInGuest`、`getGuestIPAddress`、`captureScreen` 都在 `vmrun` 自己的
+用法表里挂在 **GUEST OS COMMANDS** 下,全是发给虚机内 Tools 服务的请求(本机 `vmrun` 1.17.0 的用法
+原文,2026-08-27 打印核对)。没有 Tools,这套脚本只能开机关机,别的一件都干不成。
+
+`checkToolsState` 和 `installTools` 挂在 **GENERAL COMMANDS** 下 —— 前者能在没有 Tools 的机器上答
+「没有」,所以它能当进度指示,**不能**当装机完成的判据。
+
+**Tools 现在由应答文件自己装**(§3.5):`new-vm.ps1` 把 Workstation 安装目录里的 `windows.iso` 挂成
+第三张光盘,`FirstLogonCommands` 找到它、静默装、重启。人不用碰。
 
 「不装 VS/VC 运行库/WebView2 之外的任何东西」这条纪律和装 Tools 不冲突:Tools 是虚拟硬件的驱动,
 不是开发工具链,也不带 VC++ 运行库以外的用户态负担。但它**确实**是一件装上去的东西,所以
@@ -167,7 +207,8 @@ Windows 10 的消费设备**是** WebView2 运行时的推送目标:微软通过
 
 三道防线,按强度:
 
-1. **网卡断开连接**(虚机设置里取消「已连接」和「开机时连接」)。这一条最硬。
+1. **根本没有网卡**。`new-vm.ps1` 给 Win10 机写的是 `ethernet0.present = "FALSE"`,比取消「已连接」
+   两个勾更硬:没有的东西点不回来。guest 操作走 VMCI 后门不走网络,这台机照样能被 `vmrun` 驱动。
 2. 应答文件在 specialize 阶段写的策略键:关自动更新、禁止连 Windows Update 的互联网位置、
    `HKLM\SOFTWARE\Policies\Microsoft\EdgeUpdate` 下把 WebView2 的应用 id
    `Install{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}` 设成 0(该 id 与该策略名的用法见微软 Edge Update
@@ -210,12 +251,13 @@ pwsh -File scripts/release/cleanvm/new-answer-iso.ps1 -AnswerFile autounattend-w
 
 ```
 autounattend-win10 : computer FOLIO-WIN10, time zone China Standard Time, account folio
-D:\...\target\cleanvm\autounattend-win10.iso — 63,488 bytes
+D:\...\target\cleanvm\autounattend-win10.iso — 65,536 bytes
 attach it to the VM as a second CD/DVD device, connected at power on.
 ```
 
-挂载回来验过:根目录一个 `Autounattend.xml`(10,270 字节,大小写正确),占位符全部替换掉,密码两处
-(本地账户与自动登录)都填上了。
+挂载回来验过:根目录一个 `Autounattend.xml`(12,689 字节,大小写正确),占位符全部替换掉,密码两处
+(本地账户与自动登录)都填上了,§3.5.4 新加的三条 `SynchronousCommand` 逐字原样(引号、`>` 重定向
+都没被 XML 转义吃掉)。
 
 脚本用的是 Windows 自带的 IMAPI2 光盘刻录服务,**不需要装 Windows ADK**。装了 ADK 的机器上等价的
 一行是:
@@ -255,14 +297,129 @@ Windows)、装到第 3 个分区、跳过 OOBE 的隐私/网络/微软账号页�
 **两份应答文件都标着「未验证」**:它们是照微软 unattend 参考写的,还没有对着 ISO 跑过。门 5 的第一次
 建机就是它们的第一次运行。第一次装如果卡在某一页,截图记下卡在哪一页,回来改对应的一段 —— 别改一堆。
 
-### 3.5 建机三步(留给用户的操作)
+### 3.5 建机:用户只提供 ISO,其余 `new-vm.ps1` 做
 
-1. **建机**:按 2.1 的表建两台。Win11 那台先加密再加 vTPM(2.2)。声卡打印机 USB 都删掉。
-   Win10 那台把网卡的「已连接 / 开机时连接」两个勾都去掉。
-2. **挂两张盘 + 开机装**:CD1 = 微软安装 ISO,CD2 = `target/cleanvm/autounattend-winXX.iso`,
-   两个都勾「开机时连接」。开机,让它自己装完到桌面。装完手工装 VMware Tools,重启。
-3. **打快照**:确认桌面干净、Folio 从未在这台机上跑过、网络状态是你想要的,然后打一个名叫
-   **`clean`** 的快照。名字必须是 `clean` —— 脚本的默认值,也是这台机唯一该有的那个快照。
+原来这里写着「建机三步(留给用户的操作)」:在 Workstation 向导里建机、挂两张盘看着装、手工装
+Tools 再打快照。**那三步现在是 `scripts/release/cleanvm/new-vm.ps1`。** 留给人的只剩把 ISO 下下来,
+告诉脚本它在哪。
+
+#### 3.5.1 两条命令
+
+```powershell
+# Win10 机:一条命令从零到 clean 快照,中间不用管
+pwsh -File scripts/release/cleanvm/new-vm.ps1 -Name win10 `
+    -Iso D:\iso\Win10_22H2_English_x64.iso -Memory 4096 -DiskGB 60
+
+# Win11 机:建完 .vmx 停一次(vTPM,见 §2.2a),点三下,再接上
+pwsh -File scripts/release/cleanvm/new-vm.ps1 -Name win11 `
+    -Iso D:\iso\Win11_25H2_EnterpriseEval_x64.iso
+#   → 按屏幕上打出来的三步加密 + 加 TPM,然后:
+pwsh -File scripts/release/cleanvm/new-vm.ps1 -Name win11 -Stage install -VmPassword <加密口令>
+```
+
+**先带 `-WhatIf` 跑一遍**:它把每一步和**将要写入的 `.vmx` 全文**打出来,一个文件都不建,ISO 都不
+必存在。
+
+参数:`-Name win11|win10`、`-Iso`、`-VmRoot`(默认 `D:\VMs\folio-cleanvm`)、`-Memory 8192`、
+`-Cpus 2`、`-DiskGB 64`、`-Stage build|install|all`、`-VTpm auto|none|software|encrypted`、
+`-VmPassword`、`-GuestUser/-GuestPassword`(默认 `folio`/`folio`)、`-AnswerIso`、`-ForceAnswerIso`、
+`-ToolsIso`、`-HardwareVersion 21`、`-InstallTimeoutMinutes 90`、`-KeepMedia`、`-SkipImageCheck`、
+`-VmrunPath`、`-VdiskManagerPath`、`-WhatIf`。
+
+**幂等靠拒绝,不靠覆盖**:`<VmRoot>\folio-<name>` 已存在时 build 阶段直接报错退出,提示要么删目录
+要么改 `-VmRoot` 要么 `-Stage install` 接着已有的那台。一次半覆盖比不覆盖坏得多。
+
+#### 3.5.2 脚本做了什么
+
+1. **找工具**:`vmrun.exe`、`vmware-vdiskmanager.exe`、`windows.iso`,三者都按 `run-smoke-in-vm.ps1`
+   同一套办法探测(Workstation 目录 → Player 目录 → 注册表 `InstallPath` → `PATH`)。
+2. **核 ISO 的映像名**:挂载安装 ISO,`Get-WindowsImage` 读 `sources\install.wim`/`install.esd`,和
+   应答文件里的 `/IMAGE/NAME`(Win11 `Windows 11 Enterprise Evaluation`、Win10 `Windows 10 Pro`)
+   比一次。对不上就**当场停**,并把 ISO 里真实有的版本名列出来 —— 这一条挡的是最贵的一种失败:名字
+   写错时 Setup 不报错,它画出选版本那一页等一个不存在的人,而脚本要轮询九十分钟才发现。挂载 ISO
+   要管理员权限,不是管理员就打一行「没核成」继续走(`-SkipImageCheck` 关掉它)。
+3. **应答 ISO**:`target/cleanvm/autounattend-<name>.iso` 不存在就调 `new-answer-iso.ps1` 现做
+   (改过 `.xml` 之后用 `-ForceAnswerIso` 重做)。
+4. **建盘**:`vmware-vdiskmanager -c -s <N>GB -a nvme -t 1 <vmdk>`。`-t 1` = 可增长且按 2 GB 拆文件。
+5. **写 `.vmx`**:见 3.5.3。
+6. **开机 + 轮询 + 快照**:`vmrun start … nogui` → 轮询哨兵 → `stop soft` → 等它离开 `vmrun list` →
+   把三个光驱在 `.vmx` 里改成「开机不连接」、引导顺序改回 `hdd,cdrom` → `vmrun snapshot <vmx> clean`。
+
+**快照是关机态的,而且必须是。** `run-smoke-in-vm.ps1` 的第一步是 `revertToSnapshot` 紧接着 `start`;
+回到一个「运行中」的快照之后再 `start`,`vmrun` 是报错而不是无操作。
+
+**光驱要断开**,否则每次回快照都要在「press any key to boot from CD」上耗掉十秒,而且这台「干净机」
+的快照里永远插着一张微软安装盘。`-KeepMedia` 保留它们。
+
+#### 3.5.3 `.vmx` 里的关键几行
+
+全文用 `-WhatIf` 看。这里只说要解释的:
+
+| 键 | 值 | 为什么 |
+| --- | --- | --- |
+| `virtualHW.version` | `21` | **本机实测**:17.6.4 的 `vmcli VM Create` 自己写的就是 21。`-HardwareVersion 20` 是要在更老的 Workstation 上开这台机时的退路 |
+| `guestOS` | `windows11-64` / **`windows9-64`** | **这一条最容易写错**:Workstation **没有** `windows10-64`。本机 `vmcli VM Create -g windows10-64` 直接报「Invalid argument」并列出合法值,里面是 `windows9-64`;安装目录的 `isoimages_manifest.txt` 也只有 `windows9-64` 和 `windows11-64` 两条映射到 `windows.iso` |
+| `firmware` / `uefi.secureBoot.enabled` | `efi` / `TRUE` | 两台机都是,§2.1 |
+| `bios.bootOrder` | 装机时 `cdrom,hdd`,装完改 `hdd,cdrom` | **未经官方文档核实**(第三方引用一致,EFI 下也拼 `bios.`)。装机时其实无所谓:盘是空的,固件自己会落到光驱 |
+| `nvme0:0` | 系统盘 | Win10/Win11 都自带 NVMe 内置驱动,Setup 不用加载任何东西就能看见盘;Workstation 给 Win11 客户机默认也是 NVMe |
+| `sata0:0` / `sata0:1` / `sata0:2` | 安装 ISO / 应答 ISO / **Tools ISO** | 三张,都 `present = TRUE` + `startConnected = TRUE`。第三张是 §3.5.4 的关键 |
+| `ethernet0.virtualDev` | `e1000e` | 内置驱动,Tools 装之前就有网卡;而且 Broadcom 那条静默安装的注意事项警告 `REBOOT=R` 在 vmxnet3 上会当场断网 |
+| `ethernet0.present`(Win10) | `FALSE` | 比 §2.4 的「取消勾选已连接」更硬:根本没有网卡,谁也点不回来。guest 操作走 VMCI 后门不走网络,所以这台机照样能被 `vmrun` 驱动 |
+| `svga.autodetect` `svga.maxWidth` `svga.maxHeight` `svga.vramSize` | `FALSE` / `1920` / `1080` / `16777216` | 固定 1920×1080。1920×1080×4 = 8,294,400 < 16 MB,且 16777216 能被 65536 整除(Windows 客户机的要求)。键名见 Broadcom KB 313896 <https://knowledge.broadcom.com/external/article/313896/adding-video-resolution-modes-to-windows.html>(2026-08-27 抓取) |
+| `mks.enable3d` | **`TRUE`** | Folio 用 GPU 画;关掉 3D 得到的证据是关于产品不走的那条路的 |
+| `sound/usb/ehci/usb_xhci/serial0/parallel0/floppy0` | 全 `FALSE` | §2.1 「声卡打印机 USB 全部移除」 |
+| `isolation.tools.*` | 全 `FALSE`(即默认:不隔离) | 写出来是为了文件自己说清这台机允许什么 |
+| `msg.autoAnswer` | `TRUE` | 无头启动的前提:ISO 挪过位置之类的问题不能变成没人看的模态框 |
+| `uuid.action` | `create` | 第一次开机那句「moved or copied?」当场有答案 |
+| `pciBridge*` / `hpet0` / `svga.present` / `vmci0` | 照抄 | 本机 `vmcli` 给新机器写的就是这些 |
+
+#### 3.5.4 「装完了没有」怎么知道:文件哨兵 + 让客户机自己装 Tools
+
+这是这个脚本唯一一处需要设计的地方。
+
+**先说走不通的:** `vmrun` 的 guest 命令全部依赖 Tools(§2.3),装机阶段没有 Tools,所以
+`fileExistsInGuest`、`listProcessesInGuest`、`getGuestIPAddress` 一个都问不出来。`checkToolsState`
+不依赖 Tools,但它只会一直答「没有」,答不出「Windows 装完了」。
+
+**走通的这条:让客户机自己装 Tools,再自己说一声。**
+
+1. `new-vm.ps1` 把 Workstation 安装目录里的 `windows.iso` 挂成 `sata0:2`。**本机实测**:
+   `C:\Program Files (x86)\VMware\VMware Workstation\windows.iso`,113,586,176 字节,根目录是
+   `setup.exe`(111 MB)、`VMwareToolsUpgrader.exe`、`manifest.txt`(`monolithic.version = "12.5.3"`)、
+   `autorun.inf`、`autorun.ico`、`certified.txt`、`Program Files\`。**注意没有 `setup64.exe`** ——
+   17.6.4 的这张盘上只有一个 `setup.exe`。
+2. 两份应答文件的 `FirstLogonCommands` 加了三条(本次改动):
+   - **Order 3** 找到那张盘并静默装:
+     ```
+     cmd /c for %d in (D E F … Z) do @if exist %d:\VMwareToolsUpgrader.exe start /wait %d:\setup.exe /S /v"/qn REBOOT=R"
+     ```
+     认盘认的是 `VMwareToolsUpgrader.exe` 而不是 `setup.exe` —— **微软安装 ISO 的根目录也有一个
+     `setup.exe`**,认错了就是把 Windows Setup 又开一遍。开关是 Broadcom 文档的原话
+     `setup.exe /S /v"/qn REBOOT=R"`(<https://knowledge.broadcom.com/external/article/376237/installing-vmware-tools-on-a-vmware-vsph.html>,
+     2026-08-27 抓取;`REBOOT=R` 压掉安装器自己的重启,好让后面两条还能跑)。
+   - **Order 4** 用 `RunOnce` 预约哨兵:重启之后才写 `C:\folio-vm\oobe-done.txt`。**顺序是要紧的**
+     —— 哨兵要是在重启之前就有了,宿主会在机器正往下关的时候以为它好了。
+   - **Order 5** `shutdown /r /t 20`。这次重启才是把 Tools 驱动装到位的那一下。
+3. 宿主端轮询 `vmrun -gu -gp fileExistsInGuest <vmx> C:\folio-vm\oobe-done.txt`,15 秒一次。
+   **这一条问的其实是两件事**:能问出答案说明 Tools 起来了,答案是「有」说明装机走完了。一个动作
+   两个事实。每分钟顺带打一行 `checkToolsState` 当进度。
+4. 超时(默认 90 分钟)不是一句「失败」:它打出 `checkToolsState` 的最后回答、`vmrun captureScreen`
+   的命令,以及三种典型现场各自意味着什么(卡在 Setup 某一页 / 有桌面没 Tools / 有 Tools 没哨兵)。
+
+**Tools 是这台机上唯一允许装的东西**,§2.3 已经说过理由,`in-guest.ps1` 的 `unpack` 阶段会把它写进
+`machine.txt`,谁看证据都知道。
+
+#### 3.5.5 建完之后
+
+脚本最后自己打出来:`.vmx` 路径、`listSnapshots` 的结果,和下一步
+
+```powershell
+pwsh -File scripts/release/package.ps1
+pwsh -File scripts/release/cleanvm/run-smoke-in-vm.ps1 -Vmx <打出来的路径> -WhatIf
+pwsh -File scripts/release/cleanvm/run-smoke-in-vm.ps1 -Vmx <打出来的路径>
+```
+
+快照名固定是 **`clean`** —— `run-smoke-in-vm.ps1` 的默认值,也是这台机唯一该有的那个快照。
 
 ---
 
@@ -468,6 +625,18 @@ docs/plans/release/clean-vm-evidence/
 | 项 | 状态 |
 | --- | --- |
 | 两份 `autounattend-*.xml` | **未验证** —— 照微软 unattend 参考写,没对着 ISO 跑过 |
+| `FirstLogonCommands` 新加的三条(装 Tools / RunOnce 哨兵 / 重启) | **未验证** —— 语法与开关有来源(§3.5.4),但没在真机上跑过 |
+| Win11 25H2 的 OOBE 在**联网**时是否还认 `HideOnlineAccountScreens` 而不强推微软账号 | **未验证** —— 近期 Win11 有此报告;Win10 那台没网,不受影响。第一次装 Win11 若停在账号页,这是第一嫌疑 |
+| `new-vm.ps1` 写出的 `.vmx` 能不能真的开机装完 | **未验证** —— 本次不建真虚机;`-WhatIf` 全流程跑过,键名逐条有来源 |
+| `bios.bootOrder` 在 EFI 固件下的确切键名 | **未验证** —— 第三方引用一致,官方文档没找到;盘是空的时候不影响首次引导 |
+| `managedvm.autoAddVTPM = "software"` 在 17.6.4 上是否仍然让 `vmrun start` 失败 | **未验证** —— 报告见 §2.2a,本机没试;`-VTpm software` 是留给试它的开关 |
+| 加 vTPM 前的「剩余空间要够整盘大小」检查 | **未验证** —— 二手报道(§2.2a 末尾) |
+| **已验证(本机 2026-08-27 探测)**:`virtualHW.version = 21` 是 17.6.4 自己写的 | `vmcli VM Create` 产物 |
+| **已验证**:Workstation 无 `windows10-64`,Win10 是 `windows9-64` | `vmcli VM Create -g windows10-64` 报错并列出合法值;`isoimages_manifest.txt` |
+| **已验证**:`windows.iso` 在 Workstation 安装目录,根目录只有 `setup.exe`(没有 `setup64.exe`),Tools 12.5.3 | 挂载核对 |
+| **已验证**:`vmware-vdiskmanager -a nvme` 被接受(用法文本里没列),写出的描述符 `ddb.adapterType` 仍是 `lsilogic` | 本机建过 1 GB 测试盘再删 |
+| **已验证**:`vmrun` 用法表把 `fileExistsInGuest` 等全部归在 GUEST OS COMMANDS,`checkToolsState` 归在 GENERAL | `vmrun` 无参输出 |
+| **已验证**:本机 `vmcli` 没有任何加密/TPM 模块 | `vmcli --help` |
 | Win10 多版本 ISO 里 `Windows 10 Pro` 这个映像名 | **未验证** —— 装之前用 `dism /Get-ImageInfo` 核 |
 | Win10 ISO 页面在 Windows 浏览器上会被导去 MCT / MCT 自 2025-10 起造不了介质 | **未验证** —— 二手报道,不是微软页面原话 |
 | Visual Studio 订阅仍有 Win10 企业版镜像 | **未验证** —— 二手讨论 |
@@ -478,7 +647,8 @@ docs/plans/release/clean-vm-evidence/
 | 已验证:Win11 企业评估页 / Win10 评估页已下架 / evalcenter 客户端列表 / Win10 ISO 页 | 2026-08-27 逐页抓取 |
 | 已验证:宿主 Workstation 17.6.4 + vmrun 1.17.0 路径 | 本机探测 |
 | 已验证:`new-answer-iso.ps1` 能造出可挂载、内容正确的 ISO | 本机跑过并挂载核对 |
-| 已验证:三个 `.ps1` 语法、两个 `.xml` 格式、`run-smoke-in-vm.ps1` 的 `-WhatIf` 全流程 | 本机跑过 |
+| 已验证:四个 `.ps1` 语法、两个 `.xml` 格式(改后重新解析过)、`run-smoke-in-vm.ps1` 与 `new-vm.ps1` 的 `-WhatIf` 全流程 | 本机跑过 |
+| 已验证:`new-vm.ps1` 的幂等拒绝与 `-Stage install` 的前置检查 | 本机跑过(用临时目录) |
 
 ### 参考链接(全部 2026-08-27 抓取)
 
@@ -497,3 +667,19 @@ docs/plans/release/clean-vm-evidence/
   <https://blogs.windows.com/msedgedev/2022/06/27/delivering-the-microsoft-edge-webview2-runtime-to-windows-10-consumers/>
 - Microsoft Edge Update 策略文档:
   <https://learn.microsoft.com/en-us/deployedge/microsoft-edge-update-policies>
+- Workstation Pro 17 加密虚机(快速加密 / 全盘加密,口令丢了找不回):
+  <https://techdocs.broadcom.com/us/en/vmware-cis/desktop-hypervisors/workstation-pro/17-0/using-vmware-workstation-pro/configuring-and-managing-virtual-machines/encrypting-and-restricting-virtual-machines-ws-guide.html>
+- 虚拟机硬件版本对照表:
+  <https://knowledge.broadcom.com/external/article/315655/virtual-machine-hardware-versions.html>
+- VMware Tools 静默安装(`setup.exe /S /v"/qn REBOOT=R"`):
+  <https://knowledge.broadcom.com/external/article/376237/installing-vmware-tools-on-a-vmware-vsph.html>
+- VMware Tools 静默安装的组件选择(同一条命令的官方形态与 `ADDLOCAL`/`REMOVE`):
+  <https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/tools/12-5-0/vmware-tools-administration-12-5-0/installing-vmware-tools/automatically-install-vmware-tools-on-multiple-windows-virtual-machines/specify-vmware-tools-components-for-silent-installations.html>
+- 给 Windows 客户机加显示分辨率(`svga.autodetect` / `svga.maxWidth` / `svga.maxHeight` / `svga.vramSize`):
+  <https://knowledge.broadcom.com/external/article/313896/adding-video-resolution-modes-to-windows.html>
+- 实验性 vTPM 的代价(`managedvm.autoAddVTPM`、最低 16.2、加密了哪些文件、自动化坏在哪):
+  <https://www.vimalin.com/blog/what-you-should-know-about-vmwares-experimental-vtpm/>
+- `vmrun` 开加了实验性 vTPM 的机器(`The operation is not supported`):
+  <https://communities.vmware.com/t5/VMware-Workstation-Pro/How-to-1-click-start-VMs-with-16-2-TPM/m-p/2927197>
+- `vmrun -vp` 开正常加密机器可行:
+  <https://communities.vmware.com/t5/VMware-Workstation-Pro/Issue-vmrun-Running-with-vp-encryptedVirtualMachinePassword/td-p/2893108>

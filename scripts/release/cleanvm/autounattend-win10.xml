@@ -247,6 +247,45 @@
           <Description>Let the host drive PowerShell in this guest</Description>
           <CommandLine>powershell -NoProfile -Command "Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned -Force"</CommandLine>
         </SynchronousCommand>
+        <!--
+          VMware Tools, from a third CD-ROM that new-vm.ps1 attaches: the
+          Workstation installation directory's own windows.iso. Every vmrun
+          command under GUEST OS COMMANDS is a request to the Tools service, so
+          until this runs the host can start this machine and nothing else, and
+          "did the install finish" has nobody to ask.
+
+          The disc is found by the one file only it carries — the Windows
+          installation ISO has a setup.exe at its root too, and running that one
+          here would start Windows Setup all over again.
+
+          The switches are Broadcom's documented silent install
+          (KB 376237, fetched 2026-08-27):
+              setup.exe /S /v"/qn REBOOT=R"
+          REBOOT=R suppresses the installer's own restart so that the two
+          commands below can still run; the restart happens at the end of this
+          list instead, which is what puts the Tools drivers in place.
+        -->
+        <SynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Description>Install VMware Tools silently from the third CD-ROM</Description>
+          <CommandLine>cmd /c for %d in (D E F G H I J K L M N O P Q R S T U V W X Y Z) do @if exist %d:\VMwareToolsUpgrader.exe start /wait %d:\setup.exe /S /v&quot;/qn REBOOT=R&quot;</CommandLine>
+        </SynchronousCommand>
+        <!--
+          The sentinel the host polls for, armed here and written after the
+          restart. RunOnce rather than a file written now, because a sentinel
+          that exists before the restart would tell the host the machine is
+          ready while it is still on its way down.
+        -->
+        <SynchronousCommand wcm:action="add">
+          <Order>4</Order>
+          <Description>Arm the sentinel the host polls for, to be written after the restart</Description>
+          <CommandLine>reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce" /v FolioOobeDone /t REG_SZ /d "cmd /c &gt;C:\folio-vm\oobe-done.txt echo unattended install finished" /f</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>5</Order>
+          <Description>Restart, so the Tools drivers are loaded before the clean snapshot</Description>
+          <CommandLine>shutdown /r /t 20 /c "VMware Tools installed - restarting for the clean snapshot"</CommandLine>
+        </SynchronousCommand>
       </FirstLogonCommands>
     </component>
   </settings>
