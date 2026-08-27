@@ -40684,12 +40684,14 @@ impl Runtime<'_> {
         // pool already offers and the shape the float migration already uses.
         if let Some(mut buffer) = tab.preview_pool.take(source) {
             buffer.source = moved.clone();
-            buffer.name = name.to_owned();
             // The suffix is what the body is drawn from, so a rename that
             // changes it changes the view — `notes.md` to `notes.txt` really
             // does turn a rendered document into a text editor, which is the
-            // filesystem's answer and not ours to soften.
-            buffer.ftype = preview::preview_ftype(name);
+            // filesystem's answer and not ours to soften. **What a new name
+            // cannot take back is the sniff** (§7.32): see
+            // [`preview::PreviewBuffer::rename`], which is where both halves of
+            // that live now.
+            buffer.rename(name.to_owned());
             tab.preview_pool.insert(buffer);
         }
         for (_, pane) in tab.preview_panes.iter_mut() {
@@ -43064,21 +43066,37 @@ impl Runtime<'_> {
     /// that used to ask the buffer alone asks through here, so two surfaces on
     /// one file can disagree about it and both be right.
     ///
-    /// **A page's source is read and not written** (user ruling 2026-08-26;
-    /// DESIGN §7.7 ⑭). The buffer under it is an ordinary text buffer and would
-    /// answer yes on its own — that is the point of the promotion, and it is
-    /// what gets the markup a highlighter and a 64KB cap without a second reader
-    /// being written. What this seat is *on* is still the page, though: its row
-    /// is an address, its name is a title, and the browser drawing it a moment
-    /// ago has no idea a file was edited. So the far face is a reading, exactly
-    /// as the glance card's is, and the two questions a writer would raise —
-    /// what the live document on the glass does with a save, and what the head's
-    /// one verb slot holds when `Save` and `DevTools` both want it — are not
-    /// this ruling's to answer.
+    /// **A page's source is the editor** (user ruling 2026-08-27; DESIGN §7.32,
+    /// overturning §7.7 ⑭'s read-only half).
+    ///
+    /// The 2026-08-26 ruling gave a local page a source face and left it a
+    /// reading, and it said in as many words which two questions it was not
+    /// answering: what the live document on the glass does with a save, and
+    /// which of `Save` and `DevTools` gets the head's one verb slot. Both are
+    /// answered now and neither needed a new surface.
+    ///
+    /// * **The live document takes a reload.** The file a preview seat is
+    ///   showing is already watched ([`preview_watch`]), and a page whose file
+    ///   moves already takes an ordinary `Reload` — see
+    ///   [`Self::refresh_preview_file`], which is the door a save in *another*
+    ///   editor has always come through. A save in this one is that same event
+    ///   with this window as the writer, so the page behind the source face
+    ///   comes back current without a second mechanism and without the flip
+    ///   knowing anything about it.
+    /// * **The two verbs do not share a slot.** They never did: the head lays
+    ///   out `save`, `flip`, `stop`, `devtools`, `popout` and `lock` as six
+    ///   boxes ([`seats::preview_head_geometry`]), so a page showing its source
+    ///   wears a `Save` beside its `</>` and its developer tools, and the
+    ///   collision the earlier ruling reserved judgement on turned out not to
+    ///   exist.
+    ///
+    /// So nothing is special-cased here at all. The buffer under the source face
+    /// is an ordinary text buffer — that is the whole point of the promotion —
+    /// and it answers this question the way every other text buffer in this
+    /// window does, including its refusals: a truncated head is read-only
+    /// wherever it is shown, and so is a `.pdf`, which has no source face to
+    /// begin with.
     fn preview_is_editable(&self, surface: PreviewSurface) -> bool {
-        if self.page_source_shown_on(surface).is_some() {
-            return false;
-        }
         let md_source = self.preview_md_source(surface);
         self.preview_buffer_on(surface)
             .is_some_and(|buffer| buffer.is_editable(md_source))
@@ -44720,7 +44738,32 @@ impl Runtime<'_> {
         // exactly as before and the *shape* they land in is the paint's.
         let page = self.web_on(seat).map(|web| web.page().clone());
         if let Some(page) = page {
-            let lead = page_foot_lead(&page.url, &page.hover);
+            // **A page turned to its source is a document, and the bubble says a
+            // document's phrase** (user ruling 2026-08-27; `docs/DESIGN.md`
+            // §7.32). The far face edits and saves now, so it owes the same two
+            // receipts every other editing surface in this window owes — the
+            // flashed `Saved`, and the standing `Read-only · 64 KB` or
+            // `Not saved · changed on disk` — and the one place a page has to
+            // put a phrase is this corner.
+            //
+            // **One slot, one phrase, the fresher first**, which is
+            // [`seats::dress_foot`]'s own rule read in a band that has only a
+            // left hand: a confirmation owns the strip while it stands, and what
+            // is underneath it comes back when it goes.
+            //
+            // **And the hover line is silent while the source is up.** The
+            // pointer is over text this window drew; a link target left from the
+            // last frame the browser was on the glass would be a sentence about
+            // a page nobody is looking at.
+            let sourced = self.page_source_shown_on(surface).is_some();
+            let lead = if sourced {
+                self.preview_save_notice(surface, now)
+                    .or_else(|| self.preview_foot_notice(surface, now))
+                    .unwrap_or_default()
+                    .to_owned()
+            } else {
+                page_foot_lead(&page.url, &page.hover)
+            };
             // **And the magnification, when the wheel has just moved it** (user
             // ruling 2026-08-25). The same word the picture beside it says, on
             // this band's own one flash clock — see [`page_foot_flash`], which
@@ -44734,7 +44777,16 @@ impl Runtime<'_> {
             // The receipt, and the ninety milliseconds it takes to trade places
             // with the hover line — see [`Self::foot_saying`]. The two clocks in
             // front of it (`page_foot_flash`'s own) are untouched.
-            let wanted = page_foot_flash(zoomed, opened, now);
+            // **Neither confirmation belongs to the source face.** A zoom is the
+            // engine's magnification and an `Opened` is this window having handed
+            // the file to a browser; both are about the page, and the page is not
+            // what is on the glass. The phrase the source face owes is already in
+            // `lead` above.
+            let wanted = if sourced {
+                None
+            } else {
+                page_foot_flash(zoomed, opened, now)
+            };
             let (flash, dissolved) =
                 self.foot_saying(FootSaying::PageTag(seat), wanted.as_deref(), now);
             let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
@@ -46993,7 +47045,24 @@ impl Runtime<'_> {
     /// seat-shaped question and stays docked-only, because what *it* is for is
     /// hanging chrome off a pane head — see the note there.
     fn page_with_the_keyboard(&self) -> Option<LeafId> {
-        match self.preview_keyboard_surface()? {
+        let surface = self.preview_keyboard_surface()?;
+        // **A surface showing its page's source is not a surface typing goes
+        // into a page on** (user ruling 2026-08-27; DESIGN §7.32). It matters
+        // now that the source face edits: the ordinary way to reach it is to
+        // read the page, press `</>`, and start typing — and the press that read
+        // the page had already handed the keyboard to the engine. Without this
+        // clause `settle_the_web_keyboard` finds the page still "the typing
+        // target", keeps the keys where they are, and every letter goes into a
+        // browser that is not even on the glass.
+        //
+        // Asked here rather than in the settling loop because this is the one
+        // sentence both readers share: the loop takes the keyboard back on it,
+        // and `Focus::web_page` stops claiming `Ctrl+L` and `F12` on it, which
+        // are the page's verbs and not this document's.
+        if self.page_source_shown_on(surface).is_some() {
+            return None;
+        }
+        match surface {
             PreviewSurface::Float(id) => self.page_carried_by(id),
             // And not while the quick edit has it: that is answered by
             // `preview_keyboard_surface` above and is a different surface's
@@ -50351,6 +50420,10 @@ impl Runtime<'_> {
                                     text,
                                     truncated: false,
                                     mtime: None,
+                                    // A composed document's text came out of a
+                                    // program as a `String`; there are no bytes
+                                    // here to be in doubt about (§7.32).
+                                    content_says_text: true,
                                 }),
                                 Err(fault) => {
                                     peek.decline(git_panel::fault_sentence(&fault));
@@ -50368,6 +50441,10 @@ impl Runtime<'_> {
                             // this document is not one.
                             truncated: false,
                             mtime: None,
+                            // And nothing sniffed it, for the same reason:
+                            // a program handed this window a `String`
+                            // (§7.32).
+                            content_says_text: true,
                         }),
                         Err(fault) => buffer.decline(git_panel::fault_sentence(&fault)),
                     }
@@ -54145,7 +54222,21 @@ impl Runtime<'_> {
         Some(FilePeekSubject {
             path: peek.source.file_path().map(Path::to_path_buf),
             name: peek.name.clone(),
-            ftype: preview::preview_ftype(&peek.name),
+            // **The chip says what the name claims, and when the name claims
+            // nothing it says what the bytes said** (user ruling 2026-08-27;
+            // §7.32). The first half is the 2026-08-25 ruling untouched: an
+            // `.html` glance says `web` in the corner and shows the markup
+            // underneath, because the name really does mean page and the body is
+            // a judgement about which reader the card uses. The second half is
+            // this ruling's, and it is not a second rule but the same one asked
+            // of a name with nothing in it: `script.ps1` is in no table, so
+            // there is no claim for the chip to print, and printing `unknown`
+            // over a card full of legible source is the card contradicting
+            // itself.
+            ftype: match preview::preview_ftype(&peek.name) {
+                preview::PreviewFtype::Unknown => buffer.ftype,
+                named => named,
+            },
             // A network path or a type this window will not read says so in the
             // card's own one line, exactly as the preview pane's unknown card
             // does — the refusal is the preview's judgement, borrowed.
@@ -85404,6 +85495,126 @@ mod floated_page_tests {
         );
     }
 
+    /// RED — **the far face of a page is the editor, and saving it brings the
+    /// page back current** (user ruling 2026-08-27; DESIGN §7.32, overturning
+    /// §7.7 ⑭'s read-only half).
+    ///
+    /// The reported defect was one sentence: `.html` could be *read* as source
+    /// and not written. Three things had to become true, and each is one block
+    /// below.
+    ///
+    /// **① The buffer under the source face saves like any other.** It always
+    /// could — it is an ordinary text buffer, which is the whole point of the
+    /// promotion — and the only thing standing between it and a caret was
+    /// [`Runtime::preview_is_editable`]'s first two lines.
+    ///
+    /// **② The keyboard leaves the engine when the source comes up.** The
+    /// ordinary way to reach this face is to read the page, press `</>`, and
+    /// type; the press that read the page had already handed the keys to the
+    /// browser, so without the clause in [`Runtime::page_with_the_keyboard`]
+    /// every letter would go into a browser that is not even on the glass.
+    ///
+    /// **③ The save is what reloads the page**, through the watcher that was
+    /// already there: the file a preview seat shows is watched, a save moves its
+    /// stamp, and [`Runtime::refresh_preview_file`] answers a moved page file
+    /// with an ordinary `Reload`. No new mechanism, and the flip knows nothing
+    /// about any of it.
+    ///
+    /// RED GATE ①: put `if self.page_source_shown_on(surface).is_some() { return
+    /// false; }` back at the top of `preview_is_editable` and the source-reading
+    /// assertion fails — which on screen is the defect verbatim. RED GATE ②:
+    /// drop the same question from `page_with_the_keyboard` and block ② fails.
+    /// RED GATE ③: make `PreviewBuffer::save` write in place instead of
+    /// atomically, or stop `refresh_preview_file` reloading pages, and block ③
+    /// fails.
+    #[test]
+    fn the_source_face_of_a_page_is_the_editor_and_a_save_reloads_the_page() {
+        use crate::preview::{PreviewBuffer, PreviewFtype, PreviewSource, SaveOutcome, read_head};
+        use crate::preview_watch::Stamp;
+
+        // ① The buffer, end to end, on a real file.
+        let dir = std::env::temp_dir().join(format!("bt-page-source-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("index.html");
+        std::fs::write(&path, "<p>one</p>\n").unwrap();
+
+        let mut buffer = PreviewBuffer::new(
+            PreviewSource::file(&path),
+            // A page's own name, as the pane hands it over.
+            "index.html".to_owned(),
+        );
+        buffer.read_a_pages_bytes_as_text();
+        assert_eq!(
+            buffer.ftype,
+            PreviewFtype::Text,
+            "the door both the glance and the `</>` go through promotes it"
+        );
+        buffer.accept(read_head(&path));
+        assert!(
+            buffer.is_editable(false),
+            "and a promoted text buffer has always been editable — \
+             only the surface was refusing"
+        );
+
+        let before = Stamp::of(&path).expect("the file is on the disk");
+        assert!(buffer.edit_content(|text| {
+            text.push_str("<p>two</p>\n");
+            true
+        }));
+        assert_eq!(buffer.save(), SaveOutcome::Saved);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "<p>one</p>\n<p>two</p>\n",
+            "the bytes on the disk are the ones that were typed"
+        );
+
+        // ③ …and the watcher can see that they moved, which is the whole of how
+        // the page behind this face learns about it.
+        assert_ne!(
+            Stamp::of(&path),
+            Some(before),
+            "a save the watcher cannot see is a page that never reloads"
+        );
+        let refresh = fn_body(concat!(
+            "fn refresh_preview_file",
+            "(&mut self, path: &Path) -> Result<()> {"
+        ));
+        assert!(
+            refresh.contains("web.reload(&window.compositor)"),
+            "and a watched file that a page is standing on takes an ordinary reload"
+        );
+        let watched = fn_body(concat!(
+            "fn watched_preview_files",
+            "(&self) -> BTreeSet<PathBuf> {"
+        ));
+        assert!(
+            watched.contains("path_and_tail_of_file_url"),
+            "which requires a local page's own file to be on the watched list"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // ① again, at the surface: the refusal is gone.
+        let editable = fn_body(concat!(
+            "fn preview_is_editable",
+            "(&self, surface: PreviewSurface) -> bool {"
+        ));
+        assert!(
+            !editable.contains("page_source_shown_on"),
+            "a page's source face is not special-cased into read-only any more"
+        );
+
+        // ② The keyboard.
+        let keyboard = fn_body(concat!(
+            "fn page_with_the_keyboard",
+            "(&self) -> Option<LeafId> {"
+        ));
+        assert!(
+            keyboard.contains("page_source_shown_on(surface).is_some()"),
+            "and typing over a source face is not typing into the page under it"
+        );
+    }
+
     /// RED — **turning a page over hides it; it does not close it** (user ruling
     /// 2026-08-26; DESIGN §7.7 ⑭: 「翻回不重载」).
     ///
@@ -108329,6 +108540,7 @@ mod tests {
             text: source.to_owned(),
             truncated: false,
             mtime: None,
+            content_says_text: true,
         });
         let wide = preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0]);
         let narrow = preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0]);
@@ -109671,6 +109883,7 @@ mod tests {
             text: body.to_owned(),
             truncated: false,
             mtime: None,
+            content_says_text: true,
         });
         buffer
     }
@@ -111598,6 +111811,7 @@ mod tests {
             text: body.to_owned(),
             truncated: false,
             mtime: None,
+            content_says_text: true,
         });
         buffer
     }

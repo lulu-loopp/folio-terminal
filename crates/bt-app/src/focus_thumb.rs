@@ -1081,6 +1081,7 @@ mod tests {
             text: body.to_owned(),
             truncated: false,
             mtime: None,
+            content_says_text: true,
         });
         buffer
     }

@@ -3115,6 +3115,20 @@ pub struct PreviewBuffer {
     /// and re-walking sixty-four kilobytes to answer it each time would put the
     /// file's size into the frame budget the head read exists to keep it out of.
     pub max_columns: usize,
+    /// **What the bytes said when this buffer was last read** (user ruling
+    /// 2026-08-27; `docs/DESIGN.md` §7.32).
+    ///
+    /// [`HeadOutcome::Read::content_says_text`], kept — because the question is
+    /// asked twice and the disk is only visited once. The first asking is the
+    /// promotion in [`Self::accept`]; the second is [`Self::rename`], where a
+    /// file that has just been called something nobody listed must not lose the
+    /// answer this window already has about it. A `script.ps1` renamed to
+    /// `script.ps1.old` is the same bytes it was a moment ago, and a pane that
+    /// went blank on the rename would be re-asking a question it had answered.
+    ///
+    /// `false` until a head lands, which is the honest answer for a buffer that
+    /// has not been read: nothing has said anything about these bytes yet.
+    content_says_text: bool,
 }
 
 impl PreviewBuffer {
@@ -3180,7 +3194,19 @@ impl PreviewBuffer {
                         // `Web` and must not start — this window does not read a
                         // page as text under any name.
                         PreviewFtype::Web => PreviewLoad::Pending,
-                        PreviewFtype::Unknown => PreviewLoad::Refused(PreviewRefusal::Type),
+                        // **A name nobody listed waits for its own bytes** (user
+                        // ruling 2026-08-27; §7.32). It used to be refused here,
+                        // on the name alone, and that is the whole of the
+                        // reported defect: `.ps1` is not in any table this
+                        // window keeps, so a PowerShell script — the one kind of
+                        // file a Windows terminal is most likely to be looking
+                        // at — got the card that says nothing in this window
+                        // reads it. What actually decides is [`read_head`]'s
+                        // [`head_reads_as_text`], and `Pending` is how a buffer
+                        // says the answer is on its way. If the bytes say no,
+                        // [`Self::accept`] files exactly the refusal that used
+                        // to be filed here.
+                        PreviewFtype::Unknown => PreviewLoad::Pending,
                     }
                 }
             }
@@ -3220,7 +3246,32 @@ impl PreviewBuffer {
             head_asked: false,
             stale: false,
             max_columns: 0,
+            content_says_text: false,
         }
+    }
+
+    /// **This buffer's file was renamed** — take the new name, and re-ask what
+    /// it means without throwing away what the bytes already said (user ruling
+    /// 2026-08-27; `docs/DESIGN.md` §7.32).
+    ///
+    /// The suffix is what the body is drawn from, so a rename that changes it
+    /// changes the view: `notes.md` to `notes.txt` really does turn a rendered
+    /// document into a text editor, which is the filesystem's answer and not
+    /// ours to soften.
+    ///
+    /// **What the name cannot take back is the sniff.** A file this window read
+    /// and found to be text is text; renaming it to something no table lists
+    /// does not make its bytes unreadable, and a pane that answered "no preview
+    /// for this file type" about the document it was showing one keystroke
+    /// earlier would be this window forgetting an answer it already has. So the
+    /// name's judgement is asked first and `Unknown` — and only `Unknown` — is
+    /// overruled by the evidence.
+    pub fn rename(&mut self, name: String) {
+        self.name = name;
+        self.ftype = match preview_ftype(&self.name) {
+            PreviewFtype::Unknown if self.content_says_text => PreviewFtype::Text,
+            named => named,
+        };
     }
 
     /// **The buffer a glance takes over a file** (user ruling 2026-08-25;
@@ -3299,13 +3350,22 @@ impl PreviewBuffer {
     /// be dropped.
     /// **And whether one is still owed.** A read already out with the worker is
     /// not a read to ask for — see [`Self::head_asked`].
+    ///
+    /// **`Unknown` is on this lane since 2026-08-27** (user ruling; §7.32), and
+    /// it is the whole of how a name nobody listed gets an answer: the sniff is
+    /// a question about bytes, bytes come off a disk, and the disk is this
+    /// worker's. Nothing new reads a file — the read that was already the
+    /// preview's one trip is the read the verdict comes back on.
     pub fn wants_head_read(&self) -> bool {
         self.source.file_path().is_some()
             && (self.load == PreviewLoad::Pending || self.stale)
             && !self.head_asked
             && matches!(
                 self.ftype,
-                PreviewFtype::Text | PreviewFtype::Markdown | PreviewFtype::Table
+                PreviewFtype::Text
+                    | PreviewFtype::Markdown
+                    | PreviewFtype::Table
+                    | PreviewFtype::Unknown
             )
     }
 
@@ -3611,7 +3671,31 @@ impl PreviewBuffer {
                 text,
                 truncated,
                 mtime,
+                content_says_text,
             } => {
+                self.content_says_text = content_says_text;
+                // **The sniff, and the one place it is read** (user ruling
+                // 2026-08-27; §7.32). A name in a table has already been
+                // answered and this cannot touch it — `.txt` full of Latin-1 is
+                // text because it is called `.txt`, and the strict verdict below
+                // would say otherwise. Only a name that fell all the way to
+                // `Unknown` asks the bytes, and only then is the answer here the
+                // answer at all.
+                if self.ftype == PreviewFtype::Unknown {
+                    if !content_says_text {
+                        // Exactly the refusal `PreviewBuffer::new` used to file
+                        // on the name alone: nothing in this window reads this
+                        // kind of file. It is the same card, reached by
+                        // evidence instead of by a table.
+                        self.content = None;
+                        self.truncated = false;
+                        self.max_columns = 0;
+                        self.disk_mtime = None;
+                        self.load = PreviewLoad::Refused(PreviewRefusal::Type);
+                        return;
+                    }
+                    self.ftype = PreviewFtype::Text;
+                }
                 self.max_columns = widest_line_columns(&text);
                 self.content = Some(text);
                 self.truncated = truncated;
@@ -3619,6 +3703,22 @@ impl PreviewBuffer {
                 self.load = PreviewLoad::Ready;
             }
             HeadOutcome::Refused(refusal) => {
+                // **A name that claimed nothing cannot be contradicted** (user
+                // ruling 2026-08-27; §7.32). [`PreviewRefusal::Binary`]'s own
+                // words are "the head held a NUL, *whatever the name claimed*" —
+                // it is a sentence about a file that said it was text and was
+                // not, and a name no table lists never said anything. So what it
+                // gets is the card it has always got, and the two ways of
+                // failing the sniff do not produce two different sentences about
+                // one file.
+                //
+                // A **fault** is never turned: a disk saying no is news whatever
+                // the file is called, and it is the one refusal here whose
+                // subject is not the bytes.
+                let refusal = match (self.ftype, refusal) {
+                    (PreviewFtype::Unknown, PreviewRefusal::Binary) => PreviewRefusal::Type,
+                    (_, refusal) => refusal,
+                };
                 self.content = None;
                 self.truncated = false;
                 self.max_columns = 0;
@@ -4012,8 +4112,178 @@ pub enum HeadOutcome {
         /// about a file that had already been replaced between the two, which
         /// is precisely the race the answer exists to detect.
         mtime: Option<SystemTime>,
+        /// **Whether the bytes themselves say this is text** —
+        /// [`head_reads_as_text`]'s verdict, carried back with the head that
+        /// answered it (user ruling 2026-08-27; `docs/DESIGN.md` §7.32).
+        ///
+        /// It rides on the head rather than being a question of its own because
+        /// it is a fact about the very bytes that were just read: a second
+        /// `PreviewWant` for it would be a second trip to the same disk for the
+        /// same 64KB, and the two trips could disagree about a file being
+        /// written to right now.
+        ///
+        /// **Only a buffer whose *name* nobody could classify reads it.** A name
+        /// in [`TEXT_EXTENSIONS`] is text because it is listed, and the body it
+        /// gets is a lossy decode on purpose — a preview that refused a Latin-1
+        /// log file over one byte is a preview that refuses log files. This is
+        /// the stricter question the fast path never has to ask, and
+        /// [`PreviewBuffer::accept`] is the one place it is asked.
+        ///
+        /// A composed document — a git diff, a git show — passes `true`: its
+        /// text came out of a program that handed this window a `String`, and
+        /// there are no bytes here to be in doubt about.
+        content_says_text: bool,
     },
     Refused(PreviewRefusal),
+}
+
+/// **How many bytes of a head decide whether an unnamed kind of file is text**
+/// (user ruling 2026-08-27; `docs/DESIGN.md` §7.32).
+///
+/// Git's own number. `buffer_is_binary` looks at the first 8000 bytes of a blob
+/// and calls it binary if it finds a NUL, and the reason to borrow the constant
+/// rather than to pick one is that this window is answering git's question — "is
+/// there any point showing this to a human as text" — about the same files, on
+/// the same machines, and an answer that disagreed with the tool the reader
+/// already trusts would be a second opinion nobody asked for.
+///
+/// It is deliberately **less** than [`PREVIEW_HEAD_BYTES`]: the head is what
+/// gets *drawn*, and this is what gets *judged*. A judgement that walked the
+/// whole 64KB would spend four times the work to answer a question that is
+/// settled, in every real binary format, inside the first few dozen bytes.
+pub const TEXT_SNIFF_BYTES: usize = 8000;
+
+/// **The byte-order mark a head begins with**, and therefore how the bytes after
+/// it are to be read (user ruling 2026-08-27; `docs/DESIGN.md` §7.32).
+///
+/// Marks and nothing else. There is no statistical guessing here and there will
+/// not be: a mark is the file *saying* what it is, and everything else on this
+/// platform that is not UTF-8 is a code page this window has no way to name. So
+/// three marks answer, and every other head is read as UTF-8 — which is what it
+/// almost always is, and what the lossy decode below is written for.
+///
+/// **UTF-16 earns its two arms because Windows writes it.** `Out-File` and every
+/// `>` redirect in Windows PowerShell 5.1 produce UTF-16 LE with a mark, so a
+/// window that treated a NUL as proof of binary would refuse the transcripts its
+/// own shell writes — which is exactly what this window did until this ruling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HeadEncoding {
+    /// No mark. Read as UTF-8.
+    Utf8,
+    /// `EF BB BF`.
+    Utf8Bom,
+    /// `FF FE`.
+    Utf16Le,
+    /// `FE FF`.
+    Utf16Be,
+}
+
+impl HeadEncoding {
+    /// Which mark, if any, these bytes begin with.
+    #[must_use]
+    pub fn of(head: &[u8]) -> Self {
+        if head.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            Self::Utf8Bom
+        } else if head.starts_with(&[0xFF, 0xFE]) {
+            Self::Utf16Le
+        } else if head.starts_with(&[0xFE, 0xFF]) {
+            Self::Utf16Be
+        } else {
+            Self::Utf8
+        }
+    }
+
+    /// How many bytes of the head the mark itself occupies.
+    #[must_use]
+    fn mark_len(self) -> usize {
+        match self {
+            Self::Utf8 => 0,
+            Self::Utf16Le | Self::Utf16Be => 2,
+            Self::Utf8Bom => 3,
+        }
+    }
+
+    /// Whether the bytes after the mark are pairs rather than octets.
+    #[must_use]
+    fn is_utf16(self) -> bool {
+        matches!(self, Self::Utf16Le | Self::Utf16Be)
+    }
+
+    /// The bytes this head carries **after** its mark.
+    #[must_use]
+    fn body(self, head: &[u8]) -> &[u8] {
+        &head[self.mark_len().min(head.len())..]
+    }
+}
+
+/// **Whether these bytes are text on their own evidence** (user ruling
+/// 2026-08-27; `docs/DESIGN.md` §7.32).
+///
+/// The judgement a name that nobody listed is promoted on, and the whole of it:
+/// the head decodes under the encoding its mark declares, and the first
+/// [`TEXT_SNIFF_BYTES`] of it hold no NUL.
+///
+/// **Why decoding is asked as well as the NUL.** A NUL alone is git's rule and
+/// it is the right rule for a *byte* stream, but the two UTF-16 arms are full of
+/// NULs by construction — every ASCII character in a UTF-16 LE file is a letter
+/// followed by one — so the question has to be asked of the characters and not
+/// of the octets. Once it is asked of characters, "does it decode" is already
+/// most of the answer, and asking it costs one pass either way.
+///
+/// **A sequence the cut broke in half is the cut's fault, not the file's.** The
+/// window ends at a fixed offset, so the last character of a large file's window
+/// is very often incomplete; refusing on it would make a file's classification
+/// depend on where 8000 bytes happens to land inside it.
+#[must_use]
+pub fn head_reads_as_text(head: &[u8]) -> bool {
+    let encoding = HeadEncoding::of(head);
+    let body = encoding.body(head);
+    let cut = body.len() > TEXT_SNIFF_BYTES;
+    let window = &body[..body.len().min(TEXT_SNIFF_BYTES)];
+    if encoding.is_utf16() {
+        // The trailing half-pair is forgiven **only when there was a cut**, on
+        // the UTF-8 arm's own terms below: a file that simply ends on a lone
+        // high surrogate is malformed, and nothing here should call it text.
+        let units = utf16_units(window, encoding == HeadEncoding::Utf16Le, cut);
+        return char::decode_utf16(units)
+            .all(|decoded| matches!(decoded, Ok(character) if character != '\0'));
+    }
+    match std::str::from_utf8(window) {
+        Ok(text) => !text.contains('\0'),
+        // The one error this forgives, and only when there really was a cut: a
+        // sequence that runs off the end of the window (`error_len() == None`)
+        // with everything before it valid.
+        Err(error) => {
+            cut && error.error_len().is_none() && !window[..error.valid_up_to()].contains(&0)
+        }
+    }
+}
+
+/// The `u16`s a run of UTF-16 bytes spells.
+///
+/// A trailing odd byte is dropped and so — when `whole_pairs` is set — is a
+/// trailing lone high surrogate: both are artefacts of where the caller stopped
+/// reading rather than facts about the file, which is [`trim_partial_utf8`]'s own
+/// sentence one encoding over.
+fn utf16_units(bytes: &[u8], little_endian: bool, whole_pairs: bool) -> Vec<u16> {
+    let mut units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| {
+            if little_endian {
+                u16::from_le_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_be_bytes([pair[0], pair[1]])
+            }
+        })
+        .collect();
+    if whole_pairs
+        && units
+            .last()
+            .is_some_and(|unit| (0xD800..0xDC00).contains(unit))
+    {
+        units.pop();
+    }
+    units
 }
 
 /// How a save turned out.
@@ -4142,16 +4412,35 @@ pub fn read_head(path: &Path) -> HeadOutcome {
     // calls by name a file can be replaced entirely, and a stamp belonging to a
     // file other than the one that was read is worse than no stamp at all.
     let mtime = file.metadata().ok().and_then(|meta| meta.modified().ok());
+    // **The strict question, asked of every head and read by almost none of
+    // them** (user ruling 2026-08-27; §7.32). It is what a name nobody listed is
+    // promoted on — see [`HeadOutcome::Read::content_says_text`] — and it is
+    // computed here because here is where the bytes are.
+    let content_says_text = head_reads_as_text(&head);
+    let encoding = HeadEncoding::of(&head);
     // The one sniff §7.1.3 asks for, and the only one that is nearly free and
     // nearly never wrong: text does not hold a NUL, and every binary format
     // worth refusing holds one in its first few bytes.
-    if head.contains(&0) {
+    //
+    // **Except behind a UTF-16 mark**, where a NUL is what an ASCII letter is
+    // spelled with. A file that says it is UTF-16 and then decodes is text
+    // whatever its octets look like; a file that says it is UTF-16 and does
+    // *not* decode is a binary file that happened to begin with those two
+    // bytes, and it is refused on the same word this line has always refused
+    // on.
+    let holds_a_nul = if encoding.is_utf16() {
+        !content_says_text
+    } else {
+        head.contains(&0)
+    };
+    if holds_a_nul {
         return HeadOutcome::Refused(PreviewRefusal::Binary);
     }
     HeadOutcome::Read {
         text: decode_head(&head, truncated),
         truncated,
         mtime,
+        content_says_text,
     }
 }
 
@@ -4162,13 +4451,31 @@ pub fn read_head(path: &Path) -> HeadOutcome {
 /// character the *cut* broke in half: that replacement character would be an
 /// artefact of the limit rather than of the file, and it would sit at the end of
 /// every truncated CJK document.
+///
+/// **The mark is read first** (user ruling 2026-08-27; §7.32). A head that
+/// declares UTF-16 is decoded as UTF-16 and a UTF-8 mark is eaten rather than
+/// drawn as `` at the top of the body — one function, because the encoding a
+/// file is *judged* under ([`head_reads_as_text`]) and the encoding it is *shown*
+/// in have to be the same one or a promoted file would be drawn as mojibake.
 fn decode_head(head: &[u8], truncated: bool) -> String {
-    let head = if truncated {
-        trim_partial_utf8(head)
+    let encoding = HeadEncoding::of(head);
+    let body = encoding.body(head);
+    if encoding.is_utf16() {
+        // The pairing is `truncated`'s business for [`trim_partial_utf8`]'s
+        // reason exactly: a high surrogate whose low half is past the cut is the
+        // cut's artefact, and a replacement character parked at the end of every
+        // long UTF-16 document is a lie about the file.
+        let units = utf16_units(body, encoding == HeadEncoding::Utf16Le, truncated);
+        return char::decode_utf16(units)
+            .map(|decoded| decoded.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect();
+    }
+    let body = if truncated {
+        trim_partial_utf8(body)
     } else {
-        head
+        body
     };
-    String::from_utf8_lossy(head).into_owned()
+    String::from_utf8_lossy(body).into_owned()
 }
 
 /// Drop a trailing UTF-8 sequence the caller's cut left incomplete.
@@ -4812,6 +5119,7 @@ mod tests {
             text: text.to_owned(),
             truncated,
             mtime: None,
+            content_says_text: true,
         }
     }
 
@@ -5104,6 +5412,7 @@ mod tests {
             text: "fn main() {}\n".to_owned(),
             truncated: false,
             mtime: None,
+            content_says_text: true,
         });
         assert!(!read.claim_head_read(), "there is nothing left to ask");
     }
@@ -5317,6 +5626,7 @@ mod tests {
             text: "# one\n".into(),
             truncated: false,
             mtime: None,
+            content_says_text: true,
         });
         assert_eq!(buffer.load, PreviewLoad::Ready);
         assert!(!buffer.wants_head_read(), "nothing is owed");
@@ -5344,6 +5654,7 @@ mod tests {
             text: "# two\n".into(),
             truncated: false,
             mtime: None,
+            content_says_text: true,
         });
         assert!(!buffer.wants_head_read(), "and the answer closes it");
 
@@ -5805,9 +6116,15 @@ mod tests {
             share.load,
             PreviewLoad::Refused(PreviewRefusal::NetworkPath)
         );
-        // And the regression half: a name with no reader at all is refused for
-        // its type exactly as it always was.
-        let unknown = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.exe"), "a.exe".to_owned());
+        // And the regression half, **as §7.32 left it**: a name with no reader
+        // at all is no longer refused *here* — it waits for its own bytes — but
+        // it is still refused for its type when they come back saying binary,
+        // which is the card this line has always been about. See
+        // `an_unreadable_type_asks_the_disk_once_and_refuses_on_the_answer`.
+        let mut unknown =
+            PreviewBuffer::new(PreviewSource::file(r"C:\w\a.exe"), "a.exe".to_owned());
+        assert_eq!(unknown.load, PreviewLoad::Pending);
+        unknown.accept(HeadOutcome::Refused(PreviewRefusal::Binary));
         assert_eq!(unknown.load, PreviewLoad::Refused(PreviewRefusal::Type));
     }
 
@@ -5990,6 +6307,7 @@ mod tests {
                 text: "one line\n".to_owned(),
                 truncated: false,
                 mtime: file_mtime(&small),
+                content_says_text: true,
             }
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -6034,17 +6352,56 @@ mod tests {
         assert!(!buffer.wants_head_read());
     }
 
-    /// A type with no reader never asks the disk either.
+    /// A type with no reader **asks the disk once** and refuses on the answer
+    /// (user ruling 2026-08-27; `docs/DESIGN.md` §7.32).
     ///
-    /// Mutation: give [`PreviewFtype::Unknown`] `PreviewLoad::Pending`.
+    /// It used to refuse here, on the name, and this test asserted that. The
+    /// ruling overturned it in one sentence — 文本由内容判定,不由扩展名 — because
+    /// a list of suffixes is never finished and `.ps1` was the proof. What
+    /// survives unchanged is the other half of the old assertion: **a name the
+    /// tables *do* know is never sniffed**, and a network path is refused before
+    /// any of this, because that refusal is about the path and not about the
+    /// bytes.
+    ///
+    /// Mutation: give [`PreviewFtype::Unknown`] `PreviewLoad::Refused` back and
+    /// the first block fails; let a `.rs` file's ftype be decided by
+    /// [`PreviewBuffer::accept`] and the last block does.
     #[test]
-    fn an_unreadable_type_is_refused_before_the_disk_is_asked() {
-        let buffer = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.exe"), "a.exe".to_owned());
-        assert_eq!(buffer.load, PreviewLoad::Refused(PreviewRefusal::Type));
-        assert!(!buffer.wants_head_read());
-        let text = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.rs"), "a.rs".to_owned());
+    fn an_unreadable_type_asks_the_disk_once_and_refuses_on_the_answer() {
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.exe"), "a.exe".to_owned());
+        assert_eq!(
+            buffer.load,
+            PreviewLoad::Pending,
+            "the name has no opinion, so the bytes are asked"
+        );
+        assert!(buffer.wants_head_read());
+        assert!(buffer.claim_head_read());
+        buffer.accept(HeadOutcome::Read {
+            text: "MZ\u{0}".to_owned(),
+            truncated: false,
+            mtime: None,
+            content_says_text: false,
+        });
+        assert_eq!(
+            buffer.load,
+            PreviewLoad::Refused(PreviewRefusal::Type),
+            "and the card it lands in is the one it always got"
+        );
+        assert!(!buffer.wants_head_read(), "asked once, answered once");
+
+        let mut text = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.rs"), "a.rs".to_owned());
         assert_eq!(text.load, PreviewLoad::Pending);
         assert!(text.wants_head_read());
+        // A listed name is text because it is listed. The strict verdict is not
+        // even consulted — which is what keeps a Latin-1 log file previewable.
+        text.accept(HeadOutcome::Read {
+            text: "caf\u{fffd} au lait\n".to_owned(),
+            truncated: false,
+            mtime: None,
+            content_says_text: false,
+        });
+        assert_eq!(text.ftype, PreviewFtype::Text);
+        assert_eq!(text.load, PreviewLoad::Ready);
     }
 
     // ── slice 2: the read-only view family ──────────────────────────────────
@@ -8202,5 +8559,241 @@ mod tests {
             &[],
         );
         assert_eq!(pool.len(), 5);
+    }
+
+    // ── §7.32: text is decided by content when the name will not say ────────
+
+    /// **RED GATE ①** (user report 2026-08-27; `docs/DESIGN.md` §7.32).
+    ///
+    /// A PowerShell script has no row in [`TEXT_EXTENSIONS`] and never will —
+    /// the point of the ruling is that no list of suffixes is ever finished — so
+    /// the whole of its preview is the sniff: the name falls to `Unknown`, the
+    /// buffer waits instead of refusing, and the head that comes back promotes
+    /// it.
+    ///
+    /// Mutation: put `PreviewFtype::Unknown => PreviewLoad::Refused(...Type)`
+    /// back in [`PreviewBuffer::new`] and the first assertion fails; drop
+    /// `PreviewFtype::Unknown` from [`PreviewBuffer::wants_head_read`] and the
+    /// second does; drop the promotion in [`PreviewBuffer::accept`] and the
+    /// last two do.
+    #[test]
+    fn a_script_nobody_listed_previews_as_text() {
+        let dir = scratch("script");
+        let path = dir.join("Deploy.ps1");
+        std::fs::write(&path, "param(\n    [string]$Target\n)\n").unwrap();
+
+        assert_eq!(
+            preview_ftype("Deploy.ps1"),
+            PreviewFtype::Unknown,
+            "the table has no opinion about it, which is the whole premise"
+        );
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(&path), "Deploy.ps1".to_owned());
+        assert_eq!(
+            buffer.load,
+            PreviewLoad::Pending,
+            "so the name refuses nothing — the bytes have not been asked yet"
+        );
+        assert!(
+            buffer.claim_head_read(),
+            "and the question that asks them is the preview's own one read"
+        );
+
+        buffer.accept(read_head(&path));
+        assert_eq!(
+            buffer.ftype,
+            PreviewFtype::Text,
+            "the bytes said text, so the file is text"
+        );
+        assert_eq!(buffer.load, PreviewLoad::Ready);
+        assert_eq!(
+            buffer.content.as_deref(),
+            Some("param(\n    [string]$Target\n)\n")
+        );
+        assert_eq!(
+            buffer.view(false),
+            PreviewView::Text,
+            "and a text buffer is drawn as text, on the surface every other one is"
+        );
+        assert!(
+            buffer.is_editable(false),
+            "including the caret — a text preview is an editor (§7.1.6c-4c)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **RED GATE ②** — the sniff refuses as readily as it promotes.
+    ///
+    /// The card a name nobody listed used to get by default is exactly the card
+    /// it still gets when its bytes are not text, and it must be *that* card:
+    /// "nothing in this window reads this kind of file", not a sentence about
+    /// the disk.
+    ///
+    /// Mutation: promote unconditionally in [`PreviewBuffer::accept`] and the
+    /// ftype assertion fails; make [`head_reads_as_text`] ignore the NUL and it
+    /// fails one line earlier.
+    #[test]
+    fn a_binary_with_an_unknown_name_stays_unknown() {
+        let dir = scratch("unknown-binary");
+        let path = dir.join("bundle.pak");
+        std::fs::write(&path, b"PAK\x01\x00\x00\x00\x08entries follow").unwrap();
+
+        assert!(
+            !head_reads_as_text(b"PAK\x01\x00\x00\x00\x08entries follow"),
+            "a NUL inside the sniff window is the whole of git's own rule"
+        );
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(&path), "bundle.pak".to_owned());
+        assert!(buffer.claim_head_read());
+        buffer.accept(read_head(&path));
+        assert_eq!(
+            buffer.ftype,
+            PreviewFtype::Unknown,
+            "the bytes did not say text, so nothing promoted it"
+        );
+        assert_eq!(
+            buffer.load,
+            PreviewLoad::Refused(PreviewRefusal::Type),
+            "and the card is the one this name has always got"
+        );
+        assert_eq!(buffer.content, None);
+        assert_eq!(buffer.view(false), PreviewView::None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **RED GATE ③** — a mark is the file saying what it is, and NUL is not
+    /// evidence against a file that has said UTF-16.
+    ///
+    /// This is not a curiosity: `Out-File` and every `>` in Windows PowerShell
+    /// 5.1 write UTF-16 LE with a mark, so before this ruling the transcripts
+    /// this product's own shell produces were refused as binary.
+    ///
+    /// Mutation: delete the UTF-16 arms of [`HeadEncoding::of`] and every
+    /// assertion below fails — the head is refused as binary before it is ever
+    /// classified.
+    #[test]
+    fn a_utf16_file_with_a_bom_is_text() {
+        let dir = scratch("utf16");
+        let mut le = vec![0xFF, 0xFE];
+        for unit in "Write-Host 'hi'\n".encode_utf16() {
+            le.extend_from_slice(&unit.to_le_bytes());
+        }
+        let mut be = vec![0xFE, 0xFF];
+        for unit in "Write-Host 'hi'\n".encode_utf16() {
+            be.extend_from_slice(&unit.to_be_bytes());
+        }
+        assert!(head_reads_as_text(&le), "little-endian, marked");
+        assert!(head_reads_as_text(&be), "big-endian, marked");
+        // The same bytes with the mark taken off are a file that has said
+        // nothing, and then the NULs are all there is to go on.
+        assert!(!head_reads_as_text(&le[2..]), "unmarked UTF-16 is not text");
+
+        let path = dir.join("transcript.log1");
+        std::fs::write(&path, &le).unwrap();
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(&path), "transcript.log1".into());
+        assert!(buffer.claim_head_read());
+        buffer.accept(read_head(&path));
+        assert_eq!(buffer.ftype, PreviewFtype::Text);
+        assert_eq!(
+            buffer.content.as_deref(),
+            Some("Write-Host 'hi'\n"),
+            "and it is *decoded*, not shown as one letter per two bytes"
+        );
+
+        // A file that claims UTF-16 and then does not decode is a binary file
+        // that happened to start with those two bytes, and it is refused on the
+        // word this window has always refused on.
+        let liar = dir.join("liar.bin1");
+        std::fs::write(&liar, b"\xFF\xFE\x00\xD8\x00\x00\x01\x00").unwrap();
+        assert_eq!(
+            read_head(&liar),
+            HeadOutcome::Refused(PreviewRefusal::Binary)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **RED GATE ④** — the sniff is a disk read, and disk reads are the
+    /// worker's.
+    ///
+    /// The window thread cannot be made to block on a file: that is
+    /// [`PreviewWorker`]'s whole reason for existing, and a sniff bolted onto
+    /// [`preview_ftype`] — which is asked of a *name*, on the frame that draws
+    /// the row — would have put a `File::open` inside the paint.
+    ///
+    /// **Pinned by reading this file's own source**, because what is being
+    /// asserted is a fact about the call graph rather than about a value: there
+    /// is exactly one non-test caller of [`read_head`] in this crate and it is
+    /// the closure [`PreviewWorker::spawn`] hands to `spawn_at_priority`.
+    ///
+    /// Mutation: call `read_head` (or `head_reads_as_text`) from
+    /// [`preview_ftype`] or from [`PreviewBuffer::new`] and the count moves.
+    #[test]
+    fn sniffing_happens_off_the_window_thread() {
+        const SOURCE: &str = include_str!("preview.rs");
+        let (module, tests) = SOURCE
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file carries its tests at the end");
+        assert!(!tests.is_empty(), "and the split found them");
+
+        // The definition, and the one call.
+        assert_eq!(
+            module.matches("read_head(").count(),
+            2,
+            "read_head is defined once and called once outside the tests"
+        );
+        let spawned_at = module
+            .find("pub fn spawn(proxy: EventLoopProxy<AppEvent>)")
+            .expect("PreviewWorker::spawn is declared here");
+        let called_at = module
+            .rfind("read_head(")
+            .expect("the call the count above just found");
+        assert!(
+            called_at > spawned_at,
+            "and that one call is inside the worker's thread body"
+        );
+
+        // Neither door the window thread asks is allowed to touch a disk. Both
+        // are pure functions of a name and a source, and the assertions say so
+        // in the vocabulary a reviewer would use.
+        for signature in [
+            "pub fn preview_ftype(name: &str) -> PreviewFtype {",
+            "pub fn new(source: PreviewSource, name: String) -> Self {",
+        ] {
+            let body = one_function(module, signature);
+            // **Calls, not mentions.** Both of these functions are allowed to
+            // *say* where the answer comes from — that is what their comments
+            // are for — and neither may go and get it.
+            for disk in [
+                "read_head(",
+                "head_reads_as_text(",
+                "File::open(",
+                "fs::read",
+                "metadata(",
+            ] {
+                assert!(
+                    !body.contains(disk),
+                    "{signature} must not reach the disk, and it calls {disk}"
+                );
+            }
+        }
+    }
+
+    /// One function's text, from its signature to whichever closing brace comes
+    /// first — [`sniffing_happens_off_the_window_thread`]'s reader.
+    ///
+    /// Both indentations are tried and the **nearer** wins, because the two
+    /// functions read here are declared at different depths: a free function
+    /// closes at column zero and a method closes four spaces in, and taking the
+    /// first of the two that merely *exists* would hand a method the whole rest
+    /// of its `impl`.
+    fn one_function<'src>(source: &'src str, signature: &str) -> &'src str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &source[start + signature.len()..];
+        let end = ["\n}", "\n    }"]
+            .into_iter()
+            .filter_map(|close| rest.find(close))
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
     }
 }
