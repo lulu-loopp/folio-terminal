@@ -133,6 +133,29 @@ pub enum FloatTrigger {
     Tab(TabId),
     /// The folder button on a terminal pane's own head, in a split tab (H110).
     Pane(LeafId),
+    /// **A folder named in a pane's own output** (user ruling 2026-08-27,
+    /// `docs/DESIGN.md` §7.29) — the run of cells a verified directory is
+    /// printed on, hovered.
+    ///
+    /// A third trigger and not a third window: what comes up is the same peek
+    /// the two buttons above raise, on the same intent, with the same head, the
+    /// same tree and the same six pixels of promotion. The ruling is that a
+    /// folder has one card however you point at it, and this is the door from
+    /// the one surface that had none.
+    ///
+    /// It names a **cell** rather than a path, and that is what keeps
+    /// `FloatTrigger` `Copy` and re-askable: the root, like the rectangle, is
+    /// read back off the frame every time it is wanted (G86's rule — "looked up
+    /// again, by identity"), so a reference scrolled away or overwritten stops
+    /// answering and the peek hanging off it goes, exactly as a peek goes when
+    /// the tab that summoned it closes.
+    Reference {
+        /// The pane whose output it is printed in.
+        leaf: LeafId,
+        /// Its flat cell index in that pane's last-drawn frame — `row * columns
+        /// + column`, the same number [`crate::RowHost::Terminal`] carries.
+        cell: u32,
+    },
 }
 
 /// A float that has been torn off a docked column carries no trigger: the header
