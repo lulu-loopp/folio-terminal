@@ -3962,6 +3962,72 @@ find_pwsh()           = Some(...\Microsoft.PowerShell_7.6.5.0_x64__8wekyb3d8bbwe
 - `a_card_heads_run_arrives_as_ink_rather_than_appearing`:寄存器给 0.4 时 ✕ 与空心钉都是 0.4(一次显形不许两半错开),钉住那张的实心钉是 1.0;寄存器为空时照 hover 画满。
 
 **日期:2026-08-27 用户实证,当日落地。**
+### 7.27 出厂即最好的那把 shell,提示条一次运行只问一次(发布前审计缺口 B「成因 A」与 B2 的两条改判,2026-08-27 用户裁决;`crates/bt-app/src/{profiles,settings,i18n,shell_integration,main}.rs`)
+
+**由头。** `docs/plans/release/readiness-gaps-2026-08-27.md` 的缺口 B 是「一台全新机器上第一次双击 `folio.exe` 会看到什么」。§7.25 已经把 B1 的「成因 B」翻掉了(探测没病),剩下的两条是**产品裁过的行为本身**,不是 bug——所以它们不能被修,只能被改判。用户当日两条都改了。
+
+#### ① 首启默认 shell = 内置探测顺序里第一个在场的
+
+**旧行为。** `settings.json` 的 `default_profile` 未设时是空串,`default_profile_in` 把「空串」「本 build 没有的 id」「这台机器起不来的 id」三种情形一律落到 `fallback_profile()` = `winps`。于是**装了 PowerShell 7 的机器,第一个 tab 仍旧是 Windows PowerShell 5.1**;测试自己承认这一点(`the_default_profile_is_the_stored_choice_unless_this_machine_cannot_honour_it` 里那句「nobody has ever opened the setting: the floor」,左边第二个参数是装齐了的机器)。
+
+**这不是 bug 而是 2026-08-11 那条裁决的射程。** 那天裁的是**地板**:地板必须是一个「属于 Windows 的一部分、永不为空」的行,所以从 `pwsh` 换成 `winps`。这条今天原样成立。错的是把**「没人选过」**和**「选的那个坏了」**当成同一个问题的两个名字——地板回答的是后者,而前者是一台从来没被问过的机器,它欠的是它有的最好的那把 shell,不是那把总在的。
+
+**新行为(用户裁决 2026-08-27)。** 未设时走**内置探测顺序** `pwsh → winps → wsl → gitbash → cmd`,取第一个 `is_available` 为真的;一个都不在场时才落地板。三条判据逐条说清:
+
+- **走的是 `SHIPPED_ORDER` 而不是走表。** 表是用户能拖能加的那一张,一次拖动就能改「一台没被问过的机器开哪把 shell」,而用户自建的 profile 停在第一行就能赢——这不是「探测顺序」,是「谁排得靠前」。`SHIPPED_ORDER` 是本 build 的一个事实,拖不动;红门 `the_automatic_default_walks_the_shipped_order` 把它与 `shipped()` 逐条对住,新增或改名一行而忘了这里,那一行会**无声地**掉出这次行走。
+- **地板仍是这条行走的底。** `winps` 指名的是 Windows 自带的那个程序,所以实务上行走最晚停在它;`unwrap_or_else(fallback_profile_in)` 是地板一直背着的那条保证,不是第二条规矩。
+- **未设 ≠ 显式选 winps。** 这是本条裁决的分水岭。用户在对话框里点过 `Windows PowerShell 5.1` 是一个**决定**,它压过这次行走,在正是那台装了 7 的机器上照样开 5.1。`chosen_profile_in` 是这条规矩唯一被写下的地方,`default_profile_in` 与 `default_profile_is_automatic` 两个读者共用它——两份拼法就是徽章长在一行、`+` 开另一行的那种 bug。
+- **降级的两种(id 本 build 没有 / 选的那把卸载了)也走这次行走**,理由是同一条:它们都是「此刻没有一个能生效的选择」。而**存着的 id 一个字不改**,原规矩未动——卸了 Git 不许把「Git Bash」这个答案吃掉,装回去要能自己回来。
+
+**设置页跟着说话。** Profiles 页那枚徽章原来只有 `default` 一个字。首启那一行现在是**没人选过**的一行,而 `default` 写在一个从来没被做出的选择上,会把读者支去 General 页找一个他找不到的改动。所以徽章分两态:`default` / `automatic default`(中文「默认」/「自动默认」),同一个槽、同一种字、同一种墨。`Text::ALL` 520 → **521**。几何这一半不是装饰:徽章挂在**名字的尾巴上**而不是挂在一根自己的列上,右边那串动词是贴着行右沿右对齐的,而 `automatic default` 是 `default` 的两倍多宽——这条裁决唯一可能以坏掉的样子上屏的方式,就是徽章跑到 `Edit` 底下去。红门 `a_default_nobody_chose_says_so_and_still_fits_the_row` 拿本 build 最长的那个名字量,量的是英文列(中文那列四个字,英文十七个字符,宽的是英文)。
+
+**红证(把 `default_profile_in` 写回 2026-08-11 那一句)。**
+
+```
+test profiles::tests::the_default_profile_is_the_stored_choice_unless_this_machine_cannot_honour_it ... FAILED
+assertion `left == right` failed: nobody has ever opened the setting: the first shipped shell
+this machine has, which on a machine with PowerShell 7 is PowerShell 7
+  left: 1
+ right: 0
+```
+
+`left: 1` 是 `winps`,`right: 0` 是 `pwsh`——正是缺口 B 报的那一句「产品出厂即 5.1」。
+
+#### ② PowerShell 整合提示条一次运行只问一次
+
+**旧行为。** `powershell_integration_offer` 是一个**总闸**(默认 `true`),而条带本身是 per-leaf 的、不落盘;`×` 关掉写的是 `Offer::Closed`,注记明写「nothing was decided, so the next PowerShell is asked again」。于是:每次启动都弹一次,**每开一个新的 PowerShell pane 也再弹一次**——四块 PowerShell pane 的人,为同一个文件被问四遍,而且每一遍关掉都什么也没买到。
+
+**这条同样不是 bug。** `×` 什么都不裁是对的,而且这条今天原样成立——它回答的是「这个人说不了吗?」。它答不了的是另一个问题:**「这个人一次运行里可以被问几遍?」** 旧代码里没有任何东西在数这个数,因为没有任何一层是「运行」。
+
+**新行为(用户裁决 2026-08-27)。** 一次运行只问一次:本进程内**第一个真正欠一条提示**的 PowerShell pane 弹一次;此后任何 pane、任何 tab、任何窗都不再弹。「不再提示」仍旧是那枚永久的总闸,「加进 $PROFILE」装上了就不再需要问。
+
+- **数在 `App` 上而不是在窗上**,因为裁的是「运行」而窗不是运行:开第二扇窗不是被问第二次,在第一扇窗里开第四块 pane 也不是。`Offer` 仍旧住在 leaf 上——**这一层数,那一层记**。
+- **不落盘,而且这是刻意的。** 盘上已经有 `powershell_integration_offer`,那是读者亲手结束提问的地方。再写一个「已经问过一次」的布尔,等于造出第三种状态:一个**没有人裁过就不再被问**的问题,而且窗里没有任何一个控件能把它放回去。这枚随进程死,所以明天的启动照问一次。
+- **欠不到的不花钱。** 判据落在 `Offer::Owed` 上而不是落在「这是不是一块 PowerShell」上:一块 `$PROFILE` 里已经有那行的 pane 答 `Silent` 并把这次询问**原样留着**,于是第一块已装、第二块没装的人仍旧被问一次——问的是第二块。
+- **`Closed` 与 `Silent` 的差别随之收窄**成「下一次运行还问不问」,而不再是「下一个 pane 还问不问」。两者仍旧都要存在,理由不变。
+- **规矩写成一个纯函数**(`shell_integration::offer_once_per_run`)而不是写在 `settle_pane_notices` 的循环里,因为那个循环要一个 `Runtime`(要 GPU、要窗、要 App),而这条裁决的每一句都能用两个路径和一个 `bool` 问清楚。`settle_pane_notices` 只做把这枚 `bool` 借进循环、还回 `App` 这一件事——循环借的是这张 tab 的叶子,数住在应用层,进出各一行就是全部的对账。
+
+**红证(把 `offer_once_per_run` 写回 `offer_for` 本身,并把徽章写回只有一态)。**
+
+```
+thread 'shell_integration::tests::one_powershell_is_asked_per_run_and_the_next_run_asks_again'
+panicked at crates/bt-app/src/shell_integration.rs:1885:9:
+the run has spent its ask
+thread 'settings::tests::a_default_nobody_chose_says_so_and_still_fits_the_row'
+panicked at crates/bt-app/src/settings.rs:22306:9:
+the row wears the badge that says which of the two it is
+test result: FAILED. 0 passed; 2 failed
+```
+
+**红门。**
+
+- `shell_integration::tests::one_powershell_is_asked_per_run_and_the_next_run_asks_again`:同一次运行第二块 pane 答 `Silent`;新的一次运行照答 `Owed`;已装的那块答 `Silent` 且**不花掉**这次询问,后面那块没装的照拿到 `Owed`。
+- `profiles::tests::the_default_profile_is_the_stored_choice_unless_this_machine_cannot_honour_it`:装了 7 的机器未设 → `pwsh`;只有 5.1 的机器未设 → `winps`;显式选 5.1 且装了 7 → 5.1;`default_profile_is_automatic` 三态各一句。
+- `profiles::tests::the_automatic_default_walks_the_shipped_order`:`SHIPPED_ORDER` 与 `shipped()` 逐条相等;四行灰掉第五行是答案;全灰落地板。
+- `settings::tests::a_default_nobody_chose_says_so_and_still_fits_the_row`:自动那一态画的是 `automatic default` 而不是 `default`(且不是两枚),右沿停在这一行第一枚动词的左边。
+
+**日期:2026-08-27。**
+
 ## 12. 发布工程
 
 一个能跑的 build 和一个能发的 build 之间隔着七件事,这一节是其中属于「构建与分发」和「CI」的那两件。写在这里而不是写在 workflow 的注释里,是因为其中每一条都是**裁决**:为什么版本只有一处、为什么 `.res` 是自己写的、为什么 `lto` 开或不开、为什么静态 CRT 没有采用——这些在一年后会被重新提起,而 YAML 不是回答它们的地方。
@@ -4076,69 +4142,3 @@ RES 容器是一串对齐的记录,`VS_VERSIONINFO` 是一棵对齐的块树,两
 没有引 `cargo-sbom` 或 `cargo-cyclonedx`:那两个读的是同一份 `cargo metadata` 再重排一遍,买下这次重排的代价是在 release job 里 `cargo install` 一个未钉版本、依赖工具链的二进制——比下面六十行更重的一件要信的东西。哪天有它们答得了而这里答不了的需求(VEX、组件哈希、签名),那天带着需求去把依赖加上。
 
 除时间戳外确定:组件排序固定,文档的 serial number 由组件表推出——同一份 lock file 两次跑出同一个身份。
-
-### 7.27 出厂即最好的那把 shell,提示条一次运行只问一次(发布前审计缺口 B「成因 A」与 B2 的两条改判,2026-08-27 用户裁决;`crates/bt-app/src/{profiles,settings,i18n,shell_integration,main}.rs`)
-
-**由头。** `docs/plans/release/readiness-gaps-2026-08-27.md` 的缺口 B 是「一台全新机器上第一次双击 `folio.exe` 会看到什么」。§7.25 已经把 B1 的「成因 B」翻掉了(探测没病),剩下的两条是**产品裁过的行为本身**,不是 bug——所以它们不能被修,只能被改判。用户当日两条都改了。
-
-#### ① 首启默认 shell = 内置探测顺序里第一个在场的
-
-**旧行为。** `settings.json` 的 `default_profile` 未设时是空串,`default_profile_in` 把「空串」「本 build 没有的 id」「这台机器起不来的 id」三种情形一律落到 `fallback_profile()` = `winps`。于是**装了 PowerShell 7 的机器,第一个 tab 仍旧是 Windows PowerShell 5.1**;测试自己承认这一点(`the_default_profile_is_the_stored_choice_unless_this_machine_cannot_honour_it` 里那句「nobody has ever opened the setting: the floor」,左边第二个参数是装齐了的机器)。
-
-**这不是 bug 而是 2026-08-11 那条裁决的射程。** 那天裁的是**地板**:地板必须是一个「属于 Windows 的一部分、永不为空」的行,所以从 `pwsh` 换成 `winps`。这条今天原样成立。错的是把**「没人选过」**和**「选的那个坏了」**当成同一个问题的两个名字——地板回答的是后者,而前者是一台从来没被问过的机器,它欠的是它有的最好的那把 shell,不是那把总在的。
-
-**新行为(用户裁决 2026-08-27)。** 未设时走**内置探测顺序** `pwsh → winps → wsl → gitbash → cmd`,取第一个 `is_available` 为真的;一个都不在场时才落地板。三条判据逐条说清:
-
-- **走的是 `SHIPPED_ORDER` 而不是走表。** 表是用户能拖能加的那一张,一次拖动就能改「一台没被问过的机器开哪把 shell」,而用户自建的 profile 停在第一行就能赢——这不是「探测顺序」,是「谁排得靠前」。`SHIPPED_ORDER` 是本 build 的一个事实,拖不动;红门 `the_automatic_default_walks_the_shipped_order` 把它与 `shipped()` 逐条对住,新增或改名一行而忘了这里,那一行会**无声地**掉出这次行走。
-- **地板仍是这条行走的底。** `winps` 指名的是 Windows 自带的那个程序,所以实务上行走最晚停在它;`unwrap_or_else(fallback_profile_in)` 是地板一直背着的那条保证,不是第二条规矩。
-- **未设 ≠ 显式选 winps。** 这是本条裁决的分水岭。用户在对话框里点过 `Windows PowerShell 5.1` 是一个**决定**,它压过这次行走,在正是那台装了 7 的机器上照样开 5.1。`chosen_profile_in` 是这条规矩唯一被写下的地方,`default_profile_in` 与 `default_profile_is_automatic` 两个读者共用它——两份拼法就是徽章长在一行、`+` 开另一行的那种 bug。
-- **降级的两种(id 本 build 没有 / 选的那把卸载了)也走这次行走**,理由是同一条:它们都是「此刻没有一个能生效的选择」。而**存着的 id 一个字不改**,原规矩未动——卸了 Git 不许把「Git Bash」这个答案吃掉,装回去要能自己回来。
-
-**设置页跟着说话。** Profiles 页那枚徽章原来只有 `default` 一个字。首启那一行现在是**没人选过**的一行,而 `default` 写在一个从来没被做出的选择上,会把读者支去 General 页找一个他找不到的改动。所以徽章分两态:`default` / `automatic default`(中文「默认」/「自动默认」),同一个槽、同一种字、同一种墨。`Text::ALL` 520 → **521**。几何这一半不是装饰:徽章挂在**名字的尾巴上**而不是挂在一根自己的列上,右边那串动词是贴着行右沿右对齐的,而 `automatic default` 是 `default` 的两倍多宽——这条裁决唯一可能以坏掉的样子上屏的方式,就是徽章跑到 `Edit` 底下去。红门 `a_default_nobody_chose_says_so_and_still_fits_the_row` 拿本 build 最长的那个名字量,量的是英文列(中文那列四个字,英文十七个字符,宽的是英文)。
-
-**红证(把 `default_profile_in` 写回 2026-08-11 那一句)。**
-
-```
-test profiles::tests::the_default_profile_is_the_stored_choice_unless_this_machine_cannot_honour_it ... FAILED
-assertion `left == right` failed: nobody has ever opened the setting: the first shipped shell
-this machine has, which on a machine with PowerShell 7 is PowerShell 7
-  left: 1
- right: 0
-```
-
-`left: 1` 是 `winps`,`right: 0` 是 `pwsh`——正是缺口 B 报的那一句「产品出厂即 5.1」。
-
-#### ② PowerShell 整合提示条一次运行只问一次
-
-**旧行为。** `powershell_integration_offer` 是一个**总闸**(默认 `true`),而条带本身是 per-leaf 的、不落盘;`×` 关掉写的是 `Offer::Closed`,注记明写「nothing was decided, so the next PowerShell is asked again」。于是:每次启动都弹一次,**每开一个新的 PowerShell pane 也再弹一次**——四块 PowerShell pane 的人,为同一个文件被问四遍,而且每一遍关掉都什么也没买到。
-
-**这条同样不是 bug。** `×` 什么都不裁是对的,而且这条今天原样成立——它回答的是「这个人说不了吗?」。它答不了的是另一个问题:**「这个人一次运行里可以被问几遍?」** 旧代码里没有任何东西在数这个数,因为没有任何一层是「运行」。
-
-**新行为(用户裁决 2026-08-27)。** 一次运行只问一次:本进程内**第一个真正欠一条提示**的 PowerShell pane 弹一次;此后任何 pane、任何 tab、任何窗都不再弹。「不再提示」仍旧是那枚永久的总闸,「加进 $PROFILE」装上了就不再需要问。
-
-- **数在 `App` 上而不是在窗上**,因为裁的是「运行」而窗不是运行:开第二扇窗不是被问第二次,在第一扇窗里开第四块 pane 也不是。`Offer` 仍旧住在 leaf 上——**这一层数,那一层记**。
-- **不落盘,而且这是刻意的。** 盘上已经有 `powershell_integration_offer`,那是读者亲手结束提问的地方。再写一个「已经问过一次」的布尔,等于造出第三种状态:一个**没有人裁过就不再被问**的问题,而且窗里没有任何一个控件能把它放回去。这枚随进程死,所以明天的启动照问一次。
-- **欠不到的不花钱。** 判据落在 `Offer::Owed` 上而不是落在「这是不是一块 PowerShell」上:一块 `$PROFILE` 里已经有那行的 pane 答 `Silent` 并把这次询问**原样留着**,于是第一块已装、第二块没装的人仍旧被问一次——问的是第二块。
-- **`Closed` 与 `Silent` 的差别随之收窄**成「下一次运行还问不问」,而不再是「下一个 pane 还问不问」。两者仍旧都要存在,理由不变。
-- **规矩写成一个纯函数**(`shell_integration::offer_once_per_run`)而不是写在 `settle_pane_notices` 的循环里,因为那个循环要一个 `Runtime`(要 GPU、要窗、要 App),而这条裁决的每一句都能用两个路径和一个 `bool` 问清楚。`settle_pane_notices` 只做把这枚 `bool` 借进循环、还回 `App` 这一件事——循环借的是这张 tab 的叶子,数住在应用层,进出各一行就是全部的对账。
-
-**红证(把 `offer_once_per_run` 写回 `offer_for` 本身,并把徽章写回只有一态)。**
-
-```
-thread 'shell_integration::tests::one_powershell_is_asked_per_run_and_the_next_run_asks_again'
-panicked at crates/bt-app/src/shell_integration.rs:1885:9:
-the run has spent its ask
-thread 'settings::tests::a_default_nobody_chose_says_so_and_still_fits_the_row'
-panicked at crates/bt-app/src/settings.rs:22306:9:
-the row wears the badge that says which of the two it is
-test result: FAILED. 0 passed; 2 failed
-```
-
-**红门。**
-
-- `shell_integration::tests::one_powershell_is_asked_per_run_and_the_next_run_asks_again`:同一次运行第二块 pane 答 `Silent`;新的一次运行照答 `Owed`;已装的那块答 `Silent` 且**不花掉**这次询问,后面那块没装的照拿到 `Owed`。
-- `profiles::tests::the_default_profile_is_the_stored_choice_unless_this_machine_cannot_honour_it`:装了 7 的机器未设 → `pwsh`;只有 5.1 的机器未设 → `winps`;显式选 5.1 且装了 7 → 5.1;`default_profile_is_automatic` 三态各一句。
-- `profiles::tests::the_automatic_default_walks_the_shipped_order`:`SHIPPED_ORDER` 与 `shipped()` 逐条相等;四行灰掉第五行是答案;全灰落地板。
-- `settings::tests::a_default_nobody_chose_says_so_and_still_fits_the_row`:自动那一态画的是 `automatic default` 而不是 `default`(且不是两枚),右沿停在这一行第一枚动词的左边。
-
-**日期:2026-08-27。**
