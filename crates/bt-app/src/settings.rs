@@ -38,8 +38,8 @@ use bt_persist::{
 };
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX,
-    FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad,
-    WINDOW_CAPTION_GLYPH_LOGICAL_PX, chrome_palette, rounded_overlay_fill, rounded_overlay_shadow,
+    FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, chrome_palette,
+    rounded_overlay_fill, rounded_overlay_shadow,
 };
 
 use crate::i18n::Text;
@@ -643,15 +643,24 @@ const ENV_GHOSTS: [(&str, &str); 3] = [
 /// type — which is what it is: the editor's heading, wearing the heading's face.
 const CRUMB_MARGIN_TOP_LOGICAL_PX: f32 = 10.0;
 const CRUMB_MARGIN_BOTTOM_LOGICAL_PX: f32 = 2.0;
-/// `.pf-crumb { gap: 6px }`, between the way back, the separator and the name.
+/// `.pf-crumb { gap: 6px }`, between `‹ Profiles`, the `›` and the name.
 const CRUMB_GAP_LOGICAL_PX: f32 = 6.0;
-// The separator between the way back and where you are, and the arrow the way
-// back opens with, are `crate::seats::crumb_separator_mark` and
-// `crate::seats::crumb_back_mark` — one drawing at two quarter turns, which is
-// what makes the pair read as one direction rather than as two glyphs that
-// happen to point. They were `›` and `‹` in the dialog's own type until P1,
-// and the preview rail's own breadcrumb was retired in the same edit and to the
-// same two marks: two breadcrumbs in one window may not be two vocabularies.
+/// The separator the breadcrumb draws between the way back and where you are.
+///
+/// **裁3, 2026-08-26: 「原来的好看」.** P1 spent these two on
+/// `crate::marks::ChromeMark::Chevron` at two quarter turns, on `marks.rs`'s
+/// founding law about codepoints; the acceptance sent them back, and the reason
+/// it is right is that a breadcrumb is a **sentence**. `‹ Profiles › Windows
+/// PowerShell` is a line of type, the guillemets are its punctuation, and
+/// punctuation is measured, spaced, tracked and inked by the run it stands in.
+/// A mark in the middle of a phrase is a glyph the phrase's own metrics know
+/// nothing about. See `crate::seats::PREVIEW_CRUMB_SEPARATOR`, which is the
+/// other breadcrumb in this window and came back in the same edit — two
+/// breadcrumbs in one window may not be two vocabularies.
+const CRUMB_SEPARATOR: &str = "\u{203a}";
+/// And the guillemet `‹ Profiles` opens with — the same character turned, so
+/// the pair reads as one direction and not as two glyphs that happen to point.
+const CRUMB_BACK_PREFIX: &str = "\u{2039} ";
 // `.pf-more > button { width: 26px }` — the `⋯` trigger, which explicitly
 // undoes `.combo > button`'s 118px floor, its hairline and its space-between,
 // because every line of that recipe is wrong for a trigger one glyph wide. The
@@ -6518,10 +6527,10 @@ pub struct EnvRowLayout {
 pub struct CrumbLayout {
     /// The whole line, which is what the heading's band would have been.
     pub band: [f32; 4],
-    /// `‹ Profiles`, the only way back that is a control.
+    /// `‹ Profiles`, the only way back that is a control — the guillemet
+    /// included, because since 裁3 it is a character in that phrase's own run
+    /// and not a mark standing in front of it.
     pub back: [f32; 4],
-    /// The arrow in front of the way back.
-    back_mark: [f32; 4],
     /// The separator's own cell.
     pub separator: [f32; 4],
     /// The profile's own name, which reports and is not a control.
@@ -8248,37 +8257,31 @@ pub fn layout_for_menus(
                 // label's face, and a width measured without the letter-spacing
                 // that face carries is a width one glyph short — which is exactly
                 // far enough for the `›` to sit on the last letter.
-                let back_word = Text::CategoryProfiles.text();
+                //
+                // The guillemet is measured *with* the word (裁3, 2026-08-26):
+                // `‹ Profiles` is one phrase in one run, so it is one string
+                // handed to one measurement, which is also what stops the arrow
+                // and the word drifting apart at a scale factor.
+                let back_word = format!("{CRUMB_BACK_PREFIX}{}", Text::CategoryProfiles.text());
                 let tracked = |text: &str, measure: &mut dyn FnMut(&str, f32) -> f32| {
                     measure(text, font)
                         + font * GROUP_LABEL_TRACKING_EM * text.chars().count() as f32
                 };
-                // The arrow's own box carries its air, so the word starts where
-                // the box ends and no gap is spent between them: the two are one
-                // phrase, and the gap is what separates *phrases*.
-                let back_mark_width = px(crate::seats::compact_head_glyph_box_logical_px(
-                    crate::seats::crumb_back_mark(),
-                )[0]);
-                let back_mark = [band[0], band[1], band[0] + back_mark_width, band[3]];
                 let back = [
                     band[0],
                     band[1],
-                    back_mark[2] + tracked(back_word, measure),
+                    band[0] + tracked(&back_word, measure),
                     band[3],
                 ];
-                let separator_width = px(crate::seats::compact_head_glyph_box_logical_px(
-                    crate::seats::crumb_separator_mark(),
-                )[0]);
                 let separator = [
                     back[2] + px(CRUMB_GAP_LOGICAL_PX),
                     band[1],
-                    back[2] + px(CRUMB_GAP_LOGICAL_PX) + separator_width,
+                    back[2] + px(CRUMB_GAP_LOGICAL_PX) + tracked(CRUMB_SEPARATOR, measure),
                     band[3],
                 ];
                 placed_crumb = Some(CrumbLayout {
                     band,
                     back,
-                    back_mark,
                     separator,
                     name: [
                         separator[2] + px(CRUMB_GAP_LOGICAL_PX),
@@ -9995,7 +9998,16 @@ pub fn build(
     if focus == Some(SettingsTarget::Close) {
         quads.extend(focus_ring(layout.close, scale, palette.accent));
     }
-    let glyph = px(WINDOW_CAPTION_GLYPH_LOGICAL_PX).round().max(1.0);
+    // **The house's box, since the house's cross** (裁2, 2026-08-26). This
+    // read `WINDOW_CAPTION_GLYPH_LOGICAL_PX` while the dialog's `✕` was the
+    // caption's own drawing; it is `#i-cross` now — cut in the house's sixteen,
+    // ten units of ink inside it — and a house drawing takes the slot table's
+    // box or it is the only mark in the window sized by hand.
+    let glyph = px(crate::seats::compact_head_glyph_logical_px(
+        crate::icons::ActionIcon::CloseDialog.mark(),
+    ))
+    .round()
+    .max(1.0);
     let glyph_left = ((layout.close[0] + layout.close[2]) / 2.0 - glyph / 2.0).round();
     let glyph_top = ((layout.close[1] + layout.close[3]) / 2.0 - glyph / 2.0).round();
     sprites.push(ChromeSprite::new(
@@ -11166,43 +11178,23 @@ fn push_editor_page(
     let Some(ink) = editor else { return };
     if let Some(crumb) = layout.crumb {
         let font = px(GROUP_LABEL_FONT_LOGICAL_PX);
-        // The way back wears the ink a control wears under the pointer; the
-        // separator and the name after it report and stay muted.
+        // `‹ Profiles` is the way back and wears the ink a control wears under
+        // the pointer; the `›` and the name after it report and stay muted.
+        //
+        // **Three runs of type and no marks** (裁3, 2026-08-26). The guillemets
+        // were a pair of house chevrons drawn as sprites from P1 until the
+        // acceptance; they are punctuation in this line's own face again, which
+        // is why the first of the three carries the arrow inside its own string
+        // rather than beside it.
         let lit = hover == Some(SettingsTarget::EditorBack);
-        for (mark, cell, ink) in [
-            (
-                crate::seats::crumb_back_mark(),
-                crumb.back_mark,
-                if lit {
-                    palette.dialog_title_text
-                } else {
-                    palette.dialog_muted_text
-                },
-            ),
-            (
-                crate::seats::crumb_separator_mark(),
-                crumb.separator,
-                palette.dialog_muted_text,
-            ),
-        ] {
-            stack.sprites.push(ChromeSprite::new(
-                mark,
-                crate::seats::crumb_punctuation_box(cell, mark, scale),
-                ink,
-            ));
-        }
         for (rect, text, muted, align_right) in [
             (
-                [
-                    crumb.back_mark[2],
-                    crumb.back[1],
-                    crumb.back[2],
-                    crumb.back[3],
-                ],
-                Text::CategoryProfiles.text().to_owned(),
+                crumb.back,
+                format!("{CRUMB_BACK_PREFIX}{}", Text::CategoryProfiles.text()),
                 !lit,
                 false,
             ),
+            (crumb.separator, CRUMB_SEPARATOR.to_owned(), true, false),
             (
                 crumb.name,
                 values
@@ -17858,8 +17850,14 @@ mod tests {
         }
     }
 
-    /// The dialog's close affordance is the mock-up's own `#i-close`, and it is
+    /// The dialog's close affordance is the house's own `#i-cross`, and it is
     /// the only mark the **header** draws.
+    ///
+    /// It was the mock-up's `#i-close` at the caption's ten until 裁2
+    /// (2026-08-26): the dialog is this house's surface and not Windows's, so
+    /// its cross is the house's, and a house drawing takes the compact head's
+    /// box — thirteen, with ten units of ink inside it, which is a *smaller*
+    /// picture than the ten-unit cross that filled its own box.
     ///
     /// "The only mark the overlay draws" until §7.1.6c-5, when the Advanced
     /// disclosure gave the scrolling stack one of its own — the house's
@@ -17873,20 +17871,25 @@ mod tests {
         let sprites = sprites_of(&placed, None, &values());
         let closes: Vec<_> = sprites
             .iter()
-            .filter(|sprite| sprite.mark == ChromeMark::WindowClose)
+            .filter(|sprite| sprite.mark == ChromeMark::TabClose)
             .collect();
         assert_eq!(closes.len(), 1, "one close, and only one");
         assert!(
             sprites.iter().all(|sprite| matches!(
                 sprite.mark,
-                ChromeMark::WindowClose | ChromeMark::Chevron { .. }
+                ChromeMark::TabClose | ChromeMark::Chevron { .. }
             )),
             "the overlay's marks are the close and the disclosure's chevron,              and nothing has quietly joined them: {:?}",
             sprites.iter().map(|sprite| sprite.mark).collect::<Vec<_>>()
         );
         let glyph = closes[0].rect;
-        assert_eq!(width(glyph), 10.0, "the close icon is 10px");
-        assert_eq!(height(glyph), 10.0);
+        assert_eq!(
+            width(glyph),
+            crate::seats::compact_head_glyph_logical_px(ChromeMark::TabClose),
+            "the close icon takes the compact head's box",
+        );
+        assert_eq!(width(glyph), 13.0);
+        assert_eq!(height(glyph), 13.0);
         assert!(
             (((glyph[0] + glyph[2]) / 2.0) - ((placed.close[0] + placed.close[2]) / 2.0)).abs()
                 <= 0.5,

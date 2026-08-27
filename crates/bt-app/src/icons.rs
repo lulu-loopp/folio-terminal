@@ -192,6 +192,32 @@ impl MarkSlot {
 #[cfg(test)]
 pub const OPTICAL_STROKE_BAND_LOGICAL_PX: [f32; 2] = [0.95, 1.15];
 
+/// **How far apart two controls standing in one run may look in size** — the
+/// optical band's second half, and 裁2's (2026-08-26) own gate.
+///
+/// The band above governs a mark's **pen**, and a companion derivation
+/// ([`marks::HOUSE_INK_RATIO`]) levels its **ink width**. A pane head passed
+/// both and the acceptance still reported *`✕` 视觉上比 `⌄` 大*, because
+/// neither is what a reader compares. What a reader compares is the **picture**
+/// — the box the ink fills — and its size is that box's diagonal
+/// ([`marks::ChromeMark::optical_picture_logical_px`]). Measured there the run
+/// read `14.71 : 13.44 : 11.72` for the `✕`, the `🗀` and the `⌄`: a quarter
+/// as big again across a run of three buttons, all three of them inside every
+/// band this module had.
+///
+/// **Twenty per cent, and the number is the house's own floor rather than a
+/// taste.** On that same head the two drawings nobody has complained about —
+/// the flat arrow and the folder silhouette, each at the box its own grid asks
+/// for — differ by `14.7%`, and no box moves that: it is what a `12.8 × 6.4`
+/// arrow and a `12.8 × 10.4` folder *are*. A band tighter than `14.7%` would
+/// therefore be this gate condemning a drawing the design is happy with, which
+/// is the failure mode `NOT_A_CONTROL_SLOT` was written to avoid one rule up.
+/// Twenty is that floor with a little air, and it is still tight enough to have
+/// been red at `25.5%` on the morning the report came in — see
+/// `a_heads_run_is_one_picture`, which is that measurement as an assertion.
+#[cfg(test)]
+pub const OPTICAL_PICTURE_SPREAD: f32 = 0.20;
+
 // ── the verb table ─────────────────────────────────────────────────────────
 
 /// **One verb, one shape** — the chrome's whole vocabulary of actions and the
@@ -291,11 +317,10 @@ pub enum ActionIcon {
     /// `Browse…` — the root menu's escape hatch, which opens the system's own
     /// folder picker.
     ///
-    /// **An act, and the rows above it are places**, which is exactly the line
-    /// P2's fill policy is drawn along: a cwd row wears the solid folder because
-    /// it *is* a folder, and this row wears the struck one because it is a
-    /// question. The mock-up's own choice of the open folder for both survives
-    /// — what changes is which rendition each of them gets.
+    /// **An act, and the rows above it are places** — which P2 drew a line
+    /// along and 裁1 (2026-08-26) rubbed out. Both wear the mock-up's open
+    /// folder, solid, because both are about a folder; what tells this row from
+    /// the places above it is its own word.
     BrowseForFolder,
 
     // ── the Git menus, panel and graph ───────────────────────────────────
@@ -601,10 +626,18 @@ impl ActionIcon {
             Self::MaximiseWindow => ChromeMark::WindowMaximize,
             // **Closing a surface, and nothing else.** P1 took the other three
             // senses off the cross: deleting goes to the bin below, stopping to
-            // the square below that. What is left is one act at three sizes,
-            // which is what the three variant names are for.
-            Self::CloseWindow | Self::CloseDialog => ChromeMark::WindowClose,
-            Self::CloseTab => ChromeMark::TabClose,
+            // the square below that. What is left is one act — and, since 裁2
+            // (2026-08-26), *two drawings of it*: the caption's cross is the
+            // platform's ten and every other cross in this house is
+            // `#i-cross`, which is the same two strokes cut in the house's own
+            // grid at the house's own pen. See `marks::ChromeMark::PaneClose`
+            // for why that had to be a re-cut and not a smaller box.
+            //
+            // The dialog's `✕` closes the *dialog*, which is this house's
+            // surface and not Windows's, so it is on the house's cross with the
+            // tab's and the pane's.
+            Self::CloseWindow => ChromeMark::WindowClose,
+            Self::CloseTab | Self::CloseDialog => ChromeMark::TabClose,
             // Leaving a comparison closes it: the two versions stop being on
             // screen and nothing is destroyed, which is the cross's own sense
             // and not the bin's.
@@ -643,17 +676,21 @@ impl ActionIcon {
             Self::GoToParentCommit | Self::MoveRowUp => ChromeMark::Arrow {
                 turned_degrees: 270,
             },
-            // **A folder, twice — once as a thing and once as an act** (P2's
-            // fill policy). The solid silhouette is what a row that *is* a
-            // folder wears; a row that *does* something with one wears the same
-            // silhouette struck, so a menu's icon column is one weight all the
-            // way down. See [`Self::is_an_object`] for the division, and
-            // `marks::ChromeMark::FolderOutline` for why the two are one
-            // drawing.
-            Self::FolderObject | Self::FilesSeat => ChromeMark::Folder,
-            Self::OpenFilesPane | Self::NewTerminalInFolder => ChromeMark::FolderOutline,
-            Self::OpenFolderObject => ChromeMark::FolderOpen,
-            Self::RevealInFolder | Self::BrowseForFolder => ChromeMark::FolderOpenOutline,
+            // **A folder, once** (裁1, 2026-08-26 — *还是原来的好看*). P2 gave
+            // the object a solid and the act a struck rendition of the same
+            // silhouette; the acceptance sent the struck pair back and the two
+            // drawings are gone. What survives of P2 here is the *reason* the
+            // ruling is not an exception to the fill policy: a folder is an
+            // object, and a row about an object is a row about a thing however
+            // its sentence is worded — which is the entry the fill gate's
+            // `FILLED_WITH_A_REASON` now carries under its second class.
+            Self::FolderObject
+            | Self::FilesSeat
+            | Self::OpenFilesPane
+            | Self::NewTerminalInFolder => ChromeMark::Folder,
+            Self::OpenFolderObject | Self::RevealInFolder | Self::BrowseForFolder => {
+                ChromeMark::FolderOpen
+            }
             // **One gesture, four containers.** The frame says which one, which
             // is the whole of the 裁2 quarrel: a pane pops out into a float, or
             // leaves for a tab, or for a window of its own, or for one already
@@ -727,9 +764,15 @@ impl ActionIcon {
     ///   rather than beside a verb, and a solid is how a small identity mark
     ///   survives being small.
     ///
-    /// So `Reveal in folder` and `a folder` are two entries wearing two
-    /// renditions of one drawing, and this is the function that says which is
-    /// which.
+    /// **裁1 (2026-08-26) moved the folder across that line rather than moving
+    /// the line.** P2 read `Reveal in folder` as an act and struck it; the
+    /// acceptance's answer was *还是原来的好看*, and the reason the ruling is
+    /// right is that a folder row is not saying *reveal* with a picture, it is
+    /// saying *a folder* beside the word `Reveal`. The four folder rows are
+    /// therefore filled with the reason a thing is filled — see
+    /// `FILLED_WITH_A_REASON`'s second class, which is where an entry that is a
+    /// *verb* wearing an object's drawing has to argue for itself. This
+    /// function stays the list of entries that name nothing but the thing.
     #[must_use]
     #[cfg(test)]
     pub fn is_an_object(self) -> bool {
@@ -811,9 +854,10 @@ mod tests {
         }
         for mark in [
             ChromeMark::chevron(0.0),
-            // The head's `🗀` is a *button*, so it is the struck rendition since
-            // P2 — see this module's fill policy.
-            ChromeMark::FolderOutline,
+            // The head's `🗀` is the solid again since 裁1 — see this module's
+            // fill policy, which is now a policy with one argued exception in
+            // it rather than a second folder.
+            ChromeMark::Folder,
             ChromeMark::PaneClose,
         ] {
             sites.push((
@@ -1048,32 +1092,33 @@ mod tests {
             ChromeMark::File,
             crate::toast::TOAST_MARK_LOGICAL_PX,
         );
-        for mark in [ChromeMark::Pencil, ChromeMark::WindowClose] {
+        for mark in [ChromeMark::Pencil, ChromeMark::Trash] {
             wide.push((
                 "settings row button",
                 mark,
                 MarkSlot::CompactHead.mark_box_logical_px(mark),
             ));
         }
+        // The dialog's own header cross, which took the compact head's box in
+        // 裁2 — see `settings::push_dialog_head`.
+        wide.push((
+            "settings dialog close",
+            ActionIcon::CloseDialog.mark(),
+            MarkSlot::CompactHead.mark_box_logical_px(ActionIcon::CloseDialog.mark()),
+        ));
         bespoke(
             "search bar button",
             ChromeMark::chevron(0.0),
             crate::search::BUTTON_GLYPH_LOGICAL_PX,
         );
-        // The two breadcrumbs' punctuation, which was a `‹` and a `›` set in
-        // each surface's own type until P1 and is the house's arrow now. Both
-        // are drawn at the compact head's box, whatever cell the layout gives
-        // them — see `seats::crumb_punctuation_box`.
-        for mark in [
-            crate::seats::crumb_back_mark(),
-            crate::seats::crumb_separator_mark(),
-        ] {
-            wide.push((
-                "breadcrumb punctuation",
-                mark,
-                MarkSlot::CompactHead.mark_box_logical_px(mark),
-            ));
-        }
+        // **The two breadcrumbs' punctuation is not here** (裁3, 2026-08-26).
+        // P1 drew each surface's `‹` and `›` as the house's arrow at the compact
+        // head's box, and this gate walked them; the acceptance sent them back
+        // to the characters they were, on the argument this module's own
+        // `no_font_character_stands_in_for_a_mark` now carries as a class — a
+        // breadcrumb is a sentence and a guillemet is its comma. A run of type
+        // has no pen for a band to hold.
+        //
         // The settings dialog's own row verbs, which were five font characters
         // in the same edit.
         for icon in [
@@ -1251,7 +1296,7 @@ mod tests {
             "peek strip leaf",
             "Git row button",
             "float close",
-            "breadcrumb punctuation",
+            "settings dialog close",
             "settings row verb",
         ] {
             assert!(
@@ -1267,10 +1312,16 @@ mod tests {
     /// measured `1.56 : 0.80` between the `⌄` and the `✕`, and traced it to two
     /// causes stacked — a `13px` square handed to a `10×6` arrow, and an `8px`
     /// box handed to the `×` beside it. Both are the slot's business, so both
-    /// are fixed here: one slot, one derivation, and the three marks put the
-    /// same amount of ink on the head.
+    /// are fixed here: one slot, one derivation, and the three marks lay the
+    /// same width of ink across the head.
+    ///
+    /// **This is one of the two things a run has to get right and it was never
+    /// the one the reader was looking at** — see `a_heads_run_is_one_picture`,
+    /// which is the other. The cross is off this assertion since 裁2: it lays
+    /// `8.1px` of ink where its neighbours lay `10.4`, deliberately, because
+    /// levelling its *picture* is what levelling a cross means.
     #[test]
-    fn the_pane_heads_run_is_one_size() {
+    fn the_pane_heads_run_lays_one_width_of_ink() {
         // How many logical pixels of ink the mark lays across the head: the box
         // it is given, times the fraction of its own box its artwork covers.
         let ink = |mark: ChromeMark| {
@@ -1282,11 +1333,155 @@ mod tests {
             }
         };
         let chevron = ink(ChromeMark::chevron(0.0));
-        let folder = ink(ChromeMark::FolderOutline);
-        let close = ink(ChromeMark::PaneClose);
+        let folder = ink(ChromeMark::Folder);
         assert!(
-            (chevron - close).abs() < 0.01 && (folder - close).abs() < 0.01,
-            "the pane head's run draws {chevron:.2}, {folder:.2} and {close:.2} of ink",
+            (chevron - folder).abs() < 0.01,
+            "the pane head's run draws {chevron:.2} and {folder:.2} of ink",
+        );
+    }
+
+    /// **The runs the chrome stands marks in side by side**, for the picture
+    /// band to walk — each one a surface and the marks it draws, left to right.
+    ///
+    /// A *run* is the thing this band is about, and it is a narrower claim than
+    /// a slot. `MarkSlot::Menu` is not a run: a menu row can wear any of the
+    /// registry's eighty-six verbs, the reader is reading names down a column
+    /// rather than comparing three buttons, and the column's own pictures span
+    /// `9.2` (`#i-tri`) to `16.8` (`#i-pencil`) — a spread of eighty per cent
+    /// that no re-cut should close, because a tick and a pencil are not the
+    /// same kind of sign and a menu does not ask anyone to weigh them against
+    /// each other. Neither is the window caption, whose three are the
+    /// platform's own set at the platform's own sizes (a `10px` bar beside a
+    /// `10px` square is already `41%` apart, and Windows draws it that way).
+    ///
+    /// What is here is the place a reader *does* compare: a short row of
+    /// buttons on one head, met as a group.
+    fn head_runs() -> Vec<(&'static str, Vec<ChromeMark>)> {
+        vec![(
+            "pane head",
+            vec![
+                ChromeMark::chevron(0.0),
+                ChromeMark::Folder,
+                ChromeMark::PaneClose,
+            ],
+        )]
+    }
+
+    /// **A run of buttons on one head is one picture** —
+    /// [`OPTICAL_PICTURE_SPREAD`], measured off the raster.
+    ///
+    /// RED EVIDENCE (2026-08-26, 裁2 — 「`✕` 视觉上比 `⌄` 大」). With
+    /// `PaneClose` on `#i-close`, the caption's ten-unit cross, the pane head's
+    /// run measured:
+    ///
+    /// ```text
+    /// i-chev         ink 12.88 × 6.50 units   →  10.46 × 5.28 px   picture 11.718
+    /// i-folder       ink 12.88 × 10.38 units  →  10.46 × 8.43 px   picture 13.435
+    /// i-close        ink 10.00 × 10.00 units  →  10.40 × 10.40 px  picture 14.708
+    /// ```
+    ///
+    /// — `14.708 / 11.718 = 1.255`, red against a band of `1.20`. Every other
+    /// gate in this module was green on that run: the pens read `0.975`, `—`
+    /// and `1.040`, all inside the stroke band, and the ink widths read
+    /// `10.46`, `10.46` and `10.40`, level to a twentieth of a pixel. The
+    /// report was about none of that.
+    ///
+    /// MUTATION: point `ClosePane` back at a ten-unit cross — give
+    /// `ChromeMark::PaneClose` `symbol_index` `3` again — and this goes red
+    /// with the numbers above.
+    #[test]
+    fn a_heads_run_is_one_picture() {
+        let mut wrong = Vec::new();
+        for (surface, run) in head_runs() {
+            let pictures: Vec<(&'static str, f32)> = run
+                .iter()
+                .filter_map(|mark| {
+                    let [width, height] = MarkSlot::CompactHead.mark_box_logical_px(*mark);
+                    Some((
+                        mark.drawing_id(),
+                        mark.optical_picture_logical_px(width, height)?,
+                    ))
+                })
+                .collect();
+            let biggest = pictures
+                .iter()
+                .copied()
+                .fold(
+                    ("", f32::MIN),
+                    |so_far, one| if one.1 > so_far.1 { one } else { so_far },
+                );
+            let smallest = pictures
+                .iter()
+                .copied()
+                .fold(
+                    ("", f32::MAX),
+                    |so_far, one| if one.1 < so_far.1 { one } else { so_far },
+                );
+            let spread = biggest.1 / smallest.1 - 1.0;
+            if spread <= OPTICAL_PICTURE_SPREAD {
+                continue;
+            }
+            wrong.push(format!(
+                "{surface}: {} makes a {:.3} picture beside {}'s {:.3} — {:.1}% apart",
+                biggest.0,
+                biggest.1,
+                smallest.0,
+                smallest.1,
+                spread * 100.0,
+            ));
+        }
+        assert!(
+            wrong.is_empty(),
+            "a run of buttons on one head is read as one group:\n{}",
+            wrong.join("\n"),
+        );
+    }
+
+    /// And the two the report actually names, on their own, so that "the `✕` is
+    /// the size of the `⌄`" is a sentence in this file rather than an average
+    /// over a run that a third drawing could carry.
+    #[test]
+    fn a_pane_heads_cross_is_the_size_of_its_arrow() {
+        let picture = |mark: ChromeMark| {
+            let [width, height] = MarkSlot::CompactHead.mark_box_logical_px(mark);
+            mark.optical_picture_logical_px(width, height)
+                .expect("a quoted symbol has a picture")
+        };
+        let arrow = picture(ChromeMark::chevron(0.0));
+        let cross = picture(ChromeMark::PaneClose);
+        let apart = (cross / arrow - 1.0).abs();
+        assert!(
+            apart <= 0.05,
+            "the head's cross makes a {cross:.3} picture beside its arrow's \
+             {arrow:.3} — {:.1}% apart",
+            apart * 100.0,
+        );
+    }
+
+    /// **The derivation the cross's own grid is cut from**, checked against the
+    /// drawing it was derived off rather than left as a number in a comment.
+    ///
+    /// `#i-cross` is ten units of ink in the house's sixteen because a square
+    /// whose *diagonal* is the arrow's picture measures `14.31 / √2 = 10.12` on
+    /// a side. Re-cut `#i-chev` and this says so, which is the point: the two
+    /// drawings are tied together by the reason one of them is that size.
+    #[test]
+    fn the_crosss_ink_is_the_arrows_picture_turned_square() {
+        let [across, down] = ChromeMark::chevron(0.0)
+            .ink_extent_units()
+            .expect("the arrow is a quoted symbol");
+        let wanted = across.hypot(down) / std::f32::consts::SQRT_2;
+        let [cross_across, cross_down] = ChromeMark::PaneClose
+            .ink_extent_units()
+            .expect("the cross is a quoted symbol");
+        assert!(
+            (cross_across - cross_down).abs() < 0.2,
+            "the cross's ink is square: {cross_across:.2} × {cross_down:.2}",
+        );
+        assert!(
+            (cross_across - wanted).abs() < 0.3,
+            "the cross is cut at {cross_across:.2} units where the arrow's \
+             picture asks for {wanted:.2}",
         );
     }
 
@@ -1335,13 +1530,19 @@ mod tests {
     /// different nouns. What was a fault was the shape standing for two
     /// different acts, and there is none of that left.
     const REUSED_SHAPES: &[(&str, &[ActionIcon], bool)] = &[
-        // Closing a surface. Four names for one act at three sizes, and
-        // `LeaveCompare` because leaving a comparison puts two versions away
-        // and destroys nothing — which is the cross's sense and not the bin's.
+        // Closing a surface. Four names for one act, and `LeaveCompare` because
+        // leaving a comparison puts two versions away and destroys nothing —
+        // which is the cross's sense and not the bin's.
+        //
+        // **`#i-close` came off this list in 裁2** and is worn by
+        // `CloseWindow` alone: the caption's cross is Windows's drawing at
+        // Windows's size, and every cross this house draws for itself is the
+        // one below. A split by *rendition* rather than by sense, on the two
+        // folders' precedent — one act, two grids, and the reader never meets
+        // the two in one run.
         (
-            "i-close",
+            "i-cross",
             &[
-                ActionIcon::CloseWindow,
                 ActionIcon::CloseDialog,
                 ActionIcon::CloseTab,
                 ActionIcon::ClosePane,
@@ -1464,28 +1665,31 @@ mod tests {
         // that a tree row and a seat's mark both say so with one drawing is the
         // drawing doing its job.
         //
-        // **P2 took the two acts off this list**, not by splitting the meaning
-        // but by splitting the *rendition*: `Open files pane` and `New terminal
-        // in folder…` are still about a folder, and they wear the same
-        // silhouette struck instead of filled, because they stand in a column
-        // of verbs. `#i-folder-open`'s pair split the same way and came out
-        // with one verb each, so neither is on this list at all.
+        // **P2 split the rendition and 裁1 put it back** (2026-08-26): the four
+        // rows below are a tree row, a seat's mark, a head's button and a menu
+        // row, and all four are about a folder. That the acts sit on this list
+        // beside the objects is the ruling written where a reader of the table
+        // meets it.
         (
             "i-folder",
-            &[ActionIcon::FolderObject, ActionIcon::FilesSeat],
+            &[
+                ActionIcon::FolderObject,
+                ActionIcon::FilesSeat,
+                ActionIcon::OpenFilesPane,
+                ActionIcon::NewTerminalInFolder,
+            ],
             false,
         ),
+        // The open folder: a row that is one, and the two rows that go and look
+        // at one somewhere outside this window — File Explorer, or the system's
+        // own picker.
         (
-            "i-folder-line",
-            &[ActionIcon::OpenFilesPane, ActionIcon::NewTerminalInFolder],
-            false,
-        ),
-        // Going and looking at a folder somewhere outside this window — in
-        // File Explorer, or in the system's own picker. One act aimed at two
-        // ways of naming the folder, which is what this list is for.
-        (
-            "i-folder-open-line",
-            &[ActionIcon::RevealInFolder, ActionIcon::BrowseForFolder],
+            "i-folder-open",
+            &[
+                ActionIcon::OpenFolderObject,
+                ActionIcon::RevealInFolder,
+                ActionIcon::BrowseForFolder,
+            ],
             false,
         ),
         (
@@ -1582,7 +1786,10 @@ mod tests {
         assert!(owed.is_empty(), "still awaiting a split: {owed:?}");
         for shape in [
             "i-external",
-            "i-close",
+            // The audit's `i-close`, which 裁2 re-cut and renamed: the four
+            // verbs it found sharing one cross still share one, and it is the
+            // house's rather than the caption's.
+            "i-cross",
             "i-refresh",
             "i-split",
             "i-copy",
@@ -1636,6 +1843,19 @@ mod tests {
     /// breadcrumbs' `‹ ›`, and the preview switcher's `●` — which is what a
     /// law with no gate under it is worth.
     ///
+    /// **And 裁3 (2026-08-26) gave the law its one class of exception**, which
+    /// is a smaller thing than an exception: the two breadcrumbs' guillemets
+    /// are back, and they are back because they were never marks. A breadcrumb
+    /// is a *sentence* — `‹ Profiles › Windows PowerShell`, `project › src ›
+    /// main.rs` — and the guillemet in it is the sentence's comma: it sits on
+    /// the run's baseline, at the run's size, tracked by the run's tracking,
+    /// inked by the run's colour, and it is measured by the same call that
+    /// measures the words either side of it. Struck as a mark it became a glyph
+    /// in the middle of a phrase, centred in a box the phrase's metrics know
+    /// nothing about. The law says a codepoint may not stand in for **a mark**;
+    /// punctuation inside a line of type is not one, and [`PUNCTUATION`] is
+    /// where a character has to argue that it is that and not this.
+    ///
     /// **What this reads is the escape spelling**, `\u{...}`, and that is the
     /// whole of what makes the gate precise rather than noisy. The characters
     /// themselves appear all over this crate for reasons that are none of this
@@ -1650,30 +1870,46 @@ mod tests {
     /// in a constant by its codepoint.
     #[test]
     fn no_font_character_stands_in_for_a_mark() {
-        // The retired eight, and `⎇`, which R4 struck first.
+        // The retired eight, less the two 裁3 sent back, and `⎇`, which R4
+        // struck first.
         const RETIRED: &[(&str, &str)] = &[
             ("21ba", "restore defaults"),
             ("2191", "move this row up"),
             ("2193", "move this row down"),
             ("22ef", "the rest of this row's verbs"),
             ("2715", "remove this row"),
-            ("2039", "a breadcrumb's way back"),
-            ("203a", "a breadcrumb's separator"),
             ("25cf", "unsaved edits"),
             ("2387", "a branch"),
             ("25b8", "a submenu"),
             ("2304", "a list folded away"),
         ];
-        // **The one survivor, and what it is doing.** A gate whose exceptions
-        // are written down is a scope; one that quietly skips a file is a hole.
-        const SPELT_AS_TEXT: &[(&str, &str, &str)] = &[(
-            "seats.rs",
-            "203a",
-            "`PREVIEW_CRUMB_SEPARATOR` joins a path's segments into a *sentence* \
-             — a window's title, a tooltip's line — where it is a character \
-             again and this question does not arise. What the rail *draws* is \
-             `crumb_separator_mark`.",
-        )];
+        // **Punctuation inside a line of type**, which is the class 裁3
+        // (2026-08-26) added and the only thing that may be spelled as a
+        // character. A gate whose exceptions are written down is a scope; one
+        // that quietly skips a file is a hole — so each of these names its
+        // file, its codepoint, and the sentence it is punctuating.
+        const PUNCTUATION: &[(&str, &str, &str)] = &[
+            (
+                "seats.rs",
+                "203a",
+                "the preview rail's breadcrumb, and the same constant joins a \
+                 path's segments into a window title or a tooltip line. One \
+                 phrase, one face, one comma — 裁3, 2026-08-26.",
+            ),
+            (
+                "settings.rs",
+                "203a",
+                "`CRUMB_SEPARATOR`, between the editor's way back and where you \
+                 are. Two breadcrumbs in one window may not be two \
+                 vocabularies, so it came back with the rail's.",
+            ),
+            (
+                "settings.rs",
+                "2039",
+                "`CRUMB_BACK_PREFIX` — the same character turned, measured \
+                 inside the phrase `‹ Profiles` rather than beside it.",
+            ),
+        ];
         for (file, source) in [
             ("settings.rs", include_str!("settings.rs")),
             ("seats.rs", include_str!("seats.rs")),
@@ -1689,12 +1925,6 @@ mod tests {
             ("restore.rs", include_str!("restore.rs")),
         ] {
             for (codepoint, meaning) in RETIRED {
-                if SPELT_AS_TEXT
-                    .iter()
-                    .any(|(where_, which, _)| *where_ == file && which == codepoint)
-                {
-                    continue;
-                }
                 let escape = format!("\\u{{{codepoint}}}");
                 assert!(
                     !source.contains(&escape),
@@ -1703,27 +1933,63 @@ mod tests {
                     codepoint.to_uppercase(),
                 );
             }
+            // And the punctuation class cuts the same way `REUSED_SHAPES` does:
+            // a character written down as punctuation *in this file* has to
+            // still be in it, so a surface that stops setting one takes its
+            // entry off the list instead of leaving it as folklore.
+            for (where_, codepoint, why) in PUNCTUATION {
+                if *where_ != file {
+                    continue;
+                }
+                assert!(
+                    source.contains(&format!("\\u{{{codepoint}}}")),
+                    "{file} is written down as punctuating with U+{} ({why}) \
+                     and does not",
+                    codepoint.to_uppercase(),
+                );
+            }
         }
     }
 
-    /// And the exception is held to its own claim: the surviving separator is
-    /// **joined into strings and never set into a box**.
+    /// And the class is held to its own claim: **every character on it is set
+    /// as type, in a run, and none of them is centred in a box of its own.**
     ///
-    /// `ChromeLabel`'s `text` field is how a run of type reaches the renderer,
-    /// so a constant that is never written next to it is a constant no surface
-    /// draws. This is the assertion the exception above is worth exactly as
-    /// much as.
+    /// `ChromeLabel` is how a run of type reaches the renderer and `ChromeSprite`
+    /// is how a mark does, so the claim "this is punctuation and not a mark" is
+    /// checkable: the two breadcrumbs push labels. This is the assertion the
+    /// exception above is worth exactly as much as — without it, `PUNCTUATION`
+    /// would be a place to write a sentence that excuses a glyph.
     #[test]
-    fn the_separator_that_stayed_a_character_is_never_set_into_a_box() {
-        let source = include_str!("seats.rs");
+    fn the_punctuation_that_stayed_a_character_is_set_as_type() {
+        let seats = include_str!("seats.rs");
         assert!(
-            !source.contains("text: PREVIEW_CRUMB_SEPARATOR"),
-            "the preview rail is setting its separator as type again",
+            seats.contains("text: PREVIEW_CRUMB_SEPARATOR.to_owned(),"),
+            "the preview rail sets its separator as type",
+        );
+        let settings = include_str!("settings.rs");
+        assert!(
+            settings.contains("(crumb.separator, CRUMB_SEPARATOR.to_owned(), true, false),"),
+            "the editor's breadcrumb sets its separator as type",
         );
         assert!(
-            source.contains("crumb_separator_mark()"),
-            "the preview rail draws the separator as a mark",
+            settings.contains("format!(\"{CRUMB_BACK_PREFIX}{}\", Text::CategoryProfiles.text())"),
+            "and its way back carries the guillemet inside the phrase",
         );
+        // And neither surface has kept a mark to draw one with: the three
+        // functions P1 cut for this are gone, so there is nothing to fall back
+        // to and nothing to drift.
+        for (name, source) in [("seats.rs", seats), ("settings.rs", settings)] {
+            for gone in [
+                "crumb_separator_mark",
+                "crumb_back_mark",
+                "crumb_punctuation_box",
+            ] {
+                assert!(
+                    !source.contains(gone),
+                    "{name} still reaches for {gone}, which 裁3 retired",
+                );
+            }
+        }
     }
 
     // ── P2: the fill policy, and the two disclosure languages ──────────────
@@ -1755,6 +2021,23 @@ mod tests {
     /// Plus the one foreign drawing the 2026-08-26 ruling keeps as it is.
     const FILLED_WITH_A_REASON: &[(&str, &str)] = &[
         (
+            "i-folder",
+            "class 2, and a user ruling with it (裁1, 2026-08-26): *还是原来的\
+             好看*. P2 struck the folder for the rows that are acts and the \
+             acceptance sent the struck rendition back — a folder is an object, \
+             and `Open files pane` puts one beside a name for the same reason a \
+             tree row does. What the class costs is written down beside it: the \
+             solid is `1.36×` its column's ink where every struck neighbour is \
+             level, and that is the price of the ruling rather than an \
+             oversight",
+        ),
+        (
+            "i-folder-open",
+            "class 2, 裁1 again and the same object: `Reveal in folder` and \
+             `Browse…` wear the open folder solid because the row is about a \
+             folder. One ruling about one object covers both of its frames",
+        ),
+        (
             "i-gear",
             "the one foreign drawing (Material's 24-unit fill); 裁5, 2026-08-26, \
              keeps it — and a fill has no pen to hold to the band anyway",
@@ -1781,19 +2064,24 @@ mod tests {
     /// **An act is struck; a thing may be filled.** P2's fill policy, over the
     /// whole registry.
     ///
-    /// RED EVIDENCE (2026-08-26, before the split): `i-folder` and
-    /// `i-folder-open` — worn by `Open files pane`, `New terminal in folder…`
-    /// and `Reveal in folder`, three rows of two menus — are pure fills, and
-    /// P1's own实机 reading of the pane menu says what that costs: every row in
-    /// the column came into a `1.36×` ink band *except* the solid folder, which
-    /// stayed the outlier at more than twice its neighbours' ink. A fill among
-    /// outlines is not a heavier drawing but a different kind of drawing, and
-    /// no slot levels it — which is why the answer was a second rendition
-    /// rather than a smaller box.
+    /// RED EVIDENCE (2026-08-26, before P2): `i-folder` and `i-folder-open` —
+    /// worn by `Open files pane`, `New terminal in folder…` and `Reveal in
+    /// folder`, three rows of two menus — are pure fills, and P1's own实机
+    /// reading of the pane menu says what that costs: every row in the column
+    /// came into a `1.36×` ink band *except* the solid folder, which stayed the
+    /// outlier at more than twice its neighbours' ink.
     ///
-    /// MUTATION: point `OpenFilesPane` back at `ChromeMark::Folder` and this
-    /// goes red naming it; move `FolderObject` off
-    /// [`ActionIcon::is_an_object`] and it goes red naming that instead.
+    /// **The acceptance ruled that this is a price and not a fault** (裁1,
+    /// 2026-08-26 — *还是原来的好看*), so the gate no longer reads the two
+    /// folders as owing a stroke; it reads them as a class-2 entry on
+    /// [`FILLED_WITH_A_REASON`] with the `1.36×` written into the entry. That
+    /// is the whole difference between a policy with an argued exception and a
+    /// policy with a hole: the measurement is still on the page.
+    ///
+    /// MUTATION: take `i-folder` off [`FILLED_WITH_A_REASON`] and this goes red
+    /// naming the four folder rows; point any other verb at a drawing with no
+    /// pen — `ClearScreen` at `ChromeMark::Pin { filled: true }`, say — and it
+    /// goes red naming that.
     #[test]
     fn an_act_is_struck_and_only_a_thing_is_filled() {
         let mut unstruck = Vec::new();
@@ -1823,19 +2111,15 @@ mod tests {
     /// list instead of leaving it there as folklore.
     ///
     /// This is `REUSED_SHAPES`' own discipline applied to the other list. The
-    /// two folders are the case in point: had P2 struck `#i-folder` itself
-    /// rather than adding a rendition, an entry saying "the folder is filled"
-    /// would have outlived the fill.
+    /// two folders are the case in point in both directions: P2 wrote them down
+    /// as *struck*, and had 裁1 not also deleted the struck renditions an entry
+    /// saying so would have outlived the drawing.
     #[test]
     fn nothing_is_written_down_as_filled_that_is_not() {
         let filled: Vec<&str> = ActionIcon::ALL
             .iter()
             .map(|icon| icon.mark())
-            .chain([
-                marks::ChromeMark::Folder,
-                marks::ChromeMark::FolderOpen,
-                marks::tree_disclosure(0.0),
-            ])
+            .chain([marks::tree_disclosure(0.0)])
             .filter(|mark| !mark.is_struck())
             .map(marks::ChromeMark::drawing_id)
             .collect();
@@ -1845,12 +2129,13 @@ mod tests {
                 "{shape} is written down as filled ({why}) and is struck",
             );
         }
-        // And the two renditions are two drawings of one object: the object's
-        // is solid, the act's is struck, and they are not the same shape.
+        // And the object has one rendition again: 裁1 took the struck pair off
+        // the sheet, so there is no second folder for a drawing point to reach
+        // for. That is the compiler's fact now rather than a convention — the
+        // two variants are gone from `marks::ChromeMark` — and what is left to
+        // check here is that the one that survived is the solid.
         assert!(!marks::ChromeMark::Folder.is_struck());
-        assert!(marks::ChromeMark::FolderOutline.is_struck());
         assert!(!marks::ChromeMark::FolderOpen.is_struck());
-        assert!(marks::ChromeMark::FolderOpenOutline.is_struck());
     }
 
     /// **No body carries a bare alpha** — the 2026-08-25 specification's last
@@ -2049,6 +2334,62 @@ mod tests {
                 ],
             );
         }
+        // And 裁2 left it there: the caption's cross is still the platform's
+        // ten-unit drawing at the platform's box, beside a bar and a square cut
+        // to match it. What moved is every *other* cross in the window — see
+        // `marks::ChromeMark::PaneClose`, and `the_house_and_the_platform_draw_
+        // two_crosses` for the line between them.
+        assert!(ChromeMark::WindowClose.draws_edge_to_edge());
+        assert_eq!(ChromeMark::WindowClose.drawing_id(), "i-close");
+    }
+
+    /// **Two crosses, and which surface gets which** (裁2, 2026-08-26).
+    ///
+    /// The caption's three are Windows's furniture at Windows's size and this
+    /// house does not re-cut them; everything else that closes something is the
+    /// house's own control on the house's own grid. The rule is worth stating
+    /// as an assertion because the two are one act — a reader who sees them as
+    /// one act is right — and the only thing keeping them two drawings is that
+    /// they stand in two different companies.
+    #[test]
+    fn the_house_and_the_platform_draw_two_crosses() {
+        assert_eq!(
+            ActionIcon::CloseWindow.mark().drawing_id(),
+            "i-close",
+            "the caption's cross is the platform's",
+        );
+        for icon in [
+            ActionIcon::CloseTab,
+            ActionIcon::ClosePane,
+            ActionIcon::CloseDialog,
+            ActionIcon::LeaveCompare,
+        ] {
+            assert_eq!(
+                icon.mark().drawing_id(),
+                "i-cross",
+                "{} closes one of this house's own surfaces",
+                icon.name(),
+            );
+        }
+        // And the house's cross is a house drawing all through: the house's
+        // grid, the house's pen, the house's air.
+        assert_eq!(
+            ChromeMark::PaneClose.view_box_units(),
+            Some([marks::HOUSE_GRID_UNITS, marks::HOUSE_GRID_UNITS]),
+        );
+        assert_eq!(ChromeMark::PaneClose.design_stroke_units(), Some(1.2));
+        assert!(!ChromeMark::PaneClose.draws_edge_to_edge());
+        // Two cache slots, one drawing — which is what the two variant names
+        // were kept for and what they still are. (That the two *cache* names
+        // stay apart is `marks`' own business and is checked there.)
+        assert_eq!(
+            ChromeMark::TabClose.drawing_id(),
+            ChromeMark::PaneClose.drawing_id(),
+        );
+        assert_ne!(
+            ChromeMark::TabClose.drawing_id(),
+            ChromeMark::WindowClose.drawing_id(),
+        );
     }
 
     /// **No mark is squeezed into somebody else's proportion**, which is the
@@ -2125,6 +2466,11 @@ mod tests {
             ChromeMark::TabNew,
             ChromeMark::WindowNew,
             ChromeMark::WindowPick,
+            // 裁2's re-cut: the house's cross came from the platform's `1.0` in
+            // a ten to the house's `1.2` in a sixteen, which is what pays for
+            // its smaller ink.
+            ChromeMark::TabClose,
+            ChromeMark::PaneClose,
         ] {
             assert_eq!(
                 mark.design_stroke_units(),
@@ -2182,8 +2528,6 @@ mod tests {
     fn the_edge_to_edge_family_is_the_drawings_that_have_no_margin() {
         for mark in [
             ChromeMark::WindowClose,
-            ChromeMark::TabClose,
-            ChromeMark::PaneClose,
             ChromeMark::WindowMinimize,
             ChromeMark::WindowMaximize,
         ] {
@@ -2200,6 +2544,11 @@ mod tests {
             ChromeMark::Minus,
             ChromeMark::chevron(0.0),
             ChromeMark::ResizeGrip,
+            // **And the two 裁2 took off it**, the same way and for the same
+            // reason one rule up: a cross with its ink on its own wall is a
+            // cross whose picture no slot can level.
+            ChromeMark::TabClose,
+            ChromeMark::PaneClose,
         ] {
             assert!(
                 !mark.draws_edge_to_edge(),

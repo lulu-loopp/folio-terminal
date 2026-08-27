@@ -5184,18 +5184,73 @@ pub fn tab_strip_contains(width: f32, scale: f32, tab_count: usize, x: f64, y: f
     x >= geometry.viewport[0] && x < geometry.viewport[1] && y >= 0.0 && y < title
 }
 
+/// **What is putting a pane head's run on screen this frame** — two facts, and
+/// a head is showing its run if either of them names it.
+///
+/// It was one fact until 裁4 (2026-08-26). See [`head_run_revealed`] for the
+/// question the pair answers and [`Self::menu`] for the arm the acceptance
+/// added.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeadRun {
+    /// **The pane the hand is standing in** — [`ChromePointer::pane_hover`],
+    /// and the whole of what `.pane:hover .pane-close { visibility: visible }`
+    /// says.
+    pub hovered: Option<SeatId>,
+    /// **The pane whose own menu is standing open** — the `⌄`'s list, which is
+    /// dropped under the button that raised it so the hand walks *off* the head
+    /// to reach it.
+    pub menu: Option<SeatId>,
+}
+
+impl HeadRun {
+    /// The hand is in this pane and no menu is up — what every reading of this
+    /// predicate meant before 裁4, and what a test that is not about menus
+    /// says.
+    ///
+    /// Test-only, and that is the honest shape: the one place the window builds
+    /// this pair for real (`Runtime::head_run`) has both facts to hand and must
+    /// pass both, so a constructor that quietly supplies `None` for the second
+    /// is a constructor production code has no business reaching for.
+    #[cfg(test)]
+    #[must_use]
+    pub const fn hovered(seat: SeatId) -> Self {
+        Self {
+            hovered: Some(seat),
+            menu: None,
+        }
+    }
+}
+
 /// Whether one pane head's hover-revealed run — the `×`, the `⌄`, the folder,
 /// the pop-out — is **on screen**, which is the one question the painter draws
 /// by and the hit test answers by.
 ///
-/// `revealed` is [`ChromePointer::pane_hover`]: the pane the hand is standing
-/// in, and the whole of what puts that run there
-/// (`.pane:hover .pane-close { visibility: visible }`). One function so the two
-/// sides read the same fact — see the note on [`hit_chrome`]'s own parameter for
-/// what it cost to have them read two.
+/// One function so the two sides read the same fact — see the note on
+/// [`hit_chrome`]'s own parameter for what it cost to have them read two.
+///
+/// **裁4, 2026-08-26: a menu is an extension of the surface that raised it.**
+/// The acceptance asked whether the row above stays visible while the pointer
+/// is down in the list, and ruled that the *whole run* does. It has to be
+/// ruled, because the plumbing says the opposite by default: the instant the
+/// hand crosses onto the pane menu, `drive_pane_menu_hover` claims the pointer
+/// and `update_chrome_hover_target(None)` clears
+/// [`ChromePointer::pane_hover`] — so the head that opened the list went dark
+/// under it, and its `×` stopped taking a press with it.
+///
+/// This is the icon rail's own rule one surface over
+/// (`Runtime::rail_zone_wants_open`, which is `inside || popup_from_the_rail`),
+/// and the lone pane's corner ghost has had the seat-wise half of it since E61
+/// — that chevron is lit by `hover == PaneMenu(seat) || pane_menu_seat ==
+/// seat`. What 裁4 adds is that the *run* obeys it and not just the one button
+/// in it: a `⌄` that stays lit beside a `×` that has faded out from under the
+/// pointer is a worse answer than either.
+///
+/// Two seats can be showing a run at once and that is not a bug: open a pane's
+/// menu, then walk into the pane beside it, and one head is lit because its
+/// list is standing while the other is lit because the hand is in it.
 #[must_use]
-pub fn head_run_revealed(revealed: Option<SeatId>, seat: SeatId) -> bool {
-    revealed == Some(seat)
+pub fn head_run_revealed(revealed: HeadRun, seat: SeatId) -> bool {
+    revealed.hovered == Some(seat) || revealed.menu == Some(seat)
 }
 
 /// What the pointer is over, in device pixels of the window.
@@ -5225,7 +5280,7 @@ pub fn hit_chrome(
     seats: &Seats,
     layout: &SeatLayout,
     scale: f32,
-    revealed: Option<SeatId>,
+    revealed: HeadRun,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
@@ -7832,7 +7887,13 @@ pub fn build_chrome_for_tabs(
                 // one number and cannot come apart mid-fade.
                 let head_ink_here = head_ink.of(
                     placement.id,
-                    head_run_revealed(pointer.pane_hover, placement.id),
+                    head_run_revealed(
+                        HeadRun {
+                            hovered: pointer.pane_hover,
+                            menu: pane_menu_seat,
+                        },
+                        placement.id,
+                    ),
                 );
                 let preview_head = (placement.kind == SeatKind::Preview)
                     .then(|| preview_head(placement.id))
@@ -13286,64 +13347,29 @@ pub const PREVIEW_CRUMB_RADIUS_LOGICAL_PX: f32 = 4.0;
 /// The cell the `›` between two segments is drawn in, centred.
 ///
 /// A fixed cell and not a measured one, deliberately: the separator is one
-/// mark this window chose and never changes, so measuring it would put a font
-/// on the path of a layout that has one possible answer. Since P1 that is
-/// true twice over — there is no font on the path at all.
+/// character this window chose and never changes, so measuring it would put a
+/// font on the path of a layout that has one possible answer.
 pub const PREVIEW_CRUMB_SEPARATOR_CELL_LOGICAL_PX: f32 = 11.0;
 /// And the cell the folded middle's `…` is drawn in.
 pub const PREVIEW_CRUMB_FOLD_CELL_LOGICAL_PX: f32 = 18.0;
-/// `›` — how a path reads **in a sentence**: the window's title, a
-/// tooltip's line, anywhere the crumb's segments are joined into running text.
+/// `›` — **the separator between two segments**, and how a path reads in a
+/// sentence: the window's title, a tooltip's line, anywhere the crumb's
+/// segments are joined into running text. One constant, because they are one
+/// thing.
 ///
-/// **It is no longer what the rail draws.** P1 retired the drawn character in
-/// favour of [`crate::marks::ChromeMark::Chevron`] at the crumb's own size,
-/// on `marks.rs`'s founding law: a codepoint is a fact about whichever
-/// typeface the machine happens to have, and the segments beside it are
-/// geometry. In a *sentence* it is a character again, and that is not the same
-/// question — the sentence is text all the way through.
+/// **裁3, 2026-08-26: 「原来的好看」.** P1 retired the drawn character in
+/// favour of `crate::marks::ChromeMark::Chevron` at the crumb's own size, on
+/// `marks.rs`'s founding law that a codepoint is a fact about whichever
+/// typeface the machine happens to have. The law stands and this is not an
+/// exception to it — it is the law being told what it is about. A breadcrumb
+/// is **a sentence**: `project › src › main.rs` is a line of type with its
+/// own punctuation in it, the `›` sits on the same baseline as the words
+/// either side and is measured, spaced and inked by the same run. Drawing it
+/// as a mark is what put a *glyph* in the middle of a phrase, at a box and a
+/// baseline no font metric knows about. The law's own sentence, which
+/// `crate::icons`' gate now carries as a class of its own: a codepoint may not
+/// stand in for a **mark** — and this is not one.
 pub const PREVIEW_CRUMB_SEPARATOR: &str = "\u{203a}";
-/// **The mark a breadcrumb spends where it used to spend a guillemet.**
-///
-/// One drawing at two quarter turns: east between two segments, west in front
-/// of the way back. `ChromeMark::chevron` is the house's disclosure arrow and
-/// this is deliberately it rather than the history arrow `ChromeMark::Arrow`
-/// — a crumb's punctuation is not a Back button, it is the sentence's own
-/// comma, and what it says is *and then, inside that*.
-#[must_use]
-pub fn crumb_separator_mark() -> ChromeMark {
-    ChromeMark::Chevron {
-        turned_degrees: 270,
-    }
-}
-
-/// The same arrow pointing the other way — what stands in front of a
-/// breadcrumb's way back.
-#[must_use]
-pub fn crumb_back_mark() -> ChromeMark {
-    ChromeMark::Chevron { turned_degrees: 90 }
-}
-
-/// **Where a crumb's punctuation is struck inside the cell the layout gave
-/// it**, in physical pixels.
-///
-/// The cell is the *advance* — how far the next segment starts — and the box
-/// is the compact head's, because a mark drawn smaller than that carries a pen
-/// below the band whatever else is true of it (see `crate::icons`). The two
-/// need not agree: a turned chevron's ink is a fifth of its box across, so a
-/// thirteen-pixel box centred on an eleven-pixel cell puts four and a half
-/// pixels of ink in the middle of it and nothing anywhere near either edge.
-#[must_use]
-pub fn crumb_punctuation_box(cell: [f32; 4], mark: ChromeMark, scale: f32) -> [f32; 4] {
-    let [width, height] = compact_head_glyph_box(mark, scale);
-    let left = f32::midpoint(cell[0], cell[2]) - width / 2.0;
-    let top = f32::midpoint(cell[1], cell[3]) - height / 2.0;
-    [
-        left.round(),
-        top.round(),
-        left.round() + width,
-        top.round() + height,
-    ]
-}
 
 /// `…` — what the folded middle of a long path is drawn as.
 pub const PREVIEW_CRUMB_FOLD: &str = "\u{2026}";
@@ -15060,7 +15086,7 @@ pub fn hit_preview_head(
     layout: &SeatLayout,
     scale: f32,
     tools: &[(SeatId, PreviewHeadTools)],
-    revealed: Option<SeatId>,
+    revealed: HeadRun,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
@@ -16212,22 +16238,32 @@ pub(crate) fn push_preview_rail(
                     clip: Some(fold),
                 });
             }
-            // **The house's own arrow, turned east** (P1, 字符退役). It was
-            // `›` U+203A in the rail's own type until this block, which put a
-            // third folded-arrow language on screen beside the chevron and the
-            // disclosure triangle — and put it there as a *codepoint*, whose
-            // width and weight are facts about the installed font rather than
-            // about this drawing.
+            // **The punctuation of a sentence, set in the sentence's own type**
+            // (裁3, 2026-08-26 — 「原来的好看」). P1 struck this as a house
+            // chevron and the acceptance sent it back: a crumb rail is a path
+            // read as a phrase, the `›` is its comma, and a comma belongs to
+            // the run of type it punctuates — same face, same baseline, same
+            // measurement — rather than to the box a control glyph is centred
+            // in. See `PREVIEW_CRUMB_SEPARATOR` for the line that draws between
+            // this and `marks.rs`'s founding law.
             //
             // The palest ink the row has: a separator is punctuation and not a
             // segment, and one drawn in the segments' own ink reads as a folder
             // called `›`.
             for seam in &geometry.separators {
-                sprites.push(ChromeSprite::new(
-                    crumb_separator_mark(),
-                    crumb_punctuation_box(*seam, crumb_separator_mark(), scale),
-                    palette.files_row_muted,
-                ));
+                labels.push(ChromeLabel {
+                    mono: false,
+                    text: PREVIEW_CRUMB_SEPARATOR.to_owned(),
+                    rect: *seam,
+                    font_size_px: font,
+                    color: palette.files_row_muted,
+                    align_right: false,
+                    align_center: true,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: Some(*seam),
+                });
             }
             for crumb in &geometry.crumbs {
                 let Some(text) = content.segments.get(crumb.depth) else {
@@ -18509,7 +18545,7 @@ mod tests {
             "the lone leaf wears its profile mark only in the window tab"
         );
         assert!(!quads.iter().any(|quad| quad.color == palette.pane_head));
-        assert!(hit_chrome(&seats, &layout, 1.0, None, 480.0, 300.0).is_none());
+        assert!(hit_chrome(&seats, &layout, 1.0, HeadRun::default(), 480.0, 300.0).is_none());
     }
 
     /// PIN (visual fidelity pass): the caption glyphs are the mock-up's own
@@ -19225,7 +19261,7 @@ mod tests {
                         &seats,
                         &layout,
                         scale,
-                        Some(placement.id),
+                        HeadRun::hovered(placement.id),
                         f64::from(rect.left as f32 + 1.0),
                         f64::from(top + bar - 1.0),
                     ),
@@ -20365,7 +20401,7 @@ mod tests {
         ] {
             let (x, y) = centre(box_.expect("a head this wide seats every control"));
             assert_eq!(
-                hit_preview_head(&layout, 1.0, &[(seat, tools)], Some(seat), x, y),
+                hit_preview_head(&layout, 1.0, &[(seat, tools)], HeadRun::hovered(seat), x, y),
                 Some(expected),
                 "{expected:?} answers for its own rectangle"
             );
@@ -20396,7 +20432,7 @@ mod tests {
         assert_eq!(alone.pill, None, "no switcher, no pill");
         let (x, y) = centre(alone.name);
         assert_eq!(
-            hit_preview_head(&layout, 1.0, &[(seat, lone)], Some(seat), x, y),
+            hit_preview_head(&layout, 1.0, &[(seat, lone)], HeadRun::hovered(seat), x, y),
             Some(ChromeTarget::PreviewName(seat)),
             "and the name answers for itself"
         );
@@ -20404,7 +20440,7 @@ mod tests {
         // so it answers at rest. The five tools beside it are the ones the
         // reveal gate is about.
         assert_eq!(
-            hit_preview_head(&layout, 1.0, &[(seat, lone)], None, x, y),
+            hit_preview_head(&layout, 1.0, &[(seat, lone)], HeadRun::default(), x, y),
             Some(ChromeTarget::PreviewName(seat)),
         );
     }
@@ -20464,7 +20500,7 @@ mod tests {
         ] {
             let (x, y) = centre(box_);
             assert_eq!(
-                hit_preview_head(&layout, 1.0, &[(seat, tools)], None, x, y),
+                hit_preview_head(&layout, 1.0, &[(seat, tools)], HeadRun::default(), x, y),
                 None,
                 "{name} is not on screen, so nothing in this head answers for it"
             );
@@ -20477,7 +20513,7 @@ mod tests {
         };
         let (x, y) = centre(preview_head_geometry(&head, 1.0, shut).lock);
         assert_eq!(
-            hit_preview_head(&layout, 1.0, &[(seat, shut)], None, x, y),
+            hit_preview_head(&layout, 1.0, &[(seat, shut)], HeadRun::default(), x, y),
             Some(ChromeTarget::PreviewLock(seat)),
             "`.pv-tool.pv-pin.on {{ opacity: 1 }}` — visible at rest, pressable at rest"
         );
@@ -22150,7 +22186,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                None,
+                HeadRun::default(),
                 f64::from((bar.left + bar.right) as i32) / 2.0,
                 f64::from((bar.top + bar.bottom) as i32) / 2.0,
             ),
@@ -22235,12 +22271,26 @@ mod tests {",
         );
 
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, None, divider.0, divider.1),
+            hit_chrome(
+                &seats,
+                &layout,
+                1.0,
+                HeadRun::default(),
+                divider.0,
+                divider.1
+            ),
             Some(ChromeTarget::Divider(slot.id)),
             "the first point really is a divider"
         );
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, Some(preview), seat.0, seat.1),
+            hit_chrome(
+                &seats,
+                &layout,
+                1.0,
+                HeadRun::hovered(preview),
+                seat.0,
+                seat.1
+            ),
             Some(ChromeTarget::PaneHeader(preview)),
             "the second point really is another seat's head"
         );
@@ -23514,7 +23564,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(column),
+                HeadRun::hovered(column),
                 f64::from(cx),
                 f64::from(cy)
             ),
@@ -23932,9 +23982,9 @@ mod tests {",
             .iter()
             .find(|sprite| sprite.rect == geometry.foot_mark)
             .expect("the foot wears a mark");
-        // The struck rendition since P2: the foot's glyph is a *button* that
-        // opens File Explorer, not the folder it is standing in.
-        assert_eq!(mark.mark, ChromeMark::FolderOpenOutline);
+        // The folder, solid — 裁1 (2026-08-26) took the struck rendition off
+        // the sheet, so a button about a folder wears the folder.
+        assert_eq!(mark.mark, ChromeMark::FolderOpen);
         assert_eq!(mark.color, palette.files_row_muted, "`color: var(--ink3)`");
         let label = chrome
             .labels
@@ -26550,18 +26600,35 @@ mod tests {",
     /// The sizes are the mock-up's own argument, quoted at 362-364: "the pin
     /// carries a state and a glyph that has to survive a 45° turn, and both cost
     /// silhouette. It is not the close button's twin and sizing it like one made
-    /// it read as lint." So the assertion is not merely `== 13`; it is also
-    /// `!= the ×'s 8`.
+    /// it read as lint." So the assertion is not merely `== 13`.
+    ///
+    /// **What it compares is ink and no longer boxes** (裁2, 2026-08-26). The
+    /// cross is a house drawing now, so it takes the house's box like everything
+    /// else and the two rectangles are both thirteen; what keeps the pin from
+    /// being "the close button's twin" is the thing the mock-up was actually
+    /// arguing about — the pin fills the house's ink band and the cross sits ten
+    /// units inside it, so the pin's picture is a third bigger than the cross's.
     #[test]
     fn the_drawn_pin_is_thirteen_pixels_filled_for_a_state_and_outlined_for_an_offer() {
         let palette = chrome_palette();
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let glyph = (WINDOW_TAB_PIN_GLYPH_LOGICAL_PX * scale).round();
-            assert_ne!(
-                glyph,
-                (compact_head_glyph_logical_px(crate::icons::ActionIcon::CloseTab.mark()) * scale)
-                    .round(),
-                "scale {scale}: the pin is not the close button's twin"
+            let picture = |mark: ChromeMark, side: f32| {
+                mark.optical_picture_logical_px(side, side)
+                    .expect("a quoted symbol makes a picture")
+            };
+            let pin = picture(
+                ChromeMark::Pin { filled: false },
+                WINDOW_TAB_PIN_GLYPH_LOGICAL_PX,
+            );
+            let cross = picture(
+                crate::icons::ActionIcon::CloseTab.mark(),
+                compact_head_glyph_logical_px(crate::icons::ActionIcon::CloseTab.mark()),
+            );
+            assert!(
+                pin > cross * 1.2,
+                "scale {scale}: the pin makes a {pin:.2} picture beside the close \
+                 button's {cross:.2}, which is the close button's twin"
             );
             let pin_sprite = |sprites: &[ChromeSprite], filled: bool| {
                 sprites
@@ -27853,7 +27920,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from((close[0] + close[2]) / 2.0),
                 middle_y
             ),
@@ -27878,7 +27945,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from(close[0]) - 1.0,
                 middle_y
             ),
@@ -27889,7 +27956,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from(close[0]),
                 middle_y
             ),
@@ -27910,7 +27977,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from(files[0]) - 1.0,
                 middle_y
             ),
@@ -27922,7 +27989,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from(split[0]) - 1.0,
                 middle_y
             ),
@@ -27981,7 +28048,7 @@ mod tests {",
         for (name, box_) in [("the pop-out", float), ("the `×`", close)] {
             let (x, y) = centre(box_);
             assert_eq!(
-                hit_chrome(&seats, &layout, 1.0, None, x, y),
+                hit_chrome(&seats, &layout, 1.0, HeadRun::default(), x, y),
                 Some(ChromeTarget::PaneHeader(column)),
                 "{name} is not on screen, so the head answers for its own box"
             );
@@ -27990,18 +28057,18 @@ mod tests {",
         // one's: the reveal is per pane, exactly as `.pane:hover` is.
         let (x, y) = centre(float);
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, Some(terminal), x, y),
+            hit_chrome(&seats, &layout, 1.0, HeadRun::hovered(terminal), x, y),
             Some(ChromeTarget::PaneHeader(column)),
         );
 
         // ── and once the hand is in the pane, the run is there to be pressed ──
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, Some(column), x, y),
+            hit_chrome(&seats, &layout, 1.0, HeadRun::hovered(column), x, y),
             Some(ChromeTarget::PaneFloat(column)),
         );
         let (x, y) = centre(close);
         assert_eq!(
-            hit_chrome(&seats, &layout, 1.0, Some(column), x, y),
+            hit_chrome(&seats, &layout, 1.0, HeadRun::hovered(column), x, y),
             Some(ChromeTarget::PaneClose(column)),
         );
 
@@ -28023,12 +28090,12 @@ mod tests {",
         ] {
             let (x, y) = centre(box_);
             assert_eq!(
-                hit_chrome(&seats, &layout, 1.0, None, x, y),
+                hit_chrome(&seats, &layout, 1.0, HeadRun::default(), x, y),
                 Some(ChromeTarget::PaneHeader(terminal)),
                 "{target:?} is hidden on an unhovered head"
             );
             assert_eq!(
-                hit_chrome(&seats, &layout, 1.0, Some(terminal), x, y),
+                hit_chrome(&seats, &layout, 1.0, HeadRun::hovered(terminal), x, y),
                 Some(target),
             );
         }
@@ -28061,6 +28128,142 @@ mod tests {",
                 .iter()
                 .any(|sprite| sprite.mark == ChromeMark::Float),
             "and the hovered column draws the pop-out the hit test just answered for"
+        );
+    }
+
+    /// RED (裁4, 2026-08-26) — **a head whose own menu is standing keeps its
+    /// whole run**, drawn and pressable, with the hand down in the list.
+    ///
+    /// The acceptance asked whether the icons above stay visible while the
+    /// pointer is in the drop-down, and ruled that the *run* does — not the `⌄`
+    /// alone. The plumbing says the opposite by default and that is the bug
+    /// this pins: `drive_pane_menu_hover` claims the pointer the instant it
+    /// crosses onto the menu and clears [`ChromePointer::pane_hover`], so the
+    /// head that raised the list went dark under it and its `×` stopped taking
+    /// a press — the run vanishing out from under a hand that had not left the
+    /// control it was using.
+    ///
+    /// It is the icon rail's own rule, seat-wise: a popup is an extension of
+    /// the surface that raised it (`Runtime::rail_zone_wants_open`), and E61
+    /// already lights the lone pane's corner ghost this way. What is new is
+    /// that the whole run obeys it, on one predicate, so the paint and the hit
+    /// test cannot disagree about it.
+    ///
+    /// MUTATION: drop [`HeadRun::menu`] from [`head_run_revealed`] and every
+    /// assertion in the first two blocks below answers `PaneHeader` off a head
+    /// that is drawing three buttons.
+    #[test]
+    fn a_head_keeps_its_run_while_its_own_menu_is_standing() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let terminal = layout.rects[0].id;
+        let column = layout
+            .rects
+            .iter()
+            .find(|placement| placement.kind == SeatKind::Files)
+            .expect("the second seat is the files column")
+            .id;
+        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        let centre = |box_: [f32; 4]| {
+            (
+                f64::from((box_[0] + box_[2]) / 2.0),
+                f64::from((box_[1] + box_[3]) / 2.0),
+            )
+        };
+        let run = [
+            (
+                ChromeTarget::PaneMenu(terminal),
+                head.chevron.expect("the `⌄`"),
+            ),
+            (
+                ChromeTarget::PaneFiles(terminal),
+                head.files.expect("the folder"),
+            ),
+            (
+                ChromeTarget::PaneClose(terminal),
+                head.close.expect("the `×`"),
+            ),
+        ];
+
+        // ── the hand is on the menu, so it is in no pane at all ──────────────
+        let standing = HeadRun {
+            hovered: None,
+            menu: Some(terminal),
+        };
+        assert!(head_run_revealed(standing, terminal));
+        for (target, box_) in run {
+            let (x, y) = centre(box_);
+            assert_eq!(
+                hit_chrome(&seats, &layout, 1.0, standing, x, y),
+                Some(target),
+                "{target:?} is on screen while its own menu is up, so it takes a press"
+            );
+        }
+
+        // ── and the menu lights its own head and nobody else's ───────────────
+        assert!(!head_run_revealed(standing, column));
+        let column_close =
+            pane_head_geometry(device_rect_of(&layout, column), SeatKind::Files, 1.0)
+                .close
+                .expect("a files head carries a `×`");
+        let (x, y) = centre(column_close);
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, standing, x, y),
+            Some(ChromeTarget::PaneHeader(column)),
+        );
+        // Both arms at once, which is a real frame: the list is standing on one
+        // head while the hand has walked into the pane beside it.
+        let both = HeadRun {
+            hovered: Some(column),
+            menu: Some(terminal),
+        };
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, both, x, y),
+            Some(ChromeTarget::PaneClose(column)),
+        );
+        let (x, y) = centre(head.close.expect("the `×`"));
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, both, x, y),
+            Some(ChromeTarget::PaneClose(terminal)),
+        );
+
+        // ── the menu shuts and the hand is outside: the run goes ─────────────
+        assert!(!head_run_revealed(HeadRun::default(), terminal));
+        for (target, box_) in run {
+            let (x, y) = centre(box_);
+            assert_eq!(
+                hit_chrome(&seats, &layout, 1.0, HeadRun::default(), x, y),
+                Some(ChromeTarget::PaneHeader(terminal)),
+                "{target:?} is gone once the list is shut and the hand is out"
+            );
+        }
+
+        // ── and the paint says the same thing, which is the whole claim ──────
+        let crosses = |menu: Option<SeatId>| {
+            let (_, _, sprites) = pane_chrome(
+                &seats,
+                &layout,
+                1.0,
+                ChromePointer::default(),
+                None,
+                (None, menu),
+            );
+            sprites
+                .iter()
+                .filter(|sprite| sprite.mark == ChromeMark::PaneClose)
+                .count()
+        };
+        assert_eq!(
+            crosses(Some(terminal)),
+            1,
+            "the head under the standing menu draws its `×`",
+        );
+        assert_eq!(
+            crosses(None),
+            0,
+            "and with no menu and no hand, no head draws one",
         );
     }
 
@@ -28162,7 +28365,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from((split[0] + split[2]) / 2.0),
                 middle_y
             ),
@@ -28173,7 +28376,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from(split[0]),
                 middle_y
             ),
@@ -28187,7 +28390,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from(split[0]) - 1.0,
                 middle_y
             ),
@@ -28200,7 +28403,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from(split[2]),
                 middle_y
             ),
@@ -28267,7 +28470,7 @@ mod tests {",
                 .map(|sprite| sprite.rect);
             (
                 find(ChromeMark::Chevron { turned_degrees: 0 }, head.chevron),
-                find(ChromeMark::FolderOutline, head.files),
+                find(ChromeMark::Folder, head.files),
                 pill,
             )
         };
@@ -28475,7 +28678,7 @@ mod tests {",
                 &split,
                 &split_layout,
                 1.0,
-                Some(terminal),
+                HeadRun::hovered(terminal),
                 f64::from((chevron[0] + chevron[2]) / 2.0),
                 f64::from((chevron[1] + chevron[3]) / 2.0)
             ),
@@ -28831,7 +29034,7 @@ mod tests {",
                 })
                 .map(|sprite| (sprite.rect, sprite.color));
             (
-                pick(ChromeMark::FolderOutline),
+                pick(ChromeMark::Folder),
                 pick(ChromeMark::Chevron { turned_degrees: 0 }),
                 chip,
             )
@@ -29088,13 +29291,12 @@ mod tests {",
                 .iter()
                 // **The strip's folder, said out loud** (2026-08-25). This build
                 // draws the panes too, and since the corner ghost grew its own
-                // 🗀 there is a second `FolderOutline` in the frame — one that rests at
+                // 🗀 there is a second `Folder` in the frame — one that rests at
                 // `.45` and is not what this test is about. The layer is the
                 // difference and it is the honest filter: the strip is the title
                 // bar, the ghost is out over the terminal.
                 .find(|sprite| {
-                    sprite.mark == ChromeMark::FolderOutline
-                        && !in_the_pane_layer(sprite.rect, scale)
+                    sprite.mark == ChromeMark::Folder && !in_the_pane_layer(sprite.rect, scale)
                 })
                 .map(|sprite| sprite.opacity)
         };
@@ -31363,7 +31565,7 @@ mod tests {",
                 &seats,
                 &layout,
                 1.0,
-                None,
+                HeadRun::default(),
                 f64::from((bar.left + bar.right) as i32) / 2.0,
                 f64::from((bar.top + bar.bottom) as i32) / 2.0,
             ),
@@ -38243,7 +38445,7 @@ mod tests {",
                 &layout,
                 1.0,
                 &[(seat, tools)],
-                Some(seat),
+                HeadRun::hovered(seat),
                 f64::from((box_[0] + box_[2]) / 2.0),
                 f64::from((box_[1] + box_[3]) / 2.0),
             ),
@@ -40458,11 +40660,22 @@ mod tests {",
         let at = source
             .find("let head_ink_here = head_ink.of(")
             .expect("the paint's gate is in this file");
-        let gate = &source[at..at + 200];
+        let gate = &source[at..at + 300];
         assert!(
-            gate.contains("head_run_revealed(pointer.pane_hover, placement.id)"),
+            gate.contains("head_run_revealed("),
             "the paint no longer asks the predicate, so the two have come apart"
         );
+        // **And it asks it with both arms** (裁4, 2026-08-26): the hand's pane
+        // and the pane whose menu is standing. A paint that dropped the second
+        // would fade the run out from under an open list while the hit test
+        // went on answering for it — which is this rule's own failure, in the
+        // other direction.
+        for arm in ["hovered: pointer.pane_hover", "menu: pane_menu_seat"] {
+            assert!(
+                gate.contains(arm),
+                "the paint's gate has lost `{arm}`, so the two have come apart"
+            );
+        }
     }
 
     /// RED — **a tab's chrome changes hands over the fast span, and its geometry

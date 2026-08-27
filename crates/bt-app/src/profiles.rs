@@ -10938,25 +10938,35 @@ mod tests {
         );
     }
 
-    /// **P2's fill policy, read off the menus the user actually opens.**
+    /// **A folder is solid wherever a row is about one** — 裁1, 2026-08-26,
+    /// read off the menus the user actually opens.
     ///
-    /// RED EVIDENCE (2026-08-26, on the real window): the registry gate went
-    /// green while the profile menu still drew two solid accent-blue folders
-    /// under its rule, because those two rows named `ChromeMark::Folder`
+    /// This test is P2's, turned round. It was written to hold the *opposite*
+    /// assertion: that a folder in a column of verbs is struck and only a
+    /// folder that is a place is solid. The acceptance's answer to that split
+    /// was 「还是原来的好看」, and it is the ruling this file now checks —
+    /// with the same method, because the method was never the thing that was
+    /// wrong.
+    ///
+    /// RED EVIDENCE for the method (2026-08-26, on the real window): the
+    /// registry gate went green while the profile menu still drew two folders
+    /// of its own choosing, because those two rows named a `ChromeMark`
     /// themselves instead of asking. A table gate is worth what its drawing
     /// points are worth, so this one asks the *drawings*:
     ///
-    /// * **The profile menu names no place at all** — every row is an act, so
-    ///   there is no solid folder anywhere in it.
-    /// * **The root menu names both**, and the division is the whole policy: a
-    ///   cwd row *is* a folder and wears the solid one, `Browse…` is a question
-    ///   and wears the struck one.
+    /// * **The profile menu's two folder rows wear the solid**, which is what
+    ///   裁1 restored — and, since the struck rendition is gone from the sheet
+    ///   entirely, wearing anything else is now a compile error rather than a
+    ///   test failure.
+    /// * **The root menu's two kinds of row wear one drawing.** A cwd row *is*
+    ///   a folder; `Browse…` is a question about one. P2 gave them two
+    ///   renditions; they are one again.
     ///
-    /// MUTATION: point either profile-menu row back at `ChromeMark::Folder` and
-    /// the first half goes red naming the row's rectangle; point `Browse…` back
-    /// at `ChromeMark::FolderOpen` and the second half goes red.
+    /// MUTATION: point either profile-menu row at `ChromeMark::File` and the
+    /// first half goes red naming the count; point `Browse…` at anything but
+    /// the open folder and the second half goes red naming what it found.
     #[test]
-    fn a_folder_in_a_column_of_verbs_is_struck_and_a_folder_that_is_a_place_is_solid() {
+    fn a_folder_is_solid_in_a_column_of_verbs_too() {
         let scale = 1.0;
         let vault = [term(r"C:\work", None, 3_600)];
         let layout = layout(
@@ -10977,24 +10987,14 @@ mod tests {
             &crate::favicon::Favicons::default(),
             &mut fake_measure,
         ));
-        let solid: Vec<[f32; 4]> = layer
-            .sprites
-            .iter()
-            .filter(|sprite| matches!(sprite.mark, ChromeMark::Folder | ChromeMark::FolderOpen))
-            .map(|sprite| sprite.rect)
-            .collect();
-        assert!(
-            solid.is_empty(),
-            "every row of the profile menu is an act, so none of them wears the              object's solid folder: {solid:?}",
-        );
         assert_eq!(
             layer
                 .sprites
                 .iter()
-                .filter(|sprite| sprite.mark == ChromeMark::FolderOutline)
+                .filter(|sprite| sprite.mark == ChromeMark::Folder)
                 .count(),
             2,
-            "`Files pane` and `New terminal in folder…` wear the struck one",
+            "`Files pane` and `New terminal in folder…` are rows about a folder,              and a folder is solid",
         );
 
         // And the menu that holds both kinds of row.
@@ -11024,15 +11024,15 @@ mod tests {
             .collect();
         assert_eq!(
             browse,
-            vec![ChromeMark::FolderOpenOutline],
-            "`Browse…` is a question, and a question is struck",
+            vec![ChromeMark::FolderOpen],
+            "`Browse…` is a question about a folder, and it wears the folder",
         );
         assert!(
             root_layer.sprites.iter().any(|sprite| {
                 root.items.iter().any(|item| inside(*item, sprite))
                     && matches!(sprite.mark, ChromeMark::Folder | ChromeMark::FolderOpen)
             }),
-            "and a row that names a place keeps the object's solid folder",
+            "and a row that names a place wears the same drawing",
         );
     }
 
@@ -13845,9 +13845,9 @@ mod tests {
                 ChromeMark::Pencil,
                 ChromeMark::Copy,
                 ChromeMark::Paste,
-                // The *act* of revealing, so the struck rendition (P2's fill
-                // policy): a menu's icon column is one weight all the way down.
-                ChromeMark::FolderOpenOutline,
+                // A row about a folder, so the folder — solid, which is what
+                // 裁1 (2026-08-26) restored after P2 struck it.
+                ChromeMark::FolderOpen,
             ],
             "each verb wears its own glyph — the copy and the paste are not one \
              mark twice"
@@ -15883,17 +15883,16 @@ mod tests {
         let house = crate::icons::MarkSlot::Menu.house_box_logical_px();
         let edge = crate::icons::MarkSlot::Menu.edge_to_edge_box_logical_px();
         assert!(edge < house, "the edge-to-edge family is given less room");
-        // **Five, and P1 is why it is not nine.** The three the enumerated
-        // list never reached — `#i-minus`, `#i-chev`, the grip — were
-        // edge-to-edge because they were cut in somebody else's box, which
+        // **Three, and two rulings are why it is not nine.** The three the
+        // enumerated list never reached — `#i-minus`, `#i-chev`, the grip —
+        // were edge-to-edge because they were cut in somebody else's box, which
         // is also what cost them their pen; re-cut into the house's sixteen
         // they carry the house's air and take the house's box, and so does
-        // `#i-plus` beside them. What is left is the caption family, whose
-        // ten is the platform's and not this design's.
+        // `#i-plus` beside them (P1). 裁2 took the tab's and the pane's cross
+        // off the same way. What is left is the caption family, whose ten is
+        // the platform's and not this design's.
         for edge_to_edge in [
             ChromeMark::WindowClose,
-            ChromeMark::TabClose,
-            ChromeMark::PaneClose,
             ChromeMark::WindowMinimize,
             ChromeMark::WindowMaximize,
         ] {
@@ -15948,10 +15947,13 @@ mod tests {
                 .unwrap_or_else(|| panic!("{glyph:?} is one of this menu's rows"));
             sprite.rect
         };
+        // **The cross is a house mark now** (裁2, 2026-08-26): `#i-cross` is
+        // cut in the house's sixteen, so it takes the house's box and puts its
+        // smaller picture inside it. The edge-to-edge box above is the caption
+        // family's alone.
         let cross = sprite_of(ChromeMark::PaneClose);
-        // A menu row *about* a folder, so the struck rendition since P2.
-        let folder = sprite_of(ChromeMark::FolderOutline);
-        assert_eq!(cross[2] - cross[0], edge.round());
+        let folder = sprite_of(ChromeMark::Folder);
+        assert_eq!(cross[2] - cross[0], house);
         assert_eq!(folder[2] - folder[0], house);
         for (glyph, wanted) in [
             (ChromeMark::Split, house),

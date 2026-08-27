@@ -3217,6 +3217,61 @@ cargo test -p bt-app --bin folio -- --ignored --nocapture the_symbol_sheet
 
 **⑥ 一条留给下一片的观察。** 本片没有把 `ChromeMark::Folder`/`FolderOpen` 的**对象用法**也收进注册表(tab 标、restore 行、浮窗头仍直接写画名)。写了红门的是**菜单**这一层;真要让「谁都不能绕过表」成立,得让每一处对象标也报一个 `ActionIcon`。列在这里而不是悄悄跳过,是范围与窟窿的区别。
 
+————
+
+**验收回修续写(图标统一块 · 验收回修,2026-08-26 用户验 next11 后四裁,已落地;`crates/bt-app/src/{marks,icons,profiles,seats,settings,float,main}.rs`)**
+
+**一句话:P0 到 P2 三片把「一个动词一枚形、一枚形一个框、一支笔一个格子」立成了法,用户在真窗前看了一遍,退回四条——两条是政策改判(文件夹回实心、面包屑回字符),一条是这三片的红门**测不到**的东西(`✕` 看起来比 `⌄` 大),一条是这三片没想过的时刻(下拉开着时上面那排该不该在)。四条都不是「实现走样」,是**规矩本身要修**。**
+
+**① 裁2:`✕` 视觉上比 `⌄` 大——补一条「视觉面积带」,并把房子的十字重切。**
+
+**这三片的红门为什么测不到。** 光学带管的是**笔**(`optical = units × min(框/vw)`,`1.05 ± 0.10`),`HOUSE_INK_RATIO` 管的是**墨宽**(边到边族取房子框的 `0.8`,于是两族在一行里放同样宽的墨)。pane 头那一排两条都是绿的:`#i-chev` 与 `#i-close` 的墨宽在紧凑头框上分别是 `10.46` 与 `10.40` 逻辑 px,差半个百分点;笔是 `0.975` 与 `1.040`,都在带内。**而读者比的两样都不是。** 读者比的是这枚形**画出来那张图有多大**,而一张图的大小是它的**外接框对角**——一个十字的墨从角跑到角,同样的墨宽,它的图比一枚扁箭头的图大 `√2`。
+
+于是本片给光学带添了**第二半**:`OPTICAL_PICTURE_SPREAD`,同一排控件里最大的图与最小的图相差不得超过 **20%**,量的是 `ChromeMark::optical_picture_logical_px`——**off the raster**,`ink_extent_units` 把每枚形在 256px 上光栅化一次量出它自己的墨框,再按槽位缩放取对角。`design_stroke_units` 之于笔是什么,它之于图就是什么:一个关于**画**的事实,不是第二张表。
+
+**20% 是这扇窗自己的地板,不是口味。** 同一个头上另外两枚——扁箭头与文件夹剪影,各自都在自己的格子给的框里,谁也没被投诉过——相差 **14.7%**,而且没有任何框能改这个数:那就是 `12.8 × 6.4` 的箭头和 `12.8 × 10.4` 的文件夹**本来的样子**。带子若比 `14.7%` 紧,就是规矩在把一张设计满意的画判错——这正是 P0 写 `NOT_A_CONTROL_SLOT` 时防的那件事,换一层重演。二十是那个地板加一点余量,而且报告进来那天它是红的。
+
+**红证(2026-08-26,`a_heads_run_is_one_picture`,pane 头三枚,紧凑头 13px 框):**
+
+```text
+i-chev     ink 12.88 × 6.50 units   →  10.46 × 5.28 px   picture 11.718
+i-folder   ink 12.88 × 10.38 units  →  10.46 × 8.43 px   picture 13.435
+i-close    ink 10.00 × 10.00 units  →  10.40 × 10.40 px  picture 14.708
+pane head: i-close makes a 14.708 picture beside i-chev's 11.718 — 25.5% apart
+```
+
+**修法是重切一张画,而不是换一个框**,理由和 P1 重切 `#i-plus`/`#i-chev`/手柄时一模一样:**框同时缩墨和笔**。要把十字的图缩到箭头那么大,框得从 `10.40` 走到 `8.1`,而 `#i-close` 是十格里的 `1.0` 笔,`8.1` 的框把它画成 `0.81` 逻辑 px——比带子下沿还低三分之一。所以十字进房子的十六格,拿房子的 `1.2` 笔,**墨盒十个单位居中**(`3.0 – 13.0`)。这个「十」是推的不是拍的:`#i-chev` 的墨是 `12.8 × 6.4`,那张图的对角是 `14.31` 个单位,一个对角等于它的正方形边长是 `14.31 / √2 = 10.12`。红门 `the_crosss_ink_is_the_arrows_picture_turned_square` 把这条推导本身钉住——重切箭头,它当场说话。
+
+**这必须是两张画,而标题栏那三枚一动不动。** `#i-close` 是 Windows 的画在 Windows 的尺寸上(十格,`1.0` 笔),和 `#i-min`/`#i-max` 是配套的一副;把它整枚重切,标题栏的 `✕` 会比旁边的 `□` 小一圈,那是拿一条投诉换另一条。所以拆:`ChromeMark::WindowClose` 留 `#i-close`(标题栏,**只剩它一处**),`TabClose`/`PaneClose` 走新的 `#i-cross`。**这一天是 `PaneClose` 自己的注释预约了十一天的那一天**——「分开只为各占一个栅格缓存槽,好让哪天要重切的那个控件有地方可以被重切」。设置对话框的头也归 `#i-cross`(那是本房子的表面不是 Windows 的),并顺手从写死的 `WINDOW_CAPTION_GLYPH_LOGICAL_PX` 改成走紧凑头槽位——一枚房子的画不该是全窗唯一一枚手填尺寸的。
+
+**② 裁1:文件夹回实心——P2 的「动作=描边」在文件夹这一族上改判。**
+
+用户原话:**「还是原来的好看」**。P2 的政策没有被推翻,是被告诉了它的界线在哪:**一个文件夹是一个对象**,而一行「关于一个对象」的行,不论它的句子写成名词还是动词,说的都是那个对象。`Open files pane` 把一枚文件夹放在一个名字旁边,和文件树行放它的理由是同一个——为了说**一个文件夹**。
+
+所以 `#i-folder-line` / `#i-folder-open-line` 两张 P2 新切的画**从符号表里删掉**(没有第二处用它们了,留着就是给绘制点留一条可以悄悄走回去的路),四个动词行 `Open files pane`、`New terminal in folder…`、`Reveal in folder`、`Browse…` 回到 `#i-folder` / `#i-folder-open`。`FILLED_WITH_A_REASON` 加两条**第二类(对象)**的登记,并且**把代价写在条目里**:实心在那一列里是 `1.36×` 的墨,那是裁决的价钱,不是漏网。P2 那条读绘制结果的红门 `a_folder_in_a_column_of_verbs_is_struck…` **改判为相反断言**并改名 `a_folder_is_solid_in_a_column_of_verbs_too`——方法没错,错的是它当时断言的那一边。
+
+**③ 裁3:面包屑回字符——`no_font_character_stands_in_for_a_mark` 添一类,而不是开一个洞。**
+
+用户原话:**「原来的好看」**。`marks.rs` 的开篇法(*a codepoint is not a drawing*)不动,本片是**告诉它管的是什么**:一条面包屑是**一句话**。`‹ PROFILES › PowerShell 7`、`project › src › main.rs` 都是一行排版,`›` 是这句话的逗号——它坐在两边词的同一条基线上,由同一次测量、同一个字号、同一份 tracking、同一种墨来管。P1 把它struck成一枚控件形,等于往一句话中间塞了一枚这句话的度量根本不知道的字。法说的是「一个码位不得**冒充一枚形**」;句子里的标点不是一枚形。
+
+于是 `RETIRED` 去掉 `2039`/`203a` 两枚,新增一张 `PUNCTUATION` 名单——**逐文件、逐码位、逐句理由**,并且和 `REUSED_SHAPES` 同一条纪律:**登记在册的标点必须真的还在那个文件里**,某个表面不再排它了就得把条目撤掉,不许留成传说。P1 那条 `the_separator_that_stayed_a_character_is_never_set_into_a_box`(断言 `seats.rs` 里**不得**出现 `text: PREVIEW_CRUMB_SEPARATOR`)整条翻面成 `the_punctuation_that_stayed_a_character_is_set_as_type`:两条面包屑都**排字**,而且 P1 为此新造的三个函数(`crumb_separator_mark`/`crumb_back_mark`/`crumb_punctuation_box`)全部删除——没有可以退回去的东西,才叫改判。设置页的 `‹ Profiles` 也**连着量**:一句话是一次测量,`CrumbLayout` 的 `back_mark` 字段随之消失。P1 没有为面包屑造过专用的小尺寸常量(它走的是通用的 `compact_head_glyph_box_logical_px`),所以没有可撤的常量,只有可删的函数。
+
+**④ 裁4:菜单开着时,那个头的整排保持显形。**
+
+用户问「鼠标在下拉时上面图标显不显示」,裁:**整排显示**。这条必须被裁,因为管线默认是反的——手一走上 pane 菜单,`drive_pane_menu_hover` 接管指针并 `update_chrome_hover_target(None)` 清掉 `ChromePointer::pane_hover`,于是**刚刚打开这张单子的那个头在单子底下变黑了**,连它的 `✕` 一起不再接受按下。
+
+这就是侧栏那条规矩往下一层:**弹层是它 owner 表面的延伸**(`rail_zone_wants_open` = `inside || popup_from_the_rail`,`PopupOwner` 判的)。独 pane 的角落 ghost 从 E61 起就有**按席位**的那一半(`hover == PaneMenu(seat) || pane_menu_seat == seat`)。本片加的是:**整排**照这条办,而不只是那一枚按钮——一枚还亮着的 `⌄` 配一枚在指针底下淡掉的 `✕`,比两个都错还糟。
+
+落法是把谓词的参数从一个事实改成两个:`seats::HeadRun { hovered, menu }`,`head_run_revealed(run, seat)` = `hovered == seat || menu == seat`。**画、命中、淡入淡出三处读同一句**——`build_chrome_with_preview` 的 `head_ink.of(...)`、`hit_chrome`/`hit_preview_head`、`Runtime::settled_head_ink` 的 90ms 目标,全部走 `Runtime::head_run()` 这一处装配;清尾束那条「画与命中同源」的读源码红门跟着改成**两条臂都要在**。两个头同时显形是合法帧,不是 bug:单子立在一个头上,手走进旁边那个 pane。
+
+**⑤ 实机读数(隔离 `%APPDATA%`、`BT_PTY_DUMP`、`SWP_NOACTIVATE`,DPI 2.0,物理像素;修前=`HEAD`,修后=本片)。**
+
+- **pane 头三枚的墨框**:`⌄` `22×10`(图 `24.17`)与 `🗀` `22×17`(图 `27.80`)**两片都没动**;`✕` **`21×21`(图 `29.70`)→ `16×16`(图 `22.63`)**。用户投诉的那一对 `✕ : ⌄` 从 **+22.9% 变成 −6.4%**——第一次是 `⌄` 略大而不是 `✕` 大一圈。
+- **pane 菜单一列**:`New terminal in folder…` 的描边文件夹回实心,`Close pane` 的 `✕` 同步缩到 `#i-cross`。
+- **设置对话框**:头的 `✕` 从标题栏的十格画改成房子的十字,框从写死的 `10` 走到紧凑头的 `13`——框大了,**图小了**。
+- **编辑页面包屑**:`❮ PROFILES ❯` 两枚粗几何 chevron → `‹ PROFILES ›` 两枚排在标题自己那行里的引号。
+- **裁4 的三帧**:单子开着、指针停在 `New terminal in folder…` 上时,修前那个头**一枚不剩**(量到的 run 墨 = 0),修后 `⌄ 🗀 ✕` 三枚俱在;单子关掉、指针移到 tab 条上,两片都退干净。
+
 ### 7.18 motion 令牌:三档、一段位移、两条曲线,和一张不许出现第四档的登记表（动画块前置片 丙12，2026-08-26 用户裁；`crates/bt-render/src/{motion(新),theme,lib}.rs`、`crates/bt-app/src/{main,toast,tooltip,keyhint,seats,cmdrail,termscroll,float,profiles,files}.rs`、`crates/bt-platform/src/lib.rs`）
 
 **一句话:这扇窗的节奏第一次是一处决定,而不是九处各自都说得通的数字。**
