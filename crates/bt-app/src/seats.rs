@@ -83,7 +83,7 @@ use crate::focus_thumb::MiniMetrics;
 // about `bt_render::chrome_label_attrs` rather than about that page, so it is
 // borrowed here rather than copied.
 use crate::git_panel::{Measure, MeasureFace};
-use crate::marks::{ChromeMark, ChromeSprite, Corner, tree_disclosure};
+use crate::marks::{ChromeMark, ChromeSprite, Corner};
 
 /// `.pane:not(.focused) .panehead .ticon { opacity: .5 }` (mock-up 1647).
 ///
@@ -15215,6 +15215,11 @@ pub(crate) fn push_files_tree(
             }
             RowKind::Directory { open } => {
                 // C33: the triangle turns; the file rows below keep its slot.
+                //
+                // The drawing is the registry's, asked for at this row's frame
+                // of the turn (P2): the tree and a submenu row are the chrome's
+                // *two* uses of the filled triangle, and both of them now read
+                // one table rather than each naming the glyph.
                 let turn = tree
                     .turns
                     .get(&row.key)
@@ -15227,7 +15232,11 @@ pub(crate) fn push_files_tree(
                     middle(tri) + tri,
                 ];
                 if wholly_inside(tri_rect) {
-                    sprites.push(ChromeSprite::new(tree_disclosure(turn), tri_rect, muted));
+                    sprites.push(ChromeSprite::new(
+                        crate::icons::ActionIcon::FoldFolder.turned(turn),
+                        tri_rect,
+                        muted,
+                    ));
                 }
                 let icon_left = content_left + tri + gap;
                 let icon_rect = [
@@ -16424,7 +16433,10 @@ fn push_files_foot(
                 favicon: strip.and_then(|strip| strip.favicon),
             }
         } else {
-            crate::icons::ActionIcon::OpenFolderObject.mark()
+            // **The act of revealing, not the folder itself** (P2): this glyph
+            // is a button that opens File Explorer, and it stands in the same
+            // foot as the tick above it.
+            crate::icons::ActionIcon::RevealInFolder.mark()
         },
         geometry.foot_mark,
         ink,
@@ -23563,7 +23575,9 @@ mod tests {",
             .iter()
             .find(|sprite| sprite.rect == geometry.foot_mark)
             .expect("the foot wears a mark");
-        assert_eq!(mark.mark, ChromeMark::FolderOpen);
+        // The struck rendition since P2: the foot's glyph is a *button* that
+        // opens File Explorer, not the folder it is standing in.
+        assert_eq!(mark.mark, ChromeMark::FolderOpenOutline);
         assert_eq!(mark.color, palette.files_row_muted, "`color: var(--ink3)`");
         let label = chrome
             .labels
@@ -27883,7 +27897,7 @@ mod tests {",
                 .map(|sprite| sprite.rect);
             (
                 find(ChromeMark::Chevron { turned_degrees: 0 }, head.chevron),
-                find(ChromeMark::Folder, head.files),
+                find(ChromeMark::FolderOutline, head.files),
                 pill,
             )
         };
@@ -28447,7 +28461,7 @@ mod tests {",
                 })
                 .map(|sprite| (sprite.rect, sprite.color));
             (
-                pick(ChromeMark::Folder),
+                pick(ChromeMark::FolderOutline),
                 pick(ChromeMark::Chevron { turned_degrees: 0 }),
                 chip,
             )
@@ -28704,12 +28718,13 @@ mod tests {",
                 .iter()
                 // **The strip's folder, said out loud** (2026-08-25). This build
                 // draws the panes too, and since the corner ghost grew its own
-                // 🗀 there is a second `Folder` in the frame — one that rests at
+                // 🗀 there is a second `FolderOutline` in the frame — one that rests at
                 // `.45` and is not what this test is about. The layer is the
                 // difference and it is the honest filter: the strip is the title
                 // bar, the ghost is out over the terminal.
                 .find(|sprite| {
-                    sprite.mark == ChromeMark::Folder && !in_the_pane_layer(sprite.rect, scale)
+                    sprite.mark == ChromeMark::FolderOutline
+                        && !in_the_pane_layer(sprite.rect, scale)
                 })
                 .map(|sprite| sprite.opacity)
         };

@@ -4006,7 +4006,11 @@ pub fn build(
             // names a kind of pane, and every profile mark in the list above it
             // names a shell. Borrowing one here would say the tree belongs to
             // whichever shell lent its glyph.
-            mark: Some(ChromeMark::Folder),
+            //
+            // Asked of the registry since P2, which is also where it stopped
+            // being the *solid* folder: this row is an act, and an act in a
+            // column of verbs is struck.
+            mark: Some(ActionIcon::OpenFilesPane.mark()),
             name: files_pane_text(),
             hint: Some(hint(files_pane_hint_text().to_owned())),
             dirty: false,
@@ -4026,10 +4030,11 @@ pub fn build(
         &Row {
             rect: layout.new_in_folder,
             // The same generic folder the pane menu's own `New terminal in
-            // folder…` wears (`PaneMenuRow::mark`). Two rows under one rule both
-            // marked with a folder is the section saying what it is: the glyph
-            // names the thing being chosen, not the thing being opened.
-            mark: Some(ChromeMark::Folder),
+            // folder…` wears (`PaneMenuRow::mark`) — literally the same, since
+            // P2, because both ask the registry for it. Two rows under one rule
+            // both marked with a folder is the section saying what it is: the
+            // glyph names the thing being chosen, not the thing being opened.
+            mark: Some(ActionIcon::NewTerminalInFolder.mark()),
             name: new_in_folder_text(),
             hint: None,
             dirty: false,
@@ -5155,7 +5160,10 @@ pub fn root_menu_build(
             // the only row here that earns it by meaning rather than by state: the
             // rows above wear an open folder to say "you are already here", and
             // this one wears it to say "go and look".
-            mark: Some(ChromeMark::FolderOpen),
+            //
+            // Which is also why it is the **struck** rendition since P2 while
+            // they keep the solid one: they are places and this is a question.
+            mark: Some(ActionIcon::BrowseForFolder.mark()),
             name: browse_text(),
             // No note. Every row above answers "why is this offered?"; this one is
             // offered because nothing else was, and a hint saying so would be the
@@ -5470,7 +5478,7 @@ impl FileMenuRow {
             // mark turns with the word. Not a second glyph for a second kind of
             // disclosure: a reader who has opened a folder in this window has
             // already learned what a turned triangle means.
-            Self::Fold => crate::marks::tree_disclosure(
+            Self::Fold => ActionIcon::FoldFolder.turned(
                 if matches!(look.subject, FileMenuSubject::Folder { expanded: true }) {
                     1.0
                 } else {
@@ -7591,11 +7599,15 @@ pub fn term_menu_build(
             // with: `#i-tri` at rest, in the row's trailing padding, lit with the
             // row. A second angle or a written `▸` would be the fifth
             // close-enough triangle `ChromeMark::TreeDisclosure` argues against.
+            //
+            // **Asked of the registry since P2**, so that "the triangle lives in
+            // the tree and on a submenu row and nowhere else" is a row of one
+            // table rather than a construction in two files.
             let size = px(SUBMENU_INDICATOR_LOGICAL_PX).round().max(1.0);
             let right = item.rect[2] - px(ITEM_PADDING_X_LOGICAL_PX);
             let top = ((item.rect[1] + item.rect[3] - size) / 2.0).round();
             sprites.push(ChromeSprite::new(
-                ChromeMark::TreeDisclosure { turned_degrees: 0 },
+                ActionIcon::OpenSubmenu.mark(),
                 [right - size, top, right, top + size],
                 if hovered {
                     palette.menu_item_text_selected
@@ -9217,12 +9229,13 @@ pub fn pane_menu_build(
             // angle, and no fifth close-enough triangle in a build that already
             // has one — see `ChromeMark::TreeDisclosure`, whose own note argues
             // that three marks differing by where a line falls are three marks
-            // nobody can tell apart at fourteen pixels.
+            // nobody can tell apart at fourteen pixels. Asked of the registry
+            // since P2, with the file menu's own submenu row.
             let size = px(SUBMENU_INDICATOR_LOGICAL_PX).round().max(1.0);
             let right = rect[2] - px(ITEM_PADDING_X_LOGICAL_PX);
             let top = ((rect[1] + rect[3] - size) / 2.0).round();
             sprites.push(ChromeSprite::new(
-                ChromeMark::TreeDisclosure { turned_degrees: 0 },
+                ActionIcon::OpenSubmenu.mark(),
                 [right - size, top, right, top + size],
                 if hover == Some(PaneMenuHover::Row(*row)) {
                     palette.menu_item_text_selected
@@ -10922,6 +10935,104 @@ mod tests {
         assert!(
             layer.labels.iter().any(|label| label.text == browse_text()),
             "the row says its own name"
+        );
+    }
+
+    /// **P2's fill policy, read off the menus the user actually opens.**
+    ///
+    /// RED EVIDENCE (2026-08-26, on the real window): the registry gate went
+    /// green while the profile menu still drew two solid accent-blue folders
+    /// under its rule, because those two rows named `ChromeMark::Folder`
+    /// themselves instead of asking. A table gate is worth what its drawing
+    /// points are worth, so this one asks the *drawings*:
+    ///
+    /// * **The profile menu names no place at all** — every row is an act, so
+    ///   there is no solid folder anywhere in it.
+    /// * **The root menu names both**, and the division is the whole policy: a
+    ///   cwd row *is* a folder and wears the solid one, `Browse…` is a question
+    ///   and wears the struck one.
+    ///
+    /// MUTATION: point either profile-menu row back at `ChromeMark::Folder` and
+    /// the first half goes red naming the row's rectangle; point `Browse…` back
+    /// at `ChromeMark::FolderOpen` and the second half goes red.
+    #[test]
+    fn a_folder_in_a_column_of_verbs_is_struck_and_a_folder_that_is_a_place_is_solid() {
+        let scale = 1.0;
+        let vault = [term(r"C:\work", None, 3_600)];
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            &vault,
+            &mut fake_measure,
+        );
+        let layer = one_layer(build(
+            &layout,
+            &equipped(),
+            0,
+            None,
+            &vault,
+            now(),
+            &crate::favicon::Favicons::default(),
+            &mut fake_measure,
+        ));
+        let solid: Vec<[f32; 4]> = layer
+            .sprites
+            .iter()
+            .filter(|sprite| matches!(sprite.mark, ChromeMark::Folder | ChromeMark::FolderOpen))
+            .map(|sprite| sprite.rect)
+            .collect();
+        assert!(
+            solid.is_empty(),
+            "every row of the profile menu is an act, so none of them wears the              object's solid folder: {solid:?}",
+        );
+        assert_eq!(
+            layer
+                .sprites
+                .iter()
+                .filter(|sprite| sprite.mark == ChromeMark::FolderOutline)
+                .count(),
+            2,
+            "`Files pane` and `New terminal in folder…` wear the struck one",
+        );
+
+        // And the menu that holds both kinds of row.
+        let choices = root_choices(r"C:\work\project", None, &[]);
+        let root = root_menu_layout(
+            [40.0, 8.0, 140.0, 27.0],
+            (960.0, 600.0),
+            1.0,
+            &choices,
+            &mut fake_measure,
+        );
+        let root_layer = one_layer(root_menu_build(
+            &root,
+            &choices,
+            r"C:\work\project",
+            None,
+            &mut fake_measure,
+        ));
+        let inside = |row: [f32; 4], sprite: &ChromeSprite| {
+            sprite.rect[1] >= row[1] && sprite.rect[3] <= row[3]
+        };
+        let browse: Vec<ChromeMark> = root_layer
+            .sprites
+            .iter()
+            .filter(|sprite| inside(root.browse, sprite))
+            .map(|sprite| sprite.mark)
+            .collect();
+        assert_eq!(
+            browse,
+            vec![ChromeMark::FolderOpenOutline],
+            "`Browse…` is a question, and a question is struck",
+        );
+        assert!(
+            root_layer.sprites.iter().any(|sprite| {
+                root.items.iter().any(|item| inside(*item, sprite))
+                    && matches!(sprite.mark, ChromeMark::Folder | ChromeMark::FolderOpen)
+            }),
+            "and a row that names a place keeps the object's solid folder",
         );
     }
 
@@ -13734,7 +13845,9 @@ mod tests {
                 ChromeMark::Pencil,
                 ChromeMark::Copy,
                 ChromeMark::Paste,
-                ChromeMark::FolderOpen,
+                // The *act* of revealing, so the struck rendition (P2's fill
+                // policy): a menu's icon column is one weight all the way down.
+                ChromeMark::FolderOpenOutline,
             ],
             "each verb wears its own glyph — the copy and the paste are not one \
              mark twice"
@@ -15836,7 +15949,8 @@ mod tests {
             sprite.rect
         };
         let cross = sprite_of(ChromeMark::PaneClose);
-        let folder = sprite_of(ChromeMark::Folder);
+        // A menu row *about* a folder, so the struck rendition since P2.
+        let folder = sprite_of(ChromeMark::FolderOutline);
         assert_eq!(cross[2] - cross[0], edge.round());
         assert_eq!(folder[2] - folder[0], house);
         for (glyph, wanted) in [

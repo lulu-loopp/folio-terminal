@@ -229,6 +229,20 @@ pub enum ActionIcon {
     /// The `⌄` beside it, and every other list-that-is-folded-away trigger.
     PickProfile,
     CloseTab,
+    /// **The `▸` a menu row wears when it opens another menu** — the pane
+    /// menu's `Move to window ▸`, the file menu's submenus.
+    ///
+    /// One of the chrome's **two** disclosure languages and not a third. See
+    /// [`Self::FoldFolder`], which is this drawing turned, and the 2026-08-26
+    /// ruling that keeps the triangle in exactly these two places.
+    OpenSubmenu,
+    /// **The files tree's own triangle**, and the file menu's `Expand` /
+    /// `Collapse` row, which is a word for the same gesture.
+    ///
+    /// [`Self::OpenSubmenu`]'s drawing at the other end of its turn — one
+    /// disclosure triangle, two orientations, which is what the two draw sites
+    /// asking the registry now makes checkable.
+    FoldFolder,
 
     // ── a pane's head ────────────────────────────────────────────────────
     /// The head's `⌄`, and the lone pane's corner ghost, which opens the same
@@ -270,8 +284,19 @@ pub enum ActionIcon {
     CopyPath,
     InsertPath,
     /// `Reveal in folder`, and the Git row menu's `Reveal in Explorer` — one
-    /// verb, which is why the two share a string already.
+    /// verb, which is why the two share a string already. Also the files pane's
+    /// own foot and a docked float's, which are the same act on the folder the
+    /// column is rooted at.
     RevealInFolder,
+    /// `Browse…` — the root menu's escape hatch, which opens the system's own
+    /// folder picker.
+    ///
+    /// **An act, and the rows above it are places**, which is exactly the line
+    /// P2's fill policy is drawn along: a cwd row wears the solid folder because
+    /// it *is* a folder, and this row wears the struck one because it is a
+    /// question. The mock-up's own choice of the open folder for both survives
+    /// — what changes is which rendition each of them gets.
+    BrowseForFolder,
 
     // ── the Git menus, panel and graph ───────────────────────────────────
     CheckoutBranch,
@@ -332,6 +357,14 @@ pub enum ActionIcon {
     EditRow,
     DeleteRow,
     CloseDialog,
+    /// **A page's `Advanced` header**, which turns a chevron (the 2026-08-26
+    /// ruling: the triangle stays in the tree and the submenu, the dialog and
+    /// both breadcrumbs take the arrow).
+    ///
+    /// P1 changed the drawing and left the drawing point choosing it by hand;
+    /// P2 routes it here, so the chrome's three disclosure sites are three rows
+    /// of one table instead of three opinions in three files.
+    ExpandAdvanced,
     /// **The four verbs the dialog was spending font characters on** (P1, the
     /// plan's 字符退役). `↺`, `↑`, `↓`, `⋯` and `✕` were drawn as text runs
     /// in the dialog's own type, which is the thing `marks.rs`'s opening
@@ -370,7 +403,7 @@ pub enum ActionIcon {
 impl ActionIcon {
     /// Every verb, for the reverse index to walk.
     #[cfg(test)]
-    pub const ALL: [Self; 82] = [
+    pub const ALL: [Self; 86] = [
         Self::OpenSettings,
         Self::MinimiseWindow,
         Self::MaximiseWindow,
@@ -378,6 +411,8 @@ impl ActionIcon {
         Self::NewTab,
         Self::PickProfile,
         Self::CloseTab,
+        Self::OpenSubmenu,
+        Self::FoldFolder,
         Self::OpenPaneMenu,
         Self::OpenFilesPane,
         Self::FloatFilesPane,
@@ -401,6 +436,7 @@ impl ActionIcon {
         Self::CopyPath,
         Self::InsertPath,
         Self::RevealInFolder,
+        Self::BrowseForFolder,
         Self::CheckoutBranch,
         Self::CreateBranch,
         Self::CreateTag,
@@ -438,6 +474,7 @@ impl ActionIcon {
         Self::EditRow,
         Self::DeleteRow,
         Self::CloseDialog,
+        Self::ExpandAdvanced,
         Self::RestoreRowDefaults,
         Self::MoveRowUp,
         Self::MoveRowDown,
@@ -467,6 +504,8 @@ impl ActionIcon {
             Self::NewTab => "NewTab",
             Self::PickProfile => "PickProfile",
             Self::CloseTab => "CloseTab",
+            Self::OpenSubmenu => "OpenSubmenu",
+            Self::FoldFolder => "FoldFolder",
             Self::OpenPaneMenu => "OpenPaneMenu",
             Self::OpenFilesPane => "OpenFilesPane",
             Self::FloatFilesPane => "FloatFilesPane",
@@ -490,6 +529,7 @@ impl ActionIcon {
             Self::CopyPath => "CopyPath",
             Self::InsertPath => "InsertPath",
             Self::RevealInFolder => "RevealInFolder",
+            Self::BrowseForFolder => "BrowseForFolder",
             Self::CheckoutBranch => "CheckoutBranch",
             Self::CreateBranch => "CreateBranch",
             Self::CreateTag => "CreateTag",
@@ -527,6 +567,7 @@ impl ActionIcon {
             Self::EditRow => "EditRow",
             Self::DeleteRow => "DeleteRow",
             Self::CloseDialog => "CloseDialog",
+            Self::ExpandAdvanced => "ExpandAdvanced",
             Self::RestoreRowDefaults => "RestoreRowDefaults",
             Self::MoveRowUp => "MoveRowUp",
             Self::MoveRowDown => "MoveRowDown",
@@ -582,7 +623,15 @@ impl ActionIcon {
             Self::LoadMoreCommits => ChromeMark::MoreDown,
             // A list that is folded away, and nothing else: the browser's Back
             // and Forward moved to the arrow below.
-            Self::PickProfile | Self::OpenPaneMenu => ChromeMark::chevron(0.0),
+            Self::PickProfile | Self::OpenPaneMenu | Self::ExpandAdvanced => {
+                ChromeMark::chevron(0.0)
+            }
+            // **The other disclosure language, and the last one.** The 2026-08-26
+            // ruling keeps the filled triangle in the files tree and on a
+            // submenu row and nowhere else; both of those are here, so "nowhere
+            // else" is a fact about this table rather than a hope about the
+            // drawing points.
+            Self::OpenSubmenu | Self::FoldFolder => marks::tree_disclosure(0.0),
             // One arrow at four quarter turns. East is forward, west is back,
             // north is the parent of this commit and the row above it, south is
             // the row below.
@@ -594,11 +643,17 @@ impl ActionIcon {
             Self::GoToParentCommit | Self::MoveRowUp => ChromeMark::Arrow {
                 turned_degrees: 270,
             },
-            Self::OpenFilesPane
-            | Self::NewTerminalInFolder
-            | Self::FolderObject
-            | Self::FilesSeat => ChromeMark::Folder,
-            Self::RevealInFolder | Self::OpenFolderObject => ChromeMark::FolderOpen,
+            // **A folder, twice — once as a thing and once as an act** (P2's
+            // fill policy). The solid silhouette is what a row that *is* a
+            // folder wears; a row that *does* something with one wears the same
+            // silhouette struck, so a menu's icon column is one weight all the
+            // way down. See [`Self::is_an_object`] for the division, and
+            // `marks::ChromeMark::FolderOutline` for why the two are one
+            // drawing.
+            Self::FolderObject | Self::FilesSeat => ChromeMark::Folder,
+            Self::OpenFilesPane | Self::NewTerminalInFolder => ChromeMark::FolderOutline,
+            Self::OpenFolderObject => ChromeMark::FolderOpen,
+            Self::RevealInFolder | Self::BrowseForFolder => ChromeMark::FolderOpenOutline,
             // **One gesture, four containers.** The frame says which one, which
             // is the whole of the 裁2 quarrel: a pane pops out into a float, or
             // leaves for a tab, or for a window of its own, or for one already
@@ -651,6 +706,43 @@ impl ActionIcon {
             Self::OpenDevTools => ChromeMark::DevTools,
             Self::LockPreview => ChromeMark::Lock { engaged: false },
         }
+    }
+
+    /// **Whether this entry names a thing or an act** — P2's fill policy, and
+    /// the line it is drawn along.
+    ///
+    /// The registry's opening paragraph already said the table is a table of
+    /// *verbs*, "with the handful of fixed object marks a row can wear" allowed
+    /// in because those were the arms the dispatchers were choosing by hand.
+    /// P2 needs the two halves told apart rather than merely acknowledged,
+    /// because the fill policy applies to one of them and not the other:
+    ///
+    /// * **An act is struck.** A menu's icon column is a run of outlines at one
+    ///   weight, and a solid among them reads as a badge somebody pasted in —
+    ///   which is the 2026-08-26 measurement of the pane menu, where every row
+    ///   came into a `1.36×` ink band except the filled folder at more than
+    ///   twice its neighbours'.
+    /// * **A thing may be filled.** A tree row, a breadcrumb chip, a tab's
+    ///   mark, a seat's: these say *what this is*, they stand beside a name
+    ///   rather than beside a verb, and a solid is how a small identity mark
+    ///   survives being small.
+    ///
+    /// So `Reveal in folder` and `a folder` are two entries wearing two
+    /// renditions of one drawing, and this is the function that says which is
+    /// which.
+    #[must_use]
+    #[cfg(test)]
+    pub fn is_an_object(self) -> bool {
+        matches!(
+            self,
+            Self::FilesSeat
+                | Self::PreviewSeat
+                | Self::UnknownSeat
+                | Self::FolderObject
+                | Self::OpenFolderObject
+                | Self::FileObject
+                | Self::PageObject
+        )
     }
 
     /// **The same drawing, at the frame of its turn this control is showing.**
@@ -719,7 +811,9 @@ mod tests {
         }
         for mark in [
             ChromeMark::chevron(0.0),
-            ChromeMark::Folder,
+            // The head's `🗀` is a *button*, so it is the struck rendition since
+            // P2 — see this module's fill policy.
+            ChromeMark::FolderOutline,
             ChromeMark::PaneClose,
         ] {
             sites.push((
@@ -1188,7 +1282,7 @@ mod tests {
             }
         };
         let chevron = ink(ChromeMark::chevron(0.0));
-        let folder = ink(ChromeMark::Folder);
+        let folder = ink(ChromeMark::FolderOutline);
         let close = ink(ChromeMark::PaneClose);
         assert!(
             (chevron - close).abs() < 0.01 && (folder - close).abs() < 0.01,
@@ -1295,10 +1389,26 @@ mod tests {
             false,
         ),
         // A list that is folded away. The browser's Back and Forward came off
-        // this list in P1 and wear the arrow above.
+        // this list in P1 and wear the arrow above; the settings dialog's
+        // `Advanced` joined it in P2, which is where it had been drawing since
+        // P1 without the table knowing.
         (
             "i-chev",
-            &[ActionIcon::PickProfile, ActionIcon::OpenPaneMenu],
+            &[
+                ActionIcon::PickProfile,
+                ActionIcon::OpenPaneMenu,
+                ActionIcon::ExpandAdvanced,
+            ],
+            false,
+        ),
+        // **The other disclosure, and the last one.** One triangle at two
+        // orientations: pointing right on a row that opens another menu,
+        // turned down on a folder that is open. The 2026-08-26 ruling keeps it
+        // in exactly these two places, and both of them are now rows of this
+        // table rather than constructions in two files.
+        (
+            "i-tri",
+            &[ActionIcon::OpenSubmenu, ActionIcon::FoldFolder],
             false,
         ),
         // Fetching the same thing again. `Restart shell` came off this list in
@@ -1351,21 +1461,31 @@ mod tests {
             false,
         ),
         // One sense, several rows. A folder is a folder and a file is a file;
-        // that a menu row and a tree row and a pane head all say so with one
-        // drawing is the drawing doing its job.
+        // that a tree row and a seat's mark both say so with one drawing is the
+        // drawing doing its job.
+        //
+        // **P2 took the two acts off this list**, not by splitting the meaning
+        // but by splitting the *rendition*: `Open files pane` and `New terminal
+        // in folder…` are still about a folder, and they wear the same
+        // silhouette struck instead of filled, because they stand in a column
+        // of verbs. `#i-folder-open`'s pair split the same way and came out
+        // with one verb each, so neither is on this list at all.
         (
             "i-folder",
-            &[
-                ActionIcon::OpenFilesPane,
-                ActionIcon::NewTerminalInFolder,
-                ActionIcon::FolderObject,
-                ActionIcon::FilesSeat,
-            ],
+            &[ActionIcon::FolderObject, ActionIcon::FilesSeat],
             false,
         ),
         (
-            "i-folder-open",
-            &[ActionIcon::RevealInFolder, ActionIcon::OpenFolderObject],
+            "i-folder-line",
+            &[ActionIcon::OpenFilesPane, ActionIcon::NewTerminalInFolder],
+            false,
+        ),
+        // Going and looking at a folder somewhere outside this window — in
+        // File Explorer, or in the system's own picker. One act aimed at two
+        // ways of naming the folder, which is what this list is for.
+        (
+            "i-folder-open-line",
+            &[ActionIcon::RevealInFolder, ActionIcon::BrowseForFolder],
             false,
         ),
         (
@@ -1603,6 +1723,280 @@ mod tests {
         assert!(
             source.contains("crumb_separator_mark()"),
             "the preview rail draws the separator as a mark",
+        );
+    }
+
+    // ── P2: the fill policy, and the two disclosure languages ──────────────
+
+    /// **The drawings a verb may wear that have no pen at all**, and which of
+    /// the four classes each one is.
+    ///
+    /// P2's policy, in one sentence: *an act's silhouette is struck, and ink is
+    /// laid down solid only where a stroke would say something else.* Four
+    /// places it says something else, and nothing may join the list without
+    /// naming one of them:
+    ///
+    /// 1. **A state.** The on-face of a two-state control — `#i-pinned`,
+    ///    `#i-locked` — which is Fluent's fill axis and the reason the registry
+    ///    answers with the *off* face: a control asks [`ActionIcon::engaged`]
+    ///    for the other one. Nothing on this list, because nothing on this list
+    ///    is what a verb resolves to.
+    /// 2. **A thing.** A brand chassis, a favicon, a status dot, and the object
+    ///    folders — see [`ActionIcon::is_an_object`], which is where that half
+    ///    is decided rather than here.
+    /// 3. **A field inside a struck frame.** `#i-dock-left`'s panel, on
+    ///    `marks::MarkLayer::Field`. The mark's silhouette is still the frame,
+    ///    so it is not on this list either.
+    /// 4. **A sign whose whole meaning is the solid.** Outlined, each of these
+    ///    becomes a *different sign*: three dots become three rings, a stop
+    ///    square becomes a panel, a disclosure triangle becomes a play button.
+    ///    That is the argument, and it is the only argument this list accepts.
+    ///
+    /// Plus the one foreign drawing the 2026-08-26 ruling keeps as it is.
+    const FILLED_WITH_A_REASON: &[(&str, &str)] = &[
+        (
+            "i-gear",
+            "the one foreign drawing (Material's 24-unit fill); 裁5, 2026-08-26, \
+             keeps it — and a fill has no pen to hold to the band anyway",
+        ),
+        (
+            "i-tri",
+            "class 4, and a user ruling with it (裁6, 2026-08-26): the disclosure \
+             triangle stays filled in the files tree and on a submenu row. \
+             Outlined at fourteen pixels a 4.6-unit triangle is three hairlines \
+             meeting, and what it reads as is a play button",
+        ),
+        (
+            "i-stop",
+            "class 4 — the transport control's solid. An outlined rounded square \
+             is `#i-panel`, which is a different sign standing in the same head",
+        ),
+        (
+            "i-more",
+            "class 4 — three dots `2.4` units across, which is two pens: a ring \
+             drawn at the house's weight has no hole left in it",
+        ),
+    ];
+
+    /// **An act is struck; a thing may be filled.** P2's fill policy, over the
+    /// whole registry.
+    ///
+    /// RED EVIDENCE (2026-08-26, before the split): `i-folder` and
+    /// `i-folder-open` — worn by `Open files pane`, `New terminal in folder…`
+    /// and `Reveal in folder`, three rows of two menus — are pure fills, and
+    /// P1's own实机 reading of the pane menu says what that costs: every row in
+    /// the column came into a `1.36×` ink band *except* the solid folder, which
+    /// stayed the outlier at more than twice its neighbours' ink. A fill among
+    /// outlines is not a heavier drawing but a different kind of drawing, and
+    /// no slot levels it — which is why the answer was a second rendition
+    /// rather than a smaller box.
+    ///
+    /// MUTATION: point `OpenFilesPane` back at `ChromeMark::Folder` and this
+    /// goes red naming it; move `FolderObject` off
+    /// [`ActionIcon::is_an_object`] and it goes red naming that instead.
+    #[test]
+    fn an_act_is_struck_and_only_a_thing_is_filled() {
+        let mut unstruck = Vec::new();
+        for icon in ActionIcon::ALL {
+            let mark = icon.mark();
+            if mark.is_struck() || icon.is_an_object() {
+                continue;
+            }
+            let shape = mark.drawing_id();
+            if FILLED_WITH_A_REASON
+                .iter()
+                .any(|(named, _)| *named == shape)
+            {
+                continue;
+            }
+            unstruck.push(format!("{} wears {shape}, which has no pen", icon.name()));
+        }
+        assert!(
+            unstruck.is_empty(),
+            "an act's silhouette is struck with the house pen:\n{}",
+            unstruck.join("\n"),
+        );
+    }
+
+    /// And the list cuts the other way: **a drawing written down as filled with
+    /// a reason has to still be filled**, so a re-cut takes its entry off the
+    /// list instead of leaving it there as folklore.
+    ///
+    /// This is `REUSED_SHAPES`' own discipline applied to the other list. The
+    /// two folders are the case in point: had P2 struck `#i-folder` itself
+    /// rather than adding a rendition, an entry saying "the folder is filled"
+    /// would have outlived the fill.
+    #[test]
+    fn nothing_is_written_down_as_filled_that_is_not() {
+        let filled: Vec<&str> = ActionIcon::ALL
+            .iter()
+            .map(|icon| icon.mark())
+            .chain([
+                marks::ChromeMark::Folder,
+                marks::ChromeMark::FolderOpen,
+                marks::tree_disclosure(0.0),
+            ])
+            .filter(|mark| !mark.is_struck())
+            .map(marks::ChromeMark::drawing_id)
+            .collect();
+        for (shape, why) in FILLED_WITH_A_REASON {
+            assert!(
+                filled.contains(shape),
+                "{shape} is written down as filled ({why}) and is struck",
+            );
+        }
+        // And the two renditions are two drawings of one object: the object's
+        // is solid, the act's is struck, and they are not the same shape.
+        assert!(!marks::ChromeMark::Folder.is_struck());
+        assert!(marks::ChromeMark::FolderOutline.is_struck());
+        assert!(!marks::ChromeMark::FolderOpen.is_struck());
+        assert!(marks::ChromeMark::FolderOpenOutline.is_struck());
+    }
+
+    /// **No body carries a bare alpha** — the 2026-08-25 specification's last
+    /// line about colour (*不要在 SVG body 内写任意 opacity*), as a gate.
+    ///
+    /// Four drawings did: `#i-folder-open`'s back plate and the float grip at
+    /// `.55`, `#i-dock-left` and `#i-dock-right`'s panel at `.7`, each with a
+    /// comment recording where the number came from — which is a provenance and
+    /// not a meaning. They are two things and they now have two names; what a
+    /// body writes is `marks::MarkLayer`'s token, and the alpha is substituted
+    /// on the way to the rasterizer beside `currentColor`.
+    ///
+    /// Both halves are checked, because either alone leaves the hole open: that
+    /// no source in the crate spells an opacity that is not a layer, and that
+    /// no token survives into a rendered document (a substitution that stopped
+    /// happening would otherwise pass silently, drawing every layer at full
+    /// strength).
+    #[test]
+    fn no_drawing_carries_a_bare_alpha() {
+        const ATTRIBUTE: &str = "opacity=\"";
+        let source = include_str!("marks.rs");
+        let mut bare = Vec::new();
+        let mut rest = source;
+        while let Some(at) = rest.find(ATTRIBUTE) {
+            rest = &rest[at + ATTRIBUTE.len()..];
+            let end = rest.find('"').expect("an attribute closes its quote");
+            let value = &rest[..end];
+            if !marks::MarkLayer::ALL
+                .iter()
+                .any(|layer| layer.token() == value)
+            {
+                bare.push(value.to_owned());
+            }
+            rest = &rest[end..];
+        }
+        assert!(
+            bare.is_empty(),
+            "these alphas are written into a drawing instead of being a named \
+             layer (see marks::MarkLayer): {bare:?}",
+        );
+        for layer in marks::MarkLayer::ALL {
+            assert!(
+                source.contains(layer.token()),
+                "{:?} is a layer nothing rides, so the name is folklore",
+                layer,
+            );
+            assert!(
+                !layer.alpha().is_empty() && layer.alpha() != layer.token(),
+                "a layer's token is not its alpha",
+            );
+        }
+    }
+
+    /// **The chrome has two disclosure languages, and this is the whole of
+    /// them** (user ruling 2026-08-26, 裁6).
+    ///
+    /// The 2026-08-25 audit found three in one window: a filled triangle in the
+    /// files tree and on a submenu row, a chevron on the pane head and the
+    /// profile picker, and the characters `‹ ›` in two breadcrumbs. P1 retired
+    /// the characters and moved the settings dialog's `Advanced` onto the
+    /// chevron; what P2 adds is that the surviving two are **rows of the
+    /// registry** rather than glyph names written into three files, so a fourth
+    /// cannot appear without appearing here.
+    ///
+    /// The triangle's two uses are one drawing at two orientations, which is the
+    /// claim the ruling rests on — the reader who opens a folder learns what a
+    /// turned triangle means, and the submenu row is the same sentence pointing
+    /// the other way.
+    #[test]
+    fn the_chrome_folds_things_away_in_two_languages_and_not_three() {
+        let languages: BTreeMap<&str, Vec<&str>> = [
+            ActionIcon::PickProfile,
+            ActionIcon::OpenPaneMenu,
+            ActionIcon::ExpandAdvanced,
+            ActionIcon::OpenSubmenu,
+            ActionIcon::FoldFolder,
+        ]
+        .into_iter()
+        .fold(BTreeMap::new(), |mut by_shape, icon| {
+            by_shape
+                .entry(icon.mark().drawing_id())
+                .or_default()
+                .push(icon.name());
+            by_shape
+        });
+        assert_eq!(
+            languages.keys().copied().collect::<Vec<_>>(),
+            vec!["i-chev", "i-tri"],
+            "two drawings say *there is more here, folded away*: {languages:?}",
+        );
+        // One triangle, two orientations — and the tree's open frame really is
+        // the other end of the submenu row's turn rather than a second glyph.
+        let shut = ActionIcon::OpenSubmenu.mark();
+        let open = ActionIcon::FoldFolder.turned(1.0);
+        assert_eq!(shut.drawing_id(), open.drawing_id());
+        assert_eq!(shut, marks::tree_disclosure(0.0));
+        assert_eq!(
+            open,
+            ChromeMark::TreeDisclosure {
+                turned_degrees: marks::TREE_DISCLOSURE_OPEN_DEGREES,
+            },
+        );
+        assert_ne!(shut, open, "the two ends of the turn are two frames");
+        // And the chevron's three turn rather than swapping: the same drawing
+        // at rest and fully over.
+        assert_eq!(
+            ActionIcon::ExpandAdvanced.turned(1.0).drawing_id(),
+            ActionIcon::ExpandAdvanced.mark().drawing_id(),
+        );
+    }
+
+    /// The two draw sites the ruling names **ask the registry**, so "the
+    /// triangle lives in the tree and on a submenu row and nowhere else" is
+    /// checkable rather than merely written down.
+    ///
+    /// Read off the sources that paint chrome, on
+    /// `no_font_character_stands_in_for_a_mark`'s precedent: a surface that
+    /// constructs the glyph itself is a surface the table above cannot see, and
+    /// three of them are exactly how the build came to have three disclosure
+    /// languages in the first place.
+    #[test]
+    fn no_surface_reaches_past_the_registry_for_a_disclosure() {
+        for (file, source) in [
+            ("seats.rs", include_str!("seats.rs")),
+            ("settings.rs", include_str!("settings.rs")),
+            ("git_panel.rs", include_str!("git_panel.rs")),
+            ("git_graph.rs", include_str!("git_graph.rs")),
+            ("float.rs", include_str!("float.rs")),
+            ("search.rs", include_str!("search.rs")),
+        ] {
+            assert!(
+                !source.contains("TreeDisclosure { turned_degrees:"),
+                "{file} strikes the disclosure triangle itself; it is \
+                 ActionIcon::OpenSubmenu or ::FoldFolder",
+            );
+        }
+        // `profiles.rs` draws both submenu indicators and holds the file menu's
+        // `Expand`/`Collapse` row, so it is the file the rule is most about.
+        let profiles = include_str!("profiles.rs");
+        assert!(
+            !profiles.contains("TreeDisclosure { turned_degrees:"),
+            "the two submenu indicators ask the registry",
+        );
+        assert!(
+            profiles.contains("ActionIcon::OpenSubmenu.mark()"),
+            "and they ask it by name",
         );
     }
 

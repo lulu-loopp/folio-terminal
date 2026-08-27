@@ -3136,6 +3136,53 @@ Codex 找到而 Claude 一轮审计漏报的那一批：设置页 `↺`（恢复
 
 **两张名单归零的算术读数。** 菜单框（14）里：`#i-check` 1.400→1.050、`#i-code` 1.225→1.050、`#i-plus`/`#i-minus` 1.344→1.050、`#i-chev` 1.344→1.050、手柄（浮窗框） 1.500→0.975。pane 头那一排从 1.152 : 0.960 变成 0.975 : 1.040（框从 12 走到 13），三枚墨量依旧相等。新切的十五枚全部 `1.2 / 16`，在菜单框里一律读 1.050。
 
+————
+
+**P2 续写(图标统一块 P2 · 收尾,2026-08-26,已落地;`crates/bt-app/src/{marks,icons,profiles,seats,settings,float}.rs`)**
+
+**一句话:P0 补了尺寸与语义两张表,P1 把两张待办名单清空,P2 收的是最后一条没人写下来的规矩——「什么时候可以把墨涂实」——顺带把品牌标搬进房子的气口,把三套「展开」语言收成两套并各归其表,并让符号表从一次性草稿变成 build 里的一条命令。**
+
+**① 实心/描边政策成文(`icons.rs` 的 `FILLED_WITH_A_REASON`)。** 一句话规矩:**动作的轮廓一律用房子的笔画出来;墨只在四种地方可以涂实**——① **状态**(`#i-pinned`/`#i-locked`,Fluent 的 fill 轴;注册表答的永远是 off 面,on 面由 `engaged()` 取)、② **对象**(品牌标、favicon、状态点,以及实心文件夹族——见 `ActionIcon::is_an_object`)、③ **描边框里的一块场**(`#i-dock-left/right` 的面板,骑在具名图层上)、④ **意义就是那块实心的符号**(`#i-more` 三点、`#i-stop` 传输方块、`#i-tri` 三角、`#i-refresh`/`#i-history-restore` 的箭头头——描边之后每一枚都变成**另一个符号**:三个环、一块面板、一个播放键)。加上唯一一件外来画 `#i-gear`(裁5 维持)。
+
+- **`Folder`/`FolderOpen` 一分为二,分的不是意思是**渲染**。** 新增 `#i-folder-line` / `#i-folder-open-line`:路径是实心版**自己的边**往里收半支笔,描边外沿与原来的填充边**逐位重合**——两张画一个对象,走 `#p-shell-line` 一年前立的先例。哪一处是「对象」哪一处是「动作」写进 `ActionIcon::is_an_object()`:文件树行、面包屑、tab 标、席位标、root 菜单里那些**指着某个目录**的行是对象(留实心);`Open files pane`、`New terminal in folder…`、`Reveal in folder`、files 脚栏与浮窗脚栏的「在资源管理器里打开」、root 菜单的 `Browse…` 是动作(改描边)。
+- **红证(表)**:`OpenFilesPane wears i-folder, which has no pen` ×3 行。
+- **红证(实机,更要紧的一条)**:表的红门绿了之后,profile 菜单里那两块**实心蓝文件夹**还在——因为那两行是自己写 `ChromeMark::Folder` 而不是查表的。于是补了一条**读绘制结果**的红门 `a_folder_in_a_column_of_verbs_is_struck_and_a_folder_that_is_a_place_is_solid`:profile 菜单**一行都不指着地方**,所以整张菜单不得出现实心文件夹;root 菜单**两种行都有**,cwd 行实心、`Browse…` 描边。**一张表的红门只值它的绘制点那么多钱**,这是本片学到的一句。
+- **任意 opacity 退役 → `marks::MarkLayer`。** 四处写死的 `.55`/`.7` 收成两个具名图层:`Behind`(`#i-folder-open` 的背板、浮窗手柄的弧——"同一个物件,更远一层")与 `Field`(`#i-dock-left/right` 的面板——"描边框圈住的一块地")。body 里写 `opacity="$behind"`,替换与 `currentColor` 走同一道门(`svg_document`);token 故意**不是合法的 SVG opacity**,漏替换就当场炸而不是悄悄画成全强度。红门 `no_drawing_carries_a_bare_alpha` 读 `marks.rs` 全文,任何不是 token 的 opacity 值当场红——红证:`[".55"]`。
+
+**② 品牌标进房子的气口(`BRAND_CHASSIS_INK_UNITS = 12.0`)。** 五枚彩色标 + 三枚 line 渲染是**一副底盘**:`#p-pwsh` 是填充面板,`#p-shell-line` 是同一块面板的边,两者逐位相叠。这副底盘一直跑 **14 个单位**的墨(`#p-git` 因为自己描边跑到 14.5),而同一列里每一枚描边形跑 `1.6–14.4` = **12.8**。菜单槽位上是 **12.25px 墨对 11.20px**,而且更糟的一半不在算术里:**实心把墨铺满整个框,描边只铺一圈 1.2 单位的环**,所以 profile 标在自己那一列里读起来大一号——正是 `HOUSE_INK_RATIO` 当年为 caption 族推导出来的那件事,换一族重演。
+
+推导而不是拍脑袋:**实心形的气口 = 它自己的圆角半径**(`HOUSE_OUTER_RADIUS_UNITS = 2.0`,P1 定的外框半径),描边形的气口是一个半单位。`16 − 2×2 = 12`,正好是 Codex 审计 §5 写的目标墨盒 `12×12`(允许弧线斜线越界 ≤0.5)。全族按各自的**实际墨宽**等比缩到 12(pwsh/ubuntu/cmd/generic `12/14`,git `12/14.5`),**品牌内部图案与颜色一律保留**;line 渲染的**几何跟着缩、笔不跟着缩**(仍是房子的 1.2)——这是"更小"和"更远"的区别。
+
+两道红门都量光栅而不是读常数:`the_brand_chassis_is_one_box_and_it_is_the_solids_own`(红证:`p-pwsh draws 14.00 units` / `p-ubuntu draws 14.00 units`,天花板 12±0.5)与 `a_line_rendition_is_the_same_size_as_the_mark_it_re_strikes`(红证:`p-pwsh draws 12.00 units and p-shell-line draws 14.00`——重切时最容易破的正是 `in_line()` 那句"同一张画"的承诺)。
+
+**③ 三套展开语言收成两套,并且两套都进了表。** 用户裁6:三角留在**文件树行**与**子菜单 ▸**,其余(设置 Advanced、两条面包屑、pane 头/profile 选择器的 ⌄)归 chevron。P1 已经改了画,但**画的选择权还散在三个文件里**;P2 把四个绘制点全部改成查表:`ActionIcon::OpenSubmenu`(两处子菜单指示器)、`ActionIcon::FoldFolder`(文件树行 + 文件菜单的 `Expand`/`Collapse` 行)、`ActionIcon::ExpandAdvanced`(设置页)。于是:
+
+- `the_chrome_folds_things_away_in_two_languages_and_not_three` 走注册表,断言「说『这里还有东西折着』」的画**恰好两枚**,且 `▸` 与树三角是**同一枚 `#i-tri` 的两个朝向**(`OpenSubmenu.mark()` = 0°,`FoldFolder.turned(1.0)` = `TREE_DISCLOSURE_OPEN_DEGREES`)。红证(把 Advanced 指到第三枚画):`{"i-chev": [...], "i-more-down": ["ExpandAdvanced"], "i-tri": [...]}`。
+- `no_surface_reaches_past_the_registry_for_a_disclosure` 读六个画 chrome 的源文件,任何一处自己构造 `TreeDisclosure { turned_degrees: … }` 当场红——红证:`the two submenu indicators ask the registry`。**三套语言当初就是这么长出来的**:三个绘制点各自挑了一枚画。
+- 顺带清掉 P1 留下的两处过期注释(`settings.rs` 仍写着 Advanced 用的是 `ChromeMark::TreeDisclosure`,而代码 P1 起就是 chevron)。
+- **不在本片范围但记下来**:搜索条的 ‹ › 是「上一处/下一处匹配」,面包屑的 `›` 是句读——两者都不是「展开」,本片不动。
+
+**④ 符号表进 build,和被它抓到的那一对。** `marks.rs` 的 `#[ignore]` 测试 `the_symbol_sheet_is_written_for_a_person_to_look_at`:
+
+```text
+cargo test -p bt-app --bin folio -- --ignored --nocapture the_symbol_sheet
+```
+
+写出 `target/icon-sheet.png`(74 枚画 × 14/26/64px 三档,窗口自己的底与墨)与 `target/icon-sheet.txt`(行列 → id → 变体名)。**纪律:新形入册必看表。** 光学红门管笔、`every_chrome_mark_rasterizes…` 管「有墨且不是一块实心」,两道都管不了「它像不像旁边那枚」——P1 一个下午被这张表抓到两次(`#i-split-right` 的胶囊、`#i-devtools` 的缺口环),P1 报告点名要它别再是一次性草稿。
+
+它抓到的第三件是 P1 自己点名的那一对:**`#i-tab-new` 与 `#i-window-new` 在 14px 下仍读作同一张画**。两枚都是「左下一个盒子,右上一支箭」,而 tab 的盒子是 `5.6 × 7.4`——**高比宽大,那是窗的比例不是页签的**。P2 把 tab 切成 `5.0 × 4.6` 低而宽地站在通栏的横杠上,把窗的标题带从 `2.2` 收到 `1.6`(框顶边与标题线相距一支半笔 = 一条**粗顶边**,而不是一条空条纹)。
+
+红门 `a_tab_and_a_window_are_two_pictures_at_a_menu_rows_size` 有两半,因为**掩码差是廉价的、轮廓不是**:P1 那对掩码已经差了 `0.567`(远超阈值)却仍读作一张画,差的是**细节**不是**物件**。所以第二半量的是物件的比例——两枚 body 自己的注释都写着「箭头独占右上象限」,那么每一枚**画的东西**就是右上象限之外的墨,而 tab 与窗靠它的长宽比分开:tab ≥ 1.8(低而宽),窗 ≤ 1.35(约等高等宽)。红证:`a tab is low and wide on its strip, and this one is 1.50 wide for its height`。
+
+**⑤ 实机读数(隔离 APPDATA + `BT_PROBE_INPUT`,DPI 2.0,物理像素)。**
+
+- **pane 菜单图标列**(P1 挂账的那一条):六行墨量跨度 **2.32× → 1.53×**;`New terminal in folder…` 一行从 **79150 → 33644**,由该列的最重项(次重项的 1.66 倍)落回带内。P1 报告里写的「实心文件夹仍是该列的墨量异常值,那是 P2 的 fill policy」由此结清。
+- **tab 上的品牌标**:墨盒 **27×22 → 24×18 物理 px**(15px `.pmark` 槽,scale 2)。
+- **files 浮窗**:头的实心文件夹、树行的实心文件夹与实心三角**全部照旧**(它们是对象),脚栏那枚「在资源管理器里打开」改成描边开口文件夹——一张图里两种渲染各归其位。
+- **`Move pane to new tab` / `Move pane to new window`**:一枚低而宽的页签站在通栏上,一枚带粗顶边的窗框。
+
+**⑥ 一条留给下一片的观察。** 本片没有把 `ChromeMark::Folder`/`FolderOpen` 的**对象用法**也收进注册表(tab 标、restore 行、浮窗头仍直接写画名)。写了红门的是**菜单**这一层;真要让「谁都不能绕过表」成立,得让每一处对象标也报一个 `ActionIcon`。列在这里而不是悄悄跳过,是范围与窟窿的区别。
+
 ### 7.18 motion 令牌:三档、一段位移、两条曲线,和一张不许出现第四档的登记表（动画块前置片 丙12，2026-08-26 用户裁；`crates/bt-render/src/{motion(新),theme,lib}.rs`、`crates/bt-app/src/{main,toast,tooltip,keyhint,seats,cmdrail,termscroll,float,profiles,files}.rs`、`crates/bt-platform/src/lib.rs`）
 
 **一句话:这扇窗的节奏第一次是一处决定,而不是九处各自都说得通的数字。**

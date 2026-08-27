@@ -209,7 +209,20 @@ pub enum ChromeMark {
     /// the chevron beside it this really is a second drawing: the mock-up's open
     /// folder is a different silhouette with a different number of paths, and no
     /// rotation of the closed one produces it.
+    ///
+    /// **The object's open folder**, on [`Self::Folder`]'s division: a file
+    /// menu's own head, a tree row that is open. What `Reveal in folder` wears
+    /// is [`Self::FolderOpenOutline`].
     FolderOpen,
+    /// `#i-folder-open-line` — the act of opening a folder somewhere else, on
+    /// [`Self::FolderOutline`]'s division.
+    ///
+    /// The back plate becomes the shut folder's own top-left profile and the
+    /// front flap a struck quadrilateral, both landing on the same ink band the
+    /// filled pair does. The flap is *open at the top left*, which is the one
+    /// thing that tells this from [`Self::FolderOutline`] at a menu row's
+    /// fourteen pixels.
+    FolderOpenOutline,
     /// `#i-tri` — the disclosure triangle at some angle through its turn (C33).
     ///
     /// An angle and not a boolean for the reason [`Self::Chevron`] gives at
@@ -341,8 +354,30 @@ pub enum ChromeMark {
     Globe {
         favicon: Option<crate::favicon::FaviconId>,
     },
-    /// `#i-folder`.
+    /// `#i-folder` — **the object.** A row that *is* a folder: a tree row, a
+    /// breadcrumb's chip, a seat's identity mark, a tab's.
+    ///
+    /// It is the one filled silhouette the mock-up hands this house, and P2
+    /// keeps it exactly where a fill belongs — see [`Self::FolderOutline`] for
+    /// where it does not, and `crate::icons`' fill policy for the rule the two
+    /// split along.
     Folder,
+    /// `#i-folder-line` — **the act.** A menu row or a head button *about* a
+    /// folder: `Open files pane`, `New terminal in folder…`.
+    ///
+    /// The same silhouette to the digit — this drawing's path is
+    /// [`Self::Folder`]'s own edge, pulled in half a pen so the stroke's outer
+    /// edge lands exactly where the fill's did. Two drawings of one object,
+    /// which is what makes the split a *policy* rather than a second folder:
+    /// what tells them apart is whether the row is a thing or a verb, and the
+    /// two never appear in the same column.
+    ///
+    /// **The report this closes** (P1's own, 2026-08-26): the pane menu's ink
+    /// mass came into a `1.36×` band except for one row — the solid folder,
+    /// which stayed the column's outlier at more than twice its neighbours'
+    /// ink. A fill among outlines is not a heavier drawing, it is a different
+    /// *kind* of drawing, and no slot can level it.
+    FolderOutline,
     /// `#i-panel` — a pane whose kind this build cannot name.
     Panel,
     /// `#i-copy` — "put this row's path on the clipboard" (K143).
@@ -1008,7 +1043,9 @@ impl ChromeMark {
             Self::File => "i-file",
             Self::Globe { .. } => "i-globe",
             Self::Folder => "i-folder",
+            Self::FolderOutline => "i-folder-line",
             Self::FolderOpen => "i-folder-open",
+            Self::FolderOpenOutline => "i-folder-open-line",
             // One id for every angle, on `Self::Chevron`'s precedent above.
             Self::TreeDisclosure { .. } => "i-tri",
             Self::Panel => "i-panel",
@@ -1866,9 +1903,9 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                     // implicit `{r}` capture, because a `concat!` is not a
                     // literal to `format!` and only a literal supports it.
                     concat!(
-                        r##"<rect x="1" y="2.5" width="14" height="11" rx="1.8" fill="#{r:02x}{g:02x}{b:02x}"/>"##,
-                        r##"<path d="M4.4 5.7L7.3 8l-2.9 2.3" fill="none" stroke="#fff" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>"##,
-                        r##"<path d="M8.5 10.9h3.2" stroke="#fff" stroke-width="1.35" stroke-linecap="round"/>"##,
+                        r##"<rect x="2" y="3.29" width="12" height="9.42" rx="1.54" fill="#{r:02x}{g:02x}{b:02x}"/>"##,
+                        r##"<path d="M4.91 6.03L7.4 8l-2.49 1.97" fill="none" stroke="#fff" stroke-width="1.16" stroke-linecap="round" stroke-linejoin="round"/>"##,
+                        r##"<path d="M8.43 10.49h2.74" stroke="#fff" stroke-width="1.16" stroke-linecap="round"/>"##,
                     ),
                     r = r,
                     g = g,
@@ -1885,20 +1922,26 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
             PROFILE_CHASSIS_VIEW_BOX.to_owned(),
             match glyph {
                 // `#p-pwsh`'s panel as an outline — the fill's box pulled in by
-                // half a pen on every side (1 → 1.6, 2.5 → 3.1, and the radius
-                // 1.8 → 1.2, because a corner's centre line turns on a radius
+                // half a pen on every side (2 → 2.6, 3.29 → 3.89, and the radius
+                // 1.54 → 0.94, because a corner's centre line turns on a radius
                 // half a pen smaller than the edge it belongs to). The chevron
                 // and the underline are the coloured mark's own `d` to the
-                // digit, at this column's weight instead of the panel's 1.35.
+                // digit, at this column's weight instead of the panel's 1.16.
+                //
+                // **The pen does not scale with the chassis.** P2 pulled the
+                // family onto [`BRAND_CHASSIS_INK_UNITS`] and this rendition's
+                // geometry came with it; its weight is the house's `1.2` and
+                // stays there, which is the difference between a drawing that
+                // is smaller and one that is further away.
                 ProfileGlyph::Console => format!(
                     concat!(
-                        r#"<rect x="1.6" y="3.1" width="12.8" height="9.8" rx="1.2" fill="none" stroke="currentColor" stroke-width="{pen}"/>"#,
-                        r#"<path d="M4.4 5.7L7.3 8l-2.9 2.3" fill="none" stroke="currentColor" stroke-width="{pen}" stroke-linecap="round" stroke-linejoin="round"/>"#,
-                        r#"<path d="M8.5 10.9h3.2" fill="none" stroke="currentColor" stroke-width="{pen}" stroke-linecap="round"/>"#,
+                        r#"<rect x="2.6" y="3.89" width="10.8" height="8.22" rx=".94" fill="none" stroke="currentColor" stroke-width="{pen}"/>"#,
+                        r#"<path d="M4.91 6.03L7.4 8l-2.49 1.97" fill="none" stroke="currentColor" stroke-width="{pen}" stroke-linecap="round" stroke-linejoin="round"/>"#,
+                        r#"<path d="M8.43 10.49h2.74" fill="none" stroke="currentColor" stroke-width="{pen}" stroke-linecap="round"/>"#,
                     ),
                     pen = PROFILE_LINE_STROKE_UNITS,
                 ),
-                // The disc as an outline (7 → 6.4, half a pen in) and the three
+                // The disc as an outline (6 → 5.4, half a pen in) and the three
                 // friends as filled dots, **exactly where the coloured mark puts
                 // them** — on `r=4.1`, one pointing up, which is the constraint
                 // `ChromeMark::ProfileUbuntu` states in as many words.
@@ -1915,8 +1958,8 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 // supplies the closed curve the friends stand on.
                 ProfileGlyph::Ubuntu => format!(
                     concat!(
-                        r#"<circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="{pen}"/>"#,
-                        r#"<g fill="currentColor"><circle cx="8" cy="3.9" r="1.5"/><circle cx="11.55" cy="10.05" r="1.5"/><circle cx="4.45" cy="10.05" r="1.5"/></g>"#,
+                        r#"<circle cx="8" cy="8" r="5.4" fill="none" stroke="currentColor" stroke-width="{pen}"/>"#,
+                        r#"<g fill="currentColor"><circle cx="8" cy="4.49" r="1.29"/><circle cx="11.04" cy="9.76" r="1.29"/><circle cx="4.96" cy="9.76" r="1.29"/></g>"#,
                     ),
                     pen = PROFILE_LINE_STROKE_UNITS,
                 ),
@@ -1928,9 +1971,9 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 // of the white they were against the orange.
                 ProfileGlyph::Git => format!(
                     concat!(
-                        r#"<path d="M8 1.3L14.7 8 8 14.7 1.3 8z" fill="none" stroke="currentColor" stroke-width="{pen}" stroke-linejoin="round"/>"#,
-                        r#"<g stroke="currentColor" stroke-width="{pen}" fill="none" stroke-linecap="round"><path d="M5.7 10.3l4.6-4.6"/><path d="M8 8l2.3 2.3"/></g>"#,
-                        r#"<g fill="currentColor"><circle cx="5.7" cy="10.3" r="1.2"/><circle cx="10.3" cy="5.7" r="1.2"/><circle cx="10.3" cy="10.3" r="1.2"/></g>"#,
+                        r#"<path d="M8 2.46L13.54 8 8 13.54 2.46 8z" fill="none" stroke="currentColor" stroke-width="{pen}" stroke-linejoin="round"/>"#,
+                        r#"<g stroke="currentColor" stroke-width="{pen}" fill="none" stroke-linecap="round"><path d="M6.1 9.9l3.81-3.81"/><path d="M8 8l1.9 1.9"/></g>"#,
+                        r#"<g fill="currentColor"><circle cx="6.1" cy="9.9" r=".99"/><circle cx="9.9" cy="6.1" r=".99"/><circle cx="9.9" cy="9.9" r=".99"/></g>"#,
                     ),
                     pen = PROFILE_LINE_STROKE_UNITS,
                 ),
@@ -2013,6 +2056,12 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
     } else {
         body
     };
+    // And the named layers, through the same door and for the same reason: a
+    // number that means something is the house's, not the drawing's. See
+    // [`MarkLayer`].
+    let body = MarkLayer::ALL.iter().fold(body, |body, layer| {
+        body.replace(layer.token(), layer.alpha())
+    });
     Some(format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{raster_width_px}" height="{raster_height_px}" viewBox="{view_box}">{body}</svg>"#
     ))
@@ -2172,6 +2221,104 @@ pub const HOUSE_INK_UNITS: f32 = 12.8;
 /// [`crate::icons::MarkSlot`] does with it.
 pub const HOUSE_INK_RATIO: f32 = HOUSE_INK_UNITS / HOUSE_GRID_UNITS;
 
+/// **The house's outer corner radius**, in the same units — the number P1 cut
+/// every frame's corner to (`外框 2.0 / 内件 1.2`).
+#[cfg(test)]
+pub const HOUSE_OUTER_RADIUS_UNITS: f32 = 2.0;
+
+/// **How much air a solid silhouette takes, where a struck one takes
+/// [`HOUSE_INK_UNITS`]' one and a half** — the profile chassis's inset (P2).
+///
+/// The five brand marks and their three line renditions are one chassis:
+/// `#p-pwsh` is a filled panel, `#p-shell-line` is that panel's own edge drawn,
+/// and the two are laid on top of each other to the digit. Until P2 that
+/// chassis ran `1.0 – 15.0` — **fourteen units of ink in a sixteen-unit box**,
+/// where every struck mark beside it in the same column runs `1.6 – 14.4`. At
+/// the menu slot that is `12.25` logical pixels of ink against `11.20`, and the
+/// difference is worse than the arithmetic says, because a *solid* puts ink on
+/// every pixel of its box while an outline puts it on a `1.2`-unit ring: the
+/// profile marks read a size larger than the column they stand in, which is the
+/// same complaint [`HOUSE_INK_RATIO`] was derived from one family further
+/// along.
+///
+/// So the chassis takes **its own corner radius** of air —
+/// [`HOUSE_OUTER_RADIUS_UNITS`], the radius its panel already turns on — where
+/// a struck mark takes a unit and a half. One number doing the two jobs it was
+/// always doing: a solid shape has no air *inside* it, so it takes its air
+/// outside.
+#[cfg(test)]
+pub const BRAND_CHASSIS_AIR_UNITS: f32 = HOUSE_OUTER_RADIUS_UNITS;
+
+/// [`BRAND_CHASSIS_AIR_UNITS`]' answer: **twelve units of ink in the house's
+/// sixteen**, which is the box the 2026-08-25 specification asked every mark
+/// for and the one this family is held to (`crate::icons`'s own gate measures
+/// it off the raster, not off this constant).
+#[cfg(test)]
+pub const BRAND_CHASSIS_INK_UNITS: f32 = HOUSE_GRID_UNITS - 2.0 * BRAND_CHASSIS_AIR_UNITS;
+
+/// **The two layers a drawing may set part of itself back onto**, and the only
+/// alphas a quoted body is allowed to carry.
+///
+/// The 2026-08-25 specification's last line about colour: *不要在 SVG body 内
+/// 写任意 opacity*. Four bodies did — `#i-folder-open`'s back plate and the
+/// grip at `.55`, `#i-dock-left` and `#i-dock-right`'s panel at `.7` — each
+/// with a comment saying the number came from the mock-up, which is a
+/// provenance and not a meaning. A reader of the sheet could not tell whether
+/// two drawings sharing `.55` were saying the same thing or had merely been
+/// copied from the same stylesheet.
+///
+/// They are two things and they now have two names. A body writes
+/// [`Self::token`] where the number was, and [`svg_document`] substitutes the
+/// alpha on the way to the rasterizer — the same door `currentColor` goes
+/// through, for the same reason: a value that means something belongs to the
+/// house, not to the drawing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkLayer {
+    /// **A plate the drawing puts behind its own body.** `#i-folder-open`'s
+    /// shut-folder silhouette showing past the open flap; the float grip's arc,
+    /// which is a corner of the window seen through the content rather than a
+    /// control drawn on top of it. Both say *this is the same object, further
+    /// away*.
+    Behind,
+    /// **A field a struck frame encloses.** `#i-dock-left` and `#i-dock-right`
+    /// are pictures of a window with one side given over to a panel, and the
+    /// side is filled because that is what the picture is about. It is not the
+    /// mark's silhouette — the frame is — which is why it is a layer and not a
+    /// fill (see `crate::icons`' fill policy).
+    Field,
+}
+
+impl MarkLayer {
+    /// Both, for the substitution and for the gate to walk.
+    pub const ALL: [Self; 2] = [Self::Behind, Self::Field];
+
+    /// What a quoted body writes where the alpha goes.
+    ///
+    /// Not a legal SVG opacity, on purpose: a body that reaches the rasterizer
+    /// with one of these still in it fails loudly rather than rendering at full
+    /// strength.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Behind => "$behind",
+            Self::Field => "$field",
+        }
+    }
+
+    /// The alpha the layer is worth.
+    ///
+    /// The mock-up's own two numbers, kept — what P2 changes is that they are
+    /// now *named*, so a fifth drawing that wants to set something back has to
+    /// say which of the two things it means.
+    #[must_use]
+    pub const fn alpha(self) -> &'static str {
+        match self {
+            Self::Behind => "0.55",
+            Self::Field => "0.7",
+        }
+    }
+}
+
 impl ChromeMark {
     /// Whether this mark's artwork is one of [`SYMBOL_BODY`]'s quoted strings.
     ///
@@ -2259,6 +2406,38 @@ impl ChromeMark {
                 heaviest_stroke_units(SYMBOL_BODY[symbol_index(mark)])
             }
             _ => None,
+        }
+    }
+
+    /// **Whether this drawing's silhouette is struck with a pen or laid down as
+    /// a solid** — the queryable half of P2's fill policy.
+    ///
+    /// Read off the body, like [`Self::design_stroke_units`] and for the same
+    /// reason: a table of "which marks are filled" is a second authority for
+    /// something the artwork already says, and the day the two disagree it is
+    /// the table that will be believed. What the answer is *for* is
+    /// `crate::icons`' gate — **a verb may not wear a drawing that has no pen**,
+    /// because a fill in a column of outlines is not a heavier mark but a
+    /// different kind of mark, and no slot can level it.
+    ///
+    /// Distinct from [`Self::design_stroke_units`] in the one way that matters
+    /// here: that answers `None` for a *brand* mark, whose pen is not the
+    /// house's to hold, and a brand mark is struck all the same. This asks only
+    /// whether there is a pen, not whose.
+    #[must_use]
+    #[cfg(test)]
+    pub fn is_struck(self) -> bool {
+        match self {
+            // The chassis family: the coloured panels carry an edge, the line
+            // renditions are nothing but edge, and both are generated.
+            Self::ProfileLine(_) | Self::ProfileGeneric { .. } => true,
+            mark if mark.is_quoted_symbol() => {
+                heaviest_stroke_units(SYMBOL_BODY[symbol_index(mark)]).is_some()
+            }
+            // The generated family — a pill, a tab silhouette, a ring, a card
+            // corner. Some are struck and some are filled; none of them is a
+            // verb's mark, which is the only question this answers for.
+            _ => false,
         }
     }
 
@@ -2373,7 +2552,9 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::File => 6,
         ChromeMark::Globe { .. } => 41,
         ChromeMark::Folder => 7,
+        ChromeMark::FolderOutline => 61,
         ChromeMark::FolderOpen => 15,
+        ChromeMark::FolderOpenOutline => 62,
         ChromeMark::TreeDisclosure { .. } => 16,
         ChromeMark::Panel => 8,
         ChromeMark::Chevron { .. } => 9,
@@ -2485,7 +2666,7 @@ pub fn preview_row_mark(is_page: bool, favicon: Option<crate::favicon::FaviconId
 
 const PROFILE_CHASSIS_VIEW_BOX: &str = "0 0 16 16";
 
-const SYMBOL_VIEW_BOX: [&str; 61] = [
+const SYMBOL_VIEW_BOX: [&str; 63] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -2611,11 +2792,16 @@ const SYMBOL_VIEW_BOX: [&str; 61] = [
     "0 0 16 16", // #i-search
     "0 0 16 16", // #i-more
     "0 0 16 16", // #i-history-restore
+    // **The two P2 struck**, and they are the house sixteen because they are
+    // the filled folders' own edges: a drawing that has to lie on top of
+    // another one to the digit cannot be cut in a second box.
+    "0 0 16 16", // #i-folder-line
+    "0 0 16 16", // #i-folder-open-line
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 61] = [
+const SYMBOL_BODY: [&str; 63] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min. The rule is pulled half a pen in from each edge so the round cap
@@ -2645,10 +2831,17 @@ const SYMBOL_BODY: [&str; 61] = [
     // this rasterizer has no reason to be handed one.
     r#"<path d="M8 2.2v11.6M2.2 8h11.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
     // #p-pwsh — flat, and its own colours (a mark carries its own).
+    //
+    // **Scaled about its own centre onto the chassis in P2** — the whole family
+    // by `12 / 14`, which is [`BRAND_CHASSIS_INK_UNITS`] over the fourteen the
+    // mock-up's panel ran. Nothing about the drawing is re-invented: the panel,
+    // the chevron, the underline and the white pen keep their proportions to
+    // the digit, and what changes is that the chassis now leaves the air a
+    // solid needs beside a column of struck marks.
     concat!(
-        r##"<rect x="1" y="2.5" width="14" height="11" rx="1.8" fill="#2C5C9E"/>"##,
-        r##"<path d="M4.4 5.7L7.3 8l-2.9 2.3" fill="none" stroke="#fff" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>"##,
-        r##"<path d="M8.5 10.9h3.2" stroke="#fff" stroke-width="1.35" stroke-linecap="round"/>"##,
+        r##"<rect x="2" y="3.29" width="12" height="9.42" rx="1.54" fill="#2C5C9E"/>"##,
+        r##"<path d="M4.91 6.03L7.4 8l-2.49 1.97" fill="none" stroke="#fff" stroke-width="1.16" stroke-linecap="round" stroke-linejoin="round"/>"##,
+        r##"<path d="M8.43 10.49h2.74" stroke="#fff" stroke-width="1.16" stroke-linecap="round"/>"##,
     ),
     // #i-file, **re-cut into the house's ink band** (P1, 清单甲 8 and 13).
     //
@@ -2699,39 +2892,56 @@ const SYMBOL_BODY: [&str; 61] = [
     // are stroked in the disc's own orange, which *punches* the gaps in the
     // white ring rather than drawing the ring in three separate segments: one
     // ring, three holes, and no seam to line up.
+    // Scaled onto the chassis in P2 with the rest of the family, by the same
+    // `12 / 14` about the same centre: the disc's `7` becomes the chassis's `6`.
     concat!(
-        r##"<circle cx="8" cy="8" r="7" fill="#E95420"/>"##,
-        r##"<circle cx="8" cy="8" r="4.1" fill="none" stroke="#fff" stroke-width="1"/>"##,
-        r##"<g stroke="#E95420" stroke-width="1.5">"##,
-        r##"<circle cx="8" cy="3.9" r="1.5" fill="#fff"/>"##,
-        r##"<circle cx="11.55" cy="10.05" r="1.5" fill="#fff"/>"##,
-        r##"<circle cx="4.45" cy="10.05" r="1.5" fill="#fff"/>"##,
+        r##"<circle cx="8" cy="8" r="6" fill="#E95420"/>"##,
+        r##"<circle cx="8" cy="8" r="3.51" fill="none" stroke="#fff" stroke-width=".86"/>"##,
+        r##"<g stroke="#E95420" stroke-width="1.29">"##,
+        r##"<circle cx="8" cy="4.49" r="1.29" fill="#fff"/>"##,
+        r##"<circle cx="11.04" cy="9.76" r="1.29" fill="#fff"/>"##,
+        r##"<circle cx="4.96" cy="9.76" r="1.29" fill="#fff"/>"##,
         r##"</g>"##,
     ),
     // #p-git — the lozenge, the branch, and its three nodes.
+    //
+    // Scaled onto the chassis in P2 by `12 / 14.5`, and the `14.5` is the
+    // lozenge's own: it is the one brand mark whose silhouette is *stroked* as
+    // well as filled, so its ink ran half a pen past the `1.3 – 14.7` its `d`
+    // states. The whole drawing — path, branch, nodes and both pens — is scaled
+    // by that one ratio, so the outer edge lands on the chassis with the four
+    // beside it.
     concat!(
-        r##"<path d="M8 1.3L14.7 8 8 14.7 1.3 8z" fill="#F05033" stroke="#F05033" stroke-width="1.1" stroke-linejoin="round"/>"##,
-        r##"<g stroke="#fff" stroke-width="1.25" fill="none" stroke-linecap="round">"##,
-        r##"<path d="M5.7 10.3l4.6-4.6"/><path d="M8 8l2.3 2.3"/>"##,
+        r##"<path d="M8 2.46L13.54 8 8 13.54 2.46 8z" fill="#F05033" stroke="#F05033" stroke-width=".91" stroke-linejoin="round"/>"##,
+        r##"<g stroke="#fff" stroke-width="1.03" fill="none" stroke-linecap="round">"##,
+        r##"<path d="M6.1 9.9l3.81-3.81"/><path d="M8 8l1.9 1.9"/>"##,
         r##"</g>"##,
-        r##"<g fill="#fff"><circle cx="5.7" cy="10.3" r="1.2"/><circle cx="10.3" cy="5.7" r="1.2"/><circle cx="10.3" cy="10.3" r="1.2"/></g>"##,
+        r##"<g fill="#fff"><circle cx="6.1" cy="9.9" r=".99"/><circle cx="9.9" cy="6.1" r=".99"/><circle cx="9.9" cy="9.9" r=".99"/></g>"##,
     ),
     // #p-cmd — charcoal with a lighter edge, never true console black; see the
     // `ProfileCmd` variant's own note for the ruling that forbids "fixing" it.
     // The chevron and underline are `#p-pwsh`'s geometry to the digit, in
     // `#CCCCCC` instead of white: the two are the same console idiom, and what
     // tells them apart is the panel they sit in.
+    // Scaled onto the chassis in P2 with the family, edge included: the panel's
+    // own `.8` hairline scales with its box, because a lighter edge that stayed
+    // put would be a different edge.
     concat!(
-        r##"<rect x="1.4" y="2.9" width="13.2" height="10.2" rx="1.7" fill="#3A3A3A" stroke="#606060" stroke-width=".8"/>"##,
-        r##"<path d="M4.4 5.7L7.3 8l-2.9 2.3" fill="none" stroke="#CCCCCC" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>"##,
-        r##"<path d="M8.5 10.9h3.2" stroke="#CCCCCC" stroke-width="1.35" stroke-linecap="round"/>"##,
+        r##"<rect x="2.34" y="3.63" width="11.31" height="8.74" rx="1.46" fill="#3A3A3A" stroke="#606060" stroke-width=".69"/>"##,
+        r##"<path d="M4.91 6.03L7.4 8l-2.49 1.97" fill="none" stroke="#CCCCCC" stroke-width="1.16" stroke-linecap="round" stroke-linejoin="round"/>"##,
+        r##"<path d="M8.43 10.49h2.74" stroke="#CCCCCC" stroke-width="1.16" stroke-linecap="round"/>"##,
     ),
     // #i-folder-open — the same folder seen from the front: a translucent back
     // plate still in the closed folder's silhouette, and a solid front plate
-    // skewed off it. The `.55` is the mock-up's own, and it is what makes an
-    // open folder read as *the same object* rather than a second icon.
+    // skewed off it. The back plate rides [`MarkLayer::Behind`] — the mock-up's
+    // own `.55`, named in P2 — and it is what makes an open folder read as *the
+    // same object* rather than a second icon.
+    //
+    // **This is the object's folder and not the act's**; `#i-folder-open-line`
+    // is what a menu row that *reveals* something wears. See `crate::icons`'
+    // fill policy.
     concat!(
-        r##"<path d="M1.6 4.2c0-.6.5-1.1 1.1-1.1h3.1l1.3 1.5h6.2c.6 0 1.1.5 1.1 1.1v1H4.3c-.5 0-.9.3-1 .8L1.6 12z" fill="currentColor" opacity=".55"/>"##,
+        r##"<path d="M1.6 4.2c0-.6.5-1.1 1.1-1.1h3.1l1.3 1.5h6.2c.6 0 1.1.5 1.1 1.1v1H4.3c-.5 0-.9.3-1 .8L1.6 12z" fill="currentColor" opacity="$behind"/>"##,
         r##"<path d="M3.3 7.4c.1-.5.5-.8 1-.8h10.3c.7 0 1.2.7 1 1.4l-1.2 4.3c-.1.5-.6.8-1.1.8H2.4c-.7 0-1.2-.6-1-1.3z" fill="currentColor"/>"##,
     ),
     // #i-tri — the disclosure triangle, pointing right at rest. It is turned
@@ -2750,7 +2960,7 @@ const SYMBOL_BODY: [&str; 61] = [
     // the side it will actually appear on.
     concat!(
         r##"<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>"##,
-        r##"<rect x="1.6" y="2.6" width="5" height="10.8" rx="2" fill="currentColor" opacity=".7"/>"##,
+        r##"<rect x="1.6" y="2.6" width="5" height="10.8" rx="2" fill="currentColor" opacity="$field"/>"##,
     ),
     // The resize grip, translated from CSS rather than quoted from the sheet.
     //
@@ -2762,8 +2972,9 @@ const SYMBOL_BODY: [&str; 61] = [
     // sweeps a quarter turn to (1, 7.25), and the bottom border runs on to the
     // left edge — which at this radius is almost the whole of the glyph.
     //
-    // The `.55` is the mock-up's own, baked in here on `#i-folder-open`'s
-    // precedent: it is part of the drawing, not a state of it.
+    // The arc rides [`MarkLayer::Behind`] on `#i-folder-open`'s precedent — the
+    // mock-up's own `.55`, named in P2: it is part of the drawing (a corner of
+    // the window seen past the content), not a state of it.
     // **Re-derived into the house sixteen in P1** (清单甲 10). Of the three
     // numbers the CSS states, only one is a fact about the *shape*: the radius.
     // The mock-up's note (line 710-712) is that the grip's curve "nests
@@ -2779,7 +2990,7 @@ const SYMBOL_BODY: [&str; 61] = [
     // pixel of the seven the note asks for. The arms keep the CSS's proportion,
     // an eighth of the box beyond where the arc lets go, and the whole shape
     // sits in the house's bottom-right air.
-    r##"<path d="M13.8 3.8V5.8A8 8 0 0 1 5.8 13.8H3.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".55"/>"##,
+    r##"<path d="M13.8 3.8V5.8A8 8 0 0 1 5.8 13.8H3.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="$behind"/>"##,
     // #i-check, at the house pen (清单甲 3). At `1.6` it was the heaviest
     // drawing on the sheet and read `1.400` in a menu row where its neighbours
     // read `1.050`; the geometry is the mock-up's, untouched.
@@ -2830,7 +3041,7 @@ const SYMBOL_BODY: [&str; 61] = [
     // or leave a sliver of ground between two edges that are meant to be one.
     concat!(
         r##"<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>"##,
-        r##"<rect x="9.4" y="2.6" width="5" height="10.8" rx="2" fill="currentColor" opacity=".7"/>"##,
+        r##"<rect x="9.4" y="2.6" width="5" height="10.8" rx="2" fill="currentColor" opacity="$field"/>"##,
     ),
     // `#i-git-branch` — a trunk with three nodes and one branch leaving it.
     //
@@ -3002,9 +3213,18 @@ const SYMBOL_BODY: [&str; 61] = [
     // hand-off arrow leaving over its shoulder. The tab is rounded on its top
     // two corners only, which is `.tab { border-radius: var(--tabr) var(--tabr)
     // 0 0 }` and the silhouette `active_tab_path` generates at full size.
+    //
+    // **Re-proportioned in P2**, on the one finding P1's own symbol sheet
+    // produced that no arithmetic could have: beside `#i-window-new` this read
+    // as the same drawing. Both were a box in the lower left with an arrow over
+    // its shoulder, and the box was `5.6 × 7.4` — *taller than it was wide*,
+    // which is a window's proportion and not a tab's. Cut `5.0 × 4.6` it stands
+    // on the rule as a tab does, and the two marks now differ in silhouette
+    // rather than in detail: one is low and open at the foot with a rule running
+    // past it on both sides, the other is a closed frame half again as tall.
     concat!(
         r#"<path d="M2.2 12.6h11.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
-        r#"<path d="M2.8 12.6V6.4c0-.7.5-1.2 1.2-1.2h3.4c.7 0 1.2.5 1.2 1.2v6.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+        r#"<path d="M2.6 12.6V9.2c0-.7.5-1.2 1.2-1.2h2.6c.7 0 1.2.5 1.2 1.2v3.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
         r#"<path d="M10.4 2.6h3.4v3.4M13.8 2.6L9.8 6.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
     ),
     // `#i-window-new` — a window (a frame with its title bar) and the arrow
@@ -3012,9 +3232,16 @@ const SYMBOL_BODY: [&str; 61] = [
     // top-right quadrant to itself: two objects in one box, neither overlapping
     // the other, which is what keeps both legible at a menu row's fourteen
     // pixels.
+    //
+    // **The title bar closed to `1.6` in P2** — the other half of the pair's
+    // re-cut. At `2.2` the band was an empty stripe that read as nothing at all
+    // at fourteen pixels; at `1.6` the frame's top edge and the title line are
+    // two pens a pen and a half apart, which is the *heavy top edge* a window
+    // is recognised by. Nothing else moves: the frame is where it was, so the
+    // arrow still has its quadrant.
     concat!(
         r#"<rect x="2.2" y="5.6" width="8.2" height="7.2" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
-        r#"<path d="M2.2 7.8h8.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M2.2 7.2h8.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
         r#"<path d="M9.4 2.2h4.4v4.4M13.8 2.2L10.8 5.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
     ),
     // `#i-window-pick` — the same window, the same shaft, and the head on the
@@ -3023,7 +3250,7 @@ const SYMBOL_BODY: [&str; 61] = [
     // claim the pair makes.
     concat!(
         r#"<rect x="2.2" y="5.6" width="8.2" height="7.2" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
-        r#"<path d="M2.2 7.8h8.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M2.2 7.2h8.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
         r#"<path d="M13.8 2.2L10.8 5.2M10.8 3.5v1.7h1.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
     ),
     // `#i-trash` — the lid, the handle above it, the bin below and the two
@@ -3106,6 +3333,24 @@ const SYMBOL_BODY: [&str; 61] = [
         r#"<path d="M3.2 8a4.8 4.8 0 1 1 1.4 3.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
         r#"<path d="M3.2 10.9 4.7 8 1.7 8z" fill="currentColor"/>"#,
         r#"<path d="M8 5.2V8l2.2 1.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    ),
+    // `#i-folder-line` — `#i-folder`'s own edge, drawn.
+    //
+    // The path is the fill's silhouette pulled in half a pen on every side, so
+    // the stroke's outer edge lands exactly where the solid's did: ink `1.6 –
+    // 14.4` across and `3.1 – 13.4` down, the filled folder's to the digit. Two
+    // renditions of one object, on `#p-shell-line`'s precedent one family over.
+    r#"<path d="M2.2 4.3a.6.6 0 0 1 .6-.6h2.6l1.3 1.4h6.5a.6.6 0 0 1 .6.6v6.5a.6.6 0 0 1-.6.6H2.8a.6.6 0 0 1-.6-.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+    // `#i-folder-open-line` — the same object with its flap open.
+    //
+    // The back is the shut folder's top-left profile, stopping where the flap
+    // covers it; the flap is a quadrilateral leaning right, standing on the
+    // shut folder's own floor. Both land in the band the filled pair does, and
+    // the *opening at the top left* is what tells the two apart in a menu
+    // column at fourteen pixels — not a change of size and not a second colour.
+    concat!(
+        r#"<path d="M2.2 11.5V4.3a.6.6 0 0 1 .6-.6h2.6l1.3 1.4h6.5a.6.6 0 0 1 .6.6v1.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+        r#"<path d="M2.2 12.8l2.4-5.4h9.2l-2.4 5.4z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
     ),
 ];
 
@@ -5397,5 +5642,330 @@ mod tests {
             Arc::ptr_eq(&here[0].rgba, &there[0].rgba),
             "and one set of pixels — the cut is the store's, made once"
         );
+    }
+
+    // ── P2: the chassis, the pair, and the sheet ───────────────────────────
+
+    /// The whole profile family, coloured marks and line renditions together.
+    fn the_chassis_family() -> Vec<ChromeMark> {
+        let mut family = vec![
+            ChromeMark::ProfilePowerShell,
+            ChromeMark::ProfileUbuntu,
+            ChromeMark::ProfileGit,
+            ChromeMark::ProfileCmd,
+            ChromeMark::ProfileGeneric {
+                colour: MarkColour::Teal,
+            },
+        ];
+        family.extend(
+            [
+                ProfileGlyph::Console,
+                ProfileGlyph::Ubuntu,
+                ProfileGlyph::Git,
+            ]
+            .map(ChromeMark::ProfileLine),
+        );
+        family
+    }
+
+    /// How many design units across the widest part of a mark's ink is, drawn
+    /// big enough that the answer is about the drawing and not about rounding.
+    fn ink_units(rasters: &mut ChromeMarkRasters, mark: ChromeMark) -> f32 {
+        /// A hundred and sixty pixels for a sixteen-unit box: ten pixels to the
+        /// unit, so an antialiased edge costs a tenth of a unit and the
+        /// tolerance below is a statement about the artwork.
+        const SIDE: f32 = 160.0;
+        let icons = rasters.resolve(&[sprite(mark, SIDE, SIDE, [0x7a, 0x99, 0xff])]);
+        let (width, height) = ink_span(&icons[0]);
+        f32::from(u16::try_from(width.max(height)).expect("a measurable span")) * HOUSE_GRID_UNITS
+            / SIDE
+    }
+
+    /// **The brand chassis is one box, and it is not the outline family's**
+    /// (P2, `docs/plans/ui-style/audit-codex-2026-08-25.md` §5).
+    ///
+    /// RED EVIDENCE (2026-08-26, before the re-cut): every one of the eight
+    /// measured `14.0` units of ink and `#p-git` `14.5`, against the
+    /// [`HOUSE_INK_UNITS`] `12.8` every struck mark in the same menu column
+    /// carries. That is a profile mark drawing `12.25` logical pixels of ink in
+    /// a fourteen-pixel row where its neighbours draw `11.20` — and the reader's
+    /// eye has it worse than the arithmetic does, because four of the eight are
+    /// *solids*: a fill puts ink on every pixel of its box where an outline puts
+    /// it on a `1.2`-unit ring.
+    ///
+    /// So the family sits on [`BRAND_CHASSIS_INK_UNITS`] — its own corner
+    /// radius of air, where a struck mark takes a unit and a half — and this
+    /// measures it off the raster rather than off the constant, because the
+    /// constant is what the artwork is supposed to say and the raster is what
+    /// it does say.
+    ///
+    /// MUTATION: put `#p-pwsh`'s panel back at `x="1" width="14"` and this
+    /// reads `14.0` against a ceiling of `12.5`.
+    #[test]
+    fn the_brand_chassis_is_one_box_and_it_is_the_solids_own() {
+        /// What the audit allowed a rounded corner or a slanted edge to
+        /// overshoot the target box by: `12×12`, 越界最多 0.5.
+        const TOLERANCE_UNITS: f32 = 0.5;
+        let mut rasters = ChromeMarkRasters::default();
+        let mut wrong = Vec::new();
+        for mark in the_chassis_family() {
+            let units = ink_units(&mut rasters, mark);
+            if (units - BRAND_CHASSIS_INK_UNITS).abs() > TOLERANCE_UNITS {
+                wrong.push(format!("{} draws {units:.2} units", mark.drawing_id()));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "the chassis is {BRAND_CHASSIS_INK_UNITS} units of ink in the house's \
+             {HOUSE_GRID_UNITS}, ±{TOLERANCE_UNITS}:\n{}",
+            wrong.join("\n"),
+        );
+        const {
+            assert!(
+                BRAND_CHASSIS_INK_UNITS < HOUSE_INK_UNITS,
+                "a solid takes its air outside, so the chassis is inside the \
+                 outline family's own ink box and not level with it",
+            );
+        }
+    }
+
+    /// **And the line rendition lies on its coloured twin to the digit** — the
+    /// claim `ChromeMark::in_line` makes in as many words ("the same shape, in
+    /// the theme's ink").
+    ///
+    /// The re-cut is where a claim like that gets broken: scale one of the two
+    /// and forget the other and they are two drawings sharing a name. Measured
+    /// rather than asserted about the source, because the two are written in
+    /// different places — one is a quoted body, the other a `format!` — and a
+    /// measurement is the only thing that spans both.
+    #[test]
+    fn a_line_rendition_is_the_same_size_as_the_mark_it_re_strikes() {
+        let mut rasters = ChromeMarkRasters::default();
+        for coloured in [
+            ChromeMark::ProfilePowerShell,
+            ChromeMark::ProfileCmd,
+            ChromeMark::ProfileUbuntu,
+            ChromeMark::ProfileGit,
+            ChromeMark::ProfileGeneric {
+                colour: MarkColour::Amber,
+            },
+        ] {
+            let line = coloured.in_line();
+            let (filled_units, line_units) = (
+                ink_units(&mut rasters, coloured),
+                ink_units(&mut rasters, line),
+            );
+            assert!(
+                (filled_units - line_units).abs() <= 0.5,
+                "{} draws {filled_units:.2} units and {} draws {line_units:.2}",
+                coloured.drawing_id(),
+                line.drawing_id(),
+            );
+        }
+    }
+
+    /// **A tab and a window are not the same picture** — the one finding P1's
+    /// symbol sheet produced that no arithmetic could have.
+    ///
+    /// `#i-tab-new` and `#i-window-new` are the two rows of the pane menu the
+    /// 2026-08-25 audit reported rasterizing *identically*; P1 split them into
+    /// two drawings and the sheet then showed the split had not gone far enough
+    /// — both were a box in the lower left with an arrow over its shoulder, and
+    /// the tab's box was taller than it was wide, which is a window's
+    /// proportion. P2 re-cut the tab low and wide and closed the window's title
+    /// band, and this holds the pair apart **at the size a reader actually meets
+    /// them**, which is a menu row's fourteen pixels and not the sheet's
+    /// sixty-four.
+    ///
+    /// Two claims, because either alone is cheap to satisfy by accident:
+    ///
+    /// * the two masks disagree over a good part of what they cover, and
+    /// * they disagree *structurally* — the tab's foot is a rule running nearly
+    ///   the whole box, the window's is a frame that stops well short of it.
+    #[test]
+    fn a_tab_and_a_window_are_two_pictures_at_a_menu_rows_size() {
+        let box_px = crate::icons::MarkSlot::Menu.house_box_logical_px();
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(&[
+            sprite(ChromeMark::TabNew, box_px, box_px, [0x7a, 0x99, 0xff]),
+            sprite(ChromeMark::WindowNew, box_px, box_px, [0x7a, 0x99, 0xff]),
+        ]);
+        let (tab, window) = (&icons[0], &icons[1]);
+        // How much of the ink the two put down is ink only one of them puts
+        // down: nought where the drawings coincide, one where they share
+        // nothing.
+        let (mut union, mut difference) = (0_u32, 0_u32);
+        for y in 0..tab.height_px {
+            for x in 0..tab.width_px {
+                let (here, there) = (
+                    u32::from(alpha_at(tab, x, y)),
+                    u32::from(alpha_at(window, x, y)),
+                );
+                union += here.max(there);
+                difference += here.abs_diff(there);
+            }
+        }
+        let apart = f64::from(difference) / f64::from(union.max(1));
+        assert!(
+            apart >= 0.30,
+            "the tab and the window share {:.0}% of their ink at {box_px}px",
+            (1.0 - apart) * 100.0,
+        );
+        // And the structural half, which is the one that matters: **a mask
+        // difference is cheap and a silhouette is not.** Before the re-cut the
+        // two masks already disagreed over half their ink and still read as one
+        // picture, because the disagreement was in the *detail* — a title line
+        // here, a rule there — while both drew the same object: a box in the
+        // lower left, taller than it was wide, under an arrow.
+        //
+        // So the claim is about the object. Both bodies' own notes say the
+        // arrow is given the top-right quadrant to itself, which means what
+        // each mark draws *is* the ink outside that quadrant, and a tab and a
+        // window are told apart by its proportion: a tab is low and wide on a
+        // strip, a window is a frame about as tall as it is broad.
+        let object_aspect = |icon: &ChromeIcon| {
+            let half = icon.width_px / 2;
+            let mut bounds: Option<[u32; 4]> = None;
+            for y in 0..icon.height_px {
+                for x in 0..icon.width_px {
+                    let in_the_arrows_quadrant = x >= half && y < icon.height_px / 2;
+                    if in_the_arrows_quadrant || alpha_at(icon, x, y) == 0 {
+                        continue;
+                    }
+                    bounds = Some(match bounds {
+                        None => [x, y, x, y],
+                        Some([left, top, right, bottom]) => {
+                            [left.min(x), top.min(y), right.max(x), bottom.max(y)]
+                        }
+                    });
+                }
+            }
+            let [left, top, right, bottom] = bounds.expect("the mark drew an object");
+            f64::from(right - left + 1) / f64::from(bottom - top + 1)
+        };
+        let (tab_aspect, window_aspect) = (object_aspect(tab), object_aspect(window));
+        assert!(
+            tab_aspect >= 1.8,
+            "a tab is low and wide on its strip, and this one is {tab_aspect:.2} \
+             wide for its height",
+        );
+        assert!(
+            window_aspect <= 1.35,
+            "a window is a frame about as tall as it is broad, and this one is \
+             {window_aspect:.2}",
+        );
+    }
+
+    /// **The symbol sheet** — every drawing the chrome owns, rendered at the
+    /// three sizes a reader has to judge one at, written where a human can open
+    /// it.
+    ///
+    /// P1 made this sheet by hand in a scratch directory and it earned its keep
+    /// twice in one afternoon: `#i-split-right`'s pane corners read as capsules
+    /// and `#i-devtools` read as a ring with a bite out of it, and neither is a
+    /// thing an assertion about pens or boxes can see. P1's own report asked for
+    /// it to stop being a one-off, so here it is as a test the build carries:
+    ///
+    /// ```text
+    /// cargo test -p bt-app --lib -- --ignored --nocapture the_symbol_sheet
+    /// ```
+    ///
+    /// It writes `target/icon-sheet.png` and `target/icon-sheet.txt` (the names,
+    /// in the sheet's own order) and asserts nothing. **The discipline it
+    /// carries is written in `docs/DESIGN.md` §7.18: a drawing joins the sheet
+    /// by being looked at on it.** Ignored rather than deleted so that the
+    /// command is in the file the marks are in, and so the sheet cannot rot
+    /// against a registry it no longer matches.
+    #[test]
+    #[ignore = "writes a picture for a person to look at; it asserts nothing"]
+    fn the_symbol_sheet_is_written_for_a_person_to_look_at() {
+        /// The three sizes: a menu row, a comfortable reading size, and big
+        /// enough to see the corners.
+        const SIZES_PX: [u32; 3] = [14, 26, 64];
+        /// Wide enough for the three sizes and their gaps, tall enough for the
+        /// largest plus the bleed a turning glyph asks for outside its box.
+        const CELL_WIDE_PX: u32 = 4 + 64 + 4 + 26 + 4 + 14 + 4;
+        const CELL_TALL_PX: u32 = 88;
+        const COLUMNS: u32 = 4;
+        // Every drawing a verb can wear, plus the object renditions and the two
+        // frames of each turning family — in one order, so the sheet and its
+        // index cannot disagree.
+        let mut marks: Vec<ChromeMark> = Vec::new();
+        for icon in crate::icons::ActionIcon::ALL {
+            let mark = icon.mark();
+            if !marks.contains(&mark) {
+                marks.push(mark);
+            }
+        }
+        for extra in [
+            ChromeMark::chevron(1.0),
+            tree_disclosure(1.0),
+            ChromeMark::Pin { filled: false },
+            ChromeMark::Pin { filled: true },
+            ChromeMark::Lock { engaged: true },
+            ChromeMark::PaneZoom { zoomed: true },
+            ChromeMark::DockLeft,
+            ChromeMark::DockRight,
+            ChromeMark::ResizeGrip,
+            ChromeMark::GitMergeCurve,
+        ] {
+            if !marks.contains(&extra) {
+                marks.push(extra);
+            }
+        }
+        for chassis in the_chassis_family() {
+            if !marks.contains(&chassis) {
+                marks.push(chassis);
+            }
+        }
+
+        let rows = u32::try_from(marks.len().div_ceil(COLUMNS as usize)).expect("a sheet");
+        let width = COLUMNS * CELL_WIDE_PX;
+        let height = rows * CELL_TALL_PX;
+        // The chrome's own ground and ink, so the sheet is the window's
+        // contrast and not a browser's.
+        let mut sheet = image::RgbaImage::from_pixel(width, height, image::Rgba([24, 26, 31, 255]));
+        let mut rasters = ChromeMarkRasters::default();
+        let mut index = String::new();
+        for (at, mark) in marks.iter().enumerate() {
+            let column = at as u32 % COLUMNS;
+            let row = at as u32 / COLUMNS;
+            index.push_str(&format!(
+                "r{row} c{column}  {:<20} {mark:?}\n",
+                mark.drawing_id(),
+            ));
+            // The three sizes share a baseline inside the cell, largest first,
+            // so a row reads as one drawing shrinking rather than as three.
+            let mut pen_x = column * CELL_WIDE_PX + 4;
+            for size in SIZES_PX.into_iter().rev() {
+                let side = size as f32;
+                let icons = rasters.resolve(&[sprite(*mark, side, side, [0xd8, 0xdd, 0xe6])]);
+                let icon = &icons[0];
+                let top = row * CELL_TALL_PX + (CELL_TALL_PX - 8).saturating_sub(icon.height_px);
+                for y in 0..icon.height_px {
+                    for x in 0..icon.width_px {
+                        let base = ((y * icon.width_px + x) * 4) as usize;
+                        let alpha = f32::from(icon.rgba[base + 3]) / 255.0;
+                        if alpha <= 0.0 {
+                            continue;
+                        }
+                        let pixel = sheet.get_pixel_mut(pen_x + x, top + y);
+                        for channel in 0..3 {
+                            let over = f32::from(icon.rgba[base + channel]);
+                            let under = f32::from(pixel[channel]);
+                            pixel[channel] = (over * alpha + under * (1.0 - alpha)) as u8;
+                        }
+                    }
+                }
+                pen_x += icon.width_px + 4;
+            }
+        }
+        let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join("icon-sheet.png");
+        sheet.save(&target).expect("the sheet is written");
+        std::fs::write(target.with_extension("txt"), &index).expect("and its index");
+        println!("{} marks -> {}", marks.len(), target.display());
+        println!("{index}");
     }
 }

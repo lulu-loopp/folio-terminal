@@ -10415,11 +10415,12 @@ fn push_menu_bar(
 /// the page has advanced rows, which is the same shape "a category with no rows
 /// draws no heading" already has.
 ///
-/// The triangle is [`ChromeMark::TreeDisclosure`] at the angle the files tree
-/// turns it to — not a second glyph for a second kind of disclosure. A reader
-/// who has opened a folder in this window has already learned what a turned
-/// triangle means, and teaching them a chevron here would be teaching them that
-/// the two are different things.
+/// **The mark is the chevron** (user ruling 2026-08-26, 裁6): the filled
+/// triangle stays in the files tree and on a submenu row, and every other
+/// list-that-is-folded-away — this header, both breadcrumbs, the pane menu's
+/// `⌄` — turns the arrow. It is asked of [`crate::icons::ActionIcon`] at this
+/// header's frame of the turn rather than named here, so the chrome's three
+/// disclosure sites are three rows of one table.
 /// One heading in the `.group-label` grammar, into `labels`.
 ///
 /// **Written once because two things want it** (user ruling 2026-08-19): a
@@ -10502,7 +10503,7 @@ fn push_advanced_group(
     let left = group.mark[0].round();
     let top = ((group.mark[1] + group.mark[3] - height) / 2.0).round();
     stack.sprites.push(ChromeSprite::new(
-        crate::marks::ChromeMark::chevron(if group.open { 1.0 } else { 0.0 }),
+        crate::icons::ActionIcon::ExpandAdvanced.turned(if group.open { 1.0 } else { 0.0 }),
         [left, top, left + width, top + height],
         ink,
     ));
@@ -16968,11 +16969,11 @@ mod tests {
     /// the only mark the **header** draws.
     ///
     /// "The only mark the overlay draws" until §7.1.6c-5, when the Advanced
-    /// disclosure gave the scrolling stack one of its own — a
-    /// `ChromeMark::TreeDisclosure`, deliberately the files tree's and not a
-    /// second glyph for a second kind of disclosure. So the claim is stated
-    /// where it is still true and where it matters: the header holds one mark,
-    /// and it is this one.
+    /// disclosure gave the scrolling stack one of its own — the house's
+    /// chevron since the 2026-08-26 ruling, which keeps the filled triangle in
+    /// the files tree and on a submenu row. So the claim is stated where it is
+    /// still true and where it matters: the header holds one mark, and it is
+    /// this one.
     #[test]
     fn the_close_affordance_wears_the_mock_ups_own_close_symbol() {
         let placed = open(1.0, true);
