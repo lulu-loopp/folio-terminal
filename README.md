@@ -28,8 +28,9 @@ another window.
           srcset="docs/screenshots/terminal-math-dark.png">
   <img src="docs/screenshots/terminal-math-light.png" width="100%"
        alt="A single terminal pane with the output of one command typeset where it
-       was printed: a sentence carrying an inline formula, and the Gaussian
-       normalisation integral set on a line of its own.">
+       was printed: paragraphs of prose carrying short inline formulas, and three
+       display formulas set on lines of their own — the Gaussian normalisation
+       integral, the Fourier transform pair, and the series for the exponential.">
 </picture>
 
 Folio sets it in two places through one typesetter — LaTeX through MiTeX into

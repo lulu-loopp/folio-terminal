@@ -25,8 +25,9 @@
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/terminal-math-dark.png">
   <img src="docs/screenshots/terminal-math-light.png" width="100%"
-       alt="一个终端窗格，一条命令的输出就在打印的地方排好了版：一句话里嵌着
-       行内公式，下面是独立成行的高斯归一化积分。">
+       alt="一个终端窗格，一条命令的输出就在打印的地方排好了版：几段文字里嵌着短的行内
+       公式，上、中、下各有一条独立成行的公式——高斯归一化积分、傅里叶变换对，
+       以及指数函数的级数。">
 </picture>
 
 Folio 会。命令输出里的 `$…$` 和 `$$…$$` 就排在命令打印它的地方；旁边的 markdown 预览
