@@ -52,6 +52,7 @@ mod dir_news;
 mod favicon;
 mod file_peek;
 mod files;
+mod files_watch;
 mod float;
 mod focus_thumb;
 mod git;
@@ -408,6 +409,16 @@ enum AppEvent {
     /// repository clock in the window, and a commit asked every open preview
     /// whether its file had moved.
     PreviewFileChanged,
+    /// **The kernel says a folder a files column is showing has changed**
+    /// (`files_watch`, user report 2026-08-27).
+    ///
+    /// The eleventh of the family and separate for the family's own reason: a
+    /// file appearing in the folder a column is rooted at must not walk every
+    /// repository clock and every preview stamp in this window, and a `git
+    /// commit` must not re-read every open directory. Like its two neighbours it
+    /// carries nothing — it is the loop being nudged to look at a clock, and the
+    /// clock may well decide the news is not ripe yet.
+    FilesDirChanged,
 }
 
 /// One answer from the picture worker (§7.1.6c-4d).
@@ -7178,6 +7189,16 @@ struct WindowRuntime {
     /// showing. Turned by every window's own [`Runtime::turn`], not behind
     /// `application_clocks`.
     preview_watch: preview_watch::PreviewWatch,
+    /// **The folders this window's file trees are showing, watched**
+    /// (`files_watch`, user report 2026-08-27).
+    ///
+    /// Per window and beside `preview_watch` for that field's own reason, read
+    /// one subject over: a repository, the schemes folder and the storage folder
+    /// are one thing each in the whole process, while *which folders are on the
+    /// glass* is a question only a window can answer — the tab on screen is its
+    /// own, and so are its floats. Turned by every window's own
+    /// [`Runtime::turn`], not behind `application_clocks`.
+    files_watch: files_watch::FilesWatch,
     /// The Win32 cursor the page last asked for, while the pointer is over it.
     ///
     /// Kept beside the page rather than folded into [`pointer_cursor`]'s six
@@ -26993,6 +27014,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         compositor,
         web: BTreeMap::new(),
         preview_watch: preview_watch::PreviewWatch::default(),
+        files_watch: files_watch::FilesWatch::default(),
         web_cursor: None,
         web_pointer_inside: false,
         web_keyboard: None,
@@ -38992,10 +39014,14 @@ impl Runtime<'_> {
 
     /// Ask every files column that is showing this directory to read it again.
     ///
-    /// The column has no watcher (Q3 is deferred), so a rename made in this
-    /// window is one of the few moments it can be told the truth without one —
-    /// and being told is the difference between the row following its file and
-    /// the reader wondering which of the two names is real.
+    /// **Kept now that [`files_watch`] exists**, and not as a belt beside its
+    /// braces: this window is the one that made the change, so it knows the
+    /// truth a whole quiet window before the kernel's account of it arrives, and
+    /// a row that follows its file on the next frame is not the same thing as a
+    /// row that follows it in three hundred milliseconds. The watcher's own
+    /// reading lands afterwards and finds the listing already correct, which
+    /// [`files::DirCache::accept`] answers with "not a change" and no second
+    /// repaint. A folder on a share this process cannot watch has only this.
     fn refresh_files_dirs_at(&mut self, directory: &std::path::Path) {
         let active = self.window.active_tab;
         let asks: Vec<(SeatId, String)> = self.window.tabs[active]
@@ -50416,25 +50442,185 @@ impl Runtime<'_> {
 
     /// Ask for a folder again because it has just been opened.
     ///
-    /// With no watcher yet (Q3 is deferred), unfolding a folder *is* the refresh
-    /// gesture, and it is the only one there is: the cache is kept across a fold
-    /// so that re-opening is instant, and re-asking is what keeps it from being
-    /// instant *and wrong*. The kept rows stay on screen until the new answer
-    /// lands, so a refresh never blinks.
+    /// Unfolding a folder is a refresh as well as a disclosure, and it stays one
+    /// now that [`files_watch`] exists: the kernel stops speaking about a folder
+    /// the moment its handle is dropped, so what happened while it was folded
+    /// reached nobody, and the unfold is the only thing that can cover it. The
+    /// cache is kept across a fold so that re-opening is instant, and re-asking
+    /// is what keeps it from being instant *and wrong*. The kept rows stay on
+    /// screen until the new answer lands, so a refresh never blinks.
     fn refresh_files_dir(&mut self, seat: SeatId, key: &str) {
-        let active = self.window.active_tab;
-        let tab = &self.window.tabs[active];
-        let Some(state) = tab.files.get(&seat) else {
+        let tab = self.window.tabs[self.window.active_tab].id;
+        self.ask_files_dir(files::FilesHost::Docked(LeafId { tab, seat }), key);
+    }
+
+    /// Ask for one folder of one file tree again, wherever that tree lives.
+    ///
+    /// [`Self::refresh_files_dir`]'s body, addressed the way the worker's own
+    /// traffic is: a docked column is a [`LeafId`] and a float is an epoch, and
+    /// the watcher speaks to both because both draw folders that can go out of
+    /// date. A tree that has gone while the ask was being assembled resolves to
+    /// no root and asks nothing, which is the same cancellation a landed answer
+    /// with nowhere to go already is.
+    ///
+    /// **Nothing is marked pending here.** A refresh is not a first reading: the
+    /// rows already on screen are the truth until a better one lands, and a
+    /// `Pending` node would replace a listed folder with "Loading …" for as long
+    /// as the disk took.
+    fn ask_files_dir(&mut self, host: files::FilesHost, key: &str) {
+        let root = match host {
+            files::FilesHost::Docked(leaf) => self
+                .window
+                .tabs
+                .iter()
+                .find(|tab| tab.id == leaf.tab)
+                .and_then(|tab| tab.files.get(&leaf.seat))
+                .map(|state| state.root.clone()),
+            files::FilesHost::Float(epoch) => self
+                .window
+                .float
+                .live(epoch)
+                .and_then(float::FloatWin::files)
+                .map(|files| files.files.root.clone()),
+        };
+        let Some(root) = root else {
             return;
         };
         let request = files::DirRequest {
             window: self.window_id(),
-            host: files::FilesHost::Docked(LeafId { tab: tab.id, seat }),
+            host,
             key: key.to_owned(),
-            path: files::full_path(&state.root, key),
+            path: files::full_path(&root, key),
         };
         if !self.app.files_worker.request(request) {
             self.disable_files_worker();
+        }
+    }
+
+    /// **Bring the file trees' subscriptions level and answer whatever the
+    /// kernel has said** (`files_watch`, user report 2026-08-27).
+    ///
+    /// [`Self::advance_preview_watch`]'s shape one subject over, and the two
+    /// halves are one call for that function's reason: the set a window is
+    /// watching changes on the same events that produce news about it, and
+    /// syncing after answering would act on a folder no column is showing any
+    /// more.
+    fn advance_files_watch(&mut self, now: Instant) -> Result<()> {
+        let showing = self.watched_files_dirs();
+        let wanted: BTreeSet<PathBuf> = showing.keys().cloned().collect();
+        let armed = self.window.files_watch.sync(&wanted, &self.app.event_proxy);
+        let due = self.window.files_watch.due(now);
+        if armed.is_empty() && due.is_empty() {
+            return Ok(());
+        }
+        let mut asks: Vec<(files::FilesHost, String)> = Vec::new();
+        // What moved: every tree showing that folder, which is not one tree —
+        // two columns and a float can be looking at one directory, and all of
+        // them are about to be out of date together.
+        for directory in &due {
+            let Some(trees) = showing.get(directory) else {
+                continue;
+            };
+            asks.extend(trees.iter().cloned());
+        }
+        // And `files_watch`'s rule 3: a folder whose watch has only just opened
+        // was not being listened to a moment ago, so an answer this tree already
+        // holds for it was taken while nobody was watching. A folder nothing has
+        // asked about yet is left alone — the walk that put it on screen is
+        // about to ask for it for the first time, and that read is on the far
+        // side of this arming.
+        for directory in &armed {
+            let Some(trees) = showing.get(directory) else {
+                continue;
+            };
+            asks.extend(
+                trees
+                    .iter()
+                    .filter(|(host, key)| self.files_dir_answered(*host, key))
+                    .cloned(),
+            );
+        }
+        for (host, key) in asks {
+            self.ask_files_dir(host, &key);
+        }
+        Ok(())
+    }
+
+    /// **Every folder this window has the contents of on the glass, and which
+    /// trees are showing it.**
+    ///
+    /// The gate `files_watch` follows, and the whole of it. Two kinds of tree
+    /// answer and they answer with the same thing — a folder on a disk: a docked
+    /// column of the tab on screen, and a live float.
+    ///
+    /// **The tab on screen and not every tab**, which is the opposite of
+    /// [`Self::watched_preview_files`] and for a reason about the subject. A
+    /// preview buffer is *content* that is not re-read when you come back to its
+    /// tab, so gating it on visibility would make returning to a tab the one
+    /// place this window knowingly shows something it has been told is stale. A
+    /// directory listing has the other property: `files_watch` reports the
+    /// folders it newly armed, and coming back to a tab arms its folders again
+    /// and re-asks for every one of them the column already had an answer for.
+    /// So the visible gate here costs nothing in freshness and keeps a window of
+    /// twenty tabs from holding a kernel handle and a blocked thread for every
+    /// folder any of them ever unfolded.
+    ///
+    /// The value is a list rather than one address because two columns rooted at
+    /// the same place are one subscription and two trees to tell.
+    fn watched_files_dirs(&self) -> BTreeMap<PathBuf, Vec<(files::FilesHost, String)>> {
+        let mut showing: BTreeMap<PathBuf, Vec<(files::FilesHost, String)>> = BTreeMap::new();
+        // **Indexed by `get`**, because this is asked on every turn of the loop
+        // including the ones a window takes on its way out: a window whose last
+        // tab has exited has no tab on screen and is showing no folders, which
+        // is an answer and not a case to guard against.
+        if let Some(tab) = self.window.tabs.get(self.window.active_tab) {
+            for (seat, state) in &tab.files {
+                for key in files::visible_dirs(state) {
+                    let host = files::FilesHost::Docked(LeafId {
+                        tab: tab.id,
+                        seat: *seat,
+                    });
+                    showing
+                        .entry(files::full_path(&state.root, &key))
+                        .or_default()
+                        .push((host, key));
+                }
+            }
+        }
+        for win in self.window.float.live_windows() {
+            let Some(tree) = win.files() else {
+                continue;
+            };
+            for key in files::visible_dirs(&tree.files) {
+                showing
+                    .entry(files::full_path(&tree.files.root, &key))
+                    .or_default()
+                    .push((files::FilesHost::Float(win.id()), key));
+            }
+        }
+        showing
+    }
+
+    /// Whether one tree already holds an answer about one of its folders.
+    ///
+    /// `files_watch`'s rule 3 asks this and nothing else: *unheard of* is the
+    /// one state in which a newly armed folder is not owed a fresh read, because
+    /// it is the one state in which a read is coming anyway.
+    fn files_dir_answered(&self, host: files::FilesHost, key: &str) -> bool {
+        match host {
+            files::FilesHost::Docked(leaf) => self
+                .window
+                .tabs
+                .iter()
+                .find(|tab| tab.id == leaf.tab)
+                .and_then(|tab| tab.file_trees.get(&leaf.seat))
+                .is_some_and(|cache| cache.get(key).is_some()),
+            files::FilesHost::Float(epoch) => self
+                .window
+                .float
+                .live(epoch)
+                .and_then(float::FloatWin::files)
+                .is_some_and(|tree| tree.cache.get(key).is_some()),
         }
     }
 
@@ -50465,11 +50651,19 @@ impl Runtime<'_> {
                     if !tab.files.contains_key(&leaf.seat) {
                         continue;
                     }
-                    tab.file_trees
+                    // **And whether it said anything new.** Every reading that
+                    // reaches here used to be a change by definition, because
+                    // the only ones there were had been asked for by a walk that
+                    // had nothing. A watcher makes re-reads ordinary — a folder
+                    // speaks for every write to every file in it — so a listing
+                    // identical to the one already held must not heal
+                    // selections, settle a locate or ask for a frame.
+                    let told = tab
+                        .file_trees
                         .entry(leaf.seat)
                         .or_default()
                         .accept(&response.key, response.outcome);
-                    changed |= index == self.window.active_tab || carded;
+                    changed |= told && (index == self.window.active_tab || carded);
                 }
                 // The float's version of the same cancellation: the window is
                 // gone, or it is showing a *different* view than the one that
@@ -50490,8 +50684,7 @@ impl Runtime<'_> {
                     else {
                         continue;
                     };
-                    files.cache.accept(&response.key, response.outcome);
-                    changed = true;
+                    changed |= files.cache.accept(&response.key, response.outcome);
                 }
             }
         }
@@ -58171,8 +58364,10 @@ impl Runtime<'_> {
             files.cache.turn_row(&key, opening, Instant::now(), motion);
         }
         if opening {
-            // Unfolding is this product's refresh gesture (there is no watcher
-            // yet), so an opened directory is re-asked exactly as a column's is.
+            // Unfolding is a refresh as well as a disclosure — the kernel says
+            // nothing about a folded folder, because `files_watch` dropped its
+            // handle with the row — so an opened directory is re-asked exactly
+            // as a column's is.
             let request = files::DirRequest {
                 window: self.window_id(),
                 host: files::FilesHost::Float(epoch),
@@ -74310,6 +74505,10 @@ impl Runtime<'_> {
         // wake-up only while it is holding news, over subscriptions that are
         // brought level with what the seats are showing on the same turn.
         self.advance_preview_watch(now)?;
+        // And the file trees', beside it and on the same terms: this window's
+        // and not the application's, because which folders are on the glass is a
+        // question only a window can answer.
+        self.advance_files_watch(now)?;
         // The hosted page's own clock: the wait for a browser process to say it
         // has gone. **The only backstop on the graceful path**, where
         // `ProcessFailed` does not arrive at all and `BrowserProcessExited`
@@ -74625,6 +74824,10 @@ impl Runtime<'_> {
             // holding unanswered news about a file it has open, which is every
             // window most of the time.
             self.window.preview_watch.deadline(),
+            // And the file trees', on exactly the same terms: absent for every
+            // window not currently holding unanswered news about a folder it is
+            // showing, which is every window most of the time.
+            self.window.files_watch.deadline(),
         ]);
         self.reap_exited_tabs()?;
         Ok(wake_deadline)
@@ -78904,6 +79107,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // window is read and where the file itself is asked whether it was
             // the one that moved.
             AppEvent::PreviewFileChanged => Ok(()),
+            // And nothing here, on the same reasoning a fourth time: the moment
+            // the folder moved is already in `files_watch`'s mailbox, and
+            // `about_to_wait` is where the quiet window is read and where the
+            // columns showing that folder are told to ask for it again.
+            AppEvent::FilesDirChanged => Ok(()),
         };
         if let Err(error) = applied {
             self.fail(event_loop, error);
