@@ -37,8 +37,8 @@
     `target/release`.
 
 .PARAMETER Documents
-    Where the README, the two licences and the third-party notices are.
-    Defaults to the repository root.
+    Where the two licences and the third-party notices are. Defaults to the
+    repository root.
 
 .PARAMETER Output
     Where the archive and `SHA256SUMS.txt` are written. Defaults to
@@ -77,12 +77,19 @@ function Get-WorkspaceVersion {
 if (-not $Version) { $Version = Get-WorkspaceVersion }
 
 # The archive, in the order a person opening it should meet it: the program,
-# the two files it cannot start without, then what it is and what it is under.
+# the two files it cannot start without, then what it is under.
+#
+# **The README is deliberately not here.** It is written for a repository page:
+# every link in it is relative (`docs/PRIVACY.md`, `CONTRIBUTING.md`) and every
+# picture it shows is a file under `docs/screenshots/` and `assets/readme/`.
+# Dropped into an archive on its own it is a page of dead links and broken
+# images, which is worse than no page at all. It is read where it works - the
+# repository and the releases page - and what ships here is what the licences
+# require to ship.
 $manifest = @(
     @{ Name = 'folio.exe';                From = $Binaries },
     @{ Name = 'conpty.dll';               From = $Binaries },
     @{ Name = 'OpenConsole.exe';          From = $Binaries },
-    @{ Name = 'README.md';                From = $Documents },
     @{ Name = 'LICENSE-MIT';              From = $Documents },
     @{ Name = 'LICENSE-APACHE';           From = $Documents },
     @{ Name = 'THIRD-PARTY-NOTICES.md';   From = $Documents }

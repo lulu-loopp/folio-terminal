@@ -1,41 +1,54 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="316"
      viewBox="0 0 1200 316" role="img" aria-labelledby="folio-title folio-desc">
   <title id="folio-title">Folio</title>
-  <desc id="folio-desc">Folio, a terminal for Windows drawn on the GPU, with files,
-  previews and git beside the prompt. Beside the name, a terminal pane runs two
-  commands; a rule in the left margin marks how far each one reached, and the rule
-  beside the command that failed is drawn in the failure colour.</desc>
+  <desc id="folio-desc">Folio, the Windows terminal that renders math and says which
+  agent is waiting for you. Beside the name, a terminal pane has run a command that
+  printed a file, and the display formula in that file — the Gaussian integral of
+  e to the minus x squared, equal to the square root of pi — has been typeset in
+  place, in the output, above the next prompt.</desc>
 
   <rect width="1200" height="316" rx="14" fill="#F1F0EE"/>
 
   <g id="title-block" font-family="-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, &quot;PingFang SC&quot;, Roboto, Arial, sans-serif">
     <text x="64" y="70" font-size="20" font-weight="600" letter-spacing="3.4"
-          fill="#8B8985">WINDOWS &#183; RUST &#183; GPU</text>
+          fill="#8B8985">WINDOWS &#183; TERMINAL &#183; WORKSPACE</text>
     <text x="64" y="154" font-size="76" font-weight="600" letter-spacing="-1.6"
           fill="#37352F">Folio</text>
-    <text x="64" y="202" font-size="26" fill="#37352F">A terminal for Windows, drawn on the GPU.</text>
-    <text x="64" y="236" font-size="26" fill="#37352F">Files, previews and git beside the prompt.</text>
+    <text x="64" y="202" font-size="26" fill="#37352F">The Windows terminal that renders math.</text>
+    <text x="64" y="236" font-size="26" fill="#37352F">And says which agent is waiting for you.</text>
     <text x="64" y="278" font-family="ui-monospace, SFMono-Regular, &quot;Cascadia Mono&quot;, Consolas, &quot;JetBrains Mono&quot;, Menlo, monospace" font-size="19"
           fill="#8B8985">Windows 10 1809 or newer &#183; MIT or Apache-2.0</text>
   </g>
 
-  <g id="command-marks" font-family="ui-monospace, SFMono-Regular, &quot;Cascadia Mono&quot;, Consolas, &quot;JetBrains Mono&quot;, Menlo, monospace" font-size="19">
+  <g id="typeset-in-place" font-family="ui-monospace, SFMono-Regular, &quot;Cascadia Mono&quot;, Consolas, &quot;JetBrains Mono&quot;, Menlo, monospace" font-size="19">
     <text x="656" y="70" font-family="-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, &quot;PingFang SC&quot;, Roboto, Arial, sans-serif" font-size="20" font-weight="600"
-          letter-spacing="3.4" fill="#8B8985">COMMAND MARKS</text>
+          letter-spacing="3.4" fill="#8B8985">TYPESET IN PLACE</text>
 
     <rect x="656" y="88" width="480" height="188" rx="10"
           fill="#FFFFFF" stroke="#E8E7E5" stroke-width="1"/>
 
-    <rect x="674" y="116" width="3" height="49" rx="1.5"
-          fill="#AFAEAC"/>
-    <rect x="674" y="172" width="3" height="49" rx="1.5"
-          fill="#E11D48"/>
+    <text x="690" y="131" xml:space="preserve"><tspan fill="#83827E">PS </tspan><tspan fill="#37352F" text-decoration="underline">C:\Projects\aurora</tspan><tspan fill="#37352F">&gt;</tspan><tspan fill="#37352F"> cat notes.md</tspan></text>
+    <text x="690" y="159" fill="#83827E" xml:space="preserve">A Gaussian integral:</text>
 
-    <text x="690" y="131" xml:space="preserve"><tspan fill="#83827E">PS </tspan><tspan fill="#37352F" text-decoration="underline">C:\Projects\aurora&gt;</tspan><tspan fill="#37352F"> cargo build</tspan></text>
-    <text x="690" y="159" fill="#83827E" xml:space="preserve">    Finished `release` profile</text>
-    <text x="690" y="187" xml:space="preserve"><tspan fill="#83827E">PS </tspan><tspan fill="#37352F" text-decoration="underline">C:\Projects\aurora&gt;</tspan><tspan fill="#37352F"> cargo test</tspan></text>
-    <text x="690" y="215" fill="#E11D48">error: test failed</text>
-    <text x="690" y="243" xml:space="preserve"><tspan fill="#83827E">PS </tspan><tspan fill="#37352F" text-decoration="underline">C:\Projects\aurora&gt;</tspan></text>
-    <rect x="952.2" y="228" width="2.5" height="20" fill="#37352F"/>
+    <g transform="translate(813 204)" fill="#37352F"
+       font-family="&quot;Latin Modern Math&quot;, &quot;Cambria Math&quot;, &quot;STIX Two Math&quot;, Cambria, &quot;Times New Roman&quot;, Georgia, serif">
+      <path d="M 8,-26 C 8,-30 5,-31 3,-31 C 0,-31 -1,-28 -1,-24 L -1,4 C -1,8 -2,11 -5,11 C -7,11 -10,10 -10,6"
+            transform="translate(10 0)"
+            fill="none" stroke="#37352F" stroke-width="2.3"
+            stroke-linecap="round"/>
+      <text x="15" y="-25" font-size="12">&#8734;</text>
+      <text x="11" y="21" font-size="12">&#8722;&#8734;</text>
+      <text x="38" y="0" font-size="26" font-style="italic">e</text>
+      <text x="50" y="-13" font-size="15" font-style="italic">&#8722;x&#178;</text>
+      <text x="82" y="0" font-size="26" font-style="italic">dx</text>
+      <text x="118" y="0" font-size="26">=</text>
+      <path d="M 143,-7 L 147,-1 L 152,-25 L 168,-25"
+            fill="none" stroke="#37352F" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="154" y="0" font-size="25" font-style="italic">&#960;</text>
+    </g>
+
+    <text x="690" y="249" xml:space="preserve"><tspan fill="#83827E">PS </tspan><tspan fill="#37352F" text-decoration="underline">C:\Projects\aurora</tspan><tspan fill="#37352F">&gt;</tspan></text>
+    <rect x="952.2" y="234" width="2.5" height="20" fill="#37352F"/>
   </g>
 </svg>

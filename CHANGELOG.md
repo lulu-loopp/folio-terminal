@@ -56,7 +56,8 @@ things that were wrong on the way here and are worth knowing were wrong.
   site's own icon, a source view for local pages, and a place in the session so
   they come back when Folio does.
 - Video files — `.mp4`, `.m4v`, `.webm` — show their first frame, their length and
-  their size. They do not play.
+  their size, and play in the pane. A `.mov` gets the same first frame and says
+  why it has no play button.
 - The files column turns into a git panel (`Ctrl+Shift+G`): branch, working tree,
   staged and unstaged files, and the commit graph, with a selected file's diff in
   the preview.

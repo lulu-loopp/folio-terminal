@@ -2937,7 +2937,7 @@ of what has to be said about a modified copy.
 
 | Licence | Packages |
 |---|---:|
-| MIT License | 471 |
+| MIT License | 472 |
 | Apache License 2.0 | 36 |
 | Unicode License v3 | 26 |
 | BSD 2-Clause "Simplified" License | 6 |
@@ -8895,22 +8895,23 @@ SOFTWARE.
 
 ### MIT License
 
-Used by 86 package(s):
+Used by 87 package(s):
 
-- **bt-app 0.0.0**
-- **bt-corpus 0.0.0**
-- **bt-detect 0.0.0**
-- **bt-doc 0.0.0**
-- **bt-layout 0.0.0**
-- **bt-math 0.0.0**
-- **bt-persist 0.0.0**
-- **bt-platform 0.0.0**
-- **bt-pty 0.0.0**
-- **bt-render 0.0.0**
-- **bt-term 0.0.0**
-- **bt-transcript 0.0.0**
-- **bt-unicode 0.0.0**
-- **bt-viewport 0.0.0**
+- **bt-app 0.1.0**
+- **bt-corpus 0.1.0**
+- **bt-detect 0.1.0**
+- **bt-doc 0.1.0**
+- **bt-layout 0.1.0**
+- **bt-math 0.1.0**
+- **bt-persist 0.1.0**
+- **bt-platform 0.1.0**
+- **bt-pty 0.1.0**
+- **bt-render 0.1.0**
+- **bt-term 0.1.0**
+- **bt-transcript 0.1.0**
+- **bt-unicode 0.1.0**
+- **bt-viewport 0.1.0**
+- **bt-winres 0.1.0**
 - **block2 0.5.1** — <https://github.com/madsmtm/objc2>
 - **chrono 0.4.45** — <https://github.com/chronotope/chrono>
 - **comemo-macros 0.5.1** — <https://github.com/typst/comemo>

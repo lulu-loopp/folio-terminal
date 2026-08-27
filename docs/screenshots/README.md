@@ -43,6 +43,31 @@ exactly the picture JPEG is worst at.
 | `settings-agents-light.png` | The Agents page in Settings, showing the three installer rows for Claude Code, Codex and Copilot CLI with their sentences readable. Leave them switched off — that is what a reader's own machine looks like. |
 | `settings-agents-dark.png` | The same, dark. |
 
+## Still to take
+
+`terminal-math-light.png` and `terminal-math-dark.png` — **the shot the README's
+first section is written around and does not yet have.** One terminal pane, no
+files column and no preview open, showing a command whose output has been typeset
+where it was printed: a display formula on its own line and an inline one in a
+sentence, from a file read with `cat`. The point of the picture is only that
+mathematics in command output is mathematics, so nothing else should be competing
+for the eye. Until it exists the section borrows `preview-markdown-*.png`, which
+shows the same typesetter doing the other half of its job.
+
+Taking it needs the fixture the twelve below were taken through, and each part of
+it is load-bearing:
+
+- **A profile that runs the command itself.** Text cannot be injected into the
+  window by hand on a machine with a Chinese IME loaded — the IME owns unmodified
+  printable keys, and `cd C:\Projectsurora` arrives as candidate text. The shot
+  has to come from a profile whose command line runs the command and then leaves
+  an ordinary prompt, as the twelve below did.
+- **`-NoProfile`.** Otherwise the machine's own PowerShell profile prints the
+  machine's own directories into the picture.
+- **A neutral working directory.** The prompt is in the frame, so it may not name
+  an account. `C:\Projectsurora` is what the others used.
+- **A 100% display**, made rather than found — see below.
+
 ## What is committed
 
 The size is the one `scripts/check-screenshots.ps1` enforces; the hash is what
