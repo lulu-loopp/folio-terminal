@@ -507,11 +507,23 @@ const SHORTCUT_CONTROL_GAP_LOGICAL_PX: f32 = 8.0;
 /// taste: the default profile is refused the `Hide` verb precisely so it cannot
 /// leave the picker, and if a hand-edited file ever produced a row that was both
 /// then the fact worth showing is the one that is wrong.
+///
+/// **The default says which of the two it is** (user ruling 2026-08-27). Since
+/// an unset default resolves to the first shipped shell this machine has rather
+/// than to the floor, the row wearing the badge on a first run is a row nobody
+/// chose — and a badge reading `default` over a choice that was never made is
+/// the page reporting a setting the reader would not find changed if they went
+/// looking. `automatic default` is the same badge in the same slot saying which
+/// of the two it is.
 fn badge_text(line: &crate::profiles::ProfileLine) -> Option<&'static str> {
     if line.hidden {
         Some(Text::ProfilesBadgeHidden.text())
     } else if line.is_default {
-        Some(Text::ProfilesBadgeDefault.text())
+        Some(if line.default_is_automatic {
+            Text::ProfilesBadgeDefaultAutomatic.text()
+        } else {
+            Text::ProfilesBadgeDefault.text()
+        })
     } else {
         None
     }
@@ -21985,6 +21997,7 @@ mod tests {
                 command: "pwsh.exe -NoLogo".to_owned(),
                 capability: Some(Text::CapPowerShell.text()),
                 is_default: true,
+                default_is_automatic: false,
                 is_fallback: false,
                 deletable: false,
                 hidden: false,
@@ -21997,6 +22010,7 @@ mod tests {
                 command: "wsl.exe --cd ~".to_owned(),
                 capability: Some(Text::CapWslBash.text()),
                 is_default: false,
+                default_is_automatic: false,
                 is_fallback: false,
                 deletable: false,
                 hidden: false,
@@ -22009,6 +22023,7 @@ mod tests {
                 command: "Git Bash is not installed".to_owned(),
                 capability: None,
                 is_default: false,
+                default_is_automatic: false,
                 is_fallback: false,
                 deletable: false,
                 hidden: false,
@@ -22021,6 +22036,7 @@ mod tests {
                 command: "cmd.exe".to_owned(),
                 capability: Some(Text::CapCmd.text()),
                 is_default: false,
+                default_is_automatic: false,
                 is_fallback: false,
                 deletable: false,
                 hidden: true,
@@ -22261,6 +22277,53 @@ mod tests {
         let target = hit(&placed, &values(), centre.0, centre.1);
         assert_eq!(target, SettingsTarget::ProfileRow(0));
         assert_eq!(profile_action_requested(target), None);
+    }
+
+    /// PIN — **a default nobody chose says so, and the longer badge still fits.**
+    ///
+    /// User ruling 2026-08-27: an unset default resolves to the first shipped
+    /// shell this machine can start rather than to the floor, so on a first run
+    /// the badged row is a row nobody picked — and `default` over a choice that
+    /// was never made sends the reader to the General page to find a setting
+    /// they will not find changed.
+    ///
+    /// The geometry half is not decoration. The badge hangs off the *end* of the
+    /// row's name rather than off a column of its own, the run of verbs to its
+    /// right is right-aligned against the row, and `automatic default` is more
+    /// than twice the width of `default` — so the one way this ruling reaches
+    /// the screen broken is a badge running under `Edit`. Measured against the
+    /// longest name this build ships, and in English, which is the wider of the
+    /// two columns: the Chinese badge is four characters where the English is
+    /// seventeen.
+    #[test]
+    fn a_default_nobody_chose_says_so_and_still_fits_the_row() {
+        let mut lines = profile_lines();
+        lines[0].title = "Windows PowerShell 5.1";
+        lines[0].default_is_automatic = true;
+        let placed = profiles_page(&lines);
+        let row = &placed.profiles[0];
+        let badge = row.badge.expect("the default row is badged");
+        let labels = profiles_drawn(&placed, &lines, None, None)
+            .into_iter()
+            .flat_map(|layer| layer.labels)
+            .collect::<Vec<_>>();
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.text == Text::ProfilesBadgeDefaultAutomatic.text()),
+            "the row wears the badge that says which of the two it is"
+        );
+        assert!(
+            !labels
+                .iter()
+                .any(|label| label.text == Text::ProfilesBadgeDefault.text()),
+            "and it wears only one badge, not both"
+        );
+        assert!(
+            badge[2] < row.up[0],
+            "the badge stops short of the row's first verb: {badge:?} against {:?}",
+            row.up
+        );
     }
 
     // ── the editor sub-page (§7.1.6c-6b) ─────────────────────────────────────

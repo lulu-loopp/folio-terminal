@@ -2377,6 +2377,14 @@ pub struct ProfileLine {
     /// control**: the default is changed on the General page and nowhere else,
     /// because one field with two writers is the thing §7.1.6c-4a just avoided.
     pub is_default: bool,
+    /// Whether that badge is a report about the *machine* rather than about a
+    /// choice — [`default_profile_is_automatic`].
+    ///
+    /// Carried beside [`Self::is_default`] and not folded into it, because the
+    /// row is the same row either way: it is the profile the `+` opens, and the
+    /// only thing this changes is which of the two badges it wears. Meaningless
+    /// on a row that is not the default, and the badge reads them in that order.
+    pub default_is_automatic: bool,
     /// Whether this is the floor every degradation in the product lands on.
     ///
     /// A fact about the table and not about this profile, exactly as
@@ -2397,8 +2405,14 @@ pub struct ProfileLine {
 /// Hidden rows are **here** and absent from [`ProfileTable::offered`], and the
 /// asymmetry is the point: this page is where hiding is undone, so a page that
 /// honoured hiding would be a page with no way back.
+///
+/// `automatic` is [`default_profile_is_automatic`]'s answer, handed in beside
+/// the index for the reason the index itself is handed in: both are facts about
+/// `settings.json` resolved against this machine, and this function is given the
+/// resolved answer rather than the file so that the page and the `+` cannot
+/// disagree about what the default is.
 #[must_use]
-pub fn page_lines(programs: &ProfilePrograms, default: usize) -> Vec<ProfileLine> {
+pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -> Vec<ProfileLine> {
     let fallback = fallback_profile();
     with_table(|table| {
         table
@@ -2418,6 +2432,7 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize) -> Vec<ProfileLine
                     },
                     capability: available.then(|| capability_text(profile).text()),
                     is_default: index == default,
+                    default_is_automatic: automatic,
                     is_fallback: index == fallback,
                     deletable: profile.origin == Origin::User,
                     hidden: profile.hidden,
@@ -2628,6 +2643,15 @@ fn announcement_names(profile: &Profile, qualified: &str) -> Vec<String> {
 /// that ends up running 5.1 now says *Windows PowerShell* on its tab instead of
 /// wearing the name of the shell it failed to be.
 ///
+/// **It is no longer what an unset default resolves to** (user ruling
+/// 2026-08-27, amending the reach of the one above rather than the floor
+/// itself). A first run used to open Windows PowerShell 5.1 on a machine that
+/// had PowerShell 7, because "nobody has chosen" was answered here; it is
+/// answered by [`automatic_profile_in`] now, and this stays what a *broken*
+/// choice lands on. The property this row was picked for — a program that is
+/// part of Windows — is the same property that keeps it at the bottom of that
+/// walk.
+///
 /// **A lookup and no longer the literal `1`** (§7.1.6c-6). It was an ordinal
 /// into a `const` array, which was exact for as long as nothing could reorder
 /// that array; a table the user can reorder turns the same literal into "whoever
@@ -2652,6 +2676,46 @@ fn fallback_profile_in(table: &ProfileTable) -> usize {
     table.position_of_id(WINDOWS_POWERSHELL_ID).unwrap_or(0)
 }
 
+/// The built-in rows in the order [`shipped`] writes them, which is the order
+/// a default nobody has chosen is looked for in.
+///
+/// A list of its own rather than a walk of the table, and that is the point of
+/// it: the table is the one the reader reorders and adds to, so a walk of it
+/// would let a drag on the Profiles page — or a profile of the reader's own,
+/// parked at the top — decide which shell a machine that was never asked opens
+/// with. The shipped order is a fact about this build and cannot be dragged.
+/// [`the_automatic_default_walks_the_shipped_order`] pins the two together.
+const SHIPPED_ORDER: [&str; 5] = ["pwsh", WINDOWS_POWERSHELL_ID, "wsl", "gitbash", "cmd"];
+
+/// The default on a machine where nobody has chosen one: the first row of
+/// [`SHIPPED_ORDER`] this machine can actually start (**user ruling
+/// 2026-08-27**).
+///
+/// It was [`fallback_profile_in`] outright until that ruling, and the cost was
+/// paid on every first run: a machine with PowerShell 7 installed opened Windows
+/// PowerShell 5.1, because "nothing was chosen" and "the floor" were held to be
+/// one answer. They are answers to two different questions. The floor is what a
+/// *broken* choice lands on and its whole property is that it cannot fail — see
+/// [`fallback_profile`] — while an unset default is a machine that has never been
+/// asked, and what it is owed is the best shell it has rather than the one that
+/// is always there.
+///
+/// **The floor is still the bottom of this**, for the case the walk cannot
+/// answer. In practice the walk stops at `winps` at the latest, because that row
+/// names a program that is part of Windows; the `unwrap_or_else` is the same
+/// guarantee the floor always carried and not a second rule.
+///
+/// **This is not the same as choosing `winps` in the dialog**, which is the
+/// distinction the ruling turns on: a stored id is a decision and outranks this
+/// one — see [`default_profile_in`].
+fn automatic_profile_in(table: &ProfileTable, available: impl Fn(usize) -> bool) -> usize {
+    SHIPPED_ORDER
+        .iter()
+        .filter_map(|id| table.position_of_id(id))
+        .find(|index| available(*index))
+        .unwrap_or_else(|| fallback_profile_in(table))
+}
+
 /// Which profile the `+`, `Ctrl+Shift+N` and the opening window start from —
 /// `state.defaultProfile` (mock-up 3217), resolved for this machine.
 ///
@@ -2662,21 +2726,56 @@ fn fallback_profile_in(table: &ProfileTable) -> usize {
 /// slightly different:
 ///
 /// * an id naming no profile in this build — including the empty id a user who
-///   has never opened the setting has — is [`fallback_profile()`], which is
-///   [`index_of_id`]'s rule and not a second one;
+///   has never opened the setting has — is [`automatic_profile_in`], the first
+///   shipped row this machine can start;
 /// * an id naming a profile this machine cannot start is **also**
-///   [`fallback_profile()`], and this is the part `index_of_id` cannot do because
-///   it is a fact about the machine rather than about the file. Someone who chose
-///   Git Bash and then uninstalled Git must still get a window;
+///   [`automatic_profile_in`], and this is the part `index_of_id` cannot do
+///   because it is a fact about the machine rather than about the file. Someone
+///   who chose Git Bash and then uninstalled Git must still get a window;
 /// * anything else is what they chose.
 ///
 /// The stored id is *not* rewritten when it degrades. Uninstalling Git must not
 /// quietly consume the answer "Git Bash", or reinstalling it would leave the
 /// user's own choice erased with nothing to say so — the degradation lives for
-/// exactly as long as its cause.
+/// exactly as long as its cause. The same sentence is why an unset default is
+/// resolved afresh on every read and never written down: a machine that grows a
+/// PowerShell 7 opens with it the next morning, and one that loses it stops.
 #[must_use]
 pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
     with_table(|table| default_profile_in(table, stored, |index| programs.is_available(index)))
+}
+
+/// Whether the answer above came from the machine rather than from the reader —
+/// which is what the Profiles page's badge says out loud.
+///
+/// It asks [`chosen_profile_in`], the same rule [`default_profile_in`] asks, and
+/// deliberately not "is `stored` empty": a stored id this build does not have,
+/// and one naming a shell that has since been uninstalled, are both defaults
+/// nobody is currently choosing, and a badge that called them chosen would be
+/// pointing at a row for a reason that is not the reason it is there.
+#[must_use]
+pub fn default_profile_is_automatic(stored: &str, programs: &ProfilePrograms) -> bool {
+    with_table(|table| {
+        chosen_profile_in(table, stored, |index| programs.is_available(index)).is_none()
+    })
+}
+
+/// What the *file* decides, or `None` when it decides nothing this machine can
+/// honour.
+///
+/// One rule with two readers — [`default_profile_in`] and
+/// [`default_profile_is_automatic`] — because "which row is the default" and "is
+/// that row the default because somebody said so" are one question asked from
+/// two sides, and two spellings of it are how the badge ends up on a different
+/// row from the one the `+` opens.
+fn chosen_profile_in(
+    table: &ProfileTable,
+    stored: &str,
+    available: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    table
+        .position_of_id(stored)
+        .filter(|index| available(*index))
 }
 
 /// The same three inputs over a table handed in — see [`fallback_profile_in`].
@@ -2692,10 +2791,8 @@ fn default_profile_in(
     stored: &str,
     available: impl Fn(usize) -> bool,
 ) -> usize {
-    table
-        .position_of_id(stored)
-        .filter(|index| available(*index))
-        .unwrap_or_else(|| fallback_profile_in(table))
+    chosen_profile_in(table, stored, &available)
+        .unwrap_or_else(|| automatic_profile_in(table, &available))
 }
 
 /// Which profile a seed's `profile_id` names, or [`fallback_profile()`] when the
@@ -13193,6 +13290,15 @@ mod tests {
     /// resolver that trusted the file hands a window a shell that is not
     /// installed, and one that only ever answered `fallback_profile()` makes the
     /// setting a control that does nothing.
+    ///
+    /// **The unset case was re-decided on 2026-08-27** (user ruling). It used to
+    /// assert `fallback_profile()` here — `winps` on a machine with PowerShell 7
+    /// installed — and the comment beside it read "nobody has ever opened the
+    /// setting: the floor". The floor is what a *broken* choice lands on; a
+    /// machine nobody has asked is owed the first shipped shell it can start,
+    /// and only a machine with none of them falls all the way through. What has
+    /// not changed is the line under it: choosing `winps` in the dialog is a
+    /// decision and still answers `winps` on a machine that has both.
     #[test]
     fn the_default_profile_is_the_stored_choice_unless_this_machine_cannot_honour_it() {
         let all = equipped();
@@ -13204,13 +13310,34 @@ mod tests {
         );
         assert_eq!(
             default_profile(bt_persist::DEFAULT_PROFILE_UNSET, &all),
+            index_of_id("pwsh"),
+            "nobody has ever opened the setting: the first shipped shell this \
+             machine has, which on a machine with PowerShell 7 is PowerShell 7"
+        );
+        assert_eq!(
+            default_profile(bt_persist::DEFAULT_PROFILE_UNSET, &bare()),
             fallback_profile(),
-            "nobody has ever opened the setting: the floor, not an error"
+            "and on a machine that has only the one, the walk stops at the floor"
+        );
+        assert_eq!(
+            default_profile(WINDOWS_POWERSHELL_ID, &all),
+            index_of_id(WINDOWS_POWERSHELL_ID),
+            "unset is not the same as choosing 5.1: a reader who picked it keeps it \
+             on the very machine the unset answer would have moved off"
+        );
+        assert!(
+            default_profile_is_automatic(bt_persist::DEFAULT_PROFILE_UNSET, &all),
+            "and the page can tell the two apart, which is what its badge says"
+        );
+        assert!(!default_profile_is_automatic(WINDOWS_POWERSHELL_ID, &all));
+        assert!(
+            default_profile_is_automatic("gitbash", &bare()),
+            "a choice this machine cannot honour is not a choice it is honouring"
         );
         assert_eq!(
             default_profile("a-profile-from-a-newer-build", &all),
-            fallback_profile(),
-            "an id this build does not have degrades exactly as a leaf's does"
+            index_of_id("pwsh"),
+            "an id this build does not have decides nothing, so the machine does"
         );
         assert_eq!(
             default_profile("gitbash", &bare()),
@@ -13227,6 +13354,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// PIN — the order a machine that was never asked is searched in is the
+    /// order the rows are shipped in, and the two cannot drift.
+    ///
+    /// [`SHIPPED_ORDER`] is a second list of the same five ids, written out so
+    /// that a table the reader has reordered cannot move the answer. A second
+    /// list is a second thing to maintain, and this is what stops it becoming a
+    /// second thing to *believe*: a row renamed or added in [`shipped`] and not
+    /// here would silently drop out of the walk, and the machine's answer would
+    /// quietly skip it.
+    #[test]
+    fn the_automatic_default_walks_the_shipped_order() {
+        let five = shipped_five();
+        let ids: Vec<&str> = five.iter().map(|profile| profile.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            SHIPPED_ORDER.to_vec(),
+            "every shipped row is in the walk, in the order it is shipped in"
+        );
+        // And the walk itself: the first *available* one, not the first one.
+        let table = ProfileTable {
+            profiles: shipped(),
+        };
+        assert_eq!(
+            automatic_profile_in(&table, |index| index == index_of_id("cmd")),
+            index_of_id("cmd"),
+            "four rows greyed and the fifth is the answer, wherever it sits"
+        );
+        assert_eq!(
+            automatic_profile_in(&table, |_| false),
+            fallback_profile_in(&table),
+            "and a machine that can start none of them still opens a window"
+        );
     }
 
     /// PIN — every profile can say where it starts, and WSL says it differently.
@@ -19233,15 +19394,20 @@ mod tests {
     }
 
     /// PIN — **a row deleted in an editor leaves every list, and the default it
-    /// was falls back to the built-in floor without the stored name being
-    /// touched.**
+    /// was falls back to what a machine nobody has asked answers, without the
+    /// stored name being touched.**
     ///
     /// The two halves are one claim: the row goes because the array is the
     /// order and an entry that is not in it is not in the table, and the
-    /// default goes to the floor because `default_profile` has answered "an id
-    /// nothing holds" that way since the day the setting existed. No rule was
-    /// invented for a deletion made on disk — a deletion made on disk is simply
-    /// a file that no longer names it.
+    /// default goes wherever `default_profile` has always sent "an id nothing
+    /// holds". No rule was invented for a deletion made on disk — a deletion
+    /// made on disk is simply a file that no longer names it.
+    ///
+    /// **User ruling 2026-08-27 moved where that lands, not whether this is the
+    /// case that lands there.** It used to be [`fallback_profile_in`] outright;
+    /// it is [`automatic_profile_in`] now, whose bottom is that same floor. The
+    /// sentence this pin is made of is unchanged: the *stored id* is left alone,
+    /// so putting the entry back puts the default back.
     ///
     /// And no card: `Undo` is the verb of a deletion *this window* performed,
     /// and an editor's deletion is a fact rather than an offer.
@@ -19274,13 +19440,26 @@ mod tests {
         );
         assert_eq!(
             default_profile_in(&after, "claude-7f3a", |_| true),
-            fallback_profile_in(&after),
-            "the default falls to the floor rather than to nothing"
+            automatic_profile_in(&after, |_| true),
+            "the default falls to what a machine with no choice on it answers, \
+             rather than to nothing"
         );
         assert_eq!(
             after.get(fallback_profile_in(&after)).map(|row| &*row.id),
             Some(WINDOWS_POWERSHELL_ID),
-            "and the floor is the built-in every machine has"
+            "and the floor under that walk is the built-in every machine has"
+        );
+
+        // Put the entry back and the default is back, because the stored id was
+        // never rewritten — the degradation lived for exactly as long as its
+        // cause.
+        registry.install(&file(vec![named("pwsh"), mine("claude-7f3a")]));
+        let restored = registry.table();
+        assert_eq!(
+            default_profile_in(&restored, "claude-7f3a", |_| true),
+            restored
+                .position_of_id("claude-7f3a")
+                .expect("the row is back"),
         );
     }
 
@@ -20174,7 +20353,7 @@ mod tests {
     /// one line the row has room for is the reason it cannot start.
     #[test]
     fn an_unavailable_row_gives_its_reason_and_drops_its_capability_line() {
-        let lines = page_lines(&bare(), fallback_profile());
+        let lines = page_lines(&bare(), fallback_profile(), true);
         assert_eq!(lines.len(), count());
         let git = lines
             .iter()
@@ -20211,7 +20390,7 @@ mod tests {
     /// say nothing about where the tab opens, which is what `--cd ~` is.
     #[test]
     fn the_line_under_a_name_is_the_executable_and_its_words() {
-        let lines = page_lines(&equipped(), fallback_profile());
+        let lines = page_lines(&equipped(), fallback_profile(), false);
         let of = |id: &str| {
             lines
                 .iter()

@@ -774,6 +774,10 @@ pub enum Text {
     /// The badges. They report and are not controls, which is why they wear the
     /// group label's type and the ink an unavailable thing wears.
     ProfilesBadgeDefault,
+    /// The same badge on a machine that was never asked: this is the row the
+    /// `+` opens, and it is that row because it is the first shipped shell this
+    /// machine has rather than because anybody picked it.
+    ProfilesBadgeDefaultAutomatic,
     ProfilesBadgeHidden,
 
     // ── the honest capability sentences (J85) ──────────────────
@@ -2496,6 +2500,7 @@ impl Text {
             // raises it in the English and there is no case to raise in the
             // Chinese, which is the same ruling `CategoryGeneral` carries.
             Self::ProfilesBadgeDefault => pick(lang, "default", "默认"),
+            Self::ProfilesBadgeDefaultAutomatic => pick(lang, "automatic default", "自动默认"),
             Self::ProfilesBadgeHidden => pick(lang, "hidden", "已隐藏"),
             Self::CapFull => pick(
                 lang,
@@ -3511,7 +3516,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 520] = [
+    pub const ALL: [Self; 521] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3693,6 +3698,7 @@ impl Text {
         Self::CategoryProfiles,
         Self::ProfilesDuplicate,
         Self::ProfilesBadgeDefault,
+        Self::ProfilesBadgeDefaultAutomatic,
         Self::ProfilesBadgeHidden,
         Self::CapFull,
         Self::CapPowerShell,

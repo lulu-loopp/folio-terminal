@@ -6801,6 +6801,21 @@ struct App {
     /// file off. Cached beside the field above rather than read on every frame — one half of it is
     /// a file read and the other half is a process — and refreshed when the probe's answer lands.
     copilot_readiness: attention_copilot::Readiness,
+    /// **Whether this run has already put the PowerShell integration strip in
+    /// front of the reader** (user ruling 2026-08-27; §7.1.6j).
+    ///
+    /// On `App` because the ruling is about the *run* and a window is not the
+    /// run: opening a second window is not being asked a second time, and
+    /// neither is opening a fourth pane in the first one. The offer itself stays
+    /// on the leaf, where it belongs — this counts, and the leaf records.
+    ///
+    /// **Not persisted, and that is deliberate**: `settings.json` already holds
+    /// `powershell_integration_offer`, which is the reader ending the asking for
+    /// good. A second bool on disk saying "asked once" would be a third state
+    /// nobody chose — a question that stopped being asked without anybody
+    /// deciding it should — and there would be no control anywhere that put it
+    /// back. This one dies with the process, so tomorrow's launch asks once.
+    powershell_integration_asked: bool,
     /// **This process's voice in the notification centre** (§7.6).
     ///
     /// On `App` and not on `WindowRuntime`, which is the opposite of
@@ -28231,6 +28246,9 @@ impl Runtime<'_> {
             copilot_hooks_installed: attention_copilot::state()
                 == attention_copilot::State::Installed,
             copilot_readiness: attention_copilot::readiness(),
+            // Nobody has been asked yet, which is the only thing a launch can
+            // truthfully say about it — see the field.
+            powershell_integration_asked: false,
             notifications: NotificationDesk::new(proxy.clone()),
             session_store,
             settings_store,
@@ -32861,6 +32879,13 @@ impl Runtime<'_> {
             .settings_store
             .loaded()
             .powershell_integration_offer;
+        // **This run's one ask, carried through the loop and put back after it**
+        // (user ruling 2026-08-27 — `shell_integration::offer_once_per_run` is
+        // the rule). A local because the loop borrows the tab's leaves and the
+        // count lives on the application; copying a `bool` in and out is the
+        // whole of the reconciliation, and it cannot go stale because nothing
+        // between the two lines can reach the field.
+        let mut already_asked = self.app.powershell_integration_asked;
         let mut presence = std::collections::BTreeSet::new();
         let mut states: std::collections::BTreeMap<SeatId, notice::Notice> =
             std::collections::BTreeMap::new();
@@ -32876,7 +32901,10 @@ impl Runtime<'_> {
                     .and_then(shell_integration::profile_probe)
                     .flatten();
                 if let Some(profile) = asked {
-                    leaf.integration_offer = Some(shell_integration::offer_for(&profile));
+                    leaf.integration_offer = Some(shell_integration::offer_once_per_run(
+                        &profile,
+                        &mut already_asked,
+                    ));
                 }
             }
             let showing = offering
@@ -32893,6 +32921,7 @@ impl Runtime<'_> {
                 states.insert(*seat, state);
             }
         }
+        self.app.powershell_integration_asked = already_asked;
         // **Two changes, not one, and they gate different work.** Whether a seat
         // *wears* a strip decides the pane's height, so a change to that set is a
         // layout change and re-solves. Which strip it wears — `Offer` before the
@@ -33020,9 +33049,12 @@ impl Runtime<'_> {
     /// Take one pane's strip down without deciding anything.
     ///
     /// [`shell_integration::Offer::Closed`] and not `Silent`: nothing was
-    /// answered, so the next PowerShell that starts is asked again. That is the
-    /// difference between the close and `Don't show again`, and it is the whole
-    /// reason both exist.
+    /// answered. What that still buys the reader is the *next launch* — this run
+    /// has spent its one ask either way (user ruling 2026-08-27,
+    /// [`shell_integration::offer_once_per_run`]), while `Don't show again`
+    /// writes the setting and ends the asking for good. Before that ruling the
+    /// difference was the next PowerShell pane, which is how a reader with four
+    /// of them was asked four times.
     fn close_pane_notice(&mut self, seat: SeatId) -> Result<()> {
         let Some(leaf) = self.sessions.get_mut(&seat) else {
             return Ok(());
@@ -33914,7 +33946,11 @@ impl Runtime<'_> {
             // beside it: the page has to show what is true *this frame*, and a
             // copy kept on the struct is a copy that has to be refreshed by
             // whoever changed the table, in every place they changed it.
-            profiles::page_lines(&self.app.profile_programs, self.default_profile()),
+            profiles::page_lines(
+                &self.app.profile_programs,
+                self.default_profile(),
+                self.default_profile_is_automatic(),
+            ),
             // And the folder, for the third list's own reason: which of the
             // scheme pickers' rows are files the reader wrote is what is in
             // `%APPDATA%\Folio\schemes\` *now*, and the catalogue is re-read on
@@ -34228,6 +34264,20 @@ impl Runtime<'_> {
         )
     }
 
+    /// Whether that answer came from the machine rather than from the reader —
+    /// the Profiles page's badge, and nothing else asks.
+    ///
+    /// A second call rather than one function answering both, for the reason
+    /// above: this is derived where it is drawn, and the two readings cannot
+    /// drift because [`profiles::default_profile_is_automatic`] and
+    /// [`profiles::default_profile`] ask the same private rule.
+    fn default_profile_is_automatic(&self) -> bool {
+        profiles::default_profile_is_automatic(
+            &self.app.settings_store.loaded().default_profile,
+            &self.app.profile_programs,
+        )
+    }
+
     /// **Hand one band of the overlay to the arrival register** — see
     /// [`arrival::Passages::stage`].
     ///
@@ -34421,8 +34471,11 @@ impl Runtime<'_> {
             let focus = self.window.settings.focus_ring();
             let values = &self.settings_values();
             let shortcuts = self.app.shortcuts.editor_rows();
-            let profile_lines =
-                profiles::page_lines(&self.app.profile_programs, self.default_profile());
+            let profile_lines = profiles::page_lines(
+                &self.app.profile_programs,
+                self.default_profile(),
+                self.default_profile_is_automatic(),
+            );
             let background_image = self.background_image_name();
             let recording = self.window.settings.recording_state();
             let recording =
