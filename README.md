@@ -22,10 +22,18 @@ another window.
 
 ## No terminal on Windows typesets LaTeX
 
-Folio sets it where the command printed it. `$…$` and `$$…$$` in command output
-are typeset in place; the markdown preview beside it takes those plus `\(…\)`,
-`\[…\]` and the bare `amsmath` environments, through the same typesetter — LaTeX
-through MiTeX into Typst. What cannot be set is shown as it was printed.
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/preview-markdown-dark.png">
+  <img src="docs/screenshots/preview-markdown-light.png" width="100%"
+       alt="A markdown document typeset in a preview pane beside a terminal, with
+       a summation formula set on a line of its own, a table and a code block.">
+</picture>
+
+Folio sets it in two places through one typesetter — LaTeX through MiTeX into
+Typst. `$…$` and `$$…$$` in command output are set where the command printed
+them; the preview beside it takes those plus `\(…\)`, `\[…\]` and the bare
+`amsmath` environments. What cannot be set is shown as it was printed.
 
 ## Why that matters now
 

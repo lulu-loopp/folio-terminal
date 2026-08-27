@@ -20,10 +20,18 @@
 
 ## Windows 上没有终端会排 LaTeX
 
-Folio 会，就排在命令打印它的地方。命令输出里的 `$…$` 和 `$$…$$` 就地排版；旁边的
-markdown 预览除了这两种，还认 `\(…\)`、`\[…\]` 和裸的 amsmath 环境。两边走的是同一套
-排版（LaTeX 经 MiTeX 交给 Typst），所以同一个公式在哪边看都一样。排不出来的，按打印出来
-的原样显示。
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/preview-markdown-dark.png">
+  <img src="docs/screenshots/preview-markdown-light.png" width="100%"
+       alt="终端旁边的预览窗格里排着一份 markdown 文档：一个独立成行的求和公式，
+       一张表，一段代码。">
+</picture>
+
+Folio 会。命令输出里的 `$…$` 和 `$$…$$` 就排在命令打印它的地方；旁边的 markdown 预览
+除了这两种，还认 `\(…\)`、`\[…\]` 和裸的 amsmath 环境。两边走的是同一套排版
+（LaTeX 经 MiTeX 交给 Typst），所以同一个公式在哪边看都一样。排不出来的，按打印出来的
+原样显示。
 
 ## 为什么是现在
 
