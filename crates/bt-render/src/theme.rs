@@ -385,7 +385,6 @@ pub(crate) fn search_current_rgb() -> [u8; 3] {
 pub(crate) fn search_current_ink_rgb() -> [u8; 3] {
     background_rgb()
 }
-pub(crate) const DEFAULT_STATUS_BACKGROUND_RGB: [u8; 3] = [0x33, 0x33, 0x33];
 
 // ---------------------------------------------------------------------------
 // Seat chrome — the styling pass (user-approved 2026-08-07).
@@ -1383,6 +1382,95 @@ pub struct ChromePalette {
     /// command rail's ticks and the column's pin seam already wear, which is
     /// this house's level for "an instrument that is there and is not shouting".
     pub focus_mini_seam: [u8; 3],
+}
+
+/// The contrast floor a floating tag's ink is held to against the tag's **own
+/// face** — the text bar, because every word a tag carries is something you
+/// read: an address, a receipt, a count of rows.
+///
+/// The same 4.5 the rose and the seven syntax inks are already pinned at
+/// (`the_error_rose_reads_on_both_canvases`, `the_highlight_inks_read_as_text`),
+/// so this is the house floor applied to one more surface rather than a second
+/// opinion about what "legible" means.
+pub const FLOAT_TAG_MINIMUM_CONTRAST: f64 = 4.5;
+
+/// **What a chip that floats over a body wears** — one face, one hairline, one
+/// ink, asked for by name (light-canvas link-tag defect, 2026-08-27).
+///
+/// # Why this is a type and not three field reads at each call site
+///
+/// Every card in this window that floats over content — a tooltip, a toast, a
+/// keyhint, a Cards bubble, a drag ghost, a peek — already draws
+/// [`ChromePalette::menu_surface`] with [`ChromePalette::menu_border`] round it
+/// and the menu's ink inside. The two surfaces that did *not* were the two
+/// drawn by the renderer rather than by the chrome: the terminal's status
+/// overlay and a formula block's toolbar buttons, which shared one hard-coded
+/// `#333333`. On the dark canvas the accident held — a dark grey chip under the
+/// scheme's pale default ink — and on the light canvas the same chip was a black
+/// slab with the light scheme's near-black ink on it: the reported bug, and
+/// literally invisible text.
+///
+/// A constant cannot be given a theme, so the fix is not a second constant. It
+/// is this: **one place that answers "what does a floating tag wear", derived
+/// from the palette in force**, which every member of the family asks. A chip
+/// that reaches for a literal now has nowhere to reach.
+///
+/// # Three opaque colours
+///
+/// Opaque, like every other chrome fill, for the reason
+/// [`ChromePalette::tab_close_pill_on_content`] spells out: this pipeline
+/// composites in linear light and a browser composites in sRGB, so an alpha
+/// handed to this blender is not the alpha the design drew. The hairline is
+/// therefore pre-composited over the face it stands on, and the two call paths —
+/// a `ChromeSprite` ring and a `RectInstance` edge — get the same bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FloatTagInk {
+    /// The chip's face: `--menu`, the surface every float in this window has.
+    pub face: [u8; 3],
+    /// Its hairline — `--border` pre-composited over [`Self::face`].
+    ///
+    /// Not decoration. On every light scheme this product ships, `--menu` and
+    /// `--termbg` are the *same colour* (measured: Folio Light, Gruvbox Light,
+    /// One Half Light and Solarized Light all put a white-ish face on a
+    /// white-ish canvas), so without an edge the chip is a shape nobody can see
+    /// and the words appear to float on the terminal itself.
+    pub edge: [u8; 3],
+    /// Its ink: `--ink` over `--menu`, raised to
+    /// [`FLOAT_TAG_MINIMUM_CONTRAST`] against [`Self::face`].
+    ///
+    /// **The raise is not a patch over a badly chosen ink; it is the rule.** A
+    /// scheme is a user-supplied pair of colours, so no fixed palette entry can
+    /// promise a ratio: measured across the ten bundled schemes, `--ink` over
+    /// `--menu` runs from 12.26:1 (Folio Light) down to 3.98:1 (Solarized
+    /// Dark), because Solarized's low contrast is the point of Solarized — for
+    /// its *terminal*. Chrome is held to the house floor regardless, and
+    /// `contrast::raise_against` is the solver the `Minimum contrast` row
+    /// already uses, so this is one contrast authority rather than two. On the
+    /// eight schemes that already clear the floor it returns the ink untouched.
+    pub ink: [u8; 3],
+}
+
+impl ChromePalette {
+    /// What a floating tag drawn on this palette wears — see [`FloatTagInk`].
+    #[must_use]
+    pub fn float_tag(&self) -> FloatTagInk {
+        let face = self.menu_surface;
+        FloatTagInk {
+            face,
+            // `menu_border_alpha` is in 1/255ths and `ink_over_bp` takes
+            // ten-thousandths, which is the one conversion between them.
+            edge: ink_over_bp(
+                face,
+                self.menu_border,
+                i32::from(self.menu_border_alpha) * 10_000 / 255,
+            ),
+            ink: crate::contrast::raise_against(
+                self.menu_item_text_selected,
+                face,
+                FLOAT_TAG_MINIMUM_CONTRAST,
+            ),
+        }
+    }
 }
 
 /// Chrome over a dark canvas — `design/ui-mockup.html` `body.dark`, with its

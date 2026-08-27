@@ -70,7 +70,7 @@ pub use theme::{
     DOCK_SHIFT_INSET_LOGICAL_PX, DOCK_SHIFT_RADIUS_LOGICAL_PX, DRAG_GHOST_BORDER_LOGICAL_PX,
     DRAG_GHOST_FONT_LOGICAL_PX, DRAG_GHOST_GAP_LOGICAL_PX, DRAG_GHOST_PADDING_X_LOGICAL_PX,
     DRAG_GHOST_PADDING_Y_LOGICAL_PX, DRAG_GHOST_POINTER_OFFSET_LOGICAL_PX,
-    DRAG_GHOST_RADIUS_LOGICAL_PX, FLOAT_WINDOW_BORDER_LOGICAL_PX,
+    DRAG_GHOST_RADIUS_LOGICAL_PX, FLOAT_TAG_MINIMUM_CONTRAST, FLOAT_WINDOW_BORDER_LOGICAL_PX,
     FLOAT_WINDOW_DRAG_MARGIN_LOGICAL_PX, FLOAT_WINDOW_FOOT_LOGICAL_PX,
     FLOAT_WINDOW_GRIP_LOGICAL_PX, FLOAT_WINDOW_HEAD_LOGICAL_PX, FLOAT_WINDOW_MAX_HEIGHT_LOGICAL_PX,
     FLOAT_WINDOW_MAX_HEIGHT_VIEWPORT_FRACTION, FLOAT_WINDOW_MIN_HEIGHT_LOGICAL_PX,
@@ -89,7 +89,7 @@ pub use theme::{
     FOCUS_MINI_PADDING_LOGICAL_PX, FOCUS_MINI_RADIUS_LOGICAL_PX,
     FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX,
     FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, FOCUS_MINI_SEAM_ALPHA, FOCUS_MINI_SEAM_LOGICAL_PX,
-    FOCUS_MINI_TERM_FONT_LOGICAL_PX, FOCUS_MINI_TERM_LINE_HEIGHT, GRAPH_LANE_COUNT,
+    FOCUS_MINI_TERM_FONT_LOGICAL_PX, FOCUS_MINI_TERM_LINE_HEIGHT, FloatTagInk, GRAPH_LANE_COUNT,
     LIGHT_BACKGROUND_RGB, LIGHT_CHROME, PANE_HEAD_FILE_MARK_LOGICAL_PX,
     PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX,
     PREVIEW_BODY_INSET_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
@@ -137,11 +137,10 @@ use theme::{
     CURSOR_UNDERLINE_HEIGHT_LOGICAL_PX, DEFAULT_DIM_FOREGROUND_RGB, ansi_16_rgb, cursor_rgb,
     unfocused_cursor_rgb,
 };
-use theme::{
-    DEFAULT_STATUS_BACKGROUND_RGB, search_current_ink_rgb, search_current_rgb, search_match_rgb,
-    selection_background_rgb,
-};
 pub use theme::{background_is_light, ink_over_bp, scheme_in_force, schemes_in_force, set_schemes};
+use theme::{
+    search_current_ink_rgb, search_current_rgb, search_match_rgb, selection_background_rgb,
+};
 
 /// `mark.srch { border-radius: 3px }` (mock-up 1530) — the corner a found word
 /// wears, and the one thing that tells it apart from a dragged selection at a
@@ -5416,17 +5415,8 @@ impl WindowRenderer {
                 .and_then(|status| {
                     status_overlay_geometry(self.metrics, frame, status, entry.seat.width as f32)
                 })
-                .map(|geometry| {
-                    self.pixel_rect(
-                        geometry.rect[0],
-                        geometry.rect[1],
-                        geometry.rect[2],
-                        geometry.rect[3],
-                        DEFAULT_STATUS_BACKGROUND_RGB,
-                    )
-                })
-                .into_iter()
-                .collect::<Vec<_>>();
+                .map(|geometry| self.float_tag_rects(geometry.rect))
+                .unwrap_or_default();
             let status_rect_data = if status_rects.is_empty() {
                 empty_rect.as_slice()
             } else {
@@ -7285,12 +7275,20 @@ impl WindowRenderer {
             if math_block_dim_is_drawn(placement, drawn_math_blocks.contains(&index))
                 && let Some(geometry) = self.math_block_geometry(frame, placement)
             {
+                // **The palette's one scrim, not the status chip's face.** This
+                // wash shared `#333333` with the two chips above until
+                // 2026-08-27 and is not one: a chip is a surface with words on
+                // it and a scrim is the absence of a surface, which is exactly
+                // why `modal_scrim` is the single entry the palette declares
+                // once for both canvases. Sharing the chips' constant also made
+                // the doc line above ("the dim darkens a block") false on the
+                // dark canvas, where `#333333` is *lighter* than `--termbg`.
                 rects.push(self.pixel_rect_with_coverage(
                     geometry.block[0],
                     geometry.block[1],
                     geometry.block[2],
                     geometry.block[3],
-                    DEFAULT_STATUS_BACKGROUND_RGB,
+                    chrome_palette().modal_scrim,
                     0.45,
                 ));
             }
@@ -7451,7 +7449,12 @@ impl WindowRenderer {
 
     fn math_overlay_rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
         let mut rects = Vec::new();
-        let ink = foreground_rgb();
+        // The eye and the copy glyph are drawn *on a chip*, not on the canvas,
+        // so they take the chip's ink and not the terminal's. Before 2026-08-27
+        // they took `foreground_rgb()` — the scheme's default ink, chosen to
+        // read against the canvas — and stood on a hard-coded `#333333`: the
+        // status overlay's defect, in a second place, for the same reason.
+        let ink = chrome_palette().float_tag().ink;
         let unit = self.metrics.scale_factor as f32;
         for placement in &frame.math_blocks {
             let Some(geometry) = self.math_block_geometry(frame, placement) else {
@@ -7463,13 +7466,7 @@ impl WindowRenderer {
                 continue;
             };
             for button in [eye, copy] {
-                rects.push(self.pixel_rect(
-                    button[0],
-                    button[1],
-                    button[2],
-                    button[3],
-                    DEFAULT_STATUS_BACKGROUND_RGB,
-                ));
+                rects.extend(self.float_tag_rects(button));
             }
             let eye_mid_x = (eye[0] + eye[2]) / 2.0;
             let eye_mid_y = (eye[1] + eye[3]) / 2.0;
@@ -7556,6 +7553,24 @@ impl WindowRenderer {
         color: [u8; 3],
     ) -> RectInstance {
         self.pixel_rect_with_coverage(left, top, right, bottom, color, 1.0)
+    }
+
+    /// One floating chip: its face, and the hairline round it.
+    ///
+    /// The hairline is four rectangles rather than a rounded pill because this
+    /// is the terminal's own rect pipeline and the pill rasterizer belongs to
+    /// the chrome pass — but it is the *same* hairline the chrome family draws,
+    /// taken from [`ChromePalette::float_tag`], so the two cannot drift apart.
+    /// Without it the chip has no edge at all on every light scheme this product
+    /// ships, where `--menu` and `--termbg` are one colour.
+    fn float_tag_rects(&self, rect: [f32; 4]) -> Vec<RectInstance> {
+        let hairline = (self.metrics.scale_factor as f32).max(1.0);
+        float_tag_boxes(rect, hairline, chrome_palette().float_tag())
+            .into_iter()
+            .map(|(box_of, colour)| {
+                self.pixel_rect(box_of[0], box_of[1], box_of[2], box_of[3], colour)
+            })
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7832,7 +7847,11 @@ fn prepare_text_rows(
         next_rows.push(row);
     }
     if let Some(status) = frame.status_text.as_deref() {
-        let cells = status_overlay_cells(frame.columns.get() as usize, status);
+        let cells = status_overlay_cells(
+            frame.columns.get() as usize,
+            status,
+            chrome_palette().float_tag(),
+        );
         let key = ComposedRowKey {
             cells: cells.clone(),
             metrics: metrics.into(),
@@ -8717,7 +8736,44 @@ pub fn text_row_cells(
     Ok(frame.cells.chunks_exact(frame.columns.get() as usize))
 }
 
-fn status_overlay_cells(columns: usize, status: &str) -> Vec<CapturedCell> {
+/// The status overlay's row of cells, dressed in the floating tag's own colours.
+///
+/// # Why the cells carry explicit colours instead of the defaults
+///
+/// Until 2026-08-27 they were [`CapturedCell::plain`], i.e. `Named(16)`/
+/// `Named(17)` — "the scheme's default ink on the scheme's default paper". The
+/// paper part was a lie: the chip under them is not the canvas, it is a chip,
+/// and it was drawn in a hard-coded dark grey. So `resolve_colors` picked an ink
+/// to read against the **terminal's** background and then that ink was printed
+/// on something else entirely. On the dark canvas the two happened to be close
+/// enough; on the light canvas the scheme's near-black ink landed on a near-black
+/// slab and the tag became an unreadable smear — the reported defect.
+///
+/// Naming both ends closes it at the source rather than at the paint: the ink is
+/// the tag's, the ground is the tag's face, and `resolve_colors`'s contrast floor
+/// — the reader's own `Minimum contrast` row — is finally being handed the pair
+/// that is actually on the glass.
+/// The five boxes one floating chip is drawn from — the face, then its four
+/// hairline edges — each paired with the colour it is painted in.
+///
+/// Split out of [`WindowRenderer::float_tag_rects`] so the claim "a chip wears
+/// nothing but the palette's own three" can be *measured* rather than read: the
+/// normalisation into clip space needs a live seat, and the colours do not.
+fn float_tag_boxes(
+    [left, top, right, bottom]: [f32; 4],
+    hairline: f32,
+    tag: FloatTagInk,
+) -> [([f32; 4], [u8; 3]); 5] {
+    [
+        ([left, top, right, bottom], tag.face),
+        ([left, top, right, top + hairline], tag.edge),
+        ([left, bottom - hairline, right, bottom], tag.edge),
+        ([left, top, left + hairline, bottom], tag.edge),
+        ([right - hairline, top, right, bottom], tag.edge),
+    ]
+}
+
+fn status_overlay_cells(columns: usize, status: &str, tag: FloatTagInk) -> Vec<CapturedCell> {
     let mut displayed = vec![CapturedCell::default(); columns];
     let characters = status.chars().collect::<Vec<_>>();
     let shown = characters.len().min(displayed.len());
@@ -8727,6 +8783,8 @@ fn status_overlay_cells(columns: usize, status: &str) -> Vec<CapturedCell> {
         .zip(characters[characters.len() - shown..].iter())
     {
         *cell = CapturedCell::plain(character.to_string());
+        cell.style.foreground = TerminalColor::Rgb(tag.ink[0], tag.ink[1], tag.ink[2]);
+        cell.style.background = TerminalColor::Rgb(tag.face[0], tag.face[1], tag.face[2]);
     }
     displayed
 }
@@ -11159,10 +11217,17 @@ mod tests {
                     bottom - top
                 );
                 // Red gate: the box this pass replaced was Campbell bright-black
-                // around the status bar's grey, with square corners.
+                // around the status bar's grey, with square corners. The grey
+                // was `DEFAULT_STATUS_BACKGROUND_RGB`, retired on 2026-08-27
+                // when the status bar itself stopped being a literal; the bytes
+                // stay spelled out here because this gate is about the *old*
+                // box, and a gate that followed the constant it was written to
+                // forbid would have quietly stopped forbidding anything.
                 assert!(
-                    !fills.iter().any(|fill| fill.color == [0x76, 0x76, 0x76]
-                        || fill.color == DEFAULT_STATUS_BACKGROUND_RGB),
+                    !fills
+                        .iter()
+                        .any(|fill| fill.color == [0x76, 0x76, 0x76]
+                            || fill.color == [0x33, 0x33, 0x33]),
                     "the flyout must be built from --menu/--border, not the old flat box"
                 );
             }
@@ -11624,6 +11689,87 @@ mod tests {
         // `first_column` indexes the prepared glyph row, which is a grid row, so it must keep
         // naming grid columns however far left the pixels moved.
         assert_eq!(clamped.first_column + status.chars().count(), columns);
+    }
+
+    /// PIN (light-canvas link-tag defect, 2026-08-27) — **every chip this
+    /// renderer floats over a body takes its face, its hairline and its ink from
+    /// [`ChromePalette::float_tag`], and nothing else.**
+    ///
+    /// The two chips are the terminal's status overlay (a hovered link's target,
+    /// the `N rows above` count) and a formula block's toolbar buttons. Both
+    /// stood on one hard-coded `#333333` with the *scheme's* default ink on top
+    /// — an ink resolved for contrast against the terminal canvas, printed on
+    /// something that was not the terminal canvas. On the dark canvas the
+    /// accident held; on the light canvas it was near-black on near-black, which
+    /// is the defect this gate is written from.
+    ///
+    /// Three claims, and the third is the one that keeps it true:
+    ///
+    /// 1. the cells carry the tag's ink **and** the tag's face, so the contrast
+    ///    floor downstream is finally handed the pair that is on the glass;
+    /// 2. the chip is five boxes and every one of them is a `float_tag` field;
+    /// 3. the chip helper's name, followed by an open paren, occurs exactly
+    ///    three times in this file — one definition and two call sites — so a
+    ///    third chip that struck its own colours drops this gate rather than
+    ///    shipping.
+    #[test]
+    fn every_chip_the_renderer_floats_over_a_body_is_struck_from_the_palette() {
+        for palette in [DARK_CHROME, LIGHT_CHROME] {
+            let tag = palette.float_tag();
+            assert_eq!(tag.face, palette.menu_surface, "a chip's face is `--menu`");
+            assert_ne!(
+                tag.edge, tag.face,
+                "a chip with no edge is invisible on every light scheme, where \
+                 `--menu` and `--termbg` are one colour"
+            );
+            assert!(
+                contrast_ratio(tag.ink, tag.face) >= FLOAT_TAG_MINIMUM_CONTRAST,
+                "a tag's ink reads on its own face: {:.2}:1",
+                contrast_ratio(tag.ink, tag.face)
+            );
+
+            // ① The words.
+            let cells = status_overlay_cells(24, "file:///C:/notes.md", tag);
+            let printed = cells
+                .iter()
+                .filter(|cell| !cell.text.as_str().is_empty())
+                .collect::<Vec<_>>();
+            assert_eq!(printed.len(), "file:///C:/notes.md".chars().count());
+            for cell in printed {
+                assert_eq!(
+                    cell.style.foreground,
+                    TerminalColor::Rgb(tag.ink[0], tag.ink[1], tag.ink[2])
+                );
+                assert_eq!(
+                    cell.style.background,
+                    TerminalColor::Rgb(tag.face[0], tag.face[1], tag.face[2])
+                );
+            }
+
+            // ② The box under them.
+            let boxes = float_tag_boxes([10.0, 20.0, 110.0, 40.0], 1.0, tag);
+            assert_eq!(boxes[0].1, tag.face);
+            for edge in &boxes[1..] {
+                assert_eq!(edge.1, tag.edge);
+            }
+            for (_, colour) in boxes {
+                assert_ne!(
+                    colour,
+                    [0x33, 0x33, 0x33],
+                    "the retired literal must not come back by hand"
+                );
+            }
+        }
+
+        // ③ One function answers for every chip.
+        let source = include_str!("lib.rs");
+        // Spelled in two halves so this line is not itself a fourth occurrence.
+        assert_eq!(
+            source.matches(concat!("float_tag_rects", "(")).count(),
+            3,
+            "one definition and two call sites — a chip that struck its own \
+             colours would be a fourth"
+        );
     }
 
     #[test]
