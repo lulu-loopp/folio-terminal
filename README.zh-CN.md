@@ -23,10 +23,10 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
-          srcset="docs/screenshots/preview-markdown-dark.png">
-  <img src="docs/screenshots/preview-markdown-light.png" width="100%"
-       alt="终端旁边的预览窗格里排着一份 markdown 文档：一个独立成行的求和公式，
-       一张表，一段代码。">
+          srcset="docs/screenshots/terminal-math-dark.png">
+  <img src="docs/screenshots/terminal-math-light.png" width="100%"
+       alt="一个终端窗格，一条命令的输出就在打印的地方排好了版：一句话里嵌着
+       行内公式，下面是独立成行的高斯归一化积分。">
 </picture>
 
 Folio 会。命令输出里的 `$…$` 和 `$$…$$` 就排在命令打印它的地方；旁边的 markdown 预览

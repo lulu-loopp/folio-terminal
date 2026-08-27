@@ -25,10 +25,11 @@ another window.
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
-          srcset="docs/screenshots/preview-markdown-dark.png">
-  <img src="docs/screenshots/preview-markdown-light.png" width="100%"
-       alt="A markdown document typeset in a preview pane beside a terminal, with
-       a summation formula set on a line of its own, a table and a code block.">
+          srcset="docs/screenshots/terminal-math-dark.png">
+  <img src="docs/screenshots/terminal-math-light.png" width="100%"
+       alt="A single terminal pane with the output of one command typeset where it
+       was printed: a sentence carrying an inline formula, and the Gaussian
+       normalisation integral set on a line of its own.">
 </picture>
 
 Folio sets it in two places through one typesetter — LaTeX through MiTeX into

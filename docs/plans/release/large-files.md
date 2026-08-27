@@ -48,6 +48,18 @@ LFS 会给每个 clone 加一层必须配置的依赖,换来的只是三个文�
 | 29 | 464,009 | `docs/spikes/artifacts/webview2/comp-04-resize-anim-3.png` | **keep** | 同上 |
 | 30 | 439,900 | `vendor/alacritty_terminal/tests/ref/sgr/grid.json` | **keep** | 同 1 |
 
+## README 图片这一批(2026-08-27 起为 2x)
+
+单个都进不了上面的前三十(最大一张 631,882 字节),但它们是一起下的,所以按批签收。
+
+| 批 | 张数 | 总字节 | 结论 | 理由 |
+|---|---:|---:|:--:|---|
+| `docs/screenshots/*.png` | 14 | 2,564,435 (2.45 MiB) | **keep** | README 两语共用的实拍图。2026-08-27 由 100%(1600×1000)改拍 200%(3200×2000),字节数约翻四倍——**这是明知的代价**:README 主要在 1.25×–2× 的屏幕上读,1x 图在那里是放大过的图。每张都过 `oxipng -o 4 --strip safe`(无损,省下 19.7%:3,192,930 → 2,564,435)。规格与逐张哈希见 `docs/screenshots/README.md` |
+| `assets/readme/surfaces-*.png` | 2 | 1,185,727 (1.13 MiB) | **keep** | 三面拼板,由 `assets/readme/src/surfaces-*.svg` 裁上面那批渲染而成,随它们一同改为 3200×3240。同样过 `oxipng -o 4 --strip safe`(1,444,629 → 1,185,727)。SVG 一个字没改:版面用的是画布自己的单位 |
+
+两批合计 **3,750,162 字节(3.58 MiB)**,占一次 clone 的约 3.4%。
+`assets/readme/hero-*.svg` 是纯 SVG,两个加起来 5,952 字节,不入此列。
+
 ## 顺带核实过的两件
 
 - `git ls-files dist` 零输出;`dist/` 在 `.gitignore` 里。开发机 `dist/` 下现有的

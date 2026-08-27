@@ -6,10 +6,12 @@
 #
 #   * a row naming a file that is not there. A README that links a picture nobody
 #     took shows a broken image on the front page of the repository.
-#   * a file that is not the size its row claims. The shots are 1600 x 1000
-#     physical pixels taken on a 100% display, and the one failure mode that
-#     cannot be seen by looking at the picture is a resampled one - a screenshot
-#     of a terminal scaled by a resampler is a screenshot of the resampler.
+#   * a file that is not the size its row claims. The shots are 3200 x 2000
+#     physical pixels - 1600 x 1000 logical at 200%, two device pixels to the
+#     logical one - and the one failure mode that cannot be seen by looking at
+#     the picture is a resampled one: a screenshot of a terminal scaled by a
+#     resampler is a screenshot of the resampler. A file that measures 1600 x
+#     1000 is one of the earlier 100% pass, not a retake.
 #   * a picture either README references that the table does not list. The table
 #     is what says how a shot was taken and what it is of; an image that appears
 #     on the page without a row in it is one nobody can retake.
@@ -53,7 +55,7 @@ if (-not (Test-Path -LiteralPath $manifest)) {
 }
 
 # Table rows naming a file, and table rows carrying a size, read separately and
-# joined by name. The document says the same twelve things twice on purpose -
+# joined by name. The document says the same fourteen things twice on purpose -
 # once as what each shot is of, once as what was taken and when - so a file's
 # name and the size it should be do not have to arrive in the same row.
 $listed = New-Object System.Collections.Generic.List[string]
