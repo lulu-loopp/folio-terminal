@@ -36,7 +36,7 @@ exactly the picture JPEG is worst at.
 
 | File | Scene |
 | --- | --- |
-| `terminal-math-light.png` | One terminal pane and nothing else open, showing a command whose output was typeset where it was printed: a sentence with an inline formula inside it and a display formula on its own line. Nothing else competes for the eye — the picture says only that mathematics in command output is mathematics. |
+| `terminal-math-light.png` | One terminal pane and nothing else open, showing a command whose output was typeset where it was printed: paragraphs that run most of the way across the pane, three display formulas spread down it, and short inline ones inside the sentences between them. Nothing else competes for the eye — the picture says only that mathematics in command output is mathematics. |
 | `terminal-math-dark.png` | The same, dark. |
 | `main-window-light.png` | The three-column window: a files column on the left, two terminal panes side by side in the middle, a markdown document open in a preview pane on the right. Something real in the terminal — a build running, a directory listing — not an empty prompt. |
 | `main-window-dark.png` | The same window, dark scheme, same content. |
@@ -59,8 +59,8 @@ can be told from one that was retaken on purpose.
 
 | File | Size | Taken | SHA-256 |
 | --- | --- | --- | --- |
-| `terminal-math-light.png` | 3200 x 2000 | 2026-08-27 | `7be66a3300b359fb2403213a94d827f5cc5cea605160e6f4a467b63116c8d19c` |
-| `terminal-math-dark.png` | 3200 x 2000 | 2026-08-27 | `04c164a11bb6ae1e3d2f39ec84a4dd3ddfc2959e101da1985718615602150a20` |
+| `terminal-math-light.png` | 3200 x 2000 | 2026-08-27 | `be5796d8f15de6100ff69233a8601f0d0e369f67af7c44cecadf05a10de40009` |
+| `terminal-math-dark.png` | 3200 x 2000 | 2026-08-27 | `9086c637b0fb2247d4445ba036ee9a4fb1eacf28674e17ee7a6753be0e48bb7f` |
 | `main-window-light.png` | 3200 x 2000 | 2026-08-27 | `fa04896cdfe71d4146a93cab47357d7065eabe3343733c4beb58849642490281` |
 | `main-window-dark.png` | 3200 x 2000 | 2026-08-27 | `4bd254d57be67731b0490c2e5832d87fb4448362db66a273acfcf22917fad7db` |
 | `cards-light.png` | 3200 x 2000 | 2026-08-27 | `90037e34d3531f81d7180f769f1ffa26f37c8dfbd85b87b2e61034f3d25e0601` |
@@ -74,7 +74,7 @@ can be told from one that was retaken on purpose.
 | `settings-agents-light.png` | 3200 x 2000 | 2026-08-27 | `12a9d1968d7a979f6d8796cf7a8054c68f4a640c916ac6402c0c774b482768bd` |
 | `settings-agents-dark.png` | 3200 x 2000 | 2026-08-27 | `ceba5a7e1f8d3b4040b5fcb4a97cc958102bd03dcfe023b705b316952c2ed01d` |
 
-The fourteen come to 2.45 MiB after `oxipng`; `docs/plans/release/large-files.md`
+The fourteen come to 2.57 MiB after `oxipng`; `docs/plans/release/large-files.md`
 carries that number beside everything else a clone has to fetch.
 
 ## What was in front of the camera
@@ -103,6 +103,19 @@ as candidate text — so it goes in through the clipboard and `Ctrl+V`, which is
 modified key the IME does not take. Its folder is `C:\Projects\notebook`, one
 file and no repository, so that the other thirteen see a project that has not
 grown a directory for this one's sake.
+
+That one file is as long as it is on purpose. The first take of this pair filled
+the top third of the window and the left half of the pane, with a single display
+formula adrift in the white below it, and a reader's fair reading of that picture
+is that the program had run out of things to draw. So the document was written to
+the window: prose wrapped at 150 columns of the 177 the pane holds, enough of it
+to reach about 86% of the way down, and three display formulas — the Gaussian
+normalisation integral, the Fourier pair and the exponential series — spread top,
+middle and bottom. The inline runs are short ones (`$\sigma$`, `$\mu$`, `$1/n!$`,
+`$\pi$`), placed mid-sentence and never before a comma: an inline formula is drawn
+at cell height inside the cells its *source* occupies, so a short formula written
+with long macros leaves the rest of that span blank, and that blank reads as a
+defect when punctuation lands on the far side of it.
 
 **Two device pixels to the logical one, and no display is touched.** The window
 is parked at exactly 3200 × 2000 physical pixels with `SetWindowPos`, on the
