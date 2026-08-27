@@ -11,12 +11,16 @@ panic 的可见提示;有 WebView2 的 VM 验顶层 gate 与四个拒绝面。�
 | `autounattend-win11.xml` | Win11 无人值守应答文件(模板,带占位符) |
 | `autounattend-win10.xml` | Win10 无人值守应答文件(模板,带占位符) |
 | `new-answer-iso.ps1` | 把应答文件做成一张只装一个文件的小 ISO |
+| `new-install-iso.ps1` | 把安装 ISO 重制成 EFI 免提示引导的那一张(§3.1a) |
 | `new-vm.ps1` | **建机**:写 `.vmx`、建盘、装 Windows、打 `clean` 快照(§3.5) |
 | `run-smoke-in-vm.ps1` | 宿主端驱动:回快照 → 开机 → 拷进去 → 跑 → 拷回来 → 关机 |
 | `in-guest.ps1` | 客户机端五个阶段:unpack / smoke / web / notice / explorer |
 
-**本次没做的事(明确说清):没有启动任何虚机、没有下载任何 ISO、没有改 `.gitignore`、没有改任何
-`.rs`。** ISO 由用户下,**虚机由 `new-vm.ps1` 建**(Win11 的 vTPM 除外,见 §2.2a)。
+ISO 由用户下,**虚机由 `new-vm.ps1` 建**(Win11 的 vTPM 除外,见 §2.2a)。
+
+> **写这份文档的那一轮没有启动过任何虚机**,所以下面凡是标「未验证」的都是那一轮的状态。
+> 2026-08-27 晚建机时验掉了一批,最要紧的一条是 §3.1a:安装 ISO 必须重制成 EFI 免提示引导,
+> 否则两台机会在「按任意键从光盘引导」上白等到超时。§8 的表按实际结果更新过。
 
 ---
 
@@ -237,6 +241,105 @@ Windows Setup 在画第一个页面之前,按固定顺序找应答文件。顺�
 所以做法是:**给虚机挂两个 CD/DVD 设备** —— 第一个是微软的安装 ISO(原样,字节不动,哈希还能对),
 第二个是我们做的一张只装一个文件的小 ISO。不需要 U 盘直通,不需要软盘镜像,更不需要重打安装 ISO。
 
+### 3.1a EFI 无人值守必须免提示引导 —— 2026-08-27 事故
+
+**这一节是用两台机白跑两个半小时换来的,放在这里是因为它比应答文件更早决定成败。**
+
+#### 事故
+
+两台机(`D:\VMs\folio-cleanvm\folio-win10`、`folio-win11`)开机后一直没进安装。`vmware.log`
+从第一分钟起就写着答案:
+
+```
+2026-08-27T18:17:46.520Z vcpu-0 Guest: About to do EFI boot: EFI VMware Virtual SATA CDROM Drive (0.0)
+2026-08-27T18:17:49.606Z vcpu-0 Guest: Status upon boot failure: Time out
+2026-08-27T18:17:49.623Z vcpu-0 Guest: Status upon boot failure: No Media
+2026-08-27T18:17:49.644Z vcpu-0 [msg.Backdoor.OsNotFound] No operating system was found.
+```
+
+两行之间三秒。那三秒是 `efi\microsoft\boot\efisys.bin` 里的 `cdboot.efi` 在画
+「Press any key to boot from CD or DVD」等人按键。无人值守的意思正是没人按。等不到就放弃光盘,
+固件落到空盘上,于是「没有操作系统」。
+
+#### 证据链(全部本机 2026-08-27 实测)
+
+| 问的是什么 | 怎么问的 | 答案 |
+| --- | --- | --- |
+| 微软盘上是不是有免提示的那张 | 列 ISO 目录 | 有:`efi\microsoft\boot\efisys_noprompt.bin`,与 `efisys.bin` 同为 1,474,560 字节,内容不同 |
+| 原盘引导项指的是哪一张 | 读 El Torito 引导目录,把它指向的块地址上的 1,474,560 字节做 SHA256 | 两张盘都等于各自的 `efisys.bin` —— 就是会提示的那一张 |
+| 免提示那张真的不提示吗 | 拿同一套内容做两张只有引导映像不同的小 ISO,分别开机 | `efisys.bin` 那张:3.2 秒后 `Status upon boot failure: Time out`;`efisys_noprompt.bin` 那张:0.18 秒后 `Not Found`(盘上本来就没有系统)。**「等三秒」这件事消失了** |
+| 重制后的整盘能不能引导 | 两台机各挂重制盘开机 | `About to do EFI boot` 之后不再有 `Time out` / `No Media` / `OsNotFound`,直接进 Setup |
+
+#### 解法
+
+`new-install-iso.ps1`:取出 ISO 内容,用 IMAPI2 重建一张一模一样但**引导项指向
+`efisys_noprompt.bin`** 的盘,落在 `target/cleanvm/<原名>-noprompt.iso`。
+
+```powershell
+pwsh -File scripts/release/cleanvm/new-install-iso.ps1 -Iso D:\iso\Win10_22H2.iso
+```
+
+`new-vm.ps1` 的 build 阶段自己会调它,所以平时不必单独跑。它有两种「什么都不做」:盘本来就免提示
+(读引导目录跟盘上自带的 `efisys_noprompt.bin` 比一次哈希),或者这个源做过的重制盘还在
+(输出旁边有一行记着源的名字、大小、写入时间)。两种情况都直接把该用的路径交出来。
+
+**本机实测(2026-08-27):**
+
+| 盘 | 源大小 | 重制耗时 | 重制后大小 |
+| --- | --- | --- | --- |
+| `Win10_22H2.iso` | 4,893,900,800 | 21 秒(取出 6 秒 / 写出 3 秒) | 4,893,900,800(100.0%) |
+| Win11 25H2 企业评估版 | 7,092,807,680 | 20 秒(取出 10 秒 / 写出 5 秒) | 7,093,157,888(100.0%) |
+
+#### 免提示引导带出来的第二件事:**光驱不能排在硬盘前面**
+
+这一条是重制盘装到一半才暴露的,写在这里因为它和上面是同一件事的两面。
+
+一直以来光驱能排第一而不出事,靠的正是那个「按任意键」:第二次开机没人按,提示超时,固件就落到
+Setup 刚写好的硬盘上。**把提示拿掉,这条退路也一起没了。** `bios.bootOrder = "cdrom,hdd"` 配免提示
+盘的结果是每次开机都从光盘走,Setup 第一次重启又回到 Setup:
+
+```
+Windows Setup
+It looks like you started an upgrade and booted from installation media.
+If you want to continue with the upgrade, remove the media from your PC and click Yes.
+```
+
+Win11 那台 2026-08-27 就卡在这个框上四十分钟:映像已经铺完(`.vmdk` 涨到 14.16 GB)、机器重启、
+然后从光盘又进了一次 Setup。
+
+**所以引导顺序装机时也得是 `hdd,cdrom`。** 第一次开机盘是空的,固件答 `No Media` 之后自己往下走到
+光驱;本机日志逐字是:
+
+```
+Guest: Status upon boot failure: No Media
+Guest: Status upon boot failure: No Media
+Guest: About to do EFI boot: EFI VMware Virtual SATA CDROM Drive (0.0)
+```
+
+之后每次开机硬盘上都有 Windows Boot Manager,硬盘赢。`new-vm.ps1` 现在两个阶段都写 `hdd,cdrom`。
+
+#### 几个当时踩到的点,写下来免得再踩
+
+- **取出内容不能靠 `Mount-DiskImage`**:本机它报「需要提权」。一个用来准备「干净机」的脚本要管理员
+  才能跑本身就荒唐。脚本按顺序找 `7z`(本机 `C:\Program Files\7-Zip\7z.exe`),再找带 `pycdlib`
+  的 Python;两个都没有就把两条安装命令和 `oscdimg` 的等价写法一起打出来。**`pycdlib` 那条本机
+  没有走过,未验证。**
+- **文件系统只能是 UDF。** Win11 的 `sources\install.wim` 有 6,225,286,811 字节,ISO9660 装不下。
+  这也正是微软自己的做法:那张原盘的 ISO9660 目录树里只有一个 `README.TXT`,真内容全在 UDF 上。
+- **`Emulation` 必须在 `AssignBootImage` 之后设。** `AssignBootImage` 看见 1,474,560 字节就自己判成
+  1.44 MB 软盘仿真;先设的 `Emulation = 0` 会被它覆盖,引导目录写出去是 media type 2。顺序对了才
+  是 media type 0 + 2880 扇区,跟微软原盘一致。
+- **IMAPI2 不认长路径。** 超过 259 字符它只答一句「找不到指定的路径」,不说是哪个文件。Win11 盘里
+  `sources\replacementmanifests\` 下有 148 字符的相对路径,而那张 ISO 的文件名本身就有 91 字符 ——
+  以它命名的暂存目录直接越线。脚本因此把暂存目录起名 `staging-<源路径哈希前八位>`,并在展开后
+  自己量一遍最长路径,超了就报出是哪个文件。
+- **`BootImageOptionsArray` 在 PowerShell 里设不进去**:`IFileSystemImage3` 的这个属性要
+  `SAFEARRAY(IUnknown*)`,.NET 送过去的是 `SAFEARRAY(VARIANT)`,一律回 `E_NOINTERFACE`(直接赋值、
+  `InvokeMember`、按读回来的元素类型建数组,三种都试过)。所以脚本用单数的 `BootImageOptions`,
+  写出来的是「校验项平台 0xEF + 默认项就是 EFI 映像」,而不是原盘那种「默认项 BIOS + 分节头
+  0xEF」。**这一形态在本机 VMware EFI 固件(VMW201.00V.24006586)上实测能引导** —— 上表第三行的
+  两张小 ISO 就是为验它做的。
+
 ### 3.2 生成那张小 ISO
 
 ```powershell
@@ -294,8 +397,46 @@ Windows)、装到第 3 个分区、跳过 OOBE 的隐私/网络/微软账号页�
   那一页等一个不存在的人。
 - **磁盘 0**。虚机只有一块盘时它就是 0。别把这两个 xml 拿到真机上跑。
 
-**两份应答文件都标着「未验证」**:它们是照微软 unattend 参考写的,还没有对着 ISO 跑过。门 5 的第一次
-建机就是它们的第一次运行。第一次装如果卡在某一页,截图记下卡在哪一页,回来改对应的一段 —— 别改一堆。
+**第三处,2026-08-27 第一次真装才发现的:`<ProductKey>` 里必须有 `<Key>`。**
+
+Win10 那台在装机第一分钟就停在一个消息框上,半小时没动,磁盘一个字节都没写(`.vmdk` 还是初始的
+8.5 MB,说明 windowsPE 那一趟连 `DiskConfiguration` 都没走到):
+
+```
+Windows Setup
+  Windows cannot read the <ProductKey> setting from the unattend answer file.
+```
+
+原来写的是只有 `<WillShowUI>Never</WillShowUI>` 而没有 `<Key>` 的 `<ProductKey>`,Setup 认不出来。
+补一个**空的** `<Key></Key>` 就过了 —— 空元素才是「明确地不给密钥」。Win11 那份没有 `<Key>` 也照样
+装,因为评估版镜像本来就不问密钥;所以两份文件在这一处不同,而且应该继续不同。真要给密钥,微软
+公开的 Windows 10 Pro 版本选择用 KMS client setup key 是 `W269N-WFGWX-YVC9B-4J6C9-T83GX`,它只选
+版本,不激活任何东西。
+
+**第四处,同一天再发现的:OOBE 的「地区」页不归 `<OOBE>` 管。**
+
+两台机在 Setup 全程静默之后,双双停在 OOBE 第一页:
+
+```
+Let's start with region. Is this right?          (Win10)
+Is this the right country or region?             (Win11)
+```
+
+`<OOBE>` 里那一串 `Hide…Page` 管不到它。管它的是 **`oobeSystem` 趟里的
+`Microsoft-Windows-International-Core`** 组件(`InputLocale` / `SystemLocale` / `UILanguage` /
+`UserLocale`)。原来两份文件的 `oobeSystem` 里只有 `Microsoft-Windows-Shell-Setup`。
+
+注意别和 `windowsPE` 趟里那个名字几乎一样的
+`Microsoft-Windows-International-Core-**WinPE**` 搞混:后者只替 Setup 自己回答,前者替 Setup 装出来
+的那台机器回答。两个都要有。
+
+**教训:装机卡住先看屏幕。** 没有 Tools 的机器 `vmrun captureScreen` 用不了(它要 guest 登录),
+但 `vmware.exe <vmx>` 能把正在跑的机器挂进 Workstation 窗口,再对那个窗口截图就看见了。这一步比
+任何推理都快 —— 上面这四条里有三条是一张截图当场定的案,而在有截图之前,同样的问题已经猜了半小时。
+
+**两份应答文件原本都标着「未验证」**:它们是照微软 unattend 参考写的。2026-08-27 是它们的第一次
+运行,上面这一条就是那次跑出来的。第一次装如果卡在某一页,截图记下卡在哪一页,回来改对应的一段
+—— 别改一堆。
 
 ### 3.5 建机:用户只提供 ISO,其余 `new-vm.ps1` 做
 
@@ -316,6 +457,22 @@ pwsh -File scripts/release/cleanvm/new-vm.ps1 -Name win11 `
 #   → 按屏幕上打出来的三步加密 + 加 TPM,然后:
 pwsh -File scripts/release/cleanvm/new-vm.ps1 -Name win11 -Stage install -VmPassword <加密口令>
 ```
+
+**给已经建好的机换安装盘**:`-Stage install` 也收 `-Iso`,它改写 `.vmx` 的 `sata0:0.fileName`、
+把光驱设成开机连接、引导顺序设回 `cdrom,hdd`,然后照常装。§3.1a 那次事故就是这么收的场 ——
+两台机不用重建:
+
+```powershell
+pwsh -File scripts/release/cleanvm/new-vm.ps1 -Name win10 -Stage install `
+    -Iso D:\Developer\BetterTerminal\target\cleanvm\Win10_22H2-noprompt.iso -InstallTimeoutMinutes 120
+```
+
+**Win11 的 `.vmx` 是 partial 加密的,手改明文键照样认。** 那台机的文件里有
+`vmx.encryptionType = "partial"` 和 `encryption.keySafe` / `encryption.data` 两行,别的键都是明文。
+在副本上改掉 `sata0:0.fileName` 之后 `vmrun -T ws -vp <口令> listSnapshots` 照答不误,而同一条命令
+换个错口令仍然答 `Incorrect password` —— 说明文件还是真在被解密,不是被放行。真机上开机后
+`vmware.log` 的 `DICT sata0:0.fileName` 与 `CDROM: Connecting sata0:0 to …` 两行也印着改后的路径。
+(本机 2026-08-27 实测。)
 
 **先带 `-WhatIf` 跑一遍**:它把每一步和**将要写入的 `.vmx` 全文**打出来,一个文件都不建,ISO 都不
 必存在。
@@ -338,11 +495,13 @@ pwsh -File scripts/release/cleanvm/new-vm.ps1 -Name win11 -Stage install -VmPass
    比一次。对不上就**当场停**,并把 ISO 里真实有的版本名列出来 —— 这一条挡的是最贵的一种失败:名字
    写错时 Setup 不报错,它画出选版本那一页等一个不存在的人,而脚本要轮询九十分钟才发现。挂载 ISO
    要管理员权限,不是管理员就打一行「没核成」继续走(`-SkipImageCheck` 关掉它)。
-3. **应答 ISO**:`target/cleanvm/autounattend-<name>.iso` 不存在就调 `new-answer-iso.ps1` 现做
+3. **重制安装盘**:调 `new-install-iso.ps1`(§3.1a),把 `sata0:0` 指向免提示引导的那一张。盘本来
+   就免提示、或这个源做过的重制盘还在,它就什么都不做。
+4. **应答 ISO**:`target/cleanvm/autounattend-<name>.iso` 不存在就调 `new-answer-iso.ps1` 现做
    (改过 `.xml` 之后用 `-ForceAnswerIso` 重做)。
-4. **建盘**:`vmware-vdiskmanager -c -s <N>GB -a nvme -t 1 <vmdk>`。`-t 1` = 可增长且按 2 GB 拆文件。
-5. **写 `.vmx`**:见 3.5.3。
-6. **开机 + 轮询 + 快照**:`vmrun start … nogui` → 轮询哨兵 → `stop soft` → 等它离开 `vmrun list` →
+5. **建盘**:`vmware-vdiskmanager -c -s <N>GB -a nvme -t 1 <vmdk>`。`-t 1` = 可增长且按 2 GB 拆文件。
+6. **写 `.vmx`**:见 3.5.3。
+7. **开机 + 轮询 + 快照**:`vmrun start … nogui` → 轮询哨兵 → `stop soft` → 等它离开 `vmrun list` →
    把三个光驱在 `.vmx` 里改成「开机不连接」、引导顺序改回 `hdd,cdrom` → `vmrun snapshot <vmx> clean`。
 
 **快照是关机态的,而且必须是。** `run-smoke-in-vm.ps1` 的第一步是 `revertToSnapshot` 紧接着 `start`;
@@ -360,9 +519,9 @@ pwsh -File scripts/release/cleanvm/new-vm.ps1 -Name win11 -Stage install -VmPass
 | `virtualHW.version` | `21` | **本机实测**:17.6.4 的 `vmcli VM Create` 自己写的就是 21。`-HardwareVersion 20` 是要在更老的 Workstation 上开这台机时的退路 |
 | `guestOS` | `windows11-64` / **`windows9-64`** | **这一条最容易写错**:Workstation **没有** `windows10-64`。本机 `vmcli VM Create -g windows10-64` 直接报「Invalid argument」并列出合法值,里面是 `windows9-64`;安装目录的 `isoimages_manifest.txt` 也只有 `windows9-64` 和 `windows11-64` 两条映射到 `windows.iso` |
 | `firmware` / `uefi.secureBoot.enabled` | `efi` / `TRUE` | 两台机都是,§2.1 |
-| `bios.bootOrder` | 装机时 `cdrom,hdd`,装完改 `hdd,cdrom` | **未经官方文档核实**(第三方引用一致,EFI 下也拼 `bios.`)。装机时其实无所谓:盘是空的,固件自己会落到光驱 |
+| `bios.bootOrder` | **两个阶段都是 `hdd,cdrom`** | 键名**未经官方文档核实**(第三方引用一致,EFI 下也拼 `bios.`)。但行为已实测:免提示盘配 `cdrom,hdd` 会让 Setup 每次重启又回到 Setup(§3.1a 第二件事);空盘答 `No Media`,固件自己落到光驱 |
 | `nvme0:0` | 系统盘 | Win10/Win11 都自带 NVMe 内置驱动,Setup 不用加载任何东西就能看见盘;Workstation 给 Win11 客户机默认也是 NVMe |
-| `sata0:0` / `sata0:1` / `sata0:2` | 安装 ISO / 应答 ISO / **Tools ISO** | 三张,都 `present = TRUE` + `startConnected = TRUE`。第三张是 §3.5.4 的关键 |
+| `sata0:0` / `sata0:1` / `sata0:2` | **免提示重制的**安装 ISO(§3.1a)/ 应答 ISO / **Tools ISO** | 三张,都 `present = TRUE` + `startConnected = TRUE`。第三张是 §3.5.4 的关键 |
 | `ethernet0.virtualDev` | `e1000e` | 内置驱动,Tools 装之前就有网卡;而且 Broadcom 那条静默安装的注意事项警告 `REBOOT=R` 在 vmxnet3 上会当场断网 |
 | `ethernet0.present`(Win10) | `FALSE` | 比 §2.4 的「取消勾选已连接」更硬:根本没有网卡,谁也点不回来。guest 操作走 VMCI 后门不走网络,所以这台机照样能被 `vmrun` 驱动 |
 | `svga.autodetect` `svga.maxWidth` `svga.maxHeight` `svga.vramSize` | `FALSE` / `1920` / `1080` / `16777216` | 固定 1920×1080。1920×1080×4 = 8,294,400 < 16 MB,且 16777216 能被 65536 整除(Windows 客户机的要求)。键名见 Broadcom KB 313896 <https://knowledge.broadcom.com/external/article/313896/adding-video-resolution-modes-to-windows.html>(2026-08-27 抓取) |
@@ -624,10 +783,15 @@ docs/plans/release/clean-vm-evidence/
 
 | 项 | 状态 |
 | --- | --- |
-| 两份 `autounattend-*.xml` | **未验证** —— 照微软 unattend 参考写,没对着 ISO 跑过 |
+| 两份 `autounattend-*.xml` | **2026-08-27 第一次真跑,改了两处**。① Win10 的 `<ProductKey>` 缺 `<Key>`,Setup 当场停在消息框上;② 两份的 `oobeSystem` 都缺 `Microsoft-Windows-International-Core`,两台机都停在 OOBE 地区页。均见 §3.4 |
 | `FirstLogonCommands` 新加的三条(装 Tools / RunOnce 哨兵 / 重启) | **未验证** —— 语法与开关有来源(§3.5.4),但没在真机上跑过 |
 | Win11 25H2 的 OOBE 在**联网**时是否还认 `HideOnlineAccountScreens` 而不强推微软账号 | **未验证** —— 近期 Win11 有此报告;Win10 那台没网,不受影响。第一次装 Win11 若停在账号页,这是第一嫌疑 |
-| `new-vm.ps1` 写出的 `.vmx` 能不能真的开机装完 | **未验证** —— 本次不建真虚机;`-WhatIf` 全流程跑过,键名逐条有来源 |
+| `new-vm.ps1` 写出的 `.vmx` 能不能真的开机装完 | **部分已验证(2026-08-27 晚)** —— 两台机都从这个 `.vmx` 引导进了 Setup;前提是安装盘按 §3.1a 重制过 |
+| **原样的微软安装 ISO 在无人值守下能不能引导** | **已验证为不能** —— §3.1a。`efisys.bin` 的 `cdboot.efi` 等按键,三秒后 `Status upon boot failure: Time out` |
+| **重制成 `efisys_noprompt.bin` 引导后能不能引导** | **已验证能** —— §3.1a。两台机 `About to do EFI boot` 之后不再有 `Time out` / `OsNotFound` |
+| **partial 加密的 `.vmx` 手改明文键之后 `vmrun` 还认不认** | **已验证认** —— §3.5.1。副本上改 `sata0:0.fileName` 后 `-vp` 只读命令照答,错口令仍答 `Incorrect password`;真机 `vmware.log` 印着改后的路径 |
+| IMAPI2 的 `BootImageOptionsArray` 能不能在 PowerShell 里设 | **已验证不能** —— 一律 `E_NOINTERFACE`,三种写法都试过(§3.1a 末尾)。脚本改用单数的 `BootImageOptions` |
+| `new-install-iso.ps1` 的 `pycdlib` 取出分支 | **未验证** —— 本机装着 7-Zip,这一支从没被选中过 |
 | `bios.bootOrder` 在 EFI 固件下的确切键名 | **未验证** —— 第三方引用一致,官方文档没找到;盘是空的时候不影响首次引导 |
 | `managedvm.autoAddVTPM = "software"` 在 17.6.4 上是否仍然让 `vmrun start` 失败 | **未验证** —— 报告见 §2.2a,本机没试;`-VTpm software` 是留给试它的开关 |
 | 加 vTPM 前的「剩余空间要够整盘大小」检查 | **未验证** —— 二手报道(§2.2a 末尾) |
