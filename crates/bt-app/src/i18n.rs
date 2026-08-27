@@ -1985,6 +1985,31 @@ pub enum Text {
     /// other's are a profile's fields, and a table that made them one entry
     /// would be a table where translating one page's verb moved the other's.
     ShortcutRestoreAll,
+
+    // ── the two head buttons that had no words (user ruling 2026-08-27) ─────
+    //
+    // One contiguous block at the end, per this table's standing rule. Two
+    // entries, and two rather than three: the head's `Save` is the chord's own
+    // verb and takes the chord's own row (`ShortcutSavePreview`), on
+    // `ShortcutWebDevTools`' precedent — a button and a key onto one room are
+    // one name.
+    /// **The `■` a playing video's head wears** (§7.23 ⑩).
+    ///
+    /// Not `Stop`, bare: the same square is the page's *stop loading* one row
+    /// down, and a reader who has met it there is entitled to be told which
+    /// stopping this is.
+    PreviewStopPlaying,
+    /// **The `↗` a head wears** — this pane leaves for a window of its own.
+    ///
+    /// One entry for both heads that carry one (a preview's `.pv-popout` and a
+    /// files column's `.pane-float`), because it is one sentence about one
+    /// destination; they already share a drawing for the same reason.
+    ///
+    /// Its own words rather than the rail's `Open in browser`, which is the
+    /// button the report proves needed telling apart: the two arrows stand one
+    /// band apart and hand the same document to two different places, and the
+    /// user read this one as *「交给系统程序」* — the other one's verb.
+    HeadPopOut,
 }
 
 impl Text {
@@ -3007,6 +3032,10 @@ impl Text {
                 "Unlock — this pane becomes the reusable preview again",
                 "解锁 —— 此窗格重新成为可复用的预览",
             ),
+
+            // ── the two head buttons that had no words (2026-08-27) ─────────
+            Self::PreviewStopPlaying => pick(lang, "Stop playing", "停止播放"),
+            Self::HeadPopOut => pick(lang, "Open in a floating window", "在浮动窗口中打开"),
             // ── moving a pane out of this window (multiwindow slice F1c) ───
             Self::PaneMenuMoveToNewWindow => {
                 pick(lang, "Move pane to new window", "把窗格移到新窗口")
@@ -3516,7 +3545,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 521] = [
+    pub const ALL: [Self; 523] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4038,6 +4067,8 @@ impl Text {
         Self::ShortcutRecord,
         Self::ShortcutRecordListening,
         Self::ShortcutRestoreAll,
+        Self::PreviewStopPlaying,
+        Self::HeadPopOut,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

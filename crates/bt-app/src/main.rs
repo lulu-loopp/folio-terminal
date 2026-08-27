@@ -26101,16 +26101,24 @@ fn folder_pick_outcome(
     }
 }
 
-/// What the pane head's `⌄` says it does (user ruling, 2026-08-16).
+/// **What one control of a pane's own run says it does** (user ruling
+/// 2026-08-27 — 「头/轨上每一枚可点的东西都必须有 tooltip,且由注册表守着」).
 ///
-/// "Split and more", and both halves are doing work. `Split` because that is
-/// what the button in this slot did yesterday and what four of the six entries
-/// behind it still do — a tip that named the *menu* ("Pane options") would be
-/// telling you the shape of the thing rather than what it is for. `and more`
-/// because the sixth entry closes the pane, and a tip that promised only
-/// splitting would be a tip that hid the destructive verb behind it.
-fn pane_chevron_tip() -> &'static str {
-    i18n::Text::PaneChevronTip.text()
+/// **It reads the registry**, which is the second half of the ruling: the words
+/// a verb wears live in `icons::ActionIcon::bare_tip` beside the shape it
+/// wears, and this only spends them. None of a pane run's four changes with the
+/// state, so the first entry is the whole of what each has to say — the two
+/// controls on this window that do change (a preview's padlock and a page's
+/// reload) are the head's and the rail's, and their own passes choose between
+/// the two words the registry lists for them.
+///
+/// A free function, so a gate can read the same table without a live window.
+/// The empty string is unreachable: the gate walks every verb a run can answer
+/// with and fails the build if one has no words.
+fn pane_control_tip(verb: icons::ActionIcon) -> &'static str {
+    verb.bare_tip()
+        .and_then(|words| words.first())
+        .map_or("", |text| text.text())
 }
 
 /// **Which verb the system folder chooser was opened for.**
@@ -31647,7 +31655,7 @@ impl Runtime<'_> {
                 // loud wins), and which pane's menu is up (the ghost stays lit
                 // under its own list).
                 search_seat: self.window.search.seat(),
-                pane_menu_seat: self.window.pane_menu.as_ref().map(|menu| menu.seat),
+                head_raised: self.head_that_raised_a_layer(),
             },
         );
         let seats::WindowChrome {
@@ -31806,57 +31814,49 @@ impl Runtime<'_> {
         // sits over its own pane and under the popups, and nothing else in the
         // window claims these nineteen pixels.
         if self.window.drag.is_none() {
-            // Silenced on the head whose menu is up — the gear's rule and the
-            // strip chevron's, for their reason: a tip explaining what a button
-            // opens, standing beside the thing it just opened, is a sentence
-            // about a fact already on screen.
-            let open_on = self.window.pane_menu.as_ref().map(|menu| menu.seat);
+            // **Every control on every pane's own run** (user ruling
+            // 2026-08-27). One walk of `seats::pane_control_boxes`, which
+            // answers for whichever layout the pane is in — its head's run, or
+            // its corner's two doors — so a control that is on screen is a
+            // control this pass has seen.
+            //
+            // It was the `⌄` and the corner's 🗀 alone. The argument for leaving
+            // the head's folder and its `×` out was that both are idioms this
+            // product has taught elsewhere; the ruling overturns it, on the
+            // ground an idiom cannot say *what* a `×` closes.
+            //
+            // Silenced on the one control whose own layer is standing — the
+            // gear's rule and the strip chevron's, for their reason: a tip
+            // explaining what a button opens, standing beside the thing it just
+            // opened, is a sentence about a fact already on screen. It is the
+            // control and not the whole run, because the rest of the run is
+            // saying nothing that is already on screen.
+            let raised = self.head_that_raised_a_layer();
+            let capsule = self.window.search.seat();
             let seats: Vec<SeatId> = self
                 .seat_layout
                 .rects
                 .iter()
                 .map(|placement| placement.id)
-                .filter(|seat| Some(*seat) != open_on)
                 .collect();
             for seat in seats {
-                let Some(rect) = self.pane_chevron_box(seat) else {
-                    continue;
-                };
-                anchors.push(
-                    tooltip::TooltipAnchorId::PaneChevron(seat),
-                    rect,
-                    pane_chevron_tip(),
-                );
-            }
-            // **The 🗀 beside it, on a lone pane only** (user proposal, Claude
-            // 认可 2026-08-25). The words are the tab's folder's, because it is
-            // the same action — `float_trigger_tip` is the one place they are
-            // written. The head's own folder is deliberately not on this list:
-            // see `tooltip::TooltipAnchorId::PaneFiles`, and the gate below is
-            // the same predicate the paint and the hit test share, so the day
-            // the corner is refused the tip goes with it.
-            let corners: Vec<SeatId> = self
-                .seat_layout
-                .rects
-                .iter()
-                .filter(|placement| {
-                    self.seats.seat_wears_ghost(
-                        placement.kind,
-                        placement.id,
-                        self.window.search.seat(),
-                    )
-                })
-                .map(|placement| placement.id)
-                .collect();
-            for seat in corners {
-                let Some(rect) = self.pane_files_box(seat) else {
-                    continue;
-                };
-                anchors.push(
-                    tooltip::TooltipAnchorId::PaneFiles(seat),
-                    rect,
-                    float_trigger_tip(),
-                );
+                for (verb, box_) in
+                    seats::pane_control_boxes(&self.seats, &self.seat_layout, seat, scale, capsule)
+                {
+                    if raised
+                        == Some(seats::PaneLayer {
+                            seat,
+                            door: Some(verb),
+                        })
+                    {
+                        continue;
+                    }
+                    anchors.push(
+                        tooltip::TooltipAnchorId::PaneControl(seat, verb),
+                        box_,
+                        pane_control_tip(verb),
+                    );
+                }
             }
             // A page's hand-off arrow, in the same pass and inside the same
             // guard: it is a pane head's control like the chevron above, and a
@@ -31875,65 +31875,41 @@ impl Runtime<'_> {
                     i18n::Text::PreviewOpenInBrowser.text(),
                 );
             }
-            // **The padlock**, in the same pass and inside the same guard
-            // (§7.7 ⑧). It is offered on every preview head rather than on the
-            // pages' heads only, so unlike the arrow above every preview seat
-            // registers — and the tip is the button's own state, because the
-            // button changes.
-            let previews: Vec<SeatId> = self.seats.preview_seats();
-            for seat in previews {
-                let Some(rect) = self.preview_lock_box(seat) else {
-                    continue;
-                };
-                anchors.push(
-                    tooltip::TooltipAnchorId::PreviewLock(seat),
-                    rect,
-                    if self.seats.preview_is_locked(seat) {
-                        i18n::Text::PreviewUnlock.text()
-                    } else {
-                        i18n::Text::PreviewLock.text()
-                    },
-                );
-            }
-            // **The source flip that stayed on the head**, in the same pass and
-            // inside the same guard (user ruling 2026-08-25). The 2026-08-24
-            // ruling moved this button down to the breadcrumb row and left it
-            // here for the one markdown that grows no breadcrumb — a composed
-            // document, whose bytes are in the repository rather than on a disk
-            // — because 「一个动词不该跟着一行一起消失」. A button that survives
-            // its row keeps its tip too, and it is the same two words the row's
-            // own flip says, from the same function.
+            // **Every control on every preview head**, in the same pass and
+            // inside the same guard (user ruling 2026-08-27 — 「头/轨上每一枚可
+            // 点的东西都必须有 tooltip」).
+            //
+            // One loop over one list, and that is the fix rather than a tidying.
+            // This used to be three loops naming three of the six controls: the
+            // padlock had its own, the source flip borrowed the rail's, the
+            // developer tools rode the page's navigation loop — and `Save`, the
+            // player's `■` and the pop-out `↗` were named by none of them,
+            // because a control got words here by somebody remembering to add a
+            // fourth loop. `seats::preview_head_tool_boxes` is the run the paint
+            // and the hit test walk, so a control that is on screen is a control
+            // this pass has already seen.
             let previews: Vec<SeatId> = self.seats.preview_seats();
             for seat in previews {
                 let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
                     continue;
                 };
                 let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
-                let Some(box_) =
-                    seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).flip
-                else {
-                    continue;
-                };
-                let to_source = !self.preview_md_source(self.preview_here(seat));
-                anchors.push(
-                    tooltip::TooltipAnchorId::PreviewRail(
-                        self.preview_here(seat),
-                        seats::PreviewRailTip::Flip,
-                    ),
-                    box_,
-                    preview_rail_tip_text(
-                        seats::PreviewRailTip::Flip,
-                        seats::PreviewRailKind::Crumbs,
-                        &[],
-                        &[],
-                        to_source,
-                    ),
-                );
+                let geometry =
+                    seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat));
+                for (tool, box_) in seats::preview_head_tool_boxes(&geometry) {
+                    anchors.push(
+                        tooltip::TooltipAnchorId::PreviewHeadTool(seat, tool),
+                        box_,
+                        self.preview_head_tool_tip(seat, tool),
+                    );
+                }
             }
-            // **A page's four**, in the same pass and inside the same guard
-            // (§7.7 ②). Only the seats whose head actually draws them register:
-            // `preview_head_tools` answers `web: false` for every other seat, so
-            // the boxes are `None` and nothing is pushed.
+            // **A page's three navigation buttons**, in the same pass and inside
+            // the same guard (§7.7 ②). Only the seats whose rail actually draws
+            // them register: `rail_geometry` answers `None` for every other
+            // seat, so nothing is pushed. (The developer tools were a fourth
+            // entry here until 2026-08-27; they are drawn on the head and
+            // register with the rest of that run, above.)
             let previews: Vec<SeatId> = self.seats.preview_seats();
             for seat in previews {
                 let loading = self.web_on(seat).is_some_and(|web| web.page().loading);
@@ -31960,11 +31936,6 @@ impl Runtime<'_> {
                         } else {
                             i18n::Text::PreviewWebReload
                         },
-                    ),
-                    (
-                        tooltip::WebNavTool::DevTools,
-                        self.preview_web_tool_box(seat, WebHeadVerb::DevTools),
-                        i18n::Text::ShortcutWebDevTools,
                     ),
                 ] {
                     let Some(box_) = box_ else {
@@ -44725,6 +44696,52 @@ impl Runtime<'_> {
         }
     }
 
+    /// **What one control on a preview head says it does** (user ruling
+    /// 2026-08-27).
+    ///
+    /// Exhaustive over [`seats::PreviewHeadTool`], which is the half of the
+    /// ruling a table alone cannot carry: the registry says *which verbs stand
+    /// bare on a head* and the gate holds it to having words for each
+    /// (`icons::ActionIcon::bare_tip`), and this says which of a verb's words
+    /// this frame's button is showing. Two of the six change with the state —
+    /// the padlock says the action or the way out of it, the flip says which
+    /// face it would turn to — and a single string for either would be the head
+    /// describing what it was a press ago.
+    ///
+    /// Nothing here is allowed to answer with the empty string:
+    /// `TooltipAnchors::push` would drop the anchor, and the control would be
+    /// back where the report found it.
+    fn preview_head_tool_tip(&self, seat: SeatId, tool: seats::PreviewHeadTool) -> String {
+        let words = tool.verb().bare_tip().unwrap_or_default();
+        let say = |at: usize| {
+            words
+                .get(at)
+                .map_or_else(String::new, |text| text.text().to_owned())
+        };
+        match tool {
+            // One word each: the save is the chord's own row (a button and a key
+            // onto one room are one name), and the other two say one thing.
+            seats::PreviewHeadTool::Save
+            | seats::PreviewHeadTool::DevTools
+            | seats::PreviewHeadTool::PopOut => say(0),
+            // The rail's own two words for the same flip, from the same function
+            // — a verb that survives its row keeps its wording too, and that
+            // function knows about the third face a page has.
+            seats::PreviewHeadTool::Flip => preview_rail_tip_text(
+                seats::PreviewRailTip::Flip,
+                seats::PreviewRailKind::Crumbs,
+                &[],
+                &[],
+                !self.preview_md_source(self.preview_here(seat)),
+            ),
+            // **The second of that sign's two sentences.** The first is the
+            // rail's stop-loading; this square is over a video.
+            seats::PreviewHeadTool::Stop => say(1),
+            // The action, or the way out of the state.
+            seats::PreviewHeadTool::Lock => say(usize::from(self.seats.preview_is_locked(seat))),
+        }
+    }
+
     // ── the foot (P32-P35) ──────────────────────────────────────────────────
 
     /// The path along the bottom of the preview pane, cut to the room it has —
@@ -52873,7 +52890,7 @@ impl Runtime<'_> {
                 _ => None,
             })
             .collect();
-        for seat in [showing.hovered, showing.menu].into_iter().flatten() {
+        for seat in [showing.hovered, showing.raised].into_iter().flatten() {
             if !seats.contains(&seat) {
                 seats.push(seat);
             }
@@ -52906,8 +52923,89 @@ impl Runtime<'_> {
     fn head_run(&self) -> seats::HeadRun {
         seats::HeadRun {
             hovered: self.window.seat_pointer.pane_hover,
-            menu: self.window.pane_menu.as_ref().map(|menu| menu.seat),
+            raised: self.head_that_raised_a_layer().map(|layer| layer.seat),
         }
+    }
+
+    /// **Which pane head put the layer that is standing on the glass** — the
+    /// second of [`Self::head_run`]'s two facts (user ruling 2026-08-27).
+    ///
+    /// [`popup_owner`]'s own sentence with a seat in it. A layer is not a
+    /// rectangle that happens to be floating over this window: it is an
+    /// extension of the control that raised it, and the head that raised one is
+    /// therefore a head with something of its own on screen — so it goes on
+    /// showing its controls, exactly as the surface under any other popup does.
+    /// 裁4 (2026-08-26) ruled that for the `⌄`; the ruling that added this
+    /// function extends it to the head's other door, whose flyout is dropped in
+    /// the same place and reached the same way.
+    ///
+    /// **Exhaustive over [`HoverFloat`] and over [`float::FloatTrigger`]**, for
+    /// [`popup_owner`]'s reason: a fifth layer, or a fourth way to raise a
+    /// flyout, does not compile until it has said whether a head is behind it.
+    /// That is also why there is no second boolean anywhere — the answer is
+    /// derived from what each layer already records about where it came from,
+    /// and nothing here asks where a rectangle happens to be.
+    fn head_that_raised_a_layer(&self) -> Option<seats::PaneLayer> {
+        HoverFloat::ALL.into_iter().find_map(|layer| match layer {
+            // Every [`Popup`] at once, because that is how `HoverFloat` carries
+            // them — so the arm asks which one, and answers for each. Three of
+            // the eight are raised by a control standing in a head; the other
+            // five are raised by a tab, a row, a toolbar or a body.
+            HoverFloat::Menu => self.popups_up().any().and_then(|popup| match popup {
+                // The head's own `⌄` — 裁4's case, the one this rule started as,
+                // and one of the two doors a lone pane's corner draws.
+                Popup::Pane => self.window.pane_menu.as_ref().map(|menu| seats::PaneLayer {
+                    seat: menu.seat,
+                    door: Some(icons::ActionIcon::OpenPaneMenu),
+                }),
+                // A files column's root button, which is the leading control of
+                // that column's head — not one of the corner's pair, because a
+                // files column always wears a head.
+                Popup::Root => self
+                    .window
+                    .root_menu
+                    .seat()
+                    .map(|seat| seats::PaneLayer { seat, door: None }),
+                // A preview head's name, which *is* the switcher when the pool
+                // holds more than one buffer.
+                Popup::Preview => self
+                    .preview_menu_seat()
+                    .map(|seat| seats::PaneLayer { seat, door: None }),
+                // The `+`'s list, a file row's menu, the graph toolbar's branch
+                // filter, a repository row's menu, the terminal's own right
+                // press, and the menu a right press on a tab raises. None of
+                // them is dropped from a head.
+                Popup::Profile
+                | Popup::File
+                | Popup::GraphFilter
+                | Popup::GitMenu
+                | Popup::TermMenu
+                | Popup::Tab => None,
+            }),
+            // **The head's 🗀** — and only it. A flyout summoned from a tab's
+            // folder hangs off the strip, and one summoned from a folder printed
+            // in a pane's own output (§7.29) hangs off the text, which is not
+            // the head either. A leaf in some other tab names a seat this tab
+            // does not have, so the tab is checked rather than assumed.
+            HoverFloat::Flyout => match self.window.float.peek().and_then(|win| win.origin) {
+                Some(float::FloatTrigger::Pane(leaf)) => (leaf.tab
+                    == self
+                        .window
+                        .tabs
+                        .get(self.window.active_tab)
+                        .map(|tab| tab.id)?)
+                .then_some(seats::PaneLayer {
+                    seat: leaf.seat,
+                    door: Some(icons::ActionIcon::OpenFilesPane),
+                }),
+                Some(float::FloatTrigger::Tab(_) | float::FloatTrigger::Reference { .. })
+                | None => None,
+            },
+            // A file row's glance card and a tab's layout peek are raised by a
+            // row and by a tab. Neither is a head, and neither has ever hidden
+            // one.
+            HoverFloat::Glance | HoverFloat::LayoutPeek => None,
+        })
     }
 
     /// **A row waiting on a write dims into it rather than jumping** (the
@@ -59108,24 +59206,6 @@ impl Runtime<'_> {
         )
     }
 
-    /// The 🗀's box on one pane, or `None` when that pane carries none this
-    /// frame — [`Self::pane_chevron_box`]'s sentence for the other door in the
-    /// same corner (user proposal, Claude 认可 2026-08-25).
-    ///
-    /// The flyout's anchor and the tip's are this one rectangle, in both
-    /// layouts, for the reason stated above it: a peek hung off a second
-    /// derivation is a peek that opens at a head that is not there.
-    fn pane_files_box(&self, seat: SeatId) -> Option<[f32; 4]> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
-        seats::pane_files_box(
-            &self.seats,
-            &self.seat_layout,
-            seat,
-            scale,
-            self.window.search.seat(),
-        )
-    }
-
     /// The hand-off arrow's box on one preview seat, or `None` when that seat is
     /// not showing a page (or has no room for the control).
     ///
@@ -59142,20 +59222,6 @@ impl Runtime<'_> {
         // the arrow stands beside the address it hands over.
         let _ = rect;
         self.rail_geometry(self.preview_here(seat), scale)?.external
-    }
-
-    /// The padlock's box on one preview seat (§7.7 ⑧).
-    ///
-    /// [`Self::preview_browser_box`]'s derivation, for its reason: one
-    /// computation for the paint, the hit test and the tip, because a tip
-    /// anchored on a second one stands beside the button rather than on it.
-    /// Unlike the arrow this control is offered on every preview head, so the
-    /// only way this is `None` is a head with no room for it.
-    fn preview_lock_box(&self, seat: SeatId) -> Option<[f32; 4]> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
-        let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
-        let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
-        seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).lock
     }
 
     /// The box one of a page's four head verbs is drawn in (§7.7 ②).

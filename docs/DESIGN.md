@@ -1967,6 +1967,8 @@ else                       { Flash }    // 在这台屏上,但不在你眼前
 
 **角落里第二扇门:🗀(用户提议、Claude 认可 2026-08-25 落地;`crates/bt-app/src/{seats.rs,main.rs,tooltip.rs}`,小样同日回写——`loneVerbHtml` 发的是 `.pane-files` 本人穿上幽灵的衣服,句柄/浮窗/tip 全沿用头里那一份)。** **洞的余量。** A 案当初只放回**一枚**动词——`⌄`——而 §7.1.6i 自己列的失物清单是三样:菜单、files 速览触发器、标题里的 cwd。菜单回来了,速览没有:独 pane 想开 files 列,手得离开这块 pane 跑到 tab 条上那枚 `.tab-files` 去按(它峰值也确实指着同一个 cwd,所以这是**绕路**而不是缺口)——而分屏时它就在头里十九个像素外。**改:角落幽灵区从一枚变两枚并列,🗀 在左、`⌄` 在右**,其余一切逐像素相同。**几何是导出的,不是第二次相减**:`pane_ghost_folder_geometry` 拿的是 `pane_ghost_geometry` 的盒子整体左移一格,于是它的右边就**是**`⌄` 的左边——任何缩放下都不可能在两枚活按钮之间开出一条无主像素的缝,这正是头里那条 `.panehead .pane-files + .pane-close { margin-left: 0 }` 的同一句话。角落窄到只坐得下一枚时**留下的是 `⌄`**:裁决当初放的是它,菜单也仍旧装着这枚 pane 的每一个动词,而半只挂在 pane 左沿外的按钮是头里那条规矩明令拒收的。**字号 11 而不是头里的 13**:`PANE_HEAD_CHEVRON_GLYPH_LOGICAL_PX` 当年把**尖角**裁到文件夹的 13,理由是「同一个 run 里字号不一致读起来像出错而不像一套」——这条规矩归 run 不归字形,所以在这个 run 里它反过来管文件夹,取幽灵自己那 11(并且写成那枚常量,重量哪天改两枚一起走)。**一个动词两扇门,一个字都没多写**:命中交回的是分屏头那枚交回的同一个 `ChromeTarget::PaneFiles(seat)`,于是按下(`press_float_trigger`)、峰值的 hold、flyout 的根、右键落回 pane 菜单——全部沿用既有那一份实现;`seats::pane_files_box` 是「两张矩形一个问题」的另一半(与 `pane_chevron_box` 同形):戴头的答头里那枚,独的答角落那枚。**顺手补掉一个洞**:`Runtime::trigger_rect` 此前对 `FloatTrigger::Pane` 无条件量 `pane_head_geometry(...).files`,在无头 pane 上量的是一顶**没有画出来的头**——锚在空气里,与 E60 那三次「菜单开在窗口左上角」是同一个 bug 换了顶帽子;现在它问的是同一个 `pane_files_box`,按钮不在了峰值就自己收(`advance_float` 早就读这个答案)。**状态脸没有第四张,而且是照着分屏头抄的**:那枚 🗀 开的是 pinned float,再按一次是提到最前,它自己只有静息与指针两张脸——画笔从头到尾**没有被告知有没有浮窗开着**,这是证据不是承诺,所以这枚也只有两张。**墨梯是幽灵的三级而不是头里的两级**(`.45` → `.75` → 满墨 + `menu_surface` 底):它浮在终端自己的输出上,没有头在旁边替它说这块 pane 有按钮;两扇门共用一个闭包写一遍,理由与头里那段写成循环的一样,而且更硬——这一对是**常在**的,某一级飘了会整天挂在屏幕上。搜索胶囊撤幽灵时**两枚一起撤**,同一个 `seat_wears_ghost`。**tooltip 挂上**:文案就是 tab 那枚的 `Text::FloatTriggerTip`(「Peek files here」/「在此速览文件」),`float_trigger_tip()` 是它唯一被写下的地方;**头里那枚仍旧不挂**——理由写在 `tooltip::TooltipAnchorId::PaneFiles` 的注记里:它站在一顶自己就在说话的头里的一个 run 中,而这枚是光着浮在输出上的一记号,正是它旁边那枚 `⌄` 当初挂 tip 的那个理由。**既有钉唯一改判的一句已就地改写**:`a_lone_pane_answers_the_pane_menu_in_its_corner_and_a_split_one_does_not` 里「`⌄` 盒子左边一像素是终端自己的文字」现在是「是它邻居的门」,那句钉子要护的事(run 有外沿、沿外是内容)原样活在新红测 `the_corner_folder_answers_the_head_folders_own_target` 里。红测三支:`the_lone_panes_corner_carries_the_folder_beside_the_chevron`(共边/同盒/同道/窄到一枚时留 `⌄`)、`the_corner_folder_answers_the_head_folders_own_target`(动词路由 + 两张矩形一个问题 + 戴头的不长第二扇)、`the_corner_folder_climbs_the_ghosts_own_ink_ladder`(三级墨梯逐控件、`menu_surface` 底、字号与像素落位),外加 `an_open_search_capsule_stands_the_corner_folder_down_too`。字符串表 `Text::ALL` **473 → 473**(不新增:这枚门的话是 tab 那枚已经写下的那句)。
 
+**两处 2026-08-27 被改判,见 §7.33 ③④。** 顺序反过来了——现在是 **`⌄` 在左、🗀 在右**,与分屏头的 `⌄ 🗀 ✕` 同一个顺序,而且那个顺序写在 `icons::PANE_DOOR_RUN` 里由角落读、由红门看着,不再是这一段与头里各写一次;这条 run 仍然是右对齐、窄到一枚时留 `⌄`,只是它留在角落本身而不是留在原来那个左格。「头里那枚 🗀 仍旧不挂 tooltip」也被推翻:头/轨上每一枚可点的东西现在都挂,连 `✕` 一起——惯用形说得出「这是个叉」,说不出它关的是 pane。角落两扇门的点亮也从「指针在它上面」加了一条「它自己举着的弹层开着」。
+
 **7.1.6j PowerShell 整合的安装提示 + 「替我加进 $PROFILE」（用户裁决 2026-08-21，按推荐；`crates/bt-app/src/{notice.rs,shell_integration.rs,main.rs,seats.rs,settings.rs,i18n.rs}`、`crates/bt-persist`、`crates/bt-term`、小样同日回写）。** **由头。** Folio 的 PowerShell 整合(`scripts/shell-integration/folio.ps1`,装到 `%APPDATA%\Folio\shell-integration\folio.ps1`)是 opt-in——`Integration::PowerShellOptIn`,§7.1.5i 与本文件顶部那张「谁装谁」表都说明了它为什么必须是 opt-in:`pwsh` 只有一个众所周知的启动文件,没有任何参数能让它在读完用户自己的之后再读第二个,所以唯一的自动注入手段是**改写属于用户的 `$PROFILE`**,而那是编辑别人的 shell。bash 有 `--init-file`,一个不碰任何磁盘文件、只为这一个交互式 shell 命名启动文件的参数,所以 bash 自动装而 PowerShell 手动装。**这条不复审。** 但它的后果是:用户两个 `$PROFILE` 空着时,他自己的 PowerShell **从来没发过 OSC 133**——提示符起点清鼠标残留(§7.1.5i)、忙碌呼吸、退出码蓝/红点全部缺席,而**这台机器上看到的效果与「没修」完全一样**。
 
 **裁决(用户同意的推荐)。** 起一个 PowerShell 系会话、检测不到整合时,在**那个 pane 里**给一条**一次性的、可关的提示条**:一句陈述句 + 两枚文字动词「Add to $PROFILE」「Don't show again」+ 关闭 ×。**不**自动往 `pwsh -NoLogo` 启动行注入(那行是裁过的,注入会改变用户 profile 的语义)。「Add」向该 shell 自己的 `$PROFILE` 追加一行 `. "$env:APPDATA\Folio\shell-integration\folio.ps1"`(script 尚未落盘先落盘),**写入前在同目录留一份 `.bak-<YYYYMMDD>`**——与替用户改 `~/.claude/settings.json` 时同一种纪律;然后提示条改说「Added to $PROFILE. Takes effect in a new shell.」+ 一枚「Restart shell」(复用 `restart_shell`)。「Don't show again」写进 settings 一个布尔(schema v18),以后不再提示,设置页 Terminal 有对应的一行 `Offer PowerShell integration` 能重新打开。× 与 Esc 只撤下这一条、**什么都不裁**:下一个 PowerShell 起来照样提示——这是 × 与「Don't show again」的唯一区别,也是两者都存在的全部理由。**「下一个 PowerShell」这半句 2026-08-27 被用户改判成「下一次运行」,见 §7.27 ②**:× 什么都不裁这一条原样活着,变的是「再问一次」的粒度。
@@ -4378,6 +4380,58 @@ docs/plans/release/clean-vm.md,这里是操作顺序):
 **没有被这条裁决改掉的东西,逐条点名。** `pane.buffer` 仍然是那张页的 `PreviewSource::Web`(§7.7 ⑭「翻回不重载」整条成立:浏览器、历史、表单、进程一样不动);`</>` 的语义仍是「说目的地」(源码 ↔ 页面),提示语三条串一个没动;地址轨、`↗`、`Open ⌄` 照旧。**引擎的 `view-source:` 从来没有被本窗用过**——那条 scheme 一直在 `webnav` 的拒绝名单上(§7.11 ⑤ 其余 scheme 惰性),头上那枚 `</>` 从落地第一天走的就是本窗自己的文本缓冲,所以**没有什么需要退役**;缺陷报告里的「引擎 view-source」是对现状的一次误读,记在这里以免下一位再去找一遍。
 
 **红门** `the_source_face_of_a_page_is_the_editor_and_a_save_reloads_the_page`,三段:真文件上跑完「提拔 → 可编辑 → 改 → `save()` → 盘上的字节是打进去的那些 → `preview_watch::Stamp` 动了」;读源码钉住 `refresh_preview_file` 对页仍是 `web.reload`、`watched_preview_files` 仍把本地页的文件放进被监视集合;读源码钉住 `preview_is_editable` 里那个特判确实没了、`page_with_the_keyboard` 里那一句确实在。
+### 7.33 一枚画得出来的按钮必须说得出自己是谁:头上的那一排走一张表,而不是走四个循环(next12 验收四件,2026-08-27 用户实证与裁决,已落地;`crates/bt-app/src/{icons,seats,tooltip,main,marks,i18n}.rs`)
+
+**一句话:头和轨上每一枚可点的东西现在都从**同一次几何遍历**里长出来——按下走它、tooltip 走它、红门也走它;顺带,`⌄` 与文件夹在两个表面上第一次是同一个顺序,DevTools 不再是一把扳手,而一顶头由自己叫出来的浮窗开着时,那一排跟着菜单一样显形。**
+
+四件都是用户在 next12 上按出来的,四件都不是「少写了一个字符串」,而是同一种形状的病:**一个可以被画出来的东西,它的第二个属性(会不会说话、站在哪一边、亮不亮)是由别处另一份名单回答的**。
+
+**① 三个循环点了三枚按钮,另外三枚没人点。** 用户报的是视频预览的头:「一枚实心方块按钮(在 🔍 左边)和 ↗,悬停没有小字,其它头按钮有。」查下去,那顶头画六枚控件(`Save`/`</>`|`■`/DevTools/`↗`/锁/`✕`),而 `rebuild_tooltip_anchors` 里为它写了**三个**循环:锁有自己的 anchor id、DevTools 搭着网页导航那一族的车、`</>` 借了地址轨的 id。`Save`、`■`、`↗` 一个都没有,不是因为没人写文案,而是因为**在这套写法里,一枚控件要会说话,得有人记得再写第四个循环**。用户读错 `↗` 的意思(以为是「交给系统程序」,那其实是下一行 `↗` 的动词)正是这件事的代价。
+
+裁决:**头/轨上每一枚可点的东西都必须有 tooltip,且由注册表守着**。落地成三件:
+
+- `seats::PreviewHeadTool`(六个成员)与 `preview_head_tool_boxes()`——**几何自己的那一份名单**。`hit_preview_head` 从六个手写的 `if hit(...)` 改成走它;窗口的 tooltip 那一趟也走它。**画得出来 ⇒ 走过这次遍历 ⇒ 被登记**,中间没有第二份名单可以漏。
+- `seats::pane_head_control_boxes()` / `pane_control_boxes()`——pane 自己那一排(`⌄ 🗀 ✕`,files 列是 `⌄ ↗ ✕`)的同一句话,而且**一个问题两种布局**:戴头的 pane 答头里那一排,独 pane 答角落那两扇门。
+- `icons::ActionIcon::bare_tip()`——注册表的第三列:**「这个动词在没有字陪着它的时候说什么」**。一枚控件会变(锁说动作或说出路、刷新会变成停止、`</>` 说它要翻到哪一面)就登记两条,选哪一条是窗口按当帧状态定的。
+
+**这条裁决推翻了一句写过的辩护。** 原来 pane 头的 `🗀` 与 `✕` 是**故意**不登记的,理由写在 `tooltip.rs` 里:「文件夹和叉是本产品在别处教过的惯用形」。惯用形告诉你的是**类别**——而「这个 `✕` 关掉的是 pane,不是 tab、不是这份文档」恰恰是惯用形说不出的那一半。所以现在整排都登记,只有**自己正举着弹层的那一枚**噤声(齿轮与 tab 条 `⌄` 的老规矩:一句解释「按下去会打开什么」的话,站在它刚刚打开的东西旁边,是在陈述一件已经在屏上的事实)。
+
+新文案两条:`PreviewStopPlaying`(「停止播放」——不写光秃秃的 `Stop`,因为同一枚实心方块在下面一行是网页的**停止加载**)、`HeadPopOut`(「在浮动窗口中打开」——一条文案两顶头共用,因为它们本来就共用一张画)。`Save` 不新开条目,走快捷键那一行自己的名字(`ShortcutWebDevTools` 立的先例:一个动词的按钮和键是同一个名字)。`Text::ALL` 521 → 523。
+
+红门 `every_control_a_head_or_a_rail_draws_says_what_it_does`:遍历 `PreviewHeadTool::ALL`、`PANE_DOOR_RUN`、两顶头各自的第三枚、以及轨上那六个动词,逐个问注册表要词,并且两种语言都不许是空串(空串会被 `TooltipAnchors::push` 丢掉——那正是报告里的状态)。**红证**(把新加的几条从 `bare_tip` 里删掉):
+
+```text
+a preview head's SavePreview has no words
+a preview head's StopNavigating has no words
+a preview head's FloatPreview has no words
+a pane's own run's OpenFilesPane has no words
+a files head's FloatFilesPane has no words
+a pane head's ClosePane has no words
+```
+
+配一条反向门(`a_verb_has_bare_words_exactly_where_a_head_or_a_rail_draws_it_bare`:有词 ⇔ 真的被画成裸标),和一条读源码的门(`the_tip_pass_walks_the_runs_instead_of_listing_the_buttons`)——**因为出问题的是形状而不是字符串**,一份填满了的注册表拦不住「一枚按钮一个循环」这种写法回来。
+
+**② DevTools 不是扳手。** P1 把它切成了一把扳手,用户的原话是「太丑」,而这枚画错了两次:扳手是**维修**的动词——那是修机器的手,而这颗按钮是**看**的仪器;而且画成「开口环加一根柄」,它就站在 `#i-search` 一个缺口之外,P1 自己的注释为此花了两段去论证开口要拉到 120° 才不至于认错——一张已经输了的画,才需要那么长的辩护。
+
+重画成**取景框的四个角标 + 一枚光标**:角标说「一个元素」,光标说「这一个」。这是每一台检查器自己的惯用形,而几何是在本房子的格子里现切的(角标取内圆角 1.2、笔 1.2,光标是四个点加一个圆接头),没有引用任何一家的路径数据,所以**不欠 Apache §4(b) 那条修改声明**(齿轮旁边那条仍然只属于齿轮)。这张纸上没有第二枚光标,所以没有可认错的东西。
+
+顺手把预览头那一排加进 `head_runs()`——**「与相邻的 `</>`、↗ 同光学重量」这句裁决从此是一次测量**(`a_heads_run_is_one_picture`,20% 带)。`■` 不进这一列:实心不是描边画出来的图形,它的墨盒**就是**它的画,拿描边的尺去量它是 `NOT_A_CONTROL_SLOT` 上一条规矩指的那种错判。
+
+还修了符号表自己:`the_symbol_sheet_is_written_for_a_person_to_look_at` 一直在 `pen_x + x` 上越界 panic——注释说「宽到放得下三个尺寸,高到放得下最大的那个加上转向箭头要的溢出」,而**只有高照做了**。溢出两个轴都算,再加一句越界就跳过:一张给人看的图不该在写到一半时崩掉。
+
+**③ 一个 pane 的两扇门只有一个顺序。** pane 头是 `⌄ 🗀 ✕`,而独 pane 的角落门(§7.1.6i)是 `🗀 ⌄`——同样两颗按钮、同样两个动词,两个顺序之间唯一的区别是它们相隔八天被写下来。裁决:**统一成 `⌄` 在文件夹左边**,角落改序。
+
+「不是两处硬编码」落地成 `icons::PANE_DOOR_RUN`:一行表,角落的几何(`pane_ghost_run`)**走它**排版,红门 `both_of_a_panes_doors_stand_in_one_order` 拿**两个表面上真的画出来的盒子**去对它。角落这条 run 是**右对齐、从右端丢**(头是从左端丢,为了让 `✕` 撑到最后):只放得下一扇时留下的仍是 `⌄`,而且它站回自己原来独占的那个角——一条只有一个成员的 run,和有两个成员时结束在同一个地方。**红证**(把角落的几何写回旧顺序):`at 1× the corner draws its two doors against the table's order`。
+
+**④ 「弹层开着头保持显形」是关于弹层,不是关于菜单。** 裁4(2026-08-26)裁的是「头上开着菜单时,那一排整排显形」,落地时那个字段叫 `menu`,于是头上**另一扇门**——`🗀`,它的浮窗掉在同一个位置、手也是同样走下去够到它——原样留着裁4 刚刚修掉的那个 bug:`pane_hover` 在手碰到浮窗的一瞬被清掉,整排从一只还没离开它正在用的控件的手底下淡出去。
+
+裁决:**凡由头上的控件叫出来的弹层,开着期间那顶头都按「悬停中」画**。判据走 `PopupOwner` 那一套——**弹层自己说它从哪来,不许从坐标猜**,而且**不加第二个布尔**:
+
+- `HeadRun::menu` 改名 `raised`,含义从「哪顶头的菜单开着」变成「哪顶头举着一件东西」。
+- `Runtime::head_that_raised_a_layer()` 是唯一的推导处,对 `HoverFloat` **穷举**(菜单 / 文件夹浮窗 / 文件行的一瞥卡 / tab 的布局速览),对 `Popup` 再穷举一层(pane 菜单、files 列的根按钮、预览头的名字=切换器,是三个从头上长出来的;另外五个从 tab、行、工具条、正文长出来),对 `FloatTrigger` 也穷举(只有 `Pane(leaf)` 是头上那颗 `🗀`,而且要求那个 leaf 在**当前 tab**)。第九种弹层不写明「有没有一顶头在它后面」就编译不过。
+- 它答的是 `seats::PaneLayer { seat, door }` 而不是一个 seat:**一件事一个值**,因为两个读者要的是同一句话的两种粒度——头上那一排按 `seat` 显形,而独 pane 的角落**只点亮举着东西的那一扇门**(两扇一起亮,是角落在说有两件事正在发生,而只有一件)。
+
+红门 `a_head_stays_lit_while_the_float_it_raised_is_open` 两半都要:命中与绘制这一半用 `HeadRun`/`pane_chrome` 真的量(浮窗开着时那顶头画不画得出 `✕`、角落哪一扇门带着自己的底),推导那一半读源码——**因为报告里坏掉的正是「喂进谓词的那个事实」,谓词本身当时是对的**,一个只测谓词的门在坏掉的版本上会全绿。
 
 ## 12. 发布工程
 

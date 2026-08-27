@@ -218,6 +218,29 @@ pub const OPTICAL_STROKE_BAND_LOGICAL_PX: [f32; 2] = [0.95, 1.15];
 #[cfg(test)]
 pub const OPTICAL_PICTURE_SPREAD: f32 = 0.20;
 
+/// **The order a pane's own two doors stand in, left to right** (user ruling
+/// 2026-08-27 — 「统一为 ⌄ 在文件夹左边」).
+///
+/// A pane offers the same two doors on two surfaces: a split pane wears them in
+/// its head, and a lone pane — which has no head — wears them floating in its
+/// top-right corner (`docs/DESIGN.md` §7.1.6i). They were built eight days
+/// apart and they came out in opposite orders: `⌄ 🗀 ✕` in the head, `🗀 ⌄` in
+/// the corner. Two orders is one door too many to learn, and the ruling picks
+/// the head's.
+///
+/// **It is a row of this table rather than a coordinate in two files**, which
+/// is the whole point of the ruling as written (「槽位表里写成一条规矩而不是两
+/// 处硬编码」). The corner lays its run out by walking this array, and the gate
+/// `both_of_a_panes_doors_stand_in_one_order` walks the *drawn* boxes on both
+/// surfaces and holds them to it — so an order changed here changes both
+/// surfaces, and an order changed in one surface's geometry by hand goes red.
+///
+/// **The `✕` is deliberately not on it.** It is the head's own third control
+/// and the corner has none: the corner is a lone pane's, and a lone pane
+/// cannot be closed without closing its tab. What this array states is the
+/// order of the doors the two surfaces *share*.
+pub const PANE_DOOR_RUN: [ActionIcon; 2] = [ActionIcon::OpenPaneMenu, ActionIcon::OpenFilesPane];
+
 // ── the verb table ─────────────────────────────────────────────────────────
 
 /// **One verb, one shape** — the chrome's whole vocabulary of actions and the
@@ -644,6 +667,106 @@ impl ActionIcon {
             Self::PlayVideo => "PlayVideo",
             Self::GoToPlayingTab => "GoToPlayingTab",
         }
+    }
+
+    /// **Where this door stands in a pane's run** — `0` is the leftmost, and
+    /// `None` for a verb that is not one of the two ([`PANE_DOOR_RUN`]).
+    ///
+    /// A geometry asks this instead of writing the order down a second time, so
+    /// there is one place the run can be re-ordered and both surfaces move.
+    #[must_use]
+    pub fn place_in_a_panes_door_run(self) -> Option<usize> {
+        PANE_DOOR_RUN.iter().position(|door| *door == self)
+    }
+
+    /// **The words a tip puts on this verb where a head or a rail draws it as a
+    /// mark with no word beside it** (user ruling 2026-08-27 — 「头/轨上每一枚可
+    /// 点的东西都必须有 tooltip,且由注册表守着」).
+    ///
+    /// The registry's third column. A verb table stopped a verb wearing two
+    /// shapes; this stops one wearing *no words*, which is the failure the
+    /// report found: a preview head draws six controls and three of them had a
+    /// tip, because a tip was got by somebody remembering to write another loop
+    /// in the window's tip pass. Now the run is walked out of the geometry and
+    /// the words are looked up here, so a control that is drawn is a control
+    /// that speaks.
+    ///
+    /// **One entry, or two for a control that changes.** A padlock says the
+    /// action or the way out of it, a reload becomes a stop, a source flip names
+    /// the face it would turn to — the button changes, so a single string would
+    /// be the head describing what it was a press ago. Which of the two a frame
+    /// shows is the window's to choose (`Runtime::preview_head_tool_tip`); what
+    /// is here is the whole of what the control can say.
+    ///
+    /// **`None` outside that scope, and the scope is the ruling's.** A menu row
+    /// spells its verb out in words beside the mark, so a tip would be the row
+    /// read aloud; the caption's and the strip's controls are the window's
+    /// furniture rather than a pane's and register from their own passes; and
+    /// an object mark is not an act at all. The gate
+    /// `every_control_a_head_or_a_rail_draws_says_what_it_does` walks the runs
+    /// themselves — [`crate::seats::PreviewHeadTool::ALL`], [`PANE_DOOR_RUN`]
+    /// and the rest of the two heads' runs — so a seventh control added to a
+    /// head lands on the `None` below and fails the build.
+    #[must_use]
+    pub fn bare_tip(self) -> Option<&'static [crate::i18n::Text]> {
+        use crate::i18n::Text;
+        Some(match self {
+            // ── a pane's own run, in its head and in its corner ───────────
+            //
+            // "Split and more", and both halves are doing work. `Split` because
+            // that is what the button in this slot did yesterday and what four
+            // of the six entries behind it still do — a tip that named the
+            // *menu* ("Pane options") would be telling you the shape of the
+            // thing rather than what it is for. `and more` because the sixth
+            // entry closes the pane, and a tip that promised only splitting
+            // would be a tip that hid the destructive verb behind it. (User
+            // ruling 2026-08-16.)
+            Self::OpenPaneMenu => &[Text::PaneChevronTip],
+            // The tab's folder's own words, because it is the same action.
+            Self::OpenFilesPane => &[Text::FloatTriggerTip],
+            // One sentence for both `↗`s that leave for a window — a files
+            // column's and a preview's. They already share a drawing.
+            Self::FloatFilesPane | Self::FloatPreview => &[Text::HeadPopOut],
+            // **What a `×` closes is the part the idiom cannot say.** A cross is
+            // an idiom this window has taught on a tab, on a card and on a
+            // toast; which of those this one is remains a guess until something
+            // says "pane".
+            Self::ClosePane => &[Text::ClosePane],
+
+            // ── a preview head's own run ──────────────────────────────────
+            //
+            // The chord's own row: a button and a key onto one room are one
+            // name (`ShortcutWebDevTools`' precedent, one line down).
+            Self::SavePreview => &[Text::ShortcutSavePreview],
+            // The two faces of one flip. Which one is showing is a fact about
+            // the buffer, and the rail's own pass and the head's both ask it.
+            Self::ViewSource | Self::ViewRendered => {
+                &[Text::PreviewFlipToSource, Text::PreviewFlipToRendered]
+            }
+            // **Two sentences on one sign, and they are different stoppings.**
+            // The same solid square ends a page that is loading and a recording
+            // that is playing; a reader who has met it one band down is entitled
+            // to be told which is which.
+            Self::StopNavigating => &[Text::PreviewWebStop, Text::PreviewStopPlaying],
+            Self::OpenDevTools => &[Text::ShortcutWebDevTools],
+            Self::LockPreview => &[Text::PreviewLock, Text::PreviewUnlock],
+
+            // ── a preview's rail ─────────────────────────────────────────
+            Self::NavigateBack => &[Text::PreviewWebBack],
+            Self::NavigateForward => &[Text::PreviewWebForward],
+            // One control, two states — see `StopNavigating` above for the
+            // second of them.
+            Self::ReloadPage => &[Text::PreviewWebReload, Text::PreviewWebStop],
+            Self::OpenInBrowser => &[Text::PreviewOpenInBrowser],
+            Self::CopyAddress => &[Text::PreviewCopyAddress],
+
+            // **Every other verb, and the wildcard is safe because the gate
+            // walks the runs and not this list.** A control added to a head
+            // whose verb is not above falls here, answers `None`, and fails
+            // `every_control_a_head_or_a_rail_draws_says_what_it_does` — which
+            // is the whole mechanism the ruling asked for.
+            _ => return None,
+        })
     }
 
     /// **The shape this verb wears.** The whole table, in one match.
@@ -1424,14 +1547,35 @@ mod tests {
     /// What is here is the place a reader *does* compare: a short row of
     /// buttons on one head, met as a group.
     fn head_runs() -> Vec<(&'static str, Vec<ChromeMark>)> {
-        vec![(
-            "pane head",
-            vec![
-                ChromeMark::chevron(0.0),
-                ChromeMark::FolderOutline,
-                ChromeMark::PaneClose,
-            ],
-        )]
+        vec![
+            (
+                "pane head",
+                vec![
+                    ChromeMark::chevron(0.0),
+                    ChromeMark::FolderOutline,
+                    ChromeMark::PaneClose,
+                ],
+            ),
+            // **The preview head's run, added 2026-08-27** with the redraw of
+            // `#i-devtools` (user report — 「DevTools 图标太丑」). The ruling
+            // asked for the new drawing to carry 「与相邻 `</>`、↗ 同光学重量」,
+            // and this is that sentence as a measurement: the run is walked out
+            // of the geometry's own table, so the day a seventh tool joins the
+            // head it is weighed with the rest.
+            //
+            // The `■` is deliberately not in it. A solid is not a picture made
+            // of strokes — it is the fourth class of `FILLED_WITH_A_REASON`,
+            // and its ink box *is* its drawing — so measuring it against
+            // outlines is the mistake `NOT_A_CONTROL_SLOT` names one rule up.
+            (
+                "preview head",
+                crate::seats::PreviewHeadTool::ALL
+                    .into_iter()
+                    .filter(|tool| !matches!(tool, crate::seats::PreviewHeadTool::Stop))
+                    .map(|tool| tool.verb().mark())
+                    .collect(),
+            ),
+        ]
     }
 
     /// **A run of buttons on one head is one picture** —
@@ -2746,5 +2890,246 @@ mod tests {
                 "{mark:?} carries the house's margin",
             );
         }
+    }
+
+    /// **Every verb a head's or a rail's run can answer with**, walked out of
+    /// the runs themselves rather than listed by hand.
+    ///
+    /// The two heads' runs come from the geometry's own tables
+    /// ([`crate::seats::PreviewHeadTool::ALL`], [`PANE_DOOR_RUN`] and the two
+    /// trailing controls a head can carry beside them), and the rail's from the
+    /// four verbs `push_preview_rail` draws. That is what makes the gate below
+    /// mechanical: a seventh control on a preview head joins this list by being
+    /// added to the enum the paint walks, and fails the moment it has no words.
+    fn every_bare_verb_on_a_head_or_a_rail() -> Vec<(&'static str, ActionIcon)> {
+        let mut verbs: Vec<(&'static str, ActionIcon)> = Vec::new();
+        for tool in crate::seats::PreviewHeadTool::ALL {
+            verbs.push(("a preview head", tool.verb()));
+        }
+        for door in PANE_DOOR_RUN {
+            verbs.push(("a pane's own run", door));
+        }
+        // The two the door run leaves out: a files column carries `↗` where a
+        // terminal carries 🗀, and every head ends in the `×`.
+        verbs.push(("a files head", ActionIcon::FloatFilesPane));
+        verbs.push(("a pane head", ActionIcon::ClosePane));
+        for verb in [
+            ActionIcon::NavigateBack,
+            ActionIcon::NavigateForward,
+            ActionIcon::ReloadPage,
+            ActionIcon::OpenInBrowser,
+            ActionIcon::CopyAddress,
+            // The flip's other face. It is a drawing the rail really puts on a
+            // button — the head's own flip answers `ViewSource` at rest and
+            // turns into this one — so it is a bare mark like the rest and has
+            // to have words of its own.
+            ActionIcon::ViewRendered,
+        ] {
+            verbs.push(("a preview rail", verb));
+        }
+        verbs
+    }
+
+    /// RED — **every control a head or a rail draws says what it does** (user
+    /// ruling 2026-08-27: 「头/轨上每一枚可点的东西都必须有 tooltip,且由注册表
+    /// 守着」).
+    ///
+    /// RED EVIDENCE (2026-08-27, the user's own report). A video preview's head
+    /// draws six controls. Three of them registered a tip — the padlock through
+    /// an id of its own, the developer tools riding the page's navigation loop,
+    /// the source flip borrowing the rail's — and three did not, because a
+    /// control got words by somebody remembering to write a fourth loop in
+    /// `rebuild_tooltip_anchors`. On that build this gate reads:
+    ///
+    /// ```text
+    /// a preview head's SavePreview has no words
+    /// a preview head's StopNavigating has no words
+    /// a preview head's FloatPreview has no words
+    /// a pane's own run's OpenFilesPane has no words
+    /// a pane head's ClosePane has no words
+    /// a files head's FloatFilesPane has no words
+    /// ```
+    ///
+    /// — the two the user pointed at (*「一枚实心方块按钮…和 ↗」*) plus the four
+    /// the same argument covers.
+    ///
+    /// MUTATION: delete any arm of [`ActionIcon::bare_tip`] and its verb is
+    /// named here; add a seventh control to `PreviewHeadTool` without a `bare_tip`
+    /// arm and it is named here the day it is drawn.
+    #[test]
+    fn every_control_a_head_or_a_rail_draws_says_what_it_does() {
+        let mut mute = Vec::new();
+        for (surface, verb) in every_bare_verb_on_a_head_or_a_rail() {
+            let Some(words) = verb.bare_tip() else {
+                mute.push(format!("{surface}'s {} has no words", verb.name()));
+                continue;
+            };
+            if words.is_empty() {
+                mute.push(format!("{surface}'s {} has an empty list", verb.name()));
+                continue;
+            }
+            // A tip that is blank in one language is a tip that is missing in
+            // that language: `TooltipAnchors::push` drops an empty string, so
+            // the button would go silent for exactly the readers who need it.
+            for text in words {
+                for lang in crate::i18n::Lang::ALL {
+                    assert!(
+                        !text.in_lang(lang).trim().is_empty(),
+                        "{surface}'s {} says nothing in {lang:?}",
+                        verb.name(),
+                    );
+                }
+            }
+        }
+        assert!(
+            mute.is_empty(),
+            "controls with no tooltip:\n{}",
+            mute.join("\n")
+        );
+    }
+
+    /// RED — **the two tables cannot drift apart**: a verb has words here
+    /// exactly when a head or a rail draws it bare.
+    ///
+    /// The other half of the gate above. Without it the registry could be filled
+    /// in for verbs nothing draws bare — a menu row's, say, where the mark
+    /// already has its verb spelled out beside it — and the table would stop
+    /// meaning what its name says.
+    #[test]
+    fn a_verb_has_bare_words_exactly_where_a_head_or_a_rail_draws_it_bare() {
+        let bare: std::collections::BTreeSet<&'static str> = every_bare_verb_on_a_head_or_a_rail()
+            .into_iter()
+            .map(|(_, verb)| verb.name())
+            .collect();
+        for verb in ActionIcon::ALL {
+            assert_eq!(
+                verb.bare_tip().is_some(),
+                bare.contains(verb.name()),
+                "{} is {} a head-or-rail control but {} words",
+                verb.name(),
+                if bare.contains(verb.name()) {
+                    ""
+                } else {
+                    "not"
+                },
+                if verb.bare_tip().is_some() {
+                    "has"
+                } else {
+                    "has no"
+                },
+            );
+        }
+    }
+
+    /// RED — **the window really does walk the runs**, rather than keeping a
+    /// second list of buttons beside them.
+    ///
+    /// The gates above are about the *registry*. This is about the pass that
+    /// spends it: the report was not a missing string, it was a loop that named
+    /// three of six controls, and a registry with every word in it would not
+    /// have caught that. Read off the source for the reason every gate in this
+    /// house that watches a pass is: what went wrong was a *shape*, and the
+    /// shape is "one walk of the geometry" against "one loop per button".
+    ///
+    /// MUTATION: go back to a loop per button and the walk disappears from the
+    /// pass, which is exactly what this reads for.
+    #[test]
+    fn the_tip_pass_walks_the_runs_instead_of_listing_the_buttons() {
+        const SOURCE: &str = include_str!("main.rs");
+        let at = SOURCE
+            .find("fn rebuild_tooltip_anchors(")
+            .expect("the window has a tip pass");
+        let pass = &SOURCE[at..];
+        let end = pass.find("\n    fn ").unwrap_or(pass.len());
+        let pass = &pass[..end];
+        for walk in [
+            "seats::pane_control_boxes(",
+            "seats::preview_head_tool_boxes(",
+        ] {
+            assert!(
+                pass.contains(walk),
+                "the tip pass no longer walks `{walk}`, so a control can be \
+                 drawn without words again"
+            );
+        }
+    }
+
+    /// RED — **both of a pane's doors stand in one order** (user ruling
+    /// 2026-08-27: 「统一为 ⌄ 在文件夹左边」).
+    ///
+    /// RED EVIDENCE (2026-08-27, the user's report). A pane offers the same two
+    /// doors on two surfaces and they came out in opposite orders: `⌄ 🗀 ✕` in a
+    /// split pane's head, `🗀 ⌄` in a lone pane's corner. Measured at 1200×800
+    /// with one terminal seat, the corner read `folder.left 1146 < chev.left
+    /// 1168` while the head read `chev.left … < folder.left …` — the same two
+    /// buttons, the same two verbs, and nothing but the day they were written to
+    /// say which way round they go.
+    ///
+    /// It walks the **drawn boxes** on both surfaces and holds them to
+    /// [`PANE_DOOR_RUN`], which is the ruling's own sentence: 「槽位表里写成一条
+    /// 规矩而不是两处硬编码」.
+    ///
+    /// MUTATION: swap the two entries of `PANE_DOOR_RUN` and the head goes red
+    /// while the corner follows; put the corner's order back by hand and it goes
+    /// red on its own.
+    #[test]
+    fn both_of_a_panes_doors_stand_in_one_order() {
+        use bt_layout::SeatKind;
+
+        use crate::seats::{
+            PaneHeadGeometry, pane_ghost_folder_geometry, pane_ghost_geometry, pane_head_geometry,
+        };
+        assert_eq!(
+            PANE_DOOR_RUN,
+            [ActionIcon::OpenPaneMenu, ActionIcon::OpenFilesPane],
+            "the ruling puts the chevron on the left"
+        );
+        let place = |verb: ActionIcon| {
+            verb.place_in_a_panes_door_run()
+                .expect("both doors are in the run")
+        };
+        let rect = [0.0_f32, 0.0, 900.0, 600.0];
+
+        // The head, at every scale the chrome is drawn at.
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let head: PaneHeadGeometry = pane_head_geometry(rect, SeatKind::Terminal, scale);
+            let chevron = head.chevron.expect("a 900px head seats its `⌄`");
+            let folder = head.files.expect("and its folder");
+            assert!(
+                (chevron[0] < folder[0])
+                    == (place(ActionIcon::OpenPaneMenu) < place(ActionIcon::OpenFilesPane)),
+                "at {scale}× the head draws its two doors against the table's order"
+            );
+            // And the corner, which is the surface the ruling moved.
+            let chevron = pane_ghost_geometry(rect, scale).expect("a 900px pane seats its corner");
+            let folder = pane_ghost_folder_geometry(rect, scale).expect("and both doors");
+            assert!(
+                (chevron[0] < folder[0])
+                    == (place(ActionIcon::OpenPaneMenu) < place(ActionIcon::OpenFilesPane)),
+                "at {scale}× the corner draws its two doors against the table's order"
+            );
+            // One run and not two marks near each other: the inner edge is
+            // shared exactly, at every scale.
+            assert!(
+                (chevron[2] - folder[0]).abs() < f32::EPSILON,
+                "at {scale}× the corner's two doors do not share an edge"
+            );
+        }
+
+        // **And the chevron is still the door that stays.** A corner with room
+        // for one box keeps the one the 2026-08-20 ruling put there, in the
+        // corner it had to itself — which is the run's right end, not its left.
+        let narrow = [860.0_f32, 0.0, 900.0, 600.0];
+        assert!(
+            pane_ghost_folder_geometry(narrow, 1.0).is_none(),
+            "a corner with room for one door drops the folder"
+        );
+        let alone = pane_ghost_geometry(narrow, 1.0).expect("and keeps the chevron");
+        let both = pane_ghost_geometry([0.0, 0.0, 900.0, 600.0], 1.0).expect("a wide corner");
+        assert!(
+            alone[2] > both[2],
+            "the lone chevron stands in the corner itself, not in the box it \
+             takes when the folder is beside it"
+        );
     }
 }

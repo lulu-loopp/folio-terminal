@@ -331,7 +331,6 @@ pub enum WebNavTool {
     Back,
     Forward,
     Reload,
-    DevTools,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -382,25 +381,24 @@ pub enum TooltipAnchorId {
     /// are the same three marks there, and an idiom does not stop being one
     /// because it is in a float.
     GitGraphTool(crate::PreviewSurface, crate::git_graph::GraphTool),
-    /// A pane head's `⌄` — the one control in a pane head with no word beside
-    /// it and more than one thing behind it (user ruling, 2026-08-16).
+    /// **One control of a pane's own run** — in its head, or in a lone pane's
+    /// corner, which are the same run in two layouts.
     ///
-    /// The head's other two controls do not register: a folder and a `×` are
-    /// idioms this product has taught elsewhere, while a chevron says only "there
-    /// is a list here" and never what is on it. It is exactly the case a tip is
-    /// for.
-    PaneChevron(bt_layout::SeatId),
-    /// The 🗀 beside a **lone** pane's corner ghost (user proposal, Claude 认可
-    /// 2026-08-25) — "Peek files here", [`Self::TabFiles`]'s own words, because
-    /// it is that action again.
+    /// It carries the verb ([`crate::icons::ActionIcon`]) rather than being one
+    /// variant per button, so a run walked out of the geometry
+    /// (`seats::pane_head_control_boxes`) can be registered without this enum
+    /// having to have grown an arm for each member first — which is exactly how
+    /// three preview-head controls came to have no words at all.
     ///
-    /// **Only the corner's**, and the clause above is why: the head's folder
-    /// still does not register, because it stands in a run inside a head that is
-    /// itself saying what the pane is. This one floats bare over the terminal's
-    /// output with nothing around it — which is the case the chevron beside it
-    /// registers for, and the sentence about idioms taught elsewhere does not
-    /// reach a mark with no surface under it.
-    PaneFiles(bt_layout::SeatId),
+    /// **Every member of the run registers since 2026-08-27** (user ruling —
+    /// 「头/轨上每一枚可点的东西都必须有 tooltip」). It was the `⌄` alone (user
+    /// ruling 2026-08-16) plus the corner's 🗀 (2026-08-25), under an argument
+    /// that a folder and a `×` are idioms this product has taught elsewhere. The
+    /// ruling overturns the argument rather than narrowing it: an idiom tells
+    /// you the *class* of thing a button does, and what a head's `×` closes —
+    /// the pane, not the tab, not the document — is exactly the part an idiom
+    /// cannot say.
+    PaneControl(bt_layout::SeatId, crate::icons::ActionIcon),
     /// A preview head's `↗` — the hand-off arrow a page's seat wears (user
     /// ruling 2026-08-20).
     ///
@@ -418,28 +416,35 @@ pub enum TooltipAnchorId {
     /// meaning something else. It is a padlock now and it registers too — see
     /// [`Self::PreviewLock`].)
     PreviewBrowser(bt_layout::SeatId),
-    /// A preview head's padlock — "do not reuse this pane" (§7.7 ⑧, Claude 定
-    /// 2026-08-23).
+    /// **One control of a preview head's own run** (user ruling 2026-08-27 —
+    /// 「头/轨上每一枚可点的东西都必须有 tooltip,且由注册表守着」).
     ///
-    /// **The second preview tool that registers, and the ruling is why.** The
-    /// exemption above — a mark this product has taught elsewhere needs no tip —
-    /// covered this control only while it was drawn as a pin, and it covered it
-    /// wrongly: what the pin taught is a tab's and a row's "this one stays in
-    /// the list", which is not what this button does. Given its own glyph it is
-    /// the one mark in that head with nothing behind it, so it is exactly the
-    /// case a tip is for.
+    /// One id for all six, carrying [`crate::seats::PreviewHeadTool`], and that
+    /// is the whole of the fix. Three of them registered before this ruling —
+    /// the padlock had an id of its own, the developer tools rode the page's
+    /// navigation enum, the source flip borrowed the rail's — and three did
+    /// not, because a control gets a tip here by somebody remembering to write
+    /// a fourth loop. The report was the two of those three a video's head
+    /// draws: *「一枚实心方块按钮(在 🔍 左边)和 ↗ 悬停无 tooltip」*. A run
+    /// walked out of the geometry cannot have a member nobody remembered.
     ///
-    /// The tip changes with the state, on [`Self::PreviewWebNav`]'s reload/stop
-    /// precedent: the button changes, so a single word for both would be the
-    /// head describing what it was a press ago.
-    PreviewLock(bt_layout::SeatId),
-    /// **A page's three navigation buttons and its developer tools** (§7.7 ②,
-    /// W2 slice ④), and every one of them registers where the hand-off arrow
-    /// above says why one has to: a `<` and a `>` in a 22px box are the
-    /// submenu's own arrow turned, a circular arrow is this window's refresh,
-    /// and `</>` is what markdown's `Edit source` wears — four glyphs a reader
-    /// has met here meaning something else. The reload's tip changes with the
-    /// button, because the button changes into a stop.
+    /// The words are the window's, because two of the six change with the
+    /// state: the padlock says the action or the way out of it, and the flip
+    /// says which face it would turn to. That is
+    /// [`Self::PreviewWebNav`]'s reload/stop precedent — the button changes, so
+    /// a single word for both would be the head describing what it was a press
+    /// ago.
+    PreviewHeadTool(bt_layout::SeatId, crate::seats::PreviewHeadTool),
+    /// **A page's three navigation buttons** (§7.7 ②, W2 slice ④), and every one
+    /// of them registers where the hand-off arrow above says why one has to: a
+    /// `<` and a `>` in a 22px box are the submenu's own arrow turned and a
+    /// circular arrow is this window's refresh — glyphs a reader has met here
+    /// meaning something else. The reload's tip changes with the button, because
+    /// the button changes into a stop.
+    ///
+    /// The developer tools were a fourth member of this enum until 2026-08-27.
+    /// They are drawn on the *head* rather than on this row and now register
+    /// with the rest of that run — see [`Self::PreviewHeadTool`].
     PreviewWebNav(bt_layout::SeatId, WebNavTool),
     /// **One control of a preview's address or breadcrumb row** (user ruling
     /// 2026-08-25 — 「预览头与地址行/面包屑行的新控件全部挂 tooltip」).
