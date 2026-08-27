@@ -322,6 +322,43 @@ pub enum ChromeMark {
     /// resolves into a smudge beside the cone; one arc keeps the silhouette a
     /// reader recognises and keeps the pen the house's.
     Speaker,
+    /// `#i-pause` — **the play button's other face** (user ruling 2026-08-27;
+    /// `docs/DESIGN.md` §7.23 ⑪).
+    ///
+    /// **Filled, for [`Self::Play`]'s reason and not for a reason of its own.**
+    /// A control that swaps between two faces has to swap between two faces of
+    /// the same weight: an outlined pause beside a solid triangle would read as
+    /// the button having gone quiet as well as the video, and the eye would
+    /// take the change of weight for the change of state instead of taking the
+    /// shape for it. So the pair is one class — P2's fourth, a sign whose whole
+    /// meaning is its solid — and the two bars are cut on the same ink band the
+    /// triangle is (`2.9 – 13.1` down), so the two rasters have the same height
+    /// and the button does not breathe as it is pressed.
+    ///
+    /// **Narrower than the triangle across, and that is the drawing being
+    /// honest rather than the drawing being small.** The triangle spans `8.1`
+    /// units and carries about `41` units of ink; two `2.2`-unit bars span
+    /// `6.2` and carry about `45`. Matching the *spans* would have made the
+    /// pause the heavier mark by half again, and a pair whose two faces are not
+    /// the same weight is the defect the paragraph above is about.
+    Pause,
+    /// `#i-speaker-mute` — **[`Self::Speaker`] with the sound taken out of it**
+    /// (user ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑪).
+    ///
+    /// **The cone is the same path, character for character.** A mute mark that
+    /// redrew the cone would be a second speaker, and a control that toggles
+    /// between two speakers has to say which is which by something other than
+    /// the cone — which is exactly what the wave and the cross are for. Copying
+    /// the path is not duplication here: the two bodies stand one after the
+    /// other on the same sheet, so a reader comparing them sees the one
+    /// difference immediately, and a re-cut cone would have to be re-cut twice.
+    ///
+    /// **A cross where the wave was**, at the house's pen with the sheet's own
+    /// round cap, in the wave's own footprint (`11.4 – 14.6` across,
+    /// `6.1 – 9.9` down). Not a slash across the whole mark: a bar drawn over
+    /// the cone cuts the cone's silhouette in half, and at a control bar's
+    /// sixteen pixels what survives is neither a speaker nor a slash.
+    SpeakerMuted,
     /// `#i-tri` — the disclosure triangle at some angle through its turn (C33).
     ///
     /// An angle and not a boolean for the reason [`Self::Chevron`] gives at
@@ -1211,7 +1248,9 @@ impl ChromeMark {
             Self::FolderOpenOutline => "i-folder-open-line",
             Self::MouseWheel => "i-wheel",
             Self::Play => "i-play",
+            Self::Pause => "i-pause",
             Self::Speaker => "i-speaker",
+            Self::SpeakerMuted => "i-speaker-mute",
             // One id for every angle, on `Self::Chevron`'s precedent above.
             Self::TreeDisclosure { .. } => "i-tri",
             Self::Panel => "i-panel",
@@ -2606,6 +2645,39 @@ impl ChromeMark {
         }
     }
 
+    /// **This mark's artwork, as the sheet holds it** — its `viewBox` and its
+    /// body, both verbatim.
+    ///
+    /// The one door out of [`SYMBOL_BODY`] for a surface that is not this
+    /// module's rasterizer, and it exists because there is exactly one such
+    /// surface: the player's shell page, which is an HTML document this window
+    /// writes and hands to an engine (`crate::player`). A page cannot be given
+    /// a texture, so it has to be given the drawing — and the whole of the
+    /// discipline this module is here for is that it is given **this** drawing
+    /// and not a second one somebody redrew in a `<style>` block.
+    ///
+    /// `currentColor` is left standing. Every consumer of a raster gets a hex
+    /// substituted for it because a texture has no cascade; a document has one,
+    /// so the caller sets `color` and the mark takes the ink of whatever it is
+    /// drawn in, which is what the attribute means everywhere else in the
+    /// world.
+    ///
+    /// **The resting artwork**, which is all any caller of this has ever wanted
+    /// and is the only thing it can honestly promise: the turning families
+    /// ([`Self::Chevron`], [`Self::Arrow`], [`Self::TreeDisclosure`]) carry
+    /// their angle in a transform the rasterizer writes, not in their bodies,
+    /// so what comes back for one of those is the glyph at rest.
+    ///
+    /// `None` for the generated family, which has no body to hand over —
+    /// [`Self::is_quoted_symbol`].
+    #[must_use]
+    pub fn artwork(self) -> Option<(&'static str, &'static str)> {
+        self.is_quoted_symbol().then(|| {
+            let index = symbol_index(self);
+            (SYMBOL_VIEW_BOX[index], SYMBOL_BODY[index])
+        })
+    }
+
     /// **The pen this mark is struck with**, in its own `viewBox`'s units — the
     /// number a reader would take off the drawing, before any surface has said
     /// how big to draw it.
@@ -2893,6 +2965,11 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::MouseWheel => 62,
         ChromeMark::Play => 65,
         ChromeMark::Speaker => 66,
+        // The player's control bar, appended for the reason the folder pair
+        // above was: an index is a position on the sheet, and the sheet only
+        // ever grows at its end.
+        ChromeMark::Pause => 67,
+        ChromeMark::SpeakerMuted => 68,
         ChromeMark::TreeDisclosure { .. } => 16,
         ChromeMark::Panel => 8,
         ChromeMark::Chevron { .. } => 9,
@@ -3006,7 +3083,7 @@ pub fn preview_row_mark(is_page: bool, favicon: Option<crate::favicon::FaviconId
 
 const PROFILE_CHASSIS_VIEW_BOX: &str = "0 0 16 16";
 
-const SYMBOL_VIEW_BOX: [&str; 67] = [
+const SYMBOL_VIEW_BOX: [&str; 69] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -3145,11 +3222,17 @@ const SYMBOL_VIEW_BOX: [&str; 67] = [
     "0 0 16 16", // #i-folder-open-line
     "0 0 16 16", // #i-play
     "0 0 16 16", // #i-speaker
+    // The player's own pair. The house sixteen, and not because everything is:
+    // `#i-pause` is `#i-play`'s other face and `#i-speaker-mute` is
+    // `#i-speaker`'s, and a face that swapped boxes with its twin would change
+    // size as it was pressed.
+    "0 0 16 16", // #i-pause
+    "0 0 16 16", // #i-speaker-mute
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 67] = [
+const SYMBOL_BODY: [&str; 69] = [
     // #i-gear. **Adapted from Google's Material Design `settings` icon** at 24dp
     // (`src/action/settings/materialicons/24px.svg` in
     // `google/material-design-icons`) — the one mark in this table somebody else
@@ -3782,6 +3865,37 @@ const SYMBOL_BODY: [&str; 67] = [
         r#"<path d="M9.2 3.3L5.9 6.1H3.3v3.8h2.6l3.3 2.8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
         r#"<path d="M11.7 5.9a3 3 0 0 1 0 4.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
     ),
+    // `#i-pause` — two solids on the triangle's own ink band.
+    //
+    // `2.9 – 13.1` down, exactly `#i-play`'s run, so the pair does not change
+    // height as the button is pressed; `4.9 – 7.1` and `8.9 – 11.1` across,
+    // which is two `2.2`-unit bars either side of the grid's eight with a
+    // `1.8`-unit gap. Written as two paths rather than one so that each bar is
+    // its own closed silhouette — a single subpathed `d` would leave the gap to
+    // a fill rule, and a fill rule is a thing a renderer can disagree about.
+    //
+    // **Fill and nothing else**, on `#i-play`'s note verbatim: a solid that
+    // carried a stroke as well would be a mark with a pen, and a pen that is
+    // not the house's `1.2` is a mark the optical band would have to be told to
+    // skip.
+    concat!(
+        r#"<path d="M4.9 2.9h2.2v10.2H4.9z" fill="currentColor"/>"#,
+        r#"<path d="M8.9 2.9h2.2v10.2H8.9z" fill="currentColor"/>"#,
+    ),
+    // `#i-speaker-mute` — `#i-speaker`'s cone, character for character, and a
+    // cross standing where its wave stood.
+    //
+    // The cone is copied and not re-cut: the two marks are one control's two
+    // faces, so the one thing that may differ between them is the thing that
+    // says which face it is. The cross takes the sheet's round cap, as every
+    // open path here does, and lands inside the wave's own footprint
+    // (`11.4 – 14.6` across, `6.1 – 9.9` down) — half a pen clear of the box on
+    // the right, which is the same clearance the wave has.
+    concat!(
+        r#"<path d="M9.2 3.3L5.9 6.1H3.3v3.8h2.6l3.3 2.8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+        r#"<path d="M11.4 6.1l3.2 3.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+        r#"<path d="M14.6 6.1l-3.2 3.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+    ),
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the
@@ -4399,6 +4513,20 @@ mod tests {
             // with them or not at all.
             (ChromeMark::Lock { engaged: false }, 13.0),
             (ChromeMark::Lock { engaged: true }, 13.0),
+            // The player's control bar, at the sixteen its buttons are drawn
+            // in. They are named here rather than picked up off
+            // `ActionIcon::ALL` because no window surface wears them: they are
+            // handed to a page as SVG text ([`ChromeMark::artwork`]). This pin
+            // is therefore the only place their coordinates are ever put
+            // through a renderer, which is exactly why it is worth having — a
+            // body with a typo in it would otherwise reach the glass before it
+            // reached a test.
+            (ChromeMark::Pause, 16.0),
+            (ChromeMark::SpeakerMuted, 16.0),
+            // And their twins at the same size, so a face and its other face
+            // are measured against one another and not each against nothing.
+            (ChromeMark::Play, 16.0),
+            (ChromeMark::Speaker, 16.0),
         ];
         for (mark, size) in cases.into_iter().chain(registry) {
             for scale in [1.0_f32, 1.5, 2.0] {
@@ -6338,6 +6466,12 @@ mod tests {
             ChromeMark::DockRight,
             ChromeMark::ResizeGrip,
             ChromeMark::GitMergeCurve,
+            // The player's two second faces. No verb in the window wears
+            // either — they are drawn inside the shell page — so without these
+            // two lines the sheet a person looks at would show the play button
+            // and the speaker and neither of the things they turn into.
+            ChromeMark::Pause,
+            ChromeMark::SpeakerMuted,
         ] {
             if !marks.contains(&extra) {
                 marks.push(extra);
