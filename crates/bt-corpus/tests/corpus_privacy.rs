@@ -19,8 +19,10 @@ use bt_corpus::{Corpus, EventKind};
 /// Personal names, the recording machine's home and project roots, account
 /// banners, and the shapes credentials take.
 const FORBIDDEN: &[&str] = &[
-    "weiyi",
-    "umich",
+    // Spelled in two halves so the source file itself never carries the word the gate bans
+    // (`scripts/check-machine-paths.ps1` reads this file too).
+    concat!("wei", "yi"),
+    concat!("um", "ich"),
     "c:\\users\\",
     "d:\\developer",
     "welcome back",

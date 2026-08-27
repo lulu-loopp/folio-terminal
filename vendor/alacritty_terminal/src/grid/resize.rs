@@ -1,3 +1,9 @@
+// MODIFIED BY THE FOLIO CONTRIBUTORS — not the upstream
+// alacritty_terminal 0.26.0 file of the same name.
+// Change: reformatted to this repository's rustfmt settings, and nothing else.
+// Index: vendor/alacritty_terminal/CHANGES-FOLIO.md
+// Notice given under section 4(b) of the Apache License, Version 2.0.
+
 //! Grid resize and reflow.
 
 use std::cmp::{Ordering, max, min};

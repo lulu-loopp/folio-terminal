@@ -5755,7 +5755,7 @@
             <div class="desc">The executable a new tab of this profile starts</div>
           </div>
           <div class="field-pair">
-            <input class="field mono" value="C:\Users\Weiyi\.local\bin\claude.exe" aria-label="Program">
+            <input class="field mono" value="C:\Users\Alice\.local\bin\claude.exe" aria-label="Program">
             <button class="btn">Browse…</button>
           </div>
         </div>
@@ -6407,7 +6407,7 @@
   /* This is a Windows terminal, so native shells stand in Windows paths — drive
      letter, backslashes. (A WSL session legitimately shows a Unix path; that stays
      Unix on purpose.) */
-  const HOME = "C:\\Users\\Weiyi";
+  const HOME = "C:\\Users\\Alice";
   /* what to show when there is room for one word: the folder you are in */
   const cwdLeaf = (s) => {
     const p = (s.cwd || HOME).replace(/[\\/]+$/, "");
@@ -7164,15 +7164,15 @@
       /* a folder this window would have found anyway (a shell stands in it): it
          is LIFTED into PINNED wearing every badge it earned, never copied — one
          folder, one row */
-      { kind: "folder", target: "C:\\Users\\Weiyi\\Developer\\folio-site" },
+      { kind: "folder", target: "C:\\Users\\Alice\\Developer\\folio-site" },
       /* and one this window has no other reason to name: the case the section
          exists for */
-      { kind: "folder", target: "C:\\Users\\Weiyi\\Documents\\Folio notes" },
+      { kind: "folder", target: "C:\\Users\\Alice\\Documents\\Folio notes" },
       /* a pinned file with NO buffer behind it (`pool: None` in the product):
          pressing it OPENS the file rather than switching to a buffer — which is
          exactly the first frame after a restart, when the pool is empty and the
          list is not */
-      { kind: "file", target: "C:\\Users\\Weiyi\\Developer\\BetterTerminal\\docs\\DESIGN.md" },
+      { kind: "file", target: "C:\\Users\\Alice\\Developer\\folio-terminal\\docs\\DESIGN.md" },
       /* AND THE THIRD KIND, WHICH THE NOTE ABOVE SAID WOULD DRAW NOTHING UNTIL
          W2 — it draws now (W1). A pinned URL with no buffer behind it is the
          file case one class over: the switcher lists it, pressing it navigates
@@ -7197,13 +7197,13 @@
   /* two claudes in two repos, and a shell in one of them: the case the strip has
      to survive, and the case a profile name alone cannot */
   state.tabs = [
-    mkWs(mkSession("PowerShell", mark("pwsh"), powershell(), false, "C:\\Users\\Weiyi\\Developer\\BetterTerminal", powershell)),
+    mkWs(mkSession("PowerShell", mark("pwsh"), powershell(), false, "C:\\Users\\Alice\\Developer\\folio-terminal", powershell)),
     /* the claude tab carries a progTitle because that is the real case P1-12 was
        written for: Claude Code names its own terminal, and with three claudes in
        one repo the title is the only thing that differs. Restoring it drops the
        progTitle (the program has not spoken yet) but keeps a manual name — which
        is the priority chain doing exactly what it promises. */
-    mkWs(mkSession("claude", mark("claude"), claude(), true, "C:\\Users\\Weiyi\\Developer\\BetterTerminal", claude, "Adam 公式推导")),
+    mkWs(mkSession("claude", mark("claude"), claude(), true, "C:\\Users\\Alice\\Developer\\folio-terminal", claude, "Adam 公式推导")),
     mkWs(mkSession("wsl", mark("ubuntu"), wsl(), false, "~/src/bt-corpus", wsl)),
   ];
   /* The first tab is the PowerShell one, and it is the pane the integration
@@ -9159,7 +9159,7 @@
   /* demo repo state per root; the native line reads the real repo (gitoxide or
      `git status --porcelain` on a debounce) — the mock defines the SURFACE */
   const GIT_DEMO = {
-    "C:\\Users\\Weiyi\\Developer\\BetterTerminal": {
+    "C:\\Users\\Alice\\Developer\\folio-terminal": {
       branch: "main", ahead: 2, behind: 0,
       branches: [["main", "12m"], ["feat/latex-blocks", "2h"], ["fix/white-collapse", "1d"], ["spike/mathjax", "6d"]],
       staged: [["A", "crates/bt-math/src/lib.rs"]],
@@ -9184,7 +9184,7 @@
      open/close curves (drawn top→bottom), refs worn as chips. The native line
      computes lanes from the real DAG; the mock hand-authors a believable one. */
   const GIT_GRAPH = {
-    "C:\\Users\\Weiyi\\Developer\\BetterTerminal": [
+    "C:\\Users\\Alice\\Developer\\folio-terminal": [
       { h: "d1900b6", m: "ui: command palette - intent navigation", t: "12m", d: 0, thr: [], refs: [["main", 0], ["HEAD", 0]], files: ["design/ui-mockup.html", "docs/DESIGN.md"] },
       { h: "7147911", m: "m1.8f-r2: frame content digest (merge)", t: "1h", d: 0, thr: [], open: [1], files: ["crates/bt-app/src/main.rs", "crates/bt-render/src/lib.rs"] },
       { h: "a41f2c9", m: "digest: fnv over row/column/text", t: "1h", d: 1, thr: [0], refs: [["fix/white-collapse", 1]], files: ["crates/bt-render/src/lib.rs"] },
@@ -15216,7 +15216,7 @@
     /* tab 2: a files column down the left, the blocked claude, and a test run
        that came back non-zero — three content classes are two of them */
     const failed = mkSession("PowerShell", mark("pwsh"), powershell(), false,
-                             "C:\\Users\\Weiyi\\Developer\\BetterTerminal", powershell);
+                             "C:\\Users\\Alice\\Developer\\folio-terminal", powershell);
     failed.lines = failed.lines.concat([
       `<div><span class="prompt">PS&gt;</span> cargo test -p bt-viewport</div>`,
       `<div class="dim">running 214 tests</div>`,
@@ -15224,28 +15224,28 @@
       `<div style="color:#e5534b">error: test failed, to rerun pass \`-p bt-viewport\`</div>`]);
     failed.unread = true; failed.lastExit = "fail";
     splitLeafIn(t2, leavesOf(t2.tree)[0].id, "right", mkLeaf(failed.uid));
-    splitRootOf(t2, "left", mkFilesLeaf("C:\\Users\\Weiyi\\Developer\\BetterTerminal"));
+    splitRootOf(t2, "left", mkFilesLeaf("C:\\Users\\Alice\\Developer\\folio-terminal"));
     /* tab 3: the downloading wsl session plus the preview pane its README opens
        into — §7.1.3's per-tab singleton, drawn inside this tab's own card */
     splitLeafIn(t3, leavesOf(t3.tree)[0].id, "bottom",
                 mkPreviewLeaf(poolBuffer(t3, "/README.md", "README.md")));
     /* two more tabs, so the column is longer than the rail is tall */
     const node = mkSession("PowerShell", mark("pwsh"), powershell(), true,
-                           "C:\\Users\\Weiyi\\Developer\\folio-site", powershell, "npm run dev");
+                           "C:\\Users\\Alice\\Developer\\folio-site", powershell, "npm run dev");
     const agent = mkSession("claude", mark("claude"), claude(), true,
-                            "C:\\Users\\Weiyi\\Developer\\bt-corpus", claude, "corpus triage");
+                            "C:\\Users\\Alice\\Developer\\bt-corpus", claude, "corpus triage");
     const t4 = mkWs(node);
     splitLeafIn(t4, leavesOf(t4.tree)[0].id, "bottom", mkLeaf(agent.uid));
     state.tabs.push(t4);
     /* THIS SHELL STANDS IN THE PARENT OF THE FILES COLUMN'S ROOT, on purpose:
        it is the square the composable `RootNotes` were written for. Tab 2's tree
-       is rooted on `…\Developer\BetterTerminal`, so `…\Developer` is at once
+       is rooted on `…\Developer\folio-terminal`, so `…\Developer` is at once
        "a terminal is here" and "parent" — the row that used to enter the list
        under the first of those and quietly lose the second. Open that column's
        ⌄ and the row wears both badges, in the fixed most-permanent → most-local
        order, at the position its FIRST reason gave it. */
     const py = mkSession("PowerShell", mark("pwsh"), powershell(), false,
-                         "C:\\Users\\Weiyi\\Developer", powershell);
+                         "C:\\Users\\Alice\\Developer", powershell);
     state.tabs.push(mkWs(py));
 
     /* ── THE TWO TABS WITH NO SHELL IN THEM (§7.1.6h, native 2026-08-19) ──
@@ -15266,8 +15266,8 @@
            and on its focus card alike.
        Neither can be renamed by hand (`Seed::can_be_named` answers `false` for
        both): the identity is a path on the disk, not a word somebody chose. */
-    state.tabs.push(wsFromLeaf(mkFilesLeaf("C:\\Users\\Weiyi\\Developer\\folio-site")));
-    const paperBuf = mkPreviewState("C:\\Users\\Weiyi\\Developer\\bt-corpus\\reflow.md", "reflow.md");
+    state.tabs.push(wsFromLeaf(mkFilesLeaf("C:\\Users\\Alice\\Developer\\folio-site")));
+    const paperBuf = mkPreviewState("C:\\Users\\Alice\\Developer\\bt-corpus\\reflow.md", "reflow.md");
     const paper = wsFromLeaf(mkPreviewLeaf(paperBuf));
     paper.pvPool = [paperBuf];   /* §7.1.3's per-tab pool: this tab IS the singleton */
     state.tabs.push(paper);
@@ -15308,10 +15308,10 @@
                               webFavicon("https://doc.rust-lang.org/std/"));
     const docsBuf = mkWebState("https://docs.rs/wgpu/latest/wgpu/", "wgpu - Rust",
                                webFavicon("https://docs.rs/wgpu/latest/wgpu/"));
-    const notesBuf = mkPreviewState("C:\\Users\\Weiyi\\Developer\\folio-site\\README.md", "README.md");
+    const notesBuf = mkPreviewState("C:\\Users\\Alice\\Developer\\folio-site\\README.md", "README.md");
     const site = wsFromLeaf(mkPreviewLeaf(devBuf));
     site.pvPool = [devBuf, stdBuf, docsBuf, notesBuf];
-    splitRootOf(site, "left", mkFilesLeaf("C:\\Users\\Weiyi\\Developer\\folio-site"));
+    splitRootOf(site, "left", mkFilesLeaf("C:\\Users\\Alice\\Developer\\folio-site"));
     state.tabs.push(site);
 
     /* ── ONE CLOSED WINDOW, WAITING IN RECENT (§2.7, multiwindow slice D) ──
@@ -15325,7 +15325,7 @@
     state.recent.unshift({
       window: { seeds: [
         { seed: seedOf(node) },
-        { files: { root: "C:\\Users\\Weiyi\\Developer\\folio-site" } },
+        { files: { root: "C:\\Users\\Alice\\Developer\\folio-site" } },
         { seed: seedOf(agent) },
       ] },
       at: Date.now() - 41 * 60000,

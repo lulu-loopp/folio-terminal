@@ -25,6 +25,25 @@
 !docs/plans/web-preview/preview-leaf-evidence/*.png
 dist/
 .tmp-repaint-capture/
-.claude/worktrees/
 local-images/
 !docs/spikes/artifacts/win-landing/*.png
+
+# Agent state. `.claude/worktrees/` holds real git worktrees: ignoring the
+# directory does not detach them, and they were never tracked to begin with.
+.claude/
+.agents/
+
+# Editor and toolchain droppings.
+.vs/
+.vscode/
+*.pdb
+*.ilk
+
+# Credentials. None of these has ever been in this tree, and the rule is here so
+# that stays true by accident as well as on purpose.
+.env
+.env.*
+*.pfx
+*.p12
+*.pem
+*.key

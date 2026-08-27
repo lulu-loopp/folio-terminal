@@ -7502,7 +7502,7 @@ pub struct ChromeGroup {
 /// icon rail overlaps the terminal for 174 of its 220 pixels). Being last in the
 /// fill channel was never enough. A pane head's caption is *text*, the text
 /// channel runs after every fill in the same run, and so the path a pane is
-/// showing — `D:\Developer\BetterTerminal` — printed straight through the face
+/// showing — `D:\Developer\folio-terminal` — printed straight through the face
 /// of the rail lying over it, which is what a real window showed.
 ///
 /// Splitting the run is the same fix `353f1aa` made for the settings dialog, for
@@ -24096,7 +24096,7 @@ mod tests {",
     /// on the path selects a file behind it.
     #[test]
     fn the_body_every_reader_gets_stops_at_the_foots_hairline() {
-        let content = footed_tree(r"C:\Users\Weiyi");
+        let content = footed_tree(r"C:\Users\Alice");
         let (seats, layout, column, _) = files_chrome(content.clone(), None);
         let rect = files_pane_rect(&layout, column).expect("the column is placed");
         let geometry = files_pane_geometry(rect, 1.0, false);
@@ -24157,7 +24157,7 @@ mod tests {",
     /// was handed, in `--ink3` over the body it stands on.
     #[test]
     fn the_foot_draws_a_hairline_a_folder_and_the_path() {
-        let path = r"C:\Users\Weiyi\Developer\BetterTerminal";
+        let path = r"C:\Users\Alice\Developer\folio-terminal";
         let (_, layout, column, chrome) = files_chrome(footed_tree(path), None);
         let palette = chrome_palette();
         let geometry = files_pane_geometry(
@@ -24200,7 +24200,7 @@ mod tests {",
     /// confirming, and the two are different states of one control.
     #[test]
     fn the_foot_lights_on_hover_and_goes_accent_while_it_confirms() {
-        let path = r"C:\Users\Weiyi";
+        let path = r"C:\Users\Alice";
         let palette = chrome_palette();
         // The fixture's tree is built the same way every time, so the column's
         // id is the same one a second build mints — which is what lets the hover
@@ -30459,7 +30459,7 @@ mod tests {",
     /// refuse.
     #[test]
     fn a_terminal_pane_head_prints_its_own_name_and_falls_back_honestly() {
-        let name = r"D:\Developer\BetterTerminal\crates\bt-app";
+        let name = r"D:\Developer\folio-terminal\crates\bt-app";
         assert_eq!(
             seat_caption(SeatKind::Terminal, None, Some(name), None),
             name,
@@ -30921,7 +30921,7 @@ mod tests {",
     /// while the first stays green, which is the exact shape of the regression.
     #[test]
     fn the_ghost_cuts_a_name_at_its_last_separator_where_the_head_prints_it_whole() {
-        let path = r"D:\Developer\BetterTerminal\crates\bt-app";
+        let path = r"D:\Developer\folio-terminal\crates\bt-app";
         assert_eq!(
             seat_short_caption(SeatKind::Terminal, None, Some(path), None),
             "bt-app",
@@ -31501,7 +31501,7 @@ mod tests {",
             Presentation::Collapsed(bt_layout::AxisSet::BOTH),
             square,
         );
-        let parts = chrome_of(&seats, &layout, Some("C:\\Users\\Weiyi\\bt"));
+        let parts = chrome_of(&seats, &layout, Some("C:\\Users\\Alice\\bt"));
         let block = [0.0, 0.0, 24.0, 24.0];
         assert!(
             parts
@@ -31558,7 +31558,7 @@ mod tests {",
             Presentation::Collapsed(bt_layout::AxisSet::ROW),
             bar,
         );
-        let parts = chrome_of(&seats, &layout, Some("C:\\Users\\Weiyi\\bt"));
+        let parts = chrome_of(&seats, &layout, Some("C:\\Users\\Alice\\bt"));
         let strip = [0.0, 100.0, 24.0, 300.0];
         let marks: Vec<_> = parts
             .sprites
@@ -31582,7 +31582,7 @@ mod tests {",
     ///
     /// It is handed a raw path here because a path is the one input on which the
     /// two spellings differ, and the closing assertion spends that difference:
-    /// the same `cwd`, on a bar, is cut to `BetterTerminal`, and on a head is
+    /// the same `cwd`, on a bar, is cut to `folio-terminal`, and on a head is
     /// printed whole. A collapsed bar is 24 logical pixels of the other axis and
     /// is a label in the same sense the drag ghost is, so it takes the ghost's
     /// length; C28's own comparison between the two lengths is stated in full at
@@ -31592,7 +31592,7 @@ mod tests {",
     /// and the first assertion reads the whole path.
     #[test]
     fn a_collapsed_bar_names_its_seat_by_the_short_name() {
-        let cwd = "C:\\Users\\Weiyi\\Developer\\BetterTerminal";
+        let cwd = "C:\\Users\\Alice\\Developer\\folio-terminal";
         let seats = Seats::lone_terminal();
         let bar = LogicalRect::new(
             LogicalPx::ZERO,
@@ -31614,7 +31614,7 @@ mod tests {",
             .collect();
         assert_eq!(named.len(), 1, "one name on the bar");
         assert_eq!(
-            named[0].text, "BetterTerminal",
+            named[0].text, "folio-terminal",
             "the last segment, not the path"
         );
         let mark = parts
@@ -37105,7 +37105,7 @@ mod tests {",
     /// printed through the rail.**
     ///
     /// A real window in icon mode, rail hovered open: the path a pane was showing
-    /// — `D:\Developer\BetterTerminal` — lay across the rail's first row, on top
+    /// — `D:\Developer\folio-terminal` — lay across the rail's first row, on top
     /// of the panel, in full ink. Nothing was mis-positioned. The rail was
     /// painted last, exactly as R1 asks, and last was not enough: chrome reaches
     /// the glass in three channels with a fixed order over the whole run, so
@@ -37133,7 +37133,7 @@ mod tests {",
         let names: BTreeMap<SeatId, String> = seats
             .terminals()
             .into_iter()
-            .map(|seat| (seat, r"D:\Developer\BetterTerminal".to_owned()))
+            .map(|seat| (seat, r"D:\Developer\folio-terminal".to_owned()))
             .collect();
         let tabs = [TabContent {
             mark_kind: ChromeMark::ProfilePowerShell,
@@ -37211,7 +37211,7 @@ mod tests {",
             .seats
             .labels
             .iter()
-            .find(|label| label.text.contains("BetterTerminal"))
+            .find(|label| label.text.contains("folio-terminal"))
             .expect("a two-pane tab wears its panes' names over their heads");
         assert!(
             covered.rect[0] < face,

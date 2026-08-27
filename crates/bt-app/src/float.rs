@@ -2271,7 +2271,7 @@ mod tests {
     }
 
     /// What a foot would print, if there were one.
-    const FOOT_PATH: &str = "C:\\Users\\Weiyi\\notes.md";
+    const FOOT_PATH: &str = "C:\\Users\\Alice\\notes.md";
 
     /// A tenant's dressing with nothing unusual in it — enough for a pin about
     /// the chassis rather than about what is written on it.
@@ -2671,8 +2671,8 @@ mod tests {
                 dissolved: 0.0,
                 mode: FloatMode::Pinned,
                 mark: ChromeMark::Folder,
-                title: "WEIYI",
-                path: "C:\\Users\\Weiyi",
+                title: "ALICE",
+                path: "C:\\Users\\Alice",
                 notice: "",
                 notice_width: 0.0,
                 dock_label: "DOCK",

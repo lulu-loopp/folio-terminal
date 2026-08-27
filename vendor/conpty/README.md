@@ -9,7 +9,12 @@ BetterTerminal pins the official Microsoft NuGet release asset as its active sou
 - Source asset: <https://github.com/microsoft/terminal/releases/download/v1.25.1912.0/Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg>
 - Package SHA-256: `05fe9b571ea4fb198f5012405cb39a132cf23eee50feaa496524c149b2502692`
 - Upstream repository: <https://github.com/microsoft/terminal>
-- License: MIT, as declared by `Microsoft.Windows.Console.ConPTY.nuspec`; upstream license text is at <https://github.com/microsoft/terminal/blob/main/LICENSE>
+- License: MIT, as declared by `Microsoft.Windows.Console.ConPTY.nuspec`. Neither `.nupkg` carries
+  a LICENSE or NOTICE entry of its own, so the upstream text
+  (<https://github.com/microsoft/terminal/blob/main/LICENSE>) is carried beside them here, verbatim,
+  as [`LICENSE-MICROSOFT-TERMINAL`](LICENSE-MICROSOFT-TERMINAL). It covers both `.nupkg` files in
+  this directory and the `conpty.dll` / `OpenConsole.exe` extracted from them into a release
+  archive; the same text is reproduced in the repository's `THIRD-PARTY-NOTICES.md`
 
 The package contains a NuGet repository signature at `.signature.p7s`. The x64 `conpty.dll` and
 `OpenConsole.exe` also carry valid Authenticode signatures whose signer subject is

@@ -1388,7 +1388,7 @@ mod tests {
     /// goes red on the first line.
     #[test]
     fn a_long_line_wraps_at_spaces_and_a_newline_stays_a_newline() {
-        let text = "the spinner stops taxing the whole house and the ring is held\nWeiyi Shi";
+        let text = "the spinner stops taxing the whole house and the ring is held\nAlice Lin";
         let lines = wrap(text, 200.0, ten_per_char);
         for line in &lines {
             assert!(
@@ -1402,11 +1402,11 @@ mod tests {
         }
         assert_eq!(
             lines.last().map(String::as_str),
-            Some("Weiyi Shi"),
+            Some("Alice Lin"),
             "the text's own newline is a line break, and the short second paragraph is its own line"
         );
         assert_eq!(
-            lines.join(" ").replace(" Weiyi", "\nWeiyi"),
+            lines.join(" ").replace(" Alice", "\nAlice"),
             text,
             "nothing is lost or reordered"
         );
@@ -1436,7 +1436,7 @@ mod tests {
         );
 
         // A path breaks at its joints, not between letters, when a joint fits.
-        let path = "D:/Developer/BetterTerminal/.claude/worktrees/t1-tab-basics";
+        let path = "D:/Developer/folio-terminal/.claude/worktrees/t1-tab-basics";
         let broken = wrap(path, 200.0, ten_per_char);
         assert!(broken.iter().all(|line| ten_per_char(line) <= 200.0));
         assert_eq!(broken.concat(), path);

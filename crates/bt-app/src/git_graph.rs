@@ -431,7 +431,7 @@ pub const GRAPH_SEEK_MAX_PAGES: usize = 20;
 /// The author column (V1/V4) — and therefore what a name is ellipsised to.
 ///
 /// 120 logical pixels is about sixteen characters at this size: enough for
-/// `Weiyi Shi` or `dependabot[bot]` whole, and enough of `A Very Long Name…`
+/// `Alice Lin` or `dependabot[bot]` whole, and enough of `A Very Long Name…`
 /// to tell two colleagues apart, which is the only question this column is
 /// ever asked.
 pub const GRAPH_AUTHOR_COLUMN_LOGICAL_PX: f32 = 120.0;
@@ -6810,16 +6810,16 @@ mod tests {
     #[test]
     fn the_author_sentence_is_a_name_and_an_address_in_gits_own_spelling() {
         let mut one = commit("c", &[]);
-        one.author_name = "Weiyi Shi".to_owned();
-        one.author_email = "weiyi@example.com".to_owned();
-        assert_eq!(author_sentence(&one), "Weiyi Shi <weiyi@example.com>");
+        one.author_name = "Alice Lin".to_owned();
+        one.author_email = "alice@example.com".to_owned();
+        assert_eq!(author_sentence(&one), "Alice Lin <alice@example.com>");
         // A commit with no address — git allows it, and importers write them —
         // gets its name and not an empty pair of brackets.
         one.author_email = String::new();
-        assert_eq!(author_sentence(&one), "Weiyi Shi");
+        assert_eq!(author_sentence(&one), "Alice Lin");
         // And it is what the row's tooltip says.
-        one.author_email = "weiyi@example.com".to_owned();
-        assert!(commit_tooltip(&one).contains("Weiyi Shi <weiyi@example.com>"));
+        one.author_email = "alice@example.com".to_owned();
+        assert!(commit_tooltip(&one).contains("Alice Lin <alice@example.com>"));
     }
 
     // ── v2 ②: the open row's story, and two rows compared ──────────────────
@@ -6830,10 +6830,10 @@ mod tests {
         let mut commits = straight(20);
         let told = &mut commits[0];
         told.body = body.to_owned();
-        told.author_name = "Weiyi Shi".to_owned();
-        told.author_email = "weiyi@example.com".to_owned();
-        told.committer_name = "Weiyi Shi".to_owned();
-        told.committer_email = "weiyi@example.com".to_owned();
+        told.author_name = "Alice Lin".to_owned();
+        told.author_email = "alice@example.com".to_owned();
+        told.committer_name = "Alice Lin".to_owned();
+        told.committer_email = "alice@example.com".to_owned();
         // In a zone four hours behind UTC, which is what makes the printed date
         // the date it was made *where* it was made.
         told.committer_offset = -4 * 3600;
@@ -6943,7 +6943,7 @@ mod tests {
         let story = story_of(&content).expect("open");
         assert_eq!(
             meta_text(story),
-            "Weiyi Shi <weiyi@example.com> \u{b7} 2026-08-15 10:18 \u{b7} parents:",
+            "Alice Lin <alice@example.com> \u{b7} 2026-08-15 10:18 \u{b7} parents:",
             // The separator space that used to end this string is gone: a chip
             // carries its own gap, and one drawn from the trailing space of a
             // line would have none the moment that line wrapped.

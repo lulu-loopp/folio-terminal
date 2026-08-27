@@ -3065,10 +3065,10 @@ mod tests {
     }
 
     /// The seat recording's own geometry: a 39-column prompt (the width of
-    /// `(base) PS D:\Developer\BetterTerminal> `) directly beneath one 49-column hard-terminated
+    /// `(base) PS D:\Developer\folio-terminal> `) directly beneath one 49-column hard-terminated
     /// row. Prompt width is the variable that decides whether a stale absolute row anchor is
     /// visible: the line editor re-addresses column 39 on whatever row it still believes in.
-    const SEAT_PROMPT: &str = "BTSEAT D:\\Developer\\BetterTerminal> ";
+    const SEAT_PROMPT: &str = "BTSEAT D:\\Developer\\folio-terminal> ";
 
     /// Typed at the wide width before the drag, so the line editor enters the resize holding a
     /// non-empty buffer and a previous render — and long enough that re-rendering it past the
@@ -3173,20 +3173,20 @@ mod tests {
     }
 
     /// The reporting host's own prompt, minus the conda prefix that the hook writes separately.
-    const PROFILE_PROBE_PROMPT: &str = "PS D:\\Developer\\BetterTerminal> ";
+    const PROFILE_PROBE_PROMPT: &str = "PS D:\\Developer\\folio-terminal> ";
     /// The line the user's screenshot shows being overwritten; it is conda's own startup noise.
     const PROFILE_PROBE_NOISE: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
     /// The command in the user's screenshot: typed, never submitted, and long enough that the
     /// prompt plus the input wraps once the pane narrows.
     const PROFILE_PROBE_TYPED: &str =
-        "echo D:\\Developer\\BetterTerminal\\local-images\\sunset.svg";
+        "echo D:\\Developer\\folio-terminal\\local-images\\sunset.svg";
     /// The same command, long enough that prompt plus input **already** occupies two rows at
     /// `PROFILE_PROBE_WIDE`. This is the one property of the reported gesture that no earlier probe
     /// shape varied: `PROFILE_PROBE_TYPED` is deliberately short enough to fit on one row until the
     /// pane narrows, and a line editor that re-derives its render anchor from the post-resize
     /// cursor is only wrong by the number of rows the input occupied *before* the resize.
     const PROFILE_PROBE_TYPED_WRAPPED: &str =
-        "echo D:\\Developer\\BetterTerminal\\local-images\\sunset-wrapped2.svg";
+        "echo D:\\Developer\\folio-terminal\\local-images\\sunset-wrapped2.svg";
     const PROFILE_PROBE_WIDE: u16 = 100;
     const PROFILE_PROBE_NARROW: u16 = 70;
     const PROFILE_PROBE_ROWS: u16 = 26;
@@ -4539,12 +4539,12 @@ mod tests {
     /// somewhere the prompt does not reach, and a non-empty buffer across that narrowing is what
     /// makes the stale anchor survive to be re-used. So the prompt is deliberately wide, the narrow
     /// step is deliberately narrower than it, and the widening step deliberately returns.
-    const DEFER_PROBE_PROMPT: &str = "BTDEFER D:\\Developer\\BetterTerminal> ";
+    const DEFER_PROBE_PROMPT: &str = "BTDEFER D:\\Developer\\folio-terminal> ";
     /// Long enough that prompt plus input already occupies two rows at `DEFER_PROBE_WIDE`. The
     /// forensic sweep found this to be the decisive property: a line editor that re-derives its
     /// anchor from the post-resize cursor is wrong by exactly the rows its input occupied.
     const DEFER_PROBE_TYPED: &str =
-        "echo D:\\Developer\\BetterTerminal\\local-images\\sunset-wrapped2.svg";
+        "echo D:\\Developer\\folio-terminal\\local-images\\sunset-wrapped2.svg";
     const DEFER_PROBE_NOISE: &str = "BTDEFER_NOISE_ROW_MUST_SURVIVE";
     const DEFER_PROBE_WIDE: u16 = 100;
     const DEFER_PROBE_NARROW: u16 = 24;
@@ -5636,8 +5636,8 @@ mod tests {
     #[test]
     #[ignore = "dev probe: reproduces exact-right-edge widening through real PSReadLine and ConPTY"]
     fn exact_right_edge_widen_reanchor_pair_probe() {
-        const PROMPT: &str = "(base) PS D:\\Developer\\BetterTerminal\\dist> ";
-        const TYPED: &str = "echo D:\\Developer\\BetterTerminal\\.tmp-repaint-capture\\sunset.svg";
+        const PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal\\dist> ";
+        const TYPED: &str = "echo D:\\Developer\\folio-terminal\\.tmp-repaint-capture\\sunset.svg";
         const INITIAL_COLUMNS: u16 = 54;
         const WIDE_COLUMNS: u16 = 56;
         assert_eq!(PROMPT.len(), 44);
@@ -5737,7 +5737,7 @@ mod tests {
     #[test]
     #[ignore = "dev probe: races real PSReadLine cursor reads against chained ConPTY resizes"]
     fn reanchor_cursor_cpr_resize_storm_pair_probe() {
-        const PROMPT: &str = "(base) PS D:\\Developer\\BetterTerminal\\dist> ";
+        const PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal\\dist> ";
         const FIRST_HISTORY: &str = "Write-Output ('BT_APP_' + 'INPUT_OK')";
         const SECOND_HISTORY: &str = "echo \"[Image: x]\"";
         const FINAL_COLUMNS: u16 = 54;
@@ -5908,7 +5908,7 @@ mod tests {
     fn nonempty_resize_shorter_history_recall_render_memory_pair_probe() {
         const PROMPT: &str = "BTHISTORY 012345678901234567890123456789> ";
         const HISTORY: &str = "Write-Output BT_SHORT";
-        const OLD_BUFFER: &str = "echo D:\\Developer\\BetterTerminal\\.tmp-repaint-capture\\BT_OLD_RESIDUE_MUST_DISAPPEAR";
+        const OLD_BUFFER: &str = "echo D:\\Developer\\folio-terminal\\.tmp-repaint-capture\\BT_OLD_RESIDUE_MUST_DISAPPEAR";
         // Keep the old width an exact multiple of the new one. That isolates render-memory loss:
         // B retains the same column through ConPTY reflow, so the red residue cannot be blamed on
         // the separate anchor-column calculation.

@@ -1,3 +1,15 @@
+// MODIFIED BY THE FOLIO CONTRIBUTORS — not the upstream
+// alacritty_terminal 0.26.0 file of the same name.
+// Change: a transcript event hook (`Term::set_transcript_hook`) and the
+// `TranscriptEvent` vocabulary an external scrollback owner reads; a resize
+// transaction that coalesces local resizes into one the PTY sees; a CPR
+// pending-wrap cursor fix; UAX #29 grapheme clustering (DEC 2027) and legacy
+// emoji-presentation width, both on `bt-unicode`; DEC 2031 theme-change
+// notification; per-row input-write tracking; `Term::fork`; and the tests for
+// all of it. The rest is this repository's rustfmt settings.
+// Index: vendor/alacritty_terminal/CHANGES-FOLIO.md
+// Notice given under section 4(b) of the Apache License, Version 2.0.
+
 //! Exports the `Term` type which is a high-level API for the Grid.
 
 use std::collections::BTreeSet;
@@ -3463,7 +3475,7 @@ mod tests {
 
     #[test]
     fn unfinished_resize_harvest_returns_to_native_history_for_the_next_grow() {
-        let prompt = "(base) PS D:\\Developer\\BetterTerminal> ";
+        let prompt = "(base) PS D:\\Developer\\folio-terminal> ";
         let config = Config {
             scrolling_history: 0,
             ..Config::default()
@@ -3505,7 +3517,7 @@ mod tests {
         };
         let mut term = Term::new(config, &TermSize::new(44, 6), VoidListener);
         let mut processor: ansi::Processor = ansi::Processor::new();
-        let prompt = "(base) PS D:\\Developer\\BetterTerminal\\dist> ";
+        let prompt = "(base) PS D:\\Developer\\folio-terminal\\dist> ";
         assert_eq!(prompt.len(), 44);
 
         processor.advance(
@@ -3531,7 +3543,7 @@ mod tests {
     fn ordinary_cup_still_clears_pending_wrap() {
         let mut term = Term::new(Config::default(), &TermSize::new(44, 4), VoidListener);
         let mut processor: ansi::Processor = ansi::Processor::new();
-        let prompt = "(base) PS D:\\Developer\\BetterTerminal\\dist> ";
+        let prompt = "(base) PS D:\\Developer\\folio-terminal\\dist> ";
 
         processor.advance(&mut term, prompt.as_bytes());
         assert!(term.grid.cursor.input_needs_wrap);
@@ -3543,7 +3555,7 @@ mod tests {
     fn cursor_motion_between_cpr_and_cup_cancels_the_pending_wrap_echo() {
         let mut term = Term::new(Config::default(), &TermSize::new(44, 4), VoidListener);
         let mut processor: ansi::Processor = ansi::Processor::new();
-        let prompt = "(base) PS D:\\Developer\\BetterTerminal\\dist> ";
+        let prompt = "(base) PS D:\\Developer\\folio-terminal\\dist> ";
 
         processor.advance(&mut term, prompt.as_bytes());
         processor.advance(&mut term, b"\x1b[6n\r\x1b[1;44H");

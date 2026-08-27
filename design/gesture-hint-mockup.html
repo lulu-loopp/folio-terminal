@@ -568,21 +568,21 @@ var CARDS = [
     name: "folio \u25B8 build", n: "2", staged: true,
     seats: [{
       focused: true, base: -22, lines: [
-        ['p',   "PS D:\\Developer\\BetterTerminal> cargo fmt"],
-        ['dim', "PS D:\\Developer\\BetterTerminal> cargo clippy"],
+        ['p',   "PS D:\\Developer\\folio-terminal> cargo fmt"],
+        ['dim', "PS D:\\Developer\\folio-terminal> cargo clippy"],
         ['dim', "    Checking bt-render v0.1.0"],
         ['dim', "    Checking bt-pty v0.1.0"],
-        ['p',   "PS D:\\Developer\\BetterTerminal> cargo build"],
+        ['p',   "PS D:\\Developer\\folio-terminal> cargo build"],
         ['',    "   Compiling bt-render v0.1.0"],
         ['',    "   Compiling bt-pty v0.1.0"],
         ['',    "   Compiling bt-app v0.1.0"],
         ['',    "    Finished dev [unoptimized] in 41.20s"],
-        ['p',   "PS D:\\Developer\\BetterTerminal> cargo test"],
+        ['p',   "PS D:\\Developer\\folio-terminal> cargo test"],
         ['',    "     Running unittests src\\main.rs"],
         ['ok',  "test keyhint::hold_then_stop_raises .. ok"],
         ['ok',  "test focus_thumb::mini_rows_fit ..... ok"],
         ['ok',  "test result: ok. 412 passed; 0 failed"],
-        ['cur', "PS D:\\Developer\\BetterTerminal> "]
+        ['cur', "PS D:\\Developer\\folio-terminal> "]
       ]
     }]
   },
@@ -625,29 +625,29 @@ var CARDS = [
     name: "notes \u25B8 scratch", n: "1",
     seats: [{
       base: 0, lines: [
-        ['p',   "PS C:\\Users\\Weiyi> git log --oneline -4"],
+        ['p',   "PS C:\\Users\\Alice> git log --oneline -4"],
         ['',    "5def7f5 the ledger points at folio-next11"],
         ['',    "f95b34c merge ink-is-fast-room-is-base"],
         ['',    "0c0a95f the ink a hover reveals is 90ms"],
         ['',    "4984e6b merge icons-p2-a-fill-is-a-thing"],
-        ['cur', "PS C:\\Users\\Weiyi> "]
+        ['cur', "PS C:\\Users\\Alice> "]
       ]
     }]
   }
 ];
 
 var STAGE = [
-  ['p',  "PS D:\\Developer\\BetterTerminal>"],
+  ['p',  "PS D:\\Developer\\folio-terminal>"],
   ['p',  "cargo build"],
   ['',   "   Compiling bt-render v0.1.0"],
   ['',   "   Compiling bt-pty v0.1.0"],
   ['',   "   Compiling bt-app v0.1.0"],
   ['',   "    Finished dev [unoptimized]"],
   ['',   "    in 41.20s"],
-  ['p',  "PS D:\\Developer\\BetterTerminal>"],
+  ['p',  "PS D:\\Developer\\folio-terminal>"],
   ['p',  "cargo test -p bt-app"],
   ['ok', "test result: ok. 412 passed"],
-  ['cur',"PS D:\\Developer\\BetterTerminal>"]
+  ['cur',"PS D:\\Developer\\folio-terminal>"]
 ];
 
 function esc(s) {

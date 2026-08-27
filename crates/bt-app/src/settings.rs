@@ -7731,7 +7731,7 @@ fn description_lines(
 /// This is B23 — `.foot-path { direction: rtl; text-align: left }` — and it is
 /// the right rule for a path rather than a stylistic preference: the end of a
 /// path is the part you are actually looking at, and a right-cut
-/// `C:\Users\Weiyi\Developer\Bett…` has thrown away the only segment that
+/// `C:\Users\Alice\Developer\foli…` has thrown away the only segment that
 /// answers "where am I".
 ///
 /// The mock-up reaches this through `direction: rtl`, and paid for it: `/`, `~`
@@ -16075,14 +16075,14 @@ mod tests {
     /// The mirror of the test above, and the rule both feet are drawn by: a
     /// float's `.fly-foot` and a docked column's `.files-foot` both show a full
     /// path in a strip narrower than one, and a right cut would give
-    /// `C:\Users\Weiyi\Developer\Bett…` — every character of which the user
+    /// `C:\Users\Alice\Developer\foli…` — every character of which the user
     /// already knew. The user's own screenshot of what they wanted is the second
-    /// assertion here: `…ers\Weiyi\Developer\BetterTerminal`.
+    /// assertion here: `…ers\Alice\Developer\folio-terminal`.
     #[test]
     fn the_left_ellipsis_keeps_the_longest_suffix_that_fits() {
         let font = 10.0;
         let advance = font * TEST_ADVANCE_PER_EM;
-        let text = r"C:\Users\Weiyi\Developer\BetterTerminal";
+        let text = r"C:\Users\Alice\Developer\folio-terminal";
         assert_eq!(
             ellipsized_left(text, advance * 100.0, font, &mut measure),
             text,
@@ -16092,7 +16092,7 @@ mod tests {
         // characters, which is exactly where their own screenshot cut.
         assert_eq!(
             ellipsized_left(text, advance * 35.0, font, &mut measure),
-            format!("{ELLIPSIS}ers\\Weiyi\\Developer\\BetterTerminal"),
+            format!("{ELLIPSIS}ers\\Alice\\Developer\\folio-terminal"),
             "the folder you are in survives; the drive letter is what goes"
         );
         for characters in 1..text.chars().count() {
