@@ -3150,7 +3150,24 @@ const SYMBOL_VIEW_BOX: [&str; 67] = [
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
 const SYMBOL_BODY: [&str; 67] = [
-    // #i-gear
+    // #i-gear. **Adapted from Google's Material Design `settings` icon** at 24dp
+    // (`src/action/settings/materialicons/24px.svg` in
+    // `google/material-design-icons`) — the one mark in this table somebody else
+    // drew, and the reason the box above it is the only twenty-four in the tree.
+    //
+    // **Modified.** It carries `fill="currentColor"` so it takes the ink of the
+    // row it is drawn in rather than upstream's own fill; the `<svg>`/`<g>`
+    // wrapper and the transparent `M0,0h24v24H0V0z` bounding path upstream draws
+    // behind it are gone; and it is rasterised at this product's sizes rather
+    // than at twenty-four device-independent pixels. The gear itself is not
+    // redrawn — these are upstream's coordinates in the minified serialisation
+    // Google also publishes, in which the hub's rounded corner is written as an
+    // arc where the unminified file writes a cubic.
+    //
+    // Apache-2.0, which is why the modifications are stated here rather than
+    // only in prose: section 4(b) asks for them in the changed file. The licence
+    // text is in `THIRD-PARTY-NOTICES.md`, and the same statement in longer form
+    // is in `licenses/bundled-assets.md`.
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min. The rule is pulled half a pen in from each edge so the round cap
     // lands *on* the box rather than half a unit past it — same ink, `0.0` to

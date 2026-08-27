@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # The web preview's engine (`src/webview.rs`). It is a thin, generated binding

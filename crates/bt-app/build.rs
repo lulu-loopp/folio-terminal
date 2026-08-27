@@ -94,9 +94,17 @@ fn resource_bytes(icon: &Path, version: &str) -> Vec<u8> {
             ("ProductVersion".to_owned(), version.to_owned()),
             ("InternalName".to_owned(), "folio".to_owned()),
             ("OriginalFilename".to_owned(), "folio.exe".to_owned()),
+            // **The same notice the two licence files carry**, word for word:
+            // `LICENSE-MIT` line 3 and the appendix of `LICENSE-APACHE`. The
+            // field is named for a copyright notice, so it holds one — the
+            // licence follows it because a reader who opens the Properties page
+            // is asking both questions at once, and this is the only place in
+            // the shipped binary where either is written.
             (
                 "LegalCopyright".to_owned(),
-                "Licensed under MIT OR Apache-2.0".to_owned(),
+                "Copyright (c) 2026 Weiyi Shi and Folio contributors. \
+                 Licensed under MIT OR Apache-2.0."
+                    .to_owned(),
             ),
         ],
     });

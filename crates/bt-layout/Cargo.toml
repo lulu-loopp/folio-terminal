@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 # No dependencies, by ruling. Red line L7 (M2-layout-solver-spec §4.1) forbids
 # bt-viewport / bt-doc / bt-term / bt-render; nothing else is needed either,

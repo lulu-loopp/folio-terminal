@@ -59,6 +59,41 @@ jobs:
       - name: build
         run: cargo build --release --locked
 
+      # **The licensing gates, run here rather than assumed.** `ci.yml` runs the
+      # same two on every push, and that is not the same statement: a tag can be
+      # pushed at a commit whose CI never finished, or finished on a different
+      # tree. The archive is what people receive, so the file it carries —
+      # `THIRD-PARTY-NOTICES.md` — is checked against the lock file in the job
+      # that builds the archive, before anything is packed.
+      #
+      # `check-vendor-notices.ps1` diffs `vendor/alacritty_terminal` against the
+      # crates.io archive of the same version, so the registry sources have to be
+      # unpacked. The build above already did that; it is named anyway, because a
+      # step that only works because of what an earlier step happened to leave
+      # behind breaks the day the steps are reordered.
+      - name: fetch the sources the notices gates read
+        run: cargo fetch --locked
+
+      # Pinned, and not `--locked` alone: `check-notices.ps1` regenerates the
+      # notices file and compares bytes, so the generator has to be the same
+      # generator that produced the checked-in one. A newer cargo-about that
+      # renders one heading differently would read as licence drift.
+      - name: cargo-about
+        run: cargo install cargo-about --locked --version 0.9.2 --features cli
+
+      # Each gate in its own process, exactly as `ci.yml` runs them. Dot-sourcing
+      # a script and then reading `$LASTEXITCODE` reads whatever the last native
+      # command in it happened to set — or nothing at all, if it ran none. `-File`
+      # gives one exit code that means one thing.
+      - name: the notices in the archive match the tree they came from
+        shell: pwsh
+        run: |
+          foreach ($gate in @("scripts/check-notices.ps1", "scripts/check-vendor-notices.ps1")) {
+            Write-Host "== $gate"
+            pwsh -NoLogo -NoProfile -File $gate
+            if ($LASTEXITCODE -ne 0) { throw "$gate failed with exit $LASTEXITCODE" }
+          }
+
       # Before the archive, so that `SHA256SUMS.txt` — written last, over
       # everything in the output directory — covers it.
       - name: bill of materials

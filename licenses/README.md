@@ -32,6 +32,7 @@ upstream changes.
 | `option-ext-MPL-2.0.txt` | `option-ext` 0.2.0, `LICENSE.txt` | MPL-2.0. `bundled-assets.md` carries the source offer this licence requires, fixed to the crate archive by SHA-256 |
 | `material-design-icons-LICENSE.txt` | <https://github.com/google/material-design-icons>, `LICENSE` | Apache-2.0, for the one copied icon path (the settings gear) |
 | `microsoft-terminal-LICENSE.txt` | <https://github.com/microsoft/terminal>, `LICENSE` | MIT. Covers the four colour schemes taken from Windows Terminal's `defaults.json`, and the ConPTY sidecar. Kept byte-identical to `vendor/conpty/LICENSE-MICROSOFT-TERMINAL`, which `check-notices.ps1` asserts |
+| `microsoft-terminal-NOTICE-v1.25.1912.0.md` | <https://github.com/microsoft/terminal>, `NOTICE.md` at tag `v1.25.1912.0` | The components `OpenConsole.exe` is statically linked against — `jsoncpp`, `{fmt}`, `stb`, `cmark`, `wil` and a dozen more. The `.nupkg` the binary is extracted from does not carry it, so it is fetched by tag and fixed by SHA-256 in `bundled-assets.md`. **CRLF, as upstream stores it** — the bytes are the point |
 | `colour-schemes/iTerm2-Color-Schemes-LICENSE.txt` | <https://github.com/mbadolato/iTerm2-Color-Schemes>, `LICENSE` | MIT, for the four schemes taken from it |
 | `colour-schemes/onehalf-LICENSE.txt` | <https://github.com/sonph/onehalf>, `LICENSE.txt` | MIT — One Half, upstream of Windows Terminal's transcription |
 | `colour-schemes/solarized-LICENSE.txt` | <https://github.com/altercation/solarized>, `LICENSE` | MIT — Solarized, same |

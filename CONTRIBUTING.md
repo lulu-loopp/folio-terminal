@@ -135,3 +135,17 @@ a files column keeps a shallow watch on every folder it is showing, and a re-rea
 
 Longer bodies are welcome and often necessary — the reasoning, the measurements,
 what was tried and rejected. Keep the subject a sentence a reader can act on.
+
+## Licensing contributions
+
+Folio is licensed under either the MIT License or the Apache License,
+Version 2.0, at the recipient's option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms
+or conditions.
+
+Do not submit code, assets, or other material that you do not have the
+right to license. Identify any third-party material and its license in
+the pull request.

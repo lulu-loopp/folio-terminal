@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 # No dependencies, and that is the whole point of the crate existing. What it
 # does — turn an `.ico` and four numbers into the `.res` file `link.exe` embeds
