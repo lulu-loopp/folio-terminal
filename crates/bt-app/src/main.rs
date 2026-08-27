@@ -24315,6 +24315,17 @@ enum Fading {
     /// would hand the colour to whichever tab moved into the slot, which is the
     /// same class of bug as a name landing on the wrong pane.
     TabActive(TabId),
+    /// **One card head's hover-revealed run** in Cards mode — the `×` and the
+    /// offer to pin, which reveal together on `.fcard:hover`.
+    ///
+    /// [`Self::HeadRun`] one surface along, and one key for the whole cluster
+    /// for its reason exactly: the two controls reveal on a single predicate, so
+    /// one number is one fewer way for the halves to come apart mid-fade.
+    ///
+    /// By [`TabId`] and never by index, which is [`Self::TabActive`]'s argument:
+    /// a column that re-sorts under a fade would hand the ink to whichever card
+    /// slid into the slot.
+    CardHead(TabId),
     /// One Git panel row waiting on a write about it — `git add` on a file,
     /// `git checkout` or `git branch -m` on a branch.
     GitPending(SeatId, GitRowKey),
@@ -24689,10 +24700,11 @@ mod arrival_wiring_tests {
     /// it.
     #[test]
     fn only_the_paint_and_the_frame_clock_can_read_the_settling_register() {
-        const ALLOWED: [&str; 7] = [
+        const ALLOWED: [&str; 8] = [
             "settle_git_pending",
             "settled_head_ink",
             "settled_tab_ink",
+            "settled_card_ink",
             "drag_ghost_layer",
             "forget_the_ghost",
             "advance_strip_animation",
@@ -30015,6 +30027,9 @@ impl Runtime<'_> {
         // And the tab strip's own ninety, for the same reason and in the same
         // place. See [`Self::settled_tab_ink`].
         let active_ink = self.settled_tab_ink(now);
+        // And the card column's, which is the same ninety on the third surface.
+        // See [`Self::settled_card_ink`].
+        let card_ink = self.settled_card_ink(now);
         // Kept for the hit test, which is `&self` by construction and cannot
         // measure a string — the same reason `files_name_widths` is a field. The
         // press then lands on the row that was drawn, because it *is* the row
@@ -30425,6 +30440,7 @@ impl Runtime<'_> {
                 tabs: &tabs,
                 head_ink: seats::HeadInk::new(&head_ink),
                 active_ink: seats::TabInk::new(&active_ink),
+                card_ink: seats::TabInk::new(&card_ink),
                 active_tab,
                 grabbed,
                 strip_preview,
@@ -50882,6 +50898,80 @@ impl Runtime<'_> {
                     settling::Toward::eased(
                         f32::from(u8::from(active == Some(tab))),
                         bt_render::TAB_ACTIVATION,
+                    ),
+                    now,
+                    motion,
+                );
+                (places[&tab], ink)
+            })
+            .collect()
+    }
+
+    /// **How solid each card head's hover-revealed run is this frame** — the `×`
+    /// and the offer to pin, in Cards mode (`bt_render::HOVER_CHROME_FADE`).
+    ///
+    /// [`Self::settled_head_ink`] on the card column and [`Self::settled_tab_ink`]
+    /// in shape: keyed by [`TabId`] inside for the register's sake and by index
+    /// outside because that is what the painter walks, translated here because
+    /// this is the one place that can do both on the same frame.
+    ///
+    /// **The list is whatever is hovered plus whatever is still leaving**, which
+    /// is what makes it a list rather than the one card under the pointer: a hand
+    /// crossing from one card to the next leaves two entries for ninety
+    /// milliseconds, one coming up and one going down.
+    ///
+    /// **Nothing is pulled toward `1.0` outside Cards mode.** The strip's `×` and
+    /// the rail's pin ride `TabTrailer::reveal`, which is a width; this register
+    /// is the card's alone, and a hover in another layout must not leave an entry
+    /// in it that the column would then draw with when the mode is turned on.
+    fn settled_card_ink(&mut self, now: Instant) -> Vec<(usize, f32)> {
+        let motion = self.app.motion;
+        let showing = self.sampled_rail(now).draws_focus_rail();
+        let hovered = showing.then(|| self.hovered_tab()).flatten();
+        let places: BTreeMap<TabId, usize> = self
+            .window
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| (tab.id, index))
+            .collect();
+        let mut wanted: Vec<TabId> = self
+            .window
+            .settling
+            .held()
+            .into_iter()
+            .filter_map(|key| match key {
+                Fading::CardHead(tab) => Some(tab),
+                _ => None,
+            })
+            .collect();
+        // A card whose tab has been closed mid-fade is forgotten rather than
+        // eased: there is nothing left on the glass for a fade home to be drawn
+        // on — `settled_tab_ink`'s own argument, one surface along.
+        for gone in wanted
+            .iter()
+            .copied()
+            .filter(|tab| !places.contains_key(tab))
+            .collect::<Vec<_>>()
+        {
+            self.window.settling.forget(&Fading::CardHead(gone));
+        }
+        wanted.retain(|tab| places.contains_key(tab));
+        if let Some(index) = hovered
+            && let Some(tab) = self.window.tabs.get(index).map(|tab| tab.id)
+            && !wanted.contains(&tab)
+        {
+            wanted.push(tab);
+        }
+        wanted
+            .into_iter()
+            .map(|tab| {
+                let ink = self.window.settling.settle(
+                    &Fading::CardHead(tab),
+                    0.0,
+                    settling::Toward::eased(
+                        f32::from(u8::from(hovered == Some(places[&tab]))),
+                        bt_render::HOVER_CHROME_FADE,
                     ),
                     now,
                     motion,

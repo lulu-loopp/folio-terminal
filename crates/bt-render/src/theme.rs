@@ -2520,13 +2520,20 @@ pub const FOCUS_CARD_FONT_LOGICAL_PX: f32 = 11.0;
 pub const FOCUS_CARD_CLOSE_BOX_LOGICAL_PX: f32 = 16.0;
 /// `.fc-head .fc-close { border-radius: 4px }` — the pill under the hovered `×`.
 pub const FOCUS_CARD_CLOSE_RADIUS_LOGICAL_PX: f32 = 4.0;
-/// `.fc-head .pinsvg { width: 11px; height: 11px }` — the pin mark a pinned
-/// tab's card wears.
-///
-/// A **mark and not a button**: F1's card states that its tab is pinned and
-/// offers no pinning, because the offer is a hover-revealed control on a tab row
-/// and the card has no second idiom for it. See §7.1.6b′ ④.
-pub const FOCUS_CARD_PIN_BOX_LOGICAL_PX: f32 = 11.0;
+// **A card's pin has no number of its own** — it is drawn at the strip's
+// `WINDOW_TAB_PIN_GLYPH_LOGICAL_PX` in a slot of
+// [`FOCUS_CARD_CLOSE_BOX_LOGICAL_PX`], exactly as the strip draws it in the
+// `×`'s box.
+//
+// `FOCUS_CARD_PIN_BOX_LOGICAL_PX = 11.0` stood here — the mock-up's
+// `.fc-head .pinsvg { width: 11px }` — while F1's card wore the pin as a **mark
+// and not a button**, on the reading of §7.1.6b′ ④ that the offer to pin belongs
+// to a tab row alone. The user's report of 2026-08-27 retired that reading (a
+// card is a tab's second face and carries the tab's own controls), and the
+// optical gate settled the size: `i-pin` at 11×11 draws a 0.825px pen against a
+// house band of 0.95..=1.15 — the same "sizing it like the `×` made it read as
+// lint" the strip's own note records, measured. One control, one drawing, one
+// number.
 /// `.fc-head .fc-close svg { width: 8px; height: 8px }` — the `×` inside its
 /// box, the same glyph the strip's own `×` is drawn at.
 pub const FOCUS_CARD_CLOSE_GLYPH_LOGICAL_PX: f32 = WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX;

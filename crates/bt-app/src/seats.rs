@@ -33,28 +33,27 @@ use bt_render::{
     FOCUS_CARD_CLOSE_BOX_LOGICAL_PX, FOCUS_CARD_CLOSE_RADIUS_LOGICAL_PX,
     FOCUS_CARD_FONT_LOGICAL_PX, FOCUS_CARD_GAP_LOGICAL_PX, FOCUS_CARD_HEAD_GAP_LOGICAL_PX,
     FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX, FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX,
-    FOCUS_CARD_PIN_BOX_LOGICAL_PX, FOCUS_CARD_RADIUS_LOGICAL_PX, FOCUS_CARD_WAIT_HALO_LOGICAL_PX,
-    FOCUS_CARD_WAIT_HALO_OPACITY, FOCUS_COLUMN_WIDTH_LOGICAL_PX, FOCUS_MINI_BAND_REDUCTION_PPM,
-    FOCUS_MINI_BORDER_LOGICAL_PX, FOCUS_MINI_FILES_FONT_LOGICAL_PX,
-    FOCUS_MINI_FILES_ICON_LOGICAL_PX, FOCUS_MINI_FILES_INDENT_LOGICAL_PX,
-    FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX, FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_PADDING_LOGICAL_PX,
-    FOCUS_MINI_RADIUS_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX,
-    FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX,
-    FOCUS_MINI_SEAM_LOGICAL_PX, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
-    PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX,
-    RAIL_GAP_LOGICAL_PX, RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX,
-    RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX, RAIL_LABEL_PADDING_TOP_LOGICAL_PX,
-    RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM, RAIL_NEW_CHEVRON_BOX_LOGICAL_PX,
-    RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX, RAIL_NEW_MARGIN_TOP_LOGICAL_PX,
-    RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_TOP_LOGICAL_PX,
-    RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX, RAIL_SEAM_INSET_X_LOGICAL_PX,
-    RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX, RAIL_SHADE_WIDTH_LOGICAL_PX,
-    RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX, RAIL_TAB_HEIGHT_LOGICAL_PX,
-    RAIL_TAB_PADDING_LEFT_LOGICAL_PX, RAIL_TAB_PADDING_RIGHT_LOGICAL_PX,
-    RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX, RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX,
-    SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX,
-    SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
-    SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX,
+    FOCUS_CARD_RADIUS_LOGICAL_PX, FOCUS_CARD_WAIT_HALO_LOGICAL_PX, FOCUS_CARD_WAIT_HALO_OPACITY,
+    FOCUS_COLUMN_WIDTH_LOGICAL_PX, FOCUS_MINI_BAND_REDUCTION_PPM, FOCUS_MINI_BORDER_LOGICAL_PX,
+    FOCUS_MINI_FILES_FONT_LOGICAL_PX, FOCUS_MINI_FILES_ICON_LOGICAL_PX,
+    FOCUS_MINI_FILES_INDENT_LOGICAL_PX, FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX,
+    FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_PADDING_LOGICAL_PX, FOCUS_MINI_RADIUS_LOGICAL_PX,
+    FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX,
+    FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, FOCUS_MINI_SEAM_LOGICAL_PX, OverlayQuad,
+    PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
+    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
+    RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
+    RAIL_NEW_CHEVRON_BOX_LOGICAL_PX, RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX,
+    RAIL_NEW_MARGIN_TOP_LOGICAL_PX, RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX,
+    RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX,
+    RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX,
+    RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
+    RAIL_TAB_PADDING_RIGHT_LOGICAL_PX, RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX,
+    RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX, SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX,
+    SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX,
     SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX, SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX,
     SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX,
     SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
@@ -2843,6 +2842,63 @@ pub struct TabTrailer {
     pub files_lit: f32,
 }
 
+/// **Which of the two trailing controls a tab wears** — `tabTrailer` (mock-up
+/// 4204-4207) as a predicate, and the one place the rule is written down.
+///
+/// Three surfaces hang controls off a tab's trailing end: the strip's chip
+/// ([`tab_strip_geometry`]), the rail's row ([`rail_geometry`]) and a card's head
+/// ([`focus_card_trailer`]). **The set is a fact about the tab and not about the
+/// surface** — the mock-up builds all three from one `tabTrailer`, which emits
+/// *either* a `.pin.on` *or* a `.pin` + `.close` pair and never both — so the
+/// three ask this rather than each writing the condition out again. What stays
+/// each surface's own is where the boxes go and how big they are; what none of
+/// them owns is *which controls there are*.
+///
+/// The card head learned this the expensive way (user report, 2026-08-27): it
+/// had the condition written out a fourth time, in the negative — a pin drawn
+/// only when pinned and never hit, beside a `×` drawn always — so a pinned card
+/// offered to close the tab it was pinned against and offered no way to unpin it.
+/// Two defects, one cause, and the cause was a copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TabTrailerControls {
+    /// Whether a `×` is written at all.
+    ///
+    /// False on a pinned tab at every width and on every surface. The width
+    /// tiers can take it away from an unpinned one as well
+    /// ([`TabWidthTier::Tight`]) — a surface may always take an affordance away,
+    /// and never add one back.
+    pub close: bool,
+    /// Whether the pin stands as the tab's **state** — `.pin.on`, filled, at
+    /// full width whether or not the pointer is anywhere near it — rather than
+    /// as the hover-revealed **offer**, which is struck and opens from nothing.
+    ///
+    /// There is always a pin: the difference between the two tabs is which of
+    /// the two things it is saying, and pressing it means the opposite in each
+    /// case (`Unpin` against `Pin`).
+    pub pin_is_state: bool,
+}
+
+impl TabTrailerControls {
+    /// The drawing the pin wears — Fluent 2's fill axis, where regular is the
+    /// action ("you could pin this") and filled is the state ("it is pinned").
+    #[must_use]
+    pub fn pin_mark(self) -> ChromeMark {
+        ChromeMark::Pin {
+            filled: self.pin_is_state,
+        }
+    }
+}
+
+/// What one tab hangs off its trailing end, given nothing but whether it is
+/// pinned — see [`TabTrailerControls`].
+#[must_use]
+pub fn tab_trailer_controls(pinned: bool) -> TabTrailerControls {
+    TabTrailerControls {
+        close: !pinned,
+        pin_is_state: pinned,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabGeometry {
     pub body: [f32; 4],
@@ -3002,11 +3058,14 @@ pub fn tab_strip_geometry(
             let right = left + tab_width;
             let active = index == active_tab;
             let close_top = tab_top + (tab_height - close_box) / 2.0;
-            let close = if trailer.pinned {
-                // `tabTrailer` (mock-up 4204-4207) writes *either* a `.pin.on`
-                // *or* a `.pin` + `.close` pair: a pinned tab has no `×` in the
-                // DOM at all, at any width. This outranks the width tiers, which
-                // only ever take affordances away.
+            // `tabTrailer` (mock-up 4204-4207) writes *either* a `.pin.on` *or*
+            // a `.pin` + `.close` pair: a pinned tab has no `×` in the DOM at
+            // all, at any width. Asked of [`tab_trailer_controls`] rather than
+            // written out here, because the rail and the card head have to get
+            // the same answer. It outranks the width tiers below, which only
+            // ever take affordances away.
+            let controls = tab_trailer_controls(trailer.pinned);
+            let close = if !controls.close {
                 None
             } else {
                 match tier {
@@ -3048,7 +3107,7 @@ pub fn tab_strip_geometry(
                 // Pinned: the pin *is* the trailer, and it stands exactly where
                 // the `×` would have — right edge on the tab's own trailing
                 // padding. Same place, so unpinning is where you already are.
-                TabWidthTier::Full if trailer.pinned => {
+                TabWidthTier::Full if controls.pin_is_state => {
                     let pin_right = (right - close_pad).max(left);
                     Some([
                         (pin_right - pin_box).max(left),
@@ -4141,7 +4200,9 @@ pub fn rail_geometry(
         // pinned row carries the `.pin.on` alone, with no `×` at all. Reading
         // Q174 as "one glyph, one fact" left the rail with no way to pin
         // anything, which is a fact the column could state and an action it
-        // could not offer.
+        // could not offer. That is now [`tab_trailer_controls`]' sentence and
+        // not this loop's, so the card head cannot read it differently.
+        let controls = tab_trailer_controls(trailer.pinned);
         let (close, pin) = {
             let right = (content_right - pad_right).max(content_left);
             let slot = [
@@ -4150,7 +4211,7 @@ pub fn rail_geometry(
                 right,
                 glyph_top + close_box,
             ];
-            if trailer.pinned {
+            if !controls.close {
                 (None, Some(slot))
             } else {
                 // The strip's own zero-width reveal, unchanged: `.tab .pin, .vtab
@@ -4402,20 +4463,25 @@ pub fn hit_rail_chrome(
 // A card **is** a tab, so nothing below invents a second vocabulary for one: the
 // boxes are the row's boxes at the card's own padding, the marks are
 // [`TabContent`]'s marks unchanged, and the hit test answers the strip's own
-// [`ChromeTarget::Tab`] / [`ChromeTarget::TabClose`] so that pressing a card runs
-// the verb pressing a tab already runs. **It adds no target of its own**: the
-// heading row that carried a visible `Exit` was withdrawn on 2026-08-20, so the
-// surface is the tab list and nothing besides.
+// [`ChromeTarget::Tab`] / [`ChromeTarget::TabClose`] / [`ChromeTarget::TabPin`]
+// so that pressing a card runs the verb pressing a tab already runs. **It adds
+// no target of its own**: the heading row that carried a visible `Exit` was
+// withdrawn on 2026-08-20, so the surface is the tab list and nothing besides.
 
 /// One card of the focus column, solved.
 ///
 /// [`RailTabGeometry`]'s opposite number, and deliberately shorter than it. The
-/// rail's row carries a `files` trigger and a hover-revealed pin *offer*; a card
-/// carries neither. §7.1.6b′ ④ is why: the folder peek and the offer to pin are
-/// gestures that belong to a tab row, and giving them a second home on a card
-/// would be the mode growing a vocabulary of its own — which is exactly the
-/// thing the ruling forbids. A pinned tab's card states that it is pinned, and
-/// that is all.
+/// rail's row carries a `files` trigger and a card does not: §7.1.6b′ ④ is why —
+/// the folder peek is a gesture that belongs to a tab row, and giving it a
+/// second home on a card would be the mode growing a vocabulary of its own.
+///
+/// **The pin is not in that class, and reading it as though it were is the
+/// defect the user reported on 2026-08-27.** Pinning is not a gesture the card
+/// invents; it is one of the two controls every tab has already been wearing on
+/// both other surfaces, and a card is that tab's second face. So the trailing
+/// cluster comes from [`focus_card_trailer`] over [`tab_trailer_controls`] — the
+/// rail's own answer — and the F1 reading, under which a card could *state* that
+/// its tab was pinned and never *do* it, is withdrawn.
 ///
 /// Reordering by card, which landed on 2026-08-20, is the same rule kept rather
 /// than an exception to it: the column offers no gesture of its own, it joins
@@ -4428,16 +4494,23 @@ pub struct FocusCardGeometry {
     /// The 15px profile-mark slot, which the dot and the progress ring hang off
     /// exactly as they do in the strip and in the rail.
     pub mark: [f32; 4],
-    /// The `×`'s box, which closes the card's tab.
+    /// **The trailing slot** — the box at the end of the head's flex line, which
+    /// holds the `×` on a tab that is not pinned and the pin itself on one that
+    /// is ([`focus_card_trailer`] is what decides which).
     ///
-    /// Never `None`, and that is the difference from both other axes rather than
-    /// an oversight: the strip's width tiers can take the `×` away and a pinned
-    /// tab is written without one, while a card is a fixed-width object in a
-    /// fixed-width column, so the box is always there and it is *reveal* — the
-    /// mock-up's `.fcard:hover .fc-close { visibility: visible }` — that decides
-    /// whether it is inked. A hit box that came and went with the pointer would
-    /// be a `×` you cannot press on the frame you reach for it.
-    pub close: [f32; 4],
+    /// The *slot* and never `None`, and that is the difference from both other
+    /// axes rather than an oversight: the strip's width tiers can take a control
+    /// away outright, while a card is a fixed-width object in a fixed-width
+    /// column, so the box is always there and it is *reveal* — the mock-up's
+    /// `.fcard:hover .fc-close { visibility: visible }` — that decides whether it
+    /// is inked. A hit box that came and went with the pointer would be a control
+    /// you cannot press on the frame you reach for it.
+    ///
+    /// It was called `close` while a card's head could only ever close a tab.
+    /// The user's report of 2026-08-27 is what renamed it: the pin stands in this
+    /// very box on a pinned card, exactly as it does on the strip and on the
+    /// rail, so that unpinning is where you already are.
+    pub trailing: [f32; 4],
     /// The name's run as `[left, right]` — a run and not a box for
     /// [`RailTabGeometry::title`]'s reason: the card's height is fixed and the
     /// name is centred in it.
@@ -4473,7 +4546,7 @@ impl FocusCardGeometry {
     /// and the mark and the `×` and the mini each at its own call site, is what
     /// keeps a translated card internally consistent by construction — and it is
     /// what lets the badge and the pin travel too without being named here at
-    /// all, since [`focus_card_badge_rect`] and [`focus_card_pin_rect`] are
+    /// all, since [`focus_card_badge_rect`] and [`focus_card_trailer`] are
     /// measured off the card they are handed.
     ///
     /// `title` is untouched, and it is the one box here that must be: it is a
@@ -4487,7 +4560,7 @@ impl FocusCardGeometry {
         Self {
             body: slide(self.body),
             mark: slide(self.mark),
-            close: slide(self.close),
+            trailing: slide(self.trailing),
             head: slide(self.head),
             mini: slide(self.mini),
             ..*self
@@ -4647,12 +4720,12 @@ pub fn focus_rail_geometry(
         let centre = |size: f32| (head[1] + (head_height - size) / 2.0).round();
         let mark_top = centre(mark);
         let mark_rect = [inner_left, mark_top, inner_left + mark, mark_top + mark];
-        let close_top = centre(close_box);
-        let close = [
+        let slot_top = centre(close_box);
+        let trailing = [
             (inner_right - close_box).max(inner_left),
-            close_top,
+            slot_top,
             inner_right,
-            close_top + close_box,
+            slot_top + close_box,
         ];
         // `title` is the run before the trailing cluster is known: the pin and
         // the badge are per-tab facts and this function is handed a count, so
@@ -4661,11 +4734,11 @@ pub fn focus_rail_geometry(
         // neither badge nor pin gets — and it is the only value both the drawing
         // and the clip are taken from.
         let title_left = mark_rect[2] + head_gap;
-        let title_right = (close[0] - head_gap).max(title_left);
+        let title_right = (trailing[0] - head_gap).max(title_left);
         cards.push(FocusCardGeometry {
             body,
             mark: mark_rect,
-            close,
+            trailing,
             title: [title_left, title_right],
             head,
             // `.fc-tab-mini` fills what the head leaves, inside the card's own
@@ -4727,25 +4800,67 @@ pub fn focus_rail_geometry(
     })
 }
 
-/// A pinned card's pin mark, or `None` on a card whose tab is not pinned.
+/// **One card's trailing cluster** — which of the two controls its head wears,
+/// and the box each one stands in.
 ///
-/// Its own function rather than a field filled in by [`focus_rail_geometry`],
+/// [`RailTabGeometry`]'s `close`/`pin` pair on the third surface, and it holds
+/// exactly what that pair holds: a rectangle for a control that is there and
+/// `None` for one that is not. Both the paint and [`hit_focus_rail`] read this
+/// and nothing else, so a card cannot draw a control it will not answer for or
+/// answer for one it does not draw.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FocusCardTrailer {
+    /// The `×`'s box, or `None` on a pinned card — which has none at all, on
+    /// this surface exactly as on the other two.
+    pub close: Option<[f32; 4]>,
+    /// The pin's box. Always there, because there is always a pin: on a pinned
+    /// card it is the state and on an unpinned one it is the offer.
+    pub pin: [f32; 4],
+    /// Which of those two the pin is — [`TabTrailerControls`], carried along so
+    /// that the drawing and the verb are read off the same answer the boxes were.
+    pub controls: TabTrailerControls,
+}
+
+/// Where a card's trailing controls stand, given whether its tab is pinned.
+///
+/// Its own function rather than fields filled in by [`focus_rail_geometry`],
 /// because that function is handed a *count*: everything about a card's boxes is
-/// the same for all of them except this one mark, and threading a per-tab list
-/// through the solver to place a single 11px glyph would make the geometry
-/// depend on the list for no other reason.
+/// the same for all of them except this cluster, and threading a per-tab list
+/// through the solver to place two glyphs would make the geometry depend on the
+/// list for no other reason.
 ///
-/// The mark stands where the mock-up's flex line puts it — one gap left of the
-/// `×` — and the name's run is shortened to clear it by
+/// **The rail's own arithmetic, on the card's own numbers.** A pinned card's pin
+/// takes the trailing slot outright — same place the `×` would have been, so
+/// unpinning is where you already are (F61) — and an unpinned card's pin stands
+/// one `.pin + .close` tighten to its left. What the card does *not* copy is the
+/// rail's zero-width rest: the boxes here are reserved at full size whatever the
+/// pointer is doing, for [`FocusCardGeometry::trailing`]'s stated reason, and
+/// what a hover decides is the ink alone.
+///
+/// The name's run is shortened to clear whichever of them stands first by
 /// [`focus_card_title_right`], which is the one place both facts are read.
 #[must_use]
-pub fn focus_card_pin_rect(card: &FocusCardGeometry, pinned: bool, scale: f32) -> Option<[f32; 4]> {
-    pinned.then(|| {
-        let pin_box = (FOCUS_CARD_PIN_BOX_LOGICAL_PX * scale).round();
-        let right = card.close[0] - FOCUS_CARD_HEAD_GAP_LOGICAL_PX * scale;
-        let top = ((card.head[1] + card.head[3] - pin_box) / 2.0).round();
-        [right - pin_box, top, right, top + pin_box]
-    })
+pub fn focus_card_trailer(card: &FocusCardGeometry, pinned: bool, scale: f32) -> FocusCardTrailer {
+    let controls = tab_trailer_controls(pinned);
+    let slot = card.trailing;
+    if !controls.close {
+        return FocusCardTrailer {
+            close: None,
+            pin: slot,
+            controls,
+        };
+    }
+    // `.tab .pin + .close { margin-left: -4px }` — the trailing controls cluster
+    // tighter than the head's own 6px gap, exactly as they do on a tab row, and
+    // from the same constant rather than a second reading of it.
+    let tighten = WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX * scale;
+    let width = slot[2] - slot[0];
+    let right = (slot[0] - tighten).max(card.title[0]);
+    FocusCardTrailer {
+        close: Some(slot),
+        pin: [(right - width).max(card.title[0]), slot[1], right, slot[3]],
+        controls,
+    }
 }
 
 /// A card's pane-count badge, or `None` when the tab holds one pane.
@@ -4763,8 +4878,11 @@ pub fn focus_card_badge_rect(
     scale: f32,
 ) -> Option<[f32; 4]> {
     (pane_count > 1).then(|| {
-        let trailing = focus_card_pin_rect(card, pinned, scale).map_or(card.close[0], |pin| pin[0])
-            - FOCUS_CARD_HEAD_GAP_LOGICAL_PX * scale;
+        // The pin is the first thing to the badge's right on every card — a
+        // pinned one wears it in the slot, an unpinned one beside the `×` — so
+        // there is no second case to write here any more.
+        let trailing =
+            focus_card_trailer(card, pinned, scale).pin[0] - FOCUS_CARD_HEAD_GAP_LOGICAL_PX * scale;
         // The **head**, for [`FocusCardGeometry::head`]'s reason: `badge_rect_of`
         // centres in the box it is handed, and a badge centred in the whole card
         // would sit halfway down the thumbnail.
@@ -4772,8 +4890,12 @@ pub fn focus_card_badge_rect(
     })
 }
 
-/// Where a card's name ends: one gap short of whichever of the badge, the pin or
-/// the `×` stands first.
+/// Where a card's name ends: one gap short of whichever of the badge and the pin
+/// stands first.
+///
+/// Two and not three, since 2026-08-27: every card carries a pin — the state on
+/// a pinned one, the offer on the rest — so the pin is always what stands to the
+/// badge's right, and the `×` is never the first thing the name has to clear.
 ///
 /// [`rail_title_right`]'s opposite number and one function for the same reason —
 /// the name is drawn from this and clipped to it, and two readings of "how much
@@ -4788,9 +4910,10 @@ pub fn focus_card_title_right(
 ) -> f32 {
     let gap = FOCUS_CARD_HEAD_GAP_LOGICAL_PX * scale;
     let trailing = focus_card_badge_rect(card, pane_count, badge_text_width, pinned, scale)
-        .map(|badge| badge[0])
-        .or_else(|| focus_card_pin_rect(card, pinned, scale).map(|pin| pin[0]))
-        .unwrap_or(card.close[0]);
+        .map_or_else(
+            || focus_card_trailer(card, pinned, scale).pin[0],
+            |badge| badge[0],
+        );
     (trailing - gap).max(card.title[0])
 }
 
@@ -5081,7 +5204,15 @@ pub fn hit_focus_rail(
         return Some(ChromeTarget::RailBody);
     }
     for (index, card) in geometry.cards.iter().enumerate() {
-        if contains(card.close, x, y) {
+        // **The same solver the paint reads** ([`focus_card_trailer`]), which is
+        // what makes "a card cannot draw a control it will not answer for" a
+        // property of the code rather than a habit. Smallest target first and the
+        // surface they stand on last, exactly as on the strip and the rail.
+        let trailing = focus_card_trailer(card, tabs[index].pinned, scale);
+        if contains(trailing.pin, x, y) {
+            return Some(ChromeTarget::TabPin(index));
+        }
+        if trailing.close.is_some_and(|close| contains(close, x, y)) {
             return Some(ChromeTarget::TabClose(index));
         }
         if contains(card.body, x, y) {
@@ -6744,6 +6875,7 @@ pub fn build_chrome_with_preview(
         ChromeContent {
             head_ink: HeadInk::default(),
             active_ink: TabInk::default(),
+            card_ink: TabInk::default(),
             tabs: &tabs,
             active_tab: 0,
             grabbed: None,
@@ -7000,6 +7132,21 @@ pub struct ChromeContent<'a> {
     pub head_ink: HeadInk<'a>,
     /// How far each tab's chrome has changed hands — see [`TabInk`].
     pub active_ink: TabInk<'a>,
+    /// **How solid each card head's hover-revealed run is** — the `×` and the
+    /// offer to pin, which reveal together on `.fcard:hover` and so wear one
+    /// number (`bt_render::HOVER_CHROME_FADE`).
+    ///
+    /// [`HeadInk`]'s rule on the card column, read through [`TabInk`] because the
+    /// shape is identical — one fraction per tab index, over a boolean the paint
+    /// already knows — and because a second type saying the same thing is a
+    /// second place for the fallback rule to be got wrong. **The entry is a gain
+    /// and never the state**: a caller with no clock draws the run exactly as the
+    /// hover says.
+    ///
+    /// Empty in every layout but the card column's: the strip's `×` and the
+    /// rail's pin ride `TabTrailer::reveal`, which is a *width* and belongs to
+    /// the geometry, and a card's boxes do not move.
+    pub card_ink: TabInk<'a>,
     pub active_tab: usize,
     /// The tab currently riding the pointer, if any — `.tab.grabbed`.
     ///
@@ -7354,8 +7501,18 @@ pub struct HeadInk<'a> {
     fades: &'a [(SeatId, f32)],
 }
 
-/// **How far each tab's chrome has taken on the active colours**, already
-/// sampled — [`HeadInk`]'s twin, one surface along, and read the same way.
+/// **A fade the window sampled, one number per tab index** — [`HeadInk`]'s twin,
+/// one surface along, and read the same way.
+///
+/// Two of them reach [`ChromeContent`]: [`ChromeContent::active_ink`], how far
+/// each tab's chrome has taken on the active colours, and
+/// [`ChromeContent::card_ink`], how solid each card head's hover-revealed run is.
+/// One type, because the shape and the rule are the same in both — a fraction
+/// keyed by index, over a boolean the paint already knows — and a second type
+/// would be a second place to get the fallback wrong.
+///
+/// What follows is written about the handover, which is the older of the two and
+/// the one the rules were argued on.
 ///
 /// `bt_render::TAB_ACTIVATION`: the ground, the ring, the title and the small
 /// marks of the tab that has just become the active one, and of the one that has
@@ -7557,6 +7714,7 @@ pub fn build_chrome_for_tabs(
         tabs,
         head_ink,
         active_ink,
+        card_ink,
         active_tab,
         grabbed,
         strip_preview,
@@ -8935,6 +9093,7 @@ pub fn build_chrome_for_tabs(
                 chevron_turn,
                 reveal: focus_reveal,
                 nudge_rows: focus_card_nudge_rows,
+                ink: card_ink,
             },
             palette,
             &mut rail_group,
@@ -11397,6 +11556,9 @@ struct FocusRail<'a> {
     /// How far the **staged** card's transcript rows stand off home, in mini
     /// rows — see [`ChromeContent::focus_card_nudge_rows`].
     nudge_rows: f32,
+    /// How solid each card head's hover-revealed run is — see
+    /// [`ChromeContent::card_ink`].
+    ink: TabInk<'a>,
 }
 
 /// **The order the cards are laid down in: everyone else first, the card in hand
@@ -11454,6 +11616,7 @@ fn focus_rail_chrome(
         chevron_turn,
         reveal,
         nudge_rows,
+        ink,
     } = rail;
     // §7.1.6e — the column keeps the panel's `+` and its `˅`, and it keeps the
     // rail's answer with them: this picker opens beside its button too.
@@ -11527,10 +11690,16 @@ fn focus_rail_chrome(
             continue;
         }
         let staged = index == active_tab;
-        // `.fcard:hover` is one hover: a pointer on the `×` is still a pointer on
-        // the card, exactly as `.vtab:hover` reads for a rail row.
-        let hovered =
-            hover == Some(ChromeTarget::Tab(index)) || hover == Some(ChromeTarget::TabClose(index));
+        // `.fcard:hover` is one hover: a pointer on the `×` or on the pin is
+        // still a pointer on the card, exactly as `.vtab:hover` reads for a rail
+        // row. A control that went dark the instant the hand reached it would be
+        // the reveal eating its own subject.
+        let hovered = matches!(
+            hover,
+            Some(
+                ChromeTarget::Tab(at) | ChromeTarget::TabClose(at) | ChromeTarget::TabPin(at)
+            ) if at == index
+        );
         let body = clip_to_list(card.body);
         // **A card that is moving is drawn on the level above** (§7.1.6b″).
         // Every one of its four channels goes there together, which is the whole
@@ -11796,19 +11965,79 @@ fn focus_rail_chrome(
             });
         }
 
-        // ── the pin, as a state and never as an offer ──
-        if let Some(pin) = focus_card_pin_rect(card, pinned, scale).filter(|pin| in_list(*pin)) {
-            sprites.push(ChromeSprite::new(
-                // Fluent 2's fill axis, filled: this is the state "it is pinned"
-                // and there is no action beside it to be the regular one.
-                ChromeMark::Pin { filled: true },
-                clip_to_list(pin),
-                if staged {
-                    palette.focus_card_title_staged
-                } else {
-                    palette.focus_card_glyph
-                },
-            ));
+        // ── the trailing cluster: the pin, and the `×` a pinned card has not got ──
+        //
+        // **One solver for both, and the hit test reads it too**
+        // ([`focus_card_trailer`]). This block used to decide for itself that a
+        // card wore a filled pin when pinned and a `×` always, which is the pair
+        // of defects the user reported on 2026-08-27: a mark with no verb behind
+        // it, beside a `×` offering to close the very tab that was pinned against
+        // being closed.
+        let trailing = focus_card_trailer(card, pinned, scale);
+        // How solid the hover-revealed half of the cluster is. The offer to pin
+        // and the `×` reveal together on `.fcard:hover`, so they wear one number
+        // — `bt_render::HOVER_CHROME_FADE`, sampled by the window and handed down
+        // — and **the register is a gain over the predicate, never a substitute
+        // for it**: a caller with no clock gets the boolean, which is what makes
+        // forgetting to fill it in unable to hide a control.
+        let revealed = ink.of(index, hovered);
+        if in_list(trailing.pin) {
+            let pin_hovered = hover == Some(ChromeTarget::TabPin(index));
+            // `.pin.on` is a fact about the tab and never fades; the offer beside
+            // an unpinned card's `×` comes and goes with the pointer.
+            let opacity = if trailing.controls.pin_is_state {
+                1.0
+            } else {
+                revealed
+            };
+            if opacity > 0.0 {
+                if pin_hovered {
+                    // The `×`'s own pill, because it is the `×`'s own slot —
+                    // same box, same round, on both faces of the control.
+                    let mut pill = ChromeSprite::new(
+                        ChromeMark::ControlPill {
+                            radius_px: (FOCUS_CARD_CLOSE_RADIUS_LOGICAL_PX * scale)
+                                .round()
+                                .max(1.0) as u32,
+                        },
+                        pixel_snapped(clip_to_list(trailing.pin)),
+                        if staged {
+                            palette.focus_card_pill_staged
+                        } else {
+                            palette.focus_card_pill
+                        },
+                    );
+                    pill.opacity = opacity;
+                    sprites.push(pill);
+                }
+                // The strip's own drawing, at the strip's own size: one control,
+                // one cut. The mock-up's 11px was measured out of the band the
+                // house pen has to land in — see the note where the card's pin
+                // number used to be (`bt_render::theme`).
+                let glyph = (WINDOW_TAB_PIN_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+                let glyph_left = ((trailing.pin[0] + trailing.pin[2] - glyph) / 2.0).round();
+                let glyph_top = ((trailing.pin[1] + trailing.pin[3] - glyph) / 2.0).round();
+                let mut mark = ChromeSprite::new(
+                    // Fluent 2's fill axis, read off the same answer the boxes
+                    // were: regular is the action ("you could pin this"), filled
+                    // is the state ("it is pinned").
+                    trailing.controls.pin_mark(),
+                    [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
+                    if pin_hovered {
+                        if staged {
+                            palette.focus_card_ink_on_pill_staged
+                        } else {
+                            palette.focus_card_ink_on_pill
+                        }
+                    } else if staged {
+                        palette.focus_card_title_staged
+                    } else {
+                        palette.focus_card_glyph
+                    },
+                );
+                mark.opacity = opacity;
+                sprites.push(mark);
+            }
         }
 
         // ── the name ──
@@ -11851,30 +12080,40 @@ fn focus_rail_chrome(
         // idiom rather than the rail's Q174 "stated at rest", and the mock-up
         // says which: a card is wider than a rail row and the reveal costs the
         // name nothing, because the box was reserved either way.
-        if hovered && in_list(card.close) {
+        //
+        // **`revealed` is the ink and never the rectangle.** The box is in the
+        // geometry whatever the pointer is doing and the hit test answers over it
+        // from the frame the reveal begins — a `×` you cannot press on the frame
+        // you reach for it is the bug the reservation exists to prevent.
+        if let Some(close) = trailing
+            .close
+            .filter(|close| revealed > 0.0 && in_list(*close))
+        {
             let close_hovered = hover == Some(ChromeTarget::TabClose(index));
             if close_hovered {
-                sprites.push(ChromeSprite::new(
+                let mut pill = ChromeSprite::new(
                     ChromeMark::ControlPill {
                         radius_px: (FOCUS_CARD_CLOSE_RADIUS_LOGICAL_PX * scale)
                             .round()
                             .max(1.0) as u32,
                     },
-                    pixel_snapped(clip_to_list(card.close)),
+                    pixel_snapped(clip_to_list(close)),
                     if staged {
                         palette.focus_card_pill_staged
                     } else {
                         palette.focus_card_pill
                     },
-                ));
+                );
+                pill.opacity = revealed;
+                sprites.push(pill);
             }
             let glyph = (compact_head_glyph_logical_px(crate::icons::ActionIcon::CloseTab.mark())
                 * scale)
                 .round()
                 .max(1.0);
-            let glyph_left = ((card.close[0] + card.close[2] - glyph) / 2.0).round();
-            let glyph_top = ((card.close[1] + card.close[3] - glyph) / 2.0).round();
-            sprites.push(ChromeSprite::new(
+            let glyph_left = ((close[0] + close[2] - glyph) / 2.0).round();
+            let glyph_top = ((close[1] + close[3] - glyph) / 2.0).round();
+            let mut mark = ChromeSprite::new(
                 crate::icons::ActionIcon::CloseTab.mark(),
                 [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
                 if close_hovered {
@@ -11888,7 +12127,9 @@ fn focus_rail_chrome(
                 } else {
                     palette.focus_card_glyph
                 },
-            ));
+            );
+            mark.opacity = revealed;
+            sprites.push(mark);
         }
     }
 
@@ -19597,6 +19838,7 @@ mod tests {
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -19675,6 +19917,7 @@ mod tests {
                 ChromeContent {
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
+                    card_ink: TabInk::default(),
                     tabs: &tabs,
                     active_tab: 0,
                     grabbed: None,
@@ -22975,6 +23218,7 @@ mod tests {",
                 ChromeContent {
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
+                    card_ink: TabInk::default(),
                     tabs: &tabs,
                     active_tab: 0,
                     grabbed: None,
@@ -23201,6 +23445,7 @@ mod tests {",
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::default(),
                 tabs,
                 active_tab,
                 grabbed: None,
@@ -23309,6 +23554,7 @@ mod tests {",
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::default(),
                 tabs: &[],
                 files_views: &NO_FILES_VIEWS,
                 git_pages: &NO_GIT_PAGES,
@@ -25037,6 +25283,7 @@ mod tests {",
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::default(),
                 tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -27367,6 +27614,7 @@ mod tests {",
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::default(),
                 tabs,
                 active_tab,
                 grabbed,
@@ -27575,6 +27823,7 @@ mod tests {",
                 ChromeContent {
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
+                    card_ink: TabInk::default(),
                     tabs: &tabs,
                     active_tab: 0,
                     grabbed: None,
@@ -27688,6 +27937,7 @@ mod tests {",
                 ChromeContent {
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
+                    card_ink: TabInk::default(),
                     tabs: &tabs,
                     // The stand-in went in ahead of the active tab, so the active
                     // tab is the one after it — which is exactly the shift
@@ -27920,6 +28170,7 @@ mod tests {",
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::default(),
                 tabs: &[TabContent {
                     flight: 0.0,
                     mark_kind: ChromeMark::ProfilePowerShell,
@@ -31072,6 +31323,7 @@ mod tests {",
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -31142,6 +31394,7 @@ mod tests {",
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -31947,6 +32200,7 @@ mod tests {",
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab,
                 grabbed: None,
@@ -32225,6 +32479,7 @@ mod tests {",
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::default(),
                 tabs,
                 active_tab,
                 grabbed,
@@ -32487,6 +32742,7 @@ mod tests {",
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -32654,6 +32910,7 @@ mod tests {",
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -33978,19 +34235,27 @@ mod tests {",
     /// fixture below stops growing a parameter every time the column learns
     /// another tween.
     #[derive(Clone, Copy, Debug)]
-    struct FocusFrame {
+    struct FocusFrame<'a> {
         /// How far into its entrance the column is, `0.0..=1.0`.
         reveal: f32,
         /// How far the staged card's rows stand off home, in mini rows.
         nudge_rows: f32,
+        /// How solid each card head's hover-revealed run is, by index — see
+        /// [`ChromeContent::card_ink`].
+        ink: &'a [(usize, f32)],
     }
 
-    impl FocusFrame {
+    impl FocusFrame<'_> {
         /// The settled column with nothing moving in it — what every test
         /// that is not about an animation wants.
+        ///
+        /// The empty register is the point rather than an omission: it is what
+        /// every caller with no clock hands down, and the paint has to fall back
+        /// to the hover it already knows.
         const SETTLED: Self = Self {
             reveal: 1.0,
             nudge_rows: 0.0,
+            ink: &[],
         };
     }
 
@@ -34001,11 +34266,12 @@ mod tests {",
         rail: RailState,
         hover: Option<ChromeTarget>,
         focus_thumbnails: &[Option<FocusThumbnail<'_>>],
-        frame: FocusFrame,
+        frame: FocusFrame<'_>,
     ) -> WindowChrome {
         let FocusFrame {
             reveal: focus_reveal,
             nudge_rows: focus_card_nudge_rows,
+            ink: card_ink,
         } = frame;
         let metrics = seat_metrics(1_000);
         // **A split tree, so the stage has something in it.** A lone terminal
@@ -34037,6 +34303,7 @@ mod tests {",
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::new(card_ink),
                 tabs,
                 active_tab,
                 grabbed: None,
@@ -34555,7 +34822,7 @@ mod tests {",
                 )
             };
             assert_eq!(
-                hit(card.close),
+                hit(card.trailing),
                 Some(ChromeTarget::TabClose(index)),
                 "the `×` on card {index} closes tab {index}"
             );
@@ -34627,6 +34894,13 @@ mod tests {",
                             ChromeTarget::RailBody
                                 | ChromeTarget::Tab(_)
                                 | ChromeTarget::TabClose(_)
+                                // Joined the list on 2026-08-27, and it is the
+                                // rule holding rather than bending: the pin is a
+                                // control every tab already wears on both other
+                                // surfaces, so a card answering for it is the
+                                // column speaking the tab list's vocabulary — the
+                                // very thing this test is about.
+                                | ChromeTarget::TabPin(_)
                                 | ChromeTarget::NewTab
                                 | ChromeTarget::NewTabMenu
                         )
@@ -35110,6 +35384,259 @@ mod tests {",
         );
     }
 
+    // ── the card head is the tab's second face (user report, 2026-08-27) ────
+    //
+    // Two defects in one head, and one cause under both: **the card decided its
+    // own trailing controls**. The pin was drawn and never hit — a mark with no
+    // verb behind it — and a pinned card went on wearing a `×` that the strip and
+    // the rail had both already ruled it out of (`tabTrailer`, mock-up
+    // 4204-4207; Q174 on the rail). The three tests below hold the answer at the
+    // three places it has to be true at once: what is drawn, what is pressed,
+    // and which rule both of those read.
+
+    /// The centre of a rectangle, as the hit test wants it.
+    fn centre_of(rect: [f32; 4]) -> (f64, f64) {
+        (
+            f64::from((rect[0] + rect[2]) / 2.0),
+            f64::from((rect[1] + rect[3]) / 2.0),
+        )
+    }
+
+    /// Every mark drawn inside one card's head — the band the trailing run
+    /// stands in, and nothing of the thumbnail below it.
+    fn marks_in_head(column: &ChromeGroup, card: &FocusCardGeometry) -> Vec<ChromeMark> {
+        column
+            .sprites
+            .iter()
+            .filter(|sprite| {
+                sprite.rect[1] >= card.head[1] - 1.0 && sprite.rect[3] <= card.head[3] + 1.0
+            })
+            .map(|sprite| sprite.mark)
+            .collect()
+    }
+
+    /// One trailer, stated.
+    fn pinned_trailer(pinned: bool) -> Vec<TabTrailer> {
+        vec![TabTrailer {
+            pinned,
+            reveal: 1.0,
+            ..TabTrailer::default()
+        }]
+    }
+
+    /// RED — **a pinned card wears the pin in the `×`'s own slot, and wears no
+    /// `×` at all** (user report 2026-08-27; `tabTrailer`, mock-up 4204-4207).
+    ///
+    /// The rail settled this on its own axis and wrote the reason down: pin and
+    /// close are *exclusive*, because `tabTrailer` emits either a `.pin.on` or a
+    /// `.pin` + `.close` pair and never both. A card that kept its `×` while
+    /// stating that its tab is pinned is the same tab saying two different things
+    /// on two surfaces — and the `×` is the dangerous half, because the whole
+    /// point of pinning is that the tab is not casually closeable.
+    ///
+    /// The slot is the card's own trailing box, which is what makes unpinning
+    /// exactly where you already are — F61's sentence, on the third surface.
+    ///
+    /// Red gate: this is the report. Before the fix the press at the slot
+    /// answered `TabClose(0)` and the column drew a `TabClose` mark on a pinned
+    /// card.
+    #[test]
+    fn a_pinned_card_wears_the_pin_in_the_closes_slot_and_no_close_at_all() {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let tabs = vec![card_tab("pinned", 1, TabMarkState::default(), true)];
+        let trailers = pinned_trailer(true);
+        let card = focus_of(state, 1).cards[0];
+        let (x, y) = centre_of(card.trailing);
+
+        assert_eq!(
+            hit_focus_rail(FIXTURE_HEIGHT, 1.0, &trailers, 0.0, state, x, y),
+            Some(ChromeTarget::TabPin(0)),
+            "the pin stands where the `×` would have, so unpinning is where you \
+             already are"
+        );
+
+        let column = window_chrome_with_rail(&tabs, 0, state, Some(ChromeTarget::Tab(0))).rail;
+        let marks = marks_in_head(&column, &card);
+        assert!(
+            marks.contains(&ChromeMark::Pin { filled: true }),
+            "a pinned card states that it is pinned: {marks:?}"
+        );
+        assert!(
+            !marks.contains(&ChromeMark::TabClose),
+            "and it offers no `×`, on a hovered card as much as a resting one: \
+             {marks:?}"
+        );
+    }
+
+    /// RED — **an unpinned card carries the `×` and, under the pointer, the
+    /// offer to pin** (user report 2026-08-27).
+    ///
+    /// The other half of `tabTrailer`, and the half the report calls "钉子点不
+    /// 动": the mark was painted on a pinned card and there was no offer at all
+    /// on an unpinned one, so the column could state pinning and never do it —
+    /// the very fault the rail's own note (Q174) records having made and undone.
+    ///
+    /// The offer is hover-revealed, exactly as the `×` beside it is: a card is a
+    /// fixed-width object and both boxes are reserved either way, so what the
+    /// pointer decides is the ink and never the rectangle.
+    ///
+    /// Red gate: before the fix the card's pin rectangle was `None` on every
+    /// unpinned card, so none was drawn and none could be pressed — the marks in
+    /// a hovered card's head were `[ProfilePowerShell, TabClose]` and nothing
+    /// else.
+    #[test]
+    fn an_unpinned_card_carries_the_close_and_offers_the_pin_beside_it() {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let tabs = vec![card_tab("loose", 1, TabMarkState::default(), false)];
+        let trailers = pinned_trailer(false);
+        let card = focus_of(state, 1).cards[0];
+        let (x, y) = centre_of(card.trailing);
+        assert_eq!(
+            hit_focus_rail(FIXTURE_HEIGHT, 1.0, &trailers, 0.0, state, x, y),
+            Some(ChromeTarget::TabClose(0)),
+            "the `×` keeps the trailing slot on a tab that is not pinned"
+        );
+
+        let column = window_chrome_with_rail(&tabs, 0, state, Some(ChromeTarget::Tab(0))).rail;
+        let marks = marks_in_head(&column, &card);
+        assert!(
+            marks.contains(&ChromeMark::TabClose),
+            "the hovered card shows its `×`: {marks:?}"
+        );
+        assert!(
+            marks.contains(&ChromeMark::Pin { filled: false }),
+            "and the hollow pin beside it, which is the offer: {marks:?}"
+        );
+
+        let pin = column
+            .sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::Pin { filled: false })
+            .expect("the offer was just found among the marks");
+        assert!(
+            pin.rect[2] <= card.trailing[0],
+            "the offer stands to the LEFT of the `×`, as it does on both other \
+             surfaces"
+        );
+        let (x, y) = centre_of(pin.rect);
+        assert_eq!(
+            hit_focus_rail(FIXTURE_HEIGHT, 1.0, &trailers, 0.0, state, x, y),
+            Some(ChromeTarget::TabPin(0)),
+            "and pressing it pins the tab — a mark with no verb behind it is the \
+             defect this test is named after"
+        );
+    }
+
+    /// RED — **the card head and the tab row read one rule, and it is a
+    /// function** (user ruling 2026-08-27: 卡头=tab 的第二张脸).
+    ///
+    /// The behavioural halves are next door; this is the structural one, and it
+    /// is the only kind of assertion that can catch the *next* copy. Three
+    /// surfaces hang controls off a tab's trailing end and the set is a fact
+    /// about the **tab**, not about the surface — so there is one predicate and
+    /// three callers of it, and a fourth surface added later gets the rule by
+    /// asking rather than by being remembered.
+    ///
+    /// Red gate: write the condition out again at any of the three call sites
+    /// and the count drops.
+    #[test]
+    fn one_predicate_says_which_trailing_controls_a_tab_wears() {
+        let source = include_str!("seats.rs")
+            .split(
+                "
+mod tests {",
+            )
+            .next()
+            .expect("a split always yields a first piece");
+        assert_eq!(
+            source.matches("tab_trailer_controls(").count(),
+            4,
+            "one definition and three callers — the strip's chip, the rail's row \
+             and a card's head"
+        );
+    }
+
+    /// RED — **a card head's run arrives as ink and never as a cut** (the
+    /// animation slice's second half, `bt_render::HOVER_CHROME_FADE`).
+    ///
+    /// The `×` and the offer to pin reveal on one predicate, so they wear one
+    /// number and cross the ninety together — a half-lit `×` beside a solid pin
+    /// would be the two halves of one reveal coming apart. The `.pin.on` a pinned
+    /// card wears is deliberately outside it: that is a fact about the tab and
+    /// not an offer that comes and goes, which is the same line the rail draws.
+    ///
+    /// And the register is a **gain over the predicate**: the fixture with no
+    /// clock in it — every other test in this module — draws the run at full
+    /// strength off the hover alone.
+    ///
+    /// Red gate: paint the run off `hovered` alone and the middle frame goes to
+    /// `1.0`; ease the pinned card's pin as well and the last assertion goes red.
+    #[test]
+    fn a_card_heads_run_arrives_as_ink_rather_than_appearing() {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        // The pinned run leads the list, as it does everywhere else in this
+        // window (F57), so the card under the pointer is the second one.
+        let tabs = vec![
+            card_tab("stuck", 1, TabMarkState::default(), true),
+            card_tab("loose", 1, TabMarkState::default(), false),
+        ];
+        let midway = [(1usize, 0.4f32)];
+        let column = window_chrome_with_thumbnails_in(
+            TALL_FIXTURE_HEIGHT,
+            &tabs,
+            0,
+            state,
+            Some(ChromeTarget::Tab(1)),
+            &[],
+            FocusFrame {
+                ink: &midway,
+                ..FocusFrame::SETTLED
+            },
+        )
+        .rail;
+        let opacity_of = |mark: ChromeMark| {
+            column
+                .sprites
+                .iter()
+                .find(|sprite| sprite.mark == mark)
+                .map(|sprite| sprite.opacity)
+        };
+        assert_eq!(
+            opacity_of(ChromeMark::TabClose),
+            Some(0.4),
+            "the `×` is four tenths of the way in"
+        );
+        assert_eq!(
+            opacity_of(ChromeMark::Pin { filled: false }),
+            Some(0.4),
+            "and the offer beside it is exactly as far, because one hover reveals \
+             the pair"
+        );
+        assert_eq!(
+            opacity_of(ChromeMark::Pin { filled: true }),
+            Some(1.0),
+            "while the pinned card's own pin is a state and never fades"
+        );
+
+        let settled = window_chrome_with_thumbnails_in(
+            TALL_FIXTURE_HEIGHT,
+            &tabs,
+            0,
+            state,
+            Some(ChromeTarget::Tab(1)),
+            &[],
+            FocusFrame::SETTLED,
+        )
+        .rail;
+        assert!(
+            settled
+                .sprites
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::TabClose && sprite.opacity == 1.0),
+            "and a caller with no clock draws the run off the hover alone"
+        );
+    }
+
     /// PIN (§7.1.5b) — **reduced motion keeps the warn edge and takes the
     /// halo.**
     ///
@@ -35544,7 +36071,7 @@ mod tests {",
                     card.head[1], card.body[1],
                     "and it starts where the card does"
                 );
-                for box_in_head in [card.mark, card.close] {
+                for box_in_head in [card.mark, card.trailing] {
                     assert!(
                         box_in_head[1] >= card.head[1] && box_in_head[3] <= card.head[3],
                         "{box_in_head:?} is in the head and not adrift in the body"
@@ -36662,8 +37189,8 @@ mod tests {",
                 y += 1.0;
             }
             let close = (
-                f64::from((card.close[0] + card.close[2]) / 2.0),
-                f64::from((card.close[1] + card.close[3]) / 2.0),
+                f64::from((card.trailing[0] + card.trailing[2]) / 2.0),
+                f64::from((card.trailing[1] + card.trailing[3]) / 2.0),
             );
             assert_eq!(
                 hit_focus_rail(
@@ -37149,6 +37676,7 @@ mod tests {",
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,
@@ -38906,6 +39434,7 @@ mod tests {",
                 ChromeContent {
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
+                    card_ink: TabInk::default(),
                     tabs: &tabs,
                     active_tab: 0,
                     grabbed: None,
@@ -39046,6 +39575,7 @@ mod tests {",
             ChromeContent {
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
+                card_ink: TabInk::default(),
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,

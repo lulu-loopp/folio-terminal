@@ -3785,3 +3785,30 @@ find_pwsh()           = Some(...\Microsoft.PowerShell_7.6.5.0_x64__8wekyb3d8bbwe
 两件测试基建也是必需而不是顺手:`store_pwsh_alias()` **双重把关**——没有 Store 装机时返回 `None`,测试按 `tests/shell_integration_osc133.rs` 已有的形状在 stderr 上说自己跳过了(CI 的 runner 就是这种机器);而路径上若坐着一个**普通** `pwsh.exe`,它同样返回 `None`,否则这两条会在一台证明不了任何事的机器上**空跑通过**。`NamedVarsRealFiles` 则是因为现有的两个环境都答不了这个问题:`FakeShellEnvironment` 的 `is_file` 来自测试自己填的集合,只能确认测试已经相信的事;`SystemShellEnvironment` 读的是**跑测试那个 shell** 的 `PATH`——而本片要复现的机器,恰恰是 `PATH` 与 `%ProgramFiles%` 两条路都不通、alias 是唯一那条的机器。变量由测试命名、文件由真机提供,才是那台机器。
 
 **⑥ 同族已核,没有第二处。** `wsl` / `gitbash` / `cmd` 三条内置档案的候选路径、`ProfilePrograms::probe`、`ProfilePrograms::candidate_path`、`search_path`、`find_git`——`crates/bt-app/src/profiles.rs` 里每一处可执行文件探测都落在**同一个** `ShellEnvironment::is_file` 上,所以本片对注释的加固对它们一次生效,也没有第二份需要同步的判定。`bt-app` 其余的 `is_file`/`exists` 全是数据文件(会话、日志、备份、配色、预览临时件),不是「这台机器能不能启动它」的问句。
+
+### 7.26 卡头是 tab 的第二张脸:钉与叉是同一条规矩的两半(Cards 卡头缺陷,2026-08-27 用户实证,已落地;`crates/bt-app/src/{seats,main,icons}.rs`、`crates/bt-render/src/{theme,lib}.rs`)
+
+**一句话:一张卡的头就是这枚 tab 在第三个面上的脸,尾部挂什么由「这枚 tab 该有哪些尾部控件」一个判定说了算;卡头曾把这条规矩自己抄了第四份,于是钉子画得出、点不动,钉住的卡还挂着一枚 ✕。**
+
+**① 两只病,一个因。** 用户实证两条:(a) 卡头右侧那枚钉子按下去什么都不发生;(b) 已经钉住的卡仍然挂着 ✕,而 tab 条上钉住的 tab 早就没有 ✕(Q174 一带;小样 `tabTrailer` 4204-4207 写的是**要么** `.pin.on`、**要么** `.pin` + `.close`,从来不是两个都有)。两条听上去是两件事,红门跑出来是同一件:`hit_focus_rail` 的卡片循环里只问 `card.close` 与 `card.body`,**根本没有 `TabPin` 那一支**;而画的那一支写的是「pinned 才画钉子、✕ 永远画」——也就是说卡头**自己重写了一遍**尾部控件的规矩,而且写反了。红证原文:钉住的卡在尾槽上按下去答 `Some(TabClose(0))`(应为 `Some(TabPin(0))`);未钉且悬停的卡,头里画出来的记号是 `[ProfilePowerShell, TabClose]`,一枚钉子都没有。
+
+**② 规矩收成一个函数,三个面都问它。** `seats::tab_trailer_controls(pinned) -> TabTrailerControls { close, pin_is_state }`:钉住 → 没有 ✕、钉子是**状态**(实心、常驻、按下去是 Unpin);未钉 → 有 ✕、钉子是**动作**(空心、悬停显形、按下去是 Pin)。tab 条的 `tab_strip_geometry`、rail 的 `rail_geometry`、卡头的 `focus_card_trailer` 三处一律改成问它,原先各写各的条件全部删掉。宽度档(`.tab.tight`)照旧只**拿走**、不加回来——这句本来就写在旧注释里,现在它拿走的是这个函数给出的集合。红门 `one_predicate_says_which_trailing_controls_a_tab_wears` 直接数源码里 `tab_trailer_controls(` 的出现次数 = 4(一个定义、三个调用方),再抄第四份就掉。
+
+**③ 卡头的盒:尾槽一个,钉子在它左边 4px。** `FocusCardGeometry::close` 改名 `trailing`——它本来就不是「✕ 的盒」而是**尾槽**:未钉的卡里站 ✕,钉住的卡里站钉子,和 tab 条、rail 上「钉子就站在 ✕ 那个位置」是同一句(F61:取消固定就在你手已经在的地方)。未钉的卡多一个盒,右缘 = 尾槽左缘 − 4px(`WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX`,与另外两个面同一个常量,不是第二次读数),宽度与尾槽相同。
+
+**卡不抄 rail 的「静止零宽」。** rail 上未钉的钉子静止时宽度为 0、随即被丢掉,是为了不让行名被一个看不见的盒吃掉宽度;卡是**定宽列里的定宽物**,盒常驻,悬停决定的是**墨**而不是矩形——这正是卡头原来就为 ✕ 写下的理由(「一个跟着指针来去的命中盒,就是一枚你伸手过去那一帧按不着的 ✕」),这一片只是把它诚实地推广到钉子。名字的右缘照旧由 `focus_card_title_right` 一处读出,现在它读的是同一个 `focus_card_trailer`。
+
+**④ 显形是九十毫秒的墨,不是硬切。** 卡头的 ✕ 与钉子在同一次 `.fcard:hover` 上一起显形,所以它们共用**一个**数:`Fading::CardHead(TabId)` 进 `settling` 寄存器,目标由 `hovered_tab()` 给,跨度 `bt_render::HOVER_CHROME_FADE`(= `MOTION_FAST_MS` = 90ms)。三条纪律原样成立:寄存器是**增益而不是替代**(没有时钟的调用方——每一条测试、每一台 reduced-motion 机器——照 hover 这个布尔画满);**命中不问墨**(盒常驻,显形第一帧就能按);**钉住的那枚钉子不参与**——它是关于这枚 tab 的事实,不是来去的邀请,所以恒 1.0,和 rail 上 `.pin.on` 同一句。Cards 之外一律不往 1.0 拉:tab 条与 rail 的显形走 `TabTrailer::reveal`(那是**宽度**、属于几何),这个寄存器是卡列自己的。
+
+**⑤ 一处改名、一个常量删掉,都是把名字改回它本来说的事。** `FocusCardGeometry::close` → `trailing`(见 ③)。`FOCUS_CARD_PIN_BOX_LOGICAL_PX = 11.0` **整个删掉**:那 11px 从来不是可按的盒(盒是尾槽的 16px,和 tab 条上 `WINDOW_TAB_PIN_BOX_LOGICAL_PX = WINDOW_TAB_CLOSE_BOX_LOGICAL_PX` 同一个理由),而它作为**画**也站不住——光学红门当场报 `focus card pin: i-pin at 11×11 draws 0.825px`,房子的笔要落在 `0.95..=1.15`。所以卡上的钉子就画 tab 条那一支 `WINDOW_TAB_PIN_GLYPH_LOGICAL_PX`(13px,0.975):**一个控件、一张画、一个数**。这正是 tab 条自己那条旧注释「按 ✕ 的尺寸给钉子,它就读起来像脏点」被量出来的样子。符号表 `draw_sites` 里 `strip tab pin` 与 `focus card pin` 两行同尺寸、实心空心各一;✕ 照旧走 `ActionIcon::CloseTab`。
+
+**⑥ 撤回 §7.1.6b′ ④ 的一半读法。** 原文把「文件夹窥视」与「钉的邀请」并列成「属于 tab 行的手势,卡上不给第二个家」。文件夹那一半照旧成立(卡确实不长 `files` 触发器);钉那一半不成立,而且它自己就是证据:一张能**声明**自己被钉住、却**做不到**取消固定的卡,不是克制,是把一个动词画成了装饰。钉不是卡自创的手势,它是这枚 tab 在另外两个面上一直戴着的两个控件之一,而卡是这枚 tab 的第二张脸。
+
+**⑦ 红门四条(`crates/bt-app/src/seats.rs`)。**
+
+- `a_pinned_card_wears_the_pin_in_the_closes_slot_and_no_close_at_all`:尾槽命中 = `TabPin(0)`;悬停时卡头里有 `Pin { filled: true }`、**没有** `TabClose`。
+- `an_unpinned_card_carries_the_close_and_offers_the_pin_beside_it`:尾槽命中 = `TabClose(0)`;悬停时头里同时有 `TabClose` 与 `Pin { filled: false }`,后者站在尾槽左边,按它 = `TabPin(0)`。
+- `one_predicate_says_which_trailing_controls_a_tab_wears`:源码里 `tab_trailer_controls(` 恰好 4 处。
+- `a_card_heads_run_arrives_as_ink_rather_than_appearing`:寄存器给 0.4 时 ✕ 与空心钉都是 0.4(一次显形不许两半错开),钉住那张的实心钉是 1.0;寄存器为空时照 hover 画满。
+
+**日期:2026-08-27 用户实证,当日落地。**
