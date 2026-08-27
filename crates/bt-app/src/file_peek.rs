@@ -1183,6 +1183,7 @@ mod tests {
     fn foot(layout: &PeekLayout, notice: &str) -> crate::seats::FootWords {
         crate::seats::dress_foot(
             crate::seats::FootDress {
+                dissolved: 0.0,
                 run: foot_run(layout, SCALE),
                 lead: peek_foot_text(),
                 flash: None,

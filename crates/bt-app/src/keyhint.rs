@@ -56,10 +56,17 @@ pub const KEY_HINT_DELAY: Duration = Duration::from_millis(800);
 ///
 /// [`crate::tooltip::TOOLTIP_FADE`]'s number and its argument — this is the
 /// other surface in this window you summon by *not moving*, so once the wait is
-/// over it has to feel like it was already there. It has no exit fade at all,
-/// for the same reason a tip has none: leaving is the half nobody is waiting
-/// for, and a card that lingered after the key that dismissed it would be
-/// standing over the thing that key just did.
+/// over it has to feel like it was already there.
+///
+/// **This is the entrance only, and it is the whole of what this file owns.**
+/// The card had no exit at all until the animation block's first slice, whose
+/// argument for one is in `arrival.rs`: the card leaves as a *picture*, over
+/// [`bt_render::POPUP_EXIT`], through [`crate::arrival::Passages::stage_departure`]
+/// — which is why it can leave at all without the state that draws it staying
+/// alive one frame past the key that dismissed it. The reason this file once
+/// gave for having no exit ("leaving is the half nobody is waiting for") is the
+/// reason that half is *fast* and does not travel, not a reason for it to be a
+/// hard cut; ninety milliseconds of ink is not standing over anything.
 pub const KEY_HINT_FADE: Duration = bt_render::MOTION_FAST;
 
 // ── the box ────────────────────────────────────────────────────────────────
