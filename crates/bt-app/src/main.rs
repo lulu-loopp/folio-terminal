@@ -18776,6 +18776,23 @@ mod motion_archive_tests {
                 ms(crate::toast::TOAST_LIFE_QUIET),
                 "how long a confirmation stands, which is a shorter reading time",
             ),
+            // The player's control bar. Its two waits are Rust constants that
+            // are written into a page rather than held by this process, and
+            // they are in the register for exactly that reason: a duration that
+            // lived only inside a JavaScript string would be the one span in
+            // this product no gate could see. Its *fades* need no line here —
+            // the page is handed `MOTION_FAST_MS` itself, which is already the
+            // first row of this list.
+            wait(
+                "player::PLAYER_BAR_REVEAL_INTENT_MS",
+                crate::player::PLAYER_BAR_REVEAL_INTENT_MS,
+                "how long a hand is in a playing pane before the control bar comes up",
+            ),
+            wait(
+                "player::PLAYER_BAR_IDLE_REST_MS",
+                crate::player::PLAYER_BAR_IDLE_REST_MS,
+                "the dwell *after*: how long a control bar with nothing left to do stays up",
+            ),
         ]
     }
 
@@ -43748,16 +43765,18 @@ impl Runtime<'_> {
                 return Ok(());
             }
         };
-        // **The window's own ground, at the moment the shell is written.** The
-        // bars beside a recording that is not this pane's shape are the only
-        // part of the page a theme can reach, and the page cannot be told about
-        // a later one — see [`player::shell_html`].
-        let ground = bt_render::chrome_palette().seat_body;
+        // **The window's own palette, at the moment the shell is written.** The
+        // page cannot read `bt_render`, so everything a theme reaches on it —
+        // the letterbox, the bar, its hairline, its two inks, its accent, its
+        // face and its size — crosses here and nowhere else, and a theme
+        // changed mid-playback does not repaint it until the next play. See
+        // [`player::PlayerSkin`], where that cost is priced.
+        let skin = player::PlayerSkin::in_force();
         // **The pane's own spelling and the disk's, both** — see
         // [`player::mint_player_shell`], where the frame this cost is written
         // down. The URL goes to the engine; the name goes to every surface that
         // has to recognise this pane again.
-        let mint = match player::mint_player_shell(&path, &canonical, ground) {
+        let mint = match player::mint_player_shell(&path, &canonical, skin) {
             Ok(mint) => mint,
             Err(refusal) => {
                 self.mouse_trace(|| format!("play_video_on leave=no-shell {refusal:?}"));
@@ -117076,8 +117095,9 @@ mod tests {
         let video = std::env::temp_dir().join("folio-play-gate.mp4");
         std::fs::write(&video, b"not a real recording, and it does not have to be")
             .expect("a temp file");
-        let mint = crate::player::mint_player_shell(&video, &video, [0x1b, 0x1b, 0x1b])
-            .expect("a drive path mints a shell");
+        let mint =
+            crate::player::mint_player_shell(&video, &video, crate::player::PlayerSkin::in_force())
+                .expect("a drive path mints a shell");
         let shell = mint.target().expect("a shell mint names its URL");
         assert!(
             shell.ends_with(".html"),

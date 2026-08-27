@@ -22,6 +22,7 @@
 !docs/plans/web-preview/w2-slice5-evidence/*.png
 !docs/plans/web-preview/w2-slice4-integration-evidence/*.png
 !docs/plans/web-preview/favicon-evidence/*.png
+!docs/plans/video-preview/player-bar-evidence/*.png
 !docs/plans/web-preview/preview-leaf-evidence/*.png
 dist/
 .tmp-repaint-capture/
