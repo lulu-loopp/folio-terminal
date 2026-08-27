@@ -27,7 +27,7 @@
 //! to create a video thumbnail**" — and reaching it costs one `windows` crate
 //! feature rather than one crate.
 //!
-//! # The thread this runs on, and why it is its own
+//! # Two lifetimes: a session the process keeps and a thread per question
 //!
 //! Media Foundation asks to be spoken to from a **multithreaded apartment**:
 //! "Work queues always have multithreaded apartment (MTA) threads … it is
@@ -39,23 +39,56 @@
 //! chooser), and the decoration worker — the thread that answers a hover with a
 //! formula, a decoded picture or a rastered PDF page — has no apartment at all.
 //!
-//! So [`first_frame`] does not run where it is called. It **spawns a thread**,
-//! and that thread owns the whole apartment for the length of one question:
-//! `CoInitializeEx(COINIT_MULTITHREADED)` and `MFStartup` on the way in,
-//! `MFShutdown` and `CoUninitialize` on the way out, paired on every path
-//! including the failing ones ("For every call to **MFStartup**, your application
-//! must call **MFShutdown**"). Nothing about Media Foundation outlives the
-//! answer, and no other lane's COM semantics are touched.
+//! **The platform is the process's, and it is entered once.** The first shape of
+//! this module started and shut the platform down inside every question, which is
+//! the pairing Microsoft asks for ("For every call to **MFStartup**, your
+//! application must call **MFShutdown**") read as if it had to happen inside one
+//! function. It does not: the pairing is per *process*.
 //!
-//! **A thread per question rather than one kept warm**, and the reason is the
-//! budget below. `MFStartup`/`MFShutdown` are not free, but a file is asked
-//! about once — the window caches the pixels against the file's modification
-//! time, exactly as it does a PDF's page — so the cost is paid on a first hover
-//! and never again. What a fresh thread buys is the one thing a shared one
-//! cannot give: a caller that can **stop waiting**. `ReadSample` is synchronous
-//! and a malformed file can send a demuxer a long way; [`FIRST_FRAME_BUDGET`] is
-//! honoured by the caller giving up on the channel, and the thread it walked
-//! away from finishes into a receiver nobody is holding and unwinds itself.
+//! What that cost was measured on 2026-08-27, against the 2,982-byte, 160×120
+//! fixture in this tree, three consecutive questions in one process, debug build:
+//!
+//! | | `MFStartup` | open | output type | seek | `ReadSample` | copy | `MFShutdown` + `CoUninitialize` |
+//! |---|---|---|---|---|---|---|---|
+//! | first | 0.41 ms | 36.8 ms | 126.1 ms | 0.70 ms | 154.5 ms | 0.09 ms | 7.0 ms |
+//! | second | 0.18 ms | 24.0 ms | 60.9 ms | 0.93 ms | 52.0 ms | 0.05 ms | 5.1 ms |
+//! | third | 0.18 ms | 23.9 ms | 51.2 ms | 0.56 ms | 22.4 ms | 0.04 ms | 4.9 ms |
+//!
+//! **`MFStartup` is not the expensive call; what `MFShutdown` throws away is.**
+//! Starting and stopping the platform is a fraction of a millisecond and a few
+//! milliseconds respectively — but between them sits everything the platform
+//! *learned*: the source resolver's handler registry, the MFT enumeration, the
+//! H.264 decoder bound to a video processor. Shut it down and the next hover pays
+//! for all of it again, which is why the third question above still costs 100 ms
+//! for 2,982 bytes and never converges any lower.
+//!
+//! So this module keeps the platform. [`media_session`] runs
+//! `CoIncrementMTAUsage` — the supported way to hold the MTA open with no thread
+//! of its own standing in it, which matters because the only threads that ever
+//! stand in it here are the per-question ones — and then `MFStartup`, both inside
+//! a `OnceLock`, and neither is given back before the process ends. Measured the
+//! same day on the same fixture: **210 ms for the first question in a process and
+//! 7.6–12 ms for every one after it**, against 100–330 ms for every question under
+//! the old shape. [`prewarm`] moves the 210 ms onto a background thread at
+//! start-up, so the first hover of a session pays the 8 ms and not the 210.
+//!
+//! **The question is still a thread's.** [`first_frame`] does not run where it is
+//! called. It spawns a thread, joins the process's apartment on it
+//! (`CoInitializeEx(COINIT_MULTITHREADED)`, which is now a refcount on an MTA that
+//! is already standing), asks its one question and unwinds. What a fresh thread
+//! buys is the one thing a shared one cannot give: a caller that can **stop
+//! waiting**. `ReadSample` is synchronous and a malformed file can send a demuxer
+//! a long way; [`FIRST_FRAME_BUDGET`] is honoured by the caller giving up on the
+//! channel, and the thread it walked away from finishes into a receiver nobody is
+//! holding and unwinds itself.
+//!
+//! **The two halves are separately callable and separately tested**, which is the
+//! other thing this split bought. [`decode_first_frame`] is the whole
+//! conversation with no clock over it, and [`within_budget`] is the giving-up with
+//! no decoder under it. A test of the first asserts a picture and never a
+//! duration; a test of the second hands it work that cannot finish. Neither is a
+//! wall-clock gate on a machine running two dozen other tests, which is what the
+//! one function they were carved out of had become.
 //!
 //! # What it refuses, and the shape of every refusal
 //!
@@ -80,6 +113,8 @@
 //! will get a different table when it is made.
 
 use std::path::Path;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Media::MediaFoundation::{
@@ -91,7 +126,9 @@ use windows::Win32::Media::MediaFoundation::{
     MFShutdown, MFStartup, MFVideoFormat_RGB32,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
-use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::System::Com::{
+    COINIT_MULTITHREADED, CoIncrementMTAUsage, CoInitializeEx, CoUninitialize,
+};
 use windows::core::{HSTRING, Interface};
 
 /// **How long one question may take before the caller stops waiting.**
@@ -155,6 +192,44 @@ pub struct VideoFrame {
     pub native_height: u32,
 }
 
+/// **Where one question's time went**, segment by segment, for a caller that
+/// wants to know why a first frame took as long as it did.
+///
+/// Six spans that together are the whole of [`decode_first_frame`], and the
+/// reason they exist is that "the first frame is slow" was true and useless: the
+/// answer turned out to be that one of these six is a second and the other five
+/// are milliseconds, which is a different bug from the one everybody assumes. See
+/// the module note.
+///
+/// A segment a refusal never reached stays zero. Nothing in this module reads
+/// these back or decides anything by them.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FirstFrameCost {
+    /// Joining the apartment and starting the platform — nearly all of a cold
+    /// process's answer, and nothing at all once [`prewarm`] has run.
+    pub session: Duration,
+    /// `MFCreateSourceReaderFromURL`: the source resolver choosing a byte stream
+    /// handler, opening the container and reading its index.
+    pub open: Duration,
+    /// Selecting the video stream and settling the RGB-32 output type, which is
+    /// where the decoder and the video processor are actually bound.
+    pub output_type: Duration,
+    /// Reading the declared duration and winding to [`SEEK_FRACTION`].
+    pub seek: Duration,
+    /// `ReadSample` until a picture comes back: the decode itself.
+    pub read_sample: Duration,
+    /// Locking the buffer and swizzling BGRX into the window's RGBA.
+    pub copy: Duration,
+}
+
+impl FirstFrameCost {
+    /// The six spans added up — the length of the whole question.
+    #[must_use]
+    pub fn total(self) -> Duration {
+        self.session + self.open + self.output_type + self.seek + self.read_sample + self.copy
+    }
+}
+
 /// **A frame out of the video at `path`, fitted inside `fit_width` ×
 /// `fit_height`**, or `None` for every refusal in the module's own note.
 ///
@@ -169,9 +244,12 @@ pub struct VideoFrame {
 /// # Where it may be called from
 ///
 /// **Never the thread that draws.** Opening a container, seeking it and decoding
-/// a frame is tens to hundreds of milliseconds and on the window's thread that is
-/// a hover freezing the window — the same sentence that already keeps the PDF
-/// rasteriser on the decoration worker, which is also this function's one caller.
+/// a frame is single-digit milliseconds once the session is warm and ~200 ms for
+/// the question that warms it, and either one on the window's thread is a hover
+/// freezing the window — the same sentence that already keeps the PDF rasteriser
+/// on the decoration worker, which is also this function's one caller. A file
+/// nothing can decode is bounded only by [`FIRST_FRAME_BUDGET`], which is three
+/// seconds and would be three seconds of frozen window.
 #[must_use]
 pub fn first_frame(path: &Path, fit_width: u32, fit_height: u32) -> Option<VideoFrame> {
     // Resolved before the thread, so what crosses is a string and not a borrow.
@@ -179,61 +257,225 @@ pub fn first_frame(path: &Path, fit_width: u32, fit_height: u32) -> Option<Video
     // `MFCreateSourceReaderFromURL`.
     let url = HSTRING::from(path.as_os_str());
     let (fit_width, fit_height) = (fit_width.max(1), fit_height.max(1));
+    within_budget(FIRST_FRAME_BUDGET, move || {
+        decode_from_url(&url, fit_width, fit_height).0
+    })
+}
+
+/// **Run `work` on a thread of its own and stop waiting for it after `budget`.**
+///
+/// The whole of this module's giving-up, with no decoder underneath it. `None`
+/// covers both endings a caller cannot tell apart and does not need to: the work
+/// answered `None`, or it had not answered at all when the budget ran out.
+///
+/// The thread that overran is **not** cancelled, because there is no supported
+/// way to interrupt a synchronous `ReadSample` in somebody else's demuxer. It is
+/// left to finish into a receiver nobody is holding, which drops its answer
+/// exactly where the caller would have dropped it, and then to unwind. That is
+/// why the work it is given holds no lock and writes to nothing but its own
+/// channel.
+fn within_budget<T: Send + 'static>(
+    budget: Duration,
+    work: impl FnOnce() -> Option<T> + Send + 'static,
+) -> Option<T> {
     let (answer, wait) = std::sync::mpsc::channel();
-    // The apartment, Media Foundation's startup and every interface below all
-    // live and die inside this closure; see the module note for why it is a
-    // thread of its own and why the caller is allowed to walk away from it.
     std::thread::Builder::new()
         .name("folio-video-frame".to_owned())
         .spawn(move || {
-            let frame = in_its_own_apartment(|| read_first_frame(&url, fit_width, fit_height));
-            // The receiver is gone when the budget ran out. That is an ordinary
-            // ending for this thread and not an error: the answer is dropped
-            // here exactly as it would have been dropped there.
-            let _ = answer.send(frame);
+            let _ = answer.send(work());
         })
         .ok()?;
-    wait.recv_timeout(FIRST_FRAME_BUDGET).ok().flatten()
+    wait.recv_timeout(budget).ok().flatten()
 }
 
-/// Run `work` on this thread with an MTA and a started Media Foundation, and
-/// give both back afterwards **whatever `work` did**.
+/// **The whole Media Foundation conversation, with no clock over it** — the half
+/// of [`first_frame`] that actually decodes.
 ///
-/// The pairing the platform asks for, written once so no early return can skip
-/// half of it: `CoUninitialize` only for an apartment this call actually
-/// entered, and `MFShutdown` only for a `MFStartup` that actually returned.
-fn in_its_own_apartment(work: impl FnOnce() -> Option<VideoFrame>) -> Option<VideoFrame> {
-    // SAFETY: this runs on a thread this function has just created and is the
-    // only code that will ever run on it. Nothing else in this process holds an
-    // apartment here, so `CoInitializeEx` cannot be changing the mode of one
-    // somebody else is using, and the two releases below run on every path.
-    unsafe {
-        let apartment = CoInitializeEx(None, COINIT_MULTITHREADED);
-        // A fresh thread has no apartment, so the only way this fails is the
-        // system refusing outright — in which case Media Foundation has nothing
-        // to stand on and the answer is the module's one silence.
-        if apartment.is_err() {
-            return None;
+/// Same answer and same silences; what it does not carry is
+/// [`FIRST_FRAME_BUDGET`], so it returns when the platform is done rather than
+/// when a caller has stopped waiting. It runs on the calling thread, which it
+/// joins the process apartment on and leaves again, so it may be called from any
+/// thread that is not already in a single-threaded apartment — and, like
+/// [`first_frame`], never from the thread that draws.
+#[must_use]
+pub fn decode_first_frame(path: &Path, fit_width: u32, fit_height: u32) -> Option<VideoFrame> {
+    decode_first_frame_measured(path, fit_width, fit_height).0
+}
+
+/// [`decode_first_frame`] with the stopwatch left running: the same answer, and
+/// where its milliseconds went.
+///
+/// The measurement is the caller's business and never this module's — nothing
+/// here reads a [`FirstFrameCost`] back or decides anything by it. It exists so
+/// that "the first frame is slow" can be answered with a segment rather than an
+/// opinion; see [`FirstFrameCost`].
+#[must_use]
+pub fn decode_first_frame_measured(
+    path: &Path,
+    fit_width: u32,
+    fit_height: u32,
+) -> (Option<VideoFrame>, FirstFrameCost) {
+    let url = HSTRING::from(path.as_os_str());
+    decode_from_url(&url, fit_width.max(1), fit_height.max(1))
+}
+
+fn decode_from_url(
+    url: &HSTRING,
+    fit_width: u32,
+    fit_height: u32,
+) -> (Option<VideoFrame>, FirstFrameCost) {
+    let mut cost = FirstFrameCost::default();
+    let frame = in_the_process_apartment(&mut cost, |cost| {
+        read_first_frame(url, fit_width, fit_height, cost)
+    });
+    (frame, cost)
+}
+
+/// **Start Media Foundation now, off the thread that asked, so the first hover
+/// does not pay for it.**
+///
+/// Idempotent and non-blocking: it spawns a thread that touches
+/// [`media_session`] and returns. A hover that arrives before the warm-up has
+/// finished is not racing it — `OnceLock` makes the second caller wait for the
+/// first rather than start a second platform — it simply pays what is left.
+///
+/// # Where it is called from
+///
+/// Once, at start-up, from `bt-app`'s `main`. It is deliberately not called
+/// lazily from the file column: the point of it is to spend the first question's
+/// ~200 ms somewhere nobody is waiting, and a hover is not that place.
+pub fn prewarm() {
+    let _ = std::thread::Builder::new()
+        .name("folio-video-prewarm".to_owned())
+        .spawn(|| {
+            media_session();
+        });
+}
+
+/// Whether this process's Media Foundation session is up, **starting it the
+/// first time anybody asks**.
+///
+/// Two things, once each and never given back. `CoIncrementMTAUsage` is the
+/// documented way to "keep MTA support active when no MTA threads are running":
+/// without it the apartment is created and destroyed around every question,
+/// because the only threads that ever stand in it are the per-question ones.
+/// `MFStartup` is the platform itself, and what makes it worth keeping is that
+/// nearly all of its cost is a first-call cost — see the module note for the
+/// measurement.
+///
+/// **Nothing releases either**, and that is the shape rather than an omission:
+/// `MFShutdown` at process exit is what [`shutdown_media_session`] is for, and a
+/// process that skips it is a process whose whole address space is going away.
+fn media_session() -> bool {
+    static SESSION: OnceLock<bool> = OnceLock::new();
+    *SESSION.get_or_init(|| {
+        // SAFETY: both calls are process-wide platform entries with no arguments
+        // this code chooses and no interface handed back that outlives them. The
+        // cookie is deliberately dropped: nothing in this process may end the
+        // MTA, which is the whole point of taking the reference.
+        unsafe {
+            if CoIncrementMTAUsage().is_err() {
+                return false;
+            }
+            // `NOSOCKET` rather than `FULL`: this reads local files and the
+            // sockets half of the platform is the network source it will never
+            // open.
+            let started = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET).is_ok();
+            // Counted here and nowhere else, and only for a startup that
+            // actually returned: this is what makes `shutdown_media_session`
+            // exactly the other half of the pairing rather than an unmatched
+            // `MFShutdown` on a machine where the platform refused to start.
+            if started {
+                MEDIA_SESSION_STARTS.fetch_add(1, Ordering::Relaxed);
+            }
+            started
         }
-        // `NOSOCKET` rather than `FULL`: this reads local files and the sockets
-        // half of the platform is the network source it will never open.
-        let started = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET).is_ok();
-        let frame = if started { work() } else { None };
-        if started {
-            let _ = MFShutdown();
-        }
-        CoUninitialize();
-        frame
+    })
+}
+
+/// How many Media Foundation sessions this process has started.
+///
+/// One, for the life of a process that ever drew a video, and zero for one that
+/// did not. It is the deterministic half of the module note's measurement: a wall
+/// clock says the second question was a hundred times faster, and this says
+/// *why* — that there was no second startup to pay for.
+#[must_use]
+pub fn media_session_starts() -> u32 {
+    MEDIA_SESSION_STARTS.load(Ordering::Relaxed)
+}
+
+static MEDIA_SESSION_STARTS: AtomicU32 = AtomicU32::new(0);
+
+/// **Give the platform back**, for a process that is closing in an orderly way.
+///
+/// The other half of the pairing Microsoft asks for, moved out to where it
+/// belongs: the process, not the question. It is a no-op when nothing ever
+/// started a session, and it does not release the MTA reference — a shutdown that
+/// tore the apartment down while another thread was still inside a `ReadSample`
+/// it is allowed to walk away from would be undoing the module's own promise.
+///
+/// # Where it is called from
+///
+/// Once, from `bt-app`'s `main`, after the event loop has returned.
+pub fn shutdown_media_session() {
+    if MEDIA_SESSION_STARTS.load(Ordering::Relaxed) == 0 {
+        return;
     }
+    // SAFETY: paired with the one `MFStartup` in `media_session`, on a process
+    // that has stopped asking questions.
+    unsafe {
+        let _ = MFShutdown();
+    }
+}
+
+/// Join the process apartment for the length of `work`, and leave it afterwards
+/// **whatever `work` did**.
+///
+/// `CoInitializeEx` is per thread and cannot be hoisted into the session the way
+/// `MFStartup` can, but with the MTA already standing it is a reference count
+/// rather than an apartment being built. `CoUninitialize` runs only for a call
+/// that actually entered, so no early return can skip half the pairing.
+fn in_the_process_apartment(
+    cost: &mut FirstFrameCost,
+    work: impl FnOnce(&mut FirstFrameCost) -> Option<VideoFrame>,
+) -> Option<VideoFrame> {
+    let started = Instant::now();
+    if !media_session() {
+        cost.session = started.elapsed();
+        return None;
+    }
+    // SAFETY: an MTA entry on the calling thread, released below on every path.
+    // The one way this fails is a thread that is already in a single-threaded
+    // apartment, which answers `RPC_E_CHANGED_MODE` and is turned away rather
+    // than having its mode changed underneath it.
+    let apartment = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    if apartment.is_err() {
+        cost.session = started.elapsed();
+        return None;
+    }
+    cost.session = started.elapsed();
+    let frame = work(cost);
+    // SAFETY: paired with the `CoInitializeEx` directly above, on its thread.
+    unsafe { CoUninitialize() };
+    frame
 }
 
 /// The whole of the Media Foundation conversation, on a thread that already has
 /// an apartment and a started platform.
-fn read_first_frame(url: &HSTRING, fit_width: u32, fit_height: u32) -> Option<VideoFrame> {
-    let deadline = Instant::now() + FIRST_FRAME_BUDGET;
+fn read_first_frame(
+    url: &HSTRING,
+    fit_width: u32,
+    fit_height: u32,
+    cost: &mut FirstFrameCost,
+) -> Option<VideoFrame> {
+    let mut segment = Instant::now();
+    let mut lap = |cost: &mut Duration| {
+        *cost = segment.elapsed();
+        segment = Instant::now();
+    };
     // SAFETY: every call below is a COM method on an interface this function
     // created and holds, on the thread that created it, inside the apartment
-    // `in_its_own_apartment` entered. The one raw pointer that leaves an
+    // `in_the_process_apartment` entered. The one raw pointer that leaves an
     // interface is the locked buffer, and it is read inside the lock and not
     // kept past `copy_locked_frame`.
     unsafe {
@@ -251,6 +493,7 @@ fn read_first_frame(url: &HSTRING, fit_width: u32, fit_height: u32) -> Option<Vi
             .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
             .ok()?;
         let reader = MFCreateSourceReaderFromURL(url, &attributes).ok()?;
+        lap(&mut cost.open);
 
         // Nothing but the video. An audio stream that is still selected is a
         // stream the reader will hand us samples from, and a sample from it is
@@ -289,14 +532,21 @@ fn read_first_frame(url: &HSTRING, fit_width: u32, fit_height: u32) -> Option<Vi
             .GetUINT32(&MF_MT_DEFAULT_STRIDE)
             .ok()
             .map(|s| s as i32);
+        lap(&mut cost.output_type);
 
         let duration_ms = duration_of(&reader);
         seek_into(&reader, duration_ms);
+        lap(&mut cost.seek);
 
+        // **The budget starts here and not at the top of this function**, because
+        // what it is for is a loop that never ends — a reader that answers with
+        // neither a sample nor an end of stream for ever. Opening a container and
+        // seeking it are not that: they finish, and a machine slow enough to make
+        // them look otherwise would be turning a good file into a refusal for a
+        // reason that has nothing to do with the file. The caller's own
+        // [`FIRST_FRAME_BUDGET`] still bounds the whole question from outside.
+        let deadline = Instant::now() + FIRST_FRAME_BUDGET;
         let sample = loop {
-            if Instant::now() >= deadline {
-                return None;
-            }
             let mut flags = 0_u32;
             let mut sample = None;
             reader
@@ -311,10 +561,15 @@ fn read_first_frame(url: &HSTRING, fit_width: u32, fit_height: u32) -> Option<Vi
             if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
                 return None;
             }
+            if Instant::now() >= deadline {
+                return None;
+            }
         };
+        lap(&mut cost.read_sample);
 
         let buffer = sample.ConvertToContiguousBuffer().ok()?;
         let rgba = copy_locked_frame(&buffer, width, height, declared_stride)?;
+        lap(&mut cost.copy);
         Some(VideoFrame {
             rgba,
             width,
@@ -680,6 +935,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// PIN — **the budget is honoured, and it is honoured about the waiting and
+    /// not about the work.**
+    ///
+    /// [`within_budget`] with no decoder underneath it, which is the only way
+    /// either half of this can be stated without a real file's real duration
+    /// standing in the middle of it. The first arm hands it work that answers at
+    /// once under a budget nothing could exceed; the second hands it work that
+    /// cannot finish inside the budget it is given, and the budget is small
+    /// enough that a machine under any load at all still cannot finish it.
+    ///
+    /// **Neither arm can be made red or green by a busy machine**, which is the
+    /// whole reason this test exists rather than a slow file: an hour is not a
+    /// duration a thread spawn and a channel send can miss, and twenty
+    /// milliseconds is not one a two-second sleep can beat.
+    ///
+    /// MUTATION: swap `recv_timeout` for `recv` and the second arm hangs for two
+    /// seconds and then answers `Some`, which is a hover that has frozen the
+    /// decoration worker for as long as the file feels like taking.
+    #[test]
+    fn a_question_that_cannot_finish_is_given_up_on() {
+        assert_eq!(
+            within_budget(Duration::from_secs(3_600), || Some(7_u32)),
+            Some(7),
+            "an answer inside the budget is the answer"
+        );
+        assert_eq!(
+            within_budget(Duration::from_millis(20), || {
+                std::thread::sleep(Duration::from_secs(2));
+                Some(7_u32)
+            }),
+            None,
+            "work that has not answered by the end of the budget is the module's one silence"
+        );
+    }
+
     /// RED — **the shipped fixture gives up a frame, its size and its length.**
     ///
     /// The one assertion in this module that a decoder cannot satisfy by
@@ -694,6 +984,22 @@ mod tests {
     /// the fixture opens on black and closes on colour, so a lane that took frame
     /// zero would pass every other assertion here and fail this one.
     ///
+    /// **It calls [`decode_first_frame`] and not [`first_frame`], and that is the
+    /// difference between a pin and a coin toss.** Through `first_frame` this
+    /// test was a decode racing [`FIRST_FRAME_BUDGET`], and losing that race
+    /// reports "no frame" for a file it had decoded perfectly. Measured on
+    /// 2026-08-27, this one test alone in its own process: **0.16–0.26 s on an
+    /// idle machine and 1.86 s under a full load** — an elevenfold spread with not
+    /// one line of this crate changing, against a 3 s gate. That is a number
+    /// reporting the scheduler, and it was set by a machine that happened to be
+    /// idle. What the test is about is whether the chain is wired, and the chain
+    /// is wired or it is not regardless of what else the machine is doing. The
+    /// budget is pinned next door, on work that has no decoder in it.
+    ///
+    /// The cost line is printed and nothing is concluded from it — it is what a
+    /// human reads when they want to know whether this got slower, and the
+    /// segment that would say so.
+    ///
     /// RED GATE: set `SEEK_FRACTION` to `0.0` and the ink assertion goes red
     /// while the size and duration assertions stay green — which is exactly the
     /// defect that would otherwise have shipped as "all my clips are black".
@@ -701,7 +1007,20 @@ mod tests {
     fn the_shipped_fixture_gives_up_a_frame() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../test-assets/folio-video-test.mp4");
-        let frame = first_frame(&fixture, 280, 160).expect("a real mp4 gives up a frame");
+        let (frame, cost) = decode_first_frame_measured(&fixture, 280, 160);
+        eprintln!(
+            "VIDEO_FIRST_FRAME total={:?} session={:?} open={:?} output_type={:?} seek={:?} \
+             read_sample={:?} copy={:?} sessions_started={}",
+            cost.total(),
+            cost.session,
+            cost.open,
+            cost.output_type,
+            cost.seek,
+            cost.read_sample,
+            cost.copy,
+            media_session_starts()
+        );
+        let frame = frame.expect("a real mp4 gives up a frame");
         assert_eq!(
             (frame.native_width, frame.native_height),
             (160, 120),
@@ -735,6 +1054,54 @@ mod tests {
         assert!(
             (4_800..=5_200).contains(&duration_ms),
             "a five-second fixture: {duration_ms}ms"
+        );
+    }
+
+    /// PIN — **a process starts one Media Foundation session, however many videos
+    /// it is asked about.**
+    ///
+    /// The counted half of the module note's measurement, and the half that does
+    /// not move when the machine does. The wall clock says the second question was
+    /// a hundred times faster than the first; this says why, and it says it in a
+    /// currency a full `cargo test --workspace` on the other cores cannot touch:
+    /// **one** startup, for every question this process will ever ask.
+    ///
+    /// It is stated as an absolute and not as a difference on purpose. The other
+    /// tests in this file decode too, and they run on their own threads in this
+    /// same process in whatever order the harness likes — so "one" has to be true
+    /// after all of them together, which is exactly the claim. A session started
+    /// per question would read three, or six, or however many videos this file
+    /// asks about on the day someone adds one.
+    ///
+    /// The two totals are printed and neither is asserted on: cold is one-off and
+    /// belongs to whichever test in this binary ran first, and warm is the number
+    /// the product cares about — 210 ms and 7.6–12 ms when this was written, see
+    /// the module note.
+    ///
+    /// MUTATION: move `MFStartup` back inside the per-question thread and this
+    /// counts one per decode; move `CoIncrementMTAUsage` out and the count stays
+    /// right while the warm total goes back to seconds, which is the failure this
+    /// pin cannot see and the printed line can.
+    #[test]
+    fn one_process_starts_one_media_session() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-assets/folio-video-test.mp4");
+        let (first, cold) = decode_first_frame_measured(&fixture, 280, 160);
+        let (second, warm) = decode_first_frame_measured(&fixture, 280, 160);
+        eprintln!(
+            "VIDEO_SESSION cold={:?} cold_session={:?} warm={:?} warm_session={:?} \
+             sessions_started={}",
+            cold.total(),
+            cold.session,
+            warm.total(),
+            warm.session,
+            media_session_starts()
+        );
+        assert!(first.is_some() && second.is_some(), "both decodes answered");
+        assert_eq!(
+            media_session_starts(),
+            1,
+            "the platform is the process's, so every question after the first finds it standing"
         );
     }
 }

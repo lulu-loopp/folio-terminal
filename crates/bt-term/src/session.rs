@@ -11072,6 +11072,113 @@ pub(crate) mod arming_ledger {
     }
 }
 
+/// **Test-only: the heap, counted per thread, underneath this crate's own unit tests.**
+///
+/// The second ledger in this file and the general one. [`arming_ledger`] counts one specific
+/// question because that question *is* the claim it serves; this counts every allocation the
+/// thread makes, because the claim it serves is a **shape** — "one more frozen line costs what the
+/// line before it cost" — and a shape has no single call site to put a counter in. A regression
+/// that rescanned history would do it by cloning line text, or by building a segment, or by
+/// re-deriving a context; all three are the heap, and none of them is a function this file could
+/// have known in advance to instrument.
+///
+/// It is here rather than in `tests/lifecycle_matrix.rs`, which has kept its own since M1.8, because
+/// the pin that needs it reaches `ingest_finalized`, `transcript` and `staging_sources` directly and
+/// all three are private. `#[cfg(test)]` keeps it to the lib's test binary: the shipped crate has no
+/// allocator of its own, and the integration tests link the lib compiled without `cfg(test)`, so
+/// their allocator is still theirs.
+///
+/// Thread-local on purpose: several hundred other tests in this binary are allocating on their own
+/// threads while a measured arm runs, and must not land in its total.
+#[cfg(test)]
+pub(crate) mod heap_ledger {
+    use std::cell::Cell;
+
+    thread_local! {
+        static BYTES: Cell<u64> = const { Cell::new(0) };
+        static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// One reading of this thread's heap. Absolute values belong to whatever else the thread has
+    /// done; a measurement is always a difference — see [`Draw::since`].
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) struct Draw {
+        pub(crate) bytes: u64,
+        pub(crate) allocations: u64,
+    }
+
+    impl Draw {
+        /// What this thread has asked the allocator for since `before` was read.
+        pub(crate) fn since(self, before: Self) -> Self {
+            Self {
+                bytes: self.bytes - before.bytes,
+                allocations: self.allocations - before.allocations,
+            }
+        }
+
+        /// The draw divided over the `count` units of work that made it.
+        pub(crate) fn per(self, count: u64) -> Self {
+            Self {
+                bytes: self.bytes / count,
+                allocations: self.allocations / count,
+            }
+        }
+    }
+
+    pub(crate) fn read() -> Draw {
+        Draw {
+            bytes: BYTES.with(Cell::get),
+            allocations: ALLOCATIONS.with(Cell::get),
+        }
+    }
+
+    fn charge(bytes: u64) {
+        BYTES.with(|counter| counter.set(counter.get().wrapping_add(bytes)));
+        ALLOCATIONS.with(|counter| counter.set(counter.get().wrapping_add(1)));
+    }
+
+    struct HeapCounter;
+
+    #[expect(
+        unsafe_code,
+        reason = "a global allocator has no safe form. Every method here forwards to \
+                  `std::alloc::System` with its arguments unchanged and adds nothing but two \
+                  thread-local counter bumps, so the safety contract is exactly System's."
+    )]
+    unsafe impl std::alloc::GlobalAlloc for HeapCounter {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            charge(layout.size() as u64);
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+            charge(layout.size() as u64);
+            unsafe { std::alloc::System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn realloc(
+            &self,
+            ptr: *mut u8,
+            layout: std::alloc::Layout,
+            new_size: usize,
+        ) -> *mut u8 {
+            // A grow is charged for the growth only; a shrink returns memory and is charged
+            // nothing. Forwarding to System's own `realloc` matters for more than speed: routing it
+            // through `alloc` + copy + `dealloc` instead would change what every `Vec` in this
+            // binary does.
+            charge(new_size.saturating_sub(layout.size()) as u64);
+            unsafe { std::alloc::System.realloc(ptr, layout, new_size) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static HEAP_COUNTER: HeapCounter = HeapCounter;
+}
+
 /// The arming pre-filter for tables: could this line be the *last* line of a table?
 ///
 /// **Two lines, because two lines is where the answer lives.** A table is proven by a header row
@@ -12931,15 +13038,69 @@ mod tests {
         assert!(session.transcript().frozen_bytes() <= budget);
     }
 
+    /// PIN — **freezing one more line costs what the line before it cost, however much history is
+    /// already frozen.**
+    ///
+    /// **This used to be a ratio of two wall clocks and could not stay one.** The claim was right
+    /// and the currency was wrong: a 32k arm and a 1k arm were timed, divided, and the quotient put
+    /// against a 64x ceiling that was really 32x of honest growth plus "2x host/timer variance".
+    /// The variance is not 2x. Ten runs of the whole `bt-term` unit suite against a full
+    /// `cargo test --workspace` and a dozen concurrent copies of itself, with not one line of this
+    /// crate changing, put the quotient at 27.1, 27.7, 40.6, 43.9, 44.1, 44.3, 50.2, 50.2, 51.0 and
+    /// 57.0 — and the eleventh run reported **89.93** and was red. On an idle machine the same
+    /// probe sits between 13 and 47. A gate that a busy machine walks through and a busier one does
+    /// not is a gate on the machine.
+    ///
+    /// What the quadratic actually was is a thing that can be **counted**: a rescan of the whole
+    /// uncertified history on every freeze, which reaches its lines by *cloning their text* into a
+    /// segment. So the arms are weighed rather than timed, in the currency
+    /// `g1_primary_tui_explicit_scroll_repaint_is_fast_and_never_becomes_transcript` and
+    /// `resize_drag_200_frames_stays_within_the_sparse_and_full_budget` already bank one screen up:
+    /// the heap draw does not move when the machine does. See [`heap_ledger`].
+    ///
+    /// **The sharp half is the second arm.** Thirty-two times the lines and nothing else different
+    /// must be thirty-two times the same cost: a per-line draw that is flat across a 32x range in N
+    /// cannot be hiding work proportional to the history behind it, because such work would be 32x
+    /// dearer per line at the far end. The old shape is not near this gate, it is nowhere near it —
+    /// a whole-history rescan asks for an allocation per resident line per freeze, which at 32,000
+    /// lines is three orders of magnitude over the budget below rather than a few percent.
+    ///
+    /// Measured 2026-08-27, identical to the byte in every run — alone, inside the 362-test suite,
+    /// and against a saturated machine: **15 allocations and 3,501–3,506 B per frozen line at all
+    /// three counts**, over the same runs whose wall-clock quotient wandered between 13 and 90. The
+    /// absolute budgets are the other half, for a constant-factor blow-up that would keep the
+    /// shape: about 12% of slack over the measured figures, which is room for the same work written
+    /// differently and not room for a second structure per line.
+    ///
+    /// The wall clock is still printed, because it is what a human reads when they want to know
+    /// whether this got slower. It is no longer what the test concludes from.
+    ///
+    /// RED GATE, run 2026-08-27: delete the `frozen_certified_through = Some(newest)` in
+    /// [`DualPlaneSession::advance_frozen_frontier`] — which is the frontier, and without it the
+    /// resync scan starts at the first resident line every time — and the per-line draw stops being
+    /// a number at all. At counts of only 100 and 800 it reads **71 allocations a line and 423**;
+    /// the shape is visible in arms that finish in eighty milliseconds, and both assertions below
+    /// are red on the first of them.
     #[test]
     fn finalized_line_ingest_stays_linear_without_live_handoffs() {
-        let mut elapsed = Vec::new();
-        for count in [1_000_usize, 16_000, 32_000] {
+        /// Measured 15. A rescan of the resident history is at least one more per resident line,
+        /// which at the 32k arm is 32,000 more.
+        const PER_LINE_ALLOCATIONS: u64 = 17;
+        /// Measured 3,501–3,506 B — one frozen line's own text, grapheme boundaries, style spans,
+        /// transaction and decoration record, and the staging row it was captured from.
+        const PER_LINE_BYTES: u64 = 3_936;
+
+        /// One arm: freeze `count` one-character lines into a pane whose quota cannot evict any of
+        /// them, and report what the heap and the clock say it cost.
+        fn ingest_arm(count: usize) -> (heap_ledger::Draw, Duration) {
             let mut session = DualPlaneSession::with_frozen_quota(
                 nz(1),
                 nz(1),
                 NonZeroUsize::new(count + 1).unwrap(),
             );
+            // Read after the session exists and before the first capture: building the pane is not
+            // what is being weighed.
+            let before = heap_ledger::read();
             let started = Instant::now();
             for _ in 0..count {
                 let captured = session.transcript.capture(CapturedRow::plain("x", false));
@@ -12950,16 +13111,53 @@ mod tests {
                     session.ingest_finalized(finalized).unwrap();
                 }
             }
-            let measured = started.elapsed();
-            eprintln!("FINALIZED_SCALE count={count} elapsed={measured:?}");
-            elapsed.push(measured);
+            let elapsed = started.elapsed();
+            let draw = heap_ledger::read().since(before);
+            assert_eq!(
+                session.document.entries().len(),
+                count,
+                "every line froze, so the arms are weighing the same work per line"
+            );
+            (draw, elapsed)
         }
-        let ratio = elapsed[2].as_secs_f64() / elapsed[0].as_secs_f64();
-        // 32k performs 32x the useful append work. A 64x ceiling allows 2x host/timer variance;
-        // the prior whole-history rescan is quadratic and measured near 1,000x on this probe.
+
+        let counts = [1_000_usize, 16_000, 32_000];
+        let arms = counts.map(ingest_arm);
+        for (count, (draw, elapsed)) in counts.iter().zip(arms) {
+            let each = draw.per(*count as u64);
+            eprintln!(
+                "FINALIZED_SCALE count={count} elapsed={elapsed:?} \
+                 per_line_allocations={} per_line_bytes={} total_allocations={} total_bytes={}",
+                each.allocations, each.bytes, draw.allocations, draw.bytes
+            );
+        }
+
+        let each = |index: usize| arms[index].0.per(counts[index] as u64);
+        let (small, large) = (each(0), each(2));
         assert!(
-            ratio <= 64.0,
-            "32k/1k finalized ingest ratio {ratio:.2} exceeds the 64x linearity ceiling: {elapsed:?}"
+            small.allocations <= PER_LINE_ALLOCATIONS && large.allocations <= PER_LINE_ALLOCATIONS,
+            "freezing one line made {} allocations at 1k and {} at 32k, budget \
+             {PER_LINE_ALLOCATIONS}",
+            small.allocations,
+            large.allocations
+        );
+        assert!(
+            small.bytes <= PER_LINE_BYTES && large.bytes <= PER_LINE_BYTES,
+            "freezing one line asked for {} B at 1k and {} B at 32k, budget {PER_LINE_BYTES} B",
+            small.bytes,
+            large.bytes
+        );
+        assert_eq!(
+            large.allocations, small.allocations,
+            "thirty-two times the history must be the same freeze: a line costs itself, not the \
+             history it lands on"
+        );
+        assert!(
+            large.bytes <= small.bytes.saturating_add(PER_LINE_BYTES / 8),
+            "the 32k arm drew {} B a line against the 1k arm's {} B, which is more than the \
+             bookkeeping a deeper transcript can account for",
+            large.bytes,
+            small.bytes
         );
     }
 
