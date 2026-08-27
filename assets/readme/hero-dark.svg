@@ -1,10 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="316"
      viewBox="0 0 1200 316" role="img" aria-labelledby="folio-title folio-desc">
   <title id="folio-title">Folio</title>
-  <desc id="folio-desc">Folio, a terminal for Windows drawn on the GPU, with files,
-  previews and git beside the prompt. Beside the name, a terminal pane runs two
-  commands; a rule in the left margin marks how far each one reached, and the rule
-  beside the command that failed is drawn in the failure colour.</desc>
+  <desc id="folio-desc">Folio, a Windows terminal built for coding agents: it says
+  which one is waiting for you. Beside the name, a terminal pane runs two commands;
+  a rule in the left margin marks how far each one reached, and the rule beside the
+  command that failed is drawn in the failure colour.</desc>
 
   <rect width="1200" height="316" rx="14" fill="#141414"/>
 
@@ -13,8 +13,8 @@
           fill="#959595">WINDOWS &#183; RUST &#183; GPU</text>
     <text x="64" y="154" font-size="76" font-weight="600" letter-spacing="-1.6"
           fill="#E0E0E0">Folio</text>
-    <text x="64" y="202" font-size="26" fill="#E0E0E0">A terminal for Windows, drawn on the GPU.</text>
-    <text x="64" y="236" font-size="26" fill="#E0E0E0">Files, previews and git beside the prompt.</text>
+    <text x="64" y="202" font-size="26" fill="#E0E0E0">A Windows terminal built for coding agents.</text>
+    <text x="64" y="236" font-size="26" fill="#E0E0E0">It says which one is waiting for you.</text>
     <text x="64" y="278" font-family="ui-monospace, SFMono-Regular, &quot;Cascadia Mono&quot;, Consolas, &quot;JetBrains Mono&quot;, Menlo, monospace" font-size="19"
           fill="#959595">Windows 10 1809 or newer &#183; MIT or Apache-2.0</text>
   </g>
