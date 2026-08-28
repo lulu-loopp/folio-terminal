@@ -932,6 +932,23 @@ impl Seats {
     /// Returns the seat a file opened right now would land on: the reused one, or
     /// the new one. `None` only when the edit itself refused, which is the honest
     /// answer rather than a half-made pane.
+    /// **Mint a seat id that is on no tree** (§7.39).
+    ///
+    /// A float that carries a page of its own addresses its engine by a
+    /// [`SeatId`] the same way a docked page does, but the leaf it names was
+    /// never in this tab's layout — a hover card promoted to a window was never a
+    /// pane. So a number is taken off the same monotonic counter every real seat
+    /// is drawn from and the tree is left untouched: nothing is split, nothing
+    /// re-solves, and the id is simply spent so it can never be handed to a pane
+    /// as well. That the counter only ever climbs is what a float's carried
+    /// `page` leans on — the leaf a float remembers cannot come to mean somebody
+    /// else's page.
+    pub fn mint_detached_seat(&mut self) -> SeatId {
+        let id = SeatId(self.next_seat);
+        self.next_seat += 1;
+        id
+    }
+
     pub fn add_preview(&mut self, metrics: &SeatMetrics) -> Option<SeatId> {
         let landing = self.landing_preview();
         if let Some(seat) = landing {
@@ -9113,88 +9130,14 @@ pub fn build_chrome_for_tabs(
                         [head_box[0], head_bottom, head_box[2], head_box[3]],
                         |geometry| geometry.body,
                     );
-                    let geometry = preview_card_geometry(
+                    push_preview_card(
                         body,
-                        card.button_text_px,
-                        !card.detail.is_empty(),
+                        card,
                         scale,
+                        &palette,
+                        &mut pane_sprites,
+                        &mut pane_labels,
                     );
-                    // `.pv-unknown svg { opacity: .5 }` — the element's own
-                    // opacity and not a paler ink, which is the distinction
-                    // `with_opacity` exists to keep.
-                    pane_sprites.push(
-                        ChromeSprite::new(card.mark, geometry.icon, palette.files_row_muted)
-                            .with_opacity(0.5),
-                    );
-                    pane_labels.push(ChromeLabel {
-                        mono: false,
-                        text: card.notice.to_owned(),
-                        rect: geometry.notice,
-                        font_size_px: geometry.notice_font,
-                        color: palette.body_hint_text,
-                        align_right: false,
-                        align_center: true,
-                        letter_spacing_em: 0.0,
-                        weight: ChromeLabelWeight::Regular,
-                        tabular_numerals: false,
-                        clip: None,
-                    });
-                    // **The fact, in the face facts are written in everywhere
-                    // else in this window** (§7.7 ④). One line, monospace, and
-                    // never a second sentence of prose: what goes here is the
-                    // thing a reader can copy into a bug report.
-                    if !card.detail.is_empty() {
-                        pane_labels.push(ChromeLabel {
-                            mono: true,
-                            text: card.detail.to_owned(),
-                            rect: geometry.detail,
-                            font_size_px: geometry.detail_font,
-                            color: palette.files_row_muted,
-                            align_right: false,
-                            align_center: true,
-                            letter_spacing_em: 0.0,
-                            weight: ChromeLabelWeight::Regular,
-                            tabular_numerals: false,
-                            clip: None,
-                        });
-                    }
-                    if card.button_hovered {
-                        pane_sprites.push(ChromeSprite::new(
-                            ChromeMark::ControlPill {
-                                radius_px: geometry.button_radius.max(0.0) as u32,
-                            },
-                            geometry.button,
-                            palette.files_row_hover,
-                        ));
-                    }
-                    // `border: 1px solid var(--border)` — a ring and not a fill,
-                    // so the button reads as an offer rather than as a primary
-                    // action (the mock-up gives it no background at rest).
-                    pane_sprites.push(ChromeSprite::new(
-                        ChromeMark::ControlPillRing {
-                            radius_px: geometry.button_radius.max(0.0) as u32,
-                            stroke_px: (scale.round().max(1.0)) as u32,
-                        },
-                        geometry.button,
-                        palette.divider,
-                    ));
-                    pane_labels.push(ChromeLabel {
-                        mono: false,
-                        text: card.button.to_owned(),
-                        rect: geometry.button,
-                        font_size_px: geometry.button_font,
-                        color: if card.button_hovered {
-                            palette.files_row_text_selected
-                        } else {
-                            palette.files_row_text
-                        },
-                        align_right: false,
-                        align_center: true,
-                        letter_spacing_em: 0.0,
-                        weight: ChromeLabelWeight::Regular,
-                        tabular_numerals: false,
-                        clip: None,
-                    });
                 }
                 let body_notice = match placement.kind {
                     // **Both asked of this seat, never of "the" preview.** A
@@ -18359,6 +18302,100 @@ pub fn preview_card_geometry(
         button_font,
         button_radius: (PREVIEW_CARD_BUTTON_RADIUS_LOGICAL_PX * scale).round(),
     }
+}
+
+/// **The "no preview" card, drawn** — its icon, its sentence, its optional fact
+/// line and its one button, stacked in the middle of a body (§7.7 ④).
+///
+/// Lifted out of the seat painter so a float can draw the very same card
+/// (§7.39, user report 2026-08-28: a file nobody previews was a card in the pane
+/// and a blank window in the float). A pane and a window are not two kinds of
+/// surface for a refusal to look different on, and the way to keep them one is
+/// one painter — the button's rectangle then comes from the same
+/// [`preview_card_geometry`] on both, so the hit test cannot land somewhere the
+/// paint did not draw.
+pub fn push_preview_card(
+    body: [f32; 4],
+    card: &PreviewCardContent,
+    scale: f32,
+    palette: &ChromePalette,
+    sprites: &mut Vec<ChromeSprite>,
+    labels: &mut Vec<ChromeLabel>,
+) {
+    let geometry = preview_card_geometry(body, card.button_text_px, !card.detail.is_empty(), scale);
+    // `.pv-unknown svg { opacity: .5 }` — the element's own opacity and not a
+    // paler ink, which is the distinction `with_opacity` exists to keep.
+    sprites.push(
+        ChromeSprite::new(card.mark, geometry.icon, palette.files_row_muted).with_opacity(0.5),
+    );
+    labels.push(ChromeLabel {
+        mono: false,
+        text: card.notice.to_owned(),
+        rect: geometry.notice,
+        font_size_px: geometry.notice_font,
+        color: palette.body_hint_text,
+        align_right: false,
+        align_center: true,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: None,
+    });
+    // **The fact, in the face facts are written in everywhere else in this
+    // window** (§7.7 ④). One line, monospace, and never a second sentence of
+    // prose: what goes here is the thing a reader can copy into a bug report.
+    if !card.detail.is_empty() {
+        labels.push(ChromeLabel {
+            mono: true,
+            text: card.detail.to_owned(),
+            rect: geometry.detail,
+            font_size_px: geometry.detail_font,
+            color: palette.files_row_muted,
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+    }
+    if card.button_hovered {
+        sprites.push(ChromeSprite::new(
+            ChromeMark::ControlPill {
+                radius_px: geometry.button_radius.max(0.0) as u32,
+            },
+            geometry.button,
+            palette.files_row_hover,
+        ));
+    }
+    // `border: 1px solid var(--border)` — a ring and not a fill, so the button
+    // reads as an offer rather than as a primary action (the mock-up gives it no
+    // background at rest).
+    sprites.push(ChromeSprite::new(
+        ChromeMark::ControlPillRing {
+            radius_px: geometry.button_radius.max(0.0) as u32,
+            stroke_px: (scale.round().max(1.0)) as u32,
+        },
+        geometry.button,
+        palette.divider,
+    ));
+    labels.push(ChromeLabel {
+        mono: false,
+        text: card.button.to_owned(),
+        rect: geometry.button,
+        font_size_px: geometry.button_font,
+        color: if card.button_hovered {
+            palette.files_row_text_selected
+        } else {
+            palette.files_row_text
+        },
+        align_right: false,
+        align_center: true,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: None,
+    });
 }
 
 /// The preview seat's body rectangle, in physical pixels.
