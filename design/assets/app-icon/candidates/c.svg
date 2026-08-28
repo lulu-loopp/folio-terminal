@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"
+     role="img" aria-labelledby="c-title c-desc">
+  <title id="c-title">Folio icon candidate C — the command mark</title>
+  <desc id="c-desc">The tile itself is the pane; inside it, the rule that marks a command
+  block down its left margin, and two lines of output beside it.</desc>
+
+  <rect x="5" y="5" width="246" height="246" rx="55" fill="#202027"/>
+
+  <!-- The command mark: the rule on the block's left margin. -->
+  <rect x="56" y="68" width="20" height="120" rx="10" fill="#F4F1EA"/>
+
+  <!-- Two lines of text beside it, one full and one short. -->
+  <rect x="96" y="84" width="104" height="20" rx="10" fill="#DDD7C9"/>
+  <rect x="96" y="152" width="72" height="20" rx="10" fill="#DDD7C9"/>
+</svg>

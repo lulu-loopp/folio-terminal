@@ -8,6 +8,7 @@
 !design/assets/wordmark-r2/*.png
 !design/assets/file-icons-r2/*.png
 !design/assets/file-icons-r3/*.png
+!design/assets/app-icon/*.png
 !docs/spikes/artifacts/03-visual/comparison.png
 !docs/spikes/artifacts/multiwindow/*.png
 !docs/spikes/artifacts/webview2/*.png
@@ -43,6 +44,9 @@ local-images/
 .vscode/
 *.pdb
 *.ilk
+# The design scripts are Python; importing one leaves this beside it.
+__pycache__/
+*.pyc
 
 # Credentials. None of these has ever been in this tree, and the rule is here so
 # that stays true by accident as well as on purpose.

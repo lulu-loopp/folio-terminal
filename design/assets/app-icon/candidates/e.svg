@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"
+     role="img" aria-labelledby="e-title e-desc">
+  <title id="e-title">Folio icon candidate E — the fold is the prompt</title>
+  <desc id="e-desc">One sheet folded once, seen along the crease, so that the two half-pages
+  make the shape of a chevron prompt. One half faces the light and one is turned away; the
+  crease runs out to the point.</desc>
+
+  <rect x="5" y="5" width="246" height="246" rx="55" fill="#202027"/>
+
+  <!-- The recto: the half-page facing the light. -->
+  <path d="M 62,40 L 194,128 L 101,128 L 62,102 Z"
+        fill="#F4F1EA" stroke="#F4F1EA" stroke-width="8" stroke-linejoin="round"/>
+  <!-- The verso: the half the fold turns away from the light. -->
+  <path d="M 62,216 L 194,128 L 101,128 L 62,154 Z"
+        fill="#D5CEBE" stroke="#D5CEBE" stroke-width="8" stroke-linejoin="round"/>
+  <!-- The crease itself, running from the near corner out to the far end of the fold. -->
+  <path d="M 103,128 H 188" fill="none" stroke="#B0A896" stroke-width="4"
+        stroke-linecap="round"/>
+</svg>

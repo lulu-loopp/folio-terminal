@@ -1,6 +1,6 @@
 # Where the files in `design/` came from
 
-28 tracked files. Each is one of three things — **own** (drawn or written here),
+45 tracked files. Each is one of three things — **own** (drawn or written here),
 **upstream** (someone else's, under someone else's licence), or **generated** (a
 picture of something else in this directory). This file says which, for every
 one of them, so that "we listed the directory" is never mistaken for "we checked
@@ -51,7 +51,7 @@ icon crowding), not copied code.
 Every PNG here is **generated** — a screenshot or a crop of a page in this same
 directory, taken to make a decision and kept as the evidence for it. They are
 this project's own work; none is a photograph, a stock image, or a screenshot of
-anyone else's software. All 21 carry no `tEXt` / `iTXt` / `zTXt` chunk and no
+anyone else's software. All 22 carry no `tEXt` / `iTXt` / `zTXt` chunk and no
 producer string: they are clean rasters.
 
 | Files | Generated from | For |
@@ -61,11 +61,23 @@ producer string: they are clean rasters.
 | `assets/file-icons-r3/*.png` (11) | `ui-mockup.html`, screenshotted with the temporary `?icons=a\|b\|c` reader | The r3 round, three variants held side by side in column, window, git-page and preview-head contexts |
 | `assets/wordmark-r2/options.png` | `assets/wordmark-r2/options.html`, rendered in a browser | The wordmark comparison sheet |
 | `assets/wordmark-r2/detail-a.png` … `detail-d.png` | the same sheet, cropped (all four 906×192) | The four wordmark candidates |
+| `assets/app-icon/candidates-2026-08-28.png` | `assets/app-icon/candidates/{a..e}.svg`, rasterised by `assets/app-icon/make-candidates-board.py` | The application-icon round: five directions at 256/48/32/16, on a light and a dark taskbar |
 
 `assets/file-icons-r2/options.html` and `assets/wordmark-r2/options.html` are
 **own**: hand-authored comparison sheets with the design commentary in them.
 `assets/wordmark-r2/DECISION.md` is **own**: the written ruling that closed the
 wordmark round.
+
+## The application icon
+
+| File | | |
+|---|---|---|
+| `assets/app-icon/folio.ico` | **generated** | The placeholder in the binary, written by the script below out of geometry it holds itself. No input file, no traced artwork. |
+| `assets/app-icon/make-folio-ico.py` | **own** | Draws that placeholder. Standard library only. |
+| `assets/app-icon/candidates/{a..e}.svg` | **own** | Five directions for the real mark, hand-set in plain SVG. Nothing traced, no font outlines converted, no external resources — the `∫` in `b.svg` is stroked geometry and not a glyph. |
+| `assets/app-icon/candidates/{a..e}.ico` | **generated** | Each of those five at nine sizes, written by `make-ico.py` from the SVG beside it. |
+| `assets/app-icon/make-ico.py`, `assets/app-icon/make-candidates-board.py` | **own** | The two build scripts: one SVG to one `.ico`, and the five SVGs to the contact sheet. Both need Pillow and a Chromium-family browser at run time; neither vendors anything. |
+| `assets/app-icon/README.md` | **own** | The written brief for the round and the instructions for swapping the icon in. |
 
 ## Nothing here is undetermined
 

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"
+     role="img" aria-labelledby="d-title d-desc">
+  <title id="d-title">Folio icon candidate D — the F and the cursor</title>
+  <desc id="d-desc">A monogram F at prompt weight; the block cursor stands in the letter's
+  lower counter, on the same baseline as its foot.</desc>
+
+  <rect x="5" y="5" width="246" height="246" rx="55" fill="#202027"/>
+
+  <!-- The letter, three strokes of one pen. -->
+  <rect x="70" y="54" width="26" height="150" rx="13" fill="#F4F1EA"/>
+  <rect x="70" y="54" width="116" height="26" rx="13" fill="#F4F1EA"/>
+  <rect x="70" y="118" width="86" height="26" rx="13" fill="#F4F1EA"/>
+
+  <!-- The cursor, sitting in the counter on the letter's own baseline. -->
+  <rect x="132" y="164" width="30" height="40" rx="5" fill="#DDD7C9"/>
+</svg>
