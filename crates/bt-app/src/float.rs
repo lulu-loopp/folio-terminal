@@ -233,6 +233,47 @@ impl FloatGeometry {
     pub fn wears_a_foot(&self) -> bool {
         self.foot[3] > self.foot[1]
     }
+
+    /// **The rectangle this window's content may fill** — the body, held clear
+    /// of the window's rounded bottom corners and of the corner grip (§7.39, user
+    /// report 2026-08-28).
+    ///
+    /// The body reaches the window's own floor once the foot has retired under a
+    /// rail, and that floor is where the two rounded corners curve and where the
+    /// grip sits. Three tenants meet them there and each is wrong to:
+    ///
+    /// * **A page** is a composition-hosted WebView2 — one opaque rectangle that
+    ///   paints its own square corners and that no click can pass through. Filling
+    ///   the whole body squares off the two rounded corners and buries the resize
+    ///   grip.
+    /// * **A document's scrollbar** rides the body's right edge down to its floor,
+    ///   so a body reaching the corner draws the rule out over the curve and the
+    ///   stroke (`Cargo.lock`, `CHANGELOG.md`, photographed 2026-08-28).
+    ///
+    /// So every tenant is given this rectangle rather than the raw body, and the
+    /// band it raises them off the bottom by is what the float's own face fills
+    /// back in — rounded corners and all — with the grip in the corner of it. One
+    /// content box, so the page, the text and the scrollbar cannot disagree about
+    /// where the window's floor is.
+    ///
+    /// Raised by the grip's own height when the window wears one, which clears
+    /// the grip and, the grip being taller than the radius, both corners with it;
+    /// by the corner radius when it does not — a peek, clear of the curve with no
+    /// grip to spare.
+    ///
+    /// Never above the body's own top: a window squeezed to its floor has a body
+    /// no taller than the inset, and its content is then given a floor-height
+    /// rectangle rather than an inverted one.
+    #[must_use]
+    pub fn content_body(&self, scale: f32) -> [f32; 4] {
+        let logical = if self.grip.is_some() {
+            FLOAT_WINDOW_GRIP_LOGICAL_PX
+        } else {
+            FLOAT_WINDOW_RADIUS_LOGICAL_PX
+        };
+        let bottom = (self.body[3] - logical * scale).round().max(self.body[1]);
+        [self.body[0], self.body[1], self.body[2], bottom]
+    }
 }
 
 /// Snap a box to whole device pixels, so a hairline is one row of pixels rather
@@ -1028,6 +1069,16 @@ pub enum FloatPart {
     /// two hosts must not be able to come to disagree about what a rail has on
     /// it.
     Rail(crate::seats::PreviewRailPart),
+    /// **The "Open in default app" button of a no-preview card** (§7.39, user
+    /// report 2026-08-28).
+    ///
+    /// A file this window cannot show wears the same card in a window as in a
+    /// pane, and the card's one button is *smaller* than the body it is centred
+    /// in — so, like a Git verb or a rail control, which button has to be decided
+    /// by the hit test that decides the body, or the body swallows it. The pane's
+    /// twin is [`crate::seats::ChromeTarget::PreviewOpenButton`]; this is that
+    /// press, one surface over.
+    CardButton,
     /// The body, but not on a row.
     Body,
     /// The foot, which reveals the folder in the OS file manager.
@@ -2423,6 +2474,154 @@ mod tests {
         .expect("a pinned float has one");
         assert_eq!(grip[2] - grip[0], 16.0, "16px wide");
         assert_eq!(grip[3] - grip[1], 16.0, "16px tall");
+    }
+
+    /// RED — **a pinned web float can be seized at its grip** (user report
+    /// 2026-08-28, §7.39).
+    ///
+    /// A composition-hosted WebView2 is one opaque rectangle, and a page filling
+    /// the whole body buries the resize grip under a surface no click can reach.
+    /// [`FloatGeometry::content_body`] is the body raised clear of it, so the
+    /// grip is uncovered — and, because `sync_web_page` gives that same rectangle
+    /// to `web_page_at`, a press there falls past the page to `press_float`,
+    /// which reads the grip and resizes.
+    ///
+    /// A web float wears the address rail, so its foot is retired and its body
+    /// reaches the window's own floor — which is exactly where the grip is. That
+    /// is the case the whole report is about, and the one built here.
+    ///
+    /// RED GATE: have `content_body` return `self.body` unchanged and the
+    /// engine's floor lands back on the grip's own bottom, covering it whole.
+    #[test]
+    fn a_pinned_web_float_can_be_seized_at_its_grip() {
+        let geometry = float_geometry(
+            frame(100.0, 100.0, 400.0, 400.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            FloatHeadTools {
+                dirty: true,
+                rail: true,
+                ..FloatHeadTools::default()
+            },
+        );
+        let grip = geometry.grip.expect("a pinned float has a grip");
+        let engine = geometry.content_body(SCALE);
+        assert!(
+            engine[3] <= grip[1],
+            "the engine's floor {} reaches into the grip, whose top is {} — the grip is buried",
+            engine[3],
+            grip[1],
+        );
+        // And the grip really is where a web float's body would otherwise end:
+        // the foot is retired, so the body reaches the floor the grip sits on.
+        assert!(
+            geometry.body[3] > grip[1],
+            "the body itself clears the grip already, so this test proves nothing",
+        );
+        // The width is untouched — only the bottom is raised, so the page keeps
+        // the whole of the window's breadth.
+        assert_eq!(
+            [engine[0], engine[1], engine[2]],
+            [geometry.body[0], geometry.body[1], geometry.body[2]],
+            "the inset is the bottom's alone",
+        );
+    }
+
+    /// RED — **the engine's bounds follow a resize** (user report 2026-08-28,
+    /// §7.39).
+    ///
+    /// The page's rectangle is a pure function of the float's frame, re-derived
+    /// every frame by `sync_web_page` from `float_body_rect`, so a drag on
+    /// the grip that grows the frame grows the page with it. Held here at the
+    /// geometry: two frames that differ only in height give engine bodies whose
+    /// floors differ by exactly that height, the constant inset cancelling.
+    ///
+    /// RED GATE: make `content_body`'s inset scale with the body's height
+    /// rather than being a constant off its floor, and the two deltas part.
+    #[test]
+    fn the_engines_bounds_follow_a_resize() {
+        let tools = FloatHeadTools {
+            dirty: true,
+            rail: true,
+            ..FloatHeadTools::default()
+        };
+        let small = float_geometry(
+            frame(100.0, 100.0, 400.0, 300.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            tools,
+        )
+        .content_body(SCALE);
+        let grown = float_geometry(
+            frame(100.0, 100.0, 400.0, 460.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            tools,
+        )
+        .content_body(SCALE);
+        assert!(
+            (grown[3] - small[3] - 160.0).abs() < 0.5,
+            "the engine floor moved by {} for a 160px taller window",
+            grown[3] - small[3],
+        );
+        assert_eq!(grown[1], small[1], "and its top did not move");
+    }
+
+    /// RED — **a float's scrollbar lies inside its own edge** (user report
+    /// 2026-08-28, §7.39).
+    ///
+    /// A preview float's scrollbar rides the right edge of the content box down
+    /// to its floor. When that box was the raw body it reached the window's
+    /// rounded corner and the rule was drawn out over the curve and the stroke
+    /// (`CHANGELOG.md`, photographed). The box is `content_body` now — inset off
+    /// the corner and the grip — and a bar built on it stops above both.
+    ///
+    /// RED GATE: build the bar on `geometry.body` instead and its track's floor
+    /// lands on the window's rounded corner.
+    #[test]
+    fn a_floats_scrollbar_lies_inside_its_own_edge() {
+        let geometry = float_geometry(
+            frame(100.0, 100.0, 400.0, 400.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            FloatHeadTools {
+                dirty: true,
+                rail: true,
+                ..FloatHeadTools::default()
+            },
+        );
+        let content = geometry.content_body(SCALE);
+        // A document twice as tall as the box, so a vertical bar exists.
+        let page = content[3] - content[1];
+        let bar = crate::preview::scroll_bar(
+            content,
+            crate::preview::ScrollAxis::Vertical,
+            0.0,
+            page * 2.0,
+            SCALE,
+        )
+        .expect("an overflowing document wears a bar");
+        assert!(
+            bar.track[0] >= content[0]
+                && bar.track[1] >= content[1]
+                && bar.track[2] <= content[2]
+                && bar.track[3] <= content[3],
+            "the track {:?} runs outside its own content box {content:?}",
+            bar.track,
+        );
+        // And the content box clears the window's rounded corner, so the rule the
+        // report photographed over the curve cannot be drawn there.
+        let radius = FLOAT_WINDOW_RADIUS_LOGICAL_PX * SCALE;
+        assert!(
+            bar.track[3] <= geometry.frame[3] - radius,
+            "the bar's floor {} reaches into the window's rounded corner (frame floor {}, radius {radius})",
+            bar.track[3],
+            geometry.frame[3],
+        );
     }
 
     /// The head's trailing run is built right to left, `DOCK` before `×` — the

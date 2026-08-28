@@ -43674,6 +43674,69 @@ impl Runtime<'_> {
         self.open_minted_page(mint)
     }
 
+    /// **The controlled file entry, onto a float's own engine** (§7.39) — the
+    /// door a page card takes when its head is carried out into a window.
+    ///
+    /// [`Self::open_preview_web_file`]'s two opening steps — the disk names the
+    /// path, the host mints the one `file:` URL it may load — and then the one
+    /// thing a float does that a tab's singleton seat does not: it keeps a page
+    /// of its own. A tab has one browser and a drop does not buy a second; a
+    /// float *is* a browser, carried by a leaf that is in no layout tree, which
+    /// is exactly the shape `pop_out_preview` leaves a popped-out page in
+    /// (§7.14a). So a detached leaf is minted on this float's tab, the float is
+    /// told to carry it, and the engine is opened on it through the same gate
+    /// every navigation passes ([`Self::open_minted_page_on`]).
+    ///
+    /// The leaf's seat is minted from the tab's own monotonic counter
+    /// ([`seats::Seats::mint_detached_seat`]) and never reused, so it cannot come
+    /// to name another pane's page — the guarantee [`float::FloatPreview::page`]
+    /// is written against.
+    fn open_preview_web_file_on_float(&mut self, id: float::FloatId, path: PathBuf) -> Result<()> {
+        let canonical = match std::fs::canonicalize(&path) {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                return self.land_page_refusal_on(
+                    PreviewSurface::Float(id),
+                    path,
+                    preview::PreviewRefusal::Fault(preview::PreviewFault::from_io(&error)),
+                );
+            }
+        };
+        let mint = match webnav::Mint::file(&canonical) {
+            Ok(mint) => mint,
+            Err(_) => {
+                return self.land_page_refusal_on(
+                    PreviewSurface::Float(id),
+                    path,
+                    preview::PreviewRefusal::NetworkPath,
+                );
+            }
+        };
+        // A detached leaf on this float's tab for the float's own engine — the
+        // seat a popped-out page keeps, minted fresh because this page was never
+        // in a pane to leave one behind.
+        let leaf = LeafId {
+            tab: self.id,
+            seat: self.seats.mint_detached_seat(),
+        };
+        // A pane at the float's surface, so the chassis has one to hand back.
+        // `DOCK` lifts the float's pane and lands it, and a float carrying a page
+        // but holding no pane would give `dock_preview_float` nothing to remove
+        // and dock nothing. It is the same empty pane a popped-out page's carried
+        // one becomes once its buffer has left it — the engine, not the pane, is
+        // what the window shows.
+        *self.preview_panes.entry(PreviewSurface::Float(id)) = PreviewPane::default();
+        // Carried before the engine is asked for, so `page_carried_by` names it
+        // the moment the web seat lands: `open_web_page_on` inserts the seat
+        // synchronously, so both facts are true by the end of this call.
+        if let Some(win) = self.window.float.live_mut(id)
+            && let float::FloatTenant::Preview(preview) = &mut win.tenant
+        {
+            preview.page = Some(leaf);
+        }
+        self.open_minted_page_on(leaf, mint)
+    }
+
     /// **The page lane asked the disk and the disk said no** — the file on the
     /// seat, with the reason on it (user ruling 2026-08-23).
     ///
@@ -43692,6 +43755,23 @@ impl Runtime<'_> {
             self.mouse_trace(|| "land_page_refusal leave=no-landing-surface".to_owned());
             return Ok(());
         };
+        self.land_page_refusal_on(surface, path, refusal)
+    }
+
+    /// The same, onto a surface the caller has already named (§7.39).
+    ///
+    /// A page promoted onto a float that turns out not to be on the disk owes
+    /// its refusal to **that float** and not to a landing preview seat: the card
+    /// became a window, and the disk's sentence belongs in the window the reader
+    /// is now looking at. Every other caller reaches the refusal through
+    /// [`Self::land_page_refusal`], which picks the landing seat exactly as
+    /// before.
+    fn land_page_refusal_on(
+        &mut self,
+        surface: PreviewSurface,
+        path: PathBuf,
+        refusal: preview::PreviewRefusal,
+    ) -> Result<()> {
         let name = files_row_display_name(&path);
         let source = preview::PreviewSource::file(path);
         self.land_preview_source_on(surface, source.clone(), name)?;
@@ -43893,8 +43973,19 @@ impl Runtime<'_> {
         // chose, exactly as it is for a double click (`open_preview_at`): a tab
         // has one page, and a drop aimed at a second pane does not buy a second
         // browser.
+        //
+        // **Except a float, which is its own page** (§7.39). The singleton rule
+        // is a *tab's* — one browser for one tab — and a float carries an engine
+        // of its own, addressed by a detached leaf, exactly as `pop_out_preview`
+        // gives it one. A page promoted onto a float that fell back to the tab's
+        // seat would open a browser on the pane behind the window and leave the
+        // float empty, which is the very thing §7.29 ⑥′'s refusal used to
+        // prevent by refusing the promotion outright.
         if let Some(path) = source_opens_as_a_page(&source) {
-            return self.open_preview_web_file(path);
+            return match surface {
+                PreviewSurface::Float(id) => self.open_preview_web_file_on_float(id, path),
+                _ => self.open_preview_web_file(path),
+            };
         }
         self.land_preview_source_on(surface, source, name)
     }
@@ -46988,7 +47079,34 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        if self.open_local_path(&path) {
+        self.open_path_in_default_app(&path)
+    }
+
+    /// The same, on a surface the caller has already named (§7.39).
+    ///
+    /// A no-preview card in a **float** hands its file to the system exactly as
+    /// the one in a pane does — the card is the same card, so its button is the
+    /// same verb — and the only thing that differs is which surface's buffer
+    /// names the file. The pane-side caller reaches the file through
+    /// [`Self::current_preview_buffer`]; a float names its own surface.
+    fn open_preview_externally_on(&mut self, surface: PreviewSurface) -> Result<()> {
+        let Some(path) = self
+            .preview_buffer_on(surface)
+            .and_then(|buffer| buffer.source.file_path())
+            .map(Path::to_path_buf)
+        else {
+            return Ok(());
+        };
+        self.open_path_in_default_app(&path)
+    }
+
+    /// Hand one file to the system's default handler and acknowledge the press.
+    ///
+    /// The card's button says `Opened` for 1300ms after — the window-level ack
+    /// [`Self::preview_open_button_label`] reads — and it is one timer because it
+    /// is one press at a time, whichever surface's card was the one pressed.
+    fn open_path_in_default_app(&mut self, path: &Path) -> Result<()> {
+        if self.open_local_path(path) {
             self.window.preview_opened_at = Some(Instant::now());
         }
         if self.refresh_chrome() {
@@ -55102,35 +55220,36 @@ impl Runtime<'_> {
 
     /// **Whether this card has a window to become** — the one predicate the
     /// head's cursor and the head's press both read (user ruling 2026-08-27,
-    /// §7.29).
+    /// §7.29; page arm opened 2026-08-28, §7.39).
     ///
-    /// Two refusals, and each is a fact about what a *preview float* can hold
-    /// rather than a hedge:
+    /// One refusal, and it is a fact about what a *preview float* can hold
+    /// rather than a hedge: **a composed document is on no disk.** A glance over
+    /// a commit's reading of a file has no path, and the door a promotion goes
+    /// through ([`Self::open_preview_onto`]) takes one. The repository's own
+    /// answer for a window over a composed document is `open_float_git_document`,
+    /// a different verb reached from a different place.
     ///
-    /// * **A composed document is on no disk.** A glance over a commit's reading
-    ///   of a file has no path, and the door a promotion goes through
-    ///   ([`Self::open_preview_onto`]) takes one. The repository's own answer
-    ///   for a window over a composed document is `open_float_git_document`, a
-    ///   different verb reached from a different place.
-    /// * **A page needs a seat, and a float is not one.** `.html` and `.pdf` go
-    ///   down the engine's lane, and an engine is placed on a **pane**
-    ///   ([`Self::open_minted_page_on`]'s own first refusal: *"Not a seat. A
-    ///   torn-off pane has no leaf to put an engine on"*). A float holds a page
-    ///   only by having had one **carried** into it with its pane
-    ///   (`pop_out_preview`, §7.14b) — and tearing the reader's pane out of
-    ///   their layout is not what dragging a hover card asked for. Opening a
-    ///   window that then had nothing in it would be worse than not opening one.
+    /// **A page is no longer refused.** It used to be — `.html` and `.pdf` go
+    /// down the engine's lane, and the note here read *"a page needs a seat, and
+    /// a float is not one"*. That was the whole of it, and §7.29 ⑥′ said what
+    /// would end it: *"when a float can be given an engine of its own, this arm
+    /// goes"*. It can now — [`Self::open_preview_web_file_on_float`] mints the
+    /// float a detached leaf and opens the engine on it, which is the very
+    /// engine `pop_out_preview` hands a float when it carries a page out of a
+    /// pane (§7.14b). So a `.pdf` card torn out is a window with a page on it,
+    /// not an empty one, and the arm is gone.
     ///
-    /// The page class is asked through [`path_opens_as_a_page`], which is the
-    /// one place that class is written down (§7.16 ④) — so this refusal cannot
-    /// drift from the lane that causes it. **When a float can be given an engine
-    /// of its own, this arm goes and nothing else here changes.**
+    /// A file path is all that is asked, then: both a document and a page have
+    /// one, and a composed glance has none. The class is not re-spelled here by
+    /// extension — the page lane's own fork ([`source_opens_as_a_page`]) is
+    /// where `.html` and `.pdf` are written down (§7.16 ④), and it is asked on
+    /// the way through, not duplicated on the way in.
     fn file_peek_promotes(&self) -> bool {
         self.window
             .file_peek
             .as_ref()
             .and_then(|peek| peek.source.file_path())
-            .is_some_and(|path| !path_opens_as_a_page(path))
+            .is_some()
     }
 
     /// The pointer travelling with the card's thumb in hand.
@@ -61331,6 +61450,19 @@ impl Runtime<'_> {
         // against the host we are walking.
         let dock_label = self.float_dock_label_width(scale);
         let now = Instant::now();
+        // **The no-preview card's button, measured once for the sweep** (§7.39).
+        // Its caption is the same in every window — `Open in default app`, or the
+        // acknowledgement that briefly replaces it — so it is asked here for
+        // `dock_label`'s reason exactly, and `preview_card_geometry` centres a
+        // button of this width in whichever window is refused below.
+        let open_button_px = {
+            let label = self.preview_open_button_label(now);
+            self.window.renderer.measure_chrome_text(
+                &mut self.app.gpu,
+                label,
+                seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
+            )
+        };
         let (x, y) = (position.x as f32, position.y as f32);
         // The identities first, then the windows one at a time: the head's tools
         // are a question about the *content* plane, which is `&self`, and asking
@@ -61378,8 +61510,28 @@ impl Runtime<'_> {
                 .git_graphs_shown
                 .get(&PreviewSurface::Float(id))
                 .cloned();
+            // **The no-preview card's button, where the paint put it** (§7.39).
+            // A refused document draws the pane's card into this body, and the
+            // button is centred by the same `preview_card_geometry` — so the hit
+            // lands on the rectangle that was drawn rather than on a second guess
+            // at it. `None` for every window that is not refused, which is a body
+            // with no button to take the press.
+            let card_button = self
+                .preview_buffer_on(PreviewSurface::Float(id))
+                .and_then(|buffer| buffer.refusal())
+                .map(|_| {
+                    seats::preview_card_geometry(geometry.body, open_button_px, false, scale).button
+                });
             if let Some(part) = float::float_hit(&geometry, x, y, rail.as_ref(), |x, y| {
                 let (x, y) = (x + geometry.body[0], y + geometry.body[1]);
+                if let Some(button) = card_button
+                    && x >= button[0]
+                    && x < button[2]
+                    && y >= button[1]
+                    && y < button[3]
+                {
+                    return Some(float::FloatPart::CardButton);
+                }
                 if let Some(graph) = graph.as_ref() {
                     // The order — toolbar, then the open block's parts, then the
                     // row — is `git_graph::graph_hit`'s and not this host's, so
@@ -61742,6 +61894,15 @@ impl Runtime<'_> {
             float::FloatPart::Foot => self.reveal_float_root(id)?,
             float::FloatPart::Save => self.save_preview_on(PreviewSurface::Float(id))?,
             float::FloatPart::Flip => self.flip_preview_source_on(PreviewSurface::Float(id))?,
+            // **The one way out of a file this window cannot show** (§7.39), the
+            // docked card's own verb (`ChromeTarget::PreviewOpenButton`) one
+            // surface over. It breaks a click chain for `.files-foot`'s reason: a
+            // chain of clicks on a button is a chain of button presses.
+            float::FloatPart::CardButton => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.open_preview_externally_on(PreviewSurface::Float(id))?;
+            }
             // **A row of whichever page this window is on.** A Git row is not a
             // drag source and never was — the docked page's rows are not either
             // (P150 delegates the *tree's* rows on both hosts) — so the drag arm
@@ -61836,10 +61997,23 @@ impl Runtime<'_> {
             // beneath it. So the order is restated, and a bar drawn on a float
             // is a bar a hand can take.
             float::FloatPart::Body if holds_a_buffer => {
+                // **And a rendered page's words are drawn across on the same
+                // terms** (§7.39, user report 2026-08-28: 「浮窗里的 md 选不中」).
+                // The docked pane's order, restated here for `press_float`'s own
+                // reason (a press inside a window is claimed *here*, above the
+                // chrome router): the two bars stand over the document, the edit
+                // surface and the rendered page are alternatives underneath them —
+                // a buffer shows its source or its render, never both — and
+                // `press_preview_text` is the render's half, reached through the
+                // same `preview_surface_at` the docked press uses, so a document
+                // in a float selects exactly as it does in a pane and shares one
+                // `preview_select` model. A source buffer's `press_preview_body`
+                // answers first and a rendered one falls through to it.
                 if !(self.press_preview_body_thumb(position)?
-                    || self.press_preview_block_thumb(position)?)
+                    || self.press_preview_block_thumb(position)?
+                    || self.press_preview_body(position)?)
                 {
-                    self.press_preview_body(position)?;
+                    self.press_preview_text(position)?;
                 }
             }
             // **The row under the head, on the window that grew one** (§7.7 ⑩
@@ -62733,6 +62907,21 @@ impl Runtime<'_> {
         self.window.web.contains_key(&leaf).then_some(leaf)
     }
 
+    /// **The rectangle a float's content fills** — its body, inset off the
+    /// rounded corners and the grip (§7.39).
+    ///
+    /// The one box every tenant of the chassis derives from, and it is why they
+    /// agree about where the window's floor is: a floated page's engine bounds,
+    /// the transparency hole punched for it and — through
+    /// [`webhost::WebSeat::shown_at`] — the region [`Self::web_page_at`] forwards
+    /// the pointer into; a document's text and the scrollbar down its right edge;
+    /// the pointer arithmetic every gesture on it does. Inset in this one place,
+    /// all of them follow: the grip a page used to cover is uncovered, hittable
+    /// and told to resize, the scrollbar a document drew over the curve stops
+    /// above it, and the two corners either squared off are the float's own
+    /// rounded face again. A resize re-solves this rectangle from the float's new
+    /// frame every frame, so the engine's bounds and the scrollbar both follow
+    /// the drag with nothing else asked ([`float::FloatGeometry::content_body`]).
     fn float_body_rect(&self, id: float::FloatId, scale: f32) -> Option<[f32; 4]> {
         let win = self.window.float.drawn().find(|win| win.epoch == id)?;
         let fade = self.float_fade_of(win, Instant::now(), scale);
@@ -62744,7 +62933,7 @@ impl Runtime<'_> {
                 0.0,
                 self.float_head_tools(id),
             )
-            .body,
+            .content_body(scale),
         )
     }
 
@@ -63420,28 +63609,76 @@ impl Runtime<'_> {
             // Quiet ink, centred, at the docked notice's size: it is the same
             // sentence in the same voice, and a window is not a different kind
             // of surface for it to be said on.
-            preview::PreviewChrome::Document => float::FloatBody {
-                quads: Vec::new(),
-                labels: self
+            preview::PreviewChrome::Document => {
+                // **A file this window cannot show wears the same card as a pane**
+                // (§7.39, user report 2026-08-28: an unpreviewable file — a
+                // `folio.exe` — was a card in the side pane and a blank window
+                // here, head and rail over nothing). Drawn by the pane's own
+                // painter given this window's body, so the two cannot come to look
+                // different, and its one button is hit and pressed exactly as the
+                // pane's is (`FloatPart::CardButton`). A document with no refusal
+                // keeps the quiet centred notice an empty diff or unreadable
+                // repository prints.
+                if let Some(notice) = self
                     .preview_buffer_on(surface)
-                    .and_then(preview::PreviewBuffer::body_notice)
-                    .map(|words| bt_render::ChromeLabel {
-                        mono: false,
-                        text: words.to_owned(),
-                        rect: geometry.body,
-                        font_size_px: bt_render::SEAT_TITLE_FONT_LOGICAL_PX * scale,
-                        color: palette.body_hint_text,
-                        align_right: false,
-                        align_center: true,
-                        letter_spacing_em: 0.0,
-                        weight: bt_render::ChromeLabelWeight::Regular,
-                        tabular_numerals: false,
-                        clip: Some(geometry.body),
-                    })
-                    .into_iter()
-                    .collect(),
-                sprites: Vec::new(),
-            },
+                    .and_then(|buffer| buffer.refusal())
+                    .map(|refusal| refusal.notice())
+                {
+                    let label = self.preview_open_button_label(now);
+                    let button_text_px = self.window.renderer.measure_chrome_text(
+                        &mut self.app.gpu,
+                        label,
+                        seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
+                    );
+                    let card = seats::PreviewCardContent {
+                        notice,
+                        detail: "",
+                        mark: marks::ChromeMark::File,
+                        fault: false,
+                        button: label,
+                        button_text_px,
+                        button_hovered: self.window.float_hover
+                            == Some((id, float::FloatPart::CardButton)),
+                    };
+                    let (mut sprites, mut labels) = (Vec::new(), Vec::new());
+                    seats::push_preview_card(
+                        geometry.body,
+                        &card,
+                        scale,
+                        &palette,
+                        &mut sprites,
+                        &mut labels,
+                    );
+                    float::FloatBody {
+                        quads: Vec::new(),
+                        labels,
+                        sprites,
+                    }
+                } else {
+                    float::FloatBody {
+                        quads: Vec::new(),
+                        labels: self
+                            .preview_buffer_on(surface)
+                            .and_then(preview::PreviewBuffer::body_notice)
+                            .map(|words| bt_render::ChromeLabel {
+                                mono: false,
+                                text: words.to_owned(),
+                                rect: geometry.body,
+                                font_size_px: bt_render::SEAT_TITLE_FONT_LOGICAL_PX * scale,
+                                color: palette.body_hint_text,
+                                align_right: false,
+                                align_center: true,
+                                letter_spacing_em: 0.0,
+                                weight: bt_render::ChromeLabelWeight::Regular,
+                                tabular_numerals: false,
+                                clip: Some(geometry.body),
+                            })
+                            .into_iter()
+                            .collect(),
+                        sprites: Vec::new(),
+                    }
+                }
+            }
             // Pixels, on this layer's own image channel further down — see the
             // note there for why a float cannot use the seat's texture lane.
             preview::PreviewChrome::Picture => float::FloatBody::default(),
@@ -66745,6 +66982,17 @@ impl Runtime<'_> {
         &self,
     ) -> Option<(bt_layout::SeatId, PhysicalPosition<f64>, &ViewportFrame)> {
         let position = self.window.pointer_position?;
+        // **A float over the pointer is a float over the pane** (§7.39, user
+        // report 2026-08-28). A press here would be taken by the window before it
+        // reached a pane — `press_float` stands above the layout in the router —
+        // and a resting pointer owes the same Z-order: a reference the window
+        // covers is under the window, not under the pointer, and a card raised
+        // for it would stand on top of the very window hiding it. This is the one
+        // root every hover consumer draws from, so the gate is here and nowhere
+        // else.
+        if self.pointer_over_a_float(position) {
+            return None;
+        }
         let seat = seats::pane_at(&self.seat_layout, position.x, position.y)?;
         let leaf = self.sessions.get(&seat)?;
         let frame = leaf.last_presented_frame.as_ref()?;
@@ -66768,6 +67016,32 @@ impl Runtime<'_> {
             ),
             frame,
         ))
+    }
+
+    /// **Whether a float stands over this point** — the Z-order gate
+    /// [`Self::pane_hit_context`] reads before it resolves a pane (§7.39, user
+    /// report 2026-08-28).
+    ///
+    /// The whole frame of every *drawn* float: a pinned window, a transient peek,
+    /// and one in mid-drag alike, because all three are in `drawn` and all three
+    /// cover what is under them. The frame is risen exactly as it is painted, so
+    /// the rectangle the pointer is tested against is the one on the glass rather
+    /// than the one the window is settling towards. The card a covered reference
+    /// had already raised is retired by the ordinary door the moment this begins
+    /// answering for the point — the pointer entering the window reads as the
+    /// pointer leaving the reference (P149).
+    ///
+    /// A float's own body answers for itself through `float_hit_at` and
+    /// `web_page_at`, neither of which comes through here; this is only about the
+    /// panes underneath.
+    fn pointer_over_a_float(&self, position: PhysicalPosition<f64>) -> bool {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let now = Instant::now();
+        let (x, y) = (position.x as f32, position.y as f32);
+        self.window.float.drawn().any(|win| {
+            let frame = risen_frame(win.frame, self.float_fade_of(win, now, scale));
+            x >= frame[0] && x < frame[2] && y >= frame[1] && y < frame[3]
+        })
     }
 
     /// The pane the pointer is standing in, and the cell of it under the pointer.
@@ -76860,6 +77134,12 @@ impl Runtime<'_> {
                 .is_some();
             let tab = &self.window.tabs[index];
             let body = match floated {
+                // **The page's own rectangle, off the corners and the grip**
+                // (§7.39). A float is the page's pane, and its rounded face and
+                // its resize grip are the two things a single opaque engine
+                // rectangle would otherwise cover; `float_body_rect` is the body
+                // raised clear of both, and it is the bounds, the hole and the
+                // pointer region all at once.
                 Some(id) => self.float_body_rect(id, scale),
                 None => {
                     preview_image_placement(&tab.seats, &tab.seat_layout, seat, scale, transform)
@@ -79853,24 +80133,25 @@ mod files_locate_door_tests {
 
     /// PIN — **one predicate says whether a glance card has a window to become,
     /// and the shape and the gesture both read it** (user ruling 2026-08-27,
-    /// §7.29).
+    /// §7.29; page arm opened 2026-08-28, §7.39).
     ///
     /// The failure this exists to prevent is the one §7.26 caught on a card head
     /// two days earlier, one surface out: a control that *advertises* a verb it
-    /// cannot perform. Here it would read as an open hand over a `.pdf` card
-    /// whose head, carried, opens an empty window — because an engine goes on a
-    /// pane and a float is not one ([`Runtime::open_minted_page_on`]'s first
-    /// refusal). Two readers, one answer, so the cursor cannot promise what the
-    /// press will not do.
+    /// cannot perform. So the cursor and the press read the **one** predicate —
+    /// two readers, one answer, and neither can promise what the other will not
+    /// do.
     ///
-    /// The class itself is **not** re-spelled here: `file_peek_promotes` asks
-    /// `path_opens_as_a_page`, which is where the page class is written down
-    /// once (§7.16 ④). A card that refused `.pdf` by name would be the second
-    /// list that whole clause was written against.
+    /// The class is **not** re-spelled here by extension: whether a `.pdf` or a
+    /// `.html` becomes a page is the page lane's own fork
+    /// ([`source_opens_as_a_page`], §7.16 ④), asked on the way through and not
+    /// duplicated on the way in. A card that named `.pdf` here would be the
+    /// second list that whole clause was written against — and, since §7.39, a
+    /// card that named it to *refuse* it would be a page card that no longer
+    /// promotes at all.
     ///
-    /// MUTATIONS that must turn it red: arm the head press without asking;
-    /// hand the cursor a grasp without asking; give `file_peek_promotes` its own
-    /// extension list instead of the page class's.
+    /// MUTATIONS that must turn it red: arm the head press without asking; hand
+    /// the cursor a grasp without asking; give `file_peek_promotes` an extension
+    /// list of its own — to admit or to refuse.
     #[test]
     fn one_predicate_says_whether_a_card_has_a_window_to_become() {
         // Assembled, so the pin cannot match its own text.
@@ -79882,16 +80163,179 @@ mod files_locate_door_tests {
             );
         }
         let predicate = body("    fn file_peek_promotes(");
-        assert!(
-            predicate.contains("path_opens_as_a_page"),
-            "the page class is asked at the one place it is written down"
-        );
-        for spelling in [".pdf", ".html", ".htm", "extension"] {
+        for spelling in [".pdf", ".html", ".htm", "extension", "path_opens_as_a_page"] {
             assert!(
                 !predicate.contains(spelling),
-                "and never re-spelled here — found {spelling}"
+                "the card's promotion is re-spelled here instead of left to the page lane — found {spelling}"
             );
         }
+    }
+
+    /// RED — **an html card torn out carries the engine the pop-out button
+    /// gives** (user ruling 2026-08-28, §7.39).
+    ///
+    /// §7.29 ⑥′ refused to promote a `.html` or `.pdf` card because a float
+    /// could not then hold an engine, and it said what would end the refusal:
+    /// *"when a float can be given an engine of its own, this arm goes"*. It can
+    /// now — a float carries a page addressed by a detached leaf, exactly as
+    /// `pop_out_preview` leaves a popped-out one. This holds the two doors to the
+    /// **same** engine so a torn-out page card is a window with a browser in it
+    /// and never an empty placeholder.
+    ///
+    /// Three facts, each with the mutation that reddens it:
+    ///
+    /// ① `file_peek_promotes` no longer refuses a page — restore
+    ///    `!path_opens_as_a_page(path)` and the page card stops promoting;
+    /// ② the page lane routes a **float** surface to the float's own opener —
+    ///    drop the `PreviewSurface::Float` arm and a promoted page opens on the
+    ///    tab's singleton seat behind the window, leaving the float empty (the
+    ///    very defect the old refusal existed to prevent);
+    /// ③ that opener gives the float the engine the way pop-out does — it sets
+    ///    the float's carried `page` and opens the browser on it through
+    ///    `open_minted_page_on`, the same gate `pop_out_preview` hands its
+    ///    carried leaf. Remove the `preview.page = Some(leaf)` line and the float
+    ///    is a chassis with no page, which is a placeholder.
+    #[test]
+    fn an_html_card_torn_out_carries_the_engine_the_pop_out_button_gives() {
+        // ① The card promotes a page: the refusal arm is gone.
+        assert!(
+            !body("    fn file_peek_promotes(").contains("path_opens_as_a_page"),
+            "file_peek_promotes still refuses the page class, so a .pdf card cannot become a window"
+        );
+
+        // ② The page lane sends a float surface to the float's own engine door,
+        //    not to the tab's singleton seat.
+        let fork = body("    fn open_preview_source_on(");
+        assert!(
+            fork.contains(
+                "PreviewSurface::Float(id) => self.open_preview_web_file_on_float(id, path)"
+            ),
+            "a page promoted onto a float falls back to the tab's page seat, and the float opens empty"
+        );
+
+        // ③ The float's opener carries the page and opens the engine on it — the
+        //    same tenant shape pop_out_preview produces.
+        let opener = body("    fn open_preview_web_file_on_float(");
+        assert!(
+            opener.contains("preview.page = Some(leaf)"),
+            "the float is never told to carry the page, so page_carried_by finds none and the window is a placeholder"
+        );
+        assert!(
+            opener.contains("open_minted_page_on(leaf, mint)"),
+            "the engine is not opened on the float's own leaf through the gate pop-out uses"
+        );
+        // The leaf is minted so it can never name a real pane's page — the
+        // guarantee `FloatPreview::page` leans on.
+        assert!(
+            opener.contains("self.seats.mint_detached_seat()"),
+            "the float's page leaf is not minted detached, so it can collide with a pane"
+        );
+    }
+
+    /// RED — **a reference under a float is not hovered through it** (user report
+    /// 2026-08-28, §7.39).
+    ///
+    /// A press over a float never reaches the pane beneath it — `press_float`
+    /// stands above the layout in the router — and the resting pointer owes the
+    /// same Z-order. [`Runtime::pane_hit_context`] is the one root every hover
+    /// consumer draws from: the terminal reference's clock
+    /// (`terminal_reference_cell`), the folder trigger's, the image peek's
+    /// (`peek_target`), the pane-crossing repaint (`observe_hovered_pane`). So
+    /// the gate is there and nowhere else — a point inside a floating window
+    /// answers "no pane", and the card a covered reference had raised is retired
+    /// by the ordinary door.
+    ///
+    /// RED GATE: drop the `pointer_over_a_float` guard and the pane under the
+    /// window answers again, so a reference the window covers raises a card that
+    /// stands on top of it — the build the user photographed.
+    #[test]
+    fn a_reference_under_a_float_is_not_hovered_through_it() {
+        let context = body("    fn pane_hit_context(");
+        assert!(
+            context.contains("if self.pointer_over_a_float(position)")
+                && context.contains("return None;"),
+            "the hover root resolves a pane without first asking whether a float covers the pointer:\n{context}"
+        );
+        // And the guard reads every drawn float's own frame — the pinned window,
+        // the peek and the one mid-drag — rather than a second list of rectangles.
+        let guard = body("    fn pointer_over_a_float(");
+        assert!(
+            guard.contains("self.window.float.drawn()"),
+            "the occlusion is measured against a rectangle list of its own instead of the live floats:\n{guard}"
+        );
+    }
+
+    /// RED — **a file nobody previews wears the same card in a float as in a
+    /// pane** (user report 2026-08-28, §7.39).
+    ///
+    /// A `folio.exe` is a card in the side pane — an icon, "No preview for this
+    /// file type" and one `Open in default app` button — and was a blank window
+    /// in a float, head and rail over nothing. A pane and a window are not two
+    /// kinds of surface for a refusal to look different on, so the card is drawn
+    /// by the one shared painter and its button is hit and pressed the way the
+    /// pane's is.
+    ///
+    /// Three facts, each with its mutation:
+    ///
+    /// ① the float draws the card through `seats::push_preview_card`, the pane's
+    ///    own painter — drop the call and the window is blank again;
+    /// ② the button is hit where the card drew it, centred by the same
+    ///    `preview_card_geometry` — drop the hit and the button does nothing;
+    /// ③ pressing it hands the file to the system through
+    ///    `open_preview_externally_on`, the pane button's own verb one surface
+    ///    over.
+    #[test]
+    fn a_file_nobody_previews_wears_the_same_card_in_a_float_as_in_a_pane() {
+        let layer = body("    fn preview_float_layer(");
+        assert!(
+            layer.contains("seats::push_preview_card("),
+            "a refused document in a float does not draw the pane's card, so the window is blank"
+        );
+        let hit = body("    fn float_hit_at(");
+        assert!(
+            hit.contains("float::FloatPart::CardButton")
+                && hit.contains("preview_card_geometry(geometry.body, open_button_px"),
+            "the float's no-preview button is not hit where the card drew it"
+        );
+        let press = body("    fn press_float(");
+        assert!(
+            press.contains("float::FloatPart::CardButton")
+                && press.contains("open_preview_externally_on(PreviewSurface::Float(id))"),
+            "the float's no-preview button does not hand the file to the default app"
+        );
+    }
+
+    /// RED — **a document in a float selects the way it does in a pane** (user
+    /// report 2026-08-28, §7.39).
+    ///
+    /// §7.31's rendered-markdown selection — drag to select, double-click a word,
+    /// `Ctrl+C`, `Ctrl+A` — was wired to a pane's press and never to a float's,
+    /// so the md rendered in a torn-off window could not be picked up. The fix is
+    /// one line of dispatch, not a second model: a press on a float's body now
+    /// reaches `press_preview_text` exactly as the docked router does, which arms
+    /// the same `preview_text_drag`; the drag, the release and the keys are the
+    /// surface-agnostic ones both hosts already share.
+    ///
+    /// RED GATE: drop `press_preview_text` from `press_float`'s body branch and a
+    /// float's rendered document stops selecting while a docked one still does.
+    #[test]
+    fn a_document_in_a_float_selects_the_way_it_does_in_a_pane() {
+        // One selection path, reached from both hosts — the float's press and the
+        // docked router's — so the window and the pane cannot come to select
+        // differently.
+        for signature in ["    fn press_float(", "    fn chrome_mouse_input("] {
+            assert!(
+                body(signature).contains("self.press_preview_text(position)"),
+                "{signature} does not reach the rendered-page selection path, so a document \
+                 selects on one host and not the other"
+            );
+        }
+        // And the drag that draws the selection is keyed on the press's own
+        // surface, not on which pane the pointer is over — the one model, shared.
+        assert!(
+            body("    fn drag_preview_text(").contains("self.preview_text_drag"),
+            "the float's selection drag spins up a second model instead of the pane's own"
+        );
     }
 
     /// **Every function on the road from a double click to a document, and not
@@ -86093,6 +86537,22 @@ mod floated_page_tests {
             sync.contains("floated.and_then(|id| self.float_hole_level(id))"),
             "the placement does not ask which float is carrying this page, so \
              every hole is punched under the whole stack again:\n{sync}"
+        );
+        // **And the floated page's rectangle is the float's content box, inset
+        // off the corners and the grip** (§7.39). The controller bounds, the hole
+        // and the pointer region all come from `float_body_rect`, which is inset
+        // in one place ([`float::FloatGeometry::content_body`]); a page that read
+        // the raw body would square the window's rounded corners and bury the
+        // grip again.
+        assert!(
+            sync.contains("Some(id) => self.float_body_rect(id, scale)"),
+            "a floated page's engine does not read the float's body:\n{sync}"
+        );
+        assert!(
+            fn_body("    fn float_body_rect(").contains(".content_body(scale)"),
+            "float_body_rect hands back the raw body, so the page's engine, a \
+             document's scrollbar and every corner they touch reach the window's \
+             rounded floor"
         );
     }
 
