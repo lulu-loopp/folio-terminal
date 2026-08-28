@@ -7285,6 +7285,84 @@ mod windows_impl {
         unsafe { FreeConsole() }.is_ok()
     }
 
+    /// **Take every window this process still owns off the screen, without
+    /// asking the application anything** (`docs/DESIGN.md` §7.43).
+    ///
+    /// The hide half of §7.34 — a window that leaves the process list while its
+    /// `HWND` is still a window is ghosted by `dwm.exe` five seconds later, and
+    /// a ghost holds the foreground with no IME context at all — said for the
+    /// one path that cannot go through the application to say it. A panic hook
+    /// runs on whichever thread faulted, with the application's own state in
+    /// whatever condition the fault left it: a hide that walked `FolioApp`'s map
+    /// of windows would be asking a broken structure to help clean up after
+    /// itself. So the window list comes from the system.
+    ///
+    /// Answers how many windows it hid, which is what makes it testable at all:
+    /// a process with no windows is not a failure and must not read as one.
+    ///
+    /// **Which call, and why two of them.** A window belonging to *this* thread
+    /// is hidden with `ShowWindow`, which is synchronous and is finished by the
+    /// time it returns. One belonging to another thread is hidden with
+    /// `ShowWindowAsync`, which posts: the synchronous call would wait on that
+    /// thread's message queue, and the thread this is most likely to be racing
+    /// is one that has just stopped answering. A hide that could block is worse
+    /// than a hide that might not land, because the caller's next statement is
+    /// the one that ends the process.
+    pub fn hide_every_window_of_this_process() -> usize {
+        use windows::Win32::Foundation::{HWND, LPARAM};
+        use windows::core::BOOL;
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GetWindowThreadProcessId, IsWindowVisible, SW_HIDE, ShowWindow,
+            ShowWindowAsync,
+        };
+
+        unsafe extern "system" fn hide_if_ours(window: HWND, state: LPARAM) -> BOOL {
+            let mut process = 0u32;
+            // SAFETY: `window` is a live top-level handle handed over by the
+            // enumeration, and the out-parameter is a local.
+            let thread = unsafe { GetWindowThreadProcessId(window, Some(&raw mut process)) };
+            // SAFETY: reading the counter the enumeration was started with.
+            let hidden = unsafe { &mut *(state.0 as *mut (u32, u32, usize)) };
+            let (ours, this_thread, count) = (hidden.0, hidden.1, &mut hidden.2);
+            if process != ours {
+                return BOOL(1);
+            }
+            // SAFETY: every call below takes the handle the enumeration gave.
+            unsafe {
+                if !IsWindowVisible(window).as_bool() {
+                    return BOOL(1);
+                }
+                if thread == this_thread {
+                    let _ = ShowWindow(window, SW_HIDE);
+                } else {
+                    let _ = ShowWindowAsync(window, SW_HIDE);
+                }
+            }
+            *count += 1;
+            BOOL(1)
+        }
+
+        // SAFETY: both answer for the calling process and take no arguments.
+        let mut state = unsafe {
+            (
+                windows::Win32::System::Threading::GetCurrentProcessId(),
+                GetCurrentThreadId(),
+                0usize,
+            )
+        };
+        // SAFETY: the callback is the function above and the parameter is the
+        // address of a local that outlives the call — `EnumWindows` is
+        // synchronous and does not keep it.
+        let _ = unsafe {
+            EnumWindows(
+                Some(hide_if_ours),
+                LPARAM(std::ptr::from_mut(&mut state) as isize),
+            )
+        };
+        state.2
+    }
+
     /// **End this process now, without running anybody else's teardown**
     /// (`docs/DESIGN.md` §7.35).
     ///
@@ -7567,7 +7645,8 @@ pub use windows_impl::{
     ImeSystemCaret, MathContextMenu, Notifier, PROGRAM_REFUSED, SystemSettingsWatch, Taskbar,
     adopt_parent_console, client_area_animation_enabled, clipboard_text, cloaked_from_attribute,
     current_thread_priority, detach_console, documents_directory, dpi_at, file_product_version,
-    flash_window, get_dpi_for_window, get_window_rect, get_work_area, install_console_ctrl_handler,
+    flash_window, get_dpi_for_window, get_window_rect, get_work_area,
+    hide_every_window_of_this_process, install_console_ctrl_handler,
     install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
     leave_process, message_box, monospace_font_families, open_local_file, open_local_path,
     open_system_fonts_page, os_ui_language, read_context_menu, recycle,

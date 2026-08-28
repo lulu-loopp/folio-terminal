@@ -481,6 +481,69 @@ pub fn wrap(text: &str, max_width: f32, mut measure: impl FnMut(&str) -> f32) ->
     lines
 }
 
+/// [`wrap`], plus the last resort CSS calls `overflow-wrap: anywhere` — a piece
+/// that does not fit a line of its own is cut at character boundaries until it
+/// does.
+///
+/// **The second wrapper this file will ever have, and it is the same one.** The
+/// mock-up asks for it by name on exactly one element: `.pv-blank .pvb-detail`,
+/// the failure card's fact line (`design/ui-mockup.html`, `overflow-wrap:
+/// anywhere`). That line is a URL or an SDK error string — one token forty or
+/// eighty characters long with no space, no path separator and no ideograph in
+/// it, so none of [`break_pieces`]'s four opportunities reaches inside it — and
+/// a card whose fact ran out of both edges of a 479-pixel seat is what gate 5
+/// photographed.
+///
+/// Written as a pass over [`wrap`]'s own answer rather than as a second greedy
+/// loop, and that is not a shortcut but the semantics: `wrap` extends a line
+/// only while the line still fits, so a line it produces is over-wide **exactly
+/// when it is one over-wide piece** — which is precisely the case CSS says
+/// `anywhere` applies to and the only one.
+#[must_use]
+pub fn wrap_anywhere(
+    text: &str,
+    max_width: f32,
+    mut measure: impl FnMut(&str) -> f32,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line in wrap(text, max_width, &mut measure) {
+        let mut rest = line.as_str();
+        while !rest.is_empty() && measure(rest) > max_width {
+            let cut = widest_prefix(rest, max_width, &mut measure);
+            lines.push(rest[..cut].to_owned());
+            rest = &rest[cut..];
+        }
+        if !rest.is_empty() {
+            lines.push(rest.to_owned());
+        }
+    }
+    lines
+}
+
+/// The longest prefix of `text` that fits `max_width`, never shorter than one
+/// character — a box narrower than a single glyph still has to make progress, or
+/// the caller loops for ever.
+fn widest_prefix(text: &str, max_width: f32, measure: &mut impl FnMut(&str) -> f32) -> usize {
+    let ends: Vec<usize> = text
+        .char_indices()
+        .skip(1)
+        .map(|(at, _)| at)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let mut best = ends[0];
+    let (mut low, mut high) = (1, ends.len());
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if measure(&text[..ends[middle]]) <= max_width {
+            best = ends[middle];
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    best
+}
+
 /// One atom of the paragraph, and whether a space stood in front of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BreakPiece<'a> {

@@ -12749,8 +12749,13 @@ fn preview_opened_label() -> &'static str {
 /// built from a host or a scheme and a `&'static str` cannot carry one (§7.7 ④).
 struct CardWords {
     notice: String,
-    /// The one line of fact, or empty.
+    /// The one fact, or empty.
     detail: String,
+    /// That fact, wrapped to the seat beside the renderer (§7.43) — the
+    /// counterpart of [`Self::width`] and filled in the same pass, because the
+    /// number of lines is what decides how tall the card is and only something
+    /// holding a font can say what it is.
+    detail_lines: Vec<String>,
     /// The one verb.
     verb: String,
     /// This content class's own mark, above the sentence.
@@ -31380,6 +31385,7 @@ impl Runtime<'_> {
                             // Everything that is not a local file this window
                             // minted goes through untouched.
                             detail: shown_address(fault.detail().unwrap_or_default()),
+                            detail_lines: Vec::new(),
                             verb: fault.verb_text().text().to_owned(),
                             // **The class's mark and never the site's**, the
                             // same ruling `websheet` states at length: §7.7 ④
@@ -31403,6 +31409,7 @@ impl Runtime<'_> {
                             .notice()
                             .to_owned(),
                         detail: String::new(),
+                        detail_lines: Vec::new(),
                         verb: preview_open_label.to_owned(),
                         mark: marks::ChromeMark::File,
                         fault: false,
@@ -31486,12 +31493,34 @@ impl Runtime<'_> {
         // width would size every button to whichever card was drawn last — and
         // the hit test reads that number.
         let mut preview_card_notices = preview_card_notices;
-        for (_, words) in &mut preview_card_notices {
+        for (seat, words) in &mut preview_card_notices {
             words.width = self.window.renderer.measure_chrome_text(
                 &mut self.app.gpu,
                 &words.verb,
                 seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
             );
+            // **And the fact, wrapped to the seat it will be drawn in** (§7.43).
+            // Gate 5 photographed the alternative on a 479-pixel seat: a
+            // 92-character `CreateCoreWebView2EnvironmentWithOptions failed: …`
+            // drawn as one centred line and cut off at both ends, so neither
+            // half of the sentence a reader was meant to copy was on screen.
+            // `restore::wrap_anywhere` and not a second wrapper, because the
+            // fact is one token as often as it is a sentence.
+            words.detail_lines = if words.detail.is_empty() {
+                Vec::new()
+            } else {
+                let Some(body) =
+                    seats::preview_seat_body_rect(&self.seats, &self.seat_layout, *seat, scale)
+                else {
+                    continue;
+                };
+                let font = seats::preview_card_detail_font_px(scale);
+                let width = seats::preview_card_detail_width(body, scale);
+                let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+                restore::wrap_anywhere(&words.detail, width, |text| {
+                    renderer.measure_chrome_text(gpu, text, font)
+                })
+            };
         }
         self.window.preview_button_width = self.window.renderer.measure_chrome_text(
             &mut self.app.gpu,
@@ -31505,7 +31534,7 @@ impl Runtime<'_> {
                     *seat,
                     seats::PreviewCardButton {
                         text_px: words.width,
-                        has_detail: !words.detail.is_empty(),
+                        detail_lines: words.detail_lines.len(),
                         fault: words.fault,
                     },
                 )
@@ -31518,7 +31547,7 @@ impl Runtime<'_> {
                     *seat,
                     seats::PreviewCardContent {
                         notice: &words.notice,
-                        detail: &words.detail,
+                        detail: &words.detail_lines,
                         mark: words.mark,
                         fault: words.fault,
                         button: &words.verb,
@@ -34115,12 +34144,23 @@ impl Runtime<'_> {
                 })
                 .collect();
             let bar = notice::lay_out(strip, showing, &widths, scale);
+            // **And the sentence, cut to the row it was left** (§7.43). The
+            // words keep their whole boxes and the prose is what gives way, so
+            // what is drawn is the longest prefix of it that fits with a `…` —
+            // `settings::ellipsized`, which is the one answer in this window to
+            // "how much of this fits", and not a second count of characters.
+            let say = {
+                let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+                notice::sentence(showing, &bar, font, &mut |text, size| {
+                    renderer.measure_chrome_text(gpu, text, size)
+                })
+            };
             let hover = self
                 .window
                 .notice_hover
                 .filter(|(hovered, _)| *hovered == seat)
                 .map(|(_, element)| element);
-            layers.push(notice::build(&bar, showing, hover, &palette, scale));
+            layers.push(notice::build(&bar, &say, hover, &palette, scale));
             layouts.insert(seat, bar);
         }
         self.window.notice_layouts = layouts;
@@ -61561,7 +61601,7 @@ impl Runtime<'_> {
                 .preview_buffer_on(PreviewSurface::Float(id))
                 .and_then(|buffer| buffer.refusal())
                 .map(|_| {
-                    seats::preview_card_geometry(geometry.body, open_button_px, false, scale).button
+                    seats::preview_card_geometry(geometry.body, open_button_px, 0, scale).button
                 });
             if let Some(part) = float::float_hit(&geometry, x, y, rail.as_ref(), |x, y| {
                 let (x, y) = (x + geometry.body[0], y + geometry.body[1]);
@@ -63673,7 +63713,7 @@ impl Runtime<'_> {
                     );
                     let card = seats::PreviewCardContent {
                         notice,
-                        detail: "",
+                        detail: &[],
                         mark: marks::ChromeMark::File,
                         fault: false,
                         button: label,
@@ -84531,6 +84571,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // program that is working.
         hang_watch::beat();
         hang_watch::run_selftest_if_due();
+        panic_selftest_if_due();
         self.about_to_wait_inner(event_loop);
         hang_watch::park(parking(event_loop.control_flow(), hang_watch::heartbeat()));
     }
@@ -86946,6 +86987,81 @@ mod floated_page_tests {
         );
     }
 
+    /// RED — **a panic leaves by the same road a shut leaves by** (user ruling
+    /// 2026-08-28, §7.43).
+    ///
+    /// §7.35's own closing paragraph books this: `panic = "unwind"`, so a panic
+    /// that reaches the top of a thread ends in the C runtime's `exit` chain and
+    /// the loader's `DLL_PROCESS_DETACH` — the exact road that section measured
+    /// a WebView2 host stopping on, twice, three months apart. The window then
+    /// stays on the screen over a process that has written its exit code and
+    /// gone nowhere, which is §7.34's ghost arriving through the one door §7.34
+    /// and §7.35 between them did not close.
+    ///
+    /// The hook's tail is therefore `main`'s tail: hide, then leave. The hide
+    /// goes through the system's own enumeration and not through `FolioApp`,
+    /// because what has just failed is the application.
+    ///
+    /// MUTATIONS: drop the `leave_process` call and the first assertion goes red
+    /// (the hook returns and the unwind takes the old road); drop the hide and
+    /// the second does; put the hide *after* the exit and the third does — a
+    /// window hidden after `TerminateProcess` is a window never hidden.
+    #[test]
+    fn a_panic_leaves_by_the_same_road_as_a_shut() {
+        // A free function at column zero, so it is cut at the `}` in that column
+        // rather than at `fn_body`'s next `impl` method.
+        let start = SOURCE
+            .find(concat!("\nfn install_", "panic_log_hook() {"))
+            .expect("the hook is declared once, at column zero");
+        let hook = &SOURCE[start..];
+        let hook = &hook[..hook.find("\n}\n").expect("and closed at column zero")];
+        let leaves = hook
+            .find(concat!("bt_platform::leave_", "process(PANIC_EXIT_CODE)"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "a panic still walks out through the loader's teardown, which \
+                     is where a WebView2 host stops:\n{hook}"
+                )
+            });
+        let hides = hook
+            .find(concat!("bt_platform::hide_every_", "window_of_this_process()"))
+            .unwrap_or_else(|| {
+                panic!("a crash leaves its windows on the screen to be ghosted:\n{hook}")
+            });
+        assert!(
+            hides < leaves,
+            "the windows are hidden after the process has been told to stop, \
+             which is to say never:\n{hook}"
+        );
+        // And the alert still gets to be read: whichever panic spoke is the one
+        // that closes the process, so a second fault in the same second cannot
+        // take the first one's message box off the screen.
+        assert!(
+            hook.contains("if !announce_panic(&path) {"),
+            "every panic now ends the process, so two faults in one second race \
+             to cut each other's alert off:\n{hook}"
+        );
+        // The exit code is the one a caller already reads.
+        assert!(
+            SOURCE.contains("const PANIC_EXIT_CODE: i32 = 101;"),
+            "a crash reports something other than 101"
+        );
+        // **And release ships no way to ask for one.** `in-guest.ps1` asserts
+        // that `--panic-selftest` is refused as an unknown flag, so the switch
+        // that makes this measurable on a machine is a debug-only one.
+        let selftest = SOURCE
+            .find(concat!("fn panic_", "selftest_if_due() {\n    let Some(after)"))
+            .expect("the debug half of the selftest");
+        let guard = SOURCE[..selftest]
+            .rfind("#[cfg(debug_assertions)]")
+            .expect("and its guard");
+        assert!(
+            SOURCE[guard..selftest].lines().count() <= 3,
+            "the controlled fault is not behind `debug_assertions`, so a release \
+             build ships an entry gate 5 requires it not to have"
+        );
+    }
+
     /// RED — **the application's bound on the engines outlasts the seat's own**
     /// (§7.35).
     ///
@@ -87957,6 +88073,31 @@ fn probe_input(value: Option<std::ffi::OsString>) -> Result<Option<Vec<u8>>> {
 /// The order is deliberate: write the report, let the previous hook have the
 /// event, and only then raise something that blocks. A message box pumps
 /// messages, so anything not yet written when it goes up might never be.
+///
+/// # And then it leaves by the road a shut leaves by (§7.43)
+///
+/// §7.35 gave the ordinary exit one door — release everything, then
+/// [`bt_platform::leave_process`] — because a process that has hosted WebView2
+/// cannot walk out through the loader's `DLL_PROCESS_DETACH`. That section's own
+/// closing paragraph books the hole this closes: `panic = "unwind"`, so a panic
+/// that reaches the top of a thread ends in `ExitProcess`-by-another-name, which
+/// is exactly the road measured to stop. The result on a machine that had opened
+/// a page is the ghost of §7.34 — a window still on the screen, holding the
+/// foreground with no input context, over a process nobody can see.
+///
+/// So the last two statements of the hook are the last two statements of `main`,
+/// in the same order and for the same two reasons: every window this process
+/// owns leaves the screen first (through the system's own enumeration, because
+/// the application's state is what has just failed and may not be walked), and
+/// then the process is terminated rather than returned from.
+///
+/// **Only the panic that got to speak leaves.** A fault that takes out the
+/// window thread very often takes a worker with it in the same second, and
+/// [`announce_panic`] already bounds the process to one alert for that reason.
+/// Terminating on the *second* panic would cut the first one's message box off
+/// the screen before it could be read — so whichever panic raised the alert is
+/// the one that closes the process, and any other returns and lets its own
+/// thread unwind into the moment or two it has left.
 fn install_panic_log_hook() {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -87976,9 +88117,73 @@ fn install_panic_log_hook() {
             eprintln!("failed to write panic report {}: {error}", path.display());
         }
         previous(info);
-        announce_panic(&path);
+        if !announce_panic(&path) {
+            return;
+        }
+        bt_platform::hide_every_window_of_this_process();
+        eprintln!(
+            "{}",
+            diagnostics::run_footer(
+                &hang_watch::utc_timestamp(std::time::SystemTime::now()),
+                PANIC_EXIT_CODE
+            )
+        );
+        bt_platform::leave_process(PANIC_EXIT_CODE)
     }));
 }
+
+/// What a run that ended in a fault of its own reports to whoever started it.
+///
+/// The number Rust's own runtime uses for a panic that reaches the top of
+/// `main`, kept when the exit moved off that road: a crash whose code changed
+/// because of *how* the process now leaves would be this fix rewriting the one
+/// fact a caller reads.
+const PANIC_EXIT_CODE: i32 = 101;
+
+/// **`BT_PANIC_SELFTEST=<seconds>` — fault this window on purpose, once, so that
+/// the exit a crash takes can be measured on a real machine** (§7.43).
+///
+/// Registered in `docs/HANDOFF-2026-08-21.md` §2 beside the other diagnostic
+/// switches, and shaped after `hang_watch`'s own selftest down to the parse: the
+/// same one-shot latch, the same "a number of seconds or nothing", the same
+/// `LazyLock` so that a turn of the loop costs no environment read.
+///
+/// **Debug builds only, and that is a release requirement rather than a
+/// convenience.** `scripts/release/cleanvm/in-guest.ps1` asserts that the
+/// shipped binary has *no* controlled way to panic — it runs
+/// `folio.exe --panic-selftest` and requires the exit code of a refused
+/// argument — and a switch that faulted a release build on request would make
+/// that assertion false. What the gate needs to observe is a property of the
+/// panic *hook*, and the hook is the same code in both profiles.
+#[cfg(debug_assertions)]
+static PANIC_SELFTEST_AFTER: std::sync::LazyLock<Option<Duration>> =
+    std::sync::LazyLock::new(|| {
+        let seconds: u64 = std::env::var("BT_PANIC_SELFTEST").ok()?.trim().parse().ok()?;
+        (seconds > 0).then(|| Duration::from_secs(seconds))
+    });
+
+/// When the window came up, so the fault lands on a window that is really on the
+/// screen — which is the whole point of measuring it.
+#[cfg(debug_assertions)]
+static PANIC_SELFTEST_ARMED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Fault this thread, once, if a debug build was asked to. See
+/// [`PANIC_SELFTEST_AFTER`].
+#[cfg(debug_assertions)]
+fn panic_selftest_if_due() {
+    let Some(after) = *PANIC_SELFTEST_AFTER else {
+        return;
+    };
+    let armed = *PANIC_SELFTEST_ARMED.get_or_init(Instant::now);
+    if armed.elapsed() < after {
+        return;
+    }
+    panic!("BT_PANIC_SELFTEST: faulting the window thread on purpose");
+}
+
+/// Release builds do not read `BT_PANIC_SELFTEST`. See the debug half.
+#[cfg(not(debug_assertions))]
+fn panic_selftest_if_due() {}
 
 /// **One crash, one alert.**
 ///
@@ -88005,9 +88210,13 @@ static PANIC_ANNOUNCED: AtomicBool = AtomicBool::new(false);
 /// success, and tells nobody — which would have made the box unreachable in
 /// precisely the resident run it exists for. See
 /// [`diagnostics::a_screen_is_watching`].
-fn announce_panic(path: &std::path::Path) {
+///
+/// Answers whether this call is the one that spoke, which is what decides which
+/// panic gets to end the process (§7.43): the alert is raised once, and the
+/// thread that raised it is the one whose reader has now seen it.
+fn announce_panic(path: &std::path::Path) -> bool {
     if PANIC_ANNOUNCED.swap(true, Ordering::SeqCst) {
-        return;
+        return false;
     }
     let text = panic_alert_text(path);
     let said = diagnostics::a_screen_is_watching(diagnostics::resident_channel())
@@ -88015,6 +88224,7 @@ fn announce_panic(path: &std::path::Path) {
     if !said {
         bt_platform::message_box(APP_NAME, &text);
     }
+    true
 }
 
 /// What that alert says: which build this was, and where it wrote what it knows.
