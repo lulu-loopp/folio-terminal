@@ -4223,7 +4223,7 @@ ChromePalette::float_tag() -> FloatTagInk { face, edge, ink }
 **⑪ 不做的,与为什么。** **(a) 卡的滚动量不随转正搬过去**——理由写在 ⑥;它是一个换了宽度就不再成立的坐标,搬过去是假精确。**(b) 文件夹卡一字未改**(除了它的头现在有抓手),它本来就是这条规矩的原型。**(c) 没有为终端卡另开 `TermPeek` 一套状态**——它只是 `RowHost` 的第四个宿主,因为「同一张卡」如果需要两套字段去实现,它就不是同一张卡。**(d) `is_dir()` 每次指针移动都问一次磁盘,不加缓存**:共享之前那句写在 `hyperlink_activation` 头上的保证——`is_network_path` 在它**之前**就返回了,所以这次调用永远只发生在本地路径上;为它造一张表就是造第二份关于磁盘的意见。
 
 **日期:2026-08-27 用户提议、派单方裁定,当日落地。**
-### 7.30 半角标点后面紧跟一个汉字,那个标点就是名字的尽头:一个候选词的几种读法,从长到短问磁盘(裸路径不识别缺陷,2026-08-27 用户实证,已落地;`crates/bt-transcript/src/paths.rs`)
+### 7.30 半角标点后面紧跟一个汉字,那个标点就是名字的尽头:一个候选词的几种读法,从长到短问磁盘(裸路径不识别缺陷,2026-08-27 用户实证;**2026-08-28 复议:接缝从一张表改成一个类,反引号成为终止符,应用折断的下半截先切接缝再拼**;`crates/bt-transcript/src/paths.rs`)
 
 **由头。** Claude Code 往终端里印这一行:
 
@@ -4237,13 +4237,14 @@ docs/plans/release/clean-vm.md,这里是操作顺序):
 
 **裁决:磁盘那条铁律一个字不动,改的是候选词的切分。** 「磁盘上有才划」(§7.1.5j ③)仍然是这条线上唯一的执照;新增的不是一条猜测,而是**同一段文字可以有不止一种读法**,而读法之间由磁盘裁,不由启发式裁。
 
-**① 接缝 = 一次字符类转换,不是一张标点清单。** 一个候选词内,凡「**ASCII 分隔标点**(`,` `;` `:` `!` `?`)**紧跟一个非 ASCII 字符**」的位置,就是一道**接缝**(`PROSE_SEPARATORS` / `prose_seam_ends`)。两头都是承重的:
+**① 接缝 = 一次字符类转换,不是一张标点清单。** 一个候选词内,凡「**一个接缝分隔符紧跟一个非 ASCII 字符**」的位置,就是一道**接缝**(`is_seam_separator` / `prose_seam_ends`)。两头都是承重的:
 
-- **ASCII → ASCII 不是接缝。** `D:\x\a.md,b` 是**一个**名字;逗号在 Windows 文件名里合法,而这一行上没有任何东西说这一个是标点。(边界表第 42 行。)
+- **接缝分隔符 = 一个类,不是一张表(2026-08-28 复议,`PROSE_SEPARATORS` 退役)。** 它是「**ASCII 标点中,路径从不用来拼写的那些**」——`is_ascii_punctuation()` 减去路径结构字符 `/ \ . - _ ~`。原来只有五个句子分隔符 `,` `;` `:` `!` `?`,而第五张截图证明了一张表是错的形状:agent 写 `docs/a.md(说明)…`、`dist\folio.exe(反斜杠)…`,`(` 不在那五个里,于是候选词一路吃到闭合 `)` 才停、拿去问磁盘、答「不在」。**`(`、`[`、`{`、`"`、`'`、`=`、`+`、`*`、`#`、`@`、`&`、`%`、`|` … 全部纳入,不再逐个加表**——这正是本节由头就在做的那件事,把一张会无限长的清单换成一句关于类别的话。
+- **ASCII → ASCII 不是接缝。** `D:\x\a.md,b` 是**一个**名字;逗号在 Windows 文件名里合法,而这一行上没有任何东西说这一个是标点。`docs/a.md(1).txt` 同理——`(` 后面跟的是 ASCII `1`、不是转换,所以接缝不触发,更短的 `docs/a.md` 一个都不产出,真有那个名字的文件整串赢。(边界表第 42、48 行。)
 - **非 ASCII → 任何东西不是接缝。** 全角标点由第 17 行整条释放,`D:\资料\A、B.md` 是别人的文件名并被整条读;**第 19 行(`见 D:\x\a.md，然后` 什么都不认)因此原样活着**,一个字没改。(第 43 行。)
-- **ASCII 句点不在这一组里。** 第 16 行早就裁过:结尾的 `.` 被 Windows 吃掉,那是同一个文件,所以句点从来不是尽头。这五个分隔标点分开的是「一样东西」与「下一样东西」,而它们从不被吃掉。
+- **ASCII 句点不在这一类里。** 第 16 行早就裁过:结尾的 `.` 被 Windows 吃掉,那是同一个文件,所以句点从来不是尽头。同理路径结构字符 `- _ / \ ~` 也不在——它们**接续**一个名字,而不分开两样东西。
 
-判据落在**字符类**上而不是落在一张全角标点表上,是 §7.1.5h ⑤ 对裸网址那条纪律的第三次复用:一张清单每遇到一种新文字就要加一行,而每一行都只是把类别已经说过的话再说一遍。
+判据落在**字符类**上而不是落在一张标点表上,是 §7.1.5h ⑤ 对裸网址那条纪律的又一次复用:一张清单每遇到一种新标点就要加一行,而每一行都只是把类别已经说过的话再说一遍。
 
 **② 一个候选词有几种读法,从长到短问磁盘,第一个在的算数。** 每道接缝产出一个**更短的前缀候选**;词法器把它们**共起点、从长到短**交出来(`detect_absolute_path_candidates` / `detect_relative_path_candidates`,`candidates_in` 按 `(byte_start, Reverse(byte_end))` 排),`links_in` 把同一个起点的那一串当**一个 token 的几种读法**走一遍:
 
@@ -4266,7 +4267,9 @@ docs/plans/release/clean-vm.md,这里是操作顺序):
 
 **⑧ §7.1.5k ② 的第⑤闸跟着读接缝。** 「两半各自单独都不是已验证引用」这一句里的「是」现在包括**通过自己的某一种读法是**:上半截若已经因为接缝而挂着一条链接,重拼就会在同一段文字上盖第二句承诺。第③闸(「恰好一个覆盖全部字符的候选」)拒的仍是**第二个起点**——同起点的几种读法是同一个 token 的读法,不是第二条引用。
 
-**边界表(§7.1.5j)补六行。** 与前面 39 行同一张表的续号;每一行一条测试。
+**⑨ 应用自己折断的下半截也先切接缝再拼(2026-08-28 与 §7.1.5k ② 共存)。** Claude Code 把 `dist\folio-next15.exe` 折在它**自己**的换行上,并给下半截尾巴焊了散文:`5.exe(反斜杠)`。`rejoin_across_newline` 在拼之前先把下半截切到它的第一道接缝——`5.exe`——再与上半截 `dist\folio-next1` 拼成名字本身;没有接缝时这就是整条 token,与从前逐字节相同。切完仍拼不出恰好一个引用,第③闸拒绝、上半截由末列截断门压住——是空白,不是错的链接(`a_wrapped_lower_half_that_carries_a_seam_rejoins_the_name_alone`)。
+
+**边界表(§7.1.5j)补九行(40–45 为 2026-08-27,46–49 为 2026-08-28)。** 与前面 39 行同一张表的续号;每一行一条测试。
 
 | # | 行上的文字 | 认出来的一段 | 为什么 |
 |---|---|---|---|
@@ -4276,6 +4279,10 @@ docs/plans/release/clean-vm.md,这里是操作顺序):
 | 43 | `见 D:\x\a.md，然后`(全角逗号) | **什么都不认**(第 19 行原样) | 非 ASCII → 任何东西不是接缝;全角标点由第 17 行整条释放,后面的字仍然是 token 的一部分 |
 | 44 | 磁盘上真有一个 `D:\x\a.md,然后` | 整条 | 从长到短问,第一个在的算数;整串在,整串赢。它有答案之前,更短的读法一个都不画 |
 | 45 | `docs/a.md:12,这里`、`docs/a.md:12:3,这里` | `docs/a.md:12` / `docs/a.md:12:3`,目标 `…#L12` / `…#L12C3` | 接缝在行号**后面**;下划线盖的是胜出的那一种读法,含它自己的 `:line[:col]`(与第 18 行同一条规矩) |
+| 46 | `docs/a.md(说明)`、`dist\folio.exe(反斜杠)` | `docs/a.md` / `dist\folio.exe` | 左括号紧跟汉字 = 接缝(2026-08-28);正反斜杠一视同仁,`(` 与逗号同属一个类 |
+| 47 | `docs/a.md[注]`、`见 D:\x\a.md=值` | `docs/a.md` / `D:\x\a.md`(绝对形态另出整串一读) | 方括号、`=` 与任何 ASCII 非路径标点都是同一个类,不再逐个加表 |
+| 48 | `docs/a.md(1).txt`(ASCII 括号) | **不切**成 `docs/a.md` | `(` 后面是 ASCII `1`、不是转换 → 接缝不触发;整串能不能认是闭合括号(第 6 行)的事,与本裁决无关 |
+| 49 | 代码跨度里的 `` `dist\folio.exe` `` | `dist\folio.exe` | 反引号是代码跨度定界符、路径从不用它拼写(2026-08-28);它像 URL 扫描一样成为 token 终止符(`is_path_terminator_char`),否则闭合反引号焊在名字上、拿去问一个磁盘没有的名字。agent 印**可运行**的名字(`.exe`)几乎总在代码跨度里,这一行的现场就是它 |
 
 **红门与红证(先写、跑红、贴原文,再改)。** 九条在 `bt_transcript::paths`,另有一条断言加在 `bt_term::inline_image` 的既有测试里(⑦):
 
@@ -4601,6 +4608,31 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 **两条之间没有因果。** ① 是「没有引擎」这件事没有被说出口,② 是「有一个座」这件事让两个分辨率同时活着;干净 Win10 同时具备两者的条件(没有运行时、且没有显示驱动),所以它们一起被拍到。Win11 那台有运行时也有驱动,两条都不发作;同一台 Win10 不开座时 ② 同样不发作,因为那时座就是整面窗,两个除数是同一个数。
 
 **日期:2026-08-28 干净机实证,当日复现、定因、落地。**
+
+### 7.38 一个不带 scheme 的裸域名也是链接,但保守到严防误判:一张短 TLD 表,而不是「任何点分二段」(用户裁决 2026-08-28,已落地;`crates/bt-transcript/src/lib.rs`、`crates/bt-viewport/src/lib.rs`)
+
+**由头。** 到此为止,本窗只把带 `http://`/`https://` 的裸地址认成链接(§7.1.5h,`detect_http_urls`)。而写中文的 agent 印地址时最爱用的是**不带 scheme 的裸域名**——`microsoft.com/software-download/windows10ISO`、`github.com/oil-oil/beautify-github-readme`——指针扫过去什么都没有。裸文件路径在 §7.1.5j 已经认了,裸带 scheme 的地址在 §7.1.5h 已经认了,唯独这一种最常见的地址一直在本窗眼皮底下不算数。
+
+**裁决:认,但保守,严防误判。** 这条线上唯一的执照不是「看起来像域名」,而是**一张保守的、常见 TLD 表**(`is_known_tld`)。判据落在 TLD 表上而不是「任何点分二段」上,是这一整片的重心:`file.txt`、`v2.0`、`a.b`、`main.rs`、`README.md`、`config.json` 全都是点分 token,而**一张包含每一个 IANA TLD 的表会把 `.md`、`.rs`、`.sh`、`.so`、`.pl` 收进来**,于是 `README.md`、`main.rs`、`build.sh` 全会被点亮成网址——这正是本片要防的那件事。所以表里每一项要么是文件从不用作扩展名的通用 TLD,要么是既不撞常见扩展名也不撞英文单词的国家码。
+
+**① 判据。** 形如 `host` 或 `host/path`,且:host 是一个合法 DNS 名、至少两段(`valid_dns_name`);host 的**尾段是表内 TLD**;候选从散文边界开始(`is_domain_leading_boundary`,与 URL 不同的是**前一个字符是非 ASCII 也算边界**——`见microsoft.com` 不加空格正是这种散文里地址到来的样子);到第一个不能属于地址的字节为止(`is_url_terminator`),尾部散文标点按 URL 那套释放(`release_url_tail` 与非 ASCII 尾巴)。**带端口或 `@` 用户信息的一律不认**——两者不带 scheme 时都太含糊(`a:b` 是主机端口,也可能是盘符或时刻),留给带 scheme 的扫描,所以 `localhost:5173` 仍然是那条线的事、不回归。
+
+**② TLD 表的来源与保守理由。** 通用:`com org net edu gov mil int io dev app ai co me info biz xyz tech cloud`;国家码:`cn uk jp de fr ru ca au br nl eu kr tw hk sg`。刻意排除的是撞源码扩展名的二字母码(`md rs sh so pl ml ...`)与撞英文单词的(`is it at be no us in ...`)。`com`/`app` 兼作 DOS 可执行与 bundle 后缀,但现代终端里一个裸 `something.com` 是地址远多于是程序,用户裁决点名收下。
+
+**③ 打开时补 `https://`,与现有 URL 规矩一字不差。** 一条认出来的裸域名折成的不是第三种记号,而是**带 scheme 的 URL 本来会是的那个对象**:`InferredLink` 的 uri = `https://` + 印出来的文字(`inferred_links_in`)。于是点=留窗内、`Ctrl+点`=交给系统、手形、路由(`hand_url_to_the_browser` / §webnav)全部因为它就是一条 `https://` 链接而自动成立,**没有第二张清单要跟第一张保持一致**——与 §7.1.5j 把裸路径折成 `file:` 目标是同一手法。
+
+**④ 竞争:域名是猜测,存在的文件是事实。** 裸域名是三种推断里**优先级最低**的一种(`inferred_links_in` 里 URL→路径→域名 依次铺,后来的盖不过先到的):带 scheme 的 URL 自报家门、已验证的路径是磁盘上的事实,而裸域名是一个猜测,所以它让位于两者。`github.com/a/b` 同时也是一条相对路径候选——若 pane 的目录下真有这个文件,路径赢(它被验证过、是事实);磁盘上没有,域名才是那条链接。真实的域名其 `cwd\host\path` 形态几乎永不存在,所以现场里这条竞争几乎总是落在「域名」一侧。
+
+**⑤ 截断闸门同样作用,性能不抬散文屏。** 触到物理行最后一格的裸域名照旧被 §7.1.5k ① 压住(可能是被切断的更长地址,`inferred_bare_domain_ranges`)。扫描沿用 `detect_http_urls` 的单遍游标:只在散文边界处起扫,失败后下一字节的前驱是 host 字符、不是边界,于是 O(1) 跳过、不在 token 内重启;整行无 `.` 直接返回。TLD 判定是对一张 ~33 项短表的 `eq_ignore_ascii_case`,长度先短路,O(1)。
+
+**红门与红证(先写、跑红、贴原文,再改)。** 在 `bt_transcript`(`detect_bare_domains`)与 `bt_viewport`(`inferred_links_in`):
+
+- `a_bare_domain_with_a_known_tld_is_recognized` —— `microsoft.com/x`、`github.com/a/b`、`example.com` 全认。
+- `an_ordinary_dotted_token_is_not_a_bare_domain` —— `file.txt`、`v2.0`、`a.b`、`main.rs`、`README.md`、`config.json` 全不认(表外 TLD)。
+- `a_bare_domain_releases_its_prose_tail_and_opens_after_cjk` —— `见 microsoft.com。` → `microsoft.com`;`见microsoft.com`(无空格)→ `microsoft.com`。
+- `a_bare_host_with_a_port_or_userinfo_is_left_to_the_schemed_scan` —— `localhost:5173`、`example.com:8080`、`user@example.com` 全不认。
+- `a_mixed_line_lights_only_the_domains` —— 一行混着 `main.rs README.md v2.0 a.b config.json` 与 `github.com/x microsoft.com`,只点亮后两个。
+- `a_bare_domain_becomes_an_https_link_and_yields_to_a_verified_path`(投影层)—— 无工作目录时 `microsoft.com/x` → `https://microsoft.com/x`;同址磁盘有文件时路径赢(`file:///…`),磁盘答「无」时域名赢。
 
 ## 12. 发布工程
 

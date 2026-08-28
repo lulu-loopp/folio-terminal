@@ -19,7 +19,10 @@ use bt_doc::{
 use bt_transcript::{
     CapturedCell, CapturedRow, CellFlags, CellHyperlink, FrozenLine, GraphemeOffset,
     HyperlinkRange, SourceGeneration, StagedRow, StagingId, TranscriptId,
-    paths::{LineEndCell, PrintedPathLinks, RejoinedReference, inferred_url_ranges},
+    paths::{
+        LineEndCell, PrintedPathLinks, RejoinedReference, inferred_bare_domain_ranges,
+        inferred_url_ranges,
+    },
 };
 use bt_unicode::{cluster_width, graphemes};
 
@@ -4518,11 +4521,19 @@ fn claim_cells(
 
 /// Every inferred reference one logical line's text offers, in reading order and never overlapping.
 ///
-/// Two kinds share this one seam so that the cell-claiming below has a single list to walk: bare
-/// web addresses, which are decided by their own text, and printed paths, which are decided by what
-/// a worker found. A path range that touches a URL's is dropped rather than allowed to fight over
-/// the cells — the URL was recognized without asking anyone anything, so it is the older claim, and
-/// two links on one cell is not a state this frame can draw.
+/// Three kinds share this one seam so that the cell-claiming below has a single list to walk, and
+/// they are laid down in priority order — a later claim that touches an earlier one is dropped
+/// rather than allowed to fight over the cells, because two links on one cell is not a state this
+/// frame can draw:
+///
+/// 1. **schemed web addresses**, decided by their own text — recognized without asking anyone
+///    anything, so they are the oldest claim;
+/// 2. **printed paths**, decided by what a worker found on the disk — a fact, so they outrank a
+///    guess;
+/// 3. **scheme-less bare domains** (§7.38), decided by their own text against a conservative TLD
+///    table — a guess, so they yield to both of the above. A bare host that a verified path already
+///    covers is that file's, not a web address (`github.com/a/b` that happens to exist under the
+///    pane's directory is the file); a bare host nobody holds on disk is the domain.
 fn inferred_links_in(
     text: &str,
     edge: Option<LineEndCell>,
@@ -4536,19 +4547,35 @@ fn inferred_links_in(
             resting_dotted: false,
         })
         .collect::<Vec<_>>();
-    let Some(paths) = paths else {
-        return links;
-    };
-    for (range, uri) in paths.links_in(text, edge) {
-        if links.iter().any(|link| {
+    let overlaps = |links: &[InferredLink], range: &HyperlinkRange| {
+        links.iter().any(|link| {
             link.range.byte_start < range.byte_end && range.byte_start < link.range.byte_end
-        }) {
+        })
+    };
+    if let Some(paths) = paths {
+        for (range, uri) in paths.links_in(text, edge) {
+            if overlaps(&links, &range) {
+                continue;
+            }
+            links.push(InferredLink {
+                range,
+                uri,
+                resting_dotted: true,
+            });
+        }
+    }
+    // §7.38. The bare domain is the lowest-priority claim and needs no working directory — it is
+    // decided by its own text — so it runs whether or not a path pass is present, and only where no
+    // schemed URL and no verified path has already spoken. Its target is the same object a schemed
+    // URL is: `https://` prepended, then routed by the one table (§webnav / `hand_url_to_the_browser`).
+    for range in inferred_bare_domain_ranges(text, edge) {
+        if overlaps(&links, &range) {
             continue;
         }
         links.push(InferredLink {
+            uri: format!("https://{}", &text[range.byte_start..range.byte_end]),
             range,
-            uri,
-            resting_dotted: true,
+            resting_dotted: false,
         });
     }
     links.sort_by_key(|link| link.range.byte_start);
@@ -6873,6 +6900,111 @@ mod tests {
         assert_eq!(
             frame.hyperlink_at(row, 0).expect("a link").uri,
             "file:///D:/src/a.md"
+        );
+    }
+
+    /// Cross-verification of the 2026-08-28 report (a backslash `.exe` said not to underline while a
+    /// forward-slash `.md` did): a **relative** reference measured from the pane's directory becomes
+    /// a link on **either** screen and for **either** slash, once the disk has answered yes. The
+    /// alternate screen carries printed paths like the primary (§7.1.5f gate ③ was retired
+    /// 2026-08-20), and the recognition applies no extension gate — so nothing here tells a `.exe`
+    /// from a `.md`.
+    #[test]
+    fn a_relative_reference_resolves_against_the_panes_directory_on_either_screen() {
+        let links = PrintedPathLinks::new(
+            Some(PathBuf::from("D:\\src")),
+            BTreeMap::from([
+                (PathBuf::from("D:\\src\\dist\\folio.exe"), true),
+                (PathBuf::from("D:\\src\\docs\\a.md"), true),
+            ]),
+        );
+        for reference in ["dist\\folio.exe", "docs/a.md"] {
+            // Primary, through the live frame.
+            let (frame, _) = live_frame_of_paths(live_rows_of(reference, 40, 3), links.clone());
+            assert!(
+                frame.hyperlink_at(0, 0).is_some(),
+                "{reference:?} is a link on the primary screen"
+            );
+
+            // Alternate, through the continuous frame.
+            let document = HistoryDocument::default();
+            let mut projection = ViewportProjection::new(
+                key(40),
+                DetectionRevision(1),
+                nz32(3),
+                cell_height(),
+                SourceGeneration(1),
+                GridGeneration(1),
+            );
+            projection.set_printed_path_links(&links);
+            let frame = projection
+                .continuous_frame(
+                    &document,
+                    &[],
+                    live_rows_of(reference, 40, 3),
+                    GridCursor {
+                        row: 0,
+                        column: 0,
+                        visible: false,
+                    },
+                    ScreenId::Alternate,
+                )
+                .unwrap();
+            let row = frame
+                .row_map
+                .iter()
+                .position(|row| row.live_grid_row == Some(0))
+                .expect("the alternate grid's first row is on screen") as u32;
+            assert!(
+                frame.hyperlink_at(row, 0).is_some(),
+                "{reference:?} is a link on the alternate screen"
+            );
+        }
+    }
+
+    /// §7.38: a scheme-less bare domain becomes a link whose target is `https://` + its printed
+    /// text, so downstream it is the same object a schemed URL is. It needs no working directory.
+    /// And it is the lowest-priority claim: where a verified path covers the same text, the path —
+    /// a fact on the disk — wins; where the disk holds nothing, the domain — a guess — is the link.
+    #[test]
+    fn a_bare_domain_becomes_an_https_link_and_yields_to_a_verified_path() {
+        // No working directory at all: a bare host is still a link.
+        let (frame, _) = live_frame_of_paths(
+            live_rows_of("microsoft.com/x", 40, 3),
+            PrintedPathLinks::default(),
+        );
+        assert_eq!(
+            frame.hyperlink_at(0, 0).expect("a link").uri,
+            "https://microsoft.com/x"
+        );
+
+        // Same text, but the pane's directory holds a file of that name: the path wins.
+        let (frame, _) = live_frame_of_paths(
+            live_rows_of("github.com/a/b", 40, 3),
+            PrintedPathLinks::new(
+                Some(PathBuf::from("D:\\src")),
+                BTreeMap::from([(PathBuf::from("D:\\src\\github.com\\a\\b"), true)]),
+            ),
+        );
+        assert_eq!(
+            frame.hyperlink_at(0, 0).expect("a link").uri,
+            "file:///D:/src/github.com/a/b",
+            "a verified path outranks a bare-domain guess"
+        );
+
+        // The disk has answered "no" for that name: the domain is the link, and the same text is
+        // not asked about twice.
+        let (frame, _) = live_frame_of_paths(
+            live_rows_of("github.com/a/b", 40, 3),
+            PrintedPathLinks::new(
+                Some(PathBuf::from("D:\\src")),
+                BTreeMap::from([(PathBuf::from("D:\\src\\github.com\\a\\b"), false)]),
+            ),
+        );
+        assert_eq!(
+            frame.hyperlink_at(0, 0).expect("a link").uri,
+            "https://github.com/a/b",
+            "with no file on the disk, the bare domain is the link"
         );
     }
 

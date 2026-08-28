@@ -156,6 +156,116 @@ fn release_url_tail(candidate: &str) -> usize {
     end
 }
 
+/// Recognize deliberately conservative **scheme-less** bare domains — `microsoft.com/x`,
+/// `github.com/a/b`, `example.com` — without changing transcript source text.
+///
+/// This is the sibling of [`detect_http_urls`] for the address an agent writing CJK prose reaches
+/// for most: a host with no `http(s)://` in front of it (§7.38). It is held to a far narrower gate
+/// than a schemed URL, because a schemed URL announced itself and a bare host is a guess:
+///
+/// * the host's last label must be a **known TLD** ([`is_known_tld`]) — a short, curated table of
+///   the common ones, never "any dotted pair", which would light `file.txt`, `v2.0` and `a.b`;
+/// * the host is a valid DNS name of at least two labels ([`valid_dns_name`]);
+/// * a candidate begins only at a prose boundary ([`is_domain_leading_boundary`]) and ends at the
+///   first byte that cannot belong to an address ([`is_url_terminator`]), with trailing prose
+///   punctuation released exactly as a URL's is ([`release_url_tail`]).
+///
+/// The range is the printed text; the caller prepends `https://` to open it, so a recognized domain
+/// becomes the same object a schemed URL is and is routed by one table (§7.38). A port or a
+/// userinfo `@` disqualifies the candidate — both are ambiguous without a scheme, so a host wearing
+/// one is left to the schemed scan (`localhost:5173` therefore stays that scan's business).
+pub fn detect_bare_domains(text: &str) -> Vec<HyperlinkRange> {
+    // A bare domain needs a dot for its TLD and cannot exist on a line without one. Most program
+    // output that carries no address still carries a sentence's dots, so this only spares the truly
+    // dotless line — but it is free, and it is honest about the equivalence.
+    if !text.as_bytes().contains(&b'.') {
+        return Vec::new();
+    }
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        // A host label opens on an ASCII alphanumeric that sits at a prose boundary. Every other
+        // position is skipped in O(1), which is what keeps a screenful of prose from being read
+        // more than once: after a boundary that fails, the next byte's predecessor is a host
+        // character, so it is not a boundary and the scan does not restart inside the token.
+        if !bytes[cursor].is_ascii_alphanumeric()
+            || (cursor != 0 && !is_domain_leading_boundary(bytes[cursor - 1]))
+        {
+            cursor += 1;
+            continue;
+        }
+        let mut end = cursor;
+        while end < bytes.len() && !is_url_terminator(bytes[end]) {
+            end += 1;
+        }
+        let candidate_end = release_url_tail(&text[cursor..end]) + cursor;
+        if bare_domain_is_valid(&text[cursor..candidate_end]) {
+            ranges.push(HyperlinkRange {
+                byte_start: cursor,
+                byte_end: candidate_end,
+            });
+            cursor = candidate_end.max(cursor + 1);
+        } else {
+            cursor += 1;
+        }
+    }
+    ranges
+}
+
+/// Where a bare domain may begin: at the start of the line, or after a byte that cannot be part of
+/// a host or the path behind it.
+///
+/// Unlike [`is_url_leading_boundary`] a **non-ASCII** byte counts — since the scan reaches this test
+/// only from an ASCII host character, that byte is the last byte of a preceding CJK character, and
+/// `见microsoft.com` written without a space is exactly how the address arrives in the prose this is
+/// for. A host character does not open one: an ASCII alphanumeric, or the `.`/`-`/`_`/`/` a host or
+/// its path is spelled with, means the scan is in the middle of a longer token.
+fn is_domain_leading_boundary(byte: u8) -> bool {
+    !byte.is_ascii()
+        || byte.is_ascii_whitespace()
+        || matches!(byte, b'"' | b'\'' | b'`' | b'(' | b'[' | b'{' | b'<')
+}
+
+fn bare_domain_is_valid(candidate: &str) -> bool {
+    if candidate
+        .bytes()
+        .any(|byte| byte.is_ascii_control() || byte == b'\\')
+    {
+        return false;
+    }
+    let authority_end = candidate.find(['/', '?', '#']).unwrap_or(candidate.len());
+    let authority = &candidate[..authority_end];
+    // A bare host wears no port and no userinfo: both are legal in a URL but ambiguous without a
+    // scheme (`a:b` is as often a drive or a clock time as a host and a port), so a host carrying
+    // either is left to the schemed scan rather than guessed at here.
+    if authority.contains(':') || authority.contains('@') {
+        return false;
+    }
+    valid_dns_name(authority) && authority.rsplit('.').next().is_some_and(is_known_tld)
+}
+
+/// A short, curated table of common top-level domains — the conservative gate that separates a bare
+/// host from an ordinary dotted token.
+///
+/// It is deliberately **not** the IANA list. A table holding every registered TLD holds `.md`,
+/// `.rs`, `.sh`, `.so`, `.pl`, and would light `README.md`, `main.rs` and `build.sh` as web
+/// addresses — the very false positives this whole line is written to prevent. Every entry here is
+/// either a generic TLD a source file is never named with, or a country code that collides with
+/// neither a common file extension nor an English word. `com`/`app` do double as a legacy DOS
+/// executable and a bundle suffix, but a bare `something.com` in modern terminal output is an
+/// address far more often than a program, and the ruling names them (user ruling 2026-08-28).
+fn is_known_tld(label: &str) -> bool {
+    const TLDS: &[&str] = &[
+        // generic
+        "com", "org", "net", "edu", "gov", "mil", "int", "io", "dev", "app", "ai", "co", "me",
+        "info", "biz", "xyz", "tech", "cloud",
+        // country code — no common file-extension or English-word collision
+        "cn", "uk", "jp", "de", "fr", "ru", "ca", "au", "br", "nl", "eu", "kr", "tw", "hk", "sg",
+    ];
+    TLDS.iter().any(|tld| label.eq_ignore_ascii_case(tld))
+}
+
 fn http_scheme_len(bytes: &[u8]) -> Option<usize> {
     bytes
         .starts_with(b"http://")
@@ -2081,6 +2191,85 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every bare domain one line offers, as the printed text of each range.
+    fn domains(text: &str) -> Vec<&str> {
+        detect_bare_domains(text)
+            .into_iter()
+            .map(|range| &text[range.byte_start..range.byte_end])
+            .collect()
+    }
+
+    /// §7.38 boundary table: the rows that a scheme-less host **is** recognized on. A host with a
+    /// path is the most trustworthy; a pure `host` with a known TLD and at least two labels is the
+    /// least, but still recognized.
+    #[test]
+    fn a_bare_domain_with_a_known_tld_is_recognized() {
+        assert_eq!(
+            domains("microsoft.com/software-download/windows10ISO"),
+            ["microsoft.com/software-download/windows10ISO"]
+        );
+        assert_eq!(
+            domains("github.com/oil-oil/beautify-github-readme"),
+            ["github.com/oil-oil/beautify-github-readme"]
+        );
+        assert_eq!(domains("microsoft.com/x"), ["microsoft.com/x"]);
+        assert_eq!(domains("github.com/a/b"), ["github.com/a/b"]);
+        assert_eq!(domains("example.com"), ["example.com"]);
+    }
+
+    /// §7.38 boundary table: the rows a scheme-less host is **not** recognized on. None of these has
+    /// a known TLD — the whole guard is the table, never "any dotted pair" — so a filename, a version
+    /// number and a two-letter initialism all stay dark.
+    #[test]
+    fn an_ordinary_dotted_token_is_not_a_bare_domain() {
+        for text in [
+            "file.txt",
+            "v2.0",
+            "a.b",
+            "main.rs",
+            "README.md",
+            "config.json",
+        ] {
+            assert!(
+                domains(text).is_empty(),
+                "`{text}` must not light up as a domain, got {:?}",
+                domains(text)
+            );
+        }
+    }
+
+    /// §7.38: prose punctuation is released off a bare domain's tail exactly as it is off a URL's —
+    /// a non-ASCII sentence stop ends the scan before it, and trailing ASCII sentence punctuation is
+    /// stripped. CJK prose with no space before the host still opens one, which a schemed URL's
+    /// leading boundary deliberately does not (that boundary must be readable; a preceding CJK
+    /// character is one).
+    #[test]
+    fn a_bare_domain_releases_its_prose_tail_and_opens_after_cjk() {
+        assert_eq!(domains("见 microsoft.com。"), ["microsoft.com"]);
+        assert_eq!(domains("见microsoft.com"), ["microsoft.com"]);
+        assert_eq!(domains("see example.com, then go"), ["example.com"]);
+        assert_eq!(domains("(github.com/a/b)"), ["github.com/a/b"]);
+    }
+
+    /// §7.38: a bare host wearing a port or a userinfo `@` is left to the schemed scan — `a:b` is as
+    /// often a drive or a clock time as a host and a port. This is what keeps `localhost:5173` the
+    /// URL scan's business and off this one.
+    #[test]
+    fn a_bare_host_with_a_port_or_userinfo_is_left_to_the_schemed_scan() {
+        assert!(domains("localhost:5173").is_empty());
+        assert!(domains("example.com:8080").is_empty());
+        assert!(domains("user@example.com").is_empty());
+    }
+
+    /// Misjudgment self-check (user requirement 2026-08-28): a line mixing filenames, a version
+    /// number, an initialism and real domains lights **only** the domains.
+    #[test]
+    fn a_mixed_line_lights_only_the_domains() {
+        let text =
+            "edit main.rs and README.md v2.0 a.b config.json, see github.com/x and microsoft.com.";
+        assert_eq!(domains(text), ["github.com/x", "microsoft.com"]);
     }
 
     #[test]

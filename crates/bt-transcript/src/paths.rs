@@ -136,6 +136,22 @@ pub fn inferred_url_ranges(text: &str, edge: Option<LineEndCell>) -> Vec<Hyperli
         .collect()
 }
 
+/// The scheme-less bare domains one logical line offers, with the same truncation gate applied
+/// (§7.38, §7.1.5k ①).
+///
+/// It sits beside [`inferred_url_ranges`] because it is the same ruling on the same kind of shape:
+/// a bare host touching the physical line's last cell may be the front of a longer address the
+/// application cut in two, and a cut address is a working link to somewhere else — the worst place
+/// to be wrong. So a candidate that reaches the row's end is pressed down exactly as a schemed URL
+/// or a printed path is.
+#[must_use]
+pub fn inferred_bare_domain_ranges(text: &str, edge: Option<LineEndCell>) -> Vec<HyperlinkRange> {
+    crate::detect_bare_domains(text)
+        .into_iter()
+        .filter(|range| !touches_line_end(range.byte_start, range.byte_end, edge))
+        .collect()
+}
+
 /// One printed path candidate: the half-open byte range it occupies in the line, its spelling, and
 /// the place inside the file it may name.
 ///
@@ -569,8 +585,17 @@ fn is_closing_delimiter(character: char) -> bool {
 }
 
 /// Where an unquoted path token stops.
+///
+/// The backtick is here for the same reason the web-address scan has stopped on it since it was
+/// written ([`crate::is_url_terminator`]): it is a code-span delimiter, never a character a path is
+/// spelled with, and an agent prints a **runnable** name — `dist\folio.exe` — inside one far more
+/// often than in the open. Its opening half already makes a boundary; without this, its closing
+/// half welds onto the name and the reference is asked about under a name no disk holds (user
+/// report 2026-08-28: an `.exe` in a code span went unrecognized while a bare `.md` did not). A
+/// filename that genuinely carries a backtick is as rare as one that ends in `)` and, like it, can
+/// still be quoted.
 pub fn is_path_terminator_char(character: char) -> bool {
-    character.is_whitespace() || is_closing_delimiter(character)
+    character.is_whitespace() || is_closing_delimiter(character) || character == '`'
 }
 
 /// End of the unquoted token starting at `start` (a byte offset on a character boundary).
@@ -656,23 +681,37 @@ fn release_prose_tail(text: &str, start: usize, end: usize) -> usize {
     end
 }
 
-/// The ASCII punctuation a sentence is separated with, and the only characters a **seam** may sit
-/// on — §7.30.
+/// The ASCII characters a **seam** may sit on — §7.30.
 ///
-/// The ASCII full stop is deliberately absent: boundary table row 16 already settled that a
-/// trailing `.` is part of the reference because Windows eats it and the name is the same file.
-/// These five separate one thing from the next and are never eaten.
-const PROSE_SEPARATORS: [char; 5] = [',', ';', ':', '!', '?'];
+/// **A class, not a table** (user ruling 2026-08-28; the same discipline §7.1.5h ⑤ settled for
+/// URLs' trailing punctuation and [`release_prose_tail`] settled for CJK stops). It was once the
+/// five sentence separators `, ; : ! ?`, and the fifth screenshot proved a table is the wrong shape
+/// for this: an agent wrote `docs/a.md(正斜杠)…` and `dist\folio.exe(反斜杠)…`, and because `(`
+/// was not one of the five, the candidate ate its way to the closing `)` and went to the disk under
+/// a name no file holds. Enumerating brackets and operators one at a time is the very thing the
+/// class was invented to end.
+///
+/// The class is: **ASCII punctuation a path is never spelled with.** [`is_ascii_punctuation`] minus
+/// the path-structure characters `/ \ . - _ ~` — everything else, from the sentence separators to
+/// `(`, `[`, `{`, `"`, `'`, `=`, `+`, `*`, `#`, `@`, `&`, `%`, `|`, is a mark a name is glued to,
+/// not part of the name.
+///
+/// [`is_ascii_punctuation`]: char::is_ascii_punctuation
+fn is_seam_separator(character: char) -> bool {
+    character.is_ascii_punctuation() && !matches!(character, '/' | '\\' | '.' | '-' | '_' | '~')
+}
 
 /// Where one unquoted token offers a **shorter form** of itself, longest first — §7.30.
 ///
-/// A seam is one **character-class transition** and not a list of stops: an ASCII separator with a
-/// non-ASCII character glued straight onto it. That is a person writing another script through an
-/// ASCII keyboard — `docs/a.md,这里是操作顺序` — and the separator is the sentence's, not the
-/// name's. Both halves of the transition are load-bearing:
+/// A seam is one **character-class transition** and not a list of stops: a [`is_seam_separator`]
+/// with a non-ASCII character glued straight onto it. That is a person writing another script
+/// through an ASCII keyboard — `docs/a.md(说明)`, `docs/a.md[注]`, `docs/a.md,这里是操作顺序` — and
+/// the separator is the sentence's, not the name's. Both halves of the transition are load-bearing:
 ///
 /// * ASCII → ASCII is **not** a seam. `D:\x\a.md,b` is one name; a comma is legal in a Windows
-///   filename and nothing on the line says this one is punctuation.
+///   filename and nothing on the line says this one is punctuation. `docs/a.md(1).txt` is likewise
+///   read whole — `(` followed by an ASCII `1` is no transition — so an existing file of that name
+///   wins over the shorter reading.
 /// * non-ASCII → anything is **not** a seam. A full-width stop is released whole by
 ///   [`release_prose_tail`] (boundary table row 17), and `D:\资料\A、B.md` is somebody's filename
 ///   read whole (row 19 stands unmoved).
@@ -688,7 +727,7 @@ fn prose_seam_ends(token: &str, limit: usize) -> Vec<usize> {
             break;
         }
         // `offset + 1` is a character boundary: every separator is one ASCII byte.
-        if PROSE_SEPARATORS.contains(&character)
+        if is_seam_separator(character)
             && token[offset + 1..]
                 .chars()
                 .next()
@@ -1401,7 +1440,18 @@ impl PrintedPathLinks {
         let upper_tail = upper.get(head.byte_start..upper_edge.byte_end)?;
 
         // Gate 2. The lower line's first cell is the continuation, so its first token opens at 0.
-        let lower_end = token_end(lower, 0);
+        //
+        // §7.30 coexisting with the rejoin (user note 2026-08-28): the continuation may carry a
+        // seam of its own — `5.exe(反斜杠)`, an agent's prose glued to the tail of the name it just
+        // wrapped — and that seam is the sentence's, not the name's. Cut the lower half at its first
+        // one before joining, so the two halves spell the name alone; when there is none this is the
+        // whole token exactly as before. If the cut still does not spell one reference, gate 3 refuses
+        // and the upper half is pressed down by the truncation gate — a blank, never a wrong link.
+        let raw_lower_end = token_end(lower, 0);
+        let lower_end = prose_seam_ends(&lower[..raw_lower_end], raw_lower_end)
+            .last()
+            .copied()
+            .unwrap_or(raw_lower_end);
         let lower_head = lower.get(..lower_end).filter(|head| !head.is_empty())?;
 
         // Gate 3. One candidate, covering all of it — one *token*, that is: the shorter forms a
@@ -1786,6 +1836,73 @@ mod tests {
             linked(&links, bracketed, last_cell_of(bracketed)),
             [(full, String::from("file:///D:/case/src/main.rs"))],
             "scenario 55: the last cell is a prose delimiter, so the candidate never reached it"
+        );
+    }
+
+    /// Cross-verification of the 2026-08-28 report (`dist\folio-next15.exe` was said not to be
+    /// underlined while `docs/plans/release/…​.md` was): the four separator × extension
+    /// combinations, each verified on the disk, every one produces a `file:` link. The recognition
+    /// layer reads `/` and `\` alike (both split the same components) and applies **no** extension
+    /// gate here (`candidates_in` accepts every reference), so `.exe` is no different from `.md`.
+    /// Neither the backslash nor the extension is the discriminator.
+    #[test]
+    fn a_relative_reference_is_recognized_in_either_slash_and_for_any_extension() {
+        let links = ledger(
+            "D:\\src",
+            &[
+                ("D:\\src\\docs\\plans\\a.md", true),
+                ("D:\\src\\dist\\folio.exe", true),
+                ("D:\\src\\docs\\plans\\a.exe", true),
+                ("D:\\src\\dist\\folio.md", true),
+            ],
+        );
+        for (line, uri) in [
+            ("docs/plans/a.md", "file:///D:/src/docs/plans/a.md"),
+            ("dist\\folio.exe", "file:///D:/src/dist/folio.exe"),
+            ("docs/plans/a.exe", "file:///D:/src/docs/plans/a.exe"),
+            ("dist\\folio.md", "file:///D:/src/dist/folio.md"),
+        ] {
+            assert_eq!(
+                linked(&links, line, None),
+                [(line, String::from(uri))],
+                "the {line:?} reference links like any other"
+            );
+        }
+        // As it really appears: a Windows prompt with an absolute cwd, then the bare relative form.
+        assert!(
+            linked(&links, "PS D:\\src> dist\\folio.exe", None)
+                .iter()
+                .any(|(text, _)| *text == "dist\\folio.exe"),
+            "the bare .exe after a prompt is linked"
+        );
+    }
+
+    /// §7.1.5j / §7.30: a reference an agent prints inside an inline code span — the ordinary form
+    /// for a **runnable** name like `dist\folio.exe` — is still a reference. Its opening backtick
+    /// already made a boundary; its closing backtick has to end the token the way whitespace and a
+    /// closing bracket do, or the `` ` `` welds onto the name and it is asked about under a name no
+    /// disk holds. The web-address scan has terminated on a backtick since it was written
+    /// ([`crate::detect_http_urls`] via [`crate::is_url_terminator`]); this is the same debt on the
+    /// same kind of text, and both slashes carry it.
+    #[test]
+    fn a_reference_inside_an_inline_code_span_is_still_recognized() {
+        let links = ledger(
+            "D:\\src",
+            &[
+                ("D:\\src\\dist\\folio.exe", true),
+                ("D:\\src\\docs\\a.md", true),
+            ],
+        );
+        assert_eq!(
+            linked(&links, "run `dist\\folio.exe` to test", None),
+            [(
+                "dist\\folio.exe",
+                String::from("file:///D:/src/dist/folio.exe")
+            )],
+        );
+        assert_eq!(
+            linked(&links, "see `docs/a.md`.", None),
+            [("docs/a.md", String::from("file:///D:/src/docs/a.md"))],
         );
     }
 
@@ -3236,6 +3353,59 @@ mod tests {
         ] {
             assert_eq!(spans(line), ["docs/a.md"], "{line} seams at its separator");
         }
+    }
+
+    /// §7.30, boundary table rows 46–48 (user ruling 2026-08-28): the seam is a **class**, so every
+    /// ASCII punctuation mark a path is not spelled with cuts — a bracket every bit as much as a
+    /// comma. This is the fifth screenshot: `docs/a.md(说明)` and its backslash twin both went dark
+    /// because `(` was not on the old five-mark table.
+    #[test]
+    fn a_bracket_glued_to_a_cjk_word_seams_like_any_other_separator() {
+        // Row 46: an opening bracket then CJK — the shorter form is offered. The bare spelling is
+        // no candidate whole (`(` is not a path character), so the seam is the only reading there is.
+        assert_eq!(spans("docs/a.md(说明)"), ["docs/a.md"]);
+        assert_eq!(spans("dist\\folio.exe(说明)"), ["dist\\folio.exe"]); // the backslash twin seams too
+        // The drive-rooted form is a candidate whole (a `(` is legal in an absolute path), so both
+        // readings are offered, longest first, and the disk chooses.
+        assert_eq!(
+            spans("见 D:\\x\\a.md(说明)"),
+            ["D:\\x\\a.md(说明", "D:\\x\\a.md"]
+        );
+        // Row 47: other brackets and operators are the same class, no table to extend.
+        assert_eq!(spans("docs/a.md[注]"), ["docs/a.md"]);
+        assert_eq!(
+            spans("见 D:\\x\\a.md{批}"),
+            ["D:\\x\\a.md{批", "D:\\x\\a.md"]
+        );
+        assert_eq!(
+            spans("见 D:\\x\\a.md=值"),
+            ["D:\\x\\a.md=值", "D:\\x\\a.md"]
+        );
+        // Row 48: `(` followed by an ASCII `1` is no transition, so the seam never fires — the
+        // shorter reading `docs/a.md` is not offered and cannot be falsely lit. (Whether the whole
+        // `docs/a.md(1).txt` is recognized is the closing-delimiter's business — `)` ends the token
+        // — and is unchanged by this ruling.)
+        assert!(
+            !spans("docs/a.md(1).txt").contains(&"docs/a.md"),
+            "an ASCII `(1)` must not seam a name into a shorter one"
+        );
+    }
+
+    /// §7.30 coexisting with §7.1.5k ② (user note 2026-08-28): an agent cut `dist\folio-next15.exe`
+    /// across its **own** newline and glued prose to the tail of the lower half — `5.exe(反斜杠)`.
+    /// The rejoin cuts that seam off the continuation first, joins the name alone, and the link
+    /// covers `5.exe` on the lower line and nothing of the sentence behind it.
+    #[test]
+    fn a_wrapped_lower_half_that_carries_a_seam_rejoins_the_name_alone() {
+        let links = ledger("D:\\src", &[("D:\\src\\dist\\folio-next15.exe", true)]);
+        assert_eq!(
+            rejoin(&links, "dist\\folio-next1", "5.exe(反斜杠)"),
+            Some((
+                "dist\\folio-next1",
+                "5.exe",
+                "file:///D:/src/dist/folio-next15.exe".to_owned()
+            ))
+        );
     }
 
     /// The crash of 2026-08-27: `names_a_dos_device` sliced a four-byte stem at byte three to
