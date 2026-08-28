@@ -202,3 +202,139 @@ come up before asserting that it goes back down — with the third arm now
 carrying the count out of the `catch_unwind` and asserting outside it, since a
 panic beating the engine thread would have made that arm pass with nothing
 standing.
+
+---
+
+## ② A second defect, found while photographing the first
+
+**A floating window drew a play disc that lit under the pointer and did nothing
+when it was pressed, and a control bar no hand could reach.**
+
+Found taking the float's evidence shot: `04-float-play-*.png` and
+`04b-float-play-*.png` — eight captures each, `212421` bytes and md5 `ACDDE96B`
+for every one of the sixteen, across a click on the disc, a click to focus and
+then a click on the disc, and a double click on the picture. The disc *lit*, so
+the pointer was inside the box the mark was drawn from.
+
+`BT_MOUSE_TRACE` says where the press went:
+
+```
+mouse_input state=Pressed  button=Left pointer=2112,649 route=none
+mouse_input state=Released button=Left pointer=2112,649 route=none
+chrome_mouse_input taken=0 at=release-target-is-some target=None
+```
+
+The *release* reached `chrome_mouse_input`; the **press never did**. `press_float`
+is asked above the chrome router — that is what makes a floating window opaque to
+the layout beneath it — and its `Body` arm went straight to the document ladder.
+`press_video_at`, which states the whole order (a play mark on a picture, then
+every control on a bar that is up, then a double click on the picture itself),
+is reached only from `chrome_mouse_input`.
+
+The asymmetry is why it survived a reading: the release half was never missing,
+because a scrubber let go *is* answered in `chrome_mouse_input` and a release
+does reach it.
+
+The mend is one line of dispatch and not a second model — the same shape
+`a_document_in_a_float_selects_the_way_it_does_in_a_pane` took one slice
+earlier: `press_float`'s body branch asks `press_video_at` first, so a player
+standing on a document out-ranks the document. Pinned by
+`a_player_in_a_float_answers_the_hand_the_way_a_pane_does`, which asserts both
+hosts reach the path and that the player is asked before the page underneath it.
+
+---
+
+## ③ The closed-float seat — a window that has left is not playing anything
+
+**The seat sweep had one door it could not ask "does this surface still exist"
+in the ordinary way, and a recording went on playing through the whole of its
+window's departure.**
+
+`Runtime::sweep_video_seats` is the single rule for all three surfaces: a seat
+lives while the surface it is keyed by is still showing the file it was opened
+on. It reads `preview_surfaces()` for "what still exists", and
+`preview_surfaces()` builds its float half from `float::FloatHost::drawn()`.
+
+`drawn()` deliberately keeps a window that is on its way out — it has to, because
+the window is still being painted while it fades, and retiring its *view*
+underneath it would blank the very thing the exit animation is animating. So a
+closed float stayed in the alive list for the whole of its exit, and the sweep
+had nothing to notice.
+
+**A decoder is not a view.** The picture went on decoding and went on being
+drawn, with the chassis already gone from over it, for as long as the departure
+took — and the sound with it.
+
+The mend is the float's own arm in that `match`, asking
+`float::FloatHost::live()` — which is `drawn()` minus the dismissed — instead of
+the drawn list, and standing *before* the fallthrough that reads `alive`, since
+a `match` takes the first arm that fits:
+
+```rust
+PreviewSurface::Float(id) if self.window.float.live(*id).is_none() => {
+    return true;
+}
+```
+
+Every other way a video ends without the stop button was already covered by the
+one rule and needed nothing: a pane handed another document, a card whose
+pointer moved to the next row, a tab closed or torn away (the seats vanish from
+`preview_seats()`), and a **window** closed outright (`WindowRuntime` drops,
+`VideoSeats::Drop` runs `shutdown_all`). `sweep_video_seats` is called from
+`advance_strip_animation`, which runs on the clock, so none of those doors has
+to remember that a decoder exists.
+
+### Red proof
+
+Pinned by `a_closed_window_stops_the_recording_it_was_showing`, in two halves —
+(1) the gap between the two lists is real (a dismissed window is still `drawn()`
+and no longer `live()`, so the arm is necessary rather than redundant), and (2)
+the sweep asks the live list and asks it first.
+
+Both this and section 2 above were **measured under one mutation**: the float arm
+deleted from `sweep_video_seats` and `press_video_at` deleted from
+`press_float`.
+
+```
+running 2 tests
+test files_locate_door_tests::a_closed_window_stops_the_recording_it_was_showing ... FAILED
+test files_locate_door_tests::a_player_in_a_float_answers_the_hand_the_way_a_pane_does ... FAILED
+
+---- files_locate_door_tests::a_closed_window_stops_the_recording_it_was_showing stdout ----
+panicked at crates\bt-app\src\main.rs:82000:14:
+the seat sweep has no arm for a closed window, so a recording goes on playing for the length of the window's exit
+
+---- files_locate_door_tests::a_player_in_a_float_answers_the_hand_the_way_a_pane_does stdout ----
+panicked at crates\bt-app\src\main.rs:81911:13:
+    fn press_float( does not reach the player's press path, so a recording starts on one host and not the other
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 2804 filtered out
+```
+
+Restored, both green.
+
+### One tidy taken on the way past
+
+`sweep_video_seats` had picked up a doc paragraph belonging to
+`sweep_preview_panes` — *"Drop the view of every surface that has stopped
+existing…"*, which is about the preview pool's dirty gates and not about
+decoders. Moved back to the function it describes.
+
+### A trap in gate 3 worth writing down
+
+`cargo fmt --all -- --check` on this tree did not report a diff — it **died**:
+
+```
+memory allocation of 53115959672 bytes failed
+```
+
+53 GB, from rustfmt 1.8.0-stable, exit 9. It is not a defect in this branch's
+code and not a machine problem. `cargo fmt --all` (apply, no `--check`) runs to
+completion in seconds; `--check` on the *formatted* file is clean and instant.
+The blow-up is in rustfmt's own `--check` diff path, and it needs a pending
+reformat inside a file the size of `main.rs` to reach it — the base commit
+`bf0e468` does not hit it because `main.rs` was already canonical there.
+
+**So: run `cargo fmt --all` before `cargo fmt --all -- --check`, always.** A hand
+that reads the 53 GB line as "the build is broken" will lose an hour, which is
+why it is written here.

@@ -72,7 +72,10 @@ fn main() {
                 longest_gap = longest_gap.max(at.saturating_duration_since(last_at));
                 last_at = at;
                 if frames <= 3 {
-                    println!("    frame {} {}x{}", frame.generation, frame.width, frame.height);
+                    println!(
+                        "    frame {} {}x{}",
+                        frame.generation, frame.width, frame.height
+                    );
                 }
             }
             std::thread::sleep(Duration::from_millis(4));

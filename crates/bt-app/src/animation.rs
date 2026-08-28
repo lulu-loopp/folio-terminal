@@ -266,8 +266,7 @@ impl Animation {
         }
         let elapsed = now.saturating_duration_since(self.started);
         let mut into = Duration::from_nanos(
-            u64::try_from(elapsed.as_nanos() % self.loop_length.as_nanos())
-                .unwrap_or(0),
+            u64::try_from(elapsed.as_nanos() % self.loop_length.as_nanos()).unwrap_or(0),
         );
         for (index, frame) in self.frames.iter().enumerate() {
             if into < frame.delay {
@@ -436,7 +435,9 @@ mod tests {
             Some(AnimationRefusal::NotAnAnimation)
         );
         assert!(path_names_an_animation(std::path::Path::new(r"D:\a\b.GIF")));
-        assert!(!path_names_an_animation(std::path::Path::new(r"D:\a\b.gifx")));
+        assert!(!path_names_an_animation(std::path::Path::new(
+            r"D:\a\b.gifx"
+        )));
         assert_eq!(
             refusal(decode_bytes(b"GIF89a but not really")),
             Some(AnimationRefusal::NotAnAnimation)

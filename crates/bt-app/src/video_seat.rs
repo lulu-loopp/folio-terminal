@@ -346,7 +346,14 @@ pub fn bar_layout(body: [f32; 4], scale: f32, clock_figures: usize) -> Option<Ba
     // rather than five `if`s so that adding a control is adding a line here and
     // nowhere else.
     for dropped in 0..=5 {
-        if needed(wants_at, wants_duration, wants_mute, wants_volume, wants_rate) <= body_width {
+        if needed(
+            wants_at,
+            wants_duration,
+            wants_mute,
+            wants_volume,
+            wants_rate,
+        ) <= body_width
+        {
             break;
         }
         match dropped {
@@ -360,7 +367,14 @@ pub fn bar_layout(body: [f32; 4], scale: f32, clock_figures: usize) -> Option<Ba
             _ => return None,
         }
     }
-    if needed(wants_at, wants_duration, wants_mute, wants_volume, wants_rate) > body_width {
+    if needed(
+        wants_at,
+        wants_duration,
+        wants_mute,
+        wants_volume,
+        wants_rate,
+    ) > body_width
+    {
         return None;
     }
 
@@ -812,12 +826,7 @@ impl VideoSeat {
     /// A modified key is never one of these: `Ctrl`, `Alt` and `Win` chords are
     /// the window's, and a player that swallowed `Ctrl+←` would be eating one of
     /// them.
-    pub fn key_press(
-        &mut self,
-        key: &winit::keyboard::Key,
-        modified: bool,
-        now: Instant,
-    ) -> bool {
+    pub fn key_press(&mut self, key: &winit::keyboard::Key, modified: bool, now: Instant) -> bool {
         use winit::keyboard::{Key, NamedKey};
         if modified {
             return false;
@@ -1107,8 +1116,14 @@ impl VideoSeat {
         let progress = state
             .duration_secs
             .filter(|duration| duration.is_finite() && *duration > 0.0)
-            .map_or(0.0, |duration| (state.position_secs / duration).clamp(0.0, 1.0));
-        let gain = if state.muted { 0.0 } else { state.volume.clamp(0.0, 1.0) };
+            .map_or(0.0, |duration| {
+                (state.position_secs / duration).clamp(0.0, 1.0)
+            });
+        let gain = if state.muted {
+            0.0
+        } else {
+            state.volume.clamp(0.0, 1.0)
+        };
         for (rail, track, fraction, slot) in [
             Some((layout.seek_rail, layout.seek, progress, BarSlot::Seek)),
             layout
@@ -1398,7 +1413,10 @@ mod tests {
         assert_eq!(situation.presence(risen, crate::Motion::Full).opacity, 1.0);
         // It stands for the whole dwell and is still whole at the end of it.
         let resting = start + VIDEO_BAR_IDLE_REST;
-        assert_eq!(situation.presence(resting, crate::Motion::Full).opacity, 1.0);
+        assert_eq!(
+            situation.presence(resting, crate::Motion::Full).opacity,
+            1.0
+        );
         // Then it goes, over one archived span.
         let half = resting + VIDEO_BAR_FADE / 2;
         let midway = situation.presence(half, crate::Motion::Full).opacity;
@@ -1407,7 +1425,11 @@ mod tests {
         assert_eq!(situation.presence(gone, crate::Motion::Full).opacity, 0.0);
 
         // The three states that are not "no action" hold it up for ever.
-        for (over_bar, grabbing, paused) in [(true, false, false), (false, true, false), (false, false, true)] {
+        for (over_bar, grabbing, paused) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
             let held = BarSituation {
                 revealed_at: Some(start),
                 acted_at: start,
@@ -1429,7 +1451,10 @@ mod tests {
             situation.presence(start, crate::Motion::Reduced).opacity,
             1.0
         );
-        assert_eq!(situation.presence(gone, crate::Motion::Reduced).opacity, 0.0);
+        assert_eq!(
+            situation.presence(gone, crate::Motion::Reduced).opacity,
+            0.0
+        );
     }
 
     /// RED — **the bar keeps play and the scrubber and gives up the rest from
@@ -1541,9 +1566,11 @@ mod tests {
         assert!(!fresh.has_finished_leaving(start + over - Duration::from_millis(1)));
         assert!(fresh.has_finished_leaving(start + over));
         // ③ and never while anything is holding it up.
-        for (over_bar, grabbing, paused) in
-            [(true, false, false), (false, true, false), (false, false, true)]
-        {
+        for (over_bar, grabbing, paused) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
             let held = BarSituation {
                 over_bar,
                 grabbing,
@@ -1567,7 +1594,10 @@ mod tests {
     fn every_control_answers_where_it_is_drawn() {
         let layout = bar_layout(a_body(), 1.0, 4).expect("a bar");
         let centre = |rect: [f32; 4]| [(rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0];
-        assert_eq!(layout.slot_at(centre(layout.play)), Some(BarSlot::PlayPause));
+        assert_eq!(
+            layout.slot_at(centre(layout.play)),
+            Some(BarSlot::PlayPause)
+        );
         assert_eq!(layout.slot_at(centre(layout.seek)), Some(BarSlot::Seek));
         assert_eq!(
             layout.slot_at(centre(layout.mute.expect("wide"))),

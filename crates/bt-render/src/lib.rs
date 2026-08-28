@@ -11650,12 +11650,7 @@ fn draw_video_stage(
             pass.set_vertex_buffer(0, vertex_buffer.slice(..));
             opened = true;
         }
-        pass.set_scissor_rect(
-            draw.clip.x,
-            draw.clip.y,
-            draw.clip.width,
-            draw.clip.height,
-        );
+        pass.set_scissor_rect(draw.clip.x, draw.clip.y, draw.clip.width, draw.clip.height);
         // A pipeline whose layout names a texture must have one bound whether
         // the fragment samples it or not, and a ground quad samples nothing.
         let bound = draw

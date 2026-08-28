@@ -6015,10 +6015,7 @@ enum PreviewOpenLane {
 /// A predicate rather than a condition written into the retirement loop,
 /// because it is a claim about content that is worth being able to ask on its
 /// own, and because the loop that consumes it is walking two maps at once.
-fn a_page_was_replaced(
-    picture: Option<&Path>,
-    buffer: Option<&preview::PreviewSource>,
-) -> bool {
+fn a_page_was_replaced(picture: Option<&Path>, buffer: Option<&preview::PreviewSource>) -> bool {
     // **The exception a player needed is gone with the player** (route B slice
     // ②, 2026-08-28; §7.44 ④).
     //
@@ -9358,6 +9355,20 @@ struct WindowRuntime {
     /// is: it is a record of what this frame's stack looks like, and a stale
     /// entry in it is a page's hole punched over somebody else's window.
     float_hole_level: BTreeMap<float::FloatId, usize>,
+    /// **Which overlay layer a float's recording is drawn at** (route B slice
+    /// ②; §7.44 ③, corrected on the machine 2026-08-28).
+    ///
+    /// [`Self::float_hole_level`]'s neighbour and deliberately not the same
+    /// number. A page's hole is punched *under* the window's own fills, because
+    /// the fills are marks that legitimately stand over a page; a recording is
+    /// the window's content and has to be drawn *over* them, or the body well
+    /// paints across the picture. So the float group pushes an empty layer
+    /// directly above each window's face and this is its index — the slot a
+    /// video is drawn into, under the window's own bar and under every window
+    /// stacked in front.
+    ///
+    /// Rebuilt from nothing on every pass, for `float_hole_level`'s reason.
+    float_video_level: BTreeMap<float::FloatId, usize>,
     /// **Which overlay layer the glance card's face is** — the index a video
     /// playing on the card is drawn above (route B slice ②, 2026-08-28; §7.44
     /// ③).
@@ -29034,6 +29045,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         git_pages_shown: BTreeMap::new(),
         float_git_pages_shown: BTreeMap::new(),
         float_hole_level: BTreeMap::new(),
+        float_video_level: BTreeMap::new(),
         file_peek_level: None,
         video_bar_drag: None,
         video_carried_off_the_card: false,
@@ -43611,13 +43623,6 @@ impl Runtime<'_> {
         surfaces
     }
 
-    /// Drop the view of every surface that has stopped existing.
-    ///
-    /// Called from the one door every seat-set change goes through and from every
-    /// float closer, because a view left behind is a buffer this tab still
-    /// believes is on screen — and the pool's dirty gates read exactly that
-    /// belief, so a stale entry is a gate that stops asking about a file nobody
-    /// can see any more.
     /// **Shut down every recording whose surface has stopped being about it**
     /// (route B slice ②, 2026-08-28; §7.44 ③).
     ///
@@ -43656,6 +43661,18 @@ impl Runtime<'_> {
                             Some(path) => Some(path),
                             None => return true,
                         }
+                    }
+                    // **A window that has been closed is not playing
+                    // anything**, and it stops on the press rather than at the
+                    // end of its own leaving (§7.44 ⑨, found on the machine
+                    // 2026-08-28). `preview_surfaces` is drawn from
+                    // `float.drawn()`, which deliberately keeps a window that is
+                    // on its way out so its *view* is not retired under it; a
+                    // decoder is not a view, and the picture stayed on the glass
+                    // — with the chassis already gone from over it — for as long
+                    // as the departure took.
+                    PreviewSurface::Float(id) if self.window.float.live(*id).is_none() => {
+                        return true;
                     }
                     _ => {
                         if !alive.contains(surface) {
@@ -43699,6 +43716,13 @@ impl Runtime<'_> {
         }
     }
 
+    /// Drop the view of every surface that has stopped existing.
+    ///
+    /// Called from the one door every seat-set change goes through and from every
+    /// float closer, because a view left behind is a buffer this tab still
+    /// believes is on screen — and the pool's dirty gates read exactly that
+    /// belief, so a stale entry is a gate that stops asking about a file nobody
+    /// can see any more.
     fn sweep_preview_panes(&mut self) {
         let alive = self.preview_surfaces();
         // **Every tab's map, not only the active one.** A float is torn out of the
@@ -46509,7 +46533,9 @@ impl Runtime<'_> {
             {
                 let path = match surface {
                     PreviewSurface::Peek => self.file_peek_subject().and_then(|it| it.path),
-                    _ => self.preview_picture(surface).map(|image| image.path.clone()),
+                    _ => self
+                        .preview_picture(surface)
+                        .map(|image| image.path.clone()),
                 };
                 let Some(path) = path else { continue };
                 self.play_video_file_on(surface, &path)?;
@@ -46628,7 +46654,9 @@ impl Runtime<'_> {
         }
         let path = match surface {
             PreviewSurface::Peek => self.file_peek_subject().and_then(|it| it.path),
-            _ => self.preview_picture(surface).map(|image| image.path.clone()),
+            _ => self
+                .preview_picture(surface)
+                .map(|image| image.path.clone()),
         };
         let Some(path) = path else { return Ok(false) };
         self.play_video_file_on(surface, &path)?;
@@ -46673,9 +46701,7 @@ impl Runtime<'_> {
             .map(|(surface, _)| surface)
             .collect::<Vec<_>>()
             .into_iter()
-            .filter_map(|surface| {
-                Some((surface, self.video_shape_of(surface, scale, now)?.rect()))
-            })
+            .filter_map(|surface| Some((surface, self.video_shape_of(surface, scale, now)?.rect())))
             .collect();
         let bars: Vec<(PreviewSurface, bool)> = shapes
             .iter()
@@ -50818,7 +50844,8 @@ impl Runtime<'_> {
                     // rounded floor, so the picture's own corners are square and
                     // the round ones belong to the face around it.
                     radius_px: 0.0,
-                    stage: bt_render::VideoStage::Overlay(self.float_hole_level(id)?),
+                    // **Not the hole's level** — see [`WindowRuntime::float_video_level`].
+                    stage: bt_render::VideoStage::Overlay(self.float_video_level(id)?),
                 })
             }
             PreviewSurface::Peek => {
@@ -50894,7 +50921,6 @@ impl Runtime<'_> {
                 .is_some_and(|entry| matches!(entry, AnimationEntry::Ready(_)))
         })
     }
-
 
     /// Fit **one** picture to the body its host gives it this frame, ask the
     /// worker for the raster that box wants, and hand the pixels to the channel
@@ -63285,6 +63311,25 @@ impl Runtime<'_> {
             // beneath it. So the order is restated, and a bar drawn on a float
             // is a bar a hand can take.
             float::FloatPart::Body if holds_a_buffer => {
+                // **A player standing on the picture answers before anything
+                // underneath it** (route B slice ②; §7.44 ①, found by
+                // photographing the machine 2026-08-28).
+                //
+                // `press_video_at` states this order for the docked pane, in
+                // `chrome_mouse_input` — and a float cannot borrow that
+                // statement for the same reason the two bars below cannot: a
+                // press inside a window is claimed *here*, above the chrome
+                // router, which is what makes a window opaque to the layout
+                // beneath it. Left unsaid, a float drew a play disc that lit
+                // under the pointer and did nothing when it was pressed, and a
+                // control bar no hand could reach — one recording on three
+                // surfaces with one of the three unable to start it.
+                //
+                // The *release* half was never missing: a scrubber let go is
+                // answered in `chrome_mouse_input`, which a release does reach.
+                if self.press_video_at(position)? {
+                    return Ok(true);
+                }
                 // **And a rendered page's words are drawn across on the same
                 // terms** (§7.39, user report 2026-08-28: 「浮窗里的 md 选不中」).
                 // The docked pane's order, restated here for `press_float`'s own
@@ -64178,6 +64223,13 @@ impl Runtime<'_> {
         self.window.float_hole_level.get(&id).copied()
     }
 
+    /// The slot a float's recording is drawn into — see
+    /// [`WindowRuntime::float_video_level`], which is why this is not
+    /// [`Self::float_hole_level`].
+    fn float_video_level(&self, id: float::FloatId) -> Option<usize> {
+        self.window.float_video_level.get(&id).copied()
+    }
+
     /// **Which page a float is carrying**, if it is carrying one.
     ///
     /// [`float::FloatPreview::page`] read through the window's own map, so that
@@ -64269,6 +64321,9 @@ impl Runtime<'_> {
         // And the ledger a floated page's hole is spelled against, on the same
         // terms and for the same reason (§7.14c).
         self.window.float_hole_level.clear();
+        // And the recording's, which is a *different* height in the same stack
+        // — see the note beside the push.
+        self.window.float_video_level.clear();
         // **The floating graphs, on the same terms** — and only the floating
         // half of that map, because the seats' entries were written by the
         // chrome pass and are not this pass's to throw away.
@@ -64299,6 +64354,29 @@ impl Runtime<'_> {
                 .float_hole_level
                 .insert(id, below + layers.len());
             layers.push(window);
+            // **And a slot of its own for a recording, directly over that
+            // face** (route B slice ②; §7.44 ③, found on the machine
+            // 2026-08-28).
+            //
+            // A page's hole and a recording's picture are *not* the same
+            // height, and writing them at one index is what put a float's video
+            // underneath the window that was supposed to be showing it. The
+            // renderer draws `VideoStage::Overlay(n)` between layer `n`'s ground
+            // and layer `n`'s fills — which is right for a hole, because a hole
+            // is punched under the marks that legitimately stand over a page,
+            // and wrong for a picture, because a float's body well is one of
+            // those fills. Photographed: the window drew its face, the fills
+            // covered the recording, and the picture only appeared for the
+            // moment the chassis was on its way out.
+            //
+            // An empty layer, and that is the whole of the mechanism: a stage
+            // index has to name a layer the z-order loop actually reaches, and
+            // what this one is for is being reached. It costs no buffer, no
+            // draw call and no quad — see `marks::OverlayLayer::default`.
+            self.window
+                .float_video_level
+                .insert(id, below + layers.len());
+            layers.push(marks::OverlayLayer::default());
             // **And the recording's control bar, on the same terms** (route B
             // slice ②; §7.44 ②). Above this window's own layer for the scroll
             // bar's reason exactly — a layer paints its quads before the
@@ -67712,15 +67790,13 @@ impl Runtime<'_> {
         // where the layout used to be would be the FLIP's own defect with a
         // recording in it.
         self.sweep_video_seats();
-        let frames_arrived =
-            self.window.video.pump(now) | self.advance_animations(now);
+        let frames_arrived = self.window.video.pump(now) | self.advance_animations(now);
         // **Animations count here too**, and forgetting them was a real bug for
         // the length of one edit: a `.gif` with no recording anywhere in the
         // window would advance its frame, bump its generation, and never hand
         // the renderer the new layer — an animation that moved in the model and
         // stood still on the glass.
-        let anything_moving =
-            !self.window.video.is_empty() || !self.window.animations.is_empty();
+        let anything_moving = !self.window.video.is_empty() || !self.window.animations.is_empty();
         let boxes_moved = anything_moving && self.refresh_video_layers();
         // **The pictures' own debt, kept as a name of its own.** It has to
         // survive the chrome's question below, which is why it is not folded
@@ -79075,7 +79151,8 @@ impl Runtime<'_> {
                             tab.preview_panes.get(surface).is_some_and(|pane| {
                                 a_page_was_replaced(
                                     pane.image.as_ref().map(|image| image.path.as_path()),
-                                    pane.buffer.as_ref())
+                                    pane.buffer.as_ref(),
+                                )
                             }),
                         )
                     })
@@ -81801,6 +81878,139 @@ mod files_locate_door_tests {
         assert!(
             body("    fn drag_preview_text(").contains("self.preview_text_drag"),
             "the float's selection drag spins up a second model instead of the pane's own"
+        );
+    }
+
+    /// RED — **a player in a float answers the hand the way a pane's does**
+    /// (route B slice ②; §7.44 ①, found by photographing the machine
+    /// 2026-08-28).
+    ///
+    /// The same shape as the selection pin above, one surface over and one
+    /// slice later. `press_video_at` states the whole order — a play mark on a
+    /// picture, then every control on a bar that is up, then a double click on
+    /// the picture itself — and it was reached only from `chrome_mouse_input`.
+    /// A press inside a floating window never gets that far: `press_float` is
+    /// asked above the chrome router and claims it, which is what makes a window
+    /// opaque to the layout beneath it. So a float drew a play disc that lit
+    /// under the pointer and did nothing when pressed, and a control bar no hand
+    /// could take — one recording on three surfaces and one of the three unable
+    /// to start it, which is exactly the ruling §7.44 ① was written for.
+    ///
+    /// The *release* half was never missing, and that asymmetry is why the
+    /// defect survived a reading: a scrubber let go is answered in
+    /// `chrome_mouse_input`, which a release does reach.
+    ///
+    /// The order inside the float's own branch is asserted too, and it is the
+    /// load-bearing half: a player standing on a document out-ranks the
+    /// document, so a press on the bar over a rendered page must not put a
+    /// caret in the page.
+    ///
+    /// RED GATE: drop `press_video_at` from `press_float`'s body branch and the
+    /// first block fails — which is the state the binary photographed on
+    /// 2026-08-28 was built from.
+    #[test]
+    fn a_player_in_a_float_answers_the_hand_the_way_a_pane_does() {
+        for signature in ["    fn press_float(", "    fn chrome_mouse_input("] {
+            assert!(
+                body(signature).contains("self.press_video_at(position)"),
+                "{signature} does not reach the player's press path, so a recording starts \
+                 on one host and not the other"
+            );
+        }
+        let press = body("    fn press_float(");
+        let player = press
+            .find("self.press_video_at(position)")
+            .expect("the float's press asks the player");
+        let document = press
+            .find("self.press_preview_text(position)")
+            .expect("the float's press reaches the document");
+        assert!(
+            player < document,
+            "the document underneath answers before the player standing on it"
+        );
+    }
+
+    /// RED — **a window that has been closed is not playing anything** (route B
+    /// slice ②; §7.44 ⑨, found on the machine 2026-08-28).
+    ///
+    /// The one door in the seat sweep that "the surface still exists" cannot be
+    /// asked about in the ordinary way, and the reason is a deliberate decision
+    /// one layer down. [`float::FloatHost::drawn`] keeps a window that is on its
+    /// way out — it has to, because the window is still being painted while it
+    /// fades, and retiring its *view* underneath it would blank the thing the
+    /// exit animation is animating. [`super::Runtime::preview_surfaces`] is
+    /// built from `drawn()`, so a closed float stays in the alive list for the
+    /// whole of its departure.
+    ///
+    /// **A decoder is not a view.** The picture went on decoding, and went on
+    /// being drawn, with the chassis already gone from over it — a recording
+    /// playing on a window that the reader has closed, for as long as the exit
+    /// took. So the float arm asks [`float::FloatHost::live`] instead, which is
+    /// `drawn()` minus the ones that have been dismissed, and the sound stops on
+    /// the press rather than at the end of the animation.
+    ///
+    /// Two halves, because the trap is the gap between the two lists and the
+    /// mend is a call site choosing the right one:
+    ///
+    /// ① **The gap is real.** A dismissed window is still drawn and no longer
+    /// live. Were that not so, this whole arm would be dead code and the
+    /// ordinary `alive.contains` branch would already have covered it.
+    ///
+    /// ② **The sweep asks the live list.** Read out of the source, because the
+    /// arm is a `match` inside a closure over a `Runtime` that no test can
+    /// build; what there is to assert is that the float's arm names `live` and
+    /// stands *before* the fallthrough that asks `alive`, since a `match` takes
+    /// the first arm that fits.
+    ///
+    /// RED GATE ①: make `drawn` filter by `is_live` and the first block fails —
+    /// which would also be a fade with nothing in it. RED GATE ②: delete the
+    /// `PreviewSurface::Float` arm from `sweep_video_seats` and the second
+    /// block fails, which is the state every binary before this commit was
+    /// built from.
+    #[test]
+    fn a_closed_window_stops_the_recording_it_was_showing() {
+        use crate::{TabId, float};
+        // ① a dismissed window is still drawn, and no longer live.
+        let mut host = float::FloatHost::default();
+        let now = std::time::Instant::now();
+        let id = host.open(
+            float::FloatMode::Pinned,
+            None,
+            float::FloatTenant::Preview(float::FloatPreview {
+                tab: TabId(1),
+                page: None,
+            }),
+            [100.0, 100.0, 430.0, 400.0],
+            None,
+            now,
+        );
+        assert!(host.live(id).is_some(), "the window is open");
+        assert!(host.dismiss(id, now), "and the reader closes it");
+        assert!(
+            host.drawn().any(|win| win.epoch == id),
+            "a window on its way out is still painted — that is what makes this \
+             arm necessary rather than redundant"
+        );
+        assert!(
+            host.live(id).is_none(),
+            "and it is no longer one of the live ones"
+        );
+
+        // ② the sweep asks the live list, and asks it first.
+        let sweep = body("    fn sweep_video_seats(");
+        let float_arm = sweep
+            .find("PreviewSurface::Float(id) if self.window.float.live(*id).is_none()")
+            .expect(
+                "the seat sweep has no arm for a closed window, so a recording goes on \
+                 playing for the length of the window's exit",
+            );
+        let fallthrough = sweep
+            .find("if !alive.contains(surface)")
+            .expect("the sweep still has its ordinary aliveness question");
+        assert!(
+            float_arm < fallthrough,
+            "the float's arm stands after the branch that reads the drawn list, so it \
+             is never taken"
         );
     }
 
@@ -120365,7 +120575,11 @@ mod tests {
                 sources.push((path, text));
             }
         }
-        assert!(sources.len() > 40, "the walk found the crate: {}", sources.len());
+        assert!(
+            sources.len() > 40,
+            "the walk found the crate: {}",
+            sources.len()
+        );
         // Spelled in halves so that this test's own text is not what it finds.
         for needle in [
             concat!("<", "video"),
@@ -120428,7 +120642,10 @@ mod tests {
             "a decoded picture and nothing else is still a frame the glass is owed"
         );
         assert!(tick_owes_a_present(true, false, false), "the chrome moved");
-        assert!(tick_owes_a_present(false, true, false), "a pane is in flight");
+        assert!(
+            tick_owes_a_present(false, true, false),
+            "a pane is in flight"
+        );
         assert!(
             !tick_owes_a_present(false, false, false),
             "and a tick with no news at all presents nothing — an idle window \
@@ -120525,7 +120742,10 @@ mod tests {
         // And closing one closes exactly one.
         assert!(seats.close(surfaces[1]));
         assert!(seats.get(surfaces[1]).is_none());
-        assert!(seats.get(surfaces[0]).is_some(), "and leaves the others alone");
+        assert!(
+            seats.get(surfaces[0]).is_some(),
+            "and leaves the others alone"
+        );
         assert_eq!(engines_outstanding(), before + 2);
         seats.shutdown_all();
         assert_eq!(
@@ -120596,10 +120816,18 @@ mod tests {
 
         // ① nothing was started and nothing was stopped.
         assert_eq!(engines_started(), started, "a second engine was opened");
-        assert_eq!(engines_shut_down(), stopped, "the first engine was shut down");
+        assert_eq!(
+            engines_shut_down(),
+            stopped,
+            "the first engine was shut down"
+        );
         let window = seats.get(float).expect("the window holds the seat now");
         // ② the texture kept its name.
-        assert_eq!(window.key(), key, "the picture was released and re-uploaded");
+        assert_eq!(
+            window.key(),
+            key,
+            "the picture was released and re-uploaded"
+        );
         assert_eq!(window.path(), fixture);
         // ③ the playhead did not go back to zero.
         assert!(
@@ -121019,14 +121247,16 @@ mod tests {
             None,
             Some(&preview::PreviewSource::Web(
                 "http://localhost:5173/app".into()
-            ))));
+            ))
+        ));
         assert!(
             a_page_was_replaced(
                 None,
                 Some(&preview::PreviewSource::file(
                     r"D:
 otes.md"
-                ))),
+                ))
+            ),
             "a document landed on the seat"
         );
         assert!(

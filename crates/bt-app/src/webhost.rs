@@ -4032,7 +4032,10 @@ mod rehost_address_tests {
             hwnd: hwnd(1),
         });
         seat.playing_audio = true;
-        assert!(seat.playing_audio(), "a live seat says it is making a sound");
+        assert!(
+            seat.playing_audio(),
+            "a live seat says it is making a sound"
+        );
         // The one line of the teardown this is about: the machine is told to go.
         let _ = seat.machine.close();
         assert!(seat.is_closing());
