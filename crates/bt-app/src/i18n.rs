@@ -528,13 +528,23 @@ pub enum Text {
     /// `</>` while the pane is showing a rendered document — press it for the
     /// source (user ruling 2026-08-25).
     PreviewFlipToSource,
-    /// **The one thing a `.mov`'s card has to say that its facts do not** (user
-    /// ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
+    /// **What a surface says when the decoder on *this machine* refused the
+    /// file** (user ruling 2026-08-27; re-sourced 2026-08-28, route B slice ②;
+    /// `docs/DESIGN.md` §7.23 ⑩, §7.44 ⑥).
     ///
-    /// A statement and not an apology: the file is a video, this window can draw
-    /// it, and the engine that would have to play it does not know the
-    /// container. It stands beside the size on the second line, where the rest
-    /// of what is true about the *file* stands.
+    /// A statement and not an apology: the file is a video, this window has a
+    /// lane for it, and the decoder would not open it.
+    ///
+    /// **Where it comes from changed and the sentence did not.** It used to be
+    /// printed off a *column of a table* — the spellings whose face came from
+    /// Media Foundation and whose playback would have come from a browser that
+    /// did not know the container. There is no such column any more (one decoder
+    /// answers both questions), so a constant compiled on a build server can no
+    /// longer know this, and it is now raised by [`bt_platform::video::engine`]'s
+    /// own `EngineError::Unsupported` at the moment a file is opened — which is
+    /// the honest source, because the answer is per machine: an HEVC `.mp4` or a
+    /// VP9 `.webm` plays where the Store codec is installed and does not where
+    /// it is not.
     VideoFormatCannotPlay,
     /// `</>` while the pane is showing the source — press it for the rendering.
     ///

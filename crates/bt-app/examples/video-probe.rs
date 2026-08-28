@@ -291,6 +291,7 @@ impl Probe {
             height: HEIGHT - CAPTION_STRIP_PX,
         };
         let layer = VideoLayer {
+            stage: bt_render::VideoStage::Seat,
             key: format!("probe-{}", self.at),
             box_,
             clip: box_,

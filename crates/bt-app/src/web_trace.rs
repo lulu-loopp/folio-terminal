@@ -101,12 +101,6 @@ pub fn mint(mint: &crate::webnav::Mint) -> String {
         crate::webnav::Mint::Nothing => String::from("nothing"),
         crate::webnav::Mint::Blank => String::from("blank"),
         crate::webnav::Mint::File(url) => format!("file:{url}"),
-        // **Both halves**, because a player is the one mint whose target and
-        // whose subject are different files, and a trace that printed only the
-        // shell would be a line nobody could tell from an ordinary local page.
-        crate::webnav::Mint::VideoShell { url, video } => {
-            format!("play:{url} of:{}", video.display())
-        }
     }
 }
 

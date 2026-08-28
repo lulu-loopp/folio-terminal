@@ -35,6 +35,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod animation;
 mod arrival;
 mod attention;
 mod attention_codex;
@@ -74,7 +75,6 @@ mod pdf;
 mod peek_strip;
 mod persist;
 mod pins;
-mod player;
 mod preview;
 mod preview_edit;
 mod preview_select;
@@ -101,6 +101,7 @@ mod toast;
 mod tooltip;
 mod trace;
 mod version;
+mod video_seat;
 mod watch_clock;
 mod web_thumb;
 mod web_trace;
@@ -608,6 +609,10 @@ impl MathWorkerResult {
             // A video's frame lands in the same window-wide decode cache a picture's does, and
             // is claimed by whoever is showing that file rather than by whoever asked.
             | DecorationWorkerCompletion::PeekVideoFrame { .. }
+            // And an animation's frames on the identical terms: one map per
+            // window keyed by the file, so three surfaces over one `loading.gif`
+            // read one answer at one phase.
+            | DecorationWorkerCompletion::PeekAnimation { .. }
             | DecorationWorkerCompletion::PeekScaledImage { .. }
             // A glance card's page is the window's on the same terms: one slot per window, keyed
             // by the file it was drawn from, and no pane owns it.
@@ -670,6 +675,28 @@ enum MathWorkerRequest {
     /// the decode cache, and that cache's own entry is what a re-hover finds; the freshness
     /// question the page lane asks is one the picture lane has never asked either.
     PeekVideoFrame { leaf: ShellAddress, path: PathBuf },
+    /// **Read every frame of one animated picture** (user ruling 2026-08-28;
+    /// `docs/DESIGN.md` §7.44 ⑤).
+    ///
+    /// [`Self::PeekImage`]'s twin one step further in: that request decodes the
+    /// *first* frame of a `.gif` and files it in the window's one picture cache,
+    /// which is all a still needs and all this window drew until today. This one
+    /// walks the whole container and comes back with the frames and their own
+    /// declared delays.
+    ///
+    /// **A second request rather than a flag on the first**, for exactly
+    /// [`Self::PeekVideoFrame`]'s reason: the two answers have different shapes,
+    /// different sizes and different lives. A still is one raster in a
+    /// byte-budgeted LRU shared with every other picture in the window; an
+    /// animation is a list of rasters held whole, bounded by its own ceiling,
+    /// and drawn down the video lane. Folding them together would put a
+    /// hundred-frame allocation behind every `.png` hover.
+    ///
+    /// **Asked once per file and not once per surface**, because the answer is
+    /// keyed by path: three surfaces over one `loading.gif` are three drawings
+    /// of one animation at one phase, which is what makes them agree without any
+    /// of them being told about the others.
+    PeekAnimation { leaf: ShellAddress, path: PathBuf },
     /// **Raster one page of a PDF the glance card is over** (user rulings 2026-08-25 and
     /// 2026-08-26; `docs/DESIGN.md` §7.10 ⑥, §7.7 ⑮).
     ///
@@ -889,6 +916,12 @@ enum DecorationWorkerCompletion {
     PeekVideoFrame {
         path: PathBuf,
         glance: VideoGlance,
+    },
+    /// Every frame of one animated picture, or the reason there are none — see
+    /// [`animation::decode`].
+    PeekAnimation {
+        path: PathBuf,
+        frames: std::result::Result<animation::Animation, animation::AnimationRefusal>,
     },
     /// One page of one glance card's column, or the news that it did not need drawing again.
     PeekPage {
@@ -1175,6 +1208,13 @@ impl MathWorker {
                             (
                                 leaf,
                                 DecorationWorkerCompletion::PeekVideoFrame { path, glance },
+                            )
+                        }
+                        MathWorkerRequest::PeekAnimation { leaf, path } => {
+                            let frames = animation::decode(&path);
+                            (
+                                leaf,
+                                DecorationWorkerCompletion::PeekAnimation { path, frames },
                             )
                         }
                         MathWorkerRequest::PeekPage {
@@ -2181,7 +2221,7 @@ struct PreviewHexHover {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-enum PreviewSurface {
+pub(crate) enum PreviewSurface {
     /// A `SeatKind::Preview` leaf of a tab's layout tree — **named by its whole
     /// [`LeafId`] and never by the seat number alone** (§7.12 ⓑ, 2026-08-24).
     ///
@@ -6558,35 +6598,20 @@ enum PreviewOpenLane {
 /// A predicate rather than a condition written into the retirement loop,
 /// because it is a claim about content that is worth being able to ask on its
 /// own, and because the loop that consumes it is walking two maps at once.
-fn a_page_was_replaced(
-    picture: Option<&Path>,
-    buffer: Option<&preview::PreviewSource>,
-    playing: Option<&Path>,
-) -> bool {
-    // **A player is not a second thing on the pane; it is the first thing,
-    // playing** (user ruling 2026-08-27; §7.23 ⑩).
+fn a_page_was_replaced(picture: Option<&Path>, buffer: Option<&preview::PreviewSource>) -> bool {
+    // **The exception a player needed is gone with the player** (route B slice
+    // ②, 2026-08-28; §7.44 ④).
     //
-    // Route A puts an engine on a video's pane without making the video a page,
-    // and everything about that arrangement rests on this line. The pane goes on
-    // pointing at the recording — that is what keeps the breadcrumb, the tab
-    // name, `session.json`, the switcher row and `↗` all naming the file the
-    // reader opened rather than a shell in a cache folder — so the ordinary
-    // reading of "one seat shows one thing" would look at that pane, see a file
-    // that is not a URL, and close the browser inside a frame of it opening.
+    // This function used to take a third argument — the recording the engine on
+    // this pane was playing — and carry a whole clause for it. Route A put a
+    // browser on a video's pane while the *pane* went on pointing at the
+    // recording, so the ordinary reading of "one seat shows one thing" looked at
+    // that pane, saw a file that was not a URL, and closed the browser inside a
+    // frame of it opening. The clause was the repair.
     //
-    // The exception is exactly as wide as the claim: the recording the shell was
-    // written for, and no other file. Open something else on this pane and the
-    // paths part company, this answers `true`, the browser retires, and the
-    // sound stops — which is not a special case for stopping playback but the
-    // general rule finally arriving at the right pane.
-    //
-    // **The picture and not the buffer is what is compared**, because a video's
-    // pane has no buffer at all: the decode lane files a `PreviewImageState` and
-    // leaves the pool alone, exactly as a `.png`'s pane does. The recording's
-    // path is on that state and nowhere else.
-    if let Some(playing) = playing {
-        return picture != Some(playing);
-    }
+    // A recording never reaches a browser now. So the ordinary reading is the
+    // whole reading again: a pane showing a picture or a document, with a page
+    // open on it, is a pane something else has landed on.
     picture.is_some() || buffer.is_some_and(|source| source.web_url().is_none())
 }
 
@@ -8803,6 +8828,34 @@ struct WindowRuntime {
     /// order every frame and a diff of two frames is a diff of the pixels rather
     /// than of a hash seed.
     web: BTreeMap<LeafId, webhost::WebSeat>,
+    /// **The recordings this window is playing, one per surface** (user ruling
+    /// 2026-08-28, route B slice ②; §7.44).
+    ///
+    /// Keyed by [`PreviewSurface`] and **not** by [`LeafId`], which is the one
+    /// difference from the map above it and the whole of what "one model, three
+    /// surfaces" costs: a video plays on a docked pane, on a floating window and
+    /// on the glance card, and only the first of those is a leaf. It is also
+    /// what makes a card dragged into a float carry its engine — see
+    /// [`video_seat::VideoSeats::rehome`], which changes a key and touches
+    /// nothing else.
+    ///
+    /// A `BTreeMap` inside, for the reason the page map is one: surface order is
+    /// stable, so the layers handed to the renderer come out in the same order
+    /// every frame.
+    video: video_seat::VideoSeats,
+    /// **Every animated picture this window has looked inside**, by the same
+    /// normalised path key the decode cache beside it uses (user ruling
+    /// 2026-08-28; §7.44 ⑤).
+    ///
+    /// Keyed by **file** and not by surface, which is the whole of why three
+    /// surfaces showing one `loading.gif` are at the same frame: they read one
+    /// clock, because there is one animation.
+    ///
+    /// A refusal is filed like an answer — see [`AnimationEntry`] — so a `.gif`
+    /// that is a single still frame is asked about once and drawn by the picture
+    /// channel thereafter, rather than sending a decode down the worker on every
+    /// pointer move.
+    animations: std::collections::HashMap<String, AnimationEntry>,
     /// **The files this window's preview seats are showing, watched** (W2 slice
     /// 5, `preview_watch`).
     ///
@@ -9889,6 +9942,52 @@ struct WindowRuntime {
     /// is: it is a record of what this frame's stack looks like, and a stale
     /// entry in it is a page's hole punched over somebody else's window.
     float_hole_level: BTreeMap<float::FloatId, usize>,
+    /// **Which overlay layer a float's recording is drawn at** (route B slice
+    /// ②; §7.44 ③, corrected on the machine 2026-08-28).
+    ///
+    /// [`Self::float_hole_level`]'s neighbour and deliberately not the same
+    /// number. A page's hole is punched *under* the window's own fills, because
+    /// the fills are marks that legitimately stand over a page; a recording is
+    /// the window's content and has to be drawn *over* them, or the body well
+    /// paints across the picture. So the float group pushes an empty layer
+    /// directly above each window's face and this is its index — the slot a
+    /// video is drawn into, under the window's own bar and under every window
+    /// stacked in front.
+    ///
+    /// Rebuilt from nothing on every pass, for `float_hole_level`'s reason.
+    float_video_level: BTreeMap<float::FloatId, usize>,
+    /// **Which overlay layer the glance card's face is** — the index a video
+    /// playing on the card is drawn above (route B slice ②, 2026-08-28; §7.44
+    /// ③).
+    ///
+    /// [`Self::float_hole_level`]'s twin down to the reason it is a stored
+    /// number and not a question: the index is a fact about the *stack*, and the
+    /// stack is only assembled during the chrome pass, while the layer list is
+    /// built a moment later by a pass that has no view of it. Written by
+    /// [`OverlayStack::below_the_file_peek`] as the card's own layers go in;
+    /// `None` when there is no card up, which is a video with nowhere to be
+    /// drawn and is therefore not drawn.
+    file_peek_level: Option<usize>,
+    /// **Which surface's control bar has a track in hand** (route B slice ②,
+    /// 2026-08-28; §7.44 ②).
+    ///
+    /// One `Option` per gesture kind, which is the shape every other drag in
+    /// this window has and is not a matter of taste: `TerminalThumbDrag`'s own
+    /// note refuses a shared "which am I dragging" enum because the gestures can
+    /// never be in hand at once. The scrubber and the volume are the exception
+    /// that proves it — they *are* two tracks — so which of them is held lives
+    /// on the seat itself (`video_seat::VideoSeat::is_grabbing`) and what lives
+    /// here is only which surface owns the pointer.
+    video_bar_drag: Option<PreviewSurface>,
+    /// **A card's engine is on its way into a float** — see
+    /// [`Runtime::promote_file_peek`] and [`Runtime::hide_file_peek`].
+    ///
+    /// True for the length of one promotion and nowhere else. A flag rather than
+    /// a parameter because the two functions that need to agree are three calls
+    /// apart with `float::FloatHost::open` between them, and threading a boolean
+    /// through that would put a promotion's business into a door every other
+    /// dismissal comes through.
+    video_carried_off_the_card: bool,
     /// The graph each preview **surface** drew this frame —
     /// [`Self::git_pages_shown`]'s twin, kept for the same `&self` hit test.
     ///
@@ -16749,22 +16848,25 @@ fn image_destination(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> [f3
 ///
 /// A body with no area answers with the body, which draws nothing and is what
 /// every caller above already handles.
+///
+/// # It is the caller and not a second rule (2026-08-28)
+///
+/// This used to *restate* the rule — fit the extent, then centre it on the
+/// body's own floating-point midpoint — and a restatement is a second rule
+/// however short it is. The two disagreed by **half a pixel** whenever the
+/// leftover was odd: a 160×120 recording in a 960×556 body is 741 wide, the
+/// leftover is 219, and `video_frame_rect` splits that by an integer floor to
+/// 109 while a midpoint subtraction gives 109.5. Half a pixel is exactly the
+/// flicker a reader sees when they press play, which is what
+/// `the_still_and_the_first_played_frame_share_a_rect` was written to catch and
+/// what it caught.
+///
+/// So the still is now placed by the same function the playing layer is placed
+/// by, and there is nothing left here that could drift from it.
 fn video_still_destination(body: [f32; 4], video_px: [u32; 2]) -> [f32; 4] {
-    let width = (body[2] - body[0]).max(0.0).round() as u32;
-    let height = (body[3] - body[1]).max(0.0).round() as u32;
-    let Some((fitted_width, fitted_height)) =
-        bt_render::video_fit_extent(width, height, video_px[0], video_px[1])
-    else {
-        return body;
-    };
-    let centre_x = (body[0] + body[2]) / 2.0;
-    let centre_y = (body[1] + body[3]) / 2.0;
-    [
-        centre_x - fitted_width as f32 / 2.0,
-        centre_y - fitted_height as f32 / 2.0,
-        centre_x + fitted_width as f32 / 2.0,
-        centre_y + fitted_height as f32 / 2.0,
-    ]
+    viewport_of_rect(body)
+        .and_then(|box_| bt_render::video_frame_rect(box_, video_px[0], video_px[1]))
+        .unwrap_or(body)
 }
 
 /// The pan a zoom actually gets to keep against this body, read out of the one
@@ -19537,21 +19639,24 @@ mod motion_archive_tests {
                 ms(crate::toast::TOAST_LIFE_QUIET),
                 "how long a confirmation stands, which is a shorter reading time",
             ),
-            // The player's control bar. Its two waits are Rust constants that
-            // are written into a page rather than held by this process, and
-            // they are in the register for exactly that reason: a duration that
-            // lived only inside a JavaScript string would be the one span in
-            // this product no gate could see. Its *fades* need no line here —
-            // the page is handed `MOTION_FAST_MS` itself, which is already the
-            // first row of this list.
+            // The player's control bar. Both waits kept their values and both
+            // changed address when the shell page retired (route B slice ②,
+            // 2026-08-28; §7.44 ②): they used to be Rust constants written into
+            // a JavaScript string, registered here precisely *because* a
+            // duration living inside a page would be the one span no gate could
+            // see. The bar is this window's own drawing now, so they are
+            // ordinary waits — and they are still registered, because a wait is
+            // registered for being a wait and not for being hard to find. Its
+            // *fade* needs no line: it is `MOTION_FAST` itself, the first row of
+            // this list.
             wait(
-                "player::PLAYER_BAR_REVEAL_INTENT_MS",
-                crate::player::PLAYER_BAR_REVEAL_INTENT_MS,
-                "how long a hand is in a playing pane before the control bar comes up",
+                "video_seat::VIDEO_BAR_REVEAL_INTENT",
+                ms(crate::video_seat::VIDEO_BAR_REVEAL_INTENT),
+                "how long a hand is on a playing picture before the control bar comes up",
             ),
             wait(
-                "player::PLAYER_BAR_IDLE_REST_MS",
-                crate::player::PLAYER_BAR_IDLE_REST_MS,
+                "video_seat::VIDEO_BAR_IDLE_REST",
+                ms(crate::video_seat::VIDEO_BAR_IDLE_REST),
                 "the dwell *after*: how long a control bar with nothing left to do stays up",
             ),
         ]
@@ -21502,6 +21607,69 @@ fn hole_for(
     }
 }
 
+/// **What this window knows about one animated file** (§7.44 ⑤).
+///
+/// Three states and not an `Option`, because "asked and not answered yet" and
+/// "asked and there is nothing here" are two facts a surface does two different
+/// things with, and an `Option` would make the second one indistinguishable from
+/// "never asked" — which is how a refused decode gets re-sent on every frame.
+enum AnimationEntry {
+    Pending,
+    /// Boxed for the reason every large payload in this file is: the map's
+    /// entries are moved when it grows, and an animation is its frames.
+    Ready(Box<animation::Animation>),
+    /// The reason is not carried, and that is the whole of what this window does
+    /// differently for each of them: **nothing**. A `.gif` with one frame, one
+    /// too large to hold, and one that will not decode are all drawn the same
+    /// way — as the still picture the picture channel already has — so a variant
+    /// per reason would be four states with one behaviour between them. The
+    /// reason is printed once, where a reason belongs.
+    Refused,
+}
+
+/// **Where a playing video is drawn on one surface** — see
+/// [`Runtime::video_shape_of`].
+///
+/// A struct and not a tuple of six because two callers read it — the layer and
+/// the control bar — and a bar laid out against a rectangle the picture is not
+/// in is the one defect this type exists to make impossible.
+#[derive(Clone, Copy, Debug)]
+struct VideoShape {
+    box_: bt_render::SeatViewport,
+    clip: bt_render::SeatViewport,
+    ground: Option<[u8; 3]>,
+    radius_px: f32,
+    stage: bt_render::VideoStage,
+}
+
+impl VideoShape {
+    /// The box as an ordinary rectangle, which is what chrome is laid out in.
+    fn rect(self) -> [f32; 4] {
+        [
+            self.box_.x as f32,
+            self.box_.y as f32,
+            (self.box_.x + self.box_.width) as f32,
+            (self.box_.y + self.box_.height) as f32,
+        ]
+    }
+}
+
+/// A rectangle as the renderer's own viewport, or `None` for one with no area —
+/// a float mid-collapse, a card that has not been laid out.
+fn viewport_of_rect(rect: [f32; 4]) -> Option<bt_render::SeatViewport> {
+    let width = (rect[2] - rect[0]).round();
+    let height = (rect[3] - rect[1]).round();
+    if width < 1.0 || height < 1.0 {
+        return None;
+    }
+    Some(bt_render::SeatViewport {
+        x: rect[0].max(0.0).round() as u32,
+        y: rect[1].max(0.0).round() as u32,
+        width: width as u32,
+        height: height as u32,
+    })
+}
+
 fn preview_image_placement(
     seats: &seats::Seats,
     layout: &SeatLayout,
@@ -21652,6 +21820,21 @@ struct OverlayStack {
     /// it has to stand above its own window and below the next one, so it rides
     /// in [`Self::float`] beside the window it belongs to.
     preview_bars: Vec<marks::OverlayLayer>,
+    /// **A docked preview pane's video control bar** (route B slice ②,
+    /// 2026-08-28; §7.44 ②), beside the scroll bar above it and on its argument:
+    /// it belongs *to* a pane rather than floating over the window, so every
+    /// surface above is entitled to cover it.
+    ///
+    /// It is in the overlay at all for a reason of its own, and a sharper one
+    /// than the scroll bar's: the video it stands on is drawn in the seats'
+    /// **video** pass, which runs after the seats' pictures and before every
+    /// layer here — so a bar handed to any earlier lane would be painted under
+    /// the moving picture it exists to control.
+    ///
+    /// A float's bar and a card's are not here. Each has to stand above its own
+    /// surface and below the next one, so they ride beside the layer they belong
+    /// to — in [`Self::float`] and in [`Self::file_peek`].
+    video_bars: Vec<marks::OverlayLayer>,
     /// **A terminal pane's scroll thumb** (P2-9 slice 1), beside the preview's
     /// bar and on its argument: it belongs *to* a pane rather than floating over
     /// the window, and every surface above is entitled to cover it.
@@ -21911,8 +22094,30 @@ impl OverlayStack {
     /// `the_offset_below_the_floats_is_where_the_float_group_starts` is what
     /// says so out loud rather than leaving it to be discovered by a page
     /// appearing over somebody else's window.
+    /// **How many layers stand under the glance card** — the offset a video
+    /// playing *on* the card is drawn above (route B slice ②; §7.44 ③).
+    ///
+    /// [`Self::below_the_floats`]'s twin and written beside it in the same
+    /// order, for the identical reason: this is where the list's order and an
+    /// index into it meet, and a group added to one has to be added to both.
+    fn below_the_file_peek(&self) -> usize {
+        self.below_the_floats()
+            + self.float.len()
+            + self.modal.len()
+            + self.file_menu.len()
+            + self.pane_menu.len()
+            + self.git_menu.len()
+            + self.term_menu.len()
+            + self.tab_menu.len()
+            + self.toast.len()
+            + self.key_hint.len()
+            + self.card_hint.len()
+            + self.tooltip.len()
+    }
+
     fn below_the_floats(&self) -> usize {
         self.preview_bars.len()
+            + self.video_bars.len()
             + self.terminal_bars.len()
             + self.command_rail.len()
             + self.rail.len()
@@ -21927,6 +22132,7 @@ impl OverlayStack {
     fn flattened(self) -> Vec<marks::OverlayLayer> {
         let Self {
             preview_bars,
+            video_bars,
             terminal_bars,
             command_rail,
             rail,
@@ -21953,6 +22159,7 @@ impl OverlayStack {
         } = self;
         [
             preview_bars,
+            video_bars,
             terminal_bars,
             command_rail,
             rail,
@@ -29264,6 +29471,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         taskbar: TaskbarMirror::default(),
         compositor,
         web: BTreeMap::new(),
+        video: video_seat::VideoSeats::default(),
+        animations: std::collections::HashMap::new(),
         preview_watch: preview_watch::PreviewWatch::default(),
         files_watch: files_watch::FilesWatch::default(),
         web_cursor: None,
@@ -29432,6 +29641,10 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         git_pages_shown: BTreeMap::new(),
         float_git_pages_shown: BTreeMap::new(),
         float_hole_level: BTreeMap::new(),
+        float_video_level: BTreeMap::new(),
+        file_peek_level: None,
+        video_bar_drag: None,
+        video_carried_off_the_card: false,
         git_graphs_shown: BTreeMap::new(),
         files_view_widths: BTreeMap::new(),
         files_notice: None,
@@ -36268,6 +36481,10 @@ impl Runtime<'_> {
             // a surface floating over the window at all — see
             // [`OverlayStack::preview_bars`].
             preview_bars: self.preview_seat_bar_layers(),
+            // Directly above them and for the same argument: it belongs to a
+            // pane. See [`OverlayStack::video_bars`] for why it cannot be drawn
+            // in any earlier lane.
+            video_bars: self.preview_seat_video_bars(),
             terminal_bars: self.terminal_bar_layers(),
             command_rail: self.command_rail_layers(),
             rail: self.rail_overlay_layers(),
@@ -36597,7 +36814,15 @@ impl Runtime<'_> {
         stack.card_hint = self.stage(Layered::CardHint, card_hint, card_hint_travel, now);
         let tooltip = self.tooltip_layer();
         stack.tooltip = self.stage_departure(Layered::Tip, tooltip, now);
-        stack.file_peek = self.file_peek_layer();
+        // **Read before the card's own layers go in, and for
+        // [`OverlayStack::below_the_floats`]'s reason** (§7.44 ③): a video
+        // playing on the card is drawn into a slot of the card's own group, and
+        // this is the one place the stack's order and that index are the same
+        // statement. Handed in exactly as `below_the_floats` is handed to
+        // `float_layer`, and the group writes its own index because only the
+        // group knows where inside itself the slot went.
+        let below_peek = stack.below_the_file_peek();
+        stack.file_peek = self.file_peek_layer(below_peek);
         stack.drag_ghost = self.drag_ghost_layer();
         stack.window_ring = self.window_ring_layer();
         let flattened = stack.flattened();
@@ -44077,6 +44302,99 @@ impl Runtime<'_> {
         surfaces
     }
 
+    /// **Shut down every recording whose surface has stopped being about it**
+    /// (route B slice ②, 2026-08-28; §7.44 ③).
+    ///
+    /// One rule for all three surfaces, and it is the honest one: a seat is
+    /// alive while the surface it is keyed by is still showing the file it was
+    /// opened on. That covers every way a video ends without the stop button —
+    /// a pane handed another document, a float closed, a card whose pointer
+    /// moved to the next row, a tab torn away — without any of those doors
+    /// having to remember a decoder exists.
+    ///
+    /// **A surface that has not yet said what it is showing keeps its seat.**
+    /// The one moment that matters is a tear-off: the float is opened, the
+    /// engine is handed over, and the picture arrives a call later. A sweep that
+    /// read the missing picture as "not about this file" would shut down the
+    /// engine it was just given, which is the re-open this ruling refused,
+    /// arriving by the back door.
+    fn sweep_video_seats(&mut self) {
+        // **Which surfaces still exist**, asked once: a float that has finished
+        // its exit fade and a pane that has been closed are both gone from this
+        // list, and both take their decoder with them. Asked *here* and not
+        // through the picture, because a surface that has gone has no picture
+        // either — and "no picture" is also what a surface one call old looks
+        // like, which is the tear-off. Two questions, because they are two
+        // facts.
+        let alive = self.preview_surfaces();
+        let doomed: Vec<PreviewSurface> = self
+            .window
+            .video
+            .iter()
+            .filter(|(surface, seat)| {
+                let showing = match surface {
+                    PreviewSurface::Peek => {
+                        // A card with no subject is a card that has gone; a card
+                        // over another row is another file.
+                        match self.file_peek_subject().and_then(|it| it.path) {
+                            Some(path) => Some(path),
+                            None => return true,
+                        }
+                    }
+                    // **A window that has been closed is not playing
+                    // anything**, and it stops on the press rather than at the
+                    // end of its own leaving (§7.44 ⑨, found on the machine
+                    // 2026-08-28). `preview_surfaces` is drawn from
+                    // `float.drawn()`, which deliberately keeps a window that is
+                    // on its way out so its *view* is not retired under it; a
+                    // decoder is not a view, and the picture stayed on the glass
+                    // — with the chassis already gone from over it — for as long
+                    // as the departure took.
+                    PreviewSurface::Float(id) if self.window.float.live(*id).is_none() => {
+                        return true;
+                    }
+                    _ => {
+                        if !alive.contains(surface) {
+                            return true;
+                        }
+                        match self.preview_picture(*surface) {
+                            Some(image) => Some(image.path.clone()),
+                            // Nothing filed yet — see the note above.
+                            None => return false,
+                        }
+                    }
+                };
+                showing.is_some_and(|path| path != seat.path())
+            })
+            .map(|(surface, _)| surface)
+            .collect();
+        for surface in doomed {
+            self.window.video.close(surface);
+        }
+        // **And an engine that gave up after it had opened** (§7.44 ⑥).
+        //
+        // `EngineError` is sticky — an engine that has errored does not
+        // un-error — and it can arrive at any time: a codec that fails on a
+        // frame a minute in, a file that was replaced under the decoder, a
+        // container that turned out to be truncated. A seat left standing on one
+        // is a rectangle that will never receive another picture, so it is shut
+        // down and the surface is given the same sentence a refused *open*
+        // gives, out of the same place.
+        let faulted: Vec<(PreviewSurface, bt_platform::video::engine::EngineError)> = self
+            .window
+            .video
+            .iter()
+            .filter_map(|(surface, seat)| Some((surface, seat.fault()?)))
+            .collect();
+        for (surface, error) in faulted {
+            self.mouse_trace(|| format!("video_seat surface={surface:?} fault={error:?}"));
+            self.window.video.close(surface);
+            if let Some(picture) = self.preview_picture_mut(surface) {
+                picture.failure = Some(i18n::Text::VideoFormatCannotPlay.text().to_owned());
+            }
+        }
+    }
+
     /// Drop the view of every surface that has stopped existing.
     ///
     /// Called from the one door every seat-set change goes through and from every
@@ -44695,106 +45013,104 @@ impl Runtime<'_> {
         }
     }
 
-    /// **Play the video this pane is showing** (user ruling 2026-08-27, route A;
-    /// `docs/DESIGN.md` §7.23 ⑩).
+    /// **Play the video this surface is showing** (user ruling 2026-08-28,
+    /// route B slice ②; `docs/DESIGN.md` §7.44 ①).
     ///
-    /// The one verb that puts an engine on a video's pane, and the only door on
-    /// to the page lane a video has: [`preview_open_lane`] refuses every one of
-    /// them ([`a_video_takes_no_page_lane_at_any_door`]), which is §7.16's
-    /// measurement and is not being reopened — what is navigated to here is a
-    /// **shell this window wrote**, and the recording is a subresource inside it.
-    /// A top-level navigation to the recording itself would still become a
-    /// download and still end `ConnectionAborted`.
+    /// **The one verb, for all three surfaces**, which is the whole ruling in a
+    /// signature: the parameter is a [`PreviewSurface`], nothing below this line
+    /// asks which kind it is, and a pane, a floating window and a glance card
+    /// therefore start a video the same way by construction rather than by three
+    /// call sites remembering to agree.
     ///
-    /// Four ways it declines, and all four are silent because all four are
-    /// states in which the button was not drawn:
+    /// Route A wrote a page into a cache folder, minted a `file:` URL for it and
+    /// navigated a browser at it (§7.23 ⑩). All of that is gone: what happens
+    /// here is that Media Foundation opens the recording on a thread of its own
+    /// and this window draws the frames (§7.42). The four ways it declined are
+    /// down to three, and the one that went was the shell.
     ///
-    /// 1. **Not a seat.** A torn-off pane has no leaf to put an engine on.
-    /// 2. **No video on it**, or one whose spelling is in the face-only column
-    ///    ([`preview::path_names_a_playable_video`]). This is the *same*
-    ///    predicate [`Self::seats_wearing_a_play_button`] draws by, so a button
-    ///    that exists is a button that works.
-    /// 3. **The disk does not have it.** Canonicalised first, exactly as
-    ///    [`Self::open_preview_web_file`] canonicalises: the URL inside the shell
-    ///    has to be the path the disk agrees on, or `↗` and the player would be
-    ///    naming two different files.
-    /// 4. **The shell could not be written**, which is a full disk or a
-    ///    `%LOCALAPPDATA%` that is not there.
+    /// 1. **No video on it**, or a name outside [`preview::path_names_a_video`].
+    ///    This is the *same* predicate [`Self::seats_wearing_a_play_button`]
+    ///    draws by, so a button that exists is a button that works.
+    /// 2. **Already playing**, which is a play pressed twice and is a play.
+    /// 3. **The decoder refused it** — a Store codec that is not installed, a
+    ///    file that is not what its name says. Unlike route A this is *not*
+    ///    silent: the seat is not created, and the surface says so out of
+    ///    [`video_seat::VideoSeat::fault`]'s own error, which is the honest
+    ///    source of that sentence now that no compiled table can know it.
+    ///
+    /// **No canonicalisation.** Route A needed the disk's own spelling because a
+    /// URL had to be minted from it; a decoder is handed a path and opens it, so
+    /// the spelling this window knows the file by is the only one there is —
+    /// which retires a whole class of defect (§7.23 ⑩'s two-spellings bug) by
+    /// retiring the second spelling.
     fn play_video_on(&mut self, surface: PreviewSurface) -> Result<()> {
-        let PreviewSurface::Seat(leaf) = surface else {
-            return Ok(());
-        };
         let Some(path) = self
             .preview_picture(surface)
             .map(|picture| picture.path.clone())
         else {
             return Ok(());
         };
-        if !preview::path_names_a_playable_video(&path) {
-            return Ok(());
-        }
-        let canonical = match std::fs::canonicalize(&path) {
-            Ok(canonical) => canonical,
-            Err(error) => {
-                self.mouse_trace(|| format!("play_video_on leave=no-disk error={error}"));
-                return Ok(());
-            }
-        };
-        // **The window's own palette, at the moment the shell is written.** The
-        // page cannot read `bt_render`, so everything a theme reaches on it —
-        // the letterbox, the bar, its hairline, its two inks, its accent, its
-        // face and its size — crosses here and nowhere else, and a theme
-        // changed mid-playback does not repaint it until the next play. See
-        // [`player::PlayerSkin`], where that cost is priced.
-        let skin = player::PlayerSkin::in_force();
-        // **The pane's own spelling and the disk's, both** — see
-        // [`player::mint_player_shell`], where the frame this cost is written
-        // down. The URL goes to the engine; the name goes to every surface that
-        // has to recognise this pane again.
-        let mint = match player::mint_player_shell(&path, &canonical, skin) {
-            Ok(mint) => mint,
-            Err(refusal) => {
-                self.mouse_trace(|| format!("play_video_on leave=no-shell {refusal:?}"));
-                return Ok(());
-            }
-        };
-        self.open_minted_page_on(leaf, mint)?;
-        self.focus_seat(leaf.seat)
+        self.play_video_file_on(surface, &path)
     }
 
-    /// **Stop the video this pane is playing and put its frame back** (user
-    /// ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
-    ///
-    /// [`Self::play_video_on`]'s exact undo, and it is one line because route A
-    /// was built so that it would be: the pane never stopped being the
-    /// recording's pane, so there is nothing to restore. The
-    /// `PreviewImageState` is where it was, the decoded frame is still in the
-    /// window's cache under the same key, the breadcrumb never changed and the
-    /// buffer was never left. All that is here is a browser, and closing a
-    /// browser is what `WebSeat::close` does.
-    ///
-    /// **The engine is closed and not hidden**, which is the whole difference
-    /// between this and switching tabs: a hidden page goes on making a sound by
-    /// design (the ruling's own choice, and the reason the tab strip grew a
-    /// speaker), and a stopped one has no process left to make one with. The
-    /// same door the orphan rule uses, so a pane that stops and a pane that is
-    /// closed retire a browser the same way.
-    ///
-    /// Silent on a surface with no engine: the tool is only drawn over one that
-    /// has one, and a stop pressed twice is a stop.
-    fn stop_video_on(&mut self, surface: PreviewSurface) -> Result<()> {
-        if !self.surface_is_playing_a_video(surface) {
+    /// The same, on a path the caller already has — the door a glance card comes
+    /// through, since a card's recording is not a `PreviewImageState`.
+    fn play_video_file_on(&mut self, surface: PreviewSurface, path: &Path) -> Result<()> {
+        if !preview::path_names_a_video(path) {
             return Ok(());
         }
-        let PreviewSurface::Seat(leaf) = surface else {
+        if self.window.video.get(surface).is_some() {
             return Ok(());
-        };
-        let window = &mut *self.window;
-        let Some(web) = window.web.get_mut(&leaf) else {
+        }
+        if let Err(error) = self.window.video.open(surface, path, Instant::now()) {
+            self.mouse_trace(|| format!("play_video_on leave=no-engine {error:?}"));
+            // **And the surface says so** (§7.44 ⑥). This is the honest source
+            // of `Text::VideoFormatCannotPlay`, which used to be printed off a
+            // column of a compiled table and could therefore never know what
+            // *this machine* has: an HEVC `.mp4` or a VP9 `.webm` plays where
+            // the Store codec is installed and does not where it is not, and the
+            // only thing that knows which is the decoder that just refused.
+            //
+            // Filed on the `PreviewImageState`, which is the one place a
+            // surface's failures already live and already draw — the same slot a
+            // picture that would not decode writes into.
+            if let Some(picture) = self.preview_picture_mut(surface) {
+                picture.failure = Some(i18n::Text::VideoFormatCannotPlay.text().to_owned());
+            }
+        } else if let Some(picture) = self.preview_picture_mut(surface) {
+            // And a play that worked clears whatever the last one said.
+            picture.failure = None;
+        }
+        // The still comes off the glass and the layer goes on in the same pass,
+        // which is the pass that already owns both — see
+        // [`Self::refit_preview_picture`].
+        self.refresh_preview_for_layout();
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// **Stop the video this surface is playing and put its frame back** (user
+    /// ruling 2026-08-28; §7.44 ①).
+    ///
+    /// [`Self::play_video_on`]'s exact undo, and it is short for the reason
+    /// route A's was: the surface never stopped being the recording's surface,
+    /// so there is nothing to restore. The `PreviewImageState` is where it was,
+    /// the decoded first frame is still in the window's cache under the same
+    /// key, and the breadcrumb never changed.
+    ///
+    /// **The engine is shut down and not paused**, which is the whole difference
+    /// between this and switching tabs: a video on a tab nobody is looking at
+    /// goes on playing by the same ruling that grew the tab a speaker, and a
+    /// stopped one has no decoder left to play with. Shutting down is
+    /// idempotent and `Drop` does it too (§7.42 ⑦), so a surface that is torn
+    /// away rather than stopped does not leak one either.
+    ///
+    /// Silent on a surface with nothing playing: the tool is only drawn over one
+    /// that has something, and a stop pressed twice is a stop.
+    fn stop_video_on(&mut self, surface: PreviewSurface) -> Result<()> {
+        if !self.window.video.close(surface) {
             return Ok(());
-        };
-        let outcomes = web.close(&window.compositor);
-        self.apply_web_outcomes(leaf, outcomes)?;
+        }
         // The frame comes back on the next fit, which is this frame: the pixels
         // never left the cache and `refit_preview_picture`'s refusal is lifted
         // by the same predicate that put it there.
@@ -45295,14 +45611,19 @@ impl Runtime<'_> {
             .map(|_| seats::PreviewRailKind::Crumbs)
     }
 
-    /// **The recording a surface's engine is playing**, and `None` for a surface
-    /// with no engine or an engine on a page (user ruling 2026-08-27; §7.23 ⑩).
+    /// **The recording a surface is playing**, and `None` for a surface that is
+    /// playing nothing (user ruling 2026-08-28; §7.44 ①).
     ///
-    /// [`webhost::WebSeat::playing_video`] asked of a *surface*, which is the
-    /// form every caller in this file wants: the rail, the frame, `↗` and the
-    /// press are all about a pane and none of them holds a leaf.
+    /// One map, asked of a *surface*, which is the form every caller in this
+    /// file wants: the rail, the frame, `↗` and the press are all about a
+    /// surface and none of them holds a leaf. Route A had to ask a browser what
+    /// it was showing and the browser had to ask its mint, because the thing on
+    /// the pane was a page in a cache folder and the recording's name was
+    /// written on the side of it. There is no page now, so the question is one
+    /// lookup: a surface with a seat is playing the file that seat was opened
+    /// on, and there is nowhere for a second answer to come from.
     fn video_playing_on(&self, surface: PreviewSurface) -> Option<&Path> {
-        self.web_of(surface)?.playing_video()
+        Some(self.window.video.get(surface)?.path())
     }
 
     /// The same as a yes or no, for the callers that only need the fork.
@@ -46758,6 +47079,374 @@ impl Runtime<'_> {
     }
 
     /// One preview float's bars, on their own layers above that window.
+    /// **Every surface a pointer could be asking a video about, front to back**
+    /// (route B slice ②, 2026-08-28; §7.44 ②).
+    ///
+    /// The order is the z-order and nothing else: the glance card stands over
+    /// every float, a float stands over every pane, and the topmost thing under
+    /// the pointer is the one the gesture belongs to. Written once here rather
+    /// than repeated at the press, the drag and the hover, because three
+    /// orders is how two of them come to disagree.
+    fn video_pointer_surfaces(&self) -> Vec<PreviewSurface> {
+        let mut surfaces = vec![PreviewSurface::Peek];
+        surfaces.extend(
+            self.window
+                .float
+                .drawn()
+                .map(|win| PreviewSurface::Float(win.epoch))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev(),
+        );
+        surfaces.extend(
+            self.window
+                .video
+                .iter()
+                .map(|(surface, _)| surface)
+                .filter(|surface| matches!(surface, PreviewSurface::Seat(_))),
+        );
+        surfaces
+    }
+
+    /// **The bar of one surface, laid out** — `None` when nothing is playing
+    /// there or the bar is not up.
+    ///
+    /// The same [`video_seat::bar_layout`] the painter used, off the same
+    /// [`Self::video_shape_of`] rectangle: a hit test that derived the boxes a
+    /// second way would be a bar that answers a hand somewhere other than where
+    /// it was drawn, which is the one defect a control bar cannot have.
+    fn video_bar_layout_of(&self, surface: PreviewSurface) -> Option<video_seat::BarLayout> {
+        let seat = self.window.video.get(surface)?;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let now = Instant::now();
+        if seat.presence(now, self.app.motion).opacity <= 0.0 {
+            return None;
+        }
+        let shape = self.video_shape_of(surface, scale, now)?;
+        let state = seat.state();
+        let figures = video_seat::clock_figures(state.position_secs, state.duration_secs);
+        video_seat::bar_layout(shape.rect(), scale, figures)
+    }
+
+    /// **The play button over a surface showing a recording it is not playing.**
+    ///
+    /// The same disc [`seats::preview_play_button_box`] cuts for a pane, asked
+    /// of all three surfaces — which is the ruling's *「能动的就动」* reaching a
+    /// glance card: a card with a first frame on it and no way to start it is a
+    /// card that knows the file is a video and will not say so.
+    fn video_play_button_of(&self, surface: PreviewSurface) -> Option<[f32; 4]> {
+        if self.window.video.get(surface).is_some() {
+            return None;
+        }
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (body, path) = match surface {
+            // A docked pane's button is cut by the chrome pass, hit-tested by
+            // `seats::hit_preview_play`, and is not this function's to answer a
+            // second time — see [`Self::seats_wearing_a_play_button`].
+            PreviewSurface::Seat(_) => return None,
+            PreviewSurface::Float(_) => (
+                self.preview_surface_body_rect(surface, scale)?,
+                self.preview_picture(surface)
+                    .map(|image| image.path.clone())?,
+            ),
+            PreviewSurface::Peek => {
+                let body = self.window.file_peek.as_ref()?.body?;
+                let path = self.file_peek_subject()?.path?;
+                (file_peek::page_ground(body, scale), path)
+            }
+        };
+        if !preview::path_names_a_video(&path) {
+            return None;
+        }
+        seats::preview_play_button_box(body, scale)
+    }
+
+    /// The play button of a float or a card, as a layer — the pane's is cut by
+    /// the chrome pass instead, which is the one place it has always been.
+    fn video_play_mark_layer(&self, surface: PreviewSurface) -> Option<marks::OverlayLayer> {
+        let button = self.video_play_button_of(surface)?;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let hovered = self
+            .window
+            .pointer_position
+            .is_some_and(|at| file_peek::contains(button, [at.x as f32, at.y as f32]));
+        // The **same** box the button was cut from, which is the box
+        // `video_play_button_of` measured against — a mark drawn from a second
+        // derivation would be a disc a press could miss.
+        let body = match surface {
+            // A recording's card, and therefore always `page_ground` — an
+            // animation never wears a play mark.
+            PreviewSurface::Peek => {
+                file_peek::page_ground(self.window.file_peek.as_ref()?.body?, scale)
+            }
+            _ => self.preview_surface_body_rect(surface, scale)?,
+        };
+        Some(marks::OverlayLayer {
+            sprites: seats::preview_play_button_sprites(
+                body,
+                hovered,
+                scale,
+                &bt_render::chrome_palette(),
+            ),
+            ..marks::OverlayLayer::default()
+        })
+    }
+
+    /// **A press somewhere a video is involved** — `true` when it was taken.
+    ///
+    /// Asked ahead of the chrome ladder for [`Self::chrome_target_at`]'s own
+    /// reason said one level up: a control standing on a picture out-ranks every
+    /// gesture on the picture, and a bar standing on a *float* or a *card* is
+    /// not in that ladder at all, because neither surface is this tab's chrome.
+    ///
+    /// **And ahead of `hide_file_peek`**, which is the one ordering that is not
+    /// obvious: P149 takes the glance card down on every press before the press
+    /// means anything, and a press on the card's own play mark would otherwise
+    /// dismiss the card it was starting.
+    fn press_video_at(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let at = [position.x as f32, position.y as f32];
+        let now = Instant::now();
+        for surface in self.video_pointer_surfaces() {
+            if let Some(button) = self.video_play_button_of(surface)
+                && file_peek::contains(button, at)
+            {
+                let path = match surface {
+                    PreviewSurface::Peek => self.file_peek_subject().and_then(|it| it.path),
+                    _ => self
+                        .preview_picture(surface)
+                        .map(|image| image.path.clone()),
+                };
+                let Some(path) = path else { continue };
+                self.play_video_file_on(surface, &path)?;
+                return Ok(true);
+            }
+            let Some(layout) = self.video_bar_layout_of(surface) else {
+                // **No bar up, so the picture itself is the control** (user
+                // ruling 2026-08-28: 「点 ▶ 或双击画面进播放态」). A double click
+                // anywhere on a recording starts it, which is the gesture every
+                // player has and the one a reader tries first.
+                if self.double_click_started_a_video(surface, at)? {
+                    return Ok(true);
+                }
+                continue;
+            };
+            if !layout.holds(at) {
+                // The same gesture over a picture whose bar is up — and here it
+                // is a *toggle*, because a video that is already playing is one
+                // a second double click should stop.
+                if self.double_click_started_a_video(surface, at)? {
+                    return Ok(true);
+                }
+                continue;
+            }
+            let slot = layout.slot_at(at);
+            let Some(key) = self
+                .window
+                .video
+                .get(surface)
+                .map(|seat| seat.key().to_owned())
+            else {
+                continue;
+            };
+            self.mouse_trace(|| {
+                format!("video_bar press surface={surface:?} slot={slot:?} texture={key}")
+            });
+            let Some(seat) = self.window.video.get_mut(surface) else {
+                continue;
+            };
+            match slot {
+                Some(video_seat::BarSlot::PlayPause) => seat.toggle(now),
+                Some(video_seat::BarSlot::Mute) => seat.toggle_mute(now),
+                Some(video_seat::BarSlot::Rate) => seat.cycle_rate(now),
+                Some(slot @ (video_seat::BarSlot::Seek | video_seat::BarSlot::Volume)) => {
+                    seat.grab(slot, &layout, at, now);
+                    self.window.video_bar_drag = Some(surface);
+                }
+                // The bar's own ground. Taken and not passed through: a press
+                // that fell past a panel would land on the picture behind it,
+                // and the picture's own gesture is a play.
+                None => seat.acted(now),
+            }
+            self.refresh_chrome();
+            self.present_chrome_change()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// **A double click on a recording's own picture** — start it, or stop it
+    /// if it is already running. `true` when the press was the second of a pair
+    /// and was taken.
+    ///
+    /// The picture and not a button, which is why it is here and not in
+    /// [`Self::press_preview_image`]: that door is the *zoom*'s, and a video's
+    /// still does not zoom (§7.23 ⑤) — it returns before it ever reaches a
+    /// click. So the two gestures never meet, and a video's double click has to
+    /// be counted where a video's presses are.
+    ///
+    /// [`ImageClicks`] is the same counter a picture's zoom toggle uses, and it
+    /// is the same counter on purpose: what makes two presses a double click —
+    /// the interval, and how far the pointer may have travelled between them —
+    /// is a fact about a hand, not about what is under it.
+    fn double_click_started_a_video(
+        &mut self,
+        surface: PreviewSurface,
+        at: [f32; 2],
+    ) -> Result<bool> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let now = Instant::now();
+        let Some(shape) = self.video_shape_of(surface, scale, now) else {
+            return Ok(false);
+        };
+        if !file_peek::contains(shape.rect(), at) {
+            return Ok(false);
+        }
+        // Only over something that is a recording — a document, a picture and a
+        // page all have their own answer to a double click.
+        let playing = self.window.video.get(surface).is_some();
+        if !playing {
+            let names_a_video = match surface {
+                PreviewSurface::Peek => self
+                    .file_peek_subject()
+                    .and_then(|it| it.path)
+                    .is_some_and(|path| preview::path_names_a_video(&path)),
+                _ => self
+                    .preview_picture(surface)
+                    .is_some_and(|image| preview::path_names_a_video(&image.path)),
+            };
+            if !names_a_video {
+                return Ok(false);
+            }
+        }
+        if !self.preview_image_clicks.register(surface, at, now) {
+            // The first of a possible pair. Not taken: a single click on a
+            // picture belongs to whatever the picture's own single click means.
+            return Ok(false);
+        }
+        if playing {
+            if let Some(seat) = self.window.video.get_mut(surface) {
+                seat.toggle(now);
+            }
+            self.refresh_chrome();
+            self.present_chrome_change()?;
+            return Ok(true);
+        }
+        let path = match surface {
+            PreviewSurface::Peek => self.file_peek_subject().and_then(|it| it.path),
+            _ => self
+                .preview_picture(surface)
+                .map(|image| image.path.clone()),
+        };
+        let Some(path) = path else { return Ok(false) };
+        self.play_video_file_on(surface, &path)?;
+        Ok(true)
+    }
+
+    /// A held track follows the pointer, and it follows it **outside its own
+    /// bar** — a scrub that stopped tracking the moment the hand left a
+    /// thirty-four pixel strip would make the end of a recording a matter of
+    /// aim. The same sentence every other drag in this window is written with.
+    fn drag_video_bar(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(surface) = self.window.video_bar_drag else {
+            return Ok(false);
+        };
+        let at = [position.x as f32, position.y as f32];
+        let now = Instant::now();
+        let Some(layout) = self.video_bar_layout_of(surface) else {
+            return Ok(false);
+        };
+        if let Some(seat) = self.window.video.get_mut(surface) {
+            seat.drag_to(&layout, at, now);
+        }
+        self.refresh_chrome();
+        self.present_chrome_change()?;
+        Ok(true)
+    }
+
+    /// **Tell every playing surface where the pointer is**, so the bar can come
+    /// up under a hand that has settled and go away under one that has left.
+    ///
+    /// Told to *every* seat and not only to the one under the pointer, because
+    /// "the pointer is somewhere else" is the fact that ends a reveal and a seat
+    /// that was never told it would hold its bar up for ever.
+    fn note_video_hover(&mut self, position: Option<PhysicalPosition<f64>>) {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let now = Instant::now();
+        let at = position.map(|at| [at.x as f32, at.y as f32]);
+        let shapes: Vec<(PreviewSurface, [f32; 4])> = self
+            .window
+            .video
+            .iter()
+            .map(|(surface, _)| surface)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(|surface| Some((surface, self.video_shape_of(surface, scale, now)?.rect())))
+            .collect();
+        let bars: Vec<(PreviewSurface, bool)> = shapes
+            .iter()
+            .map(|(surface, _)| {
+                (
+                    *surface,
+                    at.is_some_and(|at| {
+                        self.video_bar_layout_of(*surface)
+                            .is_some_and(|layout| layout.holds(at))
+                    }),
+                )
+            })
+            .collect();
+        for ((surface, rect), (_, over_bar)) in shapes.iter().zip(bars) {
+            let Some(seat) = self.window.video.get_mut(*surface) else {
+                continue;
+            };
+            match at.filter(|at| file_peek::contains(*rect, *at)) {
+                Some(_) => seat.pointer_moved(over_bar, now),
+                None => seat.pointer_left(),
+            }
+        }
+    }
+
+    /// **The control bar of every docked pane that is playing** (route B slice
+    /// ②, 2026-08-28; §7.44 ②).
+    ///
+    /// One layer per playing pane, or none at all, which is the ordinary cost of
+    /// this band on the overwhelming majority of frames: the map is empty and
+    /// this is one iteration over nothing.
+    fn preview_seat_video_bars(&self) -> Vec<marks::OverlayLayer> {
+        let mut layers = Vec::new();
+        for (surface, _) in self.window.video.iter() {
+            if !matches!(surface, PreviewSurface::Seat(_)) {
+                continue;
+            }
+            if let Some(layer) = self.video_bar_layer(surface) {
+                layers.push(layer);
+            }
+        }
+        layers
+    }
+
+    /// **One surface's control bar**, laid out against the very rectangle its
+    /// picture is drawn in.
+    ///
+    /// [`Self::video_shape_of`] and not a second derivation, which is the whole
+    /// reason that function hands back a struct: a bar computed from the pane's
+    /// body while the picture is fitted to a tween's box would sit a few pixels
+    /// off its own video for the length of every FLIP, and the two would agree
+    /// again exactly when nothing was moving.
+    fn video_bar_layer(&self, surface: PreviewSurface) -> Option<marks::OverlayLayer> {
+        let seat = self.window.video.get(surface)?;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let now = Instant::now();
+        let shape = self.video_shape_of(surface, scale, now)?;
+        let layer = seat.bar(
+            shape.rect(),
+            scale,
+            now,
+            self.app.motion,
+            &bt_render::chrome_palette(),
+        );
+        (!layer.quads.is_empty()).then_some(layer)
+    }
+
     fn preview_float_bar_layers(&self, id: float::FloatId) -> Vec<marks::OverlayLayer> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let surface = PreviewSurface::Float(id);
@@ -48326,6 +49015,38 @@ impl Runtime<'_> {
         let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(false);
         };
+        // **A player's five keys, before every reading below** (user ruling
+        // 2026-08-28; §7.44 ②).
+        //
+        // Space, `←`/`→`, `↑`/`↓` and `M`, and they are asked *first* because
+        // every one of them means something else to the surface underneath: the
+        // arrows scroll a document, Space pages one. A surface that is playing a
+        // recording is a surface whose arrows are a playhead — which is what the
+        // shell page's own `keydown` said by being inside the page, and is now
+        // said by being the first rung.
+        //
+        // **On whichever surface holds the keyboard**, which is the whole of
+        // §7.34 reaching this ruling: `preview_keyboard_surface` has already
+        // decided between a float and a docked pane, so a player in a window
+        // answers its keys exactly when that window has them and a docked one
+        // when the pane does. The glance card is never that surface and never
+        // takes a key — it is read-only by its own founding ruling, and a card
+        // that swallowed Space would be a hover eating the shell's keys.
+        if event.state.is_pressed()
+            && !self.window.modifiers.control_key()
+            && !self.window.modifiers.alt_key()
+            && !self.window.modifiers.super_key()
+        {
+            let now = Instant::now();
+            let modified = false;
+            if let Some(seat) = self.window.video.get_mut(surface)
+                && seat.key_press(&event.logical_key, modified, now)
+            {
+                self.refresh_chrome();
+                self.present_chrome_change()?;
+                return Ok(true);
+            }
+        }
         // **A graph is a list, not a document** (V14). The surface that holds it
         // is an ordinary preview surface and got the keyboard the ordinary way —
         // a press into it focused it — but what its arrows mean is "the row
@@ -50825,6 +51546,13 @@ impl Runtime<'_> {
     /// Decodes stay on the decoration worker and Lanczos3 runs on its independent
     /// scale lane; this method only routes shared data.
     fn refresh_preview_for_layout(&mut self) {
+        // **The playing recordings first**, because the picture lane below
+        // refuses to fit a still on a surface that is playing one and the two
+        // answers have to be about the same frame (route B slice ②; §7.44 ③).
+        // On the frames where nothing is playing both of these are one empty
+        // walk over an empty map.
+        self.sweep_video_seats();
+        self.refresh_video_layers();
         // The document lane's half of the same refit. `refresh_preview_body`
         // rebuilds the parsed document first, so the heal below is clamping
         // against the extent this frame actually has rather than the last one's
@@ -50864,6 +51592,280 @@ impl Runtime<'_> {
             self.refit_preview_picture(surface);
         }
     }
+    /// **Every playing recording, as this frame's video layers** (user ruling
+    /// 2026-08-28, route B slice ②; `docs/DESIGN.md` §7.44 ③).
+    ///
+    /// **One function for all three surfaces, and the whole list every time**,
+    /// which is the shape `bt_render::WindowRenderer::set_video_layers` asks for
+    /// and asks for on purpose: a key that stops appearing is a video that has
+    /// stopped, and its texture goes back the same frame (§7.42 ⑥). There is no
+    /// cheaper half to move separately, because the rectangles are recomputed
+    /// from the layout anyway.
+    ///
+    /// Each surface contributes three things and they are genuinely different:
+    ///
+    /// * **Its box.** A pane's travels with its pane's tween and carries the
+    ///   crop a FLIP needs — the same [`preview_image_placement`] the still is
+    ///   fitted by, so the picture does not move when play is pressed. A
+    ///   float's is its window's `content_body`, raised clear of the rounded
+    ///   floor. A card's is the rounded window its still frame already stood in.
+    /// * **Its ground.** `None` in a pane, where the letterbox bars are the
+    ///   pane's own body colour, already painted underneath; `Some` in a float
+    ///   and on a card, where nothing has painted the box and two bars of
+    ///   nothing would be a hole in the window.
+    /// * **Its stage.** Three heights in the renderer's pass, because a float's
+    ///   face is opaque and a card stands over every seat — see
+    ///   [`bt_render::VideoStage`].
+    fn video_layers(&self) -> Vec<bt_render::VideoLayer> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let now = Instant::now();
+        let mut layers = Vec::new();
+        for (surface, seat) in self.window.video.iter() {
+            let Some(shape) = self.video_shape_of(surface, scale, now) else {
+                continue;
+            };
+            layers.push(seat.layer(
+                shape.box_,
+                shape.clip,
+                shape.ground,
+                shape.radius_px,
+                1.0,
+                shape.stage,
+            ));
+        }
+        // **And the pictures that move on their own** (user ruling 2026-08-28;
+        // §7.44 ⑤). Down the same lane, fitted by the same rule, staged in the
+        // same three places — which is the whole reason a `.gif` needed thirty
+        // lines of decoding and no second upload path at all.
+        //
+        // A surface that is playing a *recording* is skipped: it cannot be both,
+        // and the seat above already spoke for it.
+        for surface in self.animated_surfaces() {
+            if self.window.video.get(surface).is_some() {
+                continue;
+            }
+            let Some(AnimationEntry::Ready(animation)) = self
+                .animation_path_of(surface)
+                .map(|path| normalized_local_image_path_key(&path))
+                .and_then(|key| self.window.animations.get(&key))
+            else {
+                continue;
+            };
+            let Some(shape) = self.video_shape_of(surface, scale, now) else {
+                continue;
+            };
+            layers.push(bt_render::VideoLayer {
+                key: format!("gif:{surface:?}"),
+                box_: shape.box_,
+                clip: shape.clip,
+                frame: Some(animation.upload()),
+                ground: shape.ground,
+                radius_px: shape.radius_px,
+                opacity: 1.0,
+                stage: shape.stage,
+            });
+        }
+        layers
+    }
+
+    /// **Every surface that could be showing an animation**, which is every
+    /// preview surface plus the glance card.
+    ///
+    /// The card is added by hand for the reason `preview_surfaces` leaves it
+    /// out: it is window-scoped rather than tab-scoped and is not focusable,
+    /// hit-testable or scrollable through the machinery that walk is for. It is
+    /// drawable, which is what this walk is for.
+    fn animated_surfaces(&self) -> Vec<PreviewSurface> {
+        let mut surfaces = self.preview_surfaces();
+        surfaces.push(PreviewSurface::Peek);
+        surfaces
+    }
+
+    /// **Whether this surface's picture is one this window is running** — a
+    /// `.gif` whose frames have arrived (§7.44 ⑤).
+    ///
+    /// The still and the animation are the same file at the same size in the
+    /// same box, so exactly one of them may be on the glass: the video lane
+    /// draws a whole pass before the picture lane, and a still left standing
+    /// would be painted straight over the frame that moved. This is the same
+    /// refusal `surface_is_playing_a_video` earns for a recording, said for the
+    /// other kind of moving picture.
+    fn animation_running_on(&self, surface: PreviewSurface) -> bool {
+        self.animation_path_of(surface)
+            .map(|path| normalized_local_image_path_key(&path))
+            .and_then(|key| self.window.animations.get(&key))
+            .is_some_and(|entry| matches!(entry, AnimationEntry::Ready(_)))
+    }
+
+    /// The animated file one surface is showing, if it is showing one.
+    fn animation_path_of(&self, surface: PreviewSurface) -> Option<PathBuf> {
+        let path = match surface {
+            PreviewSurface::Peek => self.file_peek_subject()?.path?,
+            _ => self.preview_picture(surface)?.path.clone(),
+        };
+        animation::path_names_an_animation(&path).then_some(path)
+    }
+
+    /// **Ask the worker for the frames of every animation on the glass that
+    /// this window has not looked inside yet** (§7.44 ⑤).
+    ///
+    /// Once per file and never again: the answer is filed under the file's key
+    /// whether it decoded or not, so a `.gif` that is one still frame — or one
+    /// over the ceiling — costs exactly one walk of one container for as long as
+    /// this window is open, and a still after that.
+    fn request_animations(&mut self) {
+        if !self.app.math_worker_running {
+            return;
+        }
+        for surface in self.animated_surfaces() {
+            let Some(path) = self.animation_path_of(surface) else {
+                continue;
+            };
+            let key = normalized_local_image_path_key(&path);
+            if self.window.animations.contains_key(&key) {
+                continue;
+            }
+            let leaf = self.focused_shell_address();
+            if self
+                .app
+                .math_worker
+                .tasks
+                .send(MathWorkerRequest::PeekAnimation {
+                    leaf,
+                    path: path.clone(),
+                })
+                .is_ok()
+            {
+                self.window.animations.insert(key, AnimationEntry::Pending);
+            }
+        }
+    }
+
+    /// **Where one surface's video is drawn, and in which stack** — the geometry
+    /// half of [`Self::video_layers`], separated because the bar needs the same
+    /// answer and two derivations of one rectangle is how a control bar ends up
+    /// somewhere its picture is not.
+    fn video_shape_of(
+        &self,
+        surface: PreviewSurface,
+        scale: f32,
+        now: Instant,
+    ) -> Option<VideoShape> {
+        match surface {
+            PreviewSurface::Seat(leaf) => {
+                let placement = (leaf.tab == self.id)
+                    .then(|| {
+                        preview_image_placement(
+                            &self.seats,
+                            &self.seat_layout,
+                            leaf.seat,
+                            scale,
+                            self.window
+                                .pane_motion
+                                .transform_of(leaf.seat, now, self.app.motion),
+                        )
+                    })
+                    .flatten()?;
+                Some(VideoShape {
+                    box_: placement.body,
+                    clip: placement.clip,
+                    // The pane painted this box a pass ago in its own body
+                    // colour, and a second authority for it would be a second
+                    // colour the day one of them is changed.
+                    ground: None,
+                    radius_px: 0.0,
+                    stage: bt_render::VideoStage::Seat,
+                })
+            }
+            PreviewSurface::Float(id) => {
+                let body = self.float_body_rect(id, scale)?;
+                let box_ = viewport_of_rect(body)?;
+                Some(VideoShape {
+                    box_,
+                    clip: box_,
+                    ground: Some(bt_render::background_rgb()),
+                    // Zero, and that is not an oversight: `content_body` has
+                    // already lifted this rectangle clear of the window's
+                    // rounded floor, so the picture's own corners are square and
+                    // the round ones belong to the face around it.
+                    radius_px: 0.0,
+                    // **Not the hole's level** — see [`WindowRuntime::float_video_level`].
+                    stage: bt_render::VideoStage::Overlay(self.float_video_level(id)?),
+                })
+            }
+            PreviewSurface::Peek => {
+                let body = self.window.file_peek.as_ref()?.body?;
+                // **Two grounds, and the card already chose between them.** A
+                // recording's card stands its frame on the taller `page_ground`
+                // (280×160, `PeekBody::Frame`) and a picture's on
+                // `picture_ground` (280×120, `PeekBody::Image`) — so an
+                // animation drawn into the recording's box would be a `.gif`
+                // forty logical pixels lower than its own still. Asked of the
+                // path, which is the same thing `peek_body_kind` asks.
+                let ground = if self.animation_path_of(PreviewSurface::Peek).is_some() {
+                    file_peek::picture_ground(body, scale)
+                } else {
+                    file_peek::page_ground(body, scale)
+                };
+                let box_ = viewport_of_rect(ground)?;
+                Some(VideoShape {
+                    box_,
+                    clip: box_,
+                    ground: Some(bt_render::background_rgb()),
+                    // The card *does* round its own picture window, and nothing
+                    // is painted behind it to round for it.
+                    radius_px: file_peek::PEEK_IMAGE_RADIUS_LOGICAL_PX * scale,
+                    // **An index the stack has not yet published draws
+                    // nothing**, which is `VideoStage::Overlay`'s own rule and
+                    // is exactly right for the one frame it can happen on: the
+                    // card's level is written by the chrome pass, so the very
+                    // first frame of a card that came up playing has no level
+                    // yet. `usize::MAX` names no layer, the picture waits one
+                    // frame, and the bar is laid out against the right box
+                    // meanwhile.
+                    stage: bt_render::VideoStage::Overlay(
+                        self.window.file_peek_level.unwrap_or(usize::MAX),
+                    ),
+                })
+            }
+        }
+    }
+
+    /// **Hand the renderer this frame's video layers.** `true` when the list
+    /// changed, which is when a frame is owed.
+    fn refresh_video_layers(&mut self) -> bool {
+        self.request_animations();
+        let layers = self.video_layers();
+        self.window.renderer.set_video_layers(layers)
+    }
+
+    /// **Move every animation on the glass to the frame that is due**, and say
+    /// whether any of them changed (§7.44 ⑤).
+    ///
+    /// Advanced on the same tick a video's frames are collected on, and for the
+    /// same reason: this is the pass that runs on a clock. `false` for the great
+    /// majority of ticks — a hundred-millisecond frame at sixty hertz is five
+    /// ticks out of six that owe nothing.
+    fn advance_animations(&mut self, now: Instant) -> bool {
+        let mut moved = false;
+        for entry in self.window.animations.values_mut() {
+            if let AnimationEntry::Ready(animation) = entry {
+                moved |= animation.advance(now);
+            }
+        }
+        moved
+    }
+
+    /// Whether anything on the glass is an animation this window is running —
+    /// what keeps the deadline live while a spinner spins.
+    fn an_animation_is_running(&self) -> bool {
+        self.animated_surfaces().iter().any(|surface| {
+            self.animation_path_of(*surface)
+                .map(|path| normalized_local_image_path_key(&path))
+                .and_then(|key| self.window.animations.get(&key))
+                .is_some_and(|entry| matches!(entry, AnimationEntry::Ready(_)))
+        })
+    }
 
     /// Fit **one** picture to the body its host gives it this frame, ask the
     /// worker for the raster that box wants, and hand the pixels to the channel
@@ -50891,7 +51893,13 @@ impl Runtime<'_> {
         // account of which recording this is, it is what the stop verb puts back
         // on the glass without a second decode, and it costs one comparison a
         // frame to leave it alone.
-        if self.surface_is_playing_a_video(surface) {
+        //
+        // **And the same refusal for an animation** (§7.44 ⑤): a `.gif` whose
+        // frames have arrived is drawn by the video layer, a whole pass before
+        // this one, and the still this function would fit is the same file at
+        // the same size in the same box. Two of them is one painted over the
+        // other, and the one on top is the one that does not move.
+        if self.surface_is_playing_a_video(surface) || self.animation_running_on(surface) {
             self.hide_preview_picture(surface);
             return;
         }
@@ -55590,6 +56598,20 @@ impl Runtime<'_> {
             .file_peek
             .as_ref()
             .is_some_and(|peek| peek.due.is_none());
+        // **The card's recording stops with the card** (route B slice ②; §7.44
+        // ③) — the pointer left, the card is collapsing, and an engine left
+        // behind would be a decoder, a work queue and a Direct3D device
+        // belonging to a surface that is no longer on the glass.
+        //
+        // **Except while it is being carried into a float**, which is the one
+        // moment this door runs with the seat still wanted:
+        // [`Self::promote_file_peek`] tears the card down *before* it opens the
+        // window, so the flag is what tells this door the engine has somewhere
+        // to go. Without it a tear-off would shut the decoder down and the float
+        // would start another — which is the re-open the ruling refused.
+        if !self.window.video_carried_off_the_card {
+            self.window.video.close(PreviewSurface::Peek);
+        }
         self.window.file_peek = None;
         // And the hand that was on its head. A press whose card has gone has
         // nothing left to promote, and a promotion that fired afterwards would
@@ -56002,7 +57024,60 @@ impl Runtime<'_> {
     /// the placement produced. The second build re-uses the first's parse — the
     /// document's key is its content and its *width*, and the width never changed
     /// — so the two passes cost one.
-    fn file_peek_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    /// **The glance card, and the control bar of a recording playing on it**
+    /// (route B slice ②, 2026-08-28; §7.44 ②).
+    ///
+    /// A wrapper rather than a line inside [`Self::file_peek_card_layers`],
+    /// because that function returns from five places — one per body kind — and
+    /// a bar appended at four of them is a bar missing from the fifth. The bar
+    /// goes **after** the card's own layers for the reason a float's does: the
+    /// video is drawn over the card's face and under everything the card draws
+    /// on top of it, and the bar is the topmost of those.
+    fn file_peek_layer(&mut self, below: usize) -> Vec<marks::OverlayLayer> {
+        // Rebuilt from nothing on every pass, exactly as the float group's two
+        // ledgers are: it is a record of what *this* frame drew, and a stale
+        // index in it is a picture drawn into somebody else's layer.
+        self.window.file_peek_level = None;
+        let mut layers = self.file_peek_card_layers();
+        if layers.is_empty() {
+            return layers;
+        }
+        // **And a slot of its own for a recording, directly over the card's
+        // face** (route B slice ②; §7.44 ③, found on the machine 2026-08-28 —
+        // the float's own defect, on the third host).
+        //
+        // The renderer draws `VideoStage::Overlay(n)` between layer `n`'s ground
+        // and layer `n`'s **fills**. Pointed at the card's face, that puts the
+        // picture underneath the card's own picture well — which is a fill —
+        // and the card shows an empty box with a control bar counting away
+        // beneath it. The float carried exactly this defect and was mended
+        // exactly this way ([`WindowRuntime::float_video_level`]): a stage index
+        // has to name a layer the z-order loop actually reaches, and what this
+        // one is for is being reached. It costs no buffer, no draw call and no
+        // quad — see `marks::OverlayLayer::default`.
+        //
+        // Written **before** the push, because that is the slot the push is
+        // about to take, and `below` is handed in for
+        // [`OverlayStack::below_the_file_peek`]'s reason: the index is a fact
+        // about the stack, and only the chrome pass has a view of the stack.
+        self.window.file_peek_level = Some(below + layers.len());
+        layers.push(marks::OverlayLayer::default());
+        // **The ▶ on the card, and the ruling that put it there** (user
+        // 2026-08-28: *「能动的就动」*). §7.23's card drew a first frame and said
+        // out loud that winding it was not what that build did. It is what this
+        // build does, on the card as much as anywhere else — so the card wears
+        // the same disc a pane does, and pressing it starts the engine where the
+        // card stands.
+        //
+        // Above the slot, with the bar, for the float's reason: a layer paints
+        // its quads before the picture it carries, and the picture here is a
+        // video drawn over the slot's own (empty) ground.
+        layers.extend(self.video_play_mark_layer(PreviewSurface::Peek));
+        layers.extend(self.video_bar_layer(PreviewSurface::Peek));
+        layers
+    }
+
+    fn file_peek_card_layers(&mut self) -> Vec<marks::OverlayLayer> {
         let Some(subject) = self.file_peek_subject() else {
             return Vec::new();
         };
@@ -56114,8 +57189,29 @@ impl Runtime<'_> {
         // The file's own image off the resample lane, for the one body that wears one. A page
         // card draws a *column* instead and takes it separately — they were one argument while
         // both bodies drew exactly one picture, and the column ended that.
+        //
+        // **And no still at all while the picture in this box is moving** —
+        // a recording playing on the card, or an animation running on it
+        // (§7.44 ⑤, and §7.44 ① for the recording half). The frames are drawn
+        // over this layer's ground by the video lane; a still handed in here
+        // would land in the card's *icon* channel, which runs after that lane,
+        // and would stand over the picture it is one frame of. The box is
+        // unaffected — `layout` was solved a moment ago from the file's own size
+        // — so the card is the same shape either way.
+        //
+        // **Both halves, and they are one question.** This clause asked only
+        // about an animation until 2026-08-28, and the machine showed what the
+        // other half costs: the card's own ▶ started the engine, the bar counted
+        // 0:01 → 0:06 off it, and the picture underneath never moved — a still of
+        // the frame at one tenth, painted over a recording that was playing
+        // perfectly well beneath it. Everywhere else in this window the pair is
+        // asked together (`refit_preview_picture`), because "is the thing in this
+        // box moving" is one question with two ways of being true.
+        let moving = self.surface_is_playing_a_video(PreviewSurface::Peek)
+            || self.animation_running_on(PreviewSurface::Peek);
         let picture = match layout.body_kind {
             file_peek::PeekBody::Facts { .. } => None,
+            _ if moving => None,
             _ => self
                 .window
                 .peek_picture
@@ -56350,6 +57446,31 @@ impl Runtime<'_> {
                 Ok(true)
             }
             file_peek::Press::Open => {
+                // **A player standing on the picture answers before the door
+                // underneath it** (route B slice ②; §7.44 ①, found by
+                // photographing the machine 2026-08-28 — the second host to
+                // have this same defect, and for the same reason).
+                //
+                // `press_video_at` states the whole order — a play mark on a
+                // picture, then every control on a bar that is up, then a double
+                // click on the picture — and it is reached from
+                // `chrome_mouse_input`. A press inside the card never gets that
+                // far: `press_file_peek` is asked *above* the chrome router,
+                // which is what makes a card opaque to the layout beneath it,
+                // and this arm went straight to the door. So the card drew a
+                // play disc that lit under the pointer and, when it was pressed,
+                // opened the preview pane instead of playing — the ruling's
+                // *「能动的就动」* reaching a glance card and being defeated by a
+                // route, one host over from the float in §7.44 ①.
+                //
+                // Here rather than at the top of the function, and that is the
+                // same placement `press_float` gives it: the card's *furniture*
+                // — the head that is a handle, the scroll thumb — is still the
+                // card's, and only on the face does the player out-rank what is
+                // under it.
+                if self.press_video_at(position)? {
+                    return Ok(true);
+                }
                 // **A wide block in the card is a scrolling region, and the bar
                 // under it is a bar** (user ruling, 2026-08-14). Asked between
                 // the card's own thumb and the door, which is the order the
@@ -56557,6 +57678,21 @@ impl Runtime<'_> {
             scale,
         );
         let tab = self.id;
+        // **Whatever is playing on the card is coming with it** (user ruling
+        // 2026-08-28: *「拖头转浮窗时把引擎带走(不重开,位置不丢)」*; §7.44 ③).
+        //
+        // Read before `hide_file_peek`, which shuts down the card's seat along
+        // with everything else the card owns, and re-homed after the float
+        // exists — so the sequence is: remember, tear the card down, open the
+        // window, hand the engine over. What is *not* here is a second `open`:
+        // the decoder is not restarted, the playhead does not go back to zero
+        // and the texture keeps its name, so not one frame is decoded or
+        // uploaded twice. That is the whole difference between carrying a video
+        // and re-opening one, and it is the difference a reader sees.
+        let carried = self.window.video.get(PreviewSurface::Peek).is_some();
+        if carried {
+            self.window.video_carried_off_the_card = true;
+        }
         // The card goes **before** the window opens, and not after: an opening
         // re-solves and repaints, and a card left standing through that would be
         // drawn once more against a row it no longer belongs to.
@@ -56572,6 +57708,12 @@ impl Runtime<'_> {
             None,
             Instant::now(),
         );
+        if carried {
+            self.window.video_carried_off_the_card = false;
+            self.window
+                .video
+                .rehome(PreviewSurface::Peek, PreviewSurface::Float(id));
+        }
         self.open_preview_onto(PreviewSurface::Float(id), path)?;
         self.window.float_drag = Some(FloatDrag {
             win: id,
@@ -63179,6 +64321,25 @@ impl Runtime<'_> {
             // beneath it. So the order is restated, and a bar drawn on a float
             // is a bar a hand can take.
             float::FloatPart::Body if holds_a_buffer => {
+                // **A player standing on the picture answers before anything
+                // underneath it** (route B slice ②; §7.44 ①, found by
+                // photographing the machine 2026-08-28).
+                //
+                // `press_video_at` states this order for the docked pane, in
+                // `chrome_mouse_input` — and a float cannot borrow that
+                // statement for the same reason the two bars below cannot: a
+                // press inside a window is claimed *here*, above the chrome
+                // router, which is what makes a window opaque to the layout
+                // beneath it. Left unsaid, a float drew a play disc that lit
+                // under the pointer and did nothing when it was pressed, and a
+                // control bar no hand could reach — one recording on three
+                // surfaces with one of the three unable to start it.
+                //
+                // The *release* half was never missing: a scrubber let go is
+                // answered in `chrome_mouse_input`, which a release does reach.
+                if self.press_video_at(position)? {
+                    return Ok(true);
+                }
                 // **And a rendered page's words are drawn across on the same
                 // terms** (§7.39, user report 2026-08-28: 「浮窗里的 md 选不中」).
                 // The docked pane's order, restated here for `press_float`'s own
@@ -64072,6 +65233,13 @@ impl Runtime<'_> {
         self.window.float_hole_level.get(&id).copied()
     }
 
+    /// The slot a float's recording is drawn into — see
+    /// [`WindowRuntime::float_video_level`], which is why this is not
+    /// [`Self::float_hole_level`].
+    fn float_video_level(&self, id: float::FloatId) -> Option<usize> {
+        self.window.float_video_level.get(&id).copied()
+    }
+
     /// **Which page a float is carrying**, if it is carrying one.
     ///
     /// [`float::FloatPreview::page`] read through the window's own map, so that
@@ -64163,6 +65331,9 @@ impl Runtime<'_> {
         // And the ledger a floated page's hole is spelled against, on the same
         // terms and for the same reason (§7.14c).
         self.window.float_hole_level.clear();
+        // And the recording's, which is a *different* height in the same stack
+        // — see the note beside the push.
+        self.window.float_video_level.clear();
         // **The floating graphs, on the same terms** — and only the floating
         // half of that map, because the seats' entries were written by the
         // chrome pass and are not this pass's to throw away.
@@ -64193,9 +65364,46 @@ impl Runtime<'_> {
                 .float_hole_level
                 .insert(id, below + layers.len());
             layers.push(window);
+            // **And a slot of its own for a recording, directly over that
+            // face** (route B slice ②; §7.44 ③, found on the machine
+            // 2026-08-28).
+            //
+            // A page's hole and a recording's picture are *not* the same
+            // height, and writing them at one index is what put a float's video
+            // underneath the window that was supposed to be showing it. The
+            // renderer draws `VideoStage::Overlay(n)` between layer `n`'s ground
+            // and layer `n`'s fills — which is right for a hole, because a hole
+            // is punched under the marks that legitimately stand over a page,
+            // and wrong for a picture, because a float's body well is one of
+            // those fills. Photographed: the window drew its face, the fills
+            // covered the recording, and the picture only appeared for the
+            // moment the chassis was on its way out.
+            //
+            // An empty layer, and that is the whole of the mechanism: a stage
+            // index has to name a layer the z-order loop actually reaches, and
+            // what this one is for is being reached. It costs no buffer, no
+            // draw call and no quad — see `marks::OverlayLayer::default`.
+            self.window
+                .float_video_level
+                .insert(id, below + layers.len());
+            layers.push(marks::OverlayLayer::default());
+            // **And the recording's control bar, on the same terms** (route B
+            // slice ②; §7.44 ②). Above this window's own layer for the scroll
+            // bar's reason exactly — a layer paints its quads before the
+            // picture it carries, and the picture here is a video drawn over
+            // this layer's ground — and below the next window for its other
+            // reason: a float in front covers this one whole.
+            let bar = self.video_bar_layer(PreviewSurface::Float(id));
+            // And the ▶ over a recording this window is *not* playing — the same
+            // disc a docked pane wears, because a float showing a video and
+            // offering no way to start it would be the surface that knows least
+            // about what it is holding.
+            let play = self.video_play_mark_layer(PreviewSurface::Float(id));
             layers.extend(
                 self.preview_float_bar_layers(id)
                     .into_iter()
+                    .chain(play)
+                    .chain(bar)
                     .map(|mut bar| {
                         bar.opacity = opacity;
                         bar
@@ -66621,6 +67829,34 @@ impl Runtime<'_> {
                     // Peek state never enters frames, so no republish is needed.
                     false
                 }
+                DecorationWorkerCompletion::PeekAnimation { path, frames } => {
+                    // **Filed whether or not it decoded**, which is what stops a
+                    // `.gif` that is one still frame — or one too large to hold
+                    // — being asked for again on every pointer move for as long
+                    // as it is on the glass. A refusal is an answer.
+                    let key = normalized_local_image_path_key(&path);
+                    self.window.animations.insert(
+                        key,
+                        match frames {
+                            Ok(animation) => AnimationEntry::Ready(Box::new(animation)),
+                            Err(refusal) => {
+                                // **Said once and not swallowed** (§7.44 ⑤).
+                                // `TooLarge` is the interesting one: it is the
+                                // ruling's own 「只播首帧」 arriving, and a reader
+                                // whose enormous capture sits still deserves a
+                                // line somewhere that says why.
+                                eprintln!(
+                                    "BT_GIF {refusal:?} {} (drawn as its first frame)",
+                                    path.display()
+                                );
+                                AnimationEntry::Refused
+                            }
+                        },
+                    );
+                    self.refresh_video_layers();
+                    self.present_chrome_change()?;
+                    false
+                }
                 // **A video's frame**, on exactly the terms above: it lands in the same cache, is
                 // claimed by the same file rather than by the same asker, and moves no frame of
                 // its own — see [`Self::complete_peek_video_frame`].
@@ -67558,6 +68794,59 @@ impl Runtime<'_> {
             .pane_motion
             .settle_frame_debt(&pane_rects, now, motion);
         self.window.pane_motion.retire(now, motion);
+        // **This tick's decoded pictures, collected** (route B slice ②; §7.44
+        // ③).
+        //
+        // Here rather than in `redraw` because this is the pass that runs on the
+        // clock: `redraw` runs when somebody asks for a frame, and a video that
+        // waited to be asked would be a video that played only while the pointer
+        // was moving. `pump` also settles each bar's armed hover intent, which
+        // is the one wait in this window that has no other tick to ride on.
+        //
+        // The layers are recomputed whether or not a frame arrived, because the
+        // *box* moves for reasons that are not the decoder — a pane in flight, a
+        // float being dragged, a window resized — and a picture that stayed
+        // where the layout used to be would be the FLIP's own defect with a
+        // recording in it.
+        self.sweep_video_seats();
+        let frames_arrived = self.window.video.pump(now) | self.advance_animations(now);
+        // **Animations count here too**, and forgetting them was a real bug for
+        // the length of one edit: a `.gif` with no recording anywhere in the
+        // window would advance its frame, bump its generation, and never hand
+        // the renderer the new layer — an animation that moved in the model and
+        // stood still on the glass.
+        // **And the tick that empties the list is a tick with something to say**
+        // (§7.44 ⑨, photographed on the machine 2026-08-28).
+        //
+        // The first two clauses are the cheap gate they look like: a window with
+        // no recording and no animation has no picture list to rebuild, and an
+        // idle window should cost nothing. The third is the one that was
+        // missing. `sweep_video_seats` runs one line above this and its whole job
+        // is to *remove* seats — so the tick on which the last one goes is
+        // precisely the tick where `self.window.video` is empty, the guard is
+        // false, and the renderer is never handed the shorter list. It goes on
+        // drawing what it was last given.
+        //
+        // Photographed: a floating window playing `clock.mp4` was closed, and
+        // its last decoded frame stayed on the glass — no head, no bar, no
+        // window around it, a rectangle of picture where a window used to be —
+        // for three and a half seconds, until a hover card was dismissed and
+        // `refresh_preview_for_layout` (which asks unconditionally) ran and swept
+        // it away. The decoder had already stopped: four captures 700ms apart
+        // were byte-identical over that rectangle.
+        //
+        // So the guard asks the renderer too. "Nothing is moving *and* the
+        // renderer is holding nothing" is the real idle case, and it is still
+        // one `is_empty()` on a slice.
+        let anything_moving = !self.window.video.is_empty()
+            || !self.window.animations.is_empty()
+            || !self.window.renderer.video_layers().is_empty();
+        let boxes_moved = anything_moving && self.refresh_video_layers();
+        // **The pictures' own debt, kept as a name of its own.** It has to
+        // survive the chrome's question below, which is why it is not folded
+        // into `owes_frame` and forgotten — see [`tick_owes_a_present`].
+        let pictures_owe = frames_arrived || boxes_moved;
+        let owes_frame = owes_frame || pictures_owe;
         if !owes_frame && !panes_owe {
             return Ok(());
         }
@@ -67574,7 +68863,11 @@ impl Runtime<'_> {
         // nothing about. A flight over a lone-headed pane can leave the chrome
         // byte-identical while the grid underneath it has to be drawn a hundred
         // pixels to the left.
-        if !self.refresh_chrome() && !panes_owe {
+        //
+        // **And a decoded picture is a third debt, which this line used to
+        // throw away** (the freeze of 2026-08-28; §7.44 ③). See
+        // [`tick_owes_a_present`] for the whole of the argument.
+        if !tick_owes_a_present(self.refresh_chrome(), panes_owe, pictures_owe) {
             return Ok(());
         }
         // Everything this pass can have moved is now in the renderer's hands or
@@ -67728,6 +69021,29 @@ impl Runtime<'_> {
             .window
             .advanced_reveal
             .is_some_and(|(_, tween)| tween.sample(now, motion).1);
+        // **A playing recording, and the same argument once more with one
+        // difference** (route B slice ②; §7.44 ③).
+        //
+        // Every other line above asks whether an *animation* is still running.
+        // A video is not an animation this window is running — it is a decoder
+        // on another thread producing pictures at its own rate — so the question
+        // is not "is a tween moving" but "is there a decoder to collect from".
+        // While there is, this window wakes at its own rate and takes whatever
+        // has arrived; between arrivals it takes nothing and draws the frame
+        // that is standing, which is what `Engine::frame`'s one atomic load is
+        // for.
+        //
+        // **Not gated on reduced motion**, and it is the only line here that is
+        // not. `Reduced` is a request about the window's own decoration, not a
+        // request for a video to stop moving: a reader who has turned animation
+        // off and then pressed play has asked for a recording to play. The
+        // *bar's* fade obeys the setting, which is the part that is this
+        // window's decoration — see `video_seat::BarSituation::presence`.
+        let playing = self.window.video.any_playing() || self.an_animation_is_running();
+        // And the bar's own two waits, which do obey it: a bar rising, standing
+        // out its dwell, or fading is a reason to wake even when the decoder has
+        // nothing new — and no reason at all once it has settled.
+        let bar_moving = self.window.video.bar_deadline(now, motion);
         [
             (tabs_moving
                 || chevron_turning
@@ -67740,8 +69056,10 @@ impl Runtime<'_> {
                 || passing
                 || fading
                 || saying
-                || disclosing)
+                || disclosing
+                || playing)
                 .then(|| now + STRIP_ANIMATION_FRAME),
+            bar_moving,
             self.window.pane_motion.deadline(now, motion),
         ]
         .into_iter()
@@ -67852,12 +69170,40 @@ impl Runtime<'_> {
     /// **Any page is enough.** A tab is a container, the mark says the sound is
     /// inside it, and one page is as much inside it as two.
     fn audible_tabs(&self) -> std::collections::BTreeSet<TabId> {
-        self.window
+        let mut tabs: std::collections::BTreeSet<TabId> = self
+            .window
             .web
             .iter()
             .filter(|(_, web)| web.playing_audio())
             .map(|(leaf, _)| leaf.tab)
-            .collect()
+            .collect();
+        // **And the recordings, which are where a sound comes from now** (route
+        // B slice ②, 2026-08-28; §7.44 ②, closing §7.42 ⑪ ⓓ).
+        //
+        // The line above asked a browser `IsDocumentPlayingAudio` — a question
+        // about a *document*, answered by an engine, arriving as an event this
+        // window had to subscribe to and remember. The new judgement is the
+        // ruling's own and needs no memory: `playing && !muted`, read off the
+        // engine at the instant the strip is drawn, plus `has_audio` so that a
+        // silent screen capture does not point a reader at a tab with nothing to
+        // hear. See `video_seat::VideoSeat::is_sounding`.
+        //
+        // **A float's and a card's recording belong to no tab**, and neither is
+        // in this set: the mark says *which tab* the sound is in, and a floating
+        // window is not in one. That is not a gap — a float is on the glass in
+        // front of the reader, which is the thing the mark exists to help them
+        // find.
+        tabs.extend(
+            self.window
+                .video
+                .iter()
+                .filter(|(_, seat)| seat.is_sounding())
+                .filter_map(|(surface, _)| match surface {
+                    PreviewSurface::Seat(leaf) => Some(leaf.tab),
+                    PreviewSurface::Float(_) | PreviewSurface::Peek => None,
+                }),
+        );
+        tabs
     }
 
     /// **Which of this tab's preview seats wear a play button** (user ruling
@@ -67869,7 +69215,7 @@ impl Runtime<'_> {
     /// [`seats::hit_preview_play`] presses by it):
     ///
     /// 1. **The pane is showing a video whose spelling can be played** —
-    ///    [`preview::path_names_a_playable_video`], which is the playable column
+    ///    [`preview::path_names_a_video`], which is the playable column
     ///    of the one table. A `.mov` has a face and no player, and what it wears
     ///    instead is a sentence in its fact line, not a button that would refuse.
     /// 2. **Nothing is already on that seat.** A pane that is playing has an
@@ -67896,24 +69242,24 @@ impl Runtime<'_> {
                     tab: self.id,
                     seat: *seat,
                 };
-                // **A seat whose browser is on its way out is a seat with
-                // nothing on it**, which is `WebSeat::is_closing`'s own reason:
-                // the engine leaves the glass when `close` is called and the map
-                // entry survives for as long as the process takes to end. Reading
-                // the entry alone would leave a stopped video with no button for
-                // most of a second, and sometimes for ten.
-                if self
-                    .window
-                    .web
-                    .get(&leaf)
-                    .is_some_and(|web| !web.is_closing())
-                {
+                // **A seat that is playing wears a pause on its bar, not a play
+                // on its picture** (route B slice ②; §7.44 ①).
+                //
+                // The `is_closing` clause this replaces was route A's whole
+                // problem in one line: a browser left the glass when `close` was
+                // called and its map entry survived for as long as the process
+                // took to end, so a stopped video had no button for most of a
+                // second and sometimes for ten. A seat is removed from the map
+                // the instant it is stopped — the shutdown is synchronous — so
+                // the button comes back in the same frame the picture does, and
+                // there is no second state to ask about.
+                if self.window.video.get(PreviewSurface::Seat(leaf)).is_some() {
                     return false;
                 }
                 tab.preview_panes
                     .get(PreviewSurface::Seat(leaf))
                     .and_then(|pane| pane.image.as_ref())
-                    .is_some_and(|image| preview::path_names_a_playable_video(&image.path))
+                    .is_some_and(|image| preview::path_names_a_video(&image.path))
             })
             .collect()
     }
@@ -69770,6 +71116,27 @@ impl Runtime<'_> {
         // `update_chrome_hover` is for that function's *other* callers — the
         // doors where the answer changed with no pointer move at all.
         self.drive_rail_zone(Some(position));
+        // **A held scrubber owns the pointer, ahead of everything** (route B
+        // slice ②; §7.44 ②) — and outside its own bar, for the reason every
+        // drag below is asked outside its own box: a scrub that stopped tracking
+        // the moment the hand left a thirty-four pixel strip would make the end
+        // of a recording a matter of aim.
+        if self.drag_video_bar(position)? {
+            return Ok(());
+        }
+        // And every playing surface is told where the pointer is, before any
+        // branch below can consume the move — the bar's reveal is armed by a
+        // pointer settling on the picture and its dwell is ended by one that has
+        // gone somewhere else, and a seat that only heard about moves nothing
+        // else wanted would hold its bar up for ever.
+        //
+        // **It asks for no frame of its own**, and that is deliberate: what a
+        // move can change is when the bar is *due* — an intent armed, a dwell
+        // restarted — and `strip_animation_deadline` reads exactly those two
+        // through `VideoSeats::bar_deadline` on the turn this move ends. A
+        // present forced here would be a repaint on every pointer move anywhere
+        // in the window for as long as anything is playing.
+        self.note_video_hover(Some(position));
         // The glance card's thumb, ahead of everything: it is the topmost thing
         // on the glass, and a gesture in flight is not a hover. It owns the
         // pointer outside the card too — a drag that let go the moment it left
@@ -73147,6 +74514,19 @@ impl Runtime<'_> {
             return Ok(false);
         }
         if state == ElementState::Released {
+            // **A held scrubber or volume, first of everything** (route B slice
+            // ②; §7.44 ②): the fraction it wrote on the way is already the
+            // answer, so letting go only puts the dot away and restarts the
+            // dwell that will take the bar off the glass.
+            if let Some(surface) = self.window.video_bar_drag.take() {
+                if let Some(seat) = self.window.video.get_mut(surface) {
+                    seat.release(Instant::now());
+                }
+                self.refresh_chrome();
+                self.present_chrome_change()?;
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-video-bar-track state={state:?} button={button:?} target={traced_target:?}"));
+                return Ok(true);
+            }
             // A thumb is let go wherever the hand lets go of it — the offset it
             // wrote on the way is already the answer, so this only puts the
             // accent out. The body's bar first, the order everything else about
@@ -73280,6 +74660,16 @@ impl Runtime<'_> {
             return Ok(taken);
         }
         let target = self.chrome_target_at(position);
+        // **A press on a player, before P149 takes the card away** (route B
+        // slice ②; §7.44 ②). Two gestures live here and both have to out-rank
+        // the dismissal below: the play mark on a float's or a card's picture,
+        // and every control on a bar that is up. A card dismissed first would be
+        // a card whose own play mark could never be pressed — which is exactly
+        // the *「能动的就动」* the ruling asked for, defeated by an ordering.
+        if self.press_video_at(position)? {
+            self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-video state={state:?} button={button:?} target={target:?}"));
+            return Ok(true);
+        }
         // **P149 — the glance is gone on press**, whatever the press turns out to
         // mean and before it means it. A card that survived the button going
         // down would be standing over the pane the press just opened.
@@ -78805,17 +80195,6 @@ impl Runtime<'_> {
                     Some(id) => PreviewSurface::Float(id),
                     None => PreviewSurface::Seat(*leaf),
                 };
-                // **What this engine was put there to play**, asked of the seat
-                // and not of the pane (user ruling 2026-08-27; §7.23 ⑩) — the
-                // mint is the note the host wrote, and it is the only thing in
-                // this process that knows a page in a cache folder is standing
-                // in for a recording.
-                let playing = self
-                    .window
-                    .web
-                    .get(leaf)
-                    .and_then(webhost::WebSeat::playing_video)
-                    .map(Path::to_path_buf);
                 !self
                     .window
                     .tabs
@@ -78829,7 +80208,6 @@ impl Runtime<'_> {
                                 a_page_was_replaced(
                                     pane.image.as_ref().map(|image| image.path.as_path()),
                                     pane.buffer.as_ref(),
-                                    playing.as_deref(),
                                 )
                             }),
                         )
@@ -78974,8 +80352,6 @@ impl Runtime<'_> {
         }
         let hwnd = window_hwnd(&self.window.window)?;
         let proxy = self.app.event_proxy.clone();
-        // Read before the mint is handed to the seat, which takes it.
-        let plays_a_video = matches!(minted, webnav::Mint::VideoShell { .. });
         match webhost::WebSeat::open(
             bt_platform::PageVisual {
                 tab: leaf.tab.0,
@@ -79033,19 +80409,19 @@ impl Runtime<'_> {
                 if !showing_a_page {
                     self.leave_preview_buffer_in(index, surface);
                 }
-                // **Except the frame of the recording this engine is here to
-                // play** (user ruling 2026-08-27; §7.23 ⑩). Every other page
-                // replaces what the pane was showing; a player does not, because
-                // what the pane was showing is the very thing it is playing. The
-                // `PreviewImageState` is the pane's whole account of that file —
-                // its path, its facts, its decoded frame — and it is what the
-                // breadcrumb, `↗` and the stop verb all read. Clearing it here
-                // would leave a pane with a browser on it and nothing at all to
-                // say about what was in the browser, and the orphan rule two
-                // screens up would close that browser on the next turn.
-                if !plays_a_video {
-                    self.clear_preview_image_in(index, surface);
-                }
+                // **And the picture with it** — unconditionally again, since
+                // route B (2026-08-28; §7.44 ④).
+                //
+                // This carried an exception while a video was played by a page:
+                // a player shell was the one navigation whose pane had to keep
+                // its `PreviewImageState`, because that state was the pane's
+                // whole account of the recording the browser was playing. There
+                // is no such navigation any more. A recording is played by an
+                // engine this window drives and drawn on its own glass, and it
+                // never travels through this door at all — so every page that
+                // reaches here is a page, and every page replaces what the pane
+                // was showing.
+                self.clear_preview_image_in(index, surface);
                 self.apply_web_outcomes(leaf, engine_said)?;
             }
             // What is left here is the one failure that is not the engine's: no
@@ -81267,7 +82643,7 @@ mod mouse_trace_station_tests {
         // Twenty-four once the two 2026-08-24/25 lines met: the address row's
         // press takes the event whole exactly as the name's double click does,
         // and it joins the exits the other line had already counted to 23.
-        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 25);
+        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 27);
     }
 
     /// Both `None`s here are silent by construction — the callers turn them into
@@ -81558,6 +82934,321 @@ mod files_locate_door_tests {
         assert!(
             body("    fn drag_preview_text(").contains("self.preview_text_drag"),
             "the float's selection drag spins up a second model instead of the pane's own"
+        );
+    }
+
+    /// RED — **a player in a float answers the hand the way a pane's does**
+    /// (route B slice ②; §7.44 ①, found by photographing the machine
+    /// 2026-08-28).
+    ///
+    /// The same shape as the selection pin above, one surface over and one
+    /// slice later. `press_video_at` states the whole order — a play mark on a
+    /// picture, then every control on a bar that is up, then a double click on
+    /// the picture itself — and it was reached only from `chrome_mouse_input`.
+    /// A press inside a floating window never gets that far: `press_float` is
+    /// asked above the chrome router and claims it, which is what makes a window
+    /// opaque to the layout beneath it. So a float drew a play disc that lit
+    /// under the pointer and did nothing when pressed, and a control bar no hand
+    /// could take — one recording on three surfaces and one of the three unable
+    /// to start it, which is exactly the ruling §7.44 ① was written for.
+    ///
+    /// The *release* half was never missing, and that asymmetry is why the
+    /// defect survived a reading: a scrubber let go is answered in
+    /// `chrome_mouse_input`, which a release does reach.
+    ///
+    /// The order inside the float's own branch is asserted too, and it is the
+    /// load-bearing half: a player standing on a document out-ranks the
+    /// document, so a press on the bar over a rendered page must not put a
+    /// caret in the page.
+    ///
+    /// RED GATE: drop `press_video_at` from `press_float`'s body branch and the
+    /// first block fails — which is the state the binary photographed on
+    /// 2026-08-28 was built from.
+    #[test]
+    fn a_player_in_a_float_answers_the_hand_the_way_a_pane_does() {
+        for signature in ["    fn press_float(", "    fn chrome_mouse_input("] {
+            assert!(
+                body(signature).contains("self.press_video_at(position)"),
+                "{signature} does not reach the player's press path, so a recording starts \
+                 on one host and not the other"
+            );
+        }
+        let press = body("    fn press_float(");
+        let player = press
+            .find("self.press_video_at(position)")
+            .expect("the float's press asks the player");
+        let document = press
+            .find("self.press_preview_text(position)")
+            .expect("the float's press reaches the document");
+        assert!(
+            player < document,
+            "the document underneath answers before the player standing on it"
+        );
+    }
+
+    /// RED — **a player on a glance card answers the hand the way a pane's
+    /// does** (route B slice ②; §7.44 ①, found by photographing the machine
+    /// 2026-08-28, one host over from the float above).
+    ///
+    /// The third surface had the *same* defect as the second, and it survived
+    /// the second one's mend because that mend named one host rather than the
+    /// rule behind it. Both `press_float` and `press_file_peek` are asked
+    /// **above** the chrome router — which is what makes a window and a card
+    /// each opaque to the layout beneath it — and `press_video_at`, which states
+    /// the whole order (a play mark on a picture, then every control on a bar
+    /// that is up, then a double click on the picture), is reached from
+    /// `chrome_mouse_input`. So the card drew the pane's own play disc, lit it
+    /// under the pointer, and on the press opened the preview pane instead:
+    /// `press_file_peek`'s face arm went straight to `press_file_peek_door`.
+    ///
+    /// Photographed: `BT_MOUSE_TRACE` on the press that this pin now forbids —
+    ///
+    /// ```text
+    /// mouse_input state=Pressed button=Left pointer=1704,524 route=none
+    /// open_preview_image enter path=…\vidshow\clock.mp4
+    /// preview_landing_surface seat=SeatId(2) reused=0
+    /// ```
+    ///
+    /// — a press on the disc, and the next station is a pane opening.
+    ///
+    /// Two halves, and the second is the load-bearing one:
+    ///
+    /// ① the card's press road reaches the player's press path at all;
+    /// ② inside the **face** arm the player stands before the door, because that
+    /// is the only ordering that lets the disc be pressed. The face and not the
+    /// whole function on purpose: the card's own furniture — the head that is a
+    /// handle (§7.29), the scroll thumb — is still the card's, and that is the
+    /// same placement `press_float` gives the player in its `Body` arm.
+    ///
+    /// RED GATE: drop `press_video_at` from the face arm and ① fails, which is
+    /// the state every build before 2026-08-28 was in.
+    #[test]
+    fn a_player_on_a_glance_card_answers_the_hand_the_way_a_pane_does() {
+        let press = body("    fn press_file_peek(");
+        assert!(
+            press.contains("self.press_video_at(position)"),
+            "the card's press does not reach the player's press path, so its own play disc \
+             opens the pane it was drawn to make unnecessary"
+        );
+        let face = press
+            .find("file_peek::Press::Open =>")
+            .expect("the card's press has a face arm");
+        let face = &press[face..];
+        let player = face
+            .find("self.press_video_at(position)")
+            .expect("the card's face asks the player");
+        let door = face
+            .find("self.press_file_peek_door()")
+            .expect("the card's face reaches the door");
+        assert!(
+            player < door,
+            "the door underneath answers before the player standing on it"
+        );
+    }
+
+    /// RED — **the card withdraws its still for a recording as well as for an
+    /// animation** (route B slice ②; §7.44 ⑤, found by photographing the machine
+    /// 2026-08-28, on the shutter after the one that found the press road).
+    ///
+    /// A card's still does not go down the picture channel `refit_preview_picture`
+    /// refuses on: it is handed to `file_peek::layout` and drawn in the card's own
+    /// **icon** channel, which runs *after* the video lane. So a still left in
+    /// place is painted over the frames, and the one on top is the one that does
+    /// not move. `file_peek_card_layers` has the clause that withdraws it — and
+    /// it asked only `animation_running_on`.
+    ///
+    /// Photographed: the card's own ▶ pressed, then eight captures 700 ms apart.
+    /// The bar counted `0:01` → `0:06` off the engine, and the picture rect was
+    /// **byte-identical in all eight** — a still of the frame at one tenth
+    /// (`clock.mp4`'s burnt-in counter reading `12` of 120 s) standing over a
+    /// recording that was playing perfectly well underneath it. The float, one
+    /// gesture later and off the *same engine*, read `9` and moved.
+    ///
+    /// The mend is that both halves are asked, which is how every other surface
+    /// asks it: `refit_preview_picture`'s refusal is
+    /// `surface_is_playing_a_video(surface) || animation_running_on(surface)`,
+    /// because *is the picture in this box moving* is one question with two ways
+    /// of being true. A clause that knows about one of them is a clause that will
+    /// be wrong about the other every time.
+    ///
+    /// RED GATE: drop the recording half and the pin fails — which is the state
+    /// the binary photographed on 2026-08-28 was built from.
+    #[test]
+    fn a_card_withdraws_its_still_for_a_recording_the_way_it_does_for_an_animation() {
+        let layers = body("    fn file_peek_card_layers(");
+        let clause = layers
+            .find("let moving = ")
+            .map(|at| &layers[at..])
+            .and_then(|rest| rest.find(';').map(|end| &rest[..end]))
+            .expect("the card has a clause that withdraws its still");
+        for half in [
+            "self.surface_is_playing_a_video(PreviewSurface::Peek)",
+            "self.animation_running_on(PreviewSurface::Peek)",
+        ] {
+            assert!(
+                clause.contains(half),
+                "the card's still is withdrawn without asking {half}, so it is painted over \
+                 the moving picture it is one frame of"
+            );
+        }
+        // And the clause is what gates the picture, not a value computed and
+        // dropped: a half-asked question that never reaches the `match` would
+        // pass the two lines above and change nothing on the glass.
+        assert!(
+            layers.contains("_ if moving => None,"),
+            "the card's still is handed in whatever the clause decided"
+        );
+    }
+
+    /// RED — **a recording drawn on an overlay host gets a layer of its own,
+    /// never that host's face** (route B slice ②; §7.44 ③, photographed twice on
+    /// 2026-08-28 — once on a float and once, after the float was mended, on a
+    /// card).
+    ///
+    /// The renderer draws `VideoStage::Overlay(n)` between layer `n`'s **ground**
+    /// and layer `n`'s **fills** (`bt_render::VideoStage::Overlay`'s own doc, and
+    /// the z-order loop in `WindowRenderer`). That is exactly right for a
+    /// [`bt_render::WebHole`], because a hole belongs under the marks that
+    /// legitimately stand over a page — and exactly wrong for a picture, because
+    /// a host's body well is one of those fills. An index pointed at the face
+    /// therefore draws the recording *underneath* the very surface that is
+    /// supposed to be showing it.
+    ///
+    /// Both hosts had it and both were photographed:
+    ///
+    /// * the **float** drew its face, the fills covered the recording, and the
+    ///   picture appeared only for the moment the chassis was on its way out;
+    /// * the **card**, one mend later, showed an empty picture well with a
+    ///   control bar counting `0:01` → `0:06` underneath it, off an engine that
+    ///   was decoding perfectly well.
+    ///
+    /// The mechanism of the mend is one line and it is the same line on both: an
+    /// **empty layer** pushed directly above the host's face, whose index is what
+    /// the video's stage names. A stage index has to name a layer the z-order
+    /// loop actually reaches, and what that layer is for is being reached — it
+    /// costs no buffer, no draw call and no quad.
+    ///
+    /// So the pin is the rule and not one host: every ledger of "which layer is
+    /// a recording drawn into" is written immediately before a push of an empty
+    /// layer. A build that points one of them at a face again has to delete that
+    /// push to do it.
+    ///
+    /// RED GATE: write either ledger as the host's own face index — which is
+    /// what both builds photographed on 2026-08-28 did — and the arm for that
+    /// host fails.
+    #[test]
+    fn a_recording_on_an_overlay_host_is_drawn_into_a_layer_of_its_own() {
+        for (signature, ledger) in [
+            ("    fn float_layer(", ".float_video_level"),
+            (
+                "    fn file_peek_layer(",
+                "self.window.file_peek_level = Some(",
+            ),
+        ] {
+            let source = body(signature);
+            // The *last* mention, because both ledgers are cleared at the top of
+            // the pass that rebuilds them — a record of what this frame drew is
+            // wrong the moment it is stale — and the write is the one that
+            // matters here.
+            let at = source
+                .rfind(ledger)
+                .unwrap_or_else(|| panic!("{signature} writes {ledger}"));
+            let after = &source[at..];
+            let push = after.find("layers.push(").unwrap_or_else(|| {
+                panic!(
+                    "{signature} names a recording's layer and pushes none, so the stage is \
+                     the host's own face and the body well is painted over the picture"
+                )
+            });
+            assert!(
+                after[push..].starts_with("layers.push(marks::OverlayLayer::default())"),
+                "{signature} points a recording's stage at a layer that draws fills, so the \
+                 host's own body well is painted over the picture it is showing"
+            );
+        }
+    }
+
+    /// RED — **a window that has been closed is not playing anything** (route B
+    /// slice ②; §7.44 ⑨, found on the machine 2026-08-28).
+    ///
+    /// The one door in the seat sweep that "the surface still exists" cannot be
+    /// asked about in the ordinary way, and the reason is a deliberate decision
+    /// one layer down. [`float::FloatHost::drawn`] keeps a window that is on its
+    /// way out — it has to, because the window is still being painted while it
+    /// fades, and retiring its *view* underneath it would blank the thing the
+    /// exit animation is animating. [`super::Runtime::preview_surfaces`] is
+    /// built from `drawn()`, so a closed float stays in the alive list for the
+    /// whole of its departure.
+    ///
+    /// **A decoder is not a view.** The picture went on decoding, and went on
+    /// being drawn, with the chassis already gone from over it — a recording
+    /// playing on a window that the reader has closed, for as long as the exit
+    /// took. So the float arm asks [`float::FloatHost::live`] instead, which is
+    /// `drawn()` minus the ones that have been dismissed, and the sound stops on
+    /// the press rather than at the end of the animation.
+    ///
+    /// Two halves, because the trap is the gap between the two lists and the
+    /// mend is a call site choosing the right one:
+    ///
+    /// ① **The gap is real.** A dismissed window is still drawn and no longer
+    /// live. Were that not so, this whole arm would be dead code and the
+    /// ordinary `alive.contains` branch would already have covered it.
+    ///
+    /// ② **The sweep asks the live list.** Read out of the source, because the
+    /// arm is a `match` inside a closure over a `Runtime` that no test can
+    /// build; what there is to assert is that the float's arm names `live` and
+    /// stands *before* the fallthrough that asks `alive`, since a `match` takes
+    /// the first arm that fits.
+    ///
+    /// RED GATE ①: make `drawn` filter by `is_live` and the first block fails —
+    /// which would also be a fade with nothing in it. RED GATE ②: delete the
+    /// `PreviewSurface::Float` arm from `sweep_video_seats` and the second
+    /// block fails, which is the state every binary before this commit was
+    /// built from.
+    #[test]
+    fn a_closed_window_stops_the_recording_it_was_showing() {
+        use crate::{TabId, float};
+        // ① a dismissed window is still drawn, and no longer live.
+        let mut host = float::FloatHost::default();
+        let now = std::time::Instant::now();
+        let id = host.open(
+            float::FloatMode::Pinned,
+            None,
+            float::FloatTenant::Preview(float::FloatPreview {
+                tab: TabId(1),
+                page: None,
+            }),
+            [100.0, 100.0, 430.0, 400.0],
+            None,
+            now,
+        );
+        assert!(host.live(id).is_some(), "the window is open");
+        assert!(host.dismiss(id, now), "and the reader closes it");
+        assert!(
+            host.drawn().any(|win| win.epoch == id),
+            "a window on its way out is still painted — that is what makes this \
+             arm necessary rather than redundant"
+        );
+        assert!(
+            host.live(id).is_none(),
+            "and it is no longer one of the live ones"
+        );
+
+        // ② the sweep asks the live list, and asks it first.
+        let sweep = body("    fn sweep_video_seats(");
+        let float_arm = sweep
+            .find("PreviewSurface::Float(id) if self.window.float.live(*id).is_none()")
+            .expect(
+                "the seat sweep has no arm for a closed window, so a recording goes on \
+                 playing for the length of the window's exit",
+            );
+        let fallthrough = sweep
+            .find("if !alive.contains(surface)")
+            .expect("the sweep still has its ordinary aliveness question");
+        assert!(
+            float_arm < fallthrough,
+            "the float's arm stands after the branch that reads the drawn list, so it \
+             is never taken"
         );
     }
 
@@ -87841,11 +89532,11 @@ mod floated_page_tests {
         );
         let page = crate::preview::PreviewSource::Web("file:///D:/site/index.html".to_owned());
         assert!(
-            !a_page_was_replaced(None, Some(&page), None),
+            !a_page_was_replaced(None, Some(&page)),
             "the flip leaves the pane on its page, so nothing has replaced it"
         );
         assert!(
-            a_page_still_has_a_pane(false, true, a_page_was_replaced(None, Some(&page), None)),
+            a_page_still_has_a_pane(false, true, a_page_was_replaced(None, Some(&page))),
             "so the browser is still the seat's and is not retired under the flip"
         );
     }
@@ -87974,6 +89665,7 @@ mod floated_page_tests {
         const FLOAT: f32 = 0.11;
         let stack = super::OverlayStack {
             preview_bars: mark(0.01),
+            video_bars: mark(0.011),
             terminal_bars: mark(0.02),
             command_rail: mark(0.03),
             rail: mark(0.04),
@@ -88761,6 +90453,36 @@ struct PictureOnGlass {
     content_revision: u64,
     /// [`WindowRuntime::presented_picture_revision`].
     presented_revision: u64,
+}
+
+/// **Whether an animation tick owes the glass a present** — the three debts a
+/// tick may be carrying, and the one that was missing.
+///
+/// [`Runtime::advance_strip_animation`] asks twice whether a frame is owed. The
+/// first question is cheap and lets an idle window return before it builds
+/// anything; this is the second, asked after the chrome has been rebuilt, and
+/// until 2026-08-28 it was written as `!self.refresh_chrome() && !panes_owe`.
+///
+/// **A decoded picture is not in the chrome.** A playing recording and a running
+/// `.gif` are a layer list handed to `bt_render::WindowRenderer::set_video_layers`
+/// and drawn from renderer state at present time, so `chrome_changed` can never
+/// become `true` because a frame arrived. The tick that had just collected a new
+/// picture returned one line before the present that would have shown it, and
+/// the recording only reached the glass as a passenger on some *other* debt —
+/// which, while the control bar is up, its own clock and scrubber supply on
+/// nearly every tick. `VIDEO_BAR_IDLE_REST + VIDEO_BAR_FADE` after the reader's
+/// last act the bar rests, the chrome goes quiet, and the picture stops: two
+/// seconds of video and then a photograph that jumps forward the moment the
+/// pointer moves. Measured on the machine as eight seconds of byte-identical
+/// captures with the recording's own burnt-in counter thirty-eight seconds
+/// further on behind it.
+///
+/// So the rule is three debts and not two, and it is a named function rather
+/// than a longer `if` because the reason the third one exists is the whole of
+/// what a reader needs and none of it is visible at the call site.
+#[must_use]
+fn tick_owes_a_present(chrome_changed: bool, panes_owe: bool, pictures_owe: bool) -> bool {
+    chrome_changed || panes_owe || pictures_owe
 }
 
 /// Whether a chrome animation's tick can be answered from the picture already
@@ -90010,6 +91732,11 @@ mod tests {
         };
         let stack = OverlayStack {
             preview_bars: mark(0),
+            // 24 and not 23, for the reason written on `card_hint` below: a
+            // marker shared by two families makes this whole assertion pass
+            // while the two swap places, and this band arrived on a later day
+            // than the Cards bubble did.
+            video_bars: mark(24),
             terminal_bars: mark(16),
             command_rail: mark(13),
             rail: mark(1),
@@ -90046,12 +91773,12 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                0, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 8, 20, 23, 9, 10, 11,
-                21
+                0, 24, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 8, 20, 23, 9, 10,
+                11, 21
             ],
-            "bottom to top: pane bars, terminal thumbs, command rails, rail, flight, ground, \
-             search capsule, integration strips, download sheet, schematic, float, modal, file \
-             menu, pane menu, git menu, terminal menu, tab menu, notices, key hint, Cards \
+            "bottom to top: pane bars, video bars, terminal thumbs, command rails, rail, flight, \
+             ground, search capsule, integration strips, download sheet, schematic, float, modal, \
+             file menu, pane menu, git menu, terminal menu, tab menu, notices, key hint, Cards \
              bubble, tip, glance, ghost, window ring"
         );
         let at = |tag: u8| {
@@ -99598,10 +101325,29 @@ mod tests {
                 "the still and the playing picture are one width",
             );
             assert_close(rect_size(still).1, rect_size(playing).1, "and one height");
-            // Both are centred on the body, so one comparison of the centres
-            // covers both origins.
-            assert_close((still[0] + still[2]) / 2.0, 600.0, "centred");
-            assert_close((still[1] + still[3]) / 2.0, 450.0, "centred");
+            // **The same rectangle and not merely the same size** (2026-08-28).
+            // The origins are compared too, because half a pixel of
+            // disagreement between them is exactly the flicker pressing play
+            // would show — and half a pixel is what the two of them were apart
+            // while the still centred itself on a floating-point midpoint and
+            // the layer split its leftover by a floor.
+            for axis in 0..4 {
+                assert_close(still[axis], playing[axis], "one rectangle, not two");
+            }
+            // And it sits on the body's centre as closely as a pixel grid
+            // allows. Half a pixel and not zero: `video_frame_rect` splits the
+            // leftover by a floor, so an odd leftover is a pixel of ground on
+            // one edge and none on the other — which is what every other
+            // centred thing in this window does and is invisible either way.
+            for (centre, want) in [
+                ((still[0] + still[2]) / 2.0, 600.0_f32),
+                ((still[1] + still[3]) / 2.0, 450.0),
+            ] {
+                assert!(
+                    (centre - want).abs() <= 0.5,
+                    "centred: {centre} is more than half a pixel off {want}"
+                );
+            }
         }
         // And the rule it is *not*: the picture channel would leave the
         // repository's own fixture at its own 160×120 in a 1000×500 body.
@@ -116258,6 +118004,7 @@ mod tests {
                 | MathWorkerRequest::InlineImage { leaf, .. }
                 | MathWorkerRequest::PeekImage { leaf, .. }
                 | MathWorkerRequest::PeekVideoFrame { leaf, .. }
+                | MathWorkerRequest::PeekAnimation { leaf, .. }
                 | MathWorkerRequest::PeekPage { leaf, .. }
                 | MathWorkerRequest::PreviewMath { leaf, .. }
                 | MathWorkerRequest::VerifyPath { leaf, .. } => leaf,
@@ -120390,29 +122137,19 @@ mod tests {
     /// are here because "not a page" is a claim about every video spelling and
     /// not only about the three this window drew a face for.
     ///
-    /// **What 2026-08-27's second ruling changed, and what it did not.** Route
-    /// A gave this window a play verb, and a played video **is** on the engine
-    /// — so the claim this test makes had to become exact. It is exact and it
-    /// is unchanged in substance: **no door opens a video as a page.** The four
-    /// doors below are the four ways a *name* reaches a lane, and all four still
-    /// answer no. The play verb is not one of them: it is a press on a control
-    /// this window drew, it does not consult [`preview_open_lane`], and what it
-    /// navigates to is **not the video** but a shell page this window wrote with
-    /// the video inside it ([`crate::player`]). §7.16's measurement stands
-    /// exactly as measured — a top-level navigation to a `.mp4` is still a
-    /// download, still cancelled, still `ConnectionAborted` — and this slice
-    /// did not test it again because it did not change it.
+    /// **What route B changed, and what it did not** (2026-08-28; §7.44 ④).
+    /// The claim is the same claim and it is now simpler than it has ever been:
+    /// **no door opens a video as a page, and there is no longer a door that
+    /// puts a video near one.** Route A's play verb wrote a shell page and
+    /// navigated a browser at it; that verb, that page and that mint are gone,
+    /// and a recording is decoded by Media Foundation and drawn on this window's
+    /// own glass. §7.16's measurement stands exactly as measured — a top-level
+    /// navigation to a `.mp4` is still a download, still cancelled, still
+    /// `ConnectionAborted` — and this slice did not test it again because it did
+    /// not change it. What it did was remove the only reason anyone would.
     ///
-    /// The last assertion is where that distinction is nailed down: the play
-    /// verb's mint carries a URL that is **not** the recording's own, so a build
-    /// that "simplified" the player by minting the video directly fails here
-    /// rather than on somebody's machine.
-    ///
-    /// RED GATE ①: add `mp4` to `preview::PAGE_EXTENSIONS` and every assertion
-    /// in the loop fails, each naming the door it stands at. RED GATE ②: make
-    /// [`crate::player::mint_player_shell`] hand back `Mint::file(video)` and
-    /// the last block fails — which is the build that plays nothing and shows
-    /// 「did not respond」.
+    /// RED GATE: add `mp4` to `preview::PAGE_EXTENSIONS` and every assertion in
+    /// the loop fails, each naming the door it stands at.
     #[test]
     fn a_video_takes_no_page_lane_at_any_door() {
         for video in [
@@ -120439,33 +122176,6 @@ mod tests {
                 "the pool's own door: {video}"
             );
         }
-        // **And the one door that does put an engine on a video's pane sends a
-        // shell, never the recording** (user ruling 2026-08-27, route A).
-        let video = std::env::temp_dir().join("folio-play-gate.mp4");
-        std::fs::write(&video, b"not a real recording, and it does not have to be")
-            .expect("a temp file");
-        let mint =
-            crate::player::mint_player_shell(&video, &video, crate::player::PlayerSkin::in_force())
-                .expect("a drive path mints a shell");
-        let shell = mint.target().expect("a shell mint names its URL");
-        assert!(
-            shell.ends_with(".html"),
-            "the engine is navigated to a page: {shell}"
-        );
-        let recording = match webnav::Mint::file(&video) {
-            Ok(webnav::Mint::File(url)) => url,
-            other => unreachable!("Mint::file answers File, saw {other:?}"),
-        };
-        assert_ne!(
-            shell, recording,
-            "and never to the recording itself, which is what §7.16 measured as a download"
-        );
-        assert_eq!(
-            mint.video_behind_the_shell(),
-            Some(video.as_path()),
-            "while the window goes on knowing which recording it is standing in for"
-        );
-        let _ = std::fs::remove_file(&video);
     }
 
     /// RED — **a video has a face of its own, and every door draws it** (user
@@ -120506,15 +122216,18 @@ mod tests {
             r"D:\shots\CLIP.MP4",
             r"D:\shots\trailer.m4v",
             r"D:\shots\screencast.webm",
-            // **And `.mov` since the play verb arrived** (user ruling
-            // 2026-08-27, the second of that day). It joined the class the day
-            // the class stopped being one column: it has a face and no player,
-            // it says so on its own card, and the first cut of this list left it
-            // out on the argument that the two sets would one day have to be one
-            // set. They are not one set and were never going to be — see
-            // `preview::VIDEO_EXTENSIONS`, where that argument is settled the
-            // other way.
+            // **And the four that route A could not play** (route B slice ②,
+            // 2026-08-28; §7.44 ⑥). The first cut of this list kept them out on
+            // the argument that "has a face" and "can be played" would one day
+            // be one set. They are one set now, and it was one decoder that made
+            // them one: every name here was handed to `Engine::open` on the
+            // machine and gave up frames. See
+            // `preview::VIDEO_EXTENSIONS`, and the class's own gate
+            // `every_name_in_the_class_plays_and_the_class_is_the_seven_that_were_opened`.
             r"D:\shots\capture.mov",
+            r"D:\shots\clip.mkv",
+            r"D:\shots\clip.avi",
+            r"D:\shots\recording.wmv",
         ] {
             assert_eq!(
                 preview_open_lane(Path::new(video)),
@@ -120533,11 +122246,11 @@ mod tests {
             );
         }
         for document in [
-            // Nothing under this window reads these containers at all, so there
-            // is no face to promise — see `preview::VIDEO_EXTENSIONS`, and note
-            // that `.mov` has left this list rather than been forgotten from it.
-            r"D:\shots\clip.mkv",
-            r"D:\shots\clip.avi",
+            // The two containers that are still outside the class, and outside
+            // it for the honest reason: nobody has opened one on the machine, so
+            // there is no fixture and no measurement behind a row (§7.44 ⑪ ⓒ).
+            r"D:\shots\clip.mpg",
+            r"D:\shots\clip.flv",
             // And the two neighbours a substring reading would sweep up.
             r"D:\shots\clip.mp4.txt",
             r"D:\shots\clip.webmx",
@@ -120557,166 +122270,45 @@ mod tests {
         );
     }
 
-    /// RED — **only a video that can be played is offered a play button, and the
-    /// one that cannot says so instead** (user ruling 2026-08-27, the second of
-    /// that day; `docs/DESIGN.md` §7.23 ⑩).
-    ///
-    /// The two halves of the second column of one table, asserted where a reader
-    /// of the *window* will find them rather than only down in `preview`. A
-    /// `.mov` has a face — it is in the class, it takes the video lane, its card
-    /// draws its frame — and pressing play on it would navigate to a shell whose
-    /// `<video>` the engine answers with nothing at all. So it is not offered
-    /// one, and the reason stands on its own card in words.
-    ///
-    /// **The sentence is on the second line and the card still has two**, which
-    /// is the constraint that decided where it went: the card's shape is pinned
-    /// elsewhere, so a third line would have been a card that changes shape for
-    /// one kind of file.
-    ///
-    /// RED GATE ①: give `mov` `VideoPlayback::Plays` and the first block fails —
-    /// a build that draws a button which navigates to a page that plays nothing.
-    /// RED GATE ②: drop the sentence from `preview::video_fact_lines` and the
-    /// second block fails — a `.mov` whose card is identical to a `.mp4`'s, so
-    /// the only way to learn it will not play is to press the button that is not
-    /// there.
-    #[test]
-    fn only_a_playable_video_is_offered_a_play_button() {
-        for playable in [
-            r"D:\shots\clip.mp4",
-            r"D:\shots\trailer.m4v",
-            r"D:\shots\screencast.webm",
-        ] {
-            assert!(
-                preview::path_names_a_playable_video(Path::new(playable)),
-                "{playable}"
-            );
-        }
-        for face_only in [r"D:\shots\capture.mov", r"D:\shots\CAPTURE.MOV"] {
-            assert!(
-                !preview::path_names_a_playable_video(Path::new(face_only)),
-                "{face_only}"
-            );
-            // …and it is still a video, which is the half that would be lost by
-            // taking the row out of the table instead of marking it.
-            assert!(
-                preview::path_names_a_video(Path::new(face_only)),
-                "{face_only}"
-            );
-        }
-        let facts = preview::VideoFacts {
-            duration_ms: Some(3_000),
-            native: Some((160, 120)),
-            bytes: Some(2_371),
-        };
-        let lines = preview::video_fact_lines(Some("mov"), facts);
-        let said = lines[1]
-            .clone()
-            .expect("the second line says what the file is");
-        assert!(
-            said.contains(i18n::Text::VideoFormatCannotPlay.text()),
-            "a face-only video says why there is no button: {said}"
-        );
-        assert!(
-            said.contains('B'),
-            "and it still says how large the file is: {said}"
-        );
-        let plays = preview::video_fact_lines(Some("mp4"), facts)[1]
-            .clone()
-            .expect("a playable video still says its size");
-        assert!(
-            !plays.contains(i18n::Text::VideoFormatCannotPlay.text()),
-            "and a video that plays says nothing of the kind: {plays}"
-        );
-        assert_eq!(
-            lines[0],
-            preview::video_fact_lines(Some("mp4"), facts)[0],
-            "the recording's own line is the same sentence for both"
-        );
-    }
+    // **`only_a_playable_video_is_offered_a_play_button` is retired here**
+    // (route B slice ②, 2026-08-28; §7.44 ⑥), and the retirement is the ruling
+    // rather than a tidy-up.
+    //
+    // It asserted the *second column* of the class table — a name with a face
+    // and no player — and that column existed for exactly one reason: the still
+    // came from Media Foundation and the playback came from Chromium, so two
+    // decoders could disagree about one file. One decoder answers both
+    // questions now, the column has no member, and a test that asserted
+    // `.mov` is not playable would today be asserting the defect.
+    //
+    // What replaces it is `preview`'s own
+    // `every_name_in_the_class_plays_and_the_class_is_the_seven_that_were_opened`,
+    // which is stronger than what stood here: it names all seven, it asserts
+    // that the face and the play button read **one** predicate so they cannot
+    // come apart by construction, and every row behind it was opened on the
+    // machine rather than declared.
 
-    /// RED — **a playing pane keeps its browser, and a pane that went somewhere
-    /// else does not** (user ruling 2026-08-27, route A; §7.23 ⑩).
+    /// RED — **a playing video is a file to every surface that names it**
+    /// (user ruling 2026-08-27; re-based on route B, 2026-08-28; §7.23 ⑩, §7.44
+    /// ①).
     ///
-    /// The line route A rests on. Every other page on a seat replaces what the
-    /// pane was showing, and the ordinary reading of "one seat shows one thing"
-    /// is written to notice that: a pane pointing at a *file* under a browser is
-    /// a pane something landed on, and the browser retires. A player is the one
-    /// arrangement where that reading is wrong — the file the pane points at is
-    /// the very thing the browser is playing — and this is where the exception is
-    /// bounded.
-    ///
-    /// It is bounded at exactly one file. Open something else on that pane and
-    /// the two paths part, this answers `true`, and the browser goes. That is not
-    /// a special case for stopping playback; it is the general rule finally
-    /// arriving at the right pane, and it is why closing a pane, replacing its
-    /// file and quitting all stop the sound without any of them being taught
-    /// about video.
-    ///
-    /// RED GATE ①: drop the `playing` arm and the first block fails — a video
-    /// that stops within one turn of the play button being pressed. RED GATE ②:
-    /// answer `false` whenever `playing.is_some()` and the third block fails — a
-    /// browser left running under a pane showing a different file, which is a
-    /// sound with no visible source anywhere in the window.
-    #[test]
-    fn a_playing_pane_keeps_its_browser_and_a_replaced_one_does_not() {
-        let clip = Path::new(r"D:\shots\clip.mp4");
-        let other = Path::new(r"D:\shots\other.mp4");
-        assert!(
-            !a_page_was_replaced(Some(clip), None, Some(clip)),
-            "the pane is showing the recording its browser is playing"
-        );
-        assert!(
-            a_page_still_has_a_pane(
-                false,
-                true,
-                a_page_was_replaced(Some(clip), None, Some(clip))
-            ),
-            "so the browser is not retired under the player"
-        );
-        assert!(
-            a_page_was_replaced(Some(other), None, Some(clip)),
-            "another file landed on the pane, so the player is over"
-        );
-        assert!(
-            a_page_was_replaced(None, None, Some(clip)),
-            "and a pane showing no picture at all is not showing the recording"
-        );
-        // And the reading for every other page is exactly what it was.
-        assert!(
-            !a_page_was_replaced(
-                None,
-                Some(&preview::PreviewSource::Web(
-                    "http://localhost:5173/app".into()
-                )),
-                None
-            ),
-            "a page on a page's pane is untouched by any of this"
-        );
-        assert!(
-            a_page_was_replaced(Some(clip), None, None),
-            "and a picture under a page with no player is still a replacement"
-        );
-    }
-
-    /// RED — **a playing video is a file to every surface that names it, and the
-    /// shell is nobody's document** (user ruling 2026-08-27, route A; §7.23 ⑩).
-    ///
-    /// Route A's whole cost is identity, and this is where it is paid. What the
-    /// engine is on is a page in a cache folder called `play-3f2c….html`; what
-    /// the reader opened is `D:\shots\clip.mp4`. Every surface that spells this
-    /// pane's identity must spell the recording — so they all ask one predicate,
-    /// and this asserts that they do rather than asserting a handful of strings.
+    /// Route A's whole cost was identity, and this is where it was paid: what
+    /// the engine was on was a page in a cache folder called `play-3f2c….html`,
+    /// and what the reader opened was `D:\shots\clip.mp4`. Route B does not pay
+    /// it — there is no second file — but the readings this test pins were never
+    /// about the shell, they were about a pane whose picture has been replaced
+    /// by something moving, and every one of them is still owed.
     ///
     /// Read out of the source because there is no value that expresses "the rail
-    /// asks the seat what it is playing": a rail's kind is computed from a window
-    /// with a browser on it, and standing one up in a unit test is standing up
-    /// WebView2.
+    /// asks what this surface is playing": a rail's kind is computed from a
+    /// window, and standing one up in a unit test is standing up a window.
     ///
     /// RED GATE ①: drop the `!self.surface_is_playing_a_video(surface)` from
-    /// `preview_rail_kind` and the first assertion fails — the pane grows an
-    /// address bar printing a cache path where its breadcrumb was. RED GATE ②:
-    /// derive the recording from the shell's file name instead of carrying it on
-    /// the mint and the fourth assertion fails.
+    /// `preview_rail_kind` and the first assertion fails — a playing pane grows
+    /// an address bar where its breadcrumb was. RED GATE ②: drop it from
+    /// `refit_preview_picture` and the still is painted straight over the moving
+    /// picture, which on the machine is a video that plays for one frame and
+    /// then freezes.
     #[test]
     fn a_playing_video_is_spelled_as_the_file_it_is() {
         const SOURCE: &str = include_str!("main.rs");
@@ -120734,24 +122326,538 @@ mod tests {
         );
         assert!(
             body("fn refit_preview_picture(").contains(playing),
-            "and the decoded frame must come off the glass while the engine is behind it"
+            "and the decoded still must come off the glass while the engine is drawing"
         );
         assert!(
             body("fn preview_head_tools(").contains(playing),
             "and the head's per-type slot must hold the stop rather than a flip"
         );
-        // The one place the recording is known, and it is carried rather than
-        // parsed back out of a shell's name.
+        // **And the one place a surface's recording is known** — one map, keyed
+        // by surface. Route A had to ask a browser, which asked its mint; there
+        // is no browser and no mint, so there is nowhere for a second answer to
+        // come from.
         assert!(
-            body("fn video_playing_on(").contains("playing_video()"),
-            "the window asks the seat, and the seat asks its mint"
+            body("fn video_playing_on(").contains("self.window.video.get(surface)"),
+            "the window asks its own map and nothing else"
         );
-        // And `↗` is untouched, because the buffer was never left: the pane is
-        // still on the file, so the hand-off door has nothing new to learn.
+    }
+
+    /// RED — **the shell page is gone, and so is everything that existed to
+    /// serve it** (user ruling 2026-08-28; `docs/DESIGN.md` §7.44 ④).
+    ///
+    /// The ruling that retired route A named five things, and a retirement that
+    /// left any one of them standing would be a build carrying a second, dead
+    /// way to play a video — which is exactly the state §7.23's own note warned
+    /// this slice about when it wrote "一行都没有删".
+    ///
+    /// 1. **`player.rs` is not on the disk.** The module that wrote the page.
+    /// 2. **No opening video element tag anywhere in the crate.** The element
+    ///    the page existed to contain, and the one string that could not survive
+    ///    by accident. Named in prose and not spelled here, for the reason the
+    ///    needles below are spelled in halves: this doc comment is inside one of
+    ///    the files the walk reads, so a sentence quoting the tag would make the
+    ///    test its own counter-example.
+    /// 3. **`Mint::VideoShell` does not exist.** The note the gate carried about
+    ///    a page standing in for a recording.
+    /// 4. **No autoplay-policy argument.** It was written for one self-starting
+    ///    player in one page this window wrote; `bt-platform`'s own gate pins
+    ///    the other half.
+    /// 5. **Nothing writes `%LOCALAPPDATA%\Folio\player`.** The folder the
+    ///    shells were content-addressed into.
+    ///
+    /// **Files left behind by an older build are not swept, on purpose.** A
+    /// shell was about seven hundred bytes and content-addressed, so what a
+    /// reader who upgrades has is one small file per recording they ever played,
+    /// in a cache folder, inside a profile that goes when the profile goes. A
+    /// sweep would need a rule for the *other* Folio running against the same
+    /// `%LOCALAPPDATA%` — which is the reason there was never a sweep — and
+    /// deleting from a directory this build no longer knows about, on the
+    /// strength of a name pattern, is a worse thing to ship than seven hundred
+    /// stale bytes. Written down rather than done.
+    ///
+    /// RED GATE: restore any one of the five and the assertion that names it
+    /// fails. The second is the load-bearing one — a build that kept the module
+    /// but stopped calling it would pass the other four.
+    #[test]
+    fn the_shell_page_is_gone() {
+        let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         assert!(
-            !body("fn preview_page_hand_off(").contains("VideoShell"),
-            "the hand-off must not have grown a case for the player"
+            !source_dir.join("player.rs").exists(),
+            "the module that wrote the shell page is still on the disk"
         );
+        let mut sources = Vec::new();
+        for entry in std::fs::read_dir(&source_dir).expect("this crate has a source directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                let text = std::fs::read_to_string(&path).expect("a source file");
+                sources.push((path, text));
+            }
+        }
+        assert!(
+            sources.len() > 40,
+            "the walk found the crate: {}",
+            sources.len()
+        );
+        // **Asked of the code, and comment lines are dropped before it is
+        // asked** (2026-08-28).
+        //
+        // Not a loophole: the rule is about what this crate *does*, and a
+        // paragraph explaining a route that was retired is not that route.
+        // `preview.rs` carries four sentences about the page, `webhost.rs` one
+        // about the accessor that read its mint, and this test's own doc comment
+        // would be another — a pin that forbade the prose would forbid the only
+        // record of why the code is gone. `bt-render`'s source pins drop
+        // comments for exactly this reason.
+        //
+        // Each needle is still spelled in halves, because this file is one of
+        // the ones walked and a needle written whole would be found in the array
+        // that looks for it.
+        let code_of = |text: &str| -> String {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let code: Vec<(&std::path::PathBuf, String)> = sources
+            .iter()
+            .map(|(path, text)| (path, code_of(text)))
+            .collect();
+        for needle in [
+            concat!("Video", "Shell"),
+            concat!("--autoplay", "-policy"),
+            concat!("mint_player", "_shell"),
+            concat!("shell_", "html"),
+        ] {
+            for (path, text) in &code {
+                assert!(
+                    !text.contains(needle),
+                    "{needle} is still in {}",
+                    path.display()
+                );
+            }
+        }
+        // **And the element, shaped like a tag rather than like four
+        // characters.** `Option<video_seat::BarLayout>` contains `<` followed by
+        // `video` and is a Rust type; a module named after the thing that
+        // replaced the page is not the page coming back. What this looks for
+        // cannot be written except by writing the element, and it is the whole
+        // class: the bare tag, the tag with attributes, and the self-closing
+        // one alike.
+        let opening = concat!("<", "video");
+        for (path, text) in &code {
+            for (at, _) in text.match_indices(opening) {
+                let after = text[at + opening.len()..].chars().next();
+                assert!(
+                    !matches!(after, None | Some('>' | ' ' | '\t' | '\n' | '/')),
+                    "an opening video element is back in {}",
+                    path.display()
+                );
+            }
+        }
+        // And the folder the shells lived in is written by nothing.
+        for (path, text) in &code {
+            assert!(
+                !text.contains(concat!("Folio", "\\", "player")),
+                "the shell folder is still named in {}",
+                path.display()
+            );
+        }
+    }
+
+    /// RED — **a tick whose only news is a decoded picture still reaches the
+    /// glass** (the freeze of 2026-08-28; §7.44 ③).
+    ///
+    /// The defect this pins was found by photographing the machine: press play,
+    /// take your hand off the mouse, and the recording runs for two seconds and
+    /// then stops dead, while the decoder behind it goes on for as long as you
+    /// leave it. Two seconds is `VIDEO_BAR_IDLE_REST + VIDEO_BAR_FADE` — the
+    /// control bar's dwell and fade — because while the bar is up its clock and
+    /// its scrubber change the *chrome*, and the picture was only ever reaching
+    /// the glass as a passenger on that.
+    ///
+    /// Two halves, because the fault had two places to live and mending one
+    /// without the other mends nothing:
+    ///
+    /// ① **The rule.** A picture's debt alone is enough, exactly as a chrome
+    /// change alone is and a pane in flight alone is — and a tick carrying none
+    /// of the three presents nothing, which is what keeps an idle window at
+    /// zero.
+    ///
+    /// ② **The call site asks it.** Read out of the source, because the gate is
+    /// a `return` inside a method that cannot be called without a window: what
+    /// there is to assert is that `advance_strip_animation` puts its question
+    /// through [`tick_owes_a_present`] and hands it the picture's debt.
+    ///
+    /// RED GATE ①: return `chrome_changed || panes_owe` from
+    /// `tick_owes_a_present` and the first block fails. RED GATE ②: write the
+    /// gate back as `!self.refresh_chrome() && !panes_owe` and the second block
+    /// fails — which is the state the binary that froze was built from.
+    #[test]
+    fn a_video_frame_alone_is_enough_to_present() {
+        // ① the rule.
+        assert!(
+            tick_owes_a_present(false, false, true),
+            "a decoded picture and nothing else is still a frame the glass is owed"
+        );
+        assert!(tick_owes_a_present(true, false, false), "the chrome moved");
+        assert!(
+            tick_owes_a_present(false, true, false),
+            "a pane is in flight"
+        );
+        assert!(
+            !tick_owes_a_present(false, false, false),
+            "and a tick with no news at all presents nothing — an idle window \
+             costs what it costs because of this half"
+        );
+
+        // ② the call site asks it.
+        const SOURCE: &str = include_str!("main.rs");
+        fn body(signature: &str) -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        }
+        let tick = body("fn advance_strip_animation(");
+        assert!(
+            tick.contains("tick_owes_a_present(self.refresh_chrome(), panes_owe, pictures_owe)"),
+            "the chrome gate asks the whole question, with the picture's debt in it"
+        );
+        assert!(
+            tick.contains("let pictures_owe = frames_arrived || boxes_moved;"),
+            "and the picture's debt is a name that survives as far as that gate"
+        );
+    }
+
+    /// RED — **the tick that empties the picture list still hands it over**
+    /// (§7.44 ⑨, photographed on the machine 2026-08-28).
+    ///
+    /// The freeze above and this are the same mistake twice, one line apart: a
+    /// gate that decides there is nothing to say by asking about the thing that
+    /// has just stopped existing.
+    ///
+    /// `advance_strip_animation` skips `refresh_video_layers` while nothing is
+    /// moving, and "nothing is moving" was read as *this window holds no
+    /// recording and no animation*. But `sweep_video_seats` runs on the line
+    /// above, and removing the last seat is exactly what makes that true — so
+    /// the one tick where the renderer needed to be told the list is now empty
+    /// is the one tick that never told it. It went on drawing the last frame it
+    /// was given.
+    ///
+    /// **What that looks like:** a floating window playing a recording is
+    /// closed, and its last decoded frame stays on the glass with no head, no
+    /// bar and no window around it, until something else happens to run a layout
+    /// pass. The decoder is already gone by then, which is why the leftover is a
+    /// photograph rather than a video — four captures 700ms apart, byte
+    /// identical over that rectangle.
+    ///
+    /// The mend keeps the gate's real purpose — an idle window rebuilds nothing
+    /// — by asking the renderer as well: *and the renderer is holding nothing*.
+    ///
+    /// A source pin because the gate is a `let` inside a method that cannot be
+    /// called without a window, and because what has to be true is about the
+    /// *condition* rather than about a value: a build where the third clause is
+    /// missing is green on every machine that never closes a video.
+    ///
+    /// RED GATE: drop the `renderer.video_layers()` clause and this fails, which
+    /// is the state the binary photographed on 2026-08-28 was built from.
+    #[test]
+    fn the_tick_that_empties_the_picture_list_still_hands_it_over() {
+        const SOURCE: &str = include_str!("main.rs");
+        fn body(signature: &str) -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        }
+        let tick = body("fn advance_strip_animation(");
+        let guard = tick
+            .find("let anything_moving =")
+            .expect("the tick still gates the picture list");
+        let end = tick[guard..].find(';').expect("the gate is one statement") + guard;
+        let condition = &tick[guard..end];
+        assert!(
+            condition.contains("self.window.renderer.video_layers().is_empty()"),
+            "the gate decides there is nothing to hand over without asking the \
+             renderer what it is still holding, so the tick that removes the last \
+             seat never tells it:\n{condition}"
+        );
+        // And the sweep is above it, which is what makes the gap reachable at
+        // all — a sweep that ran afterwards would leave the stale list for one
+        // tick and no longer.
+        let sweep = tick
+            .find("self.sweep_video_seats();")
+            .expect("the tick sweeps the seats");
+        assert!(
+            sweep < guard,
+            "the seats are swept after the list is gated, which is a different \
+             defect from the one this pins"
+        );
+    }
+
+    /// **The engine ledger is a fact about a process, and this binary is one**
+    /// (§7.42 ⑦; the same gate `bt_platform`'s own engine tests take, for the
+    /// same reason and in its own process).
+    ///
+    /// `engines_outstanding` counts every engine this *process* holds. Two tests
+    /// in here open engines, `cargo` runs them on one thread per core, and a
+    /// test that reads the counter while another is moving it reads a race — the
+    /// red that three individually-correct arms added up to the first time the
+    /// whole workspace ran together. So every test in this binary that concludes
+    /// anything from the number takes this first.
+    ///
+    /// It is not a fix to the invariant and must not be read as one: engines are
+    /// perfectly safe to open concurrently and nothing in the product serialises
+    /// them. What cannot be done concurrently is reading a global counter and
+    /// drawing a conclusion from the value.
+    fn ledger_gate() -> std::sync::MutexGuard<'static, ()> {
+        static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // A poisoned gate means nothing: what it guards is a `()`. Taking the
+        // inner value is what stops one red test turning every later one into a
+        // second, unrelated failure.
+        GATE.lock().unwrap_or_else(|held| held.into_inner())
+    }
+
+    /// **Wait for the ledger to reach `target`**, and answer where it got to.
+    ///
+    /// Since `Engine::open` stopped waiting for the engine to be built (§7.44
+    /// ⑫), "an engine exists" becomes true shortly *after* the open returns
+    /// rather than before it: the counter is bumped on the engine's own thread,
+    /// where the `IMFMediaEngine` is actually made. A test that reads the
+    /// counter on the next instruction is reading that race.
+    ///
+    /// A deadline and not a sleep, so a machine that is quick pays nothing and a
+    /// machine that is slow is not called wrong. Under [`ledger_gate`], so
+    /// nothing else is moving the number while this watches it.
+    fn engines_settling_to(target: u64) -> u64 {
+        use bt_platform::video::engine::engines_outstanding;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let now = engines_outstanding();
+            if now == target || Instant::now() >= deadline {
+                return now;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// RED — **one recording is one seat, and a seat is at home on any of the
+    /// three surfaces** (user ruling 2026-08-28: *「视频在 hover 卡、固定浮窗、侧边
+    /// 预览 pane 三个表面用同一个引擎与同一张画、同一套手势」*; §7.44 ①).
+    ///
+    /// The whole of "one model, three surfaces", stated as the two halves it
+    /// actually decomposes into:
+    ///
+    /// ① **The model does not know which surface it is on.** The same door —
+    /// `VideoSeats::open` — is taken for a docked pane, a floating window and
+    /// the glance card, and what comes back answers the same questions with the
+    /// same types. There is no per-surface branch to get wrong because there is
+    /// no per-surface type.
+    ///
+    /// ② **And they are still three pictures.** Three surfaces over one file
+    /// are three seats with three engines and three texture names, because they
+    /// are three rectangles that may be at three playheads. A build that
+    /// "shared" the seat between surfaces would show one picture in three places
+    /// and stop one of them stopping all three.
+    ///
+    /// RED GATE ①: key the map by path instead of by surface and the second
+    /// `open` returns the first seat — the count is one, the keys are equal, and
+    /// two of the three surfaces are drawing somebody else's playhead. RED GATE
+    /// ②: leave the engines to `Drop` at the end of the test instead of
+    /// `shutdown_all` and `engines_outstanding` never comes back to where it
+    /// started, which is §7.42 ⑦'s counter noticing a leak this slice could
+    /// introduce three times over.
+    #[test]
+    fn a_video_is_one_seat_on_three_surfaces() {
+        use bt_platform::video::engine::engines_outstanding;
+        let _ledger = ledger_gate();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-assets/folio-video-test.mp4");
+        let before = engines_outstanding();
+        let mut seats = video_seat::VideoSeats::default();
+        let surfaces = [
+            PreviewSurface::Seat(LeafId {
+                tab: TabId(1),
+                seat: SeatId(2),
+            }),
+            PreviewSurface::Float(9),
+            PreviewSurface::Peek,
+        ];
+        let now = Instant::now();
+        for surface in surfaces {
+            seats
+                .open(surface, &fixture, now)
+                .unwrap_or_else(|error| panic!("{surface:?} opens the fixture: {error:?}"));
+        }
+        // ① one door, one shape of answer, three surfaces.
+        let mut keys = std::collections::BTreeSet::new();
+        for surface in surfaces {
+            let seat = seats
+                .get(surface)
+                .unwrap_or_else(|| panic!("{surface:?} holds a seat"));
+            assert_eq!(seat.path(), fixture, "{surface:?}");
+            // The same questions, answered for every surface alike.
+            let _ = seat.state();
+            let _ = seat.is_sounding();
+            let _ = seat.presence(now, Motion::Full);
+            keys.insert(seat.key().to_owned());
+        }
+        // ② three pictures, not one shared between three boxes.
+        assert_eq!(keys.len(), 3, "three surfaces are three textures: {keys:?}");
+        assert_eq!(
+            engines_settling_to(before + 3),
+            before + 3,
+            "three surfaces are three decoders"
+        );
+        // And closing one closes exactly one.
+        assert!(seats.close(surfaces[1]));
+        assert!(seats.get(surfaces[1]).is_none());
+        assert!(
+            seats.get(surfaces[0]).is_some(),
+            "and leaves the others alone"
+        );
+        assert_eq!(engines_outstanding(), before + 2);
+        seats.shutdown_all();
+        assert_eq!(
+            engines_outstanding(),
+            before,
+            "and no engine outlives the surfaces it was opened for"
+        );
+    }
+
+    /// RED — **a card dragged into a window carries its engine with it** (user
+    /// ruling 2026-08-28: *「拖头转浮窗时把引擎带走(不重开,位置不丢)」*; §7.44 ③).
+    ///
+    /// The one behaviour in this slice that a reader can see and a reviewer
+    /// cannot infer. A glance card playing a recording, dragged by its head six
+    /// pixels, becomes a floating window — and the ruling is that what arrives
+    /// in that window is *the same playback*: not restarted, not re-decoded, not
+    /// back at zero.
+    ///
+    /// Four assertions, and each is one way a re-open would give itself away:
+    ///
+    /// 1. **No engine was started and none was shut down.** §7.42 ⑦'s two
+    ///    counters are process-wide and monotone, so "the same engine" is a
+    ///    thing this test can state in arithmetic rather than by looking at a
+    ///    pointer.
+    /// 2. **The texture kept its name.** A key derived from the surface would
+    ///    change here, the renderer would release one texture and upload
+    ///    another, and the reader would see one black frame.
+    /// 3. **The playhead did not go back.** A re-opened engine starts at zero;
+    ///    this one is where it was.
+    /// 4. **The card is empty afterwards.** A `rehome` that copied rather than
+    ///    moved would leave a decoder running for a card that has gone.
+    ///
+    /// RED GATE: replace `rehome` in `promote_file_peek` with a `close` and an
+    /// `open` — which is what the door did before this slice, and is what
+    /// `open_preview_onto` would do on its own — and assertions 1, 2 and 3 all
+    /// fail at once.
+    #[test]
+    fn a_card_torn_off_carries_its_engine_with_it() {
+        use bt_platform::video::engine::{engines_shut_down, engines_started};
+        let _ledger = ledger_gate();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-assets/folio-video-test.mp4");
+        let mut seats = video_seat::VideoSeats::default();
+        let now = Instant::now();
+        seats
+            .open(PreviewSurface::Peek, &fixture, now)
+            .expect("the card opens the fixture");
+        // Let the clock get off zero, so that "the playhead did not go back" is
+        // a claim with something in it.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if seats
+                .get(PreviewSurface::Peek)
+                .is_some_and(|seat| seat.state().position_secs > 0.0)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let card = seats.get(PreviewSurface::Peek).expect("a seat on the card");
+        let key = card.key().to_owned();
+        let was = card.state().position_secs;
+        assert!(was > 0.0, "the fixture is playing before the tear-off");
+        let started = engines_started();
+        let stopped = engines_shut_down();
+
+        let float = PreviewSurface::Float(4);
+        assert!(seats.rehome(PreviewSurface::Peek, float), "the tear-off");
+
+        // ① nothing was started and nothing was stopped.
+        assert_eq!(engines_started(), started, "a second engine was opened");
+        assert_eq!(
+            engines_shut_down(),
+            stopped,
+            "the first engine was shut down"
+        );
+        let window = seats.get(float).expect("the window holds the seat now");
+        // ② the texture kept its name.
+        assert_eq!(
+            window.key(),
+            key,
+            "the picture was released and re-uploaded"
+        );
+        assert_eq!(window.path(), fixture);
+        // ③ the playhead did not go back to zero.
+        assert!(
+            window.state().position_secs >= was,
+            "the playback restarted: {was} became {}",
+            window.state().position_secs
+        );
+        // ④ and the card is holding nothing.
+        assert!(seats.get(PreviewSurface::Peek).is_none());
+        seats.shutdown_all();
+    }
+
+    /// RED — **the still and the first played frame land in the same rectangle**
+    /// (user ruling 2026-08-28: *「播放前后同几何」*; §7.44 ①, closing §7.42 ⑤ for
+    /// all three surfaces).
+    ///
+    /// §7.42 pinned the *rule* — one `video_fit_extent` for both — as a property
+    /// of two pure functions. What it could not pin, because slice ① had one
+    /// surface and no play verb on the other two, is that the two callers hand
+    /// those functions the same box. This does:
+    /// [`video_still_destination`] is what a paused surface's frame is drawn by
+    /// and [`bt_render::video_frame_rect`] is what the playing layer is drawn
+    /// by, and they are asked here about the same body and the same recording.
+    ///
+    /// **The rounding is asserted to the pixel and not to a tolerance.** A
+    /// disagreement of one pixel is exactly what a reader sees as a flicker when
+    /// they press play, and a test that allowed one would be a test written to
+    /// pass.
+    ///
+    /// RED GATE: fit the still with `bt_render::preview_image_extent` — the
+    /// picture channel's rule, which never enlarges — and every small-recording
+    /// row fails by hundreds of pixels. That is the `next12` defect exactly: a
+    /// 160×120 clip drawn 160×120 in a full-height pane, jumping to fill it the
+    /// instant the first frame arrived.
+    #[test]
+    fn the_still_and_the_first_played_frame_share_a_rect() {
+        let bodies = [
+            [0.0_f32, 0.0, 960.0, 556.0],
+            [120.0, 48.0, 1_200.0, 800.0],
+            [40.0, 40.0, 320.0, 220.0],
+        ];
+        let sources = [[160_u32, 120_u32], [1_920, 1_080], [1_080, 1_920]];
+        for body in bodies {
+            for source in sources {
+                let still = video_still_destination(body, source);
+                let box_ = viewport_of_rect(body).expect("a real body");
+                let played = bt_render::video_frame_rect(box_, source[0], source[1])
+                    .expect("a real recording");
+                for axis in 0..4 {
+                    assert_eq!(
+                        still[axis].round(),
+                        played[axis].round(),
+                        "{body:?} {source:?}: the still is {still:?} and the frame is {played:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// RED — **the speaker is a second channel and not a sixth claim** (user
@@ -121106,7 +123212,7 @@ mod tests {
     #[test]
     fn a_page_leaves_the_seat_that_stopped_showing_it() {
         assert!(
-            !a_page_was_replaced(None, None, None),
+            !a_page_was_replaced(None, None),
             "a page that has been asked for and has not committed yet is not a \
              page somebody replaced"
         );
@@ -121114,8 +123220,7 @@ mod tests {
             None,
             Some(&preview::PreviewSource::Web(
                 "http://localhost:5173/app".into()
-            )),
-            None
+            ))
         ));
         assert!(
             a_page_was_replaced(
@@ -121123,13 +123228,12 @@ mod tests {
                 Some(&preview::PreviewSource::file(
                     r"D:
 otes.md"
-                )),
-                None
+                ))
             ),
             "a document landed on the seat"
         );
         assert!(
-            a_page_was_replaced(Some(Path::new(r"D:\shots.png")), None, None),
+            a_page_was_replaced(Some(Path::new(r"D:\shots.png")), None),
             "and so did a picture, which has no buffer to be found by"
         );
     }

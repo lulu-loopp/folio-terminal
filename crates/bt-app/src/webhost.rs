@@ -1796,40 +1796,6 @@ impl WebSeat {
         self.machine.recoverable_url()
     }
 
-    /// **The recording this seat is playing**, and `None` for a seat that is on
-    /// a page (user ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
-    ///
-    /// Read off [`Self::minted`] and not off the URL, because that is where the
-    /// answer is: the shell's URL names a page in a cache folder that no reader
-    /// asked for, and the note the host wrote when it asked for the navigation
-    /// is the only thing in this process that knows which recording it was
-    /// asked for. It survives a browser crash and a rebuild for the same reason
-    /// the mint does — the second navigation is as much the host's own as the
-    /// first was.
-    ///
-    /// **This one predicate is what every surface asks.** A playing video's pane
-    /// is not a page's pane: its rail is the file's breadcrumb and not an
-    /// address, `↗` hands over the recording, `</>` is not offered because the
-    /// shell is not the reader's document, and the frame this window decoded
-    /// stops being drawn because the engine is behind it. Seven readings of one
-    /// fact, and the day one of them re-derives it from a URL is the day a
-    /// reader is shown a cache path where their file's name should be.
-    ///
-    /// **A seat that has been told to close is not playing**, and that clause is
-    /// [`Self::is_closing`]'s own defect said again one lane over. The teardown
-    /// runs for as long as ten seconds while the browser process ends, and every
-    /// one of the readers above would spend those seconds believing a player is
-    /// on this pane: the frame would stay off the glass, the head would go on
-    /// offering to stop something that has already stopped, and the play button
-    /// would not come back. The engine is gone from the glass the moment
-    /// `close` is called; the map entry is bookkeeping about a process.
-    pub(crate) fn playing_video(&self) -> Option<&Path> {
-        if self.is_closing() {
-            return None;
-        }
-        self.minted.video_behind_the_shell()
-    }
-
     /// **Whether this seat's document is making a sound right now**
     /// (`ICoreWebView2_8::IsDocumentPlayingAudio`; user ruling 2026-08-27).
     ///
@@ -4114,48 +4080,43 @@ mod rehost_address_tests {
         }
     }
 
-    /// RED — **a seat that has been told to close is neither playing nor
-    /// audible** (user ruling 2026-08-27, route A; `docs/DESIGN.md` §7.23 ⑩,
-    /// (i′)).
+    /// RED — **a closing seat is not audible** (user ruling 2026-08-27; route B
+    /// slice ②, 2026-08-28; §7.23 ⑩ (i′), §7.44 ④).
     ///
     /// `close` takes the controller away in the same frame; the entry in the
     /// window's map survives until the browser *process* ends, which was
-    /// measured at up to ten seconds. Every reader of these two answers is a
-    /// surface — the frame that comes back on the glass, the head's stop tool,
-    /// the play button, the speaker in the tab's row — and a build that read the
-    /// map entry alone would leave all four in the state the page put them in,
-    /// pointing at an engine that is not there. This is the same defect
+    /// measured at up to ten seconds. A build that read the map entry alone
+    /// would leave the speaker in the tab's row lit over a silence, pointing at
+    /// an engine that is not there. This is the same defect
     /// [`WebSeat::is_closing`] itself was added for, one lane over.
     ///
-    /// RED GATE: drop the `is_closing` guard from either accessor and its half
-    /// of this test fails — which on the machine is "I pressed stop and the pane
-    /// went blank", and "the speaker stayed lit over a silence".
+    /// **It used to have a second half and route B took it away.** The other
+    /// accessor was `playing_video`, which read a `Mint::VideoShell` to say
+    /// which recording the page in this seat was standing in for. There is no
+    /// such page and no such mint: a recording is decoded by Media Foundation
+    /// and drawn on this window's own glass, so a browser is never playing one
+    /// and has nothing to be asked.
+    ///
+    /// RED GATE: drop the `is_closing` guard from the accessor and this fails —
+    /// which on the machine is "the speaker stayed lit over a silence".
     #[test]
-    fn a_closing_seat_is_neither_playing_nor_audible() {
+    fn a_closing_seat_is_not_audible() {
         let mut seat = detached(SeatAddress {
             page: page(1, 1),
             hwnd: hwnd(1),
         });
-        seat.minted = Mint::VideoShell {
-            url: "file:///C:/cache/play-1.html".to_owned(),
-            video: PathBuf::from(r"D:\shots\clip.mp4"),
-        };
         seat.playing_audio = true;
-        assert_eq!(
-            seat.playing_video(),
-            Some(Path::new(r"D:\shots\clip.mp4")),
-            "a live seat says which recording it is standing in for"
+        assert!(
+            seat.playing_audio(),
+            "a live seat says it is making a sound"
         );
-        assert!(seat.playing_audio(), "and whether it is making a sound");
         // The one line of the teardown this is about: the machine is told to go.
         let _ = seat.machine.close();
         assert!(seat.is_closing());
-        assert_eq!(
-            seat.playing_video(),
-            None,
-            "a closing seat is not playing, however long its process takes to end"
+        assert!(
+            !seat.playing_audio(),
+            "and a closing one is silent, however long its process takes to end"
         );
-        assert!(!seat.playing_audio(), "and it is silent");
     }
 
     /// PIN (F1b′) — **two panes of one window that both call themselves seat 1
