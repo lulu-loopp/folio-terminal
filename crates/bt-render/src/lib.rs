@@ -2532,13 +2532,12 @@ fn count_surface_failure(failure: SurfaceFailure) {
 
 /// The glyphon state one Terminal seat needs to put text on the glass.
 ///
-/// Grid text and the status overlay travel together because they are laid out
-/// in the same seat-local coordinate space and therefore share the seat's
-/// `Viewport`; they need two renderers rather than one because the status bar
-/// draws *over* a rectangle that is itself drawn over the grid, and a single
-/// prepared batch cannot be interleaved with a pipeline change.
+/// Two renderers and **no viewport**: the status bar draws *over* a rectangle
+/// that is itself drawn over the grid, and a single prepared batch cannot be
+/// interleaved with a pipeline change — while the resolution every glyph in
+/// this window is divided by is one number, held once on
+/// [`WindowRenderer::text_viewport`] (§7.36).
 struct SeatTextSlot {
-    viewport: Viewport,
     text_renderer: TextRenderer,
     status_text_renderer: TextRenderer,
 }
@@ -2859,24 +2858,43 @@ pub struct WindowRenderer {
     /// cover the dialog in every channel, not just in the one it happens to draw
     /// its own surface with — see [`OverlayLayer`].
     overlay_layers: Vec<OverlayLayer>,
-    /// One glyphon viewport and text-renderer pair per Terminal seat, grown on
-    /// demand — the same shape, and for the same reason, as
-    /// [`WindowRenderer::overlay_text_renderers`].
-    ///
-    /// Two constraints force it. A glyphon `Viewport` is a GPU uniform holding
-    /// *one* resolution, and grid text is laid out in seat-local pixels, so two
-    /// seats of different sizes cannot share one. And a `TextRenderer` holds
+    /// One text-renderer pair per Terminal seat, grown on demand — the same
+    /// shape, and for the same reason, as
+    /// [`WindowRenderer::overlay_text_renderers`]: a `TextRenderer` holds
     /// exactly one prepared batch, so preparing a second seat into it would
     /// destroy the first seat's glyphs before the pass ever ran.
     ///
     /// Slot 0 is built in `new` and is the slot a lone terminal leaf uses on
     /// every frame it ever draws, which is the whole of the N = 1 identity
-    /// argument: same object, same resolution, same batch, same draw call.
+    /// argument: same object, same batch, same draw call.
     seat_slots: Vec<SeatTextSlot>,
-    /// A second glyphon viewport whose resolution names the whole surface rather
-    /// than the seat, so chrome text can be positioned in window coordinates
-    /// while grid text stays in seat-local ones.
-    chrome_viewport: Viewport,
+    /// **The one resolution every glyph in this window is divided by** (§7.36).
+    ///
+    /// glyphon's vertex shader turns a glyph's pixel position into clip space by
+    /// dividing it by the `Resolution` held in the `Viewport` bound at draw
+    /// time. That number therefore *is* the coordinate system every text batch
+    /// speaks, and this window has exactly one of them: the surface. Grid text,
+    /// chrome text, a preview document's body and every overlay layer all hand
+    /// glyphon window pixels and are drawn under a whole-surface pass viewport;
+    /// the seat rectangle survives as the *scissor*, which is what it was for.
+    ///
+    /// **One object, and not one per seat.** Two `Viewport`s are two 16-byte
+    /// uniform buffers, and on the clean Win10 VM's device the two did not stay
+    /// apart: every text batch in the frame read whichever one that device had
+    /// resolved, so with a preview pane open the chrome's glyphs were divided by
+    /// the *terminal seat's* 480×500 while landing in a 960×600 pass — tab
+    /// titles twice as wide as their box, a dialog's words printed clear of its
+    /// panel (gate 5, `w10`, 2026-08-28).
+    ///
+    /// That device is not an exotic one. The guest has a working display driver
+    /// — `VMware SVGA 3D`, 9.17.9.4, status OK — and it stops at D3D11, so
+    /// wgpu's DX12 backend finds nothing and falls back to
+    /// `Microsoft Basic Render Driver`: WARP, `device_type: Cpu`. Every VMware
+    /// guest and every CI runner without a discrete GPU takes that same road.
+    ///
+    /// Nothing in this file can make a device keep two uniform buffers apart;
+    /// what it can do is stop needing two.
+    text_viewport: Viewport,
     chrome_text_renderer: TextRenderer,
     /// One text renderer per overlay layer, grown on demand: a glyphon renderer
     /// holds one prepared batch, so two layers of text are two renderers.
@@ -3886,6 +3904,26 @@ impl GpuContext {
     /// variable can only be told. On a machine that has one, the second call
     /// never happens and nothing about what these tests exercise changes.
     pub async fn headless(format: wgpu::TextureFormat) -> Result<Self, RenderError> {
+        Self::headless_on(format, false).await
+    }
+
+    /// The same context, on the adapter a machine with no graphics driver gets.
+    ///
+    /// **This is not a synthetic device; it is gate 5's device.** The clean
+    /// Win10 VM answers `Microsoft Basic Render Driver` — wgpu's WARP fallback,
+    /// `device_type: Cpu` — because its display driver (`VMware SVGA 3D`) stops
+    /// at D3D11 and this product's wgpu asks DX12 for an adapter. Every Windows
+    /// has WARP, so asking for it by name is what lets §7.36's gate run that
+    /// machine's own path on a developer's machine instead of only in a virtual
+    /// one.
+    pub async fn headless_fallback(format: wgpu::TextureFormat) -> Result<Self, RenderError> {
+        Self::headless_on(format, true).await
+    }
+
+    async fn headless_on(
+        format: wgpu::TextureFormat,
+        demand_fallback: bool,
+    ) -> Result<Self, RenderError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let phase_started = Instant::now();
         let options = |force_fallback_adapter| wgpu::RequestAdapterOptions {
@@ -3894,12 +3932,19 @@ impl GpuContext {
             force_fallback_adapter,
             ..Default::default()
         };
-        let adapter = match instance.request_adapter(&options(false)).await {
-            Ok(adapter) => adapter,
-            Err(_) => instance
+        let adapter = if demand_fallback {
+            instance
                 .request_adapter(&options(true))
                 .await
-                .map_err(|error| RenderError::Wgpu(error.to_string()))?,
+                .map_err(|error| RenderError::Wgpu(error.to_string()))?
+        } else {
+            match instance.request_adapter(&options(false)).await {
+                Ok(adapter) => adapter,
+                Err(_) => instance
+                    .request_adapter(&options(true))
+                    .await
+                    .map_err(|error| RenderError::Wgpu(error.to_string()))?,
+            }
         };
         let adapter_time = phase_started.elapsed();
         let phase_started = Instant::now();
@@ -4337,7 +4382,12 @@ impl WindowRenderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // `COPY_SRC` beside the attachment: an offscreen window is the only
+            // target a test can *read back*, and reading a frame back is how the
+            // §7.36 gate asks where a glyph actually landed. It costs a window
+            // that has a swapchain nothing, because a swapchain has no such
+            // texture.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let config = wgpu::SurfaceConfiguration {
@@ -4377,12 +4427,11 @@ impl WindowRenderer {
         let font_metrics_time = phase_started.elapsed();
         let device = &gpu.device;
         let cache = &gpu.glyphon_cache;
-        let chrome_viewport = Viewport::new(device, cache);
+        let text_viewport = Viewport::new(device, cache);
         // Slot 0: the seat a lone terminal leaf draws into on every frame it
         // ever draws. Built here rather than on demand so that shape never pays
         // an allocation mid-frame.
         let seat_slots = vec![SeatTextSlot {
-            viewport: Viewport::new(device, cache),
             text_renderer: TextRenderer::new(
                 &mut gpu.atlas,
                 device,
@@ -4436,7 +4485,7 @@ impl WindowRenderer {
             web_holes: Vec::new(),
             overlay_layers: Vec::new(),
             seat_slots,
-            chrome_viewport,
+            text_viewport,
             chrome_text_renderer,
             overlay_text_renderers: Vec::new(),
             math_texture_refusals: 0,
@@ -4925,6 +4974,75 @@ impl WindowRenderer {
         self.seat
     }
 
+    /// **Read this window's last frame back**, as `[b, g, r, a]` rows of
+    /// `config.width` pixels — an offscreen target only.
+    ///
+    /// The one way a test can ask *where a glyph landed* rather than where it
+    /// was told to land, which is the whole difference §7.36 turns on: the
+    /// coordinates handed to glyphon were right on the machine that drew them
+    /// wrong (`BT_CHROME_DUMP` said `[42, 6, 180, 40]` while the picture put the
+    /// same title at 84).
+    #[cfg(test)]
+    fn read_back(&self, gpu: &GpuContext) -> Vec<[u8; 4]> {
+        let FrameTarget::Offscreen(texture) = &self.target else {
+            panic!("only an offscreen window can be read back");
+        };
+        let (width, height) = (self.config.width, self.config.height);
+        // `copy_texture_to_buffer` wants each row padded to 256 bytes.
+        let unpadded = width * 4;
+        let padded = unpadded.div_ceil(256) * 256;
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Folio frame readback"),
+            size: u64::from(padded) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Folio frame readback"),
+            });
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit([encoder.finish()]);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        gpu.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .expect("the readback copy completes");
+        let view = buffer
+            .slice(..)
+            .get_mapped_range()
+            .expect("the readback buffer maps");
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for row in 0..height {
+            let start = (row * padded) as usize;
+            for column in 0..width {
+                let at = start + (column * 4) as usize;
+                pixels.push([view[at], view[at + 1], view[at + 2], view[at + 3]]);
+            }
+        }
+        drop(view);
+        buffer.unmap();
+        pixels
+    }
+
     /// Place the terminal seat. Returns whether the rectangle changed.
     ///
     /// Red line L10 runs the other way and is worth restating here: nothing
@@ -5150,7 +5268,6 @@ impl WindowRenderer {
     fn ensure_seat_slots(&mut self, gpu: &mut GpuContext, count: usize) {
         while self.seat_slots.len() < count {
             self.seat_slots.push(SeatTextSlot {
-                viewport: Viewport::new(&gpu.device, &gpu.glyphon_cache),
                 text_renderer: TextRenderer::new(
                     &mut gpu.atlas,
                     &gpu.device,
@@ -5279,11 +5396,13 @@ impl WindowRenderer {
             entry.frame.validate_shape()?;
         }
         let validated_at = Instant::now();
-        // Chrome text is laid out in window pixels and gets its own resolution.
-        // Grid text is laid out in seat-local pixels, so each seat's resolution
-        // is that seat's, updated inside the loop below; the pass viewport lands
-        // those pixels at the seat's corner.
-        self.chrome_viewport.update(
+        // **One resolution, written once, for every glyph this frame draws** —
+        // see [`WindowRenderer::text_viewport`]. Grid text is still *laid out*
+        // in seat-local pixels; what happens to it now is that the seat's corner
+        // is added at the one place a glyph becomes a `TextArea`, so the number
+        // glyphon divides by is the surface for the chrome and for the grid
+        // alike.
+        self.text_viewport.update(
             &gpu.queue,
             Resolution {
                 width: self.config.width,
@@ -5329,13 +5448,6 @@ impl WindowRenderer {
         for (index, entry) in seats.iter().enumerate() {
             let frame = entry.frame;
             self.seat = entry.seat;
-            self.seat_slots[index].viewport.update(
-                &gpu.queue,
-                Resolution {
-                    width: entry.seat.width,
-                    height: entry.seat.height,
-                },
-            );
             let text_stats = self.prepare_text_rows(gpu, frame)?;
             rows_prepared_at = Instant::now();
             // `text_rows` and `status_overlay` stay single slots on purpose:
@@ -5350,11 +5462,12 @@ impl WindowRenderer {
                     &gpu.queue,
                     &mut gpu.font_system,
                     &mut gpu.atlas,
-                    &slot.viewport,
+                    &self.text_viewport,
                     &mut gpu.swash_cache,
                     &self.text_rows,
                     self.metrics,
                     frame,
+                    entry.seat,
                 ) {
                     Ok(()) => prepare_status_text_atlas(
                         &mut slot.status_text_renderer,
@@ -5362,12 +5475,13 @@ impl WindowRenderer {
                         &gpu.queue,
                         &mut gpu.font_system,
                         &mut gpu.atlas,
-                        &slot.viewport,
+                        &self.text_viewport,
                         &mut gpu.swash_cache,
                         self.status_overlay.as_deref(),
                         self.metrics,
                         frame,
                         entry.seat.width as f32,
+                        entry.seat,
                     ),
                     Err(error) => Err(error),
                 }
@@ -5648,7 +5762,7 @@ impl WindowRenderer {
                 &gpu.queue,
                 &mut gpu.font_system,
                 &mut gpu.atlas,
-                &self.chrome_viewport,
+                &self.text_viewport,
                 &mut gpu.swash_cache,
                 &chrome_layouts,
             );
@@ -5713,7 +5827,7 @@ impl WindowRenderer {
                 &gpu.queue,
                 &mut gpu.font_system,
                 &mut gpu.atlas,
-                &self.chrome_viewport,
+                &self.text_viewport,
                 &mut gpu.swash_cache,
                 &preview_text_layouts,
             );
@@ -5882,7 +5996,7 @@ impl WindowRenderer {
                     &gpu.queue,
                     &mut gpu.font_system,
                     &mut gpu.atlas,
-                    &self.chrome_viewport,
+                    &self.text_viewport,
                     &mut gpu.swash_cache,
                     &layouts,
                 );
@@ -6001,20 +6115,41 @@ impl WindowRenderer {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..6, 0..1);
             }
-            // Everything a terminal draws is in seat-local pixels; the
+            // Every *rectangle* a terminal draws is in seat-local pixels; the
             // viewport/scissor pair opening each iteration is the entire
             // translation, and for a lone leaf the seat *is* the surface, so for
             // N = 1 these are the two calls that were always here, with the same
             // values, around the same draws.
-            for seat in &prepared {
+            //
+            // **Its text is not** (§7.36). A glyph's clip space comes from the
+            // resolution in the bound `Viewport`, and this window holds exactly
+            // one of those; so the glyphs arrive already carrying the seat's
+            // corner and are drawn under the surface's own viewport, with this
+            // seat's scissor still standing. `whole_surface` is that switch, and
+            // it is a state change and not a draw — for N = 1 both viewports are
+            // the same rectangle.
+            let whole_surface = |pass: &mut wgpu::RenderPass<'_>| {
                 pass.set_viewport(
-                    seat.seat.x as f32,
-                    seat.seat.y as f32,
-                    seat.seat.width as f32,
-                    seat.seat.height as f32,
+                    0.0,
+                    0.0,
+                    self.config.width as f32,
+                    self.config.height as f32,
                     0.0,
                     1.0,
                 );
+            };
+            for seat in &prepared {
+                let seat_viewport = |pass: &mut wgpu::RenderPass<'_>| {
+                    pass.set_viewport(
+                        seat.seat.x as f32,
+                        seat.seat.y as f32,
+                        seat.seat.width as f32,
+                        seat.seat.height as f32,
+                        0.0,
+                        1.0,
+                    );
+                };
+                seat_viewport(&mut pass);
                 // Viewport from `seat`, scissor from `clip`. The two are equal
                 // at rest — for `N = 1` they are both the whole surface — and
                 // differ only while a pane is mid-FLIP, where the difference is
@@ -6048,17 +6183,21 @@ impl WindowRenderer {
                     }
                 }
                 if seat.text_prepared {
+                    whole_surface(&mut pass);
                     slot.text_renderer
-                        .render(&gpu.atlas, &slot.viewport, &mut pass)
+                        .render(&gpu.atlas, &self.text_viewport, &mut pass)
                         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                    seat_viewport(&mut pass);
                 }
                 if seat.text_prepared && seat.status_rect_count > 0 {
                     pass.set_pipeline(&gpu.rect_pipeline);
                     pass.set_vertex_buffer(0, seat.status_rect_buffer.slice(..));
                     pass.draw(0..6, 0..seat.status_rect_count as u32);
+                    whole_surface(&mut pass);
                     slot.status_text_renderer
-                        .render(&gpu.atlas, &slot.viewport, &mut pass)
+                        .render(&gpu.atlas, &self.text_viewport, &mut pass)
                         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                    seat_viewport(&mut pass);
                 }
                 if seat.math_overlay_count > 0 {
                     pass.set_pipeline(&gpu.rect_pipeline);
@@ -6115,7 +6254,7 @@ impl WindowRenderer {
                 }
                 if chrome_prepared {
                     self.chrome_text_renderer
-                        .render(&gpu.atlas, &self.chrome_viewport, &mut pass)
+                        .render(&gpu.atlas, &self.text_viewport, &mut pass)
                         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
                 }
                 // And the one class of mark that is *over* the letters: a pane
@@ -6199,7 +6338,7 @@ impl WindowRenderer {
                 }
                 if preview_text_prepared {
                     self.preview_text_renderer
-                        .render(&gpu.atlas, &self.chrome_viewport, &mut pass)
+                        .render(&gpu.atlas, &self.text_viewport, &mut pass)
                         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
                 }
                 // The document's own pictures, over its fills and beside its
@@ -6344,7 +6483,7 @@ impl WindowRenderer {
                     }
                     if layer.text_prepared {
                         self.overlay_text_renderers[index]
-                            .render(&gpu.atlas, &self.chrome_viewport, &mut pass)
+                            .render(&gpu.atlas, &self.text_viewport, &mut pass)
                             .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
                     }
                 }
@@ -7120,7 +7259,7 @@ impl WindowRenderer {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: self.config.format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                     view_formats: &[],
                 });
             }
@@ -7650,9 +7789,11 @@ impl WindowRenderer {
         let started = Instant::now();
         frame.validate_shape()?;
         let (width, height) = (self.config.width, self.config.height);
-        self.seat_slots[0]
-            .viewport
+        // A probe has one seat and it is the whole target, so the window's own
+        // resolution is the seat's — the N = 1 identity §7.36 rests on.
+        self.text_viewport
             .update(&gpu.queue, Resolution { width, height });
+        let seat = SeatViewport::whole(width, height);
         let text_stats = self.prepare_text_rows(gpu, frame)?;
         let rows_prepared_at = Instant::now();
         {
@@ -7663,11 +7804,12 @@ impl WindowRenderer {
                 &gpu.queue,
                 &mut gpu.font_system,
                 &mut gpu.atlas,
-                &slot.viewport,
+                &self.text_viewport,
                 &mut gpu.swash_cache,
                 &self.text_rows,
                 self.metrics,
                 frame,
+                seat,
             )
             .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
             prepare_status_text_atlas(
@@ -7676,7 +7818,7 @@ impl WindowRenderer {
                 &gpu.queue,
                 &mut gpu.font_system,
                 &mut gpu.atlas,
-                &slot.viewport,
+                &self.text_viewport,
                 &mut gpu.swash_cache,
                 self.status_overlay.as_deref(),
                 self.metrics,
@@ -7684,6 +7826,7 @@ impl WindowRenderer {
                 // A headless probe has no seat: it renders into the whole target, so the surface is
                 // the pane.
                 width as f32,
+                seat,
             )
             .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
         }
@@ -7725,11 +7868,11 @@ impl WindowRenderer {
             });
             let slot = &self.seat_slots[0];
             slot.text_renderer
-                .render(&gpu.atlas, &slot.viewport, &mut pass)
+                .render(&gpu.atlas, &self.text_viewport, &mut pass)
                 .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
             if self.status_overlay.is_some() {
                 slot.status_text_renderer
-                    .render(&gpu.atlas, &slot.viewport, &mut pass)
+                    .render(&gpu.atlas, &self.text_viewport, &mut pass)
                     .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
             }
         }
@@ -8691,9 +8834,18 @@ fn prepare_text_atlas(
     text_rows: &[Arc<ComposedRow>],
     metrics: CellMetrics,
     frame: &ViewportFrame,
+    seat: SeatViewport,
 ) -> Result<(), PrepareError> {
+    // **The seat's corner, added here and nowhere else** (§7.36). Everything
+    // above this line is seat-local, as the whole terminal side of this crate
+    // is; everything glyphon is handed is the window's, because the window is
+    // what [`WindowRenderer::text_viewport`] measures. For a lone leaf the
+    // corner is the origin and every number below is the one that was there
+    // before this argument existed.
+    let (origin_x, origin_y) = (seat.x as f32, seat.y as f32);
     let padding = metrics.padding_px;
-    let text_right = (padding + frame.columns.get() as f32 * metrics.cell_width_px).ceil() as i32;
+    let text_right =
+        (origin_x + padding + frame.columns.get() as f32 * metrics.cell_width_px).ceil() as i32;
     // **The current hit's ink, applied here and not in the shaping** (§7.1.5d).
     //
     // A composed row is cached on its cells, and its cells are what the shell
@@ -8721,6 +8873,7 @@ fn prepare_text_atlas(
     let narrow_text_areas = text_rows.iter().enumerate().flat_map(|(row, text_row)| {
         text_row.narrow_glyphs.iter().map(move |glyph| {
             let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, row, glyph.column);
+            let (left, top, bottom) = (left + origin_x, top + origin_y, bottom + origin_y);
             TextArea {
                 buffer: &glyph.buffer,
                 left: left + glyph.left_offset_px,
@@ -8729,7 +8882,7 @@ fn prepare_text_atlas(
                 // Clip to the terminal row, not the cell. The grid owns pen origins, while
                 // accents and fallback ink remain free to overhang adjacent cells.
                 bounds: TextBounds {
-                    left: padding.floor() as i32,
+                    left: (origin_x + padding).floor() as i32,
                     top: top.floor() as i32,
                     right: text_right,
                     bottom: bottom.ceil() as i32,
@@ -8742,6 +8895,7 @@ fn prepare_text_atlas(
     let wide_text_areas = text_rows.iter().enumerate().flat_map(|(row, text_row)| {
         text_row.wide_glyphs.iter().map(move |wide| {
             let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, row, wide.column);
+            let (left, top, bottom) = (left + origin_x, top + origin_y, bottom + origin_y);
             TextArea {
                 buffer: &wide.buffer,
                 left: left + wide.left_offset_px,
@@ -8782,6 +8936,7 @@ fn prepare_status_text_atlas(
     metrics: CellMetrics,
     frame: &ViewportFrame,
     seat_width_px: f32,
+    seat: SeatViewport,
 ) -> Result<(), PrepareError> {
     let Some(status) = frame.status_text.as_deref() else {
         return Ok(());
@@ -8792,37 +8947,47 @@ fn prepare_status_text_atlas(
     let Some(geometry) = status_overlay_geometry(metrics, frame, status, seat_width_px) else {
         return Ok(());
     };
-    let narrow_text_areas = row.narrow_glyphs.iter().map(|glyph| {
-        let left = geometry.rect[0]
+    // The seat's corner, for [`prepare_text_atlas`]'s reason and at the same
+    // seam: the geometry above is the seat's, what glyphon is handed is the
+    // window's.
+    let (origin_x, origin_y) = (seat.x as f32, seat.y as f32);
+    let rect = [
+        geometry.rect[0] + origin_x,
+        geometry.rect[1] + origin_y,
+        geometry.rect[2] + origin_x,
+        geometry.rect[3] + origin_y,
+    ];
+    let narrow_text_areas = row.narrow_glyphs.iter().map(move |glyph| {
+        let left = rect[0]
             + glyph.column.saturating_sub(geometry.first_column) as f32 * metrics.cell_width_px;
         TextArea {
             buffer: &glyph.buffer,
             left: left + glyph.left_offset_px,
-            top: geometry.rect[1] + glyph.top_offset_px,
+            top: rect[1] + glyph.top_offset_px,
             scale: 1.0,
             bounds: TextBounds {
-                left: geometry.rect[0].floor() as i32,
-                top: geometry.rect[1].floor() as i32,
-                right: geometry.rect[2].ceil() as i32,
-                bottom: geometry.rect[3].ceil() as i32,
+                left: rect[0].floor() as i32,
+                top: rect[1].floor() as i32,
+                right: rect[2].ceil() as i32,
+                bottom: rect[3].ceil() as i32,
             },
             default_color: glyph.color,
             custom_glyphs: &[],
         }
     });
-    let wide_text_areas = row.wide_glyphs.iter().map(|wide| {
-        let left = geometry.rect[0]
+    let wide_text_areas = row.wide_glyphs.iter().map(move |wide| {
+        let left = rect[0]
             + wide.column.saturating_sub(geometry.first_column) as f32 * metrics.cell_width_px;
         TextArea {
             buffer: &wide.buffer,
             left: left + wide.left_offset_px,
-            top: geometry.rect[1] + wide.top_offset_px,
+            top: rect[1] + wide.top_offset_px,
             scale: 1.0,
             bounds: TextBounds {
                 left: left.floor() as i32,
-                top: geometry.rect[1].floor() as i32,
+                top: rect[1].floor() as i32,
                 right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
-                bottom: geometry.rect[3].ceil() as i32,
+                bottom: rect[3].ceil() as i32,
             },
             default_color: wide.color,
             custom_glyphs: &[],
@@ -15225,6 +15390,77 @@ mod tests {
             .collect()
     }
 
+    /// PIN (§7.36) — **a window has one glyphon `Viewport`, and every batch of
+    /// text it draws is handed that one.**
+    ///
+    /// Red gate. Against the arrangement this replaced, the constructor stands
+    /// three times in this file — one for the chrome and one per seat slot,
+    /// grown on demand — and the seat's grid and status batches are rendered
+    /// with the slot's own. That is two live uniform buffers holding two
+    /// different resolutions, and on the clean Win10 VM's device
+    /// (`Microsoft Basic Render Driver`: WARP, `device_type: Cpu`, which is what
+    /// a machine with no display driver gets) the two did not stay apart —
+    /// every batch in the frame was divided by whichever one the device
+    /// resolved, so with a preview pane open the chrome's glyphs were divided by
+    /// the seat's 480×500 inside a 960×600 pass (gate 5, `w10`, 2026-08-28).
+    ///
+    /// **Why this is a source pin and not a picture.** The defect needs that
+    /// device: WARP on a developer's machine, which has a real driver beside it,
+    /// draws the old arrangement correctly — measured, this gate's own
+    /// neighbour passes against the code it was written to catch. What a test
+    /// can hold is the property that made the device's behaviour unobservable —
+    /// one resolution — and that is a property of this file.
+    ///
+    /// Every needle is spelled in two pieces so that this test can never be its
+    /// own counter-example.
+    ///
+    /// MUTATION: give any text batch a second viewport and this says so.
+    #[test]
+    fn a_window_divides_every_glyph_it_draws_by_one_resolution() {
+        let source = source_without_prose();
+        let built = concat!("Viewport", "::new(");
+        assert_eq!(
+            source.matches(built).count(),
+            1,
+            "a window builds exactly one glyphon viewport; a second one is a \
+             second resolution, and two resolutions is the whole of the defect"
+        );
+        let written = concat!("self.text_viewport", ".update(&gpu", ".queue,Resolution{");
+        let any_write = concat!(".update(&gpu", ".queue,Resolution{");
+        assert!(
+            source.matches(written).count() > 0,
+            "the one viewport is written with this window's own resolution"
+        );
+        assert_eq!(
+            source.matches(any_write).count(),
+            source.matches(written).count(),
+            "and it is the only thing written with a resolution at all, \
+             because a second writer would be a second answer to `how big \
+             is this window`"
+        );
+        // Every glyphon batch — grid, status, chrome, a preview body, an
+        // overlay layer — is rendered against that one viewport.
+        let renders = source.matches(concat!(".render(&gpu", ".atlas,")).count();
+        assert!(
+            renders >= 6,
+            "every text renderer in this file is accounted for, saw {renders}"
+        );
+        assert_eq!(
+            source
+                .matches(concat!(".render(&gpu", ".atlas,&self.text_viewport,"))
+                .count(),
+            renders,
+            "a render that names any other viewport is a batch divided by \
+             something that is not this window"
+        );
+        assert_eq!(
+            source.matches(concat!("&slot", ".viewport")).count(),
+            0,
+            "no batch reaches for a seat's own viewport, because a seat no \
+             longer has one"
+        );
+    }
+
     fn present_frame_source() -> String {
         let source = source_without_prose();
         let start = source
@@ -17879,6 +18115,154 @@ mod tests {
                 .update_scale_factor(2.0)
                 .expect("the probe re-measures like any window");
             assert_eq!(metrics.scale_factor, 2.0);
+        }
+
+        /// PIN (§7.36) — **on the device a machine with no graphics driver
+        /// gets, a chrome label lands in its own box while a seat that is not
+        /// the whole window is on screen.**
+        ///
+        /// Red gate, and it is gate 5's own picture. The clean Win10 VM
+        /// (`Microsoft Basic Render Driver`, `device_type: Cpu` — wgpu's WARP
+        /// fallback, because a fresh Windows in a VM has no display driver)
+        /// drew every chrome glyph divided by the *terminal seat's* resolution
+        /// while landing it in a whole-window pass: tab titles twice as wide as
+        /// their box, a dialog's words printed clear of its panel. The
+        /// coordinates were never wrong — `BT_CHROME_DUMP` on that machine said
+        /// `[42, 6, 180, 40]` for the title the picture put at 84 — so nothing
+        /// short of reading the frame back can see it.
+        ///
+        /// The window is deliberately **not** a lone leaf: with one seat filling
+        /// the surface the seat's resolution and the window's are the same
+        /// number, which is exactly why every developer machine and the whole
+        /// smoke suite went green while the machine drew this.
+        ///
+        /// The label is drawn in a colour nothing else in the frame uses, so
+        /// "where did this label land" is a question about pixels and not about
+        /// what we told it.
+        #[test]
+        fn a_chrome_label_lands_in_its_box_on_the_device_a_driverless_machine_gets() {
+            const WIDTH: u32 = 640;
+            const HEIGHT: u32 = 400;
+            // The label's box, and the only red in the frame.
+            const BOX: [f32; 4] = [360.0, 8.0, 620.0, 44.0];
+            const INK: [u8; 3] = [255, 0, 0];
+
+            let Ok(mut gpu) = pollster::block_on(GpuContext::headless_fallback(FORMAT)) else {
+                // Every Windows has WARP; a platform that does not is not the
+                // platform this defect lives on.
+                return;
+            };
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
+            // A seat that is half the window wide and short of its bottom — the
+            // shape a preview pane makes, and the shape that made the two
+            // resolutions differ.
+            let seat = SeatViewport {
+                x: 0,
+                y: 60,
+                width: 320,
+                height: 300,
+            };
+            let frame = single_cell_cursor_frame(window.metrics());
+            window.set_chrome(
+                Vec::new(),
+                vec![ChromeLabel {
+                    mono: false,
+                    text: "MMMM".to_owned(),
+                    rect: BOX,
+                    font_size_px: 18.0,
+                    color: INK,
+                    align_right: false,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: None,
+                }],
+                Vec::new(),
+            );
+            window
+                .present_frame(
+                    &mut gpu,
+                    &[SeatFrame {
+                        seat,
+                        clip: seat,
+                        frame: &frame,
+                        focused: true,
+                    }],
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .expect("one frame");
+            let pixels = window.read_back(&gpu);
+            // `[b, g, r, a]`: red ink over a dark ground, at whatever coverage
+            // the antialiasing gave it.
+            let mut inked: Vec<(u32, u32)> = Vec::new();
+            for (index, pixel) in pixels.iter().enumerate() {
+                let (blue, green, red) = (u32::from(pixel[0]), u32::from(pixel[1]), pixel[2]);
+                if u32::from(red) > 70 && blue * 3 < u32::from(red) && green * 3 < u32::from(red) {
+                    inked.push((index as u32 % WIDTH, index as u32 / WIDTH));
+                }
+            }
+            assert!(
+                !inked.is_empty(),
+                "the label drew nothing at all — a gate that cannot see the ink                  cannot see it in the wrong place either"
+            );
+            let left = inked.iter().map(|(x, _)| *x).min().expect("ink");
+            let right = inked.iter().map(|(x, _)| *x).max().expect("ink");
+            let top = inked.iter().map(|(_, y)| *y).min().expect("ink");
+            let bottom = inked.iter().map(|(_, y)| *y).max().expect("ink");
+            assert!(
+                left as f32 >= BOX[0] - 1.0
+                    && (right as f32) <= BOX[2] + 1.0
+                    && top as f32 >= BOX[1] - 1.0
+                    && (bottom as f32) <= BOX[3] + 1.0,
+                "the label was laid out in {BOX:?} and its ink came back at \
+                 [{left}, {top}, {right}, {bottom}] — every glyph in a window is \
+                 divided by the surface, and a seat's resolution reaching this \
+                 batch is what stretched gate 5's chrome"
+            );
+
+            // **And the other half of the same rule.** Now that the resolution
+            // is the surface's, the seat's corner has to arrive with the
+            // glyphs — it is added in `prepare_text_atlas` and nowhere else.
+            // MUTATION: drop `origin_y` there and the shell's own character
+            // draws at the top of the window instead of inside its pane.
+            let mut grid: Vec<(u32, u32)> = Vec::new();
+            for (index, pixel) in pixels.iter().enumerate() {
+                let (blue, green, red) = (
+                    u32::from(pixel[0]),
+                    u32::from(pixel[1]),
+                    u32::from(pixel[2]),
+                );
+                let bright = blue > 110 && green > 110 && red > 110;
+                if bright {
+                    grid.push((index as u32 % WIDTH, index as u32 / WIDTH));
+                }
+            }
+            assert!(
+                !grid.is_empty(),
+                "the shell drew no character at all, so where it drew one cannot be read"
+            );
+            let outside: Vec<(u32, u32)> = grid
+                .iter()
+                .copied()
+                .filter(|(x, y)| {
+                    *x < seat.x
+                        || *x >= seat.x + seat.width
+                        || *y < seat.y
+                        || *y >= seat.y + seat.height
+                })
+                .collect();
+            assert!(
+                outside.is_empty(),
+                "the seat is {seat:?} and its own glyphs landed outside it at \
+                 {:?} — a seat's text is laid out seat-local and must arrive at \
+                 glyphon carrying that seat's corner",
+                &outside[..outside.len().min(8)]
+            );
         }
     }
 }

@@ -1192,6 +1192,25 @@ pub(crate) struct PageFacts {
 /// one that *did* answer would turn that shutdown into a false deadline.
 const BROWSER_EXIT_DEADLINE: Duration = Duration::from_secs(10);
 
+/// How long a seat waits for the engine to answer that it exists.
+///
+/// **The question is asked of a real creation attempt, and it is asked with a
+/// clock beside it** (§7.36). `CreateCoreWebView2EnvironmentWithOptions` answers
+/// three ways: it fails where it stands (a machine with no runtime answers
+/// `0x80070002` in under a millisecond — measured on the clean Win10 VM,
+/// 2026-08-28), it calls back, or — measured, `w0p-evidence.md` §3.4 — it does
+/// neither, forever. The third is the one that has no error to report, so the
+/// clock is what reports it: an engine that has said nothing by here has not
+/// started, and the seat says which of the two cards that is by asking the
+/// loader, exactly as a failure that *did* speak does.
+///
+/// Ten seconds, the same number as [`BROWSER_EXIT_DEADLINE`] and for the same
+/// reason: it has to sit well above the slowest start that is still a start. A
+/// cold profile on the two gate-5 machines reached `first_text_present` in
+/// 3.4 s and 6.0 s with the whole product's startup inside it; the engine's own
+/// half is a fraction of that.
+const ENGINE_START_DEADLINE: Duration = Duration::from_secs(10);
+
 /// How far apart two presses may land and still be one double click, in
 /// physical pixels.
 const DOUBLE_CLICK_SLOP: i32 = 6;
@@ -1424,6 +1443,15 @@ pub(crate) struct WebSeat {
     claims: Vec<ClaimedChord>,
     /// What is waiting on a browser, and until when.
     waiting: Option<(BrowserWait, Instant)>,
+    /// When the engine this seat has asked for stops being allowed to say
+    /// nothing — see [`ENGINE_START_DEADLINE`].
+    ///
+    /// Set the moment an environment or a controller is asked for, cleared the
+    /// moment either answers (**including when it answers with an error**: an
+    /// error is an answer, and the card it draws is already standing). `None`
+    /// means nothing is owed: either the engine is up, or it has already told
+    /// this seat it is not coming.
+    engine_owes_an_answer: Option<Instant>,
     /// Where the window says the page belongs this frame.
     ///
     /// Recorded whether or not there is a controller to tell, because **the
@@ -1599,7 +1627,7 @@ impl WebSeat {
         minted: Mint,
         scale: f64,
         wake: Box<dyn Fn()>,
-    ) -> Result<Self, String> {
+    ) -> Result<(Self, Vec<WebOutcome>), String> {
         let folder = user_data_folder().ok_or_else(|| {
             String::from("LOCALAPPDATA is not set, so there is no profile to use")
         })?;
@@ -1656,6 +1684,7 @@ impl WebSeat {
             mint,
             claims: Vec::new(),
             waiting: None,
+            engine_owes_an_answer: None,
             wanted: WebPresence::Hidden,
             presence: None,
             wanted_bounds: None,
@@ -1679,8 +1708,19 @@ impl WebSeat {
         };
         let effect = web.machine.request(url);
         debug_assert_eq!(effect, WebEffect::Ignore, "an engine that is not up yet");
-        web.start_environment()?;
-        Ok(web)
+        // **A refusal here is an answer, not a reason to have no seat** (§7.36).
+        //
+        // This used to be `?`, and on a machine with no runtime that one
+        // character was the whole of gate 5's second red: the loader answers
+        // `0x80070002` where it stands, `open` handed its caller an `Err`, the
+        // caller printed a line nobody sees and inserted **nothing** — so the
+        // pane it had already opened had no seat, and a card is something a seat
+        // draws. Nothing was missing from the card; the thing that draws it was
+        // never there. The failure belongs on the seat, which is where every
+        // other way the engine can fail already puts it.
+        let mut outcomes = Vec::new();
+        web.start_environment(&mut outcomes);
+        Ok((web, outcomes))
     }
 
     /// **Go somewhere on this seat** — the one door every later navigation takes
@@ -1831,39 +1871,23 @@ impl WebSeat {
     fn digest(&mut self, event: &WebEvent, outcomes: &mut Vec<WebOutcome>) -> WebEffect {
         match event {
             WebEvent::Environment { generation, error } => {
+                // The environment has spoken, so the clock the silence was
+                // hung on comes down whichever way it spoke.
+                self.engine_owes_an_answer = None;
                 // **The runtime question is asked of the loader, never of this
-                // error string.** Gate 7 watched the registry go on reporting a
-                // version for a runtime that was not there while
-                // `CreateCoreWebView2EnvironmentWithOptions` failed
-                // synchronously; the loader is the oracle that did not lie. So
-                // an environment that failed is two different cards depending on
-                // one further fact, and that fact is a second call rather than a
-                // pattern match on a message.
-                //
-                // **An environment that failed with a runtime installed draws
-                // the sixth card** (user ruling 2026-08-25). It used to draw
-                // none — §7.7 ④ named five states and this was not one of them,
-                // so the fact went to `stderr` and the seat showed a rectangle
-                // of ground colour. The ruling made it a card of the same
-                // family, and the loader is still what chooses between the two:
-                // one sends a reader to Microsoft, the other asks the engine
-                // again, and telling somebody to install what is installed is
-                // the worse of the two mistakes.
+                // error string**, and both cards it can produce are chosen in
+                // one place — [`Self::the_engine_did_not_start`], which carries
+                // the reasoning. Gate 7 is why the loader and not the registry;
+                // the user ruling of 2026-08-25 is why a failure with a runtime
+                // installed is a card at all rather than a line on `stderr` over
+                // a rectangle of ground colour.
                 if let Some(error) = error {
-                    self.fault = Some(if bt_platform::webview2_runtime_version().is_err() {
-                        WebFault::RuntimeMissing {
-                            detail: error.clone(),
-                        }
-                    } else {
-                        WebFault::EngineDidNotStart {
-                            detail: error.clone(),
-                        }
-                    });
-                    outcomes.push(WebOutcome::Fault(error.clone()));
+                    self.the_engine_did_not_start(error.clone(), outcomes);
                 }
                 self.machine.on_environment(*generation, error.is_none())
             }
             WebEvent::Controller { generation, error } => {
+                self.engine_owes_an_answer = None;
                 match error {
                     // The environment came up and the controller did not: the
                     // same sentence and the same verb, because to a reader it is
@@ -2212,8 +2236,20 @@ impl WebSeat {
         match effect {
             WebEffect::Ignore => Ok(None),
             WebEffect::CreateController => {
-                self.host
-                    .request_controller(self.address.hwnd, self.machine.generation())?;
+                // The controller half of the same question, and so the same two
+                // answers: a refusal here is one more way there is no engine on
+                // this seat, and it draws the card rather than escaping into
+                // `apply`'s generic report — which says a fault out loud and
+                // leaves the seat with nothing on it.
+                match self
+                    .host
+                    .request_controller(self.address.hwnd, self.machine.generation())
+                {
+                    Ok(()) => {
+                        self.engine_owes_an_answer = Some(Instant::now() + ENGINE_START_DEADLINE);
+                    }
+                    Err(error) => self.the_engine_did_not_start(error, outcomes),
+                }
                 Ok(None)
             }
             WebEffect::InstallEvents => {
@@ -2296,7 +2332,7 @@ impl WebSeat {
                 self.host.close();
                 self.the_controller_has_been_told_nothing();
                 bt_platform::forget_web_environment();
-                self.start_environment()?;
+                self.start_environment(outcomes);
                 Ok(None)
             }
             WebEffect::RebuildForNewVersion => {
@@ -2311,7 +2347,7 @@ impl WebSeat {
                 }
                 self.waiting = None;
                 bt_platform::forget_web_environment();
-                self.start_environment()?;
+                self.start_environment(outcomes);
                 Ok(None)
             }
             WebEffect::AwaitBrowserExitBeforeCleanup => {
@@ -2332,10 +2368,46 @@ impl WebSeat {
         }
     }
 
-    fn start_environment(&mut self) -> Result<(), String> {
+    /// **Ask for the engine, and start the clock that answers for it** — the
+    /// one door (§7.36).
+    ///
+    /// Three callers: a seat being opened, a browser that died being rebuilt,
+    /// and a runtime update being adopted. All three ask the same question, so
+    /// all three get the same two answers — the clock when the ask was taken,
+    /// [`Self::the_engine_did_not_start`] when it was refused where it stood.
+    /// It reports nothing itself, so a refusal is never *only* a log line.
+    fn start_environment(&mut self, outcomes: &mut Vec<WebOutcome>) {
         let generation = self.machine.generation();
         let folder = self.folder.clone();
-        self.host.request_environment(&folder, generation)
+        match self.host.request_environment(&folder, generation) {
+            Ok(()) => self.engine_owes_an_answer = Some(Instant::now() + ENGINE_START_DEADLINE),
+            Err(error) => self.the_engine_did_not_start(error, outcomes),
+        }
+    }
+
+    /// **The engine is not going to run here, and this is the one place that
+    /// says which card says so** (§7.36).
+    ///
+    /// Three doors reach it and they are the three ways the answer can arrive:
+    /// the creation call failing where it stands, its callback arriving with an
+    /// error, and [`ENGINE_START_DEADLINE`] passing with the callback never
+    /// having come at all. They are one sentence to a reader — there is no
+    /// engine on this seat — so they are one sentence here, and the loader is
+    /// what chooses between its two spellings for the reason `digest` records
+    /// at length: telling somebody to install what is installed is the worse of
+    /// the two mistakes.
+    fn the_engine_did_not_start(&mut self, detail: String, outcomes: &mut Vec<WebOutcome>) {
+        self.engine_owes_an_answer = None;
+        self.fault = Some(if bt_platform::webview2_runtime_version().is_err() {
+            WebFault::RuntimeMissing {
+                detail: detail.clone(),
+            }
+        } else {
+            WebFault::EngineDidNotStart {
+                detail: detail.clone(),
+            }
+        });
+        outcomes.push(WebOutcome::Fault(detail));
     }
 
     /// The clock the deadline door is hung on. **The only backstop on the
@@ -2347,6 +2419,10 @@ impl WebSeat {
         now: Instant,
         compositor: &bt_platform::Compositor,
     ) -> Vec<WebOutcome> {
+        let silent = self.engine_that_said_nothing(now);
+        if !silent.is_empty() {
+            return silent;
+        }
         let Some((kind, deadline)) = self.waiting else {
             return Vec::new();
         };
@@ -2363,9 +2439,44 @@ impl WebSeat {
         outcomes
     }
 
+    /// **The silent failure's own door** (§7.36).
+    ///
+    /// An engine that neither fails nor calls back leaves a seat with no card
+    /// and nothing to print, which is exactly what gate 5 photographed on the
+    /// machine with no runtime — and it is also the shape `w0p-evidence.md`
+    /// §3.4 measured for an environment built over a folder the old browser
+    /// still held. There is no error to report because nobody reported one, so
+    /// the clock is what reports it.
+    ///
+    /// Its own method, and one that takes nothing but the time, because that is
+    /// the whole of what it needs: [`WebSeat::tick`]'s other half needs a
+    /// compositor and this half does not, and a door that can be opened without
+    /// a window is a door a test can walk through.
+    fn engine_that_said_nothing(&mut self, now: Instant) -> Vec<WebOutcome> {
+        let Some(deadline) = self.engine_owes_an_answer else {
+            return Vec::new();
+        };
+        if now < deadline {
+            return Vec::new();
+        }
+        let mut outcomes = Vec::new();
+        self.the_engine_did_not_start(
+            String::from("the WebView2 engine was asked for and never answered, either way"),
+            &mut outcomes,
+        );
+        outcomes
+    }
+
     /// When the window next has to come back and look at the clock.
+    ///
+    /// The earlier of the two, because a deadline nobody comes back for is not
+    /// a deadline: the window sleeps until the soonest thing it owes.
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
-        self.waiting.map(|(_, deadline)| deadline)
+        let browser = self.waiting.map(|(_, deadline)| deadline);
+        match (browser, self.engine_owes_an_answer) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (only, None) | (None, only) => only,
+        }
     }
 
     fn action_for(&self, chord: WebChord) -> Option<Action> {
@@ -3897,6 +4008,7 @@ mod rehost_address_tests {
             mint: Rc::new(RefCell::new(Mint::Nothing)),
             claims: Vec::new(),
             waiting: None,
+            engine_owes_an_answer: None,
             wanted: WebPresence::Hidden,
             presence: None,
             wanted_bounds: None,
@@ -4919,6 +5031,244 @@ mod search_tests {
                 AddressVerdict::LocalPage(_)
             ),
             "a network path is refused at the mint"
+        );
+    }
+}
+
+/// **The engine's presence is answered by a real attempt, inside a clock**
+/// (`docs/DESIGN.md` §7.36).
+///
+/// Gate 5 photographed a preview pane on a machine with no WebView2 that drew
+/// *nothing at all*: no absence card, no refusal card, and not a byte on
+/// `stderr` — because `CreateCoreWebView2EnvironmentWithOptions` answered
+/// `0x80070002` where it stood, `WebSeat::open` handed that back as an `Err`,
+/// and its caller inserted no seat. A card is something a seat draws.
+#[cfg(test)]
+mod engine_absence_tests {
+    use super::rehost_address_tests::{detached, hwnd, page};
+    use super::*;
+
+    fn seat() -> WebSeat {
+        detached(SeatAddress {
+            page: page(1, 1),
+            hwnd: hwnd(0x40),
+        })
+    }
+
+    /// Both spellings of "there is no engine on this seat" send a reader
+    /// somewhere: one to Microsoft, one back at the engine. Which of the two a
+    /// machine gets is the loader's answer and not this test's business.
+    fn is_an_engine_absence(fault: Option<&WebFault>) -> bool {
+        matches!(
+            fault,
+            Some(WebFault::RuntimeMissing { .. } | WebFault::EngineDidNotStart { .. })
+        )
+    }
+
+    /// RED — **an engine that never calls back is an engine that did not
+    /// start, and the seat says so before the reader gives up.**
+    ///
+    /// The third of the three ways the question can be answered, and the only
+    /// one with nothing to report: measured in `w0p-evidence.md` §3.4, an
+    /// environment asked for over a folder the old browser still holds "does not
+    /// fail loudly — it simply never calls back". Before this there was no clock
+    /// on that silence at all, so the seat sat on ground colour for as long as
+    /// the window lived.
+    ///
+    /// MUTATION: make the clock never come due and this returns nothing, which
+    /// is the picture gate 5 took.
+    #[test]
+    fn an_engine_that_never_answers_draws_the_card_when_its_clock_runs_out() {
+        let mut web = seat();
+        let asked_at = Instant::now();
+        web.engine_owes_an_answer = Some(asked_at + ENGINE_START_DEADLINE);
+        assert!(
+            web.engine_that_said_nothing(asked_at).is_empty(),
+            "an engine still inside its deadline is an engine that may yet speak"
+        );
+        assert!(
+            web.fault().is_none(),
+            "and nothing is drawn over the seat while it may"
+        );
+        let outcomes = web.engine_that_said_nothing(asked_at + ENGINE_START_DEADLINE);
+        assert!(
+            matches!(outcomes.as_slice(), [WebOutcome::Fault(_)]),
+            "the silence is reported exactly once, saw {outcomes:?}"
+        );
+        assert!(
+            is_an_engine_absence(web.fault()),
+            "and the seat wears one of the two engine cards, saw {:?}",
+            web.fault()
+        );
+        assert_eq!(
+            web.engine_owes_an_answer, None,
+            "the debt is settled, so a second tick does not report it twice"
+        );
+        assert!(
+            web.engine_that_said_nothing(asked_at + ENGINE_START_DEADLINE * 2)
+                .is_empty()
+        );
+    }
+
+    /// RED — **the window is told when to come back for that clock.**
+    ///
+    /// A deadline nobody looks at is not a deadline: `next_deadline` is what the
+    /// event loop sleeps against, and before this it only ever named the browser
+    /// wait — so the engine's clock would have been read whenever something else
+    /// happened to wake the window, or never.
+    #[test]
+    fn the_window_is_woken_for_whichever_of_the_two_clocks_comes_first() {
+        let mut web = seat();
+        assert_eq!(web.next_deadline(), None, "a seat that owes nothing sleeps");
+        let now = Instant::now();
+        web.engine_owes_an_answer = Some(now + ENGINE_START_DEADLINE);
+        assert_eq!(web.next_deadline(), Some(now + ENGINE_START_DEADLINE));
+        web.waiting = Some((BrowserWait::Teardown, now + BROWSER_EXIT_DEADLINE * 3));
+        assert_eq!(
+            web.next_deadline(),
+            Some(now + ENGINE_START_DEADLINE),
+            "the sooner of the two, or the later one silently swallows it"
+        );
+        web.engine_owes_an_answer = None;
+        assert_eq!(web.next_deadline(), Some(now + BROWSER_EXIT_DEADLINE * 3));
+    }
+
+    /// RED — **an answer settles the debt whichever way it answers.**
+    ///
+    /// An engine that failed has spoken, and a clock still running over it would
+    /// replace the card it just drew — a "the engine did not start" over a
+    /// runtime card, ten seconds after the reader had already been told what to
+    /// install.
+    #[test]
+    fn an_engine_that_answers_takes_its_own_clock_down() {
+        for error in [
+            None,
+            Some(String::from("CreateCoreWebView2Environment failed")),
+        ] {
+            let mut web = seat();
+            web.engine_owes_an_answer = Some(Instant::now() + ENGINE_START_DEADLINE);
+            let mut outcomes = Vec::new();
+            web.digest(
+                &bt_platform::WebEvent::Environment {
+                    generation: web.machine.generation(),
+                    error: error.clone(),
+                },
+                &mut outcomes,
+            );
+            assert_eq!(
+                web.engine_owes_an_answer, None,
+                "an environment that answered {error:?} has answered"
+            );
+            assert_eq!(
+                is_an_engine_absence(web.fault()),
+                error.is_some(),
+                "a failure is a card and a success is not: {error:?}"
+            );
+        }
+    }
+
+    /// RED — **a fault the engine reports where it stands is a card on a seat,
+    /// exactly as one its callback reports is.**
+    ///
+    /// The one place that turns "no engine here" into a card, asked directly.
+    /// Which of the two cards a machine gets is the loader's answer — the
+    /// machine this runs on decides that, and both of them send a reader
+    /// somewhere.
+    #[test]
+    fn the_engine_that_did_not_start_leaves_a_card_and_says_so_once() {
+        let mut web = seat();
+        let mut outcomes = Vec::new();
+        web.the_engine_did_not_start(String::from("0x80070002"), &mut outcomes);
+        assert_eq!(
+            outcomes,
+            vec![WebOutcome::Fault(String::from("0x80070002"))],
+            "the machine's own words travel out once, for the diagnostics log"
+        );
+        assert!(
+            is_an_engine_absence(web.fault()),
+            "and the seat wears the card that says it, saw {:?}",
+            web.fault()
+        );
+        assert!(matches!(
+            web.fault().map(WebFault::verb),
+            Some(WebFaultVerb::DownloadTheRuntime | WebFaultVerb::RestartTheEngine)
+        ));
+        assert!(
+            web.fault().and_then(WebFault::detail).is_some(),
+            "carrying what the machine said, which is what the card's small \
+             print is for"
+        );
+    }
+
+    /// RED — **`open` hands back a seat and what the engine said, and never an
+    /// `Err` for an engine that refused.**
+    ///
+    /// This is gate 5's second red in one line of code. On the clean Win10 VM
+    /// `CreateCoreWebView2EnvironmentWithOptions` answers `0x80070002` where it
+    /// stands; `open` used to write `web.start_environment()?` and hand that
+    /// back, and `open_web_page_on` printed a line into `diagnostics.log` and
+    /// inserted **nothing** — so the pane it had already opened had no seat, and
+    /// every card this seat can draw, the navigation gate's refusal card
+    /// included, is something a seat draws. Nothing was wrong with the cards.
+    ///
+    /// A source pin and not a run, because the refusal it is about belongs to a
+    /// machine with no runtime: `bt-app` forbids `unsafe`, so this process
+    /// cannot point the loader at a folder that is not there, and a machine that
+    /// *has* the runtime would answer this call by building a real browser.
+    ///
+    /// MUTATION: put the `?` back and this says so.
+    #[test]
+    fn open_answers_a_refusing_engine_with_a_seat_that_wears_the_card() {
+        let source: String = include_str!("webhost.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let slice = |from: &str, to: &str| -> String {
+            let start = source.find(from).unwrap_or_else(|| panic!("{from}"));
+            let end = source[start..]
+                .find(to)
+                .unwrap_or_else(|| panic!("{to} follows {from}"));
+            source[start..start + end].to_owned()
+        };
+        let open = slice(
+            concat!("pub(crate)fn", "open("),
+            concat!("pub(crate)fn", "go("),
+        );
+        assert!(
+            !open.contains(concat!("start_environment", "()")),
+            "an engine that refuses to start is an answer about the engine, not \
+             a reason for the pane to have no seat: `open` no longer takes the \
+             answer as a `Result` it can hand back"
+        );
+        assert!(
+            open.contains(concat!("web.start_", "environment(&mutoutcomes)")),
+            "it asks through the one door, which is where the refusal is turned \
+             into a card"
+        );
+        assert!(
+            open.contains("Ok((web,outcomes))"),
+            "and the caller is handed the seat and what the engine said on the way in"
+        );
+        // Every door into "ask the engine to exist" ends at the same two places:
+        // the clock when the ask was taken, the card when it was refused.
+        let asks = slice(
+            concat!("fnstart_", "environment(&mutself"),
+            concat!("fnthe_engine_did", "_not_start("),
+        );
+        assert!(
+            asks.contains("self.engine_owes_an_answer=Some(Instant::now()+ENGINE_START_DEADLINE)"),
+            "an ask that was taken starts the clock that answers for it"
+        );
+        assert!(
+            asks.contains(concat!(
+                "Err(error)=>self.the_engine_did",
+                "_not_start(error,outcomes)"
+            )),
+            "and an ask that was refused where it stood draws the card"
         );
     }
 }

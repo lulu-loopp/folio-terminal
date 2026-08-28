@@ -4486,6 +4486,51 @@ a pane head's ClosePane has no words
 
 **日期:2026-08-27 用户实证,当日复现、定因、落地。**
 
+### 7.36 引擎在不在,必须由一次真的创建尝试在有界时间内回答;而一扇窗里所有的字,都只除以同一个分辨率(门 5 干净机两条红,2026-08-28 实证,已落地;`crates/bt-app/src/{webhost,main}.rs`、`crates/bt-render/src/lib.rs`)
+
+门 5 的干净 Win10(Pro 22H2 19045,无网卡、无 WebView2)拍回来两张照片:预览座**整块什么都不画**,以及**同一扇窗里外壳的字被画得比它的版面框大一截**。两条看着像一件事——都只在开了预览座的窗上出现——其实是两件互不相干的事,只是同一台机器同时具备触发两者的条件。
+
+#### ① 一次失败的创建也是一个答案,不是「没有座」的理由
+
+**取证。** 用本片的构建在那台机器上跑(`BT_WEB_DEV=https://example.com/`,隔离 `APPDATA`/`LOCALAPPDATA`),`stderr` 上写着:
+
+```
+BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find the file specified. (0x80070002)
+```
+
+**这一行一直都在。** 上一轮的结果文档说「`stderr` 一个字节都没有,所以 `WebOutcome::Fault` 根本没走到」——那个推论错在通道:`docs/BT-ENVIRONMENT.md` 开头就写着,从控制台起来的 folio 会**把自己的 `stdout`/`stderr` 交给 `%APPDATA%\Folio\diagnostics.log`**,除非进程里有一个名字含 `TRACE` 的 `BT_` 变量。上一轮的探针重定向了 `stderr` 却没开任何 `*TRACE*`,于是它盯着一个空文件下结论。**教训:这个产品的 `stderr` 有两个出口,读它之前先确定这一跑走的是哪一个。**
+
+**成因是一个 `?`。** `WebSeat::open` 的最后一句是 `web.start_environment()?`。加载器在没有运行时的机器上**同步**答 `0x80070002`(实测不到一毫秒),于是 `open` 把 `Err` 交给调用方,而 `open_web_page_on` 的 `Err` 臂是 `eprintln!("BT_WEB {error}")` ——**一个座都没有插进 `window.web`**。而这个产品里**每一张卡都是座画的**:缺席卡读的是 `WebSeat::fault()`,导航门的拒绝卡也读它(拒绝的理由是在引擎自己的 `NavigationStarting` 回调里写下的,没有引擎就没有那次回调)。所以「这台机器上这个座什么都不画」不是卡写错了,是**画卡的那个东西从来没被造出来**——`javascript:`/`file:`/`mailto:` 三面同样空,正是这一条的推论。
+
+**修法:失败归座,不归调用方。** `open` 现在答 `Result<(WebSeat, Vec<WebOutcome>), String>`:引擎拒绝启动时座照样成立,身上带着卡,`Vec<WebOutcome>` 是它进来时说的那句话(仍旧一路走到 `diagnostics.log`)。留在 `Err` 里的只剩一种失败,而它不是引擎的:没有 `%LOCALAPPDATA%` 就没有 profile,任何引擎都无处安身,也就没有座可挂卡。
+
+#### ① ′ 回调不来也要有 deadline
+
+`CreateCoreWebView2EnvironmentWithOptions` 有三种答法:当场失败、回调、以及**两样都不做**——`w0p-evidence.md` §3.4 早就量到过这一种(在旧浏览器还占着 profile 目录时新建环境「不会大声失败,它只是永远不回调」)。第三种没有错误可报,所以**报它的只能是一只钟**:`ENGINE_START_DEADLINE = 10s`(与 `BROWSER_EXIT_DEADLINE` 同数,理由也同:必须稳稳高过最慢的一次「确实起来了」;门 5 两台机连整个产品的冷启动在内是 3.4s 与 6.0s)。要环境或要 controller 的那一刻上钟,任一方答话(**包括答的是错误**)就撤钟;钟走完就落到「引擎没起来」。
+
+**两种拼法之间由加载器裁,而且只有一处裁。** `the_engine_did_not_start` 是那一处:`webview2_runtime_version()` 答不上来就是 `RuntimeMissing`(卡把人送去装 Evergreen 运行时),答得上来就是 `EngineDidNotStart`(卡把人送回去再试一次)。三扇门——同步失败、回调带错、钟走完——都走这一处,因为对读的人来说它们是同一句话:**这个座上没有引擎**。原来只有中间那一扇。
+
+**红门五道**(`webhost::engine_absence_tests`,全部无浏览器):钟到点出卡且只报一次、`next_deadline` 取两只钟里更早的那只、答话即撤钟(答成功不出卡、答失败出卡)、`the_engine_did_not_start` 把卡挂上座并把机器的原话交出去一次、以及一道源码门钉住 `open` 不再对 `start_environment` 用 `?`。**变异逐条实测**:①钟恒不响 → 第一道红(`saw []`,正是门 5 拍到的那张照片);②`next_deadline` 只报 browser wait → 第二道红;③`digest` 不撤钟 → 第三道红;④`the_engine_did_not_start` 不写 `fault` → 第四道红;⑤把 `?` 放回去 → 第五道红。
+
+#### ② 一扇窗里所有的字,只除以一个分辨率
+
+**取证。** 同一台机器、同一次运行、`BT_CHROME_DUMP` 与截屏同时拿:版面说标签标题的框是 `[42, 6, 180, 40]`,**照片里那行字从 x=84 开始**,而且逐列复制地宽了一倍——2× 是横向,纵向只有 1.2×,两根轴不同倍,所以既不是字号变大也不是字体换了。把两根倍数除回去:960/2 = 480,600/1.2 = 500,**正是终端座的矩形**。而版面本身是对的:同一份 dump 里每一个方块、每一枚图标都画在它该在的地方,只有**字**错位。
+
+**成因不在这份代码里,而这份代码给了它可乘之机。** 那台机器的 adapter 是 `Microsoft Basic Render Driver`(wgpu 的 WARP 退路,`device_type: Cpu`)。**它不是「没装驱动」**——客户机自报 `VMware SVGA 3D`,驱动版本 9.17.9.4,状态 OK,VMware Tools 12.5.3;那块虚拟显卡到 D3D11 为止,**没有 D3D12**,而这个产品的 wgpu 走 DX12 后端,于是每一台 VMware 客户机(以及每一台没有独显的 CI runner)拿到的都是 WARP。这条路不是边角,它是「在虚拟机里跑这个终端」的默认路。glyphon 的顶点着色器把字形的像素坐标**除以绑定的 `Viewport` 里那个分辨率**,而这扇窗当时有两个 `Viewport`:外壳一个(整面 960×600),每个终端座一个(480×500)。在那台设备上这两个 16 字节的 uniform **没有分开**:一帧里所有的字都被同一个除数除,于是开了预览座之后外壳的字被座的 480×500 除,再落进整窗的 pass 里——横向 2 倍、纵向 1.2 倍,一分不差。实测三个变体交叉验证:原样(外壳被座的数除)、每帧新建一个外壳 `Viewport`(反过来,**座的字**被整窗的数除,终端字变小)、强制重写同一个 buffer(**毫无变化**,`window.png` 与原样逐字节相同)。所以问题不是 buffer 里的值,是**两个 buffer 在这台设备上不成其为两个**。
+
+**裁决:不去要求设备把两个 uniform 分开,而是不再需要两个。** 一扇窗只保留一个 `text_viewport`,它的分辨率就是这面 surface;终端座的字仍旧按座局部排版,**座的角在唯一一处加上去**(`prepare_text_atlas` / `prepare_status_text_atlas` 造 `TextArea` 的那一行),然后在整窗的 viewport 下画,座的矩形退回它本来的身份——**scissor**。方块与图标的 NDC 仍旧按座算,所以 pass 在座与整窗之间切两次;那是几次状态设置,不是 draw。`N = 1` 时座就是整面,每一个数与从前逐字相同。
+
+**为什么红门是一道源码门 + 一张照片。** 这个缺陷要那台设备:开发机上的 WARP 旁边有真驱动,**实测**它把旧写法画得完全正确(把改动整段还原后跑同一张照片门,绿)。所以能被携带的不是那台设备的行为,而是**让那种行为无从发生的性质**——一扇窗只有一个分辨率——那是这份文件自己的性质。于是:
+
+- `a_window_divides_every_glyph_it_draws_by_one_resolution`(源码门,每根针都拆成两截拼,免得门自己成为自己的反例):`Viewport::new(` 恰好一次、写分辨率的只有 `text_viewport`、每一处 `render(&gpu.atlas, …)` 交的都是它、`&slot.viewport` 一次不剩。**变异实测**:把「每座一个 viewport」整段还原 → 红(`left: 3, right: 1`)。
+- `a_chrome_label_lands_in_its_box_on_the_device_a_driverless_machine_gets`(照片门,跑在 `GpuContext::headless_fallback` 上,也就是那台机器的同一条 WARP 路):一扇 640×400 的离屏窗,座**故意不是整面**(0,60,320×300),外壳一张只有它自己是红色的标签;读回这一帧,断言红墨落在标签的框里,且座自己的字落在座里。后半句是新写法的那一半的门:**变异**——把 `prepare_text_atlas` 里的 `origin_y` 拿掉——shell 的字就画到窗顶去了。
+
+**挂账一条:两扇窗还是两个 `Viewport`。** 一个 `Viewport` 是「这面 surface 多大」,而两扇窗是两面不一样大的 surface,所以这个字段只能在 `WindowRenderer` 上——它正是「不能共享的东西住在窗上」那条分界的本意。于是在同一台 WARP 机器上,**同时开两扇窗**(或一扇窗加一扇浮窗)理论上会把这一族的风险请回来:A 窗的外壳被 B 窗的分辨率除。没有实测,因为门 5 那一跑只开了一扇窗;两扇窗之间隔着各自的 `queue.submit`,而这次量到的错位发生在**同一个 pass 里**,所以它未必发生。真要根除,只有把这一个 uniform 提到 `GpuContext` 上、每扇窗在自己的 pass 之前重写它一次——那把一个跨窗的写序变成正确性的前提,值不值得要一次实测来定。**下一位在 WARP 机器上开两扇窗拍一张,就知道了。**
+
+**两条之间没有因果。** ① 是「没有引擎」这件事没有被说出口,② 是「有一个座」这件事让两个分辨率同时活着;干净 Win10 同时具备两者的条件(没有运行时、且没有显示驱动),所以它们一起被拍到。Win11 那台有运行时也有驱动,两条都不发作;同一台 Win10 不开座时 ② 同样不发作,因为那时座就是整面窗,两个除数是同一个数。
+
+**日期:2026-08-28 干净机实证,当日复现、定因、落地。**
+
 ## 12. 发布工程
 
 一个能跑的 build 和一个能发的 build 之间隔着七件事,这一节是其中属于「构建与分发」和「CI」的那两件。写在这里而不是写在 workflow 的注释里,是因为其中每一条都是**裁决**:为什么版本只有一处、为什么 `.res` 是自己写的、为什么 `lto` 开或不开、为什么静态 CRT 没有采用——这些在一年后会被重新提起,而 YAML 不是回答它们的地方。

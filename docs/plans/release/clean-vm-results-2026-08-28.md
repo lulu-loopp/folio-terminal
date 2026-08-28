@@ -21,6 +21,10 @@
      连导航门的拒绝卡也不出;`stderr` 一个字都没有。
   3. **Win10 同一批窗口**:外壳文字被画得比它的版面框大一截,标签、提示条、对话框三处全部溢出。
 
+> **后续(2026-08-28 晚)。** 第 2 条与第 3 条**已在同一台干净 Win10 上复现、定因、修好并复跑取证**,
+> 裁决与红门见 `docs/DESIGN.md` §7.36。这一份文档保持它当时的样子,只在被推翻的那一句上加了勘误
+> (§5.2)。第 1 条(Win11 关不掉)在另一条线上。
+
 ---
 
 ## 1. 怎么跑的
@@ -266,8 +270,17 @@ Win10 上同样的四次启动 60–80 毫秒就关了。两台机之间唯一�
 ### 5.2 (红)没有 WebView2 的机器上,预览座整块不画 —— Win10
 
 `BT_WEB_DEV` 开出预览座,座的头部画了页面图标,**座身完全是空的**。等到 15 秒还是空的;再把窗口
-拉宽 60 像素强制重画一帧,仍然是空的。这一路 `stderr` **一个字节都没有** —— `main.rs` 在
-`WebOutcome::Fault` 上是 `eprintln!("BT_WEB {text}")`,所以那条失败根本没走到。
+拉宽 60 像素强制重画一帧,仍然是空的。这一路 `stderr` **一个字节都没有**。
+
+> **勘误(2026-08-28 晚,`docs/DESIGN.md` §7.36)。** 上一句后面原本跟着一句推论——「`main.rs` 在
+> `WebOutcome::Fault` 上是 `eprintln!("BT_WEB {text}")`,所以那条失败根本没走到」——**那句推论是错的,
+> 错在通道**:从控制台起来的 folio 会把自己的 `stdout`/`stderr` 交给
+> `%APPDATA%\Folio\diagnostics.log`,除非进程里有一个名字含 `TRACE` 的 `BT_` 变量
+> (`docs/BT-ENVIRONMENT.md` 开头第二条约定)。这一轮的探针重定向了 `stderr` 却没开任何 `*TRACE*`,
+> 所以它盯着的是一个按设计就该是空的文件。带上 `BT_WEB_TRACE` 重跑同一台机器,那一行一直都在:
+> `BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find the file specified. (0x80070002)`。
+> 真正的成因是 `WebSeat::open` 把这个同步失败当 `Err` 交了出去,于是**一个座都没有被插进去**,
+> 而每一张卡都是座画的。
 
 门 5 明写要拍的「Microsoft Edge WebView2 Runtime is not installed. / Download the runtime」缺席卡,
 **在这台机上拍不到**。
@@ -359,11 +372,22 @@ Win10 上同样的四次启动 60–80 毫秒就关了。两台机之间唯一�
 
 ## 8. 挂账
 
-1. **§5.1、§5.2、§5.3 是发布阻塞项**,要先修再谈门 5 过不过。
+1. **§5.1、§5.2、§5.3 是发布阻塞项**,要先修再谈门 5 过不过。**§5.2 与 §5.3 已修**
+   (`docs/DESIGN.md` §7.36,2026-08-28 当日在同一台干净 Win10 上复现、定因、复跑取证);§5.1 在另一条线上。
 2. `javascript:` 那一面没有卡(§4),以及下载那一面根本没测。前者得先定是产品缺陷还是
    `plan.md` 的说法要改。
 3. SmartScreen 一张,仍缺。
 4. 200% 缩放下的第二轮(`clean-vm.md` §2.1 建议在 Win11 上做)本轮没做。
-5. 客户机分辨率 1024×768 与手册不一致(§6),截图都被切掉右边一条。
-6. `new-vm.ps1` 的 `checkToolsState` 同样漏 `-vp`(§2.2 末)。
-7. 证据入库与 `.gitignore` 例外行(`clean-vm.md` §7.1)本轮没做。
+5. 客户机分辨率 1024×768 与手册不一致(§6),截图都被切掉右边一条。**部分销账**:切边是**窗口位置**
+   造成的,不是分辨率——把首窗放在 (20,20) 而不是 (104,104),960×600 整个落在 1024×768 之内,§7.36 那一轮
+   的证据图都是完整的。分辨率本身仍是 1024×768:客户机装着 `VMware SVGA 3D`(驱动 9.17.9.4,状态 OK,
+   Tools 12.5.3),但 `EnumDisplaySettings` 一个模式都不报,从客户机内 `ChangeDisplaySettings` 改不动;
+   `.vmx` 里 `svga.maxWidth/maxHeight` 早已是 1920×1080 且 `svga.autodetect = FALSE`。
+6. **那块虚拟显卡没有 D3D12**,所以 wgpu 的 DX12 后端在这台机器上拿到的是 `Microsoft Basic Render Driver`
+   (WARP,`device_type: Cpu`)——§5.3 的成因就在这条路上,而这条路是「在虚拟机里跑这个终端」的默认路。
+7. `new-vm.ps1` 的 `checkToolsState` 同样漏 `-vp`(§2.2 末)。
+8. 证据入库与 `.gitignore` 例外行(`clean-vm.md` §7.1)本轮没做。
+9. **`vmrun runProgramInGuest` 的参数要分成多段传**,不能拼成一个字符串:
+   `… powershell.exe -NoProfile -ExecutionPolicy Bypass -File <脚本>` 五段答 0,而把后四段拼成一个引号串
+   的同一句答 1、什么都不跑。§2.2 末那条「第一段之后的分段不保留」说的是 `cmd.exe` 的情形,
+   两句合起来才是完整的规矩:**分段传,而且第一段之后不要再靠空格分词**。

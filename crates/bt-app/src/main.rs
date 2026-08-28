@@ -77472,7 +77472,12 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::WebPageSpoke);
             }),
         ) {
-            Ok(web) => {
+            // **A seat, even when the engine refused to start** (§7.36). The
+            // second value is what the engine said on the way in — nothing at
+            // all on a machine that has one, and on a machine that has not, the
+            // fault the seat is already wearing, on its way to `stderr` like
+            // every other. See `webhost::WebSeat::open`.
+            Ok((web, engine_said)) => {
                 self.window.web.insert(leaf, web);
                 // The pane stops showing whatever document it was on the moment
                 // it becomes a page: one seat shows one thing, and a buffer left
@@ -77519,7 +77524,11 @@ impl Runtime<'_> {
                 if !plays_a_video {
                     self.clear_preview_image_in(index, surface);
                 }
+                self.apply_web_outcomes(leaf, engine_said)?;
             }
+            // What is left here is the one failure that is not the engine's: no
+            // `%LOCALAPPDATA%`, so there is no profile for any engine to use and
+            // no seat to hang a card on.
             Err(error) => eprintln!("BT_WEB {error}"),
         }
         Ok(())
