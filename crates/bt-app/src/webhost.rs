@@ -3459,6 +3459,12 @@ mod machine_tests {
     /// RED GATE: derive the mint from the URL instead (`file:` prefix implies
     /// `Mint::File`) and the first needle disappears; drop the `check` and the
     /// second does.
+    ///
+    /// **The door moved into [`WebSeat::issue`] on 2026-08-28** (§7.43) so that
+    /// the addresses carrying *no* mint go through one too, so the ordering is
+    /// asserted in call order rather than in file order: the arm asks `issue`
+    /// before it tells the engine anything, and the host-minted question lives
+    /// in exactly one place inside it.
     #[test]
     fn the_host_asks_its_own_gate_before_it_issues_its_own_navigation() {
         let source: String = include_str!("webhost.rs")
@@ -3473,21 +3479,27 @@ mod machine_tests {
             "the mint installed is the one the caller carried, honoured only for \
              the URL it was made for"
         );
-        let gate = concat!("check(url,Origin::Host", "Minted(&minted))");
+        let gate = concat!("check(url,Origin::Host", "Minted(minted))");
         assert_eq!(
             source.matches(gate).count(),
             1,
             "exactly one host-minted gate"
         );
-        let after_gate = &source[source.find(gate).expect("the gate just counted")..];
-        let navigate = concat!("self.host.na", "vigate(url)?;");
-        assert!(
-            after_gate.contains(navigate),
-            "and it stands in front of the navigation rather than behind it"
+        let navigate = concat!("self.host.na", "vigate(&target)?;");
+        assert_eq!(
+            source.matches(navigate).count(),
+            1,
+            "exactly one road to the engine"
         );
+        let arm = &source[source
+            .find(concat!("WebEffect::", "Navigate(url)=>{"))
+            .expect("the arm that issues a navigation")..];
+        let asked = arm
+            .find(concat!("self.", "issue(url,&minted,outcomes)?"))
+            .expect("the arm asks the host's own door");
         assert!(
-            !source[..source.find(gate).expect("the gate just counted")].contains(navigate),
-            "nothing navigates before the gate"
+            asked < arm.find(navigate).expect("and then tells the engine"),
+            "the engine is told before the door has answered"
         );
     }
 
@@ -5456,7 +5468,10 @@ mod refusal_card_tests {
             Ok(Some(BLANK_PAGE.to_owned()))
         );
         let minted = Mint::file(std::path::Path::new(r"C:\notes\a.html")).expect("a local path");
-        let target = minted.target().expect("a minted file names one URL").to_owned();
+        let target = minted
+            .target()
+            .expect("a minted file names one URL")
+            .to_owned();
         assert_eq!(
             web.issue(&target, &minted, &mut outcomes),
             Ok(Some(target.clone()))

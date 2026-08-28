@@ -62,6 +62,14 @@ added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST` deliberately do not match it.
 long, once, to prove the hang watchdog writes a report) is compiled out of release
 builds — in a release build the code that reads it is a no-op.
 
+`BT_PANIC_SELFTEST` (the same shape: an integer number of seconds, once) faults
+the window thread on purpose, to prove that a crash leaves by the exit a shut
+leaves by rather than through the loader's teardown — `docs/DESIGN.md` §7.43 ④.
+It is compiled out of release builds for the same reason and one more: a release
+build is required to have **no** controlled way to panic, which
+`scripts/release/cleanvm/in-guest.ps1` checks by requiring
+`folio.exe --panic-selftest` to be refused as an unknown argument.
+
 ## 2. Read only when the tests are compiled
 
 Never present in a release binary. `BT_PSREADLINE_MODULE_PATH`, `BT_BURST_EMIT`,

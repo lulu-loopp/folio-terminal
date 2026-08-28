@@ -606,7 +606,9 @@ mod tests {
                     "at {width}px the drawn sentence is wider than its box: {say:?}"
                 );
                 assert!(
-                    Notice::Offer.text().starts_with(say.trim_end_matches('\u{2026}')),
+                    Notice::Offer
+                        .text()
+                        .starts_with(say.trim_end_matches('\u{2026}')),
                     "at {width}px the sentence is not a prefix of itself: {say:?}"
                 );
             }

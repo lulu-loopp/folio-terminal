@@ -41499,11 +41499,8 @@ mod tests {",
         let measure = |text: &str| text.chars().count() as f32 * 6.9;
         const SAID: &str = "WebErrorStatus \u{b7} HostNameNotResolved";
         let body = [0.0, 0.0, 1200.0, 400.0];
-        let lines = crate::restore::wrap_anywhere(
-            SAID,
-            preview_card_detail_width(body, 1.0),
-            measure,
-        );
+        let lines =
+            crate::restore::wrap_anywhere(SAID, preview_card_detail_width(body, 1.0), measure);
         assert_eq!(lines, vec![SAID.to_owned()]);
     }
 }

@@ -87024,7 +87024,10 @@ mod floated_page_tests {
                 )
             });
         let hides = hook
-            .find(concat!("bt_platform::hide_every_", "window_of_this_process()"))
+            .find(concat!(
+                "bt_platform::hide_every_",
+                "window_of_this_process()"
+            ))
             .unwrap_or_else(|| {
                 panic!("a crash leaves its windows on the screen to be ghosted:\n{hook}")
             });
@@ -87050,7 +87053,10 @@ mod floated_page_tests {
         // that `--panic-selftest` is refused as an unknown flag, so the switch
         // that makes this measurable on a machine is a debug-only one.
         let selftest = SOURCE
-            .find(concat!("fn panic_", "selftest_if_due() {\n    let Some(after)"))
+            .find(concat!(
+                "fn panic_",
+                "selftest_if_due() {\n    let Some(after)"
+            ))
             .expect("the debug half of the selftest");
         let guard = SOURCE[..selftest]
             .rfind("#[cfg(debug_assertions)]")
@@ -88158,7 +88164,11 @@ const PANIC_EXIT_CODE: i32 = 101;
 #[cfg(debug_assertions)]
 static PANIC_SELFTEST_AFTER: std::sync::LazyLock<Option<Duration>> =
     std::sync::LazyLock::new(|| {
-        let seconds: u64 = std::env::var("BT_PANIC_SELFTEST").ok()?.trim().parse().ok()?;
+        let seconds: u64 = std::env::var("BT_PANIC_SELFTEST")
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
         (seconds > 0).then(|| Duration::from_secs(seconds))
     });
 
