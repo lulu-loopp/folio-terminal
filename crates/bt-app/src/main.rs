@@ -36188,16 +36188,13 @@ impl Runtime<'_> {
         stack.tooltip = self.stage_departure(Layered::Tip, tooltip, now);
         // **Read before the card's own layers go in, and for
         // [`OverlayStack::below_the_floats`]'s reason** (§7.44 ③): a video
-        // playing on the card is drawn directly above the card's face, and this
-        // is the one place the stack's order and that index are the same
-        // statement.
-        stack.file_peek = self.file_peek_layer();
-        self.window.file_peek_level = (!stack.file_peek.is_empty()).then(|| {
-            // The count is taken *after* the push only because
-            // `below_the_file_peek` sums the groups under this one and the card
-            // is not one of them — the arithmetic is the same either way.
-            stack.below_the_file_peek()
-        });
+        // playing on the card is drawn into a slot of the card's own group, and
+        // this is the one place the stack's order and that index are the same
+        // statement. Handed in exactly as `below_the_floats` is handed to
+        // `float_layer`, and the group writes its own index because only the
+        // group knows where inside itself the slot went.
+        let below_peek = stack.below_the_file_peek();
+        stack.file_peek = self.file_peek_layer(below_peek);
         stack.drag_ghost = self.drag_ghost_layer();
         stack.window_ring = self.window_ring_layer();
         let flattened = stack.flattened();
@@ -56091,17 +56088,45 @@ impl Runtime<'_> {
     /// goes **after** the card's own layers for the reason a float's does: the
     /// video is drawn over the card's face and under everything the card draws
     /// on top of it, and the bar is the topmost of those.
-    fn file_peek_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    fn file_peek_layer(&mut self, below: usize) -> Vec<marks::OverlayLayer> {
+        // Rebuilt from nothing on every pass, exactly as the float group's two
+        // ledgers are: it is a record of what *this* frame drew, and a stale
+        // index in it is a picture drawn into somebody else's layer.
+        self.window.file_peek_level = None;
         let mut layers = self.file_peek_card_layers();
         if layers.is_empty() {
             return layers;
         }
+        // **And a slot of its own for a recording, directly over the card's
+        // face** (route B slice ②; §7.44 ③, found on the machine 2026-08-28 —
+        // the float's own defect, on the third host).
+        //
+        // The renderer draws `VideoStage::Overlay(n)` between layer `n`'s ground
+        // and layer `n`'s **fills**. Pointed at the card's face, that puts the
+        // picture underneath the card's own picture well — which is a fill —
+        // and the card shows an empty box with a control bar counting away
+        // beneath it. The float carried exactly this defect and was mended
+        // exactly this way ([`WindowRuntime::float_video_level`]): a stage index
+        // has to name a layer the z-order loop actually reaches, and what this
+        // one is for is being reached. It costs no buffer, no draw call and no
+        // quad — see `marks::OverlayLayer::default`.
+        //
+        // Written **before** the push, because that is the slot the push is
+        // about to take, and `below` is handed in for
+        // [`OverlayStack::below_the_file_peek`]'s reason: the index is a fact
+        // about the stack, and only the chrome pass has a view of the stack.
+        self.window.file_peek_level = Some(below + layers.len());
+        layers.push(marks::OverlayLayer::default());
         // **The ▶ on the card, and the ruling that put it there** (user
         // 2026-08-28: *「能动的就动」*). §7.23's card drew a first frame and said
         // out loud that winding it was not what that build did. It is what this
         // build does, on the card as much as anywhere else — so the card wears
         // the same disc a pane does, and pressing it starts the engine where the
         // card stands.
+        //
+        // Above the slot, with the bar, for the float's reason: a layer paints
+        // its quads before the picture it carries, and the picture here is a
+        // video drawn over the slot's own (empty) ground.
         layers.extend(self.video_play_mark_layer(PreviewSurface::Peek));
         layers.extend(self.video_bar_layer(PreviewSurface::Peek));
         layers
@@ -82107,6 +82132,74 @@ mod files_locate_door_tests {
             layers.contains("_ if moving => None,"),
             "the card's still is handed in whatever the clause decided"
         );
+    }
+
+    /// RED — **a recording drawn on an overlay host gets a layer of its own,
+    /// never that host's face** (route B slice ②; §7.44 ③, photographed twice on
+    /// 2026-08-28 — once on a float and once, after the float was mended, on a
+    /// card).
+    ///
+    /// The renderer draws `VideoStage::Overlay(n)` between layer `n`'s **ground**
+    /// and layer `n`'s **fills** (`bt_render::VideoStage::Overlay`'s own doc, and
+    /// the z-order loop in `WindowRenderer`). That is exactly right for a
+    /// [`bt_render::WebHole`], because a hole belongs under the marks that
+    /// legitimately stand over a page — and exactly wrong for a picture, because
+    /// a host's body well is one of those fills. An index pointed at the face
+    /// therefore draws the recording *underneath* the very surface that is
+    /// supposed to be showing it.
+    ///
+    /// Both hosts had it and both were photographed:
+    ///
+    /// * the **float** drew its face, the fills covered the recording, and the
+    ///   picture appeared only for the moment the chassis was on its way out;
+    /// * the **card**, one mend later, showed an empty picture well with a
+    ///   control bar counting `0:01` → `0:06` underneath it, off an engine that
+    ///   was decoding perfectly well.
+    ///
+    /// The mechanism of the mend is one line and it is the same line on both: an
+    /// **empty layer** pushed directly above the host's face, whose index is what
+    /// the video's stage names. A stage index has to name a layer the z-order
+    /// loop actually reaches, and what that layer is for is being reached — it
+    /// costs no buffer, no draw call and no quad.
+    ///
+    /// So the pin is the rule and not one host: every ledger of "which layer is
+    /// a recording drawn into" is written immediately before a push of an empty
+    /// layer. A build that points one of them at a face again has to delete that
+    /// push to do it.
+    ///
+    /// RED GATE: write either ledger as the host's own face index — which is
+    /// what both builds photographed on 2026-08-28 did — and the arm for that
+    /// host fails.
+    #[test]
+    fn a_recording_on_an_overlay_host_is_drawn_into_a_layer_of_its_own() {
+        for (signature, ledger) in [
+            ("    fn float_layer(", ".float_video_level"),
+            (
+                "    fn file_peek_layer(",
+                "self.window.file_peek_level = Some(",
+            ),
+        ] {
+            let source = body(signature);
+            // The *last* mention, because both ledgers are cleared at the top of
+            // the pass that rebuilds them — a record of what this frame drew is
+            // wrong the moment it is stale — and the write is the one that
+            // matters here.
+            let at = source
+                .rfind(ledger)
+                .unwrap_or_else(|| panic!("{signature} writes {ledger}"));
+            let after = &source[at..];
+            let push = after.find("layers.push(").unwrap_or_else(|| {
+                panic!(
+                    "{signature} names a recording's layer and pushes none, so the stage is \
+                     the host's own face and the body well is painted over the picture"
+                )
+            });
+            assert!(
+                after[push..].starts_with("layers.push(marks::OverlayLayer::default())"),
+                "{signature} points a recording's stage at a layer that draws fills, so the \
+                 host's own body well is painted over the picture it is showing"
+            );
+        }
     }
 
     /// RED — **a window that has been closed is not playing anything** (route B

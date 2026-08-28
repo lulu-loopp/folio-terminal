@@ -674,3 +674,72 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2807 filtered ou
 ```
 
 Restored, green. Recorded in `docs/DESIGN.md` §7.44 ⑤ and added to ⑩'s gate list.
+
+---
+
+## ⑪ A twelfth red, uncovered by the eleventh — the card's picture was drawn under the card's own well
+
+⑩'s mend took the still away, and the shutter after it showed what the still had
+been hiding: the card's picture box is **empty ground**, the bar underneath it
+counting `0:06` off an engine that is decoding. The recording is not late and it
+is not missing — it is being drawn **underneath the card's own picture well**.
+
+| burst | card picture rect, frame to frame |
+|---|---|
+| `22-card-play-00..07.png`, ⑩'s mend in | still 0 pixels changed — but now of an empty well, not of a still |
+| `25-float-play-00..07.png`, same engine carried over | 17 505 – 35 306 px changed per 800 ms step |
+
+### Root cause — and the float had this exact defect a slice ago
+
+`bt_render::VideoStage::Overlay(n)` is drawn between layer `n`'s **ground** and
+layer `n`'s **fills** — the renderer's z-order loop, and the variant's own doc
+says so. That placement is right for a `WebHole`, because a hole belongs under
+the marks that legitimately stand over a page, and **wrong for a picture**,
+because a host's body well is one of those fills.
+
+The float was photographed with this on 2026-08-28 and mended by pushing an
+**empty layer** directly above each window's face and pointing
+`float_video_level` at it — the comment beside that push spells the whole
+argument out, ending *"a stage index has to name a layer the z-order loop
+actually reaches, and what this one is for is being reached."*
+
+The card was given `below_the_file_peek()` — the index of **its own face**,
+whose fills include the rounded picture well. So the same defect, on the third
+host, written into the code on the same day the second host's was mended. The
+still standing over the top is what kept it invisible for two runs.
+
+### The mend
+
+`file_peek_layer` now takes `below` the way `float_layer` does, writes its own
+index — only the group knows where inside itself the slot went — and pushes the
+empty layer:
+
+```rust
+self.window.file_peek_level = Some(below + layers.len());
+layers.push(marks::OverlayLayer::default());
+```
+
+with the play disc and the control bar extended in **above** it, for the float's
+reason exactly: a layer paints its quads before the picture it carries.
+
+### Red proof — the pin is the rule, not a host
+
+`a_recording_on_an_overlay_host_is_drawn_into_a_layer_of_its_own`: every ledger
+of *which layer is a recording drawn into* is written immediately before a push
+of an empty layer. Both arms measured under their own mutation — each ledger
+pointed back at its host's face, which is the state each photographed build was
+in:
+
+```
+---- a_recording_on_an_overlay_host_is_drawn_into_a_layer_of_its_own ----
+    fn file_peek_layer( names a recording's layer and pushes none, so the stage is
+    the host's own face and the body well is painted over the picture
+
+    fn float_layer( names a recording's layer and pushes none, so the stage is
+    the host's own face and the body well is painted over the picture
+```
+
+Restored, green. This is the third time in this slice that a rule was mended on
+one host and left standing on another — the press road (§⑨), the still clause
+(§⑩) and now the stage index — so all three pins are written as *rules over the
+set of hosts* rather than as statements about one.
