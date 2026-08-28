@@ -155,6 +155,24 @@ pub struct NoticeBar {
 /// and the sentence takes what is left — which can be nothing, and a sentence
 /// with no room is a sentence that is not drawn rather than one that overruns
 /// the words beside it.
+///
+/// # What gives way, in what order (user ruling 2026-08-28, §7.43)
+///
+/// Gate 5's 700×420 window photographed the strip with the sentence lying across
+/// `Add to $PROFILE`. The sentence *was* already being given the leftovers — and
+/// the leftovers were being computed against verbs that had walked off the
+/// strip's left edge, so "what is left" was a negative number that clamped to
+/// the whole width and the label was drawn over the words it was supposed to
+/// stop short of.
+///
+/// So the order is now written down and it is the ruling's: **a button is never
+/// cut and never wrapped**. First the sentence is elided to what is left of the
+/// row (the caller does that, with the font — see [`build`]); then, when the
+/// buttons themselves no longer fit between the `×` and the strip's own left
+/// padding, the sentence goes entirely and the buttons keep the row; then the
+/// buttons go, leftmost first, because the one nearest the `×` is the one the
+/// second state leaves standing alone. What survives every width is the `×`,
+/// which is the only control that can end the asking without an answer.
 #[must_use]
 pub fn lay_out(strip: [f32; 4], notice: Notice, widths: &[f32], scale: f32) -> NoticeBar {
     let px = |logical: f32| logical * scale;
@@ -179,20 +197,37 @@ pub fn lay_out(strip: [f32; 4], notice: Notice, widths: &[f32], scale: f32) -> N
     let (verb_top, verb_bottom) = centred_box(verb_height);
     let verb_padding = px(VERB_PADDING_X_LOGICAL_PX).round();
     let gap = px(GAP_LOGICAL_PX).round();
+    let text_left = (strip[0] + px(PADDING_LEFT_LOGICAL_PX)).round();
     let mut right = close[0] - px(VERB_TRAILING_GAP_LOGICAL_PX).round();
     let mut verbs: Vec<(NoticeVerb, [f32; 4])> = Vec::new();
     for (verb, width) in notice.verbs().iter().rev().zip(widths.iter().rev()) {
         let box_width = (width + 2.0 * verb_padding).round();
         let left = right - box_width;
+        // **A word that does not fit is a word that is not offered**, and every
+        // word to the left of it goes with it: they are laid out right to left,
+        // so the first one to run out of room is the first one whose neighbours
+        // have less room still. Drawing it anyway is what put a button half off
+        // the strip and a sentence on top of the other half.
+        if left < text_left {
+            break;
+        }
         verbs.push((*verb, [left, verb_top, right, verb_bottom]));
         right = left - gap;
     }
+    // A word had to be dropped, so the row is already narrower than the strip's
+    // own furniture: the sentence is gone rather than creeping back into the
+    // space the dropped word left, which would be a notice that grows its prose
+    // as the pane gets smaller.
+    let all_offered = verbs.len() == notice.verbs().len();
     // Laid out right to left and read left to right, which is the order the
     // caller's `widths` are in and the order a hit test walks.
     verbs.reverse();
 
-    let text_left = (strip[0] + px(PADDING_LEFT_LOGICAL_PX)).round();
-    let text_right = (right - gap).max(text_left);
+    let text_right = if all_offered {
+        (right - gap).max(text_left)
+    } else {
+        text_left
+    };
     NoticeBar {
         frame: strip,
         edge: [strip[0], strip[3] - hairline, strip[2], strip[3]],
@@ -200,6 +235,37 @@ pub fn lay_out(strip: [f32; 4], notice: Notice, widths: &[f32], scale: f32) -> N
         verbs,
         close,
     }
+}
+
+/// **The sentence as much of it as the row it was left can hold** (§7.43).
+///
+/// The ruling's first clause — 「按钮保持完整,文案截断带省略号」 — turned into the
+/// one call this window already makes for that question, with the caller's own
+/// font handed in because a prefix is only the right prefix against the face
+/// that will draw it.
+///
+/// **A lone `…` is nothing said.** `settings::ellipsized` answers a bare
+/// ellipsis when not even one character fits, which is what CSS draws and is
+/// right for a label in a table; in a strip whose other half is a row of buttons
+/// it is a dot of noise where a sentence used to be, and the ruling's next
+/// clause is that the prose is what disappears. So the floor is one character
+/// plus the ellipsis, and under it the row is the buttons and the `×`.
+#[must_use]
+pub fn sentence(
+    notice: Notice,
+    bar: &NoticeBar,
+    font_px: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> String {
+    let available = bar.text[2] - bar.text[0];
+    if available <= 0.0 {
+        return String::new();
+    }
+    let said = crate::settings::ellipsized(notice.text(), available, font_px, measure);
+    if said.chars().all(|character| character == '\u{2026}') {
+        return String::new();
+    }
+    said
 }
 
 /// What is under the pointer, or `None` when the pointer is not on the strip.
@@ -221,10 +287,18 @@ pub fn hit(bar: &NoticeBar, x: f32, y: f32) -> Option<NoticeElement> {
 }
 
 /// Draw one strip.
+///
+/// `say` is the sentence **as it fits** — [`Notice::text`] when the whole of it
+/// does, and the longest prefix of it with a `…` when it does not. Elided by the
+/// caller and not here, on this module's own standing division: the box is a
+/// number and the prefix that fills it is a question only something holding a
+/// font can answer (`settings::ellipsized`, the same one the settings page's
+/// three-line descriptions use). Empty draws nothing, which is what a row with
+/// no room for prose is.
 #[must_use]
 pub fn build(
     bar: &NoticeBar,
-    notice: Notice,
+    say: &str,
     hover: Option<NoticeElement>,
     palette: &ChromePalette,
     scale: f32,
@@ -250,10 +324,10 @@ pub fn build(
     let mut labels = Vec::new();
     let mut sprites = Vec::new();
 
-    if bar.text[2] > bar.text[0] {
+    if bar.text[2] > bar.text[0] && !say.is_empty() {
         labels.push(ChromeLabel {
             mono: false,
-            text: notice.text().to_owned(),
+            text: say.to_owned(),
             rect: bar.text,
             font_size_px: px(FONT_LOGICAL_PX),
             // `--ink2` over `--panel`: a notice is wayfinding rather than
@@ -376,7 +450,7 @@ mod tests {
     /// nobody can act on would be the wrong half surviving.
     #[test]
     fn a_narrow_pane_keeps_its_verbs_and_gives_up_its_sentence() {
-        let bar = lay_out([0.0, 0.0, 200.0, 30.0], Notice::Offer, &[90.0, 100.0], 1.0);
+        let bar = lay_out([0.0, 0.0, 275.0, 30.0], Notice::Offer, &[90.0, 100.0], 1.0);
         assert_eq!(bar.close[2] - bar.close[0], 22.0);
         assert_eq!(bar.verbs.len(), 2);
         assert!(
@@ -385,7 +459,7 @@ mod tests {
             bar.text
         );
         assert!(
-            build(&bar, Notice::Offer, None, &bt_render::chrome_palette(), 1.0)
+            build(&bar, "", None, &bt_render::chrome_palette(), 1.0)
                 .labels
                 .iter()
                 .all(|label| label.text != Notice::Offer.text()),
@@ -426,5 +500,163 @@ mod tests {
     #[test]
     fn the_restart_verb_is_the_pane_menus_verb() {
         assert_eq!(NoticeVerb::Restart.text(), Text::TermMenuShellAgain.text());
+    }
+
+    /// A stand-in for a proportional face: every character the same width, which
+    /// is all this arithmetic needs and is monotonic in a prefix's length, which
+    /// is what `settings::ellipsized`'s binary search needs.
+    fn measured(text: &str, font_size_px: f32) -> f32 {
+        text.chars().count() as f32 * font_size_px * 0.55
+    }
+
+    /// RED — **a button is never drawn under the sentence and never drawn
+    /// half** (user ruling 2026-08-28, `docs/DESIGN.md` §7.43).
+    ///
+    /// Gate 5's 700×420 photograph: `PowerShell integration is not installed.`
+    /// lying across `Add to $PROFILE`. Two things were wrong and the second is
+    /// the one that made a picture — the verbs were laid out right to left with
+    /// nothing stopping them walking off the strip's left edge, so at that width
+    /// `Add to $PROFILE` started at a negative x; and the sentence's box was
+    /// `(right - gap).max(text_left)`, which with a negative `right` clamps to
+    /// the whole row. The label was then drawn from the left padding across
+    /// everything.
+    ///
+    /// The ruling's order, asserted at every width between "roomy" and "one
+    /// pixel": the buttons keep whole boxes, the sentence is elided into what is
+    /// left, and when a button will not fit whole it is dropped rather than cut,
+    /// taking the sentence with it. The `×` outlives everything.
+    ///
+    /// MUTATIONS: take the `left < text_left` break out and the "wholly inside"
+    /// assertion goes red at the narrow widths; restore
+    /// `(right - gap).max(text_left)` unconditionally and the "no overlap"
+    /// assertion goes red at exactly the widths gate 5 photographed.
+    #[test]
+    fn a_notice_bars_actions_never_overlap_its_text() {
+        let font = FONT_LOGICAL_PX;
+        let widths: Vec<f32> = Notice::Offer
+            .verbs()
+            .iter()
+            .map(|verb| measured(verb.text(), font))
+            .collect();
+        let mut seen_without_every_verb = false;
+        let mut seen_elided = false;
+        for width in (1..=900).map(|step| step as f32) {
+            let strip = [0.0, 0.0, width, 30.0];
+            let bar = lay_out(strip, Notice::Offer, &widths, 1.0);
+            let available = bar.text[2] - bar.text[0];
+            let say = sentence(Notice::Offer, &bar, font, &mut measured);
+            seen_elided |= say.ends_with('\u{2026}');
+            seen_without_every_verb |= bar.verbs.len() < Notice::Offer.verbs().len();
+
+            for (index, (verb, box_)) in bar.verbs.iter().enumerate() {
+                // Whole, which is the half of the ruling that is about the
+                // buttons: the box is exactly its caption plus its padding, and
+                // all of it is on the strip. The caption is looked up by the
+                // verb and never by position, because a row that has dropped a
+                // word is exactly the row where the two disagree.
+                let offered = Notice::Offer
+                    .verbs()
+                    .iter()
+                    .position(|offered| offered == verb)
+                    .expect("a word on the strip is one the notice offers");
+                assert_eq!(
+                    box_[2] - box_[0],
+                    (widths[offered] + 2.0 * VERB_PADDING_X_LOGICAL_PX).round(),
+                    "at {width}px `{}` is not drawn whole: {box_:?}",
+                    verb.text()
+                );
+                assert!(
+                    box_[0] >= strip[0] && box_[2] <= strip[2],
+                    "at {width}px `{}` hangs off the strip: {box_:?}",
+                    verb.text()
+                );
+                assert!(
+                    box_[2] <= bar.close[0],
+                    "at {width}px `{}` reaches into the ×: {box_:?} / {:?}",
+                    verb.text(),
+                    bar.close
+                );
+                if index + 1 < bar.verbs.len() {
+                    assert!(
+                        box_[2] <= bar.verbs[index + 1].1[0],
+                        "at {width}px two words share a pixel: {:?}",
+                        bar.verbs
+                    );
+                }
+                // And the sentence's own box stops short of every one of them,
+                // which is the half that made the photograph.
+                assert!(
+                    bar.text[2] <= box_[0] || bar.text[2] <= bar.text[0],
+                    "at {width}px the sentence's box runs into `{}`: {:?} / {box_:?}",
+                    verb.text(),
+                    bar.text
+                );
+            }
+            assert!(
+                bar.text[2] <= bar.close[0] || bar.text[2] <= bar.text[0],
+                "at {width}px the sentence's box runs into the ×: {:?}",
+                bar.text
+            );
+            // What is drawn fits what it was given, which is what the elision
+            // buys over a clip: a clipped word ends mid-letter and reads as a
+            // rendering fault rather than as "there is more".
+            if !say.is_empty() {
+                assert!(
+                    measured(&say, font) <= available,
+                    "at {width}px the drawn sentence is wider than its box: {say:?}"
+                );
+                assert!(
+                    Notice::Offer
+                        .text()
+                        .starts_with(say.trim_end_matches('\u{2026}')),
+                    "at {width}px the sentence is not a prefix of itself: {say:?}"
+                );
+            }
+            // The × is the last thing standing, at every width.
+            assert_eq!(bar.close[2] - bar.close[0], (CLOSE_BOX_LOGICAL_PX).round());
+        }
+        assert!(
+            seen_elided,
+            "no width in the sweep ever elided the sentence, so the ellipsis half \
+             of the ruling is untested"
+        );
+        assert!(
+            seen_without_every_verb,
+            "no width in the sweep ever dropped a word, so the 「a button is never \
+             cut」 half of the ruling is untested"
+        );
+    }
+
+    /// RED — **and the widths gate 5 actually photographed.**
+    ///
+    /// A pane in a 700-pixel window is about 660 wide once the window's own
+    /// chrome is off it; the sweep above covers it, and this names it so the
+    /// number in the report is in the file.
+    #[test]
+    fn the_seven_hundred_pixel_window_draws_no_word_under_its_sentence() {
+        let font = FONT_LOGICAL_PX;
+        let widths: Vec<f32> = Notice::Offer
+            .verbs()
+            .iter()
+            .map(|verb| measured(verb.text(), font))
+            .collect();
+        let bar = lay_out([0.0, 0.0, 660.0, 30.0], Notice::Offer, &widths, 1.0);
+        assert_eq!(bar.verbs.len(), 2, "both words fit a 660px row whole");
+        assert!(
+            bar.text[2] <= bar.verbs[0].1[0],
+            "the sentence stops short of the first word: {:?} / {:?}",
+            bar.text,
+            bar.verbs
+        );
+        let say = sentence(Notice::Offer, &bar, font, &mut measured);
+        let layer = build(&bar, &say, None, &bt_render::chrome_palette(), 1.0);
+        for label in &layer.labels {
+            assert!(
+                measured(&label.text, font) <= label.rect[2] - label.rect[0] + 0.5,
+                "{:?} does not fit the box it is drawn in: {:?}",
+                label.text,
+                label.rect
+            );
+        }
     }
 }

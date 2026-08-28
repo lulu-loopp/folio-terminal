@@ -18177,6 +18177,9 @@ pub use crate::preview::{
 const PREVIEW_CARD_ICON_LOGICAL_PX: f32 = 30.0;
 /// `.pv-unknown { gap: 10px }`.
 const PREVIEW_CARD_GAP_LOGICAL_PX: f32 = 10.0;
+/// `.pv-blank { padding: 16px }` — the inset the card's text column keeps from
+/// the seat's own edges, and therefore the width its fact line wraps to (§7.43).
+const PREVIEW_CARD_PADDING_LOGICAL_PX: f32 = 16.0;
 /// `.pv-unknown { font-size: 12.5px }`.
 const PREVIEW_CARD_FONT_LOGICAL_PX: f32 = 12.5;
 /// `.pv-blank .pvb-detail { font: 11.5px/1.5 Consolas, … }` — the fact line
@@ -18202,10 +18205,15 @@ const PREVIEW_CARD_BUTTON_RADIUS_LOGICAL_PX: f32 = 6.0;
 pub struct PreviewCardGeometry {
     pub icon: [f32; 4],
     pub notice: [f32; 4],
-    /// **The one line of fact under the sentence** (§7.7 ④, W2 slice ④) — an
-    /// error code, a host, a file name. Zero height when there is none, which is
-    /// the state every card that is not a page's failure is in.
+    /// **The fact under the sentence** (§7.7 ④, W2 slice ④) — an error code, a
+    /// host, a file name. Zero height when there is none, which is the state
+    /// every card that is not a page's failure is in; as many lines tall as the
+    /// caller wrapped it to when there is one (§7.43), and as wide as
+    /// [`preview_card_detail_width`], which is the width it was wrapped to.
     pub detail: [f32; 4],
+    /// One line of that fact, so the painter can walk the block the same
+    /// arithmetic laid it out with.
+    pub detail_line: f32,
     pub button: [f32; 4],
     pub notice_font: f32,
     pub detail_font: f32,
@@ -18222,7 +18230,13 @@ pub struct PreviewCardContent<'a> {
     /// **The fact, and never a second sentence of prose** (§7.7 ④). A host name,
     /// an error string, a version — the thing worth copying into a bug report.
     /// Empty for every card that has none.
-    pub detail: &'a str,
+    ///
+    /// **Already wrapped, by the caller that holds the font** (§7.43) —
+    /// [`crate::restore::wrap_anywhere`] at [`preview_card_detail_width`], which
+    /// is the same division and the same order [`crate::websheet::lay_out`]
+    /// runs on: how many lines the fact takes is what decides how tall the card
+    /// is, so it cannot be discovered inside the layout that needs it.
+    pub detail: &'a [String],
     /// The mark above the sentence: this content class's own. A file for a
     /// refused read, the globe for a page.
     pub mark: ChromeMark,
@@ -18239,15 +18253,41 @@ pub struct PreviewCardContent<'a> {
     pub button_hovered: bool,
 }
 
+/// The size the fact line is measured at — a function and not a public
+/// constant, for [`crate::websheet::verb_font_px`]'s reason: a caller
+/// multiplying by the scale itself is a caller that can forget to.
+#[must_use]
+pub fn preview_card_detail_font_px(scale: f32) -> f32 {
+    PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX * scale
+}
+
+/// **The width the fact line is wrapped to** — the seat less the card's own
+/// padding (§7.43).
+///
+/// Handed out so the caller can wrap before it lays out, which is the one order
+/// that works and the one [`crate::websheet::say_width`] already runs: how many
+/// lines the fact takes is what decides how tall the card is.
+#[must_use]
+pub fn preview_card_detail_width(body: [f32; 4], scale: f32) -> f32 {
+    (body[2] - body[0] - (PREVIEW_CARD_PADDING_LOGICAL_PX * scale).round() * 2.0).max(1.0)
+}
+
 /// Stack the card's icon, sentence and button in the middle of a body.
 ///
 /// `button_text_px` is the caption's measured width, which only something
 /// holding a font can answer; the column is centred on the body and the button
 /// is centred on the column.
+///
+/// `detail_lines` is how many lines the fact wrapped to at
+/// [`preview_card_detail_width`] — zero for every card that has no fact. It is
+/// counted outside for the same reason the button's width is measured outside,
+/// and the card grows downwards by one line for each: gate 5 photographed the
+/// alternative, a 92-character SDK error string drawn as one line across a
+/// 479-pixel seat and cut off at both ends.
 pub fn preview_card_geometry(
     body: [f32; 4],
     button_text_px: f32,
-    has_detail: bool,
+    detail_lines: usize,
     scale: f32,
 ) -> PreviewCardGeometry {
     let icon = (PREVIEW_CARD_ICON_LOGICAL_PX * scale).round().max(1.0);
@@ -18267,19 +18307,26 @@ pub fn preview_card_geometry(
             * scale)
         .round()
         .max(1.0);
-    let detail_font = PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX * scale;
-    let detail_height = if has_detail {
-        (detail_font * CHROME_LINE_HEIGHT).round().max(1.0)
-    } else {
+    let detail_font = preview_card_detail_font_px(scale);
+    let detail_line = (detail_font * CHROME_LINE_HEIGHT).round().max(1.0);
+    let detail_height = detail_line * detail_lines as f32;
+    let detail_run = if detail_lines == 0 {
         0.0
+    } else {
+        gap + detail_height
     };
-    let detail_run = if has_detail { gap + detail_height } else { 0.0 };
     let total = icon + gap + notice_height + detail_run + gap + button_height;
     let centre_x = (body[0] + body[2]) / 2.0;
     let top = (body[1] + (body[3] - body[1] - total) / 2.0).max(body[1]);
     let notice_top = top + icon + gap;
     let detail_top = notice_top + notice_height + gap;
     let button_top = notice_top + notice_height + detail_run + gap;
+    // The fact's column is the seat less the card's padding — the width it was
+    // wrapped to, so the box the lines are centred in is the box they were
+    // measured against.
+    let padding = (PREVIEW_CARD_PADDING_LOGICAL_PX * scale).round();
+    let detail_left = (body[0] + padding).min(centre_x);
+    let detail_right = (body[2] - padding).max(centre_x);
     PreviewCardGeometry {
         icon: [
             centre_x - icon / 2.0,
@@ -18290,7 +18337,13 @@ pub fn preview_card_geometry(
         // The sentence is centred by the label itself, so its box is the body's
         // width and its height is the one line it gets.
         notice: [body[0], notice_top, body[2], notice_top + notice_height],
-        detail: [body[0], detail_top, body[2], detail_top + detail_height],
+        detail: [
+            detail_left,
+            detail_top,
+            detail_right,
+            detail_top + detail_height,
+        ],
+        detail_line,
         button: [
             centre_x - button_width / 2.0,
             button_top,
@@ -18322,7 +18375,7 @@ pub fn push_preview_card(
     sprites: &mut Vec<ChromeSprite>,
     labels: &mut Vec<ChromeLabel>,
 ) {
-    let geometry = preview_card_geometry(body, card.button_text_px, !card.detail.is_empty(), scale);
+    let geometry = preview_card_geometry(body, card.button_text_px, card.detail.len(), scale);
     // `.pv-unknown svg { opacity: .5 }` — the element's own opacity and not a
     // paler ink, which is the distinction `with_opacity` exists to keep.
     sprites.push(
@@ -18342,13 +18395,20 @@ pub fn push_preview_card(
         clip: None,
     });
     // **The fact, in the face facts are written in everywhere else in this
-    // window** (§7.7 ④). One line, monospace, and never a second sentence of
-    // prose: what goes here is the thing a reader can copy into a bug report.
-    if !card.detail.is_empty() {
+    // window** (§7.7 ④), and never a second sentence of prose: what goes here is
+    // the thing a reader can copy into a bug report. One label per wrapped line,
+    // walking the block with the height the geometry laid it out with (§7.43).
+    for (index, line) in card.detail.iter().enumerate() {
+        let top = geometry.detail[1] + geometry.detail_line * index as f32;
         labels.push(ChromeLabel {
             mono: true,
-            text: card.detail.to_owned(),
-            rect: geometry.detail,
+            text: line.clone(),
+            rect: [
+                geometry.detail[0],
+                top,
+                geometry.detail[2],
+                top + geometry.detail_line,
+            ],
             font_size_px: geometry.detail_font,
             color: palette.files_row_muted,
             align_right: false,
@@ -18629,7 +18689,7 @@ pub fn hit_preview_card_button(
 ) -> Option<ChromeTarget> {
     let seat = seats.preview()?;
     let body = preview_body_rect(seats, layout, scale)?;
-    let box_ = preview_card_geometry(body, button.text_px, button.has_detail, scale).button;
+    let box_ = preview_card_geometry(body, button.text_px, button.detail_lines, scale).button;
     if !contains(box_, x as f32, y as f32) {
         return None;
     }
@@ -18651,7 +18711,12 @@ pub fn hit_preview_card_button(
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PreviewCardButton {
     pub text_px: f32,
-    pub has_detail: bool,
+    /// How many lines the card's fact wrapped to this frame — zero when it has
+    /// none. A count and no longer a `bool` since §7.43: a fact that wraps
+    /// pushes the button down by a line for each, and a hit test that still
+    /// thought "there is a fact" meant "one line" would answer for a rectangle
+    /// one line above the one that was drawn.
+    pub detail_lines: usize,
     pub fault: bool,
 }
 
@@ -20912,7 +20977,7 @@ mod tests {
         // standing — the card replaces a body, and only its own.
         let card = PreviewCardContent {
             notice: "No preview for this file type",
-            detail: "",
+            detail: &[],
             mark: ChromeMark::File,
             fault: false,
             button: "Open in default app",
@@ -25142,7 +25207,7 @@ mod tests {",
     #[test]
     fn the_cards_button_answers_for_exactly_the_box_it_is_drawn_in() {
         let body = [40.0, 60.0, 440.0, 460.0];
-        let geometry = preview_card_geometry(body, 120.0, false, 1.0);
+        let geometry = preview_card_geometry(body, 120.0, 0, 1.0);
         assert!(
             geometry.icon[3] < geometry.notice[1] && geometry.notice[3] < geometry.button[1],
             "icon over sentence over button, in that order"
@@ -41314,8 +41379,8 @@ mod tests {",
     #[test]
     fn the_card_stacks_a_fact_between_the_sentence_and_the_verb() {
         let body = [40.0, 60.0, 440.0, 460.0];
-        let plain = preview_card_geometry(body, 120.0, false, 1.0);
-        let detailed = preview_card_geometry(body, 120.0, true, 1.0);
+        let plain = preview_card_geometry(body, 120.0, 0, 1.0);
+        let detailed = preview_card_geometry(body, 120.0, 1, 1.0);
         assert_eq!(
             plain.detail[3] - plain.detail[1],
             0.0,
@@ -41331,6 +41396,112 @@ mod tests {",
         let plain_middle = (plain.icon[1] + plain.button[3]) / 2.0;
         let detailed_middle = (detailed.icon[1] + detailed.button[3]) / 2.0;
         assert!((plain_middle - detailed_middle).abs() < 1.5);
+    }
+
+    /// RED — **the absence card's fact wraps inside the seat instead of running
+    /// out of both edges of it** (user ruling 2026-08-28, `docs/DESIGN.md`
+    /// §7.43).
+    ///
+    /// Gate 5's clean Win10 photographed the card §7.36 put there and the second
+    /// line of it read `…View2EnvironmentWithOptions failed: The system cannot
+    /// find the fi…`: 92 characters centred in a 479-pixel seat, so both the
+    /// name of the call that failed and the reason it gave were off the screen —
+    /// and that line exists precisely so it can be copied into a report.
+    ///
+    /// The seat here is that seat: 479 wide, and the string is the machine's own
+    /// from `docs/plans/release/clean-vm-results-2026-08-28.md` §5.2.
+    ///
+    /// MUTATIONS: wrap to `body[2] - body[0]` with no padding and the second
+    /// assertion goes red at the card's own inset; hand `preview_card_geometry`
+    /// a `1` for any number of lines and the third does — the fact would be
+    /// drawn over the button under it.
+    #[test]
+    fn the_absence_cards_detail_wraps_inside_the_seat() {
+        // A stand-in for the monospace face the fact is set in: every character
+        // the same width, which is what a monospace face is.
+        let measure = |text: &str| text.chars().count() as f32 * 6.9;
+        const SAID: &str = "CreateCoreWebView2EnvironmentWithOptions failed: The system cannot \
+                            find the file specified.";
+        for seat_width in [479.0_f32, 240.0, 120.0] {
+            let body = [0.0, 0.0, seat_width, 400.0];
+            let width = preview_card_detail_width(body, 1.0);
+            let lines = crate::restore::wrap_anywhere(SAID, width, measure);
+            assert!(
+                !lines.is_empty(),
+                "a {seat_width}px seat drew no fact at all"
+            );
+            let card = PreviewCardContent {
+                notice: "Folio could not start a browser engine here.",
+                detail: &lines,
+                mark: ChromeMark::Globe { favicon: None },
+                fault: true,
+                button: "Try again",
+                button_text_px: 60.0,
+                button_hovered: false,
+            };
+            let (mut sprites, mut labels) = (Vec::new(), Vec::new());
+            push_preview_card(
+                body,
+                &card,
+                1.0,
+                &chrome_palette(),
+                &mut sprites,
+                &mut labels,
+            );
+            let drawn: Vec<&ChromeLabel> = labels.iter().filter(|label| label.mono).collect();
+            assert_eq!(
+                drawn.len(),
+                lines.len(),
+                "every wrapped line is a line that is drawn"
+            );
+            for label in &drawn {
+                assert!(
+                    measure(&label.text) <= width,
+                    "a {seat_width}px seat draws `{}` at {}px in a {width}px column",
+                    label.text,
+                    measure(&label.text)
+                );
+                assert!(
+                    label.rect[0] >= body[0] && label.rect[2] <= body[2],
+                    "and the box it is centred in is inside the seat: {:?}",
+                    label.rect
+                );
+            }
+            // The whole fact is still there — a wrap that dropped a word would
+            // be the same defect wearing better clothes.
+            assert_eq!(
+                drawn
+                    .iter()
+                    .map(|label| label.text.as_str())
+                    .collect::<String>()
+                    .replace(' ', ""),
+                SAID.replace(' ', ""),
+                "the fact lost characters on its way onto the card"
+            );
+            // And the card grew: the button is below the last line, not under it.
+            let geometry = preview_card_geometry(body, 60.0, lines.len(), 1.0);
+            assert!(
+                geometry.detail[3] <= geometry.button[1],
+                "the fact and the verb share pixels at {seat_width}px: {geometry:?}"
+            );
+            assert!(
+                geometry.detail[3] - geometry.detail[1]
+                    >= geometry.detail_line * lines.len() as f32 - 0.5,
+                "the card did not grow by a line for each line of fact"
+            );
+        }
+    }
+
+    /// RED — **and a seat wide enough keeps it on one line**, so the wrap is a
+    /// wrap and not a habit.
+    #[test]
+    fn a_wide_seat_still_draws_the_fact_as_one_line() {
+        let measure = |text: &str| text.chars().count() as f32 * 6.9;
+        const SAID: &str = "WebErrorStatus \u{b7} HostNameNotResolved";
+        let body = [0.0, 0.0, 1200.0, 400.0];
+        let lines =
+            crate::restore::wrap_anywhere(SAID, preview_card_detail_width(body, 1.0), measure);
+        assert_eq!(lines, vec![SAID.to_owned()]);
     }
 }
 

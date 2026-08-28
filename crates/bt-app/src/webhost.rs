@@ -1930,18 +1930,17 @@ impl WebSeat {
             // finished; what the window owes is the refusal, said out loud.
             WebEvent::NavigationStarting { uri, cancelled } => {
                 if *cancelled {
-                    // The card is for a URL the **seat** was handed, not for a
-                    // link inside a page: §7.1.5g ⑤ says a link this window will
-                    // not follow does nothing and says so in the foot, and there
-                    // is a page standing there to say it over. What tells the two
-                    // apart is whether anything ever committed here.
+                    // **The engine's door and the host's own end in the same
+                    // place** (§7.43): whichever of the two turned an address
+                    // away, the seat says so on one card. A cancel with no
+                    // verdict behind it is not a refusal — a search or a
+                    // download cancels here too — so it travels out and draws
+                    // nothing.
                     let refused = self.refusal.borrow_mut().take();
-                    if let Some((url, why)) = refused
-                        && self.page.url.is_empty()
-                    {
-                        self.fault = Some(WebFault::Blocked { url, refusal: why });
+                    match refused {
+                        Some((url, why)) => self.was_refused(url, why, outcomes),
+                        None => outcomes.push(WebOutcome::Refused(uri.clone())),
                     }
-                    outcomes.push(WebOutcome::Refused(uri.clone()));
                 } else {
                     if !self.page.loading {
                         self.page.loading_since = Some(Instant::now());
@@ -2294,31 +2293,20 @@ impl WebSeat {
                 } else {
                     Mint::Nothing
                 };
-                // **The third door** (`webnav` 6): what the host mints, the host
-                // asks about before it issues it, so that "every navigation this
-                // product starts has been through a gate" has no exception in it.
-                // An ordinary address has no mint and was gated at its call site
-                // by `webnav::address_bar`; there is nothing here for it to
-                // answer.
-                if minted != Mint::Nothing {
-                    match check(url, Origin::HostMinted(&minted)) {
-                        Decision::Navigate(target) if target == *url => {}
-                        verdict => {
-                            return Err(format!(
-                                "the host declined to issue its own navigation to {url}: {verdict:?}"
-                            ));
-                        }
-                    }
-                }
+                // **The third door** (`webnav` 6), asked of every navigation and
+                // no longer of the minted ones alone (§7.43).
+                let Some(target) = self.issue(url, &minted, outcomes)? else {
+                    return Ok(None);
+                };
                 crate::web_trace::line(|| {
                     format!(
-                        "navigate {} url={url} mint={}",
+                        "navigate {} url={target} mint={}",
                         crate::web_trace::seat(self.address.page),
                         crate::web_trace::mint(&minted),
                     )
                 });
                 *self.mint.borrow_mut() = minted;
-                self.host.navigate(url)?;
+                self.host.navigate(&target)?;
                 Ok(None)
             }
             WebEffect::Reload => {
@@ -2370,6 +2358,80 @@ impl WebSeat {
                 Ok(None)
             }
         }
+    }
+
+    /// **The host's own door on the way out, with no exception left in it**
+    /// (§7.43).
+    ///
+    /// Answers the address to hand the engine, or `None` when the door refused —
+    /// in which case the seat is already wearing the refusal's card.
+    ///
+    /// The clause this closes was written into the arm above as a fact and was
+    /// not one: 「an ordinary address has no mint and was gated at its call site
+    /// by `webnav::address_bar`」. `open_development_web_page` is a call site
+    /// that does not, and every caller that *does* gate answers a refusal by
+    /// opening no page at all — so an address the door turned away arrived here
+    /// unasked and left through `ICoreWebView2::Navigate`. Gate 5 photographed
+    /// what that looks like: `file:` and `mailto:` each drew a card, because the
+    /// engine reports *those* back as a cancelled `NavigationStarting` and the
+    /// gate inside that callback wrote the reason down; `javascript:` drew
+    /// nothing, because Chromium refuses a script URL handed to its navigation
+    /// API without ever raising the event this window learns refusals from. One
+    /// scheme's card therefore depended on the engine's willingness to report
+    /// it, which is not a property of the refusal.
+    ///
+    /// **Asked as the engine's own door would ask it.**
+    /// [`navigation_starting`] is the same rule the callback runs, so a mint is
+    /// honoured exactly once and a URL with no mint behind it faces the
+    /// allowlist alone; a search cannot come out of that origin, which is what
+    /// makes every non-`Navigate` answer here a [`Refusal`] a card can spell.
+    /// Minted targets keep the stricter door they have always had — a mismatch
+    /// there is this program disagreeing with itself, not an address a reader
+    /// asked for, and it stays a fault rather than becoming a card that blames
+    /// them for it.
+    fn issue(
+        &mut self,
+        url: &str,
+        minted: &Mint,
+        outcomes: &mut Vec<WebOutcome>,
+    ) -> Result<Option<String>, String> {
+        let verdict = if *minted == Mint::Nothing {
+            navigation_starting(url, &Mint::Nothing)
+        } else {
+            check(url, Origin::HostMinted(minted))
+        };
+        match verdict {
+            // Where the door names a different string it is the normalised form
+            // of this one, and going where the door said is what the engine-side
+            // gate does with its own `CancelAndNavigateTo`.
+            Decision::Navigate(target) => Ok(Some(target)),
+            Decision::Refuse(why) if *minted == Mint::Nothing => {
+                self.was_refused(url.to_owned(), why, outcomes);
+                Ok(None)
+            }
+            verdict => Err(format!(
+                "the host declined to issue its own navigation to {url}: {verdict:?}"
+            )),
+        }
+    }
+
+    /// **One refused address, one card, whichever door refused it** (§7.43).
+    ///
+    /// The card is for a URL the **seat** was handed, not for a link inside a
+    /// page: §7.1.5g ⑤ says a link this window will not follow does nothing and
+    /// says so in the foot, and there is a page standing there to say it over.
+    /// What tells the two apart is whether anything ever committed here.
+    ///
+    /// The reason travels out either way, because `diagnostics.log` is where a
+    /// refusal that drew no card has to be readable.
+    fn was_refused(&mut self, url: String, why: Refusal, outcomes: &mut Vec<WebOutcome>) {
+        if self.page.url.is_empty() {
+            self.fault = Some(WebFault::Blocked {
+                url: url.clone(),
+                refusal: why,
+            });
+        }
+        outcomes.push(WebOutcome::Refused(url));
     }
 
     /// **Ask for the engine, and start the clock that answers for it** — the
@@ -3397,6 +3459,12 @@ mod machine_tests {
     /// RED GATE: derive the mint from the URL instead (`file:` prefix implies
     /// `Mint::File`) and the first needle disappears; drop the `check` and the
     /// second does.
+    ///
+    /// **The door moved into [`WebSeat::issue`] on 2026-08-28** (§7.43) so that
+    /// the addresses carrying *no* mint go through one too, so the ordering is
+    /// asserted in call order rather than in file order: the arm asks `issue`
+    /// before it tells the engine anything, and the host-minted question lives
+    /// in exactly one place inside it.
     #[test]
     fn the_host_asks_its_own_gate_before_it_issues_its_own_navigation() {
         let source: String = include_str!("webhost.rs")
@@ -3411,21 +3479,27 @@ mod machine_tests {
             "the mint installed is the one the caller carried, honoured only for \
              the URL it was made for"
         );
-        let gate = concat!("check(url,Origin::Host", "Minted(&minted))");
+        let gate = concat!("check(url,Origin::Host", "Minted(minted))");
         assert_eq!(
             source.matches(gate).count(),
             1,
             "exactly one host-minted gate"
         );
-        let after_gate = &source[source.find(gate).expect("the gate just counted")..];
-        let navigate = concat!("self.host.na", "vigate(url)?;");
-        assert!(
-            after_gate.contains(navigate),
-            "and it stands in front of the navigation rather than behind it"
+        let navigate = concat!("self.host.na", "vigate(&target)?;");
+        assert_eq!(
+            source.matches(navigate).count(),
+            1,
+            "exactly one road to the engine"
         );
+        let arm = &source[source
+            .find(concat!("WebEffect::", "Navigate(url)=>{"))
+            .expect("the arm that issues a navigation")..];
+        let asked = arm
+            .find(concat!("self.", "issue(url,&minted,outcomes)?"))
+            .expect("the arm asks the host's own door");
         assert!(
-            !source[..source.find(gate).expect("the gate just counted")].contains(navigate),
-            "nothing navigates before the gate"
+            asked < arm.find(navigate).expect("and then tells the engine"),
+            "the engine is told before the door has answered"
         );
     }
 
@@ -5277,6 +5351,181 @@ mod engine_absence_tests {
                 "_not_start(error,outcomes)"
             )),
             "and an ask that was refused where it stood draws the card"
+        );
+    }
+}
+
+/// **A refused address is a card, and which card it is does not depend on
+/// whether the engine felt like reporting the refusal** (`docs/DESIGN.md`
+/// §7.43).
+///
+/// Gate 5's refusal probe on the machine that *has* a runtime: `file:` and
+/// `mailto:` each drew 「…addresses do not open in a preview」 and
+/// `javascript:alert(1)` drew nothing at all — the seat fell back to the empty
+/// placeholder and the address row was blank. All three take the same arm of
+/// [`crate::webnav::known_scheme`]'s classification; what differed was the
+/// *door*. Browserless, because what is under test is which door answers.
+#[cfg(test)]
+mod refusal_card_tests {
+    use super::rehost_address_tests::{detached, hwnd, page};
+    use super::*;
+
+    fn seat() -> WebSeat {
+        detached(SeatAddress {
+            page: page(1, 1),
+            hwnd: hwnd(0x41),
+        })
+    }
+
+    /// The three addresses gate 5 pointed `BT_WEB_DEV` at, and the scheme each
+    /// one's card has to name.
+    const GATE_FIVE_REFUSALS: [(&str, &str); 3] = [
+        ("javascript:alert(1)", "javascript"),
+        ("file:///C:/Windows/win.ini", "file"),
+        ("mailto:someone@example.com", "mailto"),
+    ];
+
+    /// RED — **`javascript:` is refused on the same card as `file:` and
+    /// `mailto:`, from the same door, with the same sentence** (§7.43).
+    ///
+    /// MUTATION: put the `minted != Mint::Nothing` guard back around the third
+    /// door and all three rows go red at once — which is the honest shape of the
+    /// defect, because the two that *did* draw a card were drawing it on the
+    /// engine's charity rather than on this window's rule.
+    #[test]
+    fn a_javascript_address_is_refused_on_a_card_like_file_and_mailto() {
+        for (url, scheme) in GATE_FIVE_REFUSALS {
+            let mut web = seat();
+            let mut outcomes = Vec::new();
+            let issued = web
+                .issue(url, &Mint::Nothing, &mut outcomes)
+                .expect("an address a reader asked for is never this program's own fault");
+            assert_eq!(
+                issued, None,
+                "{url} was handed to the engine instead of being refused here"
+            );
+            assert_eq!(
+                outcomes,
+                vec![WebOutcome::Refused(url.to_owned())],
+                "{url} left no line for the diagnostics log"
+            );
+            let fault = web.fault().expect("{url} left the seat with no card");
+            assert!(
+                matches!(fault, WebFault::Blocked { .. }),
+                "{url} drew something other than the refusal card: {fault:?}"
+            );
+            assert_eq!(
+                fault.say(),
+                crate::i18n::web_fail_blocked_scheme(scheme),
+                "{url}'s card does not name the scheme that was refused"
+            );
+            assert_eq!(
+                fault.detail(),
+                Some(url),
+                "{url}'s card does not carry the address it is about"
+            );
+            assert_eq!(
+                fault.verb(),
+                WebFaultVerb::CopyAddress(url.to_owned()),
+                "{url}'s card offers something other than the address"
+            );
+        }
+    }
+
+    /// RED — **the three of them are one refusal to `webnav` as well**, so the
+    /// card above is not three cards that happen to agree.
+    #[test]
+    fn the_one_classification_answers_for_all_three_schemes() {
+        for (url, _) in GATE_FIVE_REFUSALS {
+            assert!(
+                matches!(
+                    navigation_starting(url, &Mint::Nothing),
+                    Decision::Refuse(
+                        Refusal::ScriptOrInlineScheme
+                            | Refusal::FileScheme
+                            | Refusal::ExternalScheme
+                    )
+                ),
+                "{url} is not turned away by the door the host asks"
+            );
+        }
+    }
+
+    /// RED — **an address the door admits is still issued, and it is issued as
+    /// the door spelled it.**
+    ///
+    /// The other half: a gate that refused everything would pass the test above
+    /// and ship a window that opens nothing.
+    #[test]
+    fn an_admitted_address_is_issued_in_the_form_the_door_named() {
+        let mut web = seat();
+        let mut outcomes = Vec::new();
+        assert_eq!(
+            web.issue("https://example.com/", &Mint::Nothing, &mut outcomes),
+            Ok(Some(String::from("https://example.com/")))
+        );
+        assert!(outcomes.is_empty());
+        assert!(web.fault().is_none());
+        // The blank page and a minted file keep the door they have always had.
+        assert_eq!(
+            web.issue(BLANK_PAGE, &Mint::Blank, &mut outcomes),
+            Ok(Some(BLANK_PAGE.to_owned()))
+        );
+        let minted = Mint::file(std::path::Path::new(r"C:\notes\a.html")).expect("a local path");
+        let target = minted
+            .target()
+            .expect("a minted file names one URL")
+            .to_owned();
+        assert_eq!(
+            web.issue(&target, &minted, &mut outcomes),
+            Ok(Some(target.clone()))
+        );
+        // And a mint that does not admit what the host is issuing is this
+        // program disagreeing with itself, which is a fault and not a card.
+        assert!(
+            web.issue("file:///C:/other.html", &minted, &mut outcomes)
+                .is_err(),
+            "a mismatched mint became a card blaming the reader for it"
+        );
+        assert!(web.fault().is_none());
+    }
+
+    /// RED — **the navigation the engine is told about is the one the door
+    /// answered**, and there is no second road to `ICoreWebView2::Navigate`.
+    ///
+    /// A source pin for the reason §7.36's own is one: what it protects is a
+    /// path only a machine with a live engine can walk, and the property worth
+    /// carrying is that the arm has no way around the door.
+    ///
+    /// MUTATION: call `self.host.navigate(url)` with the effect's own string
+    /// again and the second assertion goes red — the door's answer would be
+    /// computed and thrown away.
+    #[test]
+    fn the_engine_is_only_ever_told_what_the_door_answered() {
+        let source: String = include_str!("webhost.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let start = source
+            .find(concat!("WebEffect::", "Navigate(url)=>{"))
+            .expect("the arm that issues a navigation");
+        let arm = &source[start..start + 700];
+        assert!(
+            arm.contains(concat!("self.", "issue(url,&minted,outcomes)?")),
+            "the arm issues a navigation without asking the host's own door:\n{arm}"
+        );
+        assert!(
+            arm.contains(concat!("self.host.", "navigate(&target)?")),
+            "the engine is told something other than what the door answered:\n{arm}"
+        );
+        assert!(
+            !arm.contains(concat!("if", "minted!=Mint::Nothing")),
+            "the door still excuses every address that carries no mint, which is \
+             every address a reader types:\n{arm}"
         );
     }
 }

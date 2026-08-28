@@ -4806,6 +4806,79 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 
 **日期:2026-08-28,四条同批。**
 
+### 7.43 一句话要么全在框里,要么带着省略号停下:四件「字和框谈不拢」,外加一条 panic 走的路(门 5 尾账四件,2026-08-28 用户裁决,已落地;`crates/bt-app/src/{seats,restore,webhost,notice,main}.rs`、`crates/bt-platform/src/lib.rs`)
+
+门 5 干净机三条发布阻塞项修完之后(§7.35、§7.36),结果文档 `docs/plans/release/clean-vm-results-2026-08-28.md` 的挂账里剩下四件小的。它们看着不相干,前三件其实是同一句话的三个说法:**一个框的宽度是已知的,一段字的宽度只有拿着字体的人知道,而这两件事必须在同一帧里谈拢**——谈不拢的时候,让路的永远是字,不是框。第四件是 §7.35 自己在末尾记下的那笔「没修的」。
+
+#### ① 缺席卡的细节行在座里换行,而不是从两头淌出去
+
+**报告。** §7.36 修完之后,没有 WebView2 的机器上缺席卡终于画出来了,而它的第二行是
+`CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find the file specified.`——92 个字符,居中画在一条 479 像素宽的座位里,于是**两头各被切掉一截**:失败的那个调用叫什么、机器给的理由是什么,一个都不在屏幕上。而这一行存在的唯一理由,就是让人把它抄进一份报告里(§7.7 ④:「the thing worth copying into a bug report」)。
+
+**成因是这张卡从来只会算一行。** `seats::preview_card_geometry` 收的是 `has_detail: bool`,细节框的高度因此是 `if has_detail { 一行 } else { 0 }`,宽度是整条座位;画的时候一个 `ChromeLabel` 居中、不裁、不换行。小样(`design/ui-mockup.html` 的 `.pv-blank .pvb-detail`)写的是 `max-width: 46ch; overflow-wrap: anywhere`——**换行在小样里一直都在,只是没被搬过来**。
+
+**修法:换行由拿着字体的那一方在布局之前做,和 `websheet::lay_out` 同一条分工、同一个顺序。**「这行字占几行」正是「这张卡有多高」的输入,所以它不能在需要它的那次布局**里面**才被发现。于是:
+
+* `PreviewCardContent::detail` 从 `&str` 变成 `&[String]`——**已经换好行的那几行**;
+* `preview_card_geometry` 收 `detail_lines: usize`,卡按行数往下长,按钮跟着下移,整叠仍旧在座里居中;
+* 细节框的宽度是 `preview_card_detail_width` = 座宽减小样的 `padding: 16px`,**这也正是换行用的那个宽度**——量的框和画的框是同一个,否则居中会把字推回边上去;
+* 命中侧 `PreviewCardButton::has_detail` 跟着变成 `detail_lines: usize`。一个还以为「有细节 = 一行」的命中测试,会替一个比实际高一行的位置作答。
+
+**换行用的是这扇窗唯一的那台换行机**(裁决原话:「与卡的正文排版同源,别另写一套换行」):`restore::wrap`,它已经知道拉丁词不能从中间断、一串汉字之间处处可断、路径分隔符之后可断。它缺的只有小样点名要的最后一手——`overflow-wrap: anywhere`,因为这一行常常是**一个**四十到九十个字符、没有空格也没有分隔符的整词(一条 URL、一个 SDK 错误名),上面四种断点一个都伸不进去。于是加了 `restore::wrap_anywhere`,**写成对 `wrap` 答案的一趟后处理而不是第二个贪心循环,而这不是取巧,这是语义**:`wrap` 只在行还装得下的时候才往上加,所以它产出的行**恰好在它是一个装不下的整词时**才会超宽——那正是 CSS 说 `anywhere` 生效的唯一情形。
+
+**红门 `the_absence_cards_detail_wraps_inside_the_seat`**(`seats.rs`):479 / 240 / 120 三种座宽,字符串就是那台机器的原话,断言每一行的画宽 ≤ 细节栏宽、每一行的框在座里、拼回去一个字符不少、按钮在最后一行之下。**变异实测**:让 `wrap_anywhere` 原样返回一整行 → 红(`a 479px seat draws '…' at 627.9px in a 447px column`,正是那张照片)。配一道 `a_wide_seat_still_draws_the_fact_as_one_line`,免得这条修成「一律换行」。
+
+#### ② `javascript:` 被拒也是一张卡,而不是引擎肯不肯汇报的问题
+
+**报告。** 门 5 的拒绝面探针在**有**运行时的机器上跑三个地址:`file:///C:/Windows/win.ini` 与 `mailto:someone@example.com` 各出一张「…addresses do not open in a preview」的卡,`javascript:alert(1)` **什么都不出**——座回到空座占位,地址栏空白。
+
+**三个地址在 `webnav` 里走的是同一处分类。** `known_scheme` 把 `javascript`/`data`/`blob`/`vbscript` 判成 `Refusal::ScriptOrInlineScheme`,`file` 判成 `FileScheme`,`mailto` 落到 `ExternalScheme`——三条都是 `Decision::Refuse`,谁都没有漏判。**不同的是这一次拒绝由哪扇门作出。** 这个窗口学到「一次导航被拒了」的唯一途径,是引擎回调 `NavigationStarting` 里那道门:理由写在那个闭包里(`WebSeat::open` 的 `refusal_sink`),`WebEvent::NavigationStarting { cancelled: true }` 到来时取出来做成 `WebFault::Blocked`。而 Chromium 对交给导航 API 的 `javascript:` URL 的处理是**直接拒收,根本不产生那次事件**。于是 `file:` 和 `mailto:` 的卡一直是**靠引擎肯汇报**才有的,而「这个地址被拒了」显然不该是引擎的性格问题。
+
+**成因写在代码自己的注释里,而那句话是假的。** `WebSeat::step` 的 `WebEffect::Navigate` 一臂有第三扇门(`webnav` ⑥「host 自己铸的,host 自己发出去之前先问一遍」),它加了一个条件:
+
+> `if minted != Mint::Nothing { … }` ——「An ordinary address has no mint and was gated at its call site by `webnav::address_bar`; there is nothing here for it to answer.」
+
+`open_development_web_page`(`BT_WEB_DEV`,门 5 的探针走的正是它)**没有**在调用处过那扇门;而每一个真的过了门的调用处,对一次拒绝的回答都是「那就不开这张页」——**没有一个会造卡**。所以一个被门拒的地址就这样一路走到 `ICoreWebView2::Navigate`,剩下的全看引擎心情。
+
+**修在那扇门本身,而不是给 `javascript:` 加特判。** 新的 `WebSeat::issue` 是那一臂唯一的出口,而它对**每一次**导航发问:有铸记的照旧走更严的 `Origin::HostMinted`(铸记对不上是这个程序自己前后矛盾,仍旧是 fault,不是一张怪读者的卡);没有铸记的走 `navigation_starting(url, &Mint::Nothing)`——**引擎那扇门自己的规则,提前问一遍**。选这个 origin 而不是 `Origin::AddressBar` 是有理由的:搜索出不了这道门(`check` 里 `NavigationStarting` 的无 scheme 分支答 `Refuse(ExternalScheme)`),所以这里每一个非 `Navigate` 的答案都是一个**卡说得出口的 `Refusal`**。
+
+拒绝的落地由 `WebSeat::was_refused` 一处完成,引擎那扇门和这扇门都调它:座上没有提交过任何文档时挂 `WebFault::Blocked`(§7.1.5g ⑤ 的老规矩——页里的链接不出卡,因为有一张页在那儿替它说话),`WebOutcome::Refused` 无论如何都走出去进 `diagnostics.log`。文案模板一个字没改:`WebFault::say()` 早就会 `web_fail_blocked_scheme(scheme)`,`javascript:` 于是和 `file:`、`mailto:` 说同一句话、指同一个 scheme、给同一枚 `Copy address`。
+
+**红门四道**(`webhost::refusal_card_tests`,全部无浏览器):三个 scheme 逐个走 `issue`,要求答 `None`(没交给引擎)、留一条 `Refused`、挂 `Blocked` 卡、`say()` 等于 `web_fail_blocked_scheme` 的对应 scheme、`detail()` 是那个地址、`verb()` 是 `CopyAddress`;一道钉住三者在 `webnav` 里本就是同一次拒绝;一道反面门要求放行的地址仍旧照门给的写法发出去(否则「全拒」也能过);一道源码门钉住那一臂经 `issue` 且只把门的答案交给引擎。**变异实测**:把 `Mint::Nothing` 一支改回「原样放行」→ 第一道红(`javascript:alert(1) was handed to the engine instead of being refused here`)。
+
+#### ③ 提示条:按钮永远是整的,让路的是句子
+
+**报告。** 700×420 的窗口上,pane 顶那条提示条(`PowerShell integration is not installed. · Add to $PROFILE · Don't show again · ×`)把句子画到了按钮上。
+
+**两处,而第二处才是那张照片。** `notice::lay_out` 从右往左排:`×` 占住尾栏,动词依次向左,**没有任何东西拦着它们走出条子的左边缘**——那个宽度下 `Add to $PROFILE` 的 `left` 是负数。句子的框接着算 `(right - gap).max(text_left)`:`right` 是负的,`max` 于是把它抬回 `text_left`,句子拿到的是**整条**宽度,从左内边距一路画过去。所以既有一枚半截在条外的按钮,又有一句压在它上面的话。
+
+**裁决(用户)是一条优先级,现在写进代码里:按钮不许被裁,也不许换行。** 顺序是:①句子先带省略号截断到它剩下的那截;②按钮自己都排不下时,**按钮不换行**,句子整个消失,条子留给按钮;③最窄时只剩 `×`——它是唯一一个不用回答问题就能结束这次询问的控件。
+
+* 排按钮时加一句 `if left < text_left { break; }`:**排不下的词就是不提供的词**,而它左边的每一个词跟着它一起走(它们只会更挤)。画一半是那张照片的来历。
+* 只要有词被丢掉,句子框就是空的(`all_offered` 那一支),而不是回头去占那个词腾出来的地方——一条「pane 越小、话越多」的提示条是荒谬的。
+* 截断交给 `notice::sentence`,它把 `settings::ellipsized`(这扇窗回答「这里塞得下多少」的唯一一处,设置页三行说明用的就是它)包了一层,加上一条本地规矩:**只剩一个 `…` 等于什么都没说**——`ellipsized` 在一个字符都塞不下时答一个孤零零的省略号,那对表格里的标签是对的,对一条另一半是按钮的条子只是一粒噪点,而裁决的下一句正是「让文案消失」。于是地板是「一个字符 + 省略号」。
+* `notice::build` 因此收 `say: &str` 而不再收 `Notice`——**框是数字,填进框里的前缀是只有拿着字体的人才答得出的问题**,这是本节前两件同一条分工。
+
+**红门 `a_notice_bars_actions_never_overlap_its_text`**(`notice.rs`):1..=900 逐像素扫,每个宽度上断言每枚动词的框恰好是「量到的字宽 + 两边 7px」(整的)、整个在条内、不碰 `×`、彼此不碰、句子框停在第一枚动词左边;画出来的句子不宽于它的框且是原句的前缀;`×` 每个宽度都在。扫完还要求这一趟里**确实出现过**省略号和**确实丢过**一个词,否则这两半都没被测到。配一道 `the_seven_hundred_pixel_window_draws_no_word_under_its_sentence` 把报告里那个数字钉进文件。**变异实测**:去掉 `left < text_left` 那条 break → 红(`at 1px 'Add to $PROFILE' hangs off the strip: [-272.0, …]`)。
+
+#### ④ 一次 panic 走的是关窗走的那条路
+
+**这是 §7.35 自己记下的「没修的」。** 那一节给正常退出定了一扇门——释放完一切之后 `bt_platform::leave_process`,因为一个托过 WebView2 的进程不能从 `main` 里走出去(载在进程里的 Edge 客户端 DLL 是 Chromium,它的拆卸路径要一个还在泵消息的 apartment 和还活着的线程,而 `ExitProcess` **先**杀光其它线程**再**跑各模块的 detach)。而 `panic = "unwind"`(§12.4 的裁决,为的是 panic hook 和那个告诉用户日志在哪的对话框都跑在展开路径里),**一次 panic 恰恰走的是那条被量到会卡住的路**。后果就是 §7.34 的幽灵:窗还在屏幕上、抢着前台、没有输入法上下文,底下的进程谁也看不见。
+
+**裁决(用户):panic 处理器的末尾也走同一条出口。** 于是 hook 的最后两句就是 `main` 的最后两句,同样的顺序、同样的两个理由:
+
+* **先把这个进程所有顶层窗从屏幕上拿走**,而且是**通过系统自己的枚举**——`bt_platform::hide_every_window_of_this_process`(`EnumWindows` + `GetWindowThreadProcessId` 筛本进程)。**不走 `FolioApp` 的窗口表**,因为刚刚出故障的正是这个应用:一次要求一个已经损坏的结构帮忙收尸的清理,是在赌它还没坏到那一步。同线程的窗用 `ShowWindow`(同步、返回即完成),别的线程的窗用 `ShowWindowAsync`(投递、不阻塞)——同步调用要等那个线程的消息队列,而它最可能正是刚刚停止应答的那根;**一次可能卡住的隐藏比一次可能没落地的隐藏更坏,因为调用方的下一句就是终结进程**。
+* **再 `leave_process(101)`。** 101 是 Rust 自己给「panic 走到 `main` 顶上」的那个数,退出的路改了而这个数不改:一份因为「进程现在怎么离开」而变了值的退出码,是这次修理去改写调用方读的那一件事实。走之前照 §7.35 的规矩写一行 `diagnostics::run_footer`。
+
+**只有说过话的那次 panic 才走。** 一个打掉窗口线程的故障常常在同一秒里带走一个 worker,`announce_panic` 早就为此把整个进程限定成一次告警;要是**第二**次 panic 也去终结进程,它会在读者看清之前把第一次的消息框从屏幕上抹掉。所以 `announce_panic` 现在答一个 `bool`:抢到那次告警的线程是关掉进程的那一个,别的 panic 原样返回,让自己那根线程在剩下的一两拍里继续展开。
+
+**红门 `a_panic_leaves_by_the_same_road_as_a_shut`**(`main.rs`,`floated_page_tests`,源码门):hook 里必须有 `leave_process(PANIC_EXIT_CODE)`、必须有那次隐藏、隐藏必须在退出**之前**(在 `TerminateProcess` 之后隐藏的窗等于从没隐藏过)、必须有 `if !announce_panic(&path)` 那道闸、`PANIC_EXIT_CODE` 必须是 101。**变异实测**:去掉 `leave_process` 那一句 → 红(`a panic still walks out through the loader's teardown, which is where a WebView2 host stops`)。
+
+**而在真机上量它,需要一个能按需触发的故障,**门 5 又要求 release **没有**这样的入口(`scripts/release/cleanvm/in-guest.ps1` 跑 `folio.exe --panic-selftest` 并要求它按「未知参数」被拒)。两件事都要成立,所以照 `hang_watch` 自己那只 selftest 的形状加了一个 **debug 构建独有**的开关:`BT_PANIC_SELFTEST=<秒>`,窗口起来若干秒后在窗口线程上 panic 一次。release 半边是一个空函数,而红门里有一段钉住那个 `#[cfg(debug_assertions)]` 就贴在它上面。要观察的性质属于 **hook**,而 hook 在两个 profile 里是同一段代码。
+
+**日期:2026-08-28,门 5 尾账四件,用户当日裁决,当日落地。**
+
+
 ## 12. 发布工程
 
 一个能跑的 build 和一个能发的 build 之间隔着七件事,这一节是其中属于「构建与分发」和「CI」的那两件。写在这里而不是写在 workflow 的注释里,是因为其中每一条都是**裁决**:为什么版本只有一处、为什么 `.res` 是自己写的、为什么 `lto` 开或不开、为什么静态 CRT 没有采用——这些在一年后会被重新提起,而 YAML 不是回答它们的地方。
