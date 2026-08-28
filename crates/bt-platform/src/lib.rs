@@ -1452,6 +1452,54 @@ pub fn fonts_folder() -> std::path::PathBuf {
     std::path::PathBuf::from(root).join("Fonts")
 }
 
+/// `CREATE_NO_WINDOW` — the flag that decides whether a child process gets a
+/// console of its own, and therefore whether a window belonging to somebody else
+/// appears on this user's screen.
+///
+/// Spelled here once. It used to be a `const` inside four different functions,
+/// which is the shape a rule takes when nothing enforces it: the fifth caller
+/// (`wsl::probe`) simply did not write it, and on Windows 11 — where the default
+/// console host is Windows Terminal rather than `conhost` — the console Windows
+/// handed that child was **a Windows Terminal window**, tab-titled
+/// `C:\WINDOWS\System32\wsl.exe`, opening in front of Folio at every launch.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// **The one door every child process this product starts outside a ConPTY goes
+/// through** (§7.40 ①).
+///
+/// Folio is a GUI process: it has no console, so every console child it starts
+/// is a child Windows must find a console *for*. Left alone, Windows allocates a
+/// new one and hands it to the machine's registered console host, and since
+/// Windows 11 that host is Windows Terminal — a second terminal emulator's
+/// window, opening in front of the terminal emulator that asked. `CREATE_NO_WINDOW`
+/// is the documented "give it a console with no window", which is what a probe
+/// whose output this process reads through a pipe actually wants.
+///
+/// **Why a door and not a rule written down.** The flag was already set at four
+/// of the five call sites, each with its own copy of the constant and its own
+/// paragraph explaining it — and the fifth was still wrong, for seven weeks, in
+/// the most visible way any of them could be. A rule that has to be remembered
+/// at each `Command::new` is a rule that is one new call site away from being
+/// broken again, so this is the only place in the workspace's shipped source
+/// that is allowed to name `std::process::Command::new`, and
+/// `no_command_is_built_outside_the_quiet_door` is what keeps that true.
+///
+/// **What is deliberately not behind it.** A shell in a pane is started by
+/// `bt-pty` through ConPTY, which is a different mechanism entirely: it is
+/// *given* a pseudoconsole rather than allocated a real one, so it has no window
+/// to suppress and `PtyCommand` is not this type. The gate matches
+/// `Command::new` on a word boundary for exactly that reason.
+#[must_use]
+pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// The family the renderer draws when a settings file names none.
 ///
 /// It is a constant here rather than a lookup because [`monospace_font_families`]
@@ -1640,8 +1688,8 @@ mod windows_impl {
             // `install_context_menu`.
             Registry::{
                 HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
-                REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW,
-                RegQueryValueExW, RegSetValueExW,
+                REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW,
+                RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
             },
             Threading::{
                 CreateEventW, GetCurrentThread, GetThreadPriority, INFINITE, ResetEvent, SetEvent,
@@ -5978,6 +6026,82 @@ mod windows_impl {
         text
     }
 
+    /// One `REG_SZ` under `HKEY_CURRENT_USER`, for readers outside this crate.
+    ///
+    /// The same call [`read_registry_string`] makes, published: the WSL
+    /// installation is described entirely by `REG_SZ` values under
+    /// `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` (§7.40 ②), and a
+    /// reader that had to start a process to learn what is sitting in a registry
+    /// value is the defect that section exists to remove.
+    #[must_use]
+    pub fn current_user_registry_string(key: &str, name: &str) -> Option<String> {
+        read_registry_string(key, name)
+    }
+
+    /// Every immediate subkey of one `HKEY_CURRENT_USER` key, in the order the
+    /// registry enumerates them.
+    ///
+    /// The order is the registry's own and is not sorted here: this function's
+    /// job is to report what is there, and a caller that needs a stable order is
+    /// the one that knows what to order it by.
+    ///
+    /// A key that is not there, or that cannot be opened, has no subkeys — which
+    /// is the same answer as a key with none, and deliberately: "this machine has
+    /// no WSL" and "this machine has WSL and no distributions" are told apart by
+    /// whether `wsl.exe` exists, not by which way this failed.
+    #[must_use]
+    pub fn current_user_registry_subkeys(key: &str) -> Vec<String> {
+        let key_units = wide_null(key);
+        let mut opened = HKEY::default();
+        // SAFETY: the buffer is live and NUL-terminated across the call; the
+        // handle is closed on every path below.
+        let status = unsafe {
+            RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key_units.as_ptr()),
+                None,
+                KEY_READ,
+                &mut opened,
+            )
+        };
+        if status.is_err() {
+            return Vec::new();
+        }
+        let mut names = Vec::new();
+        // 255 characters is the documented maximum length of a registry key
+        // name, plus the terminator the API writes.
+        let mut buffer = [0u16; 256];
+        for index in 0.. {
+            let mut written = buffer.len() as u32;
+            // SAFETY: `buffer` holds `written` units and stays live across the
+            // call; every other out-parameter is either null or an owned local.
+            let status = unsafe {
+                RegEnumKeyExW(
+                    opened,
+                    index,
+                    Some(PWSTR(buffer.as_mut_ptr())),
+                    &mut written,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            };
+            if status.is_err() {
+                break;
+            }
+            names.push(String::from_utf16_lossy(
+                &buffer[..(written as usize).min(buffer.len())],
+            ));
+        }
+        // SAFETY: `opened` came from the `RegOpenKeyExW` above and is not used
+        // again after this.
+        unsafe {
+            let _ = RegCloseKey(opened);
+        }
+        names
+    }
+
     /// Whether a key exists at all, whatever it holds.
     ///
     /// The question the removal's own claim asks — "is it gone", and its harder
@@ -7566,8 +7690,9 @@ pub use windows_impl::{
     Compositor, CustomWindowFrame, DirWatch, FilePickKind, FolderPicker, ImagePicker,
     ImeSystemCaret, MathContextMenu, Notifier, PROGRAM_REFUSED, SystemSettingsWatch, Taskbar,
     adopt_parent_console, client_area_animation_enabled, clipboard_text, cloaked_from_attribute,
-    current_thread_priority, detach_console, documents_directory, dpi_at, file_product_version,
-    flash_window, get_dpi_for_window, get_window_rect, get_work_area, install_console_ctrl_handler,
+    current_thread_priority, current_user_registry_string, current_user_registry_subkeys,
+    detach_console, documents_directory, dpi_at, file_product_version, flash_window,
+    get_dpi_for_window, get_window_rect, get_work_area, install_console_ctrl_handler,
     install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
     leave_process, message_box, monospace_font_families, open_local_file, open_local_path,
     open_system_fonts_page, os_ui_language, read_context_menu, recycle,
@@ -8983,6 +9108,167 @@ mod custom_frame_tests {
         assert_eq!(
             custom_frame_hit_test(m, m.width - 1, 1),
             CustomFrameHit::Client
+        );
+    }
+}
+
+/// **The gate under [`quiet_command`]** (§7.40 ①).
+///
+/// The rule this enforces cannot be enforced by the type system: `std::process`
+/// is within every crate's reach, building a child is one call, and the flag
+/// that decides whether that child is handed a window is an argument somebody
+/// has to remember. It was remembered at four call sites and forgotten at the
+/// fifth for seven weeks, in the most visible way it could be — a Windows
+/// Terminal window opening in front of Folio at every launch. So the rule is
+/// written as a property of the source tree instead: there is one door, and this
+/// is the test that nothing else is a door.
+#[cfg(test)]
+mod quiet_door_tests {
+    use std::path::{Path, PathBuf};
+
+    /// The workspace root, from where this crate is rather than from where the
+    /// test happened to be started.
+    fn repository_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .expect("the workspace root, two directories above this crate")
+    }
+
+    /// Every `.rs` file that can end up in `folio.exe`, as
+    /// `bt_app::diagnostics`'s own walk defines that — **the walk is the point**:
+    /// a list of files here would be a list somebody has to remember to add to,
+    /// which is the same failure this whole section exists to remove.
+    ///
+    /// Three exclusions, each for a reason of its own:
+    ///
+    /// * `vendor/` is upstream code held to upstream's choices, exactly as the
+    ///   workspace lint table says. This product's rules are not theirs;
+    /// * `build.rs` sits beside `src/` rather than inside it, and is run **by
+    ///   cargo**, which owns a console already. There is no window to suppress
+    ///   there, and a build script cannot depend on the crate holding the door
+    ///   without building that crate for the host first;
+    /// * `bin/` and `tests/` are the shipped walk's own exclusions: a development
+    ///   binary is a console program on purpose, and an integration test runs
+    ///   under the harness's console.
+    ///
+    /// Everything else, **test modules inside `src/` included**. A `#[cfg(test)]`
+    /// block is exempted from nothing here, and deliberately: the stripping such
+    /// an exemption would need is a brace-counting parser, a suite whose own
+    /// children flash consoles across a developer's screen is a suite nobody
+    /// wants, and the door costs a test exactly as little as it costs the
+    /// product.
+    fn shipped_sources(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        walk(&root.join("crates"), &mut found);
+        found.retain(|path| {
+            path.components()
+                .any(|component| component.as_os_str() == "src")
+        });
+        found.sort();
+        assert!(
+            found.len() > 50,
+            "the walk found {} files, which is not a source tree",
+            found.len()
+        );
+        found
+    }
+
+    fn walk(directory: &Path, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let name = entry.file_name();
+            if path.is_dir() {
+                if name != "bin" && name != "tests" && name != "target" {
+                    walk(&path, found);
+                }
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    /// How many times `text` builds a `std::process` child by hand.
+    ///
+    /// **On a word boundary**, which is the whole of the difference between this
+    /// rule and a ban on starting processes: `bt_pty::PtyCommand` carries this
+    /// spelling as a substring and is a different type entirely — a shell in a
+    /// pane is *given* a pseudoconsole by ConPTY rather than allocated a real
+    /// one, so it has no window to suppress and nothing to route through the
+    /// door.
+    ///
+    /// The needle is assembled at compile time rather than written as one
+    /// literal, for `bt_app::attention_hooks`'s reason: a test that spelled it
+    /// whole would be an occurrence of the very thing it counts, and this file is
+    /// the one file whose count has to be exact.
+    fn doors_built_in(text: &str) -> usize {
+        const NEEDLE: &str = concat!("Command", "::new(");
+        text.match_indices(NEEDLE)
+            .filter(|(at, _)| {
+                text[..*at]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|before| !before.is_alphanumeric() && before != '_')
+            })
+            .count()
+    }
+
+    /// RED — **the workspace builds a child process in exactly one place.**
+    ///
+    /// Red gate for §7.40 ①. RED GATE: build a child by hand anywhere under a
+    /// crate's `src/` and this fails naming the file and the count; the
+    /// `wsl::probe` this section was opened by would have failed it on the two
+    /// lines that opened a Windows Terminal window at every launch.
+    ///
+    /// MUTATION: match without the word boundary and every `PtyCommand` in
+    /// `bt-pty` reads as a violation, so the gate has to be weakened to pass and
+    /// stops being one.
+    #[test]
+    fn no_command_is_built_outside_the_quiet_door() {
+        let root = repository_root();
+        let door = root
+            .join("crates")
+            .join("bt-platform")
+            .join("src")
+            .join("lib.rs");
+        let mut outside = Vec::new();
+        let mut inside = 0;
+        for file in shipped_sources(&root) {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            let built = doors_built_in(&text);
+            if built == 0 {
+                continue;
+            }
+            if file == door {
+                inside = built;
+            } else {
+                outside.push(format!(
+                    "{} builds {built} of its own",
+                    file.strip_prefix(&root).unwrap_or(&file).display()
+                ));
+            }
+        }
+        assert!(
+            outside.is_empty(),
+            "every child process this product starts goes through \
+             `bt_platform::quiet_command`, which is the only place the console Windows would \
+             otherwise hand it is refused; these do not: {outside:#?}"
+        );
+        assert_eq!(
+            inside, 1,
+            "and the door itself builds exactly one, in `quiet_command`"
+        );
+        assert!(
+            std::fs::read_to_string(&door)
+                .expect("this crate's own source")
+                .contains("pub fn quiet_command("),
+            "the door is still called `quiet_command`"
         );
     }
 }

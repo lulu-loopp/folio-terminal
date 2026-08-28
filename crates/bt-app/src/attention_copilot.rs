@@ -609,13 +609,10 @@ pub(crate) fn probe() -> Option<Version> {
 /// one call covers both ways this program gets onto a machine.
 #[cfg(windows)]
 fn run_probe() -> Option<Version> {
-    use std::os::windows::process::CommandExt;
-    // `CREATE_NO_WINDOW`, `psreadline::run_probe`'s reason: without it a console flashes on screen
-    // the first time somebody opens the settings dialog.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let output = std::process::Command::new("cmd.exe")
+    // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
+    // window opens on screen the first time somebody opens the settings dialog.
+    let output = bt_platform::quiet_command("cmd.exe")
         .args(["/c", "copilot", "--version"])
-        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     Version::parse(&String::from_utf8_lossy(&output.stdout))

@@ -2921,7 +2921,11 @@ pub fn title(profile: usize) -> &'static str {
             return found;
         }
     }
-    let qualifier = crate::wsl::facts().title_qualifier();
+    // Bound rather than read inline because the answer is now owned: it is
+    // joined here out of the registry's list and whatever the deferred login
+    // shell probe has published (§7.40 ②③), and the qualifier borrows from it.
+    let facts = crate::wsl::facts();
+    let qualifier = facts.title_qualifier();
     let composed: Vec<&'static str> = with_table(|table| {
         table
             .profiles

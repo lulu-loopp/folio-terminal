@@ -425,13 +425,11 @@ if ($m) { $m.Version.ToString() } else { '' }; \
 
 #[cfg(windows)]
 fn run_probe() -> Probe {
-    use std::os::windows::process::CommandExt;
-    // `CREATE_NO_WINDOW`. Without it a console flashes on screen every time a
-    // PowerShell pane is opened for the first time in a session.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let output = std::process::Command::new("powershell.exe")
+    // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
+    // window opens on screen every time a PowerShell pane is opened for the
+    // first time in a session.
+    let output = bt_platform::quiet_command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", PROBE_COMMAND])
-        .creation_flags(CREATE_NO_WINDOW)
         .output();
     let Ok(output) = output else {
         return Probe::default();
