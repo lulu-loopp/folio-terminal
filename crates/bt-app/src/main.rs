@@ -56220,16 +56220,28 @@ impl Runtime<'_> {
         // card draws a *column* instead and takes it separately — they were one argument while
         // both bodies drew exactly one picture, and the column ended that.
         //
-        // **And no still at all while an animation is running** (§7.44 ⑤). The
-        // frames are drawn over this layer's ground by the video lane; a still
-        // handed in here would land in the card's *icon* channel, which runs
-        // after that lane, and would stand over the picture it is one frame of.
-        // The box is unaffected — `layout` was solved a moment ago from the
-        // file's own size — so the card is the same shape either way.
-        let running = self.animation_running_on(PreviewSurface::Peek);
+        // **And no still at all while the picture in this box is moving** —
+        // a recording playing on the card, or an animation running on it
+        // (§7.44 ⑤, and §7.44 ① for the recording half). The frames are drawn
+        // over this layer's ground by the video lane; a still handed in here
+        // would land in the card's *icon* channel, which runs after that lane,
+        // and would stand over the picture it is one frame of. The box is
+        // unaffected — `layout` was solved a moment ago from the file's own size
+        // — so the card is the same shape either way.
+        //
+        // **Both halves, and they are one question.** This clause asked only
+        // about an animation until 2026-08-28, and the machine showed what the
+        // other half costs: the card's own ▶ started the engine, the bar counted
+        // 0:01 → 0:06 off it, and the picture underneath never moved — a still of
+        // the frame at one tenth, painted over a recording that was playing
+        // perfectly well beneath it. Everywhere else in this window the pair is
+        // asked together (`refit_preview_picture`), because "is the thing in this
+        // box moving" is one question with two ways of being true.
+        let moving = self.surface_is_playing_a_video(PreviewSurface::Peek)
+            || self.animation_running_on(PreviewSurface::Peek);
         let picture = match layout.body_kind {
             file_peek::PeekBody::Facts { .. } => None,
-            _ if running => None,
+            _ if moving => None,
             _ => self
                 .window
                 .peek_picture
@@ -82040,6 +82052,60 @@ mod files_locate_door_tests {
         assert!(
             player < door,
             "the door underneath answers before the player standing on it"
+        );
+    }
+
+    /// RED — **the card withdraws its still for a recording as well as for an
+    /// animation** (route B slice ②; §7.44 ⑤, found by photographing the machine
+    /// 2026-08-28, on the shutter after the one that found the press road).
+    ///
+    /// A card's still does not go down the picture channel `refit_preview_picture`
+    /// refuses on: it is handed to `file_peek::layout` and drawn in the card's own
+    /// **icon** channel, which runs *after* the video lane. So a still left in
+    /// place is painted over the frames, and the one on top is the one that does
+    /// not move. `file_peek_card_layers` has the clause that withdraws it — and
+    /// it asked only `animation_running_on`.
+    ///
+    /// Photographed: the card's own ▶ pressed, then eight captures 700 ms apart.
+    /// The bar counted `0:01` → `0:06` off the engine, and the picture rect was
+    /// **byte-identical in all eight** — a still of the frame at one tenth
+    /// (`clock.mp4`'s burnt-in counter reading `12` of 120 s) standing over a
+    /// recording that was playing perfectly well underneath it. The float, one
+    /// gesture later and off the *same engine*, read `9` and moved.
+    ///
+    /// The mend is that both halves are asked, which is how every other surface
+    /// asks it: `refit_preview_picture`'s refusal is
+    /// `surface_is_playing_a_video(surface) || animation_running_on(surface)`,
+    /// because *is the picture in this box moving* is one question with two ways
+    /// of being true. A clause that knows about one of them is a clause that will
+    /// be wrong about the other every time.
+    ///
+    /// RED GATE: drop the recording half and the pin fails — which is the state
+    /// the binary photographed on 2026-08-28 was built from.
+    #[test]
+    fn a_card_withdraws_its_still_for_a_recording_the_way_it_does_for_an_animation() {
+        let layers = body("    fn file_peek_card_layers(");
+        let clause = layers
+            .find("let moving = ")
+            .map(|at| &layers[at..])
+            .and_then(|rest| rest.find(';').map(|end| &rest[..end]))
+            .expect("the card has a clause that withdraws its still");
+        for half in [
+            "self.surface_is_playing_a_video(PreviewSurface::Peek)",
+            "self.animation_running_on(PreviewSurface::Peek)",
+        ] {
+            assert!(
+                clause.contains(half),
+                "the card's still is withdrawn without asking {half}, so it is painted over \
+                 the moving picture it is one frame of"
+            );
+        }
+        // And the clause is what gates the picture, not a value computed and
+        // dropped: a half-asked question that never reaches the `match` would
+        // pass the two lines above and change nothing on the glass.
+        assert!(
+            layers.contains("_ if moving => None,"),
+            "the card's still is handed in whatever the clause decided"
         );
     }
 

@@ -606,3 +606,71 @@ test files_locate_door_tests::a_player_in_a_float_answers_the_hand_the_way_a_pan
 
 Recorded in `docs/DESIGN.md` §7.44 ① (second addendum) and added to ⑩'s gate
 list.
+
+---
+
+## ⑩ An eleventh red, on the very next shutter — the card's still stood over its own recording
+
+With ⑨ mended and the release rebuilt, the card's ▶ starts the engine. The
+**bar** proves it: `⏸ 0:01 … 2:00 🔇 ▁▁▁▁` at the first capture and `⏸ 0:06` at
+the eighth, five seconds later, and every cell on that bar is read off the
+engine on the frame it is drawn (§7.44 ②). The **picture** did not move at all:
+
+| burst | picture rect, frame to frame |
+|---|---|
+| `22-card-play-00..07.png` (8 frames, 700 ms apart) | **0 pixels changed**, every consecutive pair, of 130 536 |
+
+and the picture it was stuck on is the *still*: `clock.mp4`'s burnt-in counter
+reads `12`, which is the frame at one tenth of 120 s — exactly what
+`read_video_glance` samples. One gesture later the same engine, carried into a
+float, read `9` and moved 17 000 – 36 000 pixels per 800 ms step.
+
+### Root cause — a clause that knows about one of the two ways a picture moves
+
+A card's still does **not** go down the picture channel that
+`refit_preview_picture` refuses on. It is handed to `file_peek::layout` and drawn
+in the card's own **icon** channel, which runs *after* the video lane — so a
+still left in place is painted over the frames, and the one on top is the one
+that does not move. `file_peek_card_layers` has the clause that withdraws it,
+and its own comment states the mechanism correctly. The predicate was half:
+
+```rust
+let running = self.animation_running_on(PreviewSurface::Peek);
+let picture = match layout.body_kind {
+    file_peek::PeekBody::Facts { .. } => None,
+    _ if running => None,
+    …
+```
+
+Everywhere else in this window the pair is asked together —
+`refit_preview_picture`'s refusal is `surface_is_playing_a_video(surface) ||
+animation_running_on(surface)` — because *is the picture in this box moving* is
+**one question with two ways of being true**. A clause that knows about one of
+them is a clause that will be wrong about the other every time, and §7.44 ⑤ had
+already written the consequence down in advance: *「留着的那一张会被画在动的那一张
+上面,而盖在上面的那张是不动的那张」*.
+
+### The mend
+
+```rust
+let moving = self.surface_is_playing_a_video(PreviewSurface::Peek)
+    || self.animation_running_on(PreviewSurface::Peek);
+```
+
+### Red proof
+
+Pinned by `a_card_withdraws_its_still_for_a_recording_the_way_it_does_for_an_animation`
+— both halves are in the clause, and the clause is what gates the `match` (a
+value computed and dropped would pass a naïve pin and change nothing on the
+glass). Measured under its own mutation, the recording half dropped:
+
+```
+---- files_locate_door_tests::a_card_withdraws_its_still_for_a_recording_the_way_it_does_for_an_animation stdout ----
+panicked at crates\bt-app\src\main.rs:82096:13:
+the card's still is withdrawn without asking self.surface_is_playing_a_video(PreviewSurface::Peek),
+so it is painted over the moving picture it is one frame of
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2807 filtered out
+```
+
+Restored, green. Recorded in `docs/DESIGN.md` §7.44 ⑤ and added to ⑩'s gate list.
