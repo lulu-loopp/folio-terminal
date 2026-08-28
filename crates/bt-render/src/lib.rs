@@ -1186,6 +1186,22 @@ pub struct PreviewRun {
     /// Set in the monospace face — a file's own bytes, or an inline code span.
     pub mono: bool,
     pub bold: bool,
+    /// Set in the family's italic face — markdown's single-delimiter emphasis
+    /// (`*a*`, `_a_`), and bold-italic when it rides beside [`Self::bold`]
+    /// (`***a***`).
+    ///
+    /// **Real italic where the family has one; a synthesised oblique where it
+    /// does not.** The shaper is asked for [`Style::Italic`] and answers with
+    /// the italic face when the family carries one; when it does not — as the
+    /// preview body's sans (Segoe UI, upright-only in this build) does not — it
+    /// shears the upright glyphs instead (cosmic-text's `FAKE_ITALIC`, a 14°
+    /// skew). That oblique is a fallback and not a true italic: a family that
+    /// ships a drawn italic would be set in it the day it is loaded, no line of
+    /// this crate changing. The monospace preview (a source file, Consolas)
+    /// does carry a drawn italic and is set in it, but markdown emphasis never
+    /// reaches the monospace face — a code span is literal and carries no
+    /// emphasis — so the body's oblique is what a reader sees.
+    pub italic: bool,
     /// How large this run is set **relative to its paragraph's own size** — CSS
     /// `font-size: 85%` on an inline element, and nothing more general than that.
     ///
@@ -8378,7 +8394,12 @@ fn shape_chrome_labels(
 /// the same family the terminal grid is set in, so the preview of a source file
 /// and the terminal beside it agree about how wide a character is — the whole of
 /// the mock-up's `font: 12.5px/1.5 Consolas, "Cascadia Mono", monospace`.
-fn preview_run_attrs(mono: bool, bold: bool, letter_spacing_em: f32) -> Attrs<'static> {
+fn preview_run_attrs(
+    mono: bool,
+    bold: bool,
+    italic: bool,
+    letter_spacing_em: f32,
+) -> Attrs<'static> {
     let mut attrs = Attrs::new()
         .family(if mono {
             Family::Monospace
@@ -8390,6 +8411,11 @@ fn preview_run_attrs(mono: bool, bold: bool, letter_spacing_em: f32) -> Attrs<'s
         } else {
             Weight::NORMAL
         });
+    // The italic face where the family carries one, a synthesised oblique where
+    // it does not — the shaper decides which, per [`PreviewRun::italic`].
+    if italic {
+        attrs = attrs.style(Style::Italic);
+    }
     if letter_spacing_em != 0.0 {
         attrs = attrs.letter_spacing(letter_spacing_em);
     }
@@ -8612,7 +8638,9 @@ fn inline_box_placeholder_em(font_system: &mut FontSystem, mono: bool, bold: boo
     buffer.set_wrap(Wrap::None);
     buffer.set_text(
         INLINE_BOX_PLACEHOLDER,
-        &preview_run_attrs(mono, bold, 0.0),
+        // Upright: the placeholder is inkless and its advance does not move
+        // under an oblique's skew, so the box's tracking is the same either way.
+        &preview_run_attrs(mono, bold, false, 0.0),
         Shaping::Advanced,
         None,
     );
@@ -8643,11 +8671,11 @@ fn set_preview_runs(
             Some(width / metrics.font_size.max(1.0) - placeholder)
         })
         .collect();
-    let default = preview_run_attrs(false, false, letter_spacing_em);
+    let default = preview_run_attrs(false, false, false, letter_spacing_em);
     buffer.set_rich_text(
         runs.iter().zip(&boxes).map(|(run, tracking)| {
             let [r, g, b] = run.color;
-            let mut attrs = preview_run_attrs(run.mono, run.bold, letter_spacing_em)
+            let mut attrs = preview_run_attrs(run.mono, run.bold, run.italic, letter_spacing_em)
                 .color(Color::rgba(r, g, b, 255));
             // The size is the run's own; the *leading* stays the paragraph's,
             // so a line carrying a code span is exactly as tall as the line
@@ -16997,6 +17025,7 @@ mod tests {
                     color: [0, 0, 0],
                     mono: true,
                     bold: false,
+                    italic: false,
                     font_scale: scale,
                     inline_box_px: None,
                 }],
@@ -17058,6 +17087,7 @@ mod tests {
             color: [0, 0, 0],
             mono: false,
             bold: false,
+            italic: false,
             font_scale: 1.0,
             inline_box_px: None,
         };
@@ -17070,6 +17100,7 @@ mod tests {
                     color: [0, 0, 0],
                     mono: false,
                     bold: false,
+                    italic: false,
                     font_scale: 1.0,
                     inline_box_px: Some(width),
                 },
@@ -17084,6 +17115,47 @@ mod tests {
                 "and the line it stands on is exactly as tall as it was without it"
             );
         }
+    }
+
+    /// PIN (user ruling, 2026-08-28) — **markdown emphasis is set in a real
+    /// italic where the family carries one and a synthesised oblique where it
+    /// does not, and this build's preview sans (Segoe UI, upright-only) is the
+    /// second case.** The observable is the shear itself: an upright letter and
+    /// the same letter asked for [`Style::Italic`] are shaped in the one sans
+    /// face, and the italic one's ink comes out visibly wider — a 14° skew of a
+    /// mostly-vertical glyph leans its top away from its foot and widens the
+    /// axis-aligned box that holds it. The day the family gains a drawn italic
+    /// this stays green for a different reason (a real italic H is not the
+    /// upright one either), which is why the assertion is "wider", not "sheared
+    /// by exactly 14°".
+    ///
+    /// MUTATION: drop the `.style(Style::Italic)` that [`preview_run_attrs`] adds
+    /// for an italic run — the two boxes come out identical and this goes red.
+    #[test]
+    fn the_slant_of_a_face_without_an_italic_is_synthesised() {
+        let mut font_system = terminal_font_system();
+        let mut swash_cache = SwashCache::new();
+        let metrics = Metrics::new(200.0, 260.0);
+        let mut ink_width = |italic: bool| {
+            let mut buffer = Buffer::new(&mut font_system, metrics);
+            buffer.set_wrap(Wrap::None);
+            buffer.set_text(
+                "H",
+                &preview_run_attrs(false, false, italic, 0.0),
+                Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(&mut font_system, false);
+            let [left, _, right, _] = glyph_ink_bounds(&buffer, &mut font_system, &mut swash_cache)
+                .expect("the sans face shapes an H");
+            right - left
+        };
+        let upright = ink_width(false);
+        let slanted = ink_width(true);
+        assert!(
+            slanted > upright * 1.1,
+            "a synthesised oblique widens the H's box: {slanted} against {upright}",
+        );
     }
 
     /// **A pointer put on a paragraph names the byte it is standing on, and a
@@ -17110,6 +17182,7 @@ mod tests {
                 color: [0, 0, 0],
                 mono: false,
                 bold: false,
+                italic: false,
                 font_scale: 1.0,
                 inline_box_px: None,
             }],
@@ -17189,6 +17262,7 @@ mod tests {
                 color: [0, 0, 0],
                 mono: false,
                 bold: false,
+                italic: false,
                 font_scale: 1.0,
                 inline_box_px: None,
             }],

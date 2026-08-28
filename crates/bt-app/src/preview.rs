@@ -710,7 +710,16 @@ pub fn diff_line_kind(line: &str) -> DiffLineKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpanStyle {
     Plain,
+    /// `**a**` or `__a__` — CommonMark strong emphasis, two delimiters a side.
     Bold,
+    /// `*a*` or `_a_` — CommonMark emphasis, one delimiter a side. Set in the
+    /// family's italic face where it has one and a synthesised oblique where it
+    /// does not (see [`bt_render::PreviewRun::italic`]); a face this window
+    /// gained on 2026-08-28, having drawn every level of emphasis bold until
+    /// then.
+    Italic,
+    /// `***a***` — emphasis inside strong emphasis, set bold **and** italic.
+    BoldItalic,
     /// `` `like this` `` — set in the monospace face.
     Code,
     /// `[text](url)` — **the text only** is printed, in the accent colour; the
@@ -768,6 +777,14 @@ impl Span {
 
     pub fn bold(text: &str) -> Self {
         Self::styled(text, SpanStyle::Bold)
+    }
+
+    pub fn italic(text: &str) -> Self {
+        Self::styled(text, SpanStyle::Italic)
+    }
+
+    pub fn bold_italic(text: &str) -> Self {
+        Self::styled(text, SpanStyle::BoldItalic)
     }
 
     pub fn code(text: &str) -> Self {
@@ -966,8 +983,15 @@ pub fn parse_inline(line: &str) -> Vec<Span> {
 /// during the scan and processed after it).
 #[derive(Debug)]
 enum Piece {
-    /// Text nothing has claimed. `strong` is the emphasis pass's answer.
-    Text { text: String, strong: bool },
+    /// Text nothing has claimed. `bold` and `italic` are the emphasis pass's
+    /// answer: a single-delimiter pair over this text sets `italic`, a
+    /// double-delimiter pair sets `bold`, and a run enclosed by both (`***a***`)
+    /// carries both — CommonMark's emphasis and strong emphasis, which nest.
+    Text {
+        text: String,
+        bold: bool,
+        italic: bool,
+    },
     /// A run already claimed by the code, mathematics or link pass.
     ///
     /// It stands *inside* an emphasis span perfectly well — it simply cannot
@@ -1007,8 +1031,11 @@ struct Delimiter {
     /// by a pair either side of it. It may still have characters left, and those
     /// characters are text.
     struck: bool,
-    /// Whatever is left of it stands inside an emphasis span.
-    strong: bool,
+    /// Whatever is left of it stands inside an emphasis span — `bold` if a
+    /// double-delimiter pair enclosed it, `italic` if a single one, both if it
+    /// sits inside both.
+    bold: bool,
+    italic: bool,
 }
 
 impl Delimiter {
@@ -1051,7 +1078,8 @@ impl Delimiter {
             can_open,
             can_close,
             struck: false,
-            strong: false,
+            bold: false,
+            italic: false,
         }
     }
 }
@@ -1434,7 +1462,8 @@ fn push_piece_text(text: &str, pieces: &mut Vec<Piece>) {
         Some(Piece::Text { text: last, .. }) => last.push_str(text),
         _ => pieces.push(Piece::Text {
             text: text.to_owned(),
-            strong: false,
+            bold: false,
+            italic: false,
         }),
     }
 }
@@ -1458,13 +1487,19 @@ fn push_piece_text(text: &str, pieces: &mut Vec<Piece>) {
 /// whether the closer could also have opened — the three things the matching
 /// rules read, so two closers that agree on all three are interchangeable.
 ///
-/// **Every level of emphasis comes out bold, and that is a face this window does
-/// not own rather than a rule it does not know.** The renderer sets a run in one
-/// upright face at one weight or the other ([`bt_render::PreviewRun`]); there is
-/// no italic in the stack, so `*a*`, `**a**` and `***a***` are all set in the one
-/// emphatic face there is. Printing `*a*`'s asterisks instead — which is what
-/// this pass used to do — shows the reader markup where the author wrote
-/// emphasis, and that is the worse of the two losses.
+/// **Emphasis comes out in two layers, keyed on how many delimiters a pair
+/// spends** (2026-08-28, reversing the single-layer ruling below it). A pair
+/// that spends two characters a side is strong emphasis and its span is bold; a
+/// pair that spends one is emphasis and its span is italic; `***a***` is the two
+/// nested, so `a` is bold and italic at once. [`close_emphasis`] reads `spent`
+/// and sets the two flags; the italic is a real face where the family has one
+/// and a synthesised oblique where it does not ([`bt_render::PreviewRun::italic`]).
+///
+/// Until this day every level came out bold, because the window had one emphatic
+/// face and no italic in the stack — `*a*`, `**a**` and `***a***` were all that
+/// one weight. That was a floor of the renderer, not of this pass: the delimiter
+/// stack always knew which level it had matched, and the moment an oblique
+/// existed the two readings could split the way CommonMark writes them.
 fn resolve_emphasis(pieces: &mut [Piece]) {
     // [marker][closer run length % 3][the closer can open too]
     let mut openers_bottom = [[[0usize; 2]; 3]; 2];
@@ -1546,11 +1581,24 @@ fn close_emphasis(pieces: &mut [Piece], opener: usize, closer: usize) {
     } else {
         1
     };
+    // Two delimiters spent is strong emphasis (bold); one is emphasis (italic).
+    // The two are `|=`'d rather than set so that the two passes `***a***` makes
+    // — the outer pair spending two, the inner spending one — leave `a` carrying
+    // both, which is CommonMark's emphasis nested inside strong emphasis.
+    let (add_bold, add_italic) = if spent == 2 {
+        (true, false)
+    } else {
+        (false, true)
+    };
     for piece in &mut pieces[opener + 1..closer] {
         match piece {
-            Piece::Text { strong, .. } => *strong = true,
+            Piece::Text { bold, italic, .. } => {
+                *bold |= add_bold;
+                *italic |= add_italic;
+            }
             Piece::Delimiter(run) => {
-                run.strong = true;
+                run.bold |= add_bold;
+                run.italic |= add_italic;
                 run.struck = true;
             }
             // A code span, a formula or a link keeps its own style inside an
@@ -1581,12 +1629,13 @@ fn settle(pieces: Vec<Piece>) -> Vec<Span> {
     let mut spans = Vec::new();
     for piece in pieces {
         match piece {
-            Piece::Text { text, strong } => push_text(&text, strong, &mut spans),
+            Piece::Text { text, bold, italic } => push_text(&text, bold, italic, &mut spans),
             Piece::Claimed(span) => spans.push(span),
             // Whatever a delimiter run did not spend is what the author typed.
             Piece::Delimiter(run) => push_text(
                 &(run.marker as char).to_string().repeat(run.unspent),
-                run.strong,
+                run.bold,
+                run.italic,
                 &mut spans,
             ),
         }
@@ -1602,14 +1651,15 @@ fn settle(pieces: Vec<Piece>) -> Vec<Span> {
 /// the shaper is given a rich-text sequence and a break opportunity between two
 /// runs is not the same thing as one inside a run, so `a [TODO] note` split at
 /// the bracket could wrap where the text does not permit it.
-fn push_text(text: &str, strong: bool, spans: &mut Vec<Span>) {
+fn push_text(text: &str, bold: bool, italic: bool, spans: &mut Vec<Span>) {
     if text.is_empty() {
         return;
     }
-    let span = if strong {
-        Span::bold(text)
-    } else {
-        Span::plain(text)
+    let span = match (bold, italic) {
+        (true, true) => Span::bold_italic(text),
+        (true, false) => Span::bold(text),
+        (false, true) => Span::italic(text),
+        (false, false) => Span::plain(text),
     };
     match spans.last_mut() {
         Some(last) if last.style == span.style => last.text.push_str(text),
@@ -6547,17 +6597,49 @@ mod tests {
         );
     }
 
+    /// PIN (user ruling, 2026-08-28: `*a*` and `**a**` both came out bold, since
+    /// the window drew every level of emphasis in its one bold face) — **one
+    /// delimiter a side is italic, two are bold, and three are both.**
+    ///
+    /// The whole of the two-layer reading in one line: `*a*` is
+    /// [`SpanStyle::Italic`], `**b**` is [`SpanStyle::Bold`], and `***c***` is
+    /// [`SpanStyle::BoldItalic`]. This is what the old single-face renderer could
+    /// not say — it folded `<em>` into `<strong>` because it had no italic to set
+    /// `<em>` in — and what a synthesised oblique now lets it say ([`DESIGN.md`
+    /// §7.1.3i″ ⑥], [`resolve_emphasis`]).
+    ///
+    /// MUTATIONS: map a one-delimiter pair to bold (row 1 goes red); map a
+    /// two-delimiter pair to italic (row 2); drop the nesting that makes `***c***`
+    /// carry both flags (row 3).
+    #[test]
+    fn a_single_star_run_is_italic_and_a_double_star_run_is_bold() {
+        assert_eq!(
+            parse_inline("*a* **b** ***c***"),
+            vec![
+                Span::italic("a"),
+                Span::plain(" "),
+                Span::bold("b"),
+                Span::plain(" "),
+                Span::bold_italic("c"),
+            ]
+        );
+    }
+
     /// PIN — **CommonMark's emphasis, checked against CommonMark's own examples.**
     ///
     /// One table, one row per case, and the left column is the specification's
     /// input verbatim (§6.2, "Emphasis and strong emphasis", version 0.31.2).
-    /// The right column is that example's HTML read as *structure*: this window
-    /// has no italic face, so `<em>` and `<strong>` both arrive as
-    /// [`SpanStyle::Bold`] and the comparison is over where the spans begin and
-    /// end rather than over which of the two tags the specification wrote (see
-    /// [`resolve_emphasis`]). Every other property of the answer — which
-    /// delimiters were spent, which were left as text, and where the text broke —
-    /// is compared exactly.
+    /// The right column is that example's HTML read as *structure*: `<em>` is
+    /// [`SpanStyle::Italic`], `<strong>` is [`SpanStyle::Bold`], and `<em>`
+    /// nested in `<strong>` (or the reverse) is [`SpanStyle::BoldItalic`] — the
+    /// two-layer reading this window gained on 2026-08-28. **This overturns the
+    /// row expectations recorded until that day**, when the window had no italic
+    /// face and every `<em>` was folded into `SpanStyle::Bold` alongside every
+    /// `<strong>`; the ruling on 2026-08-28 (`DESIGN.md` §7.1.3i″ ⑥) gave
+    /// emphasis a synthesised oblique, so a single-delimiter pair is now italic
+    /// and a double one is bold, exactly as the two tags divide them. Every
+    /// other property of the answer — which delimiters were spent, which were
+    /// left as text, and where the text broke — is compared exactly.
     ///
     /// MUTATIONS, and each takes at least one row down: read only ASCII
     /// punctuation in the flanking rule (the six Chinese rows); drop the `_`
@@ -6570,10 +6652,11 @@ mod tests {
     #[test]
     fn emphasis_is_matched_by_the_specifications_flanking_rules() {
         let cases: &[(&str, Vec<Span>)] = &[
-            // § the plain pair, either marker.
-            ("*foo bar*", vec![Span::bold("foo bar")]),
+            // § the plain pair, either marker: one delimiter a side is italic,
+            // two are bold.
+            ("*foo bar*", vec![Span::italic("foo bar")]),
             ("**foo bar**", vec![Span::bold("foo bar")]),
-            ("_foo bar_", vec![Span::bold("foo bar")]),
+            ("_foo bar_", vec![Span::italic("foo bar")]),
             ("__foo bar__", vec![Span::bold("foo bar")]),
             // § a run that whitespace makes non-flanking opens and closes nothing.
             ("a * foo bar*", vec![Span::plain("a * foo bar*")]),
@@ -6587,10 +6670,10 @@ mod tests {
             ("a*\"foo\"*", vec![Span::plain("a*\"foo\"*")]),
             ("*(*foo)", vec![Span::plain("*(*foo)")]),
             // § `*` inside a word is emphasis and `_` inside a word is not.
-            ("foo*bar*", vec![Span::plain("foo"), Span::bold("bar")]),
+            ("foo*bar*", vec![Span::plain("foo"), Span::italic("bar")]),
             (
                 "5*6*78",
-                vec![Span::plain("5"), Span::bold("6"), Span::plain("78")],
+                vec![Span::plain("5"), Span::italic("6"), Span::plain("78")],
             ),
             ("foo_bar_", vec![Span::plain("foo_bar_")]),
             ("5_6_78", vec![Span::plain("5_6_78")]),
@@ -6598,18 +6681,27 @@ mod tests {
             // § the two markers never pair with each other.
             ("_foo*", vec![Span::plain("_foo*")]),
             // § nesting, and the leftovers of a run that spent part of itself.
-            ("*(*foo*)*", vec![Span::bold("(foo)")]),
-            ("***foo***", vec![Span::bold("foo")]),
-            ("*foo*bar", vec![Span::bold("foo"), Span::plain("bar")]),
-            ("**foo*", vec![Span::plain("*"), Span::bold("foo")]),
-            ("*foo**", vec![Span::bold("foo"), Span::plain("*")]),
+            // Emphasis inside emphasis is italic inside italic — still italic;
+            // emphasis inside strong (`***`) is bold and italic at once.
+            ("*(*foo*)*", vec![Span::italic("(foo)")]),
+            ("***foo***", vec![Span::bold_italic("foo")]),
+            ("*foo*bar", vec![Span::italic("foo"), Span::plain("bar")]),
+            ("**foo*", vec![Span::plain("*"), Span::italic("foo")]),
+            ("*foo**", vec![Span::italic("foo"), Span::plain("*")]),
             ("__foo, __bar__, baz__", vec![Span::bold("foo, bar, baz")]),
             // § the multiple-of-3 rule: the inner `**` of the first row cannot
             // pair with either single `*`, so it stays as text inside the span
             // the singles make; the second row is the same rule letting a real
             // pair through.
-            ("*foo**bar*", vec![Span::bold("foo**bar")]),
-            ("*foo**bar**baz*", vec![Span::bold("foobarbaz")]),
+            ("*foo**bar*", vec![Span::italic("foo**bar")]),
+            (
+                "*foo**bar**baz*",
+                vec![
+                    Span::italic("foo"),
+                    Span::bold_italic("bar"),
+                    Span::italic("baz"),
+                ],
+            ),
             // § Chinese punctuation is punctuation. Every row here flips if the
             // flanking rule is asked of ASCII alone: 。 、 （ ） are the P
             // categories the specification names, and a table that does not know

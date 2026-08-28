@@ -1237,6 +1237,7 @@ pub fn build(
                     color: ink,
                     mono: true,
                     bold: false,
+                    italic: false,
                     font_scale: 1.0,
                     inline_box_px: None,
                 }],
