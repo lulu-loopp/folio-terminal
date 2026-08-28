@@ -2035,6 +2035,24 @@ pub enum Text {
     /// band apart and hand the same document to two different places, and the
     /// user read this one as *「交给系统程序」* — the other one's verb.
     HeadPopOut,
+
+    // ── pictures in a markdown page (§7.1.3k) ──────────────────────────────
+    /// Under the alt text where a picture would be, when the file named is not
+    /// there or no decoder in this window reads it.
+    ///
+    /// **Not [`Self::PreviewFailedImageLoad`]**, which is the image *pane*'s
+    /// sentence and opens with 「Preview failed」: nothing failed to preview
+    /// here — the page around the picture is drawn and readable, and one block
+    /// of it is standing on what it says instead of on what it shows.
+    MarkdownImageUnreadable,
+    /// Under the alt text where a remote picture would be.
+    ///
+    /// **A statement of what this program is, not an apology** (`README.md`,
+    /// `PRIVACY.md`): Folio has no network client of its own, so an `http`
+    /// source is not something it declined to fetch — it is something it has no
+    /// way to fetch. The address is drawn beside it as a link, because opening
+    /// it is a thing the reader may well want and this window knows how.
+    MarkdownImageRemote,
 }
 
 impl Text {
@@ -3062,6 +3080,15 @@ impl Text {
             // ── the two head buttons that had no words (2026-08-27) ─────────
             Self::PreviewStopPlaying => pick(lang, "Stop playing", "停止播放"),
             Self::HeadPopOut => pick(lang, "Open in a floating window", "在浮动窗口中打开"),
+            // ── pictures in a markdown page (§7.1.3k) ──────────────────────
+            Self::MarkdownImageUnreadable => {
+                pick(lang, "This image did not open", "这张图片没有打开")
+            }
+            Self::MarkdownImageRemote => pick(
+                lang,
+                "Folio has no network client, so this image is not fetched",
+                "Folio 没有网络客户端，所以这张图片不会被取回",
+            ),
             // ── moving a pane out of this window (multiwindow slice F1c) ───
             Self::PaneMenuMoveToNewWindow => {
                 pick(lang, "Move pane to new window", "把窗格移到新窗口")
@@ -3571,7 +3598,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 524] = [
+    pub const ALL: [Self; 526] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4096,6 +4123,8 @@ impl Text {
         Self::ShortcutRestoreAll,
         Self::PreviewStopPlaying,
         Self::HeadPopOut,
+        Self::MarkdownImageUnreadable,
+        Self::MarkdownImageRemote,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
