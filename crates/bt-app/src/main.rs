@@ -109229,6 +109229,7 @@ mod tests {
             blocks: Vec::new(),
             layout: prose_only,
             math: DocumentMath::default(),
+            pictures: DocumentPictures::default(),
         };
         let max = preview_document_max_scroll(&document, pane, 1.0, 8.0, 0.0, 0);
         assert_eq!(
@@ -109255,6 +109256,7 @@ mod tests {
                 },
             ],
             math: DocumentMath::default(),
+            pictures: DocumentPictures::default(),
         };
         let max = preview_document_max_scroll(&with_a_fence, pane, 1.0, 8.0, 0.0, 0);
         assert_eq!(
@@ -109551,6 +109553,8 @@ mod tests {
             400.0,
             metrics,
             &DocumentMath::default(),
+            &DocumentPictures::default(),
+            bt_render::Theme::Dark,
             &mut never_measured,
         );
         assert_eq!(
@@ -109574,6 +109578,8 @@ mod tests {
             400.0,
             metrics,
             &math,
+            &DocumentPictures::default(),
+            bt_render::Theme::Dark,
             &mut never_measured,
         );
         assert_eq!(
@@ -109619,6 +109625,8 @@ mod tests {
             (&blocks, &[], &layout),
             &palette,
             &math,
+            &DocumentPictures::default(),
+            bt_render::Theme::Dark,
         );
         let (left, right) = preview::markdown_measure_box(body, metrics);
         assert_eq!(rendered.body.rasters.len(), 1, "one formula, one picture");
@@ -109647,6 +109655,8 @@ mod tests {
             (&blocks, &[], &layout),
             &palette,
             &DocumentMath::default(),
+            &DocumentPictures::default(),
+            bt_render::Theme::Dark,
         );
         assert!(waiting.body.rasters.is_empty());
         assert_eq!(
@@ -109658,6 +109668,319 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["E = mc^2"],
             "what the author wrote, until there is something better to show",
+        );
+    }
+
+    /// One picture already decoded, in the shape a page draws it from.
+    ///
+    /// The pixels are never looked at: every assertion about a picture here is
+    /// about the *box* — how much room the page gave it and where it put it.
+    fn one_image(source: &str, native: [u32; 2]) -> DocumentPictures {
+        let mut pictures = DocumentPictures::default();
+        pictures.by_source.insert(
+            source.to_owned(),
+            MarkdownPicture::Ready {
+                key: format!("test:{source}"),
+                rgba: Arc::from(
+                    vec![0_u8; (native[0] * native[1] * 4) as usize].into_boxed_slice(),
+                ),
+                raster: native,
+                native,
+            },
+        );
+        pictures
+    }
+
+    /// The words a card is drawing, in the order it draws them.
+    fn card_text(rendered: &BuiltMarkdown) -> Vec<String> {
+        rendered
+            .body
+            .paragraphs
+            .iter()
+            .map(|paragraph| {
+                paragraph
+                    .runs
+                    .iter()
+                    .map(|run| run.text.as_str())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// RED GATE (user report, 2026-08-28: 「md 预览不渲染图片」) — **a picture's
+    /// source is resolved against the directory the document was read from**,
+    /// and the block that carries it is as tall as the picture is drawn.
+    ///
+    /// The two halves are one rule seen at two moments, the same pair
+    /// [`a_display_formula_is_as_tall_as_its_picture_and_stands_on_its_source_until_it_comes`]
+    /// pins: a source resolved against the wrong directory is a picture that is
+    /// never found, and a block measured from anything but
+    /// [`markdown_image_extent`] is a screenshot drawn over the paragraph under
+    /// it.
+    ///
+    /// MUTATIONS: resolve against the process's working directory instead of the
+    /// document's and the first assertion goes red; reserve the decode's own
+    /// height instead of the drawn one and the second does; drop the `.min(1.0)`
+    /// out of [`markdown_image_extent`] and the badge in the third is blown up
+    /// to the width of the column.
+    #[test]
+    fn a_markdown_image_is_drawn_from_the_documents_own_directory() {
+        let blocks = preview::parse_markdown("![a shot](docs/screenshots/one.png)\n");
+        let mut asked: Vec<PathBuf> = Vec::new();
+        let pictures = resolve_document_pictures(
+            &blocks,
+            Some(Path::new(r"D:\proj\README.md")),
+            bt_render::Theme::Dark,
+            &mut |path, _| {
+                asked.push(path.to_path_buf());
+                MarkdownPicture::Loading
+            },
+        );
+        assert_eq!(
+            asked,
+            vec![PathBuf::from(r"D:\proj\docs/screenshots/one.png")],
+            "the source is relative to the document, not to this process",
+        );
+        assert_eq!(
+            pictures.files,
+            [PathBuf::from(r"D:\proj\docs/screenshots/one.png")]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "and that file is what the watch is told to follow",
+        );
+
+        // The block is as tall as the picture is *drawn*: a 3200-wide screenshot
+        // brought down to a 400-wide column keeps its shape.
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let mut never_measured = |_: &[bt_render::PreviewRun], _: f32, _: f32, _: f32| {
+            unreachable!("a picture that is in hand asks the shaper nothing")
+        };
+        let placed = measure_markdown_block(
+            &blocks[0],
+            &MarkdownBlockIntrinsic::default(),
+            400.0,
+            metrics,
+            &DocumentMath::default(),
+            &one_image("docs/screenshots/one.png", [3200, 2000]),
+            bt_render::Theme::Dark,
+            &mut never_measured,
+        );
+        assert_eq!(
+            placed.height, 250.0,
+            "400 of 3200 is an eighth, and 2000 eighths is 250",
+        );
+
+        // And it is never blown up past its own pixels: a small badge stands at
+        // its own size in the middle of the column.
+        let badge = measure_markdown_block(
+            &blocks[0],
+            &MarkdownBlockIntrinsic::default(),
+            400.0,
+            metrics,
+            &DocumentMath::default(),
+            &one_image("docs/screenshots/one.png", [96, 20]),
+            bt_render::Theme::Dark,
+            &mut never_measured,
+        );
+        assert_eq!(badge.height, 20.0);
+        let rendered = build_preview_markdown_body(
+            [0.0, 0.0, 400.0, 400.0],
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (&blocks, &[], &[MarkdownBlockLayout::solid(20.0)]),
+            &bt_render::chrome_palette(),
+            &DocumentMath::default(),
+            &one_image("docs/screenshots/one.png", [96, 20]),
+            bt_render::Theme::Dark,
+        );
+        let [drawn] = rendered.body.rasters.as_slice() else {
+            panic!("one picture, one raster: {:#?}", rendered.body.rasters);
+        };
+        let (left, right) = preview::markdown_measure_box([0.0, 0.0, 400.0, 400.0], metrics);
+        assert_eq!(
+            (drawn.rect[2] - drawn.rect[0], drawn.rect[3] - drawn.rect[1]),
+            (96.0, 20.0),
+            "its own pixels, never stretched to the column",
+        );
+        assert_eq!(
+            drawn.rect[0] - left,
+            right - drawn.rect[2],
+            "and the air either side of it is equal",
+        );
+        assert!(
+            rendered.body.paragraphs.is_empty(),
+            "with no card under it once the pixels are there: {:?}",
+            card_text(&rendered),
+        );
+    }
+
+    /// RED GATE (same report; `README.md` and `PRIVACY.md`'s promise) — **a
+    /// remote picture is never fetched.**
+    ///
+    /// It is a structural gate and not a behavioural one, and that is the point:
+    /// `ask` is the only door to a file in [`resolve_document_pictures`], so
+    /// owning one and counting what reaches it asserts that an `http` source
+    /// produces **no** read, no request and no lane traffic — rather than that
+    /// today's code happens to take a different branch. What the reader gets
+    /// instead is the alt text and the address, as a link this window will open.
+    ///
+    /// MUTATION: hand a remote source to `ask` and the first assertion goes red
+    /// with the URL it tried to open as a path.
+    #[test]
+    fn a_remote_image_is_never_fetched() {
+        let blocks =
+            preview::parse_markdown("![a badge](https://img.example/badge.svg)\n");
+        let mut doors = 0usize;
+        let pictures = resolve_document_pictures(
+            &blocks,
+            Some(Path::new(r"D:\proj\README.md")),
+            bt_render::Theme::Dark,
+            &mut |_, _| {
+                doors += 1;
+                MarkdownPicture::Failed
+            },
+        );
+        assert_eq!(doors, 0, "nothing asked the disk, or anything else");
+        assert!(
+            pictures.files.is_empty(),
+            "and nothing was handed to the file watch either",
+        );
+        assert!(matches!(
+            pictures.get("https://img.example/badge.svg"),
+            Some(MarkdownPicture::Remote(url)) if url == "https://img.example/badge.svg"
+        ));
+
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let rendered = build_preview_markdown_body(
+            [0.0, 0.0, 400.0, 400.0],
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (
+                &blocks,
+                &[],
+                &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
+            ),
+            &bt_render::chrome_palette(),
+            &DocumentMath::default(),
+            &pictures,
+            bt_render::Theme::Dark,
+        );
+        assert!(
+            rendered.body.rasters.is_empty(),
+            "there are no pixels, because none were fetched",
+        );
+        let said = card_text(&rendered);
+        assert_eq!(said.first().map(String::as_str), Some("a badge"));
+        assert!(
+            said.last()
+                .is_some_and(|note| note.contains("https://img.example/badge.svg")),
+            "and the address is printed: {said:?}",
+        );
+        assert_eq!(
+            rendered
+                .links
+                .iter()
+                .map(|site| site.target.as_str())
+                .collect::<Vec<_>>(),
+            vec!["https://img.example/badge.svg"],
+            "as a link, on this window's own terms",
+        );
+    }
+
+    /// RED GATE (same report) — **a picture that will not decode says so where
+    /// it stands**: the alt text, and one line under it.
+    ///
+    /// The sentence is not [`i18n::Text::PreviewFailedImageLoad`] and must not
+    /// become it: nothing failed to *preview* here — the page around the picture
+    /// is drawn and readable, and one block of it is standing on what it says
+    /// instead of on what it shows.
+    ///
+    /// MUTATIONS: draw nothing for a failed picture and the block is a blank box
+    /// in the middle of the page; draw the alt without the note and the reader
+    /// is left to guess whether the words are the author's prose.
+    #[test]
+    fn an_image_that_will_not_decode_says_so_in_place() {
+        let blocks = preview::parse_markdown("![a shot](docs/gone.png)\n");
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let mut pictures = DocumentPictures::default();
+        pictures
+            .by_source
+            .insert("docs/gone.png".to_owned(), MarkdownPicture::Failed);
+        let rendered = build_preview_markdown_body(
+            [0.0, 0.0, 400.0, 400.0],
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (
+                &blocks,
+                &[],
+                &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
+            ),
+            &bt_render::chrome_palette(),
+            &DocumentMath::default(),
+            &pictures,
+            bt_render::Theme::Dark,
+        );
+        assert!(rendered.body.rasters.is_empty());
+        assert_eq!(
+            card_text(&rendered),
+            vec![
+                "a shot".to_owned(),
+                i18n::Text::MarkdownImageUnreadable.text().to_owned(),
+            ],
+        );
+        assert!(
+            rendered.links.is_empty(),
+            "a file that is not there is not a link either",
+        );
+
+        // While the decode is still out there is nothing to tell the reader:
+        // "loading" is not a fact about the document, and a card that explains
+        // itself and is then replaced by a screenshot is a flash.
+        let mut waiting = DocumentPictures::default();
+        waiting
+            .by_source
+            .insert("docs/gone.png".to_owned(), MarkdownPicture::Loading);
+        let rendered = build_preview_markdown_body(
+            [0.0, 0.0, 400.0, 400.0],
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (
+                &blocks,
+                &[],
+                &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
+            ),
+            &bt_render::chrome_palette(),
+            &DocumentMath::default(),
+            &waiting,
+            bt_render::Theme::Dark,
+        );
+        assert_eq!(card_text(&rendered), vec!["a shot".to_owned()]);
+    }
+
+    /// **What a picture copies is `![alt](src)`** (§7.1.3k ④), and a selection
+    /// passes over it whole.
+    ///
+    /// The display formula's answer one block kind over, for its reason: the alt
+    /// text alone would paste as a sentence the author never wrote, with nothing
+    /// to say that anything had been a picture.
+    #[test]
+    fn a_picture_copies_the_markdown_that_named_it() {
+        let blocks = preview::parse_markdown("![a shot](docs/one.png)\n");
+        let pieces = preview_select::pieces(&blocks);
+        let [piece] = pieces.as_slice() else {
+            panic!("one block, one piece: {pieces:#?}");
+        };
+        assert_eq!(piece.text, "![a shot](docs/one.png)");
+        assert!(piece.atomic, "there is no offset into a picture");
+        let all = preview_select::select_all(&pieces).expect("a document with a picture in it");
+        let (start, end) = all.range(&pieces);
+        assert_eq!(
+            preview_select::copy_text(&pieces, start, end),
+            "![a shot](docs/one.png)",
         );
     }
 
@@ -109847,6 +110170,8 @@ mod tests {
                 right - left,
                 metrics,
                 &DocumentMath::default(),
+                &DocumentPictures::default(),
+                bt_render::Theme::Dark,
                 wrap,
             )
             .last()
@@ -109994,6 +110319,8 @@ mod tests {
             (&blocks, &[], &layout),
             &palette,
             &math,
+            &DocumentPictures::default(),
+            bt_render::Theme::Dark,
         );
         let drawn = &rendered.body.rasters;
         assert_eq!(
@@ -110085,6 +110412,8 @@ mod tests {
             (&blocks, &[], &layout),
             &palette,
             &DocumentMath::default(),
+            &DocumentPictures::default(),
+            bt_render::Theme::Dark,
         );
         let sites: Vec<_> = rendered
             .links
@@ -110206,6 +110535,8 @@ mod tests {
             (&blocks, &[], &layout),
             &palette,
             &DocumentMath::default(),
+            &DocumentPictures::default(),
+            bt_render::Theme::Dark,
         );
         let pieces = preview_select::pieces(&blocks);
         assert_eq!(
@@ -110492,6 +110823,7 @@ mod tests {
             intrinsic: Vec::new(),
             layout: Vec::new(),
             math: DocumentMath::default(),
+            pictures: DocumentPictures::default(),
         });
         assert_eq!(pane.md_select, None, "the selection went with the document");
         assert!(
@@ -110860,6 +111192,7 @@ mod tests {
             blocks: blocks.clone(),
             layout: layout.clone(),
             math: DocumentMath::default(),
+            pictures: DocumentPictures::default(),
         };
         let max = preview_document_max_scroll(&document, body, 1.0, cell, 0.0, 0);
         assert_eq!(max[0], 0.0, "the page has no horizontal axis of its own");
@@ -111007,8 +111340,8 @@ mod tests {
             mtime: None,
             content_says_text: true,
         });
-        let wide = preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0]);
-        let narrow = preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0]);
+        let wide = preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark);
+        let narrow = preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark);
         assert_ne!(wide, narrow, "a width change is still a layout change");
         assert_eq!(
             wide.parse, narrow.parse,
@@ -111020,7 +111353,7 @@ mod tests {
             true
         });
         assert_ne!(
-            preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0]).parse,
+            preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark).parse,
             wide.parse,
             "an edit re-parses"
         );
@@ -111113,6 +111446,8 @@ mod tests {
             400.0,
             metrics,
             &DocumentMath::default(),
+            &DocumentPictures::default(),
+            bt_render::Theme::Dark,
             &mut measure,
         );
         assert_eq!(
@@ -111135,6 +111470,8 @@ mod tests {
                 width,
                 metrics,
                 &DocumentMath::default(),
+                &DocumentPictures::default(),
+                bt_render::Theme::Dark,
                 &mut measure,
             );
             heights.push(layout.last().map_or(0.0, |last| last.top + last.height));
@@ -111710,6 +112047,8 @@ mod tests {
             document,
             palette,
             &DocumentMath::default(),
+            &DocumentPictures::default(),
+            bt_render::Theme::Dark,
         )
         .body
     }
@@ -112406,8 +112745,8 @@ mod tests {
             "the source face has a caret and the rendered page has not"
         );
         assert_ne!(
-            preview_document_key(buffer, true, 400.0, 1.0, 0, [0, 0, 0]),
-            preview_document_key(buffer, false, 400.0, 1.0, 0, [0, 0, 0]),
+            preview_document_key(buffer, true, 400.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark),
+            preview_document_key(buffer, false, 400.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark),
             "so the two faces cannot share one cached document"
         );
 
@@ -112442,13 +112781,13 @@ mod tests {
     #[test]
     fn a_same_length_edit_rebuilds_the_cached_document() {
         let mut buffer = text_buffer("a.rs", "let x = 1;\n");
-        let before = preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0]);
+        let before = preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark);
         buffer.edit_content(|content| {
             content.replace_range(8..9, "2");
             true
         });
         assert_eq!(buffer.content.as_deref(), Some("let x = 2;\n"));
-        let after = preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0]);
+        let after = preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark);
         assert_ne!(
             before, after,
             "one letter for another is still a different document"
@@ -112457,19 +112796,19 @@ mod tests {
         // the same key, or every wheel notch would re-parse the file.
         assert_eq!(
             after,
-            preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0])
+            preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark)
         );
         assert_ne!(
             after,
-            preview_document_key(&buffer, true, 400.0, 2.0, 0, [0, 0, 0])
+            preview_document_key(&buffer, true, 400.0, 2.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark)
         );
         assert_ne!(
             after,
-            preview_document_key(&buffer, false, 401.0, 2.0, 0, [0, 0, 0])
+            preview_document_key(&buffer, false, 401.0, 2.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark)
         );
         assert_ne!(
             after,
-            preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0])
+            preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark)
         );
     }
 
@@ -112566,6 +112905,7 @@ mod tests {
             intrinsic: Vec::new(),
             layout,
             math: DocumentMath::default(),
+            pictures: DocumentPictures::default(),
         };
         let max = preview_document_max_scroll(&markdown, body, scale, 8.0, 0.0, 0);
         assert!(max[1] > 0.0, "a document taller than its pane can scroll");
@@ -119036,6 +119376,8 @@ mod tests {
             (&blocks, &intrinsic, &layout),
             &palette,
             &DocumentMath::default(),
+            &DocumentPictures::default(),
+            bt_render::Theme::Dark,
         );
         // The two fences' lines, in the order they were pushed. The `lang` chip
         // is a proportional paragraph and rides after them, so the two mono
@@ -119263,8 +119605,8 @@ mod tests {
     #[test]
     fn a_resize_cannot_re_walk_a_grammar_and_an_edit_must() {
         let mut buffer = text_buffer("main.rs", "fn main() {}\n");
-        let narrow = preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0]);
-        let wide = preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0]);
+        let narrow = preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark);
+        let wide = preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark);
         assert_ne!(narrow, wide, "the two widths are two documents");
         assert_eq!(
             narrow.parse, wide.parse,
@@ -119275,7 +119617,7 @@ mod tests {
             true
         });
         assert_ne!(
-            preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0]).parse,
+            preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark).parse,
             narrow.parse,
             "and an edit re-walks it"
         );
