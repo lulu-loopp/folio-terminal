@@ -1312,6 +1312,11 @@ pub enum Text {
     /// different sentence from [`Self::PreviewRefusalBinary`] because this one
     /// covers the unrecognised type as well.
     PeekUnknown,
+    /// **What the card says over a reference whose file has been deleted** (user
+    /// ruling 2026-08-28, §7.37). A different sentence from [`Self::PeekUnknown`]
+    /// because it is a different fact: the refusal is about a file this window
+    /// will not read, and this is about a file that is not there to read.
+    PeekFileGone,
     /// A diff with nothing in it, which is not a failure: a commit's reading of
     /// a file it did not touch, or two copies that agree.
     GitDocumentEmpty,
@@ -2999,6 +3004,7 @@ impl Text {
                 "No preview — binary or unrecognized type.",
                 "无法预览 —— 二进制或无法识别的类型。",
             ),
+            Self::PeekFileGone => pick(lang, "The file is no longer there.", "文件已不存在。"),
             // A statement of what the row does. The card has no engine, so it
             // cannot show the page; what it can do is stop saying the opposite.
             Self::PeekOpensAsPage => pick(lang, "Opens as a page.", "打开为页面。"),
@@ -3545,7 +3551,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 523] = [
+    pub const ALL: [Self; 524] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3954,6 +3960,7 @@ impl Text {
         Self::RefNameShape,
         Self::PeekFoot,
         Self::PeekUnknown,
+        Self::PeekFileGone,
         Self::GitDocumentEmpty,
         Self::DragOpenInPreview,
         Self::DragRootTreeHere,

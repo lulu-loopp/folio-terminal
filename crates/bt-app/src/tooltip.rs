@@ -341,6 +341,14 @@ pub enum TooltipAnchorId {
     TabIcon(usize),
     /// The pin, in the `×`'s own slot.
     TabPin(usize),
+    /// The close `×`, matching `ChromeTarget::TabClose` — "Close tab" (user
+    /// ruling 2026-08-28, `docs/DESIGN.md` §7.37). A cross is an idiom this
+    /// window teaches on a tab, a card and a toast; which one *this* one is —
+    /// and so what it closes — is the half the idiom cannot say, exactly as a
+    /// pane head's `×` could not. Registered only where the tab actually draws a
+    /// clickable close (`TabGeometry::close` / `RailTabGeometry::close` is
+    /// `Some`): a pinned tab wears the pin here instead and has no `×` to tip.
+    TabClose(usize),
     /// The folder trigger — "Peek files here" (H108), the same words on both
     /// surfaces because it is the same action in both.
     TabFiles(usize),

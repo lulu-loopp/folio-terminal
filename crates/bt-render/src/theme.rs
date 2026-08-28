@@ -1384,15 +1384,32 @@ pub struct ChromePalette {
     pub focus_mini_seam: [u8; 3],
 }
 
+/// **The house's reading floor for chrome text** — WCAG 1.4.3 AA's 4.5:1, which
+/// is what body text owes its reader.
+///
+/// The same 4.5 the rose and the seven syntax inks are already pinned at
+/// (`the_error_rose_reads_on_both_canvases`, `the_highlight_inks_read_as_text`)
+/// and the number every surface held to a floor is held to: a floating tag's ink
+/// against its own face ([`FLOAT_TAG_MINIMUM_CONTRAST`]) and, since the
+/// 2026-08-28 ruling (`docs/DESIGN.md` §7.37), a menu row's own words against
+/// the menu surface. **One constant rather than one per surface**, because two
+/// names for one number is how two floors that are the same floor drift apart —
+/// the same rule `menu_item_hint_text` was split out to keep.
+///
+/// What it does *not* cover is deliberate: inks that mean "this is not
+/// available" are held below it on purpose (WCAG 1.4.3's own exception for
+/// inactive components), and large display type has a lower bar this house has
+/// no surface for.
+pub const CHROME_TEXT_MINIMUM_CONTRAST: f64 = 4.5;
+
 /// The contrast floor a floating tag's ink is held to against the tag's **own
 /// face** — the text bar, because every word a tag carries is something you
 /// read: an address, a receipt, a count of rows.
 ///
-/// The same 4.5 the rose and the seven syntax inks are already pinned at
-/// (`the_error_rose_reads_on_both_canvases`, `the_highlight_inks_read_as_text`),
-/// so this is the house floor applied to one more surface rather than a second
-/// opinion about what "legible" means.
-pub const FLOAT_TAG_MINIMUM_CONTRAST: f64 = 4.5;
+/// [`CHROME_TEXT_MINIMUM_CONTRAST`] under the name of the surface that first
+/// needed it, kept because a reader of `float_tag` wants to be told which floor
+/// this is rather than sent to a general one.
+pub const FLOAT_TAG_MINIMUM_CONTRAST: f64 = CHROME_TEXT_MINIMUM_CONTRAST;
 
 /// **What a chip that floats over a body wears** — one face, one hairline, one
 /// ink, asked for by name (light-canvas link-tag defect, 2026-08-27).
@@ -1942,7 +1959,18 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     dialog_secondary_text: [0x7d, 0x7c, 0x78],
     dialog_muted_text: [0xa5, 0xa4, 0xa1],
     dialog_hover: [0xf4, 0xf4, 0xf4],
-    menu_item_text: [0x7d, 0x7c, 0x78],
+    // `--ink2` over `--menu` #FFFFFF (#7D7C78), **raised to the house's reading
+    // floor** (user ruling 2026-08-28, `docs/DESIGN.md` §7.37). The mock-up's
+    // own level reads 4.18:1 on white — under the 4.5:1 body text owes a reader
+    // — and this is what `contrast::raise_against` returns for it: the same warm
+    // grey, hue kept, travelled the shortest distance in lightness that arrives.
+    // Not struck by hand: the derivation in `scheme.rs` applies the same solver
+    // to every scheme, and `the_derivation_reproduces_the_light_palette_byte_
+    // for_byte` is what keeps this table and that derivation the one answer.
+    // The brand accent is untouched, and the muted inks below stay where they
+    // are — a control that cannot be pressed is entitled to read as one (WCAG
+    // 1.4.3's own exception).
+    menu_item_text: [0x77, 0x76, 0x72],
     menu_item_text_selected: [0x37, 0x35, 0x2f],
     menu_item_hover: [0xf4, 0xf4, 0xf4],
     // `--active` rgba(55,53,47,.09) over `--menu` #FFFFFF:
@@ -2790,6 +2818,32 @@ pub const FOCUS_MINI_SEAM_LOGICAL_PX: f32 = 1.0;
 
 /// A seat title's font size (`.panehead { font-size: 11.5px }`).
 pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 11.5;
+
+/// **The one typeface a file-name head wears** — whether it is drawn on a hover
+/// preview card (`bt_app::file_peek`) or on the header of the pinned float that
+/// same card promotes into (`bt_app::float`) — user ruling 2026-08-28,
+/// `docs/DESIGN.md` §7.37.
+///
+/// A card and the window it becomes name the *same file*, and for a day they
+/// named it in two different runs of type: the card at 11.5px regular with no
+/// tracking, the float at 11px semibold with `.04em`. The ruling is that a file
+/// name is one run of type on either surface — same size, same weight, same
+/// tracking — so both draw and measure it through these three constants rather
+/// than each spelling their own. It is the window header's own face
+/// (`.fly-head`), because that face is already the shared standard across every
+/// float this window raises, and the card joins it rather than the other way
+/// about.
+///
+/// **Colour is not here, and deliberately.** A card sits on `--menu` and a float
+/// on `--win`, so the name is `menu_item_text` on one and `dialog_muted_text` on
+/// the other — each surface's own ink over its own ground. The ruling is about
+/// the letters, not the light behind them, and folding the colour in would be a
+/// second decision hiding under the first.
+pub const HEAD_TITLE_FONT_LOGICAL_PX: f32 = 11.0;
+/// The weight that run is drawn at — `.fly-head { font-weight: 600 }`.
+pub const HEAD_TITLE_WEIGHT: crate::ChromeLabelWeight = crate::ChromeLabelWeight::SemiBold;
+/// The tracking that run carries — `.fly-head { letter-spacing: .04em }`.
+pub const HEAD_TITLE_TRACKING_EM: f32 = 0.04;
 /// The inset between a title bar's edge and its first item
 /// (`.panehead { padding: 0 6px 0 12px }`).
 pub const SEAT_TITLE_PADDING_LOGICAL_PX: f32 = 12.0;
@@ -3837,6 +3891,77 @@ mod tests {
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
+    /// RED — **menu text clears WCAG AA on both built-in themes** (user ruling
+    /// 2026-08-28, `docs/DESIGN.md` §7.37).
+    ///
+    /// A menu row's own words — a right-click menu's, the `⌄` menu's, the profile
+    /// picker's — are body text on the menu surface, and body text owes its
+    /// reader **4.5:1** (WCAG 1.4.3 AA). The light theme's `--ink2` on white read
+    /// 4.18:1, so this gate was red there:
+    ///
+    /// ```text
+    /// light menu text on its surface is 4.18:1, under AA 4.5
+    /// ```
+    ///
+    /// It walks both built-in palettes and asks the resting menu ink clears
+    /// 4.5:1 on its own ground. Only the built-in two are covered — a user's own
+    /// scheme is theirs to set — and the accent is not touched: the fix moved the
+    /// foreground's lightness alone.
+    ///
+    /// **Disabled and unavailable inks are listed apart, and exempt.** A control
+    /// that cannot be pressed is entitled to read as one (WCAG 1.4.3's own
+    /// exception for inactive components), so `menu_item_hint_text` (a row's
+    /// trailing annotation) and `menu_item_unavailable_text` (a control with
+    /// nothing behind it) are only required to be *dimmer* than the enabled ink —
+    /// which is what makes them read as set aside — and never held to AA.
+    ///
+    /// It walks the **derivation** as well as the two struck tables, because the
+    /// raise is a rule about every scheme rather than a byte in one table: a
+    /// palette built from a scheme goes through `contrast::raise_against` in
+    /// `scheme.rs`, and a gate that only read the constants would stay green the
+    /// day that line was deleted.
+    ///
+    /// MUTATION: drop the `raise_against` call in `scheme::ChromePalette::derive`
+    /// and the light derivation falls to 4.18:1; put the struck light
+    /// `menu_item_text` back to #7D7C78 and the struck half falls with it; lift
+    /// either exempt ink to the enabled strength and the dimmer-than assertion
+    /// does.
+    #[test]
+    fn menu_text_clears_wcag_aa_on_both_built_in_themes() {
+        const AA: f64 = CHROME_TEXT_MINIMUM_CONTRAST;
+        // The rule at its source: both built-in schemes, through the derivation
+        // every scheme goes through.
+        for (name, scheme) in [
+            ("derived dark", &crate::scheme::FOLIO_DARK),
+            ("derived light", &crate::scheme::FOLIO_LIGHT),
+        ] {
+            let palette = ChromePalette::derive(scheme);
+            let ratio = contrast(palette.menu_item_text, palette.menu_surface);
+            assert!(
+                ratio >= AA,
+                "{name} menu text on its surface is {ratio:.2}:1, under AA {AA}",
+            );
+        }
+        for (name, palette) in [("dark", DARK_CHROME), ("light", LIGHT_CHROME)] {
+            let normal = contrast(palette.menu_item_text, palette.menu_surface);
+            assert!(
+                normal >= AA,
+                "{name} menu text on its surface is {normal:.2}:1, under AA {AA}",
+            );
+            // The set-aside inks, single-file: each dimmer than the row that can
+            // be read, and none of them held to AA.
+            for (ink, colour) in [
+                ("hint", palette.menu_item_hint_text),
+                ("unavailable", palette.menu_item_unavailable_text),
+            ] {
+                assert!(
+                    contrast(colour, palette.menu_surface) < normal,
+                    "{name}'s {ink} ink reads as strong as an enabled row",
+                );
+            }
+        }
+    }
+
     /// PIN (R18): eight lanes, all eight legible on both canvases, and no two
     /// of them the same colour.
     ///
@@ -4586,10 +4711,12 @@ mod tests {
         assert_eq!(LIGHT_CHROME.menu_item_hover, [0xf4, 0xf4, 0xf4]);
 
         // `.combo-item` is --ink2 and `.combo-item.selected` is --ink, both over
-        // --menu: the selected one is the one that reads at full strength.
+        // --menu: the selected one is the one that reads at full strength. The
+        // light `--ink2` is lifted off the mock-up's #7D7C78 to clear WCAG AA
+        // (§7.37) — see `menu_text_clears_wcag_aa_on_both_built_in_themes`.
         assert_eq!(DARK_CHROME.menu_item_text, [0x9f, 0x9f, 0x9f]);
         assert_eq!(DARK_CHROME.menu_item_text_selected, [0xe3, 0xe3, 0xe3]);
-        assert_eq!(LIGHT_CHROME.menu_item_text, [0x7d, 0x7c, 0x78]);
+        assert_eq!(LIGHT_CHROME.menu_item_text, [0x77, 0x76, 0x72]);
         assert_eq!(LIGHT_CHROME.menu_item_text_selected, [0x37, 0x35, 0x2f]);
 
         for palette in [DARK_CHROME, LIGHT_CHROME] {

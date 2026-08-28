@@ -106,8 +106,17 @@ pub const PEEK_SHADOW_LOGICAL_PX: f32 = 28.0;
 pub const PEEK_HEAD_PADDING_TOP_LOGICAL_PX: f32 = 7.0;
 pub const PEEK_HEAD_PADDING_X_LOGICAL_PX: f32 = 10.0;
 pub const PEEK_HEAD_PADDING_BOTTOM_LOGICAL_PX: f32 = 5.0;
-/// `.fpeek-head { font-size: 11.5px }`.
-pub const PEEK_HEAD_FONT_LOGICAL_PX: f32 = 11.5;
+/// The head's font size — the file-name head's shared face (`docs/DESIGN.md`
+/// §7.37).
+///
+/// The mock-up's `.fpeek-head` set this to 11.5px regular, a run of its own that
+/// read as a different typeface from the float this card promotes into (11px
+/// semibold). The 2026-08-28 ruling makes a file name one run of type wherever
+/// it is shown, so the head's size, its weight and its tracking now come from
+/// the one place both surfaces read — see [`bt_render::HEAD_TITLE_FONT_LOGICAL_PX`]
+/// and the weight and tracking beside it, spent where the name label is built in
+/// [`build`].
+pub const PEEK_HEAD_FONT_LOGICAL_PX: f32 = bt_render::HEAD_TITLE_FONT_LOGICAL_PX;
 /// `.fpeek-head { gap: 6px }`.
 pub const PEEK_HEAD_GAP_LOGICAL_PX: f32 = 6.0;
 /// `.pmark { width: 15px }` (mock-up 246), which is the head's file mark.
@@ -225,6 +234,19 @@ pub fn foot_run(layout: &PeekLayout, scale: f32) -> [f32; 4] {
 #[must_use]
 pub fn peek_unknown_text() -> &'static str {
     crate::i18n::Text::PeekUnknown.text()
+}
+
+/// **What the card says over a reference whose file has gone** (user ruling
+/// 2026-08-28, `docs/DESIGN.md` §7.37).
+///
+/// A terminal reference is validated when it is printed; the file can be deleted
+/// after that, and a pointer resting on the still-underlined word used to raise a
+/// card saying "No preview — binary or unrecognized type." That was not true: the
+/// file is not binary, it is not there. So the card states the one fact that is —
+/// see [`PeekBody::Gone`].
+#[must_use]
+pub fn peek_gone_text() -> &'static str {
+    crate::i18n::Text::PeekFileGone.text()
 }
 
 /// **What the card says over a name that opens as a page** (user ruling
@@ -462,6 +484,19 @@ pub enum PeekBody {
     Image { width: f32, height: f32 },
     /// A file this window will not read.
     Refused,
+    /// **A reference whose file is no longer on disk** (user ruling 2026-08-28,
+    /// `docs/DESIGN.md` §7.37).
+    ///
+    /// One line, laid out exactly as [`Self::Refused`]'s and [`Self::Page`]'s
+    /// are, and a separate variant rather than a second sentence through the
+    /// refusal because it is a different fact: the refusal says this window will
+    /// not read the file, and this says there is no file to read. A terminal
+    /// reference is validated when it is printed and the file can vanish after —
+    /// and for a day the card over the still-underlined word said "binary or
+    /// unrecognized type", which is neither true nor kind. It says what is true
+    /// instead, and the card wears no type chip, because there is no type to
+    /// name. See [`peek_gone_text`].
+    Gone,
     /// **A name that opens as a page** (user ruling 2026-08-23,
     /// `docs/DESIGN.md` §7.10 ⑥).
     ///
@@ -601,7 +636,7 @@ impl PeekBody {
             // the same box, so a column of rows does not change shape as the
             // pointer walks from a file with no reader to a file that opens as a
             // page.
-            Self::Refused | Self::Page => {
+            Self::Refused | Self::Page | Self::Gone => {
                 px(PEEK_NONE_PADDING_TOP_LOGICAL_PX)
                     + none_line(scale)
                     + px(PEEK_NONE_PADDING_BOTTOM_LOGICAL_PX)
@@ -987,7 +1022,16 @@ pub fn layout(
     // The chip is `margin-left: auto`, so it is hung off the right edge and the
     // name takes whatever is left. A name too long for what is left is clipped
     // by its own box rather than pushing the chip out of the card.
-    let chip_width = (ftype_width + px(PEEK_TYPE_PADDING_X_LOGICAL_PX) * 2.0).round();
+    //
+    // **A card with no type to name reserves nothing for it** (§7.37): a gone
+    // file's card draws no chip ([`build`]), and a padding-only box held open on
+    // the right would be ten pixels the name could have had, spent on a chip
+    // nobody draws.
+    let chip_width = if content.ftype.is_empty() {
+        0.0
+    } else {
+        (ftype_width + px(PEEK_TYPE_PADDING_X_LOGICAL_PX) * 2.0).round()
+    };
     let ftype = [
         head_right - chip_width,
         head_top,
@@ -1098,12 +1142,21 @@ pub fn build(
         tabular_numerals: false,
     };
 
-    labels.push(label(
-        &content.name,
-        layout.name,
-        px(PEEK_HEAD_FONT_LOGICAL_PX),
-        palette.menu_item_text,
-    ));
+    // The name, in the file-name head's shared face (§7.37): the same size,
+    // weight and tracking a float's header draws, so this card and the window it
+    // becomes wear one typeface over the same file. Only the ink stays the
+    // card's own — `menu_item_text` over `--menu`, where a float has
+    // `dialog_muted_text` over `--win`.
+    labels.push(ChromeLabel {
+        weight: bt_render::HEAD_TITLE_WEIGHT,
+        letter_spacing_em: bt_render::HEAD_TITLE_TRACKING_EM,
+        ..label(
+            &content.name,
+            layout.name,
+            px(PEEK_HEAD_FONT_LOGICAL_PX),
+            palette.menu_item_text,
+        )
+    });
     if let Some(rect) = layout.dirty {
         // The same drawing and the same ink the preview head and the switcher
         // put on an unsaved buffer — one dot means one thing, and since the icon
@@ -1113,34 +1166,41 @@ pub fn build(
         // the one circle at the one size.
         sprites.push(crate::marks::dirty_dot_sprite(rect, palette.accent, scale));
     }
-    // The chip: a hairline box with the type word inside it.
-    quads.extend(bt_render::rounded_overlay_fill(
-        layout.ftype,
-        px(PEEK_TYPE_RADIUS_LOGICAL_PX),
-        palette.menu_border,
-        alpha(palette.menu_border_alpha),
-    ));
-    quads.extend(bt_render::rounded_overlay_fill(
-        [
-            layout.ftype[0] + 1.0,
-            layout.ftype[1] + 1.0,
-            layout.ftype[2] - 1.0,
-            layout.ftype[3] - 1.0,
-        ],
-        (px(PEEK_TYPE_RADIUS_LOGICAL_PX) - 1.0).max(0.0),
-        palette.menu_surface,
-        1.0,
-    ));
-    labels.push(ChromeLabel {
-        mono: false,
-        align_center: true,
-        ..label(
-            &content.ftype,
+    // The chip: a hairline box with the type word inside it. **Drawn only when
+    // there is a type to name** (§7.37): a reference whose file has gone has no
+    // type — `content.ftype` is empty for it — and a chip printing `unknown`
+    // over the sentence saying the file is not there would be the card
+    // contradicting itself. An empty type is the one case that omits it; every
+    // real file still names its own.
+    if !content.ftype.is_empty() {
+        quads.extend(bt_render::rounded_overlay_fill(
             layout.ftype,
-            px(PEEK_TYPE_FONT_LOGICAL_PX),
-            palette.body_hint_text,
-        )
-    });
+            px(PEEK_TYPE_RADIUS_LOGICAL_PX),
+            palette.menu_border,
+            alpha(palette.menu_border_alpha),
+        ));
+        quads.extend(bt_render::rounded_overlay_fill(
+            [
+                layout.ftype[0] + 1.0,
+                layout.ftype[1] + 1.0,
+                layout.ftype[2] - 1.0,
+                layout.ftype[3] - 1.0,
+            ],
+            (px(PEEK_TYPE_RADIUS_LOGICAL_PX) - 1.0).max(0.0),
+            palette.menu_surface,
+            1.0,
+        ));
+        labels.push(ChromeLabel {
+            mono: false,
+            align_center: true,
+            ..label(
+                &content.ftype,
+                layout.ftype,
+                px(PEEK_TYPE_FONT_LOGICAL_PX),
+                palette.body_hint_text,
+            )
+        });
+    }
 
     match &layout.body_kind {
         // Nothing to draw here: the document is a `PreviewBody` on the layer's
@@ -1173,14 +1233,14 @@ pub fn build(
                 });
             }
         }
-        PeekBody::Refused | PeekBody::Page => {
+        PeekBody::Refused | PeekBody::Page | PeekBody::Gone => {
             let left = layout.body[0] + px(PEEK_NONE_PADDING_X_LOGICAL_PX);
             let right = layout.body[2] - px(PEEK_NONE_PADDING_X_LOGICAL_PX);
             let top = layout.body[1] + px(PEEK_NONE_PADDING_TOP_LOGICAL_PX);
-            let words = if matches!(content.body, PeekBody::Page) {
-                peek_page_text()
-            } else {
-                peek_unknown_text()
+            let words = match content.body {
+                PeekBody::Page => peek_page_text(),
+                PeekBody::Gone => peek_gone_text(),
+                _ => peek_unknown_text(),
             };
             labels.push(label(
                 words,
@@ -1508,6 +1568,211 @@ mod tests {
     }
 
     const LINE_HEIGHT: f32 = 18.0;
+
+    /// RED — **a card over a file that has gone says so, and wears no type
+    /// chip** (user ruling 2026-08-28, `docs/DESIGN.md` §7.37).
+    ///
+    /// RED EVIDENCE (2026-08-28, the user's report). A terminal reference whose
+    /// file had been deleted still raised a card, and the card said "No preview —
+    /// binary or unrecognized type." Two things were wrong with it and this
+    /// pins both: the sentence (the file is not binary, it is absent) and the
+    /// chip beside it, which printed a type for a file with none. Before the fix
+    /// the body was [`PeekBody::Refused`] and this reads:
+    ///
+    /// ```text
+    /// the card says the file is gone
+    /// ```
+    ///
+    /// MUTATION: send `Gone` down the refusal's words and the first assertion
+    /// falls; draw the chip for an empty ftype and the second does.
+    #[test]
+    fn a_card_over_a_file_that_has_gone_says_so_and_wears_no_type_chip() {
+        let palette = bt_render::chrome_palette();
+        // A gone file has no type to name — the window empties the ftype for it.
+        let card = PeekContent {
+            name: "notes.md".to_owned(),
+            ftype: String::new(),
+            dirty: false,
+            body: PeekBody::Gone,
+        };
+        let gone_layout = layout(
+            &card,
+            [40.0, 300.0, 240.0, 320.0],
+            (1600.0, 900.0),
+            ruler(&card.name, PEEK_HEAD_FONT_LOGICAL_PX),
+            0.0,
+            SCALE,
+        );
+        let gone_foot = foot(&gone_layout, "");
+        let layer = build(&gone_layout, &card, &gone_foot, None, &[], &palette, SCALE);
+
+        let said = |words: &str| layer.labels.iter().find(|label| label.text == words);
+        assert!(
+            said(peek_gone_text()).is_some(),
+            "the card says the file is gone",
+        );
+        assert!(
+            said(peek_unknown_text()).is_none(),
+            "and never calls an absent file binary",
+        );
+
+        // No chip: neither its word nor the two rounded fills that make its box.
+        assert!(
+            layer.labels.iter().all(|label| !label.text.is_empty()),
+            "no empty chip label is drawn",
+        );
+        assert_eq!(
+            gone_layout.ftype[2] - gone_layout.ftype[0],
+            0.0,
+            "and the head reserves no width for a chip it will not draw",
+        );
+
+        // A real file still names its type, chip and all — the regression half.
+        let typed = PeekContent {
+            ftype: "text".to_owned(),
+            body: PeekBody::Refused,
+            ..card.clone()
+        };
+        let typed_layout = layout(
+            &typed,
+            [40.0, 300.0, 240.0, 320.0],
+            (1600.0, 900.0),
+            ruler(&typed.name, PEEK_HEAD_FONT_LOGICAL_PX),
+            ruler("text", PEEK_TYPE_FONT_LOGICAL_PX),
+            SCALE,
+        );
+        let typed_foot = foot(&typed_layout, "");
+        let typed_layer = build(
+            &typed_layout,
+            &typed,
+            &typed_foot,
+            None,
+            &[],
+            &palette,
+            SCALE,
+        );
+        assert!(
+            typed_layer.labels.iter().any(|label| label.text == "text"),
+            "a file with a type still wears its chip",
+        );
+        assert!(
+            typed_layout.ftype[2] - typed_layout.ftype[0] > 0.0,
+            "and still reserves the room for it",
+        );
+    }
+
+    /// RED — **a file name wears one typeface whether it is a card or a window**
+    /// (user ruling 2026-08-28, `docs/DESIGN.md` §7.37).
+    ///
+    /// RED EVIDENCE (2026-08-28, the user's screenshot). The same `long-lines.txt`
+    /// wore two runs of type: the hover card's head at 11.5px regular with no
+    /// tracking, the pinned float's header at 11px semibold with `.04em`. So the
+    /// name looked heavier and of a different family the instant the card the
+    /// pointer was over became the window it was dragged into. On the build before
+    /// the fix this reads (font sizes at `SCALE`):
+    ///
+    /// ```text
+    /// the name is one size on a card (11.5) and a window (11)
+    /// ```
+    ///
+    /// It draws both runs *for real* — the card through [`build`], the window
+    /// through [`crate::float::build`] — and compares the name's own label off
+    /// each layer, so a size, a weight or a tracking that moves on one surface and
+    /// not the other fails the build.
+    ///
+    /// MUTATION: give either surface back its old face (the card 11.5px `Regular`
+    /// `0.0`, or the window 11px `SemiBold` `.04em`) and the two runs part on
+    /// whichever field was changed.
+    #[test]
+    fn a_file_name_wears_one_typeface_whether_it_is_a_card_or_a_window() {
+        const NAME: &str = "long-lines.txt";
+        let palette = bt_render::chrome_palette();
+
+        // The card, laid out and painted where a files row raised it.
+        let card = PeekContent {
+            name: NAME.to_owned(),
+            ftype: "text".to_owned(),
+            dirty: false,
+            body: lines(6),
+        };
+        let card_layout = layout(
+            &card,
+            [40.0, 300.0, 240.0, 320.0],
+            (1600.0, 900.0),
+            ruler(NAME, PEEK_HEAD_FONT_LOGICAL_PX),
+            ruler("text", PEEK_TYPE_FONT_LOGICAL_PX),
+            SCALE,
+        );
+        let card_foot = foot(&card_layout, "");
+        let card_layer = build(&card_layout, &card, &card_foot, None, &[], &palette, SCALE);
+        let card_name = &card_layer.labels[0];
+        assert_eq!(card_name.text, NAME, "the card's first label is the name");
+
+        // The window that same card promotes into, painted through the float's
+        // own header recipe.
+        let geometry = crate::float::float_geometry(
+            [100.0, 100.0, 364.0, 500.0],
+            crate::float::FloatMode::Pinned,
+            SCALE,
+            30.0,
+            crate::float::FloatHeadTools::default(),
+        );
+        let window_layer = crate::float::build(
+            &geometry,
+            &crate::float::FloatChrome {
+                dissolved: 0.0,
+                mode: crate::float::FloatMode::Pinned,
+                mark: ChromeMark::File,
+                title: NAME,
+                path: "C:\\Users\\Alice\\long-lines.txt",
+                notice: "",
+                notice_width: 0.0,
+                dock_label: "DOCK",
+                dock_mark: ChromeMark::DockLeft,
+                hover: None,
+                revealed: false,
+                dirty: false,
+                flip_to_source: false,
+            },
+            crate::float::FloatBody {
+                quads: Vec::new(),
+                labels: Vec::new(),
+                sprites: Vec::new(),
+            },
+            SCALE,
+            &palette,
+            crate::float::FloatFade {
+                opacity: 1.0,
+                rise: 0.0,
+                moving: false,
+            },
+        );
+        let window_name = &window_layer.labels[0];
+        assert_eq!(
+            window_name.text, NAME,
+            "the window's first label is the title"
+        );
+
+        assert_eq!(
+            card_name.font_size_px, window_name.font_size_px,
+            "the name is one size on a card ({}) and a window ({})",
+            card_name.font_size_px, window_name.font_size_px,
+        );
+        assert_eq!(
+            card_name.weight, window_name.weight,
+            "the name is one weight on a card ({:?}) and a window ({:?})",
+            card_name.weight, window_name.weight,
+        );
+        assert_eq!(
+            card_name.letter_spacing_em, window_name.letter_spacing_em,
+            "the name carries one tracking on a card ({}) and a window ({})",
+            card_name.letter_spacing_em, window_name.letter_spacing_em,
+        );
+        assert_eq!(
+            card_name.mono, window_name.mono,
+            "the name is drawn from one family on a card and a window",
+        );
+    }
 
     /// PIN (user ruling, 2026-08-15) — **the glance card's foot hangs the same
     /// phrase on the same side, and the way out survives it.**

@@ -287,7 +287,10 @@ pub fn suppresses(showing: Option<usize>, anchor: crate::tooltip::TooltipAnchorI
     };
     matches!(
         anchor,
-        TooltipAnchorId::Tab(index) | TooltipAnchorId::TabIcon(index) | TooltipAnchorId::TabPin(index)
+        TooltipAnchorId::Tab(index)
+            | TooltipAnchorId::TabIcon(index)
+            | TooltipAnchorId::TabPin(index)
+            | TooltipAnchorId::TabClose(index)
         if index == shown
     )
 }
@@ -2314,6 +2317,7 @@ mod tests {
             TooltipAnchorId::Tab(2),
             TooltipAnchorId::TabIcon(2),
             TooltipAnchorId::TabPin(2),
+            TooltipAnchorId::TabClose(2),
         ] {
             assert!(suppresses(Some(2), anchor), "{anchor:?}");
             assert!(
