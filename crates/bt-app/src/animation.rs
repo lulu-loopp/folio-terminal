@@ -420,10 +420,11 @@ mod tests {
     /// PIN — **the four ways this module declines, and none of them is a
     /// panic.**
     ///
-    /// A `.png` is not this lane's; bytes that are not a container are not
-    /// either; a single-frame GIF is a picture the picture channel already
-    /// draws; and a file over the ceiling is drawn as its first frame and left
-    /// still. Every one of those is a `.gif` a reader can hover.
+    /// A `.png` is not this lane's; bytes that announce no container at all are
+    /// not either; bytes that announce a GIF and then will not open are a broken
+    /// GIF rather than a stranger; a single-frame GIF is a picture the picture
+    /// channel already draws; and a file over the ceiling is drawn as its first
+    /// frame and left still. Every one of those is a `.gif` a reader can hover.
     #[test]
     fn a_file_that_is_not_an_animation_says_so_rather_than_pretending() {
         // `Result<Animation, _>` is deliberately not `PartialEq` — an animation
@@ -438,9 +439,17 @@ mod tests {
         assert!(!path_names_an_animation(std::path::Path::new(
             r"D:\a\b.gifx"
         )));
+        // **A header that says GIF is taken at its word, and then the bytes
+        // behind it are the thing that fails.** These two are a pair and the
+        // difference between them is the whole of why there are two refusals:
+        // the first announces the container this module opens and then has
+        // nothing openable in it, which is `Undecodable`; the second announces
+        // nothing at all, which is `NotAnAnimation`. Answering the first with
+        // "not an animation" would be this module telling a reader their `.gif`
+        // is not a `.gif`, when what is true is that it is a broken one.
         assert_eq!(
             refusal(decode_bytes(b"GIF89a but not really")),
-            Some(AnimationRefusal::NotAnAnimation)
+            Some(AnimationRefusal::Undecodable)
         );
         assert_eq!(
             refusal(decode_bytes(&[])),

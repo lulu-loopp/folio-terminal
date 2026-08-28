@@ -338,3 +338,93 @@ reformat inside a file the size of `main.rs` to reach it — the base commit
 **So: run `cargo fmt --all` before `cargo fmt --all -- --check`, always.** A hand
 that reads the 53 GB line as "the build is broken" will lose an hour, which is
 why it is written here.
+
+---
+
+## ④ The gates, run for the first time on this branch — eight reds
+
+`cargo test --workspace` had not been run on this line before this hand took it
+over (`NOTES.md`'s checklist had that box open). It found **eight** failures.
+None of them was flaky and none was environmental; every one was a real
+disagreement between what the slice did and what its own tests said.
+
+| red | what it was |
+|---|---|
+| `the_environment_is_created_with_no_browser_arguments_at_all` (`bt-platform`) | The pin reads the whole of `webview.rs` looking for the retired autoplay switch — and the **comment explaining that the switch is retired** quoted it verbatim. Spelled in pieces now, the way every needle in that family already is. |
+| `a_video_has_a_face_of_its_own` | Its "outside the class" list still held `.mkv` and `.avi`, which §7.44 ⑥ moved *into* the class. They are in the video block now, `.wmv` beside them, and the two rows left outside are `.mpg`/`.flv` — outside for the honest reason that nobody has opened one. |
+| `only_a_playable_video_is_offered_a_play_button` | Pinned the retired **second column** ("a face and no player"), and had been half-renamed into a test that asserted `!path_names_a_video(capture.mov)` and `path_names_a_video(capture.mov)` two lines apart. **Retired**, with a tombstone naming its replacement, `every_name_in_the_class_plays_and_the_class_is_the_seven_that_were_opened`. |
+| `the_modal_family_covers_the_float_and_the_tip_covers_them_both` | The new `video_bars` band was added to the constructed stack with marker `23` — the marker `card_hint` already carries, which is the collision the comment three lines below it warns about — and was never added to the expected order. Marker `24`, and the band is in the order and in the prose. |
+| `the_still_and_the_first_played_frame_share_a_rect` | **A real defect, and the one this test was written for.** See ⑤ below. |
+| `the_shell_page_is_gone` | Two false positives that the retirement itself created. See ⑥ below. |
+| `a_video_is_one_seat_on_three_surfaces` | `engines_outstanding()` read `0` where it wanted `3`. Since ⑫ made `Engine::open` return without waiting, the ledger is bumped on the engine's own thread — so "three surfaces are three decoders" becomes true a moment *after* the third open returns. `bt-platform` had already grown `ledger_gate` + `engines_settling_to` for this; `bt-app` is a different test binary and needed its own pair. Both tests in here that conclude anything from the process-wide counter now take the gate. |
+| `a_file_that_is_not_an_animation_says_so_rather_than_pretending` | Expected `NotAnAnimation` for `GIF89a but not really`. The bytes **announce** the container this module opens and then have nothing openable in them, which is `Undecodable`; answering "not an animation" would be telling a reader their `.gif` is not a `.gif` when what is true is that it is a broken one. The test was wrong and the product was right. |
+
+## ⑤ Half a pixel between the still and the first played frame
+
+`the_still_and_the_first_played_frame_share_a_rect` failed on every
+odd-leftover row:
+
+```
+[0.0, 0.0, 960.0, 556.0] [160, 120]: the still is [109.5, 0.0, 850.5, 556.0]
+                                    and the frame is [109.0, 0.0, 850.0, 556.0]
+  left: 110.0
+ right: 109.0
+```
+
+A 160×120 recording in a 960×556 body fits to 741 wide; the leftover is 219.
+`bt_render::video_frame_rect` splits it by an **integer floor** — 109, and its
+doc says so: *"a one-pixel letterbox is a pixel of ground on one side and
+nothing on the other"*. `video_still_destination` centred on the body's
+floating-point midpoint instead — 480 − 741/2 = 109.5.
+
+The two were never one rule; they were two statements of one rule, and they
+disagreed by exactly the half pixel a reader sees as a flicker when they press
+play. The mend is that there is now only one statement:
+
+```rust
+fn video_still_destination(body: [f32; 4], video_px: [u32; 2]) -> [f32; 4] {
+    viewport_of_rect(body)
+        .and_then(|box_| bt_render::video_frame_rect(box_, video_px[0], video_px[1]))
+        .unwrap_or(body)
+}
+```
+
+The doc above it had already claimed *"one of them is the other's caller"*. It
+is true now.
+
+`a_videos_still_lands_where_the_playing_picture_does` went red on the change and
+was right to: it asserted the still's centre is exactly the body's. It now
+compares all four edges against `video_frame_rect` **to the pixel** — the
+load-bearing half — and allows the centre the half pixel the floor costs, with
+the reason written beside it.
+
+## ⑥ A retirement pin that could not survive being written about
+
+`the_shell_page_is_gone` reads every `.rs` in the crate for five needles. Two of
+them now had false positives, and both were created by the retirement itself:
+
+* **`<video`** matched `Option<video_seat::BarLayout>` — a Rust type naming the
+  module that *replaced* the page.
+* **`VideoShell`** and **`Folio\player`** matched the prose in `preview.rs`,
+  `webhost.rs` and this test's own doc comment, which is where the record of why
+  route A is gone actually lives.
+
+A pin that forbids the explanation forbids the only account of the decision. So
+the rule is now asked of the **code**: comment lines are dropped before the
+search — which is what `bt-render`'s source pins already do, and for this reason
+— and the element is looked for **shaped like a tag** (`<video` followed by `>`,
+whitespace or `/`) rather than as four characters. What is left cannot be
+written except by writing the element, and it still covers the whole class.
+
+## The three gates
+
+Run on `worktree-agent-aed4f82cd0a9189dd` after the eight above were mended:
+
+```
+cargo test --workspace --no-fail-fast -j 4     CARGO_EXIT=0
+    4423 passed; 0 failed; 22 ignored
+cargo clippy --workspace --all-targets -j 4 -- -D warnings    CARGO_EXIT=0
+cargo fmt --all -- --check                                     CARGO_EXIT=0
+```
+
+`PSModulePath` was **not** cleared, per the standing ruling.

@@ -887,9 +887,12 @@ impl WebHost {
         // because the runtime has no per-page spelling of it: it is a command
         // line to the browser process, and the browser process is made once.
         // **And it writes none** (route B slice ②, 2026-08-28; `docs/DESIGN.md`
-        // §7.44 ④). The one argument that was ever here was
-        // `--autoplay-policy=no-user-gesture-required`, and it existed for one
-        // reason: a shell page this window wrote carried `<video autoplay>`, and
+        // §7.44 ④). The one argument that was ever here was Chromium's
+        // `autoplay-policy` switch, set to `no-user-gesture-required` — spelled
+        // in pieces because the pin that keeps it gone reads this whole file and
+        // a sentence about a retired flag must not look like the flag — and it
+        // existed for one reason: a shell page this window wrote carried a
+        // self-starting player, and
         // Chromium's policy would not start it because the gesture that asked
         // for it happened on a button the page could not see. There is no shell
         // page any more — a recording is decoded by Media Foundation and drawn

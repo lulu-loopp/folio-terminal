@@ -16256,22 +16256,25 @@ fn image_destination(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> [f3
 ///
 /// A body with no area answers with the body, which draws nothing and is what
 /// every caller above already handles.
+///
+/// # It is the caller and not a second rule (2026-08-28)
+///
+/// This used to *restate* the rule — fit the extent, then centre it on the
+/// body's own floating-point midpoint — and a restatement is a second rule
+/// however short it is. The two disagreed by **half a pixel** whenever the
+/// leftover was odd: a 160×120 recording in a 960×556 body is 741 wide, the
+/// leftover is 219, and `video_frame_rect` splits that by an integer floor to
+/// 109 while a midpoint subtraction gives 109.5. Half a pixel is exactly the
+/// flicker a reader sees when they press play, which is what
+/// `the_still_and_the_first_played_frame_share_a_rect` was written to catch and
+/// what it caught.
+///
+/// So the still is now placed by the same function the playing layer is placed
+/// by, and there is nothing left here that could drift from it.
 fn video_still_destination(body: [f32; 4], video_px: [u32; 2]) -> [f32; 4] {
-    let width = (body[2] - body[0]).max(0.0).round() as u32;
-    let height = (body[3] - body[1]).max(0.0).round() as u32;
-    let Some((fitted_width, fitted_height)) =
-        bt_render::video_fit_extent(width, height, video_px[0], video_px[1])
-    else {
-        return body;
-    };
-    let centre_x = (body[0] + body[2]) / 2.0;
-    let centre_y = (body[1] + body[3]) / 2.0;
-    [
-        centre_x - fitted_width as f32 / 2.0,
-        centre_y - fitted_height as f32 / 2.0,
-        centre_x + fitted_width as f32 / 2.0,
-        centre_y + fitted_height as f32 / 2.0,
-    ]
+    viewport_of_rect(body)
+        .and_then(|box_| bt_render::video_frame_rect(box_, video_px[0], video_px[1]))
+        .unwrap_or(body)
 }
 
 /// The pan a zoom actually gets to keep against this body, read out of the one
@@ -90314,7 +90317,11 @@ mod tests {
         };
         let stack = OverlayStack {
             preview_bars: mark(0),
-            video_bars: mark(23),
+            // 24 and not 23, for the reason written on `card_hint` below: a
+            // marker shared by two families makes this whole assertion pass
+            // while the two swap places, and this band arrived on a later day
+            // than the Cards bubble did.
+            video_bars: mark(24),
             terminal_bars: mark(16),
             command_rail: mark(13),
             rail: mark(1),
@@ -90351,12 +90358,12 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                0, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 8, 20, 23, 9, 10, 11,
-                21
+                0, 24, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 8, 20, 23, 9, 10,
+                11, 21
             ],
-            "bottom to top: pane bars, terminal thumbs, command rails, rail, flight, ground, \
-             search capsule, integration strips, download sheet, schematic, float, modal, file \
-             menu, pane menu, git menu, terminal menu, tab menu, notices, key hint, Cards \
+            "bottom to top: pane bars, video bars, terminal thumbs, command rails, rail, flight, \
+             ground, search capsule, integration strips, download sheet, schematic, float, modal, \
+             file menu, pane menu, git menu, terminal menu, tab menu, notices, key hint, Cards \
              bubble, tip, glance, ghost, window ring"
         );
         let at = |tag: u8| {
@@ -99903,10 +99910,29 @@ mod tests {
                 "the still and the playing picture are one width",
             );
             assert_close(rect_size(still).1, rect_size(playing).1, "and one height");
-            // Both are centred on the body, so one comparison of the centres
-            // covers both origins.
-            assert_close((still[0] + still[2]) / 2.0, 600.0, "centred");
-            assert_close((still[1] + still[3]) / 2.0, 450.0, "centred");
+            // **The same rectangle and not merely the same size** (2026-08-28).
+            // The origins are compared too, because half a pixel of
+            // disagreement between them is exactly the flicker pressing play
+            // would show — and half a pixel is what the two of them were apart
+            // while the still centred itself on a floating-point midpoint and
+            // the layer split its leftover by a floor.
+            for axis in 0..4 {
+                assert_close(still[axis], playing[axis], "one rectangle, not two");
+            }
+            // And it sits on the body's centre as closely as a pixel grid
+            // allows. Half a pixel and not zero: `video_frame_rect` splits the
+            // leftover by a floor, so an odd leftover is a pixel of ground on
+            // one edge and none on the other — which is what every other
+            // centred thing in this window does and is invisible either way.
+            for (centre, want) in [
+                ((still[0] + still[2]) / 2.0, 600.0_f32),
+                ((still[1] + still[3]) / 2.0, 450.0),
+            ] {
+                assert!(
+                    (centre - want).abs() <= 0.5,
+                    "centred: {centre} is more than half a pixel off {want}"
+                );
+            }
         }
         // And the rule it is *not*: the picture channel would leave the
         // repository's own fixture at its own 160×120 in a 1000×500 body.
@@ -120346,15 +120372,18 @@ mod tests {
             r"D:\shots\CLIP.MP4",
             r"D:\shots\trailer.m4v",
             r"D:\shots\screencast.webm",
-            // **And `.mov` since the play verb arrived** (user ruling
-            // 2026-08-27, the second of that day). It joined the class the day
-            // the class stopped being one column: it has a face and no player,
-            // it says so on its own card, and the first cut of this list left it
-            // out on the argument that the two sets would one day have to be one
-            // set. They are not one set and were never going to be — see
-            // `preview::VIDEO_EXTENSIONS`, where that argument is settled the
-            // other way.
+            // **And the four that route A could not play** (route B slice ②,
+            // 2026-08-28; §7.44 ⑥). The first cut of this list kept them out on
+            // the argument that "has a face" and "can be played" would one day
+            // be one set. They are one set now, and it was one decoder that made
+            // them one: every name here was handed to `Engine::open` on the
+            // machine and gave up frames. See
+            // `preview::VIDEO_EXTENSIONS`, and the class's own gate
+            // `every_name_in_the_class_plays_and_the_class_is_the_seven_that_were_opened`.
             r"D:\shots\capture.mov",
+            r"D:\shots\clip.mkv",
+            r"D:\shots\clip.avi",
+            r"D:\shots\recording.wmv",
         ] {
             assert_eq!(
                 preview_open_lane(Path::new(video)),
@@ -120373,11 +120402,11 @@ mod tests {
             );
         }
         for document in [
-            // Nothing under this window reads these containers at all, so there
-            // is no face to promise — see `preview::VIDEO_EXTENSIONS`, and note
-            // that `.mov` has left this list rather than been forgotten from it.
-            r"D:\shots\clip.mkv",
-            r"D:\shots\clip.avi",
+            // The two containers that are still outside the class, and outside
+            // it for the honest reason: nobody has opened one on the machine, so
+            // there is no fixture and no measurement behind a row (§7.44 ⑪ ⓒ).
+            r"D:\shots\clip.mpg",
+            r"D:\shots\clip.flv",
             // And the two neighbours a substring reading would sweep up.
             r"D:\shots\clip.mp4.txt",
             r"D:\shots\clip.webmx",
@@ -120397,82 +120426,23 @@ mod tests {
         );
     }
 
-    /// RED — **only a video that can be played is offered a play button, and the
-    /// one that cannot says so instead** (user ruling 2026-08-27, the second of
-    /// that day; `docs/DESIGN.md` §7.23 ⑩).
-    ///
-    /// The two halves of the second column of one table, asserted where a reader
-    /// of the *window* will find them rather than only down in `preview`. A
-    /// `.mov` has a face — it is in the class, it takes the video lane, its card
-    /// draws its frame — and pressing play on it would navigate to a shell whose
-    /// `<video>` the engine answers with nothing at all. So it is not offered
-    /// one, and the reason stands on its own card in words.
-    ///
-    /// **The sentence is on the second line and the card still has two**, which
-    /// is the constraint that decided where it went: the card's shape is pinned
-    /// elsewhere, so a third line would have been a card that changes shape for
-    /// one kind of file.
-    ///
-    /// RED GATE ①: give `mov` `VideoPlayback::Plays` and the first block fails —
-    /// a build that draws a button which navigates to a page that plays nothing.
-    /// RED GATE ②: drop the sentence from `preview::video_fact_lines` and the
-    /// second block fails — a `.mov` whose card is identical to a `.mp4`'s, so
-    /// the only way to learn it will not play is to press the button that is not
-    /// there.
-    #[test]
-    fn only_a_playable_video_is_offered_a_play_button() {
-        for playable in [
-            r"D:\shots\clip.mp4",
-            r"D:\shots\trailer.m4v",
-            r"D:\shots\screencast.webm",
-        ] {
-            assert!(
-                preview::path_names_a_video(Path::new(playable)),
-                "{playable}"
-            );
-        }
-        for face_only in [r"D:\shots\capture.mov", r"D:\shots\CAPTURE.MOV"] {
-            assert!(
-                !preview::path_names_a_video(Path::new(face_only)),
-                "{face_only}"
-            );
-            // …and it is still a video, which is the half that would be lost by
-            // taking the row out of the table instead of marking it.
-            assert!(
-                preview::path_names_a_video(Path::new(face_only)),
-                "{face_only}"
-            );
-        }
-        let facts = preview::VideoFacts {
-            duration_ms: Some(3_000),
-            native: Some((160, 120)),
-            bytes: Some(2_371),
-        };
-        let lines = preview::video_fact_lines(Some("mov"), facts);
-        let said = lines[1]
-            .clone()
-            .expect("the second line says what the file is");
-        assert!(
-            said.contains(i18n::Text::VideoFormatCannotPlay.text()),
-            "a face-only video says why there is no button: {said}"
-        );
-        assert!(
-            said.contains('B'),
-            "and it still says how large the file is: {said}"
-        );
-        let plays = preview::video_fact_lines(Some("mp4"), facts)[1]
-            .clone()
-            .expect("a playable video still says its size");
-        assert!(
-            !plays.contains(i18n::Text::VideoFormatCannotPlay.text()),
-            "and a video that plays says nothing of the kind: {plays}"
-        );
-        assert_eq!(
-            lines[0],
-            preview::video_fact_lines(Some("mp4"), facts)[0],
-            "the recording's own line is the same sentence for both"
-        );
-    }
+    // **`only_a_playable_video_is_offered_a_play_button` is retired here**
+    // (route B slice ②, 2026-08-28; §7.44 ⑥), and the retirement is the ruling
+    // rather than a tidy-up.
+    //
+    // It asserted the *second column* of the class table — a name with a face
+    // and no player — and that column existed for exactly one reason: the still
+    // came from Media Foundation and the playback came from Chromium, so two
+    // decoders could disagree about one file. One decoder answers both
+    // questions now, the column has no member, and a test that asserted
+    // `.mov` is not playable would today be asserting the defect.
+    //
+    // What replaces it is `preview`'s own
+    // `every_name_in_the_class_plays_and_the_class_is_the_seven_that_were_opened`,
+    // which is stronger than what stood here: it names all seven, it asserts
+    // that the face and the play button read **one** predicate so they cannot
+    // come apart by construction, and every row behind it was opened on the
+    // machine rather than declared.
 
     /// RED — **a playing video is a file to every surface that names it**
     /// (user ruling 2026-08-27; re-based on route B, 2026-08-28; §7.23 ⑩, §7.44
@@ -120537,13 +120507,17 @@ mod tests {
     /// this slice about when it wrote "一行都没有删".
     ///
     /// 1. **`player.rs` is not on the disk.** The module that wrote the page.
-    /// 2. **No `<video` anywhere in the crate.** The element the page existed to
-    ///    contain, and the one string that could not survive by accident.
+    /// 2. **No opening video element tag anywhere in the crate.** The element
+    ///    the page existed to contain, and the one string that could not survive
+    ///    by accident. Named in prose and not spelled here, for the reason the
+    ///    needles below are spelled in halves: this doc comment is inside one of
+    ///    the files the walk reads, so a sentence quoting the tag would make the
+    ///    test its own counter-example.
     /// 3. **`Mint::VideoShell` does not exist.** The note the gate carried about
     ///    a page standing in for a recording.
-    /// 4. **No `--autoplay-policy` argument.** It was written for one `<video
-    ///    autoplay>` in one page this window wrote; `bt-platform`'s own gate
-    ///    pins the other half.
+    /// 4. **No autoplay-policy argument.** It was written for one self-starting
+    ///    player in one page this window wrote; `bt-platform`'s own gate pins
+    ///    the other half.
     /// 5. **Nothing writes `%LOCALAPPDATA%\Folio\player`.** The folder the
     ///    shells were content-addressed into.
     ///
@@ -120580,15 +120554,37 @@ mod tests {
             "the walk found the crate: {}",
             sources.len()
         );
-        // Spelled in halves so that this test's own text is not what it finds.
+        // **Asked of the code, and comment lines are dropped before it is
+        // asked** (2026-08-28).
+        //
+        // Not a loophole: the rule is about what this crate *does*, and a
+        // paragraph explaining a route that was retired is not that route.
+        // `preview.rs` carries four sentences about the page, `webhost.rs` one
+        // about the accessor that read its mint, and this test's own doc comment
+        // would be another — a pin that forbade the prose would forbid the only
+        // record of why the code is gone. `bt-render`'s source pins drop
+        // comments for exactly this reason.
+        //
+        // Each needle is still spelled in halves, because this file is one of
+        // the ones walked and a needle written whole would be found in the array
+        // that looks for it.
+        let code_of = |text: &str| -> String {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let code: Vec<(&std::path::PathBuf, String)> = sources
+            .iter()
+            .map(|(path, text)| (path, code_of(text)))
+            .collect();
         for needle in [
-            concat!("<", "video"),
             concat!("Video", "Shell"),
             concat!("--autoplay", "-policy"),
             concat!("mint_player", "_shell"),
             concat!("shell_", "html"),
         ] {
-            for (path, text) in &sources {
+            for (path, text) in &code {
                 assert!(
                     !text.contains(needle),
                     "{needle} is still in {}",
@@ -120596,8 +120592,26 @@ mod tests {
                 );
             }
         }
-        // And the folder the shells lived in is named nowhere.
-        for (path, text) in &sources {
+        // **And the element, shaped like a tag rather than like four
+        // characters.** `Option<video_seat::BarLayout>` contains `<` followed by
+        // `video` and is a Rust type; a module named after the thing that
+        // replaced the page is not the page coming back. What this looks for
+        // cannot be written except by writing the element, and it is the whole
+        // class: the bare tag, the tag with attributes, and the self-closing
+        // one alike.
+        let opening = concat!("<", "video");
+        for (path, text) in &code {
+            for (at, _) in text.match_indices(opening) {
+                let after = text[at + opening.len()..].chars().next();
+                assert!(
+                    !matches!(after, None | Some('>' | ' ' | '\t' | '\n' | '/')),
+                    "an opening video element is back in {}",
+                    path.display()
+                );
+            }
+        }
+        // And the folder the shells lived in is written by nothing.
+        for (path, text) in &code {
             assert!(
                 !text.contains(concat!("Folio", "\\", "player")),
                 "the shell folder is still named in {}",
@@ -120672,6 +120686,52 @@ mod tests {
         );
     }
 
+    /// **The engine ledger is a fact about a process, and this binary is one**
+    /// (§7.42 ⑦; the same gate `bt_platform`'s own engine tests take, for the
+    /// same reason and in its own process).
+    ///
+    /// `engines_outstanding` counts every engine this *process* holds. Two tests
+    /// in here open engines, `cargo` runs them on one thread per core, and a
+    /// test that reads the counter while another is moving it reads a race — the
+    /// red that three individually-correct arms added up to the first time the
+    /// whole workspace ran together. So every test in this binary that concludes
+    /// anything from the number takes this first.
+    ///
+    /// It is not a fix to the invariant and must not be read as one: engines are
+    /// perfectly safe to open concurrently and nothing in the product serialises
+    /// them. What cannot be done concurrently is reading a global counter and
+    /// drawing a conclusion from the value.
+    fn ledger_gate() -> std::sync::MutexGuard<'static, ()> {
+        static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // A poisoned gate means nothing: what it guards is a `()`. Taking the
+        // inner value is what stops one red test turning every later one into a
+        // second, unrelated failure.
+        GATE.lock().unwrap_or_else(|held| held.into_inner())
+    }
+
+    /// **Wait for the ledger to reach `target`**, and answer where it got to.
+    ///
+    /// Since `Engine::open` stopped waiting for the engine to be built (§7.44
+    /// ⑫), "an engine exists" becomes true shortly *after* the open returns
+    /// rather than before it: the counter is bumped on the engine's own thread,
+    /// where the `IMFMediaEngine` is actually made. A test that reads the
+    /// counter on the next instruction is reading that race.
+    ///
+    /// A deadline and not a sleep, so a machine that is quick pays nothing and a
+    /// machine that is slow is not called wrong. Under [`ledger_gate`], so
+    /// nothing else is moving the number while this watches it.
+    fn engines_settling_to(target: u64) -> u64 {
+        use bt_platform::video::engine::engines_outstanding;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let now = engines_outstanding();
+            if now == target || Instant::now() >= deadline {
+                return now;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// RED — **one recording is one seat, and a seat is at home on any of the
     /// three surfaces** (user ruling 2026-08-28: *「视频在 hover 卡、固定浮窗、侧边
     /// 预览 pane 三个表面用同一个引擎与同一张画、同一套手势」*; §7.44 ①).
@@ -120701,6 +120761,7 @@ mod tests {
     #[test]
     fn a_video_is_one_seat_on_three_surfaces() {
         use bt_platform::video::engine::engines_outstanding;
+        let _ledger = ledger_gate();
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../test-assets/folio-video-test.mp4");
         let before = engines_outstanding();
@@ -120735,7 +120796,7 @@ mod tests {
         // ② three pictures, not one shared between three boxes.
         assert_eq!(keys.len(), 3, "three surfaces are three textures: {keys:?}");
         assert_eq!(
-            engines_outstanding(),
+            engines_settling_to(before + 3),
             before + 3,
             "three surfaces are three decoders"
         );
@@ -120785,6 +120846,7 @@ mod tests {
     #[test]
     fn a_card_torn_off_carries_its_engine_with_it() {
         use bt_platform::video::engine::{engines_shut_down, engines_started};
+        let _ledger = ledger_gate();
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../test-assets/folio-video-test.mp4");
         let mut seats = video_seat::VideoSeats::default();
