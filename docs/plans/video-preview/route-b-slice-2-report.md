@@ -454,3 +454,64 @@ test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 2799 filtered ou
 The two gates this hand added were measured the same way in ③ above, and
 §7.44 ⑫'s `opening_a_video_never_blocks_the_window_thread` in ① (`8 opens took
 468.6124ms, which is a window thread waiting for a decoder`).
+
+---
+
+## ⑧ A ninth red, found by the camera and not by the suite
+
+**A closed window's last frame stayed on the glass.** Found while taking the
+float's evidence shot: `07-card-00..03.png` — the floating window had been shut
+1.2 s earlier, its head, its bar and its chassis were gone, and a rectangle of
+`clock.mp4` was still painted where the window had been.
+
+It is **not** the ⑨ decoder defect coming back. The decoder had already stopped:
+the four captures are 700 ms apart and the crop over that rectangle
+(`crops/c-orphan-00..03.png`) is `a551baa3` in all four — a photograph, not a
+video. What was left was the renderer still drawing a layer list nobody had
+taken back.
+
+`Runtime::advance_strip_animation`:
+
+```rust
+self.sweep_video_seats();
+…
+let anything_moving = !self.window.video.is_empty() || !self.window.animations.is_empty();
+let boxes_moved = anything_moving && self.refresh_video_layers();
+```
+
+The sweep is on the line above the gate, and its whole job is to *remove* seats.
+So the tick on which the last seat goes is exactly the tick on which
+`self.window.video` is empty, `anything_moving` is false, and
+`refresh_video_layers` — the only thing that ever hands
+`WindowRenderer::set_video_layers` the shorter list — is skipped. The renderer
+goes on drawing what it was last given, for as long as nothing else happens.
+
+What cleared it three and a half seconds later was dismissing the hover card:
+`refresh_preview_for_layout` asks unconditionally.
+
+**This is the freeze's own mistake, one line further down** — a gate that decides
+there is nothing to say by asking about the thing that has just stopped
+existing. The mend keeps the gate's real purpose, which is that an idle window
+rebuilds nothing, and adds the clause it was missing:
+
+```rust
+let anything_moving = !self.window.video.is_empty()
+    || !self.window.animations.is_empty()
+    || !self.window.renderer.video_layers().is_empty();
+```
+
+The real idle case is *nothing is moving **and** the renderer is holding
+nothing*, and asking costs one `is_empty()` on a slice.
+
+Pinned by `the_tick_that_empties_the_picture_list_still_hands_it_over`, which
+asserts the clause is in the condition **and** that the sweep stands above the
+gate (a sweep below it would be a different defect, lasting one tick).
+
+```
+---- tests::the_tick_that_empties_the_picture_list_still_hands_it_over stdout ----
+panicked at crates\bt-app\src\main.rs:120764:9:
+the gate decides there is nothing to hand over without asking the renderer what it is
+still holding, so the tick that removes the last seat never tells it:
+let anything_moving = !self.window.video.is_empty()
+            || !self.window.animations.is_empty()
+```

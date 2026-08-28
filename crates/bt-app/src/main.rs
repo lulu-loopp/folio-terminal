@@ -67799,7 +67799,32 @@ impl Runtime<'_> {
         // window would advance its frame, bump its generation, and never hand
         // the renderer the new layer — an animation that moved in the model and
         // stood still on the glass.
-        let anything_moving = !self.window.video.is_empty() || !self.window.animations.is_empty();
+        // **And the tick that empties the list is a tick with something to say**
+        // (§7.44 ⑨, photographed on the machine 2026-08-28).
+        //
+        // The first two clauses are the cheap gate they look like: a window with
+        // no recording and no animation has no picture list to rebuild, and an
+        // idle window should cost nothing. The third is the one that was
+        // missing. `sweep_video_seats` runs one line above this and its whole job
+        // is to *remove* seats — so the tick on which the last one goes is
+        // precisely the tick where `self.window.video` is empty, the guard is
+        // false, and the renderer is never handed the shorter list. It goes on
+        // drawing what it was last given.
+        //
+        // Photographed: a floating window playing `clock.mp4` was closed, and
+        // its last decoded frame stayed on the glass — no head, no bar, no
+        // window around it, a rectangle of picture where a window used to be —
+        // for three and a half seconds, until a hover card was dismissed and
+        // `refresh_preview_for_layout` (which asks unconditionally) ran and swept
+        // it away. The decoder had already stopped: four captures 700ms apart
+        // were byte-identical over that rectangle.
+        //
+        // So the guard asks the renderer too. "Nothing is moving *and* the
+        // renderer is holding nothing" is the real idle case, and it is still
+        // one `is_empty()` on a slice.
+        let anything_moving = !self.window.video.is_empty()
+            || !self.window.animations.is_empty()
+            || !self.window.renderer.video_layers().is_empty();
         let boxes_moved = anything_moving && self.refresh_video_layers();
         // **The pictures' own debt, kept as a name of its own.** It has to
         // survive the chrome's question below, which is why it is not folded
@@ -120683,6 +120708,73 @@ mod tests {
         assert!(
             tick.contains("let pictures_owe = frames_arrived || boxes_moved;"),
             "and the picture's debt is a name that survives as far as that gate"
+        );
+    }
+
+    /// RED — **the tick that empties the picture list still hands it over**
+    /// (§7.44 ⑨, photographed on the machine 2026-08-28).
+    ///
+    /// The freeze above and this are the same mistake twice, one line apart: a
+    /// gate that decides there is nothing to say by asking about the thing that
+    /// has just stopped existing.
+    ///
+    /// `advance_strip_animation` skips `refresh_video_layers` while nothing is
+    /// moving, and "nothing is moving" was read as *this window holds no
+    /// recording and no animation*. But `sweep_video_seats` runs on the line
+    /// above, and removing the last seat is exactly what makes that true — so
+    /// the one tick where the renderer needed to be told the list is now empty
+    /// is the one tick that never told it. It went on drawing the last frame it
+    /// was given.
+    ///
+    /// **What that looks like:** a floating window playing a recording is
+    /// closed, and its last decoded frame stays on the glass with no head, no
+    /// bar and no window around it, until something else happens to run a layout
+    /// pass. The decoder is already gone by then, which is why the leftover is a
+    /// photograph rather than a video — four captures 700ms apart, byte
+    /// identical over that rectangle.
+    ///
+    /// The mend keeps the gate's real purpose — an idle window rebuilds nothing
+    /// — by asking the renderer as well: *and the renderer is holding nothing*.
+    ///
+    /// A source pin because the gate is a `let` inside a method that cannot be
+    /// called without a window, and because what has to be true is about the
+    /// *condition* rather than about a value: a build where the third clause is
+    /// missing is green on every machine that never closes a video.
+    ///
+    /// RED GATE: drop the `renderer.video_layers()` clause and this fails, which
+    /// is the state the binary photographed on 2026-08-28 was built from.
+    #[test]
+    fn the_tick_that_empties_the_picture_list_still_hands_it_over() {
+        const SOURCE: &str = include_str!("main.rs");
+        fn body(signature: &str) -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        }
+        let tick = body("fn advance_strip_animation(");
+        let guard = tick
+            .find("let anything_moving =")
+            .expect("the tick still gates the picture list");
+        let end = tick[guard..].find(';').expect("the gate is one statement") + guard;
+        let condition = &tick[guard..end];
+        assert!(
+            condition.contains("self.window.renderer.video_layers().is_empty()"),
+            "the gate decides there is nothing to hand over without asking the \
+             renderer what it is still holding, so the tick that removes the last \
+             seat never tells it:\n{condition}"
+        );
+        // And the sweep is above it, which is what makes the gap reachable at
+        // all — a sweep that ran afterwards would leave the stale list for one
+        // tick and no longer.
+        let sweep = tick
+            .find("self.sweep_video_seats();")
+            .expect("the tick sweeps the seats");
+        assert!(
+            sweep < guard,
+            "the seats are swept after the list is gated, which is a different \
+             defect from the one this pins"
         );
     }
 
