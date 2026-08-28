@@ -54,7 +54,25 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$root = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
+# **Where this file is, spelled the way both editions of PowerShell read.** The
+# machine this script has to run on last is a clean Windows, and a clean Windows
+# has Windows PowerShell 5.1 and nothing else: `Join-Path` there takes two paths
+# and refuses a third, so `Join-Path $PSScriptRoot '..' '..'` is a parameter
+# binding error raised before the first line of work — which is how gate 5's
+# first smoke died, with `A positional parameter cannot be found that accepts
+# argument '..'`. Nested two-argument calls are the one spelling 5.1 and 7 read
+# the same way.
+#
+# The root is asserted rather than allowed to be empty, too: an empty
+# `$PSScriptRoot` turns every path below into a relative one, and the failure
+# then arrives later and somewhere else, as a file that is "not at
+# \scripts\release\smoke.ps1".
+$here = $PSScriptRoot
+if (-not $here -and $PSCommandPath) { $here = Split-Path -Parent $PSCommandPath }
+if (-not $here) {
+    throw 'smoke.ps1 cannot tell where it is; run it as a file (-File, or &), not from a pasted body'
+}
+$root = (Resolve-Path (Join-Path (Join-Path $here '..') '..')).Path
 if (-not $Exe) { $Exe = Join-Path $root 'target\release\folio.exe' }
 if (-not $Artifacts) { $Artifacts = Join-Path $root 'target\smoke' }
 if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "no folio.exe at $Exe" }
@@ -71,7 +89,12 @@ Add-Type -Namespace Smoke -Name Win32 -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
+[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
+[DllImport("user32.dll")] public static extern int GetWindowLongW(IntPtr h, int index);
 [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr m, int t, out uint x, out uint y);
 public delegate bool EnumWindowsProc(IntPtr h, IntPtr p);
 public struct RECT { public int Left, Top, Right, Bottom; }
@@ -82,6 +105,17 @@ public struct RECT { public int Left, Top, Right, Bottom; }
 # virtualised coordinates by Windows and reports them confidently.
 [void][Smoke.Win32]::SetProcessDpiAwarenessContext([IntPtr]::new(-4))
 
+# **Folio's window is not the only top-level window its process owns.** winit
+# keeps a permanently visible, unowned 13 x 13 message window of class `Winit
+# Thread Event Target`, created seconds before the real one. A search for
+# "visible, unowned" alone finds whichever of the two is higher in the Z-order,
+# which is a coin this script has been winning rather than a rule it follows.
+# The rule is the one Windows uses for the Alt-Tab list: an application window
+# has no `WS_EX_TOOLWINDOW`. winit's event target has it; Folio's window has
+# `WS_EX_APPWINDOW` instead.
+$GwlExStyle = -20
+$WsExToolWindow = 0x00000080
+
 function Invoke-Folio {
     param([string[]] $Arguments)
 
@@ -89,10 +123,16 @@ function Invoke-Folio {
     $err = "$out.err"
     $process = Start-Process -FilePath $Exe -ArgumentList $Arguments -NoNewWindow -Wait -PassThru `
         -RedirectStandardOutput $out -RedirectStandardError $err
+    # **`-Encoding UTF8` on every read of something Folio wrote.** Folio writes
+    # UTF-8 without a byte-order mark; PowerShell 7 assumes that and Windows
+    # PowerShell 5.1 assumes the machine's ANSI code page, so the same file read
+    # by the same line comes back as mojibake on the clean machine. It was the
+    # `diagnostics.log` header, quoted into the evidence transcript as
+    # `â”€â”€ Folio 0.1.0`, that showed it.
     return [pscustomobject]@{
         ExitCode = $process.ExitCode
-        StdOut   = (Get-Content -LiteralPath $out -Raw -ErrorAction SilentlyContinue)
-        StdErr   = (Get-Content -LiteralPath $err -Raw -ErrorAction SilentlyContinue)
+        StdOut   = (Get-Content -LiteralPath $out -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
+        StdErr   = (Get-Content -LiteralPath $err -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
     }
 }
 
@@ -144,13 +184,20 @@ foreach ($name in $environment.Keys) {
 
 $folio = Start-Process -FilePath $Exe -PassThru `
     -RedirectStandardOutput $stdout -RedirectStandardError $trace
+# **Touching `.Handle` is what makes `.ExitCode` answerable later.** Windows
+# PowerShell 5.1 hands back a `Process` for a redirected `-PassThru` start that
+# has never opened the process handle, and a handle first asked for after the
+# process has gone cannot be had: `.ExitCode` then answers `$null` for the rest
+# of the run, and check 6 below reads "folio exited " with nothing after it.
+# PowerShell 7 caches it on its own; asking here costs nothing there.
+[void] $folio.Handle
 
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $window = [IntPtr]::Zero
 $seen = ''
 while ((Get-Date) -lt $deadline) {
     if ($folio.HasExited) { break }
-    $seen = (Get-Content -LiteralPath $trace -Raw -ErrorAction SilentlyContinue)
+    $seen = (Get-Content -LiteralPath $trace -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
     if ($seen -and $seen -match 'BT_STARTUP first_text_present=') { break }
     Start-Sleep -Milliseconds 250
 }
@@ -161,16 +208,50 @@ while ((Get-Date) -lt $deadline) {
         $pid_ = 0
         [void][Smoke.Win32]::GetWindowThreadProcessId($handle, [ref] $pid_)
         if ($pid_ -eq $folio.Id -and [Smoke.Win32]::IsWindowVisible($handle) -and
-            [Smoke.Win32]::GetWindow($handle, 4) -eq [IntPtr]::Zero) {
+            [Smoke.Win32]::GetWindow($handle, 4) -eq [IntPtr]::Zero -and
+            ([Smoke.Win32]::GetWindowLongW($handle, $script:GwlExStyle) -band $script:WsExToolWindow) -eq 0) {
             $script:window = $handle
             return $false
         }
         return $true
     }, [IntPtr]::Zero) | Out-Null
 
+# **Bringing a window to the front from a process that is not in front.**
+# Windows refuses a bare `SetForegroundWindow` from a process that does not own
+# the foreground, and answers `false` rather than raising: the capture below
+# then photographs the rectangle where the window is, showing whatever sits on
+# top of it. Joining the foreground thread's input queue for the length of the
+# call is the documented way round it, and the result is checked rather than
+# assumed — a picture of the wrong window is worse than no picture.
+function Set-WindowInFront {
+    param([IntPtr] $Window)
+
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        $foreground = [Smoke.Win32]::GetForegroundWindow()
+        if ($foreground -eq $Window) { return $true }
+
+        $owner = 0
+        $theirs = [Smoke.Win32]::GetWindowThreadProcessId($foreground, [ref] $owner)
+        $mine = [Smoke.Win32]::GetCurrentThreadId()
+        $attached = $false
+        if ($theirs -ne 0 -and $theirs -ne $mine) {
+            $attached = [Smoke.Win32]::AttachThreadInput($mine, $theirs, $true)
+        }
+        [void][Smoke.Win32]::BringWindowToTop($Window)
+        [void][Smoke.Win32]::SetForegroundWindow($Window)
+        if ($attached) { [void][Smoke.Win32]::AttachThreadInput($mine, $theirs, $false) }
+
+        Start-Sleep -Milliseconds 400
+        if ([Smoke.Win32]::GetForegroundWindow() -eq $Window) { return $true }
+    }
+    return $false
+}
+
 $picture = Join-Path $Artifacts 'window.png'
 if ($window -ne [IntPtr]::Zero) {
-    [void][Smoke.Win32]::SetForegroundWindow($window)
+    if (-not (Set-WindowInFront -Window $window)) {
+        Write-Host 'WARNING: window.png was taken while the window was not in front; read it before believing it'
+    }
     Start-Sleep -Milliseconds 600
     $rect = New-Object Smoke.Win32+RECT
     [void][Smoke.Win32]::GetWindowRect($window, [ref] $rect)
@@ -206,7 +287,7 @@ if (-not $folio.HasExited -and $window -ne [IntPtr]::Zero) {
 }
 $closed = $folio.WaitForExit(20000)
 
-$seen = (Get-Content -LiteralPath $trace -Raw -ErrorAction SilentlyContinue)
+$seen = (Get-Content -LiteralPath $trace -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
 if (-not $seen) { throw "the launch wrote no startup trace; see $trace" }
 Write-Host $seen
 
@@ -253,6 +334,7 @@ Remove-Item Env:BT_STARTUP_TRACE
 $plain = Start-Process -FilePath $Exe -PassThru `
     -RedirectStandardOutput (Join-Path $Artifacts 'plain.out') `
     -RedirectStandardError (Join-Path $Artifacts 'plain.err')
+[void] $plain.Handle
 
 $log = Join-Path $home_ 'Folio\diagnostics.log'
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -266,7 +348,8 @@ $second = [IntPtr]::Zero
         $pid_ = 0
         [void][Smoke.Win32]::GetWindowThreadProcessId($handle, [ref] $pid_)
         if ($pid_ -eq $plain.Id -and [Smoke.Win32]::IsWindowVisible($handle) -and
-            [Smoke.Win32]::GetWindow($handle, 4) -eq [IntPtr]::Zero) {
+            [Smoke.Win32]::GetWindow($handle, 4) -eq [IntPtr]::Zero -and
+            ([Smoke.Win32]::GetWindowLongW($handle, $script:GwlExStyle) -band $script:WsExToolWindow) -eq 0) {
             $script:second = $handle
             return $false
         }
@@ -280,7 +363,7 @@ if (-not $plain.HasExited) { $plain.Kill() }
 
 if (-not (Test-Path -LiteralPath $log)) { throw "no diagnostics.log under $home_" }
 Copy-Item -LiteralPath $log -Destination (Join-Path $Artifacts 'diagnostics.log') -Force
-$header = (Get-Content -LiteralPath $log -TotalCount 1)
+$header = (Get-Content -LiteralPath $log -TotalCount 1 -Encoding UTF8)
 if (-not ($header.Contains($line) -and $header.Contains('run started'))) {
     throw "diagnostics.log opens with '$header'; expected the same build line --version printed"
 }

@@ -51,6 +51,8 @@
 ## 门 5 干净机(必须,发布前最后一道)
 Win10 1809+ 与 Win11 各一台无 VS/VC redist/WebView2 的 VM,从 zip 开始:`--version`、PE 图标/VERSIONINFO、shell 输入、resize、ConPTY 来源、WebView2 缺席卡、受控 panic 的可见提示;有 WebView2 的 VM 验顶层 gate 与四个拒绝面。截图入库。
 
+**2026-08-28 首次真跑:未过。** 两台机建好、冒烟七条全绿,红的是产品三条(有预览座的窗口关不掉、无 WebView2 的机器上预览座整块不画、同一批窗口的外壳文字溢出版面)。逐条结果、验收项覆盖表与挂账见 `clean-vm-results-2026-08-28.md`;手册与工具的修补见 `clean-vm.md` §3.4b/§3.4c。
+
 ## 门 6 首次体验(该做)
 - ~~Store 版 pwsh 探测(AppExecLink)修复~~——**翻案(2026-08-27)**:std 1.85–1.94 的 `is_file` 对 AppExecLink 本就答 true,picker 从未灰过;审计缺口 B「成因 B」是推断错误,只有注释写反(已改+钉)。
 - **待裁**:`default_profile` 未设时 floor=winps 改为「探测顺序第一个在场的」(推荐改);PowerShell 整合提示条「一次运行只问一次」(推荐改)。

@@ -31,10 +31,12 @@
     Which of the five to run.
 
 .PARAMETER GuestHome
-    The working directory in the guest. Defaults to `C:\folio-vm`.
+    The working directory in the guest. Defaults to the directory this script is
+    in, which is `C:\folio-vm` when the host put it there.
 
 .PARAMETER Zip
-    The release archive, for `unpack`. Defaults to the only `.zip` in `-Home`.
+    The release archive, for `unpack`. Defaults to the only `.zip` in
+    `-GuestHome`.
 
 .PARAMETER TimeoutSeconds
     How long a launch has to put a window on the screen.
@@ -45,13 +47,27 @@ param(
     [Parameter(Mandatory)]
     [ValidateSet('unpack', 'smoke', 'web', 'notice', 'explorer')]
     [string] $Phase,
-    [string] $GuestHome = 'C:\folio-vm',
+    [string] $GuestHome,
     [string] $Zip,
     [int] $TimeoutSeconds = 120
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# **The working directory is where this file was put, and it is asserted.** The
+# host copies this script to `C:\folio-vm\in-guest.ps1` and passes `-GuestHome
+# C:\folio-vm`; when that argument arrives empty — a quoting accident on the way
+# through `vmrun`, or a hand-typed re-run that leaves it off — every path below
+# silently becomes a relative one and the phase fails somewhere else entirely,
+# reporting a `smoke.ps1` that is "not at \scripts\release\smoke.ps1". The
+# script's own directory is the same answer by construction, so it is the
+# fallback, and an unanswerable location stops the phase here.
+if (-not $GuestHome) { $GuestHome = $PSScriptRoot }
+if (-not $GuestHome -and $PSCommandPath) { $GuestHome = Split-Path -Parent $PSCommandPath }
+if (-not $GuestHome) {
+    throw 'in-guest.ps1 has no -GuestHome and cannot tell where it is; pass -GuestHome'
+}
 
 $results = Join-Path $GuestHome 'results'
 $unpacked = Join-Path $GuestHome 'folio'
@@ -68,7 +84,12 @@ Add-Type -Namespace Guest -Name Win32 -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
+[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
+[DllImport("user32.dll")] public static extern int GetWindowLongW(IntPtr h, int index);
 [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, System.Text.StringBuilder s, int n);
 [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder s, int n);
 public delegate bool EnumWindowsProc(IntPtr h, IntPtr p);
@@ -87,6 +108,22 @@ function Write-Fact {
     Write-Host "wrote $path"
 }
 
+# **The window a person would Alt-Tab to, and not merely the first one Windows
+# lists.** Folio's window is not the only top-level window its process owns:
+# winit keeps a permanently visible, unowned 13 x 13 message window of class
+# `Winit Thread Event Target`, and that one exists three seconds before the real
+# window is created. A search for "visible, unowned, first found" photographs it
+# — a 13 x 13 picture, and a `WM_CLOSE` sent to a window that ignores it, which
+# is how the `web` phase first came back with a 26 x 26 card and exit code -1.
+#
+# The discriminator is the one Windows itself uses for the Alt-Tab list rather
+# than a size threshold: an application window is a visible unowned top-level
+# window without `WS_EX_TOOLWINDOW`. winit's event target carries that bit
+# (`ex=0x080800A0`); Folio's window does not (`ex=0x00040110`, and it carries
+# `WS_EX_APPWINDOW`).
+$script:GwlExStyle = -20
+$script:WsExToolWindow = 0x00000080
+
 function Get-TopLevelWindow {
     param([int] $ProcessId)
     # **Script scope, both times.** The callback runs in a scope of its own, so a
@@ -99,7 +136,8 @@ function Get-TopLevelWindow {
             $owner = 0
             [void][Guest.Win32]::GetWindowThreadProcessId($handle, [ref] $owner)
             if ($owner -eq $script:wantedProcess -and [Guest.Win32]::IsWindowVisible($handle) -and
-                [Guest.Win32]::GetWindow($handle, 4) -eq [IntPtr]::Zero) {
+                [Guest.Win32]::GetWindow($handle, 4) -eq [IntPtr]::Zero -and
+                ([Guest.Win32]::GetWindowLongW($handle, $script:GwlExStyle) -band $script:WsExToolWindow) -eq 0) {
                 $script:foundWindow = $handle
                 return $false
             }
@@ -120,6 +158,38 @@ function Wait-ForWindow {
     return [IntPtr]::Zero
 }
 
+# **Bringing a window to the front from a process that is not in front.**
+# Windows refuses a bare `SetForegroundWindow` from a process that does not own
+# the foreground, and answers `false` rather than raising anything: the capture
+# below then photographs the screen rectangle where the window is, showing
+# whatever is on top of it. The documented way round it is to join the input
+# queue of the thread that does own the foreground for the length of the call.
+# The result is checked rather than assumed, because a photograph of the wrong
+# window is worse evidence than no photograph.
+function Set-WindowInFront {
+    param([IntPtr] $Window)
+
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        $foreground = [Guest.Win32]::GetForegroundWindow()
+        if ($foreground -eq $Window) { return $true }
+
+        $owner = 0
+        $theirs = [Guest.Win32]::GetWindowThreadProcessId($foreground, [ref] $owner)
+        $mine = [Guest.Win32]::GetCurrentThreadId()
+        $attached = $false
+        if ($theirs -ne 0 -and $theirs -ne $mine) {
+            $attached = [Guest.Win32]::AttachThreadInput($mine, $theirs, $true)
+        }
+        [void][Guest.Win32]::BringWindowToTop($Window)
+        [void][Guest.Win32]::SetForegroundWindow($Window)
+        if ($attached) { [void][Guest.Win32]::AttachThreadInput($mine, $theirs, $false) }
+
+        Start-Sleep -Milliseconds 400
+        if ([Guest.Win32]::GetForegroundWindow() -eq $Window) { return $true }
+    }
+    return $false
+}
+
 function Save-Screen {
     param([string] $Name, [IntPtr] $Window = [IntPtr]::Zero)
 
@@ -128,7 +198,9 @@ function Save-Screen {
     # hands back the blank one it never draws into. `smoke.ps1` says the same
     # thing at its own capture.
     if ($Window -ne [IntPtr]::Zero) {
-        [void][Guest.Win32]::SetForegroundWindow($Window)
+        if (-not (Set-WindowInFront -Window $Window)) {
+            Write-Host "WARNING: $Name was taken while the window was not in front; read the picture before believing it"
+        }
         Start-Sleep -Milliseconds 700
         $rect = New-Object Guest.Win32+RECT
         [void][Guest.Win32]::GetWindowRect($Window, [ref] $rect)
@@ -301,6 +373,10 @@ switch ($Phase) {
         $folio = Start-Process -FilePath $exe -PassThru `
             -RedirectStandardOutput (Join-Path $results 'web.out') `
             -RedirectStandardError (Join-Path $results 'web.err')
+        # Windows PowerShell 5.1 never opens the process handle for a redirected
+        # `-PassThru` start, and a handle first asked for after the process has
+        # gone cannot be had — `.ExitCode` would be blank in `web.txt` below.
+        [void] $folio.Handle
         $window = Wait-ForWindow -Process $folio -Seconds $TimeoutSeconds
         if ($window -eq [IntPtr]::Zero) { throw 'the launch opened no visible window' }
 
