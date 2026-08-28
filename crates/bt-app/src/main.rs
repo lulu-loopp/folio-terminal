@@ -16062,6 +16062,37 @@ fn image_destination(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> [f3
     rect
 }
 
+/// **Where a video's still frame lands in a preview body** — the one rule a
+/// video is drawn by, still or playing (user ruling 2026-08-28; §7.42).
+///
+/// [`image_destination`]'s sibling, and the difference between them is
+/// deliberately not a parameter on it: a picture's rectangle answers to a zoom,
+/// a pan and a fit fraction, and a video's answers to none of the three. It
+/// fills its body at its own proportion, centred, always — which is what
+/// [`bt_render::video_fit_extent`] means and what the renderer draws a *playing*
+/// video by, in [`bt_render::video_frame_rect`]. The two are the same size for
+/// the same box because one of them is the other's caller.
+///
+/// A body with no area answers with the body, which draws nothing and is what
+/// every caller above already handles.
+fn video_still_destination(body: [f32; 4], video_px: [u32; 2]) -> [f32; 4] {
+    let width = (body[2] - body[0]).max(0.0).round() as u32;
+    let height = (body[3] - body[1]).max(0.0).round() as u32;
+    let Some((fitted_width, fitted_height)) =
+        bt_render::video_fit_extent(width, height, video_px[0], video_px[1])
+    else {
+        return body;
+    };
+    let centre_x = (body[0] + body[2]) / 2.0;
+    let centre_y = (body[1] + body[3]) / 2.0;
+    [
+        centre_x - fitted_width as f32 / 2.0,
+        centre_y - fitted_height as f32 / 2.0,
+        centre_x + fitted_width as f32 / 2.0,
+        centre_y + fitted_height as f32 / 2.0,
+    ]
+}
+
 /// The pan a zoom actually gets to keep against this body, read out of the one
 /// rectangle rather than recomputed — what the painter is handed and what a
 /// resize writes back so the stored pan and the drawn one never drift apart.
@@ -49842,8 +49873,27 @@ impl Runtime<'_> {
         // road; storing the clamped value here — rather than clamping only at
         // paint time — is what keeps the *next* gesture (a drag, a notch about a
         // pointer) starting from the place the eye is actually looking at.
+        // **A video's still is fitted by the rule the video is *played* by, and
+        // not by the picture channel's** (user ruling 2026-08-28; §7.42). The
+        // two rules differ in one word — `bt_render::preview_image_extent` never
+        // enlarges and `bt_render::video_fit_extent` fills — and the difference
+        // is the whole of the `next12` defect: a 160×120 recording drawn at
+        // 160×120 in a full-height pane, a postage stamp in a field of ground.
+        // Route A fixed it inside the shell page's stylesheet (`object-fit:
+        // contain`, §7.23 ⑪) where this window could not see it; this is the
+        // same rule where it can, so pressing play does not move the picture.
+        //
+        // The pan goes with it. A still that is not zoomable has nothing to pan
+        // — §7.23 ⑤ ruled that a frame does not zoom while it is not playing —
+        // and a centred picture with a remembered displacement would be a
+        // recording hanging off one edge of its own pane.
+        let fitted_as_a_video = preview::path_names_a_video(&path);
         let zoom = self.preview_image_zoom(surface);
-        let clamped_pan = image_clamped_pan(body_rect, image_px, zoom);
+        let clamped_pan = if fitted_as_a_video {
+            [0.0, 0.0]
+        } else {
+            image_clamped_pan(body_rect, image_px, zoom)
+        };
         if clamped_pan != zoom.pan {
             self.preview_pane_mut(surface).zoom.pan = clamped_pan;
         }
@@ -49851,7 +49901,11 @@ impl Runtime<'_> {
             pan: clamped_pan,
             ..zoom
         };
-        let drawn = image_destination(body_rect, image_px, zoom);
+        let drawn = if fitted_as_a_video {
+            video_still_destination(body_rect, image_px)
+        } else {
+            image_destination(body_rect, image_px, zoom)
+        };
         let display_width = (drawn[2] - drawn[0]).round().max(1.0) as u32;
         let display_height = (drawn[3] - drawn[1]).round().max(1.0) as u32;
         // **The CPU never upsamples.** Above 100% the resample target stops at
@@ -97575,6 +97629,58 @@ mod tests {
             rect_size(small),
             (100.0, 50.0),
             "a small picture is drawn at its own size; Fit contains, it does not stretch"
+        );
+    }
+
+    /// RED — **a video's still lands exactly where the playing picture does**
+    /// (user ruling 2026-08-28; `docs/DESIGN.md` §7.42).
+    ///
+    /// The app-side half of `the_still_and_the_playback_share_one_fit_rule`.
+    /// [`video_still_destination`] is what a paused pane's frame is drawn by and
+    /// [`bt_render::video_frame_rect`] is what the renderer draws the moving
+    /// picture by; if the two could give different rectangles, pressing play
+    /// would move the picture, which is the thing a reader would notice first
+    /// and be least able to describe.
+    ///
+    /// The 160×120 case is the recording in this repository's `test-assets` and
+    /// the one the defect was reported on: the still fills the body, where
+    /// [`image_destination`] would draw it at 160×120 in the middle of it.
+    ///
+    /// RED GATE: put `image_destination` back in `refit_preview_picture`'s video
+    /// arm — which is the state that shipped in `next12` — and the last block
+    /// here names the size it draws instead.
+    #[test]
+    fn a_videos_still_lands_where_the_playing_picture_does() {
+        for video in [[160_u32, 120_u32], [1920, 1080], [1080, 1920], [640, 640]] {
+            let still = video_still_destination(ZOOM_BODY, video);
+            let box_ = bt_render::SeatViewport {
+                x: ZOOM_BODY[0] as u32,
+                y: ZOOM_BODY[1] as u32,
+                width: (ZOOM_BODY[2] - ZOOM_BODY[0]) as u32,
+                height: (ZOOM_BODY[3] - ZOOM_BODY[1]) as u32,
+            };
+            let playing =
+                bt_render::video_frame_rect(box_, video[0], video[1]).expect("a rectangle");
+            assert_close(
+                rect_size(still).0,
+                rect_size(playing).0,
+                "the still and the playing picture are one width",
+            );
+            assert_close(rect_size(still).1, rect_size(playing).1, "and one height");
+            // Both are centred on the body, so one comparison of the centres
+            // covers both origins.
+            assert_close((still[0] + still[2]) / 2.0, 600.0, "centred");
+            assert_close((still[1] + still[3]) / 2.0, 450.0, "centred");
+        }
+        // And the rule it is *not*: the picture channel would leave the
+        // repository's own fixture at its own 160×120 in a 1000×500 body.
+        let (width, height) = rect_size(video_still_destination(ZOOM_BODY, [160, 120]));
+        assert_close(height, 500.0, "a video fills the body it is given");
+        assert_close(width, 667.0, "at its own proportion");
+        assert_eq!(
+            rect_size(image_destination(ZOOM_BODY, [160, 120], ImageZoom::FIT)),
+            (160.0, 120.0),
+            "which is not what the picture channel does, and still should not be"
         );
     }
 

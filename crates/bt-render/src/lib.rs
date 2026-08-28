@@ -7,6 +7,7 @@ mod procedural;
 mod rounded_rect;
 mod scheme;
 mod theme;
+mod video;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -142,6 +143,7 @@ pub use theme::{background_is_light, ink_over_bp, scheme_in_force, schemes_in_fo
 use theme::{
     search_current_ink_rgb, search_current_rgb, search_match_rgb, selection_background_rgb,
 };
+pub use video::{VideoFrameUpload, VideoLayer, video_fit_extent, video_frame_rect};
 
 /// `mark.srch { border-radius: 3px }` (mock-up 1530) — the corner a found word
 /// wears, and the one thing that tells it apart from a dragged selection at a
@@ -1011,6 +1013,59 @@ struct MathTextureTile {
 
 struct CachedMathTexture {
     tiles: Vec<MathTextureTile>,
+}
+
+/// **One playing video's texture**, kept across frames and written over.
+///
+/// It is not tiled, which is the one place it differs from
+/// [`CachedMathTexture`]: a video is a single decoded surface with a size the
+/// decoder chose, and a frame bigger than the device's maximum texture is a
+/// frame this window declines to draw rather than one it stitches — see
+/// [`GpuContext::hold_video_texture`].
+struct VideoTexture {
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    width_px: u32,
+    height_px: u32,
+    /// The last [`VideoFrameUpload::generation`] written into it. A redraw that
+    /// is not a new frame writes nothing.
+    generation: u64,
+}
+
+/// One corner of a video layer's quad. Everything after the UV describes the
+/// quad rather than the corner, and rides on the vertex for
+/// [`MathVertex::opacity`]'s reason: these are drawn from one buffer in one
+/// pass, and a uniform would be a bind group per layer.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct VideoVertex {
+    position: [f32; 2],
+    uv: [f32; 2],
+    /// The flat colour, and the layer's opacity in the fourth channel. Linear
+    /// light, because the surface format encodes sRGB exactly once and every
+    /// other number this renderer hands wgpu is linear too.
+    tint: [f32; 4],
+    /// `1.0` for the picture and `0.0` for the ground under it.
+    texture_weight: f32,
+    /// The rounded box the fragment shader masks by, in **whole-surface**
+    /// pixels — which is what `@builtin(position)` is in the fragment stage
+    /// whatever viewport the pass carries.
+    box_center: [f32; 2],
+    box_half: [f32; 2],
+    radius: f32,
+}
+
+struct VideoDraw {
+    /// Which texture this draw samples, or `None` for the ground quad — which
+    /// samples nothing and is bound to [`GpuContext::video_blank`], because a
+    /// pipeline with a texture in its layout must have one bound whether the
+    /// fragment reads it or not.
+    key: Option<String>,
+    first_vertex: u32,
+    /// The scissor for this quad. It travels per draw rather than per pass
+    /// because two panes may be playing two videos in one frame, and one pass
+    /// with one scissor would crop the second by the first's box.
+    clip: SeatViewport,
 }
 
 struct MathDraw {
@@ -2619,6 +2674,21 @@ pub struct GpuContext {
     background_pipeline: wgpu::RenderPipeline,
     background_bind_group_layout: wgpu::BindGroupLayout,
     background_sampler: wgpu::Sampler,
+    video_pipeline: wgpu::RenderPipeline,
+    video_bind_group_layout: wgpu::BindGroupLayout,
+    video_sampler: wgpu::Sampler,
+    /// A 1×1 texture nothing reads, so that a ground quad — or a layer whose
+    /// engine has not produced a frame yet — has something to bind.
+    video_blank: wgpu::BindGroup,
+    /// **One texture per playing video, written over rather than replaced.**
+    ///
+    /// Deliberately not in `math_textures`, and the module note on
+    /// [`crate::video`] is the whole argument: a raster that changes sixty times
+    /// a second is not content to be cached by content. Keyed by
+    /// [`VideoLayer::key`], and an entry whose key stops appearing in a frame's
+    /// layers is dropped at the end of it — which is how a pane that stopped
+    /// playing gives its megabytes back without anybody having to say so.
+    video_textures: HashMap<String, VideoTexture>,
     /// The window's ground picture, uploaded once and keyed by its content.
     ///
     /// **One slot and not an entry in `math_textures`**, for two reasons that
@@ -2951,6 +3021,8 @@ pub struct WindowRenderer {
     cursor_blink_visible: bool,
     peek_overlay: Option<PeekImageOverlay>,
     preview_image: Option<PreviewImage>,
+    /// This frame's playing videos. See [`WindowRenderer::set_video_layers`].
+    video_layers: Vec<VideoLayer>,
     preview_bodies: Vec<PreviewBody>,
     /// **What the last frame did with the preview documents it was handed** —
     /// see [`PreviewTextFrame`]. Written on every present, read by whoever is
@@ -4011,6 +4083,10 @@ impl GpuContext {
             create_math_pipeline(&device, format);
         let (background_pipeline, background_bind_group_layout, background_sampler) =
             create_background_pipeline(&device, format);
+        let (video_pipeline, video_bind_group_layout, video_sampler) =
+            create_video_pipeline(&device, format);
+        let video_blank =
+            create_blank_bind_group(&device, &queue, &video_bind_group_layout, &video_sampler);
         let render_resources_time = phase_started.elapsed();
         Ok(Self {
             instance,
@@ -4032,6 +4108,11 @@ impl GpuContext {
             background_pipeline,
             background_bind_group_layout,
             background_sampler,
+            video_pipeline,
+            video_bind_group_layout,
+            video_sampler,
+            video_blank,
+            video_textures: HashMap::new(),
             background_texture: None,
             math_textures: ByteLru::new(MATH_TEXTURE_CACHE_BUDGET_BYTES),
             math_texture_evictions: 0,
@@ -4301,6 +4382,106 @@ impl GpuContext {
         }
         Some(CachedMathTexture { tiles })
     }
+
+    /// **Make sure this key's texture exists and holds this frame**, creating it
+    /// the first time and writing over it every time after.
+    ///
+    /// Returns whether there is a texture to bind. `false` for a frame whose
+    /// byte count does not match its dimensions — which is a caller bug and not
+    /// a thing to draw — and for one larger than the device can hold, which is
+    /// an 8K recording on an adapter with a 4096 limit and is a black pane with
+    /// a ground rather than a crash.
+    ///
+    /// **A new texture only when the size changes.** A video's frames are all
+    /// the same size, so the common path is one `write_texture` into a texture
+    /// created once: no allocation, no bind group, no view. A size *does* change
+    /// mid-playback — an adaptive stream, a file whose second track is a
+    /// different shape — and then the whole thing is rebuilt, which is correct
+    /// and rare.
+    fn hold_video_texture(&mut self, key: &str, frame: &VideoFrameUpload) -> bool {
+        let limit = self.max_texture_dimension_2d;
+        let expected = frame.width_px as usize * frame.height_px as usize * 4;
+        if frame.width_px == 0
+            || frame.height_px == 0
+            || frame.width_px > limit
+            || frame.height_px > limit
+            || frame.bgra.len() != expected
+        {
+            return false;
+        }
+        let resized = self.video_textures.get(key).is_none_or(|held| {
+            held.width_px != frame.width_px || held.height_px != frame.height_px
+        });
+        if resized {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("video layer texture"),
+                size: wgpu::Extent3d {
+                    width: frame.width_px,
+                    height: frame.height_px,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                // **BGRA, which is the order the decoder was asked for.** The
+                // engine's `MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT` is
+                // `DXGI_FORMAT_B8G8R8A8_UNORM`, so nothing between Media
+                // Foundation and this sampler reorders a channel.
+                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("video layer bind group"),
+                layout: &self.video_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.video_sampler),
+                    },
+                ],
+            });
+            self.video_textures.insert(
+                key.to_owned(),
+                VideoTexture {
+                    texture,
+                    bind_group,
+                    width_px: frame.width_px,
+                    height_px: frame.height_px,
+                    generation: 0,
+                },
+            );
+        }
+        let Some(held) = self.video_textures.get_mut(key) else {
+            return false;
+        };
+        if held.generation >= frame.generation {
+            // The picture on the GPU is already this one. A window redraws for
+            // a hundred reasons that are not a new frame.
+            return true;
+        }
+        self.queue.write_texture(
+            held.texture.as_image_copy(),
+            &frame.bgra,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(frame.width_px * 4),
+                rows_per_image: Some(frame.height_px),
+            },
+            wgpu::Extent3d {
+                width: frame.width_px,
+                height: frame.height_px,
+                depth_or_array_layers: 1,
+            },
+        );
+        held.generation = frame.generation;
+        true
+    }
 }
 
 impl WindowRenderer {
@@ -4521,6 +4702,7 @@ impl WindowRenderer {
             cursor_blink_visible: true,
             peek_overlay: None,
             preview_image: None,
+            video_layers: Vec::new(),
             preview_bodies: Vec::new(),
             preview_text_frame: PreviewTextFrame::default(),
             table_blocks: HashMap::new(),
@@ -4716,6 +4898,31 @@ impl WindowRenderer {
     #[must_use]
     pub fn preview_text_frame(&self) -> PreviewTextFrame {
         self.preview_text_frame
+    }
+
+    /// **Hand over every playing video this frame.** Returns whether anything
+    /// changed.
+    ///
+    /// The whole list every frame, for [`Self::set_preview_bodies`]'s reason:
+    /// the caller solves these rectangles out of the layout anyway. A key that
+    /// stops appearing is a video that has stopped, and its texture is released
+    /// at the end of the next frame — see [`Self::prepare_video_draws`].
+    ///
+    /// # What the caller owes
+    ///
+    /// One key per playing engine, stable while it plays. Two panes showing the
+    /// same file are two engines at two positions and therefore two keys; a key
+    /// shared between them would put one pane's picture in the other.
+    pub fn set_video_layers(&mut self, layers: Vec<VideoLayer>) -> bool {
+        let changed = self.video_layers != layers;
+        self.video_layers = layers;
+        changed
+    }
+
+    /// What the last frame was told to play — the one reader is a test.
+    #[must_use]
+    pub fn video_layers(&self) -> &[VideoLayer] {
+        &self.video_layers
     }
 
     pub fn set_preview_bodies(&mut self, bodies: Vec<PreviewBody>) -> bool {
@@ -4998,8 +5205,17 @@ impl WindowRenderer {
     /// coordinates handed to glyphon were right on the machine that drew them
     /// wrong (`BT_CHROME_DUMP` said `[42, 6, 180, 40]` while the picture put the
     /// same title at 84).
-    #[cfg(test)]
-    fn read_back(&self, gpu: &GpuContext) -> Vec<[u8; 4]> {
+    ///
+    /// # Why it is public
+    ///
+    /// It was a test's door until 2026-08-28 and is now anybody's, because an
+    /// offscreen window has no other purpose: it is created with `COPY_SRC` for
+    /// exactly this, and a target nothing can read is a target that has drawn
+    /// nothing anyone can check. The video probe (§7.42) takes its evidence
+    /// through here. It **panics** on a window with a swapchain, which is not a
+    /// mistake a caller makes twice.
+    #[must_use]
+    pub fn read_back(&self, gpu: &GpuContext) -> Vec<[u8; 4]> {
         let FrameTarget::Offscreen(texture) = &self.target else {
             panic!("only an offscreen window can be read back");
         };
@@ -5656,6 +5872,15 @@ impl WindowRenderer {
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("preview seat image vertices"),
                     contents: bytemuck::cast_slice(&preview_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let (video_draws, video_vertices) = self.prepare_video_draws(gpu);
+        let video_vertex_buffer = (!video_vertices.is_empty()).then(|| {
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("video layer vertices"),
+                    contents: bytemuck::cast_slice(&video_vertices),
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
@@ -6319,6 +6544,41 @@ impl WindowRenderer {
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
+            }
+            // **The playing videos**, in the same slot the preview seat's
+            // picture is in and directly after it — a pane is showing one or the
+            // other, never both, and the two are the same rectangle at the same
+            // size (`video_fit_extent`, §7.42). Whole-surface viewport rather
+            // than a seat-local one because a layer's box is already in the
+            // window's own coordinates, and the scissor travels per draw so two
+            // panes playing two videos do not crop each other.
+            if let Some(vertex_buffer) = video_vertex_buffer.as_ref() {
+                pass.set_viewport(
+                    0.0,
+                    0.0,
+                    self.config.width as f32,
+                    self.config.height as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.set_pipeline(&gpu.video_pipeline);
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                for draw in &video_draws {
+                    pass.set_scissor_rect(
+                        draw.clip.x,
+                        draw.clip.y,
+                        draw.clip.width,
+                        draw.clip.height,
+                    );
+                    let bound = draw
+                        .key
+                        .as_ref()
+                        .and_then(|key| gpu.video_textures.get(key))
+                        .map_or(&gpu.video_blank, |held| &held.bind_group);
+                    pass.set_bind_group(0, bound, &[]);
+                    pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                }
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
             }
             // The preview seat's text body, in the same slot as its picture and
             // for the same reason — above that seat's body chrome, below the
@@ -7012,6 +7272,87 @@ impl WindowRenderer {
             });
         }
         (Some((image.seat, image.clip)), draws, vertices)
+    }
+
+    /// **This frame's playing videos, as quads** — and the release of every
+    /// texture that stopped being one.
+    ///
+    /// Two quads per layer at most and often one: the ground, when the layer
+    /// carries a colour for its letterbox, and the picture, when a frame has
+    /// arrived. A layer with neither draws nothing, which is a video that has
+    /// been opened into a pane the pane has already painted and has not yet
+    /// decoded — and what a reader sees then is the pane, which is right.
+    ///
+    /// The **release** is the second half and it is why this takes `&mut
+    /// GpuContext`: a `HashMap` that only ever grew would hold a megabyte per
+    /// video the window has played since it opened. A key that is not in this
+    /// frame's layers is a video that is not playing, so its texture goes now.
+    fn prepare_video_draws(&mut self, gpu: &mut GpuContext) -> (Vec<VideoDraw>, Vec<VideoVertex>) {
+        gpu.video_textures
+            .retain(|key, _| self.video_layers.iter().any(|layer| &layer.key == key));
+        let (surface_width, surface_height) = (self.config.width, self.config.height);
+        let mut draws = Vec::new();
+        let mut vertices = Vec::new();
+        for layer in &self.video_layers {
+            let clip = layer.clip.clamped_to(surface_width, surface_height);
+            if clip.width == 0 || clip.height == 0 || layer.opacity <= 0.0 {
+                continue;
+            }
+            let box_ = [
+                layer.box_.x as f32,
+                layer.box_.y as f32,
+                (layer.box_.x + layer.box_.width) as f32,
+                (layer.box_.y + layer.box_.height) as f32,
+            ];
+            let opacity = layer.opacity.clamp(0.0, 1.0);
+            if let Some(ground) = layer.ground {
+                let [red, green, blue] = srgb_rgb_to_linear(ground);
+                let first_vertex = vertices.len() as u32;
+                vertices.extend(video_quad_vertices(
+                    box_,
+                    box_,
+                    layer.radius_px,
+                    [red as f32, green as f32, blue as f32, opacity],
+                    0.0,
+                    surface_width,
+                    surface_height,
+                ));
+                draws.push(VideoDraw {
+                    key: None,
+                    first_vertex,
+                    clip,
+                });
+            }
+            let Some(frame) = layer.frame.as_ref() else {
+                continue;
+            };
+            if !gpu.hold_video_texture(&layer.key, frame) {
+                continue;
+            }
+            let Some(picture) = video_frame_rect(layer.box_, frame.width_px, frame.height_px)
+            else {
+                continue;
+            };
+            let first_vertex = vertices.len() as u32;
+            vertices.extend(video_quad_vertices(
+                picture,
+                box_,
+                layer.radius_px,
+                // White at the layer's opacity: the mix takes the sampled colour
+                // whole and the fourth channel is the only thing the tint
+                // contributes to a textured quad.
+                [1.0, 1.0, 1.0, opacity],
+                1.0,
+                surface_width,
+                surface_height,
+            ));
+            draws.push(VideoDraw {
+                key: Some(layer.key.clone()),
+                first_vertex,
+                clip,
+            });
+        }
+        (draws, vertices)
     }
 
     fn math_block_geometry(
@@ -10613,6 +10954,192 @@ fn create_rect_pipeline_with_blend(
         multiview_mask: None,
         cache: None,
     })
+}
+
+/// **The playing-video pipeline**: a textured quad masked by a rounded box.
+///
+/// A pipeline of its own rather than the `math` one, for the reason the shader
+/// beside it states — the mask and the flat-colour arm are both things the math
+/// shader has no vertex attributes for, and widening the format every mark,
+/// formula and preview picture is drawn with in order to add two of them to one
+/// caller would be paying for the mask on every quad in the window.
+///
+/// The sampler is linear in both directions and that is the whole of a video's
+/// scaling: [`video_fit_extent`] enlarges, so a 160×120 recording in a 1200×800
+/// pane is stretched here, from the file's own pixels, once — rather than
+/// resampled on the CPU into a raster eighty times the size of the one the
+/// decoder produced.
+fn create_video_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::Sampler) {
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("video layer texture layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("video layer sampler"),
+        // `ClampToEdge` on both axes: the quad's UVs are the whole texture, and
+        // a repeat would wrap the first column onto the last on a fragment that
+        // landed a hair past 1.0.
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("video layer shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("video.wgsl").into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("video layer pipeline layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("video layer pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vertex"),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<VideoVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x2,
+                    1 => Float32x2,
+                    2 => Float32x4,
+                    3 => Float32,
+                    4 => Float32x2,
+                    5 => Float32x2,
+                    6 => Float32,
+                ],
+            })],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fragment"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    (pipeline, bind_group_layout, sampler)
+}
+
+/// A 1×1 opaque black texture bound to `layout`, for the draws that sample
+/// nothing — see [`GpuContext::video_blank`].
+fn create_blank_bind_group(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    let texture = device.create_texture_with_data(
+        queue,
+        &wgpu::TextureDescriptor {
+            label: Some("video layer blank"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        &[0, 0, 0, 255],
+    );
+    let view = texture.create_view(&Default::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("video layer blank bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
+/// The six corners of one video quad, in whole-surface pixels.
+///
+/// `box_` is the **mask**, not the quad: the picture's rectangle and the
+/// ground's rectangle are different quads and are masked by the same rounded
+/// box, which is what keeps a float's corner one shape rather than two.
+fn video_quad_vertices(
+    rect: [f32; 4],
+    box_: [f32; 4],
+    radius: f32,
+    tint: [f32; 4],
+    texture_weight: f32,
+    surface_width: u32,
+    surface_height: u32,
+) -> [VideoVertex; 6] {
+    let width = surface_width.max(1) as f32;
+    let height = surface_height.max(1) as f32;
+    let position = |x: f32, y: f32| [x / width * 2.0 - 1.0, 1.0 - y / height * 2.0];
+    let box_center = [(box_[0] + box_[2]) / 2.0, (box_[1] + box_[3]) / 2.0];
+    let box_half = [
+        ((box_[2] - box_[0]) / 2.0).max(0.0),
+        ((box_[3] - box_[1]) / 2.0).max(0.0),
+    ];
+    let corner = |x: f32, y: f32, u: f32, v: f32| VideoVertex {
+        position: position(x, y),
+        uv: [u, v],
+        tint,
+        texture_weight,
+        box_center,
+        box_half,
+        // A radius larger than half the shorter side is a circle, not an
+        // error: the distance function saturates and the corners meet.
+        radius: radius.clamp(0.0, box_half[0].min(box_half[1])),
+    };
+    let [left, top, right, bottom] = rect;
+    [
+        corner(left, top, 0.0, 0.0),
+        corner(left, bottom, 0.0, 1.0),
+        corner(right, bottom, 1.0, 1.0),
+        corner(left, top, 0.0, 0.0),
+        corner(right, bottom, 1.0, 1.0),
+        corner(right, top, 1.0, 0.0),
+    ]
 }
 
 fn create_math_pipeline(
@@ -18336,6 +18863,194 @@ mod tests {
                  {:?} — a seat's text is laid out seat-local and must arrive at \
                  glyphon carrying that seat's corner",
                 &outside[..outside.len().min(8)]
+            );
+        }
+
+        /// RED — **a playing video fills its box at its own proportion, the
+        /// letterbox is the ground it was given, and a radius takes the
+        /// corners** (user ruling 2026-08-28; `docs/DESIGN.md` §7.42).
+        ///
+        /// The pixels, on the device a machine with no graphics driver gets.
+        /// Everything else about this layer is a pure function with its own gate
+        /// in [`crate::video`]; this is the one assertion that the shader, the
+        /// vertex format, the upload and the scissor agree with those functions
+        /// — and it is made by reading the frame back rather than by trusting
+        /// what the layer was told, which is the lesson §7.36 cost a release
+        /// gate to learn.
+        ///
+        /// The "recording" is two pixels wide and one tall, so its proportion is
+        /// 2:1 against a 640×400 box: it must come back 640×320 with forty rows
+        /// of ground above and below. Its two pixels are two colours nothing
+        /// else in the frame uses, so "which half is which" is answerable, and a
+        /// build that flipped the sampler's U would name itself here.
+        ///
+        /// RED GATE ①: give [`crate::video_fit_extent`] the picture channel's
+        /// `.min(1.0)` and the recording comes back two pixels wide in the
+        /// middle of a field of ground — the `next12` defect, in a test.
+        /// RED GATE ②: drop the rounded mask from `video.wgsl` and the last
+        /// assertion finds ground in a corner a radius of 60 has cut away.
+        #[test]
+        fn a_video_layer_fills_its_box_letterboxes_in_its_ground_and_rounds_its_corners() {
+            const WIDTH: u32 = 640;
+            const HEIGHT: u32 = 400;
+            // Red, and nothing else in this frame is red.
+            const GROUND: [u8; 3] = [220, 30, 30];
+
+            let Ok(mut gpu) = pollster::block_on(GpuContext::headless_fallback(FORMAT)) else {
+                return;
+            };
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
+            let seat = SeatViewport::whole(WIDTH, HEIGHT);
+            let frame = single_cell_cursor_frame(window.metrics());
+            // Two pixels, BGRA: the left one blue, the right one green.
+            let recording: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
+            window.set_video_layers(vec![VideoLayer {
+                key: "one recording".to_owned(),
+                box_: seat,
+                clip: seat,
+                frame: Some(VideoFrameUpload {
+                    bgra: Arc::from(recording.into_boxed_slice()),
+                    width_px: 2,
+                    height_px: 1,
+                    generation: 1,
+                }),
+                ground: Some(GROUND),
+                radius_px: 60.0,
+                opacity: 1.0,
+            }]);
+            window
+                .present_frame(
+                    &mut gpu,
+                    &[SeatFrame {
+                        seat,
+                        clip: seat,
+                        frame: &frame,
+                        focused: true,
+                    }],
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .expect("one frame");
+            let pixels = window.read_back(&gpu);
+            let at = |x: u32, y: u32| pixels[(y * WIDTH + x) as usize];
+
+            // ① The picture fills the width and keeps 2:1, so it is 640×320 and
+            // the ground shows as forty rows at each end.
+            let picture_rows: Vec<u32> = (0..HEIGHT)
+                .filter(|y| {
+                    let [blue, green, red, _] = at(WIDTH / 2, *y);
+                    u32::from(blue) + u32::from(green) > 2 * u32::from(red)
+                })
+                .collect();
+            let top = *picture_rows.first().expect("the recording drew something");
+            let bottom = *picture_rows.last().expect("the recording drew something");
+            assert!(
+                (39..=41).contains(&top) && (358..=360).contains(&bottom),
+                "a 2:1 recording in a 640x400 box should be 640x320 centred; \
+                 its rows came back {top}..={bottom}"
+            );
+
+            // ② Left half blue, right half green — the sampler is not flipped.
+            let [blue, green, _, _] = at(WIDTH / 4, HEIGHT / 2);
+            assert!(
+                blue > 200 && green < 60,
+                "left half: {:?}",
+                at(WIDTH / 4, HEIGHT / 2)
+            );
+            let [blue, green, _, _] = at(WIDTH * 3 / 4, HEIGHT / 2);
+            assert!(
+                green > 200 && blue < 60,
+                "right half: {:?}",
+                at(WIDTH * 3 / 4, HEIGHT / 2)
+            );
+
+            // ③ The letterbox is the ground the layer was given, not the
+            // window's own and not black.
+            let [blue, green, red, _] = at(WIDTH / 2, 8);
+            assert!(
+                red > 150
+                    && u32::from(blue) * 3 < u32::from(red)
+                    && u32::from(green) * 3 < u32::from(red),
+                "the letterbox is not the ground it was given: {:?}",
+                at(WIDTH / 2, 8)
+            );
+
+            // ④ A radius of 60 cuts the corner: the pixel four in from the top
+            // left is outside a rounded box that size, so it is *not* the
+            // ground.
+            let [blue, green, red, _] = at(4, 4);
+            assert!(
+                !(red > 150
+                    && u32::from(blue) * 3 < u32::from(red)
+                    && u32::from(green) * 3 < u32::from(red)),
+                "a corner a radius of 60 cuts away is still painted: {:?}",
+                at(4, 4)
+            );
+        }
+
+        /// RED — **a video that has stopped gives its texture back** (2026-08-28;
+        /// §7.42).
+        ///
+        /// The half of the layer's lifetime that is not the engine's. An entry
+        /// that stayed would be a megabyte per recording the window has played
+        /// since it opened, held by a `HashMap` nothing else prunes — and unlike
+        /// the picture channel's LRU there is no budget here to notice.
+        ///
+        /// MUTATION: drop the `retain` at the top of `prepare_video_draws` and
+        /// the second assertion goes red.
+        #[test]
+        fn a_video_that_stopped_releases_its_texture() {
+            const WIDTH: u32 = 320;
+            const HEIGHT: u32 = 200;
+            let Ok(mut gpu) = pollster::block_on(GpuContext::headless_fallback(FORMAT)) else {
+                return;
+            };
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
+            let seat = SeatViewport::whole(WIDTH, HEIGHT);
+            let frame = single_cell_cursor_frame(window.metrics());
+            let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
+                window
+                    .present_frame(
+                        gpu,
+                        &[SeatFrame {
+                            seat,
+                            clip: seat,
+                            frame: &frame,
+                            focused: true,
+                        }],
+                        FrameTrigger {
+                            occurred_at: Instant::now(),
+                            source: FrameSource::Expose,
+                        },
+                    )
+                    .expect("one frame");
+            };
+            window.set_video_layers(vec![VideoLayer {
+                key: "a recording".to_owned(),
+                box_: seat,
+                clip: seat,
+                frame: Some(VideoFrameUpload {
+                    bgra: Arc::from(vec![0_u8, 0, 255, 255].into_boxed_slice()),
+                    width_px: 1,
+                    height_px: 1,
+                    generation: 1,
+                }),
+                ground: None,
+                radius_px: 0.0,
+                opacity: 1.0,
+            }]);
+            present(&mut window, &mut gpu);
+            assert_eq!(gpu.video_textures.len(), 1);
+            window.set_video_layers(Vec::new());
+            present(&mut window, &mut gpu);
+            assert_eq!(
+                gpu.video_textures.len(),
+                0,
+                "a key that stopped appearing is a video that stopped playing"
             );
         }
     }

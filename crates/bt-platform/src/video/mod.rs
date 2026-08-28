@@ -112,6 +112,8 @@
 //! that this window can *show* you something; playing is a different promise and
 //! will get a different table when it is made.
 
+pub mod engine;
+
 use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -366,7 +368,7 @@ pub fn prewarm() {
 /// **Nothing releases either**, and that is the shape rather than an omission:
 /// `MFShutdown` at process exit is what [`shutdown_media_session`] is for, and a
 /// process that skips it is a process whose whole address space is going away.
-fn media_session() -> bool {
+pub(crate) fn media_session() -> bool {
     static SESSION: OnceLock<bool> = OnceLock::new();
     *SESSION.get_or_init(|| {
         // SAFETY: both calls are process-wide platform entries with no arguments
@@ -416,8 +418,17 @@ static MEDIA_SESSION_STARTS: AtomicU32 = AtomicU32::new(0);
 ///
 /// # Where it is called from
 ///
-/// Once, from `bt-app`'s `main`, after the event loop has returned.
+/// Once, from `bt-app`'s `main`, after the event loop has returned — and, since
+/// route B, **after every [`engine::Engine`] has been shut down**. A platform
+/// torn down under a decoder that is still running is the same shape §7.35 spent
+/// a slice on, so the ordering is asserted here rather than remembered at the
+/// call site.
 pub fn shutdown_media_session() {
+    debug_assert_eq!(
+        engine::engines_outstanding(),
+        0,
+        "an engine is still standing: `MFShutdown` is the last thing this process does"
+    );
     if MEDIA_SESSION_STARTS.load(Ordering::Relaxed) == 0 {
         return;
     }
