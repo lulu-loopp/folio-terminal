@@ -4413,15 +4413,14 @@ fn build_preview_markdown_body(
                             box_rect[2] - metrics.code_border - metrics.code_padding_x;
                         let mut line_top =
                             box_rect[1] + metrics.code_border + metrics.code_padding_y;
-                        let said_height = (height
-                            - metrics.code_border * 2.0
-                            - metrics.code_padding_y * 2.0
-                            - if card.note.is_empty() {
-                                0.0
-                            } else {
-                                metrics.line_height
-                            })
-                        .max(metrics.line_height);
+                        // **The rows the measuring pass wrote down**, not two the
+                        // painter works out for itself — see
+                        // [`MarkdownBlockLayout`], and the note is the row that
+                        // makes it matter: an address long enough to wrap is two
+                        // lines, and a painter that assumed one would set the
+                        // sentence over its own second line.
+                        let said_height =
+                            placed.rows.first().copied().unwrap_or(metrics.line_height);
                         note_text_line(
                             &mut text_sites,
                             &card.said,
@@ -4453,14 +4452,11 @@ fn build_preview_markdown_body(
                                     target,
                                 });
                             }
+                            let note_height =
+                                placed.rows.get(1).copied().unwrap_or(metrics.line_height);
                             paragraphs.push(bt_render::PreviewParagraph {
                                 runs: card.note,
-                                rect: [
-                                    inner_left,
-                                    line_top,
-                                    inner_right,
-                                    box_rect[3] - metrics.code_border - metrics.code_padding_y,
-                                ],
+                                rect: [inner_left, line_top, inner_right, line_top + note_height],
                                 font_size_px: metrics.font_size,
                                 line_height_px: metrics.line_height,
                                 wrap: true,
@@ -49866,12 +49862,29 @@ fn measure_markdown_block(
                 let card = markdown_image_card(image, pictures.get(source), &palette);
                 let inner =
                     (width - metrics.code_padding_x * 2.0 - metrics.code_border * 2.0).max(1.0);
-                let mut height = measure(&card.said, inner, metrics.font_size, metrics.line_height);
+                // **The card's two rows are written down**, not added into one
+                // total the painter then has to take apart again: an address
+                // long enough to wrap is two lines of note, and a painter that
+                // assumed one would put the sentence over its own second line.
+                // [`MarkdownBlockLayout::rows`] is where a block that has rows
+                // says so.
+                let mut rows = vec![measure(
+                    &card.said,
+                    inner,
+                    metrics.font_size,
+                    metrics.line_height,
+                )];
                 if !card.note.is_empty() {
-                    height += measure(&card.note, inner, metrics.font_size, metrics.line_height);
+                    rows.push(measure(
+                        &card.note,
+                        inner,
+                        metrics.font_size,
+                        metrics.line_height,
+                    ));
                 }
-                MarkdownBlockLayout::solid(
-                    height + metrics.code_padding_y * 2.0 + metrics.code_border * 2.0,
+                MarkdownBlockLayout::rows(
+                    rows,
+                    metrics.code_padding_y * 2.0 + metrics.code_border * 2.0,
                 )
             }
         }
