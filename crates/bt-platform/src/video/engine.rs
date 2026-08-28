@@ -1283,6 +1283,24 @@ mod tests {
             .join(name)
     }
 
+    /// **Hold the process still while an engine is counted.**
+    ///
+    /// [`engines_outstanding`] is a fact about a *process*, and the tests in
+    /// this module all run in one. Every test here that creates an engine takes
+    /// this, so that the ledger gate below can read the counters as an absolute
+    /// rather than as a number two other threads are also moving — which is
+    /// exactly what it did on the first full-workspace run, where three arms
+    /// that are each correct in isolation added up to a red.
+    ///
+    /// It is not a fix to the invariant and must not be mistaken for one: the
+    /// engines are perfectly safe to open concurrently and nothing in the
+    /// product serialises them. What cannot be done concurrently is *reading a
+    /// global counter and concluding something from the number*.
+    fn ledger_gate() -> std::sync::MutexGuard<'static, ()> {
+        static GATE: Mutex<()> = Mutex::new(());
+        GATE.lock().unwrap_or_else(|held| held.into_inner())
+    }
+
     /// RED — **an engine reports the duration and the size of a file it
     /// opened** (user ruling 2026-08-28; `docs/DESIGN.md` §7.42).
     ///
@@ -1301,6 +1319,7 @@ mod tests {
     /// the engine will not serve and the same.
     #[test]
     fn an_engine_reports_the_duration_and_size_of_a_file_it_opened() {
+        let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mp4")).expect("an engine opens");
         assert!(
             engine.wait_for_metadata(Duration::from_secs(10)),
@@ -1348,6 +1367,7 @@ mod tests {
     /// beside it.
     #[test]
     fn a_frame_arrives_after_play_and_position_advances() {
+        let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mp4")).expect("an engine opens");
         assert!(engine.wait_for_metadata(Duration::from_secs(10)));
         engine.set_muted(true);
@@ -1420,6 +1440,7 @@ mod tests {
     /// only circumstance in which it is.
     #[test]
     fn a_quicktime_file_plays_where_the_browser_would_not_open_it() {
+        let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mov")).expect("an engine opens");
         assert!(
             engine.wait_for_metadata(Duration::from_secs(10)),
@@ -1456,6 +1477,7 @@ mod tests {
     /// machine and by nobody here.
     #[test]
     fn a_software_adapter_still_serves_frames() {
+        let _ledger = ledger_gate();
         let mut engine = Engine::open_on(&fixture("folio-video-test.mp4"), Adapter::Software)
             .expect("a WARP engine opens");
         assert_eq!(engine.adapter_in_use(), Some(Adapter::Software));
@@ -1497,6 +1519,7 @@ mod tests {
     /// red while the first stays green.
     #[test]
     fn every_engine_is_shut_down_before_the_process_leaves() {
+        let _ledger = ledger_gate();
         let path = fixture("folio-video-test.mp4");
         let before = engines_outstanding();
 
@@ -1551,6 +1574,7 @@ mod tests {
     /// §7.23 (f) had to be talked out of once already.
     #[test]
     fn the_type_table_under_reports_what_the_decoder_will_open() {
+        let _ledger = ledger_gate();
         let types = [
             "video/mp4",
             "video/mp4; codecs=\"avc1.42E01E\"",
@@ -1618,6 +1642,7 @@ mod tests {
     /// third case takes a pane's thread down.
     #[test]
     fn nothing_that_is_not_a_video_plays() {
+        let _ledger = ledger_gate();
         let dir = std::env::temp_dir().join(format!(
             "folio-video-engine-refusals-{}-{:?}",
             std::process::id(),
@@ -1665,6 +1690,7 @@ mod tests {
     /// the loop.
     #[test]
     fn the_verbs_reach_the_engine() {
+        let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mp4")).expect("an engine opens");
         assert!(engine.wait_for_metadata(Duration::from_secs(10)));
         engine.set_muted(true);
