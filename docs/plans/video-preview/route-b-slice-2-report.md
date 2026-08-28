@@ -428,3 +428,29 @@ cargo fmt --all -- --check                                     CARGO_EXIT=0
 ```
 
 `PSModulePath` was **not** cleared, per the standing ruling.
+
+---
+
+## ⑦ The red證 table — six gates, measured under one mutation round
+
+Every gate §7.44 ⑩ names for `bt-app` was **run against a build that breaks the
+thing it pins**, all six mutations applied together so that each red is its own
+and none is a side effect of another. Restored afterwards; the tree is byte-clean
+against the commit and the suite is green again.
+
+| gate | the mutation | what it said |
+|---|---|---|
+| `the_shell_page_is_gone` | `const _ROUTE_A_SHELL: &str = "<video controls></video>";` put back as code | `an opening video element is back in …\crates\bt-app\src\main.rs` |
+| `the_still_and_the_first_played_frame_share_a_rect` | the still fitted by `image_destination(…, ImageZoom::FIT)` — the picture channel's rule, which never enlarges | `[0.0, 0.0, 960.0, 556.0] [160, 120]: the still is [400.0, 218.0, 560.0, 338.0] and the frame is [109.0, 0.0, 850.0, 556.0]` — the `next12` defect exactly: a 160×120 clip drawn at its own size in a full-height pane |
+| `a_video_is_one_seat_on_three_surfaces` | the texture key derived from the path instead of the serial | `three surfaces are three textures: {"video:…\folio-video-test.mp4"}` — left 1, right 3 |
+| `a_card_torn_off_carries_its_engine_with_it` | `VideoSeats::rehome` closes and re-opens instead of moving the seat | `the first engine was shut down` — left 4, right 3 |
+| `the_bar_rises_on_hover_and_rests_by_the_registers_numbers` | `VIDEO_BAR_REVEAL_INTENT` typed as 300ms, which is what a player "feels like" | `a player's bar and a ⌄'s menu are the same promise, made twice` — left `300ms`, right `250ms` |
+| `a_gif_advances_by_its_own_frame_delays` | `frame_at` slices the loop into four equal parts instead of reading the file's delays | `at 100ms` — left 0, right 1 |
+
+```
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 2799 filtered out
+```
+
+The two gates this hand added were measured the same way in ③ above, and
+§7.44 ⑫'s `opening_a_video_never_blocks_the_window_thread` in ① (`8 opens took
+468.6124ms, which is a window thread waiting for a decoder`).
