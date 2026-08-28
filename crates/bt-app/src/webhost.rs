@@ -3658,7 +3658,11 @@ mod keyboard_tests {
         ("goto-tab-9", "Ctrl+Shift+9"),
         ("reopen-closed", "Ctrl+Shift+t"),
         ("jump-attention", "Ctrl+Shift+a"),
-        ("command-palette", "Ctrl+Shift+p"),
+        // **`command-palette` left the table on 2026-08-28** (user ruling; see
+        // `shortcuts::Action::CommandPalette`), and this list is one shorter for
+        // it. What that means over a page is exactly what it means everywhere
+        // else: `Ctrl+Shift+P` is not claimed, so the page keeps it — which is
+        // the honest state while there is no palette to open.
         ("focus-mode", "Ctrl+Shift+z"),
         ("split-horizontal", "Alt+Shift+-"),
         ("split-vertical", "Alt+Shift+="),

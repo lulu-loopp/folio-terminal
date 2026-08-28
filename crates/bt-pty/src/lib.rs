@@ -942,6 +942,54 @@ pub struct ShellFallback {
     pub started: &'static str,
 }
 
+/// The command interpreter, and the arguments it needs, when `program` is a
+/// **batch file** — `None` for everything else, which is nearly everything.
+///
+/// # Why this is here and not in the table that names the program
+///
+/// `CreateProcess` starts a PE image. A `.cmd` or a `.bat` is not one: it is a
+/// script the *interpreter* runs, and Microsoft's own documentation says so in
+/// as many words — "to run a batch file, you must start the command
+/// interpreter". So a window that resolved a program to `…\claude.cmd` and
+/// handed it straight to the launcher would fail every spawn of it with an
+/// error about a bad executable format, on a machine where the user runs
+/// `claude` from their own shell all day long.
+///
+/// That makes this a fact about **starting a program on Windows**, which is what
+/// this crate is for, rather than a fact about any one profile. Three things
+/// already meet it and they meet it in three different ways: an npm-installed
+/// tool is a `.cmd` shim and nothing else (the agent profiles, user ruling
+/// 2026-08-28), a user profile can be pointed at a `.cmd` through the editor's
+/// own file picker, and `crate::shell`'s note one file over records the sibling
+/// case — an `AppExecLink` that `CreateFileW` refuses and `CreateProcess`
+/// follows. A rule written beside the profile table would have covered the first
+/// of the three.
+///
+/// **`/c` and not `/k`**: the tab's life is the program's, exactly as it is for
+/// every other profile. `/k` would leave a `cmd` prompt sitting in the pane
+/// after the program exited, which is a second shell nobody asked for.
+///
+/// `%ComSpec%` first, because that is the interpreter this machine says it has,
+/// and a plain `cmd.exe` after it — resolved by `CreateProcess` off `PATH` —
+/// for a machine whose environment has lost the variable.
+fn through_the_interpreter(
+    program: &OsStr,
+    args: &[OsString],
+) -> Option<(OsString, Vec<OsString>)> {
+    let script = Path::new(program).extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+    });
+    if !script {
+        return None;
+    }
+    let interpreter = std::env::var_os("ComSpec").unwrap_or_else(|| OsString::from("cmd.exe"));
+    let mut wrapped = Vec::with_capacity(args.len() + 2);
+    wrapped.push(OsString::from("/c"));
+    wrapped.push(program.to_os_string());
+    wrapped.extend(args.iter().cloned());
+    Some((interpreter, wrapped))
+}
+
 impl PtySession {
     /// Shell selection order (ruling 2026-08-04): `BT_SHELL` wins outright; otherwise
     /// `pwsh.exe` (PowerShell 7) is used when [`resolve_default_shell`]'s probe can find an
@@ -1073,11 +1121,18 @@ impl PtySession {
             Some(directory) if directory.is_dir() => directory,
             _ => std::env::current_dir().map_err(PtyError::Io)?,
         };
+        // **A batch file is a program the user can run and not a program
+        // `CreateProcess` can start**, so the one that can is put in front of
+        // it. See [`through_the_interpreter`].
+        let (started, args) = match through_the_interpreter(&program, args) {
+            Some(wrapped) => wrapped,
+            None => (program.clone(), args.to_vec()),
+        };
         let command = environment
             .iter()
             .fold(
                 args.iter().fold(
-                    PtyCommand::interactive_shell(program.clone()),
+                    PtyCommand::interactive_shell(started),
                     |command, argument| command.arg(argument),
                 ),
                 |command, (key, value)| command.env(key, value),
@@ -2588,6 +2643,60 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    /// PIN (user ruling 2026-08-28, the agent profiles) — **a batch file is
+    /// started through the command interpreter and everything else is not.**
+    ///
+    /// `CreateProcess` starts a PE image, and a `.cmd` is not one. An
+    /// npm-installed tool is a `.cmd` shim and nothing else, so a window that
+    /// resolved `claude` and handed the shim straight to the launcher would fail
+    /// every spawn of it — on a machine where the user runs `claude` from their
+    /// own shell all day. The rule is about starting a program on Windows, which
+    /// is what this crate is for, so it lives here rather than beside the
+    /// profile table that happened to meet it first.
+    ///
+    /// MUTATIONS: return `None` unconditionally and the shim fails to spawn;
+    /// wrap every program and a `pwsh` tab becomes a `cmd` hosting a `pwsh`,
+    /// with an interpreter between the terminal and its shell for no reason.
+    #[test]
+    fn a_batch_file_is_started_through_the_interpreter_and_a_program_is_not() {
+        let interpreter = std::env::var_os("ComSpec").unwrap_or_else(|| OsString::from("cmd.exe"));
+        let args = [OsString::from("--resume")];
+
+        for shim in [
+            r"C:\Users\dev\AppData\Roaming\npm\claude.cmd",
+            r"D:\x\go.BAT",
+        ] {
+            let (started, wrapped) = through_the_interpreter(OsStr::new(shim), &args)
+                .unwrap_or_else(|| panic!("{shim} is a script and needs the interpreter"));
+            assert_eq!(started, interpreter);
+            assert_eq!(
+                wrapped,
+                vec![
+                    OsString::from("/c"),
+                    OsString::from(shim),
+                    OsString::from("--resume"),
+                ],
+                "the shim's own arguments follow it, and `/c` ends with the \
+                 program rather than leaving a prompt behind"
+            );
+        }
+
+        for program in [
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+            r"C:\WINDOWS\System32\wsl.exe",
+            r"C:\Users\dev\.local\bin\claude.exe",
+            // No extension at all — an npm shim's bash sibling, which
+            // `CreateProcess` cannot start either but which this rule has no
+            // business claiming to fix.
+            r"C:\Users\dev\AppData\Roaming\npm\claude",
+        ] {
+            assert!(
+                through_the_interpreter(OsStr::new(program), &args).is_none(),
+                "{program} is started as itself"
+            );
+        }
     }
 
     #[test]

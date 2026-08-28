@@ -136,6 +136,14 @@ pub enum ProfileGlyph {
     Ubuntu,
     /// The lozenge with the branch and its three nodes — `#p-git`.
     Git,
+    /// The asterisk — `#p-claude` (user ruling 2026-08-28, the agent profiles).
+    ///
+    /// The one member of this list whose coloured twin is **already nothing but
+    /// pen**: `#p-claude` is four strokes and no fill, so its line rendition is
+    /// that drawing with `#D97757` taken out of it and the column's own weight
+    /// put in. There is no silhouette to pull half a pen inside, which is the
+    /// step the three above it each owe.
+    Claude,
 }
 
 /// The pen every [`ChromeMark::ProfileLine`] is struck with, in the sixteen-unit
@@ -404,6 +412,27 @@ pub enum ChromeMark {
     /// not be the same colour as either — which is why this is `#3A3A3A` inside
     /// a `#606060` hairline and why nobody may "fix" it back to black.
     ProfileCmd,
+    /// `#p-claude` — the Claude Code profile's mark: the asterisk, spokes
+    /// radiating from the centre in Anthropic's `#D97757` (user ruling
+    /// 2026-08-28, the agent profiles).
+    ///
+    /// **Lifted from the mock-up, which struck it and never used it.** The
+    /// symbol has stood in `design/ui-mockup.html` beside the four shell marks
+    /// since the profile family was drawn, and nothing referenced it, because
+    /// until this ruling no row of the profile table ran an agent. So this
+    /// variant is the design authority being *read* rather than this crate
+    /// inventing a logo — the distinction [`Self::ProfileGeneric`]'s own note
+    /// draws, and the reason the Codex and Copilot rows arrive on that chassis
+    /// instead: the mock-up has no drawing for either of them, and a mark
+    /// nobody has struck is not a mark a crate may improvise.
+    ///
+    /// Scaled onto the chassis by `12 / 13.9` about its own centre, which is the
+    /// P2 step each of the four marks above it took. The `13.9` is this
+    /// drawing's own ink — `1.8` to `14.2` of path plus half a round cap at each
+    /// end — where the shell panels' was `14`. Nothing about the drawing is
+    /// re-invented: the spokes keep their lengths, their angles, and the ratio
+    /// between their two pens, to the digit.
+    ProfileClaude,
     /// `#p-shell` — the chassis a profile of the user's own wears, in one of
     /// [`MarkColour`]'s eight.
     ///
@@ -1233,6 +1262,7 @@ impl ChromeMark {
             Self::ProfileUbuntu => "p-ubuntu",
             Self::ProfileGit => "p-git",
             Self::ProfileCmd => "p-cmd",
+            Self::ProfileClaude => "p-claude",
             // One id for all eight colours, exactly as `Self::Chevron` has one
             // id for every angle: there is one chassis, and what tells two of
             // them apart is a parameter `mark_key` adds.
@@ -1246,6 +1276,7 @@ impl ChromeMark {
             Self::ProfileLine(ProfileGlyph::Console) => "p-shell-line",
             Self::ProfileLine(ProfileGlyph::Ubuntu) => "p-ubuntu-line",
             Self::ProfileLine(ProfileGlyph::Git) => "p-git-line",
+            Self::ProfileLine(ProfileGlyph::Claude) => "p-claude-line",
             Self::File => "i-file",
             Self::Globe { .. } => "i-globe",
             Self::Folder => "i-folder",
@@ -1372,6 +1403,7 @@ impl ChromeMark {
             }
             Self::ProfileUbuntu => Self::ProfileLine(ProfileGlyph::Ubuntu),
             Self::ProfileGit => Self::ProfileLine(ProfileGlyph::Git),
+            Self::ProfileClaude => Self::ProfileLine(ProfileGlyph::Claude),
             other => other,
         }
     }
@@ -1397,6 +1429,11 @@ impl ChromeMark {
                 | Self::ProfileUbuntu
                 | Self::ProfileGit
                 | Self::ProfileCmd
+                // The asterisk is `#D97757` and stays `#D97757`: it is a brand
+                // mark like the four above it, and the fact that it happens to
+                // be drawn in pen rather than fill changes nothing about whose
+                // colour it is.
+                | Self::ProfileClaude
                 // The chassis is struck in one of eight fixed hexes and carries
                 // it the way the other four carry theirs — the mark states its
                 // own colour, which is precisely what this match is a list of.
@@ -2261,6 +2298,23 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                     ),
                     pen = PROFILE_LINE_STROKE_UNITS,
                 ),
+                // The asterisk on its own `d`, and **no inset at all** — the
+                // coloured mark is four strokes and no fill, so its silhouette
+                // was a stroke's centre line to begin with, exactly as the
+                // lozenge above it was. What changes is the ink and the pen:
+                // the two weights `#p-claude` distinguishes its spokes with
+                // (`1.29` and `1.17`) collapse to this column's one, because a
+                // struck mark in the menu's icon column is read against its
+                // neighbours' weight and not against its own family's.
+                ProfileGlyph::Claude => format!(
+                    concat!(
+                        r#"<g stroke="currentColor" stroke-width="{pen}" fill="none" stroke-linecap="round">"#,
+                        r#"<path d="M8 2.65v10.7M2.65 8h10.7"/>"#,
+                        r#"<path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6"/>"#,
+                        r#"</g>"#,
+                    ),
+                    pen = PROFILE_LINE_STROKE_UNITS,
+                ),
             },
         ),
         ChromeMark::ProgressRing {
@@ -2988,6 +3042,10 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::ProfileUbuntu => 12,
         ChromeMark::ProfileGit => 13,
         ChromeMark::ProfileCmd => 14,
+        // Appended at the end of the sheet, on the rule the folder pair and the
+        // player's two faces already state above: an index is a position on the
+        // sheet, and the sheet only ever grows at its end.
+        ChromeMark::ProfileClaude => 69,
         ChromeMark::Float => 17,
         ChromeMark::External => 40,
         ChromeMark::DockLeft => 18,
@@ -3089,7 +3147,7 @@ pub fn preview_row_mark(is_page: bool, favicon: Option<crate::favicon::FaviconId
 
 const PROFILE_CHASSIS_VIEW_BOX: &str = "0 0 16 16";
 
-const SYMBOL_VIEW_BOX: [&str; 69] = [
+const SYMBOL_VIEW_BOX: [&str; 70] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -3234,11 +3292,15 @@ const SYMBOL_VIEW_BOX: [&str; 69] = [
     // size as it was pressed.
     "0 0 16 16", // #i-pause
     "0 0 16 16", // #i-speaker-mute
+    // `#p-claude`, the house sixteen: it is a profile mark and stands in the
+    // same `.pmark` slot the four brand marks and the chassis do, so it is cut
+    // in their box or it sits at a different weight in the same picker.
+    "0 0 16 16", // #p-claude
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 69] = [
+const SYMBOL_BODY: [&str; 70] = [
     // #i-gear. **Adapted from Google's Material Design `settings` icon** at 24dp
     // (`src/action/settings/materialicons/24px.svg` in
     // `google/material-design-icons`) — the one mark in this table somebody else
@@ -3912,6 +3974,24 @@ const SYMBOL_BODY: [&str; 69] = [
         r#"<path d="M11.4 6.1l3.2 3.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
         r#"<path d="M14.6 6.1l-3.2 3.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
     ),
+    // #p-claude — the asterisk, and its own colour like every brand mark here.
+    //
+    // The mock-up's `#p-claude`, scaled about its centre by `12 / 13.9` onto the
+    // profile chassis — the P2 step the four shell marks above took by `12 / 14`
+    // and `12 / 14.5`, with this drawing's own ink in the numerator's place:
+    // `1.8 – 14.2` of path plus half of a `1.5` round cap at each end is `13.9`.
+    // Both pens scale with it (`1.5 → 1.29`, `1.35 → 1.17`), because a spoke
+    // whose weight stayed put would be a different asterisk, not a smaller one.
+    //
+    // Four paths and no fill, which makes this the one brand mark on the sheet
+    // whose line rendition is itself with the colour taken out —
+    // `ProfileGlyph::Claude`.
+    concat!(
+        r##"<g stroke="#D97757" stroke-linecap="round" fill="none">"##,
+        r##"<path d="M8 2.65v10.7M2.65 8h10.7" stroke-width="1.29"/>"##,
+        r##"<path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6" stroke-width="1.17"/>"##,
+        r##"</g>"##,
+    ),
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the
@@ -4497,6 +4577,9 @@ mod tests {
             (ChromeMark::ProfileUbuntu, 15.0),
             (ChromeMark::ProfileGit, 15.0),
             (ChromeMark::ProfileCmd, 15.0),
+            // The agent profiles' one brand mark wears the same `.pmark` slot
+            // (user ruling 2026-08-28).
+            (ChromeMark::ProfileClaude, 15.0),
             // The three line renditions, at the menu icon column's fourteen —
             // the only place one is ever drawn (user ruling 2026-08-25). They
             // are in this list rather than beside it because the trap they can
@@ -4661,6 +4744,9 @@ mod tests {
             (ChromeMark::ProfileGit, (8.0, 3.6), [0xf0, 0x50, 0x33]),
             // The charcoal panel — *not* console black, by the mock-up's ruling.
             (ChromeMark::ProfileCmd, (3.0, 8.0), [0x3a, 0x3a, 0x3a]),
+            // Dead centre of the asterisk, where all four spokes cross: the one
+            // point of that drawing that is solid whatever the pens are.
+            (ChromeMark::ProfileClaude, (8.0, 8.0), [0xd9, 0x77, 0x57]),
             // The chassis a profile of the user's own wears: the same panel
             // again, filled from the eight. It joins this list because it is a
             // profile mark and the rule is stated over the *family* — a mark
@@ -4707,6 +4793,7 @@ mod tests {
             ChromeMark::ProfileUbuntu,
             ChromeMark::ProfileGit,
             ChromeMark::ProfileCmd,
+            ChromeMark::ProfileClaude,
         ];
         let icons = rasters.resolve(
             &marks
@@ -6227,6 +6314,7 @@ mod tests {
             ChromeMark::ProfileUbuntu,
             ChromeMark::ProfileGit,
             ChromeMark::ProfileCmd,
+            ChromeMark::ProfileClaude,
             ChromeMark::ProfileGeneric {
                 colour: MarkColour::Teal,
             },
@@ -6236,6 +6324,7 @@ mod tests {
                 ProfileGlyph::Console,
                 ProfileGlyph::Ubuntu,
                 ProfileGlyph::Git,
+                ProfileGlyph::Claude,
             ]
             .map(ChromeMark::ProfileLine),
         );
@@ -6320,6 +6409,7 @@ mod tests {
             ChromeMark::ProfileCmd,
             ChromeMark::ProfileUbuntu,
             ChromeMark::ProfileGit,
+            ChromeMark::ProfileClaude,
             ChromeMark::ProfileGeneric {
                 colour: MarkColour::Amber,
             },
