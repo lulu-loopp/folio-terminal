@@ -515,3 +515,94 @@ still holding, so the tick that removes the last seat never tells it:
 let anything_moving = !self.window.video.is_empty()
             || !self.window.animations.is_empty()
 ```
+
+---
+
+## ⑨ A tenth red, found by the camera again — and it is ⑧'s defect on the third host
+
+**A glance card drew the pane's own play disc, lit it under the pointer, and
+opened a preview pane when it was pressed.**
+
+Found on the first shutter of the evidence run this hand was sent to take: hover
+`clock.mp4` in the files column, press the ▶ on the card, and eight captures
+700 ms apart show no card at all — a **docked preview pane** with the still and
+the disc still on it. `BT_MOUSE_TRACE`, verbatim:
+
+```
+40047.991 mouse_input state=Pressed button=Left pointer=1704,524 route=none
+40048.074 open_preview_image enter path=…\vidshow\clock.mp4
+40056.475 preview_landing_surface seat=SeatId(2) reused=0
+40056.541 open_preview_image leave=opened surface=Seat(LeafId { tab: TabId(1), seat: SeatId(2) })
+40118.381 mouse_input state=Released button=Left pointer=1704,524 route=none
+```
+
+The press was on the disc — `1704,524` is its measured centre, cut out of
+`03-card-03.png` at full resolution — and the next station is a pane opening.
+No `press-video`, no `play_video_on`, no seat.
+
+### Why this is not a new defect but ② one host over
+
+`press_file_peek` is asked **above** the chrome router, at
+`crates/bt-app/src/main.rs` in the window's own press ladder ("the glance card
+takes its own presses… above the float and below the menus"), for the same
+reason `press_float` is: a card is opaque to the layout beneath it. And
+`press_video_at` — the one statement of the whole order — is reached from
+`chrome_mouse_input`. So the card's face arm, `file_peek::Press::Open`, went
+straight to `press_file_peek_door`, and §7.44 ⑧'s ruling (*「转它就是播它，而播它
+是本构建做的事」*) was defeated by a route: the `PreviewSurface::Peek` arm inside
+`press_video_at` is **unreachable by hand**, because the only points that satisfy
+it are points inside a card, and every press inside a card is claimed one level
+higher.
+
+②'s mend named a host rather than the rule behind it, which is why the third
+surface still could not start a recording. The rule, written down in §7.44 ①
+now: **every press road that stands above the chrome router and claims a whole
+region owes `press_video_at` one question.**
+
+### The mend, and where it stands
+
+In the **face** arm and not at the top of the function — the same placement
+`press_float` gives the player in its `Body` arm. The card's own furniture is
+still the card's: the head that is a handle (§7.29) and the scroll thumb answer
+first, and only on the face does a player out-rank what is under it.
+
+```rust
+file_peek::Press::Open => {
+    if self.press_video_at(position)? {
+        return Ok(true);
+    }
+    if self.press_preview_block_thumb(position)? {
+        return Ok(true);
+    }
+    self.press_file_peek_door()
+}
+```
+
+### Red proof
+
+Pinned by `a_player_on_a_glance_card_answers_the_hand_the_way_a_pane_does`, in
+two halves — ① the card's press road reaches the player's path at all, ② inside
+the face arm the player stands before the door. Measured under its own mutation
+(the two lines above deleted, which is the state every build before today was
+in):
+
+```
+running 1 test
+test files_locate_door_tests::a_player_on_a_glance_card_answers_the_hand_the_way_a_pane_does ... FAILED
+
+thread '…' panicked at crates\bt-app\src\main.rs:82022:9:
+the card's press does not reach the player's press path, so its own play disc
+opens the pane it was drawn to make unnecessary
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2806 filtered out
+```
+
+Restored, and both host pins green:
+
+```
+test files_locate_door_tests::a_player_on_a_glance_card_answers_the_hand_the_way_a_pane_does ... ok
+test files_locate_door_tests::a_player_in_a_float_answers_the_hand_the_way_a_pane_does ... ok
+```
+
+Recorded in `docs/DESIGN.md` §7.44 ① (second addendum) and added to ⑩'s gate
+list.

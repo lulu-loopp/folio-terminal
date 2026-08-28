@@ -5042,6 +5042,16 @@ RES 容器是一串对齐的记录,`VS_VERSIONINFO` 是一棵对齐的块树,两
 
 **一处补记(2026-08-28,拍照时发现):"同一套手势"要三个宿主都真的走到那条路上。** 模型没有第二种可能,派发**有**——浮窗里按下去是 `press_float` 认领的,而 `press_float` 排在 chrome 路由**之上**(一扇窗对底下的布局不透明,靠的就是这个次序),它的 `Body` 臂从前直接下到文档梯子。`press_video_at`(那条"画面上的播放圆片 → 条在台上时条上的每一枚控件 → 画面本身的双击"的完整次序)只从 `chrome_mouse_input` 走。所以浮窗画出一枚指针一上去就亮、按下去什么都不做的播放圆片,和一条手够不着的控件条——一段录像三个表面,其中一个开不了。**抬起那一半从来没缺**(松手的滑块是在 `chrome_mouse_input` 里应的,而抬起确实走得到那里),这个不对称正是它躲过一次通读的原因。改法是 `press_float` 的 `Body` 臂先问 `press_video_at`,和一片之前 §7.39 那条"浮窗里的 md 选不中"同形:**站在文档上的播放器压过文档**。红门 `a_player_in_a_float_answers_the_hand_the_way_a_pane_does`(两个宿主都到得了那条路 + 浮窗自己臂里播放器排在文档前面)。
 
+**而第三个宿主犯的是同一件事,它躲过上面那次修,是因为那次修点的是一个宿主而不是它背后的规矩(2026-08-28 再次拍照发现)。** `press_file_peek` 和 `press_float` 一样排在 chrome 路由**之上**——一张卡对底下的布局也不透明——它的「脸」那一臂(`file_peek::Press::Open`)从前直接下到 `press_file_peek_door`。于是卡画出 pane 的同一枚播放圆片、指针一上去就亮,按下去**开出一扇预览 pane** 来:⑧ 那句「转它就是播它,而播它本构建做」被一条路线打败,`press_video_at` 里那条 `PreviewSurface::Peek` 的臂对一只手来说是够不着的死码。`BT_MOUSE_TRACE` 逐字:
+
+```
+mouse_input state=Pressed button=Left pointer=1704,524 route=none
+open_preview_image enter path=…\vidshow\clock.mp4
+preview_landing_surface seat=SeatId(2) reused=0
+```
+
+按在圆片上,下一站是一扇 pane 开出来。改法与浮窗同形、也同位置:**「脸」那一臂**先问 `press_video_at`,而不是函数开头——卡自己的家具(当把手的头 §7.29、滚动拇指)仍然是卡的,而 `press_float` 给播放器的也正是 `Body` 这个位置。红门 `a_player_on_a_glance_card_answers_the_hand_the_way_a_pane_does`(①卡的按下到得了播放器那条路;②「脸」那一臂里播放器排在门前面)。**两次同形的缺陷说明这条要按规矩记:每一条排在 chrome 路由之上、认领整片区域的按下路,都欠 `press_video_at` 一问。**
+
 **② 控件条是本窗画的,而它长得和昨天一模一样。**
 
 §7.23 ⑪ 已经把这条控件条设计过一次了——发丝线一根、四枚控件、两条轨、两个等待、两条 motion 跨度。**退役壳页并没有退役那份设计**,只是把它搬到本窗画得出来的地方。`video_seat.rs` 顶上那一段常量逐行标着它替换掉的 CSS 声明(`#bar{height:34px}`、`.ib{width:22px}`、`#vol{flex:0 0 54px}`……),这样"搬家"是一件可以逐条核对的事,而不是一次重画。
@@ -5188,6 +5198,6 @@ fixture 三份新的(`.mkv` 绿 / `.avi` 粉 / `.wmv` 紫)与旧的两份同一�
 
 另外一半：**`Engine::open` 本来在窗口线程上等**。不是这次冻结的原因（它是百毫秒而不是八秒），但是同一条法在同一处被破：本机实测冷进程首开 **112 ms**、之后每开 **36-45 ms**，背后还挂着 5 秒的 `OPEN_BUDGET`。现在 `open` 什么都不等：开个通道、起个线程就返回，`MFStartup`、D3D 设备、媒体引擎、`SetSource` 全在线程那一边；建不起来就把 `EngineError` 写进共享 `EngineState`，走 `VideoSeat::fault` → `sweep_video_seats` 这条已经存在的路（⑥ 那句话晚一拍到）。**截止时间没消失，只是搬家了**：`OPEN_BUDGET` 现在花在 `Engine::state` 里——超过五秒还没建起来也没报错，答案就是 `EngineError::Unresponsive`，没有任何人阻塞在它上面。
 
-**⑩ 红门。** `bt-app`:`a_video_is_one_seat_on_three_surfaces`(一门开三面 + 三张纹理 + `engines_outstanding` 回到起点)、`a_card_torn_off_carries_its_engine_with_it`(⑦ 那四条)、`the_bar_rises_on_hover_and_rests_by_the_registers_numbers`(两个等待是登记表的 + 状态机走完一整程)、`the_bar_sheds_its_controls_from_the_right_and_never_its_player`、`every_control_answers_where_it_is_drawn`、`the_still_and_the_first_played_frame_share_a_rect`(两个调用者拿的是同一个盒子,逐像素相等)、`a_gif_advances_by_its_own_frame_delays`、`an_animation_that_has_not_changed_frame_uploads_nothing`、`the_shell_page_is_gone`(源码门五件)、`every_name_in_the_class_plays_and_the_class_is_the_seven_that_were_opened`。`bt-platform`:`the_environment_is_created_with_no_browser_arguments_at_all`、`opening_a_video_never_blocks_the_window_thread`（⑫；八次 `open` 共 60 ms 以内，变异回阻塞式是 468.6 ms）。`bt-app` 补：`a_video_frame_alone_is_enough_to_present`（⑫：真值表 + 调用点真的从 `tick_owes_a_present` 走的源码门）。
+**⑩ 红门。** `bt-app`:`a_video_is_one_seat_on_three_surfaces`(一门开三面 + 三张纹理 + `engines_outstanding` 回到起点)、`a_card_torn_off_carries_its_engine_with_it`(⑦ 那四条)、`the_bar_rises_on_hover_and_rests_by_the_registers_numbers`(两个等待是登记表的 + 状态机走完一整程)、`the_bar_sheds_its_controls_from_the_right_and_never_its_player`、`every_control_answers_where_it_is_drawn`、`the_still_and_the_first_played_frame_share_a_rect`(两个调用者拿的是同一个盒子,逐像素相等)、`a_gif_advances_by_its_own_frame_delays`、`an_animation_that_has_not_changed_frame_uploads_nothing`、`the_shell_page_is_gone`(源码门五件)、`every_name_in_the_class_plays_and_the_class_is_the_seven_that_were_opened`。`bt-platform`:`the_environment_is_created_with_no_browser_arguments_at_all`、`opening_a_video_never_blocks_the_window_thread`（⑫；八次 `open` 共 60 ms 以内，变异回阻塞式是 468.6 ms）。`bt-app` 补：`a_player_in_a_float_answers_the_hand_the_way_a_pane_does` 与 `a_player_on_a_glance_card_answers_the_hand_the_way_a_pane_does`(①:两条排在 chrome 路由之上的按下路都得到得了播放器,且各自臂里播放器排在它底下那件东西前面)、`a_video_frame_alone_is_enough_to_present`（⑫：真值表 + 调用点真的从 `tick_owes_a_present` 走的源码门）。
 
 **⑪ 挂账。** ⓐ **共享纹理仍然没做**,理由和数字都在 §7.42 ③,本片没有推翻它:CPU 回读每帧 1.9–2.6 ms(160×120),按像素线性,而这条路在没有显卡驱动的机器上照样成立。ⓑ **APNG 没接**(⑤,没有 fixture)。ⓒ **`.mpg`/`.flv` 没测**(⑥,同上)。ⓓ **一张 hover 卡压在一扇正在放的 pane 上时,pane 的条会画在卡上面**——卡在 overlay 栈里比 `video_bars` 那条带高,而 pane 的条是那条带。实际上碰不到:pane 的条只在指针停在那扇 pane 上时才在,而卡在的时候指针在文件行上,条早歇了。写下来免得下一个人当成新缺陷。ⓔ **控件条上没有 tooltip**,与 §7.23 ⑪ 的壳页版一致——媒体控件的四枚记号是通用词汇,而 §7.33 那条门走的是头和轨的 run,不走这条覆盖在画面上的条。

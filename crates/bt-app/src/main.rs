@@ -56464,6 +56464,31 @@ impl Runtime<'_> {
                 Ok(true)
             }
             file_peek::Press::Open => {
+                // **A player standing on the picture answers before the door
+                // underneath it** (route B slice ②; §7.44 ①, found by
+                // photographing the machine 2026-08-28 — the second host to
+                // have this same defect, and for the same reason).
+                //
+                // `press_video_at` states the whole order — a play mark on a
+                // picture, then every control on a bar that is up, then a double
+                // click on the picture — and it is reached from
+                // `chrome_mouse_input`. A press inside the card never gets that
+                // far: `press_file_peek` is asked *above* the chrome router,
+                // which is what makes a card opaque to the layout beneath it,
+                // and this arm went straight to the door. So the card drew a
+                // play disc that lit under the pointer and, when it was pressed,
+                // opened the preview pane instead of playing — the ruling's
+                // *「能动的就动」* reaching a glance card and being defeated by a
+                // route, one host over from the float in §7.44 ①.
+                //
+                // Here rather than at the top of the function, and that is the
+                // same placement `press_float` gives it: the card's *furniture*
+                // — the head that is a handle, the scroll thumb — is still the
+                // card's, and only on the face does the player out-rank what is
+                // under it.
+                if self.press_video_at(position)? {
+                    return Ok(true);
+                }
                 // **A wide block in the card is a scrolling region, and the bar
                 // under it is a bar** (user ruling, 2026-08-14). Asked between
                 // the card's own thumb and the door, which is the order the
@@ -81955,6 +81980,66 @@ mod files_locate_door_tests {
         assert!(
             player < document,
             "the document underneath answers before the player standing on it"
+        );
+    }
+
+    /// RED — **a player on a glance card answers the hand the way a pane's
+    /// does** (route B slice ②; §7.44 ①, found by photographing the machine
+    /// 2026-08-28, one host over from the float above).
+    ///
+    /// The third surface had the *same* defect as the second, and it survived
+    /// the second one's mend because that mend named one host rather than the
+    /// rule behind it. Both `press_float` and `press_file_peek` are asked
+    /// **above** the chrome router — which is what makes a window and a card
+    /// each opaque to the layout beneath it — and `press_video_at`, which states
+    /// the whole order (a play mark on a picture, then every control on a bar
+    /// that is up, then a double click on the picture), is reached from
+    /// `chrome_mouse_input`. So the card drew the pane's own play disc, lit it
+    /// under the pointer, and on the press opened the preview pane instead:
+    /// `press_file_peek`'s face arm went straight to `press_file_peek_door`.
+    ///
+    /// Photographed: `BT_MOUSE_TRACE` on the press that this pin now forbids —
+    ///
+    /// ```text
+    /// mouse_input state=Pressed button=Left pointer=1704,524 route=none
+    /// open_preview_image enter path=…\vidshow\clock.mp4
+    /// preview_landing_surface seat=SeatId(2) reused=0
+    /// ```
+    ///
+    /// — a press on the disc, and the next station is a pane opening.
+    ///
+    /// Two halves, and the second is the load-bearing one:
+    ///
+    /// ① the card's press road reaches the player's press path at all;
+    /// ② inside the **face** arm the player stands before the door, because that
+    /// is the only ordering that lets the disc be pressed. The face and not the
+    /// whole function on purpose: the card's own furniture — the head that is a
+    /// handle (§7.29), the scroll thumb — is still the card's, and that is the
+    /// same placement `press_float` gives the player in its `Body` arm.
+    ///
+    /// RED GATE: drop `press_video_at` from the face arm and ① fails, which is
+    /// the state every build before 2026-08-28 was in.
+    #[test]
+    fn a_player_on_a_glance_card_answers_the_hand_the_way_a_pane_does() {
+        let press = body("    fn press_file_peek(");
+        assert!(
+            press.contains("self.press_video_at(position)"),
+            "the card's press does not reach the player's press path, so its own play disc \
+             opens the pane it was drawn to make unnecessary"
+        );
+        let face = press
+            .find("file_peek::Press::Open =>")
+            .expect("the card's press has a face arm");
+        let face = &press[face..];
+        let player = face
+            .find("self.press_video_at(position)")
+            .expect("the card's face asks the player");
+        let door = face
+            .find("self.press_file_peek_door()")
+            .expect("the card's face reaches the door");
+        assert!(
+            player < door,
+            "the door underneath answers before the player standing on it"
         );
     }
 
