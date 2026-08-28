@@ -3768,6 +3768,9 @@ Reduced 那一轮是同一个进程:`SPI_SETCLIENTAREAANIMATION` 的值走 **`pv
 | `close-search`(裸 `Esc`)是装饰行 | **误判** | 「`lookup` 永远不会返回它」这个观察是对的:Esc 梯子在每一种宿主上都先答,页也不例外。漏掉的是**这一行的活是在按压成为按压之前干完的**——`webhost::claimable_chords` 读的正是这张表,用来告诉引擎哪些键要交回来。这行一撤,一张拿着键盘的页就把 `Esc` 留给自己,站在它上面的搜索胶囊没有任何办法关掉。`webhost::tests::the_page_gives_the_search_chord_back_to_the_window` 断言的正是这件事,撤行即红。**所以留着,而且留在快捷键页上**:它是一条读者能改、改了会看见效果的真和弦。理由已写在那一行的注释里,免得下一位读盘点的人再判一次 |
 ### 7.23 视频有一张脸：首帧从 Media Foundation 来，能画的集合不等于能播的集合（视频预览片①，2026-08-27 用户裁；`crates/bt-platform/src/video.rs`(新)、`crates/bt-app/src/{preview,file_peek,main}.rs`、`test-assets/folio-video-test.mp4`(新)）
 
+> **⚠ 2026-08-28 终注:本节 ⑩ 与 ⑪ 描述的整条 A 路线已经退役,现状在 §7.44。** 一张 `player.rs` 写的壳页、`Mint::VideoShell`、`--autoplay-policy` 参数、`WebSeat::playing_video`、`IsDocumentPlayingAudio` 供喇叭、`a_page_was_replaced` 的第三个参数、`ChromeMark::artwork`——七样全部拆除,清单与理由在 §7.44 ④。本节 ①–⑨(**首帧、可播矩阵的旧形、fixture、卡与 pane 的脸**)里,只有 fixture 与「一段录像有一张脸」这条裁决仍是现状;**第二列「能画不能播」整列也退役了**(§7.44 ⑥:一个解码器同时回答两个问题之后,两个集合按构造相同,`.mov`/`.mkv`/`.avi`/`.wmv` 四个已实测可播)。控件条(⑪)的**设计**原样活着,只是搬到本窗自己画(§7.44 ②)。读本节请当作历史,不要当作现状。
+
+
 **一句话：视频还是进不了页道（§7.16 一个字都没翻案），但它不再落在「这种文件类型没有预览」那张卡上——本窗自己长了一个解码器，悬停卡与预览 pane 都画它的首帧，并说它有多长、多大、多重。它不播；播是片②，路线已经裁好，写在 ④。**
 
 **① 先清一段自相矛盾的注释（零功能改动）。** `main.rs` 的 `path_opens_as_a_page` 头上留着 2026-08-25 那次「否决半片」的残段：*A `.mp4` is a page by the identical argument PDF is one … now opens a player with controls, a scrubber and a volume.* 那段话描述的是**被否掉的**那半片，与同文件的红门、与 `preview.rs` 的表注、与 §7.16 全篇矛盾——读它的人会得到与代码相反的结论。已改写成现状：视频不是页、四扇门都不给它页道、今天它的脸是首帧、播的路线在 ④。
@@ -5014,3 +5017,159 @@ RES 容器是一串对齐的记录,`VS_VERSIONINFO` 是一棵对齐的块树,两
 **⑩ 红门。** `bt-platform`:`an_engine_reports_the_duration_and_size_of_a_file_it_opened`(整条创建链)、`a_frame_arrives_after_play_and_position_advances`(帧在来 **且** 钟在走,并打印上面那张代价表)、`a_quicktime_file_plays_where_the_browser_would_not_open_it`(触发条件③)、`a_software_adapter_still_serves_frames`(WARP)、`every_engine_is_shut_down_before_the_process_leaves`(三条臂)、`the_type_table_under_reports_what_the_decoder_will_open`(⑧ 那条发现)、`the_verbs_reach_the_engine`、`nothing_that_is_not_a_video_plays`。`bt-render`:`the_still_and_the_playback_share_one_fit_rule`(纯函数,三条断言)、`a_video_layer_fills_its_box_letterboxes_in_its_ground_and_rounds_its_corners`(**读回像素**,在没有显卡驱动的机器拿到的那个设备上——§7.36 用一次发布门换来的教训)、`a_video_that_stopped_releases_its_texture`。`bt-app`:`a_videos_still_lands_where_the_playing_picture_does`。
 
 **⑪ 挂账。** ⓐ **控件条没有**:播放/进度/时间/静音/音量/倍速目前只有 A 壳页那一套,②片要把它们搬到本窗自己的 chrome 上。ⓑ **三个表面没接**:hover 卡、浮窗、侧 pane 今天还是走 A 路,②片接。ⓒ **共享纹理没做**,理由在 ③,数字也在 ③,②片凭那张表决定。ⓓ **tab 小喇叭的来源没换**:今天仍是 `IsDocumentPlayingAudio`,新的判据是 `state().playing && !muted`,②片接 UI 时一起换。ⓔ **`.webm`/`.mkv`/`.avi`/`.wmv` 没有 fixture**,矩阵里那几行是「未测」而不是「不行」——要么补 fixture,要么在②片验收时用用户自己的文件实测。ⓕ **帧速受 fixture 限制**:本仓那两份录像大约 5 fps,所以「14 帧 / 2.65 秒」说明的是钟在走,不是这条路的吞吐上限;吞吐的读法是 ③ 那张每帧代价表。
+
+### 7.44 一段录像在哪张脸上都是同一段:一个座、一条自己画的控件条、三个表面,和一张浏览器退场的清单(视频块 B 路线②,2026-08-28 用户裁,已落地;`crates/bt-app/src/{video_seat.rs,animation.rs}`(新)、`crates/bt-app/src/{main,preview,file_peek,float,marks,webnav,webhost,web_trace,i18n}.rs`、`crates/bt-app/src/player.rs`(**删**)、`crates/bt-render/src/{video.rs,lib.rs}`、`crates/bt-platform/src/{webview.rs,lib.rs}`、`test-assets/folio-video-test.{mkv,avi,wmv}`(新)、`test-assets/folio-anim-test.gif`(新))
+
+**一句话:一段录像现在由一个 `VideoSeat` 持有,它不知道自己在哪个表面上——侧 pane、固定浮窗、hover 卡三张脸问它要一个矩形,它就把画和条给出去;控件条是本窗自己画的、不再是一张页里的 CSS;卡上的 ▶ 按下去就播,拖头变浮窗时引擎跟着走、位置不丢;GIF 按自己的帧时长动起来;A 壳页连同它的 mint、它的进程参数、它的浏览器事件一起退场。**
+
+---
+
+**① 一个座,三张脸,而"三张脸"是签名里的一个参数。**
+
+用户裁决原话两句:「视频在 **hover 卡、固定浮窗、侧边预览 pane 三个表面用同一个引擎与同一张画、同一套手势**」「A 壳页退役」。
+
+这句话逼出来的形状不是"把 pane 的代码复制两份",而是 §7.31 给选区用过的那一个:**一份模型,按表面分派**。选区、滚动位置、播放头,都是关于"一份文件的一个视图"的事实,而这扇窗有三种视图。所以:
+
+- `video_seat::VideoSeat` 持有引擎、最新一帧、控件条的状态。**它不知道自己在哪**。
+- `video_seat::VideoSeats` 是 `BTreeMap<PreviewSurface, VideoSeat>`。`PreviewSurface` 早就是 `Seat(LeafId) | Float(FloatId) | Peek` 三态(§7.12 ⓑ),所以键现成。
+- 表面每帧递一个矩形进来,拿一个 `VideoLayer` 和一个 `marks::OverlayLayer`(控件条)回去。
+
+动词也是一个:`play_video_on(surface)`、`stop_video_on(surface)`,函数体里没有一处问"这是哪一种表面"。**三张脸的一致不是三个调用点记得对齐出来的,是签名里没有第二种可能。**
+
+`play_video_on` 的四条拒绝路线少了一条,少掉的那条正是壳页:路线 A 要把路径 canonicalize 一遍(URL 必须是磁盘同意的那一个拼法),而一个解码器是拿着路径直接开的——**第二个拼法没有了,§7.23 ⑩ 那个"两种拼法把播放器一帧之内关掉"的缺陷整类消失**。
+
+`seats_wearing_a_play_button` 里那条 `is_closing` 也没了,而它的消失是同一件事:路线 A 关掉浏览器之后 map 条目要活到进程结束(实测最长十秒),所以"停了之后播放键多久回来"是一个关于**别人进程**的问题;`VideoSeats::close` 是同步的,座当帧从表里消失,按钮当帧回来。
+
+**② 控件条是本窗画的,而它长得和昨天一模一样。**
+
+§7.23 ⑪ 已经把这条控件条设计过一次了——发丝线一根、四枚控件、两条轨、两个等待、两条 motion 跨度。**退役壳页并没有退役那份设计**,只是把它搬到本窗画得出来的地方。`video_seat.rs` 顶上那一段常量逐行标着它替换掉的 CSS 声明(`#bar{height:34px}`、`.ib{width:22px}`、`#vol{flex:0 0 54px}`……),这样"搬家"是一件可以逐条核对的事,而不是一次重画。
+
+- **两个等待原值不动、改了住址**:`VIDEO_BAR_REVEAL_INTENT` 仍然是 `profiles::CHEVRON_HOVER_OPEN_DELAY`(一个播放器的条和一个 `⌄` 的菜单是同一句承诺说两遍),`VIDEO_BAR_IDLE_REST` 仍然是 2s。它们**仍然在 motion 登记表里**——从前登记是因为"一个只活在 JavaScript 字符串里的时长是本产品唯一一条门看不见的跨度",现在登记是因为它是一个等待,而一个等待因为是等待才登记。
+- **淡入淡出是 `MOTION_FAST`**,不是第四个数。
+- **三个"不算没动作"的状态照旧**:暂停中、指针停在条上、轨在手里。
+- **每一个数字都当场向引擎要**。条上没有一个格子记得自己上次被告知过什么——这是 §7.42 ④「每个数字只有一个权威」延到脸上:一个记得自己按过播放的条,会在视频自己走到头那一刻开始说谎。
+
+**新增的一条规矩:窄了就从右边脱。** 同一条条要在九百像素的 pane 上和三百像素的 hover 卡上都成立,所以总得少点东西。不是两套设计加一个阈值,而是**一条固定的让位次序**:倍速 → 音量轨 → 静音 → 总时长 → 当前时间。播放键和进度条永不让位,因为两者都没有的东西不是播放器。次序本身按"每一件东西占这条裁决的多少":倍速是方便,音量后面站着键盘和静音键,静音后面站着键盘,两个时钟才是这条条存在的理由。红门 `the_bar_sheds_its_controls_from_the_right_and_never_its_player` 把宽度从九百像素一路收到不成立,记下每一件消失的次序。
+
+**键盘**照 §7.34:`preview_keyboard_surface()` 已经判过是浮窗还是坞里的 pane,所以播放器的五个键(空格、←/→ 5s、↑/↓ 音量、M)**挂在那个答案上**,不新加一级梯子。hover 卡永远不是那个答案,也永远不吃键——它按自己的立身裁决是只读的,一张吞掉空格的悬停卡是把 shell 的键抢走的悬停卡。五个键排在 preview 那条梯子的**最前面**,因为下面每一条对它们都有别的解释(方向键滚文档、空格翻页),而一个正在放录像的表面,它的方向键是播放头。
+
+**tab 小喇叭换了源**(销 §7.42 ⑪ ⓓ):从前问浏览器 `IsDocumentPlayingAudio`——一个关于**文档**的问题,由引擎回答,以事件到达,本窗要订阅并记住;现在是 `playing && !muted && volume > 0 && has_audio`,画 tab 条那一刻当场读引擎,不用记。`has_audio` 那一项是新的:一段没有声轨的录屏不该把读者指过去。**浮窗和卡上的录像不进这个集合**,而这不是缺口——那个记号说的是"声音在哪个 tab 里",而一扇浮窗不在任何 tab 里,它就在读者眼前。
+
+**③ 三个表面在渲染器里是三个高度,不是列表里三个位置。**
+
+片①只有一个表面所以只有一个答案。接上另外两个之后,**一个忽略这件事的图层会在两个方向上同时错**:画在 pane 的槽位里,浮窗的视频会压在浮窗自己那张不透明的脸**下面**,看不见;画在最后,它会盖住叠在它上面的每一扇浮窗和模态遮罩。
+
+所以 `bt_render::VideoStage`,而它的形状是**照抄 `WebHole::above`** 的——那个字段替"一张网页被合成进来的那个矩形"解决的是同一个问题(一个表面一个洞,punch 在那个表面自己在 z 序里的位置,而不是一个全局高度),同一个问题的第二套拼法就是这个渲染器一直没有的第二个权威。
+
+| 阶段 | 画在哪 | 谁在下面 | 谁在上面 |
+|---|---|---|---|
+| `Seat` | 预览座图片的那个槽位 | 座的 body chrome | 座的正文、web hole、卡、浮窗 |
+| `Overlay(i)` | 第 `i` 层 overlay 的**底之上、填充之下** | 那一层的 ground | 那一层的发丝线、头、标记、字,以及它上面的每一层 |
+
+`Overlay(i)` 一个变体同时管浮窗和 hover 卡,因为在这扇窗里**两者都是 overlay 层**:卡是 `OverlayStack::file_peek`,浮窗是 `OverlayStack::float`。给卡再起一个变体就是同一个位置的第二种说法。索引从哪来:浮窗从 `float_hole_level`(§7.14c 早就有的那张账),卡从新加的 `file_peek_level`,两者都由 chrome 那一趟写下——因为索引是**栈的**事实,而栈只在那一趟里存在。`OverlayStack::below_the_file_peek` 写在 `below_the_floats` 旁边、按同一个次序,理由一模一样:这是"列表的顺序"和"一个进列表的下标"碰面的唯一地方,给一个加了组就得给另一个也加。
+
+**控件条各回各家。** pane 的条是 overlay 栈里一条自己的带(`video_bars`,紧挨着 `preview_bars`,同一个论证:它属于一扇 pane,上面每一层都有权盖住它);浮窗的条跟它自己的滚动条一样,作为**兄弟层**排在那扇窗的层上面、下一扇窗的层下面;卡的条排在卡自己那几层后面。三条都由 `VideoSeat::bar` 这一个函数切出来,回一个 `marks::OverlayLayer`——一个表面无关的束(quads / sprites / labels),因为这条条本来就是表面无关的。
+
+**几何只算一次。** `Runtime::video_shape_of` 回一个 `VideoShape` 结构而不是六个元组值,理由就是有**两个**读者:图层和控件条。一条按 pane body 排版、而画面按 tween 的盒子定位的条,会在每一次 FLIP 的整个飞行时间里离自己的画面差几个像素,然后在什么都不动的时候又对齐——这正是这个类型存在要杜绝的那一种缺陷。
+
+**底(letterbox 两条)**:pane 里是 `None`,因为 pane 一趟之前已经用自己的体色画过那个盒子了,第二个权威就是有一天两处改一处的那个颜色;浮窗和卡里是 `Some(background_rgb())`,因为没人画过。**圆角**:pane 是 0;浮窗也是 0,而这不是疏忽——`content_body` 已经把矩形抬到圆角地板之上了,所以画面自己的角是方的,圆的那些是它周围那张脸的;卡是 `PEEK_IMAGE_RADIUS_LOGICAL_PX`,因为卡真的把自己那扇图片窗口圆过,而它背后没有别人替它圆。
+
+**④ A 壳页退役清单,和一条不扫的账。**
+
+| # | 退役的东西 | 它当初为什么在 | 现在为什么不在 |
+|---|---|---|---|
+| 1 | `crates/bt-app/src/player.rs`(整个文件) | 写 `%LOCALAPPDATA%\Folio\player\play-<hash>.html` | 没有页要写 |
+| 2 | `webnav::Mint::VideoShell{url,video}` 及 `video_behind_the_shell` | 一个 mint 是"本宿主为什么要这次导航"的便条;壳页的目标和它的主语是两个文件 | 没有第二个文件 |
+| 3 | `--autoplay-policy=no-user-gesture-required` | 壳页里 `<video autoplay>`,而 Chromium 的策略不认一个它看不见的按钮上发生的手势 | 没有 `<video>` |
+| 4 | `WebSeat::playing_video` / `IsDocumentPlayingAudio` 供喇叭 | 每个说"这个 pane 是关于什么的"的表面都要认出壳页背后那段录像;喇叭要知道页在不在响 | 没有壳页;喇叭改问引擎(②) |
+| 5 | `a_page_was_replaced` 的第三个参数 | 路线 A 把浏览器放在录像的 pane 上而 pane 仍然指着录像,于是"一个座只显示一样东西"的普通读法会在页开出来的一帧之内把它关掉 | 录像不再经过浏览器,普通读法就是全部读法 |
+| 6 | `marks::ChromeMark::artwork` | 把符号表的 `viewBox` 和路径数据以字符串交出去,唯一的调用者是壳页 | 没有文档要拿图纸;每个别的记号都是**光栅化**出来的 |
+
+`bt-platform` 那一条门从"恰好一个参数,而它是 autoplay"改判为**"一个都不写"**——零是比一更强的钉子:以后要加一个参数,得自带理由自带一行,而不是加进一张已经存在的表。
+
+**残留的 `play-*.html` 不扫,写下来而不是做掉。** 一个壳约七百字节、按内容作键,所以一个升级上来的读者手上是"每段放过的录像一个小文件",在一个缓存文件夹里,在一个连同 profile 一起消失的 profile 里。要扫就得给"**另一个**跑在同一个 `%LOCALAPPDATA%` 上的 Folio"写一条规矩——那正是当初就没有扫的理由——而凭一个名字模式去删一个本构建已经不认识的目录,是比七百个陈旧字节更糟的一件出厂物。
+
+红门 `the_shell_page_is_gone` 走**源码**,一次数五件:`player.rs` 不在盘上;整个 crate 里没有 `<video`;没有 `VideoShell`;没有 `--autoplay-policy`;没有 `Folio\player`。第二条是承重的那一条——一个留着模块但不再调用它的构建,前面四条会全过。
+
+**⑤ GIF:按它自己的帧时长动,走视频道。**
+
+这扇窗从学会解 GIF 那天起就知道它是动的(`DecodedImagePayload::animated` 一直在设),然后画第一帧就停了。用户裁决一句:**「能动的就动」**。
+
+**帧走视频层而不是图片道**,而 §7.42 ⑥ 给"正在播的视频"写的那段论证,每一行对动画都成立——这就是 `animation.rs` 只有三十行解码、没有第二条上传路的全部理由:
+
+- 图片道是**按内容作键的 LRU**,一个每秒变十次的光栅会每秒插十个条目,一分钟之内把窗里别的东西全挤出去;
+- 它也**不想要每帧一张新纹理**——尺寸从不变,而重建纹理是上传里最贵的一段;
+- 浮窗有**圆角**、卡要有**底**。视频层两样都带,图片道两样都没有。
+
+于是动画由同一个图层画、同一个 `video_fit_extent` 定尺寸、同一个 `VideoStage` 分阶段,**三个表面白送**。它唯一不借的是控件条:一段录像是有人在看的东西,一张动图是会动的图,给一个八帧的转圈套一个进度条是这扇窗把两者搞混了。
+
+**延时是读出来的,永远不是猜的。** 一个 GIF 可以每一帧声明不同的延时,而**每一种写错的实现都能通过一个等延时的 GIF**:一帧一次重绘(动画速度跟着机器负载变)、固定一百毫秒、拿第一帧的延时当全部、把延时的单位搞错。所以 fixture `folio-anim-test.gif` 的四帧声明 **100/200/300/400 ms**,四种颜色各不相同,红门 `a_gif_advances_by_its_own_frame_delays` 走完一整圈、在每一个边界的两侧各点一次名,然后再走一圈钉住它是**绕回去**而不是停在最后一帧上。
+
+`frame_at(now)` 是**采样**出来的而不是有人推着走的计数器,照 `termscroll::visibility` 的纪律:一扇忙过头漏了三帧的窗回来时落在**现在该放的那一帧**上而不是落后三帧,而两个表面看同一个文件是同一帧,因为它们问的是同一个问题。`generation` 数的是**换帧**而不是重绘——一个每 tick 都加的构建会为了写已经在那儿的像素每帧花掉一兆字节的总线,那正是 `VideoFrameUpload::generation` 存在要拒绝的开销。
+
+**两个读数照浏览器的老规矩**:声明 0 的延时读作一百毫秒(`DEFAULT_FRAME_DELAY`),下限二十毫秒(`MIN_FRAME_DELAY`)——照字面执行一个 0 是在要求转一个核,而一张动图没有资格比玻璃上其它所有东西加起来还贵。
+
+**超大的只放首帧,阈值是常量。** `MAX_ANIMATION_RGBA_BYTES = 256 MiB`,取的是 `MAX_INLINE_IMAGE_RGBA_BYTES`(64 MiB)在动画这个量级上的同一套理由:一张没人要的图给 64 MiB 是因为一屏这样的图每张都要这么多,而一张动图是读者**指了的一个**对象——但它是一个由几百张图组成的对象,所以额度是"每张动画"而不是"每帧",是单图的四倍而不是四百倍。1080p 下大约三十帧,64×64 的转圈下一万六千帧,两个都是对的答案。越线的、只有一帧的、解不开的、根本不是 GIF 的,**四种拒绝这扇窗的表现完全一样**——画图片道已经有的那张静止图——所以 `AnimationEntry::Refused` 不带载荷,理由打一行 `BT_GIF` 到 stderr,一个理由该在的地方。
+
+**静止帧当帧撤走**,三个表面各撤各的:pane 和浮窗走 `refit_preview_picture` 那条早退(和一段正在播的录像同一条),卡走 `file_peek_layer` 里把 `picture` 置 `None`。两者是同一个文件、同一个尺寸、同一个盒子,而视频道整整早一趟——留着的那一张会被画在动的那一张**上面**,而盖在上面的那张是不动的那张。
+
+**APNG 没接**,而这是个决定不是遗漏:`image` 的 `PngDecoder` 交得出它的帧,但本仓没有 APNG 的 fixture,**一条没有 fixture 的道是没人见过它工作的道**。写在这里而不是发出去。
+
+**⑥ 可播矩阵进产品:一张表一列七行,而它是靠真开文件建的。**
+
+§7.42 ⑧ 已经抓到 `CanPlayType` 少报——`video/quicktime`、`video/x-matroska`、`video/avi`、`video/x-ms-wmv` 它全答 No,而 Media Foundation 出厂就带 AVI source、ASF source 和一个把 `.mov` 读得好好的 MPEG-4 file source。本片把那个发现落进产品:**矩阵不问那个函数,矩阵开文件**。
+
+2026-08-28 本机实测(`Engine::open` + `wait_for_metadata` + 播到出三帧):
+
+| 容器 | 编码 | ready | 尺寸 | 时长 | 出帧 | 播放头 |
+|---|---|---|---|---|---|---|
+| `.mp4` | H.264 | ✓ | 160×120 | 3.0s | 3 | — |
+| `.m4v` | H.264 | ✓ | 160×120 | 3.0s | 3 | 0.421s |
+| `.webm` | VP8 | ✓ | 160×120 | 3.0s | 3 | 0.427s |
+| `.webm` | VP9 | ✓ | 160×120 | 3.0s | 3 | 0.416s |
+| **`.mov`** | H.264 | ✓ | 160×120 | 3.0s | 3 | 0.422s |
+| **`.mkv`** | H.264 | ✓ | 160×120 | 3.0s | 3 | 0.419s |
+| **`.avi`** | MPEG-4 part 2 | ✓ | 160×120 | 3.0s | 3 | 0.417s |
+| **`.wmv`** | WMV2 | ✓ | 160×120 | 3.0s | 3 | 0.415s |
+
+粗体四个是 2026-08-27 时**在可播集合之外**的:`.mov` 在 `FaceOnly` 那一列,`.mkv`/`.avi`/`.wmv` 在表外(§7.23 (f) 当时的论据是「本窗底下的解码器根本读不动它们」——那句话是关于**浏览器**的,不是关于平台的)。
+
+**第二列因此整列退役,而这就是裁决。** 那一列当初存在,是因为静止帧来自 Media Foundation 而播放来自 Chromium,两个解码器对 `.mov` 意见不同。现在**一个解码器回答两个问题**,两个集合按构造是同一个集合,一列区分它们的东西不可能有成员。一个两值枚举里有一个值到不了,就是这扇窗会在它不再为真之后继续维护的那种区分,所以 `VideoPlayback` 没了、`path_names_a_playable_video` 没了,只剩 `path_names_a_video` 一个谓词——脸、播放键、播放动词、红门读的是同一个函数,**再没有第二个问题可以答得不一样**。
+
+**这张表仍然不是关于平台的报告。** HEVC / VP9 / AV1 逐机不同(靠商店扩展),本机三项里前两项装过。一台出厂 Windows 上同一个文件是 `EngineError::Unsupported`——**而那句话现在有地方说了**:`Text::VideoFormatCannotPlay`(字面没变,来源换了)由 `VideoSeat::fault()` 或一次失败的 `open` 落到 `PreviewImageState::failure` 上,而那是每个表面的失败本来就住的、本来就画的那个格子。一个编译在构建服务器上的常量永远不可能知道这件事;当场拒绝的那个解码器知道。
+
+`.mpg` / `.flv` 仍在表外:**没有 fixture 就没有道**,加一行等于加一条道,而一条道值得加是因为有一份 fixture 证明它成立。
+
+fixture 三份新的(`.mkv` 绿 / `.avi` 粉 / `.wmv` 紫)与旧的两份同一种造法、同一种咬法——前 0.2 秒纯黑,其余纯色,160×120,3.0 秒——命令逐字在 `test-assets/PROVENANCE.md`。
+
+**⑦ 拖头带引擎:一个键改了,别的什么都没动。**
+
+用户裁决原话:「拖头转浮窗时**把引擎带走**(不重开,位置不丢)」。
+
+`promote_file_peek` 从前是这样的:读回卡的路径 → `hide_file_peek()`(把卡的一切拆掉)→ 开一扇新浮窗 → `open_preview_onto(path)` 从磁盘重读。三个表面之间没有任何一条通道运着任何状态。
+
+`VideoSeats::rehome(from, to)` 就是那条通道,而它是这张表是 **map** 而不是三个字段的全部理由:一张被拖进浮窗的卡,是同一段录像在同一瞬间换了一个表面,而这件事诚实的表达就是**一个键变了**——引擎没被碰,解码器没重启,播放头没回零,纹理保住了名字所以一帧都没有重传。
+
+顺序上有一处要小心并且写下来了:`hide_file_peek` 顺手会关掉卡的座,而它跑在浮窗**开出来之前**。所以有一个只在这一次晋升期间为真的标志 `video_carried_off_the_card`——一个参数没法用,因为要对齐的两个函数之间隔着三次调用和一个 `float::FloatHost::open`,把一个布尔穿过去等于把晋升的事务塞进每一次别的消散都要走的门。
+
+红门 `a_card_torn_off_carries_its_engine_with_it` 四条断言,每一条都是一次"重开"会露的马脚:①`engines_started`/`engines_shut_down`(§7.42 ⑦ 那两个进程级单调计数器)一个都没动——所以"同一个引擎"是一句算术而不是一次指针比较;②纹理名字没变;③播放头没回零;④卡上什么都不剩。
+
+**⑧ 卡上直接能播。**
+
+§7.23 的卡画一张按 1/10 处抽的静止帧和两行事实,而它的注释明说「**转它就是播它,而播它不是本构建做的事**」。本构建做。所以卡上戴的是 pane 戴的同一枚 ▶ 圆片(`seats::preview_play_button_sprites`,同一个盒子 `preview_play_button_box`),按下去就在卡站的地方开引擎。
+
+这里有一处**次序**是承重的:P149 规定"任何按下先把卡收掉,然后那次按下才开始表示什么"。`press_video_at` 因此排在 `hide_file_peek` **前面**——否则卡上那枚自己的播放键永远按不着,正好是这条裁决要的东西被一个次序打败。
+
+指针离开卡、卡收起(`hide_file_peek`)就 `shutdown`——一个留在后面的引擎是一个解码器、一条 work queue 和一个 Direct3D 设备,属于一个已经不在玻璃上的表面。
+
+**⑨ 一条比停止键更宽的收尾规矩。**
+
+`sweep_video_seats` 一条规矩管三个表面:**一个座活着,只要它被键住的那个表面还在显示它被打开时的那份文件。** 这一条把每一种"没按停止键就结束了"的路都盖住了——pane 换了文档、浮窗关了、卡的指针移到下一行、tab 被撕走——而这些门里没有一扇需要知道解码器存在。
+
+一条例外写在函数里:**一个还没说自己在显示什么的表面保住它的座**。要紧的就是拖头那一刻——浮窗开出来、引擎交过去、图片晚一次调用才到;一次把"还没有图片"读成"不是关于这份文件"的 sweep,会把刚接手的引擎关掉,也就是这条裁决拒绝的那次重开从后门进来。
+
+外加一条:**开完之后才出错的引擎**。`EngineError` 是黏的,而它可以在任何时刻到达(一分钟后某一帧的编解码失败、文件在解码器底下被换掉、容器其实是截断的)。站在这种引擎上的座是一个再也不会收到画面的矩形,所以当场关掉,并给表面同一句话,从同一个地方。
+
+**⑩ 红门。** `bt-app`:`a_video_is_one_seat_on_three_surfaces`(一门开三面 + 三张纹理 + `engines_outstanding` 回到起点)、`a_card_torn_off_carries_its_engine_with_it`(⑦ 那四条)、`the_bar_rises_on_hover_and_rests_by_the_registers_numbers`(两个等待是登记表的 + 状态机走完一整程)、`the_bar_sheds_its_controls_from_the_right_and_never_its_player`、`every_control_answers_where_it_is_drawn`、`the_still_and_the_first_played_frame_share_a_rect`(两个调用者拿的是同一个盒子,逐像素相等)、`a_gif_advances_by_its_own_frame_delays`、`an_animation_that_has_not_changed_frame_uploads_nothing`、`the_shell_page_is_gone`(源码门五件)、`every_name_in_the_class_plays_and_the_class_is_the_seven_that_were_opened`。`bt-platform`:`the_environment_is_created_with_no_browser_arguments_at_all`。
+
+**⑪ 挂账。** ⓐ **共享纹理仍然没做**,理由和数字都在 §7.42 ③,本片没有推翻它:CPU 回读每帧 1.9–2.6 ms(160×120),按像素线性,而这条路在没有显卡驱动的机器上照样成立。ⓑ **APNG 没接**(⑤,没有 fixture)。ⓒ **`.mpg`/`.flv` 没测**(⑥,同上)。ⓓ **一张 hover 卡压在一扇正在放的 pane 上时,pane 的条会画在卡上面**——卡在 overlay 栈里比 `video_bars` 那条带高,而 pane 的条是那条带。实际上碰不到:pane 的条只在指针停在那扇 pane 上时才在,而卡在的时候指针在文件行上,条早歇了。写下来免得下一个人当成新缺陷。ⓔ **控件条上没有 tooltip**,与 §7.23 ⑪ 的壳页版一致——媒体控件的四枚记号是通用词汇,而 §7.33 那条门走的是头和轨的 run,不走这条覆盖在画面上的条。

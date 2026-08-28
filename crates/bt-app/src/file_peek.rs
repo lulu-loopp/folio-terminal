@@ -769,8 +769,15 @@ fn fitted_ground(body: [f32; 4], scale: f32, width: f32, height: f32) -> [f32; 4
 }
 
 /// The ground a picture stands on: the mock-up's own 280×120 frame.
+///
+/// `pub` since a picture on this card may **move** (route B slice ②,
+/// 2026-08-28; `docs/DESIGN.md` §7.44 ⑤): an animated `.gif` is drawn by the
+/// video layer rather than by the card's own icon channel, and the window has to
+/// hand that layer the very rectangle this function cuts. A second derivation of
+/// it — even one that agreed today — is an animation that would sit somewhere
+/// its still did not the first time either of the two constants changed.
 #[must_use]
-fn picture_ground(body: [f32; 4], scale: f32) -> [f32; 4] {
+pub fn picture_ground(body: [f32; 4], scale: f32) -> [f32; 4] {
     fitted_ground(
         body,
         scale,

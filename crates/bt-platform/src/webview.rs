@@ -886,16 +886,18 @@ impl WebHost {
         // Written as `AdditionalBrowserArguments` and not as a per-page setting
         // because the runtime has no per-page spelling of it: it is a command
         // line to the browser process, and the browser process is made once.
-        let options = CoreWebView2EnvironmentOptions::default();
-        // SAFETY: `set_additional_browser_arguments` writes the `UnsafeCell`
-        // the COM object reads, and this write happens before the object is
-        // handed to anybody — the interface below is the first reader.
-        unsafe {
-            options.set_additional_browser_arguments(String::from(
-                "--autoplay-policy=no-user-gesture-required",
-            ));
-        }
-        let options: ICoreWebView2EnvironmentOptions = options.into();
+        // **And it writes none** (route B slice ②, 2026-08-28; `docs/DESIGN.md`
+        // §7.44 ④). The one argument that was ever here was
+        // `--autoplay-policy=no-user-gesture-required`, and it existed for one
+        // reason: a shell page this window wrote carried `<video autoplay>`, and
+        // Chromium's policy would not start it because the gesture that asked
+        // for it happened on a button the page could not see. There is no shell
+        // page any more — a recording is decoded by Media Foundation and drawn
+        // on this window's own glass — so the argument has nothing left to
+        // permit, and a command line kept "in case" is a command line nobody
+        // re-reads.
+        let options: ICoreWebView2EnvironmentOptions =
+            CoreWebView2EnvironmentOptions::default().into();
         unsafe {
             CreateCoreWebView2EnvironmentWithOptions(
                 PCWSTR::null(),

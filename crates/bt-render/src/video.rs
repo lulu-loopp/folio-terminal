@@ -137,6 +137,51 @@ pub struct VideoFrameUpload {
     pub generation: u64,
 }
 
+/// **Which of this window's three stacks a playing video is drawn in** (route B
+/// slice ②, 2026-08-28; `docs/DESIGN.md` §7.44 ③).
+///
+/// Slice ① had one answer because it had one surface. A video now plays on three
+/// — a preview pane, a floating window and a hover card — and those are not
+/// three positions in one list: the pane's picture belongs in the slot the
+/// pane's own still is in, and the other two belong inside the overlay layer
+/// their surface *is*, each with its own things above and below it. A layer that ignored the
+/// difference would be right about the pane and wrong about the other two in
+/// opposite directions: drawn in the pane's slot, a float's video sits **under**
+/// the float's own opaque face and is invisible; drawn last of everything, it
+/// sits over every float stacked above it and over the modal scrim.
+///
+/// **This is [`WebHole::above`]'s shape, and deliberately so.** That field
+/// solves the identical problem for the rectangle a browser is composed
+/// through — one hole per surface, punched in that surface's own place in the
+/// z-order rather than at one global height — and a second mechanism with a
+/// different spelling for the same question would be the second authority this
+/// renderer keeps not having.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VideoStage {
+    /// **The preview seat's picture slot** — over the seat's body chrome, under
+    /// the peek card, under every floating window. Slice ①'s only answer, and
+    /// still the pane's: a video and a still are the same rectangle in the same
+    /// place (§7.42 ⑤), so they are drawn in the same slot.
+    Seat,
+    /// **Directly above one overlay layer's ground** — a floating window's
+    /// body, or a glance card's picture window.
+    ///
+    /// One variant covers both because in this window both *are* overlay
+    /// layers: a card is `OverlayStack::file_peek` and a float is
+    /// `OverlayStack::float`, and a second variant naming the card would be a
+    /// second spelling of the same position.
+    ///
+    /// The index is into the list [`crate::WindowRenderer::set_modal_overlay`]
+    /// was last given, exactly as [`WebHole::above`]'s is, and a layer naming an
+    /// index that is not there draws nothing: it is a video whose window has
+    /// gone, and the honest picture of that is the window not being there.
+    ///
+    /// Above the ground and **below** that layer's own fills, marks and
+    /// captions, which is what puts a float's hairlines, its head and this
+    /// video's own control bar over the picture instead of under it.
+    Overlay(usize),
+}
+
 /// **A playing video, and the box it plays in.**
 ///
 /// One per playing engine. The renderer is handed the whole list every frame —
@@ -171,6 +216,9 @@ pub struct VideoLayer {
     pub radius_px: f32,
     /// A uniform multiplier on the whole layer, for an arrival or a departure.
     pub opacity: f32,
+    /// Which of the renderer's three stacks this one is drawn in. See
+    /// [`VideoStage`].
+    pub stage: VideoStage,
 }
 
 #[cfg(test)]

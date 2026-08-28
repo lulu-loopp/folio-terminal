@@ -2705,38 +2705,15 @@ impl ChromeMark {
         }
     }
 
-    /// **This mark's artwork, as the sheet holds it** — its `viewBox` and its
-    /// body, both verbatim.
-    ///
-    /// The one door out of [`SYMBOL_BODY`] for a surface that is not this
-    /// module's rasterizer, and it exists because there is exactly one such
-    /// surface: the player's shell page, which is an HTML document this window
-    /// writes and hands to an engine (`crate::player`). A page cannot be given
-    /// a texture, so it has to be given the drawing — and the whole of the
-    /// discipline this module is here for is that it is given **this** drawing
-    /// and not a second one somebody redrew in a `<style>` block.
-    ///
-    /// `currentColor` is left standing. Every consumer of a raster gets a hex
-    /// substituted for it because a texture has no cascade; a document has one,
-    /// so the caller sets `color` and the mark takes the ink of whatever it is
-    /// drawn in, which is what the attribute means everywhere else in the
-    /// world.
-    ///
-    /// **The resting artwork**, which is all any caller of this has ever wanted
-    /// and is the only thing it can honestly promise: the turning families
-    /// ([`Self::Chevron`], [`Self::Arrow`], [`Self::TreeDisclosure`]) carry
-    /// their angle in a transform the rasterizer writes, not in their bodies,
-    /// so what comes back for one of those is the glyph at rest.
-    ///
-    /// `None` for the generated family, which has no body to hand over —
-    /// [`Self::is_quoted_symbol`].
-    #[must_use]
-    pub fn artwork(self) -> Option<(&'static str, &'static str)> {
-        self.is_quoted_symbol().then(|| {
-            let index = symbol_index(self);
-            (SYMBOL_VIEW_BOX[index], SYMBOL_BODY[index])
-        })
-    }
+    // **`artwork` retired with the shell page** (route B slice ②, 2026-08-28;
+    // `docs/DESIGN.md` §7.44 ④). It handed a mark's `viewBox` and its path data
+    // out as strings, and it existed for exactly one caller: `player.rs`, which
+    // wrote them into an `<svg>` inside a page. Every other mark in this window
+    // is *rasterized* from the same two tables (`rasterize`, below), because a
+    // texture has no cascade and a document does. There is no document any more,
+    // so nothing outside this module needs the strings — and a public accessor
+    // handing out artwork is an invitation to draw a mark somewhere the
+    // rasterizer's own sizing, colouring and caching do not reach.
 
     /// **The pen this mark is struck with**, in its own `viewBox`'s units — the
     /// number a reader would take off the drawing, before any surface has said

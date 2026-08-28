@@ -519,18 +519,24 @@ mod web_security_tests {
     /// second flag from arriving beside the first without a second reading of
     /// this comment.
     #[test]
-    fn the_environment_is_created_with_one_named_browser_argument() {
+    fn the_environment_is_created_with_no_browser_arguments_at_all() {
         let source = source();
+        // **Zero, since route B** (2026-08-28; `docs/DESIGN.md` §7.44 ④). This
+        // pinned "exactly one, and it is the autoplay policy" while a video was
+        // played by a page this window wrote; the page is gone and the policy
+        // has nothing left to permit. Zero is a stronger pin than one: an
+        // argument added later has to arrive with its own reason and its own
+        // line here, rather than joining a list that already existed.
         assert_eq!(
             source
                 .matches(concat!("set_additional_browser", "_arguments("))
                 .count(),
-            1,
-            "exactly one place writes the browser's command line"
+            0,
+            "this host writes no browser command line"
         );
         assert!(
-            source.contains(concat!("--autoplay-policy=", "no-user-gesture-required")),
-            "and this is the argument it writes"
+            !source.contains(concat!("--autoplay-policy=", "no-user-gesture-required")),
+            "the shell page's autoplay argument retired with the shell page"
         );
         for absent in [
             concat!("allow-file-access", "-from-files"),

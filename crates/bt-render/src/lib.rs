@@ -144,7 +144,7 @@ pub use theme::{background_is_light, ink_over_bp, scheme_in_force, schemes_in_fo
 use theme::{
     search_current_ink_rgb, search_current_rgb, search_match_rgb, selection_background_rgb,
 };
-pub use video::{VideoFrameUpload, VideoLayer, video_fit_extent, video_frame_rect};
+pub use video::{VideoFrameUpload, VideoLayer, VideoStage, video_fit_extent, video_frame_rect};
 
 /// `mark.srch { border-radius: 3px }` (mock-up 1530) — the corner a found word
 /// wears, and the one thing that tells it apart from a dragged selection at a
@@ -1067,6 +1067,10 @@ struct VideoDraw {
     /// because two panes may be playing two videos in one frame, and one pass
     /// with one scissor would crop the second by the first's box.
     clip: SeatViewport,
+    /// Which of the three stacks this quad belongs in — see [`VideoStage`]. One
+    /// list is prepared and three loops read it, so a quad's uploaded vertices
+    /// and its position in the z-order are one decision made in one place.
+    stage: VideoStage,
 }
 
 struct MathDraw {
@@ -6554,32 +6558,14 @@ impl WindowRenderer {
             // window's own coordinates, and the scissor travels per draw so two
             // panes playing two videos do not crop each other.
             if let Some(vertex_buffer) = video_vertex_buffer.as_ref() {
-                pass.set_viewport(
-                    0.0,
-                    0.0,
-                    self.config.width as f32,
-                    self.config.height as f32,
-                    0.0,
-                    1.0,
+                draw_video_stage(
+                    &mut pass,
+                    gpu,
+                    vertex_buffer,
+                    &video_draws,
+                    VideoStage::Seat,
+                    (self.config.width, self.config.height),
                 );
-                pass.set_pipeline(&gpu.video_pipeline);
-                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                for draw in &video_draws {
-                    pass.set_scissor_rect(
-                        draw.clip.x,
-                        draw.clip.y,
-                        draw.clip.width,
-                        draw.clip.height,
-                    );
-                    let bound = draw
-                        .key
-                        .as_ref()
-                        .and_then(|key| gpu.video_textures.get(key))
-                        .map_or(&gpu.video_blank, |held| &held.bind_group);
-                    pass.set_bind_group(0, bound, &[]);
-                    pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
-                }
-                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
             }
             // The preview seat's text body, in the same slot as its picture and
             // for the same reason — above that seat's body chrome, below the
@@ -6728,6 +6714,23 @@ impl WindowRenderer {
                         });
                         pass.set_vertex_buffer(0, buffer.slice(..));
                         pass.draw(0..6, 0..layer.ground_count);
+                    }
+                    // **A video playing in this floating window**, over its
+                    // ground and under everything it draws on top (route B slice
+                    // ②; §7.44 ③). Here and not in the seat's slot because a
+                    // float's face is opaque and a video under it is a video
+                    // nobody sees; here and not last of everything because a
+                    // float stacked over this one has to cover it, which is the
+                    // whole reason this loop is the z-order.
+                    if let Some(vertex_buffer) = video_vertex_buffer.as_ref() {
+                        draw_video_stage(
+                            &mut pass,
+                            gpu,
+                            vertex_buffer,
+                            &video_draws,
+                            VideoStage::Overlay(index),
+                            (self.config.width, self.config.height),
+                        );
                     }
                     if let Some(buffer) = layer.rect_buffer.as_ref() {
                         pass.set_pipeline(&gpu.rect_pipeline);
@@ -7322,6 +7325,7 @@ impl WindowRenderer {
                     key: None,
                     first_vertex,
                     clip,
+                    stage: layer.stage,
                 });
             }
             let Some(frame) = layer.frame.as_ref() else {
@@ -7351,6 +7355,7 @@ impl WindowRenderer {
                 key: Some(layer.key.clone()),
                 first_vertex,
                 clip,
+                stage: layer.stage,
             });
         }
         (draws, vertices)
@@ -11605,6 +11610,65 @@ fn indexed_color(index: u8) -> [u8; 3] {
     // and they are spelled once in `bt_transcript` because the terminal answers
     // `OSC 4;N;?` out of the same table this draws from.
     bt_transcript::indexed_cube_color(index).unwrap_or_else(|| ansi_16_rgb()[index as usize])
+}
+
+/// **One stage's worth of playing video, drawn** (route B slice ②, 2026-08-28;
+/// `docs/DESIGN.md` §7.44 ③).
+///
+/// The three surfaces a video can play on live at three different heights in
+/// this pass, so the same prepared list is walked three times and each walk
+/// takes the quads that belong where it stands. Lifted out of the pass rather
+/// than written three times for the ordinary reason: the scissor discipline, the
+/// blank binding for a ground quad and the restore afterwards are one paragraph
+/// of correctness, and three copies of it would drift the first time one of them
+/// was touched.
+///
+/// The viewport is set to the whole surface every time. A layer's box is already
+/// in the window's own coordinates — the caller may be inside a seat's viewport
+/// or a float's, and neither is the space these quads were computed in.
+fn draw_video_stage(
+    pass: &mut wgpu::RenderPass<'_>,
+    gpu: &GpuContext,
+    vertex_buffer: &wgpu::Buffer,
+    draws: &[VideoDraw],
+    stage: VideoStage,
+    surface: (u32, u32),
+) {
+    let (surface_width, surface_height) = surface;
+    let mut opened = false;
+    for draw in draws.iter().filter(|draw| draw.stage == stage) {
+        if !opened {
+            pass.set_viewport(
+                0.0,
+                0.0,
+                surface_width as f32,
+                surface_height as f32,
+                0.0,
+                1.0,
+            );
+            pass.set_pipeline(&gpu.video_pipeline);
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            opened = true;
+        }
+        pass.set_scissor_rect(
+            draw.clip.x,
+            draw.clip.y,
+            draw.clip.width,
+            draw.clip.height,
+        );
+        // A pipeline whose layout names a texture must have one bound whether
+        // the fragment samples it or not, and a ground quad samples nothing.
+        let bound = draw
+            .key
+            .as_ref()
+            .and_then(|key| gpu.video_textures.get(key))
+            .map_or(&gpu.video_blank, |held| &held.bind_group);
+        pass.set_bind_group(0, bound, &[]);
+        pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+    }
+    if opened {
+        pass.set_scissor_rect(0, 0, surface_width, surface_height);
+    }
 }
 
 #[cfg(test)]
@@ -18907,6 +18971,7 @@ mod tests {
             // Two pixels, BGRA: the left one blue, the right one green.
             let recording: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
             window.set_video_layers(vec![VideoLayer {
+                stage: VideoStage::Seat,
                 key: "one recording".to_owned(),
                 box_: seat,
                 clip: seat,
@@ -19031,6 +19096,7 @@ mod tests {
                     .expect("one frame");
             };
             window.set_video_layers(vec![VideoLayer {
+                stage: VideoStage::Seat,
                 key: "a recording".to_owned(),
                 box_: seat,
                 clip: seat,
