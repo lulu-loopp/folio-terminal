@@ -175,6 +175,25 @@ Write-Host "         : $($banner.Trim())"
 
 # ── Every call goes through here ─────────────────────────────────────────────
 
+# **The flags every `vmrun` call needs, in one place.** `-vp` is not decoration
+# on an encrypted machine: without it `vmrun` refuses every operation, including
+# the ones that look like they only read. The Tools poll below used to build its
+# own command line and so left `-vp` off, which made the Windows 11 machine —
+# the encrypted one, because that is how it gets its TPM — spend six minutes
+# being told `A password is required for this operation` and then fail as though
+# Tools had never come up.
+function Get-VmrunFlags {
+    param(
+        # Guest operations need the account; power and snapshot operations do
+        # not, and passing credentials to them is noise in the printed plan.
+        [switch] $InGuest
+    )
+    $flags = @('-T', 'ws')
+    if ($VmPassword) { $flags += @('-vp', $VmPassword) }
+    if ($InGuest) { $flags += @('-gu', $GuestUser, '-gp', $GuestPassword) }
+    return $flags
+}
+
 function Invoke-Vmrun {
     param(
         [Parameter(Mandatory)] [string] $Step,
@@ -187,10 +206,7 @@ function Invoke-Vmrun {
         [switch] $Tolerant
     )
 
-    $flags = @('-T', 'ws')
-    if ($VmPassword) { $flags += @('-vp', $VmPassword) }
-    if ($InGuest) { $flags += @('-gu', $GuestUser, '-gp', $GuestPassword) }
-    $all = $flags + $Arguments
+    $all = (Get-VmrunFlags -InGuest:$InGuest) + $Arguments
 
     # The printed line is what a person would type, with the two secrets held
     # back: a transcript of this run is evidence and goes in a repository.
@@ -239,14 +255,75 @@ function Invoke-GuestPowerShell {
 # nobody on the host could see. A UTF-8 BOM is the one spelling both editions
 # read the same way, so a guest-bound script without one is refused here, on
 # the host, before anything is copied.
-foreach ($guestBound in @(
-        (Join-Path $root 'scripts\release\smoke.ps1'),
-        (Join-Path $root 'scripts\release\cleanvm\in-guest.ps1'))) {
+$guestBoundScripts = @(
+    (Join-Path $root 'scripts\release\smoke.ps1'),
+    (Join-Path $root 'scripts\release\cleanvm\in-guest.ps1')
+)
+foreach ($guestBound in $guestBoundScripts) {
     $head = [byte[]](Get-Content -LiteralPath $guestBound -AsByteStream -TotalCount 3)
     if (-not ($head.Count -eq 3 -and $head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF)) {
         throw "$guestBound has no UTF-8 byte-order mark; Windows PowerShell 5.1 in the guest would read it as ANSI"
     }
 }
+
+# ── …and parseable by it, which is a different question ──────────────────────
+#
+# The byte-order mark above only settles how the bytes are decoded. What the
+# guest then does with them is Windows PowerShell 5.1's business, and 5.1 is not
+# PowerShell 7: `Join-Path a b c` is a parameter binding error there rather than
+# a three-segment path, `??` and `?:` and `-AsByteStream` do not exist, and a
+# script written and tested in pwsh reads perfectly and dies on the machine that
+# matters. Gate 5's second smoke, on 2026-08-28, died exactly so, in the `smoke`
+# phase, on `Join-Path $PSScriptRoot '..' '..'`.
+#
+# So the check is made by 5.1 itself. `powershell.exe` is on every Windows and
+# is the same edition the guest will use; its parser is asked for errors and the
+# copy is refused before it happens.
+#
+# **A parser catches syntax, and that is all it catches.** The three-argument
+# `Join-Path` above parses perfectly: it is a *binding* error, raised when the
+# line runs. Nothing short of running the script finds that class of difference,
+# which is why the way to change either of these two files is to run
+# `powershell.exe -NoProfile -File scripts/release/smoke.ps1` on the host, on an
+# unpacked archive, before a virtual machine is booted at all.
+$windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
+    throw "no Windows PowerShell at $windowsPowerShell; the guest-bound scripts cannot be checked against the edition the guest runs"
+}
+# The checker is a file rather than a `-Command` string: a path with a space in
+# it then travels as one argument instead of as something a second parser has to
+# put back together.
+$parseChecker = Join-Path ([IO.Path]::GetTempPath()) ('folio-parse-' + [Guid]::NewGuid().ToString('n') + '.ps1')
+# `-WhatIf:$false` on both ends of it: this script supports `-WhatIf`, and a dry
+# run is precisely when this check earns its keep — the temporary file is the
+# checker itself and not a change to anything a dry run is protecting.
+Set-Content -LiteralPath $parseChecker -Encoding UTF8 -WhatIf:$false -Value @'
+param([Parameter(Mandatory)] [string] $Path)
+$errors = $null
+[void][System.Management.Automation.Language.Parser]::ParseFile($Path, [ref] $null, [ref] $errors)
+if ($errors -and $errors.Count -gt 0) {
+    foreach ($problem in $errors) {
+        Write-Output ('  line {0}, column {1}: {2}' -f
+            $problem.Extent.StartLineNumber, $problem.Extent.StartColumnNumber, $problem.Message)
+    }
+    exit 1
+}
+exit 0
+'@
+try {
+    foreach ($guestBound in $guestBoundScripts) {
+        $said = (& $windowsPowerShell -NoProfile -ExecutionPolicy Bypass `
+                -File $parseChecker -Path $guestBound 2>&1 | Out-String).TrimEnd()
+        if ($LASTEXITCODE -ne 0) {
+            throw @"
+$guestBound does not parse under Windows PowerShell 5.1, which is the only
+edition the clean machine has:
+$said
+"@
+        }
+    }
+}
+finally { Remove-Item -LiteralPath $parseChecker -Force -WhatIf:$false -ErrorAction SilentlyContinue }
 
 # ── What has to be on the host before any of it means anything ───────────────
 
@@ -310,22 +387,65 @@ Invoke-Vmrun -Step 'start'  -Arguments @('start', $Vmx, $(if ($NoGui) { 'nogui' 
 # in tens of seconds or in three minutes depending on what the host is doing,
 # and a fixed sleep is either a waste of two minutes or a failure nobody can
 # reproduce.
-Write-Host '  tools      waiting for VMware Tools to answer'
+#
+# **And wait by asking a guest operation, not by asking `checkToolsState`.**
+# That command answers `unknown` / `installed` / `running`, and the Windows 11
+# machine here sits at `installed` — logged on, desktop drawn, `captureScreen`
+# and `fileExistsInGuest` both answering — for as long as anyone cares to watch.
+# Six minutes of that ended the gate's first Windows 11 run. `clean-vm.md` §2.3
+# already says `checkToolsState` is a progress indicator and not a verdict; this
+# is the verdict: the thing every step after this needs is a guest operation
+# that works, so a guest operation that works is what is waited for.
+Write-Host '  tools      waiting for the guest to answer a guest operation'
 if (-not $planning) {
+    # `cmd.exe` is on every Windows there has ever been, so a non-zero exit is
+    # about the guest not answering rather than about the file. Built through
+    # `Get-VmrunFlags` like everything else, and written out here rather than
+    # going through `Invoke-Vmrun` because it runs every five seconds and would
+    # otherwise print seventy copies of the same line.
+    $readyCommand = (Get-VmrunFlags -InGuest) +
+        @('fileExistsInGuest', $Vmx, 'C:\Windows\System32\cmd.exe')
+    # **And then wait for the interactive session, which is a second fact.**
+    # Every phase below runs `-interactive`, because a window drawn on a station
+    # nobody is looking at photographs as black. The Tools answer minutes before
+    # the automatic logon has produced a desktop, and until it has, an
+    # `-interactive` program is refused with `The specified guest user must be
+    # logged in interactively to perform this operation` — which is how this
+    # gate's first re-run lost its `unpack`. So the wait ends when the thing the
+    # phases actually need succeeds: an interactive program that does nothing.
+    #
+    # **`/c exit 0` is one argument, not three.** `vmrun` hands the guest program
+    # its arguments as a single command line, and the pieces after the first do
+    # not survive as separate ones: `… cmd.exe /c ver` comes back
+    # `Guest program exited with non-zero exit code: 1` on a machine where
+    # `… cmd.exe "/c exit 0"` answers 0. Measured on this host, 2026-08-28.
+    $interactiveCommand = (Get-VmrunFlags -InGuest) +
+        @('runProgramInGuest', $Vmx, '-interactive', '-activeWindow',
+          'C:\Windows\System32\cmd.exe', '/c exit 0')
+    $toolsCommand = (Get-VmrunFlags) + @('checkToolsState', $Vmx)
     $deadline = (Get-Date).AddMinutes(6)
-    while ($true) {
-        $state = (& $vmrun -T ws checkToolsState $Vmx 2>&1 | Out-String).Trim()
-        if ($state -eq 'running') { break }
-        if ((Get-Date) -ge $deadline) {
-            throw "VMware Tools never came up; checkToolsState last said '$state'"
+    foreach ($stage in @(
+            @{ Name = 'a guest operation'; Command = $readyCommand },
+            @{ Name = 'an interactive program'; Command = $interactiveCommand })) {
+        while ($true) {
+            $answer = (& $vmrun @($stage.Command) 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -eq 0) { break }
+            if ((Get-Date) -ge $deadline) {
+                $state = (& $vmrun @toolsCommand 2>&1 | Out-String).Trim()
+                throw @"
+the guest never answered $($stage.Name).
+  vmrun said           : $answer
+  checkToolsState said : $state
+"@
+            }
+            Start-Sleep -Seconds 5
         }
-        Start-Sleep -Seconds 5
     }
-    # The Tools answer before the shell is finished drawing itself, and a program
-    # started into a half-built session is a program that photographs a desktop
-    # with no wallpaper on it.
+    # The session answers before the shell is finished drawing itself, and a
+    # program started into a half-built one photographs a desktop with no
+    # wallpaper on it.
     Start-Sleep -Seconds 20
-    Write-Host '             running'
+    Write-Host '             answering'
 }
 
 Invoke-Vmrun -Step 'mkdir' -InGuest -Arguments @('createDirectoryInGuest', $Vmx, $guestHome) -Tolerant | Out-Null

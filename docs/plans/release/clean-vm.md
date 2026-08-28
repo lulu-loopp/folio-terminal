@@ -783,6 +783,68 @@ docs/plans/release/clean-vm-evidence/
 
 客户机里跑 `smoke.ps1` 与 `in-guest.ps1` 的是 **Windows PowerShell 5.1**,它读无 BOM 的文件按 ANSI 代码页解;两份脚本都有非 ASCII 文本(一处消息里的破折号就够了),按 ANSI 读进去的字节把一个带引号的字符串拆坏,连带整个 `switch` 解析失败——首跑在 `unpack` 阶段以「Guest program exited with non-zero exit code: 1」结束,宿主上看不到原因,把 `-Phase unpack` 的输出重定向到文件再 `copyFileFromGuestToHost` 回来才见到 `Unexpected token`。现在两份脚本带 BOM,`run-smoke-in-vm.ps1` 在复制之前先验 BOM,缺就在宿主上拒绝。宿主侧脚本跑在 pwsh 7(默认 UTF-8),不受影响。
 
+### 3.4b 进客户机的脚本还得是 5.1 的方言(2026-08-28 门 5 次跑事故)
+
+BOM 修好之后 `unpack` 过了,**`smoke` 阶段当场死在下一行**:
+
+```
+smoke.ps1 : A positional parameter cannot be found that accepts argument '..'.
+    + CategoryInfo          : InvalidArgument: (:) [smoke.ps1], ParameterBindingException
+    + FullyQualifiedErrorId : PositionalParameterNotFound,smoke.ps1
+```
+
+`Join-Path $PSScriptRoot '..' '..'` 在 pwsh 7 里是三段路径,在 5.1 里是「多给了一个位置参数」。
+干净机上只有 5.1,所以**凡是要进客户机的脚本,都按 5.1 写**:两参数 `Join-Path` 套两层,不用
+`??` / `?:` / `-AsByteStream` / `Split-Path -LeafBase` 一类 7 独有的东西。
+
+同一轮在本机 5.1 上跑出来的还有三条,都不是语法而是行为差异:
+
+| 现象 | 成因 | 现在怎么写 |
+| --- | --- | --- |
+| `folio exited `(退出码是空的) | 5.1 对**带重定向的** `Start-Process -PassThru` 返回的 `Process` 从没打开过进程句柄,进程走了以后 `.ExitCode` 永远答 `$null` | 起完就 `[void] $process.Handle` |
+| 证据里的 `diagnostics.log` 首行是 `â”€â”€ Folio 0.1.0` | Folio 写的是无 BOM 的 UTF-8;`Get-Content` 在 7 里按 UTF-8 解,在 5.1 里按 ANSI 代码页解 | 凡读 Folio 写的文件一律 `-Encoding UTF8` |
+| `web` 阶段拍回一张 26×26 的「卡」,窗口还 `WM_CLOSE` 不动 | winit 有一个**常驻可见、无属主的 13×13** 消息窗(类名 `Winit Thread Event Target`),它比真窗口早三秒出生,「可见且无属主」的搜索先撞上它 | 按 Alt-Tab 的规矩再加一条:排掉 `WS_EX_TOOLWINDOW`(winit 那个 `ex=0x080800A0`,Folio 的窗口是 `ex=0x00040110`) |
+
+**红门也随之多了一道**:`run-smoke-in-vm.ps1` 复制之前,除了验 BOM,还用宿主自己的
+`powershell.exe`(就是 5.1)把两份脚本各解析一遍,不过就拒绝。解析器只管语法——上面那条
+`Join-Path` 是**绑定**错误,解析得干干净净——所以改这两份文件的办法是先在宿主上对着解出来的 zip
+跑一遍:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/release/smoke.ps1 `
+    -Exe <解压出来的>\folio.exe -Artifacts <某个临时目录>
+```
+
+### 3.4c `vmrun`:`-vp` 要给全,Tools 状态不能当判据,还要等到能交互(2026-08-28)
+
+同一轮里 Win11 那台连跑不起来,四条都在 `run-smoke-in-vm.ps1` 的等待环节:
+
+1. 等待环节自己拼了命令行,**漏了 `-vp`**,于是加密的 Win11 每五秒收到一句
+   `A password is required for this operation`,等满六分钟按「Tools 没起来」失败。现在所有
+   `vmrun` 调用共用同一个 `Get-VmrunFlags`。
+2. 补上 `-vp` 之后 `checkToolsState` 答的是 **`installed` 而不是 `running`**,而那台机此时早已
+   自动登录、桌面画完、`captureScreen` 与 `fileExistsInGuest` 都答得上来。§2.3 早写着
+   `checkToolsState` 只能当进度指示;现在等待环节直接**等一次能用的 guest 操作**
+   (`fileExistsInGuest … C:\Windows\System32\cmd.exe`),因为后面每一步要的正是这个。
+3. 那还不够:五个阶段全走 `-interactive`(§3.4「自动登录是必需的」),而自动登录比 Tools 晚**几十秒**
+   到位,这中间 `vmrun` 答的是
+
+   ```
+   Error: The specified guest user must be logged in interactively to perform this operation
+   ```
+
+   ——本轮有一次 `unpack` 就这么丢了。所以等待分两段:先等一次能用的 guest 操作,再等一个
+   **能跑起来的 `-interactive` 程序**(`cmd.exe "/c exit 0"`)。
+4. 上面那对引号是要紧的:**`vmrun` 把客户机程序的参数当一条命令行发过去,第一段之后的分段不保留。**
+   本机实测同一台机上 `… cmd.exe /c ver`(写成三段)答
+   `Guest program exited with non-zero exit code: 1`,而 `… cmd.exe "/c exit 0"`(一段)答 0。
+
+**另一件同源的事:回快照之后重新开机的机器不会再自动登录**,`-interactive` 一律被拒。想在冒烟之后
+接着在同一台机上手工做点什么,得给那一轮加 `-KeepRunning`,而不是事后再 `start` 一次。
+
+> `new-vm.ps1` 的装机轮询里 `checkToolsState` 同样没带 `-vp`(第 809、831 行)。那里只是打进度,
+> 不影响判据,**本轮没改**。
+
 
 ## 8. 已知空白与未验证项(一处列全)
 
