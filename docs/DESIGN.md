@@ -3857,6 +3857,8 @@ Reduced 那一轮是同一个进程:`SPI_SETCLIENTAREAANIMATION` 的值走 **`pv
 
 **(g) 路线 B（Media Engine → DComp）明账原样挂着，四条触发条件一条没变**（§7.23 ④）。本片没有碰它任何一块地基：MF 首帧照旧是 B 的地基，A 没有堵 B——A 加的是一张页和一个动词，两者都在 `player.rs` 与一条 mint 臂里，撤掉它们不会留下任何 B 要绕开的东西。
 
+> **2026-08-28 补注:B 路线开工了,这一整片的壳页与动词标记为「待②片退役」(见 §7.42)。** 上面那句「撤掉它们不会留下任何 B 要绕开的东西」当时是一个预测,现在是一件正在被兑现的事:`bt-platform::video::engine` 与 `bt-render` 的视频层已经落地并实机播出 `.mp4` 与 `.mov`,而**本片的 `player.rs` 壳页、`Mint::VideoShell` 那条臂、以及 `PAGE_EXTENSIONS` 之外那条走 WebView2 的播放路,一行都没有删**——它们是今天用户手上唯一能播的东西,要到②片把三个表面(hover 卡 / 浮窗 / 侧 pane)接到新引擎上、并且实机验收过之后才退役。在那之前这一节整篇仍然是现状,只是它的有效期已经写下来了。唯一被①片改掉的是**几何**:预览 pane 上那张首帧不再由图片道的「只缩不放」定尺寸,改走 `bt_render::video_fit_extent`(§7.42 ③)——所以按下播放键画面不再跳。
+
 **(h) 红门。** `a_video_takes_no_page_lane_at_any_door` 的四扇门一字未动，**加了最后一段**：播放动词铸出来的 mint，它的 target 必须是一张 `.html` 且**不等于**录像自己的 `file:` URL——一个「简化」成直接 mint 录像的构建在这里当场红，而不是在别人机器上红成「did not respond」。`a_video_has_a_face_of_its_own` 的名单里 `mov` 从「班外」搬到「班内」，并在注释里写明它是**离开了**那张名单而不是被忘了。新钉四条：`only_a_playable_video_is_offered_a_play_button`（两列各一半，删掉那句话或给 `mov` 判 `Plays` 各红一半）、`a_playing_pane_keeps_its_browser_and_a_replaced_one_does_not`（例外的两个方向都钉）、`a_playing_video_is_spelled_as_the_file_it_is`（按源文本钉住五个面问的是同一个谓词——一张 pane 的身份是浏览器 + 合成器 + Win32 焦点，本进程立不起来）、`the_speaker_is_a_second_channel_and_takes_you_to_the_sound`（阶梯仍是五级；按下那一臂里不许出现任何一个静音 API 的名字）。几何两条在 `seats.rs`：播放按钮一个圆、画的和按的是同一个纯函数、盒子太小就不给；喇叭与 pin 两个不重叠的矩形、静音时根本没有那个盒子。壳页三条在 `player.rs`：`<video controls autoplay>` 且无脚本无桥、属性转义（Windows 路径里合法的 `&` 和 `'` 会终结一个双引号属性）、一段录像一张壳。平台还有一条**被改判**的：`the_environment_is_created_with_no_browser_arguments` 当年写的是「一条参数都没有」，并且在注释里点名说「将来需要一条的那一片，必须从这里走、必须过这个测试」。本片就是那一片。它走了这里，改掉的是**主张**不是**纪律**——那条强主张从来不是「数目是零」，而是**「这张单子写在读者看得见的地方」**：一条不必申报的参数就是一条不必辩护的参数。改名 `the_environment_is_created_with_one_named_browser_argument`：断言写命令行的地方**只有一处**、那一处写的**就是这一条**，而 `--allow-file-access-from-files`（这条测试当年真正针对的那一个，它让一份 `file:` 文档能读另一份，与「让一份开始播放」是两回事）连同 `--disable-web-security`、`--remote-debugging-port` 一起继续钉为缺席。平台一条在 `video.rs`：`the_shipped_mov_fixture_gives_up_a_frame_it_will_never_play`——如果哪天解码器不再读 `mov`，它变红，而「把 mov 从表里删掉」这条提议才第一次成立。
 
 **(i) fixture。** `test-assets/folio-video-test.mov`：2315 字节，160×120，3.0 秒，前 0.2 秒纯黑其余蓝色（1/10 处是 0.30 秒，比黑场尾多出十分之一秒的富余——第一版黑 0.3 秒正好落在边界上，实机拿回 0 个亮像素，而 `SetCurrentPosition` 本来就只保证落在目标之前最近的关键帧）（与 mp4 那份同一种造法、同一种咬法，颜色换了一个好在截图上一眼分开两份 fixture）。造法逐字：`ffmpeg -f lavfi -i color=c=black:s=160x120:r=5:d=0.2 -f lavfi -i color=c=0x2F7AE0:s=160x120:r=5:d=2.8 -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0[v]" -map "[v]" -c:v libx264 -preset veryslow -crf 28 -g 1 -pix_fmt yuv420p -movflags +faststart`。
@@ -4918,3 +4920,97 @@ RES 容器是一串对齐的记录,`VS_VERSIONINFO` 是一棵对齐的块树,两
 没有引 `cargo-sbom` 或 `cargo-cyclonedx`:那两个读的是同一份 `cargo metadata` 再重排一遍,买下这次重排的代价是在 release job 里 `cargo install` 一个未钉版本、依赖工具链的二进制——比下面六十行更重的一件要信的东西。哪天有它们答得了而这里答不了的需求(VEX、组件哈希、签名),那天带着需求去把依赖加上。
 
 除时间戳外确定:组件排序固定,文档的 serial number 由组件表推出——同一份 lock file 两次跑出同一个身份。
+
+
+### 7.42 视频不再借浏览器的嘴:Windows 自己的解码器,和一条「静止与播放同一个尺寸」的规矩(视频块 B 路线①,2026-08-28 用户裁,已落地;`crates/bt-platform/src/video/engine.rs`(新)、`crates/bt-render/src/{video.rs,video.wgsl}`(新)、`crates/bt-render/src/lib.rs`、`crates/bt-app/src/main.rs`、`crates/bt-app/examples/video-probe.rs`(新))
+
+**一句话:一段视频现在由 `IMFMediaEngine` 解码、由本窗的 wgpu 画出来,`.mov` 播得动、没装 WebView2 的机器也播得动、hover 卡与浮窗与侧 pane 将来共用同一个表面;本片只做引擎与画面,控件条与三表面接入是②片,A 壳页一行没删。**
+
+**① 为什么现在动。** §7.23 ④ 把 B 写成一条明账升级路,列了四条触发条件。它们不是将来时了:
+
+| # | 触发条件 | 现状 |
+|---|---|---|
+| ① | 视频要成为**文档里的内容**(md 内嵌、一 pane 多段、按滚动抽帧) | A 路给不了:一段视频在 A 路下是**一整张页**,页占满一个 seat,一个 seat 里放不下两段 |
+| ② | 每 pane 一套 Chromium 的内存扛不住 | 同上,而且 A 路的每一次播放都是一次完整的浏览器 |
+| ③ | 要播 Chromium 不认的格式 | `.mov`。§7.16 实测 `canPlayType('video/quicktime')` 是空串;本片实测同一个平台把它当普通 MPEG-4 file source 打开,截图为证 |
+| ④ | 要完全自管后台音频与生命周期 | 引擎的 `Pause`/`SetMuted`/`Shutdown` 是本进程自己调的,不再是从一张页的状态里推出来的 |
+
+外加一条当初没写进去的:**一台完全没装 WebView2 的机器,A 路一段都播不了,B 路全播**——解码器是 Windows 的一部分。门 5 的干净机就是这种机器。
+
+`IMFMediaEngine` 就是 `<video>` 的 COM 版,微软自己写的原话是「The `IMFMediaEngine` interface contains methods that map to the HTML5 media elements」。所以离开浏览器丢掉的是**那张脸**,不是那个播放器:`Play`/`Pause`/`SetCurrentTime`/`SetPlaybackRate`/`SetMuted`/`SetVolume`/`GetDuration`/`IsEnded` 一个一个对得上。
+
+**② frame-server 模式,以及像素到底走哪条路。** 引擎有三种模式。**rendering 模式**给它一个 HWND 或一个 DirectComposition visual,它自己画——那等于在一扇已经有合成器的窗里再放一个合成器,带着它自己的 z 序、它自己的「什么时候该出帧」和一个本产品布局求解器管不着的矩形。**audio-only** 不是视频。本片走第三种,**frame-server**:引擎解码,问它要的时候交出一张面,**在哪儿画、什么时候画全留在这一侧**。
+
+不指定 `MF_MEDIA_ENGINE_PLAYBACK_HWND` 也不指定 `..._VISUAL`,拿到的就是 frame-server。两个属性让它有用:`MF_MEDIA_ENGINE_DXGI_MANAGER`(告诉引擎在哪个 Direct3D 设备上解)与 `MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM`——**和本窗 swapchain 同一个字节序**,所以从解码器到采样器,这一整条路上没有一处翻过通道。然后每一帧:`OnVideoStreamTick` 问有没有新的(注意 `S_OK`/`S_FALSE` 两个都是「成功」,`windows` crate 生成的包装分不出来,所以这里**直接走 vtable** 拿原始 `HRESULT`),`TransferVideoFrame` 把它放进本模块自己的纹理,再**回读到系统内存**交给渲染器。
+
+**③ 为什么是 CPU 回读而不是共享纹理——这是本片唯一一处「先做还是先不做」,而它的理由是结构的不是性能的。** 共享纹理要走 `IDXGIResource1::CreateSharedHandle` → wgpu 的 dx12 后端里 `ID3D12Device::OpenSharedHandle` → `wgpu_hal::dx12::Device::texture_from_raw`,外加两侧各一个共享 fence(keyed mutex 是 D3D11 的概念,D3D12 不收)。**这些调用每一个都是 `unsafe`,而这个 workspace 里唯一允许写 `unsafe` 的 crate 是 `bt-platform`**(根 `Cargo.toml` 的 `unsafe_code = "deny"`,`bt-platform` 是唯一破例)。包装必须发生在 `wgpu::Device` 所在的地方,也就是 `bt-render`;而 `bt-render` 不许写。把 wgpu 搬进 `bt-platform` 来满足它,是比本片大得多的一次改动,而且方向正好是 `bt-render` 里 `create_surface` 那段注释说不许走的那个方向(「`bt-platform` neither depends on wgpu nor should start to」)。
+
+所以帧走系统内存,而这条路的代价是**量出来的不是猜的**(160×120,本机 debug,`a_frame_arrives_after_play_and_position_advances` 打印):
+
+| 段 | 时间 |
+|---|---|
+| `TransferVideoFrame`(GPU 上合成到本模块的纹理) | 0.51–0.54 ms |
+| `CopyResource` + `Map`(回读的等待,这才是停顿所在) | 1.6–2.1 ms |
+| 逐行 `memcpy` 出来 | 12–35 µs |
+| 合计 | **1.9–2.6 ms/帧** |
+
+读法要写清楚:**前两段基本是常数**(一次 GPU 同步),第三段按像素线性——本机量到 2.2 GB/s,所以 1080p 的一帧 BGRA(8.3 MB)大约 3.8 ms,60 fps 下约占一个核的 23%。这是②片决定要不要买下共享纹理时该看的数字,而不是本片该替它决定的事。**回读还有一个共享路给不了的性质:它在没有显卡驱动的机器上照样成立**——WARP 也是 Direct3D 设备,从它回读就是一次普通回读,而软件适配器上的跨 API 共享句柄没有任何人许过愿。`Adapter::Software` 就是为了让这条路被**测**到而不是被希望到:`a_software_adapter_still_serves_frames` 强制 WARP 并断言出帧。
+
+**④ 一个引擎一条线程,别处一行 COM 都没有。** MF 要求在 MTA 里说话,而本进程在 §7.23 之前的每一个 apartment 都是窗口事件循环上的 STA。与其逐个推敲十几个 COM 调用能不能从 STA 正确 marshal 出去,**整段对话住在本模块自己的一条线程上**:它进程序的 apartment、建 Direct3D 设备、建引擎、答命令、轮询取帧、再把这四样反着还回去。回来的东西里没有一个是 COM 形状的——进去的是一个 `Command`,出来的是一堆字节(`Frame`)和一堆数字(`EngineState`)。
+
+这也是回调安全的原因。`IMFMediaEngineNotify` 是在 MF 的 work queue 线程上被调的——那是本模块从没见过的一条线程——它在那里做的唯一一件事是把事件推进命令用的同一个 channel,把引擎线程叫醒。**回调里不碰窗口、不碰布局、不碰渲染器**,而且它也碰不到:那个回调的整个世界就是一个 `Sender`。
+
+事件本身**只当叫醒用**:`LOADEDMETADATA`/`CANPLAY`/`ENDED`/`TIMEUPDATE` 到了就去读引擎,而不是相信事件的载荷。唯一的例外是 `ERROR`,它的码挂在一个 `IMFMediaError` 上,等下一轮再问就没有了。这条规矩买下的是「每个数字只有一个权威」——`EngineState` 上的每一项都是那一轮从引擎身上读回来的,而不是本模块记住的。
+
+**⑤ 一条 fit 规矩,静止与播放共用。** 图片道的 `preview_image_extent` **只缩不放**(`scale.min(1.0)`),理由是它自己的:一张被放过头的照片不如按原尺寸看,而且本窗是在 CPU 上重采样的,在那里凭空造像素要花内存。
+
+对视频那条规矩被实机推翻过两次:一段 160×120 的录像在一整扇 pane 里被画成 160×120,一张邮票躺在一片底色中间(§7.23 ⑪,next12 报的)。A 路的答案是壳页样式表里的 `object-fit: contain`——`width:100%; height:100%`,画面**填满** pane 并保持比例,而这个规矩写在本窗看不见的地方。`bt_render::video_fit_extent` 就是同一条规矩,写在本窗看得见的地方。
+
+**两边共用它,而这正是它是一个函数的全部理由。** 一扇 pane 上停着首帧,和一瞬之后同一扇 pane 在播,是同一个矩形同一个尺寸;读者按下播放看见画面跳一下,就是本窗在对「什么叫填满」这件事自我矛盾。`bt-app` 用它算首帧(`video_still_destination`),渲染器用它算播放中的那一帧(`video_frame_rect` 调用它),`the_still_and_the_playback_share_one_fit_rule` 是把这件事说出来的地方。首帧同时也**不再有 pan**:§7.23 ⑤ 裁过「不播时首帧不缩放」,一张不能缩放的图记着一个位移只会挂在自己 pane 的边上。
+
+注意**解码请求的那个 cap 没有变**:`video.rs` 的 `contain()` 仍然只缩不放,因为那是在问 MF 要一张多大的输出型——在那里放大等于让一个 scaler 造出文件里没有的像素,然后本窗的采样器再拉一次。放大发生在采样器上,一次。
+
+**⑥ 视频层是一条自己的道,不是图片道上多一个 key。** 本窗里其它每一张光栅——解码的照片、光栅化的 PDF 页、公式、从视频里取的那张首帧——都走 `PreviewImage` 和它背后那个按内容作键、按字节计预算的 LRU。
+
+一段正在播的视频把那句话里的每一条假设都反过来:它的光栅每秒变三十到六十次,按内容作键的缓存会一帧插一个条目、一分钟之内把别的东西全挤出去;而它也**不想**每帧要一张新纹理——尺寸从不变,而重建纹理恰恰是上传里最贵的那一段。视频要的是**一段视频一张纹理、反复写**,这就是 `VideoLayer` 与 `GpuContext::video_textures`。`VideoFrameUpload::generation` 是上传的闸门:一扇窗为一百种不是「来了新帧」的理由重画,而一个每次都上传的层会为了写已经在那儿的像素花掉一兆字节的总线。**一个不再出现在本帧图层表里的 key 就是一段不再播的视频**,它的纹理当帧就还回去(`a_video_that_stopped_releases_its_texture`)——图片道那个 LRU 有预算会替它注意到,这里没有。
+
+另有两件图片道做不到、因此这条道必须自己画的事:
+
+- **圆角。** 一扇浮窗有圆角,一张方角画进去会占住浮窗自己的面没盖到的那块。`rounded_overlay_fill` 画圆角**颜色**的办法是给矩形管线一行行喂覆盖率加权的段,对一张采样纹理没有这个招数。所以图层带一个半径,片元着色器按到圆角盒的有符号距离做遮罩——和 CPU 上 `rounded_rect_coverage` 给填充算的是同一个形状。
+- **自己的底。** 保比例的画面在比例不同的盒子里会剩两条,那两条里得有东西。在 pane 里那个东西是 pane 自己的体色、已经画在下面了,所以 `VideoLayer::ground` 在那里是 `None`,图层只画一个 quad;在没有人画过那个盒子的地方它是 `Some`,而且底**由同一条管线画**,这样圆的是同一个圆——方角的底垫在圆角的画面下面,会露出四个颜色不对的角。
+
+**⑦ 生命周期,和 §7.35 的退出协议。** 一段正在播的视频一个引擎;pane 或浮窗关掉、换文件时 `Engine::shutdown`,其余一切情况(包括 panic 展开)走 `Drop`,两条路通到同一个地方:线程被告知停下,它调 `IMFMediaEngine::Shutdown`、放掉设备、离开 apartment,handle 把它 join 掉。平台本身(`media_session`)是**进程的**,活得比任何一个引擎长;`shutdown_media_session` 在最后一个引擎走掉之后把它还回去。
+
+`engines_started` / `engines_shut_down` 两个计数器让「没有引擎活过进程」变成一句测试读得出来的话,而不是注释里的一句承诺;`shutdown_media_session` 上加了一条 `debug_assert`,一个还站着引擎就先 `MFShutdown` 的进程,正是 §7.35 花了一整片对付的那个形状。红门 `every_engine_is_shut_down_before_the_process_leaves` 三条臂——显式 shutdown、作用域末尾的 drop、panic 展开——第三条是真正要紧的那条:一个只在显式调用时才 Shutdown 的构建,会为每一扇不是被自己的按钮关掉的 pane 漏掉一个解码器、一条 work queue 和一个 Direct3D 设备。
+
+**⑧ 可播矩阵,以及一条把人骗过一次的发现。** 本片先写了一个用 `IMFMediaEngine::CanPlayType` 问平台的探针(`can_play_types`),因为 §7.16 当年就是这么问浏览器的。**它答错了。**
+
+本机实测:
+
+| 类型 | `CanPlayType` | 真开文件 |
+|---|---|---|
+| `video/mp4` | Maybe | 播 |
+| `video/mp4; codecs="avc1.42E01E"` | Probably | 播 |
+| `video/mp4; codecs="hvc1"`(HEVC) | Probably(本机装了扩展) | 未测(无 fixture) |
+| `video/x-m4v` | Maybe | 未测 |
+| **`video/quicktime`** | **No** | **播**(实机截图) |
+| `video/webm` | Maybe | 未测 |
+| `video/webm; codecs="vp8"` / `"vp9"` | Probably(本机装了扩展) | 未测 |
+| `video/webm; codecs="av01…"`(AV1) | No | 未测 |
+| `video/x-matroska` | No | 未测 |
+| `video/avi` | No | 未测(平台**有** AVI source) |
+| `video/x-ms-wmv` | No | 未测(平台**有** ASF source) |
+| `audio/mpeg` / `audio/flac` | Probably | — |
+| `audio/mp4` / `audio/wav` | Maybe | — |
+
+**`CanPlayType` 说话的是平台的 MIME 注册表,不是它的解码器。** `video/quicktime`、`video/x-matroska`、`video/avi`、`video/x-ms-wmv` 它都答 No,而 Media Foundation 出厂就带 AVI source、ASF source,以及一个把 `.mov` 读得好好的 MPEG-4 file source。所以**报告里的矩阵是靠真开文件建的,不是靠问这个函数**;这个函数还留着,因为它的**肯定**那一半有用(答 Maybe/Probably 的类型,平台确实注册了解码器,这是不带十几个 fixture 也能逐机报告 VP9/HEVC 的办法),更因为这个分歧本身要被钉住——`the_type_table_under_reports_what_the_decoder_will_open` 同时断言「表说 No」和「同一个平台把那份文件打开了」。§7.16 当年问**浏览器**同一个问题、把空串当作终审;在这里它不是。
+
+**HEVC / VP9 / AV1 逐机不同,如实写:**它们依赖商店里的扩展。本机 HEVC 与 VP9 都答 Probably(装过),AV1 答 No。一台出厂 Windows 上这三行都可能是 No,而那**不是缺陷**——那是 `EngineError::Unsupported`,和 §7.23 ② 写过的「这张表是关于本窗的承诺,不是关于平台的报告」是同一句话。
+
+**⑨ 证据。** `crates/bt-app/examples/video-probe.rs`:一扇真窗(`with_active(false)`,不抢前台),经过 **`folio` 自己那扇门**——`bt_platform::Compositor` 造 DirectComposition visual、swapchain 挂在上面——播一份录像,同一帧同时画进一个离屏表面并读回成 PNG。两个目标走**同一个 `WindowRenderer`、同一条管线、同一个着色器**,所以 PNG 就是窗里那张画;第二个目标存在只是因为 swapchain 读不回来,而对一扇窗截图截到的是挡在它前面的东西。
+
+`.mp4`(5.000s)与 `.mov`(3.000s)各四张,时间戳 0.000 / 0.65 / 1.64 / 2.65 秒,帧计数 0 / 4 / 9 / 14。第一张是引擎已经开好、第一帧还没到的那一刻——图层只画底,这正是「正在载入」与「坏掉了」的区别。两份录像的内容不同(mp4 橙、mov 蓝),所以那两组图也顺带说明播的确实是两份不同的文件。画面在 960×556 的盒子里是 741×556:填满高度,左右两条是图层画的底——`video_fit_extent` 在像素上的样子。
+
+**⑩ 红门。** `bt-platform`:`an_engine_reports_the_duration_and_size_of_a_file_it_opened`(整条创建链)、`a_frame_arrives_after_play_and_position_advances`(帧在来 **且** 钟在走,并打印上面那张代价表)、`a_quicktime_file_plays_where_the_browser_would_not_open_it`(触发条件③)、`a_software_adapter_still_serves_frames`(WARP)、`every_engine_is_shut_down_before_the_process_leaves`(三条臂)、`the_type_table_under_reports_what_the_decoder_will_open`(⑧ 那条发现)、`the_verbs_reach_the_engine`、`nothing_that_is_not_a_video_plays`。`bt-render`:`the_still_and_the_playback_share_one_fit_rule`(纯函数,三条断言)、`a_video_layer_fills_its_box_letterboxes_in_its_ground_and_rounds_its_corners`(**读回像素**,在没有显卡驱动的机器拿到的那个设备上——§7.36 用一次发布门换来的教训)、`a_video_that_stopped_releases_its_texture`。`bt-app`:`a_videos_still_lands_where_the_playing_picture_does`。
+
+**⑪ 挂账。** ⓐ **控件条没有**:播放/进度/时间/静音/音量/倍速目前只有 A 壳页那一套,②片要把它们搬到本窗自己的 chrome 上。ⓑ **三个表面没接**:hover 卡、浮窗、侧 pane 今天还是走 A 路,②片接。ⓒ **共享纹理没做**,理由在 ③,数字也在 ③,②片凭那张表决定。ⓓ **tab 小喇叭的来源没换**:今天仍是 `IsDocumentPlayingAudio`,新的判据是 `state().playing && !muted`,②片接 UI 时一起换。ⓔ **`.webm`/`.mkv`/`.avi`/`.wmv` 没有 fixture**,矩阵里那几行是「未测」而不是「不行」——要么补 fixture,要么在②片验收时用用户自己的文件实测。ⓕ **帧速受 fixture 限制**:本仓那两份录像大约 5 fps,所以「14 帧 / 2.65 秒」说明的是钟在走,不是这条路的吞吐上限;吞吐的读法是 ③ 那张每帧代价表。
