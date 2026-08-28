@@ -4486,6 +4486,77 @@ a pane head's ClosePane has no words
 
 **日期:2026-08-27 用户实证,当日复现、定因、落地。**
 
+### 7.35 一扇关掉的窗要等它的引擎先走,而一个托过 WebView2 的进程不能从 `main` 里走出去(门 5 干净机「开过预览座的窗关不掉」,2026-08-28,已落地;`crates/bt-app/src/{main,quit,webhost,diagnostics}.rs`、`crates/bt-platform/src/lib.rs`)
+
+**一条报告,两个互相独立、各自都足以让窗关不掉的成因。** §7.34 修的是「关掉的窗还留在屏幕上」;这一条修的是它下面那层——**关掉的窗根本没死,而进程也没走**。§7.34 末尾那两笔挂账里的第一笔(「那个 `HWND` 为什么不死仍未解」)在这里结清。
+
+#### 报告
+
+门 5 首跑(`docs/plans/release/clean-vm-results-2026-08-28.md` §5.1):干净的 Windows 11(Enterprise Evaluation 10.0.26200,WebView2 151.0.4129.107)上,**只要窗上开过一个预览座,`WM_CLOSE` 就关不掉**——五次测量全部 60 秒到点仍在,包括三次「地址被导航门拦下、什么都没导航」的启动;同一个二进制不开座的窗 91 毫秒就关了。那份文档量的是**进程有没有退出**(`Process.WaitForExit`),不是窗有没有消失——这个区别是解开整件事的第一把钥匙。
+
+#### 复现与取证
+
+同一台干净机,`BT_WEB_DEV=https://example.com/`,隔离 `APPDATA`/`LOCALAPPDATA`/`TEMP`。`WM_CLOSE` 之后每 250 毫秒同时问四件事:`IsWindow`、进程还在不在进程表里、`GetExitCodeProcess` 答不答退出码、它自己起的那六个 `msedgewebview2` 还剩几个。
+
+| 二进制 | 窗离开屏幕 | 退出码写下 | 离开进程表 | `HWND` 销毁 | 它起的六个浏览器进程 |
+|---|---:|---:|---:|---:|---:|
+| 修前(= 门 5 的 `7c6d487de2`) | 26 ms | 600 ms | **240 秒内从未** | **240 秒内从未** | **240 秒后仍有五个** |
+| 修前,但**关窗之前先杀掉浏览器树** | 72 ms | 72 ms | **4.2 s** | **4.2 s** | 0 |
+| 只修成因①(等页放手) | 38 ms | 6.888 s | 120 秒内从未 | 120 秒内从未 | **6.888 s 全部走完** |
+| 修完①②(本片) | 47 ms | 6.803 s | **6.803 s** | **6.803 s** | 6.803 s 全部走完 |
+
+**第一件被这张表推翻的事:那个「已经退出」的进程根本没有退出。** 修前那一行里 `GetExitCodeProcess` 六百毫秒就答了 0、`Process.HasExited` 因此为真——而进程仍在进程表里、窗仍是窗。这不矛盾:`RtlExitUserProcess` 先 `NtTerminateProcess(NULL, status)` 杀掉**其它**线程并**写下进程退出码**,然后才逐个模块跑 `DLL_PROCESS_DETACH`,最后才真的终止自己。退出码已写而进程还在,正是「卡在中间那一步」的指纹。把门 5 那个探针原样对着新构建再跑一遍,它列出的六个「早就在运行」的 folio 进程,逐个都是本轮探针记录为「退出码 0」的那几个。
+
+**第二件:本机(开发机)和干净机是同一件事的两种严重程度。** 同一段代码在开发机上:窗 6 毫秒离开屏幕,进程 **298 毫秒**离开进程表——这正是 §7.34 记下的 0.20 秒——而 `HWND` 90 秒后仍然是窗,5.26 秒时被 DWM 立了 ghost。核对过那个幸存句柄的 `GetWindowThreadProcessId`:它报的仍是那个**已经不在进程表里**的 folio 自己的 pid,不是句柄回收。两台机上「窗不死」都是真的,差别只在进程 rundown 卡多久。
+
+#### 成因①:关窗那条路把自己刚上好的闹钟扔了
+
+`let_go_of_this_window` 对每个座位调 `web.close()`,而那一步做的事是:关 controller,**并上一个等浏览器退出的闹钟**(`WebEffect::AwaitBrowserExitBeforeCleanup`,`webhost::BROWSER_EXIT_DEADLINE`)。然后同一次调用里,`FolioApp::close` 立刻 `self.windows.remove(id)`——窗被 drop、`DestroyWindow` 被调、`event_loop.exit()`、进程走人。**那个闹钟一次都没有被转过。**
+
+这不是疏漏,代码里早就写着这句话。`let_go_of_this_window` 自己的注释:「The wait for that browser to go is the state machine's; **on the ordinary shut this window is not around for it**, and on a quit the loop is deliberately still turning so that it can be.」——退出事务(`Ctrl+Shift+Q`)一直是对的,普通关窗一直是错的;§7.34 也已经注意到「所以 `Ctrl+Shift+Q` 从来没有这条缺陷」,只是当时把原因归到了「隐藏」那一半。
+
+**为什么这会让窗死不掉。** 引擎在这个 `HWND` **底下挂着自己的子窗口**(W0 spike 量到的那个 `Chrome_WidgetWin_0`),而子窗口是靠消息销毁的;一根不再泵消息的线程一条也发不出去。父窗于是销毁不完,窗口的 rundown 走不完,进程的 rundown 也就走不完。上表第二行是这条因果的直接证据:**同一个二进制,只在关窗前先杀掉浏览器树,窗和进程 4.2 秒就都干净地走了。**
+
+**修法是让普通关窗走退出事务早就在走的那条路。** `FolioApp::close` 不再当场丢掉窗,而是给它盖一个 `WindowRuntime::leaving = Some(deadline)`:窗已经离开屏幕(§7.34)、shell 已经关掉、controller 已经被告知要走,剩下欠它的只有一件事,而那件事需要这根线程继续泵。`about_to_wait` 里新增的 `reap_leaving_windows` 每一轮只转那一个时钟(复用退出事务的 `advance_retirement`),等到 `pages_are_gone()` 为真、或者上限到点,才 `windows.remove`——**drop 才是 `DestroyWindow`**;而「登记表空了就是进程走人」还是原来那句话,只是晚了一个正确的量。**离开中的窗不参加任何别的事**:不吃窗口消息、不上「Move to window」的名单、不进 `window_holding`、不被 `turn` 转三十个时钟——最后这条逐字就是退出事务给自己写的那句「Falling through to the sweep below would drain shut shells and publish frames for windows nobody can see」。
+
+**两个上限必须有关系,而它们原来没有。** `quit::PAGE_TEARDOWN_DEADLINE` 的段落一直宣称「it is longer than one seat's」,而它写的是 6 秒、座位自己的 `webhost::BROWSER_EXIT_DEADLINE` 写的是 10 秒:**应用层总是比它在等的那扇兜底门早四秒放弃**。凡是 `BrowserProcessExited` 迟到或不到的关闭,退出事务也一样带着还抓着窗的引擎离开。现在应用层的上限**由座位的那个算出来**(加两秒,一次循环把答案带回来的余量),红门盯的是这层关系而不是两个数字。
+
+**哨兵不许跟着等。** `App::finish` 刷文档、join 写线程、删掉 `session.lock`,而那个文件不在,就是这次运行「干净退出过」的唯一凭据。它现在花在**最后一扇窗被告知要走的那一刻**——图已经在盘上、不会再写任何东西——而不是几秒后引擎放手的那一刻。否则「关掉 folio 再立刻打开」(§7.34 那条报告本身的手势)会被一句「上次没有正常退出」迎接,而那次运行其实好好的。
+
+#### 成因②:一个托过 WebView2 的进程不能从 `main` 里走出去
+
+修完①之后,干净机上浏览器**全部**在 6.888 秒走完(修前是 240 秒后还剩五个)——等待这件事本身完全成立了。**而进程仍然没有离开进程表。**
+
+剩下的那一段路上已经没有 Folio 的东西了:shell 关了、controller 关了、浏览器等到了、会话写了、哨兵删了、媒体会话释放了。`main` 返回之后是 C 运行库的 `exit` 链和 loader 的 `DLL_PROCESS_DETACH`——而 `ExitProcess` 的顺序是**先杀光其它线程,再跑各模块的 detach**。载在这个进程里的 Edge WebView2 客户端 DLL 是 Chromium:它的拆卸路径要一个还在泵消息的 apartment 和还活着的线程,而这两样刚刚被拿走。
+
+**这一条不是本片第一次量到。** W0′ spike 结案时就记过(`docs/plans/web-preview/w0p-evidence/evidence.md` §6.3):八个探针进程各自写完 `done`、各自调了 `std::process::exit(0)`,**八个全部驻留**,占着自己的二进制(下一次 `cargo build` 因此 `Access is denied`)和自己的 UDF;判词逐字是「WebView2 loader 在一个已经不再泵消息的 apartment 线程上拆卸,就停在那里」,而它当时的解法就是本片采用的这一句。这句从来没有被搬进产品。**本片顺带复现了它的副作用**:那些卡住的 folio 抓着 `folio.exe` 不放,往客户机推新构建时 `copyFileFromHostToGuest` 直接失败。
+
+**所以 `main` 的最后一句是 `bt_platform::leave_process(code)`**——`TerminateProcess(GetCurrentProcess(), code)`。这不是「关窗之后把自己砍掉」:窗那一半在成因①里已经被正确地等完了,这里砍掉的只是**第三方的静态析构,在一根已经无法为它们服务的线程上**——与 Chromium 对自己进程下的同一个结论、同一个理由。走之前刷 `stdout`/`stderr`,因为 `exit` 链里唯一属于本程序的一件事就是它。
+
+**而「我们到底有没有走到那一句」这个问题,现在由文件回答。** `diagnostics::run_footer` 是 `run_header` 的对子,同样的横线、同样的 build 标识,写在 `leave_process` **之前**:一份 `diagnostics.log` 的最后一行如果是它,这次运行就是走到底了;如果不是,它停在 Folio 自己身上。这条线的第一位读者就是本片。
+
+#### 那六秒是引擎的,不是 Folio 的
+
+修完之后干净机上从 `WM_CLOSE` 到进程消失是 6.8 秒,而窗离开屏幕仍然是 **几十毫秒**(五次 21–47 ms)——读者看见的关窗没有变慢,变的是进程在看不见的地方多活了六秒。那六秒属于引擎:**修前**在开发机上 folio 298 毫秒就死了,而它起的六个 `msedgewebview2` 仍然花到 6.8 秒才走完。所以这个量是 WebView2 自己拆一棵进程树要的时间,等它是正确的,缩短它不在本产品手里。上限 12 秒是兜底,不是预算。
+
+#### 红门四道(`main.rs`,`floated_page_tests`;变异逐条实测)
+
+* `a_closed_window_is_dropped_only_once_its_pages_have_gone_or_the_bound_has` —— `close` 里不许有 `self.windows.remove(`、必须盖 `leaving`、必须当场花掉哨兵;`reap_leaving_windows` 里必须问 `pages_are_gone()`、必须有 `now >= until` 那条上限、必须是它 `remove` 和 `exit()`。**变异实测**:把 `remove` 放回 `close` → 红(「the shut destroys the HWND while a browser still has a child under it」);整段删掉 `now >= until` 那条臂 → 红(「the wait for the engines has no deadline」)。
+* `a_closed_window_keeps_the_loop_turning_and_takes_no_turn_of_its_own` —— 循环里必须先 reap 后 sweep,且 sweep 必须跳过 `leaving` 的窗。**变异实测**:删掉那句跳过 → 红。
+* `the_process_leaves_by_the_one_road_a_webview2_host_may_take` —— `main` 以 `leave_process(code)` 结束,且 footer 写在它之前。**变异实测**:让 `main` 以 `outcome` 结束 → 红。
+* `the_processs_wait_for_a_browser_outlasts_one_seats` —— 应用层上限严格大于座位上限。**变异实测**:把它写回 `Duration::from_secs(6)` → 红。这是四道里唯一跑真值而不读源码的,因为它盯的就是两个常量之间的关系。
+
+一条关于源码门的教训,记在这里免得下次白跑一趟:**变异必须把那段文字真的拿掉**。第一次试 `now >= until` 时改成 `false && now >= until`,门全绿——它读的是那行字在不在,而那行字还在。
+
+#### 顺带结掉的一条误判
+
+门 5 结果文档 §5.4 记的「Win11 上窗口一变宽,已经载入的页面就不见了」**不是缺陷**。翻出它的证据图(`w11-probe\web-c-after-forced-frame.png`)与它前一张(`web-b-15s.png`):两张里 PSReadLine 那张邀请卡都立在窗上,而**一张盖住整扇窗的卡把页从玻璃上撤下来是 §7.7 的裁决**(`a_modal_covers_the_window` → `WebPresence::Hidden`),地址栏与标题是 chrome、不受影响,所以看上去就是「头还在、页没了」。15 秒那张(缩放之前)已经是同一个样子,缩放与它无关。要拍会随窗变宽而重排的页,得先把那张卡按掉。
+
+#### 没修的
+
+**panic 退出仍然不走这条路。** `panic = "unwind"`,一次走出 `main` 的 panic 以 101 退出,`leave_process` 够不着;§7.34 记的那条(panic 退出会留窗)原样成立。
+
+**日期:2026-08-28,门 5 干净机首跑三条红里最硬的那条,当日复现、定因、落地、干净机复跑。**
 ### 7.36 引擎在不在,必须由一次真的创建尝试在有界时间内回答;而一扇窗里所有的字,都只除以同一个分辨率(门 5 干净机两条红,2026-08-28 实证,已落地;`crates/bt-app/src/{webhost,main}.rs`、`crates/bt-render/src/lib.rs`)
 
 门 5 的干净 Win10(Pro 22H2 19045,无网卡、无 WebView2)拍回来两张照片:预览座**整块什么都不画**,以及**同一扇窗里外壳的字被画得比它的版面框大一截**。两条看着像一件事——都只在开了预览座的窗上出现——其实是两件互不相干的事,只是同一台机器同时具备触发两者的条件。

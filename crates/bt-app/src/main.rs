@@ -7816,6 +7816,23 @@ impl NewWindowPlan {
 /// field into a map keyed by `WindowId`; this slice only makes that sentence
 /// something the type system can express.
 struct WindowRuntime {
+    /// **When this window gives up waiting for its pages to let go** (§7.35).
+    ///
+    /// `Some` from the moment [`FolioApp::close`] has told this window to go: it
+    /// is off the screen, its shells are shut and every controller on it has been
+    /// asked to close, and the only thing left owed to it is the engine's own
+    /// teardown — which needs this thread to keep pumping, because the browser's
+    /// child window under this `HWND` is destroyed by messages. A window that
+    /// stopped pumping here would leave that child standing, and a parent window
+    /// with a foreign child that will not go is a window `DestroyWindow` cannot
+    /// finish: measured on the clean machine as an `HWND` still answering
+    /// `IsWindow` four minutes after the process had set its exit code, and as
+    /// the process itself never leaving the process list.
+    ///
+    /// The instant is the bound, never a promise — see
+    /// [`quit::PAGE_TEARDOWN_DEADLINE`], which is the same bound the quit spends
+    /// and is spent here for the same reason.
+    leaving: Option<Instant>,
     renderer: WindowRenderer,
     /// This window's ear for `WM_SETTINGCHANGE`, held only so that dropping the
     /// window takes the subclass off the HWND (§7.18).
@@ -28445,6 +28462,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         .ok()
     });
     WindowRuntime {
+        // A window is born staying.
+        leaving: None,
         renderer,
         system_settings_watch,
         tabs,
@@ -81669,13 +81688,42 @@ impl FolioApp {
         self.runtime(id)
     }
 
-    /// Answer for every open window in turn, oldest first, stopping at the first
-    /// failure.
+    /// Answer for every **open** window in turn, oldest first, stopping at the
+    /// first failure.
     ///
     /// Indexed rather than iterated because the body needs `self` — the loop
     /// reads one id out of the order and gives the borrow straight back, which
     /// is what lets each turn hold a whole `Runtime`.
+    ///
+    /// **A window that has been closed is not one of them** (§7.35). It stays in
+    /// the registry until its engines let go, and for those few seconds it is
+    /// nobody's business: it draws nothing, it holds no dirty buffer anybody may
+    /// be asked about, and its picture has already been filed — a quit that
+    /// photographed it would put a window the reader closed back into
+    /// `session.json` and open it again next launch. The one caller that does
+    /// have business with it is [`Self::for_every_window_engines_included`].
     fn for_each_window(
+        &mut self,
+        mut answer: impl FnMut(&mut Runtime<'_>) -> Result<()>,
+    ) -> Result<()> {
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+            {
+                answer(&mut runtime)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The same walk, and the windows on their way out are in it (§7.35).
+    ///
+    /// One caller: the engines speaking. A page's answer carries its own address
+    /// and the answer a *closing* page gives — «my browser process has gone» —
+    /// is the one the reap is waiting for, so a walk that skipped closed windows
+    /// would leave every shut to time out on its bound instead of ending the
+    /// moment it truly can.
+    fn for_every_window_engines_included(
         &mut self,
         mut answer: impl FnMut(&mut Runtime<'_>) -> Result<()>,
     ) -> Result<()> {
@@ -82003,10 +82051,17 @@ impl FolioApp {
             // Recent either, and by the right rule rather than by omission:
             // [`Runtime::vault_this_window`] records nothing for a window with no
             // tabs, which is what an emptied window is.
+            //
+            // **And it leaves the way every other closed window leaves**
+            // (§7.35): marked rather than dropped, so that an `HWND` a browser
+            // still has a child under is destroyed after that child has gone and
+            // not before. An emptied window has no pages left to wait for, so the
+            // very next turn reaps it; the point is that there is one road out.
+            let leaving_at = Instant::now() + quit::PAGE_TEARDOWN_DEADLINE;
             if let Some(mut runtime) = self.runtime(from) {
                 runtime.close_window(false)?;
+                runtime.window.leaving = Some(leaving_at);
             }
-            self.windows.remove(from);
         }
         Ok(TransferOutcome::Moved(TabTransfer {
             tab,
@@ -82203,8 +82258,23 @@ impl FolioApp {
     /// could only ever hold one window. A window that is not the last takes only
     /// itself: its shells are shut, its surface and its tabs are dropped, and
     /// every other window is untouched.
-    fn close(&mut self, event_loop: &ActiveEventLoop, id: WindowId) -> Result<()> {
+    ///
+    /// **What it no longer does is drop the window on the spot** (§7.35). Off the
+    /// screen is immediate and is the whole of what a reader is owed; being
+    /// *dropped* is what destroys the `HWND`, and an `HWND` a browser process
+    /// still has a child window under cannot be destroyed by anybody. So the
+    /// window is marked [`WindowRuntime::leaving`] and stays in the registry for
+    /// as long as its pages need — bounded by [`quit::PAGE_TEARDOWN_DEADLINE`] —
+    /// while [`Self::reap_leaving_windows`] keeps turning the one clock that is
+    /// left. This is exactly what a quit has always done for its windows, and it
+    /// is why 「Ctrl+Shift+Q 从来没有这条缺陷」 (§7.34).
+    fn close(&mut self, id: WindowId) -> Result<()> {
         if !self.windows.contains(id) {
+            return Ok(());
+        }
+        // A window that is already on its way out is not closed again: the second
+        // close would file a second Recent row and re-arm a wait that is running.
+        if self.is_leaving(id) {
             return Ok(());
         }
         // **A quit answers this door for every window at once, so no window may
@@ -82220,23 +82290,124 @@ impl FolioApp {
         // means** (multiwindow slice D, ruling ②). The last window's shut is the
         // process ending and its picture stays in the file; any other window's is
         // the user closing a window, and it leaves the file for the vault.
-        let ending = self.windows.len() == 1;
+        //
+        // **Windows already leaving do not count.** They are off the screen and
+        // nobody can reach them, so the window a reader is closing now is the
+        // last one whenever it is the last one still on the glass — and a shut
+        // that read the raw length would file the final window in Recent and
+        // leave the session file describing a run that had already ended.
+        let ending = self.open_window_count() == 1;
+        let leaving_at = Instant::now() + quit::PAGE_TEARDOWN_DEADLINE;
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
         };
         let closed = runtime.close_window(ending);
-        self.windows.remove(id);
+        // Set whatever the teardown answered: a child that refused to die is
+        // said out loud by the caller and changes nothing about this window
+        // being on its way out.
+        runtime.window.leaving = Some(leaving_at);
+        if ending {
+            // **The run's sentinel goes with the picture, not with the process**
+            // (§7.35). `App::finish` flushes the document, joins the writer and
+            // removes `session.lock`, and the absence of that file is this run's
+            // only claim to have exited cleanly. Spent here, at the moment the
+            // last window's picture is on the disk and nothing more will ever be
+            // written, rather than up to twelve seconds later when the engines
+            // have let go: a reader who closes Folio and opens it again straight
+            // away — which is the very gesture §7.34 was reported on — would
+            // otherwise be met by 「上次没有正常退出」 about a run that had
+            // finished perfectly.
+            if let Some(app) = self.app.as_mut() {
+                app.finish();
+            }
+        }
+        closed
+    }
+
+    /// Whether this window has been told to go and is only waiting for its
+    /// engines.
+    fn is_leaving(&mut self, id: WindowId) -> bool {
+        self.windows
+            .get_mut(id)
+            .is_some_and(|window| window.leaving.is_some())
+    }
+
+    /// How many windows are still on the glass.
+    ///
+    /// Not `windows.len()`: the registry also holds the ones that have been
+    /// closed and are waiting for their pages, and none of those is a window
+    /// anybody can see, move a tab into, or close.
+    fn open_window_count(&mut self) -> usize {
+        (0..self.windows.len())
+            .filter(|index| {
+                self.windows
+                    .key_at(*index)
+                    .and_then(|id| self.windows.get_mut(id))
+                    .is_some_and(|window| window.leaving.is_none())
+            })
+            .count()
+    }
+
+    /// **Turn the one clock a closed window still has, and let go of the ones
+    /// that are done** (§7.35).
+    ///
+    /// The ordinary shut's half of what [`Self::advance_retirement`] does for a
+    /// quit, and deliberately the same call underneath: a closed window is owed
+    /// exactly one thing, the wait for its browsers to let go, and when that is
+    /// answered — or the bound runs out — the window is dropped, which is what
+    /// destroys the `HWND`. The process leaves when the registry empties, which
+    /// is the same sentence [`Self::close`] used to say one turn earlier and in
+    /// the wrong order.
+    ///
+    /// Returns the earliest moment the loop has to come back for a window that
+    /// is still leaving.
+    fn reap_leaving_windows(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        now: Instant,
+    ) -> Result<Option<Instant>> {
+        let mut done: Vec<WindowId> = Vec::new();
+        let mut waking = None;
+        for index in 0..self.windows.len() {
+            let Some(id) = self.windows.key_at(index) else {
+                continue;
+            };
+            let Some(mut runtime) = self.runtime(id) else {
+                continue;
+            };
+            let Some(until) = runtime.window.leaving else {
+                continue;
+            };
+            let deadline = runtime.advance_retirement(now)?;
+            if runtime.pages_are_gone() {
+                done.push(id);
+            } else if now >= until {
+                // Said out loud rather than swallowed, which is
+                // `quit::Quit::pages`'s own rule: a browser that outlived the
+                // bound is a fact about this machine, and everything this window
+                // was holding is already safe either way.
+                eprintln!("BT_WEB a closed window left with a page still holding its browser");
+                done.push(id);
+            } else {
+                waking = earliest_deadline([waking, deadline, Some(until)]);
+            }
+        }
+        for id in done {
+            self.windows.remove(id);
+        }
         if self.windows.is_empty() {
-            // The run's sentinel, dropped once — see `App::finish`. This is the
-            // only place the process's own half of the shut is spent on the
-            // ordinary path, because this is the only place "there are no
-            // windows left" first becomes true.
+            // **The sentinel again, and it is idempotent** (`App::finish` →
+            // `SessionStore::close`, which takes its writer and says so). The
+            // ordinary shut has already spent it, at the moment the last window
+            // was told to go; this stands for every other road that can empty
+            // the registry, and a second call costs a `None` take.
             if let Some(app) = self.app.as_mut() {
                 app.finish();
             }
             event_loop.exit();
+            return Ok(None);
         }
-        closed
+        Ok(waking)
     }
 
     /// Open a window the keyboard asked for, if one was asked for.
@@ -82288,17 +82459,31 @@ impl FolioApp {
     /// places. A handful of windows walked once a turn is cheaper than that
     /// bookkeeping and cannot go stale.
     fn publish_window_directory(&mut self) {
+        // **A window that has been closed is not open** (§7.35). It stays in the
+        // registry until its engines let go, and for that handful of seconds a
+        // directory built off the raw registry would offer 「Move to window」 a
+        // window nobody can see and nothing can be moved into. The ordinal
+        // therefore counts the rows this list actually has rather than the
+        // index it was found at.
         let open: Vec<OpenWindow> = (0..self.windows.len())
             .filter_map(|index| {
                 let id = self.windows.key_at(index)?;
-                let tabs = self.windows.get_mut(id)?.tabs.len();
-                Some(OpenWindow {
+                let window = self.windows.get_mut(id)?;
+                if window.leaving.is_some() {
+                    return None;
+                }
+                let tabs = window.tabs.len();
+                Some((id, tabs))
+            })
+            .enumerate()
+            .map(|(row, (id, tabs))| {
+                OpenWindow {
                     id,
                     // Counting from 1, because the row is read by a person and
                     // `Window 0` is a sentence written by a program.
-                    ordinal: index + 1,
+                    ordinal: row + 1,
                     tabs,
-                })
+                }
             })
             .collect();
         if let Some(app) = self.app.as_mut() {
@@ -82470,6 +82655,11 @@ impl FolioApp {
         (0..self.windows.len()).find_map(|index| {
             let id = self.windows.key_at(index)?;
             let window = self.windows.get_mut(id)?;
+            // A closed window is off the screen, so no hand is over it — and its
+            // handle outlives the close by as long as its engines take (§7.35).
+            if window.leaving.is_some() {
+                return None;
+            }
             (window_hwnd(&window.window).ok() == Some(hwnd)).then_some(id)
         })
     }
@@ -83104,17 +83294,43 @@ impl FolioApp {
                 return;
             }
         };
+        // **The windows that have been closed, before the ones that have not**
+        // (§7.35). It can end the loop — the last one leaving is the process
+        // leaving — and a sweep that turned thirty clocks over a hidden window
+        // first would be drawing frames for a reader who has already closed it.
+        match self.reap_leaving_windows(event_loop, now) {
+            Ok(deadline) => wake_deadline = earliest_deadline([wake_deadline, deadline]),
+            Err(error) => {
+                self.fail(event_loop, error);
+                return;
+            }
+        }
+        if self.windows.is_empty() {
+            return;
+        }
         // **Every window's own turn, and the earliest wake-up any of them asked
         // for.** A loop that woke for the first window's clocks and not the
         // second's would be a second window whose caret blinks only when the
         // first one's does.
+        //
+        // **A window that is leaving takes no turn at all.** Its one remaining
+        // clock was turned by the reap above; the thirty here would drain shut
+        // shells and publish frames for a window nobody can see, which is the
+        // sentence the quit's own branch says about its retirement.
+        let mut application_clocks = true;
         for index in 0..self.windows.len() {
             let Some(mut runtime) = self.runtime_at(index) else {
                 continue;
             };
-            // The window that opened first turns the application's clocks. See
-            // `Runtime::turn`.
-            match runtime.turn(now, index == 0) {
+            if runtime.window.leaving.is_some() {
+                continue;
+            }
+            // The first window still open turns the application's clocks. See
+            // `Runtime::turn` — it is the opening order, and a closed window at
+            // the head of it must not take the job away from the rest.
+            let turn = runtime.turn(now, application_clocks);
+            application_clocks = false;
+            match turn {
                 Ok(deadline) => wake_deadline = earliest_deadline([wake_deadline, deadline]),
                 Err(error) => {
                     self.fail(event_loop, error);
@@ -83544,7 +83760,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // Every window, on this family's standing reason: an answer carries
             // its own address and a window with no page finds nothing to read.
             AppEvent::WebPageSpoke => self
-                .for_each_window(|runtime| runtime.drive_web_page())
+                .for_every_window_engines_included(|runtime| runtime.drive_web_page())
                 // **And the windows that heard nothing** (the favicon slice, `docs/DESIGN.md` §7.13).
                 // A site's icon is filed for the whole application, so a page
                 // learning one in this window changes what a page on the same
@@ -83611,6 +83827,15 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             .and_then(|app| app.quit.as_ref())
             .is_some_and(quit::Quit::is_retiring)
         {
+            return;
+        }
+        // **And a window that has been closed answers nothing either** (§7.35),
+        // on the retirement's own reasoning one window down: it is off the
+        // screen, its shells are shut and its controllers have been told to go,
+        // so every message still addressed to it — a stray `WM_CLOSE`, a focus
+        // change as the window under it comes forward — is about a window the
+        // reader has already let go of.
+        if self.is_leaving(window_id) {
             return;
         }
         let Some(mut runtime) = self.runtime(window_id) else {
@@ -83772,7 +83997,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // opened for the gate.
         shutting |= std::mem::take(&mut runtime.window.window_close_requested);
         let result = if shutting {
-            result.and(self.close(event_loop, window_id))
+            result.and(self.close(window_id))
         } else {
             result
         };
@@ -86075,6 +86300,175 @@ mod floated_page_tests {
         );
     }
 
+    /// RED — **a closed window is not dropped until its engines have let go, and
+    /// the wait is bounded** (§7.35, gate 5's clean Windows 11 machine,
+    /// 2026-08-28).
+    ///
+    /// Measured there: a window that had hosted a page answered `WM_CLOSE` by
+    /// hiding itself in 21 ms and setting its exit code in 1.3 s — and then the
+    /// process stayed in the process list and its `HWND` went on answering
+    /// `IsWindow` for the whole four minutes anybody watched, with five of the
+    /// six `msedgewebview2` processes it started still running. Kill that browser
+    /// tree *before* the close and the same binary is gone, window and all, in
+    /// 4.2 s. The engine parents a child window under this `HWND`, a child window
+    /// is destroyed by messages, and a thread that has stopped pumping sends
+    /// none — so the parent cannot be destroyed and the process cannot finish
+    /// dying.
+    ///
+    /// So the shut may mark the window and must not drop it: dropping is what
+    /// calls `DestroyWindow`, and the only place allowed to do that is the reap,
+    /// which runs after [`Runtime::pages_are_gone`] says yes or after the bound
+    /// has run out.
+    ///
+    /// MUTATIONS: put `self.windows.remove(id)` back in `close` and the first
+    /// assertion goes red; drop the `leaving` mark and the second goes red; take
+    /// the `now >= until` arm out of the reap and the third goes red — that arm
+    /// is the whole difference between a bound and a promise.
+    #[test]
+    fn a_closed_window_is_dropped_only_once_its_pages_have_gone_or_the_bound_has() {
+        let close = fn_body(concat!("    fn ", "close("));
+        assert!(
+            !close.contains("self.windows.remove("),
+            "the shut destroys the HWND while a browser still has a child under \
+             it:\n{close}"
+        );
+        assert!(
+            close.contains("runtime.window.leaving = Some("),
+            "a shut window is never marked as leaving, so nothing will ever reap \
+             it:\n{close}"
+        );
+        assert!(
+            close.contains("app.finish()"),
+            "the run's sentinel now waits for the engines, so closing Folio and \
+             opening it again is met by a restore prompt about a run that \
+             finished perfectly:\n{close}"
+        );
+        let reap = fn_body(concat!("    fn ", "reap_leaving_windows("));
+        assert!(
+            reap.contains("runtime.pages_are_gone()"),
+            "the reap lets go of a window without asking whether its pages \
+             have:\n{reap}"
+        );
+        assert!(
+            reap.contains("now >= until"),
+            "the wait for the engines has no deadline, so a browser that never \
+             answers is a window that never closes:\n{reap}"
+        );
+        assert!(
+            reap.contains("self.windows.remove(id)"),
+            "the reap no longer lets go of the windows it has finished \
+             waiting for:\n{reap}"
+        );
+        assert!(
+            reap.contains("event_loop.exit()"),
+            "the last window leaving is no longer the process leaving:\n{reap}"
+        );
+    }
+
+    /// RED — **the loop keeps turning for a window that has been closed, and
+    /// turns nothing else for it** (§7.35).
+    ///
+    /// The other half of the sentence above: marking the window is worthless if
+    /// the thread stops pumping, because what the mark is buying is exactly the
+    /// messages the engine's child window needs in order to go. And the thirty
+    /// clocks `turn` reads must not run over it — that is the quit's own
+    /// retirement rule (「Falling through to the sweep below would drain shut
+    /// shells and publish frames for windows nobody can see」) said for the
+    /// ordinary shut.
+    ///
+    /// MUTATIONS: delete the `reap_leaving_windows` call and the process never
+    /// leaves at all; delete the `leaving.is_some()` skip and a hidden window
+    /// draws frames and drains shells it no longer has.
+    #[test]
+    fn a_closed_window_keeps_the_loop_turning_and_takes_no_turn_of_its_own() {
+        let door = fn_body(concat!("    fn ", "about_to_wait_inner("));
+        let reap = door
+            .find("self.reap_leaving_windows(event_loop, now)")
+            .unwrap_or_else(|| panic!("the loop never turns a closed window's clock:\n{door}"));
+        let sweep = door
+            .find("runtime.turn(now, application_clocks)")
+            .unwrap_or_else(|| panic!("the windows' own turn has moved:\n{door}"));
+        assert!(
+            reap < sweep,
+            "the closed windows are reaped after the open ones take their turn, \
+             so a window nobody can see is drawn one more time:\n{door}"
+        );
+        assert!(
+            door.contains("if runtime.window.leaving.is_some() {"),
+            "a window that has been closed still takes a full turn:\n{door}"
+        );
+        // And the walk every other door in the application uses says the same
+        // thing, because a quit that photographed a closed window would put it
+        // back into `session.json` and open it again next launch.
+        let walk = fn_body(concat!("    fn ", "for_each_window("));
+        assert!(
+            walk.contains("runtime.window.leaving.is_none()"),
+            "every sweep over the windows still answers for the ones that have \
+             been closed:\n{walk}"
+        );
+    }
+
+    /// RED — **the process leaves by the one road a WebView2 host may take, and
+    /// says so in the file first** (§7.35).
+    ///
+    /// Returning from `main` is `exit`, and `exit` is `ExitProcess`, and
+    /// `ExitProcess` runs `DLL_PROCESS_DETACH` for the Edge client DLL on a
+    /// thread whose siblings it has just killed and whose apartment no longer
+    /// pumps. Measured stopping there by the W0′ spike (`w0p-evidence.md` §6.3)
+    /// and again by gate 5 on a clean Windows 11 (§7.35), both times with
+    /// everything this program owns already released.
+    ///
+    /// MUTATIONS: end `main` with `outcome` and the first assertion goes red;
+    /// move the footer below the call and the second does — a last line written
+    /// after the process has been told to stop is a last line nobody will read.
+    #[test]
+    fn the_process_leaves_by_the_one_road_a_webview2_host_may_take() {
+        let start = SOURCE
+            .find(concat!("\nfn ", "main() -> Result<()> {"))
+            .expect("`fn main` is declared once, at column zero");
+        let body = &SOURCE[start..];
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("`fn main` is closed by a `}` at column zero")];
+        let leaves = body
+            .find("bt_platform::leave_process(code)")
+            .unwrap_or_else(|| {
+                panic!("`main` returns, and a returning WebView2 host does not leave:\n{body}")
+            });
+        let says_so = body
+            .find("diagnostics::run_footer(")
+            .unwrap_or_else(|| panic!("nothing writes the run's last line:\n{body}"));
+        assert!(
+            says_so < leaves,
+            "the run's last line is written after the process has been told to \
+             stop, which is to say never:\n{body}"
+        );
+    }
+
+    /// RED — **the application's bound on the engines outlasts the seat's own**
+    /// (§7.35).
+    ///
+    /// [`quit::PAGE_TEARDOWN_DEADLINE`]'s own paragraph has always claimed this
+    /// and it was false for as long as both numbers were written down by hand:
+    /// six seconds against the seat's ten, so the application gave up four
+    /// seconds *before* `WebSeat::tick` could open the backstop it was waiting
+    /// for, and every shut whose `BrowserProcessExited` did not arrive left with
+    /// the engine still holding the window — which is the whole of §7.35's
+    /// defect on the machines where the event is late.
+    ///
+    /// MUTATION: write either constant as a literal shorter than the other and
+    /// this goes red.
+    #[test]
+    fn the_processs_wait_for_a_browser_outlasts_one_seats() {
+        assert!(
+            crate::quit::PAGE_TEARDOWN_DEADLINE > crate::webhost::BROWSER_EXIT_DEADLINE,
+            "the process stops waiting for the browsers before the seat's own \
+             backstop can open: {:?} against {:?}",
+            crate::quit::PAGE_TEARDOWN_DEADLINE,
+            crate::webhost::BROWSER_EXIT_DEADLINE
+        );
+    }
+
     /// **A replacement retires the page wherever it happens**, and the float is
     /// not an exemption from that: dropping a document onto a floating window
     /// that is showing a page ends the page, exactly as it does in a pane.
@@ -87254,7 +87648,34 @@ fn main() -> Result<()> {
     // The session that outlived every question is released once the loop has
     // returned, never before a question could still be in flight.
     bt_platform::video::shutdown_media_session();
-    outcome
+    // **And now the process leaves, by the one road a WebView2 host may take**
+    // (§7.35). Everything this program owns has been let go of above and inside
+    // the loop — the shells, the controllers, the browsers under a deadline, the
+    // session document and its sentinel. What is left between here and the
+    // process disappearing is the C runtime's `exit` chain and the loader's
+    // `DLL_PROCESS_DETACH`, and that is where a process that has hosted a page
+    // stops: measured by the W0′ spike on this machine and by gate 5 on a clean
+    // Windows 11, where `folio.exe` set its exit code and then stayed in the
+    // process list with its window still answering `IsWindow`.
+    //
+    // The footer is written **before** the call and not after, because the whole
+    // value of the line is that it is the last thing in the file when something
+    // between it and the process's death goes wrong.
+    let code = match &outcome {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("{APP_NAME} stopped: {error:#}");
+            1
+        }
+    };
+    eprintln!(
+        "{}",
+        diagnostics::run_footer(
+            &hang_watch::utc_timestamp(std::time::SystemTime::now()),
+            code
+        )
+    );
+    bt_platform::leave_process(code)
 }
 
 #[cfg(test)]

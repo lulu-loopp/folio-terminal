@@ -1190,7 +1190,11 @@ pub(crate) struct PageFacts {
 /// shutdowns were read against: six answered in 271–390 ms, one in 6 588 ms and
 /// one not at all (`w0p-evidence.md` §4.2). A number chosen under the slowest
 /// one that *did* answer would turn that shutdown into a false deadline.
-const BROWSER_EXIT_DEADLINE: Duration = Duration::from_secs(10);
+///
+/// Read outside this module by [`crate::quit::PAGE_TEARDOWN_DEADLINE`], which is
+/// the application's bound on the same wait and has to be **longer than this
+/// one** or the seat's own backstop can never open (§7.35).
+pub(crate) const BROWSER_EXIT_DEADLINE: Duration = Duration::from_secs(10);
 
 /// How long a seat waits for the engine to answer that it exists.
 ///
