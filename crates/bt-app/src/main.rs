@@ -40299,6 +40299,19 @@ impl Runtime<'_> {
         for cache in self.window.command_rails.values_mut() {
             cache.clear();
         }
+        // **And every markdown page, for the rail's reason one surface over**
+        // (2026-08-28; §7.1.3k ②).
+        //
+        // A page's *text* recolours for free — the palette is read fresh on
+        // every frame and a glyph is drawn in whatever colour it is handed. Two
+        // things on a page do not: a formula's raster came out of the engine
+        // already inked, and a `<picture>` names **one file for a dark page and
+        // another for a light one**. Both are in `PreviewDocumentKey`'s
+        // [`PageArtKey`] precisely so that a theme flip is a different layout
+        // question — and nothing was asking the question. Without this a light
+        // window kept a dark window's hero, exactly as it kept a dark window's
+        // ticks until the loop above was written.
+        self.refresh_preview_for_layout();
         self.refresh_chrome();
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
@@ -110005,6 +110018,44 @@ mod tests {
             },
         );
         assert_eq!(card_text(&rendered), vec!["a shot".to_owned()]);
+    }
+
+    /// RED GATE (found on the glass, 2026-08-28) — **a theme flip asks every
+    /// markdown page to lay out again.**
+    ///
+    /// Two things on a page do not recolour for free: a formula's raster came
+    /// out of the engine already inked, and a `<picture>` names one file for a
+    /// dark page and another for a light one. Both are in [`PageArtKey`]
+    /// *precisely* so a theme flip is a different layout question — and until
+    /// this line nothing asked the question. Measured in the real window: the
+    /// chrome went light and the page kept the dark hero and the dark
+    /// screenshot, indefinitely.
+    ///
+    /// It is a source gate rather than a behavioural one because the subject is
+    /// a `Runtime` method that needs a window, a GPU and a palette; what is
+    /// load-bearing is that the *call* is in the one function every theme change
+    /// goes through, beside the sibling cache-clear that was written for the
+    /// same failure one surface over.
+    ///
+    /// MUTATION: delete the `refresh_preview_for_layout()` call from
+    /// `adopt_new_palette` and this goes red.
+    #[test]
+    fn a_theme_flip_asks_every_markdown_page_to_lay_out_again() {
+        const SOURCE: &str = include_str!("main.rs");
+        let start = SOURCE
+            .find("fn adopt_new_palette(&mut self) -> Result<()> {")
+            .expect("the one door every theme change goes through");
+        let body = &SOURCE[start..];
+        let end = body.find("\n    }\n").expect("its closing brace");
+        let body = &body[..end];
+        assert!(
+            body.contains("self.refresh_preview_for_layout();"),
+            "a page whose pictures and formulas are inked by the theme has to be \
+             asked again: {body}",
+        );
+        // And the rail's own clear is still there beside it, because the two are
+        // the same sentence about two surfaces.
+        assert!(body.contains("cache.clear();"));
     }
 
     /// **What a picture copies is `![alt](src)`** (§7.1.3k ④), and a selection
