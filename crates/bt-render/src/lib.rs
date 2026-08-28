@@ -14738,6 +14738,241 @@ mod tests {
         }
     }
 
+    /// A headless device is process-wide in a harder way than the theme is: the
+    /// theme is *this* crate's global, and putting a lock around it is a choice.
+    /// The graphics driver's globals are not ours, and the lock is not optional.
+    ///
+    /// **The accident (2026-08-28, merge gate).** `cargo test --workspace` runs
+    /// this binary's tests on one thread per core, and every test in here that
+    /// needs a real adapter used to stand its own device up. Several of them
+    /// therefore asked D3D12 for an adapter, a device and a readback at the same
+    /// moment on different threads, and the binary died with
+    /// `STATUS_ACCESS_VIOLATION (0xc0000005)` — reliably under load (16 of 30
+    /// processes, run six at a time), never once when the same binary was given
+    /// `--test-threads=1`. The crash is inside the driver, so nothing in this
+    /// file can make it safe; what this file can do is stop asking.
+    ///
+    /// One lock for the whole process, and it is held for the device's whole
+    /// life rather than only across its construction — the readbacks race too,
+    /// and a lock that covered construction alone would only make the window
+    /// narrower.
+    static GPU_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A headless device, and the lock that makes it the only one alive in this
+    /// process for as long as a test is holding it.
+    ///
+    /// The two fields are in this order on purpose: struct fields drop in
+    /// declaration order, so the device — and every texture, buffer and queue
+    /// behind it — is released *before* the lock is handed on. The next test in
+    /// line never overlaps this one's teardown.
+    ///
+    /// It derefs to the context so that a test reads the way it did when it
+    /// built its own.
+    struct HeadlessDevice {
+        gpu: GpuContext,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl std::ops::Deref for HeadlessDevice {
+        type Target = GpuContext;
+
+        fn deref(&self) -> &GpuContext {
+            &self.gpu
+        }
+    }
+
+    impl std::ops::DerefMut for HeadlessDevice {
+        fn deref_mut(&mut self) -> &mut GpuContext {
+            &mut self.gpu
+        }
+    }
+
+    /// **The one door.** Every headless device any test in this crate stands up
+    /// is stood up here, and `every_headless_device_in_a_test_is_taken_through_the_lock`
+    /// is what keeps that sentence true — a test that reached for the
+    /// constructor itself would take no lock and bring the accident back.
+    ///
+    /// A test body that panics while holding the lock poisons it, and a poisoned
+    /// lock here means nothing: what it guards is a `()`. Taking the inner value
+    /// is what stops one red test from turning every later one into a second,
+    /// unrelated failure.
+    fn headless_device(
+        format: wgpu::TextureFormat,
+        demand_software: bool,
+    ) -> Result<HeadlessDevice, RenderError> {
+        let lock = GPU_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let gpu = if demand_software {
+            pollster::block_on(GpuContext::headless_fallback(format))?
+        } else {
+            pollster::block_on(GpuContext::headless(format))?
+        };
+        Ok(HeadlessDevice { gpu, _lock: lock })
+    }
+
+    /// The best adapter this machine has, which on a machine with none is the
+    /// software one — [`GpuContext::headless`] already retries that way, so a
+    /// failure here is a machine with no graphics stack at all and these tests
+    /// have nothing to say about it. They say so by failing rather than by
+    /// quietly passing.
+    fn on_this_machines_adapter(format: wgpu::TextureFormat) -> HeadlessDevice {
+        headless_device(format, false).expect("a headless device context on this machine's adapter")
+    }
+
+    /// WARP by name — gate 5's device, and the only one that shows the defects
+    /// §7.36 was written against.
+    ///
+    /// `None` is a platform with no software adapter, which Windows is not; the
+    /// tests that ask for this skip rather than fail there, because what would
+    /// be red is the absence of a platform rather than a regression.
+    fn on_the_software_adapter(format: wgpu::TextureFormat) -> Option<HeadlessDevice> {
+        headless_device(format, true).ok()
+    }
+
+    /// Every `#[cfg(test)]` module in one file's source, joined — the region a
+    /// rule about *test* code is allowed to be checked against, so that the
+    /// production constructors and their own definitions are out of scope.
+    ///
+    /// Comment lines go first, so that a sentence naming a constructor can never
+    /// look like a call to it.
+    fn test_code_in(source: &str) -> String {
+        let lines: Vec<&str> = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect();
+        let mut collected = Vec::new();
+        let mut index = 0;
+        while index < lines.len() {
+            let opens_a_test_module = lines[index].trim() == concat!("#[cfg(", "test)]")
+                && lines
+                    .get(index + 1)
+                    .is_some_and(|line| line.trim_start().starts_with("mod "));
+            if !opens_a_test_module {
+                index += 1;
+                continue;
+            }
+            index += 1;
+            let indent = indent_of(lines[index]);
+            let closing = format!("{}}}", " ".repeat(indent));
+            while index < lines.len() {
+                collected.push(lines[index]);
+                if lines[index] == closing {
+                    break;
+                }
+                index += 1;
+            }
+            index += 1;
+        }
+        collected.join("\n")
+    }
+
+    /// The body of the item whose first line begins with `opening`, from that
+    /// line to the `}` at the same indent. Empty when there is no such item.
+    fn block_beginning_with(source: &str, opening: &str) -> String {
+        let lines: Vec<&str> = source.lines().collect();
+        let Some(start) = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with(opening))
+        else {
+            return String::new();
+        };
+        let closing = format!("{}}}", " ".repeat(indent_of(lines[start])));
+        let end = lines[start..]
+            .iter()
+            .position(|line| *line == closing)
+            .map_or(lines.len(), |offset| start + offset + 1);
+        lines[start..end].join("\n")
+    }
+
+    fn indent_of(line: &str) -> usize {
+        line.len() - line.trim_start().len()
+    }
+
+    /// This crate's `src`, file by file.
+    fn crate_sources() -> Vec<(String, String)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files: Vec<(String, String)> = std::fs::read_dir(&root)
+            .expect("this crate's src directory")
+            .map(|entry| entry.expect("a directory entry").path())
+            .filter(|path| path.extension().is_some_and(|kind| kind == "rs"))
+            .map(|path| {
+                let name = path
+                    .file_name()
+                    .expect("a file name")
+                    .to_string_lossy()
+                    .into_owned();
+                (name, std::fs::read_to_string(&path).expect("a source file"))
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// PIN (§7.37) — **no test in this crate stands up a headless device except
+    /// through [`headless_device`]**, which is the only place the lock is taken.
+    ///
+    /// Red gate. Put any of the three constructors back into a test body — which
+    /// is exactly how every one of these tests was written until the accident —
+    /// and this names the file and the constructor.
+    ///
+    /// A source pin rather than a runtime one because the thing to forbid is a
+    /// *call site*, and a call site that is never reached on the machine running
+    /// the suite is still the bug: the crash needs two of them live at once, so
+    /// a device built without the lock can sit green for weeks and take the
+    /// merge gate down on the day the scheduler interleaves it.
+    ///
+    /// Each needle is spelled in two pieces so this test is not its own
+    /// counter-example.
+    ///
+    /// The other crates are not swept because none of them builds a device in a
+    /// test: `bt-app` and `bt-corpus` reach wgpu only from `main`, and a process
+    /// lock could not help them anyway — `cargo` runs each test binary as its
+    /// own process, so this lock is this binary's. Two binaries that both built
+    /// headless devices would need the driver to be safe across processes, and
+    /// the evidence is that it is (six copies of this binary at once, each on
+    /// one thread, is the harness that measured the fix).
+    #[test]
+    fn every_headless_device_in_a_test_is_taken_through_the_lock() {
+        let constructors = [
+            concat!("headless", "("),
+            concat!("headless_", "fallback("),
+            concat!("headless_", "on("),
+        ];
+        let doorway = block_beginning_with(
+            &test_code_in(include_str!("lib.rs")),
+            concat!("fn headless_", "device("),
+        );
+        assert!(
+            !doorway.is_empty(),
+            "the one door has to exist before anything can be held to it"
+        );
+        assert_eq!(
+            doorway.matches(constructors[0]).count(),
+            1,
+            "the door asks for this machine's adapter exactly once"
+        );
+        assert_eq!(
+            doorway.matches(constructors[1]).count(),
+            1,
+            "and for the software adapter exactly once"
+        );
+
+        for (name, source) in crate_sources() {
+            let outside_the_door = test_code_in(&source).replace(&doorway, "");
+            for constructor in constructors {
+                assert_eq!(
+                    outside_the_door.matches(constructor).count(),
+                    0,
+                    "{name}: a test stands up a headless device with \
+                     `{constructor}` instead of going through the one door — \
+                     that device takes no lock, and two unlocked devices in one \
+                     process is `STATUS_ACCESS_VIOLATION`"
+                );
+            }
+        }
+    }
+
     /// PIN (§7.1.6c-4b) — the ground's two percentages are clamped where the
     /// ground is *set*, so no surface anywhere can be handed a value outside
     /// its range, and a ground that did not move costs no revision.
@@ -17974,9 +18209,7 @@ mod tests {
         /// composited with anything.
         #[test]
         fn a_window_drawing_into_a_texture_reports_no_alpha_mode() {
-            let mut gpu =
-                pollster::block_on(GpuContext::headless(wgpu::TextureFormat::Bgra8UnormSrgb))
-                    .expect("a headless device context on this machine's adapter");
+            let mut gpu = on_this_machines_adapter(wgpu::TextureFormat::Bgra8UnormSrgb);
             let window = WindowRenderer::offscreen(
                 &mut gpu,
                 64,
@@ -18141,9 +18374,8 @@ mod tests {
 
         const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
-        fn context() -> GpuContext {
-            pollster::block_on(GpuContext::headless(FORMAT))
-                .expect("a headless device context on this machine's adapter")
+        fn context() -> HeadlessDevice {
+            on_this_machines_adapter(FORMAT)
         }
 
         /// A four-column, two-row grid: one cell whose background a program set
@@ -18366,9 +18598,8 @@ mod tests {
 
         const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
-        fn context() -> GpuContext {
-            pollster::block_on(GpuContext::headless(FORMAT))
-                .expect("a headless device context on this machine's adapter")
+        fn context() -> HeadlessDevice {
+            on_this_machines_adapter(FORMAT)
         }
 
         /// The device layer, standing up with no window anywhere near it.
@@ -18749,9 +18980,9 @@ mod tests {
             const BOX: [f32; 4] = [360.0, 8.0, 620.0, 44.0];
             const INK: [u8; 3] = [255, 0, 0];
 
-            let Ok(mut gpu) = pollster::block_on(GpuContext::headless_fallback(FORMAT)) else {
-                // Every Windows has WARP; a platform that does not is not the
-                // platform this defect lives on.
+            // Every Windows has WARP; a platform that does not is not the
+            // platform this defect lives on.
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
                 return;
             };
             let mut window =
@@ -18897,7 +19128,7 @@ mod tests {
             // Red, and nothing else in this frame is red.
             const GROUND: [u8; 3] = [220, 30, 30];
 
-            let Ok(mut gpu) = pollster::block_on(GpuContext::headless_fallback(FORMAT)) else {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
                 return;
             };
             let mut window =
@@ -19006,7 +19237,7 @@ mod tests {
         fn a_video_that_stopped_releases_its_texture() {
             const WIDTH: u32 = 320;
             const HEIGHT: u32 = 200;
-            let Ok(mut gpu) = pollster::block_on(GpuContext::headless_fallback(FORMAT)) else {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
                 return;
             };
             let mut window =
