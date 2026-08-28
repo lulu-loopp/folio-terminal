@@ -197,6 +197,23 @@ pub fn run_header(now: &str, process_id: u32) -> String {
     )
 }
 
+/// **The last line of the file, and the one a hang is read against** (§7.35).
+///
+/// [`run_header`]'s pair, in the same rule and rails so that a reader scrolling
+/// a `diagnostics.log` sees where one run ends and the next begins — and so that
+/// the question "did this build get to the end of `main`?" is answered by the
+/// file rather than by a debugger. That question is not hypothetical here: on a
+/// clean Windows 11 the process sets its exit code and then never leaves, and
+/// this line is the difference between a shut that hung inside Folio and one
+/// that hung after Folio had finished (`docs/DESIGN.md` §7.35).
+#[must_use]
+pub fn run_footer(now: &str, code: i32) -> String {
+    format!(
+        "── {} — run ended {now}, exit {code} ──",
+        crate::version::banner()
+    )
+}
+
 /// **The front door closes here.**
 ///
 /// Called once, from `main`, after the command line has been answered and

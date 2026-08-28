@@ -7285,6 +7285,67 @@ mod windows_impl {
         unsafe { FreeConsole() }.is_ok()
     }
 
+    /// **End this process now, without running anybody else's teardown**
+    /// (`docs/DESIGN.md` §7.35).
+    ///
+    /// The last statement of `main`, and the only correct one for a process that
+    /// has hosted WebView2. Returning from `main` — or calling
+    /// [`std::process::exit`], which is the same road — hands control to the C
+    /// runtime's `exit` chain and then to `ExitProcess`, and `ExitProcess`
+    /// terminates every other thread *first* and only then calls
+    /// `DLL_PROCESS_DETACH` on every loaded module. The Edge WebView2 client DLL
+    /// is loaded into this process and is Chromium: its detach path expects an
+    /// apartment that still pumps messages and threads that are still alive, and
+    /// it is given neither.
+    ///
+    /// **Measured twice, three months and two machines apart.** The W0′ spike
+    /// found all eight of its probe processes still resident after each had
+    /// written `done` and called `std::process::exit(0)`, each holding its own
+    /// binary against the next `cargo build` and its own user data folder
+    /// (`w0p-evidence.md` §6.3); its remedy was exactly this call, and after it
+    /// every run left nothing behind. Gate 5's clean Windows 11 machine found
+    /// the same thing in the product on 2026-08-28: with every controller
+    /// closed, every browser process gone and the loop stopped, `folio.exe` set
+    /// its exit code and then stayed in the process list — window and all —
+    /// for as long as anybody watched.
+    ///
+    /// **This is not a shortcut past a teardown that was owed.** Everything this
+    /// program owns is released before this is reached, deterministically and on
+    /// the thread that owns it: the shells are shut, the controllers are closed,
+    /// the browsers are waited for under a deadline, the session document is on
+    /// the disk and its sentinel is gone. What is skipped is a third party's
+    /// static destructors on a thread that can no longer serve them — which is
+    /// the same conclusion Chromium reaches about its own processes and for the
+    /// same reason.
+    ///
+    /// `TerminateProcess` on one's own process is documented as prompt and
+    /// unconditional, so the call does not return; the `unreachable!` is there
+    /// for the type and not for a case.
+    pub fn leave_process(code: i32) -> ! {
+        use std::io::Write;
+        use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+
+        // **The buffers first, because nothing after this will do it.** The
+        // `exit` chain being skipped is the point of this function, and flushing
+        // is the one thing in that chain that belongs to this program: a
+        // `diagnostics.log` missing its last line because the process left
+        // through a faster door would be this fix eating its own evidence.
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+
+        // SAFETY: the handle is the pseudo-handle for this process, which needs
+        // no closing, and the exit code is this run's own.
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "a process exit code is a u32 on this platform and an i32 \
+                      everywhere the rest of this program says one"
+        )]
+        let _ = unsafe { TerminateProcess(GetCurrentProcess(), code as u32) };
+        // Documented as never returning for the current process. If it somehow
+        // did, the honest thing left is the road this call exists to avoid.
+        std::process::exit(code)
+    }
+
     /// The one console control handler this process installs.
     ///
     /// It exists for the window in which the process *is* still attached: the
@@ -7508,14 +7569,14 @@ pub use windows_impl::{
     current_thread_priority, detach_console, documents_directory, dpi_at, file_product_version,
     flash_window, get_dpi_for_window, get_window_rect, get_work_area, install_console_ctrl_handler,
     install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
-    message_box, monospace_font_families, open_local_file, open_local_path, open_system_fonts_page,
-    os_ui_language, read_context_menu, recycle, redirect_std_streams_to_file, remove_context_menu,
-    request_window_close, reveal_in_explorer, set_clipboard_text, set_current_thread_priority,
-    set_system_backdrop, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
-    shell_execute, silence_std_streams, spawn_at_priority, std_error_is_console,
-    system_backdrop_available, take_keyboard_focus, thread_mouse_capture, top_level_window_at,
-    virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount, work_area_at,
-    write_to_console,
+    leave_process, message_box, monospace_font_families, open_local_file, open_local_path,
+    open_system_fonts_page, os_ui_language, read_context_menu, recycle,
+    redirect_std_streams_to_file, remove_context_menu, request_window_close, reveal_in_explorer,
+    set_clipboard_text, set_current_thread_priority, set_system_backdrop, set_window_dark_mode,
+    set_window_outer_rect, set_window_topmost, shell_execute, silence_std_streams,
+    spawn_at_priority, std_error_is_console, system_backdrop_available, take_keyboard_focus,
+    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_screen_rect,
+    wheel_scroll_amount, work_area_at, write_to_console,
 };
 
 /// **The one decision in the system-preference watch.**

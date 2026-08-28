@@ -57,14 +57,23 @@ use std::time::{Duration, Instant};
 /// How long the process will wait for the hosted pages to let go before it
 /// leaves anyway.
 ///
-/// **A bound and not a promise.** `webhost`'s own `BROWSER_EXIT_DEADLINE` is the
-/// per-seat backstop for a `BrowserProcessExited` that measured late in one
+/// **A bound and not a promise.** [`crate::webhost::BROWSER_EXIT_DEADLINE`] is
+/// the per-seat backstop for a `BrowserProcessExited` that measured late in one
 /// shutdown of eight and absent in another; this is the whole application's, and
 /// it is longer than one seat's because several seats retire in parallel and the
 /// last of them starts its own clock only once it has been told to close. A quit
 /// that hung here would be a terminal that will not close, which is worse than a
 /// browser process that outlives it by a second.
-pub const PAGE_TEARDOWN_DEADLINE: Duration = Duration::from_secs(6);
+///
+/// **Derived from the seat's bound rather than written down beside it** (§7.35).
+/// It used to be a flat six seconds while the seat's was ten, so the sentence
+/// above was false: the application always gave up four seconds *before* the
+/// backstop it was waiting on could open, and every shut whose
+/// `BrowserProcessExited` did not arrive left with the engine still holding the
+/// window. Two seconds of slack, because what the application is waiting for is
+/// the last seat's own door plus one turn of the loop to carry the answer.
+pub const PAGE_TEARDOWN_DEADLINE: Duration =
+    crate::webhost::BROWSER_EXIT_DEADLINE.saturating_add(Duration::from_secs(2));
 
 /// What a press on the summary card answers.
 ///
