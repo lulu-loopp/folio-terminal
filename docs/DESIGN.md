@@ -4602,7 +4602,7 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 
 **日期:2026-08-28 干净机实证,当日复现、定因、落地。**
 
-### 7.37 一个文件名在哪张脸上都是同一行字,tab 条的 × 也要说话,菜单文字够读,箭头随展开翻,文件没了就说没了(next15 用户五条实证,2026-08-28 用户裁决,已落地;`crates/bt-app/src/{file_peek,float,main,tooltip,files,i18n}.rs`、`crates/bt-render/src/theme.rs`)
+### 7.37 一个文件名在哪张脸上都是同一行字,tab 条的 × 也要说话,菜单文字够读,箭头随展开翻,文件没了就说没了(next15 用户五条实证,2026-08-28 用户裁决,已落地并实机复验;`crates/bt-app/src/{file_peek,float,main,tooltip,files,peek_strip,i18n}.rs`、`crates/bt-render/src/{theme,scheme,lib}.rs`)
 
 五条互不相干的用户实证,同一晚裁下,每一条都是「同一件东西在两个地方长得不一样」「一个该说话的表面没说话」或「一张画背着的事实与真相不符」。
 
@@ -4618,7 +4618,13 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 
 **禁用/不可用的墨单列且豁免**:一个按不动的控件本就该看着按不动(WCAG 1.4.3 对失效构件自带的例外),所以 `menu_item_hint_text`(行尾注)与 `menu_item_unavailable_text`(身后无物的控件)只要求比可读的那行**更暗**、不达 AA。红门 `menu_text_clears_wcag_aa_on_both_built_in_themes` 两半都要:**推导那一半**(两套内置配色各过一次 `ChromePalette::derive`)与 struck 那一半,再加两枚豁免墨各比它更暗单列——只读常量的门,在 `raise_against` 那行被删掉的那天会全绿(变异:删推导那行,亮色推导掉回 4.18;亮色 struck 还回 `#7D7C78`,struck 那半塌;把任一豁免墨提到满,更暗那条塌)。
 
-**④ 一个文件夹的箭头,正好在它的子项被列出时朝下。** 用户截图实证:点开 `.playwright-mcp`,子项已经列在下面,而那行左侧的三角仍旧朝右。箭头的朝向是一个事实的两种画法——文件夹开着,或没开——`row_turn` 却把一段**已经停下的补间**看得比文件夹自己的状态重:一段被停在「合上」那端、再由一条改了 `open` 却没转这枚三角的路径留下的补间(定位、恢复、从别处折叠这行),会让这行在它开着的子项上方一直朝右。裁决与落地:**静止时,角度是文件夹自己的,不是补间的**。`row_turn` 里一段停下的补间只在它与文件夹一致时才被相信,一旦不一致,文件夹赢;**运动中的补间照旧全信**——那是手正要求的那一次转动,在飞。于是静止角度成了 `open` 的纯函数(「箭头直接由展开派生」)。红门 `a_folders_chevron_points_down_exactly_when_its_children_are_shown`:一段停在合上端的补间,文件夹却开着,断言角度朝下(1.0);镜像地,一段停在开着端的补间、文件夹已折叠,断言朝右(0.0);运动中那一帧照旧是动画值(变异:让停下的补间盖过 `open`,即旧 `row_turn`,两个方向的三角都与自己的文件夹相反)。
+**④ 一个文件夹的箭头,正好在它的子项被列出时朝下——而真正的病因是没人叫醒循环。** 用户截图实证:点开 `.playwright-mcp`,子项已经列在下面、图标也换成了打开的文件夹,而那行左侧的三角仍旧朝右。
+
+**这一条的第一版诊断是错的,记在这里因为它值一段。** 当时判成「`row_turn` 把一段已经停下的补间看得比文件夹的状态重」,改成静止时以 `open` 为准,红门也真的红过——然后**实机照片打脸**:装上修复的构建里,浮窗树点开一个文件夹,三角**照旧朝右**;而指针往树上随便一动,下一帧就是朝下的。状态从来没错过,`row_turn` 一直给的是对的角度;**错的是没有那一帧**。教训与 §7.35 是同一条:一个能自圆其说的成因不等于**这一台机器上的**成因,红门绿了不代表病好了,**得把它画出来看**。
+
+**真因:`strip_animation_deadline` 里那句「有没有三角在转」只问了停靠的那几列。** `files_turning` 走的是 `tabs[active].file_trees`——**停靠**的文件列的缓存;而一扇浮窗(文件夹浮窗、撕出去的列)把自己的 `DirCache` 挂在窗上,不在那张表里。于是在浮窗树里点开一个文件夹:补间起了、第一帧画了(那一帧上三角正好还在起点=朝右)、然后**没有人再要第二帧**,循环就地入睡,那行便一直顶着一枚朝右的三角站在自己敞开的子项上面,直到某件不相干的事把它重画。这正是 §7.1.3/`a_row_a_locate_opened_arrives_turned_rather_than_turning` 早就写下的那一类失败——「它*依赖*循环被再次叫醒」——只不过这次落在唯一一个那句问话**看不见**其缓存的面上。落地:那句问话把浮窗们的树也并进来(`float.drawn().filter_map(FloatWin::files)`)。
+
+**`row_turn` 那半保留,降为它本来的名分:一条加固,不是这条的解。** 静止时以文件夹为准仍然是对的(一段被定位/恢复留下的、与 `open` 不一致的停死补间,不该盖过事实),它的红门也照旧站着;只是它修的不是用户报的这一条。两条各有各的门:`a_folders_chevron_points_down_exactly_when_its_children_are_shown`(状态那一半,变异=让停下的补间盖过 `open`)与 `a_turning_triangle_wakes_the_loop_from_every_tree_that_can_draw_one`(帧那一半,**读源码**,因为坏的是这句问话**走哪几个仓库**这个形状——把任何一个 `DirCache` 单独拿来测,在坏掉的构建上都是绿的)。实机复验:同一枚文件夹,修后点开即朝下。
 
 **⑤ 文件已经不在了,卡片就说不在,而不是叫它二进制。** 终端里一条引用在印出时被验证过,文件可以在那之后被删掉;指针停在仍带下划线的词上,卡片却说「无法预览 —— 二进制或无法识别的类型。」——这既不真(文件不是二进制),也不可能(根本没有文件)。裁决:**文件不存在时说「文件已不存在」**(英 `The file is no longer there.`/中「文件已不存在。」,按 copy-guide 只陈述、不夹议),而且**不印类型 chip**——没有类型可命名,一枚印着 `unknown` 的 chip 压在「文件不在」那句上就是卡片自相矛盾。落地:新 `PeekBody::Gone` 与 `PeekBodyKind::Gone`,后者在 `peek_body_kind` 里**压过一切**(没有文件就没有类型、没有字节、没有页可开);窗口每帧对悬停的这一个文件 `stat` 一次判在不在(**只对本地路径**——网络路径在更早就被拒了,逐帧 `stat` 一条 share 会卡住循环;这与 §7.29 逐次指针移动 `is_dir()` 是同一份预算);`content.ftype` 为空时 `file_peek::build` 整枚 chip 不画。新文案一条 `Text::PeekFileGone`,`Text::ALL` 523 → 524。**下划线的撤销**沿用既有的重验证:引用在下一次被验证时(新输出、再悬停)由 worker 发现文件没了、不再画线,本片不新造第二套判据。红门 `a_reference_whose_file_has_gone_says_so_instead_of_calling_it_binary`:`gone` 为真时任何 ftype、任何 refused 都答 `Gone`,而「还在」的同一文件答 `Refused`,无路径的合成文档永远不会 `gone`(变异:拿掉 `peek_body_kind` 顶上的 `gone` 判据,一切又当文件还在磁盘上那样作答)。
 

@@ -66353,10 +66353,30 @@ impl Runtime<'_> {
         // already still and nothing else in the window moving. Under reduced
         // motion `RevealTween` reports the target with no frames asked for, so
         // this is never true and the window stays genuinely idle.
+        //
+        // **Every tree that can turn one, and that is the fix** (user report
+        // 2026-08-28, `docs/DESIGN.md` §7.37 ④). This asked the docked columns
+        // alone, and a *float's* tree — the folder flyout, the torn-off column —
+        // keeps its cache on the window rather than in `file_trees`. So a
+        // triangle clicked in one started its turn, drew its first frame, and
+        // then asked nobody for a second: the loop went idle mid-animation and
+        // the row sat with a shut triangle over its own open children until some
+        // unrelated event happened to repaint. Measured before this line: click
+        // a folder in a flyout and its `▸` stays `▸`; move the pointer anywhere
+        // over the tree and it is `▾` on the next frame. That is the symptom
+        // `a_row_a_locate_opened_arrives_turned_rather_than_turning` was written
+        // about one surface earlier, arriving on the one surface whose cache
+        // this question could not see.
         let files_turning = self.window.tabs[self.window.active_tab]
             .file_trees
             .values()
-            .any(|cache| cache.any_turning(now, motion));
+            .any(|cache| cache.any_turning(now, motion))
+            || self
+                .window
+                .float
+                .drawn()
+                .filter_map(float::FloatWin::files)
+                .any(|files| files.cache.any_turning(now, motion));
         // §7.7 ②, and the same argument once more: a page's mark spins while a
         // navigation is in flight, and nothing else in the window is moving
         // while it does — the engine reports when the navigation *ends*, not
@@ -85041,6 +85061,58 @@ fn tab_surface_tip_boxes(
         boxes.push((tooltip::TooltipAnchorId::NewTabMenu, rect));
     }
     boxes
+}
+
+#[cfg(test)]
+mod files_turn_wake_tests {
+    /// RED — **every tree that can turn a triangle is asked whether one is
+    /// turning** (user report 2026-08-28, `docs/DESIGN.md` §7.37 ④).
+    ///
+    /// RED EVIDENCE (2026-08-28, measured on the real window before the fix).
+    /// Click a folder in a **flyout** tree: its children appear, its icon
+    /// becomes the open folder, and its triangle stays `▸`. Move the pointer
+    /// anywhere over that tree and the very next frame draws `▾`. Nothing about
+    /// the state was ever wrong — `row_turn` had the right angle the whole time
+    /// — and nothing repainted to spend it, because `strip_animation_deadline`
+    /// asked only `tabs[active].file_trees`, the **docked** columns' caches. A
+    /// float keeps its own `DirCache` on the window, so a turn started in one
+    /// drew its first frame and then asked nobody for a second: the loop went
+    /// idle mid-animation and the row sat with a shut triangle over its own open
+    /// children until some unrelated event happened to wake it.
+    ///
+    /// It is read off the source, and that is deliberate: what was wrong is the
+    /// **shape** of the question — which stores it walks — and a gate that
+    /// exercised one `DirCache` would have been green on the broken build, since
+    /// the cache always answered correctly. This is the same reason §7.33's own
+    /// derivation gate reads the pass rather than the predicate.
+    ///
+    /// MUTATION: drop the float half and the deadline goes back to seeing only
+    /// the docked columns.
+    #[test]
+    fn a_turning_triangle_wakes_the_loop_from_every_tree_that_can_draw_one() {
+        const SOURCE: &str = include_str!("main.rs");
+        let at = SOURCE
+            .find("fn strip_animation_deadline(")
+            .expect("the window has an animation deadline");
+        let body = &SOURCE[at..];
+        let end = body.find("\n    fn ").unwrap_or(body.len());
+        let body = &body[..end];
+        let turning = body
+            .find("let files_turning")
+            .expect("the deadline asks whether a triangle is turning");
+        let question = &body[turning..];
+        let question = &question[..question.find(";\n").unwrap_or(question.len())];
+        assert!(
+            question.contains("file_trees"),
+            "the docked columns' caches are still asked:\n{question}"
+        );
+        assert!(
+            question.contains("float") && question.contains("files"),
+            "a float's own tree can turn a triangle and is never asked, so the \
+             loop goes idle mid-turn and the row keeps a shut triangle over its \
+             open children:\n{question}"
+        );
+    }
 }
 
 #[cfg(test)]
