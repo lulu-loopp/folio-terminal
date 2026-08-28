@@ -3,7 +3,7 @@
 来源:`readiness-audit-2026-08-27.md`(Claude 盘点)× `readiness-gaps-2026-08-27.md`(签名行情/首次体验补盘)× `readiness-review-codex-2026-08-27.md`(Codex 对审:14 错 13 漏)。Codex 的更正全部采纳;下面是合成后的**门**,不再引用三份里被更正的旧结论。
 
 ## 总判断
-今天不能公开。阻塞项按类分七道门;每道门是一片施工单,可并行,全部绿再定日期。时机裁决(用户):打磨期跑一轮后发;发布前一天零在飞线时做历史重写(②:filter-repo 去 `Claude-Session` trailer、邮箱 umich→gmail、`Co-Authored-By` 留)。
+今天不能公开。阻塞项按类分七道门;每道门是一片施工单,可并行,全部绿再定日期。时机裁决(用户):打磨期跑一轮后发;发布前一天零在飞线时做历史重写(②:filter-repo 去 `Claude-Session` trailer、邮箱 `weiyishi@umich.edu`→`weiyishi197@gmail.com`(用户裁 2026-08-28;`git config user.email` 已就地改为此,发布前 filter-repo 把历史全部改写为它)、`Co-Authored-By` 留)。
 
 ## 门 0 清洁(必须)
 - `corpus/claude-code-session.btcr`、`cargo-build-flood.btcr` 含真实姓名/邮箱/组织/用户名/安装路径(Codex 错1):**重录或脱敏重写**,并让 `corpus/README.md` 的「已做环境替换」成真;加一条红门:`rg -a` 扫全部跟踪文件不得命中邮箱/`C:\Users\`/`D:\Developer\`。
