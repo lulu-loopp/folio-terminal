@@ -4677,6 +4677,81 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 **⑦ 一个不可预览的文件(`folio.exe`),浮窗里画和 pane 里同一张卡、同一个「Open in default app」、同样可点。** pane 里画的是「No preview for this file type」+一个交给系统默认程序的按钮那张卡;同一文件在浮窗里曾是一片空白(只有头和地址轨)。根因:那张卡是**座位 chrome**(inline 在座位画家里),浮窗的 `preview_float_layer` 的 `PreviewChrome::Document` 一臂只画空 diff/仓库那句居中提示,没有 `Refused` 那一臂。**修:把座位画家里那段卡的绘制抽成一支公用函数 `seats::push_preview_card`,座位与浮窗都调它**(别复制一份),按钮的矩形因此两处都由同一个 `preview_card_geometry` 定,命中不会落在没画的地方。浮窗侧:`Document` 臂遇到 `refusal()` 就用这支函数把卡画进 body;新增 `FloatPart::CardButton`,`float_hit_at` 用同一个 `preview_card_geometry` 算出按钮矩形来命中(按钮标签宽度像 `dock_label` 一样在循环外量一次);`press_float` 接它 → `open_preview_externally_on(Float)` 把文件交给系统默认程序(和座位那枚 `PreviewOpenButton` 同一扇门 `open_path_in_default_app`,1300ms「Opened」回执同一个窗级计时器)。红门 `a_file_nobody_previews_wears_the_same_card_in_a_float_as_in_a_pane`。
 
 **日期:2026-08-28 用户七件实证,派单方裁定,当日落地。**
+### 7.40 一个终端不许在启动时开另一个终端,也不许为了写自己的标题去开一台虚拟机(启动弹 Windows Terminal 窗 + 启动慢,2026-08-28 用户实证 next15,已落地;`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/{wsl,profiles,git,psreadline,shell_integration,attention_copilot,main}.rs`)
+
+**报上来的病。** 「启动 Folio 很慢,而且**每次先弹出一扇 Windows Terminal 窗口**,标签叫 `C:\WINDOWS\System32\wsl.exe`,过一会 Folio 的窗才出来。」
+
+**一句话的因:`wsl.rs::probe` 在启动路径上起了两个 `wsl.exe`,一个没戴 `CREATE_NO_WINDOW`,另一个要启动一台虚拟机,而首窗的标题在等它们。** 三件事各自都有人写过理由,合起来是这个产品在别人的机器上给出的第一印象。
+
+#### ① 所有不经 ConPTY 的子进程走同一扇静默门
+
+**这不是「忘了加一个 flag」,是「一条规矩没有门」。** Folio 带 `#![windows_subsystem = "windows"]`,自己没有控制台;它起一个控制台子进程时,Windows 必须**给**那个子进程配一个控制台,而 Win11 上注册的控制台宿主是 **Windows Terminal**——于是那扇窗不是「闪一下的黑框」,是**另一个终端模拟器的一扇窗,开在这个终端模拟器前面**。`CREATE_NO_WINDOW` 是「给它控制台,但不要窗」,这才是一个用管道读输出的探针真正想要的东西。
+
+这条规矩本来在仓里有**四份**:`git.rs` 的 `no_window`、`psreadline.rs`、`shell_integration.rs`、`attention_copilot.rs`,每一份自己写一遍 `const CREATE_NO_WINDOW: u32 = 0x0800_0000;`,每一份自己写一段注释解释它。第五处——`wsl::probe`——没写。**一条要在每个 `Command` 处被想起来的规矩,离下一次被忘掉只差一个新调用点**,而这一次它被忘了七周,并且是以它可能有的最显眼的方式。
+
+所以规矩改写成**一扇门**:`bt_platform::quiet_command(program) -> Command`。仓里 `crates/*/src` 下的每一处子进程都从它出来,常量只剩这一份,四段注释合成一段。`git.rs` 那段旧注释顺带被更正:它写着「今天用不上——这个 build 还是控制台子系统程序」,而 `main.rs` 长出 `windows_subsystem = "windows"` 的那天起这句话就不再成立,那个 flag 一直是承重的。
+
+**门是用源码钉住的,不是用文档。** `no_command_is_built_outside_the_quiet_door` 走一遍 `crates/*/src`(排除 `vendor/`=上游的代码守上游的规矩、`build.rs`=cargo 自己有控制台且构建脚本不能反过来依赖持门的那个 crate、`bin/`+`tests/`=沿用 `bt_app::diagnostics` 那条已经写下的排除),数**按词边界**匹配的手工构造:`PtyCommand` 含有同样的拼写却是另一个类型——pane 里的 shell 是被 ConPTY **交给**一个伪控制台,不是被分配一个真的,它没有窗要压。`src/` 里的 `#[cfg(test)]` 块**不豁免**,而且是故意的:要豁免就得写一个数花括号的解析器,而一个自己的子进程会在开发者屏幕上闪控制台的测试套件没人想要——门对测试的代价和对产品一样低,正好是零。针本身用 `concat!` 拆成两截拼(`attention_hooks` 的老办法),否则这个测试自己就是它要数的那个东西。
+
+#### ② 发行版列表读注册表,`wsl.exe --list` 退役
+
+**「这台机器装了哪些发行版、默认是哪个」是一句关于 Windows 的事实,不是一句关于 Linux 的事实。** 它写在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`:`DefaultDistribution` 存的是一个 **GUID**,每个子键是一个发行版,键里的 `DistributionName` 才是人看的名字。这正是 `wsl.exe --list` 自己读的地方——旧代码为了拿到同一份答案,起了一个进程、等它、再把它写的 UTF-16LE 解码回来、再按位置丢掉一行被本地化了的表头。现在是三次注册表读,微秒级,零进程,不需要线程,也就没有任何东西可以等。
+
+三条判据:
+
+- **GUID join name,而不是把 `DefaultDistribution` 当名字读。** 这是这一段唯一能悄悄坏掉的地方:读成名字,`default` 在每台真机上都是 `None`,于是限定词永远不出现,而症状看起来跟「这台机器只有一个发行版」一模一样。红门里那台机器的 `DefaultDistribution` 指的是第三个子键。
+- **「有名字」才是发行版,不是「像个 GUID」。** `Lxss` 底下还坐着别的东西(装机缓存就是一个),而判据是它**有没有** `DistributionName`,不是 Windows 把它的键拼成了什么样。数错了的后果是一台单发行版机器长出一个没有第二个发行版可供区分的限定词。
+- **列表按名字排序,而排序本身不是一句主张。** 注册表按 GUID 枚举子键,那是一个没人选过、也没人能预测的顺序;把它原样传下去等于把一个任意序列当成有意义的东西呈现。字母序是这份列表唯一能被给予的、只说它自己的顺序。旧注释里的「按 `wsl.exe` 列出的顺序」随 `wsl --list` 一起退役。
+- **一个指向已经不在的键的 `DefaultDistribution`**——半途而废的 `wsl --unregister` 留下的东西——得到「有发行版、没有默认」,而这正是 `title_qualifier` 早就会闭嘴的那一种情形。
+
+**可测,是因为注册表被抽象成了 `Registry` trait。** 否则这个模块唯一的测试是「在你手上这台机器上跑一遍」:这里答 Ubuntu、隔壁桌答 Debian、CI 上什么都没有,三个答案没有一个是在说解析对不对。有了它,套件递进去一份自己写的注册表,包括真机上有、而开发者自己那台不一定有的形状。
+
+#### ③ 登录 shell 那一问,推迟到真的有人开 WSL pane
+
+**「默认发行版把用户登进哪把 shell」是一句关于一个 Linux 用户账号的事实,唯一持有它的是那个发行版自己的密码库**,而读它意味着**启动一台虚拟机**。旧代码在启动时问,于是**每一台仅仅是「装了 WSL」的机器**——包括它的主人从不开 WSL pane 的那些——每次启动 Folio 都为此启一次 WSL2 的 utility VM。
+
+新行为:这一问挂在 pane 的出生上,和 `psreadline::begin_probe` 并肩,理由也是它的理由——只有真的有人在开这种 shell 的机器上才值得花一个进程。幂等:一次运行里第二块 WSL pane 发现已经在问了,什么都不起;一次运行里一块都没开的,一个字都不问。
+
+**判据落在 namespace 上而不落在出厂的 `wsl` 这个 id 上**,因为 `shell_integration::shell_command_for` 分支分的就是 namespace:profile 编辑器(K86)让人做出第二个 WSL profile 的那天,那个 profile 的 pane 同样需要这个答案,而它不会带着那个 id。
+
+**挂账一条,明写在这里等裁决:一次运行里的第一块 WSL pane 拿不到 shell 整合。** 因为这一问是异步的、而且没有任何东西等它,所以第一块 pane 组命令行时答案还没回来,它按 `integrated_login_shell()` 答 `None` 的那条路走——起一个光秃秃的 `wsl.exe`,也就是这个模块存在之前每台机器的行为,以及一台 zsh 机器永远的行为。第二块以后都带整合。三条路里这是被选中的一条:
+- **让那次 spawn 等**:答案要几秒(虚拟机冷启动),而 spawn 在 UI 线程上,等于用户点开 WSL 的那一刻窗口冻住几秒;更糟的是默认 profile 就是 WSL 的机器——首个 tab 的 spawn 在 `show_new_window` **之前**,那样等就把 ④ 又废掉了。
+- **首帧之后统一预热**:等于给每台装了 WSL 却不用的机器每次启动都启一台虚拟机,正是本节要治的病。
+- **不等**(选中):代价有界、可见、只落在一次运行的第一块 pane 上。
+
+#### ④ 首帧不等任何探针
+
+**病灶的最后一环在 `profiles::title`。** 首窗的标题由它组,它调 `wsl::facts()`,而旧的 `WslProbe::facts` 会 **join 探针线程**;`main` 又在 `create_window` **之前**组这个标题。于是「Folio 的窗过一会才出来」的那个「一会」,是一台 WSL 虚拟机的冷启动时间,原样加在首帧前面。
+
+修后 `facts()` 按构造就不会阻塞:装机情况在 `start()` 里已经读完了(②),登录 shell 要么已经回答要么还没有(③),没有第三种状态。**所以它不叫 `try_facts`——没有一个会阻塞的孪生兄弟需要跟它区分开**;这个模块里没有任何东西能让调用者等。返回值改成 owned,因为两半来自两处、在这里被合起来;它是几个短字符串,每次 pane 出生读一次、每次 profile 标题重建读一次。
+
+也因为限定词现在在开窗之前就在手上,「标题先不带、答案回来再补画」那条备选路不需要存在,探针落地也不需要触发重绘——没有任何一枚像素依赖那个迟到的答案。
+
+**红门。**
+
+- `bt_platform::quiet_door_tests::no_command_is_built_outside_the_quiet_door`:①的源码门。**变异实测**:把 `wsl::ask_login_shell` 写回 `std::process::Command::new` → 红,`crates\bt-app\src\wsl.rs builds 1 of its own`。
+- `wsl::tests::the_installation_is_read_from_the_registry_and_the_default_is_a_guid`:②。给一棵假注册表(本机 `Lxss` 的形状:三个发行版 + 一个不命名发行版的子键 + 指向第三个的 GUID),解析出默认发行版与列表;GUID 大小写不敏感也在里面。
+- `wsl::tests::one_distribution_needs_no_qualifier_and_none_at_all_needs_no_wsl`:②的边界三态——一个发行版不带限定词、没有 `Lxss` 的机器答空、`DefaultDistribution` 指向已消失的键答「有列表没默认」。
+- `wsl::tests::the_first_frame_does_not_wait_for_the_wsl_probe`:④。把探针换成一个在测试结束前**永不回答**的桩,首帧那两处读(`facts()` 与 `profiles::title`)在另一根线程上跑、答案走 channel 回来——写法照抄 `git::tests::a_child_that_will_not_finish_is_killed_and_reported`,理由也一样:**要防的失败是「永不返回」而不是「慢」**,直接在测试线程里读会把整个套件挂死而不是报红。那一分钟不是预算,是「回来了」和「没回来」之间的差别。
+
+**量到的数**(本机,release,每次一份全新的隔离 `APPDATA`/`LOCALAPPDATA`,`BT_STARTUP_TRACE=1`,各三次;`window` 是「开窗那一段」,`background_visible` 是「窗真的在屏幕上」,都从进程起点算):
+
+| | window | pty_spawn | runtime_ready | background_visible |
+|---|---|---|---|---|
+| 修前 ① | **6006ms** | 206 | 7411 | **7504ms** |
+| 修前 ② | **1717ms** | 169 | 2669 | **2736ms** |
+| 修前 ③ | **1681ms** | 178 | 3117 | **3210ms** |
+| 修后 ① | **43ms** | 130 | 1513 | **1672ms** |
+| 修后 ② | **29ms** | 238 | 1121 | **1235ms** |
+| 修后 ③ | **37ms** | 127 | 1111 | **1235ms** |
+
+**`window` 从 1.7–6.0 秒掉到 0.03–0.04 秒**——这一段几乎全是那次 join,第一次跑的 6 秒是 WSL 虚拟机的冷启动,后两次的 1.7 秒是它已经热着时 `wsl.exe --list` 加一次 `wsl.exe -e` 的钱。**到窗真的出现在屏幕上**:7.5s / 2.7s / 3.2s → 1.7s / 1.2s / 1.2s。
+
+**弹窗那一半的实证。** 修前一次启动,进程表里多出 `WindowsTerminal`,`MainWindowTitle` 恰好是 **`C:\WINDOWS\System32\wsl.exe`**——用户报的那扇窗,一个字不差;同时多出两个 `wsl`、两个 `wslhost`、一个 `OpenConsole`。修后同样一次启动:多出的只有 `folio` 自己和一个 `OpenConsole`(第一块 pane 的 ConPTY 边车),**没有 `WindowsTerminal`,没有 `wsl`**。
+
+**懒探测那一半的实证。** 把 `session.json` 里首个 leaf 的 `profile_id` 改成 `wsl` 再启动:窗标题变成那台发行版自己的提示符(`weiyi@LAPTOP-…: /mnt/c/Users/…`),进程表里有**两个** `wsl`(一个是 pane 的 shell,一个是这一节的登录 shell 探针),**仍然没有 `WindowsTerminal`**;而 `window=42ms`、`background_visible=1105ms`——首个 tab 就是 WSL 的机器,首帧同样不等。
+
+**日期:2026-08-28。**
 
 ## 12. 发布工程
 

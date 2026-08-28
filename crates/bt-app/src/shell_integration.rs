@@ -712,13 +712,10 @@ fn begin_profile_probe(program: &Path) {
 
 #[cfg(windows)]
 fn run_profile_probe(program: &Path) -> Option<PathBuf> {
-    use std::os::windows::process::CommandExt;
-    // `CREATE_NO_WINDOW`, for the PSReadLine probe's reason: without it a
-    // console flashes on screen the first time a PowerShell pane is opened.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let output = std::process::Command::new(program)
+    // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
+    // window opens on screen the first time a PowerShell pane is opened.
+    let output = bt_platform::quiet_command(program)
         .args(["-NoProfile", "-NonInteractive", "-Command", PROFILE_COMMAND])
-        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     parse_profile_answer(&String::from_utf8_lossy(&output.stdout))

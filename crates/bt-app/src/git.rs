@@ -2062,22 +2062,6 @@ struct GitRun {
     stderr: String,
 }
 
-/// Keep the console out of it (W1).
-///
-/// Not needed today — this build is still a console subsystem application, so a
-/// child inherits our console and flashes nothing — and set anyway, because the
-/// day the subsystem flips is the day every `git` in the product would start
-/// blinking a black rectangle at the user, and nobody would connect the two.
-#[cfg(windows)]
-fn no_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn no_window(_command: &mut Command) {}
-
 /// A `git` invocation with everything this module always wants already on it.
 ///
 /// * `-C <dir>` rather than a working directory, so that a folder which has been
@@ -2091,8 +2075,15 @@ fn no_window(_command: &mut Command) {}
 /// * `LC_ALL=C`, for the reason the module header gives.
 /// * `GIT_TERMINAL_PROMPT=0`, so no read can ever turn into a child sitting
 ///   forever waiting for a password nobody can see it asking for.
+///
+/// Through [`bt_platform::quiet_command`] and not `Command::new`, which is where
+/// the console this child must not be given is refused (§7.40 ①). It used to be
+/// a `no_window` helper of this module's own, whose note said the flag was "not
+/// needed today — this build is still a console subsystem application": that
+/// stopped being true the day `main.rs` grew `#![windows_subsystem = "windows"]`,
+/// and the flag has been load-bearing ever since.
 fn git_command(program: &Path, dir: &Path, arguments: &[&OsStr]) -> Command {
-    let mut command = Command::new(program);
+    let mut command = bt_platform::quiet_command(program);
     command
         .arg("-C")
         .arg(dir)
@@ -2104,7 +2095,6 @@ fn git_command(program: &Path, dir: &Path, arguments: &[&OsStr]) -> Command {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    no_window(&mut command);
     command
 }
 
@@ -4576,13 +4566,12 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         /// Long enough that only a guard which never returns can reach it.
         const NEVER: Duration = Duration::from_secs(60);
 
-        let mut command = Command::new("ping");
+        let mut command = bt_platform::quiet_command("ping");
         command
             .args(["-t", "127.0.0.1"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        no_window(&mut command);
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let _ = tx.send(run_git(command, Duration::from_millis(150)).err());

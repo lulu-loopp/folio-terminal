@@ -26522,6 +26522,21 @@ fn create_leaf_session(
     if chosen_id == profiles::WINDOWS_POWERSHELL_ID {
         psreadline::begin_probe();
     }
+    // **The other one trigger** (§7.40 ③). Which shell the default distribution
+    // logs into is a question only the distribution can answer, and answering it
+    // means booting a virtual machine — so it is asked here, where somebody is
+    // actually opening a WSL shell, and on no other machine in the world. It
+    // used to be asked at launch, on every machine that merely had `wsl.exe`.
+    //
+    // Keyed off the namespace rather than off the shipped `wsl` id, because that
+    // is what `shell_integration::shell_command_for` branches on: the day the
+    // profile editor lets somebody make a second WSL profile, that profile's
+    // panes need this answer too and would not carry that id.
+    //
+    // Idempotent, and nothing waits for it — see `wsl::begin_login_shell_probe`.
+    if profiles::row(seed.profile).is_some_and(|row| row.paths == profiles::PathNamespace::Wsl) {
+        wsl::begin_login_shell_probe();
+    }
     // **Where it opens, decided once for both paths.** A leaf with a directory
     // of its own — inherited from the pane it was split off, revived from disk,
     // translated across from the tab you were looking at — uses it; a leaf
@@ -26592,7 +26607,7 @@ fn create_leaf_session(
             &row,
             &place.arguments,
             shell_integration::script_path(),
-            wsl::facts(),
+            &wsl::facts(),
             &bt_pty::SystemShellEnvironment,
         );
         // **The two variables that make an agent in this pane able to say something.**
@@ -28997,9 +29012,14 @@ impl Runtime<'_> {
         // start. It is an environment read and four `is_file` calls, so moving it
         // ahead of the window costs the launch nothing measurable.
         let profile_programs = profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
-        // Started here, read much later: `wsl.exe --list` and one `getent` in the
-        // distribution are around 200ms between them, which is 200ms of a window
-        // that does not exist yet rather than 200ms of a menu already clicked.
+        // Three registry reads, on this thread, finishing before the next line
+        // (§7.40 ②). This used to start a worker running `wsl.exe --list` and a
+        // `getent` inside the distribution — and the `profiles::title` call
+        // twenty lines below, which composes the opening window's own title,
+        // then **joined** that worker. So the launch waited for a WSL virtual
+        // machine to boot before it could ask for a window, and the console
+        // Windows handed that `wsl.exe` was a Windows Terminal window opening in
+        // front of Folio. What is left costs microseconds and starts nothing.
         wsl::start(profile_programs.program(profiles::index_of_id("wsl")));
         let default_profile =
             profiles::default_profile(&settings_store.loaded().default_profile, &profile_programs);
