@@ -67722,7 +67722,11 @@ impl Runtime<'_> {
         let anything_moving =
             !self.window.video.is_empty() || !self.window.animations.is_empty();
         let boxes_moved = anything_moving && self.refresh_video_layers();
-        let owes_frame = owes_frame || frames_arrived || boxes_moved;
+        // **The pictures' own debt, kept as a name of its own.** It has to
+        // survive the chrome's question below, which is why it is not folded
+        // into `owes_frame` and forgotten — see [`tick_owes_a_present`].
+        let pictures_owe = frames_arrived || boxes_moved;
+        let owes_frame = owes_frame || pictures_owe;
         if !owes_frame && !panes_owe {
             return Ok(());
         }
@@ -67739,7 +67743,11 @@ impl Runtime<'_> {
         // nothing about. A flight over a lone-headed pane can leave the chrome
         // byte-identical while the grid underneath it has to be drawn a hundred
         // pixels to the left.
-        if !self.refresh_chrome() && !panes_owe {
+        //
+        // **And a decoded picture is a third debt, which this line used to
+        // throw away** (the freeze of 2026-08-28; §7.44 ③). See
+        // [`tick_owes_a_present`] for the whole of the argument.
+        if !tick_owes_a_present(self.refresh_chrome(), panes_owe, pictures_owe) {
             return Ok(());
         }
         // Everything this pass can have moved is now in the renderer's hands or
@@ -88915,6 +88923,36 @@ struct PictureOnGlass {
     content_revision: u64,
     /// [`WindowRuntime::presented_picture_revision`].
     presented_revision: u64,
+}
+
+/// **Whether an animation tick owes the glass a present** — the three debts a
+/// tick may be carrying, and the one that was missing.
+///
+/// [`Runtime::advance_strip_animation`] asks twice whether a frame is owed. The
+/// first question is cheap and lets an idle window return before it builds
+/// anything; this is the second, asked after the chrome has been rebuilt, and
+/// until 2026-08-28 it was written as `!self.refresh_chrome() && !panes_owe`.
+///
+/// **A decoded picture is not in the chrome.** A playing recording and a running
+/// `.gif` are a layer list handed to `bt_render::WindowRenderer::set_video_layers`
+/// and drawn from renderer state at present time, so `chrome_changed` can never
+/// become `true` because a frame arrived. The tick that had just collected a new
+/// picture returned one line before the present that would have shown it, and
+/// the recording only reached the glass as a passenger on some *other* debt —
+/// which, while the control bar is up, its own clock and scrubber supply on
+/// nearly every tick. `VIDEO_BAR_IDLE_REST + VIDEO_BAR_FADE` after the reader's
+/// last act the bar rests, the chrome goes quiet, and the picture stops: two
+/// seconds of video and then a photograph that jumps forward the moment the
+/// pointer moves. Measured on the machine as eight seconds of byte-identical
+/// captures with the recording's own burnt-in counter thirty-eight seconds
+/// further on behind it.
+///
+/// So the rule is three debts and not two, and it is a named function rather
+/// than a longer `if` because the reason the third one exists is the whole of
+/// what a reader needs and none of it is visible at the call site.
+#[must_use]
+fn tick_owes_a_present(chrome_changed: bool, panes_owe: bool, pictures_owe: bool) -> bool {
+    chrome_changed || panes_owe || pictures_owe
 }
 
 /// Whether a chrome animation's tick can be answered from the picture already
@@ -120352,6 +120390,69 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    /// RED — **a tick whose only news is a decoded picture still reaches the
+    /// glass** (the freeze of 2026-08-28; §7.44 ③).
+    ///
+    /// The defect this pins was found by photographing the machine: press play,
+    /// take your hand off the mouse, and the recording runs for two seconds and
+    /// then stops dead, while the decoder behind it goes on for as long as you
+    /// leave it. Two seconds is `VIDEO_BAR_IDLE_REST + VIDEO_BAR_FADE` — the
+    /// control bar's dwell and fade — because while the bar is up its clock and
+    /// its scrubber change the *chrome*, and the picture was only ever reaching
+    /// the glass as a passenger on that.
+    ///
+    /// Two halves, because the fault had two places to live and mending one
+    /// without the other mends nothing:
+    ///
+    /// ① **The rule.** A picture's debt alone is enough, exactly as a chrome
+    /// change alone is and a pane in flight alone is — and a tick carrying none
+    /// of the three presents nothing, which is what keeps an idle window at
+    /// zero.
+    ///
+    /// ② **The call site asks it.** Read out of the source, because the gate is
+    /// a `return` inside a method that cannot be called without a window: what
+    /// there is to assert is that `advance_strip_animation` puts its question
+    /// through [`tick_owes_a_present`] and hands it the picture's debt.
+    ///
+    /// RED GATE ①: return `chrome_changed || panes_owe` from
+    /// `tick_owes_a_present` and the first block fails. RED GATE ②: write the
+    /// gate back as `!self.refresh_chrome() && !panes_owe` and the second block
+    /// fails — which is the state the binary that froze was built from.
+    #[test]
+    fn a_video_frame_alone_is_enough_to_present() {
+        // ① the rule.
+        assert!(
+            tick_owes_a_present(false, false, true),
+            "a decoded picture and nothing else is still a frame the glass is owed"
+        );
+        assert!(tick_owes_a_present(true, false, false), "the chrome moved");
+        assert!(tick_owes_a_present(false, true, false), "a pane is in flight");
+        assert!(
+            !tick_owes_a_present(false, false, false),
+            "and a tick with no news at all presents nothing — an idle window \
+             costs what it costs because of this half"
+        );
+
+        // ② the call site asks it.
+        const SOURCE: &str = include_str!("main.rs");
+        fn body(signature: &str) -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        }
+        let tick = body("fn advance_strip_animation(");
+        assert!(
+            tick.contains("tick_owes_a_present(self.refresh_chrome(), panes_owe, pictures_owe)"),
+            "the chrome gate asks the whole question, with the picture's debt in it"
+        );
+        assert!(
+            tick.contains("let pictures_owe = frames_arrived || boxes_moved;"),
+            "and the picture's debt is a name that survives as far as that gate"
+        );
     }
 
     /// RED — **one recording is one seat, and a seat is at home on any of the

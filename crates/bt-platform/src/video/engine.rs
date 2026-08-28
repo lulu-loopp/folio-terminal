@@ -125,7 +125,7 @@
 //! promise in a comment.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -181,14 +181,19 @@ pub const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(4);
 /// happening is the one case where staleness cannot be seen.
 pub const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// **How long [`Engine::open`] waits for the engine thread to say whether it
-/// exists.**
+/// **How long an engine may take to come into being before not having done so
+/// is the fault.**
 ///
-/// Creating a Direct3D device and a media engine is milliseconds on a machine
-/// with a driver and tens of milliseconds on one falling back to WARP. This
-/// bounds the pathological case — a device that is being reset, a
-/// `CoCreateInstance` that goes to a broken registration — so that a caller who
-/// opens a video never blocks a window for longer than it takes to notice.
+/// Starting Media Foundation, creating a Direct3D device and creating a media
+/// engine is a hundred milliseconds on a cold process and forty on a warm one,
+/// measured on this machine with `container-probe`. [`Engine::open`] does not
+/// wait for any of it — see its own note — so this is not a caller blocking;
+/// it is the deadline that turns *an engine that never came up* into an
+/// [`EngineError::Unresponsive`] a surface can print, instead of a rectangle
+/// that stays black for ever.
+///
+/// Five seconds, which is two orders of magnitude past the measurement and the
+/// same number the window's own watchdog calls a hang.
 ///
 /// It bounds the *creation*, not the *load*: metadata arrives later and
 /// asynchronously, which is what [`EngineState::natural_size`] being an
@@ -375,6 +380,10 @@ pub struct Engine {
     thread: Option<std::thread::JoinHandle<()>>,
     source: PathBuf,
     seen_generation: u64,
+    /// When [`Engine::open`] returned — which, since it waits for nothing, is
+    /// also when the engine thread was asked to build one. [`Self::state`]
+    /// measures [`OPEN_BUDGET`] from here.
+    opened_at: Instant,
 }
 
 impl std::fmt::Debug for Engine {
@@ -390,27 +399,35 @@ impl std::fmt::Debug for Engine {
 impl Engine {
     /// **Open `path` on whichever Direct3D device this machine offers.**
     ///
-    /// Returns when the engine exists, not when the video has loaded: a caller
-    /// that needs the size or the length watches [`EngineState::ready`], or —
-    /// off the drawing thread only — waits with [`Self::wait_for_metadata`].
+    /// Returns when the engine has been *asked for*, not when it exists and not
+    /// when the video has loaded. A caller that needs the size or the length
+    /// watches [`EngineState::ready`]; a caller that needs to know whether the
+    /// file can be played at all watches [`EngineState::error`], which is where
+    /// a refusal arrives — including a refusal to build the engine in the first
+    /// place, and including [`EngineError::Unresponsive`] for one that has not
+    /// come up inside [`OPEN_BUDGET`].
     ///
     /// # Where it may be called from
     ///
-    /// Any thread, including a window's. It starts a thread and waits for one
-    /// message; the work that would freeze a window is all on the other side of
-    /// that message.
+    /// Any thread, including a window's, and this function **waits for
+    /// nothing**. It allocates a channel and starts a thread; `MFStartup`, the
+    /// Direct3D device, the media engine and `SetSource` are all on the far side
+    /// of that thread's first instruction.
+    ///
+    /// It was not always so, and the difference is the whole of §7.42's rule
+    /// about the drawing thread. Until 2026-08-28 this waited for the far side
+    /// to report that the engine existed — a hundred milliseconds on the first
+    /// video of a process and forty on every one after, paid by whichever thread
+    /// pressed play, with a five-second worst case behind it. A window does not
+    /// have a hundred milliseconds to give a button press.
     pub fn open(path: &Path) -> Result<Self, EngineError> {
         Self::open_on(path, Adapter::Automatic)
     }
 
     /// The same, with the choice of device forced — see [`Adapter`].
     pub fn open_on(path: &Path, adapter: Adapter) -> Result<Self, EngineError> {
-        if !super::media_session() {
-            return Err(EngineError::NoPlatform);
-        }
         let shared = Arc::new(Shared::default());
         let (commands, inbox) = mpsc::channel();
-        let (report, opened) = mpsc::channel();
         let source = path.to_path_buf();
         // UTF-16 across the thread boundary and a `BSTR` built on the far side:
         // a `BSTR` is a raw pointer and therefore not `Send`, and a lossy
@@ -425,34 +442,20 @@ impl Engine {
             std::thread::Builder::new()
                 .name("folio-video-engine".to_owned())
                 .spawn(move || {
-                    run(
-                        &BSTR::from_wide(&url),
-                        adapter,
-                        &shared,
-                        &commands,
-                        &inbox,
-                        &report,
-                    );
+                    run(&BSTR::from_wide(&url), adapter, &shared, &commands, &inbox);
                 })
+                // The one thing that can still fail here, and it fails without
+                // having started anything: a process out of thread handles.
                 .map_err(|_| EngineError::Unresponsive)?
         };
-        match opened.recv_timeout(OPEN_BUDGET) {
-            Ok(Ok(())) => Ok(Self {
-                commands,
-                shared,
-                thread: Some(thread),
-                source,
-                seen_generation: 0,
-            }),
-            Ok(Err(error)) => {
-                let _ = thread.join();
-                Err(error)
-            }
-            // The thread is left to unwind on its own, for the reason
-            // `within_budget` leaves one: joining it is the wait this budget
-            // exists to end.
-            Err(_) => Err(EngineError::Unresponsive),
-        }
+        Ok(Self {
+            commands,
+            shared,
+            thread: Some(thread),
+            source,
+            seen_generation: 0,
+            opened_at: Instant::now(),
+        })
     }
 
     /// The file this engine was opened on — the spelling the caller gave, not
@@ -463,13 +466,32 @@ impl Engine {
     }
 
     /// Everything knowable about this engine at this instant. See [`EngineState`].
+    ///
+    /// **[`OPEN_BUDGET`] is spent here**, and it is the only place it is spent.
+    /// [`Self::open`] waits for nothing, so nobody is left holding a timer when
+    /// an engine fails to come into being — a `CoCreateInstance` that never
+    /// returns, a device stuck in a reset. This reading is what ends that: past
+    /// the budget with nothing built and nothing said, the answer is
+    /// [`EngineError::Unresponsive`], which is a sentence a surface already
+    /// knows how to print. Stable once it is true, so it is as sticky as the
+    /// errors the engine thread publishes itself.
     #[must_use]
     pub fn state(&self) -> EngineState {
-        *self
+        let state = *self
             .shared
             .state
             .lock()
-            .unwrap_or_else(|held| held.into_inner())
+            .unwrap_or_else(|held| held.into_inner());
+        if state.error.is_none()
+            && !self.shared.built.load(Ordering::Acquire)
+            && self.opened_at.elapsed() > OPEN_BUDGET
+        {
+            return EngineState {
+                error: Some(EngineError::Unresponsive),
+                ..state
+            };
+        }
+        state
     }
 
     /// **The newest picture, if it is newer than the last one this handle
@@ -618,6 +640,11 @@ struct Shared {
     /// `0` unknown, `1` hardware, `2` WARP — an atomic rather than a lock
     /// because it is written once.
     adapter: AtomicU32,
+    /// **Whether the engine thread got as far as having an engine.** Set once,
+    /// by [`Machinery::build`]'s caller, immediately before the pump starts.
+    /// [`Engine::state`] reads it to decide whether [`OPEN_BUDGET`] has been
+    /// missed — a question that only has an answer while this is `false`.
+    built: AtomicBool,
 }
 
 enum Command {
@@ -755,36 +782,61 @@ pub fn can_play_types(types: &[&str]) -> Vec<CanPlay> {
     }
 }
 
+/// **Everything an engine costs, on the engine's own thread.**
+///
+/// Starting Media Foundation, joining the apartment, building the machinery and
+/// running the pump — in that order, and none of it on the caller's thread.
+/// `media_session` in particular is here rather than in [`Engine::open_on`]: it
+/// is a `OnceLock` around `MFStartup`, so exactly one video open in the life of
+/// a process pays for it, and the thread that pays must not be one with a window
+/// on it.
+///
+/// Nothing is reported back through a channel, because nobody is waiting on one.
+/// A failure at any point is written into the shared [`EngineState`] as its
+/// `error`, which is the same slot a codec refusing a file a minute in writes
+/// to and the same slot every surface already reads.
 fn run(
     url: &BSTR,
     adapter: Adapter,
     shared: &Arc<Shared>,
     commands: &mpsc::Sender<Command>,
     inbox: &mpsc::Receiver<Command>,
-    report: &mpsc::Sender<Result<(), EngineError>>,
 ) {
+    if !super::media_session() {
+        publish_failure(shared, EngineError::NoPlatform);
+        return;
+    }
     // SAFETY: an MTA entry on this thread, released on every path out of this
-    // function. The process apartment is already standing (`media_session` was
-    // checked before the thread was spawned), so this is a reference count.
+    // function. The process apartment is already standing (`media_session`
+    // returned true just above), so this is a reference count.
     let apartment = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     if apartment.is_err() {
-        let _ = report.send(Err(EngineError::NoPlatform));
+        publish_failure(shared, EngineError::NoPlatform);
         return;
     }
     match Machinery::build(Some(url), adapter, shared, commands) {
         Ok(mut machinery) => {
-            let _ = report.send(Ok(()));
+            // Before the pump and after the engine: this is what stops
+            // `Engine::state` charging a working engine with having missed
+            // `OPEN_BUDGET`.
+            shared.built.store(true, Ordering::Release);
             machinery.pump(shared, inbox);
             machinery.stop();
             ENGINES_SHUT_DOWN.fetch_add(1, Ordering::Relaxed);
         }
-        Err(error) => {
-            let _ = report.send(Err(error));
-        }
+        Err(error) => publish_failure(shared, error),
     }
     // SAFETY: paired with the `CoInitializeEx` above, on its thread, after every
     // interface this thread made has been dropped.
     unsafe { CoUninitialize() };
+}
+
+/// An engine that never came into being, said in the one place a caller looks.
+fn publish_failure(shared: &Arc<Shared>, error: EngineError) {
+    let mut state = shared.state.lock().unwrap_or_else(|held| held.into_inner());
+    if state.error.is_none() {
+        state.error = Some(error);
+    }
 }
 
 /// Everything the engine thread owns. It never leaves that thread — the type is
@@ -1301,6 +1353,74 @@ mod tests {
         GATE.lock().unwrap_or_else(|held| held.into_inner())
     }
 
+    /// **Wait for the ledger to reach `target`**, and answer where it actually
+    /// got to.
+    ///
+    /// Since [`Engine::open`] stopped waiting for the engine to be built, "an
+    /// engine exists" is a thing that becomes true shortly *after* the open
+    /// returns rather than before it. A test that reads the counter on the next
+    /// instruction is reading a race, so it reads a short wait instead — the
+    /// property being pinned is that the number comes up and goes back down, not
+    /// that it does so before the caller's next line.
+    ///
+    /// Under the [`ledger_gate`], so nothing else is moving this number.
+    fn engines_settling_to(target: u64) -> u64 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let now = engines_outstanding();
+            if now == target || Instant::now() >= deadline {
+                return now;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// RED — **opening a video never blocks the thread that asked** (the freeze
+    /// of 2026-08-28; §7.42's rule about the drawing thread).
+    ///
+    /// `Engine::open` is called from a window's own thread — it is what a press
+    /// of ▶ does — and until this slice it waited there for the far side to
+    /// build a Direct3D device and a media engine and report back. Measured with
+    /// `container-probe`: **112 ms for the first video of a process and 36–45 ms
+    /// for every one after**, with a five-second worst case behind it. A window
+    /// does not have that to give a button press.
+    ///
+    /// The bound is stated over **eight opens in a row** rather than over one,
+    /// and that is what makes it a gate rather than a coin toss. A blocking open
+    /// costs its forty milliseconds *every time*, warm or cold, so eight of them
+    /// is a third of a second — five times this budget, on the fastest path the
+    /// old code had. An open that waits for nothing costs a channel and a
+    /// `spawn`, and eight of those do not add up to a frame.
+    ///
+    /// Every engine is shut down before the assertion, so this test leaves the
+    /// ledger where it found it — and the shutdowns are deliberately *outside*
+    /// the measured span, since joining a thread is a wait and this is a test
+    /// about not waiting.
+    ///
+    /// MUTATION: put the `opened.recv_timeout(OPEN_BUDGET)` back into
+    /// `Engine::open_on` and this goes red by roughly an order of magnitude.
+    #[test]
+    fn opening_a_video_never_blocks_the_window_thread() {
+        let _ledger = ledger_gate();
+        /// Eight opens, and the budget for all eight of them together.
+        const OPENS: usize = 8;
+        const BUDGET: Duration = Duration::from_millis(60);
+        let path = fixture("folio-video-test.mp4");
+        let began = Instant::now();
+        let mut engines = Vec::with_capacity(OPENS);
+        for _ in 0..OPENS {
+            engines.push(Engine::open(&path).expect("an engine is asked for"));
+        }
+        let asking = began.elapsed();
+        for mut engine in engines {
+            engine.shutdown();
+        }
+        assert!(
+            asking < BUDGET,
+            "{OPENS} opens took {asking:?}, which is a window thread waiting for a decoder"
+        );
+    }
+
     /// RED — **an engine reports the duration and the size of a file it
     /// opened** (user ruling 2026-08-28; `docs/DESIGN.md` §7.42).
     ///
@@ -1480,12 +1600,15 @@ mod tests {
         let _ledger = ledger_gate();
         let mut engine = Engine::open_on(&fixture("folio-video-test.mp4"), Adapter::Software)
             .expect("a WARP engine opens");
-        assert_eq!(engine.adapter_in_use(), Some(Adapter::Software));
         assert!(
             engine.wait_for_metadata(Duration::from_secs(10)),
             "metadata: {:?}",
             engine.state()
         );
+        // Asked once the metadata is in and not on the line after the open: the
+        // device is chosen on the engine's own thread, and since the open stopped
+        // waiting for that thread there is nothing to have chosen it yet.
+        assert_eq!(engine.adapter_in_use(), Some(Adapter::Software));
         engine.set_muted(true);
         engine.play();
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -1524,21 +1647,35 @@ mod tests {
         let before = engines_outstanding();
 
         let mut explicit = Engine::open(&path).expect("an engine opens");
-        assert_eq!(engines_outstanding(), before + 1);
+        assert_eq!(engines_settling_to(before + 1), before + 1);
         explicit.shutdown();
         assert_eq!(engines_outstanding(), before, "an explicit shutdown counts");
 
         {
             let _dropped = Engine::open(&path).expect("an engine opens");
-            assert_eq!(engines_outstanding(), before + 1);
+            assert_eq!(engines_settling_to(before + 1), before + 1);
         }
         assert_eq!(engines_outstanding(), before, "a drop counts");
 
-        let unwound = std::panic::catch_unwind(|| {
+        // The third arm has to be sure an engine was actually standing when the
+        // unwind began, or "the count came back" would be true of a panic that
+        // beat the engine thread to it — and the mutation this arm exists for
+        // would pass. The number is carried out rather than asserted inside,
+        // because an assertion inside a `catch_unwind` is a panic the
+        // `catch_unwind` swallows.
+        let standing = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&standing);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _engine = Engine::open(&path).expect("an engine opens");
+            counted.store(engines_settling_to(before + 1), Ordering::Relaxed);
             panic!("a pane whose window went away");
-        });
+        }));
         assert!(unwound.is_err());
+        assert_eq!(
+            standing.load(Ordering::Relaxed),
+            before + 1,
+            "an engine was standing when the unwind started"
+        );
         assert_eq!(engines_outstanding(), before, "an unwind counts");
         assert!(engines_started() >= 3);
     }

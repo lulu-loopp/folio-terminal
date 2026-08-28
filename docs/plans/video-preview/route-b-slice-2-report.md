@@ -52,10 +52,8 @@ and `13-after-freeze-00/01.png` differ again — the window recovered by itself.
 The runs where nothing froze (`09-pane-bar-play-*`, `10-noinput-*`) are the ones
 taken **after** a video had already been opened in that process.
 
-The identical bytes are the whole window, not the video's rectangle, so this is
-not "the decoder stopped": it is the window thread not repainting at all.
-</content>
-</invoke>
+The identical bytes are the whole window, not the video's rectangle. What that
+rules out and what it does not is settled in ① below, which reproduced it.
 
 ---
 
@@ -137,3 +135,70 @@ which is what makes it read as "the window froze and then recovered".
 
 It is not first-open at all: it is **every** video, and every `.gif` too, since
 `advance_animations` reports its debt through the same `frames_arrived`.
+
+### The mend
+
+**① The rule the tick decides by is now three debts, not two.**
+`tick_owes_a_present(chrome_changed, panes_owe, pictures_owe)` in
+`crates/bt-app/src/main.rs`, and the chrome gate is written through it. The
+picture's debt is given a name of its own — `pictures_owe = frames_arrived ||
+boxes_moved` — precisely so that it survives as far as that line instead of
+being folded into `owes_frame` and forgotten. It is general: it covers a video
+on any of the three surfaces, a `.gif` advancing by its own delays, and any
+future thing the renderer draws from state the chrome knows nothing about.
+
+Pinned by `a_video_frame_alone_is_enough_to_present`, in two halves — the rule's
+truth table, and a source reading that the call site actually asks it. RED GATE
+①: return `chrome_changed || panes_owe` and the first half fails. RED GATE ②:
+write the gate back as `!self.refresh_chrome() && !panes_owe` and the second
+fails, which is the state the binary that froze was built from.
+
+**② And while the window thread was being looked at: `Engine::open` was
+waiting on it.**
+
+Not the freeze — it is a hundred milliseconds, not eight seconds — but it is the
+same law broken in the same place. `Engine::open` is what a press of ▶ calls, on
+the window's own thread, and it waited for the far side to run `MFStartup`,
+create a Direct3D device, create an `IMFMediaEngine` and call `SetSource` before
+it returned. Measured with `container-probe` on this machine:
+
+| open | cost |
+|---|---|
+| first video of the process | **112 ms** |
+| every one after | **36 – 45 ms** |
+
+with `OPEN_BUDGET` = 5 s as the worst case behind it.
+
+It now waits for nothing at all: `open` allocates a channel, starts the thread
+and returns. `media_session` moved onto that thread with the rest of it. An
+engine that fails to be built writes its `EngineError` into the shared
+`EngineState`, which is the slot `VideoSeat::fault` already reads and
+`Runtime::sweep_video_seats` already sweeps every tick — so the sentence a
+surface prints for an unplayable file arrives by the path it already had, one
+tick later than it used to.
+
+**The deadline did not go away, it moved.** `OPEN_BUDGET` is now spent in
+`Engine::state`: past five seconds with nothing built and nothing said, the
+answer is `EngineError::Unresponsive`. Nobody blocks on it, and an engine that
+never comes up still ends as a sentence rather than as a rectangle that stays
+black for ever.
+
+Pinned by `opening_a_video_never_blocks_the_window_thread`: eight opens in a
+row, all eight inside 60 ms. Eight rather than one because a blocking open pays
+its forty milliseconds every time, warm or cold. **Measured under its own
+mutation** — the wait put back, bounded by `OPEN_BUDGET` exactly as before:
+
+```
+thread 'video::engine::tests::opening_a_video_never_blocks_the_window_thread' panicked at
+crates\bt-platform\src\video\engine.rs:1422:9:
+8 opens took 468.6124ms, which is a window thread waiting for a decoder
+```
+
+Two tests had to be told that an engine is built after the open returns rather
+than before it: `a_software_adapter_still_serves_frames` asks
+`adapter_in_use()` once the metadata is in, and
+`every_engine_is_shut_down_before_the_process_leaves` waits for the ledger to
+come up before asserting that it goes back down — with the third arm now
+carrying the count out of the `catch_unwind` and asserting outside it, since a
+panic beating the engine thread would have made that arm pass with nothing
+standing.

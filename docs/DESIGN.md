@@ -5172,6 +5172,16 @@ fixture 三份新的(`.mkv` 绿 / `.avi` 粉 / `.wmv` 紫)与旧的两份同一�
 
 外加一条:**开完之后才出错的引擎**。`EngineError` 是黏的,而它可以在任何时刻到达(一分钟后某一帧的编解码失败、文件在解码器底下被换掉、容器其实是截断的)。站在这种引擎上的座是一个再也不会收到画面的矩形,所以当场关掉,并给表面同一句话,从同一个地方。
 
-**⑩ 红门。** `bt-app`:`a_video_is_one_seat_on_three_surfaces`(一门开三面 + 三张纹理 + `engines_outstanding` 回到起点)、`a_card_torn_off_carries_its_engine_with_it`(⑦ 那四条)、`the_bar_rises_on_hover_and_rests_by_the_registers_numbers`(两个等待是登记表的 + 状态机走完一整程)、`the_bar_sheds_its_controls_from_the_right_and_never_its_player`、`every_control_answers_where_it_is_drawn`、`the_still_and_the_first_played_frame_share_a_rect`(两个调用者拿的是同一个盒子,逐像素相等)、`a_gif_advances_by_its_own_frame_delays`、`an_animation_that_has_not_changed_frame_uploads_nothing`、`the_shell_page_is_gone`(源码门五件)、`every_name_in_the_class_plays_and_the_class_is_the_seven_that_were_opened`。`bt-platform`:`the_environment_is_created_with_no_browser_arguments_at_all`。
+**⑫ 一帧画面自己就是一笔债，而开一段录像不能让窗口等（2026-08-28 实机复现后修）。**
+
+实机拍出来的缺陷：按下播放、手离开鼠标，录像走两秒就停在那儿不动了，而背后的解码器一直在跑。证据在 `docs/plans/video-preview/route-b-slice-2-report.md` ①：指针不动的 14 张连拍里后 11 张字节完全相同（八秒），而画面里烧进去的秒表在最后一张冻结图里读 `1`、鼠标动一下之后读 `39`。
+
+根因：`Runtime::advance_strip_animation` 问两次“这一拍欠不欠一帧”。第一次把新到的画面算进去，第二次是 `refresh_chrome()`——而视频**不在 chrome 里**，它是交给 `WindowRenderer::set_video_layers` 的一层，在 present 时从渲染器自己的状态里画。所以“只有一帧新画面”的那一拍，总是在要画它的 present 前一行就 return 了。控件条在台上时它的钟与进度条每拍都在变，画面是搭着条的债上玻璃的；`VIDEO_BAR_IDLE_REST + VIDEO_BAR_FADE`（2000 + 90 ms）后条歇下，搭车就没了。
+
+改法：规矩写成三笔债而不是两笔，`tick_owes_a_present(chrome_changed, panes_owe, pictures_owe)`，chrome 那道门从它走；画面的债单独命名为 `pictures_owe`，就是为了让它活到那一行。GIF 同一条路（`advance_animations` 走同一个 `frames_arrived`），所以一并治了。
+
+另外一半：**`Engine::open` 本来在窗口线程上等**。不是这次冻结的原因（它是百毫秒而不是八秒），但是同一条法在同一处被破：本机实测冷进程首开 **112 ms**、之后每开 **36-45 ms**，背后还挂着 5 秒的 `OPEN_BUDGET`。现在 `open` 什么都不等：开个通道、起个线程就返回，`MFStartup`、D3D 设备、媒体引擎、`SetSource` 全在线程那一边；建不起来就把 `EngineError` 写进共享 `EngineState`，走 `VideoSeat::fault` → `sweep_video_seats` 这条已经存在的路（⑥ 那句话晚一拍到）。**截止时间没消失，只是搬家了**：`OPEN_BUDGET` 现在花在 `Engine::state` 里——超过五秒还没建起来也没报错，答案就是 `EngineError::Unresponsive`，没有任何人阻塞在它上面。
+
+**⑩ 红门。** `bt-app`:`a_video_is_one_seat_on_three_surfaces`(一门开三面 + 三张纹理 + `engines_outstanding` 回到起点)、`a_card_torn_off_carries_its_engine_with_it`(⑦ 那四条)、`the_bar_rises_on_hover_and_rests_by_the_registers_numbers`(两个等待是登记表的 + 状态机走完一整程)、`the_bar_sheds_its_controls_from_the_right_and_never_its_player`、`every_control_answers_where_it_is_drawn`、`the_still_and_the_first_played_frame_share_a_rect`(两个调用者拿的是同一个盒子,逐像素相等)、`a_gif_advances_by_its_own_frame_delays`、`an_animation_that_has_not_changed_frame_uploads_nothing`、`the_shell_page_is_gone`(源码门五件)、`every_name_in_the_class_plays_and_the_class_is_the_seven_that_were_opened`。`bt-platform`:`the_environment_is_created_with_no_browser_arguments_at_all`、`opening_a_video_never_blocks_the_window_thread`（⑫；八次 `open` 共 60 ms 以内，变异回阻塞式是 468.6 ms）。`bt-app` 补：`a_video_frame_alone_is_enough_to_present`（⑫：真值表 + 调用点真的从 `tick_owes_a_present` 走的源码门）。
 
 **⑪ 挂账。** ⓐ **共享纹理仍然没做**,理由和数字都在 §7.42 ③,本片没有推翻它:CPU 回读每帧 1.9–2.6 ms(160×120),按像素线性,而这条路在没有显卡驱动的机器上照样成立。ⓑ **APNG 没接**(⑤,没有 fixture)。ⓒ **`.mpg`/`.flv` 没测**(⑥,同上)。ⓓ **一张 hover 卡压在一扇正在放的 pane 上时,pane 的条会画在卡上面**——卡在 overlay 栈里比 `video_bars` 那条带高,而 pane 的条是那条带。实际上碰不到:pane 的条只在指针停在那扇 pane 上时才在,而卡在的时候指针在文件行上,条早歇了。写下来免得下一个人当成新缺陷。ⓔ **控件条上没有 tooltip**,与 §7.23 ⑪ 的壳页版一致——媒体控件的四枚记号是通用词汇,而 §7.33 那条门走的是头和轨的 run,不走这条覆盖在画面上的条。
