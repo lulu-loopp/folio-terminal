@@ -1461,6 +1461,16 @@ impl PreviewBody {
 /// * `prepared == false` while `drawn > 0` — the batch was shaped and the atlas
 ///   refused it, and the frame presented every fill with none of its glyphs.
 ///
+/// **The overlay lane is counted beside the seat lane and not instead of it**
+/// (user report 2026-08-28). The five fields above only ever saw
+/// [`WindowRenderer::preview_bodies`] — the documents a *seat* draws. A glance
+/// card's document is not one of those: it rides on
+/// [`OverlayLayer::body`] so that it is drawn above the card's own face, and it
+/// is prepared in the overlay lane together with the card's head, chip and foot.
+/// So the one picture this station exists to explain — a card showing its rules
+/// and none of its words — was the one picture it could not see, and the same
+/// five questions had to be asked again of the lane that actually draws it.
+///
 /// **It changes no behaviour.** Nothing in the renderer reads it back.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PreviewTextFrame {
@@ -1471,6 +1481,106 @@ pub struct PreviewTextFrame {
     pub drawn: usize,
     /// Whether the atlas took them.
     pub prepared: bool,
+    /// Overlay layers on this frame — a glance card, a menu, a floating page.
+    pub layers: usize,
+    /// Of those, the ones carrying a document of their own.
+    pub layer_bodies: usize,
+    /// Every chrome label those layers hold: a card's file name, its type chip,
+    /// its foot. They share one batch with the document under them, which is why
+    /// a refusal takes the name and the words together.
+    pub layer_labels: usize,
+    /// The paragraphs those documents hold, before any filter.
+    pub layer_paragraphs: usize,
+    /// Labels and paragraphs that survived every filter and were handed to the
+    /// atlas, over all layers.
+    pub layer_drawn: usize,
+    /// Whether the atlas took every layer's batch.
+    pub layer_prepared: bool,
+    /// Which lanes the atlas refused on this frame — empty on a frame that owes
+    /// nothing.
+    pub refused: TextRefusals,
+}
+
+/// One of the five text batches a frame prepares.
+///
+/// Named rather than counted because "the atlas refused something" is not a
+/// usable report: the grid losing its characters and a glance card losing its
+/// name look identical in a number and completely different on the glass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextLane {
+    /// A seat's grid, and the status chip that shares its refusal.
+    Grid,
+    /// The window's own furniture: tab titles, pane heads, menus.
+    Chrome,
+    /// A seat's preview document.
+    Preview,
+    /// A floating layer — a glance card's head and document, a menu's rows.
+    Overlay,
+}
+
+impl TextLane {
+    const fn bit(self) -> u8 {
+        match self {
+            Self::Grid => 1,
+            Self::Chrome => 2,
+            Self::Preview => 4,
+            Self::Overlay => 8,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Grid => "grid",
+            Self::Chrome => "chrome",
+            Self::Preview => "preview",
+            Self::Overlay => "overlay",
+        }
+    }
+}
+
+/// The set of lanes one frame's atlas refused.
+///
+/// A set and not a `Vec`, because the question a reader asks of it is "was this
+/// lane refused" and the answer has to be free enough to record on every frame.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TextRefusals(u8);
+
+impl TextRefusals {
+    /// Nothing was refused.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether this lane was among them.
+    #[must_use]
+    pub const fn contains(self, lane: TextLane) -> bool {
+        self.0 & lane.bit() != 0
+    }
+
+    fn insert(&mut self, lane: TextLane) {
+        self.0 |= lane.bit();
+    }
+
+    /// The refused lanes' names, joined by `+`, or `none`.
+    #[must_use]
+    pub fn names(self) -> String {
+        let names: Vec<&str> = [
+            TextLane::Grid,
+            TextLane::Chrome,
+            TextLane::Preview,
+            TextLane::Overlay,
+        ]
+        .into_iter()
+        .filter(|lane| self.contains(*lane))
+        .map(TextLane::name)
+        .collect();
+        if names.is_empty() {
+            "none".to_owned()
+        } else {
+            names.join("+")
+        }
+    }
 }
 
 /// One rendered table block's picture, in the block's own coordinates.
@@ -2482,24 +2592,66 @@ fn prepare_failure_policy(error: PrepareError) -> PrepareFailurePolicy {
 /// There is one error ([`PrepareError::AtlasFull`]) and one policy for it, so
 /// the match is exhaustive rather than defensive.
 fn accept_text_prepare(
+    lane: TextLane,
     result: Result<(), PrepareError>,
     degraded_frames: &mut u64,
     text_complete: &mut bool,
+    refused: &mut TextRefusals,
 ) -> bool {
     match result {
         Ok(()) => true,
-        Err(error) => match prepare_failure_policy(error) {
-            PrepareFailurePolicy::PresentWithoutText => {
-                if *degraded_frames == 0 {
-                    eprintln!(
-                        "Folio glyph atlas reached the device limit; presenting without text and retrying"
-                    );
-                }
-                *degraded_frames += 1;
-                *text_complete = false;
-                false
+        Err(error) => {
+            text_upload_refused(lane, error, degraded_frames, text_complete, refused);
+            false
+        }
+    }
+}
+
+/// **The one way out of a refused text upload** — every lane's, and there is no
+/// second one.
+///
+/// Three things happen here and they are the whole of what a refusal means, so
+/// they are written once rather than four times:
+///
+/// 1. **It is recorded.** The lane goes into this frame's [`TextRefusals`], which
+///    reaches `BT_PREVIEW_TRACE` through [`PreviewTextFrame`]. A refusal that
+///    left no line behind was the reason the 2026-08-28 report could not be
+///    answered from the machine it happened on: from outside, a glance card that
+///    lost its name and its words looks exactly like a card whose document was
+///    never built.
+/// 2. **The frame is marked incomplete.** `text_complete` is what turns this
+///    frame into [`PresentOutcome::PresentedWithoutText`], which is the caller's
+///    instruction to put the frame back in the slot and ask for another one.
+///    **That is the retry**, and it is the only safe one: the atlas trim that
+///    frees the room is [`WindowRenderer::present_frame`]'s unconditional one on
+///    the way out, and trimming here instead would unprotect the glyphs the
+///    lanes *already prepared on this same frame* were handed coordinates for.
+/// 3. **It is said once.** The console line is for the first refusal of a run,
+///    not for each of sixty a second.
+///
+/// glyphon grows each atlas geometrically inside `prepare` and only answers
+/// [`PrepareError::AtlasFull`] when the next doubling would pass the device's
+/// `max_texture_dimension_2d`, so the growth this policy would otherwise have to
+/// ask for has already been attempted by the time this is reached.
+fn text_upload_refused(
+    lane: TextLane,
+    error: PrepareError,
+    degraded_frames: &mut u64,
+    text_complete: &mut bool,
+    refused: &mut TextRefusals,
+) {
+    match prepare_failure_policy(error) {
+        PrepareFailurePolicy::PresentWithoutText => {
+            if *degraded_frames == 0 {
+                eprintln!(
+                    "Folio glyph atlas reached the device limit on the {} lane; presenting without text and retrying",
+                    lane.name()
+                );
             }
-        },
+            *degraded_frames += 1;
+            *text_complete = false;
+            refused.insert(lane);
+        }
     }
 }
 
@@ -5674,6 +5826,10 @@ impl WindowRenderer {
         // window-level verb, and a frame in which any pane lost its characters
         // is a frame the window still owes.
         let mut text_complete = true;
+        // Which lanes the atlas refused, for the trace. Beside `text_complete`
+        // rather than folded into it: the bit says the frame is owed, and this
+        // says which surface the reader should be looking at.
+        let mut refused = TextRefusals::default();
         let mut rows_prepared_at = validated_at;
         let mut atlas_prepared_at = validated_at;
         let mut math_prepared_at = validated_at;
@@ -5732,9 +5888,11 @@ impl WindowRenderer {
             // [`Self::present_frame`], and the retry is
             // [`PresentOutcome::PresentedWithoutText`].
             let text_prepared = accept_text_prepare(
+                TextLane::Grid,
                 text_prepare_result,
                 &mut self.glyph_degraded_frames,
                 &mut text_complete,
+                &mut refused,
             );
             atlas_prepared_at = Instant::now();
 
@@ -6008,7 +6166,13 @@ impl WindowRenderer {
                 &mut gpu.swash_cache,
                 &chrome_layouts,
             );
-            accept_text_prepare(result, &mut self.glyph_degraded_frames, &mut text_complete)
+            accept_text_prepare(
+                TextLane::Chrome,
+                result,
+                &mut self.glyph_degraded_frames,
+                &mut text_complete,
+                &mut refused,
+            )
         };
         // One flat list over every body, because they are one draw: each body
         // already carries its own `clip` in whole-surface coordinates, so two
@@ -6073,7 +6237,13 @@ impl WindowRenderer {
                 &mut gpu.swash_cache,
                 &preview_text_layouts,
             );
-            accept_text_prepare(result, &mut self.glyph_degraded_frames, &mut text_complete)
+            accept_text_prepare(
+                TextLane::Preview,
+                result,
+                &mut self.glyph_degraded_frames,
+                &mut text_complete,
+                &mut refused,
+            )
         };
         // **The forensic line for "the body drew its rules and none of its
         // words"** (user report 2026-08-21). The three numbers are the three
@@ -6084,7 +6254,12 @@ impl WindowRenderer {
         // shaped and then refused by the atlas (`drawn` standing while
         // `prepared` is false). Recorded here rather than reasoned about later
         // because the frame is gone by the time anybody asks.
-        self.preview_text_frame = PreviewTextFrame {
+        //
+        // The seat lane's half is filled in here, where its numbers are; the
+        // overlay lane's is filled in after the loop below, and the record is
+        // filed once, at the bottom, so that the two halves are always the same
+        // frame's.
+        let mut preview_text_frame = PreviewTextFrame {
             bodies: self.preview_bodies.len(),
             paragraphs: self
                 .preview_bodies
@@ -6098,6 +6273,7 @@ impl WindowRenderer {
                 .sum(),
             drawn: preview_text_layouts.len(),
             prepared: preview_text_prepared,
+            ..PreviewTextFrame::default()
         };
         // The modal overlay, one layer at a time. Empty on every frame no dialog
         // is up, and every branch below is guarded on emptiness, so a window
@@ -6218,9 +6394,18 @@ impl WindowRenderer {
                 gpu.chrome_cap_height_ratio,
                 layer.opacity,
             );
+            // **This layer's share of the forensic record** (user report
+            // 2026-08-28). A glance card's head, its type chip and the document
+            // under them are one batch, so one refusal takes all three at once —
+            // which is the picture the report describes, and which the seat
+            // lane's five numbers could never have shown.
+            preview_text_frame.layer_labels += layer.labels.len();
             if let Some(body) = layer.body.as_ref() {
+                preview_text_frame.layer_bodies += 1;
+                preview_text_frame.layer_paragraphs += body.paragraph_count();
                 layouts.extend(shape_preview_body(&mut gpu.font_system, body));
             }
+            preview_text_frame.layer_drawn += layouts.len();
             while self.overlay_text_renderers.len() <= index {
                 self.overlay_text_renderers.push(TextRenderer::new(
                     &mut gpu.atlas,
@@ -6242,7 +6427,13 @@ impl WindowRenderer {
                     &mut gpu.swash_cache,
                     &layouts,
                 );
-                accept_text_prepare(result, &mut self.glyph_degraded_frames, &mut text_complete)
+                accept_text_prepare(
+                    TextLane::Overlay,
+                    result,
+                    &mut self.glyph_degraded_frames,
+                    &mut text_complete,
+                    &mut refused,
+                )
             };
             overlay_draws.push(PreparedOverlayLayer {
                 ground_buffer,
@@ -6257,6 +6448,14 @@ impl WindowRenderer {
                 text_prepared,
             });
         }
+        preview_text_frame.layers = overlay_layers.len();
+        // Every layer that had something to prepare had it taken. A layer with an
+        // empty batch is not a refusal — there was nothing to refuse — so the
+        // flag is read off the lane's own record rather than off `text_prepared`,
+        // which is `false` for both.
+        preview_text_frame.layer_prepared = !refused.contains(TextLane::Overlay);
+        preview_text_frame.refused = refused;
+        self.preview_text_frame = preview_text_frame;
         self.overlay_layers = overlay_layers;
         let overlay_has_work = overlay_draws.iter().any(|layer| {
             layer.ground_buffer.is_some()
@@ -16181,6 +16380,20 @@ mod tests {
             .collect()
     }
 
+    /// The same, with this file's own tests cut off the end.
+    ///
+    /// A rule counting how many times production code names something has to be
+    /// checked against production code alone: a gate that says "there is one
+    /// exit" and searches the whole file counts the two string literals in its
+    /// own body and reports three.
+    fn production_source() -> String {
+        let source = source_without_prose();
+        let tests = source
+            .find(concat!("#[cfg(", "test)]modtests{"))
+            .expect("this file's own test module");
+        source[..tests].to_owned()
+    }
+
     /// PIN (§7.36) — **a window has one glyphon `Viewport`, and every batch of
     /// text it draws is handed that one.**
     ///
@@ -16390,6 +16603,314 @@ mod tests {
             present_outcome(false, receipt),
             PresentOutcome::PresentedWithoutText(_)
         ));
+    }
+
+    /// PIN — **no text prepare failure is swallowed: every one of them leaves by
+    /// `text_upload_refused` and by nothing else.**
+    ///
+    /// The sibling of `every_text_prepare_in_a_frame_is_folded_into_the_frames
+    /// _answer`, one level deeper. That one says every prepare's `Result` is
+    /// *read*; this one says every `Err` it reads ends in the one place that
+    /// records the lane, marks the frame incomplete — which is what asks the
+    /// window for another turn — and says so on the console once. Two exits
+    /// would be two policies, and the second one is always the one that forgets
+    /// to ask for the retry.
+    ///
+    /// Mutation: inline `text_upload_refused`'s body back into
+    /// `accept_text_prepare`, or add a second `Err` arm anywhere in the frame
+    /// that does not call it.
+    #[test]
+    fn no_text_prepare_failure_is_swallowed() {
+        let source = production_source();
+        let start = source.find("fncompose_frame(").expect("compose_frame");
+        let end = source[start..]
+            .find("fnprepare_text_rows(&mutself,")
+            .expect("prepare_text_rows follows compose_frame");
+        let frame = &source[start..start + end];
+        // Nothing in the frame reaches the exit on its own: the frame's only
+        // verb is `accept_text_prepare`, which is the one caller.
+        assert_eq!(
+            frame.matches("text_upload_refused(").count(),
+            0,
+            "the frame calls the exit through `accept_text_prepare` and never directly"
+        );
+        // `PrepareError` is glyphon's own answer, and the only place in this
+        // crate that turns one into a decision is the exit.
+        assert_eq!(
+            source.matches("fntext_upload_refused(").count(),
+            1,
+            "there is one exit for a refused text upload"
+        );
+        assert_eq!(
+            source.matches("text_upload_refused(").count(),
+            2,
+            "and one caller of it — its own definition and `accept_text_prepare`"
+        );
+        assert_eq!(
+            source.matches("prepare_failure_policy(").count(),
+            2,
+            "the policy is spent at the exit and asserted in its own test, nowhere else"
+        );
+        // And the exit does the three things a refusal means.
+        let start = source
+            .find("fntext_upload_refused(")
+            .expect("text_upload_refused");
+        let end = source[start..]
+            .find("fnpresent_outcome(")
+            .expect("present_outcome follows text_upload_refused");
+        let exit = &source[start..start + end];
+        assert!(
+            exit.contains("*text_complete=false;"),
+            "a refusal marks the frame incomplete, which is how the retry is asked for"
+        );
+        assert!(
+            exit.contains("refused.insert(lane)"),
+            "a refusal names its lane for the trace"
+        );
+        assert!(
+            exit.contains("eprintln!("),
+            "a refusal is said out loud once"
+        );
+    }
+
+    /// RED — **every lane is named when it is refused, and a lane that was
+    /// refused is a frame that is still owed.**
+    ///
+    /// The 2026-08-28 report is a glance card that came up with its file name,
+    /// its type chip and its words all missing and its blockquote rule drawn,
+    /// and one scroll of the wheel put them back. Every one of those is in the
+    /// *overlay* lane, prepared as one batch: the card's head, its chip, its
+    /// foot and the document under them share a `TextRenderer`, so one refusal
+    /// takes all four at once — which is exactly the picture — and until this
+    /// the refusal left no record naming that lane at all.
+    ///
+    /// Mutation: drop the `refused.insert(lane)` and the report cannot be told
+    /// from a card whose document was never built.
+    #[test]
+    fn a_refused_lane_names_itself_and_leaves_the_frame_owed() {
+        let mut degraded = 0;
+        let mut complete = true;
+        let mut refused = TextRefusals::default();
+        assert!(
+            accept_text_prepare(
+                TextLane::Overlay,
+                Ok(()),
+                &mut degraded,
+                &mut complete,
+                &mut refused
+            ),
+            "a batch the atlas took is drawn"
+        );
+        assert!(refused.is_empty(), "and nothing is owed for it");
+        assert!(complete);
+        assert!(
+            !accept_text_prepare(
+                TextLane::Overlay,
+                Err(PrepareError::AtlasFull),
+                &mut degraded,
+                &mut complete,
+                &mut refused,
+            ),
+            "a refused batch is not drawn"
+        );
+        assert!(
+            refused.contains(TextLane::Overlay),
+            "the lane the card's head, chip and words share is named"
+        );
+        assert!(
+            !refused.contains(TextLane::Grid),
+            "and no other lane is blamed for it"
+        );
+        assert_eq!(refused.names(), "overlay");
+        assert!(
+            !complete,
+            "the frame is incomplete, which is what re-files it and asks for another turn"
+        );
+        assert_eq!(degraded, 1);
+        let receipt = PresentReceipt {
+            trigger: FrameTrigger {
+                occurred_at: Instant::now(),
+                source: FrameSource::Expose,
+            },
+            submitted_at: Instant::now(),
+            present_called_at: Instant::now(),
+        };
+        assert!(
+            matches!(
+                present_outcome(complete, receipt),
+                PresentOutcome::PresentedWithoutText(_)
+            ),
+            "and the outcome the window reads is the one whose arm asks for a redraw"
+        );
+        // Two lanes refused on one frame are two names, in the order they are
+        // prepared — a reader looking at the trace has to be able to tell "the
+        // whole window lost its text" from "one card did".
+        let mut both = TextRefusals::default();
+        both.insert(TextLane::Grid);
+        both.insert(TextLane::Overlay);
+        assert_eq!(both.names(), "grid+overlay");
+        assert_eq!(TextRefusals::default().names(), "none");
+    }
+
+    /// RED — **a card's text reaches the glass on the very frame its layout
+    /// lands, and the frame says so.**
+    ///
+    /// One frame, composed once, holding what a glance card holds: a face, a
+    /// head label, and a document of its own carrying a rule and a line of
+    /// words. Both inks have to be on the glass when that single frame is read
+    /// back — not on the frame after a scroll — and the frame's own record has
+    /// to account for them, which is the half the 2026-08-21 station could not
+    /// do: it counted `WindowRenderer::preview_bodies` only, so the one lane
+    /// that draws a card was the one lane it could not see.
+    ///
+    /// Mutation: drop the `layer_*` fields from `PreviewTextFrame` and the
+    /// station goes back to reporting `bodies=0 … prepared=0` for a card that is
+    /// fully drawn — which is what a reader of the trace was given on the day
+    /// the report came in.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_cards_text_reaches_the_glass_on_the_frame_its_layout_lands() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        const WIDTH: u32 = 640;
+        const HEIGHT: u32 = 400;
+        // The card's face, its head's ink, its rule and its words — four
+        // colours nothing else in the frame uses, so "did it reach the glass"
+        // is a question about pixels.
+        const FACE: [f32; 4] = [40.0, 40.0, 400.0, 300.0];
+        const HEAD: [f32; 4] = [56.0, 52.0, 380.0, 84.0];
+        const RULE: [f32; 4] = [56.0, 100.0, 60.0, 260.0];
+        const BODY: [f32; 4] = [72.0, 100.0, 380.0, 260.0];
+        const HEAD_INK: [u8; 3] = [255, 0, 0];
+        const WORD_INK: [u8; 3] = [0, 255, 0];
+
+        let mut gpu = on_this_machines_adapter(FORMAT);
+        let mut window =
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
+        let seat = SeatViewport {
+            x: 0,
+            y: 0,
+            width: WIDTH,
+            height: HEIGHT,
+        };
+        let frame = single_cell_cursor_frame(window.metrics());
+        window.set_modal_overlay(vec![OverlayLayer {
+            quads: vec![
+                OverlayQuad {
+                    rect: FACE,
+                    color: [24, 24, 28],
+                    alpha: 1.0,
+                },
+                OverlayQuad {
+                    rect: RULE,
+                    color: [0, 0, 255],
+                    alpha: 1.0,
+                },
+            ],
+            labels: vec![ChromeLabel {
+                mono: false,
+                text: "CONVENTIONS.md".to_owned(),
+                rect: HEAD,
+                font_size_px: 18.0,
+                color: HEAD_INK,
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: None,
+            }],
+            body: Some(PreviewBody {
+                clip: BODY,
+                quads: Vec::new(),
+                paragraphs: vec![PreviewParagraph {
+                    runs: vec![PreviewRun {
+                        text: "every session reads this once".to_owned(),
+                        color: WORD_INK,
+                        mono: false,
+                        bold: false,
+                        italic: false,
+                        font_scale: 1.0,
+                        inline_box_px: None,
+                    }],
+                    rect: [BODY[0], BODY[1] + 4.0, BODY[2], BODY[1] + 28.0],
+                    font_size_px: 15.0,
+                    line_height_px: 22.0,
+                    wrap: true,
+                    letter_spacing_em: 0.0,
+                    align_right: false,
+                    align_center: false,
+                }],
+                blocks: Vec::new(),
+                rasters: Vec::new(),
+            }),
+            ..OverlayLayer::default()
+        }]);
+        let outcome = window
+            .present_frame(
+                &mut gpu,
+                &[SeatFrame {
+                    seat,
+                    clip: seat,
+                    frame: &frame,
+                    focused: true,
+                }],
+                FrameTrigger {
+                    occurred_at: Instant::now(),
+                    source: FrameSource::Expose,
+                },
+            )
+            .expect("one frame");
+        assert!(
+            matches!(outcome, PresentOutcome::Presented(_)),
+            "the frame that first held the card owed nothing afterwards: {outcome:?}"
+        );
+
+        let record = window.preview_text_frame();
+        assert!(record.refused.is_empty(), "the atlas took every batch");
+        assert!(record.layer_prepared);
+        assert_eq!(record.layers, 1);
+        assert_eq!(record.layer_bodies, 1);
+        assert_eq!(record.layer_labels, 1);
+        assert_eq!(record.layer_paragraphs, 1);
+        assert_eq!(
+            record.layer_drawn, 2,
+            "the head and the line of words are the two batches the card handed over"
+        );
+
+        let pixels = window.read_back(&gpu);
+        // `[b, g, r, a]`.
+        let mut head = 0_usize;
+        let mut words = 0_usize;
+        let mut rule = 0_usize;
+        for pixel in &pixels {
+            let (blue, green, red) = (
+                u32::from(pixel[0]),
+                u32::from(pixel[1]),
+                u32::from(pixel[2]),
+            );
+            if red > 70 && blue * 3 < red && green * 3 < red {
+                head += 1;
+            }
+            if green > 70 && blue * 3 < green && red * 3 < green {
+                words += 1;
+            }
+            if blue > 70 && red * 3 < blue && green * 3 < blue {
+                rule += 1;
+            }
+        }
+        assert!(
+            rule > 0,
+            "the card's rule is drawn — without it the picture under test is not the reported one"
+        );
+        assert!(
+            head > 0,
+            "the card's file name reached the glass on this frame; the report is the frame where \
+             the rule drew and the name did not"
+        );
+        assert!(
+            words > 0,
+            "and so did the document's words, on the same frame and not after a scroll"
+        );
     }
 
     /// The vertical centre of a chrome label's cap band — cap line to baseline,
