@@ -2261,6 +2261,7 @@ pub(crate) fn markdown_runs(
                 color: palette.preview_body_text,
                 mono: false,
                 bold: true,
+                italic: false,
                 font_scale: 1.0,
                 inline_box_px: None,
             },
@@ -2269,6 +2270,7 @@ pub(crate) fn markdown_runs(
                 color: palette.files_row_text,
                 mono: false,
                 bold: false,
+                italic: false,
                 font_scale: 1.0,
                 inline_box_px: None,
             },
@@ -2277,6 +2279,30 @@ pub(crate) fn markdown_runs(
                 color: palette.preview_body_text,
                 mono: false,
                 bold: true,
+                italic: false,
+                font_scale: 1.0,
+                inline_box_px: None,
+            },
+            // `*a*` / `_a_`: emphasis, set in the italic face (a synthesised
+            // oblique where the sans has no drawn italic). A heading is bold
+            // throughout, so emphasis inside one is bold-italic — the weight is
+            // the heading's, the slant is the emphasis's.
+            preview::SpanStyle::Italic => bt_render::PreviewRun {
+                text: span.text.clone(),
+                color: palette.preview_body_text,
+                mono: false,
+                bold: heading,
+                italic: true,
+                font_scale: 1.0,
+                inline_box_px: None,
+            },
+            // `***a***`: strong emphasis and emphasis at once — bold and italic.
+            preview::SpanStyle::BoldItalic => bt_render::PreviewRun {
+                text: span.text.clone(),
+                color: palette.preview_body_text,
+                mono: false,
+                bold: true,
+                italic: true,
                 font_scale: 1.0,
                 inline_box_px: None,
             },
@@ -2289,6 +2315,7 @@ pub(crate) fn markdown_runs(
                 color: palette.preview_code_text,
                 mono: true,
                 bold: heading,
+                italic: false,
                 font_scale: preview::PREVIEW_MD_CODE_FONT_RATIO,
                 inline_box_px: None,
             },
@@ -2300,6 +2327,7 @@ pub(crate) fn markdown_runs(
                 color: palette.accent,
                 mono: false,
                 bold: heading,
+                italic: false,
                 font_scale: 1.0,
                 inline_box_px: None,
             },
@@ -2324,6 +2352,7 @@ pub(crate) fn markdown_runs(
                     color: palette.preview_body_text,
                     mono: false,
                     bold: false,
+                    italic: false,
                     font_scale: 1.0,
                     inline_box_px: Some(picture.width_px as f32),
                 },
@@ -2332,6 +2361,7 @@ pub(crate) fn markdown_runs(
                     color: palette.files_row_text,
                     mono: false,
                     bold: heading,
+                    italic: false,
                     font_scale: 1.0,
                     inline_box_px: None,
                 },
@@ -2359,6 +2389,7 @@ fn markdown_list_marker(
         color: palette.files_row_muted,
         mono: false,
         bold: false,
+        italic: false,
         font_scale: 1.0,
         inline_box_px: None,
     }
@@ -2799,6 +2830,7 @@ fn mono_paragraph(
             color,
             mono: true,
             bold: false,
+            italic: false,
             font_scale: 1.0,
             inline_box_px: None,
         }],
@@ -3271,6 +3303,7 @@ fn build_preview_table_body(
                     },
                     mono: true,
                     bold: index == 0,
+                    italic: false,
                     font_scale: 1.0,
                     inline_box_px: None,
                 }],
@@ -3624,7 +3657,10 @@ fn build_preview_markdown_body(
                     for (run, span) in runs.iter_mut().zip(spans) {
                         if matches!(
                             span.style,
-                            preview::SpanStyle::Plain | preview::SpanStyle::Bold
+                            preview::SpanStyle::Plain
+                                | preview::SpanStyle::Bold
+                                | preview::SpanStyle::Italic
+                                | preview::SpanStyle::BoldItalic
                         ) {
                             run.color = palette.files_row_muted;
                         }
@@ -3746,6 +3782,7 @@ fn build_preview_markdown_body(
                             color: palette.preview_code_lang,
                             mono: false,
                             bold: false,
+                            italic: false,
                             font_scale: 1.0,
                             inline_box_px: None,
                         }],
@@ -3821,6 +3858,7 @@ fn build_preview_markdown_body(
                                 color: palette.files_row_text,
                                 mono: false,
                                 bold: false,
+                                italic: false,
                                 font_scale: 1.0,
                                 inline_box_px: None,
                             }];
@@ -4499,6 +4537,7 @@ fn markdown_fence_width(
                 color: [0, 0, 0],
                 mono: true,
                 bold: false,
+                italic: false,
                 font_scale: 1.0,
                 inline_box_px: None,
             }];
@@ -36518,6 +36557,7 @@ impl Runtime<'_> {
                             color: [0, 0, 0],
                             mono: true,
                             bold: false,
+                            italic: false,
                             font_scale: 1.0,
                             inline_box_px: None,
                         }],
@@ -49303,6 +49343,7 @@ impl Runtime<'_> {
                     color: palette.files_row_muted,
                     mono: false,
                     bold: false,
+                    italic: false,
                     font_scale: 1.0,
                     inline_box_px: None,
                 }],
@@ -108705,6 +108746,7 @@ mod tests {
                     color: [0, 0, 0],
                     mono: false,
                     bold: false,
+                    italic: false,
                     font_scale: 1.0,
                     inline_box_px: None,
                 }],
