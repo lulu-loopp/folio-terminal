@@ -5115,3 +5115,38 @@ RES 容器是一串对齐的记录,`VS_VERSIONINFO` 是一棵对齐的块树,两
 **⑩ 红门。** `bt-platform`:`an_engine_reports_the_duration_and_size_of_a_file_it_opened`(整条创建链)、`a_frame_arrives_after_play_and_position_advances`(帧在来 **且** 钟在走,并打印上面那张代价表)、`a_quicktime_file_plays_where_the_browser_would_not_open_it`(触发条件③)、`a_software_adapter_still_serves_frames`(WARP)、`every_engine_is_shut_down_before_the_process_leaves`(三条臂)、`the_type_table_under_reports_what_the_decoder_will_open`(⑧ 那条发现)、`the_verbs_reach_the_engine`、`nothing_that_is_not_a_video_plays`。`bt-render`:`the_still_and_the_playback_share_one_fit_rule`(纯函数,三条断言)、`a_video_layer_fills_its_box_letterboxes_in_its_ground_and_rounds_its_corners`(**读回像素**,在没有显卡驱动的机器拿到的那个设备上——§7.36 用一次发布门换来的教训)、`a_video_that_stopped_releases_its_texture`。`bt-app`:`a_videos_still_lands_where_the_playing_picture_does`。
 
 **⑪ 挂账。** ⓐ **控件条没有**:播放/进度/时间/静音/音量/倍速目前只有 A 壳页那一套,②片要把它们搬到本窗自己的 chrome 上。ⓑ **三个表面没接**:hover 卡、浮窗、侧 pane 今天还是走 A 路,②片接。ⓒ **共享纹理没做**,理由在 ③,数字也在 ③,②片凭那张表决定。ⓓ **tab 小喇叭的来源没换**:今天仍是 `IsDocumentPlayingAudio`,新的判据是 `state().playing && !muted`,②片接 UI 时一起换。ⓔ **`.webm`/`.mkv`/`.avi`/`.wmv` 没有 fixture**,矩阵里那几行是「未测」而不是「不行」——要么补 fixture,要么在②片验收时用用户自己的文件实测。ⓕ **帧速受 fixture 限制**:本仓那两份录像大约 5 fps,所以「14 帧 / 2.65 秒」说明的是钟在走,不是这条路的吞吐上限;吞吐的读法是 ③ 那张每帧代价表。
+
+---
+
+### 7.45 一张卡丢字的时候必须说出是哪条道丢的:五条文字道一个出口,卡片那条不再是暗的(2026-08-28 用户实证「卡出来了但一个字没画,滚一下才有」;`crates/bt-render/src/lib.rs`、`crates/bt-app/src/preview_trace.rs`)
+
+**报告。** 悬停一条 `.md` 引用,卡片出现:头上的文件名与类型 chip 都空,正文只画了引用块那根蓝色竖条,一个字也没有;向下滚一下,头名、chip、正文全回来,而且从此正常。
+
+**这张画只可能由一个开关造成。** 卡片的头名、chip、脚上那句话和它下面那份文档是**同一批**:`file_peek::build` 把三条 `ChromeLabel` 放进这一层,`Runtime::file_peek_layer` 把文档挂进同一层的 `body`,`compose_frame` 把两者 `shape` 成一个 `layouts` 交给这一层自己的 `TextRenderer`。所以这一层的文字要么全在,要么全不在——`layer.text_prepared`。而这一层的 `quads`(卡面、chip 的圆角框、引用块那根竖条)走的是矩形管线,和那个开关无关。**「规矩画了、字没画」= `text_prepared == false`,没有第二条路能画出这张画**;红门 `a_cards_text_reaches_the_glass_on_the_frame_its_layout_lands` 的变异证据就是把这一个布尔按成 `false`,拍回来的像素与报告逐点吻合(蓝条在、名字不在)。
+
+**那个开关只有两个来源,而它们过去都不留痕。**
+
+- `Err(PrepareError::AtlasFull)` —— 图集拒收。
+- `layouts.is_empty()` —— 三条 label 全被 `shape_chrome_labels` 的 `rect[2] > rect[0]` 滤掉,**且**每个段落都没活过自己的 clip。
+
+从画面外面看这两件事一模一样,而在这一天之前,**这条道的任何一种都没有任何记录**:`BT_PREVIEW_TRACE` 的 `frame` 站只数 `WindowRenderer::preview_bodies` —— 那是**座**画的文档。卡片的文档不在那里面(它挂在 `OverlayLayer::body`,为的是画在卡面**之上**),所以这个站为了回答的正是这张画而生,却唯独看不见画出这张画的那条道:一张画得好好的卡,它报的是 `bodies=0 paragraphs=0 drawn=0 prepared=0`。这就是 2026-08-28 那份报告在它自己发生的机器上答不出来的原因。
+
+**修法一:一个出口。** `text_upload_refused(lane, error, …)` 是**任何**一批文字被拒的唯一出路,`accept_text_prepare` 是它唯一的调用者。它做三件事,不多不少:把这条道记进本帧的 `TextRefusals`(进 trace)、把 `text_complete` 按成 `false`(这**就是**重试——`PresentOutcome::PresentedWithoutText` 让 `bt-app` 把这帧塞回槽里再讨一帧),以及一轮只吼一次的控制台行。
+
+**为什么重试不是「就地 trim 再试一次」,也不是「就地扩容」。** glyphon 在 `prepare` 里面**已经**按 2 倍逐级扩容,只有下一次翻倍会越过设备的 `max_texture_dimension_2d` 时才答 `AtlasFull`——所以「扩容」这一步不是我们能补的,它已经试过了。而**帧内 trim 是被 §2.2 明令禁止的**:trim 清空 `glyphs_in_use`,那会把**本帧更早那些道已经拿到图集坐标**的字形解除保护,后面的道可以把它们从一次还没发出的 draw 底下逐出去——就是 `present_frame` 自己的契约警告的那种五彩纸屑。这一帧欠的 trim 是 `present_frame` 出口那一次无条件的,而重试是下一帧。三条门钉着这三句话:`no_exit_from_a_frame_may_skip_the_atlas_trim`、`the_frame_body_never_trims_the_shared_atlas`、`a_frame_that_lost_its_text_is_still_owed`。
+
+**修法二:卡片那条道亮起来。** `PreviewTextFrame` 长出 overlay 那一半——`layers`、`layer_bodies`、`layer_labels`、`layer_paragraphs`、`layer_drawn`、`layer_prepared`——外加全帧的 `refused=<道名>`。座那条道的五个数问的四个问题,现在原样问了画卡片的那条道,于是上面两个来源在 trace 里再也不同形:
+
+- `layer_drawn=0` 而 `layer_labels>0` —— 整批塌了(`layouts.is_empty()`),盒子是退化的。
+- `layer_drawn>0` 而 `layer_prepared=0`、`refused=overlay` —— 图集拒收。
+- `layer_bodies=0` —— 卡还没有文档(答案没回来),这不是缺陷。
+
+`refused=grid+overlay` 与 `refused=overlay` 是两句不同的话:一句是整扇窗掉字,一句是只有这张卡掉字。
+
+**这条道过去被记过一次账,今天核销。** HANDOFF §5 第 17 条写着「`AtlasFull` 被三条道吞掉:chrome / preview / overlay 全部 `.is_ok()`」——那半件事在 `0e2803b` 就随图集 trim 泄漏一起收了(四条道今天都过 `accept_text_prepare`),留下的是**没有记录**这半件:被拒的是哪条道,以及「被拒」和「整批塌了」的区别。这一节收的是这半件。
+
+**一句算术,说明重试为什么会收敛。** 一帧被保护的字形就是这一帧的**墨**,而墨被它画上去的那块面积框住——1920×1200 一屏排满互不相同的 CJK 在本机量到 2.5 Mpx² 以下,与 `max_texture_dimension_2d = 8192` 的 67 Mpx² 图集相比是二十五分之一。所以一次 trim 之后图集一定有地方,重试是一帧的事,不是一个循环。反过来读:**在一台 8192 的机器上,`AtlasFull` 单帧几乎不可达**——所以下一次这张画再出现时,trace 里 `refused=` 那一栏若写着 `none`,答案就在 `layer_drawn=0` 那一行,而不必再猜。
+
+**红门。** `bt-render`:`a_cards_text_reaches_the_glass_on_the_frame_its_layout_lands`(真设备、一帧、读回像素——卡面、蓝条、头名、正文四色分开数,断言名字和字与竖条**同一帧**在场,并断言 `PreviewTextFrame` 的 overlay 半边把它们数对了;变异=让带 `body` 的层丢掉文字,红出来的正是报告那张画)、`a_refused_lane_names_itself_and_leaves_the_frame_owed`(被拒的道自报家门、不牵连别的道、`present_outcome` 给的是讨重画那条臂)、`no_text_prepare_failure_is_swallowed`(源码门:帧里没有第二个出口,`text_upload_refused` 只有一个定义与一个调用者,出口自己做齐那三件事)。
+
+**挂账。** ⓐ 这张画在本机没有等比复现出来:14 条真引用逐条悬停(隔离 `APPDATA`,`BT_PROBE_INPUT` 印绝对路径引用,含 30 KB 与 64 KB 的中文长文),每张卡首帧文字全部在场,`refused=none` 一次没变过,`layer_drawn` 每次都等于 `layer_labels + layer_paragraphs`——与上面那句算术一致。所以本节落地的是**下一次它发生时能自己说出是哪一种**,而不是一个已经被观测证伪的猜测。要复现,`BT_PREVIEW_TRACE` 现在就够:出事那一帧的 `frame` 行会指名道姓。ⓑ release 版那一轮没跑完:桌面在实验中途不再把前台给探针窗(`ui-probe` 拒绝盲发指针,这是它该有的表现),那一轮的证据只有 debug 版的。

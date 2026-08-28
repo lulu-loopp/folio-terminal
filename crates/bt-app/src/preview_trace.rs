@@ -78,12 +78,21 @@ pub fn frame(trace: Option<&Trace>, echo: &mut FrameEcho, frame: bt_render::Prev
     }
     emit(trace, || {
         format!(
-            "frame bodies={} paragraphs={} quads={} drawn={} prepared={}",
+            "frame bodies={} paragraphs={} quads={} drawn={} prepared={} \
+             layers={} layer_bodies={} layer_labels={} layer_paragraphs={} \
+             layer_drawn={} layer_prepared={} refused={}",
             frame.bodies,
             frame.paragraphs,
             frame.quads,
             frame.drawn,
-            u8::from(frame.prepared)
+            u8::from(frame.prepared),
+            frame.layers,
+            frame.layer_bodies,
+            frame.layer_labels,
+            frame.layer_paragraphs,
+            frame.layer_drawn,
+            u8::from(frame.layer_prepared),
+            frame.refused.names()
         )
     });
 }
@@ -99,6 +108,7 @@ mod tests {
             quads: 2,
             drawn,
             prepared: true,
+            ..bt_render::PreviewTextFrame::default()
         }
     }
 
