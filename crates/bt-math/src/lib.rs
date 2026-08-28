@@ -467,7 +467,26 @@ pub enum SvgRasterError {
 /// instead of growing its own.
 pub fn rasterize_svg_document(bytes: &[u8]) -> Result<SvgRaster, SvgRasterError> {
     static OPTIONS: OnceLock<resvg::usvg::Options<'static>> = OnceLock::new();
-    let options = OPTIONS.get_or_init(resvg::usvg::Options::default);
+    let options = OPTIONS.get_or_init(|| {
+        let mut options = resvg::usvg::Options::default();
+        // **The machine's own fonts, or an SVG with words in it draws none of
+        // them** (2026-08-28, `docs/DESIGN.md` §7.1.3k).
+        //
+        // `Options::default()` starts with an **empty** font database, and usvg
+        // drops every `<text>` it cannot shape, silently. That was invisible
+        // while the only documents reaching this function came out of Typst — a
+        // typeset formula is paths, not text — and it stopped being invisible the
+        // day a markdown page started drawing an author's own SVG: this
+        // repository's `README.md` hero is sixteen `<text>` elements, and it came
+        // back as its background and nothing else.
+        //
+        // Loaded once, behind this `OnceLock`, on whichever worker asks first:
+        // enumerating the installed faces costs of the order of a hundred
+        // milliseconds, and it is paid on the lane that exists to keep tens of
+        // milliseconds of typesetting off the window's thread.
+        options.fontdb_mut().load_system_fonts();
+        options
+    });
     let tree = resvg::usvg::Tree::from_data(bytes, options)
         .map_err(|error| SvgRasterError::Parse(error.to_string()))?;
     let size = tree.size();
@@ -844,6 +863,33 @@ mod tests {
         assert_eq!((raster.width_px, raster.height_px), (8, 6));
         assert_eq!(raster.rgba.len(), 8 * 6 * 4);
         assert_eq!(&raster.rgba[..4], &[255, 0, 0, 255]);
+    }
+
+    /// RED GATE (2026-08-28, `docs/DESIGN.md` §7.1.3k) — **an SVG with words in
+    /// it draws the words.**
+    ///
+    /// `usvg::Options::default()` starts with an empty font database and drops
+    /// every `<text>` it cannot shape, silently. That was invisible while the
+    /// only documents reaching this function were Typst's own output — a typeset
+    /// formula is paths — and it stopped being invisible the day a markdown page
+    /// began drawing an author's SVG: this repository's `README.md` hero is
+    /// sixteen `<text>` elements and it came back as its background alone.
+    ///
+    /// MUTATION: drop the `load_system_fonts()` call and this raster comes back
+    /// entirely transparent (verified, 2026-08-28).
+    #[test]
+    fn an_svg_that_says_something_draws_it() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40">
+            <text x="4" y="30" font-family="Arial, sans-serif" font-size="28"
+                  fill="#000000">Folio</text>
+        </svg>"##;
+        let raster = rasterize_svg_document(svg).unwrap();
+        let inked = raster.rgba.chunks_exact(4).filter(|px| px[3] != 0).count();
+        assert!(
+            inked > 0,
+            "a machine with fonts on it can set five letters; \
+             an empty font database silently sets none",
+        );
     }
 
     #[test]

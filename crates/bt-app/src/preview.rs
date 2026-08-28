@@ -744,6 +744,20 @@ pub enum SpanStyle {
     /// environment has no delimiters to drop: the `\begin` and the `\end` are the
     /// formula.
     Math,
+    /// `![alt](src)` — a picture. [`Span::text`] is the alt text and
+    /// [`Span::target`] is the source, unresolved, exactly as [`Self::Link`]
+    /// carries a link's.
+    ///
+    /// **A span rather than only a block, because the scanner that finds one is
+    /// the scanner that finds a link** — an image *is* a link with a `!` in front
+    /// of it, and CommonMark reads the two in one pass. What becomes of the span
+    /// afterwards is [`push_prose`]'s business: a paragraph is cut at its
+    /// pictures so each one becomes a [`MarkdownBlock::Image`], and in the four
+    /// places a paragraph cannot be cut — a heading, a table cell, a list item, a
+    /// quote line — the run stands as its own alt text. That floor is the honest
+    /// one: alt text is what a picture *says*, and it is what every reader that
+    /// cannot show the picture has put in its place since there were pictures.
+    Image,
 }
 
 /// One run of inline text inside a markdown block.
@@ -802,6 +816,15 @@ impl Span {
     /// One inline formula, `text` **including** whatever delimits it.
     pub fn math(text: &str) -> Self {
         Self::styled(text, SpanStyle::Math)
+    }
+
+    /// One picture: the alt text it says, and the source it names.
+    pub fn image(alt: &str, src: &str) -> Self {
+        Self {
+            text: alt.to_owned(),
+            style: SpanStyle::Image,
+            target: Some(src.to_owned()),
+        }
     }
 
     /// The LaTeX between this run's delimiters, or `None` if it is not a formula.
@@ -915,6 +938,97 @@ pub enum MarkdownBlock {
     Math {
         source: String,
     },
+    /// One picture, standing on the page as a block of its own.
+    ///
+    /// **Every picture in this window's markdown is a block** (2026-08-28), and
+    /// the reason is [`push_prose`]: a paragraph is cut at each of its pictures,
+    /// so `text ![a](b) text` becomes prose, picture, prose rather than a
+    /// sentence with a hole in it. A picture set *inside* a line — sized to the
+    /// text around it and sitting on its baseline, which is what
+    /// [`bt_render::PreviewRun::inline_box_px`] already does for a formula — is
+    /// written down as owed rather than pretended at; see `docs/DESIGN.md`
+    /// §7.1.3k.
+    Image(MarkdownImage),
+}
+
+/// **One picture a markdown document asks for**, in the shape the page draws it
+/// from: what it says, where its pixels are, and which of several files answers
+/// for the theme in force.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MarkdownImage {
+    /// The alt text, exactly as the document wrote it — what stands here when
+    /// the pixels do not, and what a picture *says*.
+    pub alt: String,
+    /// `<picture>`'s `<source>` rows, in the order the document lists them.
+    ///
+    /// Empty for `![alt](src)` and for a bare `<img>`, and that emptiness is the
+    /// whole of the difference between them: a document that named one file
+    /// named one file, and asking it about the theme would be this window
+    /// inventing a second name.
+    pub sources: Vec<ImageCandidate>,
+    /// The `<img>`'s own `src` — `<picture>`'s last word, and everything else's
+    /// only one. **Unresolved**, for [`Span::target`]'s reason: a relative
+    /// source means nothing without the document it was written in, and the
+    /// parser does not know which file it is reading.
+    pub src: String,
+    /// `width="100%"` and nothing subtler (user ruling 2026-08-28).
+    ///
+    /// **A picture is drawn to the column and never past its own pixels**; this
+    /// is the one attribute that lifts the second half of that, because
+    /// `width="100%"` is the document saying "as wide as there is room for". A
+    /// percentage layout engine is not what a markdown preview is, so every
+    /// other spelling of a width is read and dropped.
+    pub fill: bool,
+}
+
+impl MarkdownImage {
+    /// One picture written the plain way.
+    #[must_use]
+    pub fn named(alt: &str, src: &str) -> Self {
+        Self {
+            alt: alt.to_owned(),
+            sources: Vec::new(),
+            src: src.to_owned(),
+            fill: false,
+        }
+    }
+
+    /// **The file this picture is, under the theme in force** (user ruling
+    /// 2026-08-28).
+    ///
+    /// The first candidate whose `media` names this theme, then the first that
+    /// names no theme at all, then the `<img>`'s own `src`. That is `<picture>`'s
+    /// own rule with the parts this window cannot honour left out: a browser
+    /// walks `<source>` rows asking each one every question it knows (`type`,
+    /// `media`, viewport widths), and the one question a preview pane can answer
+    /// honestly is which scheme it is painting in.
+    #[must_use]
+    pub fn source_for(&self, theme: bt_render::Theme) -> &str {
+        self.sources
+            .iter()
+            .find(|candidate| candidate.scheme == Some(theme))
+            .or_else(|| {
+                self.sources
+                    .iter()
+                    .find(|candidate| candidate.scheme.is_none())
+            })
+            .map_or(self.src.as_str(), |candidate| candidate.src.as_str())
+    }
+}
+
+/// One `<source>` row of a `<picture>`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageCandidate {
+    /// The scheme `media="(prefers-color-scheme: …)"` names, or `None` for a row
+    /// that names no scheme — which is a row that answers for both.
+    pub scheme: Option<bt_render::Theme>,
+    /// The row's `srcset`, **as one address**.
+    ///
+    /// A `srcset` may carry a comma-separated list with density descriptors, and
+    /// this window takes the first entry's URL: the rest of the list answers a
+    /// question about device pixel ratios that a picture drawn to a column and
+    /// resampled to the pixels it lands on has already answered another way.
+    pub src: String,
 }
 
 /// Split one line into its inline runs.
@@ -1364,12 +1478,19 @@ fn environment_close(text: &str, name: &str, open: usize) -> Option<usize> {
     }
 }
 
-/// The second pass: `[text](url)` inside whatever the code pass left plain.
+/// The second pass: `[text](url)` and `![alt](src)` inside whatever the code
+/// pass left plain.
 ///
 /// The label is emitted as one run and the target rides beside it, unresolved.
 /// A label carrying its own emphasis (`[**a**](b)`) keeps the asterisks visible
 /// rather than nesting two styles in one run — a deliberate floor, because the
 /// alternative is a span model with a stack in it and the case is vanishing.
+///
+/// **An image is read here and not in a pass of its own** (2026-08-28), because
+/// in CommonMark it is not a second construct: `![alt](src)` is the link
+/// grammar with a `!` in front of it, and a scanner that read images separately
+/// would have to agree with this one about where a label ends and what an
+/// escape is. What the `!` changes is the *verdict*, not the parse.
 fn push_link_runs(text: &str, at: usize, line: &str, pieces: &mut Vec<Piece>) {
     let mut rest = text;
     let mut at = at;
@@ -1377,6 +1498,14 @@ fn push_link_runs(text: &str, at: usize, line: &str, pieces: &mut Vec<Piece>) {
         let Some(label_end) = rest[open..].find(']').map(|found| open + found) else {
             break;
         };
+        // **A `!` immediately in front of the bracket makes this a picture** —
+        // unless the author escaped it, in which case the `!` is a `!` and what
+        // follows it is an ordinary link. The parity is
+        // `bt_detect::delimiter_is_escaped`'s, which is the same count the
+        // dollar and the asterisk are read with: one definition, four callers.
+        let image = open > 0
+            && rest.as_bytes()[open - 1] == b'!'
+            && !bt_detect::delimiter_is_escaped(line, at + open - 1);
         // The target has to follow the label immediately, which is what keeps
         // `[a] (b)` and a bare `[TODO]` out of this branch.
         if !rest[label_end + 1..].starts_with('(') {
@@ -1392,9 +1521,24 @@ fn push_link_runs(text: &str, at: usize, line: &str, pieces: &mut Vec<Piece>) {
         else {
             break;
         };
-        // `[]()` is punctuation, not an empty link.
-        if label_end == open + 1 {
+        // `[]()` is punctuation, not an empty link. **`![](src)` is not**: an
+        // empty alt is what a document writes when the picture says nothing a
+        // reader needs told — a rule, a spacer, a badge whose meaning is its
+        // own face — and it is a picture like any other.
+        if label_end == open + 1 && !image {
             push_delimiter_runs(&rest[..target_end + 1], at, line, pieces);
+            at += target_end + 1;
+            rest = &rest[target_end + 1..];
+            continue;
+        }
+        if image {
+            // The `!` is markup and does not survive into the page, so the text
+            // in front of the picture stops one byte short of the bracket.
+            push_delimiter_runs(&rest[..open - 1], at, line, pieces);
+            pieces.push(Piece::Claimed(Span::image(
+                &rest[open + 1..label_end],
+                &link_destination(&rest[target_open + 1..target_end]),
+            )));
             at += target_end + 1;
             rest = &rest[target_end + 1..];
             continue;
@@ -1402,12 +1546,49 @@ fn push_link_runs(text: &str, at: usize, line: &str, pieces: &mut Vec<Piece>) {
         push_delimiter_runs(&rest[..open], at, line, pieces);
         pieces.push(Piece::Claimed(Span::link(
             &rest[open + 1..label_end],
-            rest[target_open + 1..target_end].trim(),
+            &link_destination(&rest[target_open + 1..target_end]),
         )));
         at += target_end + 1;
         rest = &rest[target_end + 1..];
     }
     push_delimiter_runs(rest, at, line, pieces);
+}
+
+/// **The address inside a `(…)`**, with the title CommonMark allows beside it
+/// taken off and an angle-bracketed address unwrapped.
+///
+/// `![alt](path/to.png "A caption")` and `[text](page.md 'why')` are both the
+/// grammar's ordinary shape — destination, whitespace, title — and a reader that
+/// kept the whole of it would hand `path/to.png "A caption"` to the disk. The
+/// title itself is **parsed off and not shown**: in a browser it is a tooltip,
+/// and this window puts no tooltip on a picture, so keeping it would be keeping
+/// a string nothing reads.
+///
+/// One function for both because it is one grammar; a link with a title was
+/// carrying its own quotes into [`link_action`] until this was written.
+fn link_destination(inside: &str) -> String {
+    let inside = inside.trim();
+    // `<…>` wraps a destination that has spaces in it; the brackets are markup.
+    if let Some(angled) = inside
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+    {
+        return angled.to_owned();
+    }
+    let Some(space) = inside.find(char::is_whitespace) else {
+        return inside.to_owned();
+    };
+    let (destination, title) = inside.split_at(space);
+    let title = title.trim_start();
+    // Only a *title* may follow the destination, and a title is quoted. Anything
+    // else is an address with a space in it — rare, but the author's own bytes,
+    // and cutting it at the space would silently open a shorter path.
+    let quoted = matches!(title.as_bytes().first(), Some(b'"' | b'\'' | b'('));
+    if quoted {
+        destination.to_owned()
+    } else {
+        inside.to_owned()
+    }
 }
 
 /// The last scanning pass: cut what is left into text and delimiter runs.
@@ -1790,6 +1971,22 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
             continue;
         }
 
+        // ── `<img>` and `<picture>`, the two tags that are a picture ────────
+        //
+        // An HTML block, and it stands where the other block-swallowing arms
+        // stand: after the fence, which has already claimed anything inside it,
+        // and before every branch that would read these lines as prose. It
+        // refuses far more often than it accepts — see [`html_image_block`] —
+        // and a refusal costs nothing, because the lines then travel on to the
+        // very branch that would have taken them.
+        if let Some((image, after)) = html_image_block(&lines, index) {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            flush_list(&mut list, &mut ordered, &mut blocks);
+            blocks.push(MarkdownBlock::Image(image));
+            index = after;
+            continue;
+        }
+
         // ── the table, which is the one block needing lookahead ─────────────
         if is_pipe_row(line)
             && lines
@@ -1951,6 +2148,225 @@ fn display_math_block(lines: &[&str], start: usize) -> Option<(String, usize)> {
     ))
 }
 
+/// **The picture the HTML block at `start` is**, and the line the document goes
+/// on at — or `None`, meaning these lines are not a picture and this walk should
+/// read on as if this function had not been called (user ruling 2026-08-28;
+/// `docs/DESIGN.md` §7.1.3k ②).
+///
+/// **Two elements and no more.** `<img>` and `<picture>` are the two ways a
+/// markdown document in the wild puts a picture on a page that `![alt](src)`
+/// cannot express, and they are the two this window reads. Every other tag stays
+/// exactly what it is today — printed as the text it is — because a markdown
+/// preview that grew half an HTML renderer would be wrong in a new way on every
+/// document that used the other half.
+///
+/// **The block is CommonMark's** (§4.6, HTML block type 6): it opens on a line
+/// whose first non-blank characters are one of these tags and it closes at the
+/// blank line. Which is also why the whole run has to *be* the picture: a run
+/// carrying a picture and a sentence is an HTML block this window cannot draw,
+/// and printing it as it stands is the honest answer for it.
+fn html_image_block(lines: &[&str], start: usize) -> Option<(MarkdownImage, usize)> {
+    let first = lines.get(start)?.trim_start();
+    if !opens_html_tag(first, "picture") && !opens_html_tag(first, "img") {
+        return None;
+    }
+    let end = lines[start..]
+        .iter()
+        .position(|line| line.trim().is_empty())
+        .map_or(lines.len(), |at| start + at);
+    let block = lines[start..end].join("\n");
+    Some((html_image(&block)?, end))
+}
+
+/// Whether `text` begins the named tag — `<img`, `<img>`, `<img/>`, and never
+/// `<image`.
+fn opens_html_tag(text: &str, name: &str) -> bool {
+    let Some(rest) = text
+        .strip_prefix('<')
+        .filter(|rest| rest.len() >= name.len() && rest[..name.len()].eq_ignore_ascii_case(name))
+        .map(|rest| &rest[name.len()..])
+    else {
+        return false;
+    };
+    rest.is_empty()
+        || rest.starts_with(|character: char| character.is_whitespace() || character == '>')
+        || rest.starts_with('/')
+}
+
+/// One `<img>` or `<picture>` element, read into the picture it names.
+fn html_image(block: &str) -> Option<MarkdownImage> {
+    let tags = html_tags(block)?;
+    let image = tags.iter().find(|tag| tag.name == "img")?;
+    // Every `<source>` before the `<img>`, which is where `<picture>` puts them
+    // and the order it reads them in.
+    let sources = tags
+        .iter()
+        .filter(|tag| tag.name == "source")
+        .filter_map(|tag| {
+            let src = first_srcset_url(tag.attribute("srcset")?)?;
+            Some(ImageCandidate {
+                scheme: match tag.attribute("media") {
+                    // A row that names no media answers for every theme.
+                    None => None,
+                    // A media query this window cannot evaluate makes the row
+                    // unanswerable, and an unanswerable row must not be picked:
+                    // dropping it leaves `<img>`'s own `src`, which is exactly
+                    // what a browser falls back to when no source matches.
+                    Some(media) => Some(colour_scheme_of(media)?),
+                },
+                src,
+            })
+        })
+        .collect();
+    Some(MarkdownImage {
+        alt: image
+            .attribute("alt")
+            .map(collapse_html_whitespace)
+            .unwrap_or_default(),
+        sources,
+        src: image.attribute("src")?.trim().to_owned(),
+        fill: image
+            .attribute("width")
+            .is_some_and(|width| width.trim() == "100%"),
+    })
+}
+
+/// The scheme a `media` attribute names, or `None` for a query about anything
+/// else.
+fn colour_scheme_of(media: &str) -> Option<bt_render::Theme> {
+    let media = media.to_ascii_lowercase();
+    let inside = media
+        .split_once("prefers-color-scheme")?
+        .1
+        .trim_start()
+        .strip_prefix(':')?;
+    let value = inside.trim_start();
+    if value.starts_with("dark") {
+        Some(bt_render::Theme::Dark)
+    } else if value.starts_with("light") {
+        Some(bt_render::Theme::Light)
+    } else {
+        None
+    }
+}
+
+/// The first address in a `srcset` — see [`ImageCandidate::src`].
+fn first_srcset_url(srcset: &str) -> Option<String> {
+    let first = srcset.split(',').next()?.trim();
+    let url = first.split_whitespace().next()?;
+    (!url.is_empty()).then(|| url.to_owned())
+}
+
+/// An attribute value with its line breaks spent, which is what HTML does to
+/// them: the `alt` on this repository's own hero is five source lines of one
+/// sentence.
+fn collapse_html_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// One tag out of an HTML block this window reads.
+struct HtmlTag {
+    /// Lower-cased, and `/picture` for a closing tag: a name is a name and the
+    /// slash is part of how this scanner spells it.
+    name: String,
+    attributes: Vec<(String, String)>,
+}
+
+impl HtmlTag {
+    fn attribute(&self, name: &str) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// **Every tag in a block that is nothing but tags**, or `None`.
+///
+/// The refusal is the point: text between the tags means this run is not a
+/// picture on its own, and a scanner that skipped over it would swallow a
+/// caption the document meant to print.
+fn html_tags(block: &str) -> Option<Vec<HtmlTag>> {
+    let mut tags = Vec::new();
+    let mut rest = block;
+    while let Some(open) = rest.find('<') {
+        if !rest[..open].trim().is_empty() {
+            return None;
+        }
+        let close = html_tag_end(&rest[open..])? + open;
+        tags.push(html_tag(&rest[open + 1..close]));
+        rest = &rest[close + 1..];
+    }
+    rest.trim().is_empty().then_some(tags)
+}
+
+/// Where the `>` that closes the tag at the head of `text` is — **counting only
+/// the ones outside quotes**, because an `alt` may perfectly well contain a `>`.
+fn html_tag_end(text: &str) -> Option<usize> {
+    let mut quote: Option<u8> = None;
+    for (at, byte) in text.bytes().enumerate() {
+        match quote {
+            Some(open) if byte == open => quote = None,
+            Some(_) => {}
+            None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+            None if byte == b'>' => return Some(at),
+            None => {}
+        }
+    }
+    None
+}
+
+/// One tag's name and attributes, out of what stood between its angle brackets.
+fn html_tag(inside: &str) -> HtmlTag {
+    let inside = inside.trim().strip_suffix('/').unwrap_or(inside.trim());
+    let mut rest = inside.trim_start();
+    let name_end = rest
+        .find(|character: char| character.is_whitespace())
+        .unwrap_or(rest.len());
+    let name = rest[..name_end].to_ascii_lowercase();
+    rest = &rest[name_end..];
+    let mut attributes = Vec::new();
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        let key_end = rest
+            .find(|character: char| character.is_whitespace() || character == '=')
+            .unwrap_or(rest.len());
+        let key = rest[..key_end].to_ascii_lowercase();
+        rest = rest[key_end..].trim_start();
+        let value = match rest.strip_prefix('=') {
+            None => String::new(),
+            Some(after) => {
+                let after = after.trim_start();
+                match after.as_bytes().first() {
+                    Some(quote @ (b'"' | b'\'')) => {
+                        let quote = *quote as char;
+                        let end = after[1..].find(quote).map_or(after.len(), |at| at + 1);
+                        let value = after[1..end].to_owned();
+                        rest = after.get(end + 1..).unwrap_or("");
+                        value
+                    }
+                    _ => {
+                        let end = after
+                            .find(|character: char| character.is_whitespace())
+                            .unwrap_or(after.len());
+                        let value = after[..end].to_owned();
+                        rest = &after[end..];
+                        value
+                    }
+                }
+            }
+        };
+        if key.is_empty() {
+            break;
+        }
+        attributes.push((key, value));
+    }
+    HtmlTag { name, attributes }
+}
+
 /// A display formula's source with the blank its delimiters left behind taken
 /// off.
 ///
@@ -1996,7 +2412,40 @@ fn flush_paragraph(paragraph: &mut Vec<&str>, blocks: &mut Vec<MarkdownBlock>) {
     }
     let text = join_source_lines(paragraph);
     paragraph.clear();
-    blocks.push(MarkdownBlock::Paragraph(parse_inline(&text)));
+    push_prose(parse_inline(&text), blocks);
+}
+
+/// **Cut one paragraph's runs into the blocks they are drawn as**: prose,
+/// picture, prose.
+///
+/// See [`MarkdownBlock::Image`]. A picture standing alone in its paragraph — the
+/// ordinary case, and every picture in this repository's own `README.md` — comes
+/// out as one image block with no prose either side of it, because the runs
+/// either side are empty.
+fn push_prose(spans: Vec<Span>, blocks: &mut Vec<MarkdownBlock>) {
+    let mut run: Vec<Span> = Vec::new();
+    for span in spans {
+        if span.style != SpanStyle::Image {
+            run.push(span);
+            continue;
+        }
+        push_paragraph_run(&mut run, blocks);
+        let source = span.target.unwrap_or_default();
+        blocks.push(MarkdownBlock::Image(MarkdownImage::named(
+            &span.text, &source,
+        )));
+    }
+    push_paragraph_run(&mut run, blocks);
+}
+
+/// The prose on one side of a picture, dropped when it is nothing but the space
+/// that stood between two of them.
+fn push_paragraph_run(run: &mut Vec<Span>, blocks: &mut Vec<MarkdownBlock>) {
+    if run.iter().all(|span| span.text.trim().is_empty()) {
+        run.clear();
+        return;
+    }
+    blocks.push(MarkdownBlock::Paragraph(std::mem::take(run)));
 }
 
 /// `#` through `######` followed by a space.
@@ -2472,7 +2921,13 @@ pub fn markdown_block_margins(
         // github.css has no rule for it because github.css predates it; every
         // renderer that draws one — Typora, KaTeX's own `.katex-display` — sets
         // it in the same `1em` a paragraph stands in.
-        | MarkdownBlock::Math { .. } => (metrics.paragraph_gap, metrics.paragraph_gap),
+        | MarkdownBlock::Math { .. }
+        // `img { }` — github.css gives a picture no margin of its own, because
+        // in a browser the picture is inside the `<p>` that carries it and the
+        // paragraph's own air is what stands around it. Here the picture *is*
+        // the block, so the paragraph's air is what it asks for: the same
+        // sentence said in the place this window keeps it.
+        | MarkdownBlock::Image(_) => (metrics.paragraph_gap, metrics.paragraph_gap),
     };
     (if previous.is_none() { 0.0 } else { top }, bottom)
 }
@@ -8866,6 +9321,160 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// RED GATE (user report, 2026-08-28: 「md 预览不渲染图片」) — **the
+    /// `<picture>` element picks the file that answers for the theme in force**,
+    /// and this repository's own `README.md` is the fixture.
+    ///
+    /// MUTATION: drop the `<source>` walk in `html_image` and both themes get
+    /// the light file; drop the theme test in `MarkdownImage::source_for` and
+    /// the dark page draws the light hero.
+    ///
+    /// The alt text is checked with it because in that file it is five source
+    /// lines of one sentence, and a reader that kept the line breaks would put
+    /// them on the card the picture stands on.
+    #[test]
+    fn a_picture_element_picks_the_source_for_the_theme_in_force() {
+        let blocks = parse_markdown(concat!(
+            "<picture>\n",
+            "  <source media=\"(prefers-color-scheme: dark)\"\n",
+            "          srcset=\"assets/readme/hero-dark.svg\">\n",
+            "  <img src=\"assets/readme/hero-light.svg\" width=\"100%\"\n",
+            "       alt=\"Folio - the Windows terminal\n",
+            "       that renders math.\">\n",
+            "</picture>\n",
+            "\n",
+            "Prose after it.\n",
+        ));
+        let [MarkdownBlock::Image(image), MarkdownBlock::Paragraph(prose)] = blocks.as_slice()
+        else {
+            panic!("the element is one image block and the prose is its own: {blocks:#?}");
+        };
+        assert_eq!(prose, &vec![Span::plain("Prose after it.")]);
+        assert_eq!(
+            image.source_for(bt_render::Theme::Dark),
+            "assets/readme/hero-dark.svg"
+        );
+        assert_eq!(
+            image.source_for(bt_render::Theme::Light),
+            "assets/readme/hero-light.svg"
+        );
+        assert_eq!(image.src, "assets/readme/hero-light.svg");
+        assert!(image.fill, "a width of 100% is the document asking to fill");
+        assert_eq!(
+            image.alt, "Folio - the Windows terminal that renders math.",
+            "an attribute's line breaks are spaces, as they are in HTML"
+        );
+    }
+
+    /// A `<source>` this window cannot evaluate is a `<source>` it must not
+    /// pick: what a browser does when nothing matches is fall back to `<img>`,
+    /// and so does this.
+    #[test]
+    fn a_source_whose_media_is_not_about_the_scheme_is_not_chosen() {
+        let blocks = parse_markdown(concat!(
+            "<picture>\n",
+            "<source media=\"(min-width: 600px)\" srcset=\"wide.png\">\n",
+            "<img src=\"plain.png\" alt=\"a\">\n",
+            "</picture>\n",
+        ));
+        let [MarkdownBlock::Image(image)] = blocks.as_slice() else {
+            panic!("{blocks:#?}");
+        };
+        assert!(image.sources.is_empty());
+        assert_eq!(image.source_for(bt_render::Theme::Dark), "plain.png");
+    }
+
+    /// A bare `<img>` is a picture on the same terms, and a `srcset` list gives
+    /// up its first address.
+    #[test]
+    fn a_bare_img_tag_is_a_picture() {
+        assert_eq!(
+            parse_markdown("<img src=\"a.png\" alt=\"an a\">\n"),
+            vec![MarkdownBlock::Image(MarkdownImage::named("an a", "a.png"))]
+        );
+        assert_eq!(
+            first_srcset_url("a.png 1x, a@2x.png 2x").as_deref(),
+            Some("a.png")
+        );
+    }
+
+    /// **Every other tag is still printed as it stands** — the ruling's own
+    /// scope line, and what keeps this from being half an HTML renderer. A run
+    /// carrying a picture *and* a sentence is not a picture either: it is an
+    /// HTML block this window cannot draw, and drawing half of it would swallow
+    /// the other half.
+    #[test]
+    fn html_that_is_not_one_of_the_two_tags_is_printed_as_it_stands() {
+        for source in [
+            "<div align=\"center\">\n<b>hello</b>\n</div>\n",
+            "<picture>\n<img src=\"a.png\">\n</picture>\nand a caption\n",
+            "<video src=\"a.mp4\"></video>\n",
+            "<image src=\"a.png\">\n",
+        ] {
+            let blocks = parse_markdown(source);
+            assert!(
+                !blocks
+                    .iter()
+                    .any(|block| matches!(block, MarkdownBlock::Image(_))),
+                "{source:?} is not a picture this window reads: {blocks:#?}"
+            );
+        }
+    }
+
+    /// RED GATE (same report) — **`![alt](src)` is a picture and not a `!`
+    /// followed by a link**, which is all the link pass alone could make of it.
+    ///
+    /// MUTATION: take the `!` test out of `push_link_runs` and the first
+    /// assertion comes back as `Span::plain("!")` beside a `Span::link`.
+    #[test]
+    fn a_bang_in_front_of_a_link_makes_it_a_picture() {
+        assert_eq!(
+            parse_inline("![a shot](docs/shot.png)"),
+            vec![Span::image("a shot", "docs/shot.png")]
+        );
+        // The title CommonMark allows beside the destination is parsed off, so
+        // what reaches the disk is a path and not a path with a caption on it.
+        assert_eq!(
+            parse_inline("![a](docs/shot.png \"A caption\")"),
+            vec![Span::image("a", "docs/shot.png")]
+        );
+        // And the same grammar under a link, which was carrying its own quotes
+        // into `link_action` until the two shared one reader.
+        assert_eq!(
+            parse_inline("[a](page.md 'why')"),
+            vec![Span::link("a", "page.md")]
+        );
+        // An empty alt is a picture; an empty label is still punctuation.
+        assert_eq!(parse_inline("![](x.png)"), vec![Span::image("", "x.png")]);
+        assert_eq!(parse_inline("[]()"), vec![Span::plain("[]()")]);
+        // An escaped bang is the author's own bang.
+        assert_eq!(
+            parse_inline("\\![a](b)"),
+            vec![Span::plain("\\!"), Span::link("a", "b")]
+        );
+        // And the backtick pass still stands in front: a picture written inside
+        // a code span is the text of that code span.
+        assert_eq!(parse_inline("`![a](b)`"), vec![Span::code("![a](b)")]);
+    }
+
+    /// **A paragraph is cut at its pictures** — prose, picture, prose — which is
+    /// how every picture in this window's markdown becomes a block of its own.
+    #[test]
+    fn a_paragraph_is_cut_at_the_pictures_it_carries() {
+        assert_eq!(
+            parse_markdown("![alone](a.png)\n"),
+            vec![MarkdownBlock::Image(MarkdownImage::named("alone", "a.png"))]
+        );
+        assert_eq!(
+            parse_markdown("see ![this](a.png) here\n"),
+            vec![
+                MarkdownBlock::Paragraph(vec![Span::plain("see ")]),
+                MarkdownBlock::Image(MarkdownImage::named("this", "a.png")),
+                MarkdownBlock::Paragraph(vec![Span::plain(" here")]),
+            ]
+        );
     }
 
     /// One function's text, from its signature to whichever closing brace comes

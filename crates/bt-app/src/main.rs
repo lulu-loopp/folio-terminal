@@ -615,7 +615,13 @@ impl MathWorkerResult {
             // A preview's formula is the window's on exactly the terms the two
             // hover completions are: it is filed in one map per window, keyed by
             // its own content, and no pane owns it.
-            | DecorationWorkerCompletion::PreviewMath { .. } => {
+            | DecorationWorkerCompletion::PreviewMath { .. }
+            // And a markdown page's picture, for the very same three reasons:
+            // one map per window, keyed by its own content and size, owned by no
+            // pane. A pane closed while its screenshot is in flight does not
+            // strand the picture — the next page that shows the same file finds
+            // it already in hand.
+            | DecorationWorkerCompletion::MarkdownScaledImage { .. } => {
                 AnswerOwner::Window(self.leaf.window)
             }
             DecorationWorkerCompletion::Math { .. }
@@ -712,6 +718,7 @@ enum ScalePurpose {
     InlineImage(u64),
     Peek,
     Preview,
+    MarkdownImage,
 }
 
 enum ScaleWorkerRequest {
@@ -727,6 +734,14 @@ enum ScaleWorkerRequest {
         leaf: ShellAddress,
         task: bt_term::InlineImageScaleTask,
     },
+    /// One picture in a markdown page, at the size the page draws it
+    /// (§7.1.3k). Its own arm rather than [`Self::Preview`]'s because the two
+    /// land in different places — a `PreviewImageState` there, the window's
+    /// picture cache here — and because the coalescer below reads the purpose.
+    MarkdownImage {
+        leaf: ShellAddress,
+        task: bt_term::InlineImageScaleTask,
+    },
 }
 
 impl ScaleWorkerRequest {
@@ -735,6 +750,7 @@ impl ScaleWorkerRequest {
             Self::InlineImage { task, .. } => ScalePurpose::InlineImage(task.occurrence_id),
             Self::Peek { .. } => ScalePurpose::Peek,
             Self::Preview { .. } => ScalePurpose::Preview,
+            Self::MarkdownImage { .. } => ScalePurpose::MarkdownImage,
         }
     }
 
@@ -742,7 +758,8 @@ impl ScaleWorkerRequest {
         match self {
             Self::InlineImage { task, .. }
             | Self::Peek { task, .. }
-            | Self::Preview { task, .. } => task,
+            | Self::Preview { task, .. }
+            | Self::MarkdownImage { task, .. } => task,
         }
     }
 
@@ -750,7 +767,8 @@ impl ScaleWorkerRequest {
         match self {
             Self::InlineImage { leaf, .. }
             | Self::Peek { leaf, .. }
-            | Self::Preview { leaf, .. } => *leaf,
+            | Self::Preview { leaf, .. }
+            | Self::MarkdownImage { leaf, .. } => *leaf,
         }
     }
 
@@ -780,6 +798,12 @@ impl ScaleWorkerRequest {
             Self::Preview { leaf, task } => (
                 leaf,
                 DecorationWorkerCompletion::PreviewScaledImage {
+                    scaled: bt_term::scale_inline_image(&task),
+                },
+            ),
+            Self::MarkdownImage { leaf, task } => (
+                leaf,
+                DecorationWorkerCompletion::MarkdownScaledImage {
                     scaled: bt_term::scale_inline_image(&task),
                 },
             ),
@@ -892,6 +916,12 @@ enum DecorationWorkerCompletion {
     PreviewMath {
         key: Box<PreviewMathKey>,
         result: std::result::Result<MathRaster, MathRenderError>,
+    },
+    /// One picture of a markdown page, resampled to the size that page draws it
+    /// at (§7.1.3k). It is filed by content and size, which is the whole of the
+    /// key — see [`MarkdownRasterKey`].
+    MarkdownScaledImage {
+        scaled: bt_term::ScaledInlineImage,
     },
 }
 
@@ -1288,6 +1318,11 @@ enum PreviewDocument {
         /// ([`PreviewDocumentKey::math_generation`]), so the next layout is the
         /// one that knows about it.
         math: DocumentMath,
+        /// The pictures that were in hand when this layout was made — [`math`]'s
+        /// sentence, one block kind over.
+        ///
+        /// [`math`]: PreviewDocument::Markdown::math
+        pictures: DocumentPictures,
     },
 }
 
@@ -1558,6 +1593,413 @@ impl PreviewMathCache {
     }
 }
 
+/// **What one picture on a markdown page is, once the document's own directory
+/// and the theme in force have been applied** (user ruling 2026-08-28;
+/// `docs/DESIGN.md` §7.1.3k).
+#[derive(Clone, Debug)]
+enum MarkdownPicture {
+    /// Pixels in hand.
+    Ready {
+        /// The identity the shared GPU cache knows these pixels by.
+        key: String,
+        rgba: Arc<[u8]>,
+        /// How large `rgba` is: the exact-size resample once it has landed, and
+        /// the decode's own size until then. The sampler stretches the second
+        /// to the rectangle the first will fill — the very thing
+        /// [`Runtime::refit_preview_picture`] does during a drag, and for the
+        /// same reason: a picture that vanishes while it sharpens is worse than
+        /// one that is briefly soft.
+        raster: [u32; 2],
+        /// The decode's own pixels — what "never drawn larger than its own
+        /// pixels" is measured against, and what the block's shape comes from.
+        native: [u32; 2],
+    },
+    /// Local, asked for, not yet answered. The alt text stands meanwhile.
+    Loading,
+    /// Local, and either it is not there or nothing in this window reads it.
+    Failed,
+    /// **Remote, and never fetched** (§7.1.3k ③). The address rides along
+    /// because the card draws it as a link: opening it is a thing the reader may
+    /// want and this window knows how, and *fetching* it is the thing this
+    /// program does not do.
+    Remote(String),
+    /// A source this window resolves to nothing at all: empty, a bare fragment,
+    /// or a scheme it does not open.
+    Nowhere,
+}
+
+/// The pictures one markdown document needs, keyed by the source each block
+/// chose — [`preview::MarkdownImage::source_for`]'s answer, not the block's
+/// `src`, because a `<picture>` names one file in one theme and another in the
+/// other.
+///
+/// [`DocumentMath`]'s sibling and carried for its reason: the pass that reserved
+/// the space and the pass that fills it must be looking at the same answer.
+#[derive(Clone, Debug, Default)]
+struct DocumentPictures {
+    by_source: std::collections::HashMap<String, MarkdownPicture>,
+    /// **Every local file this page's pictures came from**, resolved.
+    ///
+    /// Two readers ask it and both would otherwise re-derive it: the file watch,
+    /// which follows a picture exactly as it follows the document that shows it
+    /// (§7.1.3k ④), and a decode landing, which asks whether any page in this
+    /// window cares before it re-keys every document in it.
+    files: BTreeSet<PathBuf>,
+}
+
+impl DocumentPictures {
+    fn get(&self, source: &str) -> Option<&MarkdownPicture> {
+        self.by_source.get(source)
+    }
+}
+
+/// **What one page's pictures are**, resolved against the document's own
+/// directory and the theme in force (user ruling 2026-08-28; §7.1.3k).
+///
+/// A free function with the disk injected, and that is what makes ③ provable
+/// rather than merely intended: `ask` is the **only** door to a file in this
+/// function, so a gate that owns one and counts what reaches it is asserting
+/// that a remote source produces no read, no request and no lane traffic — not
+/// that today's code happens to take a different branch.
+///
+/// [`preview::link_action`] does the resolving, and it does it because a
+/// picture's `src` and a link's target are the same kind of string written in
+/// the same file: relative to the document, `file:` understood, absolute
+/// honoured, every other scheme refused. A second rule for the second one would
+/// be a second answer to "what is `../assets/a.png` relative to".
+fn resolve_document_pictures(
+    blocks: &[preview::MarkdownBlock],
+    document: Option<&Path>,
+    theme: bt_render::Theme,
+    ask: &mut dyn FnMut(&Path, bool) -> MarkdownPicture,
+) -> DocumentPictures {
+    let mut pictures = DocumentPictures::default();
+    for block in blocks {
+        let preview::MarkdownBlock::Image(image) = block else {
+            continue;
+        };
+        let source = image.source_for(theme);
+        if pictures.by_source.contains_key(source) {
+            continue;
+        }
+        let resolved = match document {
+            Some(document) => preview::link_action(source, document),
+            // A document with no path on a disk — a buffer minted from a stream
+            // — has no directory for a relative source to be relative *to*, and
+            // saying so is more honest than picking one.
+            None => preview::LinkAction::Nowhere,
+        };
+        let picture = match resolved {
+            preview::LinkAction::Browse(url) => MarkdownPicture::Remote(url),
+            preview::LinkAction::Nowhere => MarkdownPicture::Nowhere,
+            preview::LinkAction::Preview(path) => {
+                let picture = ask(&path, image.fill);
+                pictures.files.insert(path);
+                picture
+            }
+        };
+        pictures.by_source.insert(source.to_owned(), picture);
+    }
+    pictures
+}
+
+/// **Everything that decides what one exact-size markdown raster looks like**:
+/// the bytes it was decoded from, and how large it is drawn.
+///
+/// The content key is a hash of the file's own bytes ([`bt_term`]'s decoder
+/// mints it), so a file rewritten on disk is a different key and there is no
+/// stale-pixel case to invent a rule for.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct MarkdownRasterKey {
+    content: String,
+    width_px: u32,
+    height_px: u32,
+}
+
+/// One exact-size raster of a markdown picture.
+#[derive(Clone, Debug)]
+enum MarkdownRaster {
+    /// Asked for, not yet answered — the decode's own pixels stand meanwhile.
+    Pending,
+    Ready {
+        key: String,
+        rgba: Arc<[u8]>,
+        width_px: u32,
+        height_px: u32,
+    },
+}
+
+/// How many bytes of exact-size markdown rasters one window keeps.
+///
+/// [`PREVIEW_MATH_CACHE_BUDGET_BYTES`]'s neighbour and sized against the same
+/// thing: a page of screenshots drawn to a reading column is a few tens of
+/// megabytes, and the ceiling is here for the document with a hundred pictures
+/// in it rather than for the ordinary one.
+const MARKDOWN_PICTURE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
+/// **The window's markdown pictures**: what it is holding, what it still owes
+/// the resample lane, and what it is watching on disk.
+#[derive(Debug, Default)]
+struct MarkdownPictures {
+    /// The exact-size rasters, bounded by bytes and evicted by last use — see
+    /// [`PreviewMathCache`], whose argument for bytes-and-not-counts is the same
+    /// one here with screenshots in place of equations.
+    rasters: std::collections::HashMap<MarkdownRasterKey, (MarkdownRaster, u64)>,
+    resident_bytes: usize,
+    tick: u64,
+    /// Ticks whenever a page's pictures would come out differently: a decode
+    /// landed or failed, an exact-size raster landed, a watched file moved. See
+    /// [`PreviewDocumentKey::picture_generation`].
+    generation: u64,
+    /// **The exact-size passes this window owes, by content key.**
+    ///
+    /// Keyed by content and not by size, which is what makes a drag cheap: every
+    /// width the pointer travels through overwrites the same entry, and what is
+    /// finally sent is the size the pointer stopped at. §7.1.3j (d)'s rule —
+    /// "geometry follows the hand, the resample follows the quiet" — said about
+    /// the pictures a document carries rather than about the one a pane holds.
+    owed: std::collections::HashMap<String, MarkdownRasterRequest>,
+    /// When the quiet is up. `None` when nothing is owed.
+    settle_deadline: Option<Instant>,
+}
+
+/// One exact-size pass, waiting for the quiet.
+#[derive(Clone, Debug)]
+struct MarkdownRasterRequest {
+    key: MarkdownRasterKey,
+    rgba: Arc<[u8]>,
+    native: [u32; 2],
+}
+
+impl MarkdownPictures {
+    /// The raster in hand for this content at this size, marked as just used.
+    fn raster(&mut self, key: &MarkdownRasterKey) -> Option<&MarkdownRaster> {
+        let tick = self.tick;
+        let (raster, used) = self.rasters.get_mut(key)?;
+        *used = tick;
+        Some(raster)
+    }
+
+    /// Write down that this pass is owed, replacing whatever size was owed for
+    /// the same picture — see [`Self::owed`].
+    fn owe(&mut self, request: MarkdownRasterRequest, now: Instant) {
+        self.owed.insert(request.key.content.clone(), request);
+        self.settle_deadline = Some(now + WINDOW_RESIZE_QUIET);
+    }
+
+    fn land(&mut self, key: MarkdownRasterKey, raster: MarkdownRaster) {
+        let tick = self.tick;
+        if let Some((MarkdownRaster::Ready { rgba, .. }, _)) = self.rasters.get(&key) {
+            self.resident_bytes = self.resident_bytes.saturating_sub(rgba.len());
+        }
+        if let MarkdownRaster::Ready { rgba, .. } = &raster {
+            self.resident_bytes = self.resident_bytes.saturating_add(rgba.len());
+            self.generation = self.generation.saturating_add(1);
+        }
+        self.rasters.insert(key, (raster, tick));
+        self.evict_to_budget();
+    }
+
+    /// Drop the least recently used rasters until the budget is met.
+    ///
+    /// [`PreviewMathCache::evict_to_budget`]'s twin, including the part that
+    /// looks like a concession and is not: the last picture stays however large
+    /// it is, because evicting it would ask for it again on the next frame,
+    /// find it too large again, and evict it again.
+    fn evict_to_budget(&mut self) {
+        while self.resident_bytes > MARKDOWN_PICTURE_BUDGET_BYTES {
+            let mut held = self
+                .rasters
+                .iter()
+                .filter_map(|(key, (raster, used))| match raster {
+                    MarkdownRaster::Ready { rgba, .. } => Some((*used, key.clone(), rgba.len())),
+                    MarkdownRaster::Pending => None,
+                })
+                .collect::<Vec<_>>();
+            if held.len() <= 1 {
+                return;
+            }
+            held.sort_unstable_by_key(|(used, _, _)| *used);
+            let (_, key, bytes) = held.remove(0);
+            self.rasters.remove(&key);
+            self.resident_bytes = self.resident_bytes.saturating_sub(bytes);
+            // An eviction changes what a page draws exactly as an arrival does,
+            // in the other direction: the picture goes back to the decode's own
+            // pixels, stretched, until the lane has been asked again.
+            self.generation = self.generation.saturating_add(1);
+        }
+    }
+
+    /// **One file on disk moved: forget what was drawn from it.**
+    ///
+    /// The rasters are keyed by a hash of the file's *bytes*, so nothing here
+    /// can serve the old picture for the new file — what has to change is the
+    /// generation, so that every page standing on this file asks again.
+    fn forget(&mut self, _path: &Path) {
+        self.generation = self.generation.saturating_add(1);
+    }
+}
+
+/// **Everything a markdown page is set with that is not the document itself**:
+/// the formulas it has been handed, the pictures it has been handed, and the
+/// theme that decides which file a `<picture>` names.
+///
+/// A bundle rather than three parameters, and the three belong together for one
+/// reason: they are what the *window* knows and the parsed document does not.
+/// Every pass that walks the blocks — the measuring one, the laying-out one, the
+/// painting one — needs all three and needs the same three, and a pass holding a
+/// different set from its neighbour is the shape of defect
+/// [`MarkdownBlockLayout`] exists to make impossible.
+#[derive(Clone, Copy)]
+struct PageArt<'a> {
+    math: &'a DocumentMath,
+    pictures: &'a DocumentPictures,
+    theme: bt_render::Theme,
+}
+
+/// **The same three as a key** — see [`PreviewDocumentKey`].
+///
+/// What is stored is not the art but *how much of it has arrived*: a counter per
+/// lane, plus the two things that change what the lanes would answer. The
+/// question a document key asks is "is this the same layout question as last
+/// time", and the answer no longer being the same is enough.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PageArtKey {
+    /// **How many formulas this window has been handed since**, which is what
+    /// makes a formula landing owe a re-flow.
+    ///
+    /// A rendered formula is as tall as its picture and the picture arrives tens
+    /// of milliseconds after the page was laid out. Without this the page keeps
+    /// the height it reserved for the source text it was standing on, draws the
+    /// picture into it, and every block below stands in the wrong place — the
+    /// same shape of defect a list measured one way and drawn another already
+    /// cost this file once ([`MarkdownBlockLayout`]).
+    math_generation: u64,
+    /// The ink the body is set in, because a formula's picture is **drawn in
+    /// it** rather than tinted at draw time.
+    ///
+    /// Every other run on the page recolours for free — the palette is read
+    /// fresh on every frame and a glyph is drawn in whatever colour it is handed.
+    /// A raster is not: its pixels came out of the engine already coloured, so a
+    /// theme change is a different picture, and a page that did not notice would
+    /// keep yesterday's ink in the middle of today's paragraph.
+    body_ink: [u8; 3],
+    /// **How many pictures this window has been handed since**
+    /// ([`Self::math_generation`]'s sibling, one block kind over).
+    ///
+    /// It ticks for a decode that landed, a decode that failed, an exact-size
+    /// raster that landed or was evicted, and a watched file that moved — every
+    /// event after which the same page would come out differently.
+    picture_generation: u64,
+    /// **The theme this page is drawn in**, because a `<picture>` names one file
+    /// for a dark page and another for a light one (§7.1.3k ②).
+    ///
+    /// Its own field rather than an inference from [`Self::body_ink`]: the ink
+    /// does happen to change with the theme today, and a document that re-flowed
+    /// only because of that coincidence would be a document that stopped
+    /// re-flowing the day two schemes shared a body colour.
+    theme: bt_render::Theme,
+}
+
+/// **How large a picture is drawn on a markdown page, and the only place that
+/// is decided** (user ruling 2026-08-28; §7.1.3k ①).
+///
+/// It fills the column and keeps its shape, and it is never drawn larger than
+/// its own pixels: a 3200-pixel screenshot comes down to the measure, and a
+/// 96-pixel badge stays 96 pixels and stands in the middle of the column. The
+/// second half is what `fill` lifts, and `fill` is `width="100%"` and nothing
+/// else — the document saying "as wide as there is room for".
+///
+/// One function, because the layout that reserves the box, the painter that
+/// fills it and the resample that is asked for exactly those pixels must not be
+/// able to disagree — the discipline [`image_destination`] states for the image
+/// pane, said again for the page.
+/// **What stands where a picture does not** (user ruling 2026-08-28; §7.1.3k ①
+/// and ③): the alt text, and one line saying why there is no picture.
+///
+/// One function for the measuring pass and the painting pass, because the box
+/// reserved and the box drawn must not be able to disagree — the discipline
+/// [`MarkdownBlockLayout`] was created by, applied to the one block whose height
+/// depends on a sentence.
+///
+/// The alt text is what the document says the picture says. Where the document
+/// said nothing — `![](x.png)`, a spacer, a badge whose face is its meaning —
+/// the source stands in its place, because a card with nothing written on it
+/// tells the reader less than the file name does.
+struct MarkdownImageCard {
+    /// The alt text, or the source where there is no alt.
+    said: Vec<bt_render::PreviewRun>,
+    /// Why there is no picture. Empty while the decode is still out: a card that
+    /// explains itself and is then replaced by a screenshot is a flash, and
+    /// "loading" is not a fact about the document.
+    note: Vec<bt_render::PreviewRun>,
+    /// The address the note's second run points at — a remote picture's own, and
+    /// `None` for every other card. It is a link on the terms every other link
+    /// in this window is: a press opens it here, `Ctrl` hands it over.
+    link: Option<String>,
+}
+
+fn markdown_image_card(
+    image: &preview::MarkdownImage,
+    picture: Option<&MarkdownPicture>,
+    palette: &bt_render::ChromePalette,
+) -> MarkdownImageCard {
+    let said = if image.alt.trim().is_empty() {
+        image.src.clone()
+    } else {
+        image.alt.clone()
+    };
+    let text = |text: String, color: [u8; 3]| bt_render::PreviewRun {
+        text,
+        color,
+        mono: false,
+        bold: false,
+        italic: false,
+        font_scale: 1.0,
+        inline_box_px: None,
+    };
+    let (note, link) = match picture {
+        Some(MarkdownPicture::Remote(url)) => (
+            vec![
+                text(
+                    format!("{} · ", i18n::Text::MarkdownImageRemote.text()),
+                    palette.files_row_muted,
+                ),
+                text(url.clone(), palette.accent),
+            ],
+            Some(url.clone()),
+        ),
+        Some(MarkdownPicture::Failed | MarkdownPicture::Nowhere) => (
+            vec![text(
+                i18n::Text::MarkdownImageUnreadable.text().to_owned(),
+                palette.files_row_muted,
+            )],
+            None,
+        ),
+        // Still out, or nothing resolved it at all. Neither is something to
+        // tell the reader about: the first is about to stop being true and the
+        // second cannot happen without the resolver having been skipped.
+        Some(MarkdownPicture::Loading | MarkdownPicture::Ready { .. }) | None => (Vec::new(), None),
+    };
+    MarkdownImageCard {
+        said: vec![text(said, palette.files_row_text)],
+        note,
+        link,
+    }
+}
+
+fn markdown_image_extent(native: [u32; 2], measure_px: f32, fill: bool) -> [f32; 2] {
+    let width = native[0].max(1) as f32;
+    let height = native[1].max(1) as f32;
+    let room = measure_px.max(1.0);
+    let scale = if fill {
+        room / width
+    } else {
+        (room / width).min(1.0)
+    };
+    [(width * scale).max(1.0), (height * scale).max(1.0)]
+}
+
 /// Everything measuring one markdown block worked out that **drawing it must
 /// not work out again**.
 ///
@@ -1665,34 +2107,13 @@ struct DiffRow {
 struct PreviewDocumentKey {
     parse: PreviewParseKey,
     body_width_px: u32,
-    /// **How many formulas this window has been handed since**, which is what
-    /// makes a formula landing owe a re-flow.
-    ///
-    /// A rendered formula is as tall as its picture and the picture arrives
-    /// tens of milliseconds after the page was laid out. Without this the page
-    /// keeps the height it reserved for the source text it was standing on,
-    /// draws the picture into it, and every block below stands in the wrong
-    /// place — the same shape of defect a list measured one way and drawn
-    /// another already cost this file once ([`MarkdownBlockLayout`]).
+    /// **What the window has handed this page, and what it would set it in** —
+    /// see [`PageArtKey`].
     ///
     /// On the width's side of the split rather than the parse's, because that is
-    /// exactly what it is: nothing about the document changed, only how tall one
-    /// of its blocks now is. So an arrival re-flows and does not re-parse.
-    ///
-    /// A counter and not the pictures themselves, because what is being asked is
-    /// "is this the same layout question as last time"; the answer no longer
-    /// being the same is enough, and the arrival that changed it is already
-    /// filed where the next resolution will find it.
-    math_generation: u64,
-    /// The ink the body is set in, because a formula's picture is **drawn in
-    /// it** rather than tinted at draw time.
-    ///
-    /// Every other run on the page recolours for free — the palette is read
-    /// fresh on every frame and a glyph is drawn in whatever colour it is handed.
-    /// A raster is not: its pixels came out of the engine already coloured, so a
-    /// theme change is a different picture, and a page that did not notice would
-    /// keep yesterday's ink in the middle of today's paragraph.
-    body_ink: [u8; 3],
+    /// exactly what these are: nothing about the document changed, only how tall
+    /// one of its blocks now is. So an arrival re-flows and does not re-parse.
+    art: PageArtKey,
 }
 
 /// The half of [`PreviewDocumentKey`] that has **nothing to do with the pane's
@@ -2202,8 +2623,7 @@ fn preview_document_key(
     md_source: bool,
     body_width_px: f32,
     scale: f32,
-    math_generation: u64,
-    body_ink: [u8; 3],
+    art: PageArtKey,
 ) -> PreviewDocumentKey {
     PreviewDocumentKey {
         parse: PreviewParseKey {
@@ -2213,8 +2633,7 @@ fn preview_document_key(
             scale_ppm: (scale * 1_000_000.0).round() as u32,
         },
         body_width_px: body_width_px.max(0.0).round() as u32,
-        math_generation,
-        body_ink,
+        art,
     }
 }
 
@@ -2265,7 +2684,18 @@ pub(crate) fn markdown_runs(
                 font_scale: 1.0,
                 inline_box_px: None,
             },
-            preview::SpanStyle::Plain => bt_render::PreviewRun {
+            // **A picture set inside a line is its own alt text** — for now.
+            //
+            // Every picture a paragraph carries is cut out into a block of its
+            // own ([`preview::MarkdownBlock::Image`]), so the only runs that
+            // reach here are the ones in the four places a paragraph cannot be
+            // cut: a heading, a table cell, a list item, a quote line. What they
+            // are owed is the box-on-the-baseline an inline formula already gets
+            // (`bt_render::PreviewRun::inline_box_px`); until that is built they
+            // say what the document says they say, which is what alt text is
+            // for. Written down as owed in §7.1.3k rather than left to be
+            // discovered.
+            preview::SpanStyle::Plain | preview::SpanStyle::Image => bt_render::PreviewRun {
                 text: span.text.clone(),
                 color: palette.files_row_text,
                 mono: false,
@@ -2662,8 +3092,11 @@ fn document_formulas(
                     inline(cell, metrics.font_size, &mut found);
                 }
             }
-            // A fence's dollars are a fence's, and a rule has none.
-            preview::MarkdownBlock::Code { .. } | preview::MarkdownBlock::Rule => {}
+            // A fence's dollars are a fence's, a rule has none, and a picture's
+            // alt text is drawn as the words it is rather than parsed as prose.
+            preview::MarkdownBlock::Code { .. }
+            | preview::MarkdownBlock::Rule
+            | preview::MarkdownBlock::Image(_) => {}
         }
     }
     found
@@ -2680,6 +3113,15 @@ fn note_link_sites(
     (block, paragraph, first_run): (Option<usize>, usize, usize),
 ) {
     sites.extend(spans.iter().enumerate().filter_map(|(index, span)| {
+        // **A picture is not a link**, even though it carries a target for the
+        // same reason a link does. The runs that reach here are the alt text of
+        // a picture in a heading or a table cell (see [`markdown_runs`]), and
+        // making them answer a press would put an unmarked hotspot in the middle
+        // of a sentence — a run drawn in the body's own ink that opens a file
+        // when it is touched.
+        if span.style == preview::SpanStyle::Image {
+            return None;
+        }
         span.target.as_ref().map(|target| PreviewLinkSite {
             block,
             paragraph,
@@ -3363,7 +3805,7 @@ fn build_preview_markdown_body(
         &[MarkdownBlockLayout],
     ),
     palette: &bt_render::ChromePalette,
-    math: &DocumentMath,
+    art: PageArt<'_>,
 ) -> BuiltMarkdown {
     let BlockScrollPaint {
         offsets: block_scroll,
@@ -3377,6 +3819,11 @@ fn build_preview_markdown_body(
     // syntax highlighting is width-free, so it was measured with the rest of
     // what a block is worth whatever the pane does (#49).
     let (blocks, intrinsic, layout) = document;
+    let PageArt {
+        math,
+        pictures,
+        theme,
+    } = art;
     // **The page has no horizontal axis; the wide blocks have their own** (user
     // ruling, 2026-08-13, overturning the same day's earlier "the whole page
     // travels").
@@ -3884,6 +4331,142 @@ fn build_preview_markdown_body(
                                 align_center: true,
                             });
                             line_top += metrics.line_height;
+                        }
+                    }
+                }
+            }
+            // **A picture, or the card it stands on until it is one** (user
+            // ruling 2026-08-28; `docs/DESIGN.md` §7.1.3k).
+            //
+            // The rectangle is [`markdown_image_extent`]'s — the same function
+            // the measuring pass reserved the height from and the same one the
+            // resample lane is asked for — centred on the measure, because a
+            // picture narrower than the column is a picture in the middle of
+            // the column in every renderer this document has been read in.
+            preview::MarkdownBlock::Image(image) => {
+                let source = image.source_for(theme);
+                let piece_len = preview_select::image_piece(image).len();
+                match pictures.get(source) {
+                    Some(MarkdownPicture::Ready {
+                        key,
+                        rgba,
+                        raster,
+                        native,
+                    }) => {
+                        let [drawn_width, drawn_height] =
+                            markdown_image_extent(*native, right - left, image.fill);
+                        let inset = ((right - left - drawn_width) / 2.0).max(0.0).round();
+                        let rect = [
+                            left + inset,
+                            top,
+                            left + inset + drawn_width,
+                            top + drawn_height,
+                        ];
+                        text_sites.push(PreviewTextSite {
+                            block: region,
+                            what: PreviewTextWhere::Picture(rect),
+                            piece: PreviewTextPiece {
+                                at: preview_select::Place::new(block_index, 0, 0),
+                                len: piece_len,
+                                lead: 0,
+                                atoms: Vec::new(),
+                                atomic: true,
+                            },
+                        });
+                        // The pixels ride the very channel a formula's picture
+                        // rides — `PreviewBody::rasters` is a list of
+                        // `ChromeIcon`, which is "a bitmap placed in window
+                        // pixels with a clip of its own", and that is what this
+                        // is. `raster` may still be the decode's own size while
+                        // the exact-size pass is out; the sampler stretches it
+                        // into the rectangle above, which is why the picture is
+                        // briefly soft and never absent.
+                        rasters.push(bt_render::ChromeIcon {
+                            key: key.clone(),
+                            rect,
+                            rgba: Arc::clone(rgba),
+                            width_px: raster[0],
+                            height_px: raster[1],
+                            opacity: 1.0,
+                            clip: Some(window),
+                            above_text: false,
+                        });
+                    }
+                    held => {
+                        let card = markdown_image_card(image, held, palette);
+                        let box_rect = [left, top, right, top + height];
+                        quads.push(bt_render::PreviewQuad {
+                            rect: box_rect,
+                            color: palette.preview_code_border,
+                        });
+                        quads.push(bt_render::PreviewQuad {
+                            rect: [
+                                box_rect[0] + metrics.code_border,
+                                box_rect[1] + metrics.code_border,
+                                box_rect[2] - metrics.code_border,
+                                box_rect[3] - metrics.code_border,
+                            ],
+                            color: palette.preview_code_ground,
+                        });
+                        let inner_left = box_rect[0] + metrics.code_border + metrics.code_padding_x;
+                        let inner_right =
+                            box_rect[2] - metrics.code_border - metrics.code_padding_x;
+                        let mut line_top =
+                            box_rect[1] + metrics.code_border + metrics.code_padding_y;
+                        // **The rows the measuring pass wrote down**, not two the
+                        // painter works out for itself — see
+                        // [`MarkdownBlockLayout`], and the note is the row that
+                        // makes it matter: an address long enough to wrap is two
+                        // lines, and a painter that assumed one would set the
+                        // sentence over its own second line.
+                        let said_height =
+                            placed.rows.first().copied().unwrap_or(metrics.line_height);
+                        note_text_line(
+                            &mut text_sites,
+                            &card.said,
+                            (region, paragraphs.len()),
+                            preview_select::Place::new(block_index, 0, 0),
+                            Some(piece_len),
+                        );
+                        paragraphs.push(bt_render::PreviewParagraph {
+                            runs: card.said,
+                            rect: [inner_left, line_top, inner_right, line_top + said_height],
+                            font_size_px: metrics.font_size,
+                            line_height_px: metrics.line_height,
+                            wrap: true,
+                            letter_spacing_em: 0.0,
+                            align_right: false,
+                            align_center: false,
+                        });
+                        line_top += said_height;
+                        if !card.note.is_empty() {
+                            // **The address is a link on this window's own
+                            // terms** — a press opens it here, `Ctrl` hands it
+                            // over — which is the one thing a remote picture
+                            // still lets a reader do (§7.1.3k ③).
+                            if let Some(target) = card.link.clone() {
+                                links.push(PreviewLinkSite {
+                                    block: region,
+                                    paragraph: paragraphs.len(),
+                                    run: card.note.len().saturating_sub(1),
+                                    target,
+                                });
+                            }
+                            paragraphs.push(bt_render::PreviewParagraph {
+                                runs: card.note,
+                                rect: [
+                                    inner_left,
+                                    line_top,
+                                    inner_right,
+                                    box_rect[3] - metrics.code_border - metrics.code_padding_y,
+                                ],
+                                font_size_px: metrics.font_size,
+                                line_height_px: metrics.line_height,
+                                wrap: true,
+                                letter_spacing_em: 0.0,
+                                align_right: false,
+                                align_center: false,
+                            });
                         }
                     }
                 }
@@ -8460,6 +9043,10 @@ struct WindowRuntime {
     /// the thing it is keyed by is content, and the same formula in two tabs is
     /// one picture. See [`PreviewMathCache`].
     preview_math: PreviewMathCache,
+    /// **The pictures the markdown pages in this window are showing** — see
+    /// [`MarkdownPictures`]. One per window for [`PreviewMathCache`]'s reason:
+    /// two panes showing one README are looking at one set of screenshots.
+    markdown_pictures: MarkdownPictures,
     /// The one display-sized thumbnail the flyout can draw, and the one resample in flight. See
     /// `PeekThumbnail` for why a single entry is the whole policy.
     peek_thumbnail: Option<PeekThumbnail>,
@@ -28731,6 +29318,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         peek_hover: PeekHover::default(),
         peek_cache: std::collections::HashMap::new(),
         preview_math: PreviewMathCache::default(),
+        markdown_pictures: MarkdownPictures::default(),
         peek_thumbnail: None,
         peek_thumbnail_pending: None,
         math_hover_anchor: None,
@@ -39751,6 +40339,19 @@ impl Runtime<'_> {
         for cache in self.window.command_rails.values_mut() {
             cache.clear();
         }
+        // **And every markdown page, for the rail's reason one surface over**
+        // (2026-08-28; §7.1.3k ②).
+        //
+        // A page's *text* recolours for free — the palette is read fresh on
+        // every frame and a glyph is drawn in whatever colour it is handed. Two
+        // things on a page do not: a formula's raster came out of the engine
+        // already inked, and a `<picture>` names **one file for a dark page and
+        // another for a light one**. Both are in `PreviewDocumentKey`'s
+        // [`PageArtKey`] precisely so that a theme flip is a different layout
+        // question — and nothing was asking the question. Without this a light
+        // window kept a dark window's hero, exactly as it kept a dark window's
+        // ticks until the loop above was written.
+        self.refresh_preview_for_layout();
         self.refresh_chrome();
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
@@ -41298,7 +41899,7 @@ impl Runtime<'_> {
     /// not here: its pixels come down the decode lane, which owns a picture's
     /// arrival, and re-decoding one is a door slice ⑤ does not open.
     fn watched_preview_files(&self) -> BTreeSet<PathBuf> {
-        let mut wanted = BTreeSet::new();
+        let mut wanted = self.markdown_picture_files();
         for tab in &self.window.tabs {
             for (_, pane) in tab.preview_panes.iter() {
                 let Some(source) = pane.buffer.as_ref() else {
@@ -41315,6 +41916,29 @@ impl Runtime<'_> {
             }
         }
         wanted
+    }
+
+    /// **Every picture file a markdown page in this window is showing.**
+    ///
+    /// The picture the watch follows and the picture a decode landing asks about
+    /// are the same set, so it is derived in one place from the documents
+    /// themselves — see [`DocumentPictures::files`]. The comment on
+    /// [`Self::watched_preview_files`] used to say a picture was deliberately
+    /// *not* watched; that was true of the image *pane*, whose pixels arrive
+    /// down the decode lane and whose file is the thing the pane is showing.
+    /// A picture inside a document is a different object: the document is what
+    /// the reader opened, the picture is part of how it reads, and 「图片文件改了
+    /// 重画」 is the ruling of 2026-08-28.
+    fn markdown_picture_files(&self) -> BTreeSet<PathBuf> {
+        let mut files = BTreeSet::new();
+        for tab in &self.window.tabs {
+            for (_, pane) in tab.preview_panes.iter() {
+                if let PreviewDocument::Markdown { pictures, .. } = &pane.doc {
+                    files.extend(pictures.files.iter().cloned());
+                }
+            }
+        }
+        files
     }
 
     /// **One watched file moved: tell whatever is showing it** (W2 slice 5).
@@ -41335,6 +41959,21 @@ impl Runtime<'_> {
     /// Every tab, because a buffer is content and belongs to a tab: two tabs on
     /// one file are two buffers and both are behind the disk.
     fn refresh_preview_file(&mut self, path: &Path) -> Result<()> {
+        // **A picture inside a document is watched too** (§7.1.3k ④). What has
+        // to be thrown away is the *decode*: the exact-size rasters are keyed by
+        // a hash of the file's own bytes, so they cannot serve the old picture
+        // for the new file, while `peek_cache` is keyed by the path and would.
+        // Ticking the generation is what tells every page standing on this file
+        // to ask again — the same sentence a formula's arrival makes.
+        if self.markdown_picture_files().contains(path) {
+            self.window
+                .peek_cache
+                .remove(&bt_term::normalized_local_image_path_key(path));
+            self.window.markdown_pictures.forget(path);
+            self.refresh_preview_for_layout();
+            self.refresh_chrome();
+            self.present_chrome_change()?;
+        }
         // **The pane and not the seat number** (F1b′): this walk is over every
         // tab, and a seat number means nothing outside the tab it was read from.
         let reload: Vec<LeafId> = self
@@ -48501,15 +49140,22 @@ impl Runtime<'_> {
         let md_source = self.preview_md_source(surface);
         let math_generation = self.window.preview_math.generation;
         let body_ink = bt_render::chrome_palette().files_row_text;
+        let picture_generation = self.window.markdown_pictures.generation;
+        let theme = bt_render::current_theme();
+        // **Where the document is** — a picture's source is relative to it
+        // (§7.1.3k ①), and it is read here rather than at resolve time because
+        // this is where the buffer is already in hand.
+        let document = self
+            .preview_buffer_on(surface)
+            .and_then(|buffer| buffer.source.file_path().map(Path::to_path_buf));
+        let art_key = PageArtKey {
+            math_generation,
+            body_ink,
+            picture_generation,
+            theme,
+        };
         let key = self.preview_buffer_on(surface).map(|buffer| {
-            preview_document_key(
-                buffer,
-                md_source,
-                body[2] - body[0],
-                scale,
-                math_generation,
-                body_ink,
-            )
+            preview_document_key(buffer, md_source, body[2] - body[0], scale, art_key)
         });
         if key == self.preview_pane_mut(surface).doc_key {
             return;
@@ -48531,11 +49177,13 @@ impl Runtime<'_> {
         // changed with the parse standing still — and it is rare (once per
         // picture, not once per pixel of a drag), which is exactly why it can
         // afford the pass a resize cannot.
-        let math_changed = key.as_ref().map(|key| (key.math_generation, key.body_ink))
+        let math_changed = key
+            .as_ref()
+            .map(|key| (key.art.math_generation, key.art.body_ink))
             != pane
                 .doc_key
                 .as_ref()
-                .map(|key| (key.math_generation, key.body_ink));
+                .map(|key| (key.art.math_generation, key.art.body_ink));
         pane.doc_key = key;
         if reflow_only
             && let PreviewDocument::Markdown {
@@ -48543,6 +49191,7 @@ impl Runtime<'_> {
                 intrinsic,
                 layout,
                 math: _,
+                pictures: _,
             } = std::mem::take(&mut pane.doc)
         {
             let metrics = seats::preview_markdown_metrics(scale);
@@ -48554,18 +49203,30 @@ impl Runtime<'_> {
             let width = (measure_right - measure_left).max(1.0);
             let _ = layout;
             let math = self.resolve_document_math(&blocks, metrics, &bt_render::chrome_palette());
+            let pictures = self.resolve_document_pictures(&blocks, document.as_deref(), width);
             let intrinsic = if math_changed {
                 self.measure_markdown_intrinsics(&blocks, metrics, &math)
             } else {
                 intrinsic
             };
-            let layout = self.lay_markdown_out(&blocks, &intrinsic, width, metrics, &math);
+            let layout = self.lay_markdown_out(
+                &blocks,
+                &intrinsic,
+                width,
+                metrics,
+                PageArt {
+                    math: &math,
+                    pictures: &pictures,
+                    theme,
+                },
+            );
             self.preview_pane_mut(surface)
                 .reflow_document(PreviewDocument::Markdown {
                     blocks,
                     intrinsic,
                     layout,
                     math,
+                    pictures,
                 });
             return;
         }
@@ -48661,13 +49322,25 @@ impl Runtime<'_> {
                 let width = (measure_right - measure_left).max(1.0);
                 let math =
                     self.resolve_document_math(&blocks, metrics, &bt_render::chrome_palette());
+                let pictures = self.resolve_document_pictures(&blocks, document.as_deref(), width);
                 let intrinsic = self.measure_markdown_intrinsics(&blocks, metrics, &math);
-                let layout = self.lay_markdown_out(&blocks, &intrinsic, width, metrics, &math);
+                let layout = self.lay_markdown_out(
+                    &blocks,
+                    &intrinsic,
+                    width,
+                    metrics,
+                    PageArt {
+                        math: &math,
+                        pictures: &pictures,
+                        theme,
+                    },
+                );
                 PreviewDocument::Markdown {
                     blocks,
                     intrinsic,
                     layout,
                     math,
+                    pictures,
                 }
             }
             // **The graph's body is empty on purpose**, and it is the one place
@@ -48771,6 +49444,184 @@ impl Runtime<'_> {
         }
     }
 
+    /// **Find every picture this page needs, and ask for the ones that are
+    /// missing** (user ruling 2026-08-28; §7.1.3k).
+    ///
+    /// [`Self::resolve_document_math`]'s twin, and the same two halves in one
+    /// pass for the same reason: the walk that collects the pictures is the walk
+    /// that discovers the gaps, and a separate "request" pass would need a rule
+    /// for when to run it that does not exist.
+    ///
+    /// **Two lanes answer, in this order.** The decode lane
+    /// ([`Self::request_peek_pixels`], `peek_cache`) says what the file's own
+    /// pixels are — that is what the block's shape comes from. The resample lane
+    /// then says what those pixels look like at the size the page draws them,
+    /// and until it has said so the decode's own raster is handed over and the
+    /// sampler stretches it. Nothing is ever *absent* while it sharpens.
+    ///
+    /// **The exact-size pass waits for the quiet** (§7.1.3j (d), applied to a
+    /// page): a window drag walks a document through a hundred widths, and a
+    /// Lanczos3 pass per width is a hundred passes for ninety-nine sizes the
+    /// hand has already left. What is owed is written down by content key, so
+    /// every width the drag passes through overwrites the same entry, and
+    /// [`Self::finish_preview_scale_if_quiet`] sends the one that was current
+    /// when the hand stopped.
+    fn resolve_document_pictures(
+        &mut self,
+        blocks: &[preview::MarkdownBlock],
+        document: Option<&Path>,
+        measure_px: f32,
+    ) -> DocumentPictures {
+        let theme = bt_render::current_theme();
+        let now = Instant::now();
+        self.window.markdown_pictures.tick = self.window.markdown_pictures.tick.saturating_add(1);
+        let mut ask = |path: &Path, fill: bool| -> MarkdownPicture {
+            let cache_key = bt_term::normalized_local_image_path_key(path);
+            let decoded = match self.window.peek_cache.get(&cache_key) {
+                Some(PeekCacheEntry::Ready {
+                    key,
+                    rgba,
+                    width_px,
+                    height_px,
+                }) => (key.clone(), Arc::clone(rgba), [*width_px, *height_px]),
+                Some(PeekCacheEntry::Pending) => return MarkdownPicture::Loading,
+                Some(PeekCacheEntry::Failed) => return MarkdownPicture::Failed,
+                None => {
+                    // The very door the image pane and the glance card ask
+                    // through, so a picture already decoded for one of them is
+                    // already decoded for this page.
+                    if self.request_peek_pixels(path) {
+                        self.window
+                            .peek_cache
+                            .insert(cache_key, PeekCacheEntry::Pending);
+                        return MarkdownPicture::Loading;
+                    }
+                    return MarkdownPicture::Failed;
+                }
+            };
+            let (content, rgba, native) = decoded;
+            if native[0] == 0 || native[1] == 0 {
+                return MarkdownPicture::Failed;
+            }
+            let [drawn_width, drawn_height] = markdown_image_extent(native, measure_px, fill);
+            // **The CPU never upsamples** — `preview_image_extent`'s `.min(1.0)`
+            // is that cap, and it is asked here for the same reason the image
+            // pane asks it: above 100% the extra pixels do not exist, and the
+            // magnification is the sampler's to carry.
+            let (cap_width, cap_height) = image_raster_cap(native);
+            let Some((raster_width, raster_height)) = bt_render::preview_image_extent(
+                (drawn_width.round().max(1.0) as u32).min(cap_width),
+                (drawn_height.round().max(1.0) as u32).min(cap_height),
+                native[0],
+                native[1],
+            ) else {
+                return MarkdownPicture::Failed;
+            };
+            let key = MarkdownRasterKey {
+                content: content.clone(),
+                width_px: raster_width,
+                height_px: raster_height,
+            };
+            match self.window.markdown_pictures.raster(&key) {
+                Some(MarkdownRaster::Ready {
+                    key,
+                    rgba,
+                    width_px,
+                    height_px,
+                }) => {
+                    return MarkdownPicture::Ready {
+                        key: key.clone(),
+                        rgba: Arc::clone(rgba),
+                        raster: [*width_px, *height_px],
+                        native,
+                    };
+                }
+                Some(MarkdownRaster::Pending) => {}
+                None => self.window.markdown_pictures.owe(
+                    MarkdownRasterRequest {
+                        key,
+                        rgba: Arc::clone(&rgba),
+                        native,
+                    },
+                    now,
+                ),
+            }
+            MarkdownPicture::Ready {
+                key: content,
+                rgba,
+                raster: native,
+                native,
+            }
+        };
+        resolve_document_pictures(blocks, document, theme, &mut ask)
+    }
+
+    /// Send every exact-size pass the quiet has released.
+    ///
+    /// Answers whether anything went out, which is what owes the caller a
+    /// re-flow: a page whose pictures are on their way has not changed yet, but
+    /// the ledger it is read from has.
+    fn send_owed_markdown_rasters(&mut self) -> bool {
+        if !self.app.math_worker_running {
+            self.window.markdown_pictures.owed.clear();
+            self.window.markdown_pictures.settle_deadline = None;
+            return false;
+        }
+        let owed: Vec<MarkdownRasterRequest> = self
+            .window
+            .markdown_pictures
+            .owed
+            .drain()
+            .map(|(_, request)| request)
+            .collect();
+        self.window.markdown_pictures.settle_deadline = None;
+        let leaf = self.focused_shell_address();
+        let mut sent = false;
+        for request in owed {
+            let task = peek_scale_task(
+                &(
+                    request.key.content.clone(),
+                    request.key.width_px,
+                    request.key.height_px,
+                ),
+                request.rgba,
+                request.native[0],
+                request.native[1],
+            );
+            if self
+                .app
+                .math_worker
+                .scale_tasks
+                .send(ScaleWorkerRequest::MarkdownImage { leaf, task })
+                .is_ok()
+            {
+                self.window
+                    .markdown_pictures
+                    .land(request.key, MarkdownRaster::Pending);
+                sent = true;
+            }
+        }
+        sent
+    }
+
+    /// Take delivery of one exact-size markdown raster.
+    fn complete_markdown_raster(&mut self, scaled: bt_term::ScaledInlineImage) {
+        let key = MarkdownRasterKey {
+            content: scaled.content_key.clone(),
+            width_px: scaled.width_px,
+            height_px: scaled.height_px,
+        };
+        self.window.markdown_pictures.land(
+            key,
+            MarkdownRaster::Ready {
+                key: scaled.key,
+                rgba: scaled.rgba,
+                width_px: scaled.width_px,
+                height_px: scaled.height_px,
+            },
+        );
+    }
+
     fn measure_markdown_intrinsics(
         &mut self,
         blocks: &[preview::MarkdownBlock],
@@ -48838,13 +49689,13 @@ impl Runtime<'_> {
         intrinsic: &[MarkdownBlockIntrinsic],
         width: f32,
         metrics: seats::PreviewMarkdownMetrics,
-        math: &DocumentMath,
+        art: PageArt<'_>,
     ) -> Vec<MarkdownBlockLayout> {
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut wrapped = |runs: &[bt_render::PreviewRun], width: f32, font: f32, line: f32| {
             renderer.measure_preview_paragraph(gpu, runs, width, font, line)
         };
-        lay_markdown_out(blocks, intrinsic, width, metrics, math, &mut wrapped)
+        lay_markdown_out(blocks, intrinsic, width, metrics, art, &mut wrapped)
     }
 }
 
@@ -48867,7 +49718,7 @@ fn lay_markdown_out(
     intrinsic: &[MarkdownBlockIntrinsic],
     width: f32,
     metrics: seats::PreviewMarkdownMetrics,
-    math: &DocumentMath,
+    art: PageArt<'_>,
     measure: &mut WrapMeasure<'_>,
 ) -> Vec<MarkdownBlockLayout> {
     {
@@ -48877,7 +49728,7 @@ fn lay_markdown_out(
         let mut previous: Option<&preview::MarkdownBlock> = None;
         for (block, intrinsic) in blocks.iter().zip(intrinsic) {
             let mut measured =
-                measure_markdown_block(block, intrinsic, width, metrics, math, measure);
+                measure_markdown_block(block, intrinsic, width, metrics, art, measure);
             // **Asymmetric since 2026-08-16**: github.css gives a heading more
             // air above it than below (`margin: 24px 0 16px`), which is what
             // binds a heading to the paragraph it introduces instead of to the
@@ -48914,10 +49765,15 @@ fn measure_markdown_block(
     intrinsic: &MarkdownBlockIntrinsic,
     width: f32,
     metrics: seats::PreviewMarkdownMetrics,
-    math: &DocumentMath,
+    art: PageArt<'_>,
     measure: &mut WrapMeasure<'_>,
 ) -> MarkdownBlockLayout {
     {
+        let PageArt {
+            math,
+            pictures,
+            theme,
+        } = art;
         let palette = bt_render::chrome_palette();
         match block {
             preview::MarkdownBlock::Heading { level, spans } => {
@@ -49041,6 +49897,34 @@ fn measure_markdown_block(
                         metrics.line_height * source.lines().count().max(1) as f32,
                     ),
                 }
+            }
+            // **A picture is as tall as it is drawn, and it is drawn to the
+            // column** — [`markdown_image_extent`], which is also what the
+            // painter fills and what the resample lane is asked for.
+            //
+            // It never asks for a scrolling region of its own, and that is a
+            // consequence rather than a rule: the extent is capped at the
+            // measure, so a picture is never wider than the box it stands in.
+            //
+            // Until the pixels arrive — and for good, where they will not — the
+            // block is the card its alt text stands on, and its height is that
+            // sentence wrapped into this width. See [`markdown_image_card`].
+            preview::MarkdownBlock::Image(image) => {
+                let source = image.source_for(theme);
+                if let Some(MarkdownPicture::Ready { native, .. }) = pictures.get(source) {
+                    let [_, height] = markdown_image_extent(*native, width, image.fill);
+                    return MarkdownBlockLayout::solid(height);
+                }
+                let card = markdown_image_card(image, pictures.get(source), &palette);
+                let inner =
+                    (width - metrics.code_padding_x * 2.0 - metrics.code_border * 2.0).max(1.0);
+                let mut height = measure(&card.said, inner, metrics.font_size, metrics.line_height);
+                if !card.note.is_empty() {
+                    height += measure(&card.note, inner, metrics.font_size, metrics.line_height);
+                }
+                MarkdownBlockLayout::solid(
+                    height + metrics.code_padding_y * 2.0 + metrics.code_border * 2.0,
+                )
             }
         }
     }
@@ -49316,6 +50200,7 @@ impl Runtime<'_> {
                 intrinsic,
                 layout,
                 math,
+                pictures,
             } => {
                 let rendered = build_preview_markdown_body(
                     body,
@@ -49328,7 +50213,11 @@ impl Runtime<'_> {
                     },
                     (blocks, intrinsic, layout),
                     &palette,
-                    math,
+                    PageArt {
+                        math,
+                        pictures,
+                        theme: bt_render::current_theme(),
+                    },
                 );
                 sites = rendered.links;
                 math_sites = rendered.math;
@@ -49890,6 +50779,11 @@ impl Runtime<'_> {
         self.preview_picture_hosts()
             .into_iter()
             .filter_map(|surface| self.preview_picture(surface)?.scale_settle_deadline)
+            // **And the pictures a markdown page carries** (§7.1.3k), which wait
+            // on the same boundary for the same reason and are read from the
+            // same place: what a wake answers is "is any picture owed a raster
+            // yet", not "which surface owes it".
+            .chain(self.window.markdown_pictures.settle_deadline)
             .min()
     }
 
@@ -49899,6 +50793,9 @@ impl Runtime<'_> {
                 picture.defer_scale_settle(observed_at);
             }
         }
+        if self.window.markdown_pictures.settle_deadline.is_some() {
+            self.window.markdown_pictures.settle_deadline = Some(observed_at + WINDOW_RESIZE_QUIET);
+        }
     }
 
     fn finish_preview_scale_if_quiet(&mut self, now: Instant) -> Result<()> {
@@ -49907,6 +50804,14 @@ impl Runtime<'_> {
             if let Some(picture) = self.preview_picture_mut(surface) {
                 due |= picture.finish_scale_settle_if_quiet(now);
             }
+        }
+        if self
+            .window
+            .markdown_pictures
+            .settle_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            due |= self.send_owed_markdown_rasters();
         }
         if due {
             self.refresh_preview_for_layout();
@@ -65771,6 +66676,15 @@ impl Runtime<'_> {
                     self.complete_preview_scale(scaled)?;
                     false
                 }
+                // A page's picture just got sharp. Nothing about the document
+                // changed and nothing about its heights did either — the block
+                // was already reserved at the size this raster fills — but the
+                // page has to be built again to hand the new pixels over, which
+                // is what the generation this landing ticks arranges.
+                DecorationWorkerCompletion::MarkdownScaledImage { scaled } => {
+                    self.complete_markdown_raster(scaled);
+                    true
+                }
                 // A verdict belongs to the seat that asked: the ledger is per pane, because
                 // the directory relative text is measured from is per pane. Unlike the two
                 // above it *is* gated on the tab still being on screen — a pane nobody can
@@ -67916,7 +68830,19 @@ impl Runtime<'_> {
                 }
             }
         }
-        if preview_matches {
+        // **And every markdown page standing on this file** (§7.1.3k). A block
+        // that was as tall as its alt text is now as tall as a screenshot, which
+        // is a re-flow and not a repaint — so the generation ticks, exactly as a
+        // formula's arrival ticks its own.
+        let in_a_page = self
+            .markdown_picture_files()
+            .iter()
+            .any(|file| normalized_local_image_path_key(file) == cache_key);
+        if in_a_page {
+            self.window.markdown_pictures.generation =
+                self.window.markdown_pictures.generation.saturating_add(1);
+        }
+        if preview_matches || in_a_page {
             self.refresh_preview_for_layout();
             self.refresh_chrome();
             self.present_chrome_change()?;
@@ -108563,6 +109489,7 @@ mod tests {
             blocks: Vec::new(),
             layout: prose_only,
             math: DocumentMath::default(),
+            pictures: DocumentPictures::default(),
         };
         let max = preview_document_max_scroll(&document, pane, 1.0, 8.0, 0.0, 0);
         assert_eq!(
@@ -108589,6 +109516,7 @@ mod tests {
                 },
             ],
             math: DocumentMath::default(),
+            pictures: DocumentPictures::default(),
         };
         let max = preview_document_max_scroll(&with_a_fence, pane, 1.0, 8.0, 0.0, 0);
         assert_eq!(
@@ -108884,7 +109812,11 @@ mod tests {
             &MarkdownBlockIntrinsic::default(),
             400.0,
             metrics,
-            &DocumentMath::default(),
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
             &mut never_measured,
         );
         assert_eq!(
@@ -108907,7 +109839,11 @@ mod tests {
             &MarkdownBlockIntrinsic::default(),
             400.0,
             metrics,
-            &math,
+            PageArt {
+                math: &math,
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
             &mut never_measured,
         );
         assert_eq!(
@@ -108952,7 +109888,11 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &[], &layout),
             &palette,
-            &math,
+            PageArt {
+                math: &math,
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
         );
         let (left, right) = preview::markdown_measure_box(body, metrics);
         assert_eq!(rendered.body.rasters.len(), 1, "one formula, one picture");
@@ -108980,7 +109920,11 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &[], &layout),
             &palette,
-            &DocumentMath::default(),
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
         );
         assert!(waiting.body.rasters.is_empty());
         assert_eq!(
@@ -108992,6 +109936,368 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["E = mc^2"],
             "what the author wrote, until there is something better to show",
+        );
+    }
+
+    /// One picture already decoded, in the shape a page draws it from.
+    ///
+    /// The pixels are never looked at: every assertion about a picture here is
+    /// about the *box* — how much room the page gave it and where it put it.
+    fn one_image(source: &str, native: [u32; 2]) -> DocumentPictures {
+        let mut pictures = DocumentPictures::default();
+        pictures.by_source.insert(
+            source.to_owned(),
+            MarkdownPicture::Ready {
+                key: format!("test:{source}"),
+                rgba: Arc::from(
+                    vec![0_u8; (native[0] * native[1] * 4) as usize].into_boxed_slice(),
+                ),
+                raster: native,
+                native,
+            },
+        );
+        pictures
+    }
+
+    /// The words a card is drawing, in the order it draws them.
+    fn card_text(rendered: &BuiltMarkdown) -> Vec<String> {
+        rendered
+            .body
+            .paragraphs
+            .iter()
+            .map(|paragraph| {
+                paragraph
+                    .runs
+                    .iter()
+                    .map(|run| run.text.as_str())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// RED GATE (user report, 2026-08-28: 「md 预览不渲染图片」) — **a picture's
+    /// source is resolved against the directory the document was read from**,
+    /// and the block that carries it is as tall as the picture is drawn.
+    ///
+    /// The two halves are one rule seen at two moments, the same pair
+    /// [`a_display_formula_is_as_tall_as_its_picture_and_stands_on_its_source_until_it_comes`]
+    /// pins: a source resolved against the wrong directory is a picture that is
+    /// never found, and a block measured from anything but
+    /// [`markdown_image_extent`] is a screenshot drawn over the paragraph under
+    /// it.
+    ///
+    /// MUTATIONS: resolve against the process's working directory instead of the
+    /// document's and the first assertion goes red; reserve the decode's own
+    /// height instead of the drawn one and the second does; drop the `.min(1.0)`
+    /// out of [`markdown_image_extent`] and the badge in the third is blown up
+    /// to the width of the column.
+    #[test]
+    fn a_markdown_image_is_drawn_from_the_documents_own_directory() {
+        let blocks = preview::parse_markdown("![a shot](docs/screenshots/one.png)\n");
+        let mut asked: Vec<PathBuf> = Vec::new();
+        let pictures = resolve_document_pictures(
+            &blocks,
+            Some(Path::new(r"D:\proj\README.md")),
+            bt_render::Theme::Dark,
+            &mut |path, _| {
+                asked.push(path.to_path_buf());
+                MarkdownPicture::Loading
+            },
+        );
+        assert_eq!(
+            asked,
+            vec![PathBuf::from(r"D:\proj\docs/screenshots/one.png")],
+            "the source is relative to the document, not to this process",
+        );
+        assert_eq!(
+            pictures.files,
+            [PathBuf::from(r"D:\proj\docs/screenshots/one.png")]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "and that file is what the watch is told to follow",
+        );
+
+        // The block is as tall as the picture is *drawn*: a 3200-wide screenshot
+        // brought down to a 400-wide column keeps its shape.
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let mut never_measured = |_: &[bt_render::PreviewRun], _: f32, _: f32, _: f32| {
+            unreachable!("a picture that is in hand asks the shaper nothing")
+        };
+        let placed = measure_markdown_block(
+            &blocks[0],
+            &MarkdownBlockIntrinsic::default(),
+            400.0,
+            metrics,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &one_image("docs/screenshots/one.png", [3200, 2000]),
+                theme: bt_render::Theme::Dark,
+            },
+            &mut never_measured,
+        );
+        assert_eq!(
+            placed.height, 250.0,
+            "400 of 3200 is an eighth, and 2000 eighths is 250",
+        );
+
+        // And it is never blown up past its own pixels: a small badge stands at
+        // its own size in the middle of the column.
+        let badge = measure_markdown_block(
+            &blocks[0],
+            &MarkdownBlockIntrinsic::default(),
+            400.0,
+            metrics,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &one_image("docs/screenshots/one.png", [96, 20]),
+                theme: bt_render::Theme::Dark,
+            },
+            &mut never_measured,
+        );
+        assert_eq!(badge.height, 20.0);
+        let rendered = build_preview_markdown_body(
+            [0.0, 0.0, 400.0, 400.0],
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (&blocks, &[], &[MarkdownBlockLayout::solid(20.0)]),
+            &bt_render::chrome_palette(),
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &one_image("docs/screenshots/one.png", [96, 20]),
+                theme: bt_render::Theme::Dark,
+            },
+        );
+        let [drawn] = rendered.body.rasters.as_slice() else {
+            panic!("one picture, one raster: {:#?}", rendered.body.rasters);
+        };
+        let (left, right) = preview::markdown_measure_box([0.0, 0.0, 400.0, 400.0], metrics);
+        assert_eq!(
+            (drawn.rect[2] - drawn.rect[0], drawn.rect[3] - drawn.rect[1]),
+            (96.0, 20.0),
+            "its own pixels, never stretched to the column",
+        );
+        assert_eq!(
+            drawn.rect[0] - left,
+            right - drawn.rect[2],
+            "and the air either side of it is equal",
+        );
+        assert!(
+            rendered.body.paragraphs.is_empty(),
+            "with no card under it once the pixels are there: {:?}",
+            card_text(&rendered),
+        );
+    }
+
+    /// RED GATE (same report; `README.md` and `PRIVACY.md`'s promise) — **a
+    /// remote picture is never fetched.**
+    ///
+    /// It is a structural gate and not a behavioural one, and that is the point:
+    /// `ask` is the only door to a file in [`resolve_document_pictures`], so
+    /// owning one and counting what reaches it asserts that an `http` source
+    /// produces **no** read, no request and no lane traffic — rather than that
+    /// today's code happens to take a different branch. What the reader gets
+    /// instead is the alt text and the address, as a link this window will open.
+    ///
+    /// MUTATION: hand a remote source to `ask` and the first assertion goes red
+    /// with the URL it tried to open as a path.
+    #[test]
+    fn a_remote_image_is_never_fetched() {
+        let blocks = preview::parse_markdown("![a badge](https://img.example/badge.svg)\n");
+        let mut doors = 0usize;
+        let pictures = resolve_document_pictures(
+            &blocks,
+            Some(Path::new(r"D:\proj\README.md")),
+            bt_render::Theme::Dark,
+            &mut |_, _| {
+                doors += 1;
+                MarkdownPicture::Failed
+            },
+        );
+        assert_eq!(doors, 0, "nothing asked the disk, or anything else");
+        assert!(
+            pictures.files.is_empty(),
+            "and nothing was handed to the file watch either",
+        );
+        assert!(matches!(
+            pictures.get("https://img.example/badge.svg"),
+            Some(MarkdownPicture::Remote(url)) if url == "https://img.example/badge.svg"
+        ));
+
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let rendered = build_preview_markdown_body(
+            [0.0, 0.0, 400.0, 400.0],
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (
+                &blocks,
+                &[],
+                &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
+            ),
+            &bt_render::chrome_palette(),
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &pictures,
+                theme: bt_render::Theme::Dark,
+            },
+        );
+        assert!(
+            rendered.body.rasters.is_empty(),
+            "there are no pixels, because none were fetched",
+        );
+        let said = card_text(&rendered);
+        assert_eq!(said.first().map(String::as_str), Some("a badge"));
+        assert!(
+            said.last()
+                .is_some_and(|note| note.contains("https://img.example/badge.svg")),
+            "and the address is printed: {said:?}",
+        );
+        assert_eq!(
+            rendered
+                .links
+                .iter()
+                .map(|site| site.target.as_str())
+                .collect::<Vec<_>>(),
+            vec!["https://img.example/badge.svg"],
+            "as a link, on this window's own terms",
+        );
+    }
+
+    /// RED GATE (same report) — **a picture that will not decode says so where
+    /// it stands**: the alt text, and one line under it.
+    ///
+    /// The sentence is not [`i18n::Text::PreviewFailedImageLoad`] and must not
+    /// become it: nothing failed to *preview* here — the page around the picture
+    /// is drawn and readable, and one block of it is standing on what it says
+    /// instead of on what it shows.
+    ///
+    /// MUTATIONS: draw nothing for a failed picture and the block is a blank box
+    /// in the middle of the page; draw the alt without the note and the reader
+    /// is left to guess whether the words are the author's prose.
+    #[test]
+    fn an_image_that_will_not_decode_says_so_in_place() {
+        let blocks = preview::parse_markdown("![a shot](docs/gone.png)\n");
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let mut pictures = DocumentPictures::default();
+        pictures
+            .by_source
+            .insert("docs/gone.png".to_owned(), MarkdownPicture::Failed);
+        let rendered = build_preview_markdown_body(
+            [0.0, 0.0, 400.0, 400.0],
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (
+                &blocks,
+                &[],
+                &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
+            ),
+            &bt_render::chrome_palette(),
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &pictures,
+                theme: bt_render::Theme::Dark,
+            },
+        );
+        assert!(rendered.body.rasters.is_empty());
+        assert_eq!(
+            card_text(&rendered),
+            vec![
+                "a shot".to_owned(),
+                i18n::Text::MarkdownImageUnreadable.text().to_owned(),
+            ],
+        );
+        assert!(
+            rendered.links.is_empty(),
+            "a file that is not there is not a link either",
+        );
+
+        // While the decode is still out there is nothing to tell the reader:
+        // "loading" is not a fact about the document, and a card that explains
+        // itself and is then replaced by a screenshot is a flash.
+        let mut waiting = DocumentPictures::default();
+        waiting
+            .by_source
+            .insert("docs/gone.png".to_owned(), MarkdownPicture::Loading);
+        let rendered = build_preview_markdown_body(
+            [0.0, 0.0, 400.0, 400.0],
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (
+                &blocks,
+                &[],
+                &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
+            ),
+            &bt_render::chrome_palette(),
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &waiting,
+                theme: bt_render::Theme::Dark,
+            },
+        );
+        assert_eq!(card_text(&rendered), vec!["a shot".to_owned()]);
+    }
+
+    /// RED GATE (found on the glass, 2026-08-28) — **a theme flip asks every
+    /// markdown page to lay out again.**
+    ///
+    /// Two things on a page do not recolour for free: a formula's raster came
+    /// out of the engine already inked, and a `<picture>` names one file for a
+    /// dark page and another for a light one. Both are in [`PageArtKey`]
+    /// *precisely* so a theme flip is a different layout question — and until
+    /// this line nothing asked the question. Measured in the real window: the
+    /// chrome went light and the page kept the dark hero and the dark
+    /// screenshot, indefinitely.
+    ///
+    /// It is a source gate rather than a behavioural one because the subject is
+    /// a `Runtime` method that needs a window, a GPU and a palette; what is
+    /// load-bearing is that the *call* is in the one function every theme change
+    /// goes through, beside the sibling cache-clear that was written for the
+    /// same failure one surface over.
+    ///
+    /// MUTATION: delete the `refresh_preview_for_layout()` call from
+    /// `adopt_new_palette` and this goes red.
+    #[test]
+    fn a_theme_flip_asks_every_markdown_page_to_lay_out_again() {
+        const SOURCE: &str = include_str!("main.rs");
+        let start = SOURCE
+            .find("fn adopt_new_palette(&mut self) -> Result<()> {")
+            .expect("the one door every theme change goes through");
+        let body = &SOURCE[start..];
+        let end = body.find("\n    }\n").expect("its closing brace");
+        let body = &body[..end];
+        assert!(
+            body.contains("self.refresh_preview_for_layout();"),
+            "a page whose pictures and formulas are inked by the theme has to be \
+             asked again: {body}",
+        );
+        // And the rail's own clear is still there beside it, because the two are
+        // the same sentence about two surfaces.
+        assert!(body.contains("cache.clear();"));
+    }
+
+    /// **What a picture copies is `![alt](src)`** (§7.1.3k ④), and a selection
+    /// passes over it whole.
+    ///
+    /// The display formula's answer one block kind over, for its reason: the alt
+    /// text alone would paste as a sentence the author never wrote, with nothing
+    /// to say that anything had been a picture.
+    #[test]
+    fn a_picture_copies_the_markdown_that_named_it() {
+        let blocks = preview::parse_markdown("![a shot](docs/one.png)\n");
+        let pieces = preview_select::pieces(&blocks);
+        let [piece] = pieces.as_slice() else {
+            panic!("one block, one piece: {pieces:#?}");
+        };
+        assert_eq!(piece.text, "![a shot](docs/one.png)");
+        assert!(piece.atomic, "there is no offset into a picture");
+        let all = preview_select::select_all(&pieces).expect("a document with a picture in it");
+        let (start, end) = all.range(&pieces);
+        assert_eq!(
+            preview_select::copy_text(&pieces, start, end),
+            "![a shot](docs/one.png)",
         );
     }
 
@@ -109180,7 +110486,11 @@ mod tests {
                 &intrinsic,
                 right - left,
                 metrics,
-                &DocumentMath::default(),
+                PageArt {
+                    math: &DocumentMath::default(),
+                    pictures: &DocumentPictures::default(),
+                    theme: bt_render::Theme::Dark,
+                },
                 wrap,
             )
             .last()
@@ -109327,7 +110637,11 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &[], &layout),
             &palette,
-            &math,
+            PageArt {
+                math: &math,
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
         );
         let drawn = &rendered.body.rasters;
         assert_eq!(
@@ -109418,7 +110732,11 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &[], &layout),
             &palette,
-            &DocumentMath::default(),
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
         );
         let sites: Vec<_> = rendered
             .links
@@ -109539,7 +110857,11 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &[], &layout),
             &palette,
-            &DocumentMath::default(),
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
         );
         let pieces = preview_select::pieces(&blocks);
         assert_eq!(
@@ -109826,6 +111148,7 @@ mod tests {
             intrinsic: Vec::new(),
             layout: Vec::new(),
             math: DocumentMath::default(),
+            pictures: DocumentPictures::default(),
         });
         assert_eq!(pane.md_select, None, "the selection went with the document");
         assert!(
@@ -110194,6 +111517,7 @@ mod tests {
             blocks: blocks.clone(),
             layout: layout.clone(),
             math: DocumentMath::default(),
+            pictures: DocumentPictures::default(),
         };
         let max = preview_document_max_scroll(&document, body, 1.0, cell, 0.0, 0);
         assert_eq!(max[0], 0.0, "the page has no horizontal axis of its own");
@@ -110341,8 +111665,8 @@ mod tests {
             mtime: None,
             content_says_text: true,
         });
-        let wide = preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0]);
-        let narrow = preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0]);
+        let wide = document_key(&buffer, false, 1200.0, 1.0);
+        let narrow = document_key(&buffer, false, 400.0, 1.0);
         assert_ne!(wide, narrow, "a width change is still a layout change");
         assert_eq!(
             wide.parse, narrow.parse,
@@ -110354,7 +111678,7 @@ mod tests {
             true
         });
         assert_ne!(
-            preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0]).parse,
+            document_key(&buffer, false, 1200.0, 1.0).parse,
             wide.parse,
             "an edit re-parses"
         );
@@ -110446,7 +111770,11 @@ mod tests {
             &heavy_intrinsic,
             400.0,
             metrics,
-            &DocumentMath::default(),
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
             &mut measure,
         );
         assert_eq!(
@@ -110468,7 +111796,11 @@ mod tests {
                 &intrinsic,
                 width,
                 metrics,
-                &DocumentMath::default(),
+                PageArt {
+                    math: &DocumentMath::default(),
+                    pictures: &DocumentPictures::default(),
+                    theme: bt_render::Theme::Dark,
+                },
                 &mut measure,
             );
             heights.push(layout.last().map_or(0.0, |last| last.top + last.height));
@@ -111043,13 +112375,43 @@ mod tests {
             bars,
             document,
             palette,
-            &DocumentMath::default(),
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
         )
         .body
     }
 
     /// The bars at rest: the offsets under test, nothing lit, one device pixel
     /// to the logical one.
+    /// A document key with both generations and the theme at rest.
+    ///
+    /// Every test below that is not about a formula or a picture wants the same
+    /// four answers — the buffer, the face, the width and the scale — and naming
+    /// the other four at each of fourteen call sites said nothing except that
+    /// they were still zero.
+    fn document_key(
+        buffer: &preview::PreviewBuffer,
+        md_source: bool,
+        width_px: f32,
+        scale: f32,
+    ) -> PreviewDocumentKey {
+        preview_document_key(
+            buffer,
+            md_source,
+            width_px,
+            scale,
+            PageArtKey {
+                math_generation: 0,
+                body_ink: [0, 0, 0],
+                picture_generation: 0,
+                theme: bt_render::Theme::Dark,
+            },
+        )
+    }
+
     fn rested_bars(offsets: &[f32]) -> BlockScrollPaint<'_> {
         BlockScrollPaint {
             offsets,
@@ -111740,8 +113102,8 @@ mod tests {
             "the source face has a caret and the rendered page has not"
         );
         assert_ne!(
-            preview_document_key(buffer, true, 400.0, 1.0, 0, [0, 0, 0]),
-            preview_document_key(buffer, false, 400.0, 1.0, 0, [0, 0, 0]),
+            document_key(buffer, true, 400.0, 1.0),
+            document_key(buffer, false, 400.0, 1.0),
             "so the two faces cannot share one cached document"
         );
 
@@ -111776,35 +113138,23 @@ mod tests {
     #[test]
     fn a_same_length_edit_rebuilds_the_cached_document() {
         let mut buffer = text_buffer("a.rs", "let x = 1;\n");
-        let before = preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0]);
+        let before = document_key(&buffer, false, 400.0, 2.0);
         buffer.edit_content(|content| {
             content.replace_range(8..9, "2");
             true
         });
         assert_eq!(buffer.content.as_deref(), Some("let x = 2;\n"));
-        let after = preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0]);
+        let after = document_key(&buffer, false, 400.0, 2.0);
         assert_ne!(
             before, after,
             "one letter for another is still a different document"
         );
         // And nothing else moved: the same buffer at the same width and scale is
         // the same key, or every wheel notch would re-parse the file.
-        assert_eq!(
-            after,
-            preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0])
-        );
-        assert_ne!(
-            after,
-            preview_document_key(&buffer, true, 400.0, 2.0, 0, [0, 0, 0])
-        );
-        assert_ne!(
-            after,
-            preview_document_key(&buffer, false, 401.0, 2.0, 0, [0, 0, 0])
-        );
-        assert_ne!(
-            after,
-            preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0])
-        );
+        assert_eq!(after, document_key(&buffer, false, 400.0, 2.0));
+        assert_ne!(after, document_key(&buffer, true, 400.0, 2.0));
+        assert_ne!(after, document_key(&buffer, false, 401.0, 2.0));
+        assert_ne!(after, document_key(&buffer, false, 400.0, 1.0));
     }
 
     /// ⑤ A caret, a selection and a scroll survive a switch to another buffer
@@ -111900,6 +113250,7 @@ mod tests {
             intrinsic: Vec::new(),
             layout,
             math: DocumentMath::default(),
+            pictures: DocumentPictures::default(),
         };
         let max = preview_document_max_scroll(&markdown, body, scale, 8.0, 0.0, 0);
         assert!(max[1] > 0.0, "a document taller than its pane can scroll");
@@ -118369,7 +119720,11 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &intrinsic, &layout),
             &palette,
-            &DocumentMath::default(),
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
         );
         // The two fences' lines, in the order they were pushed. The `lang` chip
         // is a proportional paragraph and rides after them, so the two mono
@@ -118597,8 +119952,8 @@ mod tests {
     #[test]
     fn a_resize_cannot_re_walk_a_grammar_and_an_edit_must() {
         let mut buffer = text_buffer("main.rs", "fn main() {}\n");
-        let narrow = preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0]);
-        let wide = preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0]);
+        let narrow = document_key(&buffer, false, 400.0, 1.0);
+        let wide = document_key(&buffer, false, 1200.0, 1.0);
         assert_ne!(narrow, wide, "the two widths are two documents");
         assert_eq!(
             narrow.parse, wide.parse,
@@ -118609,7 +119964,7 @@ mod tests {
             true
         });
         assert_ne!(
-            preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0]).parse,
+            document_key(&buffer, false, 400.0, 1.0).parse,
             narrow.parse,
             "and an edit re-walks it"
         );

@@ -381,12 +381,50 @@ fn block_pieces(content: &MarkdownBlock, block: usize, pieces: &mut Vec<Piece>) 
                     atomic: true,
                 });
             }
+            // **One piece, indivisible, and what it copies is `![alt](src)`**
+            // (user ruling 2026-08-28; `docs/DESIGN.md` §7.1.3k ④).
+            //
+            // The same answer [`MarkdownBlock::Math`] just above gives, for the
+            // same reason: what is on the page is a picture, and the honest
+            // plain text for a picture is the picture named as one. The alt text
+            // alone would paste as a sentence the author never wrote — a reader
+            // copying a paragraph with a screenshot in it would get the caption
+            // of the screenshot inline with the prose and no sign that anything
+            // had been a picture. So a selection **passes over** a picture the
+            // way it passes over a formula (any touch takes the whole of it,
+            // there being no offset into a picture that means anything), and
+            // what lands on the clipboard is markdown.
+            //
+            // `src` is the document's own string, unresolved: what pastes is
+            // what the file says, so pasting it back into the file leaves the
+            // file as it was.
+            MarkdownBlock::Image(image) => {
+                pieces.push(Piece {
+                    at: Place::new(block, 0, 0),
+                    lead: Lead::Block,
+                    prefix: String::new(),
+                    text: image_piece(image),
+                    atomic: true,
+                });
+            }
             // A rule is a line on the page and no words at all. Nothing to
             // stand in, and nothing to paste — which is what every browser puts
             // on the clipboard for an `<hr>` dragged through.
             MarkdownBlock::Rule => {}
         }
     }
+}
+
+/// **What a picture copies**, written down once.
+///
+/// The layout needs its *length* to reserve the piece and this module needs its
+/// *text* to put on the clipboard, and the two being one function is what keeps
+/// a selection that ends inside a picture from disagreeing with what it copies —
+/// the same discipline the display formula's `"$$$$".len()` states one arm up,
+/// said as a call instead of as an arithmetic both sides have to remember.
+#[must_use]
+pub fn image_piece(image: &crate::preview::MarkdownImage) -> String {
+    format!("![{}]({})", image.alt, image.src)
 }
 
 /// A row of a multi-row block: the first opens the block, the rest are lines of
