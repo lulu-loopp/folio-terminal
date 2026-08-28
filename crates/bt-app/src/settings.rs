@@ -13320,6 +13320,16 @@ mod tests {
     /// language through `Text::text`, this crate refuses the `unsafe` that
     /// changing a process-wide variable now is, and [`measure`] is a flat half-em
     /// per character, which is not what a Chinese face does.
+    ///
+    /// **The editor sub-page's eight rows are in it since 2026-08-28**, and they
+    /// were not before: `category_rows` folds [`EDITOR_ROWS`] in only while
+    /// `editor` is `Some`, and the fixture this pin was written on opens the
+    /// Profiles *list*. So eight sentences the dialog can draw were outside the
+    /// only gate that measures a sentence — which is how the `Arguments` row's
+    /// new example (user ruling 2026-08-28: a reader has to be told the launch
+    /// script goes in this box) could have been added without anybody measuring
+    /// it. The sub-page is one more view of this dialog and its copy is held to
+    /// this dialog's rule.
     #[test]
     fn no_settings_sentence_needs_a_fourth_line() {
         let metrics = StackMetrics::new(1.0);
@@ -13327,12 +13337,23 @@ mod tests {
         let button = COMBO_MIN_WIDTH_LOGICAL_PX;
         let rows = flat_rows();
         let held = content(&rows, &[]);
+        let editing = editing_content(&rows, &[], editor_subject(true));
         // **Every offender, not the first one.** A pin that stops at the first
         // over-long sentence turns one report into a queue of runs, and what the
         // reader of this failure wants is the list of sentences to shorten.
         let mut over: Vec<(SettingsRow, usize)> = Vec::new();
+        let mut measured: Vec<SettingsRow> = Vec::new();
         for category in SettingsCategory::ALL {
-            for row in held.category_rows(category) {
+            let page = if category == SettingsCategory::Profiles {
+                // The list has no sentences of its own — it is a table of
+                // profiles — so asking the same page with the editor standing in
+                // it is not a second fixture, it is the only one that has rows.
+                editing.category_rows(category)
+            } else {
+                held.category_rows(category)
+            };
+            for row in page {
+                measured.push(row);
                 let sentence = row.description(&values());
                 let lines = wrapped_description(
                     sentence,
@@ -13355,6 +13376,19 @@ mod tests {
             "these sentences do not fit three lines, which is copy to shorten \
              rather than a rule to change: {over:?}"
         );
+        // **And the walk really reached the sub-page.** A gate whose fixture
+        // quietly stops holding the rows it is about passes for the wrong reason
+        // and says nothing while it does — which is exactly the state this pin
+        // was in until 2026-08-28. Named rather than counted, because what is
+        // owed is that these eight rows are in it and not that some number of
+        // rows is.
+        for row in EDITOR_ROWS {
+            assert!(
+                measured.contains(&row),
+                "{row:?} is a row this dialog draws and its sentence was never \
+                 measured"
+            );
+        }
     }
 
     /// PIN (user ruling 2026-08-17) — **a picker shows eight items and scrolls

@@ -228,6 +228,19 @@ pub enum ResolutionV1 {
 }
 
 /// One place to look for an executable.
+///
+/// **[`Self::OnPath`] joined the vocabulary on 2026-08-28 and the document did
+/// not change version, on [`MarkV1`]'s own precedent.** That field grew its
+/// object form the same way a slice after it was written — "an *object* form
+/// beside this one rather than by redefining it" — and the test beside it pins
+/// the reason: no file the previous slice wrote reads differently now. The same
+/// holds here. Every `under` and `beside_on_path` on every disk parses exactly
+/// as it did; what is new is a third word this build can *write*, and it can
+/// only ever appear in a file this build wrote — a built-in writes nothing but
+/// its id, so the word reaches a disk only when somebody duplicates one of the
+/// agent rows. A `schema_version` step buys nothing an older build could act on
+/// (it would refuse the whole document rather than the one row) and would put
+/// every untouched v1 file through a migration that changes nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CandidateV1 {
@@ -236,6 +249,15 @@ pub enum CandidateV1 {
     /// Find `anchor` on `PATH`, climb out of the directory holding it, take
     /// `tail` from there.
     BesideOnPath { anchor: String, tail: String },
+    /// `name`, wherever `PATH` says it is.
+    ///
+    /// The everyday shape of a tool installed by a package manager: the
+    /// installer's whole job is to put the thing on the path, and where it put
+    /// the file is an implementation detail that differs between npm, a native
+    /// installer and whatever the user's version manager does. The two above
+    /// both start from a *place* and this one starts from a name, which is why
+    /// it is a third form rather than a degenerate case of either.
+    OnPath { name: String },
 }
 
 /// Where a profile's shell stands when it is not told.
@@ -461,6 +483,51 @@ mod tests {
             seven,
             "the shipped resolutions are named, not spelled out as a path"
         );
+    }
+
+    /// PIN — **the third candidate form is additive**: a document written
+    /// before it existed reads exactly as it did, and a document that uses it
+    /// round trips (user ruling 2026-08-28, the agent profiles).
+    ///
+    /// Red gate: spell `OnPath` as a rename of `BesideOnPath` — the first half
+    /// goes red on every `beside_on_path` already on a disk, which is the
+    /// failure a version bump would have been owed for and this shape is not.
+    #[test]
+    fn a_third_candidate_form_leaves_the_two_before_it_reading_as_they_did() {
+        let old: ProgramV1 = serde_json::from_str(
+            r#"{ "kind": "first_of", "candidates": [
+                   { "beside_on_path": { "anchor": "git.exe", "tail": "bin\\bash.exe" } },
+                   { "under": { "variable": "ProgramFiles", "tail": "Git\\bin\\bash.exe" } } ] }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            old,
+            ProgramV1::Resolution(ResolutionV1::FirstOf {
+                candidates: vec![
+                    CandidateV1::BesideOnPath {
+                        anchor: "git.exe".to_owned(),
+                        tail: r"bin\bash.exe".to_owned(),
+                    },
+                    CandidateV1::Under {
+                        variable: "ProgramFiles".to_owned(),
+                        tail: r"Git\bin\bash.exe".to_owned(),
+                    },
+                ],
+            })
+        );
+
+        let fresh = ProgramV1::Resolution(ResolutionV1::FirstOf {
+            candidates: vec![CandidateV1::OnPath {
+                name: "claude.cmd".to_owned(),
+            }],
+        });
+        let wire = serde_json::to_value(&fresh).unwrap();
+        assert_eq!(
+            wire["candidates"][0]["on_path"]["name"],
+            serde_json::Value::from("claude.cmd"),
+            "the word a person hand-editing this file would read: {wire}"
+        );
+        assert_eq!(serde_json::from_value::<ProgramV1>(wire).unwrap(), fresh);
     }
 
     /// PIN — **a bare `mark` string still names a shipped mark**, which is the

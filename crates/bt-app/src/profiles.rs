@@ -575,6 +575,26 @@ pub enum ProgramCandidate {
     /// joining onto the anchor's own is what makes this work for a layout where
     /// the two are siblings rather than nested.
     BesideOnPath { anchor: String, tail: String },
+    /// **This program, wherever `PATH` says it is** (user ruling 2026-08-28,
+    /// the agent profiles).
+    ///
+    /// The two above start from a *place* — a variable, or another tool's
+    /// install root — and this one starts from a name. That is the shape a
+    /// command-line tool installed by a package manager actually has: npm's
+    /// whole job is to put `claude.cmd` on the path, and *where* it put it is
+    /// something that differs between npm's global prefix, a native installer's
+    /// `~/.local/bin` and whatever a version manager does. Spelling that as
+    /// `BesideOnPath { anchor: "claude.cmd", tail: "claude.cmd" }` would find
+    /// the same file and would be a sentence nobody reading this file could
+    /// parse.
+    ///
+    /// **The name is looked up, never run** — like every other candidate here,
+    /// and here it has to be said out loud because this is the first form whose
+    /// subject is an executable's *name*: `search_path` asks the filesystem
+    /// where the file is, and the answer to "is this tool installed" is a file
+    /// that exists. A probe that ran `claude --version` to find out would put
+    /// three process spawns on the path of the first frame this window draws.
+    OnPath { name: String },
 }
 
 /// Which shell-integration script a profile is served by, and **how it gets
@@ -728,6 +748,10 @@ pub fn derive_integration(program: &ProgramSource) -> Integration {
             .map(|candidate| match candidate {
                 ProgramCandidate::Under { tail, .. }
                 | ProgramCandidate::BesideOnPath { tail, .. } => tail.as_str(),
+                // The name *is* the leaf here, which is the one place this
+                // third form is simpler than the two above rather than merely
+                // different from them.
+                ProgramCandidate::OnPath { name } => name.as_str(),
             })
             .map(|tail| {
                 std::borrow::Cow::Borrowed(tail.rsplit(['\\', '/']).next().unwrap_or_default())
@@ -766,7 +790,8 @@ pub fn served_by(profile: &Profile) -> Integration {
 /// feature's audience.
 pub const WINDOWS_POWERSHELL_ID: &str = "winps";
 
-/// The five profiles this build ships, freshly built.
+/// The eight profiles this build ships, freshly built — **five shells and three
+/// agents** (user ruling 2026-08-28).
 ///
 /// **The seed, not the table.** It is what a machine with no `profiles.json`
 /// gets, in this order; it is what a built-in's `Restore all defaults` compares
@@ -775,10 +800,32 @@ pub const WINDOWS_POWERSHELL_ID: &str = "winps";
 /// the file.
 ///
 /// A function and no longer a `const`, because the rows own their strings now
-/// (§7.1.6c-6). The cost is five allocations at each call and the call sites are
+/// (§7.1.6c-6). The cost is eight allocations at each call and the call sites are
 /// startup, a restore and a test — the alternative, a second `&'static` struct
 /// standing beside the owned one, would have made every row of this table exist
 /// twice and put the next person who edits one in front of two places to edit.
+///
+/// # Why an agent is a profile (§7.41)
+///
+/// A profile is *what a new tab starts*, and for the people this product was
+/// built for the answer is very often not a shell. The three rows cost nothing
+/// a shell row does not already pay for: they resolve through
+/// [`ProgramSource::FirstOf`] like `gitbash` does, they grey rather than hide on
+/// a machine that has not got them (§7.27), and a reader who lives in one of
+/// them makes it the default from the row menu and never sees a prompt again.
+///
+/// **They are not the Agents page's three rows.** That page installs *hooks* —
+/// it teaches somebody's own Claude Code, Codex or copilot configuration to tell
+/// this window when a turn is waiting. This is a launcher. The two are unrelated
+/// in every direction: hooks work on an agent started from a `pwsh` tab, and one
+/// of these tabs is silent until its hooks are installed. Nothing here reads
+/// that page and nothing there reads this table.
+///
+/// **The order is shells first.** Not a ranking — the first row of this list is
+/// not the default; `settings.json`'s `default_profile` is, and the floor under
+/// it is `winps` (see [`WINDOWS_POWERSHELL_ID`]). What the order is is the
+/// picker's, and a picker that opened on three tools most machines have not got
+/// installed would be a picker whose first screen is greyed.
 #[must_use]
 pub fn shipped() -> Vec<Profile> {
     vec![
@@ -970,6 +1017,140 @@ pub fn shipped() -> Vec<Profile> {
             }]),
             // None. `cmd.exe` has no logo to suppress, and every switch it does take
             // (`/c`, `/k`) would end the session rather than start one.
+            args: Vec::new(),
+            env: Vec::new(),
+            starting_dir: StartingDir::WindowsHome,
+            start_at: StartAt::Inherit,
+            paths: PathNamespace::Windows,
+            qualifier: Qualifier::None,
+            integration: IntegrationChoice::Auto,
+            hidden: false,
+            origin: Origin::Builtin,
+        },
+        // ── The three agents (user ruling 2026-08-28, §7.41) ─────────────────
+        //
+        // Everything the three share is shared because it is the same answer and
+        // not because they were copied: **no arguments**, because an agent
+        // started with no arguments is the agent, and any flag this table chose
+        // would be a decision made on behalf of somebody who has not been asked;
+        // **`StartAt::Inherit`**, the shipped value every other row carries, so
+        // that opening one beside a pane opens it *on that project*, which is
+        // the whole of what these tools are pointed at; **no `compared_title`**,
+        // because that string is what an integration script announces and no
+        // script this build ships announces any of these; and
+        // **`IntegrationChoice::Auto`**, which derives [`Integration::None`] —
+        // the honest answer for a program that is not a shell, and a whole one
+        // (a screen that never sees OSC 133 keeps the cursor heuristics byte for
+        // byte).
+        //
+        // The candidate lists are `PATH` first and then npm's global bin, and
+        // both halves earn their place. `PATH` is where the *install the user is
+        // already using* is, which is `find_git`'s own argument one module down;
+        // `%APPDATA%\npm` catches the machine where npm's prefix never made it
+        // onto this process's path — a real case, because `PATH` is read at
+        // logon and npm's installer edits it. The `.cmd` is named before the
+        // `.exe` in every list because npm is how these three arrive on Windows
+        // today, and `bt_pty::through_the_interpreter` is what makes a `.cmd`
+        // startable.
+        Profile {
+            id: "claude".to_owned(),
+            compared_title: None,
+            // Not localised, for the reason every title in this table is not
+            // (§G S103, `no_profile_title_has_been_pulled_into_the_language_table`):
+            // it is a product's name and a Chinese window spells it the way an
+            // English one does.
+            display_title: "Claude Code".to_owned(),
+            // The one agent with a mark the design authority struck — see
+            // `ChromeMark::ProfileClaude` for why the two below it wear the
+            // neutral chassis instead.
+            mark: ChromeMark::ProfileClaude,
+            program: ProgramSource::FirstOf(vec![
+                ProgramCandidate::OnPath {
+                    name: "claude.cmd".to_owned(),
+                },
+                ProgramCandidate::OnPath {
+                    name: "claude.exe".to_owned(),
+                },
+                ProgramCandidate::Under {
+                    variable: "AppData".to_owned(),
+                    tail: r"npm\claude.cmd".to_owned(),
+                },
+                // The native installer's own directory, which it puts on `PATH`
+                // — so this line is for the session that has not been restarted
+                // since the install.
+                ProgramCandidate::Under {
+                    variable: "UserProfile".to_owned(),
+                    tail: r".local\bin\claude.exe".to_owned(),
+                },
+            ]),
+            args: Vec::new(),
+            env: Vec::new(),
+            starting_dir: StartingDir::WindowsHome,
+            start_at: StartAt::Inherit,
+            paths: PathNamespace::Windows,
+            qualifier: Qualifier::None,
+            integration: IntegrationChoice::Auto,
+            hidden: false,
+            origin: Origin::Builtin,
+        },
+        Profile {
+            id: "codex".to_owned(),
+            compared_title: None,
+            display_title: "Codex".to_owned(),
+            // The neutral chassis, because the mock-up has struck no mark for
+            // this product and a crate may not invent one — the rule
+            // `ChromeMark::ProfileGeneric`'s own note states, met by a built-in
+            // for the first time. What tells it from the row below is the
+            // colour, which is what the eight are for.
+            mark: ChromeMark::ProfileGeneric {
+                colour: MarkColour::Slate,
+            },
+            program: ProgramSource::FirstOf(vec![
+                ProgramCandidate::OnPath {
+                    name: "codex.cmd".to_owned(),
+                },
+                ProgramCandidate::OnPath {
+                    name: "codex.exe".to_owned(),
+                },
+                ProgramCandidate::Under {
+                    variable: "AppData".to_owned(),
+                    tail: r"npm\codex.cmd".to_owned(),
+                },
+            ]),
+            args: Vec::new(),
+            env: Vec::new(),
+            starting_dir: StartingDir::WindowsHome,
+            start_at: StartAt::Inherit,
+            paths: PathNamespace::Windows,
+            qualifier: Qualifier::None,
+            integration: IntegrationChoice::Auto,
+            hidden: false,
+            origin: Origin::Builtin,
+        },
+        Profile {
+            id: "copilot".to_owned(),
+            compared_title: None,
+            // `Copilot CLI`, and the qualifier is the product's own: GitHub
+            // Copilot is several things and only one of them is a program that
+            // runs in a terminal. `crate::attention_copilot`'s probe reads the
+            // same distinction off `copilot --version`, which prints
+            // `GitHub Copilot CLI <version>`.
+            display_title: "Copilot CLI".to_owned(),
+            mark: ChromeMark::ProfileGeneric {
+                colour: MarkColour::Violet,
+            },
+            program: ProgramSource::FirstOf(vec![
+                ProgramCandidate::OnPath {
+                    name: "copilot.cmd".to_owned(),
+                },
+                ProgramCandidate::OnPath {
+                    name: "copilot.exe".to_owned(),
+                },
+                ProgramCandidate::Under {
+                    variable: "AppData".to_owned(),
+                    tail: r"npm\copilot.cmd".to_owned(),
+                },
+            ]),
             args: Vec::new(),
             env: Vec::new(),
             starting_dir: StartingDir::WindowsHome,
@@ -1532,6 +1713,9 @@ fn derived_paths(profile: &Profile) -> PathNamespace {
             ProgramCandidate::Under { tail, .. } | ProgramCandidate::BesideOnPath { tail, .. } => {
                 names_the_launcher(tail)
             }
+            // A candidate that names the program instead of a place still names
+            // a program, and the question here is only which one.
+            ProgramCandidate::OnPath { name } => names_the_launcher(name),
         }),
         ProgramSource::PowerShellSeven => false,
     };
@@ -1558,6 +1742,7 @@ fn program_from_file(program: &ProgramV1) -> ProgramSource {
                         anchor: anchor.clone(),
                         tail: tail.clone(),
                     },
+                    CandidateV1::OnPath { name } => ProgramCandidate::OnPath { name: name.clone() },
                 })
                 .collect(),
         ),
@@ -1580,6 +1765,7 @@ fn program_to_file(program: &ProgramSource) -> ProgramV1 {
                         anchor: anchor.clone(),
                         tail: tail.clone(),
                     },
+                    ProgramCandidate::OnPath { name } => CandidateV1::OnPath { name: name.clone() },
                 })
                 .collect(),
         }),
@@ -2685,7 +2871,25 @@ fn fallback_profile_in(table: &ProfileTable) -> usize {
 /// parked at the top — decide which shell a machine that was never asked opens
 /// with. The shipped order is a fact about this build and cannot be dragged.
 /// [`the_automatic_default_walks_the_shipped_order`] pins the two together.
-const SHIPPED_ORDER: [&str; 5] = ["pwsh", WINDOWS_POWERSHELL_ID, "wsl", "gitbash", "cmd"];
+///
+/// **The three agent rows are on it and none of them can ever be reached**
+/// (user ruling 2026-08-28, §7.41), which is why they are written down rather
+/// than left off. The walk stops at `winps` at the latest — that row names a
+/// program that is part of Windows — so an agent could only be answered for on a
+/// machine with no PowerShell at all, which is not a Windows. Leaving them out
+/// would have been the same sentence said by omission, and the day somebody
+/// wonders whether a first run can open Claude Code the answer would have to be
+/// reconstructed from two lists instead of read off one.
+const SHIPPED_ORDER: [&str; 8] = [
+    "pwsh",
+    WINDOWS_POWERSHELL_ID,
+    "wsl",
+    "gitbash",
+    "cmd",
+    "claude",
+    "codex",
+    "copilot",
+];
 
 /// The default on a machine where nobody has chosen one: the first row of
 /// [`SHIPPED_ORDER`] this machine can actually start (**user ruling
@@ -3430,6 +3634,11 @@ impl ProfilePrograms {
             ProgramCandidate::Under { variable, tail } => {
                 Some(Path::new(&environment.var_os(variable)?).join(tail))
             }
+            // The name is the whole address. `search_path` already answers with
+            // the file it found, so there is nothing left to join and nothing
+            // to climb — see the variant for why that is a third form and not a
+            // shorthand for the one below it.
+            ProgramCandidate::OnPath { name } => search_path(environment, name),
             ProgramCandidate::BesideOnPath { anchor, tail } => {
                 let found = search_path(environment, anchor)?;
                 // The anchor's install root is some ancestor of wherever PATH
@@ -11497,14 +11706,19 @@ mod tests {
         crate::shortcuts::Shortcuts::defaults()
     }
 
-    /// The shipped five, as the `const` array this module's cases were written
+    /// The shipped rows, as the `const` array this module's cases were written
     /// against.
     ///
     /// A call per case rather than a static: the rows own their strings now
     /// (§7.1.6c-6), so there is no array to borrow. What the cases mean by it is
     /// unchanged — **the table this build ships**, which is exactly what they
     /// were pinning before the user could reorder anything.
-    fn shipped_five() -> Vec<Profile> {
+    ///
+    /// It was `shipped_five` until 2026-08-28, when three agent rows joined the
+    /// five shells. The count came *out* of the name rather than being corrected
+    /// to eight: a number in a fixture's name is a fact about this build written
+    /// in the one place nothing can keep it true.
+    fn shipped_rows() -> Vec<Profile> {
         shipped()
     }
 
@@ -12616,15 +12830,26 @@ mod tests {
             self
         }
 
-        /// A machine with all five shells on it, spelled the way a real Windows
+        /// A machine with every shipped row startable on it — five shells and,
+        /// since 2026-08-28, three agents — spelled the way a real Windows
         /// install spells them.
+        ///
+        /// The agents arrive the way they actually arrive: npm's global bin on
+        /// `PATH`, holding a `.cmd` shim apiece. That is what keeps the greying
+        /// pin below a claim about a *machine* rather than about this fixture —
+        /// a candidate list that stopped matching how these three install would
+        /// leave every agent row greyed on every real desk and lit here.
         fn fully_equipped() -> Self {
             Self::bare_windows()
                 .with_var("ProgramFiles", r"C:\Program Files")
+                .with_var("PATH", r"C:\Users\dev\AppData\Roaming\npm")
                 .with_file(r"C:\Program Files\PowerShell\7\pwsh.exe")
                 .with_file(r"C:\WINDOWS\System32\wsl.exe")
                 .with_file(r"C:\WINDOWS\System32\cmd.exe")
                 .with_file(r"C:\Program Files\Git\bin\bash.exe")
+                .with_file(r"C:\Users\dev\AppData\Roaming\npm\claude.cmd")
+                .with_file(r"C:\Users\dev\AppData\Roaming\npm\codex.cmd")
+                .with_file(r"C:\Users\dev\AppData\Roaming\npm\copilot.cmd")
         }
 
         /// Windows with nothing installed on top of it — which still has Windows
@@ -12676,7 +12901,7 @@ mod tests {
     fn term(cwd: &str, manual_name: Option<&str>, secs_ago: u64) -> RecentEntry {
         RecentEntry {
             seed: Seed::Term {
-                profile_id: shipped_five()[fallback_profile()].id.to_owned(),
+                profile_id: shipped_rows()[fallback_profile()].id.to_owned(),
                 cwd: cwd.to_owned(),
                 manual_name: manual_name.map(str::to_owned),
             },
@@ -12901,10 +13126,19 @@ mod tests {
     /// means by "PowerShell", 5.1 beside it because the pair is the choice.
     #[test]
     fn the_picker_offers_exactly_the_profiles_this_build_has() {
-        assert_eq!(count(), 5);
-        let shipped = shipped_five();
+        assert_eq!(count(), 8);
+        let shipped = shipped_rows();
         let listed: Vec<_> = shipped.iter().map(|profile| profile.id.as_str()).collect();
-        assert_eq!(listed, ["pwsh", "winps", "wsl", "gitbash", "cmd"]);
+        // **Five shells, then three agents** (user ruling 2026-08-28, §7.41).
+        // The agents go after the shells and not among them: the order is the
+        // picker's, and a picker whose first rows are three tools most machines
+        // have not got installed opens on a screen of greyed text.
+        assert_eq!(
+            listed,
+            [
+                "pwsh", "winps", "wsl", "gitbash", "cmd", "claude", "codex", "copilot"
+            ]
+        );
         assert_eq!(display_title(fallback_profile()), "Windows PowerShell 5.1");
 
         // **Mark × title, and not the mark alone.** This used to require every
@@ -12915,8 +13149,8 @@ mod tests {
         // identity *is* — "图标 × 目录", the icon and the text together — and in
         // this list the text is the title. Two rows with the same mark are fine;
         // two rows a reader cannot tell apart are not.
-        for (index, left) in shipped_five().iter().enumerate() {
-            for right in &shipped_five()[index + 1..] {
+        for (index, left) in shipped_rows().iter().enumerate() {
+            for right in &shipped_rows()[index + 1..] {
                 assert_ne!(
                     (left.mark, &left.display_title),
                     (right.mark, &right.display_title),
@@ -12936,15 +13170,75 @@ mod tests {
         // sharing one would be two tabs that cannot be told apart on disk.
         let ids: std::collections::HashSet<_> = listed.iter().collect();
         assert_eq!(ids.len(), count());
-        for profile in shipped_five() {
+        for profile in shipped_rows() {
             assert_eq!(
                 index_of_id(&profile.id),
-                shipped_five()
+                shipped_rows()
                     .iter()
                     .position(|p| p.id == profile.id)
                     .unwrap(),
                 "{} must resolve to its own row",
                 profile.id
+            );
+        }
+    }
+
+    /// PIN (user ruling 2026-08-28, §7.41) — **the three agent rows are
+    /// profiles and nothing else is true of them.**
+    ///
+    /// Everything this asserts is a way of saying the same thing: an agent is
+    /// *what a new tab starts*, so it is a row of this table under this table's
+    /// own rules and it gets no mechanism of its own. It resolves through
+    /// [`ProgramSource::FirstOf`] like `gitbash` does; it passes no arguments,
+    /// because an agent started with no arguments is the agent and any flag
+    /// chosen here would be a decision made for somebody who was not asked; it
+    /// inherits the folder the pane beside it is standing in, which is the whole
+    /// of what these tools are pointed at; and it derives
+    /// [`Integration::None`], the honest and complete answer for a program that
+    /// is not a shell.
+    ///
+    /// **Every candidate is a lookup and none of them is a spawn.** Named here
+    /// because these three are the first rows whose program is found by *name*
+    /// rather than at a place, and "is it installed" is the one question a probe
+    /// is most tempted to answer by running `--version`: this table is walked
+    /// before the first tab exists, three process spawns on that path is the
+    /// slow-start line's own defect, and a file that exists is the answer.
+    ///
+    /// Red gate: give one of the three an argument, or point it at
+    /// [`ProgramSource::Path`] — a frozen path stops being the install the user
+    /// is actually using the first time npm moves its prefix.
+    #[test]
+    fn an_agent_row_is_a_profile_under_this_tables_own_rules() {
+        for id in ["claude", "codex", "copilot"] {
+            let row = row(index_of_id(id)).expect("the agent is a row");
+            assert_eq!(row.origin, Origin::Builtin, "{id}");
+            assert!(
+                !row.hidden,
+                "{id} ships visible; §7.27 greys, it never hides"
+            );
+            assert!(row.args.is_empty(), "{id} passes no arguments");
+            assert!(row.env.is_empty(), "{id} sets nothing in the environment");
+            assert_eq!(row.start_at, StartAt::Inherit, "{id}");
+            assert_eq!(row.starting_dir, StartingDir::WindowsHome, "{id}");
+            assert_eq!(row.paths, PathNamespace::Windows, "{id}");
+            assert_eq!(
+                row.compared_title, None,
+                "{id} has no script announcing a name this build chose"
+            );
+            assert_eq!(
+                served_by(&row),
+                Integration::None,
+                "{id} is not a shell, and no door is invented for it"
+            );
+            let ProgramSource::FirstOf(candidates) = &row.program else {
+                panic!("{id} resolves on the machine rather than at a frozen path");
+            };
+            assert!(
+                candidates.iter().any(|candidate| matches!(
+                    candidate,
+                    ProgramCandidate::OnPath { name } if name.starts_with(id)
+                )),
+                "{id} asks PATH for its own name first: {candidates:?}"
             );
         }
     }
@@ -12959,7 +13253,7 @@ mod tests {
     /// exact failure that cannot be seen from a screenshot of the menu.
     #[test]
     fn only_the_powershell_profile_asks_for_nologo() {
-        for profile in shipped_five() {
+        for profile in shipped_rows() {
             let has_nologo = profile.args.iter().any(|argument| argument == "-NoLogo");
             // Both PowerShells: the flag belongs to the family, not to one row.
             let is_powershell = profile.id == "pwsh" || profile.id == "winps";
@@ -13007,13 +13301,13 @@ mod tests {
         assert_eq!(display_title(five), "Windows PowerShell 5.1");
         for profile in [seven, five] {
             assert!(
-                shipped_five()[profile]
+                shipped_rows()[profile]
                     .display_title
                     .split_whitespace()
                     .any(|word| word.starts_with(|first: char| first.is_ascii_digit())),
                 "{:?} names its version, which is the only thing telling it from \
                  the row beside it",
-                shipped_five()[profile].id
+                shipped_rows()[profile].id
             );
         }
 
@@ -13117,13 +13411,13 @@ mod tests {
     #[test]
     fn the_fallback_profile_can_always_be_started() {
         assert_eq!(
-            shipped_five()[fallback_profile()].id,
+            shipped_rows()[fallback_profile()].id,
             "winps",
             "the floor is the shell that is part of Windows"
         );
         assert!(
             !matches!(
-                shipped_five()[fallback_profile()].program,
+                shipped_rows()[fallback_profile()].program,
                 ProgramSource::PowerShellSeven
             ),
             "and never the row that is allowed to answer `no` — a fallback chain              whose bottom can be greyed has a hole in it"
@@ -13151,7 +13445,7 @@ mod tests {
             &chord_table(),
             &mut fake_measure,
         );
-        for (chosen, profile) in shipped_five().iter().enumerate() {
+        for (chosen, profile) in shipped_rows().iter().enumerate() {
             let layers = build(
                 &layout,
                 &equipped(),
@@ -13310,6 +13604,24 @@ mod tests {
                     index_of_id("cmd"),
                     "Command Prompt — not found on this machine".to_owned()
                 ),
+                // The three agents (user ruling 2026-08-28). A bare Windows box
+                // has none of them, and each says so **in its own name** — which
+                // is what this rule is worth on these three rows in particular:
+                // `Codex` and `Copilot CLI` wear the same neutral chassis, so
+                // the name in the sentence is the only thing that tells a reader
+                // which of the two they have not got.
+                (
+                    index_of_id("claude"),
+                    "Claude Code — not found on this machine".to_owned()
+                ),
+                (
+                    index_of_id("codex"),
+                    "Codex — not found on this machine".to_owned()
+                ),
+                (
+                    index_of_id("copilot"),
+                    "Copilot CLI — not found on this machine".to_owned()
+                ),
             ],
             "every greyed row says why, in its own name, and the startable one \
              says nothing"
@@ -13328,8 +13640,9 @@ mod tests {
             assert_eq!(*rect, expected);
         }
 
-        // And on a machine with all four, no profile row has anything to add —
-        // but the Recent row still carries the path its caption cropped.
+        // And on a machine that has every one of them, no profile row has
+        // anything to add — but the Recent row still carries the path its
+        // caption cropped.
         let equipped_tips: Vec<_> = layout.tips(&equipped(), &vault).collect();
         assert_eq!(
             equipped_tips,
@@ -13422,7 +13735,7 @@ mod tests {
     /// PIN — the order a machine that was never asked is searched in is the
     /// order the rows are shipped in, and the two cannot drift.
     ///
-    /// [`SHIPPED_ORDER`] is a second list of the same five ids, written out so
+    /// [`SHIPPED_ORDER`] is a second list of the same ids, written out so
     /// that a table the reader has reordered cannot move the answer. A second
     /// list is a second thing to maintain, and this is what stops it becoming a
     /// second thing to *believe*: a row renamed or added in [`shipped`] and not
@@ -13430,8 +13743,8 @@ mod tests {
     /// quietly skip it.
     #[test]
     fn the_automatic_default_walks_the_shipped_order() {
-        let five = shipped_five();
-        let ids: Vec<&str> = five.iter().map(|profile| profile.id.as_str()).collect();
+        let rows = shipped_rows();
+        let ids: Vec<&str> = rows.iter().map(|profile| profile.id.as_str()).collect();
         assert_eq!(
             ids,
             SHIPPED_ORDER.to_vec(),
@@ -13652,8 +13965,8 @@ mod tests {
         let windows = Path::new(r"D:\Developer\folio-terminal");
         let mounted = Path::new("/mnt/d/Developer/folio-terminal");
         let inside = Path::new("/home/alice/src");
-        for (source, profile) in shipped_five().iter().enumerate() {
-            for (target, other) in shipped_five().iter().enumerate() {
+        for (source, profile) in shipped_rows().iter().enumerate() {
+            for (target, other) in shipped_rows().iter().enumerate() {
                 let (standing, expected) = match (profile.paths, other.paths) {
                     (PathNamespace::Windows, PathNamespace::Windows) => (windows, Some(windows)),
                     (PathNamespace::Windows, PathNamespace::Wsl) => (windows, Some(mounted)),
@@ -13730,7 +14043,7 @@ mod tests {
     /// unable to say which of them `WSL` opens.
     #[test]
     fn only_the_profile_that_names_a_launcher_wears_the_machine_s_answer() {
-        for profile in &shipped_five() {
+        for profile in &shipped_rows() {
             assert_eq!(
                 compose_title(profile, None),
                 profile.display_title,
@@ -13777,7 +14090,7 @@ mod tests {
         );
 
         let all = equipped();
-        for (index, profile) in shipped_five().iter().enumerate() {
+        for (index, profile) in shipped_rows().iter().enumerate() {
             assert!(
                 all.is_available(index),
                 "{} is installed here and must be offered",
@@ -14740,7 +15053,7 @@ mod tests {
     /// index, and never a profile.
     ///
     /// Red gate: the menu's rows used to be one untagged `usize` indexed
-    /// straight into [`shipped_five()`]. With a Recent section under them that number
+    /// straight into [`shipped_rows()`]. With a Recent section under them that number
     /// names two different things, and the bug it produces is silent — clicking
     /// the third recent seed launches a bare PowerShell in the wrong folder and
     /// looks, from the outside, exactly like the menu working.
@@ -17282,7 +17595,7 @@ mod tests {
                 .iter()
                 .map(|sprite| sprite.mark)
                 .collect::<Vec<_>>(),
-            shipped_five()
+            shipped_rows()
                 .iter()
                 .map(|profile| profile.mark)
                 .collect::<Vec<_>>(),
@@ -19393,11 +19706,19 @@ mod tests {
     /// Red gate: seed the table from anything but `shipped()`, or let a missing
     /// file mean "empty table", and every surface in the window changes at once.
     #[test]
-    fn a_machine_with_no_profiles_file_gets_the_shipped_five_unchanged() {
+    fn a_machine_with_no_profiles_file_gets_the_shipped_rows_unchanged() {
         let (built, faults) = merge(shipped(), &ProfilesV1::default());
         assert_eq!(built, shipped());
         assert!(faults.is_empty());
-        assert_eq!(ids(&built), ["pwsh", "winps", "wsl", "gitbash", "cmd"]);
+        // Five shells and then the three agents (user ruling 2026-08-28) — the
+        // order the picker opens in, which is shells first because a first
+        // screen of greyed rows is a first screen of nothing.
+        assert_eq!(
+            ids(&built),
+            [
+                "pwsh", "winps", "wsl", "gitbash", "cmd", "claude", "codex", "copilot"
+            ]
+        );
         assert!(
             built.iter().all(|profile| !profile.hidden),
             "and none of them arrives hidden"
@@ -19430,7 +19751,14 @@ mod tests {
             ]),
         );
         assert!(faults.is_empty());
-        assert_eq!(ids(&built), ["cmd", "wsl", "gitbash", "winps", "pwsh"]);
+        // The five the file named, in the file's order, and then the three it
+        // never mentioned — which is the rule the pin below states in full.
+        assert_eq!(
+            ids(&built),
+            [
+                "cmd", "wsl", "gitbash", "winps", "pwsh", "claude", "codex", "copilot"
+            ]
+        );
         assert_eq!(built[1].display_title, "Ubuntu");
         assert_eq!(
             built[1].id, "wsl",
@@ -19464,7 +19792,12 @@ mod tests {
     fn a_shipped_id_the_file_never_names_is_appended_and_visible() {
         let (built, faults) = merge(shipped(), &file(vec![named("cmd"), named("wsl")]));
         assert!(faults.is_empty());
-        assert_eq!(ids(&built), ["cmd", "wsl", "pwsh", "winps", "gitbash"]);
+        assert_eq!(
+            ids(&built),
+            [
+                "cmd", "wsl", "pwsh", "winps", "gitbash", "claude", "codex", "copilot"
+            ]
+        );
         assert!(built[2..].iter().all(|profile| !profile.hidden));
     }
 
@@ -19486,7 +19819,12 @@ mod tests {
                 id: "fish".to_owned()
             }]
         );
-        assert_eq!(ids(&built), ["pwsh", "cmd", "winps", "wsl", "gitbash"]);
+        assert_eq!(
+            ids(&built),
+            [
+                "pwsh", "cmd", "winps", "wsl", "gitbash", "claude", "codex", "copilot"
+            ]
+        );
         assert!(
             crate::i18n::profile_entry_fault(&faults[0]).contains("fish"),
             "the sentence names the entry, because the id is what the reader has \
@@ -19550,7 +19888,9 @@ mod tests {
                 .into_iter()
                 .map(|index| table.profiles()[index].id.as_str())
                 .collect::<Vec<_>>(),
-            ["pwsh", "winps", "wsl", "gitbash"],
+            [
+                "pwsh", "winps", "wsl", "gitbash", "claude", "codex", "copilot"
+            ],
             "the `˅` menu, the `+` and the picker are all one list, and `cmd` is \
              not on it"
         );
@@ -20196,7 +20536,9 @@ mod tests {
         assert_eq!(registry.revision(), 1);
         assert_eq!(
             ids(registry.table().profiles()),
-            ["winps", "pwsh", "wsl", "gitbash", "cmd"]
+            [
+                "winps", "pwsh", "wsl", "gitbash", "cmd", "claude", "codex", "copilot"
+            ]
         );
         assert!(
             registry.move_profile(0, true),

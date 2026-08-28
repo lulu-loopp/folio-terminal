@@ -43,15 +43,17 @@ use crate::i18n::{Lang, Text};
 
 /// Everything the window can be asked to do from the keyboard.
 ///
-/// `CommandPalette` is a real row with no machine behind it yet (the palette is P1-9). It is
-/// listed, bound, and dispatched to an explicit no-op rather than omitted: the audit decided the
-/// key belongs to us, so nothing else may claim it and nothing may leak to the shell in the
-/// meantime.
+/// `SummonPip` is the family with no machine behind it yet: four rows, listed, unassigned, and
+/// dispatched to an explicit no-op rather than omitted, because the audit decided the *slots*
+/// belong to us even though none of their chords does.
 ///
-/// `JumpAttention` was the other one until 2026-08-20, when the attention queue (P1-8) landed with
+/// `JumpAttention` was a stub too until 2026-08-20, when the attention queue (P1-8) landed with
 /// §7.1.6b′ F3 and gave it [`crate::Runtime::jump_to_attention`]. What the stub bought is exactly
 /// what it was for: the chord was already the user's, already documented, and already unable to
 /// leak, so the verb arriving changed one arm of one `match` and nothing else.
+///
+/// **`CommandPalette` was the third, and it left the table on 2026-08-28** — see the variant's
+/// own note for the ruling that took its chord back off it for the preview.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Action {
     NewTab,
@@ -81,6 +83,30 @@ pub(crate) enum Action {
     GotoTab(u8),
     ReopenClosed,
     JumpAttention,
+    /// **The verb the preview ships without, and the name it keeps** (user
+    /// ruling 2026-08-28).
+    ///
+    /// It held `Ctrl+Shift+P` from the 2026-08-10 audit until now, on the stub
+    /// row's argument: the key is ours, nothing else may claim it, nothing leaks
+    /// to the shell in the meantime. That argument is about *this table's*
+    /// neighbours, and it was answered honestly for as long as the only readers
+    /// were the panel and the shell. The preview has a third reader — a person
+    /// deciding whether this product works — and to them a row that draws itself
+    /// beside `Bound, but the action behind it is not built yet` is a shipped
+    /// feature that does nothing. So for v0.2 the palette gets its chord back;
+    /// until then the table does not claim a key it cannot honour, and
+    /// `Ctrl+Shift+P` reaches the shell like any other unclaimed chord.
+    ///
+    /// **The variant stays** rather than being deleted and re-added. The verb is
+    /// scheduled, not withdrawn; `main`'s dispatch keeps the arm that answers it
+    /// with nothing, so the day the palette lands it is one row of [`BINDINGS`]
+    /// and one arm of one `match` — the same shape `JumpAttention` had when it
+    /// arrived. Nothing constructs it while it is out of the table, which is
+    /// what the attribute below is for and the whole of what it says.
+    #[allow(
+        dead_code,
+        reason = "the v0.2 palette's name, held while its row is out of BINDINGS"
+    )]
     CommandPalette,
     /// **Turn focus mode on, or off** — one chord for both directions
     /// (§7.1.6b′ ②).
@@ -615,8 +641,14 @@ impl Action {
     /// stub row is a promise with a date on it, and the note comes off the row
     /// the day the verb lands rather than being maintained as a second opinion
     /// about which verbs exist.
+    ///
+    /// **`CommandPalette` left it the other way on 2026-08-28** — not because
+    /// the verb arrived but because the row did not, and a row that is not in
+    /// [`BINDINGS`] has no key to be claimed *or* pending. The two exits are the
+    /// same mechanism read in both directions: this predicate is about rows, so
+    /// a name with no row is not one of its answers.
     const fn is_pending(self) -> bool {
-        matches!(self, Self::CommandPalette | Self::SummonPip(_))
+        matches!(self, Self::SummonPip(_))
     }
 }
 
@@ -787,12 +819,16 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Action::JumpAttention,
         Chord::new(CTRL_SHIFT, character("a")),
     ),
-    Binding::window(
-        "command-palette",
-        Text::ShortcutCommandPalette,
-        Action::CommandPalette,
-        Chord::new(CTRL_SHIFT, character("p")),
-    ),
+    // **`command-palette` stood here until 2026-08-28, and its chord is nobody's
+    // now** (user ruling). See [`Action::CommandPalette`] for why the name is
+    // kept while the row is not, and `Ctrl+Shift+P` is asserted unclaimed by
+    // `every_ruled_binding_resolves_to_its_action` below and by `main`'s
+    // `the_retired_preview_chord_reaches_the_shell_like_any_other_key`.
+    //
+    // Nothing takes the freed key. The chord is the palette's everywhere else on
+    // this platform, and a row that moved into it for one release would have to
+    // move back out of somebody's fingers in the next.
+    //
     // **`Ctrl+Shift+Z`, and the settling of the chord P2-7 left open**
     // (§7.1.6b′ ②, user ruling 2026-08-19).
     //
@@ -2529,9 +2565,15 @@ mod tests {
             press(character("a"), CTRL_SHIFT),
             Some(Action::JumpAttention)
         );
+        // **And the chord that used to be here is nobody's** (user ruling
+        // 2026-08-28). The palette's row is out of the table until the verb
+        // behind it ships, so `Ctrl+Shift+P` reaches the shell like any other
+        // unclaimed chord — see [`Action::CommandPalette`].
         assert_eq!(
             press(character("p"), CTRL_SHIFT),
-            Some(Action::CommandPalette)
+            None,
+            "the palette's row left the table with its verb unbuilt, and took \
+             its chord with it"
         );
         // **Focus mode's one chord** (§7.1.6b′ ②), and since the 2026-08-19
         // ruling withdrew the pane-header double-click and the pane menu's row,
@@ -3151,7 +3193,10 @@ mod tests {
         // single actions. It was written on `Ctrl+Shift+Enter` first and moved the
         // same day, because a modified `Enter` does not reach this application;
         // the table is keyed on `Enter` nowhere, and that is now asserted.
-        assert_eq!(BINDINGS.len(), 40);
+        // **One fewer on 2026-08-28** (user ruling): `command-palette` is out,
+        // which puts the single actions back to 23 and the table at 39. The
+        // name survives in [`Action`] and the row does not — see that variant.
+        assert_eq!(BINDINGS.len(), 39);
         assert_eq!(
             BINDINGS
                 .iter()
@@ -3271,6 +3316,13 @@ mod tests {
     /// Every action the enum can name must actually be a row of the table —
     /// **with or without a chord**, because "unbound" is a state a row is in and
     /// not a row that is missing.
+    ///
+    /// **`CommandPalette` is the one exception and it is written down rather
+    /// than left out** (user ruling 2026-08-28): its row left the table for the
+    /// preview while the name stayed, so it is asserted *absent* at the foot of
+    /// this test instead of being quietly dropped from the list above — a name
+    /// that fell off both would be a verb nobody could tell had been withdrawn
+    /// on purpose.
     #[test]
     fn every_action_is_a_row_of_the_table() {
         let mut expected = vec![
@@ -3280,7 +3332,6 @@ mod tests {
             Action::PrevTab,
             Action::ReopenClosed,
             Action::JumpAttention,
-            Action::CommandPalette,
             Action::ToggleFocusMode,
             Action::SplitHorizontal,
             Action::SplitVertical,
@@ -3319,6 +3370,16 @@ mod tests {
                 "slot {slot} ships unassigned - see Action::SummonPip"
             );
         }
+        // **And the one name that is deliberately not a row.** Written as an
+        // assertion rather than as an omission, so that putting the row back for
+        // v0.2 is a change this test asks for out loud.
+        assert!(
+            !BINDINGS
+                .iter()
+                .any(|binding| binding.action == Action::CommandPalette),
+            "the palette's row is out of the table until its verb ships - see \
+             Action::CommandPalette"
+        );
     }
 
     // ── the editable table (Settings extension block, slice 2) ─────────────
@@ -3551,8 +3612,14 @@ mod tests {
             }
         }
         let mut table = Shortcuts::defaults();
+        // The row named here is any row: what is refused is the **chord**, and
+        // naming a row that exists is what makes the refusal the zone's rather
+        // than the id's. It used to name `command-palette`, whose row left the
+        // table on 2026-08-28 — at which point this gate started passing for the
+        // wrong reason ("no shortcut is called that in this build"), which is
+        // exactly the failure the assertion on `faults[0].reason` catches.
         let faults = table.apply_overrides(&[Override {
-            id: "command-palette".to_owned(),
+            id: "new-tab".to_owned(),
             chord: Some("Ctrl+Alt+Shift+P".to_owned()),
         }]);
         assert_eq!(faults.len(), 1, "the file's own line is refused too");
@@ -3917,10 +3984,20 @@ mod tests {
             "and it wears the scope tag its row carries — which since 2026-08-22              is the one that covers both of the capsule's hosts"
         );
 
-        // A stub row says its machine has not arrived, or a user presses it,
-        // sees nothing, and reports a decision as a bug.
-        let palette = named("Command palette");
-        assert_eq!(palette.note.as_deref(), Some(NOTE_MACHINE_PENDING.text()));
+        // **And the palette is not a line at all** (user ruling 2026-08-28).
+        // A stub row says its machine has not arrived, which is honest and was
+        // enough while the only readers were this panel and the shell. The
+        // preview has a reader deciding whether the product works, and to them
+        // a listed key that does nothing is a broken feature rather than a
+        // dated promise — so the row left the table and this page is one line
+        // shorter. See [`Action::CommandPalette`].
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.title == Text::ShortcutCommandPalette.text()),
+            "the palette's row is out of the table, so it is off the page: {:?}",
+            lines.iter().map(|line| line.title).collect::<Vec<_>>()
+        );
 
         // **And the note comes off the day the verb lands** (§7.1.6b′ F3). This
         // row was a stub for seven weeks beside the palette; the attention queue
@@ -4135,22 +4212,56 @@ mod tests {
 
     /// PIN §7.1.5e′ — **a row whose machine has not arrived is not offered.**
     ///
-    /// `Ctrl+Shift+P` is claimed, in the table and dispatched to an explicit
-    /// no-op; the shortcut *page* says so on a line with room for a note, and
-    /// this card has none. A list of what a press would do may not contain a
-    /// press that does nothing.
+    /// The shortcut *page* draws a stub row on a line with room for a note; this
+    /// card has none. A list of what a press would do may not contain a press
+    /// that does nothing.
+    ///
+    /// **Asked of a row this test builds, and that is not a workaround** (user
+    /// ruling 2026-08-28). Every pending row the build now *ships* is a
+    /// picture-in-picture slot, and all four ship with no chord at all, so the
+    /// shipped table can no longer put a pending row in front of this clause —
+    /// `answers_a_hand_holding` would refuse them on the missing chord and the
+    /// gate would pass while saying nothing. The property is about a row that is
+    /// bound **and** unbuilt, which is the state `command-palette` was in until
+    /// its row left the table (see [`Action::CommandPalette`]) and the state the
+    /// first assigned summon slot will be in the moment a user records one. So
+    /// the subject is constructed here rather than borrowed, and the clause
+    /// stays under a gate that can fail.
     ///
     /// Mutation: drop the `!self.action.is_pending()` clause.
     #[test]
     fn a_row_whose_verb_has_not_arrived_is_not_offered() {
-        let held = hint_titles(CTRL_SHIFT, ON_A_TERMINAL);
-        assert!(
-            !held.contains(&Text::ShortcutCommandPalette.text()),
-            "the palette has no machine behind it yet: {held:?}"
+        let pending = Binding::window(
+            "summon-pip-1",
+            Text::ShortcutSummonPip1,
+            Action::SummonPip(1),
+            Chord::new(CTRL_SHIFT, super::character("0")),
         );
         assert!(
+            !pending.answers_a_hand_holding(CTRL_SHIFT, ON_A_TERMINAL),
+            "a slot somebody has given a chord still has no machine behind it"
+        );
+        let arrived = Binding::window(
+            "jump-attention",
+            Text::ShortcutJumpAttention,
+            Action::JumpAttention,
+            Chord::new(CTRL_SHIFT, super::character("0")),
+        );
+        assert!(
+            arrived.answers_a_hand_holding(CTRL_SHIFT, ON_A_TERMINAL),
+            "and the identical row whose verb exists is offered"
+        );
+        // The shipped table's own half: the row that stopped being a stub is on
+        // the card, and the name whose row left the table is on nothing.
+        let held = hint_titles(CTRL_SHIFT, ON_A_TERMINAL);
+        assert!(
             held.contains(&Text::ShortcutJumpAttention.text()),
-            "and the row that stopped being a stub is offered: {held:?}"
+            "the row that stopped being a stub is offered: {held:?}"
+        );
+        assert!(
+            !held.contains(&Text::ShortcutCommandPalette.text()),
+            "and the palette, whose row is out of the table entirely, is on \
+             nothing: {held:?}"
         );
     }
 

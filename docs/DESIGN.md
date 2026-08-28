@@ -4753,6 +4753,57 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 
 **日期:2026-08-28。**
 
+### 7.41 preview 交出命令面板的键、参数行给出一句示例、内置三条 agent 档案、被应用切断的引用整条一起亮(用户四条裁决 2026-08-28,已落地;`crates/bt-app/src/{shortcuts,profiles,marks,i18n,settings,webhost}.rs`、`crates/bt-persist/src/profiles.rs`、`crates/bt-pty/src/lib.rs`、`crates/bt-viewport/src/lib.rs`)
+
+四条互不相干的裁决同批落地,写在一节里是因为它们同一天被裁,不是因为它们同一件事。
+
+**① `Ctrl+Shift+P` 交还给 shell,`Action::CommandPalette` 这个名字留着(`BINDINGS` 40 → 39)。**
+
+命令面板从 2026-08-10 的快捷键审计起就是一条「存根行」:键位是我们的,别人不许占,期间一个字节都不许漏给 shell(§7.1.5e「存根行是真实的行」)。那条论证是**说给这张表的邻居听的**,而它在只有两个读者——面板与 shell——的时候一直是诚实的。preview 有第三个读者:一个正在判断这个产品行不行的人。对那个人来说,一行画着「已绑定,但它背后的功能还没有做出来」的快捷键,不是一句带日期的承诺,是一个装出来不干活的功能。**所以 preview 把行从表里拿掉,v0.2 再绑回去**;`Ctrl+Shift+P` 在这期间像任何一个没人认领的和弦一样到达 shell,而且**没有别的行去占这个空出来的键**——这个和弦在这个平台上到处都是命令面板的,一个为了一个版本搬进去的行,下一个版本要从别人的手指底下搬出来。
+
+名字留着而不是删掉再加回来:动词是**排期了**,不是撤销了。`main` 的派发里那条答以 `Ok(())` 的臂留着(一个对该枚举的 `match` 无论多少行带键都得对每个名字负责),`Text::ShortcutCommandPalette` 也留着——「未引用文案」那条规矩的两半里,这里适用的是「保留并说明」那一半:这条串不是孤儿,是**早到**;删了它,撤走这件事在两个方向上都会变得看不见,而且 v0.2 绑回来的那天会有人把 `Command palette` 第二次翻译,一个动词两种措辞。两处 `#[allow(dead_code, reason = …)]` 是这句话在编译器面前的形式,不多也不少。
+
+门:`BINDINGS.len() == 39`;`every_action_is_a_row_of_the_table` 反过来**断言这个名字不在表里**(写成断言而不是从名单里悄悄删掉,这样 v0.2 把行放回去是这道门自己开口要的一次改动);`a_row_whose_verb_has_not_arrived_is_not_offered` 的主语改成测试自己造的一行——现在这个 build 里**在场的**待建行只剩四个画中画槽位,而四个全都不带和弦,于是 shipped 的表已经没法把「既绑定又未建成」的行摆到那条子句面前,门会因为缺和弦而通过并且什么都不说;`docs/shortcuts.md` 由 `generate-shortcuts-table.ps1` 重生成,`check-shortcuts-table.ps1` 绿。webhost 那张 `EXPECTED_CHORDS` 也少一行:在网页上这意味着的事和别处一样——这个和弦没被认领,所以页面留着它。
+
+**② 档案「参数」行给出一句示例,顺带补上一个从来没有被量过的口子。**
+
+文案加一句:英文 `e.g. -NoExit -File D:\me\start.ps1`,中文「例:-NoExit -File D:\me\start.ps1」。示例路径不含账户名。它要说的事只有一件:**启动脚本就写在这个框里**——一个装了一堆 profile 的人,不会从「传给程序」这四个字里推出「所以我可以在这里挂我的 `.ps1`」。
+
+真正要记下来的是量它的时候发现的事:**`no_settings_sentence_needs_a_fourth_line` 从来没量过编辑子页的八行**。`category_rows` 只有在 `editor` 是 `Some` 的时候才把 `EDITOR_ROWS` 折进来,而那道门的 fixture 打开的是 Profiles 的**列表**视图——于是这个对话框画得出来的八句话,一直在唯一一道量句子的门外面。这句示例本来可以就那样加进去而没有任何人量过它。门改成在 Profiles 这一页用带编辑器的 fixture 提问,并且在末尾**点名**断言这八行都被量到了(一个 fixture 悄悄不再持有它要管的行时,门会因为错误的理由通过,而且通过的时候一声不吭)。红证:把 fixture 改回去,`ProfileName is a row this dialog draws and its sentence was never measured`。
+
+**③ 内置八条:五条 shell,加 Claude Code / Codex / Copilot CLI。**
+
+一条档案是「新 tab 起什么」,而对这个产品服务的人来说,那个答案常常不是一个 shell。三条行没有为自己要任何新机制:走 `ProgramSource::FirstOf`,和 `gitbash` 一样;没装的按 §7.27 **灰显而不是隐藏**;装了的人在行菜单里 `Set as default`,以后新 tab 直接进 agent。`args` 空——不带参数启动的 agent 就是那个 agent,这张表替一个没被问过的人选的任何一个 flag 都是替他做主;起始目录 `StartAt::Inherit`,和其它每一行一样,于是在一个 pane 旁边开一个 agent 就是**在那个工程上**开它,而那正是这三样东西被指向的地方;`compared_title` 是 `None`(那个串是集成脚本报的名字,而这三条没有脚本);`IntegrationChoice::Auto` 推出 `Integration::None`,对一个不是 shell 的程序这是诚实的、也是完整的答案。
+
+**顺序是 shell 在前**,不是排名——第一行不是默认值,`settings.json` 的 `default_profile` 才是,底板是 `winps`——而是选择器的顺序:一个上来先摆三个多数机器没装的工具的选择器,第一屏是灰的。
+
+**和 Agents 页的三行开关是两回事,DESIGN 里说清:** 那一页装的是 **hook**,它教用户自己的 Claude Code / Codex / copilot 配置在一轮结束时告诉这扇窗;这里是**启动器**。两者在每个方向上都不相干:hook 对一个从 `pwsh` tab 里起的 agent 照样生效,而这三条 tab 在装 hook 之前是哑的。谁也不读谁。
+
+**探测只查文件在不在,不起进程。** 三条的候选表是 `PATH` 优先、其次 npm 的全局 bin,两半都有理由:`PATH` 上的是**用户已经在用的那一份**(`find_git` 一层之下的同一条论证),`%APPDATA%\npm` 兜住 npm 前缀没进到本进程 `PATH` 里的机器(`PATH` 是登录时读的,而 npm 的安装器改它)。这里第一次出现「按**名字**找程序」的候选形态,所以 `ProgramCandidate::OnPath { name }` 是第三种形态而不是 `BesideOnPath` 的一个退化写法——上面两种从一个**地方**出发,这一种从一个名字出发;写成 `BesideOnPath { anchor: "claude.cmd", tail: "claude.cmd" }` 找得到同一个文件,而且是一句没有人读得懂的话。**「装没装」这个问题最容易被 `--version` 回答**:这张表在第一个 tab 存在之前就被走一遍,那条路上三次起进程正是启动慢那条线在治的毛病,而一个在场的文件就是答案。
+
+**`profiles.json` 没有升版,理由是 `MarkV1` 自己的判例。** `CandidateV1` 长出第三个词是**加法**:磁盘上每一个 `under` 与 `beside_on_path` 的读法一字不变,新词只会出现在这个 build 写出来的文件里——内置行只写自己的 id,所以它上盘的唯一途径是有人**复制**了一条 agent 行。`MarkV1` 在后一个切片长出对象形态时立的规矩就是这一条:「作为一个**对象**形态站在它旁边,而不是重定义它」,前一个切片写的文件读法一字不变。升一版换不来老 build 能做的任何事(它会拒绝整份文档,而不是那一行),却要让每一份没动过的 v1 文件走一次什么都不改的迁移。
+
+**`.cmd` 是用户跑得起来、`CreateProcess` 起不动的程序**,所以起它的那一位被放到它前面(`bt_pty::through_the_interpreter`)。npm 装出来的工具就是一个 `.cmd` 垫片,一扇把 `claude` 解析到垫片、再把垫片直接交给 launcher 的窗,会在一台用户天天从自己 shell 里敲 `claude` 的机器上每一次 spawn 都失败。这是一件关于**在 Windows 上启动一个程序**的事实,所以它住在 `bt-pty` 而不是住在恰好第一个撞上它的那张档案表旁边——今天已经有三种东西撞上它:npm 垫片、编辑器文件选择器指到 `.cmd` 的用户档案、以及 `crate::shell` 隔壁记着的同族案子(`CreateFileW` 拒绝而 `CreateProcess` 会跟的 `AppExecLink`)。`/c` 而不是 `/k`:tab 的寿命就是那个程序的寿命,`/k` 会在程序退出之后在 pane 里留一个没人要的第二个 shell。
+
+**图标:一枚有,两枚没有,这是照实办而不是偷懒。** `#p-claude` **本来就在 `design/ui-mockup.html` 里**,和四枚 shell 标并排放着,从档案族被画出来那天起就没有任何地方引用过——因为在这条裁决之前,这张表里没有一行跑 agent。所以 `ChromeMark::ProfileClaude` 是**把设计权威读出来**,不是这个 crate 发明了一个 logo;按家族在 P2 走过的同一步缩到 chassis 上(`12 / 13.9` 绕自身中心,分母是这张图自己的墨:`1.8 – 14.2` 的路径两端各加半个圆头),两支笔一起缩——一支停在原处的辐条会是另一个星号,而不是一个小一点的星号。**Codex 与 Copilot 在设计权威里没有图**,而 `ChromeMark::ProfileGeneric` 的注释本来就写着这条规矩:一条没有 logo 可继承的档案穿中性 chassis,「给它发明一个,就是这张清单在主张一个这一行并不具备的来历」。两枚就穿中性 chassis(Codex 石板灰、Copilot 紫),**这是一笔挂账不是一个结论**——要不要为这两家出一枚牌子,是产品的主人的决定,并且它带着一个用户已经列在公开前清单上的商标问题。同一条 tip 门顺带把这件事钉住了:两行穿同一块 chassis,所以「没找到」那句话里**各自的名字**是读者唯一能据以分清自己缺的是哪一个的东西。
+
+**④ 一条被应用自己切成多行的引用,悬停时整条一起亮。**
+
+现象:Claude Code 这类全屏应用按自己的宽度把长路径切成几行,识别层早就能拼回并出卡(§7.30 `rejoined_across_break`),但悬停的实线只画到指针所在那一段。
+
+**真正的成因不是画线那一侧,是拼接的证据在这条路上根本拿不出来。** `rejoined_across_break` 读的是**印出来的标签**——把几段的文字接起来,看它是不是一字不差地拼出目标的两种写法之一(URI,或一个 `file:` URI 印出来的路径)。对 OSC 8 声明的链接这是唯一可读的证据:两次 emission 之间没有任何东西说它们是一件事。而 §7.1.5j 给**推断出来的**引用又添了两种标签,没有任何一种目标的写法能复现:
+
+- **带位置的**:读者看见 `…\file.rs:12:3`,目标是 `…/file.rs#L12C3` —— 接起来的字永远对不上,于是每一条 agent 跨行印出来的 `path:line[:col]` 都只亮一行;
+- **相对的**:读者看见 `dist\folio.exe`,目标是它被解析成的绝对路径,这一层既不持有也无法反推——印出来的路里有 `..` 的时候,它连答案的一个后缀都不是。
+
+所以修法不是再加第三种、第四种拼法,而是**让知道答案的那一层别把答案扔掉**:`implicit_hyperlinks` 里那五道闸门刚刚判完「这两半是一条」,就把这个判断留在 cell 上(`rejoined_reference_mark`),`ViewportFrame::rejoined_by_record` 在 `link_span` 里**先**问这条记录、问不到再退回标签推断。
+
+**这没有动 2026-08-18 那条禁令。** 那条禁的是**应用盖的 id**:某个厂商给同一个 URL 的每一次出现盖同一个 id,那说的是「同一个目标」不是「同一次出现」,照它分组会把一整屏文件列表一起点亮。这里的 id 是**本 crate 为一道接缝铸的**,说的正是那个字段本来要说的窄的那句话;开头的 `U+0001` 让两类以确定性而不是以小概率区分开——OSC 8 的 `id=` 参数到达本 crate 的是 `id=` 与终止符之间的字节,而一个 C0 控制字节做不了其中之一,它会把串**结束掉**。
+
+红门 `a_reference_the_application_broke_across_rows_lights_up_whole_on_hover`:形状就是 agent 整天在印的那一种——带 `path:line:col` 的相对路径、前面有应用自己的 `[file]` 檐子、被应用的换行切在 `…\mai` 之后,而后半截长到**终端又把它软折了一次**,于是一条引用站在**三行**上,后面还印着尺寸列;指针放在**中间那一行**(读者最不可能去悬停的那一半,也是唯一能证明这个走法两个方向都走的那一半),断言三段的每一格都亮、而檐子和尺寸列一格都不亮。
+
+**日期:2026-08-28,四条同批。**
+
 ## 12. 发布工程
 
 一个能跑的 build 和一个能发的 build 之间隔着七件事,这一节是其中属于「构建与分发」和「CI」的那两件。写在这里而不是写在 workflow 的注释里,是因为其中每一条都是**裁决**:为什么版本只有一处、为什么 `.res` 是自己写的、为什么 `lto` 开或不开、为什么静态 CRT 没有采用——这些在一年后会被重新提起,而 YAML 不是回答它们的地方。

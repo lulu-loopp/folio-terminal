@@ -106,6 +106,11 @@ pub struct HyperlinkHit {
     /// OSC 8 grouping id. Present: the link is every frame cell carrying the same (id, uri) —
     /// soft-wrapped segments separated by layout indent stay one link. Absent (implicitly
     /// detected bare URL): the link is the contiguous same-uri cell run.
+    ///
+    /// One kind of id is not the application's: a printed reference this window proved spans an
+    /// application newline wears a mark minted here (see [`rejoined_reference_mark`]). It is opaque
+    /// to everything outside this crate and, like the others, participates in nothing but a hit's
+    /// own equality.
     pub id: Option<String>,
     pub start: ContentAnchor,
     pub end: ContentAnchor,
@@ -860,12 +865,92 @@ impl ViewportFrame {
     /// The cells one link occupies on screen around a hit cell, as a pair of flat cell indices.
     ///
     /// This is [`Self::link_group_run`] — the geometrically continuous run — plus the one thing a
-    /// run cannot see: **a line break the application made itself**. See
-    /// [`Self::rejoined_across_break`].
+    /// run cannot see: **a line break the application made itself**.
+    ///
+    /// There are two kinds of evidence for such a break and they belong to the two kinds of link,
+    /// asked in this order because the first is a record and the second is an inference:
+    ///
+    /// 1. [`Self::rejoined_by_record`] — an inferred printed reference, where recognition already
+    ///    decided the question and left its answer on the cells;
+    /// 2. [`Self::rejoined_across_break`] — an application-declared OSC 8 link, where nothing but
+    ///    the printed label can say whether two emissions are one link.
     fn link_span(&self, index: usize) -> Option<(usize, usize)> {
         let link = self.cells.get(index)?.hyperlink.as_ref()?;
         let run = self.link_group_run(index, link)?;
-        Some(self.rejoined_across_break(run, &link.uri).unwrap_or(run))
+        Some(
+            self.rejoined_by_record(run, link)
+                .or_else(|| self.rejoined_across_break(run, &link.uri))
+                .unwrap_or(run),
+        )
+    }
+
+    /// Grow one run into the whole reference when **recognition already proved** the two halves are
+    /// one, as a pair of flat cell indices — `None` for every link that carries no such proof.
+    ///
+    /// # Why a record and not the label
+    ///
+    /// [`Self::rejoined_across_break`] reads the printed label because for an OSC 8 link there is
+    /// nothing else to read: two emissions arrive with no statement that they are one thing, so the
+    /// terminal must argue from the text. An **inferred** reference is the opposite case.
+    /// `implicit_hyperlinks` runs §7.1.5k ②'s five gates over the two physical lines, hands the
+    /// joined text back to the same lexer, and goes to the disk for the name it spells; when it lays
+    /// one link over both halves, the question this method answers has already been answered with
+    /// better evidence than any label comparison could be.
+    ///
+    /// Re-deriving it from the label is not merely redundant, it is **not possible**, and that is
+    /// the defect this exists for (user report 2026-08-28). The label comparison knows a target's
+    /// two spellings — its URI, and the path an application prints for a `file:` URI — and §7.1.5j
+    /// gave printed references two more that no spelling of the target can reproduce:
+    ///
+    /// - a **location**: the reader sees `…\file.rs:12:3` and the target is `…/file.rs#L12C3`, so
+    ///   the concatenation never matched and every `path:line[:col]` an agent printed across a wrap
+    ///   lit one row only;
+    /// - a **relative** reference: the reader sees `dist\folio.exe` and the target is the absolute
+    ///   path it was resolved against, which this layer does not hold and cannot invert — `..` in
+    ///   the printed route makes it not even a tail of the answer.
+    ///
+    /// So the fix is not a third spelling and a fourth: it is that the layer which knows stops
+    /// throwing its answer away. See [`rejoined_reference_mark`] for why the id field carries it and
+    /// why the 2026-08-18 ruling against id-grouping is untouched by this.
+    ///
+    /// # The one geometric demand
+    ///
+    /// The walk crosses a seam only between **consecutive physical rows**, which is the same demand
+    /// [`Self::run_across_break`] makes and is true of a rejoin by construction — the two halves are
+    /// neighbouring logical lines. It is kept because it costs nothing and it means this method
+    /// cannot be talked into joining two distant things even if a mark were somehow duplicated.
+    /// Each neighbour is admitted through [`Self::link_group_run`], so a half the terminal also
+    /// soft-wrapped joins as the whole run it is rather than as its first row.
+    fn rejoined_by_record(
+        &self,
+        run: (usize, usize),
+        link: &bt_transcript::CellHyperlink,
+    ) -> Option<(usize, usize)> {
+        if !is_rejoined_reference_mark(link.id.as_deref()) {
+            return None;
+        }
+        let columns = self.columns.get() as usize;
+        let (mut first, mut last) = run;
+        while let Some(previous) = self.cells[..first]
+            .iter()
+            .rposition(|cell| cell_in_link_group(cell, link))
+        {
+            if previous / columns + 1 != first / columns {
+                break;
+            }
+            first = self.link_group_run(previous, link)?.0;
+        }
+        while let Some(next) = self.cells[last + 1..]
+            .iter()
+            .position(|cell| cell_in_link_group(cell, link))
+            .map(|offset| last + 1 + offset)
+        {
+            if next / columns != last / columns + 1 {
+                break;
+            }
+            last = self.link_group_run(next, link)?.1;
+        }
+        ((first, last) != run).then_some((first, last))
     }
 
     /// One id-group's **geometrically continuous run** around a hit cell, as a pair of flat
@@ -4425,7 +4510,13 @@ fn implicit_hyperlinks(
             let Some(joined) = paths.rejoin(&upper.text, edge, &lower.text) else {
                 continue;
             };
-            let link = CellHyperlink::implicit(joined.uri);
+            // The two halves are marked as one reference **here**, where the five gates have just
+            // proved it, rather than left for the frame to prove again off the printed text — see
+            // [`rejoined_reference_mark`] and [`ViewportFrame::rejoined_by_record`].
+            let link = CellHyperlink {
+                id: Some(rejoined_reference_mark(index)),
+                uri: joined.uri,
+            };
             claim_cells(rows, upper, joined.upper, &link, true, &mut claims);
             claim_cells(rows, lower, joined.lower, &link, true, &mut claims);
         }
@@ -4603,6 +4694,36 @@ fn live_row_is_blank(row: &CapturedRow) -> bool {
         .iter()
         .all(|cell| cell.text.chars().all(char::is_whitespace))
 }
+
+/// The grouping id this crate mints for the **one** reference [`implicit_hyperlinks`] proved spans
+/// an application newline (§7.1.5k ②), so that the cells carry the proof instead of the frame
+/// having to find it again.
+///
+/// # Why the id field, and why an application can never write this string
+///
+/// `CellHyperlink::id` is the field whose whole purpose is "these separated cells are one link",
+/// and an inferred reference cut across a newline is exactly that. The 2026-08-18 ruling that
+/// narrowed [`ViewportFrame::link_group_run`] is about ids **an application stamps** — a vendor
+/// that puts one id on every occurrence of a URL says "same target", not "same occurrence", and
+/// obeying it lights a whole file listing at once. This id is not an application's: it is minted
+/// here, for one seam, and it says the narrow thing the field was meant to say.
+///
+/// The leading `U+0001` is what keeps the two kinds apart with certainty rather than by
+/// improbability. An OSC 8 `id=` parameter reaches this crate as the bytes between `id=` and the
+/// sequence's terminator, and a C0 control byte cannot be one of them — it ends the string
+/// instead. So no application-declared group can ever equal a mark, and the geometry gate in
+/// [`ViewportFrame::rejoined_by_record`] would refuse it even if one could.
+fn rejoined_reference_mark(seam: usize) -> String {
+    format!("{REJOINED_REFERENCE_MARK}{seam}")
+}
+
+/// Whether a group id is one [`rejoined_reference_mark`] minted.
+fn is_rejoined_reference_mark(id: Option<&str>) -> bool {
+    id.is_some_and(|id| id.starts_with(REJOINED_REFERENCE_MARK))
+}
+
+/// The unforgeable half of [`rejoined_reference_mark`]; the seam's number follows it.
+const REJOINED_REFERENCE_MARK: &str = "\u{1}rejoined:";
 
 /// True when `cell` belongs to the same OSC 8 link group: exact (id, uri) match, read explicitly
 /// because `CellHyperlink`'s own equality deliberately covers the uri alone.
@@ -6489,6 +6610,71 @@ mod tests {
             !probes.contains(&PathBuf::from("D:\\WINDOWS\\system32\\Modules")),
             "gate ⑤ answers before the disk is asked anything: {probes:?}"
         );
+    }
+
+    /// PIN (user report 2026-08-28) — **a reference the application cut across rows lights up whole
+    /// under the pointer**, however many rows it lies on and wherever on it the pointer is.
+    ///
+    /// The shape is the one an agent prints all day: a relative path with a `path:line:col`
+    /// location (§7.1.5j ⑨), behind the application's own `[file]` gutter, cut by the
+    /// application's newline after `…\mai` — and then long enough that the terminal soft-wraps the
+    /// second half too, so the one reference stands on **three** rows with the size column printed
+    /// after it. The pointer is put on the middle row, which is the half the reader is least likely
+    /// to hover and the one that proves the walk goes both ways.
+    ///
+    /// RED before [`ViewportFrame::rejoined_by_record`]: rows 1 and 2 lit and row 0 stayed dotted,
+    /// because the label evidence
+    /// ([`ViewportFrame::rejoined_across_break`]) compares the printed text against the target's two
+    /// spellings and this reference is printed in neither — `crates\…\main….rs:16810:5` is a
+    /// relative route with a location, and the target is an absolute URI carrying `#L16810C5`.
+    ///
+    /// MUTATIONS: drop the id from the rejoined claim in [`implicit_hyperlinks`] and the join goes
+    /// back to being unprovable, which is the shipped defect; let
+    /// [`ViewportFrame::rejoined_by_record`] take the neighbouring cell instead of the run
+    /// [`ViewportFrame::link_group_run`] makes of it and the middle row alone joins, leaving the
+    /// row the terminal soft-wrapped it from resting.
+    #[test]
+    fn a_reference_the_application_broke_across_rows_lights_up_whole_on_hover() {
+        const COLUMNS: usize = 30;
+        // (row text, does the terminal wrap this row, which columns are the reference).
+        let rows = [
+            ("> [file] crates\\bt-app\\src\\mai", false, 9..30),
+            ("n-window-and-a-very-long-name.", true, 0..30),
+            ("rs:16810:5  (41.2KB)          ", false, 0..10),
+        ];
+        let (mut frame, _) = live_frame_of_paths(
+            rows.iter()
+                .map(|(text, continues, _)| CapturedRow::plain(text, *continues))
+                .collect(),
+            verified(&["D:\\src\\crates\\bt-app\\src\\main-window-and-a-very-long-name.rs"]),
+        );
+
+        // The pointer is on the middle row, and what it is standing on is the whole reference.
+        let hit = frame.hyperlink_at(1, 4).expect("the middle row is a link");
+        assert_eq!(
+            hit.uri,
+            "file:///D:/src/crates/bt-app/src/main-window-and-a-very-long-name.rs#L16810C5",
+            "the target is the file the two halves spell between them, and the line inside it"
+        );
+        for (row, column) in [(0u32, 12u32), (2, 3)] {
+            assert_eq!(
+                frame.hyperlink_at(row, column).unwrap(),
+                hit,
+                "the fragment on row {row} is the same reference as the one under the pointer"
+            );
+        }
+
+        assert!(frame.underline_hyperlink(&hit));
+        for (row, (_, _, reference)) in rows.iter().enumerate() {
+            for column in 0..COLUMNS {
+                assert_eq!(
+                    solid_at(&frame, row, column),
+                    reference.contains(&column),
+                    "row {row}, column {column}: the promise covers the reference and neither the \
+                     gutter in front of it nor the size column behind it"
+                );
+            }
+        }
     }
 
     /// §7.1.5k ①, the provenance dimension (scenario 62): **a DEC soft wrap is not an application

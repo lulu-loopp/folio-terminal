@@ -1029,6 +1029,26 @@ pub enum Text {
     ShortcutPrevTab,
     ShortcutReopenClosed,
     ShortcutJumpAttention,
+    /// **Kept while the row it names is out of the table** (user ruling
+    /// 2026-08-28).
+    ///
+    /// `command-palette` left `shortcuts::BINDINGS` for the preview because the
+    /// verb behind it does not exist yet, and the table's own gates now assert
+    /// the *absence* of that row rather than its presence — which is what still
+    /// reads this entry. Deleting the string would have made the withdrawal
+    /// invisible in both directions: nothing would say the name had been taken
+    /// out on purpose, and the day v0.2 binds it back somebody would translate
+    /// `Command palette` a second time and get a second wording for one verb.
+    ///
+    /// This is the "keep and say why" half of the unreferenced-string rule, and
+    /// it is the half that applies: the string is not orphaned, it is *early*.
+    /// Nothing outside `cfg(test)` names it while its row is out of the table,
+    /// which is the whole of what the attribute below says — and the shape
+    /// `shortcuts::Action::CommandPalette` is held in one file over.
+    #[allow(
+        dead_code,
+        reason = "the v0.2 palette's name, held while its row is out of BINDINGS"
+    )]
     ShortcutCommandPalette,
     ShortcutSplitHorizontal,
     ShortcutSplitVertical,
@@ -2630,8 +2650,8 @@ impl Text {
             Self::ProfilesRowArgs => pick(lang, "Arguments", "参数"),
             Self::ProfilesRowArgsDesc => pick(
                 lang,
-                "Passed to the program before it reads anything of its own. Spaces separate; double quotes group.",
-                "在程序读取自己的任何内容之前传给它。空格分词，双引号成组。",
+                "Passed to the program before it reads anything of its own. Spaces separate; double quotes group. e.g. -NoExit -File D:\\me\\start.ps1",
+                "在程序读取自己的任何内容之前传给它。空格分词，双引号成组。例：-NoExit -File D:\\me\\start.ps1",
             ),
             Self::ProfilesRowEnv => pick(lang, "Environment", "环境变量"),
             Self::ProfilesRowEnvDesc => pick(

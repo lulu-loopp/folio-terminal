@@ -42725,10 +42725,17 @@ impl Runtime<'_> {
             }
             shortcuts::Action::ReopenClosed => self.reopen_recent(0),
             // Bound, claimed, and deliberately inert. The attention queue (P1-8)
-            // and the command palette (P1-9) are ruled and keyed but unbuilt;
-            // the row is real so that nothing else takes the chord and no byte
-            // leaks to the shell in the meantime. Same latitude as the formulas
+            // and the command palette (P1-9) were ruled and keyed but unbuilt;
+            // the row was real so that nothing else took the chord and no byte
+            // leaked to the shell in the meantime. Same latitude as the formulas
             // switch: the seat exists before the machine that sits in it.
+            //
+            // **The palette gave its chord back on 2026-08-28** (user ruling)
+            // and its row left `BINDINGS`, so nothing dispatches here under that
+            // name any more. The arm stays because the *verb* is scheduled
+            // rather than withdrawn — see `shortcuts::Action::CommandPalette` —
+            // and because a `match` over that enum has to answer for every name
+            // in it however few rows carry one.
             //
             // The picture-in-picture slots join them (2026-08-17), one rung
             // further out: they are claimed *and* unassigned, so nothing arrives
@@ -100175,12 +100182,18 @@ mod tests {
                 "{modifiers:?}+P is claimed by nothing, in either focus"
             );
         }
-        // And the chord the scaffold deliberately stood aside from is still the
-        // command palette's, which is why the scaffold wore Alt in the first
-        // place — the reason it had to go is that Alt was never free either.
+        // And the chord the scaffold deliberately stood aside from is now free
+        // as well (user ruling 2026-08-28): the command palette's row left
+        // `BINDINGS` for the preview because the verb behind it does not exist
+        // yet, so every spelling of `P` this window can see reaches the shell.
+        // The scaffold wore Alt to keep off that chord; what retired the
+        // scaffold is that Alt was never free either, and that reasoning is
+        // untouched by the row leaving.
         assert_eq!(
             claimed(ModifiersState::CONTROL | ModifiersState::SHIFT),
-            Some(shortcuts::Action::CommandPalette)
+            None,
+            "Ctrl+Shift+P is claimed by nobody until the palette ships - see \
+             shortcuts::Action::CommandPalette"
         );
     }
 
