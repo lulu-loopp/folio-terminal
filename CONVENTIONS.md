@@ -154,6 +154,21 @@ PTY 字节流、用户输入、外部 API、配置文件是边界，要校验；
 1. **地址要一路唯一到取答案的那一层。** 「地址写在请求上」只写到 tab 是不够的——问「这个 id 在整个进程里唯一吗」，不唯一就把上一层加上去（`ShellAddress { window, leaf }` 之于 `LeafId`，正如 `LeafId` 之于 `SeatId`）。合并键（newest-per-target）也要一起加，否则两个持有者问同一件事会互相顶掉。
 2. **共享队列由拥有它的那一层抽一次，下层只取写着自己名字的那些、把别人的留在原地。** 一个下层实体调用 `try_recv` 就是它在替所有兄弟决定别人的答案值不值钱。钉它的测试可以很便宜：读源码，`fn apply_*_results` 的函数体里出现 `try_recv` 即红（`layer_shape_tests::no_window_drains_a_shared_worker_answer_queue`）。
 
+### 【事故】进程里同一时刻只许站一个无头 GPU 设备，并行建设备会把测试二进制打成 0xc0000005
+
+（2026-08-28，合并门；`crates/bt-render/src/lib.rs` 的 `GPU_TEST_LOCK` 与源码门 `every_headless_device_in_a_test_is_taken_through_the_lock`。）
+
+`cargo test --workspace` 跑到 `bt_render` 时整个测试进程以 `STATUS_ACCESS_VIOLATION (0xc0000005)` 死掉，日志停在 theme/video 那几条——**停在哪里和死因无关**，死的是同一进程里另外几条线程各自在向 D3D12 要适配器、要设备、做回读。同一支二进制 `--test-threads=1` 从来不死。崩在驱动里，所以这个仓库里没有任何一行代码能把它变安全；能做的只有**不要同时要两个**。
+
+量出来的：把这支测试二进制六份同时开、跑五轮，改前 **16/30 个进程崩**（退出码 `-1073741819`），改后同一支脚本 **0/30**；单开一次跑（`cargo test -p bt-render --lib -j 4`）改前十次里一次也不崩——**这条缺陷单跑复现不了，是负载把窗口撑开的**，所以别拿"我这儿跑了五遍都绿"当结论。
+
+规则：
+
+1. **一把进程级锁，一扇门。** 无头设备只在一个 helper 里建（`fn headless_device(format, demand_software)`），锁在建之前拿、在设备**析构之后**才放（守卫结构体里设备字段写在锁字段前面，字段按声明序析构）。只锁构造是不够的:回读同样会撞。
+2. **门要有源码钉。** 光靠"大家记得用 helper"守不住:一个绕过去的调用点在自己那台机器上可以绿几个星期，然后在某天调度器把它和别人排到一起时掐掉合并门。`every_headless_device_in_a_test_is_taken_through_the_lock` 扫本 crate `src` 下每个文件的 `#[cfg(test)]` 模块，`headless(` / `headless_fallback(` / `headless_on(` 出现在那扇门以外即红（needle 用 `concat!` 拼两半，免得门自己成为反例）。
+3. **锁中毒不连坐。** 它守的是 `()`，前一条测试 panic 把锁毒了不代表设备脏了——`unwrap_or_else(std::sync::PoisonError::into_inner)`,否则一条真红会把后面每一条都变成第二条假红。
+4. **锁只管本二进制。** `cargo` 让每个测试二进制各自是一个进程，进程之间不共享这把锁;上面那支六进程的脚本同时也是这件事的证据——每个进程内部串行之后,六个进程并行是干净的。真到了两个 crate 都要建无头设备的那天，先量跨进程会不会崩，别默认这把锁保得住。
+
 ### 【预防】产品代码不留占位符
 
 `todo!()` / `unimplemented!()` 由 clippy deny（当前为 0，**没有**因它出过事故——这是预防，不是教训）。做不完就如实写 no-go。
