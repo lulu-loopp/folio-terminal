@@ -67713,7 +67713,7 @@ impl Runtime<'_> {
         // recording in it.
         self.sweep_video_seats();
         let frames_arrived =
-            self.window.video.pump(now, motion) | self.advance_animations(now);
+            self.window.video.pump(now) | self.advance_animations(now);
         // **Animations count here too**, and forgetting them was a real bug for
         // the length of one edit: a `.gif` with no recording anywhere in the
         // window would advance its frame, bump its generation, and never hand

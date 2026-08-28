@@ -66,6 +66,12 @@ ffmpeg -f lavfi -i color=c=black:s=160x120:r=5:d=0.2 \
 |---|---|---|
 | `folio-anim-test.gif` | **generated** | 423 bytes, 64×64, four frames of one solid colour each — red `0xE04B2F`, green `0x2FE04B`, blue `0x2F4BE0`, yellow `0xE0D22F` — with **deliberately unequal delays of 100, 200, 300 and 400 ms**. Written by this repository's own `image` crate (`GifEncoder`, `Delay::from_saturating_duration`) and read back through the same crate's `GifDecoder` to confirm the four delays survive the round trip. |
 
+Both of the commands above are **in the repository**, not in this file's
+memory: `crates/bt-app/examples/gif-fixture.rs` writes the animation and reads it
+back, and `crates/bt-app/examples/container-probe.rs` is what opened each of the
+five recordings to build §7.44 ⑥'s matrix. A fixture whose recipe is a sentence
+in a document is a fixture nobody can remake; these two are the recipes.
+
 The delays are unequal on purpose and that is the whole fixture: a build that
 advanced an animation at a fixed rate — one frame per redraw, or a constant
 100 ms — passes every test a uniform GIF could state and fails

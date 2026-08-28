@@ -486,6 +486,22 @@ impl BarSituation {
         self.over_bar || self.grabbing || self.paused
     }
 
+    /// **Whether the bar has finished leaving** — the dwell run out *and* the
+    /// fade run out, with nothing holding it up.
+    ///
+    /// The one question [`VideoSeat::tick`] asks before it forgets a reveal, and
+    /// it is a named predicate rather than the inline `opacity <= 0.0` it was
+    /// first written as, because that reading was wrong on the machine in a way
+    /// no reasoning found and one screenshot did: a bar **one frame into its
+    /// rise** is also at zero opacity, so the tick that granted a reveal cleared
+    /// it in the same breath and the bar never appeared. "Not up yet" and "gone
+    /// again" are opposite ends of one number, and only the clock tells them
+    /// apart.
+    fn has_finished_leaving(self, now: Instant) -> bool {
+        !self.held()
+            && now.saturating_duration_since(self.acted_at) >= VIDEO_BAR_IDLE_REST + VIDEO_BAR_FADE
+    }
+
     fn presence(self, now: Instant, motion: crate::Motion) -> BarPresence {
         let Some(revealed_at) = self.revealed_at else {
             return BarPresence {
@@ -859,7 +875,13 @@ impl VideoSeat {
     /// Let an armed intent become a reveal, and let a bar that has finished
     /// leaving be forgotten. Called on the animation tick, which is the same
     /// tick the frames arrive on.
-    pub fn tick(&mut self, now: Instant, motion: crate::Motion) {
+    ///
+    /// **No `Motion` argument**, and the ninety milliseconds that costs are
+    /// deliberate: under `Reduced` the bar leaves without a fade, so it is
+    /// forgotten one archived span later than it strictly could be. A parameter
+    /// threaded through two call sites to move a *forgetting* ninety
+    /// milliseconds earlier would be a branch nobody could see the effect of.
+    pub fn tick(&mut self, now: Instant) {
         if let Some(armed) = self.arming_at
             && now.saturating_duration_since(armed) >= VIDEO_BAR_REVEAL_INTENT
         {
@@ -867,16 +889,24 @@ impl VideoSeat {
             self.revealed_at = Some(now);
             self.acted_at = now;
         }
-        // **A bar that has gone is a bar that has to be asked for again.**
+        // **A bar that has *finished leaving* is a bar that has to be asked for
+        // again.**
         //
-        // Without this line `revealed_at` is set once, at the first reveal, and
-        // never cleared — so the *second* time a reader's hand comes back the
-        // bar is up on the first pointer move, with no intent in front of it.
-        // That is a bar that flashes at a hand travelling across the picture on
-        // its way somewhere else, which is exactly what the intent exists to
-        // stop, and it would only ever be wrong after the first hover: the kind
-        // of defect that ships because the first thing anybody tries works.
-        if self.revealed_at.is_some() && self.presence(now, motion).opacity <= 0.0 {
+        // Without this, `revealed_at` is set once at the first reveal and never
+        // cleared — so the *second* time a reader's hand comes back the bar is
+        // up on the first pointer move with no intent in front of it, which is a
+        // bar that flashes at a hand travelling across the picture on its way
+        // somewhere else.
+        //
+        // **The condition is the dwell and the fade, and not "the opacity is
+        // zero"**, which was this line's first form and was wrong on the
+        // machine: a bar that has just been asked for is *also* at zero — it is
+        // one frame into its ninety-millisecond rise — so that reading cleared
+        // the reveal on the very tick that granted it and the bar never appeared
+        // at all. Photographed as "pressing play starts the video and draws no
+        // controls"; the two states are told apart by which way the clock is
+        // running, so the clock is what this asks about.
+        if self.revealed_at.is_some() && self.situation().has_finished_leaving(now) {
             self.revealed_at = None;
         }
     }
@@ -1265,10 +1295,10 @@ impl VideoSeats {
     }
 
     /// Take every new frame. `true` when any surface owes a redraw.
-    pub fn pump(&mut self, now: Instant, motion: crate::Motion) -> bool {
+    pub fn pump(&mut self, now: Instant) -> bool {
         let mut owed = false;
         for seat in self.seats.values_mut() {
-            seat.tick(now, motion);
+            seat.tick(now);
             owed |= seat.pump();
         }
         owed
@@ -1461,6 +1491,70 @@ mod tests {
         // own edge.
         assert!(bar_layout([0.0, 0.0, 40.0, 400.0], scale, 4).is_none());
         assert!(bar_layout([0.0, 0.0, 900.0, 4.0], scale, 4).is_none());
+    }
+
+    /// RED — **a bar that has just been asked for is not forgotten on the tick
+    /// that granted it** (found on the machine, 2026-08-28; §7.44 ②).
+    ///
+    /// The defect, in full, because it is the one this slice shipped and had to
+    /// photograph to find. [`VideoSeat::tick`] forgets a reveal once the bar has
+    /// gone, so that a second hover has to serve out the intent again rather
+    /// than flashing the bar at a hand on its way past. The first spelling of
+    /// "has gone" was `presence(now).opacity <= 0.0` — and a bar **one frame
+    /// into its ninety-millisecond rise is also at zero**. So pressing play
+    /// granted a reveal and cleared it in the same tick, for ever: the recording
+    /// played and drew no controls at all, on every surface, every time.
+    ///
+    /// Both ends of the number are asserted here, because the whole mistake was
+    /// reading one end for the other:
+    ///
+    /// ① **At the instant of the reveal, and all the way through the rise**, the
+    ///    bar has *not* finished leaving.
+    /// ② **After the dwell and the fade**, it has.
+    /// ③ **And never while something is holding it up**, however long it has
+    ///    been since the reader last did anything — a paused player's bar does
+    ///    not expire.
+    ///
+    /// RED GATE: put `opacity <= 0.0` back and ① fails at the first instant,
+    /// which is exactly the frame the machine failed on.
+    #[test]
+    fn a_bar_that_was_just_asked_for_is_not_forgotten_on_the_same_tick() {
+        let start = Instant::now();
+        let fresh = BarSituation {
+            revealed_at: Some(start),
+            acted_at: start,
+            over_bar: false,
+            grabbing: false,
+            paused: false,
+        };
+        // ① the rise, from its first instant to its last.
+        assert_eq!(fresh.presence(start, crate::Motion::Full).opacity, 0.0);
+        for ms in [0_u64, 1, 45, 89, 90, 500, 1_999] {
+            assert!(
+                !fresh.has_finished_leaving(start + Duration::from_millis(ms)),
+                "at {ms}ms the bar is still owed"
+            );
+        }
+        // ② and then it is over — the dwell plus the fade, and not a moment
+        //    before.
+        let over = VIDEO_BAR_IDLE_REST + VIDEO_BAR_FADE;
+        assert!(!fresh.has_finished_leaving(start + over - Duration::from_millis(1)));
+        assert!(fresh.has_finished_leaving(start + over));
+        // ③ and never while anything is holding it up.
+        for (over_bar, grabbing, paused) in
+            [(true, false, false), (false, true, false), (false, false, true)]
+        {
+            let held = BarSituation {
+                over_bar,
+                grabbing,
+                paused,
+                ..fresh
+            };
+            assert!(
+                !held.has_finished_leaving(start + over + VIDEO_BAR_IDLE_REST),
+                "over_bar={over_bar} grabbing={grabbing} paused={paused}"
+            );
+        }
     }
 
     /// PIN — **a press lands on the control it looks like it landed on.**

@@ -1,6 +1,21 @@
-//! Temporary: write the animated-GIF fixture with four deliberately unequal
-//! frame delays, then read it back through the decoder the product will use.
-//! Deleted before the branch is reported.
+//! **Write `test-assets/folio-anim-test.gif`, then read it back through the
+//! decoder the product uses** (route B slice ②, 2026-08-28; `docs/DESIGN.md`
+//! §7.44 ⑤).
+//!
+//! The fixture's whole point is that its four frames declare **unequal** delays
+//! — 100, 200, 300 and 400 ms — because every wrong way to animate a GIF passes
+//! a uniform one: one frame per redraw, a constant hundred milliseconds, the
+//! first frame's delay applied to all of them.
+//!
+//! ```text
+//! cargo run --example gif-fixture -- test-assets\folio-anim-test.gif
+//! ```
+//!
+//! Kept beside the fixture rather than deleted, on `PROVENANCE.md`'s own rule:
+//! a tracked file whose recipe is gone is a file nobody can check. The read-back
+//! is part of the recipe — it prints the four delays and the first pixel of each
+//! frame, so running this is also how you confirm the round trip still survives
+//! an `image` upgrade.
 
 use std::fs::File;
 use std::io::BufWriter;

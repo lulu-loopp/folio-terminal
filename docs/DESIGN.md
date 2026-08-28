@@ -5136,6 +5136,8 @@ RES 容器是一串对齐的记录,`VS_VERSIONINFO` 是一棵对齐的块树,两
 
 **第二列因此整列退役,而这就是裁决。** 那一列当初存在,是因为静止帧来自 Media Foundation 而播放来自 Chromium,两个解码器对 `.mov` 意见不同。现在**一个解码器回答两个问题**,两个集合按构造是同一个集合,一列区分它们的东西不可能有成员。一个两值枚举里有一个值到不了,就是这扇窗会在它不再为真之后继续维护的那种区分,所以 `VideoPlayback` 没了、`path_names_a_playable_video` 没了,只剩 `path_names_a_video` 一个谓词——脸、播放键、播放动词、红门读的是同一个函数,**再没有第二个问题可以答得不一样**。
 
+**七行里有六行是 Windows 自带的解码器,一行不是——而这条区别要说清楚。** `.mp4`/`.m4v`/`.mov` 是同一个 MPEG-4 File Source 加内置 H.264,`.mkv` 是内置的 Matroska 支持加同一个 H.264,`.avi` 是出厂的 AVI source 加 MPEG-4 part 2,`.wmv` 是出厂的 ASF source 加 WMV2——**六行在一台刚装好的 Windows 上就成立**,这也正是门 5 那台干净机的意义:没装 WebView2 的机器 A 路一段都播不了,B 路这六种全播。第七行 `.webm` 不是:VP8/VP9 由商店扩展提供,本机装着 `Microsoft.WebMediaExtensions 2.1.38.0` 与 `Microsoft.VP9VideoExtensions 1.2.20.0`(以及 `Microsoft.HEVCVideoExtension 2.5.10.0`,那一项管的是 `.mp4` 里的 HEVC 而不是容器),所以**本片对 `.webm` 的实测是「在装了扩展的机器上成立」,不是「在任何 Windows 上成立」**。
+
 **这张表仍然不是关于平台的报告。** HEVC / VP9 / AV1 逐机不同(靠商店扩展),本机三项里前两项装过。一台出厂 Windows 上同一个文件是 `EngineError::Unsupported`——**而那句话现在有地方说了**:`Text::VideoFormatCannotPlay`(字面没变,来源换了)由 `VideoSeat::fault()` 或一次失败的 `open` 落到 `PreviewImageState::failure` 上,而那是每个表面的失败本来就住的、本来就画的那个格子。一个编译在构建服务器上的常量永远不可能知道这件事;当场拒绝的那个解码器知道。
 
 `.mpg` / `.flv` 仍在表外:**没有 fixture 就没有道**,加一行等于加一条道,而一条道值得加是因为有一份 fixture 证明它成立。
