@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"
+     role="img" aria-labelledby="b-title b-desc">
+  <title id="b-title">Folio icon candidate B — the page and the integral</title>
+  <desc id="b-desc">On a graphite tile, a clean sheet of paper carrying one typeset
+  integral sign.</desc>
+
+  <rect x="5" y="5" width="246" height="246" rx="55" fill="#202027"/>
+
+  <!-- The sheet. -->
+  <rect x="48" y="30" width="160" height="196" rx="10" fill="#F4F1EA"/>
+
+  <!-- The integral, knocked out of the paper: the hero's own motif at icon weight. -->
+  <path d="M 160,86 C 160,68 145,62 136,69 C 129,74 128,84 128,96 L 128,160
+           C 128,172 127,182 120,187 C 111,194 96,188 96,170"
+        fill="none" stroke="#202027" stroke-width="22" stroke-linecap="round"/>
+</svg>

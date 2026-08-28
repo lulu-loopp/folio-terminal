@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"
+     role="img" aria-labelledby="a-title a-desc">
+  <title id="a-title">Folio icon candidate A — the page and the prompt</title>
+  <desc id="a-desc">On a graphite tile, a sheet of paper with its top-right corner turned
+  down; printed on the sheet, a single chevron prompt.</desc>
+
+  <rect x="5" y="5" width="246" height="246" rx="55" fill="#202027"/>
+
+  <!-- The sheet, its top-right corner turned down. -->
+  <path d="M 58,30 H 160 L 208,78 V 216 Q 208,226 198,226 H 58 Q 48,226 48,216 V 40 Q 48,30 58,30 Z"
+        fill="#F4F1EA"/>
+  <path d="M 160,30 L 208,78 H 160 Z" fill="#DDD7C9"/>
+
+  <!-- The prompt, knocked out of the paper. -->
+  <path d="M 98,92 L 158,128 L 98,164" fill="none" stroke="#202027" stroke-width="22"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
