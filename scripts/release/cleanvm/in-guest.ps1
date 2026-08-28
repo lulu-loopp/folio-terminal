@@ -460,8 +460,9 @@ folio.exe --panic-selftest : exit $($refusal.ExitCode)
 
 no-console-notice.png      : the same message box a crash raises, raised here by
   a refusal from a launch Explorer started, which has no console to write to.
-  Read in the picture: the box carries the product's name, the refusal names the
-  flag, and the build line is the one --version prints.
+  Read in the picture: the box carries the product's name and the refusal names
+  the flag. There is no build line in it -- the box says what was refused and how
+  to call the program, and the build identity is diagnostics.log's first line.
 
 what is NOT proved here    : a real panic. A release build has no entry that
   raises one. The gate 5 line in docs/plans/release/clean-vm.md carries the
