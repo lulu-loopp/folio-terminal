@@ -56,3 +56,84 @@ The identical bytes are the whole window, not the video's rectangle, so this is
 not "the decoder stopped": it is the window thread not repainting at all.
 </content>
 </invoke>
+
+---
+
+## ① The freeze, reproduced and named
+
+### Reproduced
+
+`target\release\folio.exe` rebuilt from this tree, launched by
+`<scratchpad>\fz.ps1` on `<scratchpad>\vidshow` (isolated `APPDATA` /
+`LOCALAPPDATA` under `<scratchpad>\iso-fz`, `BT_PTY_DUMP` named,
+`SetWindowPos(..., SWP_NOACTIVATE)`, pixel ownership checked before every
+shutter). Files column docked, `clock.mp4` — 120 s of `testsrc` with ffmpeg's
+own second counter burnt into the picture — opened in the side pane, ▶ pressed,
+and then **fourteen captures 800 ms apart with the pointer never moved again**:
+
+| capture | at | bytes | md5 |
+|---|---|---|---|
+| `04-freeze-00.png` | 47 ms | 107 214 | `89AF7447` |
+| `04-freeze-01.png` | 831 ms | 307 287 | `06479D93` |
+| `04-freeze-02.png` | 1 613 ms | 288 796 | `F0D363C9` |
+| `04-freeze-03.png` | 2 403 ms | 293 158 | `C30481C6` |
+| `04-freeze-04..13.png` | 3 212 – 10 469 ms | 293 158 | `C30481C6` |
+
+**Eight seconds of byte-identical captures**, and the run of them starts between
+1 613 ms and 2 403 ms after the press.
+
+### The decoder was running the whole time
+
+`c-13.png` is the picture out of the last frozen capture: the burnt-in counter
+reads **1**. One `hovershot` later — the pointer nudged one pixel per frame and
+nothing else touched — `c-n1.png` reads **39**. Thirty-eight seconds of
+recording went past behind a picture that had not moved.
+
+So this is not a decoder that stalled, and it is not a window thread that hung:
+no `hang-reports` directory was ever created under either run's isolated
+`%APPDATA%\Folio`, which is the watchdog saying the pump answered every time it
+was asked. The loop was turning, the engine was decoding, and **the glass was
+being starved of presents**.
+
+`container-probe` says the same from the other side: `clock.mov`, `clock.mkv`
+and `clock.mp4` each deliver **150 frames in 5.0 s with a longest gap of 49 ms**,
+`playing=true`, no error.
+
+### Root cause — a tick that owes a picture is thrown away at the chrome gate
+
+`Runtime::advance_strip_animation` (`crates/bt-app/src/main.rs`) collects this
+tick's decoded pictures and then decides twice whether the frame is owed:
+
+```rust
+let frames_arrived = self.window.video.pump(now) | self.advance_animations(now);
+let boxes_moved = anything_moving && self.refresh_video_layers();
+let owes_frame = owes_frame || frames_arrived || boxes_moved;
+if !owes_frame && !panes_owe {
+    return Ok(());
+}
+…
+if !self.refresh_chrome() && !panes_owe {   // ← the picture's debt is not asked about
+    return Ok(());
+}
+self.publish_chrome_frame(now)
+```
+
+The second gate does not carry `owes_frame`. A video is **not in the chrome** —
+it is a layer list handed to `bt_render::WindowRenderer::set_video_layers` and
+drawn from renderer state at present time — so `refresh_chrome()` cannot ever
+answer `true` because a new picture arrived. A tick whose only news is a decoded
+frame is therefore always dropped one line before the present that would have
+shown it.
+
+**Why it looks like a first-open freeze.** While the control bar is up, its
+elapsed clock and its scrubber move, so the *chrome* changes on almost every
+tick and the picture reaches the glass as a passenger on the bar's own debt. The
+bar is born up when a seat opens (§7.44 ②) and rests `VIDEO_BAR_IDLE_REST +
+VIDEO_BAR_FADE` = **2 000 ms + 90 ms** after the last act. That is the number in
+the table above: moving at 1 613 ms, frozen at 2 403 ms. A reader who presses
+play and takes their hand off the mouse sees two seconds of video and then a
+photograph — and the picture jumps forward the instant they move the pointer,
+which is what makes it read as "the window froze and then recovered".
+
+It is not first-open at all: it is **every** video, and every `.gif` too, since
+`advance_animations` reports its debt through the same `frames_arrived`.
