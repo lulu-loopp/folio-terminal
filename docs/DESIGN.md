@@ -4609,6 +4609,33 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 
 **日期:2026-08-28 干净机实证,当日复现、定因、落地。**
 
+### 7.37 一个文件名在哪张脸上都是同一行字,tab 条的 × 也要说话,菜单文字够读,箭头随展开翻,文件没了就说没了(next15 用户五条实证,2026-08-28 用户裁决,已落地并实机复验;`crates/bt-app/src/{file_peek,float,main,tooltip,files,peek_strip,i18n}.rs`、`crates/bt-render/src/{theme,scheme,lib}.rs`)
+
+五条互不相干的用户实证,同一晚裁下,每一条都是「同一件东西在两个地方长得不一样」「一个该说话的表面没说话」或「一张画背着的事实与真相不符」。
+
+**① 一个文件名不论画在卡上还是窗上,都是同一行字。** 用户截图实证:同一个 `long-lines.txt`,悬停出来的 `.file-peek` 卡的头标题用 11.5px 常规、无字距,拖成的固定预览浮窗的头标题用 11px 半粗、`.04em` 字距——一张卡在指针底下变成一扇窗的那一瞬,同一个文件名忽然更重、像换了一族字。裁决:**一个文件名是一行字,无论它被画在哪种表面上——同字号、同字重、同字距**。落地成一处定义 `bt_render::HEAD_TITLE_{FONT_LOGICAL_PX,WEIGHT,TRACKING_EM}`:卡(`file_peek`)与窗(`float`)都从它取,不再各写各的。取的是**窗头那一族的脸**(`.fly-head`,11px 半粗 `.04em`)而不是反过来,因为那张脸早已是这扇窗里每一扇浮窗共用的标准,卡加入它、而不是它迁就卡——所以 `float` 一个像素都没动,变的只有卡:11.5→11,常规→半粗,加 `.04em`。**颜色不在这份定义里**,而且是故意的:卡坐在 `--menu` 上、窗坐在 `--win` 上,名字在一处是 `menu_item_text`、在另一处是 `dialog_muted_text`——各自的墨、各自的底,裁决管的是字形不是字底。测量随之改:`file_peek` 的名字宽度过去用 `measure_chrome_text`(常规、无字距),现在用 `measure_chrome_label` 按同一张脸量,否则名字被夹进去的盒、脏点挂在名字后面的位置,都会与真正落下来的字母错开。红门 `a_file_name_wears_one_typeface_whether_it_is_a_card_or_a_window`:把卡和窗**都真画出来**(`file_peek::build` / `float::build`),取各自第一枚 label(那就是名字/标题),断言字号、字重、字距、字族四项全等;变异——给任一面还回旧脸,两条 run 就在被改的那一项上分开。
+
+**② tab 条上的 × 也要说话。** §7.33 已让头和轨上每一枚可点的东西都登记 tooltip,唯独 tab 条这种表面当初被特意跳过:`tab_surface_tip_boxes` 登记了 tab 本体、它的记号、钉子、文件夹,却越过了 ×,理由写在旧注释里(「`tabTrailer` 不给它写 `title`,指针落上去会穿透到 tab,那正是你要的提示」)。裁决:**所有表面统一**——tab 条上的 × 也登记,文案就是 §7.33 给 pane 头 × 立下的同一句道理:惯用形说得出「这是个叉」,说不出这个叉关的是**这枚 tab**、不是文档也不是窗。落地走 §7.33 那套「画得出⇒遍历到⇒登记」:× 的盒(`TabGeometry::close`/`RailTabGeometry::close` 为 `Some`)本就是 `hit_tab_chrome` 命中它的同一个盒,现在也在 `tab_surface_tip_boxes` 这趟遍历里(strip 与 rail 两臂各加一格),而不是给它开「一按钮一处」的硬编码。**只在 × 真的可点时才出**:钉住的 tab 在这个槽里站的是钉子、没有 ×,窄档 tab 没有 × 的余地——两种都 `close: None`,遍历跳过、指针照旧穿透到 tab。文案复用既有的 `Text::TabMenuClose`(「Close tab」/「关闭标签」,tab 菜单那一行的同一个动词),不新增重复条目,`Text::ALL` 不变。红门 `the_tab_strips_close_button_says_what_it_closes`:走窗口真花的那趟 `tab_surface_tip_boxes`,断言一排普通 tab 每一枚画出来的 × 都在里头(变异:把 `TabClose` 那格从遍历里拿掉,普通 tab 全数丢掉自己的 ×),而钉住的 tab 一枚 × 都不登记。
+
+**③ 菜单普通文字够读(WCAG AA 4.5)。** 菜单一行的正文——右键菜单、`⌄` 菜单、profile 选择器——是菜单底上的正文字,而正文字欠读者 4.5:1(WCAG 1.4.3 AA)。亮色主题的 `--ink2`(`#7D7C78`)在白底上只有 4.18:1;暗色量出来 5.42:1,本就达标。裁决:**提到 ≥4.5**;**只调前景明度、不动品牌强调色**。
+
+**落地不是把常量改暗,而是把地板加进推导——这一条是施工时被仓库自己纠正的。** 第一版直接把亮色 `menu_item_text` struck 成 `#767570`,当场撞红 `the_derivation_reproduces_the_light_palette_byte_for_byte`:这张表**不是手写的**,它由 `scheme.rs` 从配色推导(`menu_item_text: ink2(menu)`),而那条红门看着表与推导逐字节一致。手改常量等于让两者分家,正是这个仓一直在防的那件事。而且它也答不了真问题:**一套配色是用户给的两个颜色,任何固定色阶都不可能对所有配色承诺一个比值**——这句话房子里已经写过一遍,就写在浮签的墨上。
+
+所以改的是推导:`menu_item_text = raise_against(ink2(menu), menu, CHROME_TEXT_MINIMUM_CONTRAST)`。`contrast::raise_against` 是**房子唯一那台对比度解算器**(浮签的墨、设置里的 `Minimum contrast` 行本来就走它),在 Oklab 里保色相、朝最近的方向把明度挪到刚好够,**已经达标的配色原样返回**——所以暗色一个字节没动,亮色恰好挪到 `#777672`(4.53:1),而**每一套配色(含用户自己的)都跟着达标**,不再只是内置两套。地板收成一个常量 `CHROME_TEXT_MINIMUM_CONTRAST = 4.5`,`FLOAT_TAG_MINIMUM_CONTRAST` 改成由它定义:**一个数不许有两个名字**,否则两条本来相同的地板迟早分家(与 `menu_item_hint_text` 当初被拆出来是同一条规矩)。选中行不参与抬升也不需要——它是满强度的 `--ink`,配色能给的最深,对它设地板只会把它推离用户选的那个墨。
+
+**禁用/不可用的墨单列且豁免**:一个按不动的控件本就该看着按不动(WCAG 1.4.3 对失效构件自带的例外),所以 `menu_item_hint_text`(行尾注)与 `menu_item_unavailable_text`(身后无物的控件)只要求比可读的那行**更暗**、不达 AA。红门 `menu_text_clears_wcag_aa_on_both_built_in_themes` 两半都要:**推导那一半**(两套内置配色各过一次 `ChromePalette::derive`)与 struck 那一半,再加两枚豁免墨各比它更暗单列——只读常量的门,在 `raise_against` 那行被删掉的那天会全绿(变异:删推导那行,亮色推导掉回 4.18;亮色 struck 还回 `#7D7C78`,struck 那半塌;把任一豁免墨提到满,更暗那条塌)。
+
+**④ 一个文件夹的箭头,正好在它的子项被列出时朝下——而真正的病因是没人叫醒循环。** 用户截图实证:点开 `.playwright-mcp`,子项已经列在下面、图标也换成了打开的文件夹,而那行左侧的三角仍旧朝右。
+
+**这一条的第一版诊断是错的,记在这里因为它值一段。** 当时判成「`row_turn` 把一段已经停下的补间看得比文件夹的状态重」,改成静止时以 `open` 为准,红门也真的红过——然后**实机照片打脸**:装上修复的构建里,浮窗树点开一个文件夹,三角**照旧朝右**;而指针往树上随便一动,下一帧就是朝下的。状态从来没错过,`row_turn` 一直给的是对的角度;**错的是没有那一帧**。教训与 §7.35 是同一条:一个能自圆其说的成因不等于**这一台机器上的**成因,红门绿了不代表病好了,**得把它画出来看**。
+
+**真因:`strip_animation_deadline` 里那句「有没有三角在转」只问了停靠的那几列。** `files_turning` 走的是 `tabs[active].file_trees`——**停靠**的文件列的缓存;而一扇浮窗(文件夹浮窗、撕出去的列)把自己的 `DirCache` 挂在窗上,不在那张表里。于是在浮窗树里点开一个文件夹:补间起了、第一帧画了(那一帧上三角正好还在起点=朝右)、然后**没有人再要第二帧**,循环就地入睡,那行便一直顶着一枚朝右的三角站在自己敞开的子项上面,直到某件不相干的事把它重画。这正是 §7.1.3/`a_row_a_locate_opened_arrives_turned_rather_than_turning` 早就写下的那一类失败——「它*依赖*循环被再次叫醒」——只不过这次落在唯一一个那句问话**看不见**其缓存的面上。落地:那句问话把浮窗们的树也并进来(`float.drawn().filter_map(FloatWin::files)`)。
+
+**`row_turn` 那半保留,降为它本来的名分:一条加固,不是这条的解。** 静止时以文件夹为准仍然是对的(一段被定位/恢复留下的、与 `open` 不一致的停死补间,不该盖过事实),它的红门也照旧站着;只是它修的不是用户报的这一条。两条各有各的门:`a_folders_chevron_points_down_exactly_when_its_children_are_shown`(状态那一半,变异=让停下的补间盖过 `open`)与 `a_turning_triangle_wakes_the_loop_from_every_tree_that_can_draw_one`(帧那一半,**读源码**,因为坏的是这句问话**走哪几个仓库**这个形状——把任何一个 `DirCache` 单独拿来测,在坏掉的构建上都是绿的)。实机复验:同一枚文件夹,修后点开即朝下。
+
+**⑤ 文件已经不在了,卡片就说不在,而不是叫它二进制。** 终端里一条引用在印出时被验证过,文件可以在那之后被删掉;指针停在仍带下划线的词上,卡片却说「无法预览 —— 二进制或无法识别的类型。」——这既不真(文件不是二进制),也不可能(根本没有文件)。裁决:**文件不存在时说「文件已不存在」**(英 `The file is no longer there.`/中「文件已不存在。」,按 copy-guide 只陈述、不夹议),而且**不印类型 chip**——没有类型可命名,一枚印着 `unknown` 的 chip 压在「文件不在」那句上就是卡片自相矛盾。落地:新 `PeekBody::Gone` 与 `PeekBodyKind::Gone`,后者在 `peek_body_kind` 里**压过一切**(没有文件就没有类型、没有字节、没有页可开);窗口每帧对悬停的这一个文件 `stat` 一次判在不在(**只对本地路径**——网络路径在更早就被拒了,逐帧 `stat` 一条 share 会卡住循环;这与 §7.29 逐次指针移动 `is_dir()` 是同一份预算);`content.ftype` 为空时 `file_peek::build` 整枚 chip 不画。新文案一条 `Text::PeekFileGone`,`Text::ALL` 523 → 524。**下划线的撤销**沿用既有的重验证:引用在下一次被验证时(新输出、再悬停)由 worker 发现文件没了、不再画线,本片不新造第二套判据。红门 `a_reference_whose_file_has_gone_says_so_instead_of_calling_it_binary`:`gone` 为真时任何 ftype、任何 refused 都答 `Gone`,而「还在」的同一文件答 `Refused`,无路径的合成文档永远不会 `gone`(变异:拿掉 `peek_body_kind` 顶上的 `gone` 判据,一切又当文件还在磁盘上那样作答)。
+
+**日期:2026-08-28 用户实证与裁决,当日落地。**
 ### 7.38 一个不带 scheme 的裸域名也是链接,但保守到严防误判:一张短 TLD 表,而不是「任何点分二段」(用户裁决 2026-08-28,已落地;`crates/bt-transcript/src/lib.rs`、`crates/bt-viewport/src/lib.rs`)
 
 **由头。** 到此为止,本窗只把带 `http://`/`https://` 的裸地址认成链接(§7.1.5h,`detect_http_urls`)。而写中文的 agent 印地址时最爱用的是**不带 scheme 的裸域名**——`microsoft.com/software-download/windows10ISO`、`github.com/oil-oil/beautify-github-readme`——指针扫过去什么都没有。裸文件路径在 §7.1.5j 已经认了,裸带 scheme 的地址在 §7.1.5h 已经认了,唯独这一种最常见的地址一直在本窗眼皮底下不算数。

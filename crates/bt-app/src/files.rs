@@ -416,6 +416,20 @@ impl DirCache {
     ///
     /// A row with no tween answers with its own state and "not moving", which is
     /// what makes this total over rows that have never been clicked.
+    ///
+    /// **At rest, the angle is the folder's own and not the tween's** (user
+    /// ruling 2026-08-28, `docs/DESIGN.md` §7.37). The triangle's direction is
+    /// two pictures of one fact — a folder is open, or it is not — so a settled
+    /// tween that disagrees with `open` is a stale one, left by a toggle that
+    /// changed the state without turning the triangle (a locate, a restore, a
+    /// path that folded the row from elsewhere). The reported bug is exactly its
+    /// shape: a `.playwright-mcp` opened with its children listed, its triangle
+    /// still pointing right because a tween settled at the closed end was never
+    /// told the folder had opened. So a tween that has stopped is only believed
+    /// while it agrees with the folder; the instant it does not, the folder
+    /// wins, and the animation resumes its authority the next time a click
+    /// retargets it. A *moving* tween is always believed — that is the turn the
+    /// hand asked for, in flight.
     pub fn row_turn(
         &self,
         key: &str,
@@ -423,9 +437,13 @@ impl DirCache {
         now: Instant,
         motion: crate::Motion,
     ) -> (f32, bool) {
+        let settled = f32::from(u8::from(open));
         match self.turns.get(key) {
-            Some(tween) => tween.sample(now, motion),
-            None => (f32::from(u8::from(open)), false),
+            Some(tween) => match tween.sample(now, motion) {
+                (_, false) => (settled, false),
+                moving => moving,
+            },
+            None => (settled, false),
         }
     }
 
@@ -1756,6 +1774,73 @@ mod tests {
         assert!(
             !cache.any_turning(now, crate::Motion::Full),
             "a locate asks the loop for no frames it cannot be sure of getting"
+        );
+    }
+
+    /// RED — **a folder's chevron points down exactly when its children are
+    /// shown** (user ruling 2026-08-28, `docs/DESIGN.md` §7.37).
+    ///
+    /// RED EVIDENCE (2026-08-28, the user's screenshot). A `.playwright-mcp` was
+    /// clicked open, its children listed below it — and its triangle went on
+    /// pointing right. The direction is two pictures of one fact, but `row_turn`
+    /// believed a *settled* tween over the folder's own state: a tween left
+    /// standing at the shut end by a toggle that changed `open` without turning
+    /// the triangle kept the row pointing right over its open children. On the
+    /// build before the fix this reads:
+    ///
+    /// ```text
+    /// an open folder points its triangle down over its shown children:
+    ///   left: (0.0, false)  right: (1.0, false)
+    /// ```
+    ///
+    /// A moving tween is still believed — that is the turn in flight — but at
+    /// rest the folder wins, so the resting angle is a pure function of `open`.
+    ///
+    /// MUTATION: believe the settled tween over `open` (the old `row_turn` body)
+    /// and both a stale-shut and a stale-open triangle disagree with their
+    /// folder.
+    #[test]
+    fn a_folders_chevron_points_down_exactly_when_its_children_are_shown() {
+        let now = Instant::now();
+        let past = now + Duration::from_millis(crate::seats::FILES_ROW_TRI_TURN_MS + 10);
+
+        // A tween settled at the SHUT end, then the folder is opened by a path
+        // that did not turn the triangle — the reported bug's exact shape.
+        let mut cache = DirCache::default();
+        cache.turn_row("/dir", false, now, crate::Motion::Full);
+        assert_eq!(
+            cache.row_turn("/dir", false, past, crate::Motion::Full),
+            (0.0, false),
+            "the tween really settled shut",
+        );
+        assert_eq!(
+            cache.row_turn("/dir", true, past, crate::Motion::Full),
+            (1.0, false),
+            "an open folder points its triangle down over its shown children",
+        );
+
+        // The mirror: a tween settled OPEN must not keep a folded folder's
+        // triangle pointing down.
+        let mut cache = DirCache::default();
+        cache.turn_row("/dir", true, now, crate::Motion::Full);
+        assert_eq!(
+            cache.row_turn("/dir", false, past, crate::Motion::Full),
+            (0.0, false),
+            "a folded folder points right, whatever a stale tween remembers",
+        );
+
+        // A turn in flight is still believed — the rest rule is about rest.
+        let mut cache = DirCache::default();
+        cache.turn_row("/dir", true, now, crate::Motion::Full);
+        let (part, moving) = cache.row_turn(
+            "/dir",
+            true,
+            now + Duration::from_millis(crate::seats::FILES_ROW_TRI_TURN_MS / 2),
+            crate::Motion::Full,
+        );
+        assert!(
+            moving && part > 0.0 && part < 1.0,
+            "mid-turn is still animated, not snapped",
         );
     }
 

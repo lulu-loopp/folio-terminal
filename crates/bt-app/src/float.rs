@@ -564,10 +564,13 @@ pub const FLOAT_HEAD_GAP_LOGICAL_PX: f32 = 6.0;
 pub const FLOAT_HEAD_PADDING_LEFT_LOGICAL_PX: f32 = 10.0;
 /// The right half of the same declaration.
 pub const FLOAT_HEAD_PADDING_RIGHT_LOGICAL_PX: f32 = 5.0;
-/// `.float-win .fly-head { font-size: 11px }`.
-pub const FLOAT_HEAD_FONT_LOGICAL_PX: f32 = 11.0;
-/// `.float-win .fly-head { letter-spacing: .04em }`.
-pub const FLOAT_HEAD_TRACKING_EM: f32 = 0.04;
+/// `.float-win .fly-head { font-size: 11px }` — the file-name head's shared
+/// face (`docs/DESIGN.md` §7.37), which this header has always been the standard
+/// for and which the hover card now joins.
+pub const FLOAT_HEAD_FONT_LOGICAL_PX: f32 = bt_render::HEAD_TITLE_FONT_LOGICAL_PX;
+/// `.float-win .fly-head { letter-spacing: .04em }` — the same shared face's
+/// tracking (§7.37).
+pub const FLOAT_HEAD_TRACKING_EM: f32 = bt_render::HEAD_TITLE_TRACKING_EM;
 /// `.float-win .fly-close { padding: 4px }` around a `9px` glyph.
 pub const FLOAT_CLOSE_BOX_LOGICAL_PX: f32 = 17.0;
 // Its glyph is the compact head's slot now, asked per mark: the same `#i-close`
@@ -2133,7 +2136,9 @@ pub fn build(
         align_right: false,
         align_center: false,
         letter_spacing_em: FLOAT_HEAD_TRACKING_EM,
-        weight: ChromeLabelWeight::SemiBold,
+        // The file-name head's shared weight (§7.37) — the same run the hover
+        // card draws, so a name looks the same before and after it is torn out.
+        weight: bt_render::HEAD_TITLE_WEIGHT,
         tabular_numerals: false,
         clip: None,
     });

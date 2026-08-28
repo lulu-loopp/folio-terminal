@@ -6128,6 +6128,11 @@ enum PeekBodyKind {
     Picture,
     /// The one line that says nothing will be shown.
     Refused,
+    /// **The one line that says the file is no longer on disk** (user ruling
+    /// 2026-08-28, §7.37) — see [`file_peek::PeekBody::Gone`]. It outranks every
+    /// other reading, because a file that is not there has no type to be, no
+    /// bytes to refuse and no page to open.
+    Gone,
     /// The one line that says what opening the row *will* do (user ruling
     /// 2026-08-23).
     ///
@@ -6187,7 +6192,17 @@ fn peek_body_kind(
     ftype: preview::PreviewFtype,
     path: Option<&Path>,
     refused: bool,
+    gone: bool,
 ) -> PeekBodyKind {
+    // **A file that has gone outranks everything below** (§7.37). The reference
+    // was validated when it was printed and the file was deleted after; there is
+    // no type to name, nothing to refuse and no page to open, so the card says
+    // the one true thing rather than calling the absence "binary". A composed
+    // document has no path and cannot be gone — `gone` is only ever true for a
+    // real file the caller stat-ed and did not find.
+    if gone && path.is_some() {
+        return PeekBodyKind::Gone;
+    }
     match (ftype, path) {
         (preview::PreviewFtype::Image, Some(_)) => PeekBodyKind::Picture,
         // **A video, and the same two-part shape the picture arm has**: a body
@@ -6220,6 +6235,73 @@ fn peek_body_kind(
         }
         _ if refused => PeekBodyKind::Refused,
         _ => PeekBodyKind::Document,
+    }
+}
+
+#[cfg(test)]
+mod peek_gone_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// RED — **a reference whose file has gone says so instead of calling it
+    /// binary** (user ruling 2026-08-28, `docs/DESIGN.md` §7.37).
+    ///
+    /// RED EVIDENCE (2026-08-28, the user's report). A terminal reference is
+    /// validated when it is printed, and its file can be deleted after; the card
+    /// over the still-underlined word answered "No preview — binary or
+    /// unrecognized type", which is neither true (the file is not binary) nor
+    /// possible (there is no file to be one). Before the fix `peek_body_kind`
+    /// had no way to know the file had gone, so every reading fell through to a
+    /// refusal:
+    ///
+    /// ```text
+    /// a gone Unknown (refused=false) says the file is not there:
+    ///   left: Refused  right: Gone
+    /// ```
+    ///
+    /// Gone outranks every ftype and outranks a refusal, because a file that is
+    /// not there has no type, no bytes and no page. A composed document (no
+    /// path) can never be gone — the caller only ever passes `gone: true` for a
+    /// real file it stat-ed and did not find.
+    ///
+    /// MUTATION: drop the `gone` guard at the top of `peek_body_kind` and every
+    /// arm answers as if the file were still on disk.
+    #[test]
+    fn a_reference_whose_file_has_gone_says_so_instead_of_calling_it_binary() {
+        use preview::PreviewFtype;
+        let path = Path::new("C:\\gone\\report.pdf");
+
+        // Still there: the ordinary readings stand.
+        assert_eq!(
+            peek_body_kind(PreviewFtype::Unknown, Some(path), false, false),
+            PeekBodyKind::Refused,
+            "an unreadable file that is still there is a refusal",
+        );
+
+        // Gone: whatever the ftype, whatever the refusal flag, the card says so.
+        for ftype in [
+            PreviewFtype::Unknown,
+            PreviewFtype::Image,
+            PreviewFtype::Video,
+            PreviewFtype::Web,
+            PreviewFtype::Markdown,
+            PreviewFtype::Text,
+        ] {
+            for refused in [false, true] {
+                assert_eq!(
+                    peek_body_kind(ftype, Some(path), refused, true),
+                    PeekBodyKind::Gone,
+                    "a gone {ftype:?} (refused={refused}) says the file is not there",
+                );
+            }
+        }
+
+        // A composed document has no path, so it cannot have lost one.
+        assert_eq!(
+            peek_body_kind(PreviewFtype::Unknown, None, true, true),
+            PeekBodyKind::Refused,
+            "a reading with no file on disk cannot be gone",
+        );
     }
 }
 
@@ -32207,6 +32289,11 @@ impl Runtime<'_> {
                 })
                 .unwrap_or_default()
                 .to_owned(),
+            // What the `×` closes, which the cross itself cannot say (§7.37).
+            // The tab menu's own `Close tab` row spells this verb already, so the
+            // tip borrows its words rather than minting a second copy of them —
+            // one action, one name, whether it is read off a row or a glyph.
+            tooltip::TooltipAnchorId::TabClose(_) => i18n::Text::TabMenuClose.text().to_owned(),
             // H108: both surfaces say the same five words, because it is one
             // action wearing one glyph in two places.
             tooltip::TooltipAnchorId::TabFiles(_) => float_trigger_tip().to_owned(),
@@ -54898,64 +54985,92 @@ impl Runtime<'_> {
         // *capped* height, and the scroll bar's arithmetic needs the uncapped one
         // to know what share of it is showing.
         let mut document = 0.0_f32;
-        let body_kind =
-            match peek_body_kind(subject.ftype, subject.path.as_deref(), subject.refused) {
-                // A picture is a picture of a *file*; nothing composed is one.
-                PeekBodyKind::Picture => {
-                    let path = subject
-                        .path
-                        .clone()
-                        .expect("a picture body is only chosen for a file");
-                    self.file_peek_picture(&path, scale)
-                }
-                PeekBodyKind::Refused => file_peek::PeekBody::Refused,
-                PeekBodyKind::Page => file_peek::PeekBody::Page,
-                // The facts of a page this card cannot render. Like a picture's,
-                // they are a *file's* and are asked for by the frame that needs
-                // them — the read is one worker hop and the box it lands in is
-                // reserved from the first frame either way.
-                PeekBodyKind::Facts => {
-                    let path = subject
-                        .path
-                        .clone()
-                        .expect("a facts body is only chosen for a file");
-                    self.file_peek_facts(&path, scale)
-                }
-                // One frame of a video and the two lines under it. Like a
-                // picture's, they are a *file's* — see [`Self::file_peek_frame`].
-                PeekBodyKind::Frame => {
-                    let path = subject
-                        .path
-                        .clone()
-                        .expect("a frame body is only chosen for a file");
-                    self.file_peek_frame(&path, scale)
-                }
-                PeekBodyKind::Document => {
-                    let probe = [
-                        0.0,
-                        0.0,
-                        file_peek::body_width(scale),
-                        file_peek::body_max_height(scale),
-                    ];
-                    self.rebuild_preview_document(PreviewSurface::Peek, probe, scale);
-                    document =
-                        self.preview_surface_document_height(PreviewSurface::Peek, probe, scale);
-                    file_peek::PeekBody::Document(document.min(probe[3]))
-                }
-            };
+        // **Has the file gone since the reference was validated?** (§7.37) One
+        // stat, and only for a real local file — a network path is refused
+        // before it ever reaches here, and stat-ing one every frame would block
+        // the loop on a share. A card is up only while the pointer rests on it,
+        // so this is one existence check per frame of one hover, which is the
+        // same budget §7.29 spends on `is_dir()` per pointer move.
+        let gone = subject
+            .path
+            .as_deref()
+            .is_some_and(|path| !preview::is_network_path(path) && !path.exists());
+        let body_kind = match peek_body_kind(
+            subject.ftype,
+            subject.path.as_deref(),
+            subject.refused,
+            gone,
+        ) {
+            // A picture is a picture of a *file*; nothing composed is one.
+            PeekBodyKind::Picture => {
+                let path = subject
+                    .path
+                    .clone()
+                    .expect("a picture body is only chosen for a file");
+                self.file_peek_picture(&path, scale)
+            }
+            PeekBodyKind::Refused => file_peek::PeekBody::Refused,
+            // The file has gone: one line saying so, and no body read is
+            // asked for — there is nothing on disk to read (§7.37).
+            PeekBodyKind::Gone => file_peek::PeekBody::Gone,
+            PeekBodyKind::Page => file_peek::PeekBody::Page,
+            // The facts of a page this card cannot render. Like a picture's,
+            // they are a *file's* and are asked for by the frame that needs
+            // them — the read is one worker hop and the box it lands in is
+            // reserved from the first frame either way.
+            PeekBodyKind::Facts => {
+                let path = subject
+                    .path
+                    .clone()
+                    .expect("a facts body is only chosen for a file");
+                self.file_peek_facts(&path, scale)
+            }
+            // One frame of a video and the two lines under it. Like a
+            // picture's, they are a *file's* — see [`Self::file_peek_frame`].
+            PeekBodyKind::Frame => {
+                let path = subject
+                    .path
+                    .clone()
+                    .expect("a frame body is only chosen for a file");
+                self.file_peek_frame(&path, scale)
+            }
+            PeekBodyKind::Document => {
+                let probe = [
+                    0.0,
+                    0.0,
+                    file_peek::body_width(scale),
+                    file_peek::body_max_height(scale),
+                ];
+                self.rebuild_preview_document(PreviewSurface::Peek, probe, scale);
+                document = self.preview_surface_document_height(PreviewSurface::Peek, probe, scale);
+                file_peek::PeekBody::Document(document.min(probe[3]))
+            }
+        };
         let content = file_peek::PeekContent {
             name: subject.name,
-            ftype: subject.ftype.label().to_owned(),
+            // A gone file has no type to name, and the card draws no chip for an
+            // empty one (§7.37) — every other body keeps the ftype's own label.
+            ftype: if matches!(body_kind, file_peek::PeekBody::Gone) {
+                String::new()
+            } else {
+                subject.ftype.label().to_owned()
+            },
             dirty: subject.dirty,
             body: body_kind,
         };
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         // Only the font knows how wide a line is, so the measuring happens here,
-        // beside the renderer, exactly as the tip's and the ghost's do.
-        let name_width = self.window.renderer.measure_chrome_text(
+        // beside the renderer, exactly as the tip's and the ghost's do — and in
+        // the file-name head's shared face (§7.37), the same weight and tracking
+        // the name is drawn in, so the box the name is clamped into and the dot
+        // hung after it are measured against the letters that actually land.
+        let name_width = self.window.renderer.measure_chrome_label(
             &mut self.app.gpu,
             &content.name,
             file_peek::PEEK_HEAD_FONT_LOGICAL_PX * scale,
+            bt_render::HEAD_TITLE_WEIGHT,
+            bt_render::HEAD_TITLE_TRACKING_EM,
+            false,
         );
         let ftype_width = self.window.renderer.measure_chrome_text(
             &mut self.app.gpu,
@@ -66516,10 +66631,30 @@ impl Runtime<'_> {
         // already still and nothing else in the window moving. Under reduced
         // motion `RevealTween` reports the target with no frames asked for, so
         // this is never true and the window stays genuinely idle.
+        //
+        // **Every tree that can turn one, and that is the fix** (user report
+        // 2026-08-28, `docs/DESIGN.md` §7.37 ④). This asked the docked columns
+        // alone, and a *float's* tree — the folder flyout, the torn-off column —
+        // keeps its cache on the window rather than in `file_trees`. So a
+        // triangle clicked in one started its turn, drew its first frame, and
+        // then asked nobody for a second: the loop went idle mid-animation and
+        // the row sat with a shut triangle over its own open children until some
+        // unrelated event happened to repaint. Measured before this line: click
+        // a folder in a flyout and its `▸` stays `▸`; move the pointer anywhere
+        // over the tree and it is `▾` on the next frame. That is the symptom
+        // `a_row_a_locate_opened_arrives_turned_rather_than_turning` was written
+        // about one surface earlier, arriving on the one surface whose cache
+        // this question could not see.
         let files_turning = self.window.tabs[self.window.active_tab]
             .file_trees
             .values()
-            .any(|cache| cache.any_turning(now, motion));
+            .any(|cache| cache.any_turning(now, motion))
+            || self
+                .window
+                .float
+                .drawn()
+                .filter_map(float::FloatWin::files)
+                .any(|files| files.cache.any_turning(now, motion));
         // §7.7 ②, and the same argument once more: a page's mark spins while a
         // navigation is in flight, and nothing else in the window is moving
         // while it does — the engine reports when the navigation *ends*, not
@@ -85297,17 +85432,25 @@ fn tab_surface_tip_boxes(
     renaming: Option<usize>,
 ) -> Vec<(tooltip::TooltipAnchorId, [f32; 4])> {
     let mut boxes = Vec::new();
-    // Per row: the pin and the mark first, then the body they sit in — the
-    // innermost-first order `TooltipAnchors` reproduces `closest()` with.
+    // Per row: the trailing controls and the mark first, then the body they sit
+    // in — the innermost-first order `TooltipAnchors` reproduces `closest()`
+    // with.
     //
-    // The close button is deliberately absent on both surfaces: `tabTrailer`
-    // writes no `title` on it (mock-up 4207), so a pointer there falls through to
-    // the tab, which is the tip you wanted anyway.
+    // **The close `×` is here now** (user ruling 2026-08-28, §7.37). It used to
+    // be deliberately absent, on the argument that `tabTrailer` writes no `title`
+    // on it (mock-up 4207) so a pointer there falls through to the tab — the tip
+    // you wanted anyway. The ruling overturns that on the same ground the pane
+    // head's `×` was: an idiom can say "this is a cross", it cannot say the cross
+    // closes *the tab* and not the document or the window. It registers exactly
+    // where the tab draws one — `slot.close` is `Some` — which is exactly where
+    // `hit_tab_chrome` answers `TabClose`, so a pinned tab (pin in the slot, no
+    // `×`) and a squeezed one (no room for one) tip nothing there and fall
+    // through as before.
     //
-    // Each of the three boxes is handed in already measured against its
-    // surface's own clip, because "cropped away" is the one thing the two
-    // surfaces answer differently — the strip clips on X, the rail on Y.
-    let mut row = |index: usize, parts: [(tooltip::TooltipAnchorId, Option<[f32; 4]>); 4]| {
+    // Each box is handed in already measured against its surface's own clip,
+    // because "cropped away" is the one thing the two surfaces answer
+    // differently — the strip clips on X, the rail on Y.
+    let mut row = |index: usize, parts: [(tooltip::TooltipAnchorId, Option<[f32; 4]>); 5]| {
         if renaming == Some(index) {
             return;
         }
@@ -85330,6 +85473,10 @@ fn tab_surface_tip_boxes(
                         (
                             tooltip::TooltipAnchorId::TabPin(index),
                             slot.pin.filter(|pin| visible(*pin)),
+                        ),
+                        (
+                            tooltip::TooltipAnchorId::TabClose(index),
+                            slot.close.filter(|close| visible(*close)),
                         ),
                         (
                             tooltip::TooltipAnchorId::TabIcon(index),
@@ -85369,6 +85516,10 @@ fn tab_surface_tip_boxes(
                                 slot.pin.filter(|pin| visible(*pin)),
                             ),
                             (
+                                tooltip::TooltipAnchorId::TabClose(index),
+                                slot.close.filter(|close| visible(*close)),
+                            ),
+                            (
                                 tooltip::TooltipAnchorId::TabIcon(index),
                                 Some(slot.mark).filter(|rect| visible(*rect)),
                             ),
@@ -85395,6 +85546,153 @@ fn tab_surface_tip_boxes(
         boxes.push((tooltip::TooltipAnchorId::NewTabMenu, rect));
     }
     boxes
+}
+
+#[cfg(test)]
+mod files_turn_wake_tests {
+    /// RED — **every tree that can turn a triangle is asked whether one is
+    /// turning** (user report 2026-08-28, `docs/DESIGN.md` §7.37 ④).
+    ///
+    /// RED EVIDENCE (2026-08-28, measured on the real window before the fix).
+    /// Click a folder in a **flyout** tree: its children appear, its icon
+    /// becomes the open folder, and its triangle stays `▸`. Move the pointer
+    /// anywhere over that tree and the very next frame draws `▾`. Nothing about
+    /// the state was ever wrong — `row_turn` had the right angle the whole time
+    /// — and nothing repainted to spend it, because `strip_animation_deadline`
+    /// asked only `tabs[active].file_trees`, the **docked** columns' caches. A
+    /// float keeps its own `DirCache` on the window, so a turn started in one
+    /// drew its first frame and then asked nobody for a second: the loop went
+    /// idle mid-animation and the row sat with a shut triangle over its own open
+    /// children until some unrelated event happened to wake it.
+    ///
+    /// It is read off the source, and that is deliberate: what was wrong is the
+    /// **shape** of the question — which stores it walks — and a gate that
+    /// exercised one `DirCache` would have been green on the broken build, since
+    /// the cache always answered correctly. This is the same reason §7.33's own
+    /// derivation gate reads the pass rather than the predicate.
+    ///
+    /// MUTATION: drop the float half and the deadline goes back to seeing only
+    /// the docked columns.
+    #[test]
+    fn a_turning_triangle_wakes_the_loop_from_every_tree_that_can_draw_one() {
+        const SOURCE: &str = include_str!("main.rs");
+        let at = SOURCE
+            .find("fn strip_animation_deadline(")
+            .expect("the window has an animation deadline");
+        let body = &SOURCE[at..];
+        let end = body.find("\n    fn ").unwrap_or(body.len());
+        let body = &body[..end];
+        let turning = body
+            .find("let files_turning")
+            .expect("the deadline asks whether a triangle is turning");
+        let question = &body[turning..];
+        let question = &question[..question.find(";\n").unwrap_or(question.len())];
+        assert!(
+            question.contains("file_trees"),
+            "the docked columns' caches are still asked:\n{question}"
+        );
+        assert!(
+            question.contains("float") && question.contains("files"),
+            "a float's own tree can turn a triangle and is never asked, so the \
+             loop goes idle mid-turn and the row keeps a shut triangle over its \
+             open children:\n{question}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tab_close_tip_tests {
+    use super::*;
+
+    /// RED — **the tab strip's close says what it closes** (user ruling
+    /// 2026-08-28, `docs/DESIGN.md` §7.37: 「所有表面统一」).
+    ///
+    /// RED EVIDENCE (2026-08-28). §7.33 gave every head and rail control a
+    /// tooltip and left the tab strip out by name: `tab_surface_tip_boxes`
+    /// registered a tab's body, its mark, its pin and its folder and stepped over
+    /// the `×`, on the argument that a pointer there falls through to the tab
+    /// anyway. So the one cross in this window that could not say what it closed
+    /// was the one on a tab. Before the fix this gate reads:
+    ///
+    /// ```text
+    /// an ordinary tab draws a × but the tip pass steps over it (tab 0)
+    /// ```
+    ///
+    /// It walks the very pass the window spends (`tab_surface_tip_boxes`) over a
+    /// strip of ordinary tabs and asks that the close each one draws is in it —
+    /// the "drawable ⇒ traversed ⇒ registered" mechanism §7.33 built, now with
+    /// the tab strip inside the gate. A pinned tab draws the pin in that slot and
+    /// no `×`, so it must tip none — the same seam `hit_tab_chrome` reads.
+    ///
+    /// MUTATION: force the `TabClose` part to `None` in `tab_surface_tip_boxes`
+    /// and every ordinary tab loses its close from the pass.
+    #[test]
+    fn the_tab_strips_close_button_says_what_it_closes() {
+        const SCALE: f32 = 1.0;
+        const WIDTH: f32 = 1200.0;
+
+        let trailers = vec![seats::TabTrailer::default(); 3];
+        let strip = seats::tab_strip_geometry(WIDTH, SCALE, &trailers, 0, 0.0);
+        // Every ordinary tab really draws a clickable `×` to be tipped — the
+        // premise the gate rests on.
+        assert!(
+            strip.tabs.iter().all(|tab| tab.close.is_some()),
+            "the fixture's tabs draw a close",
+        );
+        let boxes = tab_surface_tip_boxes(
+            seats::TabLayoutMode::Horizontal,
+            &strip,
+            None,
+            SCALE,
+            false,
+            None,
+        );
+        for index in 0..trailers.len() {
+            assert!(
+                boxes
+                    .iter()
+                    .any(|(id, _)| *id == tooltip::TooltipAnchorId::TabClose(index)),
+                "an ordinary tab draws a × but the tip pass steps over it (tab {index})",
+            );
+        }
+
+        // A pinned tab wears the pin where the `×` would stand, so it draws no
+        // close and must tip none.
+        let mut pinned = vec![seats::TabTrailer::default(); 3];
+        pinned[1] = seats::TabTrailer {
+            pinned: true,
+            ..seats::TabTrailer::default()
+        };
+        let pstrip = seats::tab_strip_geometry(WIDTH, SCALE, &pinned, 0, 0.0);
+        assert!(
+            pstrip.tabs[1].close.is_none(),
+            "the pinned tab really draws no close",
+        );
+        let pboxes = tab_surface_tip_boxes(
+            seats::TabLayoutMode::Horizontal,
+            &pstrip,
+            None,
+            SCALE,
+            false,
+            None,
+        );
+        assert!(
+            !pboxes
+                .iter()
+                .any(|(id, _)| *id == tooltip::TooltipAnchorId::TabClose(1)),
+            "a pinned tab tips no close, since it draws none",
+        );
+
+        // The words that pass spends on the close are real in both languages —
+        // an empty string would be dropped by `TooltipAnchors::push` and the
+        // button would go silent for exactly the readers who need it.
+        for lang in i18n::Lang::ALL {
+            assert!(
+                !i18n::Text::TabMenuClose.in_lang(lang).trim().is_empty(),
+                "Close tab says nothing in {lang:?}",
+            );
+        }
+    }
 }
 
 /// The first line of a pane whose profile's shell would not start —
@@ -118515,7 +118813,7 @@ mod tests {
                 "and the chip says so: {video}"
             );
             assert_eq!(
-                peek_body_kind(ftype_of(video), Some(Path::new(video)), false),
+                peek_body_kind(ftype_of(video), Some(Path::new(video)), false, false),
                 PeekBodyKind::Frame,
                 "and the glance card shows the same thing the door opens: {video}"
             );
@@ -118539,7 +118837,7 @@ mod tests {
         // A composed document that merely spells a video's name has nothing to
         // decode: a git diff of `clip.mp4` is a reading of a repository.
         assert_eq!(
-            peek_body_kind(preview::PreviewFtype::Video, None, false),
+            peek_body_kind(preview::PreviewFtype::Video, None, false, false),
             PeekBodyKind::Refused,
             "a body with no file behind it is not a frame"
         );
@@ -119003,7 +119301,7 @@ mod tests {
     fn the_glance_card_says_what_the_row_opens_as() {
         let kind = |name: &str, refused: bool| {
             let path = PathBuf::from(format!(r"D:\site\{name}"));
-            peek_body_kind(preview::preview_ftype(name), Some(&path), refused)
+            peek_body_kind(preview::preview_ftype(name), Some(&path), refused, false)
         };
         // **A page whose bytes are text shows them.** One lane, the document's,
         // and no branch of its own below this line.
@@ -119039,18 +119337,19 @@ mod tests {
             peek_body_kind(
                 preview::PreviewFtype::Web,
                 Some(Path::new(r"\\server\share\index.html")),
-                true
+                true,
+                false,
             ),
             PeekBodyKind::Refused
         );
         // A composed document has no path, so it is drawn as the document it is
         // however its name is spelled.
         assert_eq!(
-            peek_body_kind(preview::PreviewFtype::Web, None, false),
+            peek_body_kind(preview::PreviewFtype::Web, None, false, false),
             PeekBodyKind::Document
         );
         assert_eq!(
-            peek_body_kind(preview::PreviewFtype::Image, None, false),
+            peek_body_kind(preview::PreviewFtype::Image, None, false, false),
             PeekBodyKind::Refused,
             "and a picture with no file is still a picture nothing can decode"
         );

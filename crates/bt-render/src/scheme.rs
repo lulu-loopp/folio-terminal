@@ -496,7 +496,38 @@ impl ChromePalette {
             dialog_secondary_text: ink2(win),
             dialog_muted_text: ink3(win),
             dialog_hover: hover(win),
-            menu_item_text: ink2(menu),
+            // **A menu row's words, raised to the house's reading floor** (user
+            // ruling 2026-08-28, `docs/DESIGN.md` §7.37).
+            //
+            // `--ink2` over `--menu` is the design's own level and it is what
+            // this still is on every scheme that clears the floor — the solver
+            // returns its input untouched. What it is not any more is a promise
+            // the ladder cannot keep: a menu row is *body text* on the menu
+            // surface, WCAG 1.4.3 AA asks 4.5:1 of body text, and the mock-up's
+            // paper ladder lands `#7D7C78` on white at 4.18:1. Measured before
+            // this line: Folio Light 4.18 (under), Folio Dark 5.42 (over).
+            //
+            // Raised here rather than struck darker in the table, because the
+            // table is one scheme's answer and this is every scheme's question —
+            // a user scheme is a user-supplied pair of colours and no fixed
+            // level can promise a ratio across them. It is `contrast::
+            // raise_against`, the same solver the float tag and the `Minimum
+            // contrast` row already go through, so the house has one contrast
+            // authority rather than three; the ink keeps its hue and travels the
+            // shortest distance in lightness that arrives.
+            //
+            // The selected row is *not* raised and needs no raising: it is
+            // `--ink` at full strength, the darkest the scheme has to offer, and
+            // a floor applied to it could only ever move it away from the ink
+            // the reader chose. The muted inks beside it (`menu_item_hint_text`,
+            // `menu_item_unavailable_text`) are deliberately below the floor —
+            // an inactive control is entitled to read as one, which is WCAG
+            // 1.4.3's own exception.
+            menu_item_text: crate::contrast::raise_against(
+                ink2(menu),
+                menu,
+                crate::theme::CHROME_TEXT_MINIMUM_CONTRAST,
+            ),
             menu_item_text_selected: ink(menu),
             menu_item_hover: hover(menu),
             peek_leaf_focus_fill: leaf_focus,
