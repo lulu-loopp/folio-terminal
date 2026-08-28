@@ -4452,11 +4452,14 @@ fn build_preview_markdown_body(
                                     target,
                                 });
                             }
-                            let note_height =
-                                placed.rows.get(1).copied().unwrap_or(metrics.line_height);
                             paragraphs.push(bt_render::PreviewParagraph {
                                 runs: card.note,
-                                rect: [inner_left, line_top, inner_right, line_top + note_height],
+                                rect: [
+                                    inner_left,
+                                    line_top,
+                                    inner_right,
+                                    box_rect[3] - metrics.code_border - metrics.code_padding_y,
+                                ],
                                 font_size_px: metrics.font_size,
                                 line_height_px: metrics.line_height,
                                 wrap: true,
@@ -49862,29 +49865,12 @@ fn measure_markdown_block(
                 let card = markdown_image_card(image, pictures.get(source), &palette);
                 let inner =
                     (width - metrics.code_padding_x * 2.0 - metrics.code_border * 2.0).max(1.0);
-                // **The card's two rows are written down**, not added into one
-                // total the painter then has to take apart again: an address
-                // long enough to wrap is two lines of note, and a painter that
-                // assumed one would put the sentence over its own second line.
-                // [`MarkdownBlockLayout::rows`] is where a block that has rows
-                // says so.
-                let mut rows = vec![measure(
-                    &card.said,
-                    inner,
-                    metrics.font_size,
-                    metrics.line_height,
-                )];
+                let mut height = measure(&card.said, inner, metrics.font_size, metrics.line_height);
                 if !card.note.is_empty() {
-                    rows.push(measure(
-                        &card.note,
-                        inner,
-                        metrics.font_size,
-                        metrics.line_height,
-                    ));
+                    height += measure(&card.note, inner, metrics.font_size, metrics.line_height);
                 }
-                MarkdownBlockLayout::rows(
-                    rows,
-                    metrics.code_padding_y * 2.0 + metrics.code_border * 2.0,
+                MarkdownBlockLayout::solid(
+                    height + metrics.code_padding_y * 2.0 + metrics.code_border * 2.0,
                 )
             }
         }
