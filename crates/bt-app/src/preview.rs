@@ -1569,7 +1569,10 @@ fn push_link_runs(text: &str, at: usize, line: &str, pieces: &mut Vec<Piece>) {
 fn link_destination(inside: &str) -> String {
     let inside = inside.trim();
     // `<…>` wraps a destination that has spaces in it; the brackets are markup.
-    if let Some(angled) = inside.strip_prefix('<').and_then(|rest| rest.strip_suffix('>')) {
+    if let Some(angled) = inside
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+    {
         return angled.to_owned();
     }
     let Some(space) = inside.find(char::is_whitespace) else {
@@ -2186,8 +2189,7 @@ fn opens_html_tag(text: &str, name: &str) -> bool {
         return false;
     };
     rest.is_empty()
-        || rest
-            .starts_with(|character: char| character.is_whitespace() || character == '>')
+        || rest.starts_with(|character: char| character.is_whitespace() || character == '>')
         || rest.starts_with('/')
 }
 
@@ -9321,7 +9323,6 @@ mod tests {
         }
     }
 
-
     /// RED GATE (user report, 2026-08-28: 「md 预览不渲染图片」) — **the
     /// `<picture>` element picks the file that answers for the theme in force**,
     /// and this repository's own `README.md` is the fixture.
@@ -9362,8 +9363,7 @@ mod tests {
         assert_eq!(image.src, "assets/readme/hero-light.svg");
         assert!(image.fill, "a width of 100% is the document asking to fill");
         assert_eq!(
-            image.alt,
-            "Folio - the Windows terminal that renders math.",
+            image.alt, "Folio - the Windows terminal that renders math.",
             "an attribute's line breaks are spaces, as they are in HTML"
         );
     }

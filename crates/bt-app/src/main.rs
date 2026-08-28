@@ -1783,8 +1783,7 @@ impl MarkdownPictures {
     /// Write down that this pass is owed, replacing whatever size was owed for
     /// the same picture — see [`Self::owed`].
     fn owe(&mut self, request: MarkdownRasterRequest, now: Instant) {
-        self.owed
-            .insert(request.key.content.clone(), request);
+        self.owed.insert(request.key.content.clone(), request);
         self.settle_deadline = Some(now + WINDOW_RESIZE_QUIET);
     }
 
@@ -1839,6 +1838,67 @@ impl MarkdownPictures {
     fn forget(&mut self, _path: &Path) {
         self.generation = self.generation.saturating_add(1);
     }
+}
+
+/// **Everything a markdown page is set with that is not the document itself**:
+/// the formulas it has been handed, the pictures it has been handed, and the
+/// theme that decides which file a `<picture>` names.
+///
+/// A bundle rather than three parameters, and the three belong together for one
+/// reason: they are what the *window* knows and the parsed document does not.
+/// Every pass that walks the blocks — the measuring one, the laying-out one, the
+/// painting one — needs all three and needs the same three, and a pass holding a
+/// different set from its neighbour is the shape of defect
+/// [`MarkdownBlockLayout`] exists to make impossible.
+#[derive(Clone, Copy)]
+struct PageArt<'a> {
+    math: &'a DocumentMath,
+    pictures: &'a DocumentPictures,
+    theme: bt_render::Theme,
+}
+
+/// **The same three as a key** — see [`PreviewDocumentKey`].
+///
+/// What is stored is not the art but *how much of it has arrived*: a counter per
+/// lane, plus the two things that change what the lanes would answer. The
+/// question a document key asks is "is this the same layout question as last
+/// time", and the answer no longer being the same is enough.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PageArtKey {
+    /// **How many formulas this window has been handed since**, which is what
+    /// makes a formula landing owe a re-flow.
+    ///
+    /// A rendered formula is as tall as its picture and the picture arrives tens
+    /// of milliseconds after the page was laid out. Without this the page keeps
+    /// the height it reserved for the source text it was standing on, draws the
+    /// picture into it, and every block below stands in the wrong place — the
+    /// same shape of defect a list measured one way and drawn another already
+    /// cost this file once ([`MarkdownBlockLayout`]).
+    math_generation: u64,
+    /// The ink the body is set in, because a formula's picture is **drawn in
+    /// it** rather than tinted at draw time.
+    ///
+    /// Every other run on the page recolours for free — the palette is read
+    /// fresh on every frame and a glyph is drawn in whatever colour it is handed.
+    /// A raster is not: its pixels came out of the engine already coloured, so a
+    /// theme change is a different picture, and a page that did not notice would
+    /// keep yesterday's ink in the middle of today's paragraph.
+    body_ink: [u8; 3],
+    /// **How many pictures this window has been handed since**
+    /// ([`Self::math_generation`]'s sibling, one block kind over).
+    ///
+    /// It ticks for a decode that landed, a decode that failed, an exact-size
+    /// raster that landed or was evicted, and a watched file that moved — every
+    /// event after which the same page would come out differently.
+    picture_generation: u64,
+    /// **The theme this page is drawn in**, because a `<picture>` names one file
+    /// for a dark page and another for a light one (§7.1.3k ②).
+    ///
+    /// Its own field rather than an inference from [`Self::body_ink`]: the ink
+    /// does happen to change with the theme today, and a document that re-flowed
+    /// only because of that coincidence would be a document that stopped
+    /// re-flowing the day two schemes shared a body colour.
+    theme: bt_render::Theme,
 }
 
 /// **How large a picture is drawn on a markdown page, and the only place that
@@ -1919,9 +1979,7 @@ fn markdown_image_card(
         // Still out, or nothing resolved it at all. Neither is something to
         // tell the reader about: the first is about to stop being true and the
         // second cannot happen without the resolver having been skipped.
-        Some(MarkdownPicture::Loading | MarkdownPicture::Ready { .. }) | None => {
-            (Vec::new(), None)
-        }
+        Some(MarkdownPicture::Loading | MarkdownPicture::Ready { .. }) | None => (Vec::new(), None),
     };
     MarkdownImageCard {
         said: vec![text(said, palette.files_row_text)],
@@ -2049,52 +2107,13 @@ struct DiffRow {
 struct PreviewDocumentKey {
     parse: PreviewParseKey,
     body_width_px: u32,
-    /// **How many formulas this window has been handed since**, which is what
-    /// makes a formula landing owe a re-flow.
-    ///
-    /// A rendered formula is as tall as its picture and the picture arrives
-    /// tens of milliseconds after the page was laid out. Without this the page
-    /// keeps the height it reserved for the source text it was standing on,
-    /// draws the picture into it, and every block below stands in the wrong
-    /// place — the same shape of defect a list measured one way and drawn
-    /// another already cost this file once ([`MarkdownBlockLayout`]).
+    /// **What the window has handed this page, and what it would set it in** —
+    /// see [`PageArtKey`].
     ///
     /// On the width's side of the split rather than the parse's, because that is
-    /// exactly what it is: nothing about the document changed, only how tall one
-    /// of its blocks now is. So an arrival re-flows and does not re-parse.
-    ///
-    /// A counter and not the pictures themselves, because what is being asked is
-    /// "is this the same layout question as last time"; the answer no longer
-    /// being the same is enough, and the arrival that changed it is already
-    /// filed where the next resolution will find it.
-    math_generation: u64,
-    /// The ink the body is set in, because a formula's picture is **drawn in
-    /// it** rather than tinted at draw time.
-    ///
-    /// Every other run on the page recolours for free — the palette is read
-    /// fresh on every frame and a glyph is drawn in whatever colour it is handed.
-    /// A raster is not: its pixels came out of the engine already coloured, so a
-    /// theme change is a different picture, and a page that did not notice would
-    /// keep yesterday's ink in the middle of today's paragraph.
-    body_ink: [u8; 3],
-    /// **How many pictures this window has been handed since**, which is what
-    /// makes a picture landing owe a re-flow.
-    ///
-    /// [`Self::math_generation`]'s sibling, one block kind over, and on the same
-    /// side of the split for the same reason: a picture arriving changes how
-    /// tall one block is and not one byte of the document. It ticks for a decode
-    /// that landed, a decode that failed, an exact-size raster that landed or
-    /// was evicted, and a watched file that moved — every event after which the
-    /// same page would come out differently.
-    picture_generation: u64,
-    /// **The theme this page is drawn in**, because a `<picture>` names one file
-    /// for a dark page and another for a light one (§7.1.3k ②).
-    ///
-    /// Its own field rather than an inference from [`Self::body_ink`]: the ink
-    /// does happen to change with the theme today, and a document that re-flowed
-    /// only because of that coincidence would be a document that stopped
-    /// re-flowing the day two schemes shared a body colour.
-    theme: bt_render::Theme,
+    /// exactly what these are: nothing about the document changed, only how tall
+    /// one of its blocks now is. So an arrival re-flows and does not re-parse.
+    art: PageArtKey,
 }
 
 /// The half of [`PreviewDocumentKey`] that has **nothing to do with the pane's
@@ -2604,10 +2623,7 @@ fn preview_document_key(
     md_source: bool,
     body_width_px: f32,
     scale: f32,
-    math_generation: u64,
-    body_ink: [u8; 3],
-    picture_generation: u64,
-    theme: bt_render::Theme,
+    art: PageArtKey,
 ) -> PreviewDocumentKey {
     PreviewDocumentKey {
         parse: PreviewParseKey {
@@ -2617,10 +2633,7 @@ fn preview_document_key(
             scale_ppm: (scale * 1_000_000.0).round() as u32,
         },
         body_width_px: body_width_px.max(0.0).round() as u32,
-        math_generation,
-        body_ink,
-        picture_generation,
-        theme,
+        art,
     }
 }
 
@@ -3792,9 +3805,7 @@ fn build_preview_markdown_body(
         &[MarkdownBlockLayout],
     ),
     palette: &bt_render::ChromePalette,
-    math: &DocumentMath,
-    pictures: &DocumentPictures,
-    theme: bt_render::Theme,
+    art: PageArt<'_>,
 ) -> BuiltMarkdown {
     let BlockScrollPaint {
         offsets: block_scroll,
@@ -3808,6 +3819,11 @@ fn build_preview_markdown_body(
     // syntax highlighting is width-free, so it was measured with the rest of
     // what a block is worth whatever the pane does (#49).
     let (blocks, intrinsic, layout) = document;
+    let PageArt {
+        math,
+        pictures,
+        theme,
+    } = art;
     // **The page has no horizontal axis; the wide blocks have their own** (user
     // ruling, 2026-08-13, overturning the same day's earlier "the whole page
     // travels").
@@ -4392,8 +4408,7 @@ fn build_preview_markdown_body(
                             ],
                             color: palette.preview_code_ground,
                         });
-                        let inner_left =
-                            box_rect[0] + metrics.code_border + metrics.code_padding_x;
+                        let inner_left = box_rect[0] + metrics.code_border + metrics.code_padding_x;
                         let inner_right =
                             box_rect[2] - metrics.code_border - metrics.code_padding_x;
                         let mut line_top =
@@ -49081,17 +49096,14 @@ impl Runtime<'_> {
         let document = self
             .preview_buffer_on(surface)
             .and_then(|buffer| buffer.source.file_path().map(Path::to_path_buf));
+        let art_key = PageArtKey {
+            math_generation,
+            body_ink,
+            picture_generation,
+            theme,
+        };
         let key = self.preview_buffer_on(surface).map(|buffer| {
-            preview_document_key(
-                buffer,
-                md_source,
-                body[2] - body[0],
-                scale,
-                math_generation,
-                body_ink,
-                picture_generation,
-                theme,
-            )
+            preview_document_key(buffer, md_source, body[2] - body[0], scale, art_key)
         });
         if key == self.preview_pane_mut(surface).doc_key {
             return;
@@ -49113,11 +49125,13 @@ impl Runtime<'_> {
         // changed with the parse standing still — and it is rare (once per
         // picture, not once per pixel of a drag), which is exactly why it can
         // afford the pass a resize cannot.
-        let math_changed = key.as_ref().map(|key| (key.math_generation, key.body_ink))
+        let math_changed = key
+            .as_ref()
+            .map(|key| (key.art.math_generation, key.art.body_ink))
             != pane
                 .doc_key
                 .as_ref()
-                .map(|key| (key.math_generation, key.body_ink));
+                .map(|key| (key.art.math_generation, key.art.body_ink));
         pane.doc_key = key;
         if reflow_only
             && let PreviewDocument::Markdown {
@@ -49143,8 +49157,17 @@ impl Runtime<'_> {
             } else {
                 intrinsic
             };
-            let layout =
-                self.lay_markdown_out(&blocks, &intrinsic, width, metrics, &math, &pictures);
+            let layout = self.lay_markdown_out(
+                &blocks,
+                &intrinsic,
+                width,
+                metrics,
+                PageArt {
+                    math: &math,
+                    pictures: &pictures,
+                    theme,
+                },
+            );
             self.preview_pane_mut(surface)
                 .reflow_document(PreviewDocument::Markdown {
                     blocks,
@@ -49249,8 +49272,17 @@ impl Runtime<'_> {
                     self.resolve_document_math(&blocks, metrics, &bt_render::chrome_palette());
                 let pictures = self.resolve_document_pictures(&blocks, document.as_deref(), width);
                 let intrinsic = self.measure_markdown_intrinsics(&blocks, metrics, &math);
-                let layout =
-                    self.lay_markdown_out(&blocks, &intrinsic, width, metrics, &math, &pictures);
+                let layout = self.lay_markdown_out(
+                    &blocks,
+                    &intrinsic,
+                    width,
+                    metrics,
+                    PageArt {
+                        math: &math,
+                        pictures: &pictures,
+                        theme,
+                    },
+                );
                 PreviewDocument::Markdown {
                     blocks,
                     intrinsic,
@@ -49390,8 +49422,7 @@ impl Runtime<'_> {
     ) -> DocumentPictures {
         let theme = bt_render::current_theme();
         let now = Instant::now();
-        self.window.markdown_pictures.tick =
-            self.window.markdown_pictures.tick.saturating_add(1);
+        self.window.markdown_pictures.tick = self.window.markdown_pictures.tick.saturating_add(1);
         let mut ask = |path: &Path, fill: bool| -> MarkdownPicture {
             let cache_key = bt_term::normalized_local_image_path_key(path);
             let decoded = match self.window.peek_cache.get(&cache_key) {
@@ -49606,17 +49637,13 @@ impl Runtime<'_> {
         intrinsic: &[MarkdownBlockIntrinsic],
         width: f32,
         metrics: seats::PreviewMarkdownMetrics,
-        math: &DocumentMath,
-        pictures: &DocumentPictures,
+        art: PageArt<'_>,
     ) -> Vec<MarkdownBlockLayout> {
-        let theme = bt_render::current_theme();
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut wrapped = |runs: &[bt_render::PreviewRun], width: f32, font: f32, line: f32| {
             renderer.measure_preview_paragraph(gpu, runs, width, font, line)
         };
-        lay_markdown_out(
-            blocks, intrinsic, width, metrics, math, pictures, theme, &mut wrapped,
-        )
+        lay_markdown_out(blocks, intrinsic, width, metrics, art, &mut wrapped)
     }
 }
 
@@ -49639,9 +49666,7 @@ fn lay_markdown_out(
     intrinsic: &[MarkdownBlockIntrinsic],
     width: f32,
     metrics: seats::PreviewMarkdownMetrics,
-    math: &DocumentMath,
-    pictures: &DocumentPictures,
-    theme: bt_render::Theme,
+    art: PageArt<'_>,
     measure: &mut WrapMeasure<'_>,
 ) -> Vec<MarkdownBlockLayout> {
     {
@@ -49650,9 +49675,8 @@ fn lay_markdown_out(
         let mut previous_bottom = 0.0_f32;
         let mut previous: Option<&preview::MarkdownBlock> = None;
         for (block, intrinsic) in blocks.iter().zip(intrinsic) {
-            let mut measured = measure_markdown_block(
-                block, intrinsic, width, metrics, math, pictures, theme, measure,
-            );
+            let mut measured =
+                measure_markdown_block(block, intrinsic, width, metrics, art, measure);
             // **Asymmetric since 2026-08-16**: github.css gives a heading more
             // air above it than below (`margin: 24px 0 16px`), which is what
             // binds a heading to the paragraph it introduces instead of to the
@@ -49689,12 +49713,15 @@ fn measure_markdown_block(
     intrinsic: &MarkdownBlockIntrinsic,
     width: f32,
     metrics: seats::PreviewMarkdownMetrics,
-    math: &DocumentMath,
-    pictures: &DocumentPictures,
-    theme: bt_render::Theme,
+    art: PageArt<'_>,
     measure: &mut WrapMeasure<'_>,
 ) -> MarkdownBlockLayout {
     {
+        let PageArt {
+            math,
+            pictures,
+            theme,
+        } = art;
         let palette = bt_render::chrome_palette();
         match block {
             preview::MarkdownBlock::Heading { level, spans } => {
@@ -49837,8 +49864,8 @@ fn measure_markdown_block(
                     return MarkdownBlockLayout::solid(height);
                 }
                 let card = markdown_image_card(image, pictures.get(source), &palette);
-                let inner = (width - metrics.code_padding_x * 2.0 - metrics.code_border * 2.0)
-                    .max(1.0);
+                let inner =
+                    (width - metrics.code_padding_x * 2.0 - metrics.code_border * 2.0).max(1.0);
                 let mut height = measure(&card.said, inner, metrics.font_size, metrics.line_height);
                 if !card.note.is_empty() {
                     height += measure(&card.note, inner, metrics.font_size, metrics.line_height);
@@ -50134,9 +50161,11 @@ impl Runtime<'_> {
                     },
                     (blocks, intrinsic, layout),
                     &palette,
-                    math,
-                    pictures,
-                    bt_render::current_theme(),
+                    PageArt {
+                        math,
+                        pictures,
+                        theme: bt_render::current_theme(),
+                    },
                 );
                 sites = rendered.links;
                 math_sites = rendered.math;
@@ -50713,8 +50742,7 @@ impl Runtime<'_> {
             }
         }
         if self.window.markdown_pictures.settle_deadline.is_some() {
-            self.window.markdown_pictures.settle_deadline =
-                Some(observed_at + WINDOW_RESIZE_QUIET);
+            self.window.markdown_pictures.settle_deadline = Some(observed_at + WINDOW_RESIZE_QUIET);
         }
     }
 
@@ -109552,9 +109580,11 @@ mod tests {
             &MarkdownBlockIntrinsic::default(),
             400.0,
             metrics,
-            &DocumentMath::default(),
-            &DocumentPictures::default(),
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
             &mut never_measured,
         );
         assert_eq!(
@@ -109577,9 +109607,11 @@ mod tests {
             &MarkdownBlockIntrinsic::default(),
             400.0,
             metrics,
-            &math,
-            &DocumentPictures::default(),
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &math,
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
             &mut never_measured,
         );
         assert_eq!(
@@ -109624,9 +109656,11 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &[], &layout),
             &palette,
-            &math,
-            &DocumentPictures::default(),
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &math,
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
         );
         let (left, right) = preview::markdown_measure_box(body, metrics);
         assert_eq!(rendered.body.rasters.len(), 1, "one formula, one picture");
@@ -109654,9 +109688,11 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &[], &layout),
             &palette,
-            &DocumentMath::default(),
-            &DocumentPictures::default(),
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
         );
         assert!(waiting.body.rasters.is_empty());
         assert_eq!(
@@ -109760,9 +109796,11 @@ mod tests {
             &MarkdownBlockIntrinsic::default(),
             400.0,
             metrics,
-            &DocumentMath::default(),
-            &one_image("docs/screenshots/one.png", [3200, 2000]),
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &one_image("docs/screenshots/one.png", [3200, 2000]),
+                theme: bt_render::Theme::Dark,
+            },
             &mut never_measured,
         );
         assert_eq!(
@@ -109777,9 +109815,11 @@ mod tests {
             &MarkdownBlockIntrinsic::default(),
             400.0,
             metrics,
-            &DocumentMath::default(),
-            &one_image("docs/screenshots/one.png", [96, 20]),
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &one_image("docs/screenshots/one.png", [96, 20]),
+                theme: bt_render::Theme::Dark,
+            },
             &mut never_measured,
         );
         assert_eq!(badge.height, 20.0);
@@ -109790,9 +109830,11 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &[], &[MarkdownBlockLayout::solid(20.0)]),
             &bt_render::chrome_palette(),
-            &DocumentMath::default(),
-            &one_image("docs/screenshots/one.png", [96, 20]),
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &one_image("docs/screenshots/one.png", [96, 20]),
+                theme: bt_render::Theme::Dark,
+            },
         );
         let [drawn] = rendered.body.rasters.as_slice() else {
             panic!("one picture, one raster: {:#?}", rendered.body.rasters);
@@ -109829,8 +109871,7 @@ mod tests {
     /// with the URL it tried to open as a path.
     #[test]
     fn a_remote_image_is_never_fetched() {
-        let blocks =
-            preview::parse_markdown("![a badge](https://img.example/badge.svg)\n");
+        let blocks = preview::parse_markdown("![a badge](https://img.example/badge.svg)\n");
         let mut doors = 0usize;
         let pictures = resolve_document_pictures(
             &blocks,
@@ -109863,9 +109904,11 @@ mod tests {
                 &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
             ),
             &bt_render::chrome_palette(),
-            &DocumentMath::default(),
-            &pictures,
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &pictures,
+                theme: bt_render::Theme::Dark,
+            },
         );
         assert!(
             rendered.body.rasters.is_empty(),
@@ -109919,9 +109962,11 @@ mod tests {
                 &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
             ),
             &bt_render::chrome_palette(),
-            &DocumentMath::default(),
-            &pictures,
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &pictures,
+                theme: bt_render::Theme::Dark,
+            },
         );
         assert!(rendered.body.rasters.is_empty());
         assert_eq!(
@@ -109954,9 +109999,11 @@ mod tests {
                 &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
             ),
             &bt_render::chrome_palette(),
-            &DocumentMath::default(),
-            &waiting,
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &waiting,
+                theme: bt_render::Theme::Dark,
+            },
         );
         assert_eq!(card_text(&rendered), vec!["a shot".to_owned()]);
     }
@@ -110169,9 +110216,11 @@ mod tests {
                 &intrinsic,
                 right - left,
                 metrics,
-                &DocumentMath::default(),
-                &DocumentPictures::default(),
-                bt_render::Theme::Dark,
+                PageArt {
+                    math: &DocumentMath::default(),
+                    pictures: &DocumentPictures::default(),
+                    theme: bt_render::Theme::Dark,
+                },
                 wrap,
             )
             .last()
@@ -110318,9 +110367,11 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &[], &layout),
             &palette,
-            &math,
-            &DocumentPictures::default(),
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &math,
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
         );
         let drawn = &rendered.body.rasters;
         assert_eq!(
@@ -110411,9 +110462,11 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &[], &layout),
             &palette,
-            &DocumentMath::default(),
-            &DocumentPictures::default(),
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
         );
         let sites: Vec<_> = rendered
             .links
@@ -110534,9 +110587,11 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &[], &layout),
             &palette,
-            &DocumentMath::default(),
-            &DocumentPictures::default(),
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
         );
         let pieces = preview_select::pieces(&blocks);
         assert_eq!(
@@ -111340,8 +111395,8 @@ mod tests {
             mtime: None,
             content_says_text: true,
         });
-        let wide = preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark);
-        let narrow = preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark);
+        let wide = document_key(&buffer, false, 1200.0, 1.0);
+        let narrow = document_key(&buffer, false, 400.0, 1.0);
         assert_ne!(wide, narrow, "a width change is still a layout change");
         assert_eq!(
             wide.parse, narrow.parse,
@@ -111353,7 +111408,7 @@ mod tests {
             true
         });
         assert_ne!(
-            preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark).parse,
+            document_key(&buffer, false, 1200.0, 1.0).parse,
             wide.parse,
             "an edit re-parses"
         );
@@ -111445,9 +111500,11 @@ mod tests {
             &heavy_intrinsic,
             400.0,
             metrics,
-            &DocumentMath::default(),
-            &DocumentPictures::default(),
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
             &mut measure,
         );
         assert_eq!(
@@ -111469,9 +111526,11 @@ mod tests {
                 &intrinsic,
                 width,
                 metrics,
-                &DocumentMath::default(),
-                &DocumentPictures::default(),
-                bt_render::Theme::Dark,
+                PageArt {
+                    math: &DocumentMath::default(),
+                    pictures: &DocumentPictures::default(),
+                    theme: bt_render::Theme::Dark,
+                },
                 &mut measure,
             );
             heights.push(layout.last().map_or(0.0, |last| last.top + last.height));
@@ -112046,15 +112105,43 @@ mod tests {
             bars,
             document,
             palette,
-            &DocumentMath::default(),
-            &DocumentPictures::default(),
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
         )
         .body
     }
 
     /// The bars at rest: the offsets under test, nothing lit, one device pixel
     /// to the logical one.
+    /// A document key with both generations and the theme at rest.
+    ///
+    /// Every test below that is not about a formula or a picture wants the same
+    /// four answers — the buffer, the face, the width and the scale — and naming
+    /// the other four at each of fourteen call sites said nothing except that
+    /// they were still zero.
+    fn document_key(
+        buffer: &preview::PreviewBuffer,
+        md_source: bool,
+        width_px: f32,
+        scale: f32,
+    ) -> PreviewDocumentKey {
+        preview_document_key(
+            buffer,
+            md_source,
+            width_px,
+            scale,
+            PageArtKey {
+                math_generation: 0,
+                body_ink: [0, 0, 0],
+                picture_generation: 0,
+                theme: bt_render::Theme::Dark,
+            },
+        )
+    }
+
     fn rested_bars(offsets: &[f32]) -> BlockScrollPaint<'_> {
         BlockScrollPaint {
             offsets,
@@ -112745,8 +112832,8 @@ mod tests {
             "the source face has a caret and the rendered page has not"
         );
         assert_ne!(
-            preview_document_key(buffer, true, 400.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark),
-            preview_document_key(buffer, false, 400.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark),
+            document_key(buffer, true, 400.0, 1.0),
+            document_key(buffer, false, 400.0, 1.0),
             "so the two faces cannot share one cached document"
         );
 
@@ -112781,35 +112868,23 @@ mod tests {
     #[test]
     fn a_same_length_edit_rebuilds_the_cached_document() {
         let mut buffer = text_buffer("a.rs", "let x = 1;\n");
-        let before = preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark);
+        let before = document_key(&buffer, false, 400.0, 2.0);
         buffer.edit_content(|content| {
             content.replace_range(8..9, "2");
             true
         });
         assert_eq!(buffer.content.as_deref(), Some("let x = 2;\n"));
-        let after = preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark);
+        let after = document_key(&buffer, false, 400.0, 2.0);
         assert_ne!(
             before, after,
             "one letter for another is still a different document"
         );
         // And nothing else moved: the same buffer at the same width and scale is
         // the same key, or every wheel notch would re-parse the file.
-        assert_eq!(
-            after,
-            preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark)
-        );
-        assert_ne!(
-            after,
-            preview_document_key(&buffer, true, 400.0, 2.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark)
-        );
-        assert_ne!(
-            after,
-            preview_document_key(&buffer, false, 401.0, 2.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark)
-        );
-        assert_ne!(
-            after,
-            preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark)
-        );
+        assert_eq!(after, document_key(&buffer, false, 400.0, 2.0));
+        assert_ne!(after, document_key(&buffer, true, 400.0, 2.0));
+        assert_ne!(after, document_key(&buffer, false, 401.0, 2.0));
+        assert_ne!(after, document_key(&buffer, false, 400.0, 1.0));
     }
 
     /// ⑤ A caret, a selection and a scroll survive a switch to another buffer
@@ -119375,9 +119450,11 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &intrinsic, &layout),
             &palette,
-            &DocumentMath::default(),
-            &DocumentPictures::default(),
-            bt_render::Theme::Dark,
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
         );
         // The two fences' lines, in the order they were pushed. The `lang` chip
         // is a proportional paragraph and rides after them, so the two mono
@@ -119605,8 +119682,8 @@ mod tests {
     #[test]
     fn a_resize_cannot_re_walk_a_grammar_and_an_edit_must() {
         let mut buffer = text_buffer("main.rs", "fn main() {}\n");
-        let narrow = preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark);
-        let wide = preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark);
+        let narrow = document_key(&buffer, false, 400.0, 1.0);
+        let wide = document_key(&buffer, false, 1200.0, 1.0);
         assert_ne!(narrow, wide, "the two widths are two documents");
         assert_eq!(
             narrow.parse, wide.parse,
@@ -119617,7 +119694,7 @@ mod tests {
             true
         });
         assert_ne!(
-            preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0], 0, bt_render::Theme::Dark).parse,
+            document_key(&buffer, false, 400.0, 1.0).parse,
             narrow.parse,
             "and an edit re-walks it"
         );
