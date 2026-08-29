@@ -53339,8 +53339,9 @@ impl Runtime<'_> {
                     // off-pool slot. Matched by source in both, so a pointer that
                     // has moved on to another row is the cancellation §7.1.3 asks
                     // for, arriving as a dropped result.
-                    let landed = if let Some(buffer) =
-                        self.window.tabs[index].preview_pool.get_mut(&response.source)
+                    let landed = if let Some(buffer) = self.window.tabs[index]
+                        .preview_pool
+                        .get_mut(&response.source)
                     {
                         buffer.accept(outcome);
                         Some(buffer.content.clone())
