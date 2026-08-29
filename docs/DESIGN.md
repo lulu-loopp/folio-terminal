@@ -5421,3 +5421,39 @@ frame … layers=4 layer_bodies=1 layer_labels=3 layer_paragraphs=0 layer_drawn=
 **红门。** `bt-app`:`a_cold_files_card_fills_on_the_frame_its_answer_lands`(池子里有这份文档、tab 的 pane 在别的文件上、卡片站在它上面 → 走查必须点名 `Peek`;变异=把卡片那一臂从 `surfaces_reading` 里删掉,红出来的正是报告那张画)、`a_late_answer_for_a_card_still_standing_is_not_dropped`(晚到的答案对还站着的卡片有效,对已经挪到别行的卡片无效,对已经落下的卡片无效——三句都由同一个问题回答)、`a_landed_head_read_leaves_by_one_door`(源码门:`apply_preview_results` 只以 `settle_landed_head` 收尾且自己不再走查读者,门自己问 `surfaces_reading` 并把卡片递进去)。
 
 **§7.45 挂账 ⓐ 销掉一半。** 那一节写「这张画在本机没有等比复现出来,14 条真引用首帧文字全部在场」——那次跑的全是**从没预览过**的文件,走的正是唯一没有缺陷的那条臂,所以它复现不出来是必然的而不是偶然的。这一节复现了、拍到了、修了;§7.45 留下的三条判据一条没白写,是它们把这张画从图集那条道上摘了出来。
+
+### 7.47 开关切不过去的时候必须说出为什么:一台新电脑的执行策略是 `Restricted`,而那扇窗从头到尾一言不发(2026-08-29 用户在新电脑上实测 next17「点『开』没有反应、没有任何提示」,已落地;`crates/bt-app/src/{psreadline,settings,i18n,main}.rs`、`crates/bt-platform/src/lib.rs`)
+
+**用户报的画。** 设置 ▸ 终端 ▸ 「PSReadLine 补丁」,说明行写「本机为 2.0.0 · 缩放窗口时输入行仍会错位」,点「开」**没有反应**,仍是「关」,**没有任何提示说为什么**。开发机上这个开关是好的。
+
+**干净机上的复现,和它的三行事实。** `D:\VMs\folio-cleanvm\folio-win10`(Win10 Pro 22H2 19045,PS 5.1.19041,PSReadLine 2.0.0,无网卡),把 `LocalMachine` 那条答案文件给的 `RemoteSigned` 换回 Windows 客户端自己的默认 `Restricted`,再跑 next17:
+
+- 首启的邀请卡**说了**——`Windows' execution policy is Restricted, which refuses to load an unsigned module.`,`Install` 是暗的。
+- Esc 撤掉它、进设置 ▸ 终端、打开那个下拉:`On` 是暗的,**这一页上没有一个字提到执行策略**。
+- 真鼠标点在 `On` 上(`ui-probe click`,像素归属已验证):`clicked (898, 364) = window+(742, 208) … pixel ownership verified`。下拉照旧开着,勾照旧在 `Off`,没有卡,`diagnostics.log` 里**一行都没有**。
+
+**真因链,一节一节。** `Get-ExecutionPolicy` 答 `Restricted` → `ExecutionPolicy::refuses_unsigned_modules()` 为真 → `install_available` 为假 → `SettingsRow::option_enabled(0)` 为假 → `SettingsPanel::hit` 在暗项上答 `SettingsTarget::Menu(row)`,**把「是哪一项被按下」这件事丢了** → 运行时收到的是「在下拉里的某处按了一下」,于是什么也没做、什么也没说。那句唯一说得出原因的话(`psreadline_policy_reason`)只长在邀请卡上,而邀请卡是**答过一次就再也不来**的东西。
+
+**这一刀本身是对的,是实测过的。** 在那台机器上把九个文件写进 `Documents\WindowsPowerShell\Modules\PSReadLine\2.4.6`,再用一个不继承 `PSExecutionPolicyPreference` 的子进程去 `Import-Module PSReadLine`:
+
+```
+listed: 2.4.6 @ C:\Users\folio\Documents\WindowsPowerShell\Modules\PSReadLine\2.4.6 | 2.0.0 @ C:\Program Files\WindowsPowerShell\Modules\PSReadline\2.0.0
+import: FAILED … Errors occurred while loading the format data file: …\PSReadLine.format.ps1xml: The file was skipped because of the following validation exception: … cannot be loaded because running scripts is disabled on this system.
+loaded: NOTHING
+```
+
+`PSReadLine.psd1` 里 `FormatsToProcess = 'PSReadLine.format.ps1xml'`,而 `.ps1xml` 在 `Restricted` 下和 `.ps1` 一样被拒;整个 import 跟着倒。**所以「装了也不会被加载」是事实,不是保守估计**——把 `Restricted` 从拒绝名单里拿掉,会让这个产品在那台机器上写 437 KB 没人加载的文件并报告成功,那正是这一族注释早就写下的、比暗按钮更坏的一种结局。**本节因此一个字也没有放宽策略判断。** 错的从来不是这一刀,是这一刀落下时没有人出声。
+
+**裁决:一扇门,而且这扇门没有一个出口是沉默的。** `psreadline::apply(install, documents, state, probe) -> Outcome`,`Outcome` 只有三种:`Installed(path)`、`Removed(path)`、`Refused(Refusal)`。`Refusal` 有七种,每一种都有自己的一句话,**除了「Windows 不肯说 Documents 在哪」与「还在读这台机器」这两种以外,每一句都带着路径**——被告知「没装成」而没被告知「本该装到哪」的人,拿到的是一句他做不了任何事的话。运行时那半边缩成两行:出卡,并往 `diagnostics.log` 写一行 `BT_PSREADLINE refused install=<bool> why=<tag> — <sentence>`;`tag` 是英文短词而不是那句话,因为握着机器的人要在两种语言的日志里 grep 它。
+
+**`SettingsTarget::ChoiceRefused(row, index)`。** 变灰这件事一格也没动:项还是暗的,方向键还是跨过它,下拉还是不关,值还是不动。变的只有一件——按下去这件事**带着身份到达**,于是知道自己为什么暗的那一行可以出声。没什么可说的行答 `None` 一路到底,和从前一模一样。**没有走「干脆别变灰、让它按下去再出卡」那条路**:变灰本身是有信息的,它在人按之前就说了「这条路不通」;把它撤掉是拿掉一句真话去换另一句真话。两句都要。
+
+**行说明长出了第二句。** `RowState::Outdated` 在策略拒绝时不再说「本机为 2.0.0 · 缩放窗口时输入行仍会错位」,而是说「本机为 2.0.0 · Windows 的执行策略是 Restricted,不会加载未签名的模块」——这个读者要的不是「为什么想要它」(标题和邀请卡已经说了),是「为什么这个开关是暗的」。两句而不是三句:这一页每一行共用一个高度,三句会折出去。缓存仍然是安全的,理由和另外三句一样——探针是一次性的,策略不会在缓存底下动。
+
+**启动时那一次「不知道」不再冻结整个进程。** `psreadline_documents` 从「启动时读一次的值」改成「`None` 就再问一次」:一台机器可以在窗口开着的时候长出这个答案(重定向刚做完的配置文件、回来的网络主目录),而按下开关正是值得再问一次的那一刻。旧写法在这里 `return Ok(false)`,那是本节封掉的第三扇沉默的门。
+
+**`documents_directory` 改问 `KF_FLAG_DONT_VERIFY`。** 带验证的问法对「登记了但还不在盘上」的 Documents 一个字也答不出,而 **PowerShell 自己就不验证**:同一台干净机上 `PSModulePath` 已经把 `C:\Users\folio\Documents\WindowsPowerShell\Modules` 排在第一位,而 `WindowsPowerShell` 与 `Modules` 两级**都不存在**。所以验证会让这个产品对一条 PowerShell 正在搜的路径拒绝作答,而且是沉默地拒绝。目录由写入方逐级建——`install_into` 本来就走 `create_dir_all`,这一节把它钉成了红门:交给它的根**连 `Documents` 自己都可以不存在**。
+
+**红门。** `bt-app`:`a_refused_install_says_why_instead_of_staying_off`(把 `WindowsPowerShell` 那一级做成一个**文件**,写入必失败 → 必须回一条带路径、带 Windows 原话的 `Refusal`,而不是 `Ok(false)`)、`the_module_directory_is_created_level_by_level`(根目录连同 `Documents` 自己都不存在 → 七级目录与九个文件全部落地;变异 `create_dir_all`→`create_dir` 即红)、`a_policy_that_refuses_the_module_says_which_policy_and_where`(**本节的根因门**:`Restricted`/`AllSigned` 下,行说明与卡片都必须点名这个策略,卡片还要点名路径,而且盘上不许多出一个字节)、`the_greyed_item_and_the_refusal_agree_on_every_state`(画出来的暗与按下去的拒必须是同一张表的两次读)、`a_documents_folder_windows_will_not_name_still_says_something`、`every_refusal_has_its_own_sentence_and_names_its_path`,以及 `settings.rs` 的 `a_press_on_a_greyed_item_names_it_instead_of_being_swallowed`(变异:把 `Menu(row)` 放回暗项那一臂,第一项就红)。
+
+**挂账,而且要紧。** `scripts/release/cleanvm/autounattend-win10.xml` 里给新机执行了 `Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned -Force`——**门 5 的「干净机」在这一格上从来不干净**,Windows 客户端自己的默认是 `Restricted`。这条缺陷能一路走到用户的新电脑上,一半的原因就在这里:开发机是 `RemoteSigned`,干净机被答案文件改成了 `RemoteSigned`,于是这条路上没有一台机器走过用户走的那条路。本节没有改那个答案文件——那是门 5 自己的机器构建,改了要重跑整条流水才敢算数——但下一次动它的人应当把这一行拿掉:`run-smoke-in-vm.ps1` 每一次进客体都显式带着 `-ExecutionPolicy Bypass`,并不靠机器的策略。

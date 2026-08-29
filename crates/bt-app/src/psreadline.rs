@@ -596,10 +596,16 @@ pub fn row_description_in(state: RowState, lang: i18n::Lang) -> &'static str {
     match state {
         RowState::Probing => Text::PsReadLineProbing.in_lang(lang),
         RowState::RemovedElsewhere => Text::PsReadLineRowGone.in_lang(lang),
+        // **Two sentences, because there are two situations** (§7.47): a module
+        // that is merely old, and a module that is old on a machine whose
+        // execution policy will not take the replacement. The second reader's
+        // question is not "what have I got" but "why is the switch dark", and
+        // until 2026-08-29 the only surface that answered it was the invitation
+        // — which is gone the moment it is answered. The `OnceLock` is as sound
+        // for this as for the others: the probe is a one-shot, so the policy
+        // cannot move under the cache.
         RowState::Outdated => OUTDATED[slot]
-            .get_or_init(|| {
-                i18n::psreadline_row_outdated_in(lang, &probe().unwrap_or_default().found_text())
-            })
+            .get_or_init(|| outdated_line(lang, probe().unwrap_or_default()))
             .as_str(),
         RowState::InstalledByFolio => INSTALLED[slot]
             .get_or_init(|| i18n::psreadline_row_installed_in(lang, PATCHED_VERSION))
@@ -624,6 +630,23 @@ pub fn row_description_in(state: RowState, lang: i18n::Lang) -> &'static str {
                 i18n::psreadline_row_current_in(lang, &probe().unwrap_or_default().found_text())
             })
             .as_str(),
+    }
+}
+
+/// What [`RowState::Outdated`] says, which is two sentences and not one
+/// (§7.47).
+///
+/// Split out of the cache so it can be asked about a probe the process does not
+/// have: the answer is cached for the life of the run, so a test that could
+/// only reach it through [`row_description_in`] could only ever see the machine
+/// it is running on — and the machine that has to be described is the one whose
+/// execution policy refuses the module.
+#[must_use]
+pub fn outdated_line(lang: i18n::Lang, probe: Probe) -> String {
+    if probe.policy.refuses_unsigned_modules() {
+        i18n::psreadline_row_blocked_in(lang, &probe.found_text(), probe.policy.name())
+    } else {
+        i18n::psreadline_row_outdated_in(lang, &probe.found_text())
     }
 }
 
@@ -988,6 +1011,181 @@ pub fn remove_from(documents: &Path) -> io::Result<bool> {
     }
     std::fs::remove_dir_all(module_directory(documents))?;
     Ok(true)
+}
+
+// ── one door, and it always says something (§7.47) ──────────────────────────
+
+/// Why a press on this row changed nothing.
+///
+/// **Every variant carries what a reader could act on**, which for five of the
+/// six is the path — a person told that an install did not happen and not told
+/// where it would have gone has been handed a sentence with nothing in it. The
+/// sixth is [`Self::NoDocuments`], and it has no path for the reason it exists.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Refusal {
+    /// The probe has not answered, so nothing is known about the machine yet.
+    StillReading,
+    /// Windows' script execution policy would refuse the module at import.
+    ///
+    /// **Measured rather than assumed** (2026-08-29, clean Windows 10 Pro
+    /// 22H2): under `Restricted` the nine files write perfectly well and
+    /// `Import-Module PSReadLine` then loads *nothing* — `FormatsToProcess`
+    /// names `PSReadLine.format.ps1xml`, a script file, and the policy refuses
+    /// it, taking the import down with it. So writing under this policy really
+    /// does produce 437 KB no shell will load, and the refusal is right. What
+    /// was wrong was that it was silent.
+    Policy {
+        policy: ExecutionPolicy,
+        path: PathBuf,
+    },
+    /// Windows would not say where this user's `Documents` folder is.
+    NoDocuments,
+    /// `On` on a machine whose own module is already new enough.
+    AlreadyCurrent { found: String, path: PathBuf },
+    /// `On` over a directory that already holds this build's module.
+    AlreadyThere { path: PathBuf },
+    /// The write failed, and this is what Windows said about it.
+    Write { path: PathBuf, message: String },
+    /// `Off` over a directory the guard would not touch — somebody else's
+    /// module, or nothing at all.
+    NotOurs { path: PathBuf },
+    /// The delete failed, and this is what Windows said about it.
+    Remove { path: PathBuf, message: String },
+}
+
+impl Refusal {
+    /// The card's sentence, in the language in force.
+    #[must_use]
+    pub fn sentence(&self) -> String {
+        match self {
+            Self::StillReading => i18n::psreadline_still_reading(),
+            Self::Policy { policy, path } => i18n::psreadline_policy_refused(
+                PATCHED_VERSION,
+                policy.name(),
+                &path.display().to_string(),
+            ),
+            Self::NoDocuments => i18n::psreadline_no_documents(PATCHED_VERSION),
+            Self::AlreadyCurrent { found, path } => {
+                i18n::psreadline_already_current(found, &path.display().to_string())
+            }
+            Self::AlreadyThere { path } => {
+                i18n::psreadline_already_there(PATCHED_VERSION, &path.display().to_string())
+            }
+            Self::Write { path, message } => {
+                i18n::psreadline_install_failed(&path.display().to_string(), message)
+            }
+            Self::NotOurs { path } => i18n::psreadline_not_ours(&path.display().to_string()),
+            Self::Remove { path, message } => {
+                i18n::psreadline_remove_failed(&path.display().to_string(), message)
+            }
+        }
+    }
+
+    /// The one word `diagnostics.log` files this refusal under.
+    ///
+    /// A name and not the sentence: the log is read by whoever is holding the
+    /// machine open, and it has to be greppable in either language.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::StillReading => "still-reading",
+            Self::Policy { .. } => "policy",
+            Self::NoDocuments => "no-documents",
+            Self::AlreadyCurrent { .. } => "already-current",
+            Self::AlreadyThere { .. } => "already-there",
+            Self::Write { .. } => "write-failed",
+            Self::NotOurs { .. } => "not-ours",
+            Self::Remove { .. } => "remove-failed",
+        }
+    }
+}
+
+/// What a press on the row did.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Outcome {
+    Installed(PathBuf),
+    Removed(PathBuf),
+    /// Nothing on disk moved, and this is the sentence that says why.
+    Refused(Refusal),
+}
+
+/// **The only road from a press to the disk, and it never returns in silence**
+/// (§7.47).
+///
+/// Before this function existed the same decision was spread across three
+/// places that each had their own way of saying nothing: [`install_available`]
+/// greyed the item, `SettingsPanel::hit` answered `Menu` over a greyed item and
+/// dropped the press, and the runtime's own `apply_psreadline` returned early
+/// on a missing Documents folder. A machine could therefore refuse an install
+/// for a good reason and leave no trace of it on any surface — no card, no row
+/// text, no line in `diagnostics.log`. That is the 2026-08-29 defect, and one
+/// door with no silent exit is the fix.
+///
+/// `install_available` is still the *drawing's* answer and this is still the
+/// *press's*, but they are now two readings of one table rather than two
+/// tables — `the_greyed_item_and_the_refusal_agree_on_every_state` pins them
+/// together.
+#[must_use]
+pub fn apply(
+    install: bool,
+    documents: Option<&Path>,
+    state: RowState,
+    probe: Option<Probe>,
+) -> Outcome {
+    let Some(documents) = documents else {
+        return Outcome::Refused(Refusal::NoDocuments);
+    };
+    let path = module_directory(documents);
+    if !install {
+        // The guard lives inside `remove_from`, so this is a report of what it
+        // did rather than a second copy of its rule.
+        return match remove_from(documents) {
+            Ok(true) => Outcome::Removed(path),
+            Ok(false) => Outcome::Refused(Refusal::NotOurs { path }),
+            Err(error) => Outcome::Refused(Refusal::Remove {
+                path,
+                message: error.to_string(),
+            }),
+        };
+    }
+    let Some(probe) = probe else {
+        return Outcome::Refused(Refusal::StillReading);
+    };
+    // **What is already on the machine is asked before the policy is**, because
+    // a directory that already holds the module is a truer answer to "why did
+    // nothing happen" than a policy that would have stopped a write nobody
+    // needed. The order can only matter on a machine whose policy tightened
+    // after an install, and there the sentence a reader wants is the one about
+    // their own disk.
+    match state {
+        RowState::InstalledByFolio => return Outcome::Refused(Refusal::AlreadyThere { path }),
+        RowState::AlreadyCurrent => {
+            return Outcome::Refused(Refusal::AlreadyCurrent {
+                found: probe.found_text(),
+                path,
+            });
+        }
+        // `Probing` cannot be reached with a probe in hand — `row_state` answers
+        // it only when there is none — and the other three are the states this
+        // verb exists for.
+        RowState::Probing
+        | RowState::Outdated
+        | RowState::RemovedElsewhere
+        | RowState::UpdateAvailable => {}
+    }
+    if probe.policy.refuses_unsigned_modules() {
+        return Outcome::Refused(Refusal::Policy {
+            policy: probe.policy,
+            path,
+        });
+    }
+    match install_into(documents) {
+        Ok(root) => Outcome::Installed(root),
+        Err(error) => Outcome::Refused(Refusal::Write {
+            path,
+            message: error.to_string(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -1691,6 +1889,279 @@ mod tests {
             // the first caller's words to the second.
             assert_eq!(row_description_in(state, i18n::Lang::English), english);
             assert_eq!(row_description_in(state, i18n::Lang::Chinese), chinese);
+        }
+    }
+
+    // ── §7.47: a refused press is never a silent one ────────────────────────
+
+    fn probe_at(version: &str, policy: ExecutionPolicy) -> Probe {
+        Probe {
+            version: Version::parse(version),
+            policy,
+        }
+    }
+
+    /// RED GATE (§7.47) — **a refused install says why instead of just staying
+    /// off.**
+    ///
+    /// The write is made to fail the way a real one fails: `WindowsPowerShell`
+    /// is a *file* where the module path wants a directory, so `create_dir_all`
+    /// cannot get past it. What must come back is a refusal carrying the path
+    /// and Windows' own words — not `Ok(false)`, which is what the runtime used
+    /// to turn into nothing at all.
+    ///
+    /// MUTATION: make `apply` return anything without a sentence on a failed
+    /// write — an early `return`, a swallowed `Err`, an `Outcome::Installed`
+    /// on a path nothing was written to — and this fails.
+    #[test]
+    fn a_refused_install_says_why_instead_of_staying_off() {
+        let documents = temp_dir("refused-write");
+        // The one level the module path needs, occupied by a file.
+        std::fs::write(documents.join("WindowsPowerShell"), b"not a directory").unwrap();
+
+        let outcome = apply(
+            true,
+            Some(&documents),
+            RowState::Outdated,
+            Some(probe_at("2.0.0", ExecutionPolicy::RemoteSigned)),
+        );
+        let Outcome::Refused(refusal) = outcome else {
+            panic!("a write that cannot happen must refuse, not report success: {outcome:?}");
+        };
+        assert_eq!(refusal.tag(), "write-failed");
+        let sentence = refusal.sentence();
+        assert!(
+            sentence.contains(&module_directory(&documents).display().to_string()),
+            "the card must name the path the module would have gone to: {sentence:?}"
+        );
+        assert!(
+            sentence.len() > module_directory(&documents).display().to_string().len(),
+            "and Windows' own words beside it: {sentence:?}"
+        );
+        // The row did not move: nothing of ours is on disk.
+        assert_eq!(installed_copy(&documents), InstalledCopy::None);
+        assert!(!remove_available(row_state(
+            Some(probe_at("2.0.0", ExecutionPolicy::RemoteSigned)),
+            State::NotAsked,
+            installed_copy(&documents),
+        )));
+        let _ = std::fs::remove_dir_all(&documents);
+    }
+
+    /// RED GATE (§7.47) — **the module directory is created a level at a time.**
+    ///
+    /// The root handed in does not exist, and neither does one level under it:
+    /// `Documents` itself, `WindowsPowerShell`, `Modules`, `PSReadLine`, the
+    /// version leaf, and the two polyfiller subdirectories are all made by the
+    /// install. This is the shape a brand-new Windows account is in — measured
+    /// on a clean Windows 10 on 2026-08-29, where `PSModulePath` already named
+    /// `…\Documents\WindowsPowerShell\Modules` and neither directory was there.
+    ///
+    /// MUTATION: `create_dir` in place of `create_dir_all` and this fails on
+    /// the first file.
+    #[test]
+    fn the_module_directory_is_created_level_by_level() {
+        let parent = temp_dir("levels");
+        // Nothing below this exists — not even the `Documents` folder itself.
+        let documents = parent.join("Documents");
+        assert!(!documents.exists());
+
+        let root = install_into(&documents).expect("an absent root is made, not refused");
+        assert_eq!(root, module_directory(&documents));
+        for level in [
+            documents.clone(),
+            documents.join("WindowsPowerShell"),
+            documents.join(r"WindowsPowerShell\Modules"),
+            documents.join(MODULE_RELATIVE_PATH),
+            root.clone(),
+            root.join("net6plus"),
+            root.join("netstd"),
+        ] {
+            assert!(level.is_dir(), "{} was not created", level.display());
+        }
+        for (name, bytes) in BUNDLED_FILES {
+            assert_eq!(
+                std::fs::read(root.join(name)).unwrap().as_slice(),
+                bytes,
+                "{name} did not land"
+            );
+        }
+        assert_eq!(installed_copy(&documents), InstalledCopy::ThisBuild);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// RED GATE (§7.47) — **the root cause: a policy that refuses the module
+    /// says which policy, on the row and in the card.**
+    ///
+    /// This is the machine the 2026-08-29 report came from and the one this VM
+    /// run reproduced: `Get-ExecutionPolicy` answers `Restricted` — Windows'
+    /// own default on a client — the `On` item goes dark, and before this gate
+    /// nothing on the Terminal page said so. The refusal is *correct*: measured
+    /// on that machine, the nine files write and `Import-Module PSReadLine`
+    /// then loads nothing, because `PSReadLine.format.ps1xml` is a script and
+    /// the policy refuses it. What was wrong was that it was mute.
+    ///
+    /// MUTATION: drop the policy branch from `outdated_line` and the row goes
+    /// back to `2.0.0 on this machine · resizing still misplaces the input
+    /// line`; drop it from `apply` and the card stops naming `Restricted`.
+    #[test]
+    fn a_policy_that_refuses_the_module_says_which_policy_and_where() {
+        for policy in [ExecutionPolicy::Restricted, ExecutionPolicy::AllSigned] {
+            let probe = probe_at("2.0.0", policy);
+            for lang in [i18n::Lang::English, i18n::Lang::Chinese] {
+                let line = outdated_line(lang, probe);
+                assert!(
+                    line.contains(policy.name()),
+                    "the row must name the policy that dims the switch: {line:?}"
+                );
+                assert!(line.contains("2.0.0"), "and what is on the machine: {line:?}");
+            }
+
+            let documents = temp_dir("policy");
+            let outcome = apply(true, Some(&documents), RowState::Outdated, Some(probe));
+            let Outcome::Refused(refusal) = outcome else {
+                panic!("a policy that refuses the module must refuse the write: {outcome:?}");
+            };
+            assert_eq!(refusal.tag(), "policy");
+            let sentence = refusal.sentence();
+            assert!(
+                sentence.contains(policy.name()),
+                "the card must name the policy: {sentence:?}"
+            );
+            assert!(
+                sentence.contains(&module_directory(&documents).display().to_string()),
+                "and the path it would have written to: {sentence:?}"
+            );
+            assert!(
+                !module_directory(&documents).exists(),
+                "and it must not have written anything"
+            );
+            let _ = std::fs::remove_dir_all(&documents);
+        }
+    }
+
+    /// PIN (§7.47) — **the greyed item and the refusal are two readings of one
+    /// table.**
+    ///
+    /// `install_available` decides what the picker draws and `apply` decides
+    /// what a press does. They were allowed to drift for as long as the press
+    /// could not reach a greyed item at all; now that it can, a state where one
+    /// says yes and the other refuses would be a switch that moves under a dark
+    /// item, or a lit item that does nothing.
+    #[test]
+    fn the_greyed_item_and_the_refusal_agree_on_every_state() {
+        let states = [
+            RowState::Probing,
+            RowState::Outdated,
+            RowState::InstalledByFolio,
+            RowState::UpdateAvailable,
+            RowState::AlreadyCurrent,
+            RowState::RemovedElsewhere,
+        ];
+        for policy in [
+            ExecutionPolicy::Restricted,
+            ExecutionPolicy::AllSigned,
+            ExecutionPolicy::RemoteSigned,
+            ExecutionPolicy::Bypass,
+        ] {
+            for state in states {
+                // `Probing` is the state with no probe, and vice versa: the two
+                // are one fact read twice.
+                let probe = (state != RowState::Probing).then(|| probe_at("2.0.0", policy));
+                let documents = temp_dir("agree");
+                let outcome = apply(true, Some(&documents), state, probe);
+                let refused = matches!(outcome, Outcome::Refused(_));
+                assert_eq!(
+                    install_available(probe, state),
+                    !refused,
+                    "{state:?} under {policy:?}: the drawing says \
+                     {}, the press says {}",
+                    install_available(probe, state),
+                    if refused { "no" } else { "yes" }
+                );
+                let _ = std::fs::remove_dir_all(&documents);
+            }
+        }
+    }
+
+    /// PIN (§7.47) — **a `Documents` Windows would not name is a sentence, not
+    /// a shrug.**
+    ///
+    /// The runtime used to `return Ok(false)` here, which reached no card, no
+    /// row and no log line. It is the one refusal with no path in it, because
+    /// there is no path — which is what it says.
+    #[test]
+    fn a_documents_folder_windows_will_not_name_still_says_something() {
+        let outcome = apply(
+            true,
+            None,
+            RowState::Outdated,
+            Some(probe_at("2.0.0", ExecutionPolicy::RemoteSigned)),
+        );
+        assert_eq!(outcome, Outcome::Refused(Refusal::NoDocuments));
+        let Outcome::Refused(refusal) = outcome else {
+            unreachable!()
+        };
+        assert_eq!(refusal.tag(), "no-documents");
+        assert!(refusal.sentence().contains(PATCHED_VERSION));
+    }
+
+    /// PIN (§7.47) — **every refusal has words, they are all different, and
+    /// every one that has a path in hand puts it on screen.**
+    ///
+    /// The language in force is not touched: it is a process-wide fact and the
+    /// suite runs in parallel, so a test that moved it would answer for its
+    /// neighbours. What it checks is the shape a card must have in whatever
+    /// language is up — a refusal with an empty sentence, or two refusals
+    /// sharing one, is a switch that has gone quiet again by a different road.
+    #[test]
+    fn every_refusal_has_its_own_sentence_and_names_its_path() {
+        let path = PathBuf::from(r"C:\Users\somebody\Documents\WindowsPowerShell\Modules");
+        let shown = path.display().to_string();
+        let refusals = [
+            Refusal::StillReading,
+            Refusal::Policy {
+                policy: ExecutionPolicy::Restricted,
+                path: path.clone(),
+            },
+            Refusal::NoDocuments,
+            Refusal::AlreadyCurrent {
+                found: "2.4.6".to_owned(),
+                path: path.clone(),
+            },
+            Refusal::AlreadyThere { path: path.clone() },
+            Refusal::Write {
+                path: path.clone(),
+                message: "Access is denied. (os error 5)".to_owned(),
+            },
+            Refusal::NotOurs { path: path.clone() },
+            Refusal::Remove {
+                path: path.clone(),
+                message: "Access is denied. (os error 5)".to_owned(),
+            },
+        ];
+        let mut seen: Vec<String> = Vec::new();
+        for refusal in refusals {
+            let sentence = refusal.sentence();
+            assert!(
+                !sentence.trim().is_empty(),
+                "{} says nothing",
+                refusal.tag()
+            );
+            assert!(
+                !seen.contains(&sentence),
+                "{} says what another refusal already said: {sentence:?}",
+                refusal.tag()
+            );
+            // The two with nothing to point at are the two that say so.
+            if !matches!(refusal, Refusal::StillReading | Refusal::NoDocuments) {
+                assert!(
+                    sentence.contains(&shown),
+                    "{} does not name the path: {sentence:?}",
+                    refusal.tag()
+                );
+            }
+            seen.push(sentence);
         }
     }
 
