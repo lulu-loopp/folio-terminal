@@ -92,7 +92,7 @@ Everything below is that gap closed.
        scroll the picture inside a card a row at a time.">
 </picture>
 
-Claude Code, Codex and GitHub Copilot CLI each have a switch on the Agents page in
+Claude Code, Codex and GitHub Copilot CLI each have a switch on the Agent page in
 Settings that writes one notification hook into that tool's own configuration file
 and takes it back out again. Codex reports the end of a turn; the other two report
 that they are waiting for you. Any program that writes
@@ -163,7 +163,10 @@ PC"**. Click **"More info"**, check the app named there is `folio.exe`, and clic
 The first tab opens the first shell your machine actually has. The five shipped
 profiles are looked for in order — PowerShell 7, Windows PowerShell, WSL, Git
 Bash, Command Prompt — and one whose program is not installed is greyed out in the
-picker rather than hidden.
+picker rather than hidden. Seven more profiles start an agent — Claude Code,
+Codex, Copilot CLI, Kimi Code, pi, Hermes, OpenCode — and are found the same way,
+on the Windows path; one installed inside WSL is run from the WSL profile, or from
+a profile of your own whose program is `wsl.exe -e <name>`.
 
 The first time a PowerShell pane prints something, a strip says the PowerShell
 integration is not installed. **Add to `$PROFILE`** appends one line —
@@ -177,7 +180,7 @@ also what tells inline `$…$` formulas apart from a shell variable, so without 
 they stay as source while `$$…$$` blocks still typeset. Git Bash
 and WSL need none of it and leave nothing on disk.
 
-The three rows on the Agents page **install nothing by default**, and they are not
+The three rows on the Agent page **install nothing by default**, and they are not
 defaults that happen to be off: each reads the tool's own configuration file and
 reports what is in it. On a new machine all three files are absent, so all three
 read Off.
@@ -257,6 +260,8 @@ entry here, not the argument for it.
 **Not an AI that writes your code.** There is no model and no API key in here. It
 serves the agent you already run, and it works the same if you run none.
 
-**Not cross-platform.** Windows is the choice, not the starting point. ConPTY, the
-Explorer menu, WebView2, per-monitor DPI and PSReadLine are each things you only
-get to do properly by picking one.
+**Not cross-platform yet.** Windows came first because ConPTY, the Explorer menu,
+WebView2, per-monitor DPI and PSReadLine are each things you only get to do
+properly by picking one and finishing it. The drawing, the layout and the
+typesetting do not know which platform they are on; what does is one crate, and
+macOS and Linux are where it goes after this.

@@ -78,7 +78,7 @@ Folio 会。命令输出里的 `$…$` 和 `$$…$$` 就排在命令打印它的
        原布局缩画在卡片里；按住 Alt 滚轮，可以一行一行地滚动卡片里的画面。">
 </picture>
 
-Claude Code、Codex、GitHub Copilot CLI 在设置的 Agents 页上各占一行开关，打开就往那个
+Claude Code、Codex、GitHub Copilot CLI 在设置的 Agent 页上各占一行开关，打开就往那个
 工具自己的配置文件里写一个通知 hook，关掉就原样撤回。Codex 报告的是回合结束，另外两个
 报告的是「我在等你回答」。不装也行：任何往终端里写 `OSC 1337;RequestAttention=yes` 的
 程序都听得见。
@@ -136,7 +136,9 @@ Windows PowerShell 5.1 自带的 PSReadLine 还是 2.0.0：它的编辑锚点是
 
 第一个标签开的是你机器上排在最前的那个 shell。五条内置 shell 配置按 PowerShell 7、Windows
 PowerShell、WSL、Git Bash、命令提示符的顺序找；机器上没装的那条在选择器里是灰的，而不是
-被藏起来。
+被藏起来。另有七条配置用来直接启动 agent——Claude Code、Codex、Copilot CLI、Kimi Code、
+pi、Hermes、OpenCode——同样只在 Windows 的 PATH 上找；装在 WSL 里的，从 WSL 配置里启动，
+或者自建一条程序为 `wsl.exe -e <名字>` 的配置。
 
 第一个 PowerShell 窗格打印出东西之后，窗格上会浮出一条提示，说 PowerShell 整合没装。点
 「加进 `$PROFILE`」，它往你的 PowerShell 配置文件末尾加一行
@@ -217,5 +219,6 @@ MIT 或 Apache-2.0，任选其一。每个依赖的许可与完整声明在
 **不是替你写代码的 AI。** 这里面没有模型，也没有 API key。它服务你已经在用的那个
 agent；你一个都不用，它照常是个终端。
 
-**不跨平台。** Windows 是选择，不是起点。ConPTY、资源管理器菜单、WebView2、每显示器
-DPI、PSReadLine——这几样，只有认准一个平台才做得干净。
+**还不跨平台。** 先做 Windows，是因为 ConPTY、资源管理器菜单、WebView2、每显示器 DPI、
+PSReadLine 这几样只有认准一个平台、做完它才做得干净。绘制、布局、排版这一层不知道自己
+在哪个平台上；知道的只有一个 crate，macOS 和 Linux 是它之后要去的地方。
