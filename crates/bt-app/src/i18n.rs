@@ -4437,22 +4437,59 @@ pub fn psreadline_remove_failed(path: &str, message: &str) -> String {
     }
 }
 
+/// The command that lifts the refusal, in the one scope that needs no
+/// administrator.
+///
+/// **`CurrentUser` and not `LocalMachine`, and that is measured rather than
+/// preferred**: on the clean Windows 10 of 2026-08-29,
+/// `Set-ExecutionPolicy -Scope LocalMachine` from an unelevated shell failed
+/// silently — the policy did not move — while the same command at
+/// `-Scope CurrentUser` took. A card that told a reader to run something their
+/// shell will refuse is a card that has sent them somewhere worse than nowhere.
+///
+/// `RemoteSigned` and not `Bypass` or `Unrestricted`: it is the weakest policy
+/// that loads the module, it is what Windows Server ships with, and it still
+/// asks for a signature on anything that came off the network.
+pub const POLICY_REMEDY_COMMAND: &str = "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned";
+
 /// The card raised when the execution policy is what stopped the install.
 ///
 /// Measured on a clean Windows 10 Pro 22H2 on 2026-08-29: under `Restricted`
 /// the module writes perfectly well and then `Import-Module PSReadLine` loads
 /// **nothing** — `PSReadLine.format.ps1xml` is refused as a script, and the
 /// import fails with it. So the refusal is right and the silence was the bug.
+///
+/// **Three sentences, and the middle one is a way out** (§7.47). A card that
+/// names the obstacle and stops leaves its reader exactly where they were
+/// standing; the copy rule is that a sentence on screen says what can be done
+/// *now*, and what can be done now is one command in the shell already in front
+/// of them. It is on the card and deliberately not on the row: the row has one
+/// line to say what the machine is, and a command is not a state.
+///
+/// **The way out comes before the path, and that order is the whole of what a
+/// six-line cap costs.** `TOAST_MAX_LINES` drops what does not fit and marks
+/// the cut with an ellipsis, and this card carries the longest text this
+/// product raises — a module path under a redirected `Documents` can be a
+/// hundred characters on its own. Whatever falls off the end must therefore be
+/// the least actionable half, and between "here is the command that fixes it"
+/// and "here is where the file would have gone", the path is the half a reader
+/// can lose and still act. `the_way_out_survives_the_cards_six_line_cap` in
+/// `toast.rs` holds that.
+///
+/// The clause about *why* an unsigned module is refused is not repeated here:
+/// the row this card was raised from says it, one line above the picker that
+/// was just pressed.
 #[must_use]
 pub fn psreadline_policy_refused(patched: &str, policy: &str, path: &str) -> String {
+    let remedy = POLICY_REMEDY_COMMAND;
     match current() {
         Lang::English => format!(
-            "PSReadLine {patched} was not installed. Windows' execution policy is {policy}, and \
-             PowerShell will not load an unsigned module from {path}."
+            "PSReadLine {patched} was not installed. Windows' execution policy is {policy}. Run \
+             {remedy} in PowerShell, then try again. The module goes to {path}."
         ),
         Lang::Chinese => format!(
-            "未安装 PSReadLine {patched}。Windows 的执行策略是 {policy}，PowerShell 不会从 \
-             {path} 加载未签名的模块。"
+            "未安装 PSReadLine {patched}。Windows 的执行策略是 {policy}。在 PowerShell 中运行 \
+             {remedy} 后再试。模块本应写入 {path}。"
         ),
     }
 }

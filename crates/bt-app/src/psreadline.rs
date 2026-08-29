@@ -2035,6 +2035,18 @@ mod tests {
                 sentence.contains(&module_directory(&documents).display().to_string()),
                 "and the path it would have written to: {sentence:?}"
             );
+            // **And a way out.** A card that names an obstacle and stops leaves
+            // its reader where they were standing; the copy rule is that a
+            // sentence on screen says what can be done now, and here that is one
+            // command in the shell already in front of them.
+            assert!(
+                sentence.contains(i18n::POLICY_REMEDY_COMMAND),
+                "and the command that lifts the refusal: {sentence:?}"
+            );
+            assert!(
+                i18n::POLICY_REMEDY_COMMAND.contains("-Scope CurrentUser"),
+                "in the scope an unelevated shell can actually set"
+            );
             assert!(
                 !module_directory(&documents).exists(),
                 "and it must not have written anything"
