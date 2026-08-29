@@ -37296,8 +37296,9 @@ mod tests {",
         );
     }
 
-    /// PIN (§7.1.6b′ ②, ③ and ④) — **the card column takes a tab reorder, and
-    /// still refuses the other two things a drag can be.**
+    /// PIN (§7.1.6b′ ①, ② and ④) — **the card column takes a tab reorder and
+    /// both of a pane's offers, and the only drag it turns away is a file
+    /// row.**
     ///
     /// ④ used to read *"v1 不做卡片拖动排序"*, and it was a stated blank rather
     /// than an oversight: reordering by card had to arrive carrying the tab
@@ -37306,20 +37307,24 @@ mod tests {",
     /// which surface handed it one — so the whole of card reordering is this
     /// column filling `slots` with boxes it had already solved (2026-08-20).
     ///
-    /// The other two refusals are untouched, and this is where they are held:
+    /// **② is gone entirely as of the user's ruling of 2026-08-29**, and this
+    /// test is where that is held:
     ///
-    /// * **② a card list refuses a pane the *gaps*, and since 2026-08-23 only
-    ///   the gaps.** A pane dragged out of the stage may still not become a new
-    ///   tab by being dropped on the column — that is the half of ② the user
-    ///   kept — while a pane rested on a *card* is handed to that card's tab
-    ///   like it is on the other two surfaces, because focus mode hides the
-    ///   strip and ① forbids focus mode from having fewer verbs than the window
-    ///   under it. So this run answers [`PaneOffers::ADOPT_ONLY`] where a whole
-    ///   window's tab list answers [`PaneOffers::BOTH`].
-    /// * **③ it refuses file drops** — *"一份 tab 清单没有一个非任意的 tab 可以
-    ///   接住一个文件"*. That one is `DragSource::Row(_) => None` in
+    /// * The tear-out half was the last of it. 2026-08-23 had already granted
+    ///   the hand-over and kept the gaps refused, on the argument that *"两卡
+    ///   之间的缝不是屋子"*. The user withdrew that argument on the machine: a
+    ///   pane held over the blank below the last card showed a ghost and did
+    ///   nothing when the hand opened. The ruling is ①'s and it is literal —
+    ///   *"舞台就是真的那棵树,零新规、不禁任何动词"* — so what the tab strip's
+    ///   gaps do, the column's gaps do, down to the same
+    ///   `extract_pane_into_new_tab`. The run therefore answers
+    ///   [`PaneOffers::BOTH`], the same value the strip and the rail answer,
+    ///   and no surface in this build answers anything else.
+    /// * **③ it still refuses file drops** — *"一份 tab 清单没有一个非任意的 tab
+    ///   可以接住一个文件"*. That one is `DragSource::Row(_) => None` in
     ///   `Runtime::survey_strip`, global to every tab surface, so there is
-    ///   nothing here for a card to opt into.
+    ///   nothing here for a card to opt into and nothing here for the column to
+    ///   have withdrawn.
     ///
     /// And the older half of this pin stands unchanged: a surface must not
     /// become a *hole*. The band covers the column, so whatever the run refuses
@@ -37328,10 +37333,10 @@ mod tests {",
     ///
     /// Red gate: leave `slots` empty — which is what this file shipped until
     /// 2026-08-20 — and the first assertion goes red; answer `None` for the run
-    /// in focus mode and the band's does; let the column host a tear-out and ②
-    /// does.
+    /// in focus mode and the band's does; put the column back on the withdrawn
+    /// `ADOPT_ONLY` and the offers' does.
     #[test]
-    fn the_card_column_takes_a_tab_reorder_and_refuses_the_other_two_drags() {
+    fn the_card_column_takes_a_tab_reorder_and_a_panes_two_offers() {
         let state = focus_rail(TabLayoutMode::Vertical);
         // A window tall enough to hold all four cards, so that "every card is
         // covered" is the claim being checked rather than "four 160px cards fit
@@ -37355,9 +37360,10 @@ mod tests {",
         );
         assert_eq!(
             run.pane_offers,
-            PaneOffers::ADOPT_ONLY,
-            "②, as re-judged 2026-08-23: a pane taken out of the stage has no \
-             new tab to become here, and a card's tab to be handed to"
+            PaneOffers::BOTH,
+            "② withdrawn entirely 2026-08-29: a pane taken out of the stage has \
+             a card's tab to be handed to *and* a new tab to become in the \
+             blank, exactly as it has on the strip and on the rail"
         );
         assert_eq!(run.band, column.body, "and it claims its own rectangle");
         for (index, card) in column.cards.iter().enumerate() {
@@ -37384,8 +37390,9 @@ mod tests {",
             );
         }
         // The blank the column leaves between the panel's edge and a card is the
-        // run's own padding, and nobody's room — which is exactly why the half of
-        // ② that survives (no tear-out here) has somewhere to bite.
+        // run's own padding, and nobody's room — which is what makes the two
+        // offers distinguishable at all: a pointer there names no card, so it is
+        // asking for the tear-out the strip's own gaps grant.
         let first = column.cards[0].body;
         assert_eq!(
             run.slot_at(
