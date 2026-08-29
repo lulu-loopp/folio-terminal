@@ -248,17 +248,18 @@ mod tests {
     /// would move an English line on four surfaces at once.
     #[test]
     fn a_latin_word_is_one_piece() {
-        assert_eq!(runs("one two three", PathSeparators::Whole), [
-            "one", "two", "three"
-        ]);
-        assert_eq!(runs("~/.claude/settings.json", PathSeparators::Whole), [
-            "~/.claude/settings.json"
-        ]);
-        assert_eq!(runs("Alt+wheel, 12.5px (100%)", PathSeparators::Whole), [
-            "Alt+wheel,",
-            "12.5px",
-            "(100%)"
-        ]);
+        assert_eq!(
+            runs("one two three", PathSeparators::Whole),
+            ["one", "two", "three"]
+        );
+        assert_eq!(
+            runs("~/.claude/settings.json", PathSeparators::Whole),
+            ["~/.claude/settings.json"]
+        );
+        assert_eq!(
+            runs("Alt+wheel, 12.5px (100%)", PathSeparators::Whole),
+            ["Alt+wheel,", "12.5px", "(100%)"]
+        );
         // Rule 1: a run of spaces is one opportunity, and the head of the next
         // line carries none of it.
         let spaced = pieces("one  two", PathSeparators::Whole);
@@ -270,12 +271,14 @@ mod tests {
     /// the seam between a Han run and a Latin one.**
     #[test]
     fn chinese_breaks_between_any_two_characters() {
-        assert_eq!(runs("重新打开", PathSeparators::Whole), [
-            "重", "新", "打", "开"
-        ]);
-        assert_eq!(runs("重启Folio以切换", PathSeparators::Whole), [
-            "重", "启", "Folio", "以", "切", "换"
-        ]);
+        assert_eq!(
+            runs("重新打开", PathSeparators::Whole),
+            ["重", "新", "打", "开"]
+        );
+        assert_eq!(
+            runs("重启Folio以切换", PathSeparators::Whole),
+            ["重", "启", "Folio", "以", "切", "换"]
+        );
     }
 
     /// PIN — **rules 3 and 4: the punctuation that may not start a line and the
@@ -286,16 +289,21 @@ mod tests {
     /// piece of one.
     #[test]
     fn punctuation_hangs_rather_than_starting_or_ending_a_line() {
-        assert_eq!(runs("你好。再见", PathSeparators::Whole), [
-            "你", "好。", "再", "见"
-        ]);
+        assert_eq!(
+            runs("你好。再见", PathSeparators::Whole),
+            ["你", "好。", "再", "见"]
+        );
         // 「入」 and 「（」 are two pieces — a line may end after 入 and the
         // bracket opens the next one, which is right. What rule 4 forbids is the
         // bracket *ending* a line, and it does not: 「（例」 is one atom.
-        assert_eq!(runs("写入（例如）时", PathSeparators::Whole), [
-            "写", "入", "（例", "如）", "时"
-        ]);
-        for piece in pieces("目录，标记；说明：完（成）了「引」用", PathSeparators::Whole) {
+        assert_eq!(
+            runs("写入（例如）时", PathSeparators::Whole),
+            ["写", "入", "（例", "如）", "时"]
+        );
+        for piece in pieces(
+            "目录，标记；说明：完（成）了「引」用",
+            PathSeparators::Whole,
+        ) {
             let first = piece.text.chars().next().expect("no piece is empty");
             let last = piece.text.chars().next_back().expect("no piece is empty");
             assert!(
@@ -313,19 +321,20 @@ mod tests {
     /// about, and it disagrees in one direction.**
     #[test]
     fn a_path_is_whole_in_prose_and_jointed_in_the_narrow_dialog() {
-        assert_eq!(runs(r"C:\Users\me\Documents", PathSeparators::Break), [
-            r"C:\", r"Users\", r"me\", "Documents"
-        ]);
-        assert_eq!(runs(r"C:\Users\me\Documents", PathSeparators::Whole), [
-            r"C:\Users\me\Documents"
-        ]);
+        assert_eq!(
+            runs(r"C:\Users\me\Documents", PathSeparators::Break),
+            [r"C:\", r"Users\", r"me\", "Documents"]
+        );
+        assert_eq!(
+            runs(r"C:\Users\me\Documents", PathSeparators::Whole),
+            [r"C:\Users\me\Documents"]
+        );
         // A UNC root is two separators and the opportunity is after the pair,
         // never inside it — so `\\` is one atom and no line can begin with the
         // second backslash.
-        assert_eq!(runs(r"\\server\share", PathSeparators::Break), [
-            r"\\",
-            r"server\",
-            "share"
-        ]);
+        assert_eq!(
+            runs(r"\\server\share", PathSeparators::Break),
+            [r"\\", r"server\", "share"]
+        );
     }
 }
