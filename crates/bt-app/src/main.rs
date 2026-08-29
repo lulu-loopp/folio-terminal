@@ -16727,7 +16727,7 @@ fn preview_lane_after_landing(
 /// **What one preview surface is showing**, in the three shapes the recording
 /// sweep can act on (user report 2026-08-28; `docs/DESIGN.md` §7.44 ⑬).
 ///
-/// [`WindowRuntime::sweep_video_seats`] keeps a recording alive while the
+/// [`Runtime::sweep_video_seats`] keeps a recording alive while the
 /// surface it is keyed by is still about the file it was opened on. Until this
 /// type existed it asked that of the **picture lane alone**, and read a surface
 /// with no [`PreviewImageState`] as one that had not said yet — which is right
@@ -16777,7 +16777,7 @@ impl SurfaceSubject {
 /// are consulted* — and that is a claim a test can put a real [`PreviewPane`]
 /// to, while a `Runtime` is a thing no test in this file can build.
 ///
-/// **The page is asked first** for [`WindowRuntime::preview_rail_kind`]'s own
+/// **The page is asked first** for [`Runtime::preview_rail_kind`]'s own
 /// reason: an engine composed under this window's glass is what the reader is
 /// looking at, whatever else the pane still remembers. No recording is ever
 /// behind one — route B retired the shell page (§7.44 ④) — so a surface that has
