@@ -22,7 +22,7 @@ files preview beside the prompt, and an agent that is waiting for you says so.
 
 ## Features
 
-### Formulas
+### LaTeX rendering in the terminal
 
 The LaTeX a command prints is typeset where it was printed.
 
@@ -45,7 +45,7 @@ The LaTeX a command prints is typeset where it was printed.
 - Inline `$…$` is told from a shell variable by the PowerShell integration below.
   Without it inline formulas stay as source, and `$$…$$` blocks still typeset.
 
-### Agents
+### Made for agents
 
 Which agent is waiting for you is on its tab, without going to look.
 
@@ -72,7 +72,7 @@ Which agent is waiting for you is on its tab, without going to look.
   from the WSL profile. Any program that writes `OSC 1337;RequestAttention=yes` is
   heard with nothing installed at all.
 
-### File preview
+### Preview beside the prompt: files, PDF, video, web
 
 What is in a file is legible beside the prompt, without opening another
 application.
@@ -106,10 +106,10 @@ application.
        breadcrumb address field above it.">
 </picture>
 
-### Workspace
+### Panes, tabs and windows that move
 
-Panes, tabs and windows are rearranged in place, and every session can be seen at
-once.
+The layout changes while the sessions inside it keep running, and all of them can
+be seen at once.
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
@@ -131,7 +131,7 @@ once.
 - `Ctrl+Shift+↑` and `Ctrl+Shift+↓` step between commands in the scrollback, and
   a command that failed is marked as having failed.
 
-### Windows
+### Windows, in detail
 
 The Windows-only parts are settled on real hardware.
 

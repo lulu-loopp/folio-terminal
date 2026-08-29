@@ -45,8 +45,8 @@ the file in a real browser, or `chrome --headless --screenshot --window-size=120
 The two lines under the name are the promise both READMEs are written to, so they
 change when the positioning does and not otherwise. They currently read:
 
-> A Windows terminal built for coding agents.
-> It says which one is waiting for you.
+> The Windows terminal that renders math.
+> And says which agent is waiting for you.
 
 `README.zh-CN.md` shows the same English hero rather than a Chinese one. The
 title block is SVG text at fixed coordinates, and a Chinese line would be set in
