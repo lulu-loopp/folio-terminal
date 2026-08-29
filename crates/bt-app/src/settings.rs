@@ -17899,11 +17899,22 @@ mod tests {
             f64::from((item[1] + item[3]) / 2.0),
         );
 
+        // **The press names the item and still chooses nothing** (§7.47). It
+        // used to arrive as the menu's own body, which is what made a refusal
+        // impossible to explain; what has to stay true is the half that is
+        // about this row — no profile was asked for, so the runtime stores
+        // nothing and the menu stays up.
         assert_eq!(
             hit(&placed, &lacking, centre.0, centre.1),
-            SettingsTarget::Menu(SettingsRow::DefaultProfile),
-            "the press lands on the menu's body — nothing was chosen, and the \
-             menu stays up"
+            SettingsTarget::ChoiceRefused(SettingsRow::DefaultProfile, missing),
+            "the press lands on the item, greyed"
+        );
+        assert_eq!(
+            default_profile_requested(hit(&placed, &lacking, centre.0, centre.1)),
+            None,
+            "and nothing was chosen: a row with no reason to give says nothing \
+             and changes nothing, exactly as it did when the press was thrown \
+             away"
         );
         assert_eq!(
             hit(&placed, &values(), centre.0, centre.1),
