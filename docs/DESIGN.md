@@ -4915,7 +4915,15 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 
 **顺带一条内容修正(用户在新电脑上撞到):PowerShell 整合的说明里必须写出「行内公式」。** `$$…$$` 在任何机器上都排版,`$…$` 只在 OSC 133 标出的命令输出行里排版(`bt_detect::InlineMathSite::Ineligible`:「没有 shell 整合,主屏上就永远没有行内渲染」)。一个看着一种公式排版、另一种停在源码的人,没有任何途径把这件事连到自己 `$PROFILE` 里少的那一行,而「命令标记与状态」这五个字也没告诉他。提示条与设置行现在都写三件事:命令标记、当前目录跟随、输出中行内公式的渲染。README 与 README.zh-CN 同步一句,不加新段。
 
-**日期:2026-08-29,⑤⑥ 两条。**
+**第五条:第四条只说了病因,没说药——中文的断点规矩现在是全仓一份(用户裁决 2026-08-29,实机截图 `agent-zh-final.png` 起单)。** 上面那条把 `tooltip::wrap` 只在空格处断行记成了「一句更短的中文不等于一段更短的排版」的真因,但当时只改了文案。实机再拍,Agent 页三条说明依旧难看:第一行「打开后,Folio 在 Claude Code」只填了 368px 列的 **46%** 就折了,第二行整块「的用户级设置(~/.claude/settings.json)中写入」,第三行才是「hook;等待你输入时……」。**而这扇窗里另一个换行器 `restore::wrap` 从 i18n 那一片起就已经会断中文了**——一套规矩写在一个界面里,就是下一个界面没有的规矩。
+
+- **五条规矩,一份表,新文件 `crates/bt-app/src/linebreak.rs`。** ① 空格是断点,而**换行后行首不画那个空格**(空格连续则合并,即 `white-space: pre-line` 对空格的做法;`\n` 归调用方,因为只有调用方知道自己的盒子有没有段落)。② 相邻两字有一个是 CJK 就可断——汉字、假名、谚文本来就不用空格分词,拉丁/CJK 交界同样可断(`Folio时` 可拆)。③ **闭合与句末标点不许起行**(`，。、！？；：）》」』…%` 与拉丁对应物)。④ **开引与开括号不许收行**(`（《「『([{`);④不是③的镜像,因为这两组字符在 Unicode 里本来就不互为镜像,所以是两条规矩两张表。⑤ **拉丁词内部不断**:`settings.json` 里 ②③④ 一个断点也够不着,这是故意的——短于行宽的词与路径整体画出,长于行宽的才落到换行器自己的最后一档(`tooltip::break_word` 与 `restore::wrap_anywhere`,两者都优先在路径关节上切而不是在字母之间)。
+- **两个换行器只剩「怎么填」不同,不再有「哪里能断」不同。** `restore::wrap` 逐行量候选串,`tooltip::wrap` 累加片段宽度;断点全部来自 `linebreak::pieces`。唯一一处不一致做成参数而不是第二张表:`PathSeparators`。`restore` 那扇对话框只有 400 逻辑像素宽,而 PSReadLine 邀请里有一条八十字符的磁盘路径,②③④ 够不着它(里面没有 CJK),所以那里 `\` 与 `/` 之后**本身**就是断点(`Break`);设置行、提示条、toast 这些列足够宽,路径放得下,再切就是无故切开一个装得下的拉丁词,违反⑤,所以是 `Whole`。两处都只在分隔符**之后**断:行尾一个 `\` 读作「未完待续」,行首一个 `\` 读作 UNC 共享。
+- **谁跟着一起变好了。** `tooltip::wrap` 的读者有四家:设置页的行说明(`settings::wrapped_description`,三行门量的就是它)、提示条(`tooltip` 自己)、toast(`toast.rs`)、Git 图的提交气泡(`git_graph.rs` 的正文与 meta 两段)。`restore::wrap` 的读者是恢复提示、Git 面板空态句(`git_panel.rs`)、缺席卡细节行与主窗的 say 行。**八个面,一张表。**
+- **红门 `a_chinese_settings_line_is_filled_before_it_breaks`**(`settings.rs`,紧挨着另外两道三行门)。三行门只数行数,所以一行在三分之一处就折、句子又刚好短到还能塞进三行的时候它照样过——实机拍到的正是这个。这道门量的是**贪心**而不是比例:除末行外,若下一行的头一个字是汉字,把那个字接到本行末尾必须**放不下**;放得下就说明换行器丢了一个断点。同一张 CJK 量尺(`bt_unicode::cluster_width`)、同一个 118px 控件列。百分比只进报错信息不进断言——它是看截图的人认得的那个数,写成阈值就是第二条要和第一条对齐的规矩。**红证(修前)**:`DescClaudeHooks` 46%、`DescCodexNotify` 36%、`DescCopilotHooks` 46%、`DescTurnEndNotifications` 49%、`DescPowerShellOffer` 70%、`DescContextMenu` 96%、`DescCopilotHooks` 第二行 78%,一共七行。禁则与悬挂另有 `linebreak.rs` 自己的三条单元钉(拉丁词整体、汉字逐字可断、标点不起行不收行),外加 `PathSeparators` 那条两个方向都量的钉。
+- **英文逐字不变**,这是这次改动的验收条件之一:没有 CJK、没有路径分隔符的句子,`linebreak::pieces` 返回的就是原来那份按空格切出来的词表,一个不多一个不少。`the_paragraph_breaks_where_the_words_run_out` 与 `no_settings_sentence_needs_a_fourth_line` 原样过。
+
+**日期:2026-08-29,⑤⑥ 两条,外加 08-29 晚的第五条。**
 
 ### 7.43 一句话要么全在框里,要么带着省略号停下:四件「字和框谈不拢」,外加一条 panic 走的路(门 5 尾账四件,2026-08-28 用户裁决,已落地;`crates/bt-app/src/{seats,restore,webhost,notice,main}.rs`、`crates/bt-platform/src/lib.rs`)
 

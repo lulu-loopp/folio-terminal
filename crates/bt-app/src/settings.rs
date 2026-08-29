@@ -7818,11 +7818,18 @@ impl MeasureMemo {
 /// three.
 ///
 /// The breaking itself is [`crate::tooltip::wrap`], which is already this
-/// product's answer to "put this sentence in a box that wide": break at spaces,
-/// and break a run too wide for the box between characters. That second half is
-/// what makes it right in Chinese as well as in English — a Chinese sentence
-/// carries no spaces, arrives as one run, and is broken where it fills the line,
-/// which is where Chinese breaks.
+/// product's answer to "put this sentence in a box that wide", over
+/// [`crate::linebreak`]'s opportunities, which are this crate's one answer to
+/// "where may a line end".
+///
+/// **That second sentence used to read differently, and it was wrong** (user
+/// ruling 2026-08-29). It said the wrapper's character-by-character cut of an
+/// over-wide run was what made it right in Chinese; it is not, because that cut
+/// only fires for a run too wide for the box *on its own*. A Chinese run that
+/// fits the column but not the remainder of the line in hand was moved whole,
+/// and the line it left behind ended at 46% of the column — which is what the
+/// Agent page drew and what
+/// [`tests::a_chinese_settings_line_is_filled_before_it_breaks`] now measures.
 ///
 /// **The cap is [`ROW_DESC_MAX_LINES`] and the last line then says so.** What is
 /// ellipsised is everything the cap refused, joined — so the third line is full
@@ -13667,16 +13674,28 @@ mod tests {
     /// space, and a space-only wrapper has to move the whole of it or none of
     /// it.
     ///
-    /// **The assertion is greediness, not a ratio.** A line that ends where one
-    /// more character would still have fitted is a wrap that lost a break
-    /// opportunity, and in Chinese every ideograph boundary is one. So for each
-    /// line but the last, if the next line begins with a Han character, that
-    /// character appended to this line must not fit — which is the definition of
-    /// a full line, measured in the same CJK face and the same column
+    /// **The assertion is greediness, not a ratio.** A line that ends where the
+    /// smallest thing the next line could have given back would still have
+    /// fitted is a wrap that lost a break opportunity, and in Chinese every
+    /// ideograph boundary is one. So for each line but the last, if the next
+    /// line begins with a Han character, that character appended to this line
+    /// must not fit — which is the definition of a full line, measured in the
+    /// same CJK face and the same column
     /// [`no_chinese_settings_sentence_needs_a_fourth_line_either`] uses. The
     /// percentage is only reported, never asserted on: it is the number a reader
     /// of the screenshot recognises, and a threshold written in it would be a
     /// second rule to keep in agreement with the first.
+    ///
+    /// **Two things the smallest give-back is not.** It is not one character:
+    /// closing punctuation may not open a line, so 「入。」 travels as one atom
+    /// and a wrapper that refused it had 24 pixels to find, not 12. And it is
+    /// not free: when a space stood at the seam, the line that takes the atom
+    /// back owes that space too. Both are read off the sentence itself — the
+    /// atom is the run of closing punctuation trailing the first character, and
+    /// the space is there exactly when the two lines are *not* adjacent in the
+    /// source. Neither asks the wrapper anything, which is the point: a gate
+    /// that borrowed the wrapper's own arithmetic would agree with it by
+    /// construction.
     ///
     /// Red gate: before the shared [`crate::linebreak`] rules reached
     /// [`crate::tooltip::wrap`], this named `DescClaudeHooks` with a first line
@@ -13691,6 +13710,15 @@ mod tests {
         /// construction.
         fn is_han(character: char) -> bool {
             matches!(character, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}')
+        }
+        /// The punctuation that may not open a line and so cannot be left
+        /// behind when the character in front of it moves — written out here
+        /// rather than borrowed for the reason `is_han` is.
+        fn hangs(character: char) -> bool {
+            matches!(
+                character,
+                '，' | '。' | '、' | '！' | '？' | '；' | '：' | '…' | '）' | '】' | '》' | '」'
+            )
         }
         fn measure_in_a_cjk_face(text: &str, font_size_px: f32) -> f32 {
             bt_unicode::graphemes(text)
@@ -13727,8 +13755,9 @@ mod tests {
                 }
                 measured += 1;
                 let width = metrics.desc_width(row, span, button);
+                let sentence = entry.in_lang(Lang::Chinese);
                 let lines = wrapped_description(
-                    entry.in_lang(Lang::Chinese),
+                    sentence,
                     width,
                     ROW_DESC_FONT_LOGICAL_PX,
                     &mut measure_in_a_cjk_face,
@@ -13741,14 +13770,20 @@ mod tests {
                     if !is_han(first) {
                         continue;
                     }
-                    let mut grown = line.clone();
-                    grown.push(first);
+                    let atom: String = std::iter::once(first)
+                        .chain(next.chars().skip(1).take_while(|&ch| hangs(ch)))
+                        .collect();
+                    let tight = format!("{line}{atom}");
+                    let grown = if sentence.contains(&tight) {
+                        tight
+                    } else {
+                        format!("{line} {atom}")
+                    };
                     if measure_in_a_cjk_face(&grown, ROW_DESC_FONT_LOGICAL_PX) <= width {
                         let drawn = measure_in_a_cjk_face(line, ROW_DESC_FONT_LOGICAL_PX);
                         short.push(format!(
                             "{row:?}/{entry:?} line {} fills {:.0}% of its {width:.0}px \
-                             column ({line:?}) and the next line's first character \
-                             {first:?} would still have fitted",
+                             column ({line:?}) and {atom:?} would still have fitted on it",
                             at + 1,
                             drawn / width * 100.0,
                         ));

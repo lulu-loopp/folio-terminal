@@ -289,8 +289,11 @@ mod tests {
         assert_eq!(runs("你好。再见", PathSeparators::Whole), [
             "你", "好。", "再", "见"
         ]);
+        // 「入」 and 「（」 are two pieces — a line may end after 入 and the
+        // bracket opens the next one, which is right. What rule 4 forbids is the
+        // bracket *ending* a line, and it does not: 「（例」 is one atom.
         assert_eq!(runs("写入（例如）时", PathSeparators::Whole), [
-            "写", "入（例", "如）", "时"
+            "写", "入", "（例", "如）", "时"
         ]);
         for piece in pieces("目录，标记；说明：完（成）了「引」用", PathSeparators::Whole) {
             let first = piece.text.chars().next().expect("no piece is empty");
@@ -316,8 +319,12 @@ mod tests {
         assert_eq!(runs(r"C:\Users\me\Documents", PathSeparators::Whole), [
             r"C:\Users\me\Documents"
         ]);
+        // A UNC root is two separators and the opportunity is after the pair,
+        // never inside it — so `\\` is one atom and no line can begin with the
+        // second backslash.
         assert_eq!(runs(r"\\server\share", PathSeparators::Break), [
-            r"\\server\",
+            r"\\",
+            r"server\",
             "share"
         ]);
     }
