@@ -98881,7 +98881,7 @@ mod tests {
         // what the plain half was always allowed to do, and what it must never
         // do is start a *program*. That is still `Ctrl`'s, and the row below
         // pins it.
-        for uri in ["mailto:person@example.test"] {
+        for uri in ["mailto:person@example.test", "ftp://files.example.test/pub"] {
             assert_eq!(
                 hyperlink_activation(false, true, uri, &|path| path
                     == Path::new(r"C:\some\folder")),
@@ -99096,18 +99096,26 @@ mod tests {
     /// ⑤ send the folder's plain half back to `None` — the shape it had until
     ///    2026-08-21 — and every prompt in the window wears a dotted cwd that
     ///    answers nothing, which is the promise the underline is not allowed to
-    ///    break.
+    ///    break;
+    /// ⑥ send the web address's plain half back to `None` — the shape it had
+    ///    until 2026-08-29, and the last cell in this table that still had it —
+    ///    and every printed address goes back to answering a hover and not a
+    ///    press. ④ and ⑥ are the two directions this row can be got wrong in
+    ///    and they are not the same mistake: ④ is a plain click starting a
+    ///    *program*, which it must never do, and ⑥ is a plain click doing
+    ///    nothing where this window has somewhere to go, which is the same
+    ///    half-lie ⑤ is about.
     #[test]
     fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
         assert_eq!(
             hyperlink_activation(true, true, "https://example.test/path", &no_directories),
             HyperlinkActivation::Browser,
-            "a web address is the browser's"
+            "a web address under `Ctrl` is the machine's browser"
         );
         assert_eq!(
             hyperlink_activation(false, true, "https://example.test/path", &no_directories),
-            HyperlinkActivation::None,
-            "and a plain click on one is still the selection's"
+            HyperlinkActivation::Page("https://example.test/path".to_owned()),
+            "and plainly it is this window's own seat (2026-08-29): the cell that              read `None` here for as long as nothing in this window drew a page"
         );
         assert_eq!(
             hyperlink_activation(
