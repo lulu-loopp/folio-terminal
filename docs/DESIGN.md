@@ -5449,3 +5449,33 @@ frame … layers=4 layer_bodies=1 layer_labels=3 layer_paragraphs=0 layer_drawn=
 - **不做「换布时主动补一份颜色应答」。** 没问过的程序会把它当字打出来,这正是 2031「订阅了才通知」那条规矩的理由;为一个不订阅的程序破例,代价是在每一个不订阅的程序的输入里塞乱码。
 - **`COLORFGBG` 没有设,这一节也不设。** 它是一个**出生时写死的环境变量**:切主题之后它就是错的,而且错得没有任何一方能发现——比不答更坏。要不要设是一条产品裁决,不是这一节能自己做的。
 - **顺带记下的一处不一致(未动)**:开机读的主题来自 `session.json` 的 `theme`(`SessionThemeV1`,默认 **Dark**),而 `settings.json` 里另有一个 `theme_mode`(`ThemeModeV1`,默认 **System**)。两份文件各存一次同一件事,开机只读前者——一台 Windows 明暗两个开关都是「亮」的机器上,一份全新档案开出来的窗仍然是深色的。本节量到了它,没有改它。
+
+### 7.46 ② 主题只有一个来源:`settings.json` 的 `theme_mode`,而画布在窗口出生之前就已经定了(用户裁决 2026-08-29;§7.46 挂账第 2 条转「要修」;`crates/bt-persist/src/session.rs`、`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/main.rs`)
+
+**§7.46 把一条不一致记成挂账,这一节把它裁成缺陷并修掉。** 那条挂账是:开机读的主题来自 `session.json` 的 `theme`,而 `settings.json` 里另有一个 `theme_mode`,开机只读前者。查清之后两个字段的分工是这样的——
+
+| | 谁写 | 谁读 |
+|---|---|---|
+| `settings.json` 的 `theme_mode` | **没有人**(序列化时原样带过) | **没有人**;设置页画的是内存里的镜像 |
+| `session.json` 的 `theme` | 主题行(`apply_theme_mode` → `mark_session_dirty`) | 每一次开机(`Runtime::create`) |
+
+**所以看得见的那个字段是装饰,看不见的那个是法律。** 两份文件存同一件事,任何一边被单独动过就会分歧,而它们**天生**就分歧:`SettingsV1` 的默认是 `System`,`SessionV1` 的默认是 **Dark**。于是一台 `AppsUseLightTheme=1`、`SystemUsesLightTheme=1` 的机器上,一份全新档案开出来的窗是深色的——**而窗里第一个 pane 答的 `OSC 11` 就是那张深色布**。§7.46 说那条报告的成因「只剩两个形状」,这就是形状①的来源:Codex 在那张不该存在的深色布上问了一次,被告知深色,然后终生记着。
+
+**裁决:一个来源,就是 `settings.json` 的 `theme_mode`。**
+
+- **`session.json` 的 `theme` 退休:只读一次,再也不写。** `Some` 从此只有一个含义——**这份文档是裁决之前的构建写的**,里面那个模式就是那位用户一直在看的东西。读到它的那次开机把它写进 `settings.json` 并停止写这个键,所以下一份文档是 `None`,同一个档案上补迁只会发生一次。**不加 schema 版本号**,而且是故意的:迁移步骤是结构性的、只能**删掉**那个键,而那个键正是补迁要读的事实;键自己的在场就是版本标记,并且比一个数字更好——它在文件第一次被写回时自己消失。降级(旧构建读新文档)会读到无键并回落到深色,§1.3 规则 1「不支持降级」已经把这一格划在外面。
+- **画布在 `CreateWindowEx` 之前就位。** 原来的解析读 `window.theme()`,那件事非有窗不可,于是**只能**发生在建窗之后——建窗到 set_theme 之间的一切都画在进程出生时那张布上。`Window::theme()` 还会在一台不肯说话的机器上答 `None`,而 `resolve_theme_mode` 把 `None` 读成深色:正好在第一个 pane 即将被问「你站在什么颜色上」的那一刻给出一个沉默的错答案。新的 `bt_platform::system_uses_light_apps()` 直接读 Windows 自己公布的 `AppsUseLightTheme`,**不读 `SystemUsesLightTheme`**——后者是任务栏与开始菜单的,两者可以各穿一件,而一扇窗是应用。
+- **一个读者,不是两个。** 开机、主题行、以及 Windows 自己改主意时(winit 的 `ThemeChanged`)都问 `system_os_theme()`;事件的 payload 被**故意丢掉**——一台机器的一个设置有两个读者就是两次分歧的机会,而这个进程已经信过其中一个,那就是它开窗时用的那个。
+- **内存里的镜像也删了。** `App::theme_mode` 曾是第三份拷贝(设置页画它);现在设置页直接读 `settings_store.loaded().theme_mode`。一个来源的意思是一个,不是「一个加两个跟着它的」。
+
+**红门(先红后绿,红证在提交 `cb1d4ab`)。**
+
+- `the_theme_a_window_opens_in_is_the_one_the_settings_file_names` —— 四格:①全新档案 + Windows 说亮 → 亮画布、首个 pane 被告知亮底;②`theme_mode=Dark` 压过说亮的 Windows;③`theme_mode=Light` 压过说暗的 Windows;④**补迁**:还带着退休键的会话文档被相信一次。红证 `left: Dark / right: System` —— 全新档案解析出深色,而设置文件说 System。
+- `the_theme_row_writes_settings_and_the_session_file_names_no_theme` —— 源码门 + serde 门:`apply_theme_mode` 里必须有 `settings_store.store(`、不许有 `mark_session_dirty`;今天写出的 `SessionV1` 不带 `theme` 键。
+- `the_canvas_is_in_force_before_the_window_is_made` —— 源码门:`Runtime::create` 里 `adopt_stored_schemes` < `set_theme` < `create_window`,且建窗之前不出现 `window.theme()`。红证「the canvas is settled before the window exists」。
+- `bt-persist` :: `the_retired_theme_key_is_not_written_and_is_still_read` —— 退休的两半各自成立:写出去的没有这个键,读进来的旧文档仍被相信。
+
+**实机(隔离 APPDATA,Windows 两个开关都是「亮」)。**
+
+- **全新档案**:窗底 `255,255,255`(修前是 `27,27,27`),`BT_PTY_DUMP` 第 48 字节是 Codex 的 `OSC 11;?`,它随后把输入条画成 `48;2;244;244;244` —— **浅色**。这正是 §7.46 里「答深色时是 `48;2;54;54;54` 配 `38;2;108;108;108` 深灰占位字」那张画的反面。
+- **裁决前的老档案**(`session.theme=dark` + `settings.theme_mode=System`):在说亮的 Windows 上照旧开成深色 `27,27,27`,`settings.json` 被改写成 `"theme_mode": "Dark"`,`session.json` 写回之后不再带 `theme` 键。**一位老用户的选择没有被这次搬家弄丢**,而补迁只发生一次。
