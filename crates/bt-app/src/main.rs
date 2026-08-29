@@ -77197,6 +77197,28 @@ impl Runtime<'_> {
             self.press_web_page(state, button, position)?;
             return Ok(());
         }
+        // **The notice strip takes its own press — above the chrome router**
+        // (user report on a real machine, 2026-08-29).
+        //
+        // It used to stand *below* it, and for as long as the only pane that
+        // wore a strip was a terminal that was invisible: a terminal's body is
+        // cells rather than chrome, so the router looked at the band and passed.
+        // A **preview** pane's body is chrome all the way down — the rail, the
+        // document, the caret it puts in it — so the router claimed the press
+        // and the two words on the strip could be hovered, lit, and never
+        // pressed.
+        //
+        // Above it is also the order the *hover* already used
+        // (`drive_notice_hover` runs before every chrome question) and the order
+        // the strip is *drawn* in (`Layered::Notice` is above the pane). Three
+        // answers that have to agree, and this is the one that did not.
+        if state == ElementState::Pressed
+            && button == MouseButton::Left
+            && let Some(position) = self.window.pointer_position
+            && self.press_notice(position)?
+        {
+            return Ok(());
+        }
         if let Some(position) = self.window.pointer_position
             && self.chrome_mouse_input(state, button, position)?
         {
@@ -77230,18 +77252,6 @@ impl Runtime<'_> {
         if state == ElementState::Pressed
             && let Some(position) = self.window.pointer_position
             && self.press_web_sheet(position)?
-        {
-            return Ok(());
-        }
-        // **The notice strip takes its own press**, beside the capsule and for
-        // its argument: it stands inside a pane, above the pane's cells, below
-        // every surface that floats over the window. It claims its whole width
-        // for the capsule's reason too — a bar you can click a hole in is a bar
-        // that sometimes types into the shell behind it.
-        if state == ElementState::Pressed
-            && button == MouseButton::Left
-            && let Some(position) = self.window.pointer_position
-            && self.press_notice(position)?
         {
             return Ok(());
         }
