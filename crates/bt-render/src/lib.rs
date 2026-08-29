@@ -4097,6 +4097,40 @@ impl HeadlessRenderProbe {
     }
 }
 
+/// **wgpu's defaults, with one number raised to what this adapter actually
+/// has: the largest texture it will make.**
+///
+/// `wgpu::Limits::default()` is a portability floor — it caps
+/// `max_texture_dimension_2d` at 8192 on every machine, including the ones whose
+/// hardware will do 16384 and has since D3D feature level 11. A device asks for
+/// what it wants and the adapter grants what it has, so accepting the floor is a
+/// choice to have a quarter of the texture the machine offers.
+///
+/// It is the glyph atlas that pays for that choice, and it pays in the one
+/// currency it cannot borrow. glyphon sizes its atlas from
+/// `device.limits().max_texture_dimension_2d` (`text_atlas.rs`), grows it by
+/// doubling, and answers `PrepareError::AtlasFull` the moment the next doubling
+/// would pass that number — and a refusal is not one missing character but a
+/// whole lane's text gone (§7.1.3l). Raising the ceiling from 8192² to 16384² is
+/// **four times** the room for the same fonts, and it costs nothing until it is
+/// used: the atlas still starts at 256² and still only grows when it has to.
+///
+/// Only this one field moves. Asking for the adapter's whole `Limits` would be a
+/// different and much larger promise — every buffer bound, every binding count,
+/// every workgroup size — held to the widest machine that ever ran this and
+/// broken on the narrowest. This asks for one number, and asks for it from the
+/// adapter that is about to grant it, so the request can never exceed what is
+/// there.
+fn limits_with_this_adapters_textures(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    let available = adapter.limits().max_texture_dimension_2d;
+    wgpu::Limits {
+        max_texture_dimension_2d: wgpu::Limits::default()
+            .max_texture_dimension_2d
+            .max(available),
+        ..wgpu::Limits::default()
+    }
+}
+
 impl GpuContext {
     /// Open the process's device layer and its first window in one call.
     ///
@@ -4154,6 +4188,7 @@ impl GpuContext {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Folio device"),
+                required_limits: limits_with_this_adapters_textures(&adapter),
                 ..Default::default()
             })
             .await
@@ -4246,6 +4281,7 @@ impl GpuContext {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Folio replay probe device"),
+                required_limits: limits_with_this_adapters_textures(&adapter),
                 ..Default::default()
             })
             .await
@@ -17748,6 +17784,34 @@ mod tests {
              chrome did, so the two surfaces can never share a raster: {}",
             census.line()
         );
+    }
+
+    /// RED — **the device takes the largest texture the adapter offers**
+    /// (`docs/DESIGN.md` §7.1.3m).
+    ///
+    /// `wgpu::Limits::default()` caps `max_texture_dimension_2d` at 8192 as a
+    /// portability floor, and every device this crate opened accepted the floor.
+    /// glyphon sizes the glyph atlas from that number and answers `AtlasFull`
+    /// when the next doubling would pass it, so on a machine whose hardware does
+    /// 16384 — which is every D3D11-class GPU and up — three quarters of the
+    /// atlas was being left on the table, and the report's own 8192 was never
+    /// the machine's limit at all. It was ours.
+    ///
+    /// Mutation: drop `required_limits` from either `request_device` and the
+    /// device comes back at 8192 on an adapter that offers more.
+    #[test]
+    fn a_device_takes_the_largest_texture_its_adapter_offers() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let gpu = on_this_machines_adapter(FORMAT);
+        let offered = gpu.adapter.limits().max_texture_dimension_2d;
+        assert_eq!(
+            gpu.max_texture_dimension_2d(),
+            offered,
+            "the adapter offers {offered} and the device settled for less"
+        );
+        // Not an assumption about hardware, a statement about the floor: nothing
+        // may make the atlas *smaller* than what wgpu would have given anyway.
+        assert!(gpu.max_texture_dimension_2d() >= wgpu::Limits::default().max_texture_dimension_2d);
     }
 
     /// PIN — **every lane prepares into the one shared atlas.**
