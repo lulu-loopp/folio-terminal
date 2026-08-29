@@ -19928,7 +19928,7 @@ mod tests {
                 WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
             let frame = single_cell_cursor_frame(window.metrics());
-            let mut present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
+            let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
                 window
                     .present_frame(
                         gpu,

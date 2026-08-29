@@ -16764,7 +16764,7 @@ impl SurfaceSubject {
     fn is_still(&self, playing: &Path) -> bool {
         match self {
             Self::Unfilled => true,
-            Self::File(path) => path == playing,
+            Self::File(path) => path.as_path() == playing,
             Self::Elsewhere => false,
         }
     }
