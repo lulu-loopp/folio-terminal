@@ -1712,7 +1712,7 @@ mod tests {
     #[test]
     fn the_way_out_survives_the_cards_six_line_cap() {
         let start = Instant::now();
-        let long_path = r"C:\Users\a-rather-long-account-name\OneDrive - Some Organisation\Documents\WindowsPowerShell\Modules\PSReadLine\2.4.6";
+        let long_path = r"C:\Users\someone\OneDrive - Some Organisation With A Longer Name\Documents\WindowsPowerShell\Modules\PSReadLine\2.4.6";
         let body = crate::i18n::psreadline_policy_refused("2.4.6", "Restricted", long_path);
         assert!(
             body.find(crate::i18n::POLICY_REMEDY_COMMAND) < body.find(long_path),
