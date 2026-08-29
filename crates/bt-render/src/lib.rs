@@ -1,6 +1,7 @@
 //! wgpu + cosmic-text rendering for viewport-owned terminal frames.
 
 mod contrast;
+mod glyph_census;
 mod ground;
 pub mod motion;
 mod procedural;
@@ -40,6 +41,8 @@ use glyphon::{
 use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
+
+pub use glyph_census::{GlyphCensus, LaneGlyphDemand};
 
 pub use contrast::{
     ALWAYS_REACHABLE_RATIO_LIMIT, MinimumContrast, contrast_ratio, current_minimum_contrast,
@@ -1523,21 +1526,40 @@ pub enum TextLane {
 }
 
 impl TextLane {
+    /// Every lane, in prepare order.
+    pub const ALL: [Self; Self::COUNT] = [Self::Grid, Self::Chrome, Self::Preview, Self::Overlay];
+
+    /// How many there are — the width of any per-lane array.
+    pub const COUNT: usize = 4;
+
+    /// This lane's slot in a per-lane array.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Grid => 0,
+            Self::Chrome => 1,
+            Self::Preview => 2,
+            Self::Overlay => 3,
+        }
+    }
+
+    /// The lane's name, as the trace and the diagnostics log print it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Grid => "grid",
+            Self::Chrome => "chrome",
+            Self::Preview => "preview",
+            Self::Overlay => "overlay",
+        }
+    }
+
     const fn bit(self) -> u8 {
         match self {
             Self::Grid => 1,
             Self::Chrome => 2,
             Self::Preview => 4,
             Self::Overlay => 8,
-        }
-    }
-
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Grid => "grid",
-            Self::Chrome => "chrome",
-            Self::Preview => "preview",
-            Self::Overlay => "overlay",
         }
     }
 }
@@ -3194,6 +3216,14 @@ pub struct WindowRenderer {
     narrow_shaping_cache: NarrowShapingCache,
     wide_shaping_cache: WideShapingCache,
     glyph_refusal_log: GlyphRefusalLog,
+    /// Whether this window counts what each frame asks the atlas for.
+    ///
+    /// Off, and off on every frame a user ever sees: a census rasterizes every
+    /// distinct glyph a second time to learn its size, which is a cost only a
+    /// measurement is allowed to pay. See [`GlyphCensus`].
+    glyph_census_enabled: bool,
+    /// The last frame's count, when the census is on.
+    glyph_census: Option<GlyphCensus>,
     window_focused: bool,
     cursor_blink_visible: bool,
     peek_overlay: Option<PeekImageOverlay>,
@@ -4889,6 +4919,8 @@ impl WindowRenderer {
             narrow_shaping_cache: NarrowShapingCache::with_perf_tracking(measure_shaping),
             wide_shaping_cache: WideShapingCache::with_perf_tracking(measure_shaping),
             glyph_refusal_log: GlyphRefusalLog::default(),
+            glyph_census_enabled: false,
+            glyph_census: None,
             window_focused: true,
             cursor_blink_visible: true,
             peek_overlay: None,
@@ -5089,6 +5121,26 @@ impl WindowRenderer {
     #[must_use]
     pub fn preview_text_frame(&self) -> PreviewTextFrame {
         self.preview_text_frame
+    }
+
+    /// **Count what every frame from here on asks the glyph atlas for.**
+    ///
+    /// A measurement instrument and never a default: a census rasterizes each
+    /// distinct glyph a second time to learn how much atlas it takes, so a frame
+    /// under it is materially slower than the frame it is measuring. `bt-app`
+    /// turns it on for `BT_GLYPH_CENSUS`; the stress fixture turns it on for one
+    /// composed frame. See [`GlyphCensus`].
+    pub fn set_glyph_census(&mut self, enabled: bool) {
+        self.glyph_census_enabled = enabled;
+        if !enabled {
+            self.glyph_census = None;
+        }
+    }
+
+    /// The last composed frame's count, or `None` when the census is off.
+    #[must_use]
+    pub fn glyph_census(&self) -> Option<&GlyphCensus> {
+        self.glyph_census.as_ref()
     }
 
     /// **Hand over every playing video this frame.** Returns whether anything
@@ -5857,6 +5909,13 @@ impl WindowRenderer {
         // exactly what a table block is, and a second pass would be a second answer to the same
         // question about ordering.
         let mut table_block_bodies: Vec<PreviewBody> = Vec::new();
+        // This frame's count of what the atlas was asked for, when a caller has
+        // asked to be told. A local and not a field, so that the lanes below can
+        // hold `&self.text_rows` and the census at the same time; it is put back
+        // on the window once every lane has been counted.
+        let mut census = self
+            .glyph_census_enabled
+            .then(|| GlyphCensus::for_device(gpu.max_texture_dimension_2d()));
         let mut focused_text_stats = None;
         // Whether every seat's grid text reached the glass. One bit for the
         // window and not one per seat, because what the caller does with it —
@@ -5925,6 +5984,28 @@ impl WindowRenderer {
             // fit. The trim this frame owes is the unconditional one in
             // [`Self::present_frame`], and the retry is
             // [`PresentOutcome::PresentedWithoutText`].
+            if let Some(census) = census.as_mut() {
+                // The same two sequences the two prepares above were handed, in
+                // the same order — see [`grid_text_areas`].
+                census.record(
+                    TextLane::Grid,
+                    &mut gpu.font_system,
+                    &mut gpu.swash_cache,
+                    grid_text_areas(&self.text_rows, self.metrics, frame, entry.seat),
+                );
+                census.record(
+                    TextLane::Grid,
+                    &mut gpu.font_system,
+                    &mut gpu.swash_cache,
+                    status_text_areas(
+                        self.status_overlay.as_deref(),
+                        self.metrics,
+                        frame,
+                        entry.seat.width as f32,
+                        entry.seat,
+                    ),
+                );
+            }
             let text_prepared = accept_text_prepare(
                 TextLane::Grid,
                 text_prepare_result,
@@ -6209,6 +6290,14 @@ impl WindowRenderer {
         for body in self.preview_bodies.iter().chain(table_block_bodies.iter()) {
             preview_text_layouts.extend(shape_preview_body(&mut gpu.font_system, body));
         }
+        if let Some(census) = census.as_mut() {
+            census.record(
+                TextLane::Preview,
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                chrome_text_areas(&preview_text_layouts),
+            );
+        }
         let preview_text_prepared = if preview_text_layouts.is_empty() {
             false
         } else {
@@ -6237,6 +6326,14 @@ impl WindowRenderer {
             gpu.chrome_cap_height_ratio,
             1.0,
         );
+        if let Some(census) = census.as_mut() {
+            census.record(
+                TextLane::Chrome,
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                chrome_text_areas(&chrome_layouts),
+            );
+        }
         let chrome_prepared = if chrome_layouts.is_empty() {
             false
         } else {
@@ -6473,6 +6570,14 @@ impl WindowRenderer {
                     None,
                 ));
             }
+            if let Some(census) = census.as_mut() {
+                census.record(
+                    TextLane::Overlay,
+                    &mut gpu.font_system,
+                    &mut gpu.swash_cache,
+                    chrome_text_areas(&layouts),
+                );
+            }
             let text_prepared = if layouts.is_empty() {
                 false
             } else {
@@ -6515,6 +6620,8 @@ impl WindowRenderer {
         preview_text_frame.layer_prepared = !refused.contains(TextLane::Overlay);
         preview_text_frame.refused = refused;
         self.preview_text_frame = preview_text_frame;
+        // Every lane has been counted; the window may hold it again.
+        self.glyph_census = census;
         self.overlay_layers = overlay_layers;
         let overlay_has_work = overlay_draws.iter().any(|layer| {
             layer.ground_buffer.is_some()
@@ -9421,6 +9528,20 @@ fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<C
         .collect()
 }
 
+/// **Every `TextArea` one shaped chrome batch asks the atlas for**, for
+/// [`grid_text_areas`]'s reason: the prepare and the census read one sequence.
+fn chrome_text_areas(layouts: &[ChromeTextLayout]) -> impl Iterator<Item = TextArea<'_>> {
+    layouts.iter().map(|layout| TextArea {
+        buffer: &layout.buffer,
+        left: layout.left,
+        top: layout.top,
+        scale: 1.0,
+        bounds: layout.bounds,
+        default_color: layout.color,
+        custom_glyphs: &[],
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_chrome_text_atlas(
     text_renderer: &mut TextRenderer,
@@ -9438,33 +9559,49 @@ fn prepare_chrome_text_atlas(
         font_system,
         atlas,
         viewport,
-        layouts.iter().map(|layout| TextArea {
-            buffer: &layout.buffer,
-            left: layout.left,
-            top: layout.top,
-            scale: 1.0,
-            bounds: layout.bounds,
-            default_color: layout.color,
-            custom_glyphs: &[],
-        }),
+        chrome_text_areas(layouts),
         swash_cache,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn prepare_text_atlas(
-    text_renderer: &mut TextRenderer,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    font_system: &mut FontSystem,
-    atlas: &mut TextAtlas,
-    viewport: &Viewport,
-    swash_cache: &mut SwashCache,
-    text_rows: &[Arc<ComposedRow>],
-    metrics: CellMetrics,
+/// **The current hit's ink, applied at the draw and not in the shaping**
+/// (§7.1.5d) — the one cell-level recolour the grid's `TextArea`s carry.
+///
+/// A free function rather than the closure it used to be, because
+/// [`grid_text_areas`] hands its iterator back to two callers and an iterator
+/// cannot borrow a local of the function that built it.
+fn grid_glyph_ink(
     frame: &ViewportFrame,
+    current_ink: Option<Color>,
+    row: usize,
+    column: usize,
+    resting: Color,
+) -> Color {
+    current_ink
+        .filter(|_| {
+            frame.current_search_spans.iter().any(|span| {
+                span.row as usize == row
+                    && (span.start_column as usize..span.end_column as usize).contains(&column)
+            })
+        })
+        .unwrap_or(resting)
+}
+
+/// **Every `TextArea` one seat's grid asks the atlas for, built once and read
+/// twice.**
+///
+/// [`prepare_text_atlas`] hands these to glyphon; [`GlyphCensus`] walks the same
+/// sequence to count what the frame demanded. Two readers and one builder is the
+/// whole point: a census that reconstructed the geometry itself would be a
+/// second opinion about where the grid's glyphs sit, and a subpixel bin is
+/// decided by exactly that geometry — so the count would drift from the demand
+/// it claims to measure at the first change to either.
+fn grid_text_areas<'a>(
+    text_rows: &'a [Arc<ComposedRow>],
+    metrics: CellMetrics,
+    frame: &'a ViewportFrame,
     seat: SeatViewport,
-) -> Result<(), PrepareError> {
+) -> impl Iterator<Item = TextArea<'a>> + 'a {
     // **The seat's corner, added here and nowhere else** (§7.36). Everything
     // above this line is seat-local, as the whole terminal side of this crate
     // is; everything glyphon is handed is the window's, because the window is
@@ -9489,71 +9626,66 @@ fn prepare_text_atlas(
         let ink = search_current_ink_rgb();
         Color::rgb(ink[0], ink[1], ink[2])
     });
-    let recoloured = |row: usize, column: usize, resting: Color| {
-        current_ink
-            .filter(|_| {
-                frame.current_search_spans.iter().any(|span| {
-                    span.row as usize == row
-                        && (span.start_column as usize..span.end_column as usize).contains(&column)
-                })
+    let narrow_text_areas = text_rows
+        .iter()
+        .enumerate()
+        .flat_map(move |(row, text_row)| {
+            text_row.narrow_glyphs.iter().map(move |glyph| {
+                let [left, top, _, bottom] =
+                    frame_cell_bounds_px(metrics, frame, row, glyph.column);
+                let (left, top, bottom) = (left + origin_x, top + origin_y, bottom + origin_y);
+                TextArea {
+                    buffer: &glyph.buffer,
+                    left: left + glyph.left_offset_px,
+                    top: top + glyph.top_offset_px,
+                    scale: 1.0,
+                    // Clip to the terminal row, not the cell. The grid owns pen origins, while
+                    // accents and fallback ink remain free to overhang adjacent cells.
+                    bounds: TextBounds {
+                        left: (origin_x + padding).floor() as i32,
+                        top: top.floor() as i32,
+                        right: text_right,
+                        bottom: bottom.ceil() as i32,
+                    },
+                    default_color: grid_glyph_ink(
+                        frame,
+                        current_ink,
+                        row,
+                        glyph.column,
+                        glyph.color,
+                    ),
+                    custom_glyphs: &[],
+                }
             })
-            .unwrap_or(resting)
-    };
-    let narrow_text_areas = text_rows.iter().enumerate().flat_map(|(row, text_row)| {
-        text_row.narrow_glyphs.iter().map(move |glyph| {
-            let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, row, glyph.column);
-            let (left, top, bottom) = (left + origin_x, top + origin_y, bottom + origin_y);
-            TextArea {
-                buffer: &glyph.buffer,
-                left: left + glyph.left_offset_px,
-                top: top + glyph.top_offset_px,
-                scale: 1.0,
-                // Clip to the terminal row, not the cell. The grid owns pen origins, while
-                // accents and fallback ink remain free to overhang adjacent cells.
-                bounds: TextBounds {
-                    left: (origin_x + padding).floor() as i32,
-                    top: top.floor() as i32,
-                    right: text_right,
-                    bottom: bottom.ceil() as i32,
-                },
-                default_color: recoloured(row, glyph.column, glyph.color),
-                custom_glyphs: &[],
-            }
-        })
-    });
-    let wide_text_areas = text_rows.iter().enumerate().flat_map(|(row, text_row)| {
-        text_row.wide_glyphs.iter().map(move |wide| {
-            let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, row, wide.column);
-            let (left, top, bottom) = (left + origin_x, top + origin_y, bottom + origin_y);
-            TextArea {
-                buffer: &wide.buffer,
-                left: left + wide.left_offset_px,
-                top: top + wide.top_offset_px,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: left.floor() as i32,
-                    top: top.floor() as i32,
-                    right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
-                    bottom: bottom.ceil() as i32,
-                },
-                default_color: recoloured(row, wide.column, wide.color),
-                custom_glyphs: &[],
-            }
-        })
-    });
-    text_renderer.prepare(
-        device,
-        queue,
-        font_system,
-        atlas,
-        viewport,
-        narrow_text_areas.chain(wide_text_areas),
-        swash_cache,
-    )
+        });
+    let wide_text_areas = text_rows
+        .iter()
+        .enumerate()
+        .flat_map(move |(row, text_row)| {
+            text_row.wide_glyphs.iter().map(move |wide| {
+                let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, row, wide.column);
+                let (left, top, bottom) = (left + origin_x, top + origin_y, bottom + origin_y);
+                TextArea {
+                    buffer: &wide.buffer,
+                    left: left + wide.left_offset_px,
+                    top: top + wide.top_offset_px,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: left.floor() as i32,
+                        top: top.floor() as i32,
+                        right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
+                        bottom: bottom.ceil() as i32,
+                    },
+                    default_color: grid_glyph_ink(frame, current_ink, row, wide.column, wide.color),
+                    custom_glyphs: &[],
+                }
+            })
+        });
+    narrow_text_areas.chain(wide_text_areas)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_status_text_atlas(
+fn prepare_text_atlas(
     text_renderer: &mut TextRenderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -9561,20 +9693,38 @@ fn prepare_status_text_atlas(
     atlas: &mut TextAtlas,
     viewport: &Viewport,
     swash_cache: &mut SwashCache,
-    status_overlay: Option<&ComposedRow>,
+    text_rows: &[Arc<ComposedRow>],
     metrics: CellMetrics,
     frame: &ViewportFrame,
-    seat_width_px: f32,
     seat: SeatViewport,
 ) -> Result<(), PrepareError> {
+    text_renderer.prepare(
+        device,
+        queue,
+        font_system,
+        atlas,
+        viewport,
+        grid_text_areas(text_rows, metrics, frame, seat),
+        swash_cache,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn status_text_areas<'a>(
+    status_overlay: Option<&'a ComposedRow>,
+    metrics: CellMetrics,
+    frame: &'a ViewportFrame,
+    seat_width_px: f32,
+    seat: SeatViewport,
+) -> impl Iterator<Item = TextArea<'a>> + 'a {
     let Some(status) = frame.status_text.as_deref() else {
-        return Ok(());
+        return None.into_iter().flatten();
     };
     let Some(row) = status_overlay else {
-        return Ok(());
+        return None.into_iter().flatten();
     };
     let Some(geometry) = status_overlay_geometry(metrics, frame, status, seat_width_px) else {
-        return Ok(());
+        return None.into_iter().flatten();
     };
     // The seat's corner, for [`prepare_text_atlas`]'s reason and at the same
     // seam: the geometry above is the seat's, what glyphon is handed is the
@@ -9622,13 +9772,33 @@ fn prepare_status_text_atlas(
             custom_glyphs: &[],
         }
     });
+    Some(narrow_text_areas.chain(wide_text_areas))
+        .into_iter()
+        .flatten()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_status_text_atlas(
+    text_renderer: &mut TextRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    font_system: &mut FontSystem,
+    atlas: &mut TextAtlas,
+    viewport: &Viewport,
+    swash_cache: &mut SwashCache,
+    status_overlay: Option<&ComposedRow>,
+    metrics: CellMetrics,
+    frame: &ViewportFrame,
+    seat_width_px: f32,
+    seat: SeatViewport,
+) -> Result<(), PrepareError> {
     text_renderer.prepare(
         device,
         queue,
         font_system,
         atlas,
         viewport,
-        narrow_text_areas.chain(wide_text_areas),
+        status_text_areas(status_overlay, metrics, frame, seat_width_px, seat),
         swash_cache,
     )
 }
