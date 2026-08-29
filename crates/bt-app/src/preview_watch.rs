@@ -221,7 +221,8 @@ impl PreviewWatch {
         let held = self.folders.len() + self.unwatchable.len();
         self.folders
             .retain(|directory, _| folders.contains(directory));
-        self.unwatchable.retain(|directory| folders.contains(directory));
+        self.unwatchable
+            .retain(|directory| folders.contains(directory));
         changed |= self.folders.len() + self.unwatchable.len() != held;
         for directory in &folders {
             if self.folders.contains_key(directory) || self.unwatchable.contains(directory) {

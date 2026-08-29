@@ -118841,8 +118841,7 @@ mod tests {
             "the strip is a row of the document and the document yields it"
         );
 
-        let geometry =
-            seats::preview_pane_geometry(rect, scale, seats.seat_rail(seat), true);
+        let geometry = seats::preview_pane_geometry(rect, scale, seats.seat_rail(seat), true);
         assert_eq!(
             geometry.body[1] as u32, with,
             "and the rectangle derivation and the viewport one say the same number"

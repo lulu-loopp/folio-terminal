@@ -2442,12 +2442,7 @@ pub fn pane_notice_strip(
     // so that this row cannot come to disagree with the body under it.
     let rail = if seats.seat_rail(seat).is_some() {
         let bar = (PREVIEW_RAIL_BAR_LOGICAL_PX * scale).round().max(1.0) as u32;
-        bar.min(
-            viewport
-                .height
-                .saturating_sub(consumed)
-                .saturating_sub(1),
-        )
+        bar.min(viewport.height.saturating_sub(consumed).saturating_sub(1))
     } else {
         0
     };
@@ -15918,13 +15913,15 @@ pub fn hit_files_foot(
             continue;
         };
         let foot = match placement.kind {
-            SeatKind::Preview => preview_pane_geometry(
-                rect,
-                scale,
-                seats.seat_rail(placement.id),
-                seats.seat_wears_notice(placement.id),
-            )
-            .foot,
+            SeatKind::Preview => {
+                preview_pane_geometry(
+                    rect,
+                    scale,
+                    seats.seat_rail(placement.id),
+                    seats.seat_wears_notice(placement.id),
+                )
+                .foot
+            }
             _ => pane_foot_geometry(rect, placement.kind, scale).foot,
         };
         if contains(foot, x, y) {
