@@ -4885,7 +4885,23 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 
 **门**:`the_picker_offers_exactly_the_profiles_this_build_has` 的 `count()` 8 → 12 与那张 id 名单;`an_agent_row_is_a_profile_under_this_tables_own_rules` 改走 `AGENT_IDS` 并新增两条断言(每一行印的词等于它问 `PATH` 的那个词;shell 一行都不是 agent);`SHIPPED_ORDER` 8 → 12;`fully_equipped` 那台机器多四个文件(其中 Hermes 放在 `%LOCALAPPDATA%\hermes\bin`,因为它没有 npm 那条路);灰显 tip 那道门多四行,每一行报**自己的名字**——六枚共用一块 chassis,名字是读者唯一能据以分清缺的是哪一个的东西。
 
-**日期:2026-08-29,⑤ 一条。**
+**⑥ 中文界面的四条口径,和两道新门(用户裁 2026-08-29;`crates/bt-app/src/{i18n,settings}.rs`、`docs/plans/ui-style/copy-guide.md`)。**
+
+**第一条:`profile` 的中文是「配置文件」,不是「档案」。** 这推翻的是 `copy-guide.md` 自己在 2026-08-26 定的收口。理由不是哪个词更好听,是**读者从哪儿来**:中文版 Windows Terminal 管同一个对象叫「配置文件」,一个从那边过来的人读到「档案」会以为是另一样东西。行内指代用「这个配置」「默认配置」——页名是长名词,一句话里连写四遍就成了噪音。同批 `integration` 收口到**「整合」**(提示条上本来就是这个词),`shell integration` 全表一个写法。
+
+**第二条:Agent 页说人话,而「人话」有一条底线。** 三条安装行原先的中文是英文的逐字投影(「在你的 … 里加上 …,让 … 在 … 时告诉这扇窗」),既拟人又不像给用户看的字。重写成产品语气之后,第一版又踩了**另一个坑**,而那个坑值得单独记下来:句子里出现了「按通知规则提醒」——每个字都是平常中文,而它指的「规则」是 §7.1.5o 的三档触达梯子,**读者从来没被展示过**。同类还有「第一档」`episode``image worker`。
+
+于是有了 **`no_interface_string_speaks_the_repositorys_private_words`**:界面串只许指**读者看得见的东西**(标签、提醒标记、任务栏按钮、系统通知)、**设置里那一行印出来的名字**、读者自己文件里的路径或键名、产品名。一行要说另一行干什么,就点那一行的名字,或者干脆把那个行为写出来。门扫中英两列;单字内部词(「档」「座」「片」)只在**独立成词**时算数——「卡片」「片刻」「档位」里的那一个字不是,而「本片」「这一片」这类前面就站着汉字的复合词,只能按名单逐条列(这条限制写在门自己的注释里)。红证三条:`image worker`(英文整词)、「本片」(中文子串)、独立的「片」(单字规则)。顺带把 `PreviewFailedImageWorker` 的英文改掉了——「图片工作线程不可用」对读者一个字都不说。
+
+**第三条:「Agent」在中文里是单数,而且不译。** 页名与轨上都写 `Agent`,正文里 agent 小写。**不许写「智能体」**:那是一个译过来的论文词,这一页的读者没人这么叫这些工具。中文不变复数,所以品类名就是那个光名词。
+
+**第四条,也是这一批唯一一件真正的工程发现:一句更短的中文,不等于一段更短的排版。** Agent 页三条中文重写后**每一条都比它替换掉的英文短**,而其中三条画出来仍旧在第三行尾部带着 `…`。真因是 `tooltip::wrap`:它**在空格处断行**,单个超宽的词才逐字拆;而中文句子的空格只出现在拉丁词两边,于是**两个拉丁词之间的一整串汉字是一个词**。「打开后,Folio 在 Claude Code」占了 368px 一行里的 168px,下一个词是 306px 的「的用户级设置(~/.claude/settings.json)中写入一条」——放不下,于是那一行剩下 200px 空着。**总宽度对这件事一个字都没说,只有换行说了。** 这正是 `copy-guide.md` §4「不要用短拉丁词开头」那条规矩背后的真实机制,现在它有了度量。
+
+于是第二道门 **`no_chinese_settings_sentence_needs_a_fourth_line_either`**(`settings.rs`,紧挨着英文那道):同一根 `wrapped_description`、同一个 118px 控件列,量中文列。**行与 `Text` 的对应是按「这一行刚才画出来的那句英文」在 `Text::ALL` 里找的**——没有从行到 `Text` 的映射表,再写一份就是同一个 match 抄两遍;英文串撞车的条目跳过而不是猜,末尾一句 `measured >= 30` 是这条逃生口不会把门悄悄掏空的保证。量尺是 `bt_unicode::cluster_width`——本仓自己回答「这个字是不是宽的」的那一处,而一个宽字在任何 CJK 字体里就是一个 em。红证:把 08-29 之前那句中文放回 `DescClaudeHooks`,门点名 `[(ClaudeHooks, DescClaudeHooks)]`。
+
+**顺带一条内容修正(用户在新电脑上撞到):PowerShell 整合的说明里必须写出「行内公式」。** `$$…$$` 在任何机器上都排版,`$…$` 只在 OSC 133 标出的命令输出行里排版(`bt_detect::InlineMathSite::Ineligible`:「没有 shell 整合,主屏上就永远没有行内渲染」)。一个看着一种公式排版、另一种停在源码的人,没有任何途径把这件事连到自己 `$PROFILE` 里少的那一行,而「命令标记与状态」这五个字也没告诉他。提示条与设置行现在都写三件事:命令标记、当前目录跟随、输出中行内公式的渲染。README 与 README.zh-CN 同步一句,不加新段。
+
+**日期:2026-08-29,⑤⑥ 两条。**
 
 ### 7.43 一句话要么全在框里,要么带着省略号停下:四件「字和框谈不拢」,外加一条 panic 走的路(门 5 尾账四件,2026-08-28 用户裁决,已落地;`crates/bt-app/src/{seats,restore,webhost,notice,main}.rs`、`crates/bt-platform/src/lib.rs`)
 
