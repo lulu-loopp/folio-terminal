@@ -10453,6 +10453,20 @@ struct WindowRuntime {
     lawful_client_size: Option<PhysicalSize<u32>>,
 }
 
+/// **What a present tells this window's traces**, travelling as one place.
+///
+/// Two stations ask the same frame two questions — `BT_PREVIEW_TRACE` what it
+/// did with the documents on it, `BT_GLYPH_CENSUS` what it asked the shared
+/// glyph atlas for — and each keeps a memory of its own so that a still window
+/// writes one line and not sixty a second. They arrive at the funnel together
+/// because they leave it together: a frame that says nothing new to one of them
+/// usually says nothing new to the other, and a caller that had to remember two
+/// separate borrows would be a caller that could forget one.
+struct FrameTraces<'a> {
+    preview: &'a mut preview_trace::FrameEcho,
+    census: &'a mut glyph_trace::CensusEcho,
+}
+
 impl WindowRuntime {
     /// **Whether a frame that did not reach the glass whole is worth asking for
     /// again**, and the place the textless run is counted.
@@ -82173,11 +82187,11 @@ impl Runtime<'_> {
         renderer: &mut WindowRenderer,
         compositor: &bt_platform::Compositor,
         window: &Window,
-        echo: &mut preview_trace::FrameEcho,
-        census_echo: &mut glyph_trace::CensusEcho,
+        traces: FrameTraces<'_>,
         seat_frames: &[bt_render::SeatFrame<'_>],
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome> {
+        let FrameTraces { preview, census } = traces;
         // **What the frame is allowed to cost to measure**, decided at the one
         // funnel because that is the one place every frame passes. Counting a
         // frame's demand on the glyph atlas means rasterizing each distinct
@@ -82189,11 +82203,15 @@ impl Runtime<'_> {
         // **What this frame did with the documents on it** — the one funnel is
         // also the one place that can say it, and it says it only when the
         // answer moved (`BT_PREVIEW_TRACE`).
-        preview_trace::frame(preview_trace::global(), echo, renderer.preview_text_frame());
+        preview_trace::frame(
+            preview_trace::global(),
+            preview,
+            renderer.preview_text_frame(),
+        );
         // **And what it asked the shared glyph atlas for** (`BT_GLYPH_CENSUS`,
         // `docs/DESIGN.md` §7.1.3m) — the ceiling §7.1.3l could only measure by
         // hand, measurable on the machine that meets it.
-        glyph_trace::frame(glyph_trace::global(), census_echo, renderer.glyph_census());
+        glyph_trace::frame(glyph_trace::global(), census, renderer.glyph_census());
         // A textless present is still a present: an image went to the swapchain,
         // so the composition tree has to publish it or the glass keeps showing a
         // picture the swapchain no longer holds. What that frame *owes* is a
@@ -82339,8 +82357,10 @@ impl Runtime<'_> {
             &mut self.window.renderer,
             &self.window.compositor,
             &self.window.window,
-            &mut self.window.preview_trace_echo,
-            &mut self.window.glyph_census_echo,
+            FrameTraces {
+                preview: &mut self.window.preview_trace_echo,
+                census: &mut self.window.glyph_census_echo,
+            },
             &seat_frames,
             trigger,
         )
@@ -82495,8 +82515,10 @@ impl Runtime<'_> {
             &mut self.window.renderer,
             &self.window.compositor,
             &self.window.window,
-            &mut self.window.preview_trace_echo,
-            &mut self.window.glyph_census_echo,
+            FrameTraces {
+                preview: &mut self.window.preview_trace_echo,
+                census: &mut self.window.glyph_census_echo,
+            },
             &seat_frames,
             trigger,
         )

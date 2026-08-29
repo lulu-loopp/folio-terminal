@@ -17483,7 +17483,7 @@ mod tests {
             let mut column = 0;
             while column < columns {
                 if column + 1 < columns {
-                    let mut wide = CapturedCell::plain(&han.next_char().to_string());
+                    let mut wide = CapturedCell::plain(han.next_char().to_string());
                     wide.style.flags.insert(CellFlags::WIDE_CHAR);
                     cells.push(wide);
                     let mut spacer = CapturedCell::plain("");
