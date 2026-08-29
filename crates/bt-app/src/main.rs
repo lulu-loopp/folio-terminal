@@ -8431,9 +8431,6 @@ struct App {
     /// the tabs rather than inside the session file's mirror so the three doors
     /// read live state, not the last thing that happened to be flushed.
     recent: seed::SeedVault,
-    /// Persisted user choice, distinct from the resolved renderer theme. Under `BT_BG` the process
-    /// colors are locked but this mode is still kept across a diagnostic launch.
-    theme_mode: ThemeModeV1,
     /// **Every open window's picture of itself, in the order they opened**
     /// (multiwindow slice D).
     ///
@@ -30048,7 +30045,7 @@ impl Runtime<'_> {
         // be the window's opening bounds rather than a correction applied after
         // the user has already seen it somewhere else.
         let session_store = persist::SessionStore::open();
-        let settings_store = persist::SettingsStore::open();
+        let mut settings_store = persist::SettingsStore::open();
         // Before the first pane can start a probe of its own. A no-op unless
         // `BT_PSREADLINE_PROBE` is set — see `psreadline::probe_override_from_env`
         // for why the door exists and what it deliberately does not override.
@@ -30156,7 +30153,19 @@ impl Runtime<'_> {
                 )
             });
         }
-        let theme_mode = render_theme_mode(session_store.loaded().theme);
+        let theme_mode = startup_theme_mode(settings_store.loaded(), session_store.loaded());
+        // **The carry-forward's own write, and the only one it ever makes.**
+        // Paid here rather than left to the next theme change, because a profile
+        // that never touches the row again would otherwise carry its choice in a
+        // key nothing writes any more and lose it the first time the session file
+        // is rewritten.
+        if session_store.loaded().theme.is_some()
+            && settings_store.loaded().theme_mode != theme_mode
+        {
+            let mut carried = settings_store.loaded().clone();
+            carried.theme_mode = theme_mode;
+            settings_store.store(carried);
+        }
         set_cursor_style(render_cursor_style(session_store.loaded().cursor_style));
         // **Every window the file describes, sorted into the one that opens now,
         // the ones that follow it, and the ones the prompt is about**
@@ -30201,6 +30210,28 @@ impl Runtime<'_> {
         // profile's namespace. Everything it could not honour comes back in the
         // plan's own list and is said on a card once the window is up.
         let mut cli_plan = cli::resolve(cli, default_profile, cli::machine_path_kind);
+        // **The canvas, settled before there is a window to paint one in**
+        // (§7.46 ②). Everything below this point — the first frame, the first
+        // pane, and the `OSC 11` that pane answers — happens on the canvas
+        // decided here, and there is no earlier one for anything to be painted
+        // in by mistake.
+        //
+        // **Before `set_theme`**, which is the whole of why it is here: the
+        // theme's own atomic caches the background it resolves to, and that
+        // background is now a colour of the scheme rather than a constant. A
+        // pair adopted afterwards would leave the first frame painted on the
+        // canvas of whichever scheme the process was born with.
+        adopt_stored_schemes(settings_store.loaded());
+        // Beside the schemes and for their reason: the floor is read on every cell of the
+        // first frame, so a file that asks for one must be obeyed before that frame is drawn
+        // rather than at the first press of the row.
+        install_minimum_contrast(settings_store.loaded().minimum_contrast);
+        let resolved_theme = resolve_theme_mode(theme_mode, system_os_theme());
+        if set_theme(resolved_theme) == ThemeChange::LockedByEnvironment {
+            eprintln!(
+                "BT_THEME persisted_mode={theme_mode:?} resolved_theme={resolved_theme:?} ignored_for_runtime=true reason=BT_BG"
+            );
+        }
         let restored = restore_window_placement(event_loop, &opening);
         let attributes = opening_window_attributes(
             profiles::title(default_profile),
@@ -30217,22 +30248,6 @@ impl Runtime<'_> {
                 .create_window(attributes)
                 .context("create native window")?,
         );
-        // **Before `set_theme`**, which is the whole of why it is here: the
-        // theme's own atomic caches the background it resolves to, and that
-        // background is now a colour of the scheme rather than a constant. A
-        // pair adopted afterwards would leave the first frame painted on the
-        // canvas of whichever scheme the process was born with.
-        adopt_stored_schemes(settings_store.loaded());
-        // Beside the schemes and for their reason: the floor is read on every cell of the
-        // first frame, so a file that asks for one must be obeyed before that frame is drawn
-        // rather than at the first press of the row.
-        install_minimum_contrast(settings_store.loaded().minimum_contrast);
-        let resolved_theme = resolve_theme_mode(theme_mode, window.theme());
-        if set_theme(resolved_theme) == ThemeChange::LockedByEnvironment {
-            eprintln!(
-                "BT_THEME persisted_mode={theme_mode:?} resolved_theme={resolved_theme:?} ignored_for_runtime=true reason=BT_BG"
-            );
-        }
         install_theme_class_background(&window)?;
         window.set_ime_allowed(true);
         let hwnd = window_hwnd(&window)?;
@@ -30590,7 +30605,6 @@ impl Runtime<'_> {
             pins_fault,
             pins_file_broken: false,
             recent,
-            theme_mode,
             // **The document is assembled from these, and the first window's
             // paragraph is the only one that exists yet** (multiwindow slice D).
             // It is seeded with what this window was *built from* rather than
@@ -36576,7 +36590,7 @@ impl Runtime<'_> {
     /// What every row in the settings dialog currently reads.
     fn settings_values(&self) -> settings::SettingsValues {
         settings::SettingsValues {
-            theme: self.app.theme_mode,
+            theme: self.app.settings_store.loaded().theme_mode,
             cursor: current_cursor_style(),
             tab_layout: self.window.rail.layout,
             sidebar: self.window.rail.mode,
@@ -40284,21 +40298,32 @@ impl Runtime<'_> {
     /// presents, DWM retains the previous complete back buffer; the renderer never submits a frame
     /// with only one side of this transaction applied.
     fn apply_theme_mode(&mut self, mode: ThemeModeV1) -> Result<bool> {
-        let mode_changed = self.app.theme_mode != mode;
-        self.app.theme_mode = mode;
-        let theme_changed =
-            self.apply_theme(resolve_theme_mode(mode, self.window.window.theme()))?;
-        if mode_changed {
-            self.mark_session_dirty(Instant::now());
-            if !theme_changed && self.refresh_overlay() {
-                self.present_chrome_change()?;
-            }
+        // **`settings.json` and nowhere else** (§7.46 ②). This used to mark the
+        // *session* dirty, which is how the field the Settings page draws came to
+        // be one nothing wrote and nothing read.
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.theme_mode = mode;
+        let mode_changed = self.app.settings_store.store(settings);
+        let theme_changed = self.apply_theme(resolve_theme_mode(mode, system_os_theme()))?;
+        if mode_changed && !theme_changed && self.refresh_overlay() {
+            self.present_chrome_change()?;
         }
         Ok(mode_changed || theme_changed)
     }
 
-    fn os_theme_changed(&mut self, os_theme: OsTheme) -> Result<bool> {
-        let Some(theme) = resolved_theme_change(self.app.theme_mode, os_theme) else {
+    /// Windows changed its mind about light and dark.
+    ///
+    /// The event is the **trigger**; the answer comes from [`system_os_theme`],
+    /// the same reader the boot used. winit hands a theme along with the
+    /// notification and it is deliberately not taken: two readers of one machine
+    /// setting are two chances to disagree about it, and the one this process
+    /// already trusts is the one that decided the canvas its window opened in.
+    fn os_theme_changed(&mut self) -> Result<bool> {
+        let Some(os_theme) = system_os_theme() else {
+            return Ok(false);
+        };
+        let mode = self.app.settings_store.loaded().theme_mode;
+        let Some(theme) = resolved_theme_change(mode, os_theme) else {
             return Ok(false);
         };
         self.apply_theme(theme)
@@ -82803,7 +82828,11 @@ impl App {
     fn session_document(&self) -> SessionV1 {
         SessionV1 {
             schema_version: SESSION_SCHEMA_VERSION,
-            theme: session_theme_mode(self.theme_mode),
+            // **Retired, and written as absent** (§7.46 ②). The theme's store is
+            // `settings.json`; a key still written here would be a second answer
+            // for the next boot to find, and the carry-forward reads the key's
+            // *presence* as "written before the ruling".
+            theme: None,
             cursor_style: session_cursor_style(current_cursor_style()),
             windows: session_windows(
                 self.window_pictures.iter().map(|(_, window)| window),
@@ -87705,7 +87734,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // next time a page is opened in it.
             WindowEvent::Moved(_) => runtime.window_moved(),
             WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
-            WindowEvent::ThemeChanged(theme) => runtime.os_theme_changed(theme).map(|_| ()),
+            // The payload is deliberately dropped: `os_theme_changed` asks the
+            // one reader this process trusts rather than taking a second
+            // opinion off the event (§7.46 ②).
+            WindowEvent::ThemeChanged(_) => runtime.os_theme_changed().map(|_| ()),
             WindowEvent::RedrawRequested => runtime.redraw(),
             WindowEvent::Focused(false) => {
                 // Losing the window is a blur, and blur commits (J102). The
@@ -90689,12 +90721,51 @@ fn render_theme_mode(theme: SessionThemeV1) -> ThemeModeV1 {
     }
 }
 
-fn session_theme_mode(mode: ThemeModeV1) -> SessionThemeV1 {
-    match mode {
-        ThemeModeV1::System => SessionThemeV1::System,
-        ThemeModeV1::Light => SessionThemeV1::Light,
-        ThemeModeV1::Dark => SessionThemeV1::Dark,
+/// **The theme mode this process opens in, from the one file that owns it**
+/// (coordinator ruling 2026-08-29; `docs/DESIGN.md` §7.46 ②).
+///
+/// `settings.json`'s `theme_mode` is the store. It is the field the Settings
+/// page draws, the field a user editing the file by hand would expect to be
+/// obeyed, and — until this ruling — the only one of the two that nothing read.
+/// The other, `session.json`'s `theme`, was written by the theme row and read by
+/// every boot, which made the visible field a decoration and the invisible one
+/// the law. Two files holding one fact disagree the moment either is touched
+/// alone, and they disagreed **by construction**: `SettingsV1`'s default is
+/// `System` and the session's was `Dark`, so a brand-new profile on a machine
+/// whose Windows says light opened dark.
+///
+/// [`SessionV1::theme`] is read here and nowhere else, for exactly one reason:
+/// every profile written before the ruling holds the user's real choice there
+/// and an untouched `System` in settings. Believing settings alone would reset
+/// all of them. So a session document that still carries the key is believed
+/// once — it is what that user has been looking at — and the boot that believes
+/// it writes the mode into settings and stops writing the key, which is what
+/// makes this a carry-forward rather than a second store.
+fn startup_theme_mode(settings: &bt_persist::SettingsV1, session: &SessionV1) -> ThemeModeV1 {
+    match session.theme {
+        Some(carried) => render_theme_mode(carried),
+        None => settings.theme_mode,
     }
+}
+
+/// **Which canvas Windows is asking applications for, asked of Windows.**
+///
+/// Not `Window::theme()`, and the difference is the whole of the boot-order half
+/// of §7.46 ②: a window cannot be asked before it exists, so a resolution that
+/// went through one could only ever happen *after* `CreateWindowEx` — leaving
+/// everything between the two on whichever canvas the process was born with.
+/// `Window::theme()` also answers `None` on a machine that will not say, and
+/// [`resolve_theme_mode`] reads `None` as dark: a silent wrong answer at the
+/// exact moment the first pane is about to be asked what colour it stands on.
+///
+/// One reader, used by the boot and by every later resolution alike, so the two
+/// cannot come to different conclusions about the same machine.
+fn system_os_theme() -> Option<OsTheme> {
+    bt_platform::system_uses_light_apps().map(
+        |light| {
+            if light { OsTheme::Light } else { OsTheme::Dark }
+        },
+    )
 }
 
 fn resolve_theme_mode(mode: ThemeModeV1, os_theme: Option<OsTheme>) -> Theme {
@@ -97922,6 +97993,192 @@ mod tests {
         let overridden = terminal_palette(FOLIO_LIGHT, [0xf0, 0xe8, 0xd8], [0x37, 0x35, 0x2f]);
         assert_eq!(overridden.canvas, TerminalCanvas::Light);
         assert_eq!(overridden.background, [0xf0, 0xe8, 0xd8]);
+    }
+
+    /// RED GATE (coordinator ruling 2026-08-29, DESIGN §7.46 ②) — **the theme
+    /// has one store, and it is `settings.json`.**
+    ///
+    /// Until this gate there were two: `settings.json`'s `theme_mode`, which the
+    /// Settings page draws and nobody read, and `session.json`'s `theme`, which
+    /// nobody could see and which every boot actually obeyed. They disagreed by
+    /// construction — `SettingsV1::default()` is `System` and `SessionV1`'s
+    /// default was **Dark** — so a machine whose Windows says light opened a dark
+    /// window from a brand-new profile, and the first pane in it answered
+    /// `OSC 11` with the dark canvas. That is the shape §7.46 could not rule out
+    /// as the cause of the report it was written for: a Codex started on that
+    /// first dark canvas asks once, is told dark, and keeps it.
+    ///
+    /// The three cases the ruling names, and the fourth that keeps the fix from
+    /// costing every existing user their choice.
+    #[test]
+    fn the_theme_a_window_opens_in_is_the_one_the_settings_file_names() {
+        use bt_persist::SettingsV1;
+        use bt_render::{FOLIO_DARK, FOLIO_LIGHT};
+
+        /// What a pane is told when the window opened on `theme`.
+        ///
+        /// The chain this gate is really about — a boot mode, the canvas it
+        /// resolves to, and the background the first `OSC 11` carries — spelled
+        /// once so each case below reads as the one thing it varies.
+        fn told(mode: ThemeModeV1, os: Option<OsTheme>) -> [u8; 3] {
+            let scheme = match resolve_theme_mode(mode, os) {
+                Theme::Light => FOLIO_LIGHT,
+                Theme::Dark => FOLIO_DARK,
+            };
+            terminal_palette(scheme, scheme.background, scheme.foreground).background
+        }
+
+        // A brand-new profile carries no session theme at all. This is the fact
+        // the old default contradicted, and asserting it here is what makes the
+        // `None` arm below reachable on a real machine.
+        assert_eq!(SessionV1::default().theme, None);
+
+        // ① Fresh profile, Windows says light → the window opens light and the
+        //    first pane is told the light canvas.
+        let fresh = startup_theme_mode(&SettingsV1::default(), &SessionV1::default());
+        assert_eq!(fresh, ThemeModeV1::System);
+        assert_eq!(told(fresh, Some(OsTheme::Light)), FOLIO_LIGHT.background);
+
+        // ② `theme_mode = Dark` outranks a Windows that says light. A chosen
+        //    mode is a choice, not a preference to be overridden by the OS.
+        let chosen_dark = SettingsV1 {
+            theme_mode: ThemeModeV1::Dark,
+            ..SettingsV1::default()
+        };
+        let dark = startup_theme_mode(&chosen_dark, &SessionV1::default());
+        assert_eq!(dark, ThemeModeV1::Dark);
+        assert_eq!(told(dark, Some(OsTheme::Light)), FOLIO_DARK.background);
+
+        // ③ And a chosen Light outranks a Windows that says dark, which is the
+        //    case the user in the report is actually in.
+        let chosen_light = SettingsV1 {
+            theme_mode: ThemeModeV1::Light,
+            ..SettingsV1::default()
+        };
+        let light = startup_theme_mode(&chosen_light, &SessionV1::default());
+        assert_eq!(told(light, Some(OsTheme::Dark)), FOLIO_LIGHT.background);
+
+        // ④ **The carry-forward, and it fires exactly here.** Every profile
+        //    written before this ruling holds the user's real choice in
+        //    `session.json` and an untouched `System` in `settings.json`. Reading
+        //    settings alone would silently reset all of them, so a session
+        //    document that still carries the retired key is believed once — it is
+        //    what that user has been looking at — and the boot that believes it
+        //    writes it into settings and stops writing the key.
+        let carried = startup_theme_mode(
+            &SettingsV1::default(),
+            &SessionV1 {
+                theme: Some(SessionThemeV1::Light),
+                ..SessionV1::default()
+            },
+        );
+        assert_eq!(
+            carried,
+            ThemeModeV1::Light,
+            "an old profile's choice lives in session.json and must survive the move"
+        );
+        assert_eq!(told(carried, Some(OsTheme::Dark)), FOLIO_LIGHT.background);
+    }
+
+    /// RED GATE (same ruling) — **the theme row writes the settings file, and
+    /// the session file no longer carries a theme at all.**
+    ///
+    /// The store is the whole of the defect: `apply_theme_mode` used to mark the
+    /// *session* dirty, which is how `settings.json`'s `theme_mode` came to be a
+    /// field the Settings page drew and no code on either side of it ever wrote
+    /// or read. Two files holding one fact is the shape the ruling forbids, so
+    /// this is asserted structurally rather than remembered — a future edit that
+    /// sends the choice back to the session file has to delete this test to do
+    /// it.
+    ///
+    /// Mutation: put `mark_session_dirty` back in `apply_theme_mode`, or write a
+    /// `theme` key on `SessionV1` again.
+    #[test]
+    fn the_theme_row_writes_settings_and_the_session_file_names_no_theme() {
+        const SOURCE: &str = include_str!("main.rs");
+
+        let signature = "fn apply_theme_mode(&mut self, mode: ThemeModeV1) -> Result<bool> {";
+        let start = SOURCE
+            .find(signature)
+            .expect("`apply_theme_mode` is declared in this file");
+        let rest = &SOURCE[start + signature.len()..];
+        let body = &rest[..rest
+            .find(
+                "
+    fn ",
+            )
+            .unwrap_or(rest.len())];
+        assert!(
+            body.contains("settings_store.store("),
+            "the theme row's choice is written to `settings.json` and nowhere else:
+{body}"
+        );
+        assert!(
+            !body.contains("mark_session_dirty"),
+            "the session file is not the theme's store any more:
+{body}"
+        );
+
+        // And the file it used to be stored in says nothing about themes: a key
+        // that is still written is a second answer waiting to be believed.
+        let written = serde_json::to_value(SessionV1::default()).expect("a session serializes");
+        assert!(
+            written.get("theme").is_none(),
+            "a session written today carries no theme key: {written}"
+        );
+    }
+
+    /// RED GATE (same ruling) — **the canvas is decided before the window
+    /// exists, so there is no first frame in the other one.**
+    ///
+    /// The resolution used to read `window.theme()`, which cannot be asked until
+    /// there is a window; everything that happens between `create_window` and
+    /// `set_theme` therefore happens on whichever canvas the process was born
+    /// with. `Window::theme()` also answers `None` on a machine that will not
+    /// say, and `resolve_theme_mode` reads `None` as dark — a silent wrong answer
+    /// at exactly the moment the first pane is about to be asked what colour it
+    /// is standing on.
+    ///
+    /// Mutation: move `set_theme` back below `create_window`, or resolve from the
+    /// window again.
+    #[test]
+    fn the_canvas_is_in_force_before_the_window_is_made() {
+        const SOURCE: &str = include_str!("main.rs");
+
+        let signature = "    fn create(
+        event_loop: &ActiveEventLoop,";
+        let start = SOURCE
+            .find(signature)
+            .expect("`Runtime::create` is declared in this file");
+        let rest = &SOURCE[start + signature.len()..];
+        let body = &rest[..rest
+            .find(
+                "
+    fn ",
+            )
+            .unwrap_or(rest.len())];
+
+        let themed = body
+            .find("set_theme(resolved_theme)")
+            .expect("`Runtime::create` puts a canvas in force");
+        let made = body
+            .find("create_window(")
+            .expect("`Runtime::create` creates the window");
+        let schemes = body
+            .find("adopt_stored_schemes(")
+            .expect("`Runtime::create` adopts the stored scheme pair");
+        assert!(
+            schemes < themed,
+            "the pair is adopted before the theme picks one of it"
+        );
+        assert!(
+            themed < made,
+            "the canvas is settled before the window exists, or the first frame is              painted in the canvas the process was born with"
+        );
+        assert!(
+            !body[..made].contains("window.theme()"),
+            "the boot resolution cannot ask a window that does not exist yet"
+        );
     }
 
     /// **Whose size is it** (user ruling 2026-08-08), as the three rules that decide it.
