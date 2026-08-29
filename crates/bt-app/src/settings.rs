@@ -4919,8 +4919,11 @@ impl SettingsPanel {
     }
 
     /// A press on a row's `⋯`: open it, or shut the one already open on this
-    /// row — [`Self::toggle_menu`]'s own shape, because it is the same gesture.
+    /// row — [`Self::toggle_menu`]'s own shape, because it is the same gesture,
+    /// and it puts the other popup away for that function's own reason.
     pub fn toggle_row_menu(&mut self, index: usize) {
+        self.menu = None;
+        self.menu_scroll = 0.0;
         self.row_menu = (self.row_menu != Some(index)).then_some(index);
     }
 
@@ -4965,9 +4968,50 @@ impl SettingsPanel {
     /// that is open and a new list has never been scrolled. What brings the
     /// *current* answer into view is the caller, once the geometry exists to say
     /// where it is — see `SettingsLayout::menu_scroll_to_show`.
+    ///
+    /// **And the other popup goes away** — E61's "the opener closes the others"
+    /// one layer in. The two are never up together on any page this build draws
+    /// (a `⋯` hangs off a Profiles row and a picker off a row with a control),
+    /// and this line is what keeps that a structure rather than a coincidence of
+    /// which page happens to hold what.
     pub fn toggle_menu(&mut self, row: SettingsRow) {
+        self.row_menu = None;
         self.menu = (self.menu != Some(row)).then_some(row);
         self.menu_scroll = 0.0;
+    }
+
+    /// **The popup standing over this dialog's page**, if one is — innermost
+    /// first, which is [`Self::close_one_layer`]'s own order and for its reason:
+    /// a row's `⋯` is a rung above the picker it can be raised beside.
+    ///
+    /// Read off the state rather than remembered, exactly as the window's
+    /// `PopupsUp` is: "is a picker open" is a fact this panel already owns, and a
+    /// second copy of it is a copy that goes stale on whichever path forgets to
+    /// write it.
+    #[must_use]
+    pub fn popup_up(&self) -> Option<DialogPopup> {
+        if let Some(index) = self.row_menu {
+            return Some(DialogPopup::RowMenu(index));
+        }
+        self.menu.map(DialogPopup::Choice)
+    }
+
+    /// **Put one popup away under the pointer** — [`Self::close_one_layer`]'s
+    /// half for the mouse, over the same two rungs.
+    ///
+    /// The keyboard goes back to the button the popup hung from, exactly as
+    /// Escape leaves it, and the ring goes out with it: this is pointer
+    /// interaction, and `:focus-visible`'s other half is that a mouse never
+    /// leaves a ring standing behind.
+    pub fn close_popup(&mut self, popup: DialogPopup) {
+        self.focus_visible = false;
+        match popup {
+            DialogPopup::Choice(_) => self.close_menu(),
+            DialogPopup::RowMenu(index) => {
+                self.row_menu = None;
+                self.focus = Some(SettingsTarget::ProfileMore(index));
+            }
+        }
     }
 
     /// Returns whether the hover changed, so a caller can skip a repaint.
@@ -5015,18 +5059,13 @@ impl SettingsPanel {
         {
             self.recording = None;
         }
-        // The row menu's click-away, which is the pickers' own: a press
-        // anywhere that is not this menu or its trigger closes it, and a press
-        // *on* the trigger is `toggle_row_menu`'s job rather than this one's.
-        if self.row_menu.is_some_and(|index| {
-            !matches!(
-                target,
-                SettingsTarget::ProfileMore(open) | SettingsTarget::ProfileMoreItem(open, _)
-                    if open == index
-            )
-        }) {
-            self.row_menu = None;
-        }
+        // **The click-away is not here** (user ruling 2026-08-29). It used to
+        // be, for the `⋯` list alone and written as its own rectangle rule —
+        // which is how the picker beside it came to have none, and how
+        // `General ▸ Language` came to stand open under a press on the dialog's
+        // own background. Both popups leave by one door now
+        // ([`popup_press`]), asked by the runtime *before* this function: a
+        // press that misses the popup that is up never reaches here at all.
         match target {
             SettingsTarget::Close
             | SettingsTarget::Combo(_)
@@ -6378,6 +6417,137 @@ pub enum SettingsTarget {
     /// The × on an open picker's item — send that scheme's file to the Recycle
     /// Bin. [`Self::MenuItemEdit`]'s twin in every respect but the verb.
     MenuItemDelete(SettingsRow, usize),
+}
+
+/// **Every popup this dialog raises over its own page** — the window's `Popup`
+/// list one layer in, and the same finding that produced it (user report,
+/// 2026-08-29).
+///
+/// The dialog is a modal, so none of the window's nine can be up while it is and
+/// neither of these two is on that list: a press inside this dialog never
+/// reaches `mouse_input`'s popup arms, because `settings_mouse_input` answers
+/// first and answers everything. What the two lists share is the **rule** — a
+/// press outside the rectangle takes the popup down, and that press goes no
+/// further — and this enum is what lets the rule be written once for both of
+/// them instead of once per opener. Written once per opener is what it was: the
+/// `⋯` list had a click-away of its own inside [`SettingsPanel::press`] and the
+/// picker had none at all, so a reader who opened `General ▸ Language` and
+/// clicked the dialog's own background watched the list stay standing. That is
+/// E61's six hand-copied runs happening again in a smaller room.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogPopup {
+    /// A row's picker, hanging under that row's combo button (§7.1.6c).
+    Choice(SettingsRow),
+    /// A profile row's `⋯` list, by that row's place on the Profiles page.
+    RowMenu(usize),
+}
+
+/// **Which popup a hit answer came from**, or `None` for an answer that belongs
+/// to the page.
+///
+/// **The geometry is [`hit`]'s and is not repeated here.** A popup is asked
+/// before everything the page is holding, and every box of it — frame, item,
+/// greyed item, trailing mark, closing verb — answers with one of the popup's
+/// own targets. So "which target did the rectangle test give" *is* the rectangle
+/// test, and a second copy of the frames in this function would be the copy that
+/// goes stale the day a picker grows a scrollbar or an item grows a pencil.
+///
+/// Exhaustive on [`SettingsTarget`]: a target added later does not compile until
+/// it has said whether a popup can produce it.
+#[must_use]
+pub fn target_popup(target: SettingsTarget) -> Option<DialogPopup> {
+    match target {
+        // The picker's own five answers. `Menu` is its body between the items,
+        // `Choice` an item, `MenuAction` the verb behind its last hairline, and
+        // the two `MenuItem*` the marks that live inside an item.
+        SettingsTarget::Menu(row)
+        | SettingsTarget::Choice(row, _)
+        | SettingsTarget::MenuAction(row)
+        | SettingsTarget::MenuItemEdit(row, _)
+        | SettingsTarget::MenuItemDelete(row, _) => Some(DialogPopup::Choice(row)),
+        // The `⋯` list's two. `ProfileMore` is both this menu's body *and* the
+        // button that raises it — `hit` answers with it for the frame, for a
+        // refused item and for the trigger alike — which is exactly right: on
+        // the row whose menu is open it names the popup, and on any other row
+        // [`target_raises_a_popup`] names it an opener.
+        SettingsTarget::ProfileMore(index) | SettingsTarget::ProfileMoreItem(index, _) => {
+            Some(DialogPopup::RowMenu(index))
+        }
+        // Everything else is the page, the rail, the header, the scrim, or the
+        // editor sub-page — every one of them *under* a popup that is up.
+        SettingsTarget::Scrim
+        | SettingsTarget::Panel
+        | SettingsTarget::Close
+        | SettingsTarget::Nav(_)
+        | SettingsTarget::Combo(_)
+        | SettingsTarget::Slider(_)
+        | SettingsTarget::Record(_)
+        | SettingsTarget::RestoreRow(_)
+        | SettingsTarget::RestoreAll
+        | SettingsTarget::ProfileUp(_)
+        | SettingsTarget::ProfileDown(_)
+        | SettingsTarget::ProfileRow(_)
+        | SettingsTarget::ProfileEdit(_)
+        | SettingsTarget::ProfileNew
+        | SettingsTarget::EditorBack
+        | SettingsTarget::Field(_)
+        | SettingsTarget::EditorBrowse
+        | SettingsTarget::EnvName(_)
+        | SettingsTarget::EnvValue(_)
+        | SettingsTarget::EnvGhost(_)
+        | SettingsTarget::EnvRemove(_)
+        | SettingsTarget::EnvAdd
+        | SettingsTarget::EditorRestore
+        | SettingsTarget::EditorDelete
+        | SettingsTarget::Advanced(_)
+        | SettingsTarget::ResetAdvanced(_) => None,
+    }
+}
+
+/// **Whether this target is a button that raises one of the dialog's popups.**
+///
+/// The exception every menu in this program already makes for its own opener
+/// (the pane head's `⌄`, the graph toolbar's `All branches`): a press on an
+/// opener is not "outside", because swallowing it would shut the popup and leave
+/// the press with nothing to reopen it — a button you cannot toggle off, or one
+/// you have to press twice.
+///
+/// **Every** opener and not only the one that raised what is up, which is what
+/// makes pressing a second picker's button *switch* rather than merely close:
+/// one press, one popup, and the same sentence the window's own menus make when
+/// a second right press moves a context menu from one row to another. The switch
+/// itself belongs to the openers ([`SettingsPanel::toggle_menu`] and
+/// [`SettingsPanel::toggle_row_menu`], which each put the other away).
+#[must_use]
+pub fn target_raises_a_popup(target: SettingsTarget) -> bool {
+    matches!(
+        target,
+        SettingsTarget::Combo(_) | SettingsTarget::ProfileMore(_)
+    )
+}
+
+/// **What a press on this dialog is, given the popup standing over it.**
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopupPress {
+    /// Nothing is up, or the press landed inside the popup or on a button that
+    /// raises one: it goes on being the press it always was.
+    Through,
+    /// The press landed outside: **this popup goes away and the press goes no
+    /// further** (user ruling 2026-08-29).
+    Dismiss(DialogPopup),
+}
+
+/// The one door both of this dialog's popups leave by when a press misses them.
+#[must_use]
+pub fn popup_press(popup: Option<DialogPopup>, target: SettingsTarget) -> PopupPress {
+    match popup {
+        Some(popup)
+            if target_popup(target) != Some(popup) && !target_raises_a_popup(target) =>
+        {
+            PopupPress::Dismiss(popup)
+        }
+        _ => PopupPress::Through,
+    }
 }
 
 /// One row's three boxes, and which row they belong to.

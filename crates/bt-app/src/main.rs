@@ -39957,6 +39957,37 @@ impl Runtime<'_> {
             return Ok(());
         }
         let target = settings::hit(layout, &self.settings_values(), position.x, position.y);
+        // **A press outside the popper that is up takes it down and goes no
+        // further** (user report and ruling, 2026-08-29) — the window's own menu
+        // rule, asked here because this dialog is a modal with a dispatch of its
+        // own and nothing below `settings_mouse_input` will ever see this press.
+        //
+        // **Before everything**, which is what "no further" means: before the
+        // focus moves, before the scrim closes the dialog, before a `Nav` word
+        // turns the page. A press that lands on the `×` while `Language` is open
+        // shuts the list and leaves the dialog standing, exactly as the first
+        // `Esc` does — one layer per gesture, at both doors.
+        //
+        // **The judgement is `settings::popup_press`'s and the geometry is
+        // `settings::hit`'s**: the popup was hit-tested before the page one line
+        // above, so which target came back already says whether the pointer was
+        // inside it. Nothing here measures a rectangle, which is the whole reason
+        // this is one question rather than a second copy of the popup's frame.
+        if let settings::PopupPress::Dismiss(popup) =
+            settings::popup_press(self.window.settings.popup_up(), target)
+        {
+            self.window.settings.close_popup(popup);
+            if let Some(position) = self.window.pointer_position {
+                let hover = self.settings_layout().map(|layout| {
+                    settings::hit(&layout, &self.settings_values(), position.x, position.y)
+                });
+                self.window.settings.set_hover(hover);
+            }
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+            return Ok(());
+        }
         // The focus follows the finger, with the ring off — the pointer half of
         // `:focus-visible`. Stated before the verb below, because closing the
         // dialog drops the focus, and a press that set it afterwards would leave
