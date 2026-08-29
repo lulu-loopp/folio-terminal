@@ -957,11 +957,18 @@ pub enum PresentOutcome {
     /// exactly as it is after [`Self::Skipped`], and the caller's answer is the
     /// same one: keep the frame and ask for it again.
     ///
-    /// The retry converges by construction. Whatever filled the atlas, the trim
-    /// at the end of [`WindowRenderer::present_frame`] unprotects it, and a
-    /// frame's own glyphs are bounded by the ink of one window — some twenty-
-    /// five times smaller than the atlas at the device limit — so the frame
-    /// after this one has room. That is why this is a retry and not a counter.
+    /// **The retry converges because something is changed between the two
+    /// attempts, and until §7.1.3m nothing was.** This used to say that the trim
+    /// at the end of [`WindowRenderer::present_frame`] unprotects whatever
+    /// filled the atlas and that a frame's own glyphs are bounded by one
+    /// window's ink, so the next frame has room. The second half is true and
+    /// measured (§7.1.3m: 3.3% of an 8192² atlas for a whole 4K window of
+    /// Chinese); the first half was the mistake. Trimming empties the *in-use*
+    /// set, and what a long session runs out of is the packer's shelf geometry —
+    /// so the same frame met the same refusal in the same place, forever, at
+    /// half the atlas still free. What answers this outcome now is
+    /// [`GpuContext::close_the_frame`], which gives the atlas a new packing on
+    /// the first refusal; the retry then lands on the frame after it.
     PresentedWithoutText(PresentReceipt),
     Skipped,
     Reconfigure,
@@ -2666,10 +2673,11 @@ fn accept_text_prepare(
 /// 2. **The frame is marked incomplete.** `text_complete` is what turns this
 ///    frame into [`PresentOutcome::PresentedWithoutText`], which is the caller's
 ///    instruction to put the frame back in the slot and ask for another one.
-///    **That is the retry**, and it is the only safe one: the atlas trim that
-///    frees the room is [`WindowRenderer::present_frame`]'s unconditional one on
-///    the way out, and trimming here instead would unprotect the glyphs the
-///    lanes *already prepared on this same frame* were handed coordinates for.
+///    **That is the retry**, and it is the only safe one: what frees the room is
+///    [`GpuContext::close_the_frame`], on the way out of
+///    [`WindowRenderer::present_frame`] and after the draw, and doing anything to
+///    the atlas *here* would move or unprotect the glyphs the lanes **already
+///    prepared on this same frame** were handed coordinates for.
 /// 3. **It is said once.** The console line is for the first refusal of a run,
 ///    not for each of sixty a second.
 ///
@@ -2860,6 +2868,23 @@ pub struct GpuContext {
     /// mint its own viewport without rebuilding anything.
     glyphon_cache: Cache,
     atlas: TextAtlas,
+    /// **Whether the shelf layout under the atlas has already been thrown away
+    /// once for a refusal no complete frame has answered yet** — the latch that
+    /// makes [`GpuContext::close_the_frame`] a repair and not a reflex.
+    ///
+    /// See that function for the whole argument. In one line: a first refusal is
+    /// read as a packer that has run out of *geometry* and is answered by a
+    /// fresh one; a second refusal on a packer that is already fresh is read as
+    /// a frame that is genuinely bigger than the device's largest texture, which
+    /// no re-packing can cure and which must therefore not be paid for sixty
+    /// times a second.
+    glyph_atlas_refitted: bool,
+    /// How many times this process has thrown a fragmented glyph atlas away.
+    ///
+    /// A counter rather than a bit because the number is the diagnosis: one over
+    /// a day's session is the packer wearing out as it must; one a second is a
+    /// window whose demand does not fit and whose retry is spinning.
+    glyph_atlas_refits: u64,
     rect_pipeline: wgpu::RenderPipeline,
     /// The same pipeline blending `Replace`, for the chrome quads that *are*
     /// the window's ground — see [`ChromeSurface::Ground`].
@@ -4342,6 +4367,8 @@ impl GpuContext {
             swash_cache,
             glyphon_cache,
             atlas,
+            glyph_atlas_refitted: false,
+            glyph_atlas_refits: 0,
             rect_pipeline,
             ground_rect_pipeline,
             ground_fade_rect_pipeline,
@@ -4446,6 +4473,96 @@ impl GpuContext {
     #[must_use]
     pub fn max_texture_dimension_2d(&self) -> u32 {
         self.max_texture_dimension_2d
+    }
+
+    /// How many times this process has thrown a fragmented glyph atlas away —
+    /// see [`GpuContext::close_the_frame`].
+    pub fn glyph_atlas_refits(&self) -> u64 {
+        self.glyph_atlas_refits
+    }
+
+    /// **The one place the shared atlas is told a frame is over** — called by
+    /// [`WindowRenderer::present_frame`] outside every way that frame can end,
+    /// and answering the frame's own verdict on its text.
+    ///
+    /// # Why a trim is not enough, and what a refusal actually means
+    ///
+    /// [`TextAtlas::trim`] empties `glyphs_in_use`, which is the set glyphon
+    /// refuses to evict. That is all it does, and until this function existed it
+    /// was all a frame ever asked for — on the reasoning, written into
+    /// [`PresentOutcome::PresentedWithoutText`], that "whatever filled the atlas,
+    /// the trim unprotects it, so the frame after this one has room". **The
+    /// second half of that sentence is false**, and the 2026-08-29 report is
+    /// what it costs (`docs/DESIGN.md` §7.1.3m, the true cause).
+    ///
+    /// glyphon packs into `etagere`'s `BucketedAtlasAllocator`: a shelf packer
+    /// whose shelves are height-classed, whose buckets give their space back
+    /// only when *every* item in them is gone, and which reclaims a shelf only
+    /// when it is the top-most one (or one of at most three consecutive empty
+    /// ones the same column can coalesce). Room in that packer is therefore not
+    /// a quantity, it is a *geometry*: a session that draws at a ladder of sizes
+    /// — zoom levels, heading sizes, chrome against body against a card's mini
+    /// face — lays down shelves of many heights, pins most of them with a
+    /// surviving glyph, and slowly loses the ability to place a tall raster
+    /// anywhere at all. Once that has happened `try_allocate` fails, growth is
+    /// already at `max_texture_dimension_2d`, and the answer is
+    /// [`PrepareError::AtlasFull`] **for every frame after it, for the life of
+    /// the process** — measured on the model of glyphon's own allocator at
+    /// roughly half the atlas's area still free. Trimming cannot touch it: the
+    /// in-use set was never what ran out.
+    ///
+    /// So a refusal is answered here by giving the atlas a *new packing*: a
+    /// fresh [`TextAtlas`], which is a fresh `BucketedAtlasAllocator` at 256²
+    /// that will grow again as it is asked to. The rasters it held are a pure
+    /// cache — every one of them is a swash call away — so nothing is lost but
+    /// the time to draw them again, and the frame that was refused is already
+    /// owed and already being asked for again by
+    /// [`PresentOutcome::PresentedWithoutText`]. **That is what makes the retry
+    /// a retry**: before this, the next attempt met the same packer in the same
+    /// state and was refused in the same place, which is the spin the report's
+    /// hung-watchdog line recorded.
+    ///
+    /// # Why it is not a periodic flush, and why it happens at most once
+    ///
+    /// Nothing here runs on a timer or a threshold: the atlas is thrown away
+    /// only when a frame has already lost its text, which is the one moment at
+    /// which the cache has provably stopped being a cache. And it is thrown away
+    /// **once per episode**. A second refusal while `glyph_atlas_refitted` still
+    /// stands is a refusal by a packer that was fresh a frame ago, and that is a
+    /// different illness with a different name: one frame's demand is larger
+    /// than the largest texture this device will make. Re-packing cannot cure
+    /// that, and doing it every frame would turn a window that is merely too
+    /// full into one that also re-rasterizes its whole corpus sixty times a
+    /// second. The latch clears on the first frame that keeps all of its text.
+    ///
+    /// # Why the renderers that already hold coordinates are safe
+    ///
+    /// A `TextRenderer`'s prepared vertices carry positions **inside** the atlas
+    /// texture, so replacing the atlas invalidates every batch prepared against
+    /// the old one. This is called from `present_frame` after the frame has been
+    /// drawn and presented, and every lane's draw is gated on a flag recomputed
+    /// by that same frame's prepare — a lane that does not prepare is not
+    /// issued — so no batch survives into a pass against a different atlas. The
+    /// pipeline each renderer holds is minted by the shared [`Cache`] from the
+    /// format, which does not change, so the renderers themselves stay valid.
+    fn close_the_frame(&mut self, outcome: &Result<PresentOutcome, RenderError>) {
+        match outcome {
+            Ok(PresentOutcome::Presented(_)) => {
+                self.glyph_atlas_refitted = false;
+                self.atlas.trim();
+            }
+            Ok(PresentOutcome::PresentedWithoutText(_)) if !self.glyph_atlas_refitted => {
+                self.glyph_atlas_refitted = true;
+                self.glyph_atlas_refits += 1;
+                self.atlas =
+                    TextAtlas::new(&self.device, &self.queue, &self.glyphon_cache, self.format);
+            }
+            // A refused frame on a packing that is already fresh, and the three
+            // ends that say nothing about text at all (a skipped or reconfigured
+            // swapchain, a frame that never composed): the trim every frame owes,
+            // and nothing else.
+            _ => self.atlas.trim(),
+        }
     }
 
     /// Make the device hold exactly the ground's picture, and answer whether a
@@ -5887,7 +6004,12 @@ impl WindowRenderer {
         // cells. A `max_texture_dimension_2d` of 8192 is 67 Mpx², some twenty-
         // five screens. Trimmed every frame the atlas cannot fill; not trimmed,
         // it is only a matter of time.
-        gpu.atlas.trim();
+        //
+        // **The trim is only what an ordinary frame owes.** A frame that lost
+        // its text owes something else, because what ran out was never the
+        // in-use set — see [`GpuContext::close_the_frame`], which is now the one
+        // place either debt is paid.
+        gpu.close_the_frame(&outcome);
         outcome
     }
 
@@ -16840,16 +16962,21 @@ mod tests {
     ///
     /// There is no way to ask glyphon what it is protecting, so the invariant is
     /// held where it is spent: `present_frame` may not fail, may not return
-    /// early, and must trim.
+    /// early, and must close the frame out on the shared atlas.
     ///
-    /// Mutation: move the trim back inside `compose_frame` and this fails,
+    /// Since §7.1.3m the closing verb is [`GpuContext::close_the_frame`] rather
+    /// than the bare trim — an ordinary frame's trim and a refused frame's
+    /// re-packing are the same debt paid in the same place, and the reason they
+    /// are one call is that either one skipped is the same defect.
+    ///
+    /// Mutation: move the call back inside `compose_frame` and this fails,
     /// because `present_frame` stops naming it.
     #[test]
     fn no_exit_from_a_frame_may_skip_the_atlas_trim() {
         let body = present_frame_source();
         assert!(
-            body.contains("gpu.atlas.trim();"),
-            "present_frame must trim the shared atlas: {body}"
+            body.contains("gpu.close_the_frame(&outcome);"),
+            "present_frame must close the frame out on the shared atlas: {body}"
         );
         assert!(
             !body.contains('?'),
