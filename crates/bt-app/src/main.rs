@@ -85868,12 +85868,22 @@ mod pty_drain_budget_tests {
 /// **How many times in a row a textless frame is worth asking for again.**
 ///
 /// Two, and the number is an argument rather than a taste. One turn covers the
-/// only refusal the trim can cure — a frame refused because of what the frames
-/// before it had left protected, which the trim on the way out has already
-/// undone. A second covers the same thing happening across a content change, so
-/// that a document arriving in the same breath as a theme switch is not judged
-/// on the frame it landed in. A third would be asking an identical question for
-/// the third time and calling the answer new.
+/// refusal the renderer can cure, which is every refusal a session that fits on
+/// its glass will meet: `bt_render`'s `GpuContext::close_the_frame` answers a
+/// frame that lost its text by giving the shared atlas a **new packing**, so the
+/// turn after it meets a packer with room rather than the same worn-out one.
+/// (Until `docs/DESIGN.md` §7.1.3m the sentence here read "the trim on the way
+/// out has already undone it", and that was the mistake the whole section is
+/// about: trimming empties the in-use set, and what a long session runs out of
+/// is the packer's shelf geometry — so the retry re-asked an unchanged question
+/// and the spin is what the report's hung watchdog recorded.) A second turn
+/// covers the same thing happening across a content change, so that a document
+/// arriving in the same breath as a theme switch is not judged on the frame it
+/// landed in. A third would be asking an identical question for the third time
+/// and calling the answer new — and it would be identical, because the renderer
+/// re-packs once per episode and a refusal that survives a fresh packing is a
+/// frame larger than the device's largest texture, which no number of turns
+/// reaches.
 const TEXTLESS_RETRY_BUDGET: u32 = 2;
 
 /// [`WindowRuntime::may_ask_again`]'s whole decision, over the run counter
