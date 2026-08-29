@@ -5338,3 +5338,37 @@ fixture 三份新的(`.mkv` 绿 / `.avi` 粉 / `.wmv` 紫)与旧的两份同一�
 **红门。** `bt-render`:`a_cards_text_reaches_the_glass_on_the_frame_its_layout_lands`(真设备、一帧、读回像素——卡面、蓝条、头名、正文四色分开数,断言名字和字与竖条**同一帧**在场,并断言 `PreviewTextFrame` 的 overlay 半边把它们数对了;变异=让带 `body` 的层丢掉文字,红出来的正是报告那张画)、`a_refused_lane_names_itself_and_leaves_the_frame_owed`(被拒的道自报家门、不牵连别的道、`present_outcome` 给的是讨重画那条臂)、`no_text_prepare_failure_is_swallowed`(源码门:帧里没有第二个出口,`text_upload_refused` 只有一个定义与一个调用者,出口自己做齐那三件事)。
 
 **挂账。** ⓐ 这张画在本机没有等比复现出来:14 条真引用逐条悬停(隔离 `APPDATA`,`BT_PROBE_INPUT` 印绝对路径引用,含 30 KB 与 64 KB 的中文长文),每张卡首帧文字全部在场,`refused=none` 一次没变过,`layer_drawn` 每次都等于 `layer_labels + layer_paragraphs`——与上面那句算术一致。所以本节落地的是**下一次它发生时能自己说出是哪一种**,而不是一个已经被观测证伪的猜测。要复现,`BT_PREVIEW_TRACE` 现在就够:出事那一帧的 `frame` 行会指名道姓。ⓑ release 版那一轮没跑完:桌面在实验中途不再把前台给探针窗(`ui-probe` 拒绝盲发指针,这是它该有的表现),那一轮的证据只有 debug 版的。
+
+### 7.45 ② 答案回来了,但没人叫这张卡重画:一份文档的读者不在一张表里,卡片不在任何 tab 的 `preview_panes` 中(2026-08-28 用户验收 next16「有些文件第一次悬停时卡片是空的,第二次悬停同一文件才显示内容」;`crates/bt-app/src/main.rs`)
+
+**报告。** 悬停终端里的文件引用,卡片出现:头上有文件名、有 `markdown` chip、脚上有那句「Enter / double-click opens the preview pane」,**正文一个字也没有**;鼠标移开再悬停同一个文件,正文立刻就在。只有**有些**文件这样。
+
+**§7.45 那三条判据当场把它分开了,而且分到的不是图集那条。** 出事那一帧的 `frame` 行是:
+
+```
+build Peek scale=2 body=[326,329,922,377] scroll=[0,0] bytes=0 owed=1
+built Peek paragraphs=0 quads=0 blocks=0
+frame … layers=4 layer_bodies=1 layer_labels=3 layer_paragraphs=0 layer_drawn=3 layer_prepared=1 refused=none
+```
+
+`refused=none`——不是图集拒收;`layer_drawn=3 == layer_labels=3`——整批没塌,三条 label 都画上去了;`layer_paragraphs=0`——**卡片手上根本没有文档**。而 `owed=1` 是这一行自己说的:一次头读正出在 worker 那里。然后**再也没有第二条 `build` 行**。第二次悬停的第一条 build 就是 `bytes=18822 owed=0`——文档一直都在池子里,只是从来没有哪一帧去拿它。所以这不是「文字没画上去」,是**答案回来了却没有任何一帧被要求**。
+
+**成因链,一句话:一份文档的读者不在一张表里。** `apply_preview_results` 的头读那一臂过去有**两个出口**,而两个出口给的答案不一样:
+
+- **卡片自己的槽**(`window.peek_buffer`,离池的那份)——`changed |= index == active_tab`,直接讨一帧。所以一个**从没预览过**的文件,首次悬停永远是对的(本机 14 条冷引用逐条首悬,每条都在 90–165ms 后补上第二条 `build … bytes=…`,全部有字)。
+- **池子那一臂**(`tab.preview_pool`)——`changed` 由 `tab.preview_panes` 里「谁在读这个 source」算出。**而卡片的视图不在这张表里**:一个指针一张卡,它的 `PreviewPane` 挂在 `WindowRuntime::peek_pane` 上(`PreviewSurface::Peek` 自己的理由)。于是走到这一臂的答案被正确地存进了池子,`showing` 是空的,`changed` 是 false,**没有 `refresh_chrome`、没有 `present_chrome_change`、没有重画**。卡片就那样空着,直到别的什么事顺手重建了一次 overlay。
+
+**「有些文件」= 池子里那些。** 池子里躺着一个没有正文的条目,是完全正常的两件事:①`session.json` 的 pool 只存名字不存正文(P151),所以**这个 tab 以前预览过的每一个文件**,重启后都是「在池子里、但没有字」;②看门的 watcher 把一份 buffer 标 stale,它也欠一次重读。用户机器上的 pool 是长年累月攒的,所以「有些文件」正是他预览过的那些,其余的都好好的。「第二次就有」= 第一次那个答案其实已经进了池子,第二次悬停同步就画得出来。
+
+**「冷缓存」是个假线索。** 冷热完全不改变行为:冷的是磁盘,而这条缺陷在答案**已经到家之后**。真正的分界是这份文档落在哪个槽里。本机等比复现的配方是:预览过几个文件 → 关掉 → 重开(会话恢复,pool 只剩名字)→ 悬停其中一个,首帧必空。
+
+**修法:一个门,按文件身份认人。**
+
+- `surfaces_reading(panes, card, source)` —— **一份文档的读者的那一次走查,卡片在里面**。两半都问同一个问题 `PreviewPane::is_reading`,所以卡片是按**它正站在哪个文件上**认的,不是按哪一行把它举起来的、不是按那行在列表里的序号、也不是按答案落进了哪个槽。
+- `Runtime::settle_landed_head` —— **一次头读落地后唯一的出口**。池子和卡片自己的槽都从这里出来,于是「谁在读这份文档、玻璃欠不欠一帧」只答一次。光标的 heal 也搬了进来,并且改走 `preview_pane_mut`——那是唯一知道「卡片的视图不在任何 tab 的表里」的门。
+
+**为什么不是「在池子那一臂上补一句 `|| 卡片在读它`」。** 那是把同一个判断写第三遍。这条缺陷本身就是同一个判断写了两遍、其中一遍忘了卡片造成的,而它**沉默地**错:这个 tab 从没预览过的文件一切正常,只有预览过的才空——所以补丁式的第三遍会在下一个读者(浮窗?第二张卡?)出现时原样再来一次。走查收成一个函数、出口收成一个方法,是这条缺陷唯一不会复发的形状。
+
+**红门。** `bt-app`:`a_cold_files_card_fills_on_the_frame_its_answer_lands`(池子里有这份文档、tab 的 pane 在别的文件上、卡片站在它上面 → 走查必须点名 `Peek`;变异=把卡片那一臂从 `surfaces_reading` 里删掉,红出来的正是报告那张画)、`a_late_answer_for_a_card_still_standing_is_not_dropped`(晚到的答案对还站着的卡片有效,对已经挪到别行的卡片无效,对已经落下的卡片无效——三句都由同一个问题回答)、`a_landed_head_read_leaves_by_one_door`(源码门:`apply_preview_results` 只以 `settle_landed_head` 收尾且自己不再走查读者,门自己问 `surfaces_reading` 并把卡片递进去)。
+
+**§7.45 挂账 ⓐ 销掉一半。** 那一节写「这张画在本机没有等比复现出来,14 条真引用首帧文字全部在场」——那次跑的全是**从没预览过**的文件,走的正是唯一没有缺陷的那条臂,所以它复现不出来是必然的而不是偶然的。这一节复现了、拍到了、修了;§7.45 留下的三条判据一条没白写,是它们把这张画从图集那条道上摘了出来。
