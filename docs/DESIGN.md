@@ -5330,6 +5330,31 @@ fixture 三份新的(`.mkv` 绿 / `.avi` 粉 / `.wmv` 紫)与旧的两份同一�
 **⑩ 红门。** `bt-app`:`a_video_is_one_seat_on_three_surfaces`(一门开三面 + 三张纹理 + `engines_outstanding` 回到起点)、`a_card_torn_off_carries_its_engine_with_it`(⑦ 那四条)、`the_bar_rises_on_hover_and_rests_by_the_registers_numbers`(两个等待是登记表的 + 状态机走完一整程)、`the_bar_sheds_its_controls_from_the_right_and_never_its_player`、`every_control_answers_where_it_is_drawn`、`the_still_and_the_first_played_frame_share_a_rect`(两个调用者拿的是同一个盒子,逐像素相等)、`a_gif_advances_by_its_own_frame_delays`、`an_animation_that_has_not_changed_frame_uploads_nothing`、`the_shell_page_is_gone`(源码门五件)、`every_name_in_the_class_plays_and_the_class_is_the_seven_that_were_opened`。`bt-platform`:`the_environment_is_created_with_no_browser_arguments_at_all`、`opening_a_video_never_blocks_the_window_thread`（⑫；八次 `open` 共 60 ms 以内，变异回阻塞式是 468.6 ms）。`bt-app` 补：`a_player_in_a_float_answers_the_hand_the_way_a_pane_does` 与 `a_player_on_a_glance_card_answers_the_hand_the_way_a_pane_does`、`a_card_withdraws_its_still_for_a_recording_the_way_it_does_for_an_animation`、`a_recording_on_an_overlay_host_is_drawn_into_a_layer_of_its_own`(①:两条排在 chrome 路由之上的按下路都得到得了播放器,且各自臂里播放器排在它底下那件东西前面)、`a_video_frame_alone_is_enough_to_present`（⑫：真值表 + 调用点真的从 `tick_owes_a_present` 走的源码门）。
 
 **⑪ 挂账。** ⓐ **共享纹理仍然没做**,理由和数字都在 §7.42 ③,本片没有推翻它:CPU 回读每帧 1.9–2.6 ms(160×120),按像素线性,而这条路在没有显卡驱动的机器上照样成立。ⓑ **APNG 没接**(⑤,没有 fixture)。ⓒ **`.mpg`/`.flv` 没测**(⑥,同上)。ⓓ **一张 hover 卡压在一扇正在放的 pane 上时,pane 的条会画在卡上面**——卡在 overlay 栈里比 `video_bars` 那条带高,而 pane 的条是那条带。实际上碰不到:pane 的条只在指针停在那扇 pane 上时才在,而卡在的时候指针在文件行上,条早歇了。写下来免得下一个人当成新缺陷。ⓔ **控件条上没有 tooltip**,与 §7.23 ⑪ 的壳页版一致——媒体控件的四枚记号是通用词汇,而 §7.33 那条门走的是头和轨的 run,不走这条覆盖在画面上的条。
+**⑬ 换了内容就不再是那段录像——而「这个表面在放什么」不能只问图片道(2026-08-28 用户在 `next16` 上实证;`crates/bt-app/src/main.rs`)。**
+
+用户逐字:pane 里播了一个视频,再换成别的文件(`.md`),md 渲染出来了,可**一大块紫色矩形盖在正文中段,底部控件条也还在**(`▶ 0:03 ── 0:03 🔊`)。
+
+**那块紫色不是未初始化的采样,是 `folio-video-test.wmv` 自己的颜色**(violet `0x7A2FE0`,`test-assets/PROVENANCE.md` 那张表的第五行)。这一条得先说清楚:一块没人要的纯色在图形里几乎总是「采样了一张没写过的纹理」的签名,顺着那条线索去改的是着色器,而着色器一个字都没错。真相是**座根本没被撤**——引擎还在解码,图层还在被交上去,画的是那段录像的最后一帧,条也是那条真条,数的是真的播放头(`0:03 / 0:03` 正是那份 fixture 的时长)。实机复现逐格拍下:播放中是同一块紫,换成 md 之后还是同一块紫,指针一停在上面条就升起来。
+
+**真因在 `sweep_video_seats` 问的那句话。** ③ 立的规矩是「座活着,当且仅当它被键的那个表面还在显示它被打开的那个文件」,而实现问的是 `preview_picture(surface)`——**图片道**。一份 markdown 不是图片,所以答案是 `None`;而 `None` 在这条闸门里的读法是「这个表面还没说话」,并因此**保座**。那个读法是为撕出浮窗写的:引擎先交过去、图片下一拍才到,一趟把缺席读成「不是这个文件」的清扫会把刚交出去的引擎关掉。**一个读数,两种局面,为第二种写的宽限吞掉了第一种。**
+
+**改法是把问题问全,不是在每扇门上补一句。** `SurfaceSubject` 三值——`Unfilled`(哪条道都没填)、`File(path)`(某条道填了这个文件)、`Elsewhere`(填了不是文件的东西:一张活页、一张提交图、一段 diff 区间)。`surface_subject_of` 按 `preview_chrome_on` 的同一个次序问页、图片、buffer 三条道,`is_still` 只对 `Unfilled` 与「同一个文件」答是。于是撕出的宽限缩到**恰好**它该管的那一格:什么都没填。一条以后新加的内容道必须在这里作答,否则它默认答 `Unfilled`——而那正是本条缺陷的形状,所以这个类型是按它命名的。
+
+**为什么不改在门上。** 「内容身份变化的唯一入口」听起来像一处,数下来是四处以上:图片门 `open_preview_image_on`、文档门 `land_preview_source_on`、页门 `open_web_page_on`、拒绝门 `land_page_refusal`,再加会话恢复。要每一扇都记得关掉一台解码器,正是 ③ 写下这条清扫时明说要避免的事(*without any of those doors having to remember a decoder exists*)。清扫本来就是那唯一的一处,它只是问错了道。
+
+**tab 小喇叭跟着灭,不用第二条线。** ② 已经把喇叭改成画 tab 那一刻当场读引擎(`playing && !muted && volume > 0 && has_audio`),座一撤,`window.video` 里就没有这个表面——没有可读的引擎就是没有声音。这不是又一处要改的地方,而是「不记忆、当场问」当初买下的东西。
+
+红门 `a_seat_that_changes_content_drops_its_video`:①四种换法(另一份文档、另一张图、另一段录像、一张提交图)加页道,都答「不再是它」;②什么都没填仍保座——撕出的那一格;③三个表面各开一台真引擎,按这条规矩撤掉之后 `engines_outstanding()` 回到起点;④源码门——清扫问 `preview_subject`,不再问 `preview_picture`。红证:删掉 `surface_subject_of` 的 buffer 臂(那正是本次提交之前清扫所看的全部),markdown 那一格答 `Unfilled`、座活着、计数不回。
+
+**⑭ 没有画面就不画,而一张刚造出来的纹理永远先写再采(`crates/bt-render/src/lib.rs`)。**
+
+⑬ 把紫色判给了 fixture,但「这扇窗有没有一条路会画出未初始化的采样」是此前**没人陈述过**的一句话,而一次通读只能对今天的调用者作答。所以把它钉住,两条:
+
+* **没有帧就不画。** `prepare_video_draws` 对一个 `frame: None` 的层只画它的底,而 pane 的底是 `None`(③:底下那一趟已经用体色画过那个盒子了),所以一扇正在加载的 pane 上视频道**一个 quad 都不推**。一份自称的尺寸对不上字节数的帧同样是零 quad——`hold_video_texture` 拒绝它,而拒绝的表现是不画,不是绑一张最近的纹理。
+* **刚造出来的纹理一定先写。** `hold_video_texture` 里那句「GPU 上已经是这一张了」的早退原本只比 generation,而 `VideoFrameUpload::generation` 的「从 1 开始」是一句**文档注释**——让一个采样器把正确性压在一句注释上,是把它放错了地方。加 `!resized &&`:一条刚被造出来的纹理没有内容,所以「已经是这一张」对它永远不成立。常路一个字节都没多花,而这条性质从「今天的两个生产者都守规矩」变成了构造出来的。
+
+红门 `a_layer_without_a_frame_draws_nothing`(像素门,走 `on_the_software_adapter` 那把 GPU 锁):无帧、坏帧两种情况下读回的整帧与「一个视频层都没有」的那一帧**逐字节相同**,且 `video_textures` 是空的;第三格递一份 `generation: 0` 的绿色帧,读回必须是绿的。红证:去掉 `!resized &&`,第三格读回的是驱动留在一张新纹理里的东西。
+
 ### 7.45 一张卡丢字的时候必须说出是哪条道丢的:五条文字道一个出口,卡片那条不再是暗的(2026-08-28 用户实证「卡出来了但一个字没画,滚一下才有」;`crates/bt-render/src/lib.rs`、`crates/bt-app/src/preview_trace.rs`)
 
 **报告。** 悬停一条 `.md` 引用,卡片出现:头上的文件名与类型 chip 都空,正文只画了引用块那根蓝色竖条,一个字也没有;向下滚一下,头名、chip、正文全回来,而且从此正常。

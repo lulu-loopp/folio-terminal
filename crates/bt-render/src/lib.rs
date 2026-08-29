@@ -4555,6 +4555,16 @@ impl GpuContext {
     /// mid-playback — an adaptive stream, a file whose second track is a
     /// different shape — and then the whole thing is rebuilt, which is correct
     /// and rare.
+    ///
+    /// **A texture that has just been made is always written**, whatever the
+    /// generation says (§7.44 ⑭). The skip below is an optimisation resting on
+    /// [`VideoFrameUpload::generation`]'s promise to start at one, and a promise
+    /// in a doc comment is the wrong thing for a *sampler* to rest on: a caller
+    /// numbering from zero would have this bind a texture nobody ever wrote and
+    /// the shader would sample whatever is in it. The rule is that this window
+    /// never draws an uninitialised sample, and the way to have that be true by
+    /// construction rather than by arithmetic elsewhere is to ask whether the
+    /// texture has ever been written rather than only which generation it holds.
     fn hold_video_texture(&mut self, key: &str, frame: &VideoFrameUpload) -> bool {
         let limit = self.max_texture_dimension_2d;
         let expected = frame.width_px as usize * frame.height_px as usize * 4;
@@ -4617,9 +4627,13 @@ impl GpuContext {
         let Some(held) = self.video_textures.get_mut(key) else {
             return false;
         };
-        if held.generation >= frame.generation {
+        if !resized && held.generation >= frame.generation {
             // The picture on the GPU is already this one. A window redraws for
             // a hundred reasons that are not a new frame.
+            //
+            // `!resized` is what keeps that sentence true: a texture created one
+            // statement ago holds no picture at all, so "already this one" is
+            // never right about it however the generations compare.
             return true;
         }
         self.queue.write_texture(
@@ -19865,6 +19879,134 @@ mod tests {
                 gpu.video_textures.len(),
                 0,
                 "a key that stopped appearing is a video that stopped playing"
+            );
+        }
+
+        /// RED — **a layer with no frame draws nothing, and a layer with one
+        /// never samples a texture nobody wrote** (user report 2026-08-28;
+        /// `docs/DESIGN.md` §7.44 ⑭).
+        ///
+        /// The reader's report of the defect this pair belongs to said the
+        /// leftover rectangle was *purple*, and a flat colour nothing asked for
+        /// is the signature of a sampled texture with nothing in it. It was not
+        /// that — the purple was the `.wmv` fixture's own violet, still being
+        /// decoded by a seat the sweep had failed to retire (§7.44 ⑬) — and the
+        /// finding is worth a gate either way, because "there is no path to an
+        /// uninitialised sample" is a claim about this file that nobody had
+        /// stated and that a reading can only make about today's callers.
+        ///
+        /// Three ways a layer can fail to have a picture, and the same answer to
+        /// all three:
+        ///
+        /// ① **No frame at all**, which is a pane that has been opened and has
+        /// decoded nothing yet. With the pane's own `ground: None` there is
+        /// nothing to draw and what stands is the pane, byte for byte.
+        ///
+        /// ② **A frame whose byte count does not match its dimensions**, which
+        /// is a caller bug. [`GpuContext::hold_video_texture`] refuses it, and
+        /// the refusal must be *nothing drawn* rather than a quad bound to
+        /// whatever texture is nearest.
+        ///
+        /// ③ **A frame numbered from zero.** [`VideoFrameUpload::generation`]
+        /// promises to start at one and both of this window's producers keep
+        /// that promise; the skip in `hold_video_texture` used to *rest* on it,
+        /// so a zero would have created a texture, skipped the write and bound
+        /// it. The picture that comes back here is the one the frame carried.
+        ///
+        /// RED GATE ③: drop the `!resized &&` from that skip and this comes back
+        /// as whatever the driver left in a fresh texture instead of green.
+        /// RED GATE ①②: bind `video_blank` for a layer with no picture instead
+        /// of drawing nothing, and the frame stops matching the empty one.
+        #[test]
+        fn a_layer_without_a_frame_draws_nothing() {
+            const WIDTH: u32 = 320;
+            const HEIGHT: u32 = 200;
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
+            let seat = SeatViewport::whole(WIDTH, HEIGHT);
+            let frame = single_cell_cursor_frame(window.metrics());
+            let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
+                window
+                    .present_frame(
+                        gpu,
+                        &[SeatFrame {
+                            seat,
+                            clip: seat,
+                            frame: &frame,
+                            focused: true,
+                        }],
+                        FrameTrigger {
+                            occurred_at: Instant::now(),
+                            source: FrameSource::Expose,
+                        },
+                    )
+                    .expect("one frame");
+                window.read_back(gpu)
+            };
+            // The pane on its own, with no recording anywhere near it.
+            window.set_video_layers(Vec::new());
+            let empty = present(&mut window, &mut gpu);
+
+            // A pane-shaped layer: no ground of its own, because the pane has
+            // already painted the box, and no frame yet.
+            let pane_layer = |frame: Option<VideoFrameUpload>| VideoLayer {
+                stage: VideoStage::Seat,
+                key: "a recording with nothing in it".to_owned(),
+                box_: seat,
+                clip: seat,
+                frame,
+                ground: None,
+                radius_px: 0.0,
+                opacity: 1.0,
+            };
+
+            // ① nothing decoded yet.
+            window.set_video_layers(vec![pane_layer(None)]);
+            let nothing = present(&mut window, &mut gpu);
+            assert_eq!(
+                nothing, empty,
+                "a layer with no frame put something on the glass"
+            );
+            assert!(
+                gpu.video_textures.is_empty(),
+                "a layer with no frame took a texture"
+            );
+
+            // ② a frame that does not describe itself.
+            window.set_video_layers(vec![pane_layer(Some(VideoFrameUpload {
+                bgra: Arc::from(vec![0_u8; 7].into_boxed_slice()),
+                width_px: 2,
+                height_px: 1,
+                generation: 1,
+            }))]);
+            let refused = present(&mut window, &mut gpu);
+            assert_eq!(
+                refused, empty,
+                "a frame whose bytes do not match its size was drawn anyway"
+            );
+            assert!(
+                gpu.video_textures.is_empty(),
+                "a refused frame took a texture"
+            );
+
+            // ③ a frame numbered from zero is still written before it is
+            // sampled. One green pixel, stretched over the whole box.
+            window.set_video_layers(vec![pane_layer(Some(VideoFrameUpload {
+                bgra: Arc::from(vec![0_u8, 255, 0, 255].into_boxed_slice()),
+                width_px: 1,
+                height_px: 1,
+                generation: 0,
+            }))]);
+            let written = present(&mut window, &mut gpu);
+            let [blue, green, red, _] = written[(HEIGHT / 2 * WIDTH + WIDTH / 2) as usize];
+            assert!(
+                green > 200 && blue < 60 && red < 60,
+                "the first frame of a video numbered from zero was never written \
+                 to the texture it was bound to: {:?}",
+                written[(HEIGHT / 2 * WIDTH + WIDTH / 2) as usize]
             );
         }
     }
