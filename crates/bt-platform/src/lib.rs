@@ -5699,8 +5699,8 @@ mod windows_impl {
     /// silent.
     #[must_use]
     pub fn documents_directory() -> Option<PathBuf> {
-        let raw = unsafe { SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DONT_VERIFY, None) }
-            .ok()?;
+        let raw =
+            unsafe { SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DONT_VERIFY, None) }.ok()?;
         if raw.is_null() {
             return None;
         }

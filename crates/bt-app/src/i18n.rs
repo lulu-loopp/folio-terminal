@@ -4388,7 +4388,9 @@ pub fn psreadline_row_blocked_in(lang: Lang, found: &str, policy: &str) -> Strin
             "{found} on this machine · Windows' execution policy is {policy}, which refuses to \
              load an unsigned module"
         ),
-        Lang::Chinese => format!("本机为 {found} · Windows 的执行策略是 {policy}，不会加载未签名的模块"),
+        Lang::Chinese => {
+            format!("本机为 {found} · Windows 的执行策略是 {policy}，不会加载未签名的模块")
+        }
     }
 }
 

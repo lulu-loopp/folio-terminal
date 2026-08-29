@@ -2014,7 +2014,10 @@ mod tests {
                     line.contains(policy.name()),
                     "the row must name the policy that dims the switch: {line:?}"
                 );
-                assert!(line.contains("2.0.0"), "and what is on the machine: {line:?}");
+                assert!(
+                    line.contains("2.0.0"),
+                    "and what is on the machine: {line:?}"
+                );
             }
 
             let documents = temp_dir("policy");
