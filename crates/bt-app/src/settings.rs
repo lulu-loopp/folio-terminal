@@ -18859,19 +18859,6 @@ mod tests {
         );
     }
 
-    /// PIN (user ruling 2026-08-18) — **the PSReadLine row reads `Update` when an
-    /// older Folio build's module is the one on disk, and its two items are
-    /// still `On` and `Off`.**
-    ///
-    /// The value and the items answer two different questions — what this row is
-    /// *at*, and what a reader may do to it — and only the first of them has a
-    /// third answer. A third item would have been a second way to say what `On`
-    /// already says, on the one row in the dialog whose `Off` deletes a directory
-    /// outside this product's own data folder.
-    ///
-    /// Red gate: drop the `value_text` arm and the button falls back to `On`,
-    /// which is the row saying nothing about the newer module it is holding.
-    #[test]
     /// RED GATE (§7.47) — **a press on a greyed item is named, not swallowed.**
     ///
     /// The 2026-08-29 report, in one assertion: on a machine whose execution
@@ -18900,7 +18887,8 @@ mod tests {
             psreadline_remove_available: false,
             ..values()
         };
-        for index in 0..SettingsRow::PsReadLine.option_count() {
+        assert_eq!(SettingsRow::PsReadLine.option_count(), FORMULA_OPTIONS.len());
+        for (index, wanted) in FORMULA_OPTIONS.into_iter().enumerate() {
             assert!(
                 !SettingsRow::PsReadLine.option_enabled(index, &blocked),
                 "item {index} must be dark on this machine"
@@ -18914,7 +18902,7 @@ mod tests {
             );
             assert_eq!(
                 psreadline_requested(target),
-                Some(FORMULA_OPTIONS[index]),
+                Some(wanted),
                 "and reach the one door, which is what answers with a reason"
             );
         }
@@ -18930,6 +18918,18 @@ mod tests {
         );
     }
 
+    /// PIN (user ruling 2026-08-18) — **the PSReadLine row reads `Update` when an
+    /// older Folio build's module is the one on disk, and its two items are
+    /// still `On` and `Off`.**
+    ///
+    /// The value and the items answer two different questions — what this row is
+    /// *at*, and what a reader may do to it — and only the first of them has a
+    /// third answer. A third item would have been a second way to say what `On`
+    /// already says, on the one row in the dialog whose `Off` deletes a directory
+    /// outside this product's own data folder.
+    ///
+    /// Red gate: drop the `value_text` arm and the button falls back to `On`,
+    /// which is the row saying nothing about the newer module it is holding.
     #[test]
     fn the_psreadline_row_says_update_over_an_older_folio_build() {
         use crate::psreadline::RowState;
