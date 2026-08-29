@@ -8431,9 +8431,6 @@ struct App {
     /// the tabs rather than inside the session file's mirror so the three doors
     /// read live state, not the last thing that happened to be flushed.
     recent: seed::SeedVault,
-    /// Persisted user choice, distinct from the resolved renderer theme. Under `BT_BG` the process
-    /// colors are locked but this mode is still kept across a diagnostic launch.
-    theme_mode: ThemeModeV1,
     /// **Every open window's picture of itself, in the order they opened**
     /// (multiwindow slice D).
     ///
@@ -23849,11 +23846,12 @@ fn landing_for_aim(
 /// *ruling*, and a ruling that needs a `Renderer` to state is a ruling no test
 /// ever reads back.
 ///
-/// * `offers` — [`seats::PaneOffers`], §7.1.6b′ ② as re-judged 2026-08-23. Two
-///   bits and not one since the user split ② in half: the card column now says
-///   yes to the hand-over and goes on saying no to the tear-out. It is asked
-///   per verb rather than once at the top because that is what the ruling now
-///   is — a statement about the two verbs and not about the source.
+/// * `offers` — [`seats::PaneOffers`], §7.1.6b′ ②, split in half on 2026-08-23
+///   and withdrawn outright on 2026-08-29. Every surface answers
+///   [`seats::PaneOffers::BOTH`] today; the two bits stay because the two verbs
+///   are still two questions about one pointer and this function still asks
+///   them one at a time. It is asked per verb rather than once at the top
+///   because a refusal of the *source* is exactly the shape the user threw out.
 /// * `over` — the tab whose own rectangle the pointer is standing on
 ///   ([`seats::TabRun::slot_at`]), and `None` for the run's padding.
 /// * `holding` — the tab the pane in the hand lives in.
@@ -23913,10 +23911,13 @@ fn pane_strip_landing(
     // is the silent refusal M147 forbids. Away from home the landing *does*
     // something you can watch — the stage comes back — so lighting the entry is
     // the truth. The tear-out that pointer has always been offered goes on being
-    // offered, and **a card column's own card therefore still answers nothing at
-    // all** while it is the card on the stage: both halves of the re-judged ②
-    // meeting, the hand-over refused because it would do nothing and the
-    // tear-out refused because the column does not make tabs.
+    // offered, and **since 2026-08-29 a card column's own card offers it too**:
+    // the column answers `BOTH` now, so a pane rested on the card it lives in
+    // while that card is the one on the stage gets the strip's own answer, which
+    // is the tear-out at that slot. The silence that used to stand here was ②'s
+    // and it went with ② — keeping it would have meant a branch that reads
+    // "unless this is a card column", which is the second set of rules ①
+    // forbids.
     if let Some(tab) = over
         && (tab != holding || showing != holding)
     {
@@ -30044,7 +30045,7 @@ impl Runtime<'_> {
         // be the window's opening bounds rather than a correction applied after
         // the user has already seen it somewhere else.
         let session_store = persist::SessionStore::open();
-        let settings_store = persist::SettingsStore::open();
+        let mut settings_store = persist::SettingsStore::open();
         // Before the first pane can start a probe of its own. A no-op unless
         // `BT_PSREADLINE_PROBE` is set — see `psreadline::probe_override_from_env`
         // for why the door exists and what it deliberately does not override.
@@ -30152,7 +30153,19 @@ impl Runtime<'_> {
                 )
             });
         }
-        let theme_mode = render_theme_mode(session_store.loaded().theme);
+        let theme_mode = startup_theme_mode(settings_store.loaded(), session_store.loaded());
+        // **The carry-forward's own write, and the only one it ever makes.**
+        // Paid here rather than left to the next theme change, because a profile
+        // that never touches the row again would otherwise carry its choice in a
+        // key nothing writes any more and lose it the first time the session file
+        // is rewritten.
+        if session_store.loaded().theme.is_some()
+            && settings_store.loaded().theme_mode != theme_mode
+        {
+            let mut carried = settings_store.loaded().clone();
+            carried.theme_mode = theme_mode;
+            settings_store.store(carried);
+        }
         set_cursor_style(render_cursor_style(session_store.loaded().cursor_style));
         // **Every window the file describes, sorted into the one that opens now,
         // the ones that follow it, and the ones the prompt is about**
@@ -30197,6 +30210,28 @@ impl Runtime<'_> {
         // profile's namespace. Everything it could not honour comes back in the
         // plan's own list and is said on a card once the window is up.
         let mut cli_plan = cli::resolve(cli, default_profile, cli::machine_path_kind);
+        // **The canvas, settled before there is a window to paint one in**
+        // (§7.46 ②). Everything below this point — the first frame, the first
+        // pane, and the `OSC 11` that pane answers — happens on the canvas
+        // decided here, and there is no earlier one for anything to be painted
+        // in by mistake.
+        //
+        // **Before `set_theme`**, which is the whole of why it is here: the
+        // theme's own atomic caches the background it resolves to, and that
+        // background is now a colour of the scheme rather than a constant. A
+        // pair adopted afterwards would leave the first frame painted on the
+        // canvas of whichever scheme the process was born with.
+        adopt_stored_schemes(settings_store.loaded());
+        // Beside the schemes and for their reason: the floor is read on every cell of the
+        // first frame, so a file that asks for one must be obeyed before that frame is drawn
+        // rather than at the first press of the row.
+        install_minimum_contrast(settings_store.loaded().minimum_contrast);
+        let resolved_theme = resolve_theme_mode(theme_mode, system_os_theme());
+        if set_theme(resolved_theme) == ThemeChange::LockedByEnvironment {
+            eprintln!(
+                "BT_THEME persisted_mode={theme_mode:?} resolved_theme={resolved_theme:?} ignored_for_runtime=true reason=BT_BG"
+            );
+        }
         let restored = restore_window_placement(event_loop, &opening);
         let attributes = opening_window_attributes(
             profiles::title(default_profile),
@@ -30213,22 +30248,6 @@ impl Runtime<'_> {
                 .create_window(attributes)
                 .context("create native window")?,
         );
-        // **Before `set_theme`**, which is the whole of why it is here: the
-        // theme's own atomic caches the background it resolves to, and that
-        // background is now a colour of the scheme rather than a constant. A
-        // pair adopted afterwards would leave the first frame painted on the
-        // canvas of whichever scheme the process was born with.
-        adopt_stored_schemes(settings_store.loaded());
-        // Beside the schemes and for their reason: the floor is read on every cell of the
-        // first frame, so a file that asks for one must be obeyed before that frame is drawn
-        // rather than at the first press of the row.
-        install_minimum_contrast(settings_store.loaded().minimum_contrast);
-        let resolved_theme = resolve_theme_mode(theme_mode, window.theme());
-        if set_theme(resolved_theme) == ThemeChange::LockedByEnvironment {
-            eprintln!(
-                "BT_THEME persisted_mode={theme_mode:?} resolved_theme={resolved_theme:?} ignored_for_runtime=true reason=BT_BG"
-            );
-        }
         install_theme_class_background(&window)?;
         window.set_ime_allowed(true);
         let hwnd = window_hwnd(&window)?;
@@ -30586,7 +30605,6 @@ impl Runtime<'_> {
             pins_fault,
             pins_file_broken: false,
             recent,
-            theme_mode,
             // **The document is assembled from these, and the first window's
             // paragraph is the only one that exists yet** (multiwindow slice D).
             // It is seeded with what this window was *built from* rather than
@@ -32931,7 +32949,7 @@ impl Runtime<'_> {
         // just ran (§7.1.6b′ F2). A tab with no entry is a card the budget did
         // not project — off screen, or in a window where the mode is off — and
         // its slot is `None`.
-        let focus_thumbnails: Vec<Option<seats::FocusThumbnail<'_>>> = self
+        let mut focus_thumbnails: Vec<Option<seats::FocusThumbnail<'_>>> = self
             .window
             .tabs
             .iter()
@@ -32943,6 +32961,20 @@ impl Runtime<'_> {
                 })
             })
             .collect();
+        // **K124's stand-in is a guest in `tabs`, so it is a guest here too**
+        // (the card column's tear-out, user ruling 2026-08-29). This list and
+        // that one are walked by one index — `focus_card_mini_chrome` is handed
+        // `thumbnails[index]` — so a stand-in inserted into one and not the
+        // other would hand every card below the slot its neighbour's tree, and
+        // the stand-in itself a picture of a tab that is not the one it is
+        // standing in for.
+        //
+        // `None` and not a projection of the pane being torn out: what the
+        // stand-in draws is the *slot*, in the accent wash the landing wears,
+        // and the pane's own picture is the ghost under the pointer.
+        if let Some(slot) = strip_preview {
+            focus_thumbnails.insert(slot.min(focus_thumbnails.len()), None);
+        }
         let chrome = seats::build_chrome_for_tabs(
             &self.seats,
             &self.seat_layout,
@@ -36558,7 +36590,7 @@ impl Runtime<'_> {
     /// What every row in the settings dialog currently reads.
     fn settings_values(&self) -> settings::SettingsValues {
         settings::SettingsValues {
-            theme: self.app.theme_mode,
+            theme: self.app.settings_store.loaded().theme_mode,
             cursor: current_cursor_style(),
             tab_layout: self.window.rail.layout,
             sidebar: self.window.rail.mode,
@@ -39957,6 +39989,37 @@ impl Runtime<'_> {
             return Ok(());
         }
         let target = settings::hit(layout, &self.settings_values(), position.x, position.y);
+        // **A press outside the popper that is up takes it down and goes no
+        // further** (user report and ruling, 2026-08-29) — the window's own menu
+        // rule, asked here because this dialog is a modal with a dispatch of its
+        // own and nothing below `settings_mouse_input` will ever see this press.
+        //
+        // **Before everything**, which is what "no further" means: before the
+        // focus moves, before the scrim closes the dialog, before a `Nav` word
+        // turns the page. A press that lands on the `×` while `Language` is open
+        // shuts the list and leaves the dialog standing, exactly as the first
+        // `Esc` does — one layer per gesture, at both doors.
+        //
+        // **The judgement is `settings::popup_press`'s and the geometry is
+        // `settings::hit`'s**: the popup was hit-tested before the page one line
+        // above, so which target came back already says whether the pointer was
+        // inside it. Nothing here measures a rectangle, which is the whole reason
+        // this is one question rather than a second copy of the popup's frame.
+        if let settings::PopupPress::Dismiss(popup) =
+            settings::popup_press(self.window.settings.popup_up(), target)
+        {
+            self.window.settings.close_popup(popup);
+            if let Some(position) = self.window.pointer_position {
+                let hover = self.settings_layout().map(|layout| {
+                    settings::hit(&layout, &self.settings_values(), position.x, position.y)
+                });
+                self.window.settings.set_hover(hover);
+            }
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+            return Ok(());
+        }
         // The focus follows the finger, with the ring off — the pointer half of
         // `:focus-visible`. Stated before the verb below, because closing the
         // dialog drops the focus, and a press that set it afterwards would leave
@@ -40245,21 +40308,32 @@ impl Runtime<'_> {
     /// presents, DWM retains the previous complete back buffer; the renderer never submits a frame
     /// with only one side of this transaction applied.
     fn apply_theme_mode(&mut self, mode: ThemeModeV1) -> Result<bool> {
-        let mode_changed = self.app.theme_mode != mode;
-        self.app.theme_mode = mode;
-        let theme_changed =
-            self.apply_theme(resolve_theme_mode(mode, self.window.window.theme()))?;
-        if mode_changed {
-            self.mark_session_dirty(Instant::now());
-            if !theme_changed && self.refresh_overlay() {
-                self.present_chrome_change()?;
-            }
+        // **`settings.json` and nowhere else** (§7.46 ②). This used to mark the
+        // *session* dirty, which is how the field the Settings page draws came to
+        // be one nothing wrote and nothing read.
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.theme_mode = mode;
+        let mode_changed = self.app.settings_store.store(settings);
+        let theme_changed = self.apply_theme(resolve_theme_mode(mode, system_os_theme()))?;
+        if mode_changed && !theme_changed && self.refresh_overlay() {
+            self.present_chrome_change()?;
         }
         Ok(mode_changed || theme_changed)
     }
 
-    fn os_theme_changed(&mut self, os_theme: OsTheme) -> Result<bool> {
-        let Some(theme) = resolved_theme_change(self.app.theme_mode, os_theme) else {
+    /// Windows changed its mind about light and dark.
+    ///
+    /// The event is the **trigger**; the answer comes from [`system_os_theme`],
+    /// the same reader the boot used. winit hands a theme along with the
+    /// notification and it is deliberately not taken: two readers of one machine
+    /// setting are two chances to disagree about it, and the one this process
+    /// already trusts is the one that decided the canvas its window opened in.
+    fn os_theme_changed(&mut self) -> Result<bool> {
+        let Some(os_theme) = system_os_theme() else {
+            return Ok(false);
+        };
+        let mode = self.app.settings_store.loaded().theme_mode;
+        let Some(theme) = resolved_theme_change(mode, os_theme) else {
             return Ok(false);
         };
         self.apply_theme(theme)
@@ -55302,6 +55376,14 @@ impl Runtime<'_> {
                 .files
                 .get(&seat)
                 .is_some_and(|state| state.git_remotes_open);
+            // **The column this page's one sentence is wrapped to**, read before
+            // the measurer is built because that closure takes the renderer with
+            // it. A seat with no rectangle this frame gets a zero column, which
+            // is the honest reading — there is nothing to wrap into, and the page
+            // is not being drawn either.
+            let column = seats::files_pane_rect(&self.seat_layout, seat)
+                .map(|rect| seats::files_pane_geometry(rect, scale, true).body)
+                .map_or(0.0, |body| git_panel::empty_width(body, scale));
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32, face: git_panel::MeasureFace| {
                 renderer.measure_chrome_label(
@@ -55320,6 +55402,7 @@ impl Runtime<'_> {
                     remotes_open,
                 },
                 scale,
+                column,
                 &mut measure,
             );
             content.scroll_px = self.window.tabs[active]
@@ -66155,6 +66238,7 @@ impl Runtime<'_> {
                     remotes_open,
                 },
                 scale,
+                git_panel::empty_width(body, scale),
                 &mut measure,
             )
         };
@@ -72867,11 +72951,14 @@ impl Runtime<'_> {
     fn tab_run(&self, now: Instant) -> Option<seats::TabRun> {
         // **In focus mode the panel holds a card column, and the column is a
         // tab run like the other two** (§7.1.6b′ ④, 2026-08-20). It offers a card
-        // every slot the list has, and what it refuses — a pane torn into a new
-        // tab (②), a file (③) — it refuses through the run rather than beside
-        // it, so this branch stays a choice of surface and never becomes a
-        // second set of drag rules. `None` here would be the one wrong answer:
-        // it would hand every drop over the column to the pane behind it.
+        // every slot the list has, and since the user's ruling of 2026-08-29 it
+        // offers a pane both of the things the other two runs offer one — the
+        // hand-over onto a card, and the tear-out into the blank. The one drag
+        // it still turns away is a file row (③), and it turns that away through
+        // the run rather than beside it, so this branch stays a choice of
+        // surface and never becomes a second set of drag rules. `None` here
+        // would be the one wrong answer: it would hand every drop over the
+        // column to the pane behind it.
         if self.window.focus_mode {
             return self
                 .focus_rail_geometry_now(now)
@@ -73240,10 +73327,12 @@ impl Runtime<'_> {
             // its own field rather than "has no slots", because since 2026-08-20
             // the column has slots.
             //
-            // Since the user's 2026-08-23 ruling that field says the two offers
-            // separately: the column takes the hand-over and still refuses the
-            // tear-out. This arm did not have to learn that, which is the point
-            // of it living on the run.
+            // The user's 2026-08-23 ruling split that field into two offers and
+            // the ruling of 2026-08-29 granted the column both of them, so every
+            // surface in this build now answers `BOTH`. This arm did not have to
+            // learn either ruling, which is the point of it living on the run —
+            // a card column's blank makes a tab by walking the very same
+            // `insert_index_at` and `strip_insert_slot` below.
             //
             // **Two offers, and which one this pointer is asking for is
             // [`pane_strip_landing`]'s** (§7.1.6k). The run answers both questions
@@ -73411,8 +73500,12 @@ impl Runtime<'_> {
     /// [`Runtime::survey_strip`]'s counterpart for a pointer this window will
     /// never hear about, and it is deliberately the *same* table: the run's own
     /// [`seats::PaneOffers`], the run's own `slot_at`, and
-    /// [`pane_strip_landing`]. A card column that refuses a tear-out refuses it
-    /// to a visitor too, and it does not have to learn that this slice happened.
+    /// [`pane_strip_landing`]. Whatever a card column offers its own window's
+    /// panes it offers a visitor's, and it does not have to learn that this
+    /// slice happened — which is why the ruling of 2026-08-29 reached the other
+    /// window's column for free: [`Runtime::tab_run`] hands this function the
+    /// focus column in a window that is in focus mode, exactly as it hands
+    /// [`Runtime::survey_strip`] one.
     ///
     /// **The tab list is the whole door, and the body offers nothing.** That is
     /// F2's own shape — 「拖到另一扇 Folio 窗的 tab 条 = 移入」 — and the
@@ -82764,7 +82857,11 @@ impl App {
     fn session_document(&self) -> SessionV1 {
         SessionV1 {
             schema_version: SESSION_SCHEMA_VERSION,
-            theme: session_theme_mode(self.theme_mode),
+            // **Retired, and written as absent** (§7.46 ②). The theme's store is
+            // `settings.json`; a key still written here would be a second answer
+            // for the next boot to find, and the carry-forward reads the key's
+            // *presence* as "written before the ruling".
+            theme: None,
             cursor_style: session_cursor_style(current_cursor_style()),
             windows: session_windows(
                 self.window_pictures.iter().map(|(_, window)| window),
@@ -87666,7 +87763,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // next time a page is opened in it.
             WindowEvent::Moved(_) => runtime.window_moved(),
             WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
-            WindowEvent::ThemeChanged(theme) => runtime.os_theme_changed(theme).map(|_| ()),
+            // The payload is deliberately dropped: `os_theme_changed` asks the
+            // one reader this process trusts rather than taking a second
+            // opinion off the event (§7.46 ②).
+            WindowEvent::ThemeChanged(_) => runtime.os_theme_changed().map(|_| ()),
             WindowEvent::RedrawRequested => runtime.redraw(),
             WindowEvent::Focused(false) => {
                 // Losing the window is a blur, and blur commits (J102). The
@@ -90650,12 +90750,51 @@ fn render_theme_mode(theme: SessionThemeV1) -> ThemeModeV1 {
     }
 }
 
-fn session_theme_mode(mode: ThemeModeV1) -> SessionThemeV1 {
-    match mode {
-        ThemeModeV1::System => SessionThemeV1::System,
-        ThemeModeV1::Light => SessionThemeV1::Light,
-        ThemeModeV1::Dark => SessionThemeV1::Dark,
+/// **The theme mode this process opens in, from the one file that owns it**
+/// (coordinator ruling 2026-08-29; `docs/DESIGN.md` §7.46 ②).
+///
+/// `settings.json`'s `theme_mode` is the store. It is the field the Settings
+/// page draws, the field a user editing the file by hand would expect to be
+/// obeyed, and — until this ruling — the only one of the two that nothing read.
+/// The other, `session.json`'s `theme`, was written by the theme row and read by
+/// every boot, which made the visible field a decoration and the invisible one
+/// the law. Two files holding one fact disagree the moment either is touched
+/// alone, and they disagreed **by construction**: `SettingsV1`'s default is
+/// `System` and the session's was `Dark`, so a brand-new profile on a machine
+/// whose Windows says light opened dark.
+///
+/// [`SessionV1::theme`] is read here and nowhere else, for exactly one reason:
+/// every profile written before the ruling holds the user's real choice there
+/// and an untouched `System` in settings. Believing settings alone would reset
+/// all of them. So a session document that still carries the key is believed
+/// once — it is what that user has been looking at — and the boot that believes
+/// it writes the mode into settings and stops writing the key, which is what
+/// makes this a carry-forward rather than a second store.
+fn startup_theme_mode(settings: &bt_persist::SettingsV1, session: &SessionV1) -> ThemeModeV1 {
+    match session.theme {
+        Some(carried) => render_theme_mode(carried),
+        None => settings.theme_mode,
     }
+}
+
+/// **Which canvas Windows is asking applications for, asked of Windows.**
+///
+/// Not `Window::theme()`, and the difference is the whole of the boot-order half
+/// of §7.46 ②: a window cannot be asked before it exists, so a resolution that
+/// went through one could only ever happen *after* `CreateWindowEx` — leaving
+/// everything between the two on whichever canvas the process was born with.
+/// `Window::theme()` also answers `None` on a machine that will not say, and
+/// [`resolve_theme_mode`] reads `None` as dark: a silent wrong answer at the
+/// exact moment the first pane is about to be asked what colour it stands on.
+///
+/// One reader, used by the boot and by every later resolution alike, so the two
+/// cannot come to different conclusions about the same machine.
+fn system_os_theme() -> Option<OsTheme> {
+    bt_platform::system_uses_light_apps().map(
+        |light| {
+            if light { OsTheme::Light } else { OsTheme::Dark }
+        },
+    )
 }
 
 fn resolve_theme_mode(mode: ThemeModeV1, os_theme: Option<OsTheme>) -> Theme {
@@ -94998,7 +95137,7 @@ mod tests {
     /// [`cwd_whole`] and the whole-path assertions fail; drop the sanitiser's
     /// fall-through and the control-character case names the pane after a
     /// program that said nothing; **drop the profile-title filter — treat the
-    ///档案名 as a real announcement — and the first assertion prints
+    /// profile's own name as a real announcement — and the first assertion prints
     /// `PowerShell · D:\…` on every head in the window, which is the bug.**
     #[test]
     fn a_pane_head_says_where_it_is_and_a_program_speaks_only_in_front_of_it() {
@@ -97883,6 +98022,192 @@ mod tests {
         let overridden = terminal_palette(FOLIO_LIGHT, [0xf0, 0xe8, 0xd8], [0x37, 0x35, 0x2f]);
         assert_eq!(overridden.canvas, TerminalCanvas::Light);
         assert_eq!(overridden.background, [0xf0, 0xe8, 0xd8]);
+    }
+
+    /// RED GATE (coordinator ruling 2026-08-29, DESIGN §7.46 ②) — **the theme
+    /// has one store, and it is `settings.json`.**
+    ///
+    /// Until this gate there were two: `settings.json`'s `theme_mode`, which the
+    /// Settings page draws and nobody read, and `session.json`'s `theme`, which
+    /// nobody could see and which every boot actually obeyed. They disagreed by
+    /// construction — `SettingsV1::default()` is `System` and `SessionV1`'s
+    /// default was **Dark** — so a machine whose Windows says light opened a dark
+    /// window from a brand-new profile, and the first pane in it answered
+    /// `OSC 11` with the dark canvas. That is the shape §7.46 could not rule out
+    /// as the cause of the report it was written for: a Codex started on that
+    /// first dark canvas asks once, is told dark, and keeps it.
+    ///
+    /// The three cases the ruling names, and the fourth that keeps the fix from
+    /// costing every existing user their choice.
+    #[test]
+    fn the_theme_a_window_opens_in_is_the_one_the_settings_file_names() {
+        use bt_persist::SettingsV1;
+        use bt_render::{FOLIO_DARK, FOLIO_LIGHT};
+
+        /// What a pane is told when the window opened on `theme`.
+        ///
+        /// The chain this gate is really about — a boot mode, the canvas it
+        /// resolves to, and the background the first `OSC 11` carries — spelled
+        /// once so each case below reads as the one thing it varies.
+        fn told(mode: ThemeModeV1, os: Option<OsTheme>) -> [u8; 3] {
+            let scheme = match resolve_theme_mode(mode, os) {
+                Theme::Light => FOLIO_LIGHT,
+                Theme::Dark => FOLIO_DARK,
+            };
+            terminal_palette(scheme, scheme.background, scheme.foreground).background
+        }
+
+        // A brand-new profile carries no session theme at all. This is the fact
+        // the old default contradicted, and asserting it here is what makes the
+        // `None` arm below reachable on a real machine.
+        assert_eq!(SessionV1::default().theme, None);
+
+        // ① Fresh profile, Windows says light → the window opens light and the
+        //    first pane is told the light canvas.
+        let fresh = startup_theme_mode(&SettingsV1::default(), &SessionV1::default());
+        assert_eq!(fresh, ThemeModeV1::System);
+        assert_eq!(told(fresh, Some(OsTheme::Light)), FOLIO_LIGHT.background);
+
+        // ② `theme_mode = Dark` outranks a Windows that says light. A chosen
+        //    mode is a choice, not a preference to be overridden by the OS.
+        let chosen_dark = SettingsV1 {
+            theme_mode: ThemeModeV1::Dark,
+            ..SettingsV1::default()
+        };
+        let dark = startup_theme_mode(&chosen_dark, &SessionV1::default());
+        assert_eq!(dark, ThemeModeV1::Dark);
+        assert_eq!(told(dark, Some(OsTheme::Light)), FOLIO_DARK.background);
+
+        // ③ And a chosen Light outranks a Windows that says dark, which is the
+        //    case the user in the report is actually in.
+        let chosen_light = SettingsV1 {
+            theme_mode: ThemeModeV1::Light,
+            ..SettingsV1::default()
+        };
+        let light = startup_theme_mode(&chosen_light, &SessionV1::default());
+        assert_eq!(told(light, Some(OsTheme::Dark)), FOLIO_LIGHT.background);
+
+        // ④ **The carry-forward, and it fires exactly here.** Every profile
+        //    written before this ruling holds the user's real choice in
+        //    `session.json` and an untouched `System` in `settings.json`. Reading
+        //    settings alone would silently reset all of them, so a session
+        //    document that still carries the retired key is believed once — it is
+        //    what that user has been looking at — and the boot that believes it
+        //    writes it into settings and stops writing the key.
+        let carried = startup_theme_mode(
+            &SettingsV1::default(),
+            &SessionV1 {
+                theme: Some(SessionThemeV1::Light),
+                ..SessionV1::default()
+            },
+        );
+        assert_eq!(
+            carried,
+            ThemeModeV1::Light,
+            "an old profile's choice lives in session.json and must survive the move"
+        );
+        assert_eq!(told(carried, Some(OsTheme::Dark)), FOLIO_LIGHT.background);
+    }
+
+    /// RED GATE (same ruling) — **the theme row writes the settings file, and
+    /// the session file no longer carries a theme at all.**
+    ///
+    /// The store is the whole of the defect: `apply_theme_mode` used to mark the
+    /// *session* dirty, which is how `settings.json`'s `theme_mode` came to be a
+    /// field the Settings page drew and no code on either side of it ever wrote
+    /// or read. Two files holding one fact is the shape the ruling forbids, so
+    /// this is asserted structurally rather than remembered — a future edit that
+    /// sends the choice back to the session file has to delete this test to do
+    /// it.
+    ///
+    /// Mutation: put `mark_session_dirty` back in `apply_theme_mode`, or write a
+    /// `theme` key on `SessionV1` again.
+    #[test]
+    fn the_theme_row_writes_settings_and_the_session_file_names_no_theme() {
+        const SOURCE: &str = include_str!("main.rs");
+
+        let signature = "fn apply_theme_mode(&mut self, mode: ThemeModeV1) -> Result<bool> {";
+        let start = SOURCE
+            .find(signature)
+            .expect("`apply_theme_mode` is declared in this file");
+        let rest = &SOURCE[start + signature.len()..];
+        let body = &rest[..rest
+            .find(
+                "
+    fn ",
+            )
+            .unwrap_or(rest.len())];
+        assert!(
+            body.contains("settings_store.store("),
+            "the theme row's choice is written to `settings.json` and nowhere else:
+{body}"
+        );
+        assert!(
+            !body.contains("mark_session_dirty"),
+            "the session file is not the theme's store any more:
+{body}"
+        );
+
+        // And the file it used to be stored in says nothing about themes: a key
+        // that is still written is a second answer waiting to be believed.
+        let written = serde_json::to_value(SessionV1::default()).expect("a session serializes");
+        assert!(
+            written.get("theme").is_none(),
+            "a session written today carries no theme key: {written}"
+        );
+    }
+
+    /// RED GATE (same ruling) — **the canvas is decided before the window
+    /// exists, so there is no first frame in the other one.**
+    ///
+    /// The resolution used to read `window.theme()`, which cannot be asked until
+    /// there is a window; everything that happens between `create_window` and
+    /// `set_theme` therefore happens on whichever canvas the process was born
+    /// with. `Window::theme()` also answers `None` on a machine that will not
+    /// say, and `resolve_theme_mode` reads `None` as dark — a silent wrong answer
+    /// at exactly the moment the first pane is about to be asked what colour it
+    /// is standing on.
+    ///
+    /// Mutation: move `set_theme` back below `create_window`, or resolve from the
+    /// window again.
+    #[test]
+    fn the_canvas_is_in_force_before_the_window_is_made() {
+        const SOURCE: &str = include_str!("main.rs");
+
+        let signature = "    fn create(
+        event_loop: &ActiveEventLoop,";
+        let start = SOURCE
+            .find(signature)
+            .expect("`Runtime::create` is declared in this file");
+        let rest = &SOURCE[start + signature.len()..];
+        let body = &rest[..rest
+            .find(
+                "
+    fn ",
+            )
+            .unwrap_or(rest.len())];
+
+        let themed = body
+            .find("set_theme(resolved_theme)")
+            .expect("`Runtime::create` puts a canvas in force");
+        let made = body
+            .find("create_window(")
+            .expect("`Runtime::create` creates the window");
+        let schemes = body
+            .find("adopt_stored_schemes(")
+            .expect("`Runtime::create` adopts the stored scheme pair");
+        assert!(
+            schemes < themed,
+            "the pair is adopted before the theme picks one of it"
+        );
+        assert!(
+            themed < made,
+            "the canvas is settled before the window exists, or the first frame is              painted in the canvas the process was born with"
+        );
+        assert!(
+            !body[..made].contains("window.theme()"),
+            "the boot resolution cannot ask a window that does not exist yet"
+        );
     }
 
     /// **Whose size is it** (user ruling 2026-08-08), as the three rules that decide it.
@@ -104004,6 +104329,88 @@ mod tests {
         );
     }
 
+    /// RED GATE (user report and ruling, 2026-08-29) — **a press outside an
+    /// open dropdown closes it and goes no further.**
+    ///
+    /// The report: open `General ▸ Language`, click the dialog's own blank
+    /// background, and the list stays standing — while every other popup in this
+    /// window goes away on a press outside it. The ruling is one rule for all of
+    /// them, and the dialog is where it had to be asked separately: it is a modal
+    /// with a dispatch of its own, so a press inside it never reaches
+    /// `mouse_input`'s popup arms.
+    ///
+    /// **What is asserted is the position of the gate**, because that is what
+    /// "goes no further" is: the question stands between the hit test and every
+    /// verb, and it returns. Judged by `settings::popup_press`, whose own
+    /// answers are pinned beside it in `settings.rs`
+    /// (`a_press_outside_an_open_dropdown_closes_it_and_goes_no_further` there,
+    /// and `a_press_inside_the_dropdown_still_picks` for the reverse).
+    ///
+    /// Read off the source for `a_right_press_on_a_tab_raises_its_menu_and_leaves_the_active_tab_alone`'s
+    /// reason: raising this dialog needs a `Runtime`, and a `Runtime` needs a
+    /// GPU device, a swapchain and a live window.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① delete the gate — the first assertion, which is the report itself;
+    /// ② let it fall through instead of returning, so the press goes on to close
+    ///    the dialog or turn the page — the third;
+    /// ③ move it below `SettingsPanel::press` or below the verb match, where the
+    ///    focus has already moved and the scrim has already answered — the
+    ///    fourth and fifth;
+    /// ④ judge it against a rectangle of its own instead of the hit test's
+    ///    answer — the second, which pins that `hit` is asked first.
+    #[test]
+    fn a_press_outside_an_open_dropdown_closes_it_and_goes_no_further() {
+        const SOURCE: &str = include_str!("main.rs");
+        let start = SOURCE
+            .find("    fn settings_mouse_input(")
+            .expect("the settings dialog has a router of its own");
+        let rest = &SOURCE[start + "    fn settings_mouse_input(".len()..];
+        let router = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+
+        // ① the gate exists, and it asks the one door both popups leave by.
+        let gate = router
+            .find("settings::popup_press(self.window.settings.popup_up(), target)")
+            .expect(
+                "a press outside the dialog's open popup is judged by \
+                 `settings::popup_press`, not by a rule written here",
+            );
+        // ② off the hit test's own answer — the geometry is `settings::hit`'s
+        // and this router measures nothing.
+        let hit = router
+            .find("let target = settings::hit(layout,")
+            .expect("the router hit-tests the press once");
+        assert!(
+            hit < gate,
+            "the gate reads the hit test's answer, which is where the popup's \
+             own rectangle was already asked"
+        );
+        // ③ and it ends the press.
+        let press = router
+            .find("self.window.settings.press(target);")
+            .expect("the router moves the focus to what was pressed");
+        let arm = &router[gate..press];
+        assert!(
+            arm.contains("self.window.settings.close_popup(popup);"),
+            "the popup goes away: {arm}"
+        );
+        assert!(
+            arm.contains("return Ok(());"),
+            "and the press goes no further: {arm}"
+        );
+        // ④ before the focus moves.
+        assert!(gate < press, "the gate stands above `SettingsPanel::press`");
+        // ⑤ and before every verb, the scrim's close included.
+        let verbs = router
+            .find("settings::SettingsTarget::Scrim => self.window.settings.close()")
+            .expect("the scrim closes the dialog");
+        assert!(
+            gate < verbs,
+            "a press on the scrim while a list is open shuts the list, not the \
+             dialog — one layer per gesture, which is what the first Esc does"
+        );
+    }
+
     /// RED GATE (丙2) — **the tab menu holds an id, and resolves it at the
     /// moment a verb runs.**
     ///
@@ -109999,9 +110406,15 @@ mod tests {
     /// Red gate: answer `StripExtract` for a pointer over a foreign tab (which is
     /// what this file did until §7.1.6k) and the first row fails; let the pane's
     /// **own** tab answer `StripAdopt` *while it is the tab on screen* and the
-    /// second does; ask one `hosts` bit of both verbs — which is what this file
-    /// did until 2026-08-23 — and the card column's *first* row does; fall back
-    /// to the tear-out when the target will not fit and the last one does.
+    /// second does; fall back to the tear-out when the target will not fit and
+    /// the last one does.
+    ///
+    /// **Every surface hands these rows in as `BOTH` since 2026-08-29.** The
+    /// rows that used to be run a second time with the card column's own
+    /// `ADOPT_ONLY` are gone with that value: the user withdrew ② entire, so a
+    /// column's answers *are* the rows above rather than a second table beside
+    /// them, and the surface that answers them is pinned in `seats.rs` by
+    /// `the_card_column_takes_a_tab_reorder_and_a_panes_two_offers`.
     ///
     /// Every row here is a hand that is **still standing in the tab it picked
     /// the pane up from** (`showing == mine`). §7.1.6k″'s rows — the same
@@ -110012,7 +110425,6 @@ mod tests {
         let mine = TabId(1);
         let other = TabId(2);
         let both = seats::PaneOffers::BOTH;
-        let cards = seats::PaneOffers::ADOPT_ONLY;
         assert_eq!(
             pane_strip_landing(both, Some(other), mine, mine, true, Some(3)),
             Some(DropLanding::StripAdopt { tab: other }),
@@ -110029,25 +110441,6 @@ mod tests {
             Some(DropLanding::StripExtract { slot: 3 }),
             "and the run's padding is the gap between tabs, which is where a \
              new tab has always been made"
-        );
-        assert_eq!(
-            pane_strip_landing(cards, Some(other), mine, mine, true, Some(3)),
-            Some(DropLanding::StripAdopt { tab: other }),
-            "§7.1.6b′ ② as re-judged 2026-08-23: a card takes the pane, because \
-             focus mode hides the strip and ① forbids it having fewer verbs"
-        );
-        assert_eq!(
-            pane_strip_landing(cards, None, mine, mine, true, Some(3)),
-            None,
-            "and the blank between cards still makes no tab — the half of ② the \
-             user kept"
-        );
-        assert_eq!(
-            pane_strip_landing(cards, Some(mine), mine, mine, true, Some(3)),
-            None,
-            "so a pane over its own card is answered by nobody *while that card \
-             is the one on the stage*: the hand-over would do nothing and the \
-             column does not make tabs"
         );
         assert_eq!(
             pane_strip_landing(both, Some(other), mine, mine, false, Some(3)),
@@ -110095,7 +110488,6 @@ mod tests {
         let mine = TabId(1);
         let other = TabId(2);
         let both = seats::PaneOffers::BOTH;
-        let cards = seats::PaneOffers::ADOPT_ONLY;
 
         // The hand holds a pane of `mine`; the spring has left the stage on
         // `other`.
@@ -110157,47 +110549,45 @@ mod tests {
 
         // §7.1.6b′ ②'s silence was 「the hand-over would do nothing」, and that
         // premise is what the spring falsifies — so the card column gets the
-        // way home for the same reason and by the same line.
-        assert_eq!(
-            pane_strip_landing(cards, Some(mine), mine, other, true, Some(3)),
-            Some(DropLanding::StripAdopt { tab: mine }),
-            "focus mode hides the strip, so the card is the only way back \
-             there — and ① forbids the stage having fewer verbs than the \
-             ordinary one"
-        );
-        assert_eq!(
-            pane_strip_landing(cards, None, mine, other, true, Some(3)),
-            None,
-            "and the blank beside the cards still makes no tab, sprung or not \
-             — the half of ② the user kept is about the *blank*"
-        );
+        // way home for the same reason and by the same line. It needs no row of
+        // its own here any more: since 2026-08-29 the column hands this function
+        // the same `BOTH` the strip does, so the rows above *are* its rows.
     }
 
-    /// **§7.1.6b′ ② as re-judged 2026-08-23 — the card column's whole chain, end
-    /// to end, and the one nail the half that survives hangs on.**
+    /// **§7.1.6b′ ② as re-judged 2026-08-23 and withdrawn 2026-08-29 — the card
+    /// column's whole chain, end to end.**
     ///
-    /// The ruling: *"卡片接收 pane"* — rest a carried pane on a card for the
+    /// The first ruling: *"卡片接收 pane"* — rest a carried pane on a card for the
     /// chevron's own quarter second and the stage goes to that tab with the pane
     /// still in the air; let go on the card and the pane moves into that tab,
-    /// appended at the end of its tree, which is *"与 tab 条目同义"*. And the half
-    /// that stays: *"pane 在卡列空白处松手仍不撕新 tab"*.
+    /// appended at the end of its tree, which is *"与 tab 条目同义"*.
+    ///
+    /// The second took the other half. What stood here was *"pane 在卡列空白处
+    /// 松手仍不撕新 tab"*, and the user met it on the machine: a pane held over
+    /// the blank by the `+` row showed a ghost and did nothing when the hand
+    /// opened. The ruling is ① read literally — *"舞台就是真的那棵树,零新规、
+    /// 不禁任何动词"* — so the blank between two cards, and the tail below the
+    /// last one, make a tab at that slot exactly as the strip's gaps do, by the
+    /// same `Runtime::extract_pane_into_new_tab`.
     ///
     /// Every link is asserted against the machinery the strip already had rather
     /// than against a card-shaped copy of it, because that is the claim: the
     /// column answers `StripAdopt` like any run, the spring reads the survey's
     /// answer rather than the pointer's coordinates so it arms without being
-    /// told about cards, and the release verdict is the same `Adopt`.
+    /// told about cards, and both release verdicts are the strip's own.
     ///
     /// Red gate: give the column one bit for both verbs — which is what this file
     /// did until 2026-08-23 — and the first assertion answers `None`, the spring
-    /// never arms, and focus mode has no door to another tab at all; give it
-    /// `PaneOffers::BOTH` instead and the blank starts making tabs, which is the
-    /// half of ② the user kept.
+    /// never arms, and focus mode has no door to another tab at all; put it back
+    /// on `ADOPT_ONLY` and the blank stops making tabs, which is the user's
+    /// 2026-08-29 bug report word for word.
     #[test]
-    fn a_card_takes_a_pane_and_springs_while_the_blank_beside_it_still_makes_no_tab() {
+    fn a_card_takes_a_pane_and_springs_while_the_blank_beside_it_makes_a_new_tab() {
         let mine = TabId(1);
         let other = TabId(2);
-        let cards = seats::PaneOffers::ADOPT_ONLY;
+        // The very value `seats::focus_rail_run` puts on the column's run, which
+        // since 2026-08-29 is the value all three surfaces put on theirs.
+        let cards = seats::PaneOffers::BOTH;
 
         let on_a_card = pane_strip_landing(cards, Some(other), mine, mine, true, Some(3));
         assert_eq!(
@@ -110207,9 +110597,9 @@ mod tests {
         );
         assert_eq!(
             pane_strip_landing(cards, None, mine, mine, true, Some(3)),
-            None,
-            "and the blank between cards is not a room — ② keeps its tear-out \
-             refusal, so letting go there is J120's clean nothing"
+            Some(DropLanding::StripExtract { slot: 3 }),
+            "and the blank beside the cards is the gap between two tabs — the \
+             place a new one has always been made"
         );
 
         // The spring is told what the survey answered, never where the pointer
@@ -110243,8 +110633,17 @@ mod tests {
         );
         assert_eq!(
             release_verdict(pane_strip_landing(cards, None, mine, mine, true, Some(3))),
+            DragRelease::Extract { slot: 3 },
+            "while letting go in the blank tears the pane out into a card of \
+             its own at that slot — `Runtime::commit_pane_extract`, the strip's \
+             own door"
+        );
+        assert_eq!(
+            release_verdict(pane_strip_landing(cards, None, mine, mine, true, None)),
             DragRelease::Home,
-            "while letting go in the blank goes home"
+            "and the one pointer in the blank that still goes home is the one \
+             holding a pane that cannot become a tab at all (K124/G84) — a \
+             refusal of the *pane*, which every surface has always made"
         );
     }
 

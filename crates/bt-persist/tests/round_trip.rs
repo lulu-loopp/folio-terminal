@@ -71,7 +71,7 @@ fn messy_input_parses_clean_and_matches_canonical_struct() {
     // opaque byte comparison — each of these would fail on its own if the
     // corresponding piece of parsing regressed.
     assert_eq!(session.schema_version, SESSION_SCHEMA_VERSION);
-    assert_eq!(session.theme, SessionThemeV1::Dark);
+    assert_eq!(session.theme, Some(SessionThemeV1::Dark));
     assert_eq!(session.cursor_style, SessionCursorStyleV1::Bar);
     // **The one window the v8 document described, now reached through
     // `windows[0]`** (schema v9). Everything below this line is the same
@@ -186,7 +186,7 @@ fn a_preview_pane_keeps_its_pin_in_the_tree_and_its_file_in_the_content_section(
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(degradation, DegradationReport::default());
     assert_eq!(session.schema_version, SESSION_SCHEMA_VERSION);
-    assert_eq!(session.theme, SessionThemeV1::Light);
+    assert_eq!(session.theme, Some(SessionThemeV1::Light));
     assert_eq!(session.cursor_style, SessionCursorStyleV1::Block);
     let window = &session.windows[0];
     assert_eq!(window.tab_layout, SessionTabLayoutV1::Vertical);
@@ -323,7 +323,7 @@ fn a_v8_document_arrives_at_v9_as_one_window_holding_everything_it_used_to_hold(
     assert_eq!(window.placement.dpi, 144);
     // The three that stayed at the top level stayed there, which is the other
     // half of the ruling: they were never about a window.
-    assert_eq!(migrated.theme, SessionThemeV1::System);
+    assert_eq!(migrated.theme, Some(SessionThemeV1::System));
     assert_eq!(migrated.cursor_style, SessionCursorStyleV1::Underline);
     assert_eq!(migrated.recent.len(), 2);
 }
@@ -618,36 +618,50 @@ fn the_content_section_round_trips_through_the_public_session_api() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// **The retired theme key, across the file path the product really uses**
+/// (`docs/DESIGN.md` §7.46 ②).
+///
+/// This used to round-trip all three modes, back when `session.json` was where
+/// the theme lived. It is not any more: `settings.json`'s `theme_mode` is the one
+/// store, and the key here is read once — to carry a pre-ruling profile's choice
+/// across — and never written again.
+///
+/// The unit test beside the type pins those two halves against `serde_json`.
+/// This one pins them against the atomic writer and the reader the product calls,
+/// which is where a `skip_serializing_if` either takes effect or quietly does
+/// not.
 #[test]
-fn every_theme_mode_round_trips_through_the_public_session_api() {
-    for theme in [
-        SessionThemeV1::System,
-        SessionThemeV1::Light,
-        SessionThemeV1::Dark,
-    ] {
-        let dir = std::env::temp_dir().join(format!(
-            "bt-persist-theme-roundtrip-{}-{theme:?}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("session.json");
-        let session = SessionV1 {
-            theme,
-            ..SessionV1::default()
-        };
+fn a_session_written_today_names_no_theme_and_a_pre_ruling_one_still_does() {
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-theme-retirement-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("session.json");
 
-        write_session_atomic(&path, &session).unwrap();
-        let (loaded, report, degradation) = read_session(&path);
-        assert_eq!(report, ReadReport::Loaded);
-        assert!(degradation.is_clean());
-        assert_eq!(loaded, session);
+    write_session_atomic(&path, &SessionV1::default()).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !text.contains("\"theme\""),
+        "a session written today carries no theme key: {text}"
+    );
+    let (loaded, report, degradation) = read_session(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert!(degradation.is_clean());
+    assert_eq!(loaded.theme, None);
 
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
+    // And the other half: a document from before the ruling is still believed,
+    // because that key is the only record of what its owner has been looking at.
+    let (old, report, degradation) = read_session(&fixture_path("session_v3_light.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert!(degradation.is_clean());
+    assert_eq!(old.theme, Some(SessionThemeV1::Light));
+
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
-fn v3_dark_and_light_fixtures_migrate_and_round_trip_without_changing_mode() {
+fn v3_dark_and_light_fixtures_migrate_and_their_mode_is_still_readable() {
     for (fixture, expected_theme) in [
         ("session_v3_dark.json", SessionThemeV1::Dark),
         ("session_v3_light.json", SessionThemeV1::Light),
@@ -656,7 +670,11 @@ fn v3_dark_and_light_fixtures_migrate_and_round_trip_without_changing_mode() {
         assert_eq!(report, ReadReport::Loaded);
         assert!(degradation.is_clean());
         assert_eq!(migrated.schema_version, SESSION_SCHEMA_VERSION);
-        assert_eq!(migrated.theme, expected_theme);
+        assert_eq!(
+            migrated.theme,
+            Some(expected_theme),
+            "the mode a v3 document names is still readable, or its owner loses it"
+        );
 
         let dir = std::env::temp_dir().join(format!(
             "bt-persist-v3-theme-migration-{}-{expected_theme:?}",
@@ -668,6 +686,13 @@ fn v3_dark_and_light_fixtures_migrate_and_round_trip_without_changing_mode() {
         let (round_tripped, report, degradation) = read_session(&path);
         assert_eq!(report, ReadReport::Loaded);
         assert!(degradation.is_clean());
+        // A `Some` handed to the writer is still written and still read back —
+        // the field did not become lossy, it became **unwritten**, and that is a
+        // fact about `session_document` rather than about serialization. What
+        // makes the carry-forward one-shot is that the product only ever builds
+        // `None` (gated in `bt-app` by
+        // `the_theme_row_writes_settings_and_the_session_file_names_no_theme`),
+        // so the key is gone the first time a real run writes this file.
         assert_eq!(round_tripped, migrated);
         std::fs::remove_dir_all(&dir).unwrap();
     }

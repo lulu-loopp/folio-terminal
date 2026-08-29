@@ -1858,6 +1858,20 @@ else                           { Flash }    // 在这台屏上,但不在你眼�
 
 - **裁决五:预览头上的名字就是文件的名字,所以可以改**。双击它开一个就地的输入框,Enter 把磁盘上的文件改名。**它是 tab 条那个编辑器,不是第二个**:一个 `RenameSubject` 枚举把「正在改什么」提出来,于是键盘归属(`KeyboardOwner::Rename`)、IME 的光标源(`ImeCaretSource::Field`,走同一个 `rename_caret_line`)、闪烁、按键路由、「开着时吞下一切」都只写一遍并且两边都算数;主题只决定**打开时播下什么、提交时写下什么**——而那恰好就是一次改名的两头。两处不同都来自名字底下是什么:tab 的名字是一层**覆盖**,所以框里只放你写的那个、占位符把底下那个露出来;文件的名字底下没有名字,所以框里放整个名字、**且只选中主干不选后缀**(打字替掉 `notes` 而留下 `.md`,这才是改文件名几乎总是在做的事;`.gitignore` 是个名字而不是空主干加后缀,所以全选;**`Ctrl+A` 全选整串**,是留给不想只改主干的那些次的一步——用户裁决 2026-08-20 保留选主干、补上这个手势,而在那之前这句话许诺的手势并不存在,`rename_key` 把每一个 Ctrl 和弦一律吞掉。它**不进 `shortcuts::BINDINGS`**:那张表是本窗**从 shell 手里认领**的和弦登记册,而编辑器开着时没有 shell 在听,与 graph 的六枚裸键、文件列的方向键同一条归属;**光标随选区走到末尾**,因为「有选区时 caret 就是选区的末端」是这个编辑器的不变量而不是它开门那一刻的巧合)。框**按草稿的宽度**而不是填满标题栏,否则脏点与工具会被推到最右再在提交时拖回来。**拒绝是沉默的**:空名、没改、带了 Windows 不收的那九个字符、或者同名文件已存在——名字弹回去,一句话不说,因为读者正盯着答案。**只有一种拒绝会说话:文件系统自己不放手**(别的程序抓着句柄)——小样自己就写了这个例外的形式(「会说话的那一种拒绝,是读者看不见的那一种」),而其余四种都是关于**草稿**的事实、就在那个框里看得见。**碰名自己判**而不交给 Windows:`std::fs::rename` 在本平台是 `MOVEFILE_REPLACE_EXISTING`,交给它就是默不作声地吃掉同名的文件;判断写成**忽略大小写地与旧路径比**,因为 `notes.md → Notes.md` 是一次真实的改名,而在不区分大小写的文件系统上它的目标「已存在」只因为目标就是源。**虚拟文档不提供这一手**(git diff 背后没有文件),**不是拒绝而是不存在**——与一页之外内置配色不显标记是同一句话。改完之后,**三张以 `PreviewSource` 为键的表一起跟着走**(缓冲池、每一个在看它的窗格、以及记得你读到哪里的那张表),文件列被告知重读那个目录(§7.24 给它长出 watcher 之后这一句仍然留着:本窗自己做的改名,这扇窗比内核的说法早整整一个安静窗口就知道真相,而一行在下一帧跟上它的文件与在三百毫秒后跟上不是同一件事;watcher 随后那次重读读到的列表已经是对的,`DirCache::accept` 答「不是新闻」,不会有第二次重画)。**配色的 watcher 一个字都没改**:从这个头上改名一份配色文件,动的是 `SchemeWatch` 订阅的那个文件夹,于是 `rescan_verdict` 的 renamed 规则原样跑一遍——**本窗做的改名不得是个特例**,因为那条跟随规则的全部意义就是它不关心是谁动的文件。
 
+**7.1.6c-9 设置对话框的弹层与全屋一条规矩:按在外面就收,而且那一下按压被吃掉(用户验收 next17 报缺陷 + 当日裁决,2026-08-29,已落地;`crates/bt-app/src/{settings,main}.rs`)。** 由头是一句实机口供:打开 `General ▸ Language` 的下拉,**按对话框里的空白处不关**——只能再点一次那个框,或者选一项。窗里别处的弹层(pane 菜单、tab 菜单、右键菜单、files 列的根菜单)全都是按在外面就收,唯独这扇对话框里的下拉不是。
+
+**根因不是几何,是这条规矩在这扇对话框里住在错的地方。** 这个对话框自己有两枚弹层——行 picker(`SettingsPanel::menu`)与档案行的 `⋯`(`row_menu`)——而「点外面关」只有后者有,并且是写在 `SettingsPanel::press` 里的一小段自己的矩形规则。**这正是 E61 当年在窗里找到的那件事,换了一间小屋重演**:规矩住在开启者那一侧,于是长出来的第二枚弹层理所当然地没有它。
+
+**修法:两枚弹层走同一扇门,而判据复用弹层自己的几何。** 新增 `settings::DialogPopup`(`Choice(row)` / `RowMenu(index)`)、`SettingsPanel::popup_up`(内层在前,与 `close_one_layer` 拆层的顺序同一句)、`target_popup`(**穷尽 match `SettingsTarget`**:第十种目标不先回答「弹层能不能产出我」就编不过)与 `popup_press`。**判据不量矩形**:`settings::hit` 已经把弹层排在整页之前问过一次,弹层的每一个盒子——框、条目、变灰的条目、条目里的两枚小标记、末尾那个动词——都以弹层自己的目标作答,所以「命中测试给了哪个目标」**就是**那次矩形测试;在这里再抄一份框,就是那份会在 picker 长出滚动条那天开始失效的副本。
+
+**为什么问在对话框自己的分派里,而不是接进 `Popup`/`PopupOwner`。** 对话框是模态:`mouse_input` 早在 `settings_mouse_input` 那一行就把每一次按压交了出去,窗里九枚 `Popup` 一枚都不可能与它同时在场,而键盘归属那一侧 `menu_or_dialog` 里 `settings.is_open()` 一直就在。把它塞进那张九枚的表,买不到任何一位读者的答案,却要让 `close_every_popup`(切 tab)、`hover_float_is_up`、`rail_grew_a_popup` 全都开始对一个它们看不见的表面发言。**共享的是规矩不是名单**——这一节与 §7.1.6e″ 是同一句话的两层:一枚弹层是它长出来的那个表面的延伸,而这扇对话框就是那个表面。
+
+**那一下按压被吃掉。** 门站在**命中测试之后、每一个动词之前**,包括焦点的移动与 scrim 的关闭:`Language` 开着时按在 scrim 上收的是那张单子,对话框留着——**一次手势一层**,与第一次 Esc 逐字同一句(Esc 那条 `close_one_layer` 一天没改,本次只是把指针那扇门补齐)。**唯一的例外是开启者**,窗里的 pane 菜单为自己的 `⌄`、提交图为 `All branches` 早就各留了一份:按在 picker 按钮上不算「外面」,否则那枚按钮就成了关不掉的按钮。**而且是每一枚开启者而不只是当前这枚**,这就是**同一下按压直接换**:按第二个下拉,第一个当场收、第二个当场开——与窗里第二次右键把上下文菜单从一行挪到另一行完全同形,换的动作归开启者自己(`toggle_menu` / `toggle_row_menu` 各自把对方收掉,E61 的「开启者关掉其余」下沉一层)。`SettingsPanel::press` 里那段自己的 `⋯` 点外面关**删除**,因为按压根本到不了它。
+
+**滚轮不在这条规矩里,维持现状**:picker 开着时,指针在它的身体上滚的是那张单子,在别处滚的是页面——**滚不关菜单**。理由与 §7.1.6c-5 当初写下的那一句相同(「一个滚动器拥有自己框上的那些格」),而滚动不是选择:一次滚动没有回答这张单子在问的问题。
+
+**红门三条**:`settings.rs` 的 `a_press_outside_an_open_dropdown_closes_it_and_goes_no_further`(真布局、真 `hit`:空白处、`×`、rail 词、滑块一律 `Dismiss`,而每一枚开启者与 picker 自己的框一律 `Through`;`close_popup` 之后单子没了、对话框还在、键盘回到按钮上、指针不留环)、`a_press_inside_the_dropdown_still_picks`(反向对照:每一个条目、菜单身体、末尾动词、两枚标记都是弹层自己的)、`escape_closes_an_open_dropdown`;以及 `main.rs` 里读源码的那一条同名红门,钉的是**门的位置**——`hit` 在它之前、`press` 与 scrim 的动词在它之后、并且它 `return`。**红证**:把 `main.rs` 的门整段删掉,那一条当场红。
+
 **7.1.6d 瞬时通知 toast(用户裁决 2026-08-16,已落地;`crates/bt-app/src/toast.rs`)。** 立项由头是一次实测:Git 页拒绝一次 checkout,`fatal: 't1-tab-basics' is already used by worktree at …` 被切成四个词塞进列顶一条红横幅里。**两个毛病,只有一个是审美的**——审美的那个:240px 宽的列里,一句话说不完;结构的那个:**横幅是给一件已经发生完的事付永久像素**,它把下面所有行往下推,并且一直留到下一次尝试才被清掉,页面因此记仇。**通知是这两条的反面**:它**盖在**表面上而不是嵌进去(什么都不移动)、宽度随表面而不是随一行、并且自己会走。**它出现在注意力已经在的地方**(同日的第二次裁决,推翻了初稿的「窗口右下角」):卡片锚在**发起这次动作的那个表面的顶部**——`FilesColumn(seat)` 是发出该动词的那一列(哪怕它此刻翻回了 Files 页,通知仍在它头上;只有列**关掉**才算没了),`PreviewSeat(seat)` 是图上双击 checkout 的那个席位,`Window` 只作**兜底**(表面这一帧找不到 → 窗口右下角内缩 16),而锚是**每帧重解**的,所以列回来通知就回到列上。**几何**:内缩 8、宽 = 表面宽 − 16(下限 200,永不宽过表面),同一锚**向下**堆叠、间距 8、最新在下,**每锚上限 3**(第四张让该锚最老的一张立刻开始离场,不排队——排队会让通知讲一件你已经不在做的事)。**时序**:入场 120ms 淡入 + 8px 位移(锚在顶就往下落、兜底在底就往上升,位移只在入场——出场不往回缩,因为它不是要去哪儿,它是结束了)、失败驻留 6s / 确认与提示 4s、出场 90ms 淡出;**指针停在卡片上时钟停走**(读一遍不等于读完了),离开续走。**三色三记号**走既有状态墨:`Error`=`status_err`(见下条,现在是玫红)、`Info`=`accent`、`Ok`=`status_ok`,记号是该墨 15% 的圆底上一枚字形(与 Git 徽记同一配方),右上角 `×` 走 `.pv-tool` 那道三级显影梯(静止不在、卡片被指 0.7、按钮被指 1.0 带药丸)。**材质**没有新令牌:菜单的面、发丝线与阴影,与 tooltip、浮窗同一道 `push_float_window`。**z 序**在菜单之上、tooltip 之下——之上是因为卡片就挂在 pane body 顶部而 pane 菜单正好落在那里,之下是因为它自己的 `×` 也有 tooltip;**指针路由**则排在模态族之后(模态就是模态,画在它上面的两个表面都不可能与它同时存在),但**排在座位自身的命中之前**——卡片盖着一列带动词的文件行,漏过去的一次按下会去暂存你正伸手够的那张卡底下的文件。**红只归红**:持久读故障(没有 git、仓库打不开、问题超时)**不发通知**,它们六秒后不会变,通知讲完就走反而把唯一的报告拿走了——它们照旧是页面自己那句静音的话,站在本该是行的地方(`GitPanelContent::empty` / `GraphContent::empty`,`GitRow::Notice`),用的是次级墨不是红。
 
 **错误红改玫红(同日裁决)。** `--err` 从 GitHub 的危险红 `#c50f1f` 改为现代极简界面通用的粉红系:亮色 `#e11d48`(rose-600,白底 4.7:1)、暗色 `#fb7185`(rose-400,`#1B1B1B` 上 6.4:1)。**它因此成为继 `--ok` 之后第二个按主题分身的状态色**,而这不是让步是勘误——旧的那一枚在暗色画布上只有 2.8:1,当初「四色一表」的说法本来就对暗色不成立。小样 `:root` 与 `body.dark` 同步改写,`--err-deep` 随之(`#be123c` / `#f43f5e`),`.pv-diff .ddel` 那层 10% 底色按新墨重算。
@@ -2141,6 +2155,16 @@ else                           { Flash }    // 在这台屏上,但不在你眼�
 **②「不拆 tab」于 2026-08-23 被用户改判了一半:卡片接收 pane,卡列空白仍不撕 tab(用户裁决,同日落地;`crates/bt-app/src/{seats,main}.rs`)。** 原文那半句是「**pane 拖到卡列不得撕成新 tab**」,承载它的 `TabRun::hosts_pane_drop` 是**一枚位管两个动词**——撕成新 tab(K124)、交给清单里的某个 tab(§7.1.6k)——理由写在 §7.1.6k 里:「② 拒的是**源**,所以两个 offer 由同一枚位一并拒绝」。**那枚位在聚焦模式里造成的后果与 ① 直接冲突**:聚焦模式把 tab 条藏了,于是聚焦态下一枚 pane 想去别的 tab **一扇门都没有**,而 ① 是这个模式的地基——「舞台就是真的那棵树 … 与聚焦外**逐字相同**」,零新规、不禁任何动词。一条为了「别在卡列上造 tab」而写下的规矩,顺手把「去别的 tab」整个取消掉了,这是**用它当时唯一的实例写下的规则**在另一个模式里超出了它自己的意思。用户裁:**卡片接收 pane**。
 
 **于是那枚位裂成两枚**:`seats::PaneOffers { adopt, extract }`,tab 条与竖栏 = `BOTH`,卡列 = `ADOPT_ONLY`。**保留的那半是 `extract`**——一份 tab 清单里两张卡之间的空白不是一间屋子,把 pane 丢进那道缝让它变成第三张卡,正是 ② 当初挡下的「造 tab」手势,松在那里仍然是 J120 的干净的什么都没有;**开掉的那半是 `adopt`**——一张卡就是一间屋子,指着它说「放进去」,与在 tab 条上指着一个 tab 说同一句话是同一件事,落法也一样(**移入该 tab、追加为树末尾分屏**)。**pane 悬在自己那张卡上什么也不发生**,而且是两条理由同时成立:交给自己是空动作(K135 上一层),而这条 run 不造 tab——一句诚实的沉默,两个来源。
+
+**②于 2026-08-29 被用户整条推翻:卡列的空白也撕新卡,与 tab 条的缝逐字同一条路(用户裁决,同日落地;`crates/bt-app/src/{seats,main}.rs`)。** 上一段留下的那半句是「pane 松在卡列空白处仍不撕新 tab」,理由写作「两卡之间的缝不是屋子」。用户实机否决:拖起一枚 pane 悬在卡列「新建标签」行附近的空白,幽灵在,松手什么都不发生——**判为 bug**。裁决理由回到 ①,而且这次是**照字面读**:「舞台就是真的那棵树,零新规、不禁任何动词」。tab 条的缝能做的,卡列的缝就做,并且是**同一个 `Runtime::extract_pane_into_new_tab`**,不是一份卡片形状的复制品。「缝不是屋子」这句话本身也站不住:tab 条的缝同样不是屋子,而它一直在那里造 tab。于是:
+
+- **`PaneOffers` 现状**:结构留着(`{ adopt, extract }`,两个动词分开问),但**只剩 `BOTH` 一个值**——`ADOPT_ONLY` 随裁决一并删除,不留给没人用的值一个名字。三张面(tab 条、竖栏、卡列)从此答同一个词,**这正是 ① 的内容**而不是一处冗余;保留两枚位是因为 `pane_strip_landing` 仍然一个动词一个动词地问,而「拒的是源」正是用户扔掉的那种形状。**记一笔欠账**:若始终没有第四张面要答别的,这枚位与 `TabRun::pane_offers` 就是把同一句话说了三遍,可以收掉。
+- **插入位置沿用 tab 条,一个字没改**:`seats::insert_index_at` 拿卡框中线走一遍——两卡之间的缝 = 那个索引,最后一张卡以下直到列底(含 `+` 与 `˅` 那一行所在的空白,因为 run 的 band 是**整块面板**)= 末尾;`strip_insert_slot` 按 pinned 分区钳位(F57),与 tab 条同规。悬停在某张卡上仍是 adopt(2026-08-23 那半原样保留)。
+- **「悬在自己那张卡上沉默」这一条随 ② 一起没了**,而这是**照 ① 推出来的结论、不是遗漏**:在 tab 条上,pane 悬在自己那个 tab 上(且舞台还是它)拿到的是**撕出**(`pane_strip_landing` 落到 `extract` 那一支,§7.1.6k″ 只把「离家之后」那一格改成 adopt)。卡列既然答 `BOTH`,同一个指针就拿同一个答案。要让它沉默,得写一句「除非这是卡片列」——那正是 ① 禁的第二套规则。
+- **插入记号不存在轴向问题**:本产品的插入记号从来不是一条线,而是**替身**(mock-up `showDropPreview`)——`ChromeContent::strip_preview` 把一枚 dressed 成「它将要变成的那个 tab」的 `TabContent` 插进清单,邻居让位,槽位被**占住**而不是被指着。竖栏早就是竖着这么画的,所以卡列拿到的是同一张图:一张**整卡宽、整卡高**的替身卡,穿 `@keyframes tab-land` 的 `from`(9% 强调色底 + 45% 强调色内描边),由同一个 `TabContent::landing` 在替身那一格按住 1.0。`FocusRail` 因此长出 `preview` 字段,与 `Rail::preview` 同名同义。上一段那句「幽灵照旧不让位、卡片没有替身」到此**只对 adopt 成立**:adopt 仍然只把那张卡点亮,extract 占一格。缩略图那张平行清单也在同一格插一个 `None`(`Runtime::refresh_chrome`),否则替身以下每张卡都会画到邻居的树。
+- **落下之后一律照非聚焦的既有行为,本段不另定**:`extract_pane_into_new_tab` **不激活**新 tab、不切舞台、不滚动卡列(与 N157「你说的是把它放过去,不是带我过去」同一条),只把新 tab 插进 `window.tabs` 并在必要时把 `active_tab` 顺移一格。所以聚焦模式下当前 tab 不变、**舞台自然不变**,「卡列已换当前而舞台还画旧树」这一格根本到不了;真到得了的那天,舞台=当前 tab 的树这一条由 `render` 里没有聚焦分支这枚结构钉保证。
+- **跨窗不用补路**:`Runtime::foreign_strip_landing` 走的本来就是 `Runtime::tab_run()`,而聚焦中的窗给的就是卡列那条 run,所以另一扇窗的卡列与它的 tab 条同规、同 `PaneOffers`、同 `strip_insert_slot`,替身也照画(`strip_stand_in` 的 `window.foreign` 那一支在卡列上与在 tab 条上是同一段代码)。
+- **红门**:`seats.rs` 的 `the_card_column_takes_a_tab_reorder_and_a_panes_two_offers`(原 `…_and_refuses_the_other_two_drags`)与新增的 `a_pane_over_the_card_column_takes_a_whole_cards_slot_and_wears_the_landing`;`main.rs` 的 `a_card_takes_a_pane_and_springs_while_the_blank_beside_it_makes_a_new_tab`(原 `…_still_makes_no_tab`)。
 
 **手势与画法一律沿用,没有第二套。** 悬停 250ms 切舞台走的是 §7.1.6k 那枚 `SpringGate`(常量 `profiles::CHEVRON_HOVER_OPEN` 共用、状态长在 `Drag` 上**不**共用),它读的是 survey 的答案而不是指针的坐标,所以卡列一变成会答 `StripAdopt` 的面,弹簧自己就上了弦,`drive_drag` 与 `advance_drag_spring` 一行没改。**卡列是 `TabRun::slot_at` 的第三张面**,而且这件事的发现是「不用加」:它早在 2026-08-20 卡片重排解禁那天就把解好的卡框填进了 `slots`,所以「我手底下是谁的 tab」在卡列上从那天起就答得出来,缺的从来只是 offer。**被瞄准的卡穿的是 tab 条与竖栏同一对声明**(`@keyframes tab-land` 的 `from`:9% 强调色底 + 45% 强调色内描边),读的是同一个 `TabContent::landing` 字段——三张面一张图一个字段,在这里发明第四枚记号就是给「东西要去那里」造第二套词汇。**幽灵照旧不让位**:卡片没有替身、只是亮起来,说的是**哪里**而不是**什么**(§7.1.6k 的原话)。
 
@@ -4861,6 +4885,48 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 
 **日期:2026-08-28,四条同批。**
 
+**⑤ 再加四条内置 agent 配置:Kimi Code、pi、Hermes、OpenCode(用户裁 2026-08-29;`count()` 8 → 12)。**
+
+同一条 ③ 的规矩,一条新机制都没有:`ProgramSource::FirstOf`、`args` 为空、`StartAt::Inherit`、`compared_title` 为 `None`、`IntegrationChoice::Auto` 推出 `Integration::None`、没装**灰显不隐藏**。内置槽位仍是保留字,`profiles.json` 的 schema **没有升版**——理由与 ③ 第 3 条一字不差:新行只写自己的 id,`CandidateV1` 的三种读法一个字节没动。这四条与 Agent 页的通知开关**仍然是两回事**:那一页装的是别人配置文件里的 hook,这里是启动器,谁也不读谁。**这四家的通知接入没有做**,另排。
+
+**每一条的可执行名是从各家自己的安装物读出来的,不是猜的**,这是这一批唯一真正要记下来的事:
+
+- **Kimi Code → `kimi`**。npm 包 `@moonshot-ai/kimi-code` 的 `bin` 映射写着 `kimi`(注意是带连字符的 `@moonshot-ai`,不是 `@moonshotai`);官方还有一份 PowerShell 安装脚本,它把 `kimi.exe` 放进 `%USERPROFILE%\.kimi-code\bin` 并把该目录前置进用户 PATH——所以候选表里既有 `PATH` 上的名字,也有那个目录本身,后者是给「装完还没重新登录过」的那次会话的。
+- **pi → `pi`**。npm 包 `@earendil-works/pi-coding-agent` 的 `bin` 映射写着 `pi`(旧名 `@mariozechner/pi-coding-agent` 已弃)。**没有 `pi.exe` 这一行**:官方 Windows 路线是 npm,自带安装器在 `%USERPROFILE%\.pi\agent\bin` 里放的也是 `pi.cmd` 而不是可执行文件——给一个产品不产出的文件写一个候选位置,就是这张表在替它发明一种安装方式;而 `pi` 这个名字短到误命中是真风险不是理论风险。
+- **Hermes → `hermes`**(Nous Research 的 Hermes Agent)。官方 PowerShell 安装器写 `%LOCALAPPDATA%\hermes\bin\hermes.cmd` 并把该目录前置进用户 PATH。**没有 npm 这一行**:npm 上的 `hermes-agent` 的 `bugs.url` 指向 `github.com/wyrtensi/hermes-agent-npm`,是第三方包装,不是这家的发行路线,写进来等于这张表主张一条它没有的安装途径。**`PATH` 上只认 `hermes.cmd` 不认 `hermes.exe`**:`hermes` 这个名字被 Meta 的 JavaScript 引擎占着,React Native 工具链会把一个 `hermes.exe` 放上 PATH,认它就是一行谎报自己启动什么的行。
+- **OpenCode → `opencode`**。npm 包 `opencode-ai` 的 `bin` 映射写着 `opencode`,背后是一个编译出来的 `opencode.exe` 加一层 `.cmd` 垫片;`.exe` 那一行同时兜住官方文档列出的两个 Windows 包管理器(scoop、choco),它们的 shim 目录在 PATH 上放的是可执行文件。仓库已从 `sst/opencode` 迁到 `anomalyco/opencode`(GitHub API 同一个 repo id)。官方 `curl | bash` 安装器写 `~/.opencode/bin` 且只改 POSIX shell 的启动文件,**永远到不了这扇窗的 `PATH`**——从那种安装启动的会话是 WSL 会话,那是另一行的事。
+
+**图标:四枚都穿中性 chassis**,颜色 Teal / Green / Amber / Magenta。这不是偷懒,是 `ChromeMark::ProfileGeneric` 自己写着的那条规矩(③ 末段):设计权威没给这四家画牌子,而**给它发明一个,就是这张清单在主张一个这一行并不具备的来历**。八色里 Blue 留着不用——PowerShell 的标就是蓝的,一枚蓝色中性 chassis 会被读成第四个 PowerShell。
+
+**灰显那句话改了,因为它右一半是对的、整句是没用的(用户报,2026-08-29:同学的机器上 Codex 装在 WSL 里,配置页显示「未安装 Codex」)。** 这扇窗在 Windows 上找,那份安装在一个 WSL 发行版里,找得再狠也找不到——所以句子改成说**它在哪儿找的**,而底下那一行说**读者能做的两件事**,两件这个 build 早就支持、而从一行灰字里一件都看不出来:
+
+> 在 Windows 中未找到 Codex
+> 若安装在 WSL 内,请在 WSL 配置的窗格中运行,或新建配置:程序 wsl.exe,参数 -e codex
+
+**两个串而不是一个**,因为它们落进这一行本来就有的两个框:理由占「这行跑什么」那一行(带省略号截断),出路占「这行给什么能力」那两行(换行铺开)。行高一个像素没动——那对框在每一行上都是预留的,而能跑的行上本来就有字。`ProfileLine::capability` 因此从 `&'static str` 变成 `String`:那句话里有命令名。命令名**从这一行自己的第一个 `PATH` 候选读出来**、去掉扩展名,不是在旁边再写一遍——那句话叫读者把这个词交给 `wsl.exe -e`,一个跟候选表走散了的词会把人送到一个不存在的命令上;`an_agent_row_is_a_profile_under_this_tables_own_rules` 顺带把这一对钉住了。只有 agent 行说这句,shell 行仍说短的那句(`AGENT_IDS` 是写下来的名单而不是推出来的:「没有 `compared_title` 且 `Integration::None`」的行,读者自己建一条跑 `python` 的也是)。
+
+**WSL 里的 agent 本身没做,它是 v0.1.1 的第一项。** 要做的是三件互相咬合的事:**懒探测**(在一个 WSL 发行版里问 `command -v <name>`,而且只在读者第一次打开选择器时问一次,不能回到启动路径上去起进程——那正是 §7.40 在治的毛病)、**`wsl.exe -e <name>` 起它**(而不是起一个 shell 再喂命令,那会多一层不属于任何人的进程)、以及**通知 hook 经互操作回到 `folio.exe attention`**(WSL 里的 Linux 进程能直接执行 Windows 上的 `.exe`,所以三家 hook 的安装器要写的是一条 Linux 路径下的命令行指向本机的 `folio.exe`,并且路径要按 `/mnt/c/...` 翻译)。
+
+**门**:`the_picker_offers_exactly_the_profiles_this_build_has` 的 `count()` 8 → 12 与那张 id 名单;`an_agent_row_is_a_profile_under_this_tables_own_rules` 改走 `AGENT_IDS` 并新增两条断言(每一行印的词等于它问 `PATH` 的那个词;shell 一行都不是 agent);`SHIPPED_ORDER` 8 → 12;`fully_equipped` 那台机器多四个文件(其中 Hermes 放在 `%LOCALAPPDATA%\hermes\bin`,因为它没有 npm 那条路);灰显 tip 那道门多四行,每一行报**自己的名字**——六枚共用一块 chassis,名字是读者唯一能据以分清缺的是哪一个的东西。
+
+**⑥ 中文界面的四条口径,和两道新门(用户裁 2026-08-29;`crates/bt-app/src/{i18n,settings}.rs`、`docs/plans/ui-style/copy-guide.md`)。**
+
+**第一条:`profile` 的中文是「配置文件」,不是「档案」。** 这推翻的是 `copy-guide.md` 自己在 2026-08-26 定的收口。理由不是哪个词更好听,是**读者从哪儿来**:中文版 Windows Terminal 管同一个对象叫「配置文件」,一个从那边过来的人读到「档案」会以为是另一样东西。行内指代用「这个配置」「默认配置」——页名是长名词,一句话里连写四遍就成了噪音。同批 `integration` 收口到**「整合」**(提示条上本来就是这个词),`shell integration` 全表一个写法。
+
+**第二条:Agent 页说人话,而「人话」有一条底线。** 三条安装行原先的中文是英文的逐字投影(「在你的 … 里加上 …,让 … 在 … 时告诉这扇窗」),既拟人又不像给用户看的字。重写成产品语气之后,第一版又踩了**另一个坑**,而那个坑值得单独记下来:句子里出现了「按通知规则提醒」——每个字都是平常中文,而它指的「规则」是 §7.1.5o 的三档触达梯子,**读者从来没被展示过**。同类还有「第一档」`episode``image worker`。
+
+于是有了 **`no_interface_string_speaks_the_repositorys_private_words`**:界面串只许指**读者看得见的东西**(标签、提醒标记、任务栏按钮、系统通知)、**设置里那一行印出来的名字**、读者自己文件里的路径或键名、产品名。一行要说另一行干什么,就点那一行的名字,或者干脆把那个行为写出来。门扫中英两列;单字内部词(「档」「座」「片」)只在**独立成词**时算数——「卡片」「片刻」「档位」里的那一个字不是,而「本片」「这一片」这类前面就站着汉字的复合词,只能按名单逐条列(这条限制写在门自己的注释里)。红证三条:`image worker`(英文整词)、「本片」(中文子串)、独立的「片」(单字规则)。顺带把 `PreviewFailedImageWorker` 的英文改掉了——「图片工作线程不可用」对读者一个字都不说。
+
+**第三条:「Agent」在中文里是单数,而且不译。** 页名与轨上都写 `Agent`,正文里 agent 小写。**不许写「智能体」**:那是一个译过来的论文词,这一页的读者没人这么叫这些工具。中文不变复数,所以品类名就是那个光名词。
+
+**第四条,也是这一批唯一一件真正的工程发现:一句更短的中文,不等于一段更短的排版。** Agent 页三条中文重写后**每一条都比它替换掉的英文短**,而其中三条画出来仍旧在第三行尾部带着 `…`。真因是 `tooltip::wrap`:它**在空格处断行**,单个超宽的词才逐字拆;而中文句子的空格只出现在拉丁词两边,于是**两个拉丁词之间的一整串汉字是一个词**。「打开后,Folio 在 Claude Code」占了 368px 一行里的 168px,下一个词是 306px 的「的用户级设置(~/.claude/settings.json)中写入一条」——放不下,于是那一行剩下 200px 空着。**总宽度对这件事一个字都没说,只有换行说了。** 这正是 `copy-guide.md` §4「不要用短拉丁词开头」那条规矩背后的真实机制,现在它有了度量。
+
+于是第二道门 **`no_chinese_settings_sentence_needs_a_fourth_line_either`**(`settings.rs`,紧挨着英文那道):同一根 `wrapped_description`、同一个 118px 控件列,量中文列。**行与 `Text` 的对应是按「这一行刚才画出来的那句英文」在 `Text::ALL` 里找的**——没有从行到 `Text` 的映射表,再写一份就是同一个 match 抄两遍;英文串撞车的条目跳过而不是猜,末尾一句 `measured >= 30` 是这条逃生口不会把门悄悄掏空的保证。量尺是 `bt_unicode::cluster_width`——本仓自己回答「这个字是不是宽的」的那一处,而一个宽字在任何 CJK 字体里就是一个 em。红证:把 08-29 之前那句中文放回 `DescClaudeHooks`,门点名 `[(ClaudeHooks, DescClaudeHooks)]`。
+
+**顺带一条内容修正(用户在新电脑上撞到):PowerShell 整合的说明里必须写出「行内公式」。** `$$…$$` 在任何机器上都排版,`$…$` 只在 OSC 133 标出的命令输出行里排版(`bt_detect::InlineMathSite::Ineligible`:「没有 shell 整合,主屏上就永远没有行内渲染」)。一个看着一种公式排版、另一种停在源码的人,没有任何途径把这件事连到自己 `$PROFILE` 里少的那一行,而「命令标记与状态」这五个字也没告诉他。提示条与设置行现在都写三件事:命令标记、当前目录跟随、输出中行内公式的渲染。README 与 README.zh-CN 同步一句,不加新段。
+
+**日期:2026-08-29,⑤⑥ 两条。**
+
 ### 7.43 一句话要么全在框里,要么带着省略号停下:四件「字和框谈不拢」,外加一条 panic 走的路(门 5 尾账四件,2026-08-28 用户裁决,已落地;`crates/bt-app/src/{seats,restore,webhost,notice,main}.rs`、`crates/bt-platform/src/lib.rs`)
 
 门 5 干净机三条发布阻塞项修完之后(§7.35、§7.36),结果文档 `docs/plans/release/clean-vm-results-2026-08-28.md` 的挂账里剩下四件小的。它们看着不相干,前三件其实是同一句话的三个说法:**一个框的宽度是已知的,一段字的宽度只有拿着字体的人知道,而这两件事必须在同一帧里谈拢**——谈不拢的时候,让路的永远是字,不是框。第四件是 §7.35 自己在末尾记下的那笔「没修的」。
@@ -4930,6 +4996,24 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 **红门 `a_panic_leaves_by_the_same_road_as_a_shut`**(`main.rs`,`floated_page_tests`,源码门):hook 里必须有 `leave_process(PANIC_EXIT_CODE)`、必须有那次隐藏、隐藏必须在退出**之前**(在 `TerminateProcess` 之后隐藏的窗等于从没隐藏过)、必须有 `if !announce_panic(&path)` 那道闸、`PANIC_EXIT_CODE` 必须是 101。**变异实测**:去掉 `leave_process` 那一句 → 红(`a panic still walks out through the loader's teardown, which is where a WebView2 host stops`)。
 
 **而在真机上量它,需要一个能按需触发的故障,**门 5 又要求 release **没有**这样的入口(`scripts/release/cleanvm/in-guest.ps1` 跑 `folio.exe --panic-selftest` 并要求它按「未知参数」被拒)。两件事都要成立,所以照 `hang_watch` 自己那只 selftest 的形状加了一个 **debug 构建独有**的开关:`BT_PANIC_SELFTEST=<秒>`,窗口起来若干秒后在窗口线程上 panic 一次。release 半边是一个空函数,而红门里有一段钉住那个 `#[cfg(debug_assertions)]` 就贴在它上面。要观察的性质属于 **hook**,而 hook 在两个 profile 里是同一段代码。
+
+#### ⑤ Git 页那句「这台机器上没有 git」也在列里换行(追加,用户截图 2026-08-29)
+
+**报告。** files 列切到 Git 页,机器上没有 `git.exe`,页面中央那句
+`git.exe was not found on this machine — install Git for Windows to use this page`
+被画成**一行**,240 像素的列里两头各被裁掉一截——读者看见的是一句话的中段,而这句话的全部价值在它的后半句(去装什么)。**这就是本节 ① 的那张照片,换了一个表面**:①  是 479 像素座位里的 92 字符错误串,这里是 240 像素列里的 79 字符指路句。
+
+**成因与 ① 逐字相同,只是少了一步。** `GitPanelContent::empty` 是一个 `String`,`push_git_panel` 把它当作一枚居中的 `ChromeLabel`、`rect` 就是整个 viewport、`clip` 也是它——**一行,画多宽算多宽,超出的部分被裁掉**。这条路上没有任何一处知道这句话有多宽,因为知道字体的那一方(`build` 的 `measure`)当时并不知道列有多宽。
+
+**修法照 ① 那条分工:拿着字体的那一方在布局之前换好行。** `build` 多收一个 `column: f32`(`empty_width(body, scale)` = 列宽减 `.git-view` 自己左右各 10 的内边距,**也就是这一页每一行本来就站着的那一列**,否则这句话会比它底下的列表还宽出两个边距),`GitPanelContent::empty` 从 `Option<String>` 变成 `Option<Vec<String>>`——**已经换好行的那几行**;`push_git_panel` 每行一枚 label,整块按行数居中(`empty_block`,与 `preview_card_geometry` 同形:块有多高是一个只有量过的人才知道的事实,所以行数从外面进来)。三句空态话——*Reading the repository…*、*Not a git repository*、以及 git 自己关于它打不开的仓库说的每一句——走的是同一个出口,所以修的是三句而不是一句。
+
+**换行机仍然只有那一台**:`restore::wrap_anywhere`,与 ① 同一个调用。两个理由在这里同时成立——三句里有两句是本产品自己的散文、要在两种语言里各按空格与按字断开(底下的 `restore::wrap` 早就知道),第三句是 git 自己的话、常常是一条不带空格的路径或一个长 token,而那正是 `anywhere` 作为最后一招存在的场合。
+
+**列表里的 `GitRow::Notice` 不在这一条里,并且写明为什么**:它是**列表中的一行**(左对齐、行高固定、与提交标题和分支名共用同一条裁切),而不是页面中央的占位句;files 列的 `Empty folder` / `Loading…` / 权限拒绝同理——它们是树里的行,戴着自己的缩进。**这一条治的是「整页只剩一句话」的那种句子**,而那种句子在这两个表面上只有 `GitPanelContent::empty` 一处。
+
+**红门 `the_git_panels_notice_wraps_inside_its_column`**(`git_panel.rs`):170 与 240 两种列宽(一条拖窄的列与它的静息宽度),字符串就是那台机器的原话,断言每一行的画宽 ≤ 列宽、断了不止一行、去掉空白之后一个字都没丢、块高随行数、画的框与量的框是同一个。**红证**:让 `empty_lines` 原样返回一行,`a 170px column cannot hold this sentence on one line` 当场红。
+
+**日期:2026-08-29,用户截图报缺陷,当日裁决,当日落地。**
 
 **日期:2026-08-28,门 5 尾账四件,用户当日裁决,当日落地。**
 
@@ -5422,6 +5506,63 @@ frame … layers=4 layer_bodies=1 layer_labels=3 layer_paragraphs=0 layer_drawn=
 
 **§7.45 挂账 ⓐ 销掉一半。** 那一节写「这张画在本机没有等比复现出来,14 条真引用首帧文字全部在场」——那次跑的全是**从没预览过**的文件,走的正是唯一没有缺陷的那条臂,所以它复现不出来是必然的而不是偶然的。这一节复现了、拍到了、修了;§7.45 留下的三条判据一条没白写,是它们把这张画从图集那条道上摘了出来。
 
+### 7.46 那条深色输入条是 Codex 自己画的,而它画什么色只取决于我们答的那一个背景(2026-08-29 用户实证「亮色主题下 Codex 输入行是深色底、占位文字深灰」;取证结论:OSC 问答无缺陷;`crates/bt-pty/tests/color_query_through_conpty.rs`(新))
+
+**这一节没有修任何东西,它是一次取证。** 结论先写:§7.1.6c-4e 那条通路是好的——亮、暗、`BT_BG` 三张布上,`OSC 10/11/12` 都从**当前生效的那套颜色**回答,并且穿过真 ConPTY 到得了孩子手里。报告里那条深色条不是我们画的,也不是我们答错造成的;它是 Codex 按**它收到的那一个背景色**画出来的,而它这辈子只问一次。
+
+**四件事各自被单独量过。**
+
+- **那条深色条的出处。** `crates/bt-render` 在终端表面上画的东西可以逐项数完:一次 `theme_clear_color()` 的清屏、每个 cell 自己 ANSI 解出来的底、选区、搜索命中、公式遮罩与失败标记、光标、制表符几何与下划线。**没有任何一处按 OSC 133 的命令区间铺底色**,`cmdrail` 是 pane 右缘的一列刻度而不是一条横带。一块非默认底色的矩形只可能来自 `resolve_colors(&cell.style).1 != default_background()`,也就是**某个程序自己写的 SGR**。
+
+- **Codex 画那条带用的是什么色,取决于什么。** 同一台机器、同一个 `codex.exe`(0.144.4)、同一个 pane,只换我们答的背景:
+  - 答 `#ffffff` → 输入条 `SGR 48;2;244;244;244`(#f4f4f4),占位字 `38;2;235;234;234`,正文墨 `38;2;55;53;47`(正是我们答的前景)。
+  - 答 `#1b1b1b` → 输入条 `SGR 48;2;54;54;54`(#363636),占位字 `38;2;108;108;108`(**深灰**)。
+
+  第二行就是报告里那张画,一个字不差。所以**用户那次的 Codex 收到的是一个深色背景**,而不是「它自己有个固定深色主题」。
+
+- **问答本身没有缺陷,而且是量出来的不是读出来的。** 亮色 Folio(`theme=light`,画布 `#ffffff`)真机跑 `--profile codex`,`BT_PTY_DUMP` 里第 40 个字节起就是 Codex 的 `OSC 10;? ST OSC 11;? ST`(它的 `tui/src/terminal_probe.rs`,**用 ST 而不是 BEL**),而它随后画出来的整块界面是 `48;2;244;244;244` 那一版。库这一层由新红门 `the_background_a_program_asks_for_is_the_one_in_force` 钉住:真 PowerShell、真 ConPTY、真 `DualPlaneSession`,①问题到得了我们(`OSC 11;?` 出现在收到的字节里,主机没有替我们答掉)、②答案是生效画布、③**换布之后再问答的是新色**、④**终止符照抄提问者的**(第一问 BEL、第二问 ST,两个答案各自穿着被问时那一件)。变异证明:把 `set_color_palette` 改成只认出生那一次,第二个答案原样答旧色,门红,`CARGO_EXIT=101`。
+
+- **Codex 只问一次,而且不订阅 2031。** 两份 dump 里颜色查询各出现 **1** 次,它开的模式是 `?25h ?1004h ?2004h ?2026h ?9001h`——**没有 `?2031h`**。§7.1.6c-4e 已经把 DEC 2031 的门开好了:订阅了才通知,换布才通知。Codex 没走那扇门,于是**一个在深色布上启动、之后才被切到亮色的 Codex,终生停在它问到的那个答案上**,而终端这边除了「它再问一次」没有第二条路能纠正它。这不是一个可以在我们这边修掉的缺陷,是协议在对面那一半的空缺。
+
+**因此这条报告的成因只剩两个形状,而且它们画出来的是同一张画。** ①那次 Codex 是在深色画布上启动的,或者它启动之后画布才变亮;②它问了而**在它的超时之内没等到**答案——`crates/bt-term/src/palette.rs` 开头写的就是这条:等不到的一律当深色。两者的产物都是 `48;2;54;54;54` 那条带,所以照片分不开它们。别的形状都被上面四条排掉了:不是我们画的、不是我们答错的、不是传输丢的、不是它反复问而我们答歪了其中一次。
+
+**分辨这两者的办法,以及为什么第二种这里也不改。** 分辨只需一次:在**已经是亮色**的窗里重开一个 Codex——形状①管不到新进程,形状②会再犯。答案的时延是**一轮窗口循环**:`drain_leaf_pty` 在同一轮里读走这段字节、喂进去、把排好的回答写回 pty(`take_pty_writes` 在读那一段之后立刻排空一次,循环末尾再排空一次,所以一个一言不发的孩子也拿得到欠它的字节)。要缩短它,只能把颜色问答搬离窗口线程,而那意味着调色板要有第二个持有者——一个与玻璃分歧的持有者,正是 §7.1.6c-4e 拆成三个 crate 时拒绝掉的东西。所以这一节不动它,只把判据写在这里。
+
+**明写的 left-out,以及为什么不做。**
+
+- **不做「换布时主动补一份颜色应答」。** 没问过的程序会把它当字打出来,这正是 2031「订阅了才通知」那条规矩的理由;为一个不订阅的程序破例,代价是在每一个不订阅的程序的输入里塞乱码。
+- **`COLORFGBG` 没有设,这一节也不设。** 它是一个**出生时写死的环境变量**:切主题之后它就是错的,而且错得没有任何一方能发现——比不答更坏。要不要设是一条产品裁决,不是这一节能自己做的。
+- **顺带记下的一处不一致(未动)**:开机读的主题来自 `session.json` 的 `theme`(`SessionThemeV1`,默认 **Dark**),而 `settings.json` 里另有一个 `theme_mode`(`ThemeModeV1`,默认 **System**)。两份文件各存一次同一件事,开机只读前者——一台 Windows 明暗两个开关都是「亮」的机器上,一份全新档案开出来的窗仍然是深色的。本节量到了它,没有改它。
+
+### 7.46 ② 主题只有一个来源:`settings.json` 的 `theme_mode`,而画布在窗口出生之前就已经定了(用户裁决 2026-08-29;§7.46 挂账第 2 条转「要修」;`crates/bt-persist/src/session.rs`、`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/main.rs`)
+
+**§7.46 把一条不一致记成挂账,这一节把它裁成缺陷并修掉。** 那条挂账是:开机读的主题来自 `session.json` 的 `theme`,而 `settings.json` 里另有一个 `theme_mode`,开机只读前者。查清之后两个字段的分工是这样的——
+
+| | 谁写 | 谁读 |
+|---|---|---|
+| `settings.json` 的 `theme_mode` | **没有人**(序列化时原样带过) | **没有人**;设置页画的是内存里的镜像 |
+| `session.json` 的 `theme` | 主题行(`apply_theme_mode` → `mark_session_dirty`) | 每一次开机(`Runtime::create`) |
+
+**所以看得见的那个字段是装饰,看不见的那个是法律。** 两份文件存同一件事,任何一边被单独动过就会分歧,而它们**天生**就分歧:`SettingsV1` 的默认是 `System`,`SessionV1` 的默认是 **Dark**。于是一台 `AppsUseLightTheme=1`、`SystemUsesLightTheme=1` 的机器上,一份全新档案开出来的窗是深色的——**而窗里第一个 pane 答的 `OSC 11` 就是那张深色布**。§7.46 说那条报告的成因「只剩两个形状」,这就是形状①的来源:Codex 在那张不该存在的深色布上问了一次,被告知深色,然后终生记着。
+
+**裁决:一个来源,就是 `settings.json` 的 `theme_mode`。**
+
+- **`session.json` 的 `theme` 退休:只读一次,再也不写。** `Some` 从此只有一个含义——**这份文档是裁决之前的构建写的**,里面那个模式就是那位用户一直在看的东西。读到它的那次开机把它写进 `settings.json` 并停止写这个键,所以下一份文档是 `None`,同一个档案上补迁只会发生一次。**不加 schema 版本号**,而且是故意的:迁移步骤是结构性的、只能**删掉**那个键,而那个键正是补迁要读的事实;键自己的在场就是版本标记,并且比一个数字更好——它在文件第一次被写回时自己消失。降级(旧构建读新文档)会读到无键并回落到深色,§1.3 规则 1「不支持降级」已经把这一格划在外面。
+- **画布在 `CreateWindowEx` 之前就位。** 原来的解析读 `window.theme()`,那件事非有窗不可,于是**只能**发生在建窗之后——建窗到 set_theme 之间的一切都画在进程出生时那张布上。`Window::theme()` 还会在一台不肯说话的机器上答 `None`,而 `resolve_theme_mode` 把 `None` 读成深色:正好在第一个 pane 即将被问「你站在什么颜色上」的那一刻给出一个沉默的错答案。新的 `bt_platform::system_uses_light_apps()` 直接读 Windows 自己公布的 `AppsUseLightTheme`,**不读 `SystemUsesLightTheme`**——后者是任务栏与开始菜单的,两者可以各穿一件,而一扇窗是应用。
+- **一个读者,不是两个。** 开机、主题行、以及 Windows 自己改主意时(winit 的 `ThemeChanged`)都问 `system_os_theme()`;事件的 payload 被**故意丢掉**——一台机器的一个设置有两个读者就是两次分歧的机会,而这个进程已经信过其中一个,那就是它开窗时用的那个。
+- **内存里的镜像也删了。** `App::theme_mode` 曾是第三份拷贝(设置页画它);现在设置页直接读 `settings_store.loaded().theme_mode`。一个来源的意思是一个,不是「一个加两个跟着它的」。
+
+**红门(先红后绿,红证在提交 `cb1d4ab`)。**
+
+- `the_theme_a_window_opens_in_is_the_one_the_settings_file_names` —— 四格:①全新档案 + Windows 说亮 → 亮画布、首个 pane 被告知亮底;②`theme_mode=Dark` 压过说亮的 Windows;③`theme_mode=Light` 压过说暗的 Windows;④**补迁**:还带着退休键的会话文档被相信一次。红证 `left: Dark / right: System` —— 全新档案解析出深色,而设置文件说 System。
+- `the_theme_row_writes_settings_and_the_session_file_names_no_theme` —— 源码门 + serde 门:`apply_theme_mode` 里必须有 `settings_store.store(`、不许有 `mark_session_dirty`;今天写出的 `SessionV1` 不带 `theme` 键。
+- `the_canvas_is_in_force_before_the_window_is_made` —— 源码门:`Runtime::create` 里 `adopt_stored_schemes` < `set_theme` < `create_window`,且建窗之前不出现 `window.theme()`。红证「the canvas is settled before the window exists」。
+- `bt-persist` :: `the_retired_theme_key_is_not_written_and_is_still_read` —— 退休的两半各自成立:写出去的没有这个键,读进来的旧文档仍被相信。
+
+**实机(隔离 APPDATA,Windows 两个开关都是「亮」)。**
+
+- **全新档案**:窗底 `255,255,255`(修前是 `27,27,27`),`BT_PTY_DUMP` 第 48 字节是 Codex 的 `OSC 11;?`,它随后把输入条画成 `48;2;244;244;244` —— **浅色**。这正是 §7.46 里「答深色时是 `48;2;54;54;54` 配 `38;2;108;108;108` 深灰占位字」那张画的反面。
+- **裁决前的老档案**(`session.theme=dark` + `settings.theme_mode=System`):在说亮的 Windows 上照旧开成深色 `27,27,27`,`settings.json` 被改写成 `"theme_mode": "Dark"`,`session.json` 写回之后不再带 `theme` 键。**一位老用户的选择没有被这次搬家弄丢**,而补迁只发生一次。
 ### 7.47 开关切不过去的时候必须说出为什么:一台新电脑的执行策略是 `Restricted`,而那扇窗从头到尾一言不发(2026-08-29 用户在新电脑上实测 next17「点『开』没有反应、没有任何提示」,已落地;`crates/bt-app/src/{psreadline,settings,i18n,main}.rs`、`crates/bt-platform/src/lib.rs`)
 
 **用户报的画。** 设置 ▸ 终端 ▸ 「PSReadLine 补丁」,说明行写「本机为 2.0.0 · 缩放窗口时输入行仍会错位」,点「开」**没有反应**,仍是「关」,**没有任何提示说为什么**。开发机上这个开关是好的。

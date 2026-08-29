@@ -172,7 +172,9 @@ it stood to a dated backup beside itself; delete that line to undo it. **Don't
 show again** ends the asking, and closing the strip decides nothing, so the next
 PowerShell asks once more. The
 integration is what command marks run on: `Ctrl+Shift+↑` and `Ctrl+Shift+↓` step
-between commands, and a command that failed is marked as having failed. Git Bash
+between commands, and a command that failed is marked as having failed. It is
+also what tells inline `$…$` formulas apart from a shell variable, so without it
+they stay as source while `$$…$$` blocks still typeset. Git Bash
 and WSL need none of it and leave nothing on disk.
 
 The three rows on the Agents page **install nothing by default**, and they are not

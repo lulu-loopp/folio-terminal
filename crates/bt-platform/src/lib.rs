@@ -1693,9 +1693,9 @@ mod windows_impl {
             // `HKEY_CURRENT_USER`, and nothing else — see
             // `install_context_menu`.
             Registry::{
-                HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
-                REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW,
-                RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+                HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE,
+                REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW,
+                RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
             },
             Threading::{
                 CreateEventW, GetCurrentThread, GetThreadPriority, INFINITE, ResetEvent, SetEvent,
@@ -6119,6 +6119,84 @@ mod windows_impl {
         read_registry_string(key, name)
     }
 
+    /// Where Windows keeps the light/dark choice every app is expected to follow.
+    const PERSONALIZE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+    /// The one of that key's two switches that describes **applications**.
+    ///
+    /// Not `SystemUsesLightTheme`, which is the taskbar and the Start menu. The
+    /// two are set independently and a machine can wear one of each; a window is
+    /// an application, so it follows the application one.
+    const APPS_USE_LIGHT_THEME: &str = "AppsUseLightTheme";
+
+    /// **Whether Windows is asking applications to be light** — answerable before
+    /// this process owns a window.
+    ///
+    /// `None` is "this machine did not say", and it is a real answer rather than
+    /// a failure: the value is absent on a Windows old enough not to have the
+    /// setting, and a caller that reads `None` as either colour would be
+    /// inventing a preference. The caller decides what to do with silence; this
+    /// function does not decide for it.
+    ///
+    /// It exists because the answer is needed **before `CreateWindowEx`**. winit
+    /// can report the same fact, but only through a `Window`, and a canvas
+    /// settled after the window is made is a canvas that some first frame was
+    /// already painted without (`docs/DESIGN.md` §7.46 ②). Reading the value
+    /// Windows itself publishes takes the window out of the question.
+    #[must_use]
+    pub fn system_uses_light_apps() -> Option<bool> {
+        read_registry_dword(PERSONALIZE_KEY, APPS_USE_LIGHT_THEME).map(|value| value != 0)
+    }
+
+    /// One `REG_DWORD` under `HKEY_CURRENT_USER`.
+    ///
+    /// [`read_registry_string`]'s shape with the second call's buffer fixed:
+    /// a `REG_DWORD` is four bytes by definition, so this asks for exactly four
+    /// and refuses anything that is not — a value of another type under the name
+    /// wanted is a value this did not write and cannot read.
+    fn read_registry_dword(key: &str, name: &str) -> Option<u32> {
+        let key_units = wide_null(key);
+        let mut opened = HKEY::default();
+        // SAFETY: the buffer is live and NUL-terminated across the call; the
+        // handle is closed on every path below.
+        let status = unsafe {
+            RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key_units.as_ptr()),
+                None,
+                KEY_READ,
+                &mut opened,
+            )
+        };
+        if status.is_err() {
+            return None;
+        }
+        let name_units = wide_null(name);
+        let mut kind = REG_VALUE_TYPE::default();
+        let mut value = 0u32;
+        let mut bytes = u32::try_from(size_of::<u32>()).unwrap_or(4);
+        // SAFETY: `value` and `bytes` are owned locals, `bytes` states the
+        // capacity behind the pointer, and the name buffer is live across the
+        // call.
+        let status = unsafe {
+            RegQueryValueExW(
+                opened,
+                PCWSTR(name_units.as_ptr()),
+                None,
+                Some(&mut kind),
+                Some((&mut value as *mut u32).cast()),
+                Some(&mut bytes),
+            )
+        };
+        let read = (status.is_ok() && kind == REG_DWORD && bytes as usize == size_of::<u32>())
+            .then_some(value);
+        // SAFETY: `opened` came from the `RegOpenKeyExW` above and is not used
+        // again after this.
+        unsafe {
+            let _ = RegCloseKey(opened);
+        }
+        read
+    }
+
     /// Every immediate subkey of one `HKEY_CURRENT_USER` key, in the order the
     /// registry enumerates them.
     ///
@@ -7859,9 +7937,9 @@ pub use windows_impl::{
     reveal_in_explorer, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
     set_window_dark_mode, set_window_outer_rect, set_window_topmost, shell_execute,
     silence_std_streams, spawn_at_priority, std_error_is_console, system_backdrop_available,
-    take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
-    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_screen_rect,
-    wheel_scroll_amount, work_area_at, write_to_console,
+    system_uses_light_apps, take_keyboard_focus, taskbar_auto_hidden_from_state,
+    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
+    virtual_screen_rect, wheel_scroll_amount, work_area_at, write_to_console,
 };
 
 /// **The one decision in the system-preference watch.**

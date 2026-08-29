@@ -4919,8 +4919,11 @@ impl SettingsPanel {
     }
 
     /// A press on a row's `⋯`: open it, or shut the one already open on this
-    /// row — [`Self::toggle_menu`]'s own shape, because it is the same gesture.
+    /// row — [`Self::toggle_menu`]'s own shape, because it is the same gesture,
+    /// and it puts the other popup away for that function's own reason.
     pub fn toggle_row_menu(&mut self, index: usize) {
+        self.menu = None;
+        self.menu_scroll = 0.0;
         self.row_menu = (self.row_menu != Some(index)).then_some(index);
     }
 
@@ -4965,9 +4968,50 @@ impl SettingsPanel {
     /// that is open and a new list has never been scrolled. What brings the
     /// *current* answer into view is the caller, once the geometry exists to say
     /// where it is — see `SettingsLayout::menu_scroll_to_show`.
+    ///
+    /// **And the other popup goes away** — E61's "the opener closes the others"
+    /// one layer in. The two are never up together on any page this build draws
+    /// (a `⋯` hangs off a Profiles row and a picker off a row with a control),
+    /// and this line is what keeps that a structure rather than a coincidence of
+    /// which page happens to hold what.
     pub fn toggle_menu(&mut self, row: SettingsRow) {
+        self.row_menu = None;
         self.menu = (self.menu != Some(row)).then_some(row);
         self.menu_scroll = 0.0;
+    }
+
+    /// **The popup standing over this dialog's page**, if one is — innermost
+    /// first, which is [`Self::close_one_layer`]'s own order and for its reason:
+    /// a row's `⋯` is a rung above the picker it can be raised beside.
+    ///
+    /// Read off the state rather than remembered, exactly as the window's
+    /// `PopupsUp` is: "is a picker open" is a fact this panel already owns, and a
+    /// second copy of it is a copy that goes stale on whichever path forgets to
+    /// write it.
+    #[must_use]
+    pub fn popup_up(&self) -> Option<DialogPopup> {
+        if let Some(index) = self.row_menu {
+            return Some(DialogPopup::RowMenu(index));
+        }
+        self.menu.map(DialogPopup::Choice)
+    }
+
+    /// **Put one popup away under the pointer** — [`Self::close_one_layer`]'s
+    /// half for the mouse, over the same two rungs.
+    ///
+    /// The keyboard goes back to the button the popup hung from, exactly as
+    /// Escape leaves it, and the ring goes out with it: this is pointer
+    /// interaction, and `:focus-visible`'s other half is that a mouse never
+    /// leaves a ring standing behind.
+    pub fn close_popup(&mut self, popup: DialogPopup) {
+        self.focus_visible = false;
+        match popup {
+            DialogPopup::Choice(_) => self.close_menu(),
+            DialogPopup::RowMenu(index) => {
+                self.row_menu = None;
+                self.focus = Some(SettingsTarget::ProfileMore(index));
+            }
+        }
     }
 
     /// Returns whether the hover changed, so a caller can skip a repaint.
@@ -5015,18 +5059,13 @@ impl SettingsPanel {
         {
             self.recording = None;
         }
-        // The row menu's click-away, which is the pickers' own: a press
-        // anywhere that is not this menu or its trigger closes it, and a press
-        // *on* the trigger is `toggle_row_menu`'s job rather than this one's.
-        if self.row_menu.is_some_and(|index| {
-            !matches!(
-                target,
-                SettingsTarget::ProfileMore(open) | SettingsTarget::ProfileMoreItem(open, _)
-                    if open == index
-            )
-        }) {
-            self.row_menu = None;
-        }
+        // **The click-away is not here** (user ruling 2026-08-29). It used to
+        // be, for the `⋯` list alone and written as its own rectangle rule —
+        // which is how the picker beside it came to have none, and how
+        // `General ▸ Language` came to stand open under a press on the dialog's
+        // own background. Both popups leave by one door now
+        // ([`popup_press`]), asked by the runtime *before* this function: a
+        // press that misses the popup that is up never reaches here at all.
         match target {
             SettingsTarget::Close
             | SettingsTarget::Combo(_)
@@ -6390,6 +6429,138 @@ pub enum SettingsTarget {
     /// The × on an open picker's item — send that scheme's file to the Recycle
     /// Bin. [`Self::MenuItemEdit`]'s twin in every respect but the verb.
     MenuItemDelete(SettingsRow, usize),
+}
+
+/// **Every popup this dialog raises over its own page** — the window's `Popup`
+/// list one layer in, and the same finding that produced it (user report,
+/// 2026-08-29).
+///
+/// The dialog is a modal, so none of the window's nine can be up while it is and
+/// neither of these two is on that list: a press inside this dialog never
+/// reaches `mouse_input`'s popup arms, because `settings_mouse_input` answers
+/// first and answers everything. What the two lists share is the **rule** — a
+/// press outside the rectangle takes the popup down, and that press goes no
+/// further — and this enum is what lets the rule be written once for both of
+/// them instead of once per opener. Written once per opener is what it was: the
+/// `⋯` list had a click-away of its own inside [`SettingsPanel::press`] and the
+/// picker had none at all, so a reader who opened `General ▸ Language` and
+/// clicked the dialog's own background watched the list stay standing. That is
+/// E61's six hand-copied runs happening again in a smaller room.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogPopup {
+    /// A row's picker, hanging under that row's combo button (§7.1.6c).
+    Choice(SettingsRow),
+    /// A profile row's `⋯` list, by that row's place on the Profiles page.
+    RowMenu(usize),
+}
+
+/// **Which popup a hit answer came from**, or `None` for an answer that belongs
+/// to the page.
+///
+/// **The geometry is [`hit`]'s and is not repeated here.** A popup is asked
+/// before everything the page is holding, and every box of it — frame, item,
+/// greyed item, trailing mark, closing verb — answers with one of the popup's
+/// own targets. So "which target did the rectangle test give" *is* the rectangle
+/// test, and a second copy of the frames in this function would be the copy that
+/// goes stale the day a picker grows a scrollbar or an item grows a pencil.
+///
+/// Exhaustive on [`SettingsTarget`]: a target added later does not compile until
+/// it has said whether a popup can produce it.
+#[must_use]
+pub fn target_popup(target: SettingsTarget) -> Option<DialogPopup> {
+    match target {
+        // The picker's own six answers. `Menu` is its body between the items,
+        // `Choice` an item, `ChoiceRefused` a greyed one (§7.47 — the press
+        // chooses nothing and the list stays standing, which is precisely a
+        // press *inside* this popup), `MenuAction` the verb behind its last
+        // hairline, and the two `MenuItem*` the marks that live inside an item.
+        SettingsTarget::Menu(row)
+        | SettingsTarget::Choice(row, _)
+        | SettingsTarget::ChoiceRefused(row, _)
+        | SettingsTarget::MenuAction(row)
+        | SettingsTarget::MenuItemEdit(row, _)
+        | SettingsTarget::MenuItemDelete(row, _) => Some(DialogPopup::Choice(row)),
+        // The `⋯` list's two. `ProfileMore` is both this menu's body *and* the
+        // button that raises it — `hit` answers with it for the frame, for a
+        // refused item and for the trigger alike — which is exactly right: on
+        // the row whose menu is open it names the popup, and on any other row
+        // [`target_raises_a_popup`] names it an opener.
+        SettingsTarget::ProfileMore(index) | SettingsTarget::ProfileMoreItem(index, _) => {
+            Some(DialogPopup::RowMenu(index))
+        }
+        // Everything else is the page, the rail, the header, the scrim, or the
+        // editor sub-page — every one of them *under* a popup that is up.
+        SettingsTarget::Scrim
+        | SettingsTarget::Panel
+        | SettingsTarget::Close
+        | SettingsTarget::Nav(_)
+        | SettingsTarget::Combo(_)
+        | SettingsTarget::Slider(_)
+        | SettingsTarget::Record(_)
+        | SettingsTarget::RestoreRow(_)
+        | SettingsTarget::RestoreAll
+        | SettingsTarget::ProfileUp(_)
+        | SettingsTarget::ProfileDown(_)
+        | SettingsTarget::ProfileRow(_)
+        | SettingsTarget::ProfileEdit(_)
+        | SettingsTarget::ProfileNew
+        | SettingsTarget::EditorBack
+        | SettingsTarget::Field(_)
+        | SettingsTarget::EditorBrowse
+        | SettingsTarget::EnvName(_)
+        | SettingsTarget::EnvValue(_)
+        | SettingsTarget::EnvGhost(_)
+        | SettingsTarget::EnvRemove(_)
+        | SettingsTarget::EnvAdd
+        | SettingsTarget::EditorRestore
+        | SettingsTarget::EditorDelete
+        | SettingsTarget::Advanced(_)
+        | SettingsTarget::ResetAdvanced(_) => None,
+    }
+}
+
+/// **Whether this target is a button that raises one of the dialog's popups.**
+///
+/// The exception every menu in this program already makes for its own opener
+/// (the pane head's `⌄`, the graph toolbar's `All branches`): a press on an
+/// opener is not "outside", because swallowing it would shut the popup and leave
+/// the press with nothing to reopen it — a button you cannot toggle off, or one
+/// you have to press twice.
+///
+/// **Every** opener and not only the one that raised what is up, which is what
+/// makes pressing a second picker's button *switch* rather than merely close:
+/// one press, one popup, and the same sentence the window's own menus make when
+/// a second right press moves a context menu from one row to another. The switch
+/// itself belongs to the openers ([`SettingsPanel::toggle_menu`] and
+/// [`SettingsPanel::toggle_row_menu`], which each put the other away).
+#[must_use]
+pub fn target_raises_a_popup(target: SettingsTarget) -> bool {
+    matches!(
+        target,
+        SettingsTarget::Combo(_) | SettingsTarget::ProfileMore(_)
+    )
+}
+
+/// **What a press on this dialog is, given the popup standing over it.**
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopupPress {
+    /// Nothing is up, or the press landed inside the popup or on a button that
+    /// raises one: it goes on being the press it always was.
+    Through,
+    /// The press landed outside: **this popup goes away and the press goes no
+    /// further** (user ruling 2026-08-29).
+    Dismiss(DialogPopup),
+}
+
+/// The one door both of this dialog's popups leave by when a press misses them.
+#[must_use]
+pub fn popup_press(popup: Option<DialogPopup>, target: SettingsTarget) -> PopupPress {
+    match popup {
+        Some(popup) if target_popup(target) != Some(popup) && !target_raises_a_popup(target) => {
+            PopupPress::Dismiss(popup)
+        }
+        _ => PopupPress::Through,
+    }
 }
 
 /// One row's three boxes, and which row they belong to.
@@ -8649,7 +8820,7 @@ pub fn layout_for_menus(
                 text_column_right,
                 title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX),
             ];
-            let caps = line.capability.map(|_| {
+            let caps = line.capability.as_ref().map(|_| {
                 let line_of = |ordinal: f32| {
                     let top = desc[3]
                         + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX)
@@ -11065,7 +11236,7 @@ fn push_profile_page(
             tabular_numerals: false,
             clip: None,
         });
-        if let (Some(boxes), Some(text)) = (placed.caps, line.capability) {
+        if let (Some(boxes), Some(text)) = (placed.caps, line.capability.as_deref()) {
             let width = boxes[0][2] - boxes[0][0];
             for (box_, part) in boxes
                 .iter()
@@ -13415,6 +13586,101 @@ mod tests {
                  measured"
             );
         }
+    }
+
+    /// PIN (user ruling 2026-08-29) — **the same cap, held over the Chinese
+    /// column.**
+    ///
+    /// The rule above measures the language this process is running in, which
+    /// is English, and its own note says why: `description` reads the
+    /// process-wide language and this crate will not change one under the other
+    /// tests. The cost of that was paid twice in one afternoon — the Agent
+    /// page's three sentences were rewritten in Chinese, every one of them
+    /// measured shorter than the English it replaced, and three of the four
+    /// still came out of the window with a `…` on the third line.
+    ///
+    /// **Because a shorter sentence is not a shorter wrap.** `tooltip::wrap`
+    /// breaks at spaces and breaks a single over-wide word character by
+    /// character; a Chinese sentence has spaces only around its Latin words, so
+    /// a run of Han characters between two of them is one token. 「打开后，Folio
+    /// 在 Claude Code」 filled 168 of a 368px line and the next token was 306px,
+    /// so the line ended there with 200px of it unused. Total width says
+    /// nothing about this; only the wrap does.
+    ///
+    /// **The entry is found by the string the row drew.** There is no map from
+    /// a row to its `Text`, and writing one would be the same match arm twice —
+    /// so the walk asks `Text::ALL` which entry says, in English, exactly what
+    /// this row just said. An English string two entries share is skipped
+    /// rather than guessed at, and the count at the end is what keeps that
+    /// escape hatch from quietly emptying the test.
+    ///
+    /// **The measure is a CJK face's**, which is what the rule above could not
+    /// have: `bt_unicode::cluster_width` is this repository's own answer to
+    /// "is this glyph wide", and a wide glyph is one em by the definition of
+    /// every CJK font.
+    ///
+    /// Red gate: put the pre-2026-08-29 Chinese back on `DescClaudeHooks` and
+    /// this names it.
+    #[test]
+    fn no_chinese_settings_sentence_needs_a_fourth_line_either() {
+        use crate::i18n::{Lang, Text};
+        fn measure_in_a_cjk_face(text: &str, font_size_px: f32) -> f32 {
+            bt_unicode::graphemes(text)
+                .map(|cluster| bt_unicode::cluster_width(cluster) as f32)
+                .sum::<f32>()
+                * font_size_px
+                * TEST_ADVANCE_PER_EM
+        }
+        let metrics = StackMetrics::new(1.0);
+        let span = metrics.row_span(dialog_width());
+        let button = COMBO_MIN_WIDTH_LOGICAL_PX;
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        let editing = editing_content(&rows, &[], editor_subject(true));
+        let mut over: Vec<(SettingsRow, Text)> = Vec::new();
+        let mut measured = 0_usize;
+        for category in SettingsCategory::ALL {
+            let page = if category == SettingsCategory::Profiles {
+                editing.category_rows(category)
+            } else {
+                held.category_rows(category)
+            };
+            for row in page {
+                let english = row.description(&values());
+                if english.is_empty() {
+                    continue;
+                }
+                let mut saying = Text::ALL
+                    .into_iter()
+                    .filter(|entry| entry.in_lang(Lang::English) == english);
+                let Some(entry) = saying.next() else { continue };
+                if saying.next().is_some() {
+                    continue;
+                }
+                measured += 1;
+                let lines = wrapped_description(
+                    entry.in_lang(Lang::Chinese),
+                    metrics.desc_width(row, span, button),
+                    ROW_DESC_FONT_LOGICAL_PX,
+                    &mut measure_in_a_cjk_face,
+                );
+                if lines.last().is_some_and(|last| last.ends_with(ELLIPSIS)) {
+                    over.push((row, entry));
+                }
+            }
+        }
+        assert!(
+            over.is_empty(),
+            "these Chinese sentences do not fit three lines, which is copy to \
+             shorten rather than a rule to change: {over:?}"
+        );
+        // **And the walk really found the entries.** Every skip above is silent,
+        // so a change that broke the lookup would leave this passing on nothing.
+        assert!(
+            measured >= 30,
+            "only {measured} rows were matched to an entry — the lookup is \
+             broken, not the copy"
+        );
     }
 
     /// PIN (user ruling 2026-08-17) — **a picker shows eight items and scrolls
@@ -20559,6 +20825,265 @@ mod tests {
         );
     }
 
+    /// The `General` page with `Language`'s picker standing open — the dialog in
+    /// exactly the state the 2026-08-29 report was made against.
+    fn language_open() -> SettingsLayout {
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        layout_for_menu(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            Some(SettingsRow::Language),
+            None,
+            content(&rows, &lines),
+            SettingsCategory::General,
+            UNSCROLLED,
+            MENU_UNSCROLLED,
+            &mut flat(0.0),
+        )
+        .expect("this window can host the dialog")
+    }
+
+    /// RED GATE (user report and ruling, 2026-08-29) — **a press outside an open
+    /// dropdown closes it and goes no further.**
+    ///
+    /// The report: open `General ▸ Language`, click the dialog's own blank
+    /// background, and the list stays standing. Every other popup in this program
+    /// goes away on a press outside it, and this one could only be shut by
+    /// pressing its own button again or by picking something.
+    ///
+    /// The ruling is one rule for all of them: outside the rectangle takes it
+    /// down, **and that press is eaten** — it does not go on to reach the control
+    /// it landed on. So the second half of this gate presses things that are not
+    /// blank at all: the `×`, which would otherwise close the whole dialog, and a
+    /// word of the rail, which would otherwise turn the page. One layer per
+    /// gesture, which is what the first `Esc` already does.
+    ///
+    /// **The exception is an opener**, which every menu in this window already
+    /// makes for its own `⌄`: a press on a picker button is not outside, so a
+    /// second dropdown opens on the same press that shuts the first — the same
+    /// one-press switch a second right press makes of a context menu.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① `popup_press` answers `Through` for the panel — the report itself;
+    /// ② it answers `Through` for `Close` or for a rail word (the press leaks to
+    ///    the control under it, closing the dialog or turning the page);
+    /// ③ it answers `Dismiss` for a combo button (the switch becomes two
+    ///    presses, and a picker's own button can no longer toggle it shut);
+    /// ④ `target_popup` stops naming a picker item as the picker's, which makes
+    ///    choosing an option dismiss the list instead of picking from it.
+    #[test]
+    fn a_press_outside_an_open_dropdown_closes_it_and_goes_no_further() {
+        let layout = language_open();
+        let values = values();
+        let open = DialogPopup::Choice(SettingsRow::Language);
+        let up = Some(open);
+
+        // ① the list really is standing over the page, and a press in its body
+        // belongs to it.
+        let body = layout.menu.expect("the picker is open");
+        let (x, y) = centre(body);
+        assert_eq!(
+            popup_press(up, hit(&layout, &values, x, y)),
+            PopupPress::Through,
+            "the popup's own frame is not outside it"
+        );
+
+        // ② the dialog's own background — the press the report made.
+        let blank = (
+            f64::from(layout.frame[0]) + 4.0,
+            f64::from(layout.frame[3]) - 4.0,
+        );
+        assert_eq!(
+            hit(&layout, &values, blank.0, blank.1),
+            SettingsTarget::Panel,
+            "the foot of the dialog, away from every control"
+        );
+        assert_eq!(
+            popup_press(up, SettingsTarget::Panel),
+            PopupPress::Dismiss(open),
+            "and a press there takes the list down"
+        );
+
+        // ③ and a press on a live control is swallowed rather than run.
+        let (cx, cy) = centre(layout.close);
+        assert_eq!(
+            hit(&layout, &values, cx, cy),
+            SettingsTarget::Close,
+            "the ×, which is a control and not blank space"
+        );
+        for target in [
+            SettingsTarget::Close,
+            SettingsTarget::Scrim,
+            SettingsTarget::Nav(SettingsCategory::Shortcuts),
+            SettingsTarget::Slider(SettingsRow::Acrylic),
+        ] {
+            assert_eq!(
+                popup_press(up, target),
+                PopupPress::Dismiss(open),
+                "{target:?} is outside the open list, so the press ends there"
+            );
+        }
+
+        // ④ every opener is the exception, so one press switches lists.
+        for target in [
+            SettingsTarget::Combo(SettingsRow::Language),
+            SettingsTarget::Combo(SettingsRow::Theme),
+            SettingsTarget::ProfileMore(0),
+        ] {
+            assert_eq!(
+                popup_press(up, target),
+                PopupPress::Through,
+                "{target:?} raises a popup, so it owns the toggle"
+            );
+        }
+
+        // ⑤ and the panel really does put it away, leaving the dialog up.
+        let mut panel = keyboarded_on(SettingsCategory::General);
+        panel.toggle_menu(SettingsRow::Language);
+        assert_eq!(panel.popup_up(), Some(open));
+        panel.close_popup(open);
+        assert_eq!(panel.menu(), None, "the list is gone");
+        assert!(panel.is_open(), "and the dialog is not");
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Combo(SettingsRow::Language)),
+            "the keyboard goes back to the button it hung under, as Esc leaves it"
+        );
+        assert_eq!(panel.focus_ring(), None, "and a mouse leaves no ring");
+    }
+
+    /// RED GATE (2026-08-29) — **Escape closes an open dropdown**, and closes
+    /// only that.
+    ///
+    /// The pointer's door and the keyboard's are the same ruling read twice, so
+    /// the keyboard's is pinned beside it: one layer per press, the dialog still
+    /// standing afterwards, and the keyboard back on the button the list hung
+    /// under.
+    ///
+    /// Red gate: let `close_one_layer` fall through to `close()` while a picker
+    /// is open and the second assertion names a dialog that is already gone.
+    #[test]
+    fn escape_closes_an_open_dropdown() {
+        let mut panel = keyboarded_on(SettingsCategory::General);
+        panel.toggle_menu(SettingsRow::Language);
+        assert_eq!(
+            panel.popup_up(),
+            Some(DialogPopup::Choice(SettingsRow::Language))
+        );
+
+        assert_eq!(
+            keyed(&mut panel, SettingsKey::Escape),
+            SettingsKeyVerdict::Moved
+        );
+        assert_eq!(panel.popup_up(), None, "the list went");
+        assert!(panel.is_open(), "and the dialog stayed");
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Combo(SettingsRow::Language))
+        );
+    }
+
+    /// RED GATE (2026-08-29) — **a press inside the dropdown still picks**: the
+    /// reverse of the gate above, and the thing a click-away written one pixel
+    /// too wide would break.
+    ///
+    /// The whole list is asked, not one item: a rule that dismissed on `Menu`
+    /// (the body between the items) or on the scroll of a capped picker would
+    /// take the list down under the very hand reaching into it.
+    #[test]
+    fn a_press_inside_the_dropdown_still_picks() {
+        let layout = language_open();
+        let values = values();
+        let up = Some(DialogPopup::Choice(SettingsRow::Language));
+
+        assert!(
+            !layout.items.is_empty(),
+            "the Language picker draws its options"
+        );
+        for (index, item) in layout.items.iter().enumerate() {
+            let (x, y) = centre(*item);
+            let target = hit(&layout, &values, x, y);
+            assert_eq!(
+                target,
+                SettingsTarget::Choice(SettingsRow::Language, index),
+                "item {index} answers with its own choice"
+            );
+            assert_eq!(
+                popup_press(up, target),
+                PopupPress::Through,
+                "so the press reaches the picker's own verb"
+            );
+        }
+
+        // And every other answer a popup can give is its own too — the body
+        // between the items, the closing verb, and the marks that live inside an
+        // item.
+        for target in [
+            SettingsTarget::Menu(SettingsRow::Language),
+            SettingsTarget::MenuAction(SettingsRow::LightScheme),
+            SettingsTarget::MenuItemEdit(SettingsRow::LightScheme, 0),
+            SettingsTarget::MenuItemDelete(SettingsRow::LightScheme, 0),
+        ] {
+            let row = match target {
+                SettingsTarget::Menu(row)
+                | SettingsTarget::MenuAction(row)
+                | SettingsTarget::MenuItemEdit(row, _)
+                | SettingsTarget::MenuItemDelete(row, _) => row,
+                other => panic!("{other:?} is not one of the picker's answers"),
+            };
+            assert_eq!(
+                target_popup(target),
+                Some(DialogPopup::Choice(row)),
+                "{target:?} is the picker's own"
+            );
+            assert_eq!(
+                popup_press(Some(DialogPopup::Choice(row)), target),
+                PopupPress::Through
+            );
+        }
+    }
+
+    /// PIN (2026-08-29) — **the two popups this dialog raises are one at a
+    /// time**, which is E61's rule one layer in.
+    ///
+    /// The click-away that used to live inside [`SettingsPanel::press`] is what
+    /// kept them apart, and it is gone: the openers keep them apart now, which is
+    /// where the window's own menus keep it (`close_popups_except`).
+    #[test]
+    fn one_of_this_dialogs_popups_at_a_time() {
+        let mut panel = keyboarded_on(SettingsCategory::Profiles);
+        panel.toggle_row_menu(2);
+        assert_eq!(panel.popup_up(), Some(DialogPopup::RowMenu(2)));
+
+        panel.toggle_menu(SettingsRow::Language);
+        assert_eq!(
+            panel.popup_up(),
+            Some(DialogPopup::Choice(SettingsRow::Language)),
+            "the picker's opener put the row menu away"
+        );
+
+        panel.toggle_row_menu(1);
+        assert_eq!(
+            panel.popup_up(),
+            Some(DialogPopup::RowMenu(1)),
+            "and the row menu's opener put the picker away"
+        );
+        assert_eq!(panel.menu(), None);
+
+        // A row menu is the innermost rung, so it is what `popup_up` names while
+        // both fields somehow hold something — the same order `close_one_layer`
+        // unwinds in.
+        panel.close_popup(DialogPopup::RowMenu(1));
+        assert_eq!(panel.popup_up(), None);
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::ProfileMore(1)),
+            "the keyboard goes back to the ⋯ the list hung under"
+        );
+    }
+
     /// PIN: **an option this machine cannot start is skipped by the arrows and
     /// refused by Enter** — the same [`SettingsRow::option_enabled`] answer the
     /// hit test and the draw already read. A greyed item the keyboard could land
@@ -22128,7 +22653,7 @@ mod tests {
                 mark: ChromeMark::ProfilePowerShell,
                 title: "PowerShell 7",
                 command: "pwsh.exe -NoLogo".to_owned(),
-                capability: Some(Text::CapPowerShell.text()),
+                capability: Some(Text::CapPowerShell.text().to_owned()),
                 is_default: true,
                 default_is_automatic: false,
                 is_fallback: false,
@@ -22141,7 +22666,7 @@ mod tests {
                 mark: ChromeMark::ProfileUbuntu,
                 title: "WSL",
                 command: "wsl.exe --cd ~".to_owned(),
-                capability: Some(Text::CapWslBash.text()),
+                capability: Some(Text::CapWslBash.text().to_owned()),
                 is_default: false,
                 default_is_automatic: false,
                 is_fallback: false,
@@ -22167,7 +22692,7 @@ mod tests {
                 mark: ChromeMark::ProfileCmd,
                 title: "Command Prompt",
                 command: "cmd.exe".to_owned(),
-                capability: Some(Text::CapCmd.text()),
+                capability: Some(Text::CapCmd.text().to_owned()),
                 is_default: false,
                 default_is_automatic: false,
                 is_fallback: false,

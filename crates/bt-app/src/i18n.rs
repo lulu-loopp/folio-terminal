@@ -2089,7 +2089,7 @@ impl Text {
             // ── tab strip and rail ─────────────────────────────────────────
             Self::RailTabs => pick(lang, "Tabs", "标签"),
             Self::RailNewTab => pick(lang, "New tab", "新建标签"),
-            Self::ChooseProfile => pick(lang, "Choose a profile", "选择档案"),
+            Self::ChooseProfile => pick(lang, "Choose a profile", "选择配置文件"),
             Self::Pin => pick(lang, "Pin", "固定"),
             // Names the verb *and* the reason, because "Unpin" alone does not
             // explain where the close button went (mock-up 4204).
@@ -2148,7 +2148,7 @@ impl Text {
             Self::RowTabLayout => pick(lang, "Tab layout", "标签布局"),
             Self::RowSidebar => pick(lang, "Sidebar", "侧栏"),
             Self::RowSplitDirection => pick(lang, "Split direction", "拆分方向"),
-            Self::RowDefaultProfile => pick(lang, "Default profile", "默认档案"),
+            Self::RowDefaultProfile => pick(lang, "Default profile", "默认配置文件"),
             Self::RowLanguage => pick(lang, "Language", "语言"),
             Self::RowTerminalFont => pick(lang, "Terminal font", "终端字体"),
             Self::RowFontSize => pick(lang, "Font size", "字号"),
@@ -2216,7 +2216,7 @@ impl Text {
             Self::DescDefaultProfile => pick(
                 lang,
                 "Which profile a new tab opens, and which one Folio starts with.",
-                "新建标签时打开哪个档案，以及 Folio 启动时用哪个。",
+                "新建标签时打开哪个配置，以及 Folio 启动时用哪个。",
             ),
             // **It used to say when it took effect** — "Applies the next time
             // Folio starts" — because that was the one surprising thing about
@@ -2385,7 +2385,11 @@ impl Text {
 
             // ── the `˅` profile menu ───────────────────────────────────────
             Self::ProfileHintDefault => pick(lang, "default", "默认"),
-            Self::ProfileHintUnavailable => pick(lang, "not installed", "未安装"),
+            // 「没找到」and not 「未安装」(user ruling 2026-08-29): all this
+            // window did was look for a file and fail to find it. Whether the
+            // program is installed somewhere it did not look is a claim it
+            // cannot make, and 「未安装」 makes it.
+            Self::ProfileHintUnavailable => pick(lang, "not installed", "没找到"),
             Self::ProfileHintCurrent => pick(lang, "current", "当前"),
             Self::ProfileFilesPane => pick(lang, "Files pane", "文件窗格"),
             Self::ProfileFilesPaneHint => pick(lang, "this tab", "本标签"),
@@ -2488,10 +2492,15 @@ impl Text {
                 "Preview failed: image could not be loaded",
                 "预览失败：图片无法载入",
             ),
+            // **Not "image worker"** (user ruling 2026-08-29): the reader has
+            // never met the thing that stopped, and naming it tells them
+            // nothing they can act on. What is true and useful is that this
+            // picture did not get drawn — which is the same sentence the line
+            // above says about a picture that could not be read.
             Self::PreviewFailedImageWorker => pick(
                 lang,
-                "Preview failed: image worker is unavailable",
-                "预览失败：图片工作线程不可用",
+                "Preview failed: this picture could not be drawn",
+                "预览失败：无法绘制这张图片",
             ),
             Self::PreviewFailedSeatTooSmall => pick(
                 lang,
@@ -2571,8 +2580,14 @@ impl Text {
             }
 
             // ── the Profiles page (§7.1.6c-6) ──────────────────
-            Self::NavProfiles => pick(lang, "Profiles", "档案"),
-            Self::CategoryProfiles => pick(lang, "PROFILES", "档案"),
+            // 「配置文件」and not 「档案」(user ruling 2026-08-29): it is what the
+            // Chinese Windows Terminal calls the same object, so a reader who
+            // arrives from there reads one word for one thing. 「档案」 is a
+            // record in a filing cabinet, which is what the row is not. Inside a
+            // sentence the short form is 「这个配置」/「默认配置」 — the long noun
+            // is the page's name, not a word to repeat four times a line.
+            Self::NavProfiles => pick(lang, "Profiles", "配置文件"),
+            Self::CategoryProfiles => pick(lang, "PROFILES", "配置文件"),
             Self::ProfilesDuplicate => pick(lang, "Duplicate", "复制"),
             // Lower case, because it is a badge and not a heading: the type
             // raises it in the English and there is no case to raise in the
@@ -2580,27 +2595,38 @@ impl Text {
             Self::ProfilesBadgeDefault => pick(lang, "default", "默认"),
             Self::ProfilesBadgeDefaultAutomatic => pick(lang, "automatic default", "自动默认"),
             Self::ProfilesBadgeHidden => pick(lang, "hidden", "已隐藏"),
+            // **The four capability sentences say what the reader gets, in the
+            // reader's own words** (user ruling 2026-08-29). 「提示符标记」 was a
+            // word-for-word rendering of "prompt marks" and named the wrong
+            // thing — what gets marked is the command, not the prompt;
+            // 「目录」 alone is any folder, and the one meant is the one the shell
+            // is standing in; 「超链接」 is nobody's word for a link any more. The
+            // list is commas all the way and 「与」 is gone: it is an inventory,
+            // not a sentence with a last item.
             Self::CapFull => pick(
                 lang,
                 "Prompt marks, directory, exit codes and hyperlinks",
-                "提示符标记、目录、退出码与超链接",
+                "命令标记、当前目录、退出码、链接",
             ),
             Self::CapPowerShell => pick(
                 lang,
                 "Prompt marks, directory, exit codes and hyperlinks — with folio.ps1 dot-sourced",
-                "提示符标记、目录、退出码与超链接 —— 前提是已点源 folio.ps1",
+                "命令标记、当前目录、退出码、链接；点源 folio.ps1 之后才有",
             ),
             Self::CapWslBash => pick(
                 lang,
                 "Prompt marks, directory, exit codes and hyperlinks — on a bash login only",
-                "提示符标记、目录、退出码与超链接 —— 仅限 bash 登录",
+                "命令标记、当前目录、退出码、链接；只在登录 shell 是 bash 时生效",
             ),
             Self::CapCmd => pick(
                 lang,
                 "Directory and hyperlinks; no prompt marks, no exit codes",
-                "目录与超链接；没有提示符标记，没有退出码",
+                "当前目录、链接；没有命令标记和退出码",
             ),
-            Self::CapNone => pick(lang, "No shell integration", "无 shell 集成"),
+            // 「整合」 and not 「集成」 for `shell integration` throughout (user
+            // ruling 2026-08-29): the notice strip above the pane already said
+            // 「整合」, and one object may only have one name.
+            Self::CapNone => pick(lang, "No shell integration", "不带 shell 整合"),
             // 「表格」is what every Chinese markdown editor calls this object, so
             // the row reads as the same noun the reader already knows.
             Self::RowTables => pick(lang, "Tables", "表格"),
@@ -2637,30 +2663,30 @@ impl Text {
             Self::ProfilesDelete => pick(lang, "Delete", "删除"),
             Self::ProfilesSetDefault => pick(lang, "Set as default", "设为默认"),
             Self::ProfilesAlreadyDefault => pick(lang, "Already the default", "已经是默认"),
-            Self::ProfilesNew => pick(lang, "New profile", "新建档案"),
+            Self::ProfilesNew => pick(lang, "New profile", "新建配置文件"),
             Self::ProfilesRowName => pick(lang, "Name", "名称"),
             Self::ProfilesRowNameDesc => pick(
                 lang,
                 "What this profile is called on tabs, in the profile picker and in this list.",
-                "这个档案在标签、选择器和这份列表里显示的名字。",
+                "这个配置在标签、选择器和这份列表中显示的名称。",
             ),
             Self::ProfilesRowProgram => pick(lang, "Program", "程序"),
             Self::ProfilesRowProgramDesc => pick(
                 lang,
                 "The program a new tab of this profile starts.",
-                "这个档案新建标签时启动的程序。",
+                "这个配置新建标签时启动的程序。",
             ),
             Self::ProfilesRowStartingDir => pick(lang, "Starting directory", "起始目录"),
             Self::ProfilesRowStartingDirDesc => pick(
                 lang,
                 "The folder a new tab of this profile opens in.",
-                "这个档案的新标签在哪个文件夹里打开。",
+                "这个配置的新标签在哪个文件夹中打开。",
             ),
             Self::ProfilesRowColour => pick(lang, "Colour", "颜色"),
             Self::ProfilesRowColourDesc => pick(
                 lang,
                 "The colour that marks this profile on tabs and in menus.",
-                "在标签和菜单里标示这个档案的颜色。",
+                "在标签和菜单中标示这个配置的颜色。",
             ),
             Self::ProfilesInherit => pick(lang, "The current pane's folder", "当前窗格的文件夹"),
             Self::ProfilesHome => pick(lang, "Home", "主目录"),
@@ -2685,15 +2711,15 @@ impl Text {
             Self::ProfilesRowEnvDesc => pick(
                 lang,
                 "Set for every session this profile starts, over what Folio sets itself.",
-                "为这个档案启动的每个会话设置，覆盖 Folio 自己设的值。",
+                "为这个配置启动的每个会话设置，覆盖 Folio 自己设定的值。",
             ),
-            Self::ProfilesRowHyperlink => pick(lang, "Force hyperlinks", "强制超链接"),
+            Self::ProfilesRowHyperlink => pick(lang, "Force hyperlinks", "强制链接"),
             Self::ProfilesRowHyperlinkDesc => pick(
                 lang,
                 "Sets FORCE_HYPERLINK, which programs read before deciding to emit a link.",
-                "设置 FORCE_HYPERLINK，程序在决定是否输出链接前会读它。",
+                "设置 FORCE_HYPERLINK，程序在决定是否输出链接前会读取它。",
             ),
-            Self::ProfilesRowIntegration => pick(lang, "Shell integration", "Shell 集成"),
+            Self::ProfilesRowIntegration => pick(lang, "Shell integration", "Shell 整合"),
             Self::ProfilesEnvAdd => pick(lang, "Add", "添加"),
             Self::ProfilesEnvName => pick(lang, "Name", "名称"),
             Self::ProfilesEnvValue => pick(lang, "Value", "值"),
@@ -2701,23 +2727,23 @@ impl Text {
             Self::ProfilesOn => pick(lang, "On", "开"),
             Self::ProfilesOff => pick(lang, "Off", "关"),
             Self::ProfilesRestoreAll => pick(lang, "Restore all defaults", "全部恢复默认"),
-            Self::ProfilesDeleteBtn => pick(lang, "Delete profile", "删除档案"),
+            Self::ProfilesDeleteBtn => pick(lang, "Delete profile", "删除配置文件"),
             Self::ProfilesBrowse => pick(lang, "Browse…", "浏览…"),
             Self::ProfilesCannotHideDefault => pick(
                 lang,
                 "The default profile stays in the picker",
-                "默认档案留在选择器里",
+                "默认配置始终留在选择器中",
             ),
             Self::ProfilesCannotHideFallback => pick(
                 lang,
                 "Folio falls back to this profile when another cannot start",
-                "别的档案起不来时，Folio 会退到这个档案",
+                "其他配置无法启动时，Folio 退回到这个配置",
             ),
-            Self::ProfilesNameBlank => pick(lang, "A profile needs a name", "档案需要一个名字"),
+            Self::ProfilesNameBlank => pick(lang, "A profile needs a name", "配置文件需要一个名称"),
             Self::ProfilesNameTaken => pick(
                 lang,
                 "Another profile is already called this",
-                "已经有别的档案叫这个名字",
+                "已有另一个配置使用这个名称",
             ),
             Self::ProfilesUndo => pick(lang, "Undo", "撤销"),
 
@@ -2731,22 +2757,22 @@ impl Text {
             Self::CapFullNoLinks => pick(
                 lang,
                 "Prompt marks, directory and exit codes; no hyperlinks",
-                "提示符标记、目录与退出码；没有超链接",
+                "命令标记、当前目录、退出码；没有链接",
             ),
             Self::CapPowerShellNoLinks => pick(
                 lang,
                 "Prompt marks, directory and exit codes with folio.ps1 dot-sourced; no hyperlinks",
-                "已点源 folio.ps1 时有提示符标记、目录与退出码；没有超链接",
+                "点源 folio.ps1 之后有命令标记、当前目录、退出码；没有链接",
             ),
             Self::CapWslBashNoLinks => pick(
                 lang,
                 "Prompt marks, directory and exit codes on a bash login only; no hyperlinks",
-                "仅 bash 登录时有提示符标记、目录与退出码；没有超链接",
+                "只在登录 shell 是 bash 时有命令标记、当前目录、退出码；没有链接",
             ),
             Self::CapCmdNoLinks => pick(
                 lang,
                 "Directory; no prompt marks, no exit codes, no hyperlinks",
-                "目录；没有提示符标记，没有退出码，没有超链接",
+                "当前目录；没有命令标记、没有退出码、没有链接",
             ),
             // The mock-up's own wording for this row (`.pf-view[data-view=edit]`,
             // the `Shell integration` line), which says what is lost and then
@@ -2754,12 +2780,12 @@ impl Text {
             Self::CapNoneLong => pick(
                 lang,
                 "No prompt marks, no directory, no exit codes. Hyperlinks are declared anyway",
-                "没有提示符标记、没有目录、没有退出码。超链接仍然会被声明",
+                "没有命令标记、没有当前目录、没有退出码。链接照常声明",
             ),
             Self::CapNoneLongNoLinks => pick(
                 lang,
                 "No prompt marks, no directory, no exit codes, no hyperlinks",
-                "没有提示符标记、没有目录、没有退出码、没有超链接",
+                "没有命令标记、没有当前目录、没有退出码、没有链接",
             ),
 
             // ── the Shortcuts page ─────────────────────────────────────────
@@ -3142,7 +3168,7 @@ impl Text {
             Self::DescKeyHints => pick(
                 lang,
                 "Hold a modifier for a moment and this window lists the shortcuts that start with it. The list never takes a keystroke.",
-                "按住修饰键片刻，这扇窗会列出以它开头的快捷键。这个列表不会截走任何按键。",
+                "按住修饰键片刻，窗口中列出以该键开头的快捷键。此列表不会截走任何按键。",
             ),
             // ── the tree row's menu, completed (user ruling 2026-08-25) ────
             //
@@ -3280,18 +3306,28 @@ impl Text {
                 "程序主动请求时，可以在你的桌面上放一条消息。它所在的窗格正显示在聚焦的窗口里时，什么都不弹。",
             ),
             // ── the turn-end lane ──────────────────────────────────────────
-            // 「回合结束」and not 「Agent 说完了」: the row is about a moment,
-            // and the moment is the one an agent's own hooks, bells and
-            // sequences all report. English keeps the same shape.
-            Self::RowTurnEndNotifications => pick(lang, "Turn finished", "回合结束"),
+            // 「回合结束也提醒」and not 「回合结束」(user ruling 2026-08-29): the
+            // row is a *second* occasion added to the one that is always
+            // reported, and a title naming only the occasion read as the switch
+            // that turns turn-end reporting on. 「也」 is the whole difference.
+            // The class of program keeps its Latin name — 「智能体」 is a word
+            // this readership does not use for these tools.
+            Self::RowTurnEndNotifications => pick(lang, "Turn finished", "回合结束也提醒"),
             // Two clauses and no third. The first is what happens, ordered by
             // how far away the reader is; the second is the boundary — this row
             // owns the desktop and owns nothing inside the window, which is the
             // question a reader asks before switching it off.
+            //
+            // **The Chinese names both routes to the desktop** (§7.1.5o ⑩): a
+            // taskbar set to hide itself has no button to flash, so that machine
+            // gets the notification rather than nothing. The English says
+            // 「minimised」 alone and is the shorter half-truth of the pair; the
+            // sentence a reader on such a machine reads must not be wrong about
+            // the machine they are on.
             Self::DescTurnEndNotifications => pick(
                 lang,
                 "When an agent finishes a turn, this window's taskbar button flashes, or a message goes to your desktop if the window is minimised. Marks inside the window are unaffected.",
-                "一个回合结束时，闪动这扇窗的任务栏按钮；窗口最小化时改为在桌面上放一条消息。窗内的记号不受影响。",
+                "回合结束时同样提醒，即使 agent 并非在等待输入：窗口不在前台时闪烁任务栏按钮；窗口最小化或任务栏自动隐藏时发送系统通知。关闭后仅在等待输入时提醒。",
             ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
             Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),
@@ -3309,10 +3345,21 @@ impl Text {
             // Two sentences and no third: what is missing, and what it is used
             // for. Not why it is opt-in, not what the reader is being asked to
             // trust us with — the strip has two verbs and they say the rest.
+            //
+            // **The second sentence names the three things, and it names
+            // inline formulas among them** (user ruling 2026-08-29, reported on
+            // a fresh machine). `$$…$$` renders on any machine; `$…$` renders
+            // only on a line OSC 133 has marked as command output
+            // (`bt_detect::InlineMathSite::Ineligible` — "no shell integration
+            // therefore means no inline rendering on the primary screen,
+            // ever"). A reader watching one kind of formula typeset and the
+            // other stay as source has no way to connect that to a line missing
+            // from their `$PROFILE`, and "command marks and status" did not
+            // tell them.
             Self::PowerShellNoticeBody => pick(
                 lang,
-                "PowerShell integration is not installed. Folio uses it for command marks and status.",
-                "PowerShell 整合未安装。Folio 用它来标记命令与显示状态。",
+                "PowerShell integration is not installed. It marks commands, follows the current directory and typesets inline $…$ formulas in output.",
+                "尚未安装 PowerShell 整合。它提供命令标记、当前目录跟随，以及输出中行内公式 $…$ 的渲染。",
             ),
             Self::PowerShellNoticeAdd => pick(lang, "Add to $PROFILE", "加进 $PROFILE"),
             Self::PowerShellNoticeNever => pick(lang, "Don't show again", "不再提示"),
@@ -3326,23 +3373,45 @@ impl Text {
                 "已加进 $PROFILE。新开的 shell 生效。",
             ),
             Self::RowPowerShellOffer => {
-                pick(lang, "Offer PowerShell integration", "PowerShell 集成提示")
+                pick(lang, "Offer PowerShell integration", "PowerShell 整合提示")
             }
+            // The same three things as the strip, in the same order, so a
+            // reader who read one and then looked for the switch reads one list
+            // twice rather than two lists once.
             Self::DescPowerShellOffer => pick(
                 lang,
-                "A PowerShell pane whose $PROFILE does not load folio.ps1 offers to add it. Off, the offer never appears.",
-                "PowerShell 窗格的 $PROFILE 没有加载 folio.ps1 时，会提示把它加进去。关闭后不再提示。",
+                "A PowerShell pane whose $PROFILE does not load folio.ps1 offers to add it. Integration marks commands, follows the directory and typesets inline $…$ formulas.",
+                "PowerShell 窗格的 $PROFILE 未加载 folio.ps1 时，提示将其加入。整合提供命令标记、当前目录跟随，以及输出中行内公式 $…$ 的渲染。关闭后不再提示。",
             ),
-            Self::RowClaudeHooks => pick(lang, "Claude Code hooks", "Claude Code 钩子"),
+            // **The three installer rows are 「通知」 rows** (user ruling
+            // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window
+            // writes into somebody else's configuration file; what the reader is
+            // switching on is a notification. The word `hook` stays inside the
+            // sentence, in Latin, because it is what the reader will look for in
+            // their own settings file — the copy guide's own exemption.
+            //
+            // The three sentences are one template: 「打开后，Folio 在 <程序>
+            // 的用户级<设置|配置|目录>(<路径>)中写入 <什么>。<此后屏幕上出现什么>。
+            // <一句边界>。」
+            //
+            // **What the desktop does is said once, by the row that owns it.**
+            // Each of these three could have ended by naming the taskbar button
+            // and the desktop message, and the first draft did; three rows
+            // repeating the same two clauses put this sentence at 1548px in a
+            // 1104px column (three lines of 368px), which the copy guide calls a
+            // copy fault. The occasion is this row's — a mark on the tab — and
+            // where the window takes it from there belongs to 「回合结束也提醒」
+            // and 「通知」, which state it in full and are on the same two pages.
+            Self::RowClaudeHooks => pick(lang, "Claude Code hooks", "Claude Code 通知"),
             Self::DescClaudeHooks => pick(
                 lang,
                 "Adds hooks to your ~/.claude/settings.json, or CLAUDE_CONFIG_DIR, so Claude Code tells this window when it is waiting for you. Nothing is written into a project folder.",
-                "在你的 ~/.claude/settings.json 或 CLAUDE_CONFIG_DIR 里加上 hooks，让 Claude Code 在等你回答时告诉这扇窗。不会写进任何项目文件夹。",
+                "打开后，Folio 在 Claude Code 的用户级设置（~/.claude/settings.json）中写入 hook；等待你输入时对应标签显示提醒标记，不改动任何项目目录。",
             ),
             Self::ClaudeHooksAddedToast => pick(
                 lang,
                 "Added to ~/.claude/settings.json. Takes effect in a new Claude Code session.",
-                "已加进 ~/.claude/settings.json。新开的 Claude Code 会话生效。",
+                "已写入 ~/.claude/settings.json。新的 Claude Code 会话开始生效。",
             ),
             Self::ClaudeHooksRemovedToast => pick(
                 lang,
@@ -3352,7 +3421,7 @@ impl Text {
             Self::ClaudeHooksFailedToast => pick(
                 lang,
                 "Claude Code's settings were not changed",
-                "Claude Code 的设置没有被改动",
+                "Claude Code 的设置未改动",
             ),
             // 「卡片高度」rather than 「卡片身高」: the column's own word for the
             // thing is 卡片 and 高度 is what a settings row measures, which is the
@@ -3423,7 +3492,7 @@ impl Text {
             Self::WebFailRuntimeSay => pick(
                 lang,
                 "Microsoft Edge WebView2 Runtime is not installed.",
-                "未安装 Microsoft Edge WebView2 Runtime。",
+                "没找到 Microsoft Edge WebView2 Runtime。",
             ),
             Self::WebFailRuntimeVerb => pick(lang, "Download the runtime", "下载运行时"),
             // States what happened and stops. It does not guess why — the code
@@ -3464,27 +3533,33 @@ impl Text {
             // verb differently would read as a different verb.
             Self::PaneMenuMoveToWindow => pick(lang, "Move to window", "移到窗口"),
             // ── the Agents page ────────────────────────────────────────────
-            // 「Agents」stays in Latin in both columns and it is the honest
+            // The word stays in Latin in both columns and it is the honest
             // reading rather than a gap in the table: what the page is about is
             // the class of program that calls itself an agent, and every one of
             // them — Claude Code, codex — is written this way in Chinese prose
-            // too. Upper-cased at the source for the heading, as every other page
-            // is, and lower-cased by hand for the rail.
-            Self::CategoryAgents => pick(lang, "AGENTS", "AGENTS"),
-            Self::NavAgents => pick(lang, "Agents", "Agents"),
-            // 「通知程序」and not 「通知」: what the row installs is a *program*
-            // codex runs, and the row three lines up already owns the word for
-            // the thing a program puts on your desktop.
-            Self::RowCodexNotify => pick(lang, "Codex notify", "Codex 通知程序"),
+            // too. 「智能体」 is refused by name (user ruling 2026-08-29): it is a
+            // word out of a translated research paper and no reader of this page
+            // calls these tools that.
+            //
+            // **The Chinese column is singular** (same ruling): Chinese does not
+            // inflect for number, so the name of a class of thing is the bare
+            // noun. Upper-cased at the source for the heading, as every other
+            // page is, and lower-cased by hand for the rail.
+            Self::CategoryAgents => pick(lang, "AGENTS", "AGENT"),
+            Self::NavAgents => pick(lang, "Agents", "Agent"),
+            // 「通知」, the same word as its two neighbours: what the reader is
+            // switching on is a notification, and `notify` is the name of the
+            // key it writes rather than a second kind of thing.
+            Self::RowCodexNotify => pick(lang, "Codex notify", "Codex 通知"),
             Self::DescCodexNotify => pick(
                 lang,
                 "Adds a notify program to your ~/.codex/config.toml, or CODEX_HOME, so codex tells this window when a turn has ended. It does not report a codex waiting for you.",
-                "在你的 ~/.codex/config.toml 或 CODEX_HOME 里加上 notify 程序，让 codex 在一个回合结束时告诉这扇窗。它不报告它在等你回答。",
+                "打开后，Folio 在 Codex 的用户级配置（~/.codex/config.toml）中写入 notify 程序。Codex 仅在回合结束时发出通知，不区分是否在等待输入。",
             ),
             Self::CodexNotifyAddedToast => pick(
                 lang,
                 "Added to ~/.codex/config.toml. Takes effect in a new codex session.",
-                "已加进 ~/.codex/config.toml。新开的 codex 会话生效。",
+                "已写入 ~/.codex/config.toml。新的 codex 会话开始生效。",
             ),
             Self::CodexNotifyRemovedToast => pick(
                 lang,
@@ -3494,31 +3569,31 @@ impl Text {
             Self::CodexNotifyFailedToast => pick(
                 lang,
                 "codex's configuration was not changed",
-                "codex 的配置没有被改动",
+                "codex 的配置未改动",
             ),
             // 「Copilot CLI」 stays in Latin on both sides, as 「Claude Code」 does
             // two rows up and for its reason: it is the program's own name, and
             // the row beside it already spells the same kind of thing that way.
-            Self::RowCopilotHooks => pick(lang, "Copilot CLI hooks", "Copilot CLI 钩子"),
+            Self::RowCopilotHooks => pick(lang, "Copilot CLI hooks", "Copilot CLI 通知"),
             Self::DescCopilotHooks => pick(
                 lang,
                 "Adds a hook file to your ~/.copilot/hooks/, or COPILOT_HOME, so Copilot CLI tells this window when it is waiting for you. Nothing is written into a project folder.",
-                "在你的 ~/.copilot/hooks/ 或 COPILOT_HOME 里加上一个 hook 文件，让 Copilot CLI 在等你回答时告诉这扇窗。不会写进任何项目文件夹。",
+                "打开后，Folio 在 Copilot CLI 的用户级目录（~/.copilot/hooks/）中写入一个 hook 文件；等待你输入时对应标签显示提醒标记，不改动任何项目目录。",
             ),
             Self::DescCopilotHooksTooOld => pick(
                 lang,
                 "This machine's Copilot CLI is older than 1.0.26. Earlier versions report permission prompts you were never shown.",
-                "本机的 Copilot CLI 早于 1.0.26。更早的版本会报告并没有真的问过你的权限提示。",
+                "本机的 Copilot CLI 版本低于 1.0.26。更早的版本会把并未向你显示过的权限询问也报告出来。",
             ),
             Self::DescCopilotHooksDisabled => pick(
                 lang,
                 "Hooks are switched off in your ~/.copilot/settings.json, so a file installed here would not run.",
-                "你的 ~/.copilot/settings.json 里关掉了 hooks，装在这里的文件不会运行。",
+                "你的 ~/.copilot/settings.json 中已关闭 hooks，这里写入的文件不会运行。",
             ),
             Self::CopilotHooksAddedToast => pick(
                 lang,
                 "Added to ~/.copilot/hooks/folio.json. Takes effect in a new copilot session.",
-                "已加进 ~/.copilot/hooks/folio.json。新开的 copilot 会话生效。",
+                "已写入 ~/.copilot/hooks/folio.json。新的 copilot 会话开始生效。",
             ),
             Self::CopilotHooksRemovedToast => pick(
                 lang,
@@ -3528,7 +3603,7 @@ impl Text {
             Self::CopilotHooksFailedToast => pick(
                 lang,
                 "copilot's hooks were not changed",
-                "copilot 的 hooks 没有被改动",
+                "copilot 的 hooks 未改动",
             ),
 
             // ── the shortcut recorder ──────────────────────────────────────
@@ -4647,11 +4722,77 @@ pub fn unavailable_profile_tip(profile_title: &str) -> String {
 /// **The row's sentence becomes the reason** (mock-up, `.row.unavailable`): a
 /// shell that is not on this machine has no capabilities to report, and the one
 /// line the row has room for is the reason it cannot run.
+///
+/// 「没找到」 and not 「未安装」 (user ruling 2026-08-29): what happened is that a
+/// list of places was walked and no file was found at any of them. Whether the
+/// program is installed somewhere that was not walked is a different question,
+/// and the next function is the answer to the case that keeps arising.
 #[must_use]
 pub fn profile_not_installed(profile_title: &str) -> String {
-    match current() {
+    profile_not_installed_in(current(), profile_title)
+}
+
+fn profile_not_installed_in(lang: Lang, profile_title: &str) -> String {
+    match lang {
         Lang::English => format!("{profile_title} is not installed"),
-        Lang::Chinese => format!("未安装 {profile_title}"),
+        Lang::Chinese => format!("没找到 {profile_title}"),
+    }
+}
+
+/// The same row when the program is one of the built-in **agents** (user ruling
+/// 2026-08-29, reported from a machine whose codex lives inside WSL).
+///
+/// A greyed `Codex` on a machine where `codex` runs every day is a row that is
+/// **right and useless**: this window looks on Windows, that install is inside a
+/// WSL distribution, and no amount of looking harder on Windows would find it.
+/// So the sentence says where it looked, and the line under it says the two
+/// things a reader can do about it — both of which this build already supports
+/// and neither of which is discoverable from a greyed row.
+///
+/// **Two strings and not one**, because they land in the row's two boxes: the
+/// reason takes the line a row's command normally occupies and is cut with an
+/// ellipsis, and the way out takes the pair of lines a row's capabilities
+/// normally occupy and wraps across them. A single sentence would have to fit
+/// the first of those.
+#[must_use]
+pub fn agent_not_found_on_windows(profile_title: &str) -> String {
+    agent_not_found_on_windows_in(current(), profile_title)
+}
+
+fn agent_not_found_on_windows_in(lang: Lang, profile_title: &str) -> String {
+    match lang {
+        Lang::English => format!("{profile_title} was not found on Windows"),
+        Lang::Chinese => format!("在 Windows 中未找到 {profile_title}"),
+    }
+}
+
+/// The way out, under [`agent_not_found_on_windows`]: the profile that already
+/// starts a WSL shell, or a profile of the reader's own that starts this one
+/// command inside it.
+///
+/// `command` is what the reader types to start the agent — the name this table
+/// asks `PATH` for — so the arguments printed here are the arguments that work.
+#[must_use]
+pub fn agent_inside_wsl_hint(command: &str) -> String {
+    agent_inside_wsl_hint_in(current(), command)
+}
+
+fn agent_inside_wsl_hint_in(lang: Lang, command: &str) -> String {
+    match lang {
+        Lang::English => format!(
+            "If it is inside WSL, run the WSL profile, or add one with program wsl.exe and arguments -e {command}"
+        ),
+        // **The Chinese is short between its Latin tokens, and that is a
+        // layout fact rather than a style preference.** This pair of lines
+        // wraps at spaces, and a Chinese sentence has spaces only around its
+        // Latin words — so a run of Han characters between two of them is one
+        // unbreakable token. 「配置的窗格中运行，或新建配置：程序」 is 17 characters,
+        // 204px of a 339px line, which pushed the rest of the sentence onto the
+        // second line and cut `opencode` in half. 「配置启动，或新建配置：程序」 is
+        // four characters shorter and the whole sentence fits.
+        Lang::Chinese => format!(
+            "若安装在 WSL 内，可从 WSL 配置启动，或新建配置：程序 wsl.exe，参数 -e {command}"
+        ),
     }
 }
 
@@ -4935,7 +5076,7 @@ pub fn unknown_profile_banner_text(unknown: &str, started: &str) -> String {
         Lang::English => {
             format!("There is no profile {unknown:?}; using {started} instead.")
         }
-        Lang::Chinese => format!("没有名为 {unknown:?} 的档案，改用 {started}。"),
+        Lang::Chinese => format!("没有名为 {unknown:?} 的配置，改用 {started}。"),
     }
 }
 
@@ -5875,7 +6016,7 @@ fn profiles_file_unreadable_in(lang: Lang, file: &str) -> String {
         Lang::English => {
             format!("{file} could not be read; the profiles this build ships are in force")
         }
-        Lang::Chinese => format!("{file} 无法读取；现在生效的是这个版本自带的档案"),
+        Lang::Chinese => format!("{file} 无法读取；现在生效的是随程序自带的配置文件"),
     }
 }
 
@@ -5899,7 +6040,7 @@ fn profiles_file_kept_in(lang: Lang, file: &str) -> String {
         Lang::English => {
             format!("{file} could not be read; the profiles already in force were kept")
         }
-        Lang::Chinese => format!("{file} 无法读取；保留了正在生效的档案"),
+        Lang::Chinese => format!("{file} 无法读取；保留了正在生效的配置文件"),
     }
 }
 
@@ -6467,6 +6608,115 @@ mod tests {
         }
     }
 
+    /// PIN (user ruling 2026-08-29) — **the window only says things the reader
+    /// can see.**
+    ///
+    /// The gate above holds a line about *style* — words this codebase uses
+    /// about its own insides. This one holds a line about **what a sentence is
+    /// allowed to refer to**, and it is a stricter line: a name may be perfectly
+    /// ordinary English or Chinese and still name an object that exists only in
+    /// this repository. 「按通知规则提醒」 was the sentence that produced the
+    /// ruling — every word of it is plain Chinese, and the "rule" it points at
+    /// is the three-tier reach ladder of §7.1.5o, which no reader has ever been
+    /// shown. So is 「第一档」, so is `episode`, so is `image worker`.
+    ///
+    /// **What a sentence may refer to** is: something on the screen (a tab, a
+    /// mark, the taskbar button, a desktop notification), a settings row by the
+    /// name printed on it, a path or a key in the reader's own files, or a
+    /// product's name. Where a row needs to say what another row does, it names
+    /// that row, and if the behaviour is short it simply states it.
+    ///
+    /// Matching: latin words on word boundaries in **both** columns, because a
+    /// Chinese sentence quoting `lane` has leaked the same word; Chinese terms
+    /// as substrings. The three single characters get a rule of their own —
+    /// they count only when they stand alone between non-Han neighbours, since
+    /// 「档」 is inside 「档位」, 「片」 inside 「卡片」 and 「片刻」, and 「座」 inside
+    /// 「插座」: a bare-substring search for a one-character word in Chinese
+    /// forbids every compound that contains it. **And that rule has a limit
+    /// worth stating**: it cannot reach 「本片」 or 「这一片」 either, because a
+    /// Han character stands in front of the 「片」 there exactly as it does in
+    /// 「卡片」. So the compounds this repository actually writes are named in
+    /// the substring list, and the one-character rule is what catches the rest.
+    ///
+    /// Red gate: put `「按通知规则提醒」` back into `DescClaudeHooks`, or
+    /// `image worker` back into `PreviewFailedImageWorker`, and this goes red
+    /// naming the entry and the word.
+    #[test]
+    fn no_interface_string_speaks_the_repositorys_private_words() {
+        // The names of things only this repository has. Matched whole, after a
+        // string is split on everything that is not a letter.
+        const PRIVATE_LATIN: [&str; 19] = [
+            "tier", "tiers", "ledger", "ledgers", "seat", "seats", "episode", "episodes", "lane",
+            "lanes", "reach", "delivery", "gate", "gates", "probe", "probes", "worker", "workers",
+            "slice",
+        ];
+        // Matched as substrings, in either column. The last six are the
+        // compounds the one-character rule below **cannot** reach: 「本片」 and
+        // 「这一片」 both put a Han character in front of 「片」, exactly as
+        // 「卡片」 does, so the way to forbid the two this repository writes
+        // without forbidding the word a reader knows is to name them.
+        const PRIVATE_CHINESE: [&str; 14] = [
+            "账本",
+            "座位",
+            "触达",
+            "投递",
+            "闸门",
+            "红线",
+            "切片",
+            "探针",
+            "通知规则",
+            "第一档",
+            "第二档",
+            "第三档",
+            "本片",
+            "这一片",
+        ];
+        // Whole words of one character. See the note above on why these cannot
+        // be searched for as substrings, and the note on `PRIVATE_CHINESE` for
+        // what that costs: a one-character word standing inside a compound is
+        // indistinguishable from the compound, so this half catches only the
+        // case where the character stands alone, and the compounds this
+        // repository actually writes are listed above by name.
+        const PRIVATE_CHINESE_ALONE: [char; 3] = ['档', '座', '片'];
+        let is_han = |c: char| ('\u{4e00}'..='\u{9fff}').contains(&c);
+        for entry in Text::ALL {
+            for (column, sentence) in [
+                ("English", entry.in_lang(Lang::English)),
+                ("Chinese", entry.in_lang(Lang::Chinese)),
+            ] {
+                let lower = sentence.to_ascii_lowercase();
+                for word in lower.split(|c: char| !c.is_ascii_alphabetic()) {
+                    assert!(
+                        !PRIVATE_LATIN.contains(&word),
+                        "{entry:?} ({column}) says {word:?}, which names something \
+                         only this repository has: {sentence:?}"
+                    );
+                }
+                for needle in PRIVATE_CHINESE {
+                    assert!(
+                        !sentence.contains(needle),
+                        "{entry:?} ({column}) says {needle}, which names something \
+                         only this repository has: {sentence:?}"
+                    );
+                }
+                let characters: Vec<char> = sentence.chars().collect();
+                for (index, character) in characters.iter().enumerate() {
+                    if !PRIVATE_CHINESE_ALONE.contains(character) {
+                        continue;
+                    }
+                    let before = index.checked_sub(1).map(|i| characters[i]);
+                    let after = characters.get(index + 1).copied();
+                    let joined = before.is_some_and(is_han) || after.is_some_and(is_han);
+                    assert!(
+                        joined,
+                        "{entry:?} ({column}) says {character} on its own, which is \
+                         a word only this repository uses: {sentence:?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// PIN (user ruling 2026-08-26) — **the Chinese column is punctuated the
     /// Chinese way.**
     ///
@@ -6924,6 +7174,18 @@ mod tests {
                 (
                     "profiles_file_unreadable",
                     profiles_file_unreadable_in(lang, "profiles.json"),
+                ),
+                (
+                    "profile_not_installed",
+                    profile_not_installed_in(lang, "Git Bash"),
+                ),
+                (
+                    "agent_not_found_on_windows",
+                    agent_not_found_on_windows_in(lang, "Codex"),
+                ),
+                (
+                    "agent_inside_wsl_hint",
+                    agent_inside_wsl_hint_in(lang, "codex"),
                 ),
                 (
                     "profiles_file_kept",
