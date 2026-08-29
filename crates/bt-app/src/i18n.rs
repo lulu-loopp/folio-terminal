@@ -3327,7 +3327,7 @@ impl Text {
             Self::DescTurnEndNotifications => pick(
                 lang,
                 "When an agent finishes a turn, this window's taskbar button flashes, or a message goes to your desktop if the window is minimised. Marks inside the window are unaffected.",
-                "回合结束时同样提醒，即使 agent 并非在等待输入：窗口不在前台时闪烁任务栏按钮；窗口最小化或任务栏自动隐藏时发送系统通知。关闭后，仅在 agent 等待输入时提醒。",
+                "回合结束时同样提醒，即使 agent 并非在等待输入：窗口不在前台时闪烁任务栏按钮；窗口最小化或任务栏自动隐藏时发送系统通知。关闭后仅在等待输入时提醒。",
             ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
             Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),
@@ -3406,7 +3406,7 @@ impl Text {
             Self::DescClaudeHooks => pick(
                 lang,
                 "Adds hooks to your ~/.claude/settings.json, or CLAUDE_CONFIG_DIR, so Claude Code tells this window when it is waiting for you. Nothing is written into a project folder.",
-                "打开后，Folio 在 Claude Code 的用户级设置（~/.claude/settings.json）中写入一条 hook。此后 Claude Code 等待你输入时，对应标签显示提醒标记。不修改任何项目目录。",
+                "打开后，Folio 在 Claude Code 的用户级设置（~/.claude/settings.json）中写入 hook；等待你输入时对应标签显示提醒标记，不改动任何项目目录。",
             ),
             Self::ClaudeHooksAddedToast => pick(
                 lang,
@@ -3578,7 +3578,7 @@ impl Text {
             Self::DescCopilotHooks => pick(
                 lang,
                 "Adds a hook file to your ~/.copilot/hooks/, or COPILOT_HOME, so Copilot CLI tells this window when it is waiting for you. Nothing is written into a project folder.",
-                "打开后，Folio 在 Copilot CLI 的用户级目录（~/.copilot/hooks/）中写入一个 hook 文件。此后 Copilot CLI 等待你输入时，对应标签显示提醒标记。不修改任何项目目录。",
+                "打开后，Folio 在 Copilot CLI 的用户级目录（~/.copilot/hooks/）中写入一个 hook 文件；等待你输入时对应标签显示提醒标记，不改动任何项目目录。",
             ),
             Self::DescCopilotHooksTooOld => pick(
                 lang,
@@ -4619,8 +4619,16 @@ fn agent_inside_wsl_hint_in(lang: Lang, command: &str) -> String {
         Lang::English => format!(
             "If it is inside WSL, run the WSL profile, or add one with program wsl.exe and arguments -e {command}"
         ),
+        // **The Chinese is short between its Latin tokens, and that is a
+        // layout fact rather than a style preference.** This pair of lines
+        // wraps at spaces, and a Chinese sentence has spaces only around its
+        // Latin words — so a run of Han characters between two of them is one
+        // unbreakable token. 「配置的窗格中运行，或新建配置：程序」 is 17 characters,
+        // 204px of a 339px line, which pushed the rest of the sentence onto the
+        // second line and cut `opencode` in half. 「配置启动，或新建配置：程序」 is
+        // four characters shorter and the whole sentence fits.
         Lang::Chinese => format!(
-            "若安装在 WSL 内，请在 WSL 配置的窗格中运行，或新建配置：程序 wsl.exe，参数 -e {command}"
+            "若安装在 WSL 内，可从 WSL 配置启动，或新建配置：程序 wsl.exe，参数 -e {command}"
         ),
     }
 }

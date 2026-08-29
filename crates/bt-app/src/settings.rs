@@ -13391,6 +13391,101 @@ mod tests {
         }
     }
 
+    /// PIN (user ruling 2026-08-29) — **the same cap, held over the Chinese
+    /// column.**
+    ///
+    /// The rule above measures the language this process is running in, which
+    /// is English, and its own note says why: `description` reads the
+    /// process-wide language and this crate will not change one under the other
+    /// tests. The cost of that was paid twice in one afternoon — the Agent
+    /// page's three sentences were rewritten in Chinese, every one of them
+    /// measured shorter than the English it replaced, and three of the four
+    /// still came out of the window with a `…` on the third line.
+    ///
+    /// **Because a shorter sentence is not a shorter wrap.** `tooltip::wrap`
+    /// breaks at spaces and breaks a single over-wide word character by
+    /// character; a Chinese sentence has spaces only around its Latin words, so
+    /// a run of Han characters between two of them is one token. 「打开后，Folio
+    /// 在 Claude Code」 filled 168 of a 368px line and the next token was 306px,
+    /// so the line ended there with 200px of it unused. Total width says
+    /// nothing about this; only the wrap does.
+    ///
+    /// **The entry is found by the string the row drew.** There is no map from
+    /// a row to its `Text`, and writing one would be the same match arm twice —
+    /// so the walk asks `Text::ALL` which entry says, in English, exactly what
+    /// this row just said. An English string two entries share is skipped
+    /// rather than guessed at, and the count at the end is what keeps that
+    /// escape hatch from quietly emptying the test.
+    ///
+    /// **The measure is a CJK face's**, which is what the rule above could not
+    /// have: `bt_unicode::cluster_width` is this repository's own answer to
+    /// "is this glyph wide", and a wide glyph is one em by the definition of
+    /// every CJK font.
+    ///
+    /// Red gate: put the pre-2026-08-29 Chinese back on `DescClaudeHooks` and
+    /// this names it.
+    #[test]
+    fn no_chinese_settings_sentence_needs_a_fourth_line_either() {
+        use crate::i18n::{Lang, Text};
+        fn measure_in_a_cjk_face(text: &str, font_size_px: f32) -> f32 {
+            bt_unicode::graphemes(text)
+                .map(|cluster| bt_unicode::cluster_width(cluster) as f32)
+                .sum::<f32>()
+                * font_size_px
+                * TEST_ADVANCE_PER_EM
+        }
+        let metrics = StackMetrics::new(1.0);
+        let span = metrics.row_span(dialog_width());
+        let button = COMBO_MIN_WIDTH_LOGICAL_PX;
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        let editing = editing_content(&rows, &[], editor_subject(true));
+        let mut over: Vec<(SettingsRow, Text)> = Vec::new();
+        let mut measured = 0_usize;
+        for category in SettingsCategory::ALL {
+            let page = if category == SettingsCategory::Profiles {
+                editing.category_rows(category)
+            } else {
+                held.category_rows(category)
+            };
+            for row in page {
+                let english = row.description(&values());
+                if english.is_empty() {
+                    continue;
+                }
+                let mut saying = Text::ALL
+                    .into_iter()
+                    .filter(|entry| entry.in_lang(Lang::English) == english);
+                let Some(entry) = saying.next() else { continue };
+                if saying.next().is_some() {
+                    continue;
+                }
+                measured += 1;
+                let lines = wrapped_description(
+                    entry.in_lang(Lang::Chinese),
+                    metrics.desc_width(row, span, button),
+                    ROW_DESC_FONT_LOGICAL_PX,
+                    &mut measure_in_a_cjk_face,
+                );
+                if lines.last().is_some_and(|last| last.ends_with(ELLIPSIS)) {
+                    over.push((row, entry));
+                }
+            }
+        }
+        assert!(
+            over.is_empty(),
+            "these Chinese sentences do not fit three lines, which is copy to \
+             shorten rather than a rule to change: {over:?}"
+        );
+        // **And the walk really found the entries.** Every skip above is silent,
+        // so a change that broke the lookup would leave this passing on nothing.
+        assert!(
+            measured >= 30,
+            "only {measured} rows were matched to an entry — the lookup is \
+             broken, not the copy"
+        );
+    }
+
     /// PIN (user ruling 2026-08-17) — **a picker shows eight items and scrolls
     /// the rest.**
     ///
