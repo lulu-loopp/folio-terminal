@@ -1707,14 +1707,15 @@ mod windows_impl {
             HiDpi::{GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI},
             Input::KeyboardAndMouse::{GetCapture, GetKeyboardLayout, SetFocus, VkKeyScanW},
             Shell::{
-                Common::COMDLG_FILTERSPEC, DefSubclassProc, FO_DELETE, FOF_ALLOWUNDO,
-                FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
-                FOLDERID_Documents, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
-                FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem, ITaskbarList3,
-                KF_FLAG_DEFAULT, RemoveWindowSubclass, SHCreateItemFromParsingName,
-                SHFILEOPSTRUCTW, SHFileOperationW, SHGetKnownFolderPath, SIGDN_FILESYSPATH,
-                SetWindowSubclass, ShellExecuteW, TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS,
-                TBPF_NORMAL, TBPF_PAUSED, TaskbarList,
+                ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA, Common::COMDLG_FILTERSPEC, DefSubclassProc,
+                FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
+                FOF_WANTNUKEWARNING, FOLDERID_Documents, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
+                FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem,
+                ITaskbarList3, KF_FLAG_DEFAULT, RemoveWindowSubclass, SHAppBarMessage,
+                SHCreateItemFromParsingName, SHFILEOPSTRUCTW, SHFileOperationW,
+                SHGetKnownFolderPath, SIGDN_FILESYSPATH, SetWindowSubclass, ShellExecuteW,
+                TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL, TBPF_PAUSED,
+                TaskbarList,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
@@ -5219,6 +5220,67 @@ mod windows_impl {
         let _ = unsafe { FlashWindowEx(std::ptr::from_mut(&mut flash)) };
     }
 
+    /// **Whether the shell's taskbar hides itself** (user ruling 2026-08-28).
+    ///
+    /// The one fact that decides whether the middle tier of `attention`'s three
+    /// exists on this desktop at all. Flashing a taskbar button is "a mark you
+    /// can glance at without being interrupted", and that sentence has a
+    /// premise: the button is on screen. With the taskbar set to auto-hide it
+    /// is not — `FLASHW_TRAY` makes the shell *slide the whole bar out* and
+    /// leave it there, blinking, until the window comes to the foreground. That
+    /// is louder than the tier above it, which is the reader's own report and
+    /// the reason `bt_app::notify::desktop_reach` reads this.
+    ///
+    /// **`ABM_GETSTATE` and not a registry read.** `ABS_AUTOHIDE` is the shell's
+    /// own live answer about its own bar; `StuckRects3` is a serialised blob
+    /// Explorer writes when it feels like it, and reading one would be this
+    /// process guessing at a setting the owner will tell it. It is a global
+    /// state rather than a per-monitor one, which matches the setting: Windows
+    /// auto-hides every taskbar or none.
+    ///
+    /// **Asked at every delivery and never cached**, because the reader can
+    /// change it in Settings between one wait and the next and nothing tells
+    /// this process when they do. It is one call into `shell32` per attention
+    /// pass, beside the two into `user32`/`dwmapi` that
+    /// `bt_app::window_is_hidden` already makes on the same turn.
+    ///
+    /// **A shell that does not answer reports a visible taskbar** — see
+    /// [`taskbar_auto_hidden_from_state`] for why that direction.
+    #[must_use]
+    pub fn taskbar_is_auto_hidden() -> bool {
+        let mut data = APPBARDATA {
+            cbSize: u32::try_from(size_of::<APPBARDATA>()).unwrap_or(0),
+            ..Default::default()
+        };
+        // SAFETY: the structure is filled in full and `cbSize` names its own
+        // size; `ABM_GETSTATE` reads the shell's appbar state and writes
+        // nothing back into it, and the call takes no handle this process has
+        // to own.
+        let state = unsafe { SHAppBarMessage(ABM_GETSTATE, std::ptr::from_mut(&mut data)) };
+        taskbar_auto_hidden_from_state(state)
+    }
+
+    /// What one `ABM_GETSTATE` answer means, with the failure policy written
+    /// where a test can walk it.
+    ///
+    /// **A desktop this process gets no answer from is reported as having a
+    /// visible taskbar**, which is the same direction
+    /// [`cloaked_from_attribute`] takes and for the same reason: of the two
+    /// wrong answers, one flashes a button nobody can see and the other puts a
+    /// toast on a desktop the reader is looking at. Only the second is an
+    /// interruption. `SHAppBarMessage` answers `0` when there is no shell to
+    /// ask — a session with Explorer not running — and `0` has `ABS_AUTOHIDE`
+    /// clear, so the policy is what the API already does rather than a branch
+    /// on top of it.
+    ///
+    /// `ABS_ALWAYSONTOP` travels in the same word and is deliberately not read:
+    /// a bar that is on top is a bar that is on screen, which is the case the
+    /// flash was written for.
+    #[must_use]
+    pub fn taskbar_auto_hidden_from_state(state: usize) -> bool {
+        state & ABS_AUTOHIDE as usize != 0
+    }
+
     /// **Which top-level window the window manager itself puts under this screen
     /// point** (multiwindow slice F2/F4).
     ///
@@ -7784,8 +7846,9 @@ pub use windows_impl::{
     reveal_in_explorer, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
     set_window_dark_mode, set_window_outer_rect, set_window_topmost, shell_execute,
     silence_std_streams, spawn_at_priority, std_error_is_console, system_backdrop_available,
-    take_keyboard_focus, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
-    virtual_screen_rect, wheel_scroll_amount, work_area_at, write_to_console,
+    take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
+    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_screen_rect,
+    wheel_scroll_amount, work_area_at, write_to_console,
 };
 
 /// **The one decision in the system-preference watch.**
@@ -7845,6 +7908,49 @@ mod cloak_reading_tests {
                 "every non-zero reason is a window that is not on a screen: {reason}"
             );
         }
+    }
+}
+
+/// **The one decision in the taskbar reading** (user ruling 2026-08-28).
+///
+/// Everything else about [`taskbar_is_auto_hidden`] is one call into `shell32`;
+/// this is the bit of the answer that is read, and the failure policy that
+/// comes with it.
+#[cfg(all(test, windows))]
+mod taskbar_state_tests {
+    use super::taskbar_auto_hidden_from_state;
+    use windows::Win32::UI::Shell::{ABS_ALWAYSONTOP, ABS_AUTOHIDE};
+
+    /// PIN — **only `ABS_AUTOHIDE` says the bar hides itself, and a desktop that
+    /// answers nothing has a bar.**
+    ///
+    /// The failure this pins is the other direction: a shell that is not running
+    /// answers `0`, and reading that as "auto-hidden" would send every wait on
+    /// every machine straight past the middle tier and onto the desktop. The
+    /// second failure is reading the whole word — `ABS_ALWAYSONTOP` travels
+    /// beside it, and a bar that is on top is a bar that is on screen.
+    ///
+    /// MUTATIONS: test `state != 0` and the always-on-top row goes red — a
+    /// visible taskbar reported as hidden, and the flash lost on the desktop
+    /// this ruling was not about. Answer `true` for `0` and every session
+    /// without a shell loses the tier too.
+    #[test]
+    fn only_the_autohide_bit_takes_the_taskbar_off_the_screen() {
+        let autohide = ABS_AUTOHIDE as usize;
+        let always_on_top = ABS_ALWAYSONTOP as usize;
+        assert!(
+            !taskbar_auto_hidden_from_state(0),
+            "no shell to ask is a taskbar this window can flash"
+        );
+        assert!(
+            !taskbar_auto_hidden_from_state(always_on_top),
+            "a bar pinned on top is a bar on the screen"
+        );
+        assert!(taskbar_auto_hidden_from_state(autohide));
+        assert!(
+            taskbar_auto_hidden_from_state(autohide | always_on_top),
+            "both bits set is still a bar that slides away"
+        );
     }
 }
 

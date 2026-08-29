@@ -1399,10 +1399,13 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 **② 三档:`desktop_reach` 八行,而它读起来就是那三档(C2)。** 旧的 `reaches_the_desktop` 是一个谓词,论证是「它就是账本那条谓词的另一面」——**那句话在两档模型里对,在三档里不对**:中间那一档「在这台屏上,但不在你眼前」既不是「看过了」,也不是「桌面是唯一剩下的路」,它是第三个答案,而一个谓词只装得下两个。于是账本那条谓词 `attention_is_consumed` **一个参数都没加**(红线 4),桌面这一问另起了函数:
 
 ```text
-if window_is_hidden        { Toast }    // 够不到你,只能上桌面
-else if focused && active  { Nothing }  // 你正在看
-else                       { Flash }    // 在这台屏上,但不在你眼前
+if window_is_hidden            { Toast }    // 够不到你,只能上桌面
+else if focused && active      { Nothing }  // 你正在看
+else if taskbar_is_auto_hidden { Toast }    // 没有可以瞄一眼的记号(⑩)
+else                           { Flash }    // 在这台屏上,但不在你眼前
 ```
+
+**第三行是 ⑩ 加的(2026-08-28)**,下面这段关于三个 bool 的算术它一个字都不改:那三个 bool 仍然欠八个答案,新那一位只把从前答 `Flash` 的那三行改判,别的一行都碰不到——理由与落地见 ⑩。
 
 三个 bool 欠八个输入八个答案,而「最小化的窗口还持着键盘」那两行不可达——把 `hidden` 写在最外层不是防御性编程,它同时**盖住了刚刚最小化、焦点位还没跟上的那一帧**。第二行是诚实而不是字面:`FlashWindowEx` 对前台窗口是 Win32 明文的 no-op,所以「有焦窗口的非活动 tab」这一格的可见产物是**窗内那两枚记号**;写成 `Flash` 而不是 `Nothing`,是因为它答的那句话与第 3/4 行一字不差,而你下一秒切走它就变成真的闪,**谓词一个字都不用改**。写成 `Nothing` 才是撒谎——那会让「隔壁 tab」和「你正盯着的那一格」在函数里长得一模一样。
 
@@ -1440,6 +1443,18 @@ else                       { Flash }    // 在这台屏上,但不在你眼前
 **⑧ 设置行:`Agents ▸ Turn finished`,`settings.json` v23。**(页面归属 2026-08-25 用户裁时改到 Agents 页,本行原写 `Terminal ▸`,2026-08-26 就地更正;`settings.rs:2551-2558` 是准。)一行管两条臂(无焦闪 + 最小化 toast),**不拆成两个**:拆开会让「闪但不 toast」和「toast 但不闪」这两个没人要的组合合法化;真要拆是加一行,不是改判据。**这条只管两条臂,不管两条道**——③′ 拆的是「哪条道归哪一行」,不是把这一行的两条臂拆开,两件事互不相干。默认 On,理由是这条道最常走的那一档是**最轻的**——你正看着就什么都不加,你不看着才闪一个你本来没在看的按钮,而 toast 只有窗口根本不在任何一块屏上时才够得着。迁移 v22→v23 写 `true`:没有哪个能写出 v22 文件的 build 有过回合结束这条道,`false` 是把一个空白冻成一个答案。这一行**只管够不够得到桌面**,窗内的铃点、未读点、队列徽章一个都不受它影响——与红线 4 划的是同一条线。
 
 **⑨ 第四家把焦点门开反了,而这是片 A0.5 的一条副作用而不是一条反对意见(2026-08-26 取证;`docs/plans/attention/evidence-copilot-cli-2026-08-26.md` §2.5、§2.6)。** 普查当时记的横向事实是「`?1004` 焦点上报,三家把它当闸门」,而那三家的初值都等价于「你正看着呢」—— 于是一个一个焦点字节都不发的终端挨闷棍。**copilot 是第四家开 `?1004h` 的,但它的门朝反方向开**:内部那一位初值是 `null`,而门写的是 `s.current !== true`,所以「不知道」在它那里等于「那就通知」。**片 A0.5 对它因此不是修复而是收紧**:发了焦点上报之后,Folio 里的 copilot 在前台时反而会闭嘴。**这不改 A0.5 的裁决**—— 它对三家是修复,而发焦点上报本来就是终端该做的事;**也不落在本块的账上**:那道门管的是它自己的 OS 桌面 toast,**一个字节也不上 tty**,所以 Folio 今天既收不到那条 toast、也不因它闭嘴 —— 副作用落在**用户的桌面通知**上。它的铃没有焦点门。**实机复测欠着**:本机可以装到 copilot 并量到它的版本,但开不了会话(组织策略拒绝,原文 「Access denied by policy settings」),所以这一格是源码与文档取证而不是一段录音。
+
+**⑩ 任务栏自动隐藏 = 第二档不存在,触达直接升到第三档(用户验收 next16 报缺陷,2026-08-28 裁;`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/{notify,main}.rs`)。** ② 那张表的第二档,定义原话是「**一个你可以瞄一眼、不被打断的记号**」——而这句话有一个前提:那个记号在屏上。用户的任务栏设成**自动隐藏**,于是 `FLASHW_TRAY` 做的不是画一个安静的记号,是让 shell **把整条任务栏从屏边顶出来盖在他手上的活上面,红着一直闪,直到他切回 Folio 为止**。它比它上面那一档(桌面通知)更吵、更难消,而用户原以为会拿到的正是那条通知。所以**在这种桌面上第二档不存在**,请求越过它直接走第三档——与最小化、与另一个虚拟桌面同一条路,同一个理由:再近的地方没有可说的了。
+
+**判据问 shell 自己,不问注册表,也不问用户。** `SHAppBarMessage(ABM_GETSTATE)` 的 `ABS_AUTOHIDE` 位是 shell 对它自己那条 bar 的现答;`StuckRects3` 是 Explorer 高兴时才落盘的一坨序列化,读它是这个进程去猜一件它可以直接问到的事。**不加设置开关**:一个开关等于请用户把自己的桌面描述给程序听,而这件事 shell 已经知道了。**每次投递现问,一次都不缓存**——用户随时会在设置里改,而 Windows 改的时候不通知任何人;它落在 `bt_platform::taskbar_is_auto_hidden()`,与 `IsIconic`/`DWMWA_CLOAKED` 同一趟采样(`sample_window_place`),一轮三个 syscall 而不是每个 shell 三个。**读不到就报「任务栏在屏上」**(`taskbar_auto_hidden_from_state`,没有 shell 可问时 `SHAppBarMessage` 答 `0`,`ABS_AUTOHIDE` 位本来就是 0),方向与 ① 的 `cloaked_from_attribute` 同向:低报只是闪一个按钮,高报是把 toast 拍在正看着的人脸上。`ABS_ALWAYSONTOP` 同字传来,**明确不读**——置顶的 bar 是**在屏上**的 bar,正是闪要用的那一种。
+
+**这一条只动第二档能动的那三行。** 判据写在焦点对**之后**:正盯着 pane 的人无论任务栏怎样都不欠他任何东西,而不在任何屏上的窗口本来就要上桌面;它唯一能改的,是从前答 `Flash` 的那三行。
+
+**可见任务栏上 `FLASHW_TIMERNOFG` 维持**(同日复核):闪到窗口回前台为止,与 Windows Terminal / VS Code 同做法,用户抱怨的不是它。**一次投递只闪一次**由 `raise_attention` 的 `flashed` 守卫管(按钮是窗口的,闪两遍不是两倍),**同一 episode 不重复闪**由账本管——一个 episode 只出一次 `Raised`,红线 12 不许窗口这边再判一次。
+
+**三条臂从 `match` 变成一个值。** `Reach` 与它引发的动作之间那对否定——**toast 不闪、flash 不上桌面**——正是本条裁决转的那个弯,而一个没有名字的形状是测试拿不住的形状。于是 `notify::interruption(reach, desktop_messages)` 交回 `Interruption::{Nothing, FlashTheTaskbarButton, PutItOnTheDesktop}`,`raise_attention` 只**执行**它交回的那一臂(不是第二道闸,红线 12);`Notifications` 关着时被拒的 toast 是 `Nothing` 而**不是降级成闪**——那一行说的是「不许往桌面写」,没说「换个方式打扰」,而在本条治的那种桌面上,降级正好就是刚被撤掉的那次顶出。
+
+红门:`notify::an_auto_hidden_taskbar_makes_the_second_tier_unreachable`(桩 true,窗口**未最小化**、不在前台 → 三行皆 `Toast`、`interruption` 答 `PutItOnTheDesktop` 且不是 `FlashTheTaskbarButton`;并钉住盯着 pane 的那格仍是 `Nothing`)、`notify::a_visible_taskbar_keeps_the_flash`(桩 false → 第二档照旧,且 `Notifications` 关着也照闪)、`notify::a_refused_toast_is_silence_and_not_a_flash`、`bt_platform::only_the_autohide_bit_takes_the_taskbar_off_the_screen`(`0`=有 bar、`ABS_ALWAYSONTOP`=有 bar)。实机两态各验一次。
 
 **7.1.6c 设置面板的分组(用户裁决 2026-08-10,已落地)。** 小样字面就是**分组平铺**:`.content` 是一列 `.group-label` 各带自己的行(`design/ui-mockup.html` 2343/2406/2421/2452),不是一张扁平表。原生实现照此升级——组标题由**走一遍行表、在 `SettingsRow::group()` 变化处生成**,而不是在行表旁边另立一张组清单:高度、堆叠偏移、命中测试、绘制**四处同出一个推导**(R4 的教训:有一处忘了教,就是一个「能点不能见」的行),没有行的组自然不出标题也不占高度。行归组:Theme/Cursor/Tab layout/Sidebar → **Appearance**;Display formulas → **Rendered blocks**(小样把「排版对块做了什么」归在这一组,与它的 Maximum height 同列)。组间距照小样:首个标题 `margin-top:10px`(基础规则),其后每个标题 `margin-top:16px`(小样逐个内联覆盖)——多出的六个像素正是「隔开两组」与「隔开两行」的区别。行序仍守旧约:Sidebar 紧贴它依赖的 Tab layout 之下,Formulas 落在末尾作第二组的全部。**左侧类目导航本期不做**(既定裁决):它归 Settings 扩展块,与快捷键自定义面板同日出生——等这里的内容多到需要导航,再升级并回写小样。**2026-08-17 兑现,见 §7.1.6c-2**:组升为类目、类目各占一页、组标题成为页标题,导航由行表推导(没有行的类目不出词),小样同日回写。
 
