@@ -250,9 +250,10 @@ pub fn detect_absolute_path_candidates(text: &str) -> Vec<PrintedPathCandidate> 
             release_prose_tail(text, start, token)
         };
         let token_text = &text[start..end];
-        // A seam is a transition **into** another script, so a token spelled entirely in ASCII has
-        // none — and neither has a quoted one, whose quotes declared its extent.
-        let seams = if quoted || token_text.is_ascii() {
+        // A quoted token offers no shorter form: its quotes declared its extent. An unquoted one is
+        // searched whole — a drive prefix is as rare as an anchor, so this walk happens once per
+        // prefix and [`prose_seam_ends`] answers "no seams" at the cost of the walk itself.
+        let seams = if quoted {
             Vec::new()
         } else {
             prose_seam_ends(token_text, token_text.len())
@@ -318,11 +319,11 @@ pub fn detect_relative_path_candidates(
     // candidate, and finding the same token's end once per opening would read the line once per
     // character. Reusing it reads each token once, whatever opens inside it.
     let mut token_end_seen = 0usize;
-    // Whether that token carries a character outside ASCII at all — cached beside its end for the
-    // same reason and read for one purpose: a seam is a transition **into** another script (§7.30),
-    // so a token spelled entirely in ASCII has none and needs no search. A screenful of ordinary
-    // program output is such a screen, and this is what keeps the seam free there.
-    let mut token_is_ascii = true;
+    // Whether that token can carry a seam at all — cached beside its end for the same reason and
+    // read for one purpose: a token holding neither a non-ASCII character nor an opening bracket
+    // offers no shorter form (§7.30, [`token_may_carry_a_seam`]) and needs no search. A screenful
+    // of ordinary program output is such a screen, and this is what keeps the seam free there.
+    let mut token_may_seam = false;
     while cursor < bytes.len() {
         // A candidate opens on a character, so a cursor resting mid-character opens nothing. The
         // absolute scan is spared this test by its drive prefix, which is ASCII and proves the
@@ -349,7 +350,7 @@ pub fn detect_relative_path_candidates(
         } else {
             if start >= token_end_seen {
                 token_end_seen = token_end(text, start);
-                token_is_ascii = text[start..token_end_seen].is_ascii();
+                token_may_seam = token_may_carry_a_seam(&text[start..token_end_seen]);
             }
             Some(token_end_seen)
         };
@@ -370,7 +371,7 @@ pub fn detect_relative_path_candidates(
         // token is searched. A **bare** opening is the one this loop must keep a bound on, and
         // [`bare_form_limit`] is that bound — read it there for why nothing past it could be
         // admitted anyway.
-        let seams = if quoted || token_is_ascii {
+        let seams = if quoted || !token_may_seam {
             Vec::new()
         } else {
             let token_text = &text[start..end];
@@ -436,14 +437,32 @@ pub fn detect_relative_path_candidates(
 /// loosened: `docs/a.md:12:3` reaches this as `docs/a.md`, and `docs/a.md:abc` reaches it whole and
 /// is refused exactly as it always was.
 ///
-/// Three refusals. A candidate with no separator is a single bare name, which is out of scope. One
+/// Four refusals. A candidate with no separator is a single bare name, which is out of scope. One
 /// that *opens* with a separator names a place from the drive root rather than from here —
 /// `/usr/share/x.png` in a log line, or the `//host/x.png` a scheme leaves behind — and joining it
 /// to a working directory would invent a location nobody named. One containing `:` is not relative
 /// at all: the colon is exactly the character that makes text absolute (`D:\…`) or schemed
 /// (`file:…`, `https:…`), both of which are other scans' business and must never be claimed twice.
+///
+/// # A reading must end on a character that is part of a name (user ruling 2026-08-28, §7.30)
+///
+/// The fourth refusal is a **trailing** separator. `src/` is a directory prefix, and a directory
+/// prefix is a name nobody wrote — not even when the disk holds it, because existence was only ever
+/// the licence to *draw* a reference, never to invent one. The line that settled it is git's rename
+/// compression, `src/{old => new}/main.rs`, where the brace seams (§7.30) and the reading in front
+/// of it is exactly such a prefix.
+///
+/// It closes a hole in the first refusal rather than adding a rule beside it. A bare reference is
+/// admitted on the strength of **carrying a separator** — that mark is the only thing ordinary prose
+/// does not have — and a trailing separator is the one place where the mark is not evidence of two
+/// segments at all. `docs/` is `docs` with a slash after it, and `docs` alone was never a reference.
+///
+/// The absolute scan is deliberately not given the same clause: there the separator is never the
+/// evidence that something is a reference (the drive prefix is), and `D:\` is a real place whose own
+/// spelling ends in one.
 pub fn is_relative_reference(candidate: &str) -> bool {
     !candidate.starts_with(['/', '\\'])
+        && !candidate.ends_with(['/', '\\'])
         && candidate.contains(['/', '\\'])
         && !candidate.contains(':')
 }
@@ -701,20 +720,58 @@ fn is_seam_separator(character: char) -> bool {
     character.is_ascii_punctuation() && !matches!(character, '/' | '\\' | '.' | '-' | '_' | '~')
 }
 
+/// The ASCII **opening brackets**, which are seams on their own account — §7.30 (user ruling
+/// 2026-08-28, on next16).
+///
+/// This is the one mark whose seam does not consult the character behind it. The line that settled
+/// it is `dist\folio-next16.exe(0.1.0 (84d843f47e))`: the byte after the bracket is an ASCII `0`,
+/// so the class-transition rule saw no transition, the token ate its way to the closing `)`, and a
+/// file that is really on the disk went unmarked. What a version banner, a `(1)` copy suffix and
+/// `docs/a.md(说明)` have in common is not the script behind the bracket — it is the bracket, which
+/// opens an aside about the thing just named rather than continuing its name.
+///
+/// The class is stated once and not enumerated twice: these are the **opening halves of the ASCII
+/// bracket pairs whose closing halves already end a token** ([`is_closing_delimiter`] holds `)`,
+/// `]`, `}` and `>`). None of the four is legal in a Windows path, which is why a name loses
+/// nothing by being read up to one.
+///
+/// A bracket is a seam and **not** a terminator, and the difference is the whole of the ruling: a
+/// terminator would make `D:\x\a(1).txt` unaskable, while a seam merely offers `D:\x\a` as a
+/// shorter reading — asked only after the disk has denied the longer one.
+fn is_ascii_opening_bracket(character: char) -> bool {
+    matches!(character, '(' | '[' | '{' | '<')
+}
+
+/// Whether a token can carry a seam at all — the cheap per-token test that keeps an ordinary
+/// screenful free (§7.30 ④).
+///
+/// A seam is either a transition into another script or an opening bracket, so a token holding
+/// neither offers no shorter form and needs no search. Read over bytes rather than characters
+/// because the two questions agree byte for byte: every byte of a multi-byte character is non-ASCII,
+/// and no bracket byte can appear inside one.
+fn token_may_carry_a_seam(token: &str) -> bool {
+    token
+        .bytes()
+        .any(|byte| !byte.is_ascii() || is_ascii_opening_bracket(char::from(byte)))
+}
+
 /// Where one unquoted token offers a **shorter form** of itself, longest first — §7.30.
 ///
 /// A seam is one **character-class transition** and not a list of stops: a [`is_seam_separator`]
 /// with a non-ASCII character glued straight onto it. That is a person writing another script
-/// through an ASCII keyboard — `docs/a.md(说明)`, `docs/a.md[注]`, `docs/a.md,这里是操作顺序` — and
-/// the separator is the sentence's, not the name's. Both halves of the transition are load-bearing:
+/// through an ASCII keyboard — `docs/a.md,这里是操作顺序` — and the separator is the sentence's,
+/// not the name's. Both halves of the transition are load-bearing:
 ///
 /// * ASCII → ASCII is **not** a seam. `D:\x\a.md,b` is one name; a comma is legal in a Windows
-///   filename and nothing on the line says this one is punctuation. `docs/a.md(1).txt` is likewise
-///   read whole — `(` followed by an ASCII `1` is no transition — so an existing file of that name
-///   wins over the shorter reading.
+///   filename and nothing on the line says this one is punctuation.
 /// * non-ASCII → anything is **not** a seam. A full-width stop is released whole by
 ///   [`release_prose_tail`] (boundary table row 17), and `D:\资料\A、B.md` is somebody's filename
 ///   read whole (row 19 stands unmoved).
+///
+/// **An [`is_ascii_opening_bracket`] is the exception, and it is a seam whatever follows it** (user
+/// ruling 2026-08-28) — read that function for why a bracket carries its own evidence and needs no
+/// witness behind it. It is found in this same pass and not a second one: a seam search is one walk
+/// over the token, and the two questions are asked of each character where it stands.
 ///
 /// The offsets are the separator's own, so the form ends **before** it, and they come back
 /// descending so a caller reads the longest form first. `limit` is the last offset a seam may sit
@@ -727,12 +784,13 @@ fn prose_seam_ends(token: &str, limit: usize) -> Vec<usize> {
             break;
         }
         // `offset + 1` is a character boundary: every separator is one ASCII byte.
-        if is_seam_separator(character)
-            && token[offset + 1..]
-                .chars()
-                .next()
-                .is_some_and(|next| !next.is_ascii())
-        {
+        let seams_here = is_ascii_opening_bracket(character)
+            || (is_seam_separator(character)
+                && token[offset + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|next| !next.is_ascii()));
+        if seams_here {
             seams.push(offset);
         }
     }
@@ -1439,36 +1497,11 @@ impl PrintedPathLinks {
         let head = reaching.pop().filter(|_| reaching.is_empty())?;
         let upper_tail = upper.get(head.byte_start..upper_edge.byte_end)?;
 
-        // Gate 2. The lower line's first cell is the continuation, so its first token opens at 0.
-        //
-        // §7.30 coexisting with the rejoin (user note 2026-08-28): the continuation may carry a
-        // seam of its own — `5.exe(反斜杠)`, an agent's prose glued to the tail of the name it just
-        // wrapped — and that seam is the sentence's, not the name's. Cut the lower half at its first
-        // one before joining, so the two halves spell the name alone; when there is none this is the
-        // whole token exactly as before. If the cut still does not spell one reference, gate 3 refuses
-        // and the upper half is pressed down by the truncation gate — a blank, never a wrong link.
-        let raw_lower_end = token_end(lower, 0);
-        let lower_end = prose_seam_ends(&lower[..raw_lower_end], raw_lower_end)
-            .last()
-            .copied()
-            .unwrap_or(raw_lower_end);
-        let lower_head = lower.get(..lower_end).filter(|head| !head.is_empty())?;
-
-        // Gate 3. One candidate, covering all of it — one *token*, that is: the shorter forms a
-        // seam offers (§7.30) are readings of the same token and not a second reference, so what
-        // this gate refuses is a second **start**, exactly as it always did.
-        let joined = format!("{upper_tail}{lower_head}");
-        let spelled = self.candidates_in(&joined);
-        let whole = spelled.first().copied().filter(|candidate| {
-            candidate.byte_start == 0
-                && candidate.byte_end == joined.len()
-                && spelled.iter().all(|form| form.byte_start == 0)
-        })?;
-
         // Gate 5, asked before the disk so a refusal costs nothing: a half that already names a
         // file of its own is that file's reference and not the front of somebody else's. **Any of
         // its forms counts** — a seam that has already earned the upper half a link is that link's
-        // evidence, and rejoining would lay a second promise over text the first one covers.
+        // evidence, and rejoining would lay a second promise over text the first one covers. It is
+        // asked of the halves rather than of the join, so it is asked once, ahead of the readings.
         if upper_candidates.iter().any(|candidate| {
             candidate.byte_start == head.byte_start && self.is_verified(candidate, upper)
         }) {
@@ -1482,37 +1515,76 @@ impl PrintedPathLinks {
             return None;
         }
 
-        // Gate 4. The witness, asked about the file's own name.
-        let target = self.resolve(whole.path_text(&joined), whole.spelling)?;
-        match self.verdicts.get(&target) {
-            Some(true) => {}
-            Some(false) => return None,
-            None => {
-                unknown.insert(target);
-                return None;
+        // Gate 2. The lower line's first cell is the continuation, so its first token opens at 0.
+        //
+        // §7.30 coexisting with the rejoin (user note 2026-08-28): the continuation may carry a
+        // seam of its own — `5.exe(反斜杠)`, an agent's prose glued to the tail of the name it just
+        // wrapped — and that seam is the sentence's, not the name's. So the continuation offers the
+        // same **several readings of one token** the single-line scan offers, its whole self first
+        // and then one per seam, and they are tried **longest first against the disk** exactly as
+        // they are there. That ordering is what keeps an opening bracket a seam and not a
+        // terminator across a wrap too: `a(1` + `).txt` is asked whole before `a` is asked at all.
+        // When the token carries no seam this is the whole of it, byte for byte as before.
+        let raw_lower_end = token_end(lower, 0);
+        let readings = std::iter::once(raw_lower_end)
+            .chain(prose_seam_ends(&lower[..raw_lower_end], raw_lower_end));
+        for lower_end in readings {
+            let Some(lower_head) = lower.get(..lower_end).filter(|head| !head.is_empty()) else {
+                continue;
+            };
+
+            // Gate 3. One candidate, covering all of it — one *token*, that is: the shorter forms a
+            // seam offers (§7.30) are readings of the same token and not a second reference, so what
+            // this gate refuses is a second **start**, exactly as it always did. A reading that does
+            // not spell one whole reference is not a question about the disk; the next one may be.
+            let joined = format!("{upper_tail}{lower_head}");
+            let spelled = self.candidates_in(&joined);
+            let Some(whole) = spelled.first().copied().filter(|candidate| {
+                candidate.byte_start == 0
+                    && candidate.byte_end == joined.len()
+                    && spelled.iter().all(|form| form.byte_start == 0)
+            }) else {
+                continue;
+            };
+
+            // Gate 4. The witness, asked about the file's own name. A denial hands the question to
+            // the next shorter reading; a name **nobody has looked at yet** ends the search instead,
+            // because a shorter reading may never be promised while a longer one is still unanswered
+            // (§7.30 ②) — the answer arrives and the next frame decides.
+            let Some(target) = self.resolve(whole.path_text(&joined), whole.spelling) else {
+                continue;
+            };
+            match self.verdicts.get(&target) {
+                Some(true) => {}
+                Some(false) => continue,
+                None => {
+                    unknown.insert(target);
+                    return None;
+                }
             }
+            let mut uri = local_path_to_file_uri(&target);
+            if let Some(location) = whole.location {
+                uri.push('#');
+                uri.push_str(&location.uri_fragment());
+            }
+            return Some(RejoinedReference {
+                upper: HyperlinkRange {
+                    byte_start: head.byte_start,
+                    byte_end: upper_edge.byte_end,
+                },
+                lower: HyperlinkRange {
+                    byte_start: 0,
+                    byte_end: lower_end,
+                },
+                target,
+                resolution_base: match whole.spelling {
+                    PrintedPathSpelling::Relative => self.working_directory.clone(),
+                    _ => None,
+                },
+                uri,
+            });
         }
-        let mut uri = local_path_to_file_uri(&target);
-        if let Some(location) = whole.location {
-            uri.push('#');
-            uri.push_str(&location.uri_fragment());
-        }
-        Some(RejoinedReference {
-            upper: HyperlinkRange {
-                byte_start: head.byte_start,
-                byte_end: upper_edge.byte_end,
-            },
-            lower: HyperlinkRange {
-                byte_start: 0,
-                byte_end: lower_end,
-            },
-            target,
-            resolution_base: match whole.spelling {
-                PrintedPathSpelling::Relative => self.working_directory.clone(),
-                _ => None,
-            },
-            uri,
-        })
+        None
     }
 
     /// Every candidate one text offers, in reading order — the one scan both the single-line pass
@@ -2342,8 +2414,6 @@ mod tests {
             ],
         );
         for line in [
-            "D:\\case\\src\\main.cpp(12,34): error C2143",
-            "src/app.ts(7,19): error TS2322",
             "at Foo in D:\\case\\Foo.cs:line 42",
             "src/main.rs:12:let x = 1",
         ] {
@@ -2353,6 +2423,50 @@ mod tests {
                 "{line} has no settled position syntax, so it has no link at all"
             );
         }
+        // 7 and 8 as the opening-bracket seam leaves them (§7.30, user ruling 2026-08-28 evening).
+        // The bracket is a seam whatever follows it, so the reading in front of it is **the path
+        // itself** — which is what these two rows always wanted ("只画路径"), short of the
+        // `(12,34)` fragment no contract spells out yet. What the scenario forbade — a link over
+        // `…main.cpp(12,34`, a name nobody printed — is still not offered by anything.
+        let with_position_syntax = ledger(
+            "D:\\case",
+            &[
+                ("D:\\case\\src\\main.cpp", true),
+                ("D:\\case\\src\\main.cpp(12,34", false),
+                ("D:\\case\\src\\app.ts", true),
+            ],
+        );
+        assert_eq!(
+            linked(
+                &with_position_syntax,
+                "D:\\case\\src\\main.cpp(12,34): error C2143",
+                None
+            ),
+            [(
+                "D:\\case\\src\\main.cpp",
+                "file:///D:/case/src/main.cpp".to_owned()
+            )]
+        );
+        assert_eq!(
+            linked(
+                &with_position_syntax,
+                "src/app.ts(7,19): error TS2322",
+                None
+            ),
+            [("src/app.ts", "file:///D:/case/src/app.ts".to_owned())]
+        );
+        // And the absolute spelling's first frame is the ordinary two-frame rhythm, not a promise:
+        // the whole printed string is a name of its own until the disk has denied it.
+        let mut unknown = BTreeSet::new();
+        assert_eq!(
+            named.links_in(
+                "D:\\case\\src\\main.cpp(12,34): error C2143",
+                None,
+                &mut unknown
+            ),
+            [],
+            "the shorter reading waits for the longer one's verdict"
+        );
         // 11, 12 — the two position shapes that *are* unambiguous today.
         assert_eq!(
             linked_on_a_full_disk(cwd, "--> src/main.rs:12:5"),
@@ -2560,6 +2674,10 @@ mod tests {
     #[test]
     fn group_d_git_and_virtual_schemes() {
         let cwd = Some("D:\\case");
+        // 44 keeps its "no link at all" across the opening-bracket seam (§7.30, user ruling
+        // 2026-08-28 evening). The brace does seam, but the reading in front of it is `src/` — a
+        // directory prefix, and a reading must end on a character that is part of a name. See
+        // `a_reading_that_ends_on_a_separator_is_not_a_name`.
         for line in [
             "--- a/src/main.rs",
             "+++ b/src/main.rs",
@@ -3381,13 +3499,109 @@ mod tests {
             spans("见 D:\\x\\a.md=值"),
             ["D:\\x\\a.md=值", "D:\\x\\a.md"]
         );
-        // Row 48: `(` followed by an ASCII `1` is no transition, so the seam never fires — the
-        // shorter reading `docs/a.md` is not offered and cannot be falsely lit. (Whether the whole
-        // `docs/a.md(1).txt` is recognized is the closing-delimiter's business — `)` ends the token
-        // — and is unchanged by this ruling.)
-        assert!(
-            !spans("docs/a.md(1).txt").contains(&"docs/a.md"),
-            "an ASCII `(1)` must not seam a name into a shorter one"
+        // Row 48 as it stands after the evening ruling of the same day (see
+        // `an_opening_bracket_is_a_seam_whatever_follows_it`): an opening bracket seams whatever
+        // follows it, so `docs/a.md(1).txt` **does** offer the shorter reading — it is offered, not
+        // promised, and the disk still decides. What has not changed is that `(` is a seam and not
+        // a terminator, which is what leaves a name that really carries a bracket askable at all.
+        assert_eq!(spans("docs/a.md(1).txt"), ["docs/a.md"]);
+        assert_eq!(
+            spans("见 D:\\x\\a.md(1"),
+            ["D:\\x\\a.md(1", "D:\\x\\a.md"],
+            "the whole name is still the first reading offered"
+        );
+    }
+
+    /// §7.30, boundary table rows 50 and 51 (user ruling 2026-08-28, on next16): an **ASCII
+    /// opening bracket** is a seam on its own account, **whatever follows it** — the one place in
+    /// this ruling where the character after the mark is not consulted.
+    ///
+    /// The line that proved it: `dist\folio-next16.exe(0.1.0 (84d843f47e))`, where the byte behind
+    /// the bracket is an ASCII `0`. The transition rule saw no transition, the token ate its way to
+    /// the closing `)`, and a file that is really on the disk went unmarked. A bracket does not open
+    /// a filename in the wild — it opens an aside about the thing just named — so it offers a
+    /// shorter reading, and the disk still decides between the readings, longest first.
+    #[test]
+    fn an_opening_bracket_is_a_seam_whatever_follows_it() {
+        // Row 50, the user's line. The bare spelling is no candidate whole (`(` is not a path
+        // character), so the seam is the only reading there is — and it is a real file.
+        assert_eq!(
+            spans("dist\\folio-next16.exe(0.1.0 (84d843f47e))"),
+            ["dist\\folio-next16.exe"]
+        );
+        // The drive-rooted spelling *is* a candidate whole, so both readings are offered, longest
+        // first, exactly as a comma's seam offers them.
+        assert_eq!(
+            spans("见 D:\\dist\\x.exe(0.1.0"),
+            ["D:\\dist\\x.exe(0.1.0", "D:\\dist\\x.exe"]
+        );
+        // All four openers, and an ASCII digit, letter and space-less word behind each of them: the
+        // class is "the opening half of the bracket pairs whose closing half already ends a token".
+        for line in ["docs/a.md(1", "docs/a.md[2", "docs/a.md{v3", "docs/a.md<x"] {
+            assert_eq!(spans(line), ["docs/a.md"], "{line} seams at its bracket");
+        }
+        // Row 51 at the disk, all three frames. Frame one: neither reading has an answer, so
+        // nothing is promised and both are asked — the shorter one may not be drawn ahead of the
+        // longer one's verdict.
+        let mut unknown = BTreeSet::new();
+        let asking = ledger("D:\\case", &[]);
+        assert_eq!(
+            asking.links_in("见 D:\\x\\a.exe(0.1.0", None, &mut unknown),
+            []
+        );
+        assert_eq!(
+            unknown.into_iter().collect::<Vec<_>>(),
+            [
+                PathBuf::from("D:\\x\\a.exe"),
+                PathBuf::from("D:\\x\\a.exe(0.1.0")
+            ]
+        );
+        // Frame two, the ordinary answer: the printed string is nobody's name, the name in front of
+        // the bracket is.
+        let denied = ledger(
+            "D:\\case",
+            &[("D:\\x\\a.exe", true), ("D:\\x\\a.exe(0.1.0", false)],
+        );
+        assert_eq!(
+            linked(&denied, "见 D:\\x\\a.exe(0.1.0", None),
+            [("D:\\x\\a.exe", "file:///D:/x/a.exe".to_owned())]
+        );
+        // Frame two, the other answer: a name that really carries a bracket wins whole, which is
+        // why the bracket is a seam and not a terminator.
+        let whole = ledger("D:\\case", &[("D:\\x\\a(1", true), ("D:\\x\\a", true)]);
+        assert_eq!(
+            linked(&whole, "见 D:\\x\\a(1", None),
+            [("D:\\x\\a(1", "file:///D:/x/a%281".to_owned())]
+        );
+    }
+
+    /// §7.30, boundary table row 52 (user ruling 2026-08-28, evening): **a reading must end on a
+    /// character that is part of a name.** A trailing `/` or `\` is not; what stands in front of one
+    /// is a directory prefix, and a directory prefix is a name nobody wrote — not even when the disk
+    /// holds it, because existence was never the licence to invent a reference, only to draw one.
+    ///
+    /// This is the same discipline that keeps a single bare word out (`README` is prose until
+    /// something says otherwise): a bare reference is admitted on the strength of carrying a
+    /// separator, and a **trailing** separator is the one place where that mark is not evidence of
+    /// two segments at all. So it closes a hole in the old rule rather than adding a new one, and it
+    /// is asked of every reading — the seam's shorter forms and the whole token alike.
+    #[test]
+    fn a_reading_that_ends_on_a_separator_is_not_a_name() {
+        let cwd = Some("D:\\case");
+        // The line that settled it: git's rename compression, where the opening brace seams and the
+        // reading in front of it is a directory prefix. Scenario 44 keeps its "no link at all".
+        assert_eq!(linked_on_a_full_disk(cwd, "src/{old => new}/main.rs"), []);
+        // The same shape without any seam: a lone directory prefix is refused at the lexer, so it
+        // never reaches the disk. `docs` alone was already out; `docs/` is out for the same reason.
+        assert!(spans("docs/").is_empty());
+        assert!(spans("cd docs/").is_empty());
+        assert!(spans("./").is_empty(), "an anchor alone names no file");
+        assert_eq!(linked_on_a_full_disk(cwd, "cd docs/"), []);
+        // What the rule must not touch: a reading that ends on a name still stands, seam or no seam.
+        assert_eq!(spans("docs/a.md(1"), ["docs/a.md"]);
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "cd docs/a.md"),
+            [("docs/a.md", "file:///D:/case/docs/a.md".to_owned())]
         );
     }
 
