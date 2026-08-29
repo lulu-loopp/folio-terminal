@@ -437,14 +437,32 @@ pub fn detect_relative_path_candidates(
 /// loosened: `docs/a.md:12:3` reaches this as `docs/a.md`, and `docs/a.md:abc` reaches it whole and
 /// is refused exactly as it always was.
 ///
-/// Three refusals. A candidate with no separator is a single bare name, which is out of scope. One
+/// Four refusals. A candidate with no separator is a single bare name, which is out of scope. One
 /// that *opens* with a separator names a place from the drive root rather than from here —
 /// `/usr/share/x.png` in a log line, or the `//host/x.png` a scheme leaves behind — and joining it
 /// to a working directory would invent a location nobody named. One containing `:` is not relative
 /// at all: the colon is exactly the character that makes text absolute (`D:\…`) or schemed
 /// (`file:…`, `https:…`), both of which are other scans' business and must never be claimed twice.
+///
+/// # A reading must end on a character that is part of a name (user ruling 2026-08-28, §7.30)
+///
+/// The fourth refusal is a **trailing** separator. `src/` is a directory prefix, and a directory
+/// prefix is a name nobody wrote — not even when the disk holds it, because existence was only ever
+/// the licence to *draw* a reference, never to invent one. The line that settled it is git's rename
+/// compression, `src/{old => new}/main.rs`, where the brace seams (§7.30) and the reading in front
+/// of it is exactly such a prefix.
+///
+/// It closes a hole in the first refusal rather than adding a rule beside it. A bare reference is
+/// admitted on the strength of **carrying a separator** — that mark is the only thing ordinary prose
+/// does not have — and a trailing separator is the one place where the mark is not evidence of two
+/// segments at all. `docs/` is `docs` with a slash after it, and `docs` alone was never a reference.
+///
+/// The absolute scan is deliberately not given the same clause: there the separator is never the
+/// evidence that something is a reference (the drive prefix is), and `D:\` is a real place whose own
+/// spelling ends in one.
 pub fn is_relative_reference(candidate: &str) -> bool {
     !candidate.starts_with(['/', '\\'])
+        && !candidate.ends_with(['/', '\\'])
         && candidate.contains(['/', '\\'])
         && !candidate.contains(':')
 }
@@ -2656,9 +2674,14 @@ mod tests {
     #[test]
     fn group_d_git_and_virtual_schemes() {
         let cwd = Some("D:\\case");
+        // 44 keeps its "no link at all" across the opening-bracket seam (§7.30, user ruling
+        // 2026-08-28 evening). The brace does seam, but the reading in front of it is `src/` — a
+        // directory prefix, and a reading must end on a character that is part of a name. See
+        // `a_reading_that_ends_on_a_separator_is_not_a_name`.
         for line in [
             "--- a/src/main.rs",
             "+++ b/src/main.rs",
+            "src/{old => new}/main.rs",
             "\"a/\\346\\226\\207.txt\"",
             "webpack://app/src/main.ts:7:2",
             "node:internal/modules/cjs/loader:123:4",
@@ -2669,16 +2692,6 @@ mod tests {
                 "{line} is a synthesized name and not this working tree's"
             );
         }
-        // 44 as the opening-bracket seam leaves it (§7.30, user ruling 2026-08-28 evening). The
-        // brace seams, so the reading in front of it is `src/` — **a directory that really is
-        // there**, and the whole of this line is about files inside it. Neither half the scenario
-        // forbade is offered: not `src/{old`, not `new`. The scenario's "no link at all" is what
-        // the seam costs here, and the ruling paid it knowingly: a shorter reading is drawn on the
-        // strength of the disk holding it, never on the strength of a guess about the syntax.
-        assert_eq!(
-            linked_on_a_full_disk(cwd, "src/{old => new}/main.rs"),
-            [("src/", "file:///D:/case/src".to_owned())]
-        );
     }
 
     /// Group G of the scenario list (68 to 73) — **the boundary table's new placement axis.**
@@ -3559,6 +3572,36 @@ mod tests {
         assert_eq!(
             linked(&whole, "见 D:\\x\\a(1", None),
             [("D:\\x\\a(1", "file:///D:/x/a%281".to_owned())]
+        );
+    }
+
+    /// §7.30, boundary table row 52 (user ruling 2026-08-28, evening): **a reading must end on a
+    /// character that is part of a name.** A trailing `/` or `\` is not; what stands in front of one
+    /// is a directory prefix, and a directory prefix is a name nobody wrote — not even when the disk
+    /// holds it, because existence was never the licence to invent a reference, only to draw one.
+    ///
+    /// This is the same discipline that keeps a single bare word out (`README` is prose until
+    /// something says otherwise): a bare reference is admitted on the strength of carrying a
+    /// separator, and a **trailing** separator is the one place where that mark is not evidence of
+    /// two segments at all. So it closes a hole in the old rule rather than adding a new one, and it
+    /// is asked of every reading — the seam's shorter forms and the whole token alike.
+    #[test]
+    fn a_reading_that_ends_on_a_separator_is_not_a_name() {
+        let cwd = Some("D:\\case");
+        // The line that settled it: git's rename compression, where the opening brace seams and the
+        // reading in front of it is a directory prefix. Scenario 44 keeps its "no link at all".
+        assert_eq!(linked_on_a_full_disk(cwd, "src/{old => new}/main.rs"), []);
+        // The same shape without any seam: a lone directory prefix is refused at the lexer, so it
+        // never reaches the disk. `docs` alone was already out; `docs/` is out for the same reason.
+        assert!(spans("docs/").is_empty());
+        assert!(spans("cd docs/").is_empty());
+        assert!(spans("./").is_empty(), "an anchor alone names no file");
+        assert_eq!(linked_on_a_full_disk(cwd, "cd docs/"), []);
+        // What the rule must not touch: a reading that ends on a name still stands, seam or no seam.
+        assert_eq!(spans("docs/a.md(1"), ["docs/a.md"]);
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "cd docs/a.md"),
+            [("docs/a.md", "file:///D:/case/docs/a.md".to_owned())]
         );
     }
 
