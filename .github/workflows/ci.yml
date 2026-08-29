@@ -202,6 +202,7 @@ jobs:
           $gates = @(
             "scripts/check-notices.ps1",
             "scripts/check-machine-paths.ps1",
+            "scripts/check-doc-words.ps1",
             "scripts/check-vendor-notices.ps1"
           )
           $ran = 0
