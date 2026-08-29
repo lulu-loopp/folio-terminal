@@ -2,175 +2,166 @@
   <source media="(prefers-color-scheme: dark)"
           srcset="assets/readme/hero-dark.svg">
   <img src="assets/readme/hero-light.svg" width="100%"
-       alt="Folio——会把数学排出来的 Windows 终端，还会告诉你哪个 agent 在等你。
-       名字旁边是一个终端窗格：一条命令把一个文件打印了出来，文件里那个
-       独立成行的公式——e 的负 x 平方在全实轴上的积分等于根号 π——就排在
-       输出里，排在下一个提示符上面。">
+       alt="Folio——可将数学公式排版的 Windows 终端，同时指示哪个 agent 正在等待。
+       名称旁边有一个终端窗格：一条命令将文件内容打印至输出，其中独立成行的公式——e 的负 x 平方在全实轴上的积分等于根号 π——在输出中按其原位置排版，位于下一个提示符上方。">
 </picture>
 
-Folio 是一个 Windows 终端：命令打印出来的公式就地排版，命令提到的文件就在提示符旁边预览，哪个 agent 在等你回话，它会告诉你。
+Folio 是一款 Windows 终端：命令输出的公式将在其打印位置排版，命令提及的文件将在提示符旁预览，等待用户响应的 agent 将被明确标示。
 
 [English](README.md) · [快捷键](docs/shortcuts.md) · [安全](SECURITY.md) · [更新记录](CHANGELOG.md)
 
-> **预览版。** 0.1.0 是第一个公开版本，没有代码签名，见下面的 [SmartScreen](#smartscreen)。
+> **预览版。** 0.1.0 为第一个公开版本，未进行代码签名，详见下方 [SmartScreen](#smartscreen)。
 
 ---
 
 ## 主要功能
 
-### 命令输出里的 LaTeX 排版
+### 命令输出中的 LaTeX 排版
 
-命令打印出来的公式，就排在它打印的位置上。
+命令输出的 LaTeX 将在其打印位置完成排版。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/terminal-math-dark.png">
   <img src="docs/screenshots/terminal-math-light.png" width="100%"
-       alt="一个终端窗格，一条命令的输出就在打印的地方排好了版：几段文字里嵌着短的行内
-       公式，上、中、下各有一条独立成行的公式——高斯归一化积分、傅里叶变换对，
-       以及指数函数的级数。">
+       alt="一个终端窗格，其中一条命令的输出在其打印位置完成排版：若干段文字内嵌有短行内公式，上、中、下位置各有一条独立成行的公式——高斯归一化积分、傅里叶变换对，以及指数函数的级数。">
 </picture>
 
-- 命令输出中的 `$…$` 和 `$$…$$` 会就地排版，不用复制到别的地方去看。
-- 预览窗格除了这两种写法，还支持 `\(…\)`、`\[…\]` 和不带包裹的 amsmath 环境。
-- 两处共用同一套排版：LaTeX 经 MiTeX 交给 Typst，同一个公式在两处显示一致；排不出来的内容按打印出来的原样显示。
-- 行内 `$…$` 靠 PowerShell 整合与 shell 变量区分；没装整合时，行内公式保持源码原样，`$$…$$` 块照常排版。
+- 命令输出中的 `$…$` 与 `$$…$$` 将在对应打印行内完成排版。
+- 预览窗格除上述两种写法外，还支持 `\(…\)`、`\[…\]` 及不带包裹的 amsmath 环境。
+- 两处共用同一排版引擎：LaTeX 经 MiTeX 转换至 Typst；无法排版的内容将按其打印原样显示。
+- 行内 `$…$` 依赖 PowerShell 整合与 shell 变量进行区分；未安装整合时，行内公式保持源码原样，`$$…$$` 块仍照常排版。
 
 ### agent 的提醒与配置
 
-哪个 agent 在等你回话，不用你挨个标签页去看。
+等待响应的 agent 将在其标签页上标记，无需逐个查看标签页。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/settings-agents-dark.png">
   <img src="docs/screenshots/settings-agents-light.png" width="100%"
-       alt="设置的 Agent 页：三行，分别对应 Claude Code、Codex 和 GitHub Copilot CLI，
-       每行一句话说明它的开关会往哪个文件里写通知 hook，三行都处于关闭状态。">
+       alt="设置的 Agent 页：三行，分别对应 Claude Code、Codex 与 GitHub Copilot CLI，每行以一句话说明其开关将向哪个文件写入通知 hook，三行均处于关闭状态。">
 </picture>
 
-- 等待中的 agent 会在标签页上亮一个点；你人在别的程序里时，任务栏跟着闪；窗口最小化或不在当前桌面时，发一条 Windows 通知。
-- 一次请求最多打扰一次。点不会因为你看了一眼就消失，要你在那个窗格里回了话，或者那个程序自己撤回，它才消失。`Ctrl+Shift+A` 跳到等待时间最长的那一个。
-- 设置的 Agent 页上，Claude Code、Codex、GitHub Copilot CLI 各有一行开关：打开会往对应工具自己的配置文件里写一个通知 hook，关掉会原样撤回。默认不装任何东西。
-- 七条配置直接启动 agent：Claude Code、Codex、Copilot CLI、Kimi Code、pi、Hermes、OpenCode，在 Windows 的 PATH 上查找；装在 WSL 里的 agent，从 WSL 配置启动。任何往终端里写 `OSC 1337;RequestAttention=yes` 的程序，不装任何东西也听得见。
+- 等待响应的 agent 将在其标签页显示一个圆点；焦点位于其他程序时，任务栏将闪烁；窗口最小化或位于其他桌面时，将发出 Windows 通知。
+- 一次请求最多中断一次；圆点仅在用户于对应窗格内回复或该程序撤回请求后清除。`Ctrl+Shift+A` 可跳转至等待时间最长的一项。
+- 设置的 Agent 页中，Claude Code、Codex 与 GitHub Copilot CLI 各有一行开关：开启时向对应工具自身的配置文件写入一个通知 hook，关闭时将其撤回。默认不安装任何内容。
+- 七条配置可直接启动 agent：Claude Code、Codex、Copilot CLI、Kimi Code、pi、Hermes、OpenCode，均在 Windows PATH 中查找；安装于 WSL 内的 agent 将从 WSL 配置启动。任何向终端写入 `OSC 1337;RequestAttention=yes` 的程序，无需安装任何内容即可被识别。
 
 ### 文件、PDF、视频与网页的预览
 
-文件在提示符旁边就能看，不用切到别的程序。
+文件内容可在提示符旁直接阅读，无需打开其他应用程序。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/preview-pdf-dark.png">
   <img src="docs/screenshots/preview-pdf-light.png" width="100%"
-       alt="鼠标停在文件列的一个文件名上，底下弹出一张卡片，画着这份 PDF 的第一页，
-       下面写着页数和大小；滚轮可以在卡片里一页页往下翻。">
+       alt="指针悬停于文件列中的一个文件名上，下方弹出卡片，显示该 PDF 的第一页，并标注页数与大小；滚轮可在卡片内逐页翻阅。">
 </picture>
 
-- 鼠标停在文件列的文件名上会弹出一张卡片：PDF 的第一页、视频的第一帧、文本的头几行，图片则是图片本身；滚轮可以在卡片里翻页。
-- 文件开在提示符旁边的窗格里：markdown 排好版，PDF 一页一页翻，视频可以播放，网页带地址栏和后退。
-- 终端打印出来的路径可以直接点开，开在旁边的窗格里；按住 `Ctrl` 再点，交给系统的默认程序。没有做过标记的裸路径也认，前提是这个文件确实存在。
-- 网页地址遵循同样的规则：单击开在预览窗格里，`Ctrl`+单击交给浏览器。
+- 指针悬停于文件列中的文件名上时，将弹出卡片：PDF 显示第一页，视频显示第一帧，文本显示开头数行，图片显示图片本身；滚轮可在卡片内翻页。
+- 文件将在提示符旁的预览窗格中打开：markdown 完成排版，PDF 逐页显示，视频可播放，网页带有地址栏与后退功能。
+- 终端输出的路径可单击打开至预览窗格；按住 `Ctrl` 并单击将交由系统默认程序处理。未作标记的裸路径在确认文件存在后亦可识别。
+- 网页地址遵循相同规则：单击在预览窗格中打开，`Ctrl`+单击交予浏览器处理。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="assets/readme/surfaces-dark.png">
   <img src="assets/readme/surfaces-light.png" width="100%"
-       alt="另外三个面：摊成卡片的一扇窗、排在预览窗格里的 markdown 文档，
-       以及开在预览窗格里的一个网页，上面是一条面包屑式的地址栏。">
+       alt="另外三种界面形态：以卡片排布的窗口、在预览窗格中完成排版的 markdown 文档，以及带面包屑式地址栏的网页预览窗格。">
 </picture>
 
 ### 标签页、窗格与窗口的排布
 
-布局可以随时调整，会话不会中断，所有会话可以同时看到。
+布局可随时调整，会话不中断，所有会话均可同时查看。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/cards-dark.png">
   <img src="docs/screenshots/cards-light.png" width="100%"
-       alt="标签条变成了一列卡片。这一张卡片代表一个装了八个窗格的标签，八个窗格都按
-       原布局缩画在卡片里；按住 Alt 滚轮，可以一行一行地滚动卡片里的画面。">
+       alt="标签条已变为一列卡片。该卡片代表一个包含八个窗格的标签页，八个窗格均按原布局缩绘于卡片内；按住 Alt 并滚动滚轮，可逐行滚动卡片内的画面。">
 </picture>
 
-- `Alt+Shift+-` 横向分屏，`Alt+Shift+=` 纵向分屏。标签页和单个窗格都可以拖出来自成一扇窗口，拖出去时没被碰到的窗格宽度不变。
-- `Ctrl+Shift+Z` 把标签条换成一列卡片，一张卡片就是一个标签页，卡片里按这个标签页自己的布局画出它的每一个窗格。
-- `Ctrl+Shift+G` 把文件列切换成 git 面板：分支、工作区、暂存与未暂存的文件、提交图；选中哪个文件，它的差异就显示在预览里。
-- `Ctrl+Shift+↑` 和 `Ctrl+Shift+↓` 在命令之间跳转，执行失败的命令会被标出来。
+- `Alt+Shift+-` 横向分屏，`Alt+Shift+=` 纵向分屏。标签页或单个窗格可拖出并独立成窗，未触及的窗格宽度保持不变。
+- `Ctrl+Shift+Z` 将标签条切换为一列卡片，一张卡片对应一个标签页，卡片内按该标签页自身的布局绘出全部窗格。
+- `Ctrl+Shift+G` 将文件列切换为 git 面板：显示分支、工作区、暂存与未暂存文件、提交图；选中文件后，其差异将显示于预览窗格。
+- `Ctrl+Shift+↑` 与 `Ctrl+Shift+↓` 可在滚动缓冲区中的命令间跳转，执行失败的命令将标记为失败。
 
 ### Windows 上的细节
 
-Windows 专属的部分都在真机上验证过。
+Windows 专属功能已在真实硬件上验证。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/main-window-dark.png">
   <img src="docs/screenshots/main-window-light.png" width="100%"
-       alt="窗口的默认样子：左边是文件列，中间两个终端窗格并排，右边的预览窗格里开着
-       一份 markdown 文档。默认字体、默认配色。">
+       alt="窗口默认外观：左侧为文件列，中间两个终端窗格并排，右侧预览窗格中打开一份 markdown 文档，均采用默认字体与默认配色。">
 </picture>
 
-- 宽字符有一套录好的宽度用例守着，逐字节记录一个字占几列、光标能停在哪、选区能切在哪。
-- 微软拼音、微信输入法、搜狗三家在真机上逐项敲过。搜狗不把正在拼的那一串报给应用，所以拼音只画在它自己的候选窗口里，上屏的文字是对的。
-- 两块缩放不同的屏幕在真硬件上量过：窗口在两块屏之间拖动、最大化、往两个方向拉到超出屏幕边缘。「在此处打开 Folio」在资源管理器右键菜单的「显示更多选项」下面。
-- Windows PowerShell 5.1 自带的还是 PSReadLine 2.0.0，它的编辑锚点取自窗口改变大小之前数出的格数，所以把窗口拖窄，输入行会画回原来的位置，盖住已经移走的文字。Folio 内置了一份打过补丁的 2.4.6，你让它装，它就装进你的模块目录。机器的执行策略还是出厂的 Restricted 时，开关会说明原因，并给出让模块能加载的命令 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。
+- 宽字符拥有已记录的宽度用例语料库，逐字节记录每个字符所占列数、光标可落位置及选区可切断位置。
+- 微软拼音、微信输入法与搜狗输入法均已在真实硬件上手动逐项验证。搜狗输入法不向应用程序报告正在输入的拼音音节，因此拼音仅显示于其自身候选窗口，上屏文字保持正确。
+- 两块缩放比例不同的显示器已在真实硬件上测量：窗口在两屏间拖动、最大化、向两个方向拉至超出屏幕边缘。「在此处打开 Folio」位于资源管理器右键菜单的「显示更多选项」之下。
+- Windows PowerShell 5.1 仍随附 PSReadLine 2.0.0，其编辑锚点取自窗口尺寸变更前统计的单元格数，因此窗口变窄时输入行将重绘至已移动的文字之上。Folio 内置一份已修补的 2.4.6 版本，用户可要求将其安装至模块路径。当机器的执行策略仍为出厂默认的 `Restricted` 时，该开关将说明原因，并提供可让模块加载的 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 命令。
 
 ---
 
 ## 下载
 
-从 releases 页面下载 `folio-0.1.0-windows-x64.zip`，解压到你放程序的目录，运行 `folio.exe`。没有安装程序；在你运行它之前，解压目录之外不会被写入任何东西。`SHA256SUMS.txt` 是你下载到的文件的哈希。需要 **Windows 10 1809 或更高版本，或 Windows 11，64 位**。
+从 releases 页面获取 `folio-0.1.0-windows-x64.zip`，解压至存放程序的目录，运行 `folio.exe`。无安装程序；运行之前，解压目录之外不会写入任何内容。`SHA256SUMS.txt` 为所下载文件的哈希值。需 **Windows 10 1809 或更高版本，或 Windows 11，64 位**。
 
-网页预览需要 **WebView2 运行时**。Windows 11 自带；Windows 10 通常也有，如果没有，可以从[微软的下载页](https://developer.microsoft.com/microsoft-edge/webview2/)装一个 Evergreen 运行时。没有它，除网页预览之外的功能照常，预览窗格会写明缺的是什么。
+网页预览需 **WebView2 运行时**。Windows 11 自带该运行时；Windows 10 通常亦已安装，若未安装，可从此处获取 [Evergreen 运行时](https://developer.microsoft.com/microsoft-edge/webview2/)。缺少该运行时，除网页预览外的所有功能均正常，预览窗格将说明缺失项。
 
 ## SmartScreen
 
-0.1.0 没有代码签名，所以第一次运行可能会出现「Windows 已保护你的电脑」。点「更多信息」，确认上面写的程序名是 `folio.exe`，再点「仍要运行」。不要为此关掉 SmartScreen。
+0.1.0 未进行代码签名，首次运行时可能出现「Windows 已保护你的电脑」提示。请点击「更多信息」，确认所列程序名为 `folio.exe`，再点击「仍要运行」。请勿为此关闭 SmartScreen。
 
 ## 第一次运行
 
-第一个标签页打开的是你机器上排在最前的那个 shell。五条内置 shell 配置按 PowerShell 7、Windows PowerShell、WSL、Git Bash、命令提示符的顺序查找；机器上没装的那条在选择器里是灰的，而不是被藏起来。七条 agent 配置用同样的方式在 Windows 的 PATH 上查找。
+第一个标签页将打开系统中排在最前的 shell。五条内置 shell 配置按 PowerShell 7、Windows PowerShell、WSL、Git Bash、命令提示符的顺序查找；未安装对应程序的配置在选择器中显示为灰色而非隐藏。七条 agent 配置以同样方式在 Windows PATH 中查找。
 
-第一个 PowerShell 窗格打印出内容之后，会浮出一条提示，说 PowerShell 整合还没有装。**加进 `$PROFILE`** 会往你的 PowerShell 配置文件末尾追加一行 `. "$env:APPDATA\Folio\shell-integration\folio.ps1"`，追加之前先把原文件按日期另存一份放在旁边；删掉这一行就能撤销。**不再提示** 从此不再问。把提示条直接关掉不算做出决定，下一个 PowerShell 还会再问一次。命令标记和行内 `$…$` 公式靠的就是这套整合。Git Bash 和 WSL 不用装，磁盘上也不留东西。
+第一个 PowerShell 窗格输出内容后，将显示提示条，说明 PowerShell 整合尚未安装。**加进 `$PROFILE`** 将在 PowerShell 配置文件末尾追加一行 `. "$env:APPDATA\Folio\shell-integration\folio.ps1"`，追加前先将原文件按日期另存为备份；删除该行可撤销。**不再提示** 将终止询问；直接关闭提示条不构成决定，下一个 PowerShell 窗格将再次询问。命令标记与行内 `$…$` 公式依赖该整合。Git Bash 与 WSL 无需安装任何内容，亦不在磁盘上留下痕迹。
 
-设置的 Agent 页上那三行**默认不装任何东西**，它们也不是「默认关」的开关：每一行都去读对应工具自己的配置文件，如实显示里面有什么。新机器上三个文件都不存在，所以三行都显示为关。
+设置的 Agent 页中三行**默认不安装任何内容**，且并非「默认关闭」的开关：每行均读取对应工具自身的配置文件并如实显示其中内容。新机器上三个文件均不存在，因此三行均显示为关闭。
 
 ---
 
 ## 隐私
 
-Folio 不向任何地方发送数据：没有遥测、没有统计、没有崩溃上报、没有更新检查，自己也没有网络客户端。唯一联网的是你在网页预览里打开的那个页面。Folio 里没有模型，也没有 API key，它服务的是你自己已经在跑的 agent。
+Folio 不向任何位置发送数据：无遥测、无统计、无崩溃上报、无更新检查，亦无自有网络客户端。唯一联网行为为用户在网页预览中打开的页面。Folio 内不含模型或 API key，其服务对象为用户已运行的 agent。
 
-它记住的东西放在两个目录：`%APPDATA%\Folio` 放设置、配置文件、配色和会话，`%LOCALAPPDATA%\Folio\WebView2` 放网页预览的 cookie 和缓存。删掉前一个，Folio 就回到第一次启动的样子。
+其保存的数据位于两个目录：`%APPDATA%\Folio` 存放设置、配置文件、配色与会话，`%LOCALAPPDATA%\Folio\WebView2` 存放网页预览的 cookie 与缓存。删除前者后，Folio 将恢复至首次启动状态。
 
 ```powershell
 Remove-Item -Recurse -Force "$env:APPDATA\Folio"
 Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
 ```
 
-哪个文件里存了什么、`session.json` 里为什么会留下完整的地址，都写在 [`docs/PRIVACY.md`](docs/PRIVACY.md)。
+各文件所存内容及 `session.json` 中完整地址的形成原因，详见 [`docs/PRIVACY.md`](docs/PRIVACY.md)。
 
 ## 已知问题
 
-- **没有签名。** 见上面的 [SmartScreen](#smartscreen)。
-- **`.mov` 不能播。** 它有首帧、时长和大小，窗格里会写明为什么没有播放按钮。`.mkv` 和 `.avi` 连预览都没有。
-- **有过一次「窗口挪到副屏之后上半扇是黑的」的报告，没能复现。** 真撞上了，请附上 `%APPDATA%\Folio\diagnostics.log`。
-- **「在此处打开 Folio」不在 Windows 11 右键菜单的第一层。** 要进第一层，程序得先签名并打包。
-- **`.webm` 的卡片可能没有画面。** 那一帧要靠机器上装着的解码器，出厂的 Windows 未必有 VP9 或 AV1；时长、大小和播放都不受影响。
-- 其余的记在 [`CHANGELOG.md`](CHANGELOG.md)。
+- **未签名。** 见上方 [SmartScreen](#smartscreen)。
+- **`.mov` 无法播放。** 可获取首帧、时长与大小，窗格将说明无播放按钮的原因。`.mkv` 与 `.avi` 不提供任何预览。
+- **曾有窗口移至第二显示器后上半部分显示为黑色的报告，未能复现。** 如遇此问题，请附上 `%APPDATA%\Folio\diagnostics.log`。
+- **「在此处打开 Folio」不在 Windows 11 右键菜单的首层。** 首层菜单要求程序已完成签名并打包，该功能将待签名后实现。
+- **`.webm` 卡片在出厂 Windows 系统上可能为空白。** 该帧需依赖系统已安装的解码器，出厂 Windows 可能缺少 VP9 或 AV1 解码器；时长、大小与播放均不受影响。
+- 其余问题见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 许可
 
-MIT 或 Apache-2.0，任选其一。每个依赖的许可，以及它们要求随附的声明，都在 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
+MIT 或 Apache-2.0，任选其一。各依赖项的许可及其要求的声明，均列于 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
 
-这两份许可给的是版权与专利许可，不包含其它内容。Folio 这个名字和标识不在其中，[`TRADEMARK.md`](TRADEMARK.md) 写明了这对修改后的分发意味着什么。
+两份许可仅授予版权与专利许可，不包含其他内容。Folio 名称及标识不在许可范围内，[`TRADEMARK.md`](TRADEMARK.md) 说明了这对修改后分发的影响。
 
 ## 构建与参与
 
-从源码构建见 [`docs/BUILDING.md`](docs/BUILDING.md)，参与开发见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，安全问题请走 [`SECURITY.md`](SECURITY.md) 里的私下渠道，不要提交公开 issue。
+从源码构建见 [`docs/BUILDING.md`](docs/BUILDING.md)；变更流程见 [`CONTRIBUTING.md`](CONTRIBUTING.md)；安全报告请通过 [`SECURITY.md`](SECURITY.md) 中的私密渠道提交，勿以公开 issue 形式提出。
 
 ## 后续方向
 
-- **快捷键呼出的临时终端。** 按一个热键，从屏幕顶部滑下一扇窗口，再按一次收回，内容还在。
-- **预览窗格里的 markdown 编辑。** 所见即所得，边写边排版。
-- **macOS 与 Linux。** 绘制、布局与排版这一层不区分平台，要换的是与系统打交道的那一层；先 macOS，再 Linux。
-- **在手机上看谁在等你。** agent 仍然跑在电脑上，手机负责显示哪个在等你回话，并且能回它一句。默认是关的，你打开才有，而且先只走你自己的网络。
+- 快捷键呼出的临时终端：按一个热键，窗口从屏幕顶部滑下，再按一次收回，其中内容保持不变。
+- 预览窗格中的 markdown 编辑：在排版位置直接编辑。
+- macOS 与 Linux 支持：绘制、布局与排版层不区分平台，需替换的仅为与系统交互的组件；先实现 macOS，后实现 Linux。
+- 手机端查看等待状态：agent 仍运行于电脑，手机负责显示等待响应的 agent 并可回复；默认关闭，开启后先仅限自有网络使用。
 
-这些是方向，不是日期。
+以上为方向，非时间承诺。
