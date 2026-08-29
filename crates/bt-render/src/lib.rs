@@ -1,6 +1,7 @@
 //! wgpu + cosmic-text rendering for viewport-owned terminal frames.
 
 mod contrast;
+mod glyph_census;
 mod ground;
 pub mod motion;
 mod procedural;
@@ -40,6 +41,8 @@ use glyphon::{
 use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
+
+pub use glyph_census::{GlyphCensus, LaneGlyphDemand};
 
 pub use contrast::{
     ALWAYS_REACHABLE_RATIO_LIMIT, MinimumContrast, contrast_ratio, current_minimum_contrast,
@@ -1523,21 +1526,40 @@ pub enum TextLane {
 }
 
 impl TextLane {
+    /// Every lane, in prepare order.
+    pub const ALL: [Self; Self::COUNT] = [Self::Grid, Self::Chrome, Self::Preview, Self::Overlay];
+
+    /// How many there are — the width of any per-lane array.
+    pub const COUNT: usize = 4;
+
+    /// This lane's slot in a per-lane array.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Grid => 0,
+            Self::Chrome => 1,
+            Self::Preview => 2,
+            Self::Overlay => 3,
+        }
+    }
+
+    /// The lane's name, as the trace and the diagnostics log print it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Grid => "grid",
+            Self::Chrome => "chrome",
+            Self::Preview => "preview",
+            Self::Overlay => "overlay",
+        }
+    }
+
     const fn bit(self) -> u8 {
         match self {
             Self::Grid => 1,
             Self::Chrome => 2,
             Self::Preview => 4,
             Self::Overlay => 8,
-        }
-    }
-
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Grid => "grid",
-            Self::Chrome => "chrome",
-            Self::Preview => "preview",
-            Self::Overlay => "overlay",
         }
     }
 }
@@ -3194,6 +3216,14 @@ pub struct WindowRenderer {
     narrow_shaping_cache: NarrowShapingCache,
     wide_shaping_cache: WideShapingCache,
     glyph_refusal_log: GlyphRefusalLog,
+    /// Whether this window counts what each frame asks the atlas for.
+    ///
+    /// Off, and off on every frame a user ever sees: a census rasterizes every
+    /// distinct glyph a second time to learn its size, which is a cost only a
+    /// measurement is allowed to pay. See [`GlyphCensus`].
+    glyph_census_enabled: bool,
+    /// The last frame's count, when the census is on.
+    glyph_census: Option<GlyphCensus>,
     window_focused: bool,
     cursor_blink_visible: bool,
     peek_overlay: Option<PeekImageOverlay>,
@@ -4067,6 +4097,40 @@ impl HeadlessRenderProbe {
     }
 }
 
+/// **wgpu's defaults, with one number raised to what this adapter actually
+/// has: the largest texture it will make.**
+///
+/// `wgpu::Limits::default()` is a portability floor — it caps
+/// `max_texture_dimension_2d` at 8192 on every machine, including the ones whose
+/// hardware will do 16384 and has since D3D feature level 11. A device asks for
+/// what it wants and the adapter grants what it has, so accepting the floor is a
+/// choice to have a quarter of the texture the machine offers.
+///
+/// It is the glyph atlas that pays for that choice, and it pays in the one
+/// currency it cannot borrow. glyphon sizes its atlas from
+/// `device.limits().max_texture_dimension_2d` (`text_atlas.rs`), grows it by
+/// doubling, and answers `PrepareError::AtlasFull` the moment the next doubling
+/// would pass that number — and a refusal is not one missing character but a
+/// whole lane's text gone (§7.1.3l). Raising the ceiling from 8192² to 16384² is
+/// **four times** the room for the same fonts, and it costs nothing until it is
+/// used: the atlas still starts at 256² and still only grows when it has to.
+///
+/// Only this one field moves. Asking for the adapter's whole `Limits` would be a
+/// different and much larger promise — every buffer bound, every binding count,
+/// every workgroup size — held to the widest machine that ever ran this and
+/// broken on the narrowest. This asks for one number, and asks for it from the
+/// adapter that is about to grant it, so the request can never exceed what is
+/// there.
+fn limits_with_this_adapters_textures(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    let available = adapter.limits().max_texture_dimension_2d;
+    wgpu::Limits {
+        max_texture_dimension_2d: wgpu::Limits::default()
+            .max_texture_dimension_2d
+            .max(available),
+        ..wgpu::Limits::default()
+    }
+}
+
 impl GpuContext {
     /// Open the process's device layer and its first window in one call.
     ///
@@ -4124,6 +4188,7 @@ impl GpuContext {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Folio device"),
+                required_limits: limits_with_this_adapters_textures(&adapter),
                 ..Default::default()
             })
             .await
@@ -4216,6 +4281,7 @@ impl GpuContext {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Folio replay probe device"),
+                required_limits: limits_with_this_adapters_textures(&adapter),
                 ..Default::default()
             })
             .await
@@ -4889,6 +4955,8 @@ impl WindowRenderer {
             narrow_shaping_cache: NarrowShapingCache::with_perf_tracking(measure_shaping),
             wide_shaping_cache: WideShapingCache::with_perf_tracking(measure_shaping),
             glyph_refusal_log: GlyphRefusalLog::default(),
+            glyph_census_enabled: false,
+            glyph_census: None,
             window_focused: true,
             cursor_blink_visible: true,
             peek_overlay: None,
@@ -5089,6 +5157,26 @@ impl WindowRenderer {
     #[must_use]
     pub fn preview_text_frame(&self) -> PreviewTextFrame {
         self.preview_text_frame
+    }
+
+    /// **Count what every frame from here on asks the glyph atlas for.**
+    ///
+    /// A measurement instrument and never a default: a census rasterizes each
+    /// distinct glyph a second time to learn how much atlas it takes, so a frame
+    /// under it is materially slower than the frame it is measuring. `bt-app`
+    /// turns it on for `BT_GLYPH_CENSUS`; the stress fixture turns it on for one
+    /// composed frame. See [`GlyphCensus`].
+    pub fn set_glyph_census(&mut self, enabled: bool) {
+        self.glyph_census_enabled = enabled;
+        if !enabled {
+            self.glyph_census = None;
+        }
+    }
+
+    /// The last composed frame's count, or `None` when the census is off.
+    #[must_use]
+    pub fn glyph_census(&self) -> Option<&GlyphCensus> {
+        self.glyph_census.as_ref()
     }
 
     /// **Hand over every playing video this frame.** Returns whether anything
@@ -5857,6 +5945,13 @@ impl WindowRenderer {
         // exactly what a table block is, and a second pass would be a second answer to the same
         // question about ordering.
         let mut table_block_bodies: Vec<PreviewBody> = Vec::new();
+        // This frame's count of what the atlas was asked for, when a caller has
+        // asked to be told. A local and not a field, so that the lanes below can
+        // hold `&self.text_rows` and the census at the same time; it is put back
+        // on the window once every lane has been counted.
+        let mut census = self
+            .glyph_census_enabled
+            .then(|| GlyphCensus::for_device(gpu.max_texture_dimension_2d()));
         let mut focused_text_stats = None;
         // Whether every seat's grid text reached the glass. One bit for the
         // window and not one per seat, because what the caller does with it —
@@ -5925,6 +6020,28 @@ impl WindowRenderer {
             // fit. The trim this frame owes is the unconditional one in
             // [`Self::present_frame`], and the retry is
             // [`PresentOutcome::PresentedWithoutText`].
+            if let Some(census) = census.as_mut() {
+                // The same two sequences the two prepares above were handed, in
+                // the same order — see [`grid_text_areas`].
+                census.record(
+                    TextLane::Grid,
+                    &mut gpu.font_system,
+                    &mut gpu.swash_cache,
+                    grid_text_areas(&self.text_rows, self.metrics, frame, entry.seat),
+                );
+                census.record(
+                    TextLane::Grid,
+                    &mut gpu.font_system,
+                    &mut gpu.swash_cache,
+                    status_text_areas(
+                        self.status_overlay.as_deref(),
+                        self.metrics,
+                        frame,
+                        entry.seat.width as f32,
+                        entry.seat,
+                    ),
+                );
+            }
             let text_prepared = accept_text_prepare(
                 TextLane::Grid,
                 text_prepare_result,
@@ -6209,6 +6326,14 @@ impl WindowRenderer {
         for body in self.preview_bodies.iter().chain(table_block_bodies.iter()) {
             preview_text_layouts.extend(shape_preview_body(&mut gpu.font_system, body));
         }
+        if let Some(census) = census.as_mut() {
+            census.record(
+                TextLane::Preview,
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                chrome_text_areas(&preview_text_layouts),
+            );
+        }
         let preview_text_prepared = if preview_text_layouts.is_empty() {
             false
         } else {
@@ -6237,6 +6362,14 @@ impl WindowRenderer {
             gpu.chrome_cap_height_ratio,
             1.0,
         );
+        if let Some(census) = census.as_mut() {
+            census.record(
+                TextLane::Chrome,
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                chrome_text_areas(&chrome_layouts),
+            );
+        }
         let chrome_prepared = if chrome_layouts.is_empty() {
             false
         } else {
@@ -6473,6 +6606,14 @@ impl WindowRenderer {
                     None,
                 ));
             }
+            if let Some(census) = census.as_mut() {
+                census.record(
+                    TextLane::Overlay,
+                    &mut gpu.font_system,
+                    &mut gpu.swash_cache,
+                    chrome_text_areas(&layouts),
+                );
+            }
             let text_prepared = if layouts.is_empty() {
                 false
             } else {
@@ -6515,6 +6656,8 @@ impl WindowRenderer {
         preview_text_frame.layer_prepared = !refused.contains(TextLane::Overlay);
         preview_text_frame.refused = refused;
         self.preview_text_frame = preview_text_frame;
+        // Every lane has been counted; the window may hold it again.
+        self.glyph_census = census;
         self.overlay_layers = overlay_layers;
         let overlay_has_work = overlay_draws.iter().any(|layer| {
             layer.ground_buffer.is_some()
@@ -8915,6 +9058,32 @@ fn shape_chrome_labels(
     labels
         .iter()
         .filter(|label| !label.text.is_empty() && label.rect[2] > label.rect[0])
+        // **A label whose box does not survive its own clip is not shaped**
+        // (`docs/DESIGN.md` §7.1.3m) — the rule [`shape_preview_body`] has
+        // applied to a page's paragraphs since it existed, arriving here where
+        // §7.1.3l wrote down that it was missing.
+        //
+        // It is not a saving of ink; the glyphs were never going to be seen
+        // either way. It is a saving of **atlas**: glyphon rasterizes a glyph
+        // and finds it a place in the texture *before* it tests the glyph
+        // against `TextArea.bounds` (`text_render.rs`, `prepare_glyph` — the
+        // bounds arithmetic is below the `try_allocate` loop, not above it), so
+        // a caption cropped down to nothing costs exactly what a caption in
+        // plain sight costs, and costs it in the one resource a frame can run
+        // out of. A row scrolled past the top of a git graph, a badge in a row
+        // that straddles the viewport's edge, a caption in a pane mid-flight
+        // behind a clip that has already closed — every one of them was casting
+        // its bitmaps.
+        //
+        // `crop_to` and not a hand-rolled overlap test, for its own two
+        // refusals as much as for the intersection: a box carrying a `NaN` or
+        // inverted by a caller's own crop is not a crop at all, and the glyphs
+        // it admits land wherever the arithmetic put them.
+        .filter(|label| {
+            label
+                .clip
+                .is_none_or(|clip| crop_to(label.rect, clip).is_some())
+        })
         .map(|label| {
             let width = label.rect[2] - label.rect[0];
             let line_height = label.font_size_px * 1.4;
@@ -9421,6 +9590,20 @@ fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<C
         .collect()
 }
 
+/// **Every `TextArea` one shaped chrome batch asks the atlas for**, for
+/// [`grid_text_areas`]'s reason: the prepare and the census read one sequence.
+fn chrome_text_areas(layouts: &[ChromeTextLayout]) -> impl Iterator<Item = TextArea<'_>> {
+    layouts.iter().map(|layout| TextArea {
+        buffer: &layout.buffer,
+        left: layout.left,
+        top: layout.top,
+        scale: 1.0,
+        bounds: layout.bounds,
+        default_color: layout.color,
+        custom_glyphs: &[],
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_chrome_text_atlas(
     text_renderer: &mut TextRenderer,
@@ -9438,33 +9621,49 @@ fn prepare_chrome_text_atlas(
         font_system,
         atlas,
         viewport,
-        layouts.iter().map(|layout| TextArea {
-            buffer: &layout.buffer,
-            left: layout.left,
-            top: layout.top,
-            scale: 1.0,
-            bounds: layout.bounds,
-            default_color: layout.color,
-            custom_glyphs: &[],
-        }),
+        chrome_text_areas(layouts),
         swash_cache,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn prepare_text_atlas(
-    text_renderer: &mut TextRenderer,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    font_system: &mut FontSystem,
-    atlas: &mut TextAtlas,
-    viewport: &Viewport,
-    swash_cache: &mut SwashCache,
-    text_rows: &[Arc<ComposedRow>],
-    metrics: CellMetrics,
+/// **The current hit's ink, applied at the draw and not in the shaping**
+/// (§7.1.5d) — the one cell-level recolour the grid's `TextArea`s carry.
+///
+/// A free function rather than the closure it used to be, because
+/// [`grid_text_areas`] hands its iterator back to two callers and an iterator
+/// cannot borrow a local of the function that built it.
+fn grid_glyph_ink(
     frame: &ViewportFrame,
+    current_ink: Option<Color>,
+    row: usize,
+    column: usize,
+    resting: Color,
+) -> Color {
+    current_ink
+        .filter(|_| {
+            frame.current_search_spans.iter().any(|span| {
+                span.row as usize == row
+                    && (span.start_column as usize..span.end_column as usize).contains(&column)
+            })
+        })
+        .unwrap_or(resting)
+}
+
+/// **Every `TextArea` one seat's grid asks the atlas for, built once and read
+/// twice.**
+///
+/// [`prepare_text_atlas`] hands these to glyphon; [`GlyphCensus`] walks the same
+/// sequence to count what the frame demanded. Two readers and one builder is the
+/// whole point: a census that reconstructed the geometry itself would be a
+/// second opinion about where the grid's glyphs sit, and a subpixel bin is
+/// decided by exactly that geometry — so the count would drift from the demand
+/// it claims to measure at the first change to either.
+fn grid_text_areas<'a>(
+    text_rows: &'a [Arc<ComposedRow>],
+    metrics: CellMetrics,
+    frame: &'a ViewportFrame,
     seat: SeatViewport,
-) -> Result<(), PrepareError> {
+) -> impl Iterator<Item = TextArea<'a>> + 'a {
     // **The seat's corner, added here and nowhere else** (§7.36). Everything
     // above this line is seat-local, as the whole terminal side of this crate
     // is; everything glyphon is handed is the window's, because the window is
@@ -9489,71 +9688,66 @@ fn prepare_text_atlas(
         let ink = search_current_ink_rgb();
         Color::rgb(ink[0], ink[1], ink[2])
     });
-    let recoloured = |row: usize, column: usize, resting: Color| {
-        current_ink
-            .filter(|_| {
-                frame.current_search_spans.iter().any(|span| {
-                    span.row as usize == row
-                        && (span.start_column as usize..span.end_column as usize).contains(&column)
-                })
+    let narrow_text_areas = text_rows
+        .iter()
+        .enumerate()
+        .flat_map(move |(row, text_row)| {
+            text_row.narrow_glyphs.iter().map(move |glyph| {
+                let [left, top, _, bottom] =
+                    frame_cell_bounds_px(metrics, frame, row, glyph.column);
+                let (left, top, bottom) = (left + origin_x, top + origin_y, bottom + origin_y);
+                TextArea {
+                    buffer: &glyph.buffer,
+                    left: left + glyph.left_offset_px,
+                    top: top + glyph.top_offset_px,
+                    scale: 1.0,
+                    // Clip to the terminal row, not the cell. The grid owns pen origins, while
+                    // accents and fallback ink remain free to overhang adjacent cells.
+                    bounds: TextBounds {
+                        left: (origin_x + padding).floor() as i32,
+                        top: top.floor() as i32,
+                        right: text_right,
+                        bottom: bottom.ceil() as i32,
+                    },
+                    default_color: grid_glyph_ink(
+                        frame,
+                        current_ink,
+                        row,
+                        glyph.column,
+                        glyph.color,
+                    ),
+                    custom_glyphs: &[],
+                }
             })
-            .unwrap_or(resting)
-    };
-    let narrow_text_areas = text_rows.iter().enumerate().flat_map(|(row, text_row)| {
-        text_row.narrow_glyphs.iter().map(move |glyph| {
-            let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, row, glyph.column);
-            let (left, top, bottom) = (left + origin_x, top + origin_y, bottom + origin_y);
-            TextArea {
-                buffer: &glyph.buffer,
-                left: left + glyph.left_offset_px,
-                top: top + glyph.top_offset_px,
-                scale: 1.0,
-                // Clip to the terminal row, not the cell. The grid owns pen origins, while
-                // accents and fallback ink remain free to overhang adjacent cells.
-                bounds: TextBounds {
-                    left: (origin_x + padding).floor() as i32,
-                    top: top.floor() as i32,
-                    right: text_right,
-                    bottom: bottom.ceil() as i32,
-                },
-                default_color: recoloured(row, glyph.column, glyph.color),
-                custom_glyphs: &[],
-            }
-        })
-    });
-    let wide_text_areas = text_rows.iter().enumerate().flat_map(|(row, text_row)| {
-        text_row.wide_glyphs.iter().map(move |wide| {
-            let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, row, wide.column);
-            let (left, top, bottom) = (left + origin_x, top + origin_y, bottom + origin_y);
-            TextArea {
-                buffer: &wide.buffer,
-                left: left + wide.left_offset_px,
-                top: top + wide.top_offset_px,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: left.floor() as i32,
-                    top: top.floor() as i32,
-                    right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
-                    bottom: bottom.ceil() as i32,
-                },
-                default_color: recoloured(row, wide.column, wide.color),
-                custom_glyphs: &[],
-            }
-        })
-    });
-    text_renderer.prepare(
-        device,
-        queue,
-        font_system,
-        atlas,
-        viewport,
-        narrow_text_areas.chain(wide_text_areas),
-        swash_cache,
-    )
+        });
+    let wide_text_areas = text_rows
+        .iter()
+        .enumerate()
+        .flat_map(move |(row, text_row)| {
+            text_row.wide_glyphs.iter().map(move |wide| {
+                let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, row, wide.column);
+                let (left, top, bottom) = (left + origin_x, top + origin_y, bottom + origin_y);
+                TextArea {
+                    buffer: &wide.buffer,
+                    left: left + wide.left_offset_px,
+                    top: top + wide.top_offset_px,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: left.floor() as i32,
+                        top: top.floor() as i32,
+                        right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
+                        bottom: bottom.ceil() as i32,
+                    },
+                    default_color: grid_glyph_ink(frame, current_ink, row, wide.column, wide.color),
+                    custom_glyphs: &[],
+                }
+            })
+        });
+    narrow_text_areas.chain(wide_text_areas)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_status_text_atlas(
+fn prepare_text_atlas(
     text_renderer: &mut TextRenderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -9561,20 +9755,38 @@ fn prepare_status_text_atlas(
     atlas: &mut TextAtlas,
     viewport: &Viewport,
     swash_cache: &mut SwashCache,
-    status_overlay: Option<&ComposedRow>,
+    text_rows: &[Arc<ComposedRow>],
     metrics: CellMetrics,
     frame: &ViewportFrame,
-    seat_width_px: f32,
     seat: SeatViewport,
 ) -> Result<(), PrepareError> {
+    text_renderer.prepare(
+        device,
+        queue,
+        font_system,
+        atlas,
+        viewport,
+        grid_text_areas(text_rows, metrics, frame, seat),
+        swash_cache,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn status_text_areas<'a>(
+    status_overlay: Option<&'a ComposedRow>,
+    metrics: CellMetrics,
+    frame: &'a ViewportFrame,
+    seat_width_px: f32,
+    seat: SeatViewport,
+) -> impl Iterator<Item = TextArea<'a>> + 'a {
     let Some(status) = frame.status_text.as_deref() else {
-        return Ok(());
+        return None.into_iter().flatten();
     };
     let Some(row) = status_overlay else {
-        return Ok(());
+        return None.into_iter().flatten();
     };
     let Some(geometry) = status_overlay_geometry(metrics, frame, status, seat_width_px) else {
-        return Ok(());
+        return None.into_iter().flatten();
     };
     // The seat's corner, for [`prepare_text_atlas`]'s reason and at the same
     // seam: the geometry above is the seat's, what glyphon is handed is the
@@ -9622,13 +9834,33 @@ fn prepare_status_text_atlas(
             custom_glyphs: &[],
         }
     });
+    Some(narrow_text_areas.chain(wide_text_areas))
+        .into_iter()
+        .flatten()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_status_text_atlas(
+    text_renderer: &mut TextRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    font_system: &mut FontSystem,
+    atlas: &mut TextAtlas,
+    viewport: &Viewport,
+    swash_cache: &mut SwashCache,
+    status_overlay: Option<&ComposedRow>,
+    metrics: CellMetrics,
+    frame: &ViewportFrame,
+    seat_width_px: f32,
+    seat: SeatViewport,
+) -> Result<(), PrepareError> {
     text_renderer.prepare(
         device,
         queue,
         font_system,
         atlas,
         viewport,
-        narrow_text_areas.chain(wide_text_areas),
+        status_text_areas(status_overlay, metrics, frame, seat_width_px, seat),
         swash_cache,
     )
 }
@@ -17045,6 +17277,812 @@ mod tests {
             page > 0,
             "not one pixel of the page reached the glass (refused={})",
             record.refused.names()
+        );
+    }
+
+    /// **A deterministic page of Chinese, with running Chinese's own skew.**
+    ///
+    /// Drawing uniformly out of a pool of ideographs would model a dictionary
+    /// rather than a document: every character on the screen distinct, which no
+    /// page has ever been. The 常用字 table is about 2500 characters and covers
+    /// some 98% of running text, so that is the pool; the index is the *square*
+    /// of a uniform draw, which puts most of the ink at the common end and
+    /// leaves a thin tail — the shape a screenful of prose actually has, and the
+    /// shape that decides how many distinct rasters the atlas is asked for.
+    ///
+    /// Deterministic because a ceiling measured against a different page each
+    /// run is not a measurement. The generator is xorshift64, seeded per
+    /// surface, so every lane's text is the same text on every machine.
+    struct HanStream(u64);
+
+    impl HanStream {
+        const POOL: u32 = 2500;
+
+        fn new(seed: u64) -> Self {
+            Self(seed | 1)
+        }
+
+        fn step(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn next_char(&mut self) -> char {
+            let uniform = (self.step() >> 11) as f64 / (1u64 << 53) as f64;
+            let index = (uniform * uniform * f64::from(Self::POOL)) as u32;
+            char::from_u32(0x4E00 + index.min(Self::POOL - 1)).expect("an ideograph")
+        }
+
+        fn text(&mut self, characters: usize) -> String {
+            (0..characters).map(|_| self.next_char()).collect()
+        }
+    }
+
+    /// A chrome label with nothing but its text, box, size and clip named.
+    fn stress_label(
+        text: String,
+        rect: [f32; 4],
+        font_size_px: f32,
+        clip: Option<[f32; 4]>,
+        mono: bool,
+    ) -> ChromeLabel {
+        ChromeLabel {
+            mono,
+            text,
+            rect,
+            font_size_px,
+            color: [220, 220, 220],
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip,
+        }
+    }
+
+    /// **The frame the 2026-08-29 report was standing in front of** — 3840×2160
+    /// at 200%, eight tabs in the card column, and Chinese in every one of the
+    /// four lanes.
+    ///
+    /// Everything here is the app's own geometry read back as numbers: the card
+    /// column is `FOCUS_COLUMN_WIDTH_LOGICAL_PX` wide, its mini rows are set at
+    /// `FOCUS_MINI_TERM_FONT_LOGICAL_PX` and `FOCUS_MINI_FILES_FONT_LOGICAL_PX`,
+    /// its heads at `FOCUS_CARD_FONT_LOGICAL_PX`, and the card column arrives in
+    /// the **overlay** lane because `rail_overlay_layer` is what `bt-app` puts it
+    /// in. The terminal fills the rest of the width above a rendered page, both
+    /// in the ideographs the report's window was full of.
+    ///
+    /// It is a fixture and not a screenshot, so it is allowed to be honest about
+    /// what it leaves out: the icons, the fills and the hairlines cost the atlas
+    /// nothing, so none of them are here.
+    struct ChineseFourK {
+        seat: SeatViewport,
+        frame: ViewportFrame,
+        chrome: Vec<ChromeLabel>,
+        cards: OverlayLayer,
+        page: PreviewBody,
+        /// How many of the eight cards the column's clip actually shows.
+        cards_in_view: usize,
+        /// How many it does not — the labels §7.1.3l's own debt is about.
+        cards_out_of_view: usize,
+    }
+
+    #[cfg(target_os = "windows")]
+    fn chinese_four_k_frame(metrics: CellMetrics, width: u32, height: u32) -> ChineseFourK {
+        let scale = 2.0_f32;
+        let column_width = theme::FOCUS_COLUMN_WIDTH_LOGICAL_PX * scale;
+        let strip_height = 44.0 * scale;
+
+        // ---- the card column, in the overlay lane -------------------------
+        let card_head = 28.0 * scale;
+        let card_body = 160.0 * scale;
+        let card_height = card_head + card_body;
+        let card_gap = 8.0 * scale;
+        let column_clip = [0.0, strip_height, column_width, height as f32];
+        let head_font = theme::FOCUS_CARD_FONT_LOGICAL_PX * scale;
+        let term_font = theme::FOCUS_MINI_TERM_FONT_LOGICAL_PX * scale;
+        let files_font = theme::FOCUS_MINI_FILES_FONT_LOGICAL_PX * scale;
+        let term_line = (term_font * theme::FOCUS_MINI_TERM_LINE_HEIGHT).round();
+        let mut cards = OverlayLayer::default();
+        let mut han = HanStream::new(0x0C4A_1D50);
+        let (mut in_view, mut out_of_view) = (0, 0);
+        for card in 0..8 {
+            let top = strip_height + card as f32 * (card_height + card_gap);
+            let body_top = top + card_head;
+            if top < column_clip[3] {
+                in_view += 1;
+            } else {
+                out_of_view += 1;
+            }
+            cards.labels.push(stress_label(
+                han.text(9),
+                [
+                    8.0 * scale,
+                    top,
+                    column_width - 8.0 * scale,
+                    top + card_head,
+                ],
+                head_font,
+                Some(column_clip),
+                false,
+            ));
+            // The mini projection: one row of the tab's transcript per line of
+            // the card's body, in the terminal's own face at the mini size.
+            let rows = (card_body / term_line) as usize;
+            let columns = ((column_width - 16.0 * scale) / (term_font * 1.0)) as usize;
+            for row in 0..rows {
+                let row_top = body_top + row as f32 * term_line;
+                cards.labels.push(stress_label(
+                    han.text(columns.max(1)),
+                    [
+                        8.0 * scale,
+                        row_top,
+                        column_width - 8.0 * scale,
+                        row_top + term_line,
+                    ],
+                    if row % 5 == 0 { files_font } else { term_font },
+                    Some(column_clip),
+                    row % 5 != 0,
+                ));
+            }
+        }
+
+        // ---- the window's own furniture, in the chrome lane ---------------
+        let chrome_font = 12.0 * scale;
+        let mut chrome = Vec::new();
+        chrome.push(stress_label(
+            han.text(14),
+            [column_width, 0.0, width as f32, strip_height],
+            13.0 * scale,
+            None,
+            false,
+        ));
+        for index in 0..12 {
+            let left = column_width + index as f32 * 240.0 * scale;
+            chrome.push(stress_label(
+                han.text(11),
+                [
+                    left,
+                    strip_height,
+                    left + 230.0 * scale,
+                    strip_height + 32.0,
+                ],
+                chrome_font,
+                None,
+                false,
+            ));
+        }
+        chrome.push(stress_label(
+            han.text(40),
+            [
+                column_width,
+                height as f32 - 30.0,
+                width as f32,
+                height as f32,
+            ],
+            11.0 * scale,
+            None,
+            false,
+        ));
+
+        // ---- the terminal, in the grid lane -------------------------------
+        let seat = SeatViewport {
+            x: column_width as u32,
+            y: (strip_height + 32.0) as u32,
+            width: width - column_width as u32,
+            height: (height as f32 * 0.5) as u32,
+        };
+        let usable = seat.width as f32 - 2.0 * metrics.padding_px;
+        let columns = ((usable / metrics.cell_width_px) as u32).max(2);
+        let rows = ((seat.height as f32 / metrics.cell_height_px) as u32).max(1);
+        let mut cells = Vec::with_capacity((columns * rows) as usize);
+        for _ in 0..rows {
+            let mut column = 0;
+            while column < columns {
+                if column + 1 < columns {
+                    let mut wide = CapturedCell::plain(han.next_char().to_string());
+                    wide.style.flags.insert(CellFlags::WIDE_CHAR);
+                    cells.push(wide);
+                    let mut spacer = CapturedCell::plain("");
+                    spacer.wide_spacer = true;
+                    cells.push(spacer);
+                    column += 2;
+                } else {
+                    cells.push(CapturedCell::plain(" "));
+                    column += 1;
+                }
+            }
+        }
+        let frame = ViewportFrame {
+            columns: NonZeroU32::new(columns).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(columns),
+            grid_rows: NonZeroU32::new(rows).unwrap(),
+            rows: NonZeroU32::new(rows).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells,
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: true,
+            },
+            cell_anchors: test_cell_anchors((columns * rows) as usize),
+            row_map: test_row_map_for_metrics(rows, metrics),
+            selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(columns),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+
+        // ---- the rendered page, in the preview lane -----------------------
+        let page_top = (seat.y + seat.height) as f32 + 16.0;
+        let page_clip = [column_width, page_top, width as f32, height as f32 - 30.0];
+        let body_font = 12.5 * scale;
+        let body_line = (body_font * 1.5).round();
+        let page_columns = ((page_clip[2] - page_clip[0]) / body_font) as usize;
+        let mut paragraphs = Vec::new();
+        let mut top = page_top;
+        let mut index = 0;
+        while top + body_line < page_clip[3] {
+            // Every seventh line is a heading, which is the same ideograph at a
+            // second size and therefore a second raster — the multiplier §7.1.3l
+            // names as the reason Chinese reaches a ceiling Latin never does.
+            let heading = index % 7 == 0;
+            let font = if heading { body_font * 1.5 } else { body_font };
+            let line = if heading { body_line * 1.6 } else { body_line };
+            paragraphs.push(PreviewParagraph {
+                runs: vec![PreviewRun {
+                    text: han.text(if heading { 12 } else { page_columns.max(1) }),
+                    color: [235, 235, 235],
+                    mono: !heading,
+                    bold: heading,
+                    italic: false,
+                    font_scale: 1.0,
+                    inline_box_px: None,
+                }],
+                rect: [page_clip[0], top, page_clip[2], top + line],
+                font_size_px: font,
+                line_height_px: line,
+                wrap: false,
+                letter_spacing_em: 0.0,
+                align_right: false,
+                align_center: false,
+            });
+            top += line;
+            index += 1;
+        }
+        let page = PreviewBody {
+            clip: page_clip,
+            quads: Vec::new(),
+            paragraphs,
+            blocks: Vec::new(),
+            rasters: Vec::new(),
+        };
+
+        ChineseFourK {
+            seat,
+            frame,
+            chrome,
+            cards,
+            page,
+            cards_in_view: in_view,
+            cards_out_of_view: out_of_view,
+        }
+    }
+
+    /// RED — **the frame a 4K, eight-tab, all-Chinese window draws fits in the
+    /// glyph atlas** (`docs/DESIGN.md` §7.1.3m).
+    ///
+    /// §7.1.3l settled who yields when the atlas runs out and wrote down, in the
+    /// open, that it had not touched the other half: nothing had been done to
+    /// make one frame ask for *less*. This is that half's gate, and it is the
+    /// report's own window rather than a ladder built to overflow — 3840×2160 at
+    /// 200%, eight cards in the column, Chinese in the chrome, in the terminal
+    /// and in the rendered page.
+    ///
+    /// One assertion, and it is the only one that matters to the person who
+    /// filed the report: **no lane was refused**. The census beside it is the
+    /// number §7.1.3l could not produce twice — printed under `--nocapture`, and
+    /// carried into the design note so the next change to any of these four
+    /// lanes can be weighed against it instead of guessed at.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_4k_chinese_frame_fits_the_glyph_atlas() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        const WIDTH: u32 = 3840;
+        const HEIGHT: u32 = 2160;
+
+        let mut gpu = on_this_machines_adapter(FORMAT);
+        let mut window =
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
+        window.set_glyph_census(true);
+        let fixture = chinese_four_k_frame(window.metrics(), WIDTH, HEIGHT);
+        assert!(
+            fixture.cards_out_of_view > 0,
+            "eight cards at this height must overflow the column, or the fixture is not the \
+             report's window"
+        );
+        window.set_chrome(Vec::new(), fixture.chrome, Vec::new());
+        window.set_modal_overlay(vec![fixture.cards]);
+        window.set_preview_bodies(vec![fixture.page]);
+
+        let outcome = window
+            .present_frame(
+                &mut gpu,
+                &[SeatFrame {
+                    seat: fixture.seat,
+                    clip: fixture.seat,
+                    frame: &fixture.frame,
+                    focused: true,
+                }],
+                FrameTrigger {
+                    occurred_at: Instant::now(),
+                    source: FrameSource::Expose,
+                },
+            )
+            .expect("one frame");
+        let census = window
+            .glyph_census()
+            .expect("the census was asked for")
+            .clone();
+        println!(
+            "{} cards_in_view={} cards_out_of_view={}",
+            census.line(),
+            fixture.cards_in_view,
+            fixture.cards_out_of_view
+        );
+        let record = window.preview_text_frame();
+        assert!(
+            record.refused.is_empty(),
+            "a 4K all-Chinese frame lost a whole lane's words: refused={} outcome={outcome:?} \
+             {}",
+            record.refused.names(),
+            census.line()
+        );
+    }
+
+    /// RED — **one ideograph at one size is one bitmap, however many lanes want
+    /// it and whatever colour each of them wants it in** (`docs/DESIGN.md`
+    /// §7.1.3m).
+    ///
+    /// The atlas is one texture for the whole process and a raster's identity is
+    /// cosmic-text's own `CacheKey` — face, glyph, size, weight, flags and the
+    /// subpixel bin the pen landed in. It carries **no lane** and **no colour**,
+    /// and both of those absences are load-bearing: a window whose interface,
+    /// terminal and document are all in Chinese draws the same few hundred
+    /// characters over and over, and an atlas that kept a copy per surface or
+    /// per ink would multiply the one number that has a ceiling.
+    ///
+    /// The chrome and an overlay layer are shaped by the same function from the
+    /// same geometry, so this can put the identical caption in both and demand
+    /// the strict answer: twice the instances, **once** the rasters. The page's
+    /// lane is shaped by a different function against a different metric, so of
+    /// it the honest question is the one about the fonts — the faces and sizes
+    /// it resolves to must be the chrome's, or the two surfaces are not even
+    /// candidates for sharing.
+    ///
+    /// Mutation: fold the lane or the label's colour into the shaping and
+    /// `shared` collapses to zero.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn one_ideograph_at_one_size_is_one_bitmap_in_every_lane() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        const WIDTH: u32 = 1600;
+        const HEIGHT: u32 = 1200;
+        const FONT_PX: f32 = 28.0;
+        const RECT: [f32; 4] = [40.0, 100.0, 1400.0, 160.0];
+
+        let text: String = (0..60)
+            .map(|index| char::from_u32(0x4E00 + index).expect("an ideograph"))
+            .collect();
+        let distinct = text.chars().count();
+
+        let mut gpu = on_this_machines_adapter(FORMAT);
+        let mut window =
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
+        window.set_glyph_census(true);
+
+        // The same caption in two lanes, in two inks, in one box.
+        window.set_chrome(
+            Vec::new(),
+            vec![stress_label(text.clone(), RECT, FONT_PX, None, false)],
+            Vec::new(),
+        );
+        let mut overlay = OverlayLayer::default();
+        let mut in_another_ink = stress_label(text.clone(), RECT, FONT_PX, None, false);
+        in_another_ink.color = [12, 200, 90];
+        overlay.labels.push(in_another_ink);
+        window.set_modal_overlay(vec![overlay]);
+        // And the same characters at the same size on a page, in the same face —
+        // a different shaper, a different lane, and the same fonts underneath.
+        window.set_preview_bodies(vec![PreviewBody {
+            clip: [40.0, 400.0, 1400.0, 800.0],
+            quads: Vec::new(),
+            paragraphs: vec![PreviewParagraph {
+                runs: vec![PreviewRun {
+                    text: text.clone(),
+                    color: [200, 40, 40],
+                    mono: false,
+                    bold: false,
+                    italic: false,
+                    font_scale: 1.0,
+                    inline_box_px: None,
+                }],
+                rect: [40.0, 400.0, 1400.0, 460.0],
+                font_size_px: FONT_PX,
+                line_height_px: 60.0,
+                wrap: false,
+                letter_spacing_em: 0.0,
+                align_right: false,
+                align_center: false,
+            }],
+            blocks: Vec::new(),
+            rasters: Vec::new(),
+        }]);
+
+        let frame = single_cell_cursor_frame(window.metrics());
+        window
+            .present_frame(
+                &mut gpu,
+                &[SeatFrame {
+                    seat: SeatViewport {
+                        x: 0,
+                        y: 0,
+                        width: WIDTH,
+                        height: HEIGHT,
+                    },
+                    clip: SeatViewport {
+                        x: 0,
+                        y: 0,
+                        width: WIDTH,
+                        height: HEIGHT,
+                    },
+                    frame: &frame,
+                    focused: true,
+                }],
+                FrameTrigger {
+                    occurred_at: Instant::now(),
+                    source: FrameSource::Expose,
+                },
+            )
+            .expect("one frame");
+        let census = window.glyph_census().expect("the census was asked for");
+        let chrome = census.lane(TextLane::Chrome);
+        let overlay_demand = census.lane(TextLane::Overlay);
+        assert_eq!(
+            (chrome.requested, overlay_demand.requested),
+            (distinct, distinct),
+            "both lanes must have asked for the whole caption: {}",
+            census.line()
+        );
+        assert_eq!(
+            chrome.unique,
+            distinct,
+            "the chrome's own caption is one bitmap per character: {}",
+            census.line()
+        );
+        assert_eq!(
+            census.shared_across_lanes(),
+            distinct,
+            "the same caption in two lanes and two inks is one set of bitmaps, not two: {}",
+            census.line()
+        );
+        let chrome_faces = census.lane_faces_and_sizes(TextLane::Chrome);
+        let page_faces = census.lane_faces_and_sizes(TextLane::Preview);
+        assert_eq!(
+            chrome_faces,
+            page_faces,
+            "the page resolved the same characters at the same size to different fonts than the \
+             chrome did, so the two surfaces can never share a raster: {}",
+            census.line()
+        );
+    }
+
+    /// RED — **the device takes the largest texture the adapter offers**
+    /// (`docs/DESIGN.md` §7.1.3m).
+    ///
+    /// `wgpu::Limits::default()` caps `max_texture_dimension_2d` at 8192 as a
+    /// portability floor, and every device this crate opened accepted the floor.
+    /// glyphon sizes the glyph atlas from that number and answers `AtlasFull`
+    /// when the next doubling would pass it, so on a machine whose hardware does
+    /// 16384 — which is every D3D11-class GPU and up — three quarters of the
+    /// atlas was being left on the table, and the report's own 8192 was never
+    /// the machine's limit at all. It was ours.
+    ///
+    /// Mutation: drop `required_limits` from either `request_device` and the
+    /// device comes back at 8192 on an adapter that offers more.
+    #[test]
+    fn a_device_takes_the_largest_texture_its_adapter_offers() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let gpu = on_this_machines_adapter(FORMAT);
+        let offered = gpu.adapter.limits().max_texture_dimension_2d;
+        assert_eq!(
+            gpu.max_texture_dimension_2d(),
+            offered,
+            "the adapter offers {offered} and the device settled for less"
+        );
+        // Not an assumption about hardware, a statement about the floor: nothing
+        // may make the atlas *smaller* than what wgpu would have given anyway.
+        assert!(gpu.max_texture_dimension_2d() >= wgpu::Limits::default().max_texture_dimension_2d);
+    }
+
+    /// PIN — **every lane prepares into the one shared atlas.**
+    ///
+    /// The sharing the gate above measures is only true while there is one
+    /// texture to share. `GpuContext` holds exactly one [`TextAtlas`] and every
+    /// prepare in the frame is handed `&mut gpu.atlas`; a second atlas — one per
+    /// lane, say, which is the obvious way to buy a lane its own ceiling — would
+    /// buy it by making every character the chrome and the page both set at the
+    /// same size into two bitmaps instead of one.
+    ///
+    /// Mutation: give any lane an atlas of its own.
+    #[test]
+    fn every_lane_prepares_into_the_one_shared_atlas() {
+        let source = source_without_prose();
+        let start = source.find("fncompose_frame(").expect("compose_frame");
+        let end = source[start..]
+            .find("fnprepare_text_rows(&mutself,")
+            .expect("prepare_text_rows follows compose_frame");
+        let body = &source[start..start + end];
+        assert_eq!(
+            body.matches("&mutgpu.atlas,").count(),
+            6,
+            "five prepares — the grid, the status chip, the chrome, the page and each overlay \
+             level — and the one `TextRenderer::new` a new overlay level needs, all naming \
+             `gpu.atlas` and nothing else"
+        );
+        let context = block_beginning_with(include_str!("lib.rs"), "pub struct GpuContext {");
+        assert!(
+            !context.is_empty(),
+            "the device context has to exist before anything can be held to it"
+        );
+        assert_eq!(
+            context.matches("TextAtlas").count(),
+            1,
+            "one device context, one atlas"
+        );
+    }
+
+    /// RED — **a label nobody can see does not cast its bitmaps**
+    /// (`docs/DESIGN.md` §7.1.3m, the first of §7.1.3l's two written-down
+    /// debts).
+    ///
+    /// glyphon crops a glyph to `TextArea.bounds` **after** it has rasterized it
+    /// and found it a place in the texture (`text_render.rs`: the bounds
+    /// arithmetic is below the `try_allocate` loop, not above it), so until this
+    /// the atlas paid full price for every caption a clip had already closed
+    /// over.
+    ///
+    /// **The axis matters, and it is why this fixture scrolls sideways.**
+    /// glyphon does cull one way for free: `is_run_visible` drops a *line* whose
+    /// band misses the area's bounds vertically, before any glyph of it is
+    /// asked for. It has no such test across the page, so a row shifted out of
+    /// its own column — a strip scrolled past its last tab, a git graph's badge
+    /// in a row that straddles the edge, a caption in a pane mid-flight behind a
+    /// clip that has already closed — cast every one of its bitmaps and then had
+    /// every one of them thrown away.
+    ///
+    /// Mutation: drop the `crop_to` filter from `shape_chrome_labels` and the
+    /// chrome lane's demand goes up by the whole hidden half.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_label_behind_a_closed_clip_casts_nothing() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        const WIDTH: u32 = 1600;
+        const HEIGHT: u32 = 1200;
+        const COLUMNS: usize = 24;
+        const GLYPHS: usize = 30;
+        const COLUMN_WIDTH: f32 = 400.0;
+        // The strip's window: one column of it, and nothing else.
+        const VIEWPORT: [f32; 4] = [0.0, 0.0, COLUMN_WIDTH, HEIGHT as f32];
+
+        let mut gpu = on_this_machines_adapter(FORMAT);
+        let mut window =
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
+        window.set_glyph_census(true);
+
+        // Two disjoint blocks of ideographs, so a raster can only have come from
+        // one side.
+        let seen = |column: usize, index: usize| {
+            char::from_u32(0x4E00 + ((column * GLYPHS + index) % 2000) as u32)
+                .expect("an ideograph")
+        };
+        let hidden = |column: usize, index: usize| {
+            char::from_u32(0x5DB0 + ((column * GLYPHS + index) % 2000) as u32)
+                .expect("an ideograph")
+        };
+
+        let mut labels = Vec::new();
+        for column in 0..COLUMNS {
+            let left = column as f32 * COLUMN_WIDTH;
+            let rect = [left, 0.0, left + COLUMN_WIDTH, 50.0];
+            // The caption a scrolled strip would draw: laid out where the solver
+            // put it, clipped to the strip's window. Everything past the first
+            // column is wholly outside it.
+            let in_view = rect[2] <= VIEWPORT[2];
+            labels.push(ChromeLabel {
+                mono: false,
+                text: (0..GLYPHS)
+                    .map(|index| {
+                        if in_view {
+                            seen(column, index)
+                        } else {
+                            hidden(column, index)
+                        }
+                    })
+                    .collect(),
+                rect,
+                font_size_px: 26.0,
+                color: [220, 220, 220],
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: Some(VIEWPORT),
+            });
+        }
+        let visible_rows = labels
+            .iter()
+            .filter(|label| label.rect[2] <= VIEWPORT[2])
+            .count();
+        assert!(
+            visible_rows > 0 && visible_rows < COLUMNS,
+            "the fixture must hold both halves"
+        );
+
+        window.set_chrome(Vec::new(), labels, Vec::new());
+        let frame = single_cell_cursor_frame(window.metrics());
+        window
+            .present_frame(
+                &mut gpu,
+                &[SeatFrame {
+                    seat: SeatViewport {
+                        x: 0,
+                        y: 0,
+                        width: WIDTH,
+                        height: HEIGHT,
+                    },
+                    clip: SeatViewport {
+                        x: 0,
+                        y: 0,
+                        width: WIDTH,
+                        height: HEIGHT,
+                    },
+                    frame: &frame,
+                    focused: true,
+                }],
+                FrameTrigger {
+                    occurred_at: Instant::now(),
+                    source: FrameSource::Expose,
+                },
+            )
+            .expect("one frame");
+        let census = window.glyph_census().expect("the census was asked for");
+        let demand = census.lane(TextLane::Chrome);
+        assert_eq!(
+            demand.requested,
+            visible_rows * GLYPHS,
+            "the chrome lane cast bitmaps for captions the clip had already closed over: {}",
+            census.line()
+        );
+    }
+
+    /// RED — **a long Chinese session does not run the shared atlas out of
+    /// room** (`docs/DESIGN.md` §7.1.3m).
+    ///
+    /// One frame cannot fill an 8192² atlas with text — the measurement beside
+    /// this one puts a whole 4K all-Chinese window at a few percent of it — so
+    /// the refusal the 2026-08-29 report describes cannot have been one frame's
+    /// demand. What *can* fill it is a session: glyphon's glyph cache is an
+    /// **unbounded** LRU and [`TextAtlas::trim`] empties only `glyphs_in_use`,
+    /// so every raster a window has ever drawn stays allocated in the packer
+    /// until the packer is full, and only then is anything evicted — one entry
+    /// at a time, in LRU order, into a *bucketed* allocator whose shelves are
+    /// height-classed.
+    ///
+    /// A Chinese session is the worst case for that arrangement and a Latin one
+    /// is nearly the best: two hundred screens of Latin ask for the same few
+    /// hundred rasters over and over, while two hundred screens of Chinese keep
+    /// arriving with characters the atlas has not seen.
+    ///
+    /// So this walks a window through many screenfuls of fresh ideographs at a
+    /// rotating ladder of sizes, and asserts every frame kept its text.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_long_chinese_session_never_runs_the_atlas_out_of_room() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        const WIDTH: u32 = 3840;
+        const HEIGHT: u32 = 2160;
+        const FRAMES: usize = 240;
+
+        let mut gpu = on_this_machines_adapter(FORMAT);
+        let mut window =
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
+        let metrics = window.metrics();
+        let mut han = HanStream::new(0x5EA7_11FF);
+        let mut worst: Option<(usize, String)> = None;
+        for frame_index in 0..FRAMES {
+            // A page of Chinese at one rung of the ladder a markdown document
+            // sets its headings on, so a session walks sizes as well as
+            // characters.
+            let font = 18.0 + (frame_index % 24) as f32;
+            let line = (font * 1.5).ceil();
+            let clip = [0.0, 0.0, WIDTH as f32, HEIGHT as f32];
+            let columns = (WIDTH as f32 / font) as usize;
+            let mut paragraphs = Vec::new();
+            let mut top = 0.0;
+            while top + line < HEIGHT as f32 {
+                paragraphs.push(PreviewParagraph {
+                    runs: vec![PreviewRun {
+                        text: han.text(columns.max(1)),
+                        color: [235, 235, 235],
+                        mono: true,
+                        bold: false,
+                        italic: false,
+                        font_scale: 1.0,
+                        inline_box_px: None,
+                    }],
+                    rect: [0.0, top, WIDTH as f32, top + line],
+                    font_size_px: font,
+                    line_height_px: line,
+                    wrap: false,
+                    letter_spacing_em: 0.0,
+                    align_right: false,
+                    align_center: false,
+                });
+                top += line;
+            }
+            window.set_preview_bodies(vec![PreviewBody {
+                clip,
+                quads: Vec::new(),
+                paragraphs,
+                blocks: Vec::new(),
+                rasters: Vec::new(),
+            }]);
+            let frame = single_cell_cursor_frame(metrics);
+            window
+                .present_frame(
+                    &mut gpu,
+                    &[SeatFrame {
+                        seat: SeatViewport {
+                            x: 0,
+                            y: 0,
+                            width: WIDTH,
+                            height: HEIGHT,
+                        },
+                        clip: SeatViewport {
+                            x: 0,
+                            y: 0,
+                            width: WIDTH,
+                            height: HEIGHT,
+                        },
+                        frame: &frame,
+                        focused: true,
+                    }],
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .expect("one frame");
+            let refused = window.preview_text_frame().refused;
+            if !refused.is_empty() && worst.is_none() {
+                worst = Some((frame_index, refused.names()));
+            }
+        }
+        assert_eq!(
+            worst, None,
+            "a Chinese session went dumb after enough screens: the shared atlas kept every raster \
+             the session had ever drawn and had no room left for the next one"
         );
     }
 
