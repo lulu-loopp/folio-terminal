@@ -39957,6 +39957,37 @@ impl Runtime<'_> {
             return Ok(());
         }
         let target = settings::hit(layout, &self.settings_values(), position.x, position.y);
+        // **A press outside the popper that is up takes it down and goes no
+        // further** (user report and ruling, 2026-08-29) — the window's own menu
+        // rule, asked here because this dialog is a modal with a dispatch of its
+        // own and nothing below `settings_mouse_input` will ever see this press.
+        //
+        // **Before everything**, which is what "no further" means: before the
+        // focus moves, before the scrim closes the dialog, before a `Nav` word
+        // turns the page. A press that lands on the `×` while `Language` is open
+        // shuts the list and leaves the dialog standing, exactly as the first
+        // `Esc` does — one layer per gesture, at both doors.
+        //
+        // **The judgement is `settings::popup_press`'s and the geometry is
+        // `settings::hit`'s**: the popup was hit-tested before the page one line
+        // above, so which target came back already says whether the pointer was
+        // inside it. Nothing here measures a rectangle, which is the whole reason
+        // this is one question rather than a second copy of the popup's frame.
+        if let settings::PopupPress::Dismiss(popup) =
+            settings::popup_press(self.window.settings.popup_up(), target)
+        {
+            self.window.settings.close_popup(popup);
+            if let Some(position) = self.window.pointer_position {
+                let hover = self.settings_layout().map(|layout| {
+                    settings::hit(&layout, &self.settings_values(), position.x, position.y)
+                });
+                self.window.settings.set_hover(hover);
+            }
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+            return Ok(());
+        }
         // The focus follows the finger, with the ring off — the pointer half of
         // `:focus-visible`. Stated before the verb below, because closing the
         // dialog drops the focus, and a press that set it afterwards would leave
@@ -55273,6 +55304,14 @@ impl Runtime<'_> {
                 .files
                 .get(&seat)
                 .is_some_and(|state| state.git_remotes_open);
+            // **The column this page's one sentence is wrapped to**, read before
+            // the measurer is built because that closure takes the renderer with
+            // it. A seat with no rectangle this frame gets a zero column, which
+            // is the honest reading — there is nothing to wrap into, and the page
+            // is not being drawn either.
+            let column = seats::files_pane_rect(&self.seat_layout, seat)
+                .map(|rect| seats::files_pane_geometry(rect, scale, true).body)
+                .map_or(0.0, |body| git_panel::empty_width(body, scale));
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32, face: git_panel::MeasureFace| {
                 renderer.measure_chrome_label(
@@ -55291,6 +55330,7 @@ impl Runtime<'_> {
                     remotes_open,
                 },
                 scale,
+                column,
                 &mut measure,
             );
             content.scroll_px = self.window.tabs[active]
@@ -66126,6 +66166,7 @@ impl Runtime<'_> {
                     remotes_open,
                 },
                 scale,
+                git_panel::empty_width(body, scale),
                 &mut measure,
             )
         };
@@ -103972,6 +104013,88 @@ mod tests {
             "the tab menu's opener stands above the chrome router, where an open \
              rail lies over the panes (Q179) and the tab list is what
              `chrome_target_at` answers first"
+        );
+    }
+
+    /// RED GATE (user report and ruling, 2026-08-29) — **a press outside an
+    /// open dropdown closes it and goes no further.**
+    ///
+    /// The report: open `General ▸ Language`, click the dialog's own blank
+    /// background, and the list stays standing — while every other popup in this
+    /// window goes away on a press outside it. The ruling is one rule for all of
+    /// them, and the dialog is where it had to be asked separately: it is a modal
+    /// with a dispatch of its own, so a press inside it never reaches
+    /// `mouse_input`'s popup arms.
+    ///
+    /// **What is asserted is the position of the gate**, because that is what
+    /// "goes no further" is: the question stands between the hit test and every
+    /// verb, and it returns. Judged by `settings::popup_press`, whose own
+    /// answers are pinned beside it in `settings.rs`
+    /// (`a_press_outside_an_open_dropdown_closes_it_and_goes_no_further` there,
+    /// and `a_press_inside_the_dropdown_still_picks` for the reverse).
+    ///
+    /// Read off the source for `a_right_press_on_a_tab_raises_its_menu_and_leaves_the_active_tab_alone`'s
+    /// reason: raising this dialog needs a `Runtime`, and a `Runtime` needs a
+    /// GPU device, a swapchain and a live window.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① delete the gate — the first assertion, which is the report itself;
+    /// ② let it fall through instead of returning, so the press goes on to close
+    ///    the dialog or turn the page — the third;
+    /// ③ move it below `SettingsPanel::press` or below the verb match, where the
+    ///    focus has already moved and the scrim has already answered — the
+    ///    fourth and fifth;
+    /// ④ judge it against a rectangle of its own instead of the hit test's
+    ///    answer — the second, which pins that `hit` is asked first.
+    #[test]
+    fn a_press_outside_an_open_dropdown_closes_it_and_goes_no_further() {
+        const SOURCE: &str = include_str!("main.rs");
+        let start = SOURCE
+            .find("    fn settings_mouse_input(")
+            .expect("the settings dialog has a router of its own");
+        let rest = &SOURCE[start + "    fn settings_mouse_input(".len()..];
+        let router = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+
+        // ① the gate exists, and it asks the one door both popups leave by.
+        let gate = router
+            .find("settings::popup_press(self.window.settings.popup_up(), target)")
+            .expect(
+                "a press outside the dialog's open popup is judged by \
+                 `settings::popup_press`, not by a rule written here",
+            );
+        // ② off the hit test's own answer — the geometry is `settings::hit`'s
+        // and this router measures nothing.
+        let hit = router
+            .find("let target = settings::hit(layout,")
+            .expect("the router hit-tests the press once");
+        assert!(
+            hit < gate,
+            "the gate reads the hit test's answer, which is where the popup's \
+             own rectangle was already asked"
+        );
+        // ③ and it ends the press.
+        let press = router
+            .find("self.window.settings.press(target);")
+            .expect("the router moves the focus to what was pressed");
+        let arm = &router[gate..press];
+        assert!(
+            arm.contains("self.window.settings.close_popup(popup);"),
+            "the popup goes away: {arm}"
+        );
+        assert!(
+            arm.contains("return Ok(());"),
+            "and the press goes no further: {arm}"
+        );
+        // ④ before the focus moves.
+        assert!(gate < press, "the gate stands above `SettingsPanel::press`");
+        // ⑤ and before every verb, the scrim's close included.
+        let verbs = router
+            .find("settings::SettingsTarget::Scrim => self.window.settings.close()")
+            .expect("the scrim closes the dialog");
+        assert!(
+            gate < verbs,
+            "a press on the scrim while a list is open shuts the list, not the \
+             dialog — one layer per gesture, which is what the first Esc does"
         );
     }
 
