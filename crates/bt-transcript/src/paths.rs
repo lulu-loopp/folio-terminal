@@ -2430,14 +2430,22 @@ mod tests {
             )]
         );
         assert_eq!(
-            linked(&with_position_syntax, "src/app.ts(7,19): error TS2322", None),
+            linked(
+                &with_position_syntax,
+                "src/app.ts(7,19): error TS2322",
+                None
+            ),
             [("src/app.ts", "file:///D:/case/src/app.ts".to_owned())]
         );
         // And the absolute spelling's first frame is the ordinary two-frame rhythm, not a promise:
         // the whole printed string is a name of its own until the disk has denied it.
         let mut unknown = BTreeSet::new();
         assert_eq!(
-            named.links_in("D:\\case\\src\\main.cpp(12,34): error C2143", None, &mut unknown),
+            named.links_in(
+                "D:\\case\\src\\main.cpp(12,34): error C2143",
+                None,
+                &mut unknown
+            ),
             [],
             "the shorter reading waits for the longer one's verdict"
         );
@@ -3516,12 +3524,7 @@ mod tests {
         );
         // All four openers, and an ASCII digit, letter and space-less word behind each of them: the
         // class is "the opening half of the bracket pairs whose closing half already ends a token".
-        for line in [
-            "docs/a.md(1",
-            "docs/a.md[2",
-            "docs/a.md{v3",
-            "docs/a.md<x",
-        ] {
+        for line in ["docs/a.md(1", "docs/a.md[2", "docs/a.md{v3", "docs/a.md<x"] {
             assert_eq!(spans(line), ["docs/a.md"], "{line} seams at its bracket");
         }
         // Row 51 at the disk, all three frames. Frame one: neither reading has an answer, so
@@ -3552,10 +3555,7 @@ mod tests {
         );
         // Frame two, the other answer: a name that really carries a bracket wins whole, which is
         // why the bracket is a seam and not a terminator.
-        let whole = ledger(
-            "D:\\case",
-            &[("D:\\x\\a(1", true), ("D:\\x\\a", true)],
-        );
+        let whole = ledger("D:\\case", &[("D:\\x\\a(1", true), ("D:\\x\\a", true)]);
         assert_eq!(
             linked(&whole, "见 D:\\x\\a(1", None),
             [("D:\\x\\a(1", "file:///D:/x/a%281".to_owned())]
