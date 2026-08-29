@@ -6848,8 +6848,8 @@ pub struct TabRun {
     pub pane_offers: PaneOffers,
 }
 
-/// **The two offers a tab list makes a pane, said separately** (§7.1.6b′ ② as
-/// re-judged by the user on 2026-08-23).
+/// **The two offers a tab list makes a pane, said separately** (§7.1.6b′ ②, as
+/// re-judged by the user on 2026-08-23 and withdrawn outright on 2026-08-29).
 ///
 /// A pane over a tab list can do one of two different things: mint a **new** tab
 /// out of itself (K124, the tear-out) or be handed to one of the entries the
@@ -6859,18 +6859,25 @@ pub struct TabRun {
 /// read as a refusal of the *source* and a refusal of the source refuses every
 /// verb it could ask for.
 ///
-/// **The user split that sentence in half.** Focus mode hides the tab strip, so
-/// while it is on the one bit made a pane's route to another tab disappear
-/// entirely — which collides with the ruling focus mode is built on, *"不禁任何
-/// 动词零新规"* (§7.1.6b′ ①). What ② was actually protecting is the *other* half:
-/// a card column is a list of rooms, and letting a pane fall into the gap
-/// between two of them and become a third is the tab-making gesture ② turned
-/// away. So the tear-out stays refused and the hand-over is granted, and the
-/// only way to say that is two bits.
+/// **The user split that sentence in half, and then threw away the half that
+/// was left.** 2026-08-23 granted the hand-over: focus mode hides the tab strip,
+/// so while it was on the one bit made a pane's route to another tab disappear
+/// entirely, which collides with the ruling focus mode is built on — *"不禁任何
+/// 动词零新规"* (§7.1.6b′ ①). What ② was then said to be protecting was the
+/// tear-out: *"两卡之间的缝不是屋子"*. On 2026-08-29 the user met that on the
+/// machine — a pane held over the blank below the last card, a ghost under the
+/// pointer, and an empty hand on release — and ruled the argument gone. ① is
+/// literal: what the strip's gaps do, the column's gaps do, by the very same
+/// `extract_pane_into_new_tab`.
 ///
-/// One struct rather than two loose booleans on [`TabRun`] so that a surface
-/// answers this question in one place and a third offer, if one is ever
-/// invented, has somewhere to be added that every surface must fill in.
+/// **So every surface in this build answers [`Self::BOTH`], and there is no
+/// second value.** `ADOPT_ONLY` was deleted with the ruling rather than left
+/// standing for nobody. What survives is the *shape*: two bits and not one,
+/// because the two verbs are still two questions about one pointer and
+/// `pane_strip_landing` still asks them one at a time. Recorded as a debt in
+/// §7.1.6b′ rather than pretended away — if no surface ever answers anything
+/// but `BOTH`, this struct and [`TabRun::pane_offers`] are a bit that says the
+/// same thing three times and can be collected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PaneOffers {
     /// §7.1.6k — the pane may be handed to the tab under the pointer.
@@ -6880,15 +6887,11 @@ pub struct PaneOffers {
 }
 
 impl PaneOffers {
-    /// A whole window's tab list: both offers stand (the strip and the rail).
+    /// A tab list: both offers stand — the strip, the rail and, since
+    /// 2026-08-29, the card column.
     pub const BOTH: Self = Self {
         adopt: true,
         extract: true,
-    };
-    /// The focus column: a card takes a pane, the gaps between cards do not.
-    pub const ADOPT_ONLY: Self = Self {
-        adopt: true,
-        extract: false,
     };
 }
 
@@ -7036,15 +7039,17 @@ pub fn rail_run(geometry: &RailGeometry) -> TabRun {
 /// The other two answers are said in two different places because they are two
 /// different offers:
 ///
-/// * **②, a pane source: half of it was withdrawn on 2026-08-23**
-///   ([`PaneOffers`]). The column now answers [`PaneOffers::ADOPT_ONLY`]: a pane
-///   rested on a *card* is handed to that card's tab, exactly as it is on the
-///   other two surfaces, and a pane let go in the column's **blank** is still
-///   refused — it does not become a tab of its own there, which is the half of
-///   ② the user kept. The reason the other half went is ①'s: focus mode hides
-///   the strip, so a bit that refused the source outright left a pane in focus
-///   mode with no door to another tab at all, and *"不禁任何动词零新规"* is the
-///   ruling focus mode is built on.
+/// * **②, a pane source: withdrawn in halves, on 2026-08-23 and 2026-08-29,
+///   and now gone** ([`PaneOffers`]). The column answers [`PaneOffers::BOTH`],
+///   which is the same word the strip and the rail answer: a pane rested on a
+///   *card* is handed to that card's tab, and a pane let go in the column's
+///   **blank** — the gap between two cards, or the tail below the last one,
+///   which is the band the `+` row stands in — becomes a tab of its own at that
+///   slot, by `Runtime::extract_pane_into_new_tab`, the same function the strip
+///   spends. The reason both halves went is ①'s, and the second time it was
+///   read literally: focus mode may not have fewer verbs than the window under
+///   it, and *"两卡之间的缝不是屋子"* was a rule about the column that the tab
+///   strip's own gaps disprove.
 /// * **③, file drops:** `DragSource::Row(_) => None` in
 ///   `Runtime::survey_strip`, which is global to every tab surface, so a card
 ///   has nothing to opt into. The refusal is the strip's own: no insertion caret
@@ -7063,7 +7068,7 @@ pub fn focus_rail_run(geometry: &FocusRailGeometry) -> TabRun {
         slots: geometry.cards.iter().map(|card| card.body).collect(),
         band: geometry.body,
         viewport: geometry.viewport,
-        pane_offers: PaneOffers::ADOPT_ONLY,
+        pane_offers: PaneOffers::BOTH,
     }
 }
 
@@ -9469,6 +9474,7 @@ pub fn build_chrome_for_tabs(
                 tabs,
                 active_tab,
                 grabbed,
+                preview: strip_preview,
                 thumbnails: focus_thumbnails,
                 scroll: rail_scroll,
                 state: rail,
@@ -11950,12 +11956,9 @@ fn rail_chrome(
 /// than it by everything the mode does not have.
 ///
 /// It carries [`Rail::grabbed`] since 2026-08-20 and for that field's one
-/// reason: paint order. No `preview`, and that is ②'s shape rather than an
-/// omission — K124's stand-in is the slot a *torn-out pane* would take, and
-/// [`focus_rail_run`] hosts no tear-out, so no slot is ever held open for one.
-/// The hand-over the column *did* gain on 2026-08-23 ([`PaneOffers::ADOPT_ONLY`])
-/// does not want one either: it takes no slot, it lights the card it is aimed
-/// at, and the ghost stays under the pointer saying what is in the hand.
+/// reason: paint order, and [`Self::preview`] since 2026-08-29, when the user
+/// withdrew the last of ② and the column began making tabs in its blank like
+/// every other tab list.
 /// No `shown` either: the folder flyout is summoned from a tab row's own
 /// trigger, and a card carries no trigger to summon it with.
 struct FocusRail<'a> {
@@ -11964,6 +11967,19 @@ struct FocusRail<'a> {
     /// The card currently riding the pointer — [`Rail::grabbed`], buying the
     /// same one thing on the third surface.
     grabbed: Option<usize>,
+    /// K124's stand-in slot — see [`ChromeContent::strip_preview`], and
+    /// [`Rail::preview`] for the field this one is a copy of rather than a
+    /// cousin.
+    ///
+    /// **The column had none of this until 2026-08-29** and the note that stood
+    /// here said why: `focus_rail_run` hosted no tear-out, so no slot was ever
+    /// held open for one. That is exactly the sentence the user withdrew. The
+    /// column now takes the stand-in on the same terms the rail does — the
+    /// entry is already in [`Self::tabs`] at its index, dressed as the tab the
+    /// pane would become, and this field says only which index it is — because
+    /// an insertion mark that was a *line* here and an occupied slot on the
+    /// other two surfaces would be the second vocabulary §7.1.6b′ forbids.
+    preview: Option<usize>,
     /// One entry per tab, parallel to [`Self::tabs`] — see
     /// [`ChromeContent::focus_thumbnails`].
     thumbnails: &'a [Option<FocusThumbnail<'a>>],
@@ -12031,6 +12047,7 @@ fn focus_rail_chrome(
         tabs,
         active_tab,
         grabbed,
+        preview,
         thumbnails,
         scroll,
         state,
@@ -12203,20 +12220,34 @@ fn focus_rail_chrome(
         ));
         // ── the aiming mark: `@keyframes tab-land`'s `from`, on a card ──
         //
-        // **§7.1.6b′ ② as re-judged 2026-08-23.** A card that a carried pane is
-        // resting on wears the very pair the strip's aimed tab and the rail's
-        // aimed row wear — a 9% accent wash under a 45% accent inset ring — and
-        // it wears it off the same [`TabContent::landing`], which the window
-        // holds at `1.0` for whichever tab the survey answered `StripAdopt`
-        // about. Three surfaces, one drawing, one field: a fourth mark invented
-        // here would be a second vocabulary for "this is where it goes", which
-        // is the argument §7.1.6k made when the strip grew this and the reason
-        // the column may not answer it differently.
+        // **§7.1.6b′ ② as re-judged 2026-08-23 and withdrawn 2026-08-29.** A
+        // card that a carried pane is resting on wears the very pair the strip's
+        // aimed tab and the rail's aimed row wear — a 9% accent wash under a 45%
+        // accent inset ring — and it wears it off the same
+        // [`TabContent::landing`], which the window holds at `1.0` for whichever
+        // tab the survey answered `StripAdopt` about. Three surfaces, one
+        // drawing, one field: a fourth mark invented here would be a second
+        // vocabulary for "this is where it goes", which is the argument §7.1.6k
+        // made when the strip grew this and the reason the column may not answer
+        // it differently.
+        //
+        // **And K124's stand-in is that same pair held at 1.0**, which is the
+        // whole of what the column gained when the blank started making tabs:
+        // the mock-up's `.drop-preview` and the landing keyframe's `from` are
+        // one pair of declarations written twice, so the slot a torn-out pane
+        // aims at and the card that lands in it cannot drift apart. Said as the
+        // landing held rather than as a second pair of constants — the rail's
+        // own line, on the third surface.
         //
         // Over the card's own fill and its edge, and under everything the card
         // holds — where a `background` and an inset `box-shadow` sit in CSS, and
         // the same place both other surfaces put it.
-        if content.landing > 0.0 {
+        let landing = if preview == Some(index) {
+            1.0
+        } else {
+            content.landing
+        };
+        if landing > 0.0 {
             let mut wash = ChromeSprite::new(
                 ChromeMark::ControlPill {
                     radius_px: card_radius,
@@ -12224,7 +12255,7 @@ fn focus_rail_chrome(
                 body,
                 palette.accent,
             );
-            wash.opacity = TAB_LAND_WASH_ALPHA * content.landing;
+            wash.opacity = TAB_LAND_WASH_ALPHA * landing;
             sprites.push(wash);
             let mut ring = ChromeSprite::new(
                 ChromeMark::ControlPillRing {
@@ -12234,7 +12265,7 @@ fn focus_rail_chrome(
                 body,
                 palette.accent,
             );
-            ring.opacity = TAB_LAND_RING_ALPHA * content.landing;
+            ring.opacity = TAB_LAND_RING_ALPHA * landing;
             sprites.push(ring);
         }
         // ── the breath: `@keyframes fcard-wait` (§7.1.5b, §7.1.6b′ F3) ──
@@ -35746,6 +35777,11 @@ mod tests {",
     /// is geometry, so they arrive together and are read together — and the
     /// fixture below stops growing a parameter every time the column learns
     /// another tween.
+    ///
+    /// No `strip_preview` here, and that is a boundary rather than a gap: the
+    /// stand-in the column gained on 2026-08-29 is a *guest in the list* and
+    /// [`rail_paint_of_in`] already names it, so a second door onto it would be
+    /// two ways to say one thing.
     #[derive(Clone, Copy, Debug)]
     struct FocusFrame<'a> {
         /// How far into its entrance the column is, `0.0..=1.0`.
@@ -37410,6 +37446,74 @@ mod tests {",
     fn painted_focus_column(height: f32, tabs: usize) -> FocusRailGeometry {
         focus_rail_geometry(height, 1.0, tabs, 0.0, focus_rail(TabLayoutMode::Vertical))
             .expect("focus mode puts a column on screen")
+    }
+
+    /// **K124 on the third surface — the stand-in holds a whole card's slot and
+    /// wears the landing at full strength** (user ruling 2026-08-29).
+    ///
+    /// `a_pane_over_the_strip_takes_a_slot_and_wears_the_accent`, on the column,
+    /// and the point of writing it here is that it needed no drawing of its own:
+    /// the insertion mark this product has is not a line between two entries but
+    /// an entry *dressed as the tab that would land there*, inserted into the
+    /// list so its neighbours move aside. The rail has drawn that vertically
+    /// since K124, so the column asks the same question — is this index the
+    /// preview's — of the same [`TabContent::landing`] pair, and the answer is a
+    /// card-wide wash where a strip's is tab-wide. A horizontal caret invented
+    /// for this axis would have been the second vocabulary §7.1.6b′ forbids.
+    ///
+    /// Red gate: leave `FocusRail` without its `preview` and the stand-in is a
+    /// blank card in the middle of the column — the slot is held, and nothing
+    /// says it is the one the hand is aiming at.
+    #[test]
+    fn a_pane_over_the_card_column_takes_a_whole_cards_slot_and_wears_the_landing() {
+        const SLOT: usize = 1;
+        let palette = chrome_palette();
+        // Three tabs and a guest at index 1: exactly what `Runtime::refresh_chrome`
+        // hands down, which inserts the stand-in into the list it is about to
+        // draw rather than drawing it beside the list.
+        let mut tabs = dragging_rows(0, 0.0, 0.0);
+        tabs.insert(SLOT, TabContent::default());
+        let (_, _, sprites) = rail_paint_of_in(
+            TALL_FIXTURE_HEIGHT,
+            1.0,
+            &tabs,
+            0,
+            None,
+            Some(SLOT),
+            focus_rail(TabLayoutMode::Vertical),
+            None,
+        );
+        let held = painted_focus_column(TALL_FIXTURE_HEIGHT, tabs.len());
+        let slot = held.cards[SLOT].body;
+        // **The slot is occupied, not gestured at**: the third real tab is drawn
+        // a whole card lower than it would be in the column of three this window
+        // holds when no hand is over it.
+        let settled = painted_focus_column(TALL_FIXTURE_HEIGHT, 3);
+        assert!(
+            held.cards[SLOT + 1].body[1] > settled.cards[SLOT].body[1],
+            "the stand-in's neighbours move over for it, exactly as the strip's do"
+        );
+        let worn = |alpha: f32, ring: bool| {
+            sprites.iter().any(|sprite| {
+                sprite.rect == slot
+                    && sprite.color == palette.accent
+                    && (sprite.opacity - alpha).abs() < 1e-6
+                    && match sprite.mark {
+                        ChromeMark::ControlPillRing { .. } => ring,
+                        ChromeMark::ControlPill { .. } => !ring,
+                        _ => false,
+                    }
+            })
+        };
+        assert!(
+            worn(TAB_LAND_WASH_ALPHA, false),
+            "`.drop-preview`'s wash, at full strength for as long as the slot \
+             stands there — the landing held at 1.0 and not a second constant"
+        );
+        assert!(
+            worn(TAB_LAND_RING_ALPHA, true),
+            "and its inset ring, the other half of the same pair of declarations"
+        );
     }
 
     /// **A card in hand is drawn where the drag put it, and over what it passes**
