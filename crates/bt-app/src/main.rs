@@ -10442,17 +10442,7 @@ impl WindowRuntime {
     /// full atlas, and a counter each would let the two take turns spinning
     /// forever.
     fn may_ask_again(&mut self, outcome: &PresentOutcome) -> bool {
-        match outcome {
-            PresentOutcome::Presented(_) => {
-                self.textless_frames = 0;
-                false
-            }
-            PresentOutcome::Skipped | PresentOutcome::Reconfigure => true,
-            PresentOutcome::PresentedWithoutText(_) => {
-                self.textless_frames = self.textless_frames.saturating_add(1);
-                self.textless_frames <= TEXTLESS_RETRY_BUDGET
-            }
-        }
+        ask_again_after(outcome, &mut self.textless_frames)
     }
 
     /// **Where this window is, as the three facts [`notify::desktop_reach`] reads together**
@@ -85315,10 +85305,102 @@ mod pty_drain_budget_tests {
 /// the third time and calling the answer new.
 const TEXTLESS_RETRY_BUDGET: u32 = 2;
 
+/// [`WindowRuntime::may_ask_again`]'s whole decision, over the run counter
+/// alone — a free function so that it can be asked without a surface, a
+/// compositor and four Win32 bridges.
+fn ask_again_after(outcome: &PresentOutcome, textless_run: &mut u32) -> bool {
+    match outcome {
+        PresentOutcome::Presented(_) => {
+            *textless_run = 0;
+            false
+        }
+        // The swapchain handed back no image at all. What changes between this
+        // turn and the next is the swapchain, not this window, so the ask is
+        // unconditional — it always was.
+        PresentOutcome::Skipped | PresentOutcome::Reconfigure => true,
+        PresentOutcome::PresentedWithoutText(_) => {
+            *textless_run = textless_run.saturating_add(1);
+            *textless_run <= TEXTLESS_RETRY_BUDGET
+        }
+    }
+}
+
 /// What a window does with a frame that reached the glass without its
 /// characters — `bt-render`'s [`PresentOutcome::PresentedWithoutText`].
 #[cfg(test)]
 mod textless_present_tests {
+    use super::{PresentOutcome, TEXTLESS_RETRY_BUDGET, ask_again_after};
+    use bt_render::{FrameSource, FrameTrigger, PresentReceipt};
+    use std::time::Instant;
+
+    fn receipt() -> PresentReceipt {
+        let now = Instant::now();
+        PresentReceipt {
+            trigger: FrameTrigger {
+                occurred_at: now,
+                source: FrameSource::Expose,
+            },
+            submitted_at: now,
+            present_called_at: now,
+        }
+    }
+
+    /// RED — **a frame that lost its characters is asked for again a bounded
+    /// number of times, and then let be** (user report 2026-08-29,
+    /// `docs/DESIGN.md` §7.1.3l).
+    ///
+    /// The answer to `PresentedWithoutText` is "re-file the frame and ask for
+    /// another turn", and its stated warrant is that the atlas is trimmed on the
+    /// way out of every frame, so the next turn has room. That is true of a
+    /// refusal caused by what *earlier* frames had left protected. It is false
+    /// when a single frame's own glyphs are more than the device will hold —
+    /// which a 4K window whose interface, terminal and document are all written
+    /// in Han characters reaches — because the next turn is then composed from
+    /// the same seats, the same chrome and the same document and is refused in
+    /// exactly the same place. Unbounded, that is not a retry: it is a spin that
+    /// redraws an identical picture as fast as the machine can, which is how the
+    /// report's window came to fire its hang watchdog in the same run.
+    ///
+    /// The two swapchain refusals keep asking without a budget: what changes
+    /// between their turns is the swapchain, not the window.
+    ///
+    /// Mutation: drop the budget and the textless run never stops asking.
+    #[test]
+    fn a_textless_run_is_asked_for_again_a_bounded_number_of_times() {
+        let mut run = 0_u32;
+        for turn in 1..=TEXTLESS_RETRY_BUDGET {
+            assert!(
+                ask_again_after(&PresentOutcome::PresentedWithoutText(receipt()), &mut run),
+                "turn {turn} is inside the budget and is worth another try"
+            );
+        }
+        assert!(
+            !ask_again_after(&PresentOutcome::PresentedWithoutText(receipt()), &mut run),
+            "an identical question asked past the budget is not asked again"
+        );
+        assert!(
+            !ask_again_after(&PresentOutcome::PresentedWithoutText(receipt()), &mut run),
+            "and it stays not-asked, so the window goes idle instead of spinning"
+        );
+
+        // A whole frame ends the run, so the next refusal is a new question.
+        assert!(!ask_again_after(&PresentOutcome::Presented(receipt()), &mut run));
+        assert_eq!(run, 0);
+        assert!(ask_again_after(
+            &PresentOutcome::PresentedWithoutText(receipt()),
+            &mut run
+        ));
+
+        // The swapchain's own two refusals are not budgeted, and do not spend
+        // the textless run either.
+        let mut swapchain = 0_u32;
+        for _ in 0..(TEXTLESS_RETRY_BUDGET + 5) {
+            assert!(ask_again_after(&PresentOutcome::Skipped, &mut swapchain));
+            assert!(ask_again_after(&PresentOutcome::Reconfigure, &mut swapchain));
+        }
+        assert_eq!(swapchain, 0, "no image is not a textless image");
+    }
+
     /// This file as text, for [`application_change_tests::SOURCE`]'s reason:
     /// what is under test is which *arm* a variant lands in, and a
     /// `WindowRuntime` is a surface, a compositor and four Win32 bridges.
