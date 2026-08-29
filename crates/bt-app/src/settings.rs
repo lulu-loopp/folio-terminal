@@ -8627,7 +8627,7 @@ pub fn layout_for_menus(
                 text_column_right,
                 title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX),
             ];
-            let caps = line.capability.map(|_| {
+            let caps = line.capability.as_ref().map(|_| {
                 let line_of = |ordinal: f32| {
                     let top = desc[3]
                         + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX)
@@ -11039,7 +11039,7 @@ fn push_profile_page(
             tabular_numerals: false,
             clip: None,
         });
-        if let (Some(boxes), Some(text)) = (placed.caps, line.capability) {
+        if let (Some(boxes), Some(text)) = (placed.caps, line.capability.as_deref()) {
             let width = boxes[0][2] - boxes[0][0];
             for (box_, part) in boxes
                 .iter()
@@ -22029,7 +22029,7 @@ mod tests {
                 mark: ChromeMark::ProfilePowerShell,
                 title: "PowerShell 7",
                 command: "pwsh.exe -NoLogo".to_owned(),
-                capability: Some(Text::CapPowerShell.text()),
+                capability: Some(Text::CapPowerShell.text().to_owned()),
                 is_default: true,
                 default_is_automatic: false,
                 is_fallback: false,
@@ -22042,7 +22042,7 @@ mod tests {
                 mark: ChromeMark::ProfileUbuntu,
                 title: "WSL",
                 command: "wsl.exe --cd ~".to_owned(),
-                capability: Some(Text::CapWslBash.text()),
+                capability: Some(Text::CapWslBash.text().to_owned()),
                 is_default: false,
                 default_is_automatic: false,
                 is_fallback: false,
@@ -22068,7 +22068,7 @@ mod tests {
                 mark: ChromeMark::ProfileCmd,
                 title: "Command Prompt",
                 command: "cmd.exe".to_owned(),
-                capability: Some(Text::CapCmd.text()),
+                capability: Some(Text::CapCmd.text().to_owned()),
                 is_default: false,
                 default_is_automatic: false,
                 is_fallback: false,

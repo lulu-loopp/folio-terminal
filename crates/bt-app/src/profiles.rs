@@ -1027,9 +1027,15 @@ pub fn shipped() -> Vec<Profile> {
             hidden: false,
             origin: Origin::Builtin,
         },
-        // ── The three agents (user ruling 2026-08-28, §7.41) ─────────────────
+        // ── The agents (user rulings 2026-08-28 and 2026-08-29, §7.41) ───────
         //
-        // Everything the three share is shared because it is the same answer and
+        // Three on the first day and four more on the second — Kimi Code, pi,
+        // Hermes, OpenCode — added under the same rules and adding no rule of
+        // their own. The list is not a judgement about which tools are worth
+        // starting: it is the tools a reader might already have installed, and
+        // a row for one they have not costs them a greyed line (§7.27).
+        //
+        // Everything they share is shared because it is the same answer and
         // not because they were copied: **no arguments**, because an agent
         // started with no arguments is the agent, and any flag this table chose
         // would be a decision made on behalf of somebody who has not been asked;
@@ -1161,7 +1167,215 @@ pub fn shipped() -> Vec<Profile> {
             hidden: false,
             origin: Origin::Builtin,
         },
+        // ── Four more (user ruling 2026-08-29, §7.41 ⑤) ──────────────────────
+        //
+        // Same rules, no new mechanism. What each one needed answering for
+        // itself was **where it puts its executable**, and that was read off
+        // each product's own installer or npm manifest rather than guessed —
+        // the note on each row says which.
+        Profile {
+            id: "kimi".to_owned(),
+            compared_title: None,
+            display_title: "Kimi Code".to_owned(),
+            // The neutral chassis, on `ChromeMark::ProfileGeneric`'s own rule:
+            // the design authority struck no mark for this product and a crate
+            // may not invent one. The colour is what tells it from the other
+            // rows wearing the same chassis.
+            mark: ChromeMark::ProfileGeneric {
+                colour: MarkColour::Teal,
+            },
+            // `kimi`, from the npm manifest's own `bin` map
+            // (`@moonshot-ai/kimi-code`). The product also ships a PowerShell
+            // installer that writes `%USERPROFILE%\.kimi-code\bin\kimi.exe` and
+            // puts that directory on the user PATH — hence both a name on
+            // `PATH` and the directory it comes from, for the session that has
+            // not been signed out of since the install.
+            program: ProgramSource::FirstOf(vec![
+                ProgramCandidate::OnPath {
+                    name: "kimi.cmd".to_owned(),
+                },
+                ProgramCandidate::OnPath {
+                    name: "kimi.exe".to_owned(),
+                },
+                ProgramCandidate::Under {
+                    variable: "AppData".to_owned(),
+                    tail: r"npm\kimi.cmd".to_owned(),
+                },
+                ProgramCandidate::Under {
+                    variable: "UserProfile".to_owned(),
+                    tail: r".kimi-code\bin\kimi.exe".to_owned(),
+                },
+            ]),
+            args: Vec::new(),
+            env: Vec::new(),
+            starting_dir: StartingDir::WindowsHome,
+            start_at: StartAt::Inherit,
+            paths: PathNamespace::Windows,
+            qualifier: Qualifier::None,
+            integration: IntegrationChoice::Auto,
+            hidden: false,
+            origin: Origin::Builtin,
+        },
+        Profile {
+            id: "pi".to_owned(),
+            compared_title: None,
+            // Its own name, lower case, which is how the product writes it
+            // everywhere including its own prompt.
+            display_title: "pi".to_owned(),
+            mark: ChromeMark::ProfileGeneric {
+                colour: MarkColour::Green,
+            },
+            // `pi`, from the npm manifest's `bin` map
+            // (`@earendil-works/pi-coding-agent`). **No `.exe` line**: the
+            // documented Windows route is npm, and the product's own installer
+            // stages a `pi.cmd` in `%USERPROFILE%\.pi\agent\bin` rather than an
+            // executable. A `pi.exe` candidate would be a place this build
+            // invented for a file the product does not produce — and `pi` is a
+            // short enough name that a stray match is a real risk, not a
+            // theoretical one.
+            program: ProgramSource::FirstOf(vec![
+                ProgramCandidate::OnPath {
+                    name: "pi.cmd".to_owned(),
+                },
+                ProgramCandidate::Under {
+                    variable: "AppData".to_owned(),
+                    tail: r"npm\pi.cmd".to_owned(),
+                },
+                ProgramCandidate::Under {
+                    variable: "UserProfile".to_owned(),
+                    tail: r".pi\agent\bin\pi.cmd".to_owned(),
+                },
+            ]),
+            args: Vec::new(),
+            env: Vec::new(),
+            starting_dir: StartingDir::WindowsHome,
+            start_at: StartAt::Inherit,
+            paths: PathNamespace::Windows,
+            qualifier: Qualifier::None,
+            integration: IntegrationChoice::Auto,
+            hidden: false,
+            origin: Origin::Builtin,
+        },
+        Profile {
+            id: "hermes".to_owned(),
+            compared_title: None,
+            display_title: "Hermes".to_owned(),
+            mark: ChromeMark::ProfileGeneric {
+                colour: MarkColour::Amber,
+            },
+            // `hermes`, from the product's own PowerShell installer, which
+            // writes `%LOCALAPPDATA%\hermes\bin\hermes.cmd` and prepends that
+            // directory to the user PATH. There is no official npm or PyPI
+            // route — the `hermes-agent` package on npm is a third party's
+            // wrapper, so `%APPDATA%\npm` is **not** on this list; a candidate
+            // there would be this build asserting an install route the product
+            // does not offer.
+            //
+            // **`hermes.cmd` and not `hermes.exe` on `PATH`.** The name is
+            // heavily shared — Meta's JavaScript engine ships a `hermes.exe`
+            // that React Native toolchains put on `PATH` — and a row that
+            // started that one would be a row that lied about what it starts.
+            // The `.cmd` is the launcher this product installs, and the
+            // directory below it is the definitive answer.
+            program: ProgramSource::FirstOf(vec![
+                ProgramCandidate::OnPath {
+                    name: "hermes.cmd".to_owned(),
+                },
+                ProgramCandidate::Under {
+                    variable: "LocalAppData".to_owned(),
+                    tail: r"hermes\bin\hermes.cmd".to_owned(),
+                },
+                ProgramCandidate::Under {
+                    variable: "LocalAppData".to_owned(),
+                    tail: r"hermes\bin\hermes.exe".to_owned(),
+                },
+            ]),
+            args: Vec::new(),
+            env: Vec::new(),
+            starting_dir: StartingDir::WindowsHome,
+            start_at: StartAt::Inherit,
+            paths: PathNamespace::Windows,
+            qualifier: Qualifier::None,
+            integration: IntegrationChoice::Auto,
+            hidden: false,
+            origin: Origin::Builtin,
+        },
+        Profile {
+            id: "opencode".to_owned(),
+            compared_title: None,
+            display_title: "OpenCode".to_owned(),
+            mark: ChromeMark::ProfileGeneric {
+                colour: MarkColour::Magenta,
+            },
+            // `opencode`, from the npm manifest's `bin` map (`opencode-ai`),
+            // which points at a compiled `opencode.exe` behind a `.cmd` shim.
+            // The `.exe` line covers the two Windows package managers the
+            // product documents — scoop and chocolatey — whose shim directories
+            // are on `PATH` and hold an executable rather than a batch file.
+            // The product's `curl | bash` installer writes
+            // `~/.opencode/bin` and edits POSIX shell startup files only, so it
+            // never reaches this window's `PATH`; it is not a candidate here
+            // because a Windows session started from that install is a WSL
+            // session, which is a different row.
+            program: ProgramSource::FirstOf(vec![
+                ProgramCandidate::OnPath {
+                    name: "opencode.cmd".to_owned(),
+                },
+                ProgramCandidate::OnPath {
+                    name: "opencode.exe".to_owned(),
+                },
+                ProgramCandidate::Under {
+                    variable: "AppData".to_owned(),
+                    tail: r"npm\opencode.cmd".to_owned(),
+                },
+            ]),
+            args: Vec::new(),
+            env: Vec::new(),
+            starting_dir: StartingDir::WindowsHome,
+            start_at: StartAt::Inherit,
+            paths: PathNamespace::Windows,
+            qualifier: Qualifier::None,
+            integration: IntegrationChoice::Auto,
+            hidden: false,
+            origin: Origin::Builtin,
+        },
     ]
+}
+
+/// The built-in rows that start an **agent** rather than a shell.
+///
+/// Written down rather than derived, because every derivation available is a
+/// coincidence: these rows are the ones with no `compared_title` and
+/// `Integration::None`, and so is a profile of the reader's own that starts
+/// `python`. What makes a row one of these is that this list says so, and what
+/// the list is for is the sentence a greyed one shows — see
+/// [`agent_command`].
+const AGENT_IDS: [&str; 7] = [
+    "claude", "codex", "copilot", "kimi", "pi", "hermes", "opencode",
+];
+
+/// What a reader types to start this agent, or `None` if the row is not one of
+/// the built-in agents.
+///
+/// **Read off the row's own first `PATH` candidate**, with the extension
+/// dropped, rather than written down a second time: the sentence a greyed row
+/// shows tells the reader to pass this word to `wsl.exe -e`, and a word that
+/// drifted from the one this table looks for would send them to a command that
+/// does not exist. `an_agent_row_is_a_profile_under_this_tables_own_rules`
+/// already pins that the first candidate is a name on `PATH`.
+fn agent_command(profile: &Profile) -> Option<&str> {
+    if profile.origin != Origin::Builtin || !AGENT_IDS.contains(&profile.id.as_str()) {
+        return None;
+    }
+    let ProgramSource::FirstOf(candidates) = &profile.program else {
+        return None;
+    };
+    candidates.iter().find_map(|candidate| match candidate {
+        ProgramCandidate::OnPath { name } => {
+            Some(name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem))
+        }
+        _ => None,
+    })
 }
 
 /// The profile table this window actually reads: [`shipped`] merged with
@@ -2558,7 +2772,17 @@ pub struct ProfileLine {
     /// sentence the row has room for is the reason it cannot start — which is
     /// `.row.unavailable`'s existing rule applied to a row that happened to have
     /// two lines.
-    pub capability: Option<&'static str>,
+    ///
+    /// **An unavailable *agent* fills it with the way out instead** (user ruling
+    /// 2026-08-29): those two lines are already reserved on every row alike, and
+    /// what a reader whose codex lives inside WSL needs is not more silence but
+    /// the one profile and the two arguments that reach it. Nothing about the
+    /// row's height changes — the pair of boxes is laid out for whatever text
+    /// is here, and there was text on every startable row already.
+    ///
+    /// A `String` and no longer a `&'static str`, because that sentence names
+    /// the command.
+    pub capability: Option<String>,
     /// Whether the `default` badge is on this row. **It reports and is not a
     /// control**: the default is changed on the General page and nowhere else,
     /// because one field with two writers is the thing §7.1.6c-4a just avoided.
@@ -2611,12 +2835,24 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
                     index,
                     mark: profile.mark,
                     title: title(index),
-                    command: if available {
-                        command_line(profile, programs.program(index))
-                    } else {
-                        crate::i18n::profile_not_installed(title(index))
+                    command: match (available, agent_command(profile)) {
+                        (true, _) => command_line(profile, programs.program(index)),
+                        // An agent this window did not find says **where it
+                        // looked**, because the answer to "but I use it every
+                        // day" is very often "inside WSL" and a row that only
+                        // said 「没找到」 left the reader with nothing to do.
+                        (false, Some(_)) => {
+                            crate::i18n::agent_not_found_on_windows(title(index))
+                        }
+                        (false, None) => crate::i18n::profile_not_installed(title(index)),
                     },
-                    capability: available.then(|| capability_text(profile).text()),
+                    capability: match (available, agent_command(profile)) {
+                        (true, _) => Some(capability_text(profile).text().to_owned()),
+                        (false, Some(command)) => {
+                            Some(crate::i18n::agent_inside_wsl_hint(command))
+                        }
+                        (false, None) => None,
+                    },
                     is_default: index == default,
                     default_is_automatic: automatic,
                     is_fallback: index == fallback,
@@ -2872,15 +3108,15 @@ fn fallback_profile_in(table: &ProfileTable) -> usize {
 /// with. The shipped order is a fact about this build and cannot be dragged.
 /// [`the_automatic_default_walks_the_shipped_order`] pins the two together.
 ///
-/// **The three agent rows are on it and none of them can ever be reached**
-/// (user ruling 2026-08-28, §7.41), which is why they are written down rather
-/// than left off. The walk stops at `winps` at the latest — that row names a
-/// program that is part of Windows — so an agent could only be answered for on a
-/// machine with no PowerShell at all, which is not a Windows. Leaving them out
-/// would have been the same sentence said by omission, and the day somebody
-/// wonders whether a first run can open Claude Code the answer would have to be
-/// reconstructed from two lists instead of read off one.
-const SHIPPED_ORDER: [&str; 8] = [
+/// **The seven agent rows are on it and none of them can ever be reached**
+/// (user rulings 2026-08-28 and 2026-08-29, §7.41), which is why they are
+/// written down rather than left off. The walk stops at `winps` at the latest —
+/// that row names a program that is part of Windows — so an agent could only be
+/// answered for on a machine with no PowerShell at all, which is not a Windows.
+/// Leaving them out would have been the same sentence said by omission, and the
+/// day somebody wonders whether a first run can open Claude Code the answer
+/// would have to be reconstructed from two lists instead of read off one.
+const SHIPPED_ORDER: [&str; 12] = [
     "pwsh",
     WINDOWS_POWERSHELL_ID,
     "wsl",
@@ -2889,6 +3125,10 @@ const SHIPPED_ORDER: [&str; 8] = [
     "claude",
     "codex",
     "copilot",
+    "kimi",
+    "pi",
+    "hermes",
+    "opencode",
 ];
 
 /// The default on a machine where nobody has chosen one: the first row of
@@ -12831,18 +13071,22 @@ mod tests {
         }
 
         /// A machine with every shipped row startable on it — five shells and,
-        /// since 2026-08-28, three agents — spelled the way a real Windows
+        /// since 2026-08-28, the agents — spelled the way a real Windows
         /// install spells them.
         ///
         /// The agents arrive the way they actually arrive: npm's global bin on
-        /// `PATH`, holding a `.cmd` shim apiece. That is what keeps the greying
-        /// pin below a claim about a *machine* rather than about this fixture —
-        /// a candidate list that stopped matching how these three install would
-        /// leave every agent row greyed on every real desk and lit here.
+        /// `PATH`, holding a `.cmd` shim apiece, except the two that have no
+        /// npm route at all — Hermes installs into `%LOCALAPPDATA%\hermes\bin`
+        /// from its own script, and that is where this fixture puts it. That is
+        /// what keeps the greying pin below a claim about a *machine* rather
+        /// than about this fixture — a candidate list that stopped matching how
+        /// these install would leave every agent row greyed on every real desk
+        /// and lit here.
         fn fully_equipped() -> Self {
             Self::bare_windows()
                 .with_var("ProgramFiles", r"C:\Program Files")
                 .with_var("PATH", r"C:\Users\dev\AppData\Roaming\npm")
+                .with_var("LocalAppData", r"C:\Users\dev\AppData\Local")
                 .with_file(r"C:\Program Files\PowerShell\7\pwsh.exe")
                 .with_file(r"C:\WINDOWS\System32\wsl.exe")
                 .with_file(r"C:\WINDOWS\System32\cmd.exe")
@@ -12850,6 +13094,10 @@ mod tests {
                 .with_file(r"C:\Users\dev\AppData\Roaming\npm\claude.cmd")
                 .with_file(r"C:\Users\dev\AppData\Roaming\npm\codex.cmd")
                 .with_file(r"C:\Users\dev\AppData\Roaming\npm\copilot.cmd")
+                .with_file(r"C:\Users\dev\AppData\Roaming\npm\kimi.cmd")
+                .with_file(r"C:\Users\dev\AppData\Roaming\npm\pi.cmd")
+                .with_file(r"C:\Users\dev\AppData\Roaming\npm\opencode.cmd")
+                .with_file(r"C:\Users\dev\AppData\Local\hermes\bin\hermes.cmd")
         }
 
         /// Windows with nothing installed on top of it — which still has Windows
@@ -13126,17 +13374,20 @@ mod tests {
     /// means by "PowerShell", 5.1 beside it because the pair is the choice.
     #[test]
     fn the_picker_offers_exactly_the_profiles_this_build_has() {
-        assert_eq!(count(), 8);
+        assert_eq!(count(), 12);
         let shipped = shipped_rows();
         let listed: Vec<_> = shipped.iter().map(|profile| profile.id.as_str()).collect();
-        // **Five shells, then three agents** (user ruling 2026-08-28, §7.41).
-        // The agents go after the shells and not among them: the order is the
-        // picker's, and a picker whose first rows are three tools most machines
-        // have not got installed opens on a screen of greyed text.
+        // **Five shells, then seven agents** (user rulings 2026-08-28 and
+        // 2026-08-29, §7.41). The agents go after the shells and not among
+        // them: the order is the picker's, and a picker whose first rows are
+        // tools most machines have not got installed opens on a screen of
+        // greyed text. Within the agents the order is the order they were
+        // ruled in, which is a fact and not a ranking.
         assert_eq!(
             listed,
             [
-                "pwsh", "winps", "wsl", "gitbash", "cmd", "claude", "codex", "copilot"
+                "pwsh", "winps", "wsl", "gitbash", "cmd", "claude", "codex", "copilot", "kimi",
+                "pi", "hermes", "opencode"
             ]
         );
         assert_eq!(display_title(fallback_profile()), "Windows PowerShell 5.1");
@@ -13209,7 +13460,12 @@ mod tests {
     /// is actually using the first time npm moves its prefix.
     #[test]
     fn an_agent_row_is_a_profile_under_this_tables_own_rules() {
-        for id in ["claude", "codex", "copilot"] {
+        assert_eq!(
+            AGENT_IDS.len(),
+            7,
+            "the list the greyed-row sentence reads is the list of agents"
+        );
+        for id in AGENT_IDS {
             let row = row(index_of_id(id)).expect("the agent is a row");
             assert_eq!(row.origin, Origin::Builtin, "{id}");
             assert!(
@@ -13239,6 +13495,29 @@ mod tests {
                     ProgramCandidate::OnPath { name } if name.starts_with(id)
                 )),
                 "{id} asks PATH for its own name first: {candidates:?}"
+            );
+            // **And the word the greyed row prints is the word this table
+            // looks for.** The sentence tells a reader to pass it to
+            // `wsl.exe -e`, so a word invented beside the candidate list would
+            // send them to a command that does not exist (user ruling
+            // 2026-08-29).
+            assert_eq!(
+                agent_command(&row),
+                Some(id),
+                "{id} prints the name it asks PATH for"
+            );
+        }
+        // A shell is not an agent, and the sentence it shows when it is missing
+        // is the shorter one. Read off the shipped rows so that a sixth shell
+        // does not have to be added here as well.
+        for profile in shipped_rows() {
+            let is_agent = AGENT_IDS.contains(&profile.id.as_str());
+            assert_eq!(
+                agent_command(&profile).is_some(),
+                is_agent,
+                "{} is {}an agent",
+                profile.id,
+                if is_agent { "" } else { "not " }
             );
         }
     }
@@ -13604,12 +13883,12 @@ mod tests {
                     index_of_id("cmd"),
                     "Command Prompt — not found on this machine".to_owned()
                 ),
-                // The three agents (user ruling 2026-08-28). A bare Windows box
-                // has none of them, and each says so **in its own name** — which
-                // is what this rule is worth on these three rows in particular:
-                // `Codex` and `Copilot CLI` wear the same neutral chassis, so
-                // the name in the sentence is the only thing that tells a reader
-                // which of the two they have not got.
+                // The agents (user rulings 2026-08-28 and 2026-08-29). A bare
+                // Windows box has none of them, and each says so **in its own
+                // name** — which is what this rule is worth on these rows in
+                // particular: six of the seven wear the same neutral chassis,
+                // so the name in the sentence is the only thing that tells a
+                // reader which of them they have not got.
                 (
                     index_of_id("claude"),
                     "Claude Code — not found on this machine".to_owned()
@@ -13621,6 +13900,22 @@ mod tests {
                 (
                     index_of_id("copilot"),
                     "Copilot CLI — not found on this machine".to_owned()
+                ),
+                (
+                    index_of_id("kimi"),
+                    "Kimi Code — not found on this machine".to_owned()
+                ),
+                (
+                    index_of_id("pi"),
+                    "pi — not found on this machine".to_owned()
+                ),
+                (
+                    index_of_id("hermes"),
+                    "Hermes — not found on this machine".to_owned()
+                ),
+                (
+                    index_of_id("opencode"),
+                    "OpenCode — not found on this machine".to_owned()
                 ),
             ],
             "every greyed row says why, in its own name, and the startable one \
@@ -19716,7 +20011,8 @@ mod tests {
         assert_eq!(
             ids(&built),
             [
-                "pwsh", "winps", "wsl", "gitbash", "cmd", "claude", "codex", "copilot"
+                "pwsh", "winps", "wsl", "gitbash", "cmd", "claude", "codex", "copilot", "kimi",
+                "pi", "hermes", "opencode"
             ]
         );
         assert!(
@@ -19756,7 +20052,8 @@ mod tests {
         assert_eq!(
             ids(&built),
             [
-                "cmd", "wsl", "gitbash", "winps", "pwsh", "claude", "codex", "copilot"
+                "cmd", "wsl", "gitbash", "winps", "pwsh", "claude", "codex", "copilot", "kimi",
+                "pi", "hermes", "opencode"
             ]
         );
         assert_eq!(built[1].display_title, "Ubuntu");
@@ -19795,7 +20092,8 @@ mod tests {
         assert_eq!(
             ids(&built),
             [
-                "cmd", "wsl", "pwsh", "winps", "gitbash", "claude", "codex", "copilot"
+                "cmd", "wsl", "pwsh", "winps", "gitbash", "claude", "codex", "copilot", "kimi",
+                "pi", "hermes", "opencode"
             ]
         );
         assert!(built[2..].iter().all(|profile| !profile.hidden));
@@ -19822,7 +20120,8 @@ mod tests {
         assert_eq!(
             ids(&built),
             [
-                "pwsh", "cmd", "winps", "wsl", "gitbash", "claude", "codex", "copilot"
+                "pwsh", "cmd", "winps", "wsl", "gitbash", "claude", "codex", "copilot", "kimi",
+                "pi", "hermes", "opencode"
             ]
         );
         assert!(
@@ -19889,7 +20188,8 @@ mod tests {
                 .map(|index| table.profiles()[index].id.as_str())
                 .collect::<Vec<_>>(),
             [
-                "pwsh", "winps", "wsl", "gitbash", "claude", "codex", "copilot"
+                "pwsh", "winps", "wsl", "gitbash", "claude", "codex", "copilot", "kimi", "pi",
+                "hermes", "opencode"
             ],
             "the `˅` menu, the `+` and the picker are all one list, and `cmd` is \
              not on it"
@@ -20899,7 +21199,7 @@ mod tests {
             .expect("the floor is always a row");
         assert!(floor.available && floor.is_default);
         assert_eq!(
-            floor.capability,
+            floor.capability.as_deref(),
             Some(crate::i18n::Text::CapPowerShell.text())
         );
         assert_eq!(

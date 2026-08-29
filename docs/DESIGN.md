@@ -4861,6 +4861,32 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 
 **日期:2026-08-28,四条同批。**
 
+**⑤ 再加四条内置 agent 配置:Kimi Code、pi、Hermes、OpenCode(用户裁 2026-08-29;`count()` 8 → 12)。**
+
+同一条 ③ 的规矩,一条新机制都没有:`ProgramSource::FirstOf`、`args` 为空、`StartAt::Inherit`、`compared_title` 为 `None`、`IntegrationChoice::Auto` 推出 `Integration::None`、没装**灰显不隐藏**。内置槽位仍是保留字,`profiles.json` 的 schema **没有升版**——理由与 ③ 第 3 条一字不差:新行只写自己的 id,`CandidateV1` 的三种读法一个字节没动。这四条与 Agent 页的通知开关**仍然是两回事**:那一页装的是别人配置文件里的 hook,这里是启动器,谁也不读谁。**这四家的通知接入没有做**,另排。
+
+**每一条的可执行名是从各家自己的安装物读出来的,不是猜的**,这是这一批唯一真正要记下来的事:
+
+- **Kimi Code → `kimi`**。npm 包 `@moonshot-ai/kimi-code` 的 `bin` 映射写着 `kimi`(注意是带连字符的 `@moonshot-ai`,不是 `@moonshotai`);官方还有一份 PowerShell 安装脚本,它把 `kimi.exe` 放进 `%USERPROFILE%\.kimi-code\bin` 并把该目录前置进用户 PATH——所以候选表里既有 `PATH` 上的名字,也有那个目录本身,后者是给「装完还没重新登录过」的那次会话的。
+- **pi → `pi`**。npm 包 `@earendil-works/pi-coding-agent` 的 `bin` 映射写着 `pi`(旧名 `@mariozechner/pi-coding-agent` 已弃)。**没有 `pi.exe` 这一行**:官方 Windows 路线是 npm,自带安装器在 `%USERPROFILE%\.pi\agent\bin` 里放的也是 `pi.cmd` 而不是可执行文件——给一个产品不产出的文件写一个候选位置,就是这张表在替它发明一种安装方式;而 `pi` 这个名字短到误命中是真风险不是理论风险。
+- **Hermes → `hermes`**(Nous Research 的 Hermes Agent)。官方 PowerShell 安装器写 `%LOCALAPPDATA%\hermes\bin\hermes.cmd` 并把该目录前置进用户 PATH。**没有 npm 这一行**:npm 上的 `hermes-agent` 的 `bugs.url` 指向 `github.com/wyrtensi/hermes-agent-npm`,是第三方包装,不是这家的发行路线,写进来等于这张表主张一条它没有的安装途径。**`PATH` 上只认 `hermes.cmd` 不认 `hermes.exe`**:`hermes` 这个名字被 Meta 的 JavaScript 引擎占着,React Native 工具链会把一个 `hermes.exe` 放上 PATH,认它就是一行谎报自己启动什么的行。
+- **OpenCode → `opencode`**。npm 包 `opencode-ai` 的 `bin` 映射写着 `opencode`,背后是一个编译出来的 `opencode.exe` 加一层 `.cmd` 垫片;`.exe` 那一行同时兜住官方文档列出的两个 Windows 包管理器(scoop、choco),它们的 shim 目录在 PATH 上放的是可执行文件。仓库已从 `sst/opencode` 迁到 `anomalyco/opencode`(GitHub API 同一个 repo id)。官方 `curl | bash` 安装器写 `~/.opencode/bin` 且只改 POSIX shell 的启动文件,**永远到不了这扇窗的 `PATH`**——从那种安装启动的会话是 WSL 会话,那是另一行的事。
+
+**图标:四枚都穿中性 chassis**,颜色 Teal / Green / Amber / Magenta。这不是偷懒,是 `ChromeMark::ProfileGeneric` 自己写着的那条规矩(③ 末段):设计权威没给这四家画牌子,而**给它发明一个,就是这张清单在主张一个这一行并不具备的来历**。八色里 Blue 留着不用——PowerShell 的标就是蓝的,一枚蓝色中性 chassis 会被读成第四个 PowerShell。
+
+**灰显那句话改了,因为它右一半是对的、整句是没用的(用户报,2026-08-29:同学的机器上 Codex 装在 WSL 里,配置页显示「未安装 Codex」)。** 这扇窗在 Windows 上找,那份安装在一个 WSL 发行版里,找得再狠也找不到——所以句子改成说**它在哪儿找的**,而底下那一行说**读者能做的两件事**,两件这个 build 早就支持、而从一行灰字里一件都看不出来:
+
+> 在 Windows 中未找到 Codex
+> 若安装在 WSL 内,请在 WSL 配置的窗格中运行,或新建配置:程序 wsl.exe,参数 -e codex
+
+**两个串而不是一个**,因为它们落进这一行本来就有的两个框:理由占「这行跑什么」那一行(带省略号截断),出路占「这行给什么能力」那两行(换行铺开)。行高一个像素没动——那对框在每一行上都是预留的,而能跑的行上本来就有字。`ProfileLine::capability` 因此从 `&'static str` 变成 `String`:那句话里有命令名。命令名**从这一行自己的第一个 `PATH` 候选读出来**、去掉扩展名,不是在旁边再写一遍——那句话叫读者把这个词交给 `wsl.exe -e`,一个跟候选表走散了的词会把人送到一个不存在的命令上;`an_agent_row_is_a_profile_under_this_tables_own_rules` 顺带把这一对钉住了。只有 agent 行说这句,shell 行仍说短的那句(`AGENT_IDS` 是写下来的名单而不是推出来的:「没有 `compared_title` 且 `Integration::None`」的行,读者自己建一条跑 `python` 的也是)。
+
+**WSL 里的 agent 本身没做,它是 v0.1.1 的第一项。** 要做的是三件互相咬合的事:**懒探测**(在一个 WSL 发行版里问 `command -v <name>`,而且只在读者第一次打开选择器时问一次,不能回到启动路径上去起进程——那正是 §7.40 在治的毛病)、**`wsl.exe -e <name>` 起它**(而不是起一个 shell 再喂命令,那会多一层不属于任何人的进程)、以及**通知 hook 经互操作回到 `folio.exe attention`**(WSL 里的 Linux 进程能直接执行 Windows 上的 `.exe`,所以三家 hook 的安装器要写的是一条 Linux 路径下的命令行指向本机的 `folio.exe`,并且路径要按 `/mnt/c/...` 翻译)。
+
+**门**:`the_picker_offers_exactly_the_profiles_this_build_has` 的 `count()` 8 → 12 与那张 id 名单;`an_agent_row_is_a_profile_under_this_tables_own_rules` 改走 `AGENT_IDS` 并新增两条断言(每一行印的词等于它问 `PATH` 的那个词;shell 一行都不是 agent);`SHIPPED_ORDER` 8 → 12;`fully_equipped` 那台机器多四个文件(其中 Hermes 放在 `%LOCALAPPDATA%\hermes\bin`,因为它没有 npm 那条路);灰显 tip 那道门多四行,每一行报**自己的名字**——六枚共用一块 chassis,名字是读者唯一能据以分清缺的是哪一个的东西。
+
+**日期:2026-08-29,⑤ 一条。**
+
 ### 7.43 一句话要么全在框里,要么带着省略号停下:四件「字和框谈不拢」,外加一条 panic 走的路(门 5 尾账四件,2026-08-28 用户裁决,已落地;`crates/bt-app/src/{seats,restore,webhost,notice,main}.rs`、`crates/bt-platform/src/lib.rs`)
 
 门 5 干净机三条发布阻塞项修完之后(§7.35、§7.36),结果文档 `docs/plans/release/clean-vm-results-2026-08-28.md` 的挂账里剩下四件小的。它们看着不相干,前三件其实是同一句话的三个说法:**一个框的宽度是已知的,一段字的宽度只有拿着字体的人知道,而这两件事必须在同一帧里谈拢**——谈不拢的时候,让路的永远是字,不是框。第四件是 §7.35 自己在末尾记下的那笔「没修的」。
