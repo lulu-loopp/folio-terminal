@@ -67,6 +67,7 @@ mod i18n;
 mod icons;
 mod input;
 mod keyhint;
+mod linebreak;
 mod marks;
 mod mouse_trace;
 mod notice;

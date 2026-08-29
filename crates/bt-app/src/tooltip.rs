@@ -970,14 +970,30 @@ const CHROME_LINE_HEIGHT: f32 = 1.4;
 ///
 /// `white-space: pre-line`, plus the width bound the mock-up did not have: every
 /// `\n` in the text is a line break, and a line wider than `max_width` is broken
-/// at spaces so no line exceeds it. A single word wider than the bound — a path,
-/// a hash — is broken between characters instead, because a tip that ran off the
-/// window to keep a word whole would be keeping the wrong promise.
+/// where [`crate::linebreak`] says a line may end. A single piece wider than the
+/// bound — a path, a hash — is broken between characters instead, because a tip
+/// that ran off the window to keep a word whole would be keeping the wrong
+/// promise.
+///
+/// **The opportunities are the crate's, not this function's** (user ruling
+/// 2026-08-29). This used to split on the space and nothing else, which is the
+/// whole of what English needs and half of what Chinese does: a Chinese sentence
+/// carries spaces only around its Latin words, so the run of Han between two of
+/// them arrived here as one indivisible token. The settings dialog drew
+/// 「打开后，Folio 在 Claude Code」 and stopped, 46% of the way across a 368px
+/// column, because the next token was 306px wide and there was nowhere inside it
+/// to break — while the other wrapper in this crate had known where to break
+/// Chinese since the i18n slice. One rule table now answers both;
+/// [`crate::linebreak::PathSeparators::Whole`] is the only thing this caller
+/// says for itself, and it says it because these columns are wide enough that a
+/// path fits and cutting one that fits would be breaking a Latin word for no
+/// reason. `break_word` below is still the last resort for the one that does not
+/// fit, and it still prefers a path joint to a letter boundary.
 ///
 /// `measure` is the font's answer to "how wide is this string", handed in for
 /// the reason `place` takes measured widths: only the renderer knows. It is
-/// asked once per word (and once for the space), never once per candidate line,
-/// so a paragraph-long subject costs the number of words it has and not their
+/// asked once per piece (and once for the space), never once per candidate line,
+/// so a paragraph-long subject costs the number of pieces it has and not their
 /// square. The line the caller then measures for `layout` may differ from the
 /// sum by a kerning pair's worth, which is why the bound is checked here on the
 /// sum and the *box* is sized on the measured line — the box always fits its
@@ -989,22 +1005,30 @@ pub fn wrap(text: &str, max_width: f32, mut measure: impl FnMut(&str) -> f32) ->
     for paragraph in text.split('\n') {
         let mut line = String::new();
         let mut line_width = 0.0_f32;
-        for word in paragraph.split(' ') {
-            let width = measure(word);
+        for piece in crate::linebreak::pieces(paragraph, crate::linebreak::PathSeparators::Whole) {
+            let width = measure(piece.text);
             if line.is_empty() {
-                // The first word of a line always goes on it; if it is wider than
-                // the bound on its own it is broken below, character by
+                // The first piece of a line always goes on it; if it is wider
+                // than the bound on its own it is broken below, character by
                 // character, and its tail becomes the line in hand.
-                (line, line_width) = break_word(word, width, max_width, &mut measure, &mut lines);
+                (line, line_width) =
+                    break_word(piece.text, width, max_width, &mut measure, &mut lines);
                 continue;
             }
-            if line_width + space + width <= max_width {
-                line.push(' ');
-                line.push_str(word);
-                line_width += space + width;
+            // The space that stood in front of a piece is drawn only when the
+            // piece stays on this line — a line never ends in it, and the line
+            // that takes the piece instead never begins with it.
+            let gap = if piece.space_before { space } else { 0.0 };
+            if line_width + gap + width <= max_width {
+                if piece.space_before {
+                    line.push(' ');
+                }
+                line.push_str(piece.text);
+                line_width += gap + width;
             } else {
                 lines.push(std::mem::take(&mut line));
-                (line, line_width) = break_word(word, width, max_width, &mut measure, &mut lines);
+                (line, line_width) =
+                    break_word(piece.text, width, max_width, &mut measure, &mut lines);
             }
         }
         lines.push(line);

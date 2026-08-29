@@ -41,6 +41,7 @@ use bt_render::{
 };
 
 use crate::{
+    linebreak::PathSeparators,
     marks::{ChromeMark, ChromeSprite, OverlayLayer},
     profiles::{self, index_of_id},
     seed::Seed,
@@ -443,12 +444,20 @@ fn dialog_width(surface_width: f32, scale: f32) -> f32 {
 /// Break `text` into lines no wider than `max_width`, measuring with the
 /// caller's own font.
 ///
-/// Greedy over [`break_pieces`], which is what CSS `overflow-wrap: normal` does
-/// in a browser that knows about CJK: a Latin word that cannot fit alone gets a
-/// line of its own and overruns it, because the alternative — breaking inside a
-/// word — is a thing the design never asked for and would put half a path on
-/// each of two lines; a run of ideographs breaks between any two of them,
-/// because that is where Chinese has its opportunities and it has no others.
+/// Greedy over [`crate::linebreak::pieces`], which is what CSS `overflow-wrap:
+/// normal` does in a browser that knows about CJK: a Latin word that cannot fit
+/// alone gets a line of its own and overruns it, because the alternative —
+/// breaking inside a word — is a thing the design never asked for and would put
+/// half a path on each of two lines; a run of ideographs breaks between any two
+/// of them, because that is where Chinese has its opportunities and it has no
+/// others.
+///
+/// **[`PathSeparators::Break`], which is this dialog's own answer and not the
+/// rule table's.** 400 logical pixels is the narrowest prose box in the window
+/// and the PSReadLine invitation names a place on disk in it; the wider columns
+/// that read the same table ask for [`PathSeparators::Whole`]. See the
+/// parameter's note for why the difference is a measure rather than a second
+/// set of rules.
 ///
 /// The whitespace that separated two pieces is put back when they end up on one
 /// line and dropped when they do not, which is why this joins with a space
@@ -458,7 +467,7 @@ fn dialog_width(surface_width: f32, scale: f32) -> f32 {
 pub fn wrap(text: &str, max_width: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
-    for piece in break_pieces(text) {
+    for piece in crate::linebreak::pieces(text, PathSeparators::Break) {
         if line.is_empty() {
             line.push_str(piece.text);
             continue;
@@ -490,7 +499,7 @@ pub fn wrap(text: &str, max_width: f32, mut measure: impl FnMut(&str) -> f32) ->
 /// the failure card's fact line (`design/ui-mockup.html`, `overflow-wrap:
 /// anywhere`). That line is a URL or an SDK error string — one token forty or
 /// eighty characters long with no space, no path separator and no ideograph in
-/// it, so none of [`break_pieces`]'s four opportunities reaches inside it — and
+/// it, so none of [`crate::linebreak`]'s opportunities reaches inside it — and
 /// a card whose fact ran out of both edges of a 479-pixel seat is what gate 5
 /// photographed.
 ///
@@ -542,185 +551,6 @@ fn widest_prefix(text: &str, max_width: f32, measure: &mut impl FnMut(&str) -> f
         }
     }
     best
-}
-
-/// One atom of the paragraph, and whether a space stood in front of it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct BreakPiece<'a> {
-    text: &'a str,
-    space_before: bool,
-}
-
-/// Cut `text` into the smallest runs a line may end after.
-///
-/// **Whitespace first, then inside each word.** The first cut is the one this
-/// function has always made and is the whole of what English needs. The second
-/// exists because Chinese has no spaces at all: `SUB_TEXT` in Chinese is one
-/// forty-character "word", and a wrapper that only knew about spaces would draw
-/// it as a single line running off both edges of a 400px dialog. That is the one
-/// place in the whole string table where translation is not enough and the
-/// rendering path itself has to learn something (§A15 of the string inventory
-/// flagged it as such before the words existed).
-///
-/// **A character-class rule, not UAX#14.** The real algorithm has thirty-odd
-/// classes, a pair table and tailoring, and it exists to serve arbitrary text in
-/// any script; what is being wrapped here is one paragraph of this product's own
-/// prose, in two languages, at one measure. Three rules cover it, and each is
-/// listed because a rule that is not written down is a rule the next person
-/// deletes:
-///
-/// 1. **Break between two adjacent characters when either is CJK.** Ideographs,
-///    kana and Hangul are written without spaces and a line may end after any of
-///    them; the Latin/CJK boundary is a break opportunity too, so `Folio时` may
-///    split even though nothing separates them.
-/// 2. **Never break *before* closing punctuation** — `，。、！？；：）》」』` and
-///    their Latin equivalents. A line that began with `。` would be the single
-///    most obviously wrong thing this could do.
-/// 3. **Never break *after* opening punctuation** — `（《「『` and `([{`. The
-///    mirror of rule 2, and it is a separate rule rather than a symmetry because
-///    the two sets are not each other's mirror image in Unicode.
-///
-/// 4. **Break *after* a path separator** — `\\` and `/`, in both languages.
-///    Added with the PSReadLine invitation (§7.1.6c-3b), which is the first of
-///    these sentences to name a place on disk: a Windows path is one
-///    space-less token forty or eighty characters long, and rule 1 does not
-///    reach it because nothing in it is CJK. Without this the paragraph draws a
-///    line that runs out of both edges of a 400px dialog — which is exactly the
-///    failure Chinese had, arriving in a second script. *After* and not before,
-///    because a line ending in `\\` reads as "continues", and a line beginning
-///    with one reads as a UNC share.
-///
-/// What is knowingly given up: no line-break class for the numeric and unit
-/// runs (`64 KB` is protected only by having a space in it, as it is in
-/// English), no tailoring for the two Chinese conventions about `·`, and no
-/// hyphenation in either language. None of the three is reachable from the
-/// sentences this function actually wraps.
-fn break_pieces(text: &str) -> Vec<BreakPiece<'_>> {
-    let mut pieces = Vec::new();
-    for (index, word) in text.split_whitespace().enumerate() {
-        let mut start = 0usize;
-        let mut previous: Option<char> = None;
-        for (offset, character) in word.char_indices() {
-            if let Some(previous) = previous
-                && breaks_between(previous, character)
-            {
-                pieces.push(BreakPiece {
-                    text: &word[start..offset],
-                    space_before: index > 0 && start == 0,
-                });
-                start = offset;
-            }
-            previous = Some(character);
-        }
-        pieces.push(BreakPiece {
-            text: &word[start..],
-            space_before: index > 0 && start == 0,
-        });
-    }
-    pieces
-}
-
-/// Whether a line may end between these two characters — see [`break_pieces`]
-/// for the three rules and for what they deliberately leave out.
-fn breaks_between(before: char, after: char) -> bool {
-    // Rule 4, ahead of the CJK gate because it is not about script: a path
-    // separator is a break opportunity in an English sentence as much as in a
-    // Chinese one.
-    if matches!(before, '\\' | '/') && !matches!(after, '\\' | '/') {
-        return true;
-    }
-    if !is_cjk(before) && !is_cjk(after) {
-        return false;
-    }
-    !no_break_before(after) && !no_break_after(before)
-}
-
-/// The scripts written without spaces, plus the punctuation that belongs to
-/// them.
-///
-/// The ranges are blocks rather than a property lookup, which is the same trade
-/// `bt-unicode` makes for width: the answer only has to be right for text this
-/// product writes, and every one of these blocks is unambiguous.
-fn is_cjk(character: char) -> bool {
-    matches!(character,
-        '\u{1100}'..='\u{11ff}'      // Hangul Jamo
-        | '\u{2e80}'..='\u{2eff}'    // CJK radicals
-        | '\u{3000}'..='\u{303f}'    // CJK symbols and punctuation
-        | '\u{3040}'..='\u{30ff}'    // Hiragana, Katakana
-        | '\u{3130}'..='\u{318f}'    // Hangul compatibility jamo
-        | '\u{3400}'..='\u{4dbf}'    // CJK extension A
-        | '\u{4e00}'..='\u{9fff}'    // CJK unified ideographs
-        | '\u{a960}'..='\u{a97f}'    // Hangul jamo extended A
-        | '\u{ac00}'..='\u{d7ff}'    // Hangul syllables
-        | '\u{f900}'..='\u{faff}'    // CJK compatibility ideographs
-        | '\u{fe30}'..='\u{fe4f}'    // CJK compatibility forms
-        | '\u{ff00}'..='\u{ff60}'    // Fullwidth forms
-        | '\u{ffe0}'..='\u{ffe6}'    // Fullwidth signs
-        | '\u{20000}'..='\u{3ffff}'  // CJK extensions B and beyond
-    )
-}
-
-/// Punctuation a line may never begin with.
-fn no_break_before(character: char) -> bool {
-    matches!(
-        character,
-        '，' | '。'
-            | '、'
-            | '！'
-            | '？'
-            | '；'
-            | '：'
-            | '·'
-            | '…'
-            | '‥'
-            | '）'
-            | '〕'
-            | '】'
-            | '》'
-            | '〉'
-            | '」'
-            | '』'
-            | '〗'
-            | '〙'
-            | '〛'
-            | '〞'
-            | '＂'
-            | '％'
-            | '℃'
-            | 'ー'
-            | '～'
-            | '〜'
-            | ','
-            | '.'
-            | '!'
-            | '?'
-            | ';'
-            | ':'
-            | ')'
-            | ']'
-            | '}'
-            | '%'
-    )
-}
-
-/// Punctuation a line may never end with.
-fn no_break_after(character: char) -> bool {
-    matches!(
-        character,
-        '（' | '〔'
-            | '【'
-            | '《'
-            | '〈'
-            | '「'
-            | '『'
-            | '〖'
-            | '〘'
-            | '〚'
-            | '〝'
-            | '('
-            | '['
-            | '{'
-    )
 }
 
 /// One row's boxes, and the text that goes in them.
