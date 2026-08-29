@@ -2515,6 +2515,197 @@ impl PreviewPane {
     }
 }
 
+/// **Every surface reading this document, the glance card included** (user
+/// report 2026-08-28; `docs/DESIGN.md` §7.45 ②).
+///
+/// One walk, and the card is in it, because the readers of one file are not all
+/// in one map: a pane's view is its tab's ([`PreviewPanes`]) and the card's is
+/// the window's ([`WindowRuntime::peek_pane`]), for [`PreviewSurface::Peek`]'s
+/// own stated reason — one pointer, one glance. A walk of the tab's map alone
+/// therefore answers "nobody is reading this" about a file a card is standing
+/// on, and a body that lands with nobody reading it is a body nothing redraws.
+///
+/// **Identity is the file and nothing else.** Both halves ask
+/// [`PreviewPane::is_reading`], the one question a pane is asked, so a card
+/// cannot be matched by the row it was raised over, by where that row was in a
+/// list, or by which slot the document happened to be filed in.
+fn surfaces_reading(
+    panes: &PreviewPanes,
+    card: Option<&PreviewPane>,
+    source: &preview::PreviewSource,
+) -> Vec<PreviewSurface> {
+    let mut showing: Vec<PreviewSurface> = panes
+        .iter()
+        .filter(|(_, pane)| pane.is_reading(source))
+        .map(|(surface, _)| surface)
+        .collect();
+    if card.is_some_and(|card| card.is_reading(source)) {
+        showing.push(PreviewSurface::Peek);
+    }
+    showing
+}
+
+/// **The route a landed head read takes to the glass** (user report 2026-08-28;
+/// `docs/DESIGN.md` §7.45 ②).
+#[cfg(test)]
+mod card_answer_route_tests {
+    use super::*;
+
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// [`layer_shape_tests::fn_body`]'s reader, kept beside the pins that use it
+    /// for the reason that module keeps its own.
+    fn fn_body(name: &str) -> &'static str {
+        let head = format!(
+            "
+    fn {name}("
+        );
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`fn {name}` is declared once in an `impl`"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find(
+                    "
+    }
+",
+                )
+                .expect("a method is closed by a `}` at the `impl`'s indentation");
+        &SOURCE[start..end]
+    }
+
+    fn on(path: &str) -> PreviewPane {
+        PreviewPane {
+            buffer: Some(preview::PreviewSource::file(path)),
+            ..PreviewPane::default()
+        }
+    }
+
+    fn a_seat() -> PreviewSurface {
+        PreviewSurface::Seat(LeafId {
+            tab: TabId(1),
+            seat: bt_layout::SeatId(1),
+        })
+    }
+
+    /// **A card over a file this tab has previewed before fills on the frame its
+    /// answer lands** (user report 2026-08-28: *「有些文件第一次悬停时卡片是空的,
+    /// 第二次悬停同一文件才显示内容」*).
+    ///
+    /// Reproduced on the machine with `BT_PREVIEW_TRACE`: the card came up
+    /// (`build Peek … bytes=0 owed=1`), the frame drew its three labels and no
+    /// document at all (`layer_labels=3 layer_paragraphs=0`), and **no second
+    /// build line followed** — the head read came home, was filed into the
+    /// pool, and asked nobody for a frame. The next hover found the text already
+    /// there (`bytes=18822 owed=0`) and drew it in the same breath, which is the
+    /// whole of "empty the first time, right the second".
+    ///
+    /// The cause is one map: the card's view is the window's
+    /// ([`PreviewSurface::Peek`]) and is in no tab's `preview_panes`, so a walk
+    /// of that map answered "nobody is reading this" about the file the card was
+    /// standing on. [`surfaces_reading`] is that walk with the card in it.
+    ///
+    /// MUTATION: drop the card arm from [`surfaces_reading`] and this goes red
+    /// with exactly the reported picture — a document that landed with no reader
+    /// owes no frame, and the card stays blank until the pointer leaves and
+    /// comes back.
+    #[test]
+    fn a_cold_files_card_fills_on_the_frame_its_answer_lands() {
+        let cold = preview::PreviewSource::file("C:/tmp/cold05.md");
+        // The tab has a preview pane, and it is on some other file — which is
+        // the ordinary case: the card is over a row, not over the pane.
+        let mut panes = PreviewPanes::default();
+        *panes.entry(a_seat()) = on("C:/tmp/other.md");
+        let card = on("C:/tmp/cold05.md");
+        let showing = surfaces_reading(&panes, Some(&card), &cold);
+        assert_eq!(
+            showing,
+            vec![PreviewSurface::Peek],
+            "the card is reading the file whose body just landed, so it is a \
+             reader of it and the window owes it a frame"
+        );
+        assert!(
+            !showing.is_empty(),
+            "and an empty list is the bug itself: `settle_landed_head` reads it \
+             as `nobody is looking at this` and asks for no frame"
+        );
+    }
+
+    /// **A body that comes home late reaches the card that is still standing on
+    /// it** — and only that card.
+    ///
+    /// The other half of the same report. A head read is addressed to a *file*,
+    /// so what decides whether its answer still has a reader is the file the
+    /// card is on and nothing else: not which row raised the card, not where
+    /// that row was in a list, and not which of the two slots the document was
+    /// filed in. A card that has since moved to another row is the cancellation
+    /// §7.1.3 asks for, arriving as a dropped result — and it is dropped by the
+    /// same one question.
+    ///
+    /// MUTATION: match the card by anything but its buffer — its row, its
+    /// index, the slot the answer landed in — and either the late answer is
+    /// dropped on a card that is still up, or a stale one is drawn onto a card
+    /// that has moved on.
+    #[test]
+    fn a_late_answer_for_a_card_still_standing_is_not_dropped() {
+        let cold = preview::PreviewSource::file("C:/tmp/cold05.md");
+        // No pane at all: the card is the only reader there has ever been, which
+        // is what a hover over a row in the terminal's own output is.
+        let panes = PreviewPanes::default();
+        assert_eq!(
+            surfaces_reading(&panes, Some(&on("C:/tmp/cold05.md")), &cold),
+            vec![PreviewSurface::Peek],
+            "the card is still on the file the answer is about"
+        );
+        assert!(
+            surfaces_reading(&panes, Some(&on("C:/tmp/cold06.txt")), &cold).is_empty(),
+            "and a card that has moved to another row is not a reader of this \
+             answer — the pointer replaced the question before it was answered"
+        );
+        assert!(
+            surfaces_reading(&panes, None, &cold).is_empty(),
+            "nor is a card that has come down"
+        );
+    }
+
+    /// PIN — **one door out for a landed head read, and it is the door that
+    /// knows about the card.**
+    ///
+    /// The defect was two exits with two different answers: the glance's own
+    /// slot asked for a frame outright, the pool's asked the tab's panes. A
+    /// second walk written back into `apply_preview_results` is that split
+    /// returning, and it returns silently — every file the tab has never
+    /// previewed goes on working perfectly.
+    ///
+    /// MUTATION: inline either half back into `apply_preview_results` and this
+    /// says so.
+    #[test]
+    fn a_landed_head_read_leaves_by_one_door() {
+        let lane = fn_body("apply_preview_results");
+        assert!(
+            lane.contains("self.settle_landed_head(index, &response.source, content, carded)"),
+            "the head arm files the answer and leaves; who was reading it is not \
+             its question"
+        );
+        assert!(
+            !lane.contains("is_reading("),
+            "and it does not walk the readers itself: a second walk is a second \
+             answer, and the second answer is the one that forgot the card"
+        );
+        let door = fn_body("settle_landed_head");
+        assert!(
+            door.contains("surfaces_reading("),
+            "the door asks the one walk"
+        );
+        assert!(
+            door.contains("peek_pane"),
+            "and hands it the card, which is the whole of what the tab's map \
+             cannot say"
+        );
+    }
+}
+
 /// Every preview surface this tab has, and what each is showing.
 ///
 /// A `Vec` of pairs rather than a `HashMap`, and the reason is the frame: the
@@ -53195,6 +53386,56 @@ impl Runtime<'_> {
         }
     }
 
+    /// **The one door a landed head read leaves by** (user report 2026-08-28;
+    /// `docs/DESIGN.md` §7.45 ②).
+    ///
+    /// Both slots a document can arrive in — the tab's pool and the glance's own
+    /// off-pool buffer — come out here, so "who was reading this, and does the
+    /// glass owe a frame for it" is answered once rather than once per slot.
+    ///
+    /// It used to be answered twice, and the two answers disagreed. The card's
+    /// own slot asked for a frame outright; the pool's asked the tab's
+    /// `preview_panes` and nobody else — and the card's view is not in that map,
+    /// it is the window's ([`PreviewSurface::Peek`]). So a card standing on a
+    /// **pooled** file took its answer, filed it, and never redrew: the head, the
+    /// type chip and the foot were there and the document was blank. A pooled
+    /// file is an ordinary one — a name restored out of a saved session carries
+    /// no text (P151), and a body a watcher marked stale owes a re-read — so this
+    /// was every card over a file this tab had ever previewed. The next hover
+    /// found the text already in the pool and drew it synchronously, which is
+    /// exactly what "empty the first time, right the second" was.
+    ///
+    /// Answers whether the glass owes a frame.
+    fn settle_landed_head(
+        &mut self,
+        index: usize,
+        source: &preview::PreviewSource,
+        content: Option<String>,
+        carded: bool,
+    ) -> bool {
+        let showing = surfaces_reading(
+            &self.window.tabs[index].preview_panes,
+            // **The card reads the tab in front** — [`Self::mature_file_peek`]
+            // points its surface at the row through that tab's pool — so it is a
+            // reader of this answer only while this answer is that tab's.
+            (index == self.window.active_tab).then_some(&self.window.peek_pane),
+            source,
+        );
+        // A body has just arrived under a caret that was restored from the view
+        // store, and the file may not be the one it was remembered against — a
+        // buffer evicted and re-read is a fresh read of a file that has had time
+        // to change. Healed here rather than trusted, which is the same
+        // discipline the scroll offset is held to two lines from a body landing.
+        // Through [`Self::preview_pane_mut`], the one door that knows the card's
+        // view is not in any tab's map.
+        if let Some(content) = content {
+            for surface in &showing {
+                self.preview_pane_mut(*surface).caret.heal(&content);
+            }
+        }
+        !showing.is_empty() && (index == self.window.active_tab || carded)
+    }
+
     /// Take every file head the preview worker has finished.
     ///
     /// The twin of [`Self::apply_files_results`], down to the shape of the
@@ -53236,61 +53477,38 @@ impl Runtime<'_> {
             // column's clip box — read from the pass that just ran
             // rather than re-derived here.
             let carded = self.window.focus_thumbs.seats(response.tab).is_some();
-            let tab = &mut self.window.tabs[index];
             match response.answer {
                 preview::PreviewAnswer::Head(outcome) => {
-                    let Some(buffer) = tab.preview_pool.get_mut(&response.source) else {
-                        // **The glance's own slot** (P145): a hover
-                        // read is not an open file and never enters the
-                        // pool, so its answer lands here or nowhere.
-                        // Matched by source, exactly as the pool's is —
-                        // the pointer may have moved on to another row
-                        // during the read, and that is the cancellation
-                        // §7.1.3 asks for, arriving as a dropped result.
-                        if let Some(peek) = self
-                            .window
-                            .peek_buffer
-                            .as_mut()
-                            .filter(|peek| peek.source == response.source)
-                        {
-                            peek.accept(outcome);
-                            changed |= index == self.window.active_tab;
-                        }
+                    // **Where this document lives, and there are two places.**
+                    // The tab's one pool; or — for a hover, which is not an open
+                    // file and never enters the pool (P145) — the glance's own
+                    // off-pool slot. Matched by source in both, so a pointer that
+                    // has moved on to another row is the cancellation §7.1.3 asks
+                    // for, arriving as a dropped result.
+                    let landed = if let Some(buffer) = self.window.tabs[index]
+                        .preview_pool
+                        .get_mut(&response.source)
+                    {
+                        buffer.accept(outcome);
+                        Some(buffer.content.clone())
+                    } else if let Some(peek) = self
+                        .window
+                        .peek_buffer
+                        .as_mut()
+                        .filter(|peek| peek.source == response.source)
+                    {
+                        peek.accept(outcome);
+                        Some(peek.content.clone())
+                    } else {
+                        None
+                    };
+                    // Evicted, never opened, and no card standing on it: nobody
+                    // to file it against.
+                    let Some(content) = landed else {
                         continue;
                     };
-                    buffer.accept(outcome);
-                    // A body has just arrived under a caret that was
-                    // restored from the view store, and the file may not
-                    // be the one it was remembered against — a buffer
-                    // evicted and re-read is a fresh read of a file that
-                    // has had time to change. Healed here rather than
-                    // trusted, which is the same discipline the scroll
-                    // offset is held to two lines from a body landing.
-                    let content = buffer.content.clone();
-                    let tab = &mut self.window.tabs[index];
-                    // **Every surface on this buffer**, and there may be
-                    // several: one file open in two panes is one buffer
-                    // (§7.1.3) with two carets, and a body arriving under
-                    // one of them arrives under both. Asked through
-                    // `PreviewPane::is_reading`, because since 2026-08-26 a
-                    // pane can be reading a file it is not *on* — a page turned
-                    // to its source — and comparing `pane.buffer` alone left
-                    // that pane out of `showing`, which left `changed` false,
-                    // which is a body that arrived and was never drawn (found
-                    // on the machine, `BT_PREVIEW_TRACE`: `bytes=0 owed=1` at
-                    // the flip and no build line afterwards at all).
-                    let showing: Vec<PreviewSurface> = tab
-                        .preview_panes
-                        .iter()
-                        .filter(|(_, pane)| pane.is_reading(&response.source))
-                        .map(|(surface, _)| surface)
-                        .collect();
-                    if let Some(content) = content {
-                        for surface in &showing {
-                            tab.preview_panes.entry(*surface).caret.heal(&content);
-                        }
-                    }
-                    changed |= !showing.is_empty() && (index == self.window.active_tab || carded);
+                    // **And out by the one door**, whichever slot it landed in.
+                    changed |= self.settle_landed_head(index, &response.source, content, carded);
                 }
                 // A picture's byte count, for the meta line under it.
                 // Filed against the image state rather than the pool,
@@ -53305,6 +53523,7 @@ impl Runtime<'_> {
                     let Some(answered) = response.source.file_path() else {
                         continue;
                     };
+                    let tab = &mut self.window.tabs[index];
                     let mut told = false;
                     for (_, pane) in tab.preview_panes.iter_mut() {
                         if let Some(image) =
