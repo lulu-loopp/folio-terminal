@@ -18224,11 +18224,7 @@ enum PreviewLinkActivation {
 /// reason the pointing finger over a preview link is drawn from this and from
 /// nothing else ([`preview_link_answers_a_press`]): a hand that promises a press
 /// the release then declines is this window lying about what it can do.
-fn preview_link_activation(
-    control: bool,
-    target: &str,
-    document: &Path,
-) -> PreviewLinkActivation {
+fn preview_link_activation(control: bool, target: &str, document: &Path) -> PreviewLinkActivation {
     match preview::link_action(target, document) {
         preview::LinkAction::Preview(path) => PreviewLinkActivation::Preview(path),
         // **The terminal's own row, not a second reading of it.** This is the
@@ -18239,13 +18235,14 @@ fn preview_link_activation(
         // to it. The note ⑥ left behind is what this line obeys — 「按同一张表
         // 改,不要在那边另写一个 `if control`」 — and obeying it means calling the
         // row rather than restating it.
-        preview::LinkAction::Web(url) => match web_address_activation(ClickIntent::of(control), &url)
-        {
-            WebAddressActivation::None => PreviewLinkActivation::None,
-            WebAddressActivation::Page => PreviewLinkActivation::Page(url),
-            WebAddressActivation::Browser => PreviewLinkActivation::Browser(url),
-            WebAddressActivation::Blocked => PreviewLinkActivation::Blocked(url),
-        },
+        preview::LinkAction::Web(url) => {
+            match web_address_activation(ClickIntent::of(control), &url) {
+                WebAddressActivation::None => PreviewLinkActivation::None,
+                WebAddressActivation::Page => PreviewLinkActivation::Page(url),
+                WebAddressActivation::Browser => PreviewLinkActivation::Browser(url),
+                WebAddressActivation::Blocked => PreviewLinkActivation::Blocked(url),
+            }
+        }
         preview::LinkAction::Nowhere => PreviewLinkActivation::None,
     }
 }
@@ -48806,12 +48803,7 @@ impl Runtime<'_> {
             printable_address(url),
             i18n::Text::HyperlinkBlockedSuffix.text()
         );
-        self.toast(
-            toast::ToastKind::Error,
-            surface.toast_anchor(),
-            None,
-            body,
-        )
+        self.toast(toast::ToastKind::Error, surface.toast_anchor(), None, body)
     }
 
     /// **Which byte of a rendered page a point names**, in the document's own
@@ -73135,11 +73127,7 @@ impl Runtime<'_> {
         else {
             return false;
         };
-        preview_link_answers_a_press(
-            self.window.modifiers.control_key(),
-            &link.target,
-            document,
-        )
+        preview_link_answers_a_press(self.window.modifiers.control_key(), &link.target, document)
     }
 
     /// What the pointer is being offered over a picture, if anything (ticket
@@ -99656,7 +99644,11 @@ mod tests {
         // and the reason it is not a hole in 「Ctrl = 交出去」: this arm is
         // already the destination inside the window, and a relative target is
         // still resolved against the document's own folder.
-        for target in ["./notes.md", r"..\assets\a.png", "file:///C:/notes/a%20b.md"] {
+        for target in [
+            "./notes.md",
+            r"..\assets\a.png",
+            "file:///C:/notes/a%20b.md",
+        ] {
             for control in [false, true] {
                 assert!(
                     matches!(
