@@ -88,6 +88,31 @@ impl NotificationRoute {
     }
 }
 
+/// **Where this window is, as far as the reader's eyes are concerned** (`attention` plan §5.2;
+/// user ruling 2026-08-28).
+///
+/// The three facts [`desktop_reach`] reads, and they travel together because every caller of it
+/// carries all three and none of them means anything on its own: "not focused" is a different
+/// sentence on a window that is minimised, and "minimised" is a different sentence on a desktop
+/// whose taskbar is not there. The pane's own fact — which tab is on screen — stays a separate
+/// argument, because that one changes from leaf to leaf inside a single pass while these three are
+/// sampled once for the whole window.
+///
+/// This is not the argument-list struct the passes below argue against: those lists are seven
+/// unrelated questions about one turn, and a name in front of them would move the list rather than
+/// shorten it. This is one question — *where is this window* — that happens to take three bits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowPlace {
+    /// This window holds the desktop's keyboard.
+    pub focused: bool,
+    /// Minimised, or on a virtual desktop the reader has switched away from — `bt_app`'s
+    /// `window_is_hidden`, which is `IsIconic` or `DWMWA_CLOAKED`.
+    pub hidden: bool,
+    /// The shell's taskbar is set to hide itself
+    /// ([`bt_platform::taskbar_is_auto_hidden`]).
+    pub taskbar_is_auto_hidden: bool,
+}
+
 /// **How far a request about this pane gets** (`attention` plan §10.7's eight-row table).
 ///
 /// Three answers and not two, and the third row of the table is the reason the two-answer version
@@ -109,16 +134,35 @@ impl NotificationRoute {
 /// lanes.
 ///
 /// ```text
-/// if window_is_hidden        { Toast }    // out of reach; the desktop is what is left
-/// else if focused && active  { Nothing }  // you are looking at it
-/// else                       { Flash }    // on this screen, but not in front of you
+/// if place.hidden                  { Toast }    // out of reach; the desktop is what is left
+/// else if place.focused && active  { Nothing }  // you are looking at it
+/// else if taskbar_is_auto_hidden   { Toast }    // there is no mark to glance at
+/// else                             { Flash }    // on this screen, but not in front of you
 /// ```
 ///
-/// **`window_is_hidden` outranks the focus bits, and the two unreachable rows are the reason it is
-/// written outermost.** A three-`bool` function owes all eight inputs an answer, and rows 5 and 6 —
-/// a minimised window that holds the keyboard — cannot happen. Answering them from the hidden bit
-/// is not defensive: it is what covers the frame after a minimise, before the focus bits have
-/// caught up.
+/// **`place.hidden` outranks the focus bits, and the two unreachable rows are the reason it is
+/// written outermost.** The window facts owe all eight of their combinations an answer, and rows 5
+/// and 6 — a minimised window that holds the keyboard — cannot happen. Answering them from the
+/// hidden bit is not defensive: it is what covers the frame after a minimise, before the focus bits
+/// have caught up.
+///
+/// **The middle tier does not exist on a desktop whose taskbar hides itself** (user ruling
+/// 2026-08-28, from acceptance of `next16`). The second tier is defined as *a mark you can glance
+/// at and not be interrupted by*, and that definition has a premise: the mark is on screen. With
+/// the taskbar set to auto-hide it is not, and `FLASHW_TRAY` does not draw a quiet mark — it makes
+/// the shell slide the whole bar out over the reader's work and leave it there, blinking, until
+/// this window comes to the foreground. That is louder than the tier above it, and the reader
+/// reported it as exactly that: they expected a notification and got a taskbar that would not go
+/// away. So where the second tier does not exist the request goes on to the third, the same road a
+/// minimised window takes, and for the same reason — there is nowhere nearer to say it.
+///
+/// **Asked per delivery rather than remembered**, because it is a setting the reader can change
+/// between one wait and the next and nothing tells this process when they do. It is a fact of the
+/// desktop and not of this window, which is why it rides in beside the other two rather than being
+/// read here: `desktop_reach` is a function of facts and reads nothing itself.
+///
+/// **No new settings row.** A switch would ask the reader to describe their own desktop to this
+/// program, and the shell already knows the answer.
 ///
 /// **The second row is honest rather than literal, and the doc has to say so or the branch reads
 /// as a mistake.** `FlashWindowEx` on the *foreground* window is a documented no-op, so the
@@ -129,19 +173,67 @@ impl NotificationRoute {
 /// flash and **not one character of the predicate changes**. Writing it `Nothing` would make "a
 /// background tab of the focused window" and "the pane you are staring at" indistinguishable here,
 /// which is the one distinction the row exists to draw.
+///
+/// **The auto-hide row is tested after the focus pair and not before it**, and the order is the
+/// whole of what it says: a reader looking straight at the pane is owed nothing whatever their
+/// taskbar does, and a window that is not on any screen was already going to the desktop. The only
+/// rows it can change are the three the flash was ever the answer to.
 #[must_use]
-pub fn desktop_reach(
-    tab_is_active: bool,
-    window_is_focused: bool,
-    window_is_hidden: bool,
-) -> crate::attention::Reach {
+pub fn desktop_reach(tab_is_active: bool, place: WindowPlace) -> crate::attention::Reach {
     use crate::attention::Reach;
-    if window_is_hidden {
+    if place.hidden {
         Reach::Toast
-    } else if window_is_focused && tab_is_active {
+    } else if place.focused && tab_is_active {
         Reach::Nothing
+    } else if place.taskbar_is_auto_hidden {
+        Reach::Toast
     } else {
         Reach::Flash
+    }
+}
+
+/// **What one allowed delivery asks of the window** (`attention` plan §11.7, slice C3).
+///
+/// The three-armed consumer of [`crate::attention::Reach`], as a value rather than as three arms
+/// of a `match` inside the method that performs them. It is written out here for the reason the
+/// reach itself is: the arms have a *shape* — that a `Toast` never flashes and a `Flash` never
+/// reaches the desktop — and a shape nothing can name is a shape nothing can hold. The ruling of
+/// 2026-08-28 turns on exactly that pair of negatives.
+///
+/// **Not a second gate** (red line 12). Whether the interruption was owed was settled at the door;
+/// this is the last translation between a decision and a syscall, and it asks nothing new.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Interruption {
+    /// The in-window marks and nothing beyond them.
+    Nothing,
+    /// `bt_platform::flash_window` on this window's taskbar button — **once per turn however many
+    /// panes spoke**, because the button is the window's and flashing it twice is not twice as
+    /// much of anything.
+    FlashTheTaskbarButton,
+    /// A message on the desktop.
+    PutItOnTheDesktop,
+}
+
+/// **The last gate a delivery passes, and it is `Notifications` and not the door**
+/// (§7.1.5o ③, user ruling 2026-08-26).
+///
+/// `terminal_notifications` governs whether a program may *put a message on the desktop*, so it
+/// takes the third arm and leaves the second alone: a taskbar button calling for attention is not
+/// a message and leaves nothing behind. A `Reach::Flash` the door let through still flashes with
+/// `Notifications` off.
+///
+/// A refused toast is [`Interruption::Nothing`] rather than a demotion to the flash. The row says
+/// the desktop is not to be written to; it does not say to interrupt some other way, and on the
+/// desktop this block was reopened for — one whose taskbar hides itself — a demotion would be the
+/// very slide-out the ruling took the flash off.
+#[must_use]
+pub fn interruption(reach: crate::attention::Reach, desktop_messages: bool) -> Interruption {
+    use crate::attention::Reach;
+    match reach {
+        Reach::Nothing => Interruption::Nothing,
+        Reach::Flash => Interruption::FlashTheTaskbarButton,
+        Reach::Toast if desktop_messages => Interruption::PutItOnTheDesktop,
+        Reach::Toast => Interruption::Nothing,
     }
 }
 
@@ -169,8 +261,16 @@ pub fn toast_title(carried: Option<&str>, pane_name: Option<&str>, profile_name:
 
 #[cfg(test)]
 mod tests {
-    use super::{NotificationRoute, desktop_reach, toast_title};
+    use super::{Interruption, NotificationRoute, WindowPlace, desktop_reach, interruption,
+        toast_title};
     use crate::attention::Reach;
+
+    /// A desktop with its taskbar on the screen, which is what Windows ships.
+    const VISIBLE_TASKBAR: WindowPlace = WindowPlace {
+        focused: false,
+        hidden: false,
+        taskbar_is_auto_hidden: false,
+    };
 
     /// PIN (§7.6) — **a route survives the round trip and nothing else is read as one.**
     ///
@@ -253,12 +353,113 @@ mod tests {
         ];
         for ((focused, active, hidden), expected) in table {
             assert_eq!(
-                desktop_reach(active, focused, hidden),
+                desktop_reach(
+                    active,
+                    WindowPlace {
+                        focused,
+                        hidden,
+                        ..VISIBLE_TASKBAR
+                    }
+                ),
                 expected,
                 "focused={focused} active={active} hidden={hidden}"
             );
         }
         assert_eq!(table.len(), 8, "a three-bool function owes eight answers");
+    }
+
+    /// PIN (§7.1.5o ⑩, user ruling 2026-08-28) — **a taskbar that hides itself has no middle
+    /// tier, so the request goes on to the third.**
+    ///
+    /// The defect this pins is the one the reader reported from `next16`: their taskbar is set to
+    /// auto-hide, so the second tier's "a mark you can glance at" was in fact the shell shoving
+    /// the whole bar out over their work and blinking it until they switched back — louder than
+    /// the desktop notification they had expected, and the one thing they could not dismiss.
+    ///
+    /// The window here is **not hidden**: it is on a screen, unfocused, exactly the row that used
+    /// to be the flash. That is what makes this a new row rather than the minimised one restated.
+    ///
+    /// MUTATIONS: test the taskbar bit before the focus pair and a reader looking straight at the
+    /// pane gets a desktop toast — the loudest way this block can be wrong. Drop the bit from
+    /// `desktop_reach` entirely and every row goes back to flashing a bar that is not there.
+    /// Answer `FlashTheTaskbarButton` from `interruption` for a `Toast` and the flash comes back
+    /// under a different name.
+    #[test]
+    fn an_auto_hidden_taskbar_makes_the_second_tier_unreachable() {
+        let hidden_bar = WindowPlace {
+            taskbar_is_auto_hidden: true,
+            ..VISIBLE_TASKBAR
+        };
+        for (active, focused) in [(true, false), (false, false), (false, true)] {
+            let reach = desktop_reach(
+                active,
+                WindowPlace {
+                    focused,
+                    ..hidden_bar
+                },
+            );
+            assert_eq!(
+                reach,
+                Reach::Toast,
+                "the flash's own rows go to the desktop: active={active} focused={focused}"
+            );
+            assert_eq!(interruption(reach, true), Interruption::PutItOnTheDesktop);
+            assert_ne!(
+                interruption(reach, true),
+                Interruption::FlashTheTaskbarButton,
+                "nothing on this road asks the shell to slide the bar out"
+            );
+        }
+        assert_eq!(
+            desktop_reach(
+                true,
+                WindowPlace {
+                    focused: true,
+                    ..hidden_bar
+                }
+            ),
+            Reach::Nothing,
+            "a reader looking at the pane is owed nothing, whatever their taskbar does"
+        );
+    }
+
+    /// PIN (§7.1.5o ⑩) — **and a taskbar that is on the screen keeps the flash.**
+    ///
+    /// The other half of the ruling, and the half a fix is likeliest to lose: `FLASHW_TIMERNOFG`
+    /// on a visible taskbar is what Windows Terminal and VS Code do, the reader did not complain
+    /// about it, and it stays. Written as its own test so that "the flash survived" is a red
+    /// light of its own rather than a row inside the test about removing it.
+    ///
+    /// MUTATIONS: send every unfocused window to the desktop and this goes red — a machine with a
+    /// perfectly visible taskbar loses the quiet tier it was built for.
+    #[test]
+    fn a_visible_taskbar_keeps_the_flash() {
+        let reach = desktop_reach(true, VISIBLE_TASKBAR);
+        assert_eq!(reach, Reach::Flash);
+        assert_eq!(
+            interruption(reach, true),
+            Interruption::FlashTheTaskbarButton
+        );
+        assert_eq!(
+            interruption(reach, false),
+            Interruption::FlashTheTaskbarButton,
+            "a taskbar button is not a message, so `Notifications` does not gate it"
+        );
+    }
+
+    /// PIN (§7.1.5o ③) — **the desktop row gates the third tier and nothing else.**
+    ///
+    /// `terminal_notifications` says whether a program may put a message on the desktop. A toast
+    /// it refuses is nothing at all — not a flash by another route, which on the desktop this
+    /// block was reopened for is the slide-out the ruling above just removed.
+    #[test]
+    fn a_refused_toast_is_silence_and_not_a_flash() {
+        assert_eq!(
+            interruption(Reach::Toast, false),
+            Interruption::Nothing,
+            "the row says do not write to the desktop, not interrupt some other way"
+        );
+        assert_eq!(interruption(Reach::Nothing, true), Interruption::Nothing);
     }
 
     /// PIN (`attention` plan §10.7, red line 4) — **the ledger's predicate and the desktop's
@@ -275,9 +476,24 @@ mod tests {
             !crate::attention_is_consumed(false, true),
             "the ledger admits it: nobody is looking at that tab"
         );
-        assert_eq!(desktop_reach(false, true, false), Reach::Flash);
         assert_eq!(
-            desktop_reach(true, true, false),
+            desktop_reach(
+                false,
+                WindowPlace {
+                    focused: true,
+                    ..VISIBLE_TASKBAR
+                }
+            ),
+            Reach::Flash
+        );
+        assert_eq!(
+            desktop_reach(
+                true,
+                WindowPlace {
+                    focused: true,
+                    ..VISIBLE_TASKBAR
+                }
+            ),
             Reach::Nothing,
             "and the pane that *is* consumed is the one that adds nothing"
         );

@@ -9044,6 +9044,20 @@ struct WindowRuntime {
     /// never seeded hopefully. A window is born visible and this starts `false`,
     /// which is the same answer the first sample gives.
     window_hidden: bool,
+    /// **Whether this desktop's taskbar hides itself** (user ruling 2026-08-28).
+    ///
+    /// The fourth fact [`notify::desktop_reach`] answers from, and the one that
+    /// says whether the middle tier exists here at all: a taskbar button
+    /// flashing is a mark you can glance at only when the bar is on the screen.
+    ///
+    /// A fact of the *desktop* rather than of this window, and cached beside
+    /// the window's own for the same reason — the pass that reads it walks
+    /// every leaf of every tab, and one `SHAppBarMessage` a turn is not one per
+    /// shell. **Sampled on the same turns `window_hidden` is** and never
+    /// remembered longer than that: the reader can change it in Settings
+    /// between one wait and the next, and nothing tells this process when they
+    /// do. Born `false`, which is what Windows ships.
+    taskbar_auto_hidden: bool,
     ime_system_caret: bt_platform::ImeSystemCaret,
     pointer_position: Option<PhysicalPosition<f64>>,
     mouse_route: Option<MouseRoute>,
@@ -10198,6 +10212,26 @@ struct WindowRuntime {
     /// what lets the two be told apart without guessing, and without a one-shot flag whose
     /// correctness would depend on winit's delivery order.
     lawful_client_size: Option<PhysicalSize<u32>>,
+}
+
+impl WindowRuntime {
+    /// **Where this window is, as the three facts [`notify::desktop_reach`] reads together**
+    /// (`attention` plan §5.2; user ruling 2026-08-28).
+    ///
+    /// The cached reading, for the doors that are not a pass over the window's shells: closing a
+    /// tab, closing a pane, answering a request, looking at a tab. Every one of them happens
+    /// *inside* a turn whose pass has already sampled these on the same frame, so asking the OS
+    /// again here would be asking it twice about one instant.
+    ///
+    /// The passes themselves take a place built from a fresh sample — see
+    /// [`sample_window_place`], which is what writes the two fields this reads.
+    fn place(&self) -> notify::WindowPlace {
+        notify::WindowPlace {
+            focused: self.window_focused,
+            hidden: self.window_hidden,
+            taskbar_is_auto_hidden: self.taskbar_auto_hidden,
+        }
+    }
 }
 
 /// **This application, doing something for one of its windows.**
@@ -18659,6 +18693,30 @@ fn window_is_hidden(window: &Window) -> bool {
     bt_platform::is_window_minimized(hwnd) || bt_platform::is_window_cloaked(hwnd)
 }
 
+/// **Ask the desktop where this window is, on the turn that is about to decide what the reader is
+/// owed** (`attention` plan §5.2; user ruling 2026-08-28).
+///
+/// The one place the three facts of [`notify::WindowPlace`] are *read* rather than remembered, and
+/// it exists so that "sampled together, on one turn" is a call and not a convention three passes
+/// each keep on their own. Focus is the caller's, because the two passes that run this disagree
+/// about where it comes from and both are right: `drain_pty` asks the window itself, the animation
+/// tick uses the answer `WM_SETFOCUS` left behind.
+///
+/// Three syscalls a turn — `IsIconic`, `DwmGetWindowAttribute`, `SHAppBarMessage` — against a pass
+/// that walks every leaf of every tab. That is why the answers land in `WindowRuntime`'s fields on
+/// the way past: the doors that fire *inside* a turn read them back from there rather than asking
+/// again about the same instant.
+fn sample_window_place(window: &Window, focused: bool) -> notify::WindowPlace {
+    notify::WindowPlace {
+        focused,
+        hidden: window_is_hidden(window),
+        // **Every turn, never cached across them.** The reader can turn auto-hide on in Settings
+        // between one wait and the next, and Windows tells this process nothing when they do — so
+        // the only honest reading is the one taken at the delivery it decides.
+        taskbar_is_auto_hidden: bt_platform::taskbar_is_auto_hidden(),
+    }
+}
+
 /// The pane a tab's `Awaiting` is about: **the oldest place it holds.**
 ///
 /// The one the queue would send you to ([`next_attention_stop`]'s 先到先服务), which is what makes
@@ -18712,15 +18770,15 @@ fn tab_queue_leader(tab: &TabState) -> Option<SeatId> {
 /// a permanent dot on a tab whose shell never spoke. Seeing is painting, and painting is answered
 /// where the painting happens ([`Runtime::redraw`]).
 // Seven, and each is a different question about one pass: where the panes are, which of them the
-// reader is looking at, how far this window is from their eyes, what serial to draw a place from,
-// when now is, where the lines go, and where the interruptions the ledger allows are collected. A
-// struct would move the list rather than shorten it.
+// reader is looking at, where this window is with respect to the reader's eyes, what serial to
+// draw a place from, when now is, where the lines go, and where the interruptions the ledger
+// allows are collected. A struct would move the list rather than shorten it — `place` is not that
+// struct, it is the third question, which happens to take three bits to ask.
 #[allow(clippy::too_many_arguments)]
 fn settle_attention(
     tabs: &mut [TabState],
     active_tab: usize,
-    window_is_focused: bool,
-    window_is_hidden: bool,
+    place: notify::WindowPlace,
     switches: attention::NotificationSwitches,
     next_place: &mut u64,
     now: Instant,
@@ -18730,8 +18788,8 @@ fn settle_attention(
     let traced = trace.is_some();
     for (index, tab) in tabs.iter_mut().enumerate() {
         let tab_is_active = index == active_tab;
-        let consumed = attention_is_consumed(tab_is_active, window_is_focused);
-        let reach = notify::desktop_reach(tab_is_active, window_is_focused, window_is_hidden);
+        let consumed = attention_is_consumed(tab_is_active, place.focused);
+        let reach = notify::desktop_reach(tab_is_active, place);
         let tab_id = tab.id;
         // Only computed when someone is reading: the claim is a fold over every shell in the tab,
         // and this pass runs on every turn of the event loop. The leader is sampled beside it,
@@ -18786,7 +18844,7 @@ fn settle_attention(
             }
             let settle = attention::Event::Settle {
                 active: tab_is_active,
-                focused: window_is_focused,
+                focused: place.focused,
             };
             let outcome = leaf.attention.apply(at, reach, settle, next_place, now);
             emit_attention_lines(trace, outcome.lines);
@@ -18977,17 +19035,16 @@ fn attention_delivery(
 /// Run from the animation tick instead, the announcement would arrive at a pane with no live
 /// request and its sentence would be dropped — the program's own words lost to a scheduling
 /// detail.
-// Ten, and `settle_attention`'s allowance for its reason: every one is a different question about
+// Nine, and `settle_attention`'s allowance for its reason: every one is a different question about
 // one turn of one tab's OSC lane, and a struct would move the list rather than shorten it. The
-// tenth is when now is, which this lane needs because a `RequestAttention=yes` arriving on it is a
+// ninth is when now is, which this lane needs because a `RequestAttention=yes` arriving on it is a
 // program speaking in that pane (`attention` plan §11.10.4).
 #[allow(clippy::too_many_arguments)]
 fn deliver_osc_attention(
     tab: &mut TabState,
     index: usize,
     tab_is_active: bool,
-    window_is_focused: bool,
-    window_is_hidden: bool,
+    place: notify::WindowPlace,
     switches: attention::NotificationSwitches,
     next_place: &mut u64,
     announcements: &[(SeatId, bt_term::TerminalNotification)],
@@ -18995,7 +19052,7 @@ fn deliver_osc_attention(
     trace: Option<&attention_trace::Trace>,
     raised: &mut Vec<AttentionDelivery>,
 ) {
-    let reach = notify::desktop_reach(tab_is_active, window_is_focused, window_is_hidden);
+    let reach = notify::desktop_reach(tab_is_active, place);
     let tab_id = tab.id;
     // Carried out of the mutable walk for `settle_attention`'s reason: the title's three-layer
     // chain reads facts of the tab that its leaves' borrow is holding. The carried title travels
@@ -19081,8 +19138,7 @@ fn deliver_osc_attention(
 fn deliver_attention(
     tabs: &mut [TabState],
     active_tab: usize,
-    window_is_focused: bool,
-    window_is_hidden: bool,
+    place: notify::WindowPlace,
     switches: attention::NotificationSwitches,
     next_place: &mut u64,
     messages: &[attention_wire::Message],
@@ -19098,7 +19154,7 @@ fn deliver_attention(
         }
         for (index, tab) in tabs.iter_mut().enumerate() {
             let tab_is_active = index == active_tab;
-            let reach = notify::desktop_reach(tab_is_active, window_is_focused, window_is_hidden);
+            let reach = notify::desktop_reach(tab_is_active, place);
             let tab_id = tab.id;
             let mut allowed: Vec<(SeatId, attention::Raised)> = Vec::new();
             let Some((seat, leaf)) = tab.leaves_mut().find(|(_, leaf)| {
@@ -29512,6 +29568,11 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // from `IsIconic` and `DWMWA_CLOAKED`, and both answer the same `false`
         // for a window that has just opened.
         window_hidden: false,
+        // The shipped setting, corrected by the first pass that asks the shell.
+        // Seeding it `true` would be this process assuming a desktop it has not
+        // looked at yet, and the assumption would cost a toast rather than a
+        // flash.
+        taskbar_auto_hidden: false,
         ime_system_caret,
         pointer_position: None,
         mouse_route: None,
@@ -31588,11 +31649,7 @@ impl Runtime<'_> {
                 let mut removed = self.window.tabs.remove(index);
                 // Every place this tab's panes held, given up before its shells are — the same
                 // door `close_pane` uses, asked of every leaf because a tab closes all of them.
-                let reach = notify::desktop_reach(
-                    was_active,
-                    self.window.window_focused,
-                    self.window.window_hidden,
-                );
+                let reach = notify::desktop_reach(was_active, self.window.place());
                 let now = Instant::now();
                 for (seat, leaf) in removed.leaves_mut() {
                     expire_leaf_attention(
@@ -43560,8 +43617,7 @@ impl Runtime<'_> {
             // (`attention` plan §4 B4): the program never withdrew and nobody answered, so the
             // ledger says `expire … reason=leaf-gone` and the serial stands where it is.
             let index = self.window.active_tab;
-            let reach =
-                notify::desktop_reach(true, self.window.window_focused, self.window.window_hidden);
+            let reach = notify::desktop_reach(true, self.window.place());
             expire_leaf_attention(
                 attention::Site { tab: index, seat },
                 reach,
@@ -68106,8 +68162,16 @@ impl Runtime<'_> {
     /// * **`Flash`** — the shell is asked to call the eye to this window's taskbar button. **Once
     ///   per turn however many panes spoke**, because the button is the window's and flashing it
     ///   twice is not twice as much of anything. On a window that has the keyboard this is a
-    ///   documented no-op and the arm is written knowing it — see [`notify::desktop_reach`].
-    /// * **`Toast`** — the window is not on any screen, so the desktop is what is left.
+    ///   documented no-op and the arm is written knowing it — see [`notify::desktop_reach`]. It
+    ///   never arrives on a desktop whose taskbar hides itself: there is no button to flash there,
+    ///   and the reach said so (user ruling 2026-08-28).
+    /// * **`Toast`** — the window is out of reach of the reader's eyes, so the desktop is what is
+    ///   left.
+    ///
+    /// **The three arms are [`notify::interruption`]'s and the `match` here only performs them.**
+    /// The pairing of a reach with what it does is a claim — that a toast never flashes and a
+    /// flash never reaches the desktop — and it lives in a function so a test can hold it. This
+    /// method owns the parts a test cannot: which window's handle, which route, which sentence.
     ///
     /// **`terminal_notifications` gates the toast and not the flash**, and the split is the row's
     /// own sentence: it governs whether a program may *put a message on the desktop*. A taskbar
@@ -68145,18 +68209,15 @@ impl Runtime<'_> {
         let mut flashed = false;
         let mut refusal = None;
         for delivery in raised {
-            match delivery.reach {
-                attention::Reach::Nothing => {}
-                attention::Reach::Flash => {
+            match notify::interruption(delivery.reach, enabled) {
+                notify::Interruption::Nothing => {}
+                notify::Interruption::FlashTheTaskbarButton => {
                     if !flashed && let Ok(hwnd) = window_hwnd(&self.window.window) {
                         flashed = true;
                         bt_platform::flash_window(hwnd);
                     }
                 }
-                attention::Reach::Toast => {
-                    if !enabled {
-                        continue;
-                    }
+                notify::Interruption::PutItOnTheDesktop => {
                     let route = notify::NotificationRoute {
                         window,
                         tab: delivery.tab.0,
@@ -68336,8 +68397,9 @@ impl Runtime<'_> {
         // **Asked of the window on the same turn and for the same reason** (`attention` plan §5.2):
         // it is a fact about where this window is, and a cached answer taken at the last
         // transition is a cached answer about a window that has since been minimised.
-        self.window.window_hidden = window_is_hidden(&self.window.window);
-        let window_hidden = self.window.window_hidden;
+        let place = sample_window_place(&self.window.window, window_focused);
+        self.window.window_hidden = place.hidden;
+        self.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
         let switches = self.notification_switches();
         let owner_is_a_shell = self.keyboard_owner_is_a_shell();
         let active_tab = self.window.active_tab;
@@ -68358,8 +68420,7 @@ impl Runtime<'_> {
                 tab,
                 index,
                 index == active_tab,
-                window_focused,
-                window_hidden,
+                place,
                 switches,
                 &mut self.window.attention_next_place,
                 &outcome.notifications,
@@ -68602,17 +68663,19 @@ impl Runtime<'_> {
         // Every door of the attention queue, in one pass over one leaf at a time
         // — see `settle_attention` for why they stopped being two passes whose
         // order was the mechanism, and for the order the four that are left run in.
-        // Sampled here beside the pass that reads it, and on the same turn: the fact that separates
-        // "not in front of you" from "not on any screen" is a fact about *now*, and this pass is
-        // the one that decides what the reader is owed.
-        self.window.window_hidden = window_is_hidden(&self.window.window);
+        // Sampled here beside the pass that reads it, and on the same turn: the facts that separate
+        // "not in front of you" from "not on any screen" — and from "there is no taskbar to look
+        // at" — are facts about *now*, and this pass is the one that decides what the reader is
+        // owed.
+        let place = sample_window_place(&self.window.window, self.window.window_focused);
+        self.window.window_hidden = place.hidden;
+        self.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
         let mut raised: Vec<AttentionDelivery> = Vec::new();
         let switches = self.notification_switches();
         settle_attention(
             &mut self.window.tabs,
             self.window.active_tab,
-            self.window.window_focused,
-            self.window.window_hidden,
+            place,
             switches,
             &mut self.window.attention_next_place,
             now,
@@ -76904,8 +76967,7 @@ impl Runtime<'_> {
     /// every shell comes through here, and almost none of them is answering anything.
     fn answer_attention(&mut self, seat: SeatId, by: UserInputKind) {
         let index = self.window.active_tab;
-        let reach =
-            notify::desktop_reach(true, self.window.window_focused, self.window.window_hidden);
+        let reach = notify::desktop_reach(true, self.window.place());
         // Split rather than reached through `self`: the place is drawn from the window's own serial
         // while the account it lands in is a field of one of that window's tabs.
         let WindowRuntime {
@@ -76932,8 +76994,7 @@ impl Runtime<'_> {
     /// able to see that the standing requests were *offered the same event and kept*. A rule that
     /// held only because nobody had written the call is a rule one edit away from not holding.
     fn mark_attention_seen(&mut self, index: usize) {
-        let reach =
-            notify::desktop_reach(true, self.window.window_focused, self.window.window_hidden);
+        let reach = notify::desktop_reach(true, self.window.place());
         // A look is not a program speaking, so this instant stamps nothing (`attention` plan
         // §11.10.4 — [`attention::Event::is_the_programs_voice`] answers `MarkSeen` with `false`).
         // It is read here rather than threaded down from a frame because a tab switch is not part
@@ -87079,14 +87140,18 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 };
                 let now = Instant::now();
                 self.for_each_window(|runtime| {
-                    runtime.window.window_hidden = window_is_hidden(&runtime.window.window);
+                    let place = sample_window_place(
+                        &runtime.window.window,
+                        runtime.window.window_focused,
+                    );
+                    runtime.window.window_hidden = place.hidden;
+                    runtime.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
                     let mut raised: Vec<AttentionDelivery> = Vec::new();
                     let switches = runtime.notification_switches();
                     deliver_attention(
                         &mut runtime.window.tabs,
                         runtime.window.active_tab,
-                        runtime.window.window_focused,
-                        runtime.window.window_hidden,
+                        place,
                         switches,
                         &mut runtime.window.attention_next_place,
                         &messages,
@@ -96615,12 +96680,21 @@ mod tests {
     /// A window that is on a screen and a turn-end lane that is switched on, which is what a fresh
     /// install is. The deliveries are collected and dropped: what these tests are about is the
     /// ledger's own bookkeeping, and `raise_attention` is the window's.
+    /// A window on a screen, on a desktop whose taskbar is where Windows puts it — which is what
+    /// these fixtures are about when they say nothing about either.
+    fn on_a_screen(focused: bool) -> notify::WindowPlace {
+        notify::WindowPlace {
+            focused,
+            hidden: false,
+            taskbar_is_auto_hidden: false,
+        }
+    }
+
     fn one_turn(tabs: &mut [TabState], active: usize, focused: bool, next: &mut u64) {
         settle_attention(
             tabs,
             active,
-            focused,
-            false,
+            on_a_screen(focused),
             BOTH_NOTIFICATION_ROWS_ON,
             next,
             Instant::now(),
@@ -96642,8 +96716,10 @@ mod tests {
         settle_attention(
             tabs,
             active,
-            focused,
-            hidden,
+            notify::WindowPlace {
+                hidden,
+                ..on_a_screen(focused)
+            },
             attention::NotificationSwitches {
                 turn_end: turn_end_enabled,
                 desktop_messages: true,
@@ -97043,8 +97119,7 @@ mod tests {
             settle_attention(
                 tabs,
                 active,
-                true,
-                false,
+                on_a_screen(true),
                 BOTH_NOTIFICATION_ROWS_ON,
                 next,
                 Instant::now(),
