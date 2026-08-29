@@ -2195,6 +2195,14 @@ pub fn create(template: usize) -> Option<usize> {
 /// same colour is the exact failure a colour is there to prevent. Walking round
 /// after eight is honest — a ninth profile has to share with somebody, and
 /// sharing with the oldest is the least surprising choice.
+///
+/// **Six of the eight are worn by a built-in since 2026-08-29** (§7.41 ⑤): the
+/// six agents with no mark of their own are told apart by colour, which is what
+/// the palette is for, and that leaves Blue and Red for the reader. So the
+/// walking-round happens at the third profile of somebody's own rather than at
+/// the ninth. Named rather than left to be found, and pinned in
+/// `a_new_profile_wears_the_chassis_and_a_duplicate_wears_the_brand`: the fix,
+/// if it ever needs one, is more colours, not fewer agents.
 fn unworn_colour(profiles: &[Profile]) -> MarkColour {
     let worn = |candidate: MarkColour| {
         profiles
@@ -20711,13 +20719,32 @@ mod tests {
             "the template supplies the program; it is the identity that is new"
         );
 
+        // **Red and not Teal since 2026-08-29**, and the change is the whole of
+        // what four more built-in agents cost: six of the eight colours are
+        // worn by a built-in now (Slate, Violet, Teal, Green, Amber, Magenta),
+        // so the two [`unworn_colour`] has left to hand out are Blue and Red.
+        // The number is asserted here rather than left to be discovered, since
+        // it is the point at which a reader's third profile starts sharing.
         let again = registry.create(0).expect("pwsh is a row");
         assert_eq!(
             registry.table().get(again).unwrap().mark,
             ChromeMark::ProfileGeneric {
-                colour: MarkColour::Teal
+                colour: MarkColour::Red
             },
             "two rows in one list must not wear one colour"
+        );
+        let worn_by_a_builtin = MarkColour::ALL
+            .into_iter()
+            .filter(|colour| {
+                shipped()
+                    .iter()
+                    .any(|profile| profile.mark == ChromeMark::ProfileGeneric { colour: *colour })
+            })
+            .count();
+        assert_eq!(
+            worn_by_a_builtin, 6,
+            "six of the eight are spoken for, so a third profile of the \
+             reader's own shares with their first"
         );
     }
 
@@ -20837,7 +20864,8 @@ mod tests {
         assert_eq!(
             ids(registry.table().profiles()),
             [
-                "winps", "pwsh", "wsl", "gitbash", "cmd", "claude", "codex", "copilot"
+                "winps", "pwsh", "wsl", "gitbash", "cmd", "claude", "codex", "copilot", "kimi",
+                "pi", "hermes", "opencode"
             ]
         );
         assert!(

@@ -94969,7 +94969,7 @@ mod tests {
     /// [`cwd_whole`] and the whole-path assertions fail; drop the sanitiser's
     /// fall-through and the control-character case names the pane after a
     /// program that said nothing; **drop the profile-title filter — treat the
-    ///档案名 as a real announcement — and the first assertion prints
+    /// profile's own name as a real announcement — and the first assertion prints
     /// `PowerShell · D:\…` on every head in the window, which is the bug.**
     #[test]
     fn a_pane_head_says_where_it_is_and_a_program_speaks_only_in_front_of_it() {
