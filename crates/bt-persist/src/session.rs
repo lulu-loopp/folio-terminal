@@ -65,8 +65,11 @@ impl PreviewSourceV1 {
     }
 }
 
-/// Persisted theme mode restored with the session. `System` is resolved by the app against winit's
-/// OS theme; `BT_BG` remains a process diagnostic override and is never persisted as a mode.
+/// The theme mode a **pre-2026-08-29** session document carries.
+///
+/// Kept for the one job [`SessionV1::theme`] describes: reading a profile written before the theme
+/// moved to `settings.json`. Nothing writes one any more, and `ThemeModeV1` is the type the rest of
+/// the product says this in.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionThemeV1 {
@@ -115,11 +118,24 @@ pub enum SessionSidebarModeV1 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionV1 {
     pub schema_version: u32,
-    /// Added in schema v2 and expanded with `system` in schema v4. `default` also makes
-    /// hand-authored documents with the field omitted degrade to the dark product default rather
-    /// than losing the entire session.
-    #[serde(default)]
-    pub theme: SessionThemeV1,
+    /// **Retired 2026-08-29 — read once, never written.** Added in schema v2 and expanded with
+    /// `system` in schema v4; the store for the theme is now `settings.json`'s `theme_mode`, which
+    /// is the only field either side of the Settings page can see (`docs/DESIGN.md` §7.46 ②).
+    ///
+    /// `Some` therefore means exactly one thing: **this document was written by a build from
+    /// before that ruling**, and the mode in it is the choice that user has been looking at. The
+    /// boot that reads it carries it into `settings.json` and stops writing the key, so the next
+    /// document is `None` and the carry-forward can never fire twice on one profile.
+    ///
+    /// **No schema bump goes with this**, and that is deliberate rather than an omission: a
+    /// migration step is structural and would have to *remove* the key, which is precisely the
+    /// fact the carry-forward exists to read. The key's own presence is the version marker, and it
+    /// is a better one than a number because it disappears by itself the first time the file is
+    /// written. A build older than the ruling that read a document written after it would find no
+    /// key and fall back to dark — a downgrade, which §1.3 rule 1 of the schema document already
+    /// places out of scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<SessionThemeV1>,
     /// Added in schema v3; missing values degrade to the historical bar cursor.
     #[serde(default)]
     pub cursor_style: SessionCursorStyleV1,
@@ -135,7 +151,7 @@ impl Default for SessionV1 {
     fn default() -> Self {
         Self {
             schema_version: SESSION_SCHEMA_VERSION,
-            theme: SessionThemeV1::Dark,
+            theme: None,
             cursor_style: SessionCursorStyleV1::Bar,
             windows: Vec::new(),
             recent: Vec::new(),
@@ -569,13 +585,47 @@ mod tests {
     fn default_session_is_empty_at_current_version() {
         let defaults = SessionV1::default();
         assert_eq!(defaults.schema_version, SESSION_SCHEMA_VERSION);
-        assert_eq!(defaults.theme, SessionThemeV1::Dark);
+        assert_eq!(
+            defaults.theme, None,
+            "the theme is `settings.json`'s; a session written today names none"
+        );
         assert_eq!(defaults.cursor_style, SessionCursorStyleV1::Bar);
         assert!(
             defaults.windows.is_empty(),
             "no windows at all is how a first run spells itself (schema v9)"
         );
         assert!(defaults.recent.is_empty());
+    }
+
+    /// RED GATE (coordinator ruling 2026-08-29, `docs/DESIGN.md` §7.46 ②) — the
+    /// retired key is **absent** from what is written and **believed** in what is
+    /// read.
+    ///
+    /// Both halves are the carry-forward's, and they fail in opposite
+    /// directions: a key still written makes a second store, and a key not read
+    /// takes the theme away from every profile that predates the ruling.
+    #[test]
+    fn the_retired_theme_key_is_not_written_and_is_still_read() {
+        let written = serde_json::to_value(SessionV1::default()).expect("a session serializes");
+        assert!(
+            written.get("theme").is_none(),
+            "a session written today carries no theme key: {written}"
+        );
+
+        let old_document = serde_json::json!({
+            "schema_version": SESSION_SCHEMA_VERSION,
+            "theme": "light",
+            "cursor_style": "bar",
+            "windows": [],
+            "recent": [],
+        });
+        let read: SessionV1 =
+            serde_json::from_value(old_document).expect("a pre-ruling document still parses");
+        assert_eq!(
+            read.theme,
+            Some(SessionThemeV1::Light),
+            "the choice a profile written before the ruling holds is the one it has been showing"
+        );
     }
 
     /// The window record's own defaults, which are what a hand-authored document
