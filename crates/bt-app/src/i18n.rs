@@ -2739,9 +2739,7 @@ impl Text {
                 "Folio falls back to this profile when another cannot start",
                 "其他配置无法启动时，Folio 退回到这个配置",
             ),
-            Self::ProfilesNameBlank => {
-                pick(lang, "A profile needs a name", "配置文件需要一个名称")
-            }
+            Self::ProfilesNameBlank => pick(lang, "A profile needs a name", "配置文件需要一个名称"),
             Self::ProfilesNameTaken => pick(
                 lang,
                 "Another profile is already called this",
@@ -4619,7 +4617,7 @@ pub fn agent_inside_wsl_hint(command: &str) -> String {
 fn agent_inside_wsl_hint_in(lang: Lang, command: &str) -> String {
     match lang {
         Lang::English => format!(
-            "If it is inside WSL, run it from the WSL profile, or add one with program wsl.exe and arguments -e {command}"
+            "If it is inside WSL, run the WSL profile, or add one with program wsl.exe and arguments -e {command}"
         ),
         Lang::Chinese => format!(
             "若安装在 WSL 内，请在 WSL 配置的窗格中运行，或新建配置：程序 wsl.exe，参数 -e {command}"
@@ -6463,7 +6461,11 @@ mod tests {
     /// they count only when they stand alone between non-Han neighbours, since
     /// 「档」 is inside 「档位」, 「片」 inside 「卡片」 and 「片刻」, and 「座」 inside
     /// 「插座」: a bare-substring search for a one-character word in Chinese
-    /// forbids every compound that contains it.
+    /// forbids every compound that contains it. **And that rule has a limit
+    /// worth stating**: it cannot reach 「本片」 or 「这一片」 either, because a
+    /// Han character stands in front of the 「片」 there exactly as it does in
+    /// 「卡片」. So the compounds this repository actually writes are named in
+    /// the substring list, and the one-character rule is what catches the rest.
     ///
     /// Red gate: put `「按通知规则提醒」` back into `DescClaudeHooks`, or
     /// `image worker` back into `PreviewFailedImageWorker`, and this goes red
@@ -6473,28 +6475,16 @@ mod tests {
         // The names of things only this repository has. Matched whole, after a
         // string is split on everything that is not a letter.
         const PRIVATE_LATIN: [&str; 19] = [
-            "tier",
-            "tiers",
-            "ledger",
-            "ledgers",
-            "seat",
-            "seats",
-            "episode",
-            "episodes",
-            "lane",
-            "lanes",
-            "reach",
-            "delivery",
-            "gate",
-            "gates",
-            "probe",
-            "probes",
-            "worker",
-            "workers",
+            "tier", "tiers", "ledger", "ledgers", "seat", "seats", "episode", "episodes", "lane",
+            "lanes", "reach", "delivery", "gate", "gates", "probe", "probes", "worker", "workers",
             "slice",
         ];
-        // Matched as substrings, in either column.
-        const PRIVATE_CHINESE: [&str; 9] = [
+        // Matched as substrings, in either column. The last six are the
+        // compounds the one-character rule below **cannot** reach: 「本片」 and
+        // 「这一片」 both put a Han character in front of 「片」, exactly as
+        // 「卡片」 does, so the way to forbid the two this repository writes
+        // without forbidding the word a reader knows is to name them.
+        const PRIVATE_CHINESE: [&str; 14] = [
             "账本",
             "座位",
             "触达",
@@ -6504,9 +6494,18 @@ mod tests {
             "切片",
             "探针",
             "通知规则",
+            "第一档",
+            "第二档",
+            "第三档",
+            "本片",
+            "这一片",
         ];
         // Whole words of one character. See the note above on why these cannot
-        // be searched for as substrings.
+        // be searched for as substrings, and the note on `PRIVATE_CHINESE` for
+        // what that costs: a one-character word standing inside a compound is
+        // indistinguishable from the compound, so this half catches only the
+        // case where the character stands alone, and the compounds this
+        // repository actually writes are listed above by name.
         const PRIVATE_CHINESE_ALONE: [char; 3] = ['档', '座', '片'];
         let is_han = |c: char| ('\u{4e00}'..='\u{9fff}').contains(&c);
         for entry in Text::ALL {

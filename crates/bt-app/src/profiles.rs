@@ -1371,9 +1371,10 @@ fn agent_command(profile: &Profile) -> Option<&str> {
         return None;
     };
     candidates.iter().find_map(|candidate| match candidate {
-        ProgramCandidate::OnPath { name } => {
-            Some(name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem))
-        }
+        ProgramCandidate::OnPath { name } => Some(
+            name.rsplit_once('.')
+                .map_or(name.as_str(), |(stem, _)| stem),
+        ),
         _ => None,
     })
 }
@@ -2849,16 +2850,12 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
                         // looked**, because the answer to "but I use it every
                         // day" is very often "inside WSL" and a row that only
                         // said 「没找到」 left the reader with nothing to do.
-                        (false, Some(_)) => {
-                            crate::i18n::agent_not_found_on_windows(title(index))
-                        }
+                        (false, Some(_)) => crate::i18n::agent_not_found_on_windows(title(index)),
                         (false, None) => crate::i18n::profile_not_installed(title(index)),
                     },
                     capability: match (available, agent_command(profile)) {
                         (true, _) => Some(capability_text(profile).text().to_owned()),
-                        (false, Some(command)) => {
-                            Some(crate::i18n::agent_inside_wsl_hint(command))
-                        }
+                        (false, Some(command)) => Some(crate::i18n::agent_inside_wsl_hint(command)),
                         (false, None) => None,
                     },
                     is_default: index == default,
