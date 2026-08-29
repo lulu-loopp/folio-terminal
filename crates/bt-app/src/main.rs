@@ -9148,6 +9148,29 @@ struct WindowRuntime {
     /// captured, projected, decorated and recomposed to say the same thing it
     /// said 16ms ago.
     chrome_present_pending: bool,
+    /// **How many frames in a row have reached the glass without their
+    /// characters** (user report 2026-08-29, `docs/DESIGN.md` §7.1.3l).
+    ///
+    /// `PresentedWithoutText` means the shared glyph atlas turned a lane's whole
+    /// batch away, and the window answers it by re-filing the frame and asking
+    /// for another turn. That answer is right exactly once: the atlas is trimmed
+    /// on the way out of every frame, so a refusal caused by what *earlier*
+    /// frames had left protected is gone by the next one.
+    ///
+    /// It is wrong forever after. When a single frame's own glyphs are more than
+    /// the device's `max_texture_dimension_2d` allows — which a 4K window whose
+    /// interface, terminal and document are all written in Han characters can
+    /// reach — the next turn is composed from the same seats, the same chrome and
+    /// the same document, and is refused in exactly the same place. The window
+    /// then repaints as fast as it can, forever, and every one of those frames is
+    /// missing the same lane's words. That is not a retry, it is a spin: it burns
+    /// a core and a GPU queue to redraw an identical picture, and it is why the
+    /// report's window had a hang watchdog fire in the same run.
+    ///
+    /// So the retry is budgeted. Reset by any frame that did reach the glass
+    /// whole, which is the only event that makes the next attempt a different
+    /// question.
+    textless_frames: u32,
     /// A pane that is **not** the focused one has said something that has not
     /// been through a compositor pass.
     ///
@@ -10404,6 +10427,34 @@ struct WindowRuntime {
 }
 
 impl WindowRuntime {
+    /// **Whether a frame that did not reach the glass whole is worth asking for
+    /// again**, and the place the textless run is counted.
+    ///
+    /// The two swapchain refusals always are: `Skipped` and `Reconfigure` mean
+    /// no image was handed over at all, and the thing that changes between one
+    /// turn and the next is the swapchain, not this window. A textless present
+    /// is worth [`TEXTLESS_RETRY_BUDGET`] turns and no more — see
+    /// [`WindowRuntime::textless_frames`].
+    ///
+    /// Counting here rather than at the two call sites because a run is a run
+    /// across both of them: an animation tick that re-presents the retained
+    /// picture and a freshly composed frame are the same window meeting the same
+    /// full atlas, and a counter each would let the two take turns spinning
+    /// forever.
+    fn may_ask_again(&mut self, outcome: &PresentOutcome) -> bool {
+        match outcome {
+            PresentOutcome::Presented(_) => {
+                self.textless_frames = 0;
+                false
+            }
+            PresentOutcome::Skipped | PresentOutcome::Reconfigure => true,
+            PresentOutcome::PresentedWithoutText(_) => {
+                self.textless_frames = self.textless_frames.saturating_add(1);
+                self.textless_frames <= TEXTLESS_RETRY_BUDGET
+            }
+        }
+    }
+
     /// **Where this window is, as the three facts [`notify::desktop_reach`] reads together**
     /// (`attention` plan §5.2; user ruling 2026-08-28).
     ///
@@ -29870,6 +29921,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         terminal_content_revision: 0,
         presented_picture_revision: 0,
         chrome_present_pending: false,
+        textless_frames: 0,
         unpainted_pane_output: false,
         composed_terminal_frames: 0,
         wheel_events: 0,
@@ -82028,7 +82080,10 @@ impl Runtime<'_> {
         )
         .context("re-present the retained terminal picture")?
         {
-            PresentOutcome::Presented(_) => Ok(()),
+            PresentOutcome::Presented(_) => {
+                self.window.textless_frames = 0;
+                Ok(())
+            }
             // The swapchain was not ready. The picture is unchanged and still
             // owed, so the debt is simply re-filed — there is no frame to put
             // back in the slot, which is the whole point of this path.
@@ -82037,11 +82092,13 @@ impl Runtime<'_> {
             // the same reason and re-filed the same way: what is on the glass is
             // not the picture this window means to be showing, and the atlas the
             // renderer trimmed on its way out has room for it next time.
-            PresentOutcome::PresentedWithoutText(_)
+            outcome @ (PresentOutcome::PresentedWithoutText(_)
             | PresentOutcome::Skipped
-            | PresentOutcome::Reconfigure => {
+            | PresentOutcome::Reconfigure) => {
                 self.window.chrome_present_pending = true;
-                self.window.window.request_redraw();
+                if self.window.may_ask_again(&outcome) {
+                    self.window.window.request_redraw();
+                }
                 Ok(())
             }
         }
@@ -82179,6 +82236,10 @@ impl Runtime<'_> {
         .context("render terminal frame")?
         {
             PresentOutcome::Presented(receipt) => {
+                // A whole frame ends whatever textless run was going, which is
+                // what makes the next refusal a new question rather than the
+                // continuation of an old one ([`WindowRuntime::may_ask_again`]).
+                self.window.textless_frames = 0;
                 // The glass now holds the newest picture anyone composed. This
                 // is the equality [`chrome_tick_reuses_picture`] reads as its
                 // licence to answer the next animation tick from the screen.
@@ -82284,14 +82345,16 @@ impl Runtime<'_> {
             // recording it as presented would leave `presented_picture_revision`
             // claiming the glass holds a frame it does not — which is the licence
             // the animation path reads before answering a tick from the screen.
-            PresentOutcome::PresentedWithoutText(_)
+            outcome @ (PresentOutcome::PresentedWithoutText(_)
             | PresentOutcome::Skipped
-            | PresentOutcome::Reconfigure => {
+            | PresentOutcome::Reconfigure) => {
                 self.window
                     .pending_frames
                     .publish(frame, trigger)
                     .context("reject non-rectangular frame during redraw retry")?;
-                self.window.window.request_redraw();
+                if self.window.may_ask_again(&outcome) {
+                    self.window.window.request_redraw();
+                }
             }
         }
         Ok(())
@@ -85240,6 +85303,17 @@ mod pty_drain_budget_tests {
         );
     }
 }
+
+/// **How many times in a row a textless frame is worth asking for again.**
+///
+/// Two, and the number is an argument rather than a taste. One turn covers the
+/// only refusal the trim can cure — a frame refused because of what the frames
+/// before it had left protected, which the trim on the way out has already
+/// undone. A second covers the same thing happening across a content change, so
+/// that a document arriving in the same breath as a theme switch is not judged
+/// on the frame it landed in. A third would be asking an identical question for
+/// the third time and calling the answer new.
+const TEXTLESS_RETRY_BUDGET: u32 = 2;
 
 /// What a window does with a frame that reached the glass without its
 /// characters — `bt-render`'s [`PresentOutcome::PresentedWithoutText`].

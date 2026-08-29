@@ -1587,6 +1587,24 @@ impl TextRefusals {
     }
 }
 
+/// **What this window has already said out loud about a refused text upload.**
+///
+/// Two facts and not one, because they answer two different questions. `frames`
+/// counts how often the atlas has turned a batch away, which is the size of the
+/// debt; `reported` remembers *which lanes* have had their sentence printed, so
+/// that the console line is said once per lane rather than once per run.
+///
+/// The split is the 2026-08-29 report's own lesson. One counter served all five
+/// lanes, so the first refusal in a run printed and every later one was silent —
+/// and the machine that lost a whole rendered page's words had a log naming the
+/// *overlay* lane and nothing at all about the page. A refusal that leaves no
+/// line behind is a refusal nobody can answer.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct GlyphRefusalLog {
+    frames: u64,
+    reported: TextRefusals,
+}
+
 /// One rendered table block's picture, in the block's own coordinates.
 ///
 /// **Coordinates, not pixels, and that is the whole of what makes a table different from a
@@ -2598,14 +2616,14 @@ fn prepare_failure_policy(error: PrepareError) -> PrepareFailurePolicy {
 fn accept_text_prepare(
     lane: TextLane,
     result: Result<(), PrepareError>,
-    degraded_frames: &mut u64,
+    log: &mut GlyphRefusalLog,
     text_complete: &mut bool,
     refused: &mut TextRefusals,
 ) -> bool {
     match result {
         Ok(()) => true,
         Err(error) => {
-            text_upload_refused(lane, error, degraded_frames, text_complete, refused);
+            text_upload_refused(lane, error, log, text_complete, refused);
             false
         }
     }
@@ -2640,19 +2658,21 @@ fn accept_text_prepare(
 fn text_upload_refused(
     lane: TextLane,
     error: PrepareError,
-    degraded_frames: &mut u64,
+    log: &mut GlyphRefusalLog,
     text_complete: &mut bool,
     refused: &mut TextRefusals,
 ) {
     match prepare_failure_policy(error) {
         PrepareFailurePolicy::PresentWithoutText => {
-            if *degraded_frames == 0 {
+            // Once per **lane**, not once per run: see [`GlyphRefusalLog`].
+            if !log.reported.contains(lane) {
+                log.reported.insert(lane);
                 eprintln!(
                     "Folio glyph atlas reached the device limit on the {} lane; presenting without text and retrying",
                     lane.name()
                 );
             }
-            *degraded_frames += 1;
+            log.frames += 1;
             *text_complete = false;
             refused.insert(lane);
         }
@@ -3173,7 +3193,7 @@ pub struct WindowRenderer {
     font_revision: u64,
     narrow_shaping_cache: NarrowShapingCache,
     wide_shaping_cache: WideShapingCache,
-    glyph_degraded_frames: u64,
+    glyph_refusal_log: GlyphRefusalLog,
     window_focused: bool,
     cursor_blink_visible: bool,
     peek_overlay: Option<PeekImageOverlay>,
@@ -4868,7 +4888,7 @@ impl WindowRenderer {
             font_revision: 1,
             narrow_shaping_cache: NarrowShapingCache::with_perf_tracking(measure_shaping),
             wide_shaping_cache: WideShapingCache::with_perf_tracking(measure_shaping),
-            glyph_degraded_frames: 0,
+            glyph_refusal_log: GlyphRefusalLog::default(),
             window_focused: true,
             cursor_blink_visible: true,
             peek_overlay: None,
@@ -5908,7 +5928,7 @@ impl WindowRenderer {
             let text_prepared = accept_text_prepare(
                 TextLane::Grid,
                 text_prepare_result,
-                &mut self.glyph_degraded_frames,
+                &mut self.glyph_refusal_log,
                 &mut text_complete,
                 &mut refused,
             );
@@ -6165,6 +6185,52 @@ impl WindowRenderer {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
+        // **The documents' words are asked for before the labels around them**
+        // (user report 2026-08-29, `docs/DESIGN.md` §7.1.3l).
+        //
+        // Prepare order is not draw order — a `TextRenderer` keeps the batch it
+        // was handed and is issued later, in the z-order below — so the only
+        // thing this order decides is **who gets the shared atlas when there is
+        // not enough of it**. A glyph a lane has prepared is protected from
+        // eviction for the rest of the frame, so whichever lane goes last is the
+        // one that meets a full atlas and loses *all* of its text at once.
+        //
+        // Until this line the order was chrome, then this, then the overlays,
+        // and the report is what that costs: a 4K window whose interface,
+        // terminal and document are all in Chinese asked for more distinct
+        // glyph rasters than the device's `max_texture_dimension_2d` allows, and
+        // the surface that lost every one of its words was the rendered page —
+        // while the pane head above it, four words long, kept its own. A tab
+        // title that loses its letters is a label gone missing; a document that
+        // loses its letters is not a document. So the page is served first, and
+        // what yields under pressure is the furniture around it.
+
+        let mut preview_text_layouts: Vec<ChromeTextLayout> = Vec::new();
+        for body in self.preview_bodies.iter().chain(table_block_bodies.iter()) {
+            preview_text_layouts.extend(shape_preview_body(&mut gpu.font_system, body));
+        }
+        let preview_text_prepared = if preview_text_layouts.is_empty() {
+            false
+        } else {
+            let result = prepare_chrome_text_atlas(
+                &mut self.preview_text_renderer,
+                &gpu.device,
+                &gpu.queue,
+                &mut gpu.font_system,
+                &mut gpu.atlas,
+                &self.text_viewport,
+                &mut gpu.swash_cache,
+                &preview_text_layouts,
+            );
+            accept_text_prepare(
+                TextLane::Preview,
+                result,
+                &mut self.glyph_refusal_log,
+                &mut text_complete,
+                &mut refused,
+            )
+        };
+
         let chrome_layouts = shape_chrome_labels(
             &mut gpu.font_system,
             &self.chrome_labels,
@@ -6187,7 +6253,7 @@ impl WindowRenderer {
             accept_text_prepare(
                 TextLane::Chrome,
                 result,
-                &mut self.glyph_degraded_frames,
+                &mut self.glyph_refusal_log,
                 &mut text_complete,
                 &mut refused,
             )
@@ -6238,31 +6304,6 @@ impl WindowRenderer {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
-        let mut preview_text_layouts: Vec<ChromeTextLayout> = Vec::new();
-        for body in self.preview_bodies.iter().chain(table_block_bodies.iter()) {
-            preview_text_layouts.extend(shape_preview_body(&mut gpu.font_system, body));
-        }
-        let preview_text_prepared = if preview_text_layouts.is_empty() {
-            false
-        } else {
-            let result = prepare_chrome_text_atlas(
-                &mut self.preview_text_renderer,
-                &gpu.device,
-                &gpu.queue,
-                &mut gpu.font_system,
-                &mut gpu.atlas,
-                &self.text_viewport,
-                &mut gpu.swash_cache,
-                &preview_text_layouts,
-            );
-            accept_text_prepare(
-                TextLane::Preview,
-                result,
-                &mut self.glyph_degraded_frames,
-                &mut text_complete,
-                &mut refused,
-            )
-        };
         // **The forensic line for "the body drew its rules and none of its
         // words"** (user report 2026-08-21). The three numbers are the three
         // places that picture can come from and they separate them completely:
@@ -6448,7 +6489,7 @@ impl WindowRenderer {
                 accept_text_prepare(
                     TextLane::Overlay,
                     result,
-                    &mut self.glyph_degraded_frames,
+                    &mut self.glyph_refusal_log,
                     &mut text_complete,
                     &mut refused,
                 )
@@ -16761,7 +16802,7 @@ mod tests {
     /// from a card whose document was never built.
     #[test]
     fn a_refused_lane_names_itself_and_leaves_the_frame_owed() {
-        let mut degraded = 0;
+        let mut degraded = GlyphRefusalLog::default();
         let mut complete = true;
         let mut refused = TextRefusals::default();
         assert!(
@@ -16799,7 +16840,32 @@ mod tests {
             !complete,
             "the frame is incomplete, which is what re-files it and asks for another turn"
         );
-        assert_eq!(degraded, 1);
+        assert_eq!(degraded.frames, 1);
+        assert!(
+            degraded.reported.contains(TextLane::Overlay),
+            "the lane's sentence was said, and is not owed a second time"
+        );
+        // **And a second lane going dark says so too** (user report
+        // 2026-08-29). One counter for all five lanes meant only the first
+        // refusal of a run ever printed, so the machine whose rendered page lost
+        // every word had a log naming the *overlay* lane and nothing about the
+        // page. The record is per lane.
+        assert!(
+            !accept_text_prepare(
+                TextLane::Preview,
+                Err(PrepareError::AtlasFull),
+                &mut degraded,
+                &mut complete,
+                &mut refused,
+            ),
+            "a refused batch is not drawn"
+        );
+        assert_eq!(refused.names(), "preview+overlay");
+        assert!(
+            degraded.reported.contains(TextLane::Preview)
+                && degraded.reported.contains(TextLane::Overlay),
+            "each lane that went dark left its own line behind"
+        );
         let receipt = PresentReceipt {
             trigger: FrameTrigger {
                 occurred_at: Instant::now(),
@@ -16823,6 +16889,163 @@ mod tests {
         both.insert(TextLane::Overlay);
         assert_eq!(both.names(), "grid+overlay");
         assert_eq!(TextRefusals::default().names(), "none");
+    }
+
+    /// RED — **when the glyph atlas runs out, the page keeps its words and the
+    /// labels around it are what gives way** (user report 2026-08-29,
+    /// `docs/DESIGN.md` §7.1.3l).
+    ///
+    /// The report: a rendered `README.zh-CN.md` drew its heading rules, its
+    /// quote bar and both of its pictures, and **not one character**, while the
+    /// pane head above it kept its own four words. Everything about the document
+    /// was right — the same file draws whole in this apparatus under three
+    /// themes at the same scale and the same geometry — and the machine's own
+    /// `diagnostics.log` names what happened in that very run: `Folio glyph
+    /// atlas reached the device limit`. A refusal takes a **whole lane's batch**,
+    /// and the lanes were prepared chrome-first, so the surface that met the
+    /// full atlas was always the last one asked — the page.
+    ///
+    /// Prepare order is not draw order, so the order is free to say who matters:
+    /// a tab title that loses its letters is a label gone missing, a document
+    /// that loses its letters is not a document. This composes one frame whose
+    /// chrome asks for more distinct glyph rasters than the device will hold and
+    /// checks that the page's line is on the glass anyway.
+    ///
+    /// Mutation: move the preview lane's `prepare` back below the chrome lane's
+    /// and the red line disappears from the read-back, exactly as it did from
+    /// the report's screenshot.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_full_atlas_takes_the_labels_before_it_takes_the_page() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        const WIDTH: u32 = 3840;
+        const HEIGHT: u32 = 2160;
+        // The page's ink, and nothing else in the frame is allowed to be it.
+        const PAGE_INK: [u8; 3] = [255, 0, 0];
+        // Twenty-four sheets of Han characters each side, each sheet at its own
+        // size so that the same ideograph is a *different* raster on every one
+        // of them - which is what a window whose interface, terminal and
+        // document are all in Chinese asks the atlas for, and what a Latin one
+        // never does. Either side fits on its own; the two together do not, so
+        // the frame is decided entirely by which lane is asked first.
+        const SHEETS: usize = 64;
+        const ROWS: usize = 20;
+        const COLUMNS: usize = 40;
+        // The two halves of the surface, so a red pixel can only have come from
+        // the page and neither lane can draw over the other.
+        const LABEL_TOP: f32 = 0.0;
+        const PAGE_TOP: f32 = 1100.0;
+
+        // The `n`th ideograph of a sheet, out of a block wide enough that the
+        // two lanes never ask for the same character at the same size.
+        fn ideograph(base: usize, sheet: usize, row: usize, column: usize) -> char {
+            let index = base + ((sheet * ROWS + row) * COLUMNS + column) % 10_000;
+            char::from_u32(0x4E00 + index as u32).expect("an ideograph")
+        }
+
+        let mut gpu = on_this_machines_adapter(FORMAT);
+        let mut window =
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
+        let seat = SeatViewport {
+            x: 0,
+            y: 0,
+            width: WIDTH,
+            height: HEIGHT,
+        };
+        let frame = single_cell_cursor_frame(window.metrics());
+
+        let mut labels = Vec::new();
+        let mut paragraphs = Vec::new();
+        for sheet in 0..SHEETS {
+            let size = 20.0 + (sheet % 24) as f32;
+            for row in 0..ROWS {
+                let label_top = LABEL_TOP + row as f32 * 50.0;
+                labels.push(ChromeLabel {
+                    mono: false,
+                    text: (0..COLUMNS)
+                        .map(|column| ideograph(0, sheet, row, column))
+                        .collect(),
+                    rect: [0.0, label_top, WIDTH as f32, label_top + 48.0],
+                    font_size_px: size,
+                    color: [40, 40, 40],
+                    align_right: false,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: None,
+                });
+                let page_top = PAGE_TOP + row as f32 * 50.0;
+                paragraphs.push(PreviewParagraph {
+                    runs: vec![PreviewRun {
+                        text: (0..COLUMNS)
+                            .map(|column| ideograph(10_000, sheet, row, column))
+                            .collect(),
+                        color: PAGE_INK,
+                        mono: false,
+                        bold: false,
+                        italic: false,
+                        font_scale: 1.0,
+                        inline_box_px: None,
+                    }],
+                    rect: [0.0, page_top, WIDTH as f32, page_top + 48.0],
+                    font_size_px: size,
+                    line_height_px: 50.0,
+                    wrap: false,
+                    letter_spacing_em: 0.0,
+                    align_right: false,
+                    align_center: false,
+                });
+            }
+        }
+        window.set_chrome(Vec::new(), labels, Vec::new());
+        window.set_preview_bodies(vec![PreviewBody {
+            clip: [0.0, PAGE_TOP, WIDTH as f32, HEIGHT as f32],
+            quads: Vec::new(),
+            paragraphs,
+            blocks: Vec::new(),
+            rasters: Vec::new(),
+        }]);
+
+        let outcome = window
+            .present_frame(
+                &mut gpu,
+                &[SeatFrame {
+                    seat,
+                    clip: seat,
+                    frame: &frame,
+                    focused: true,
+                }],
+                FrameTrigger {
+                    occurred_at: Instant::now(),
+                    source: FrameSource::Expose,
+                },
+            )
+            .expect("one frame");
+        let record = window.preview_text_frame();
+        assert!(
+            !record.refused.is_empty(),
+            "the ladder no longer reaches the atlas ceiling on this adapter, so the frame under \
+             test is not the one the report describes: refused={} outcome={outcome:?}",
+            record.refused.names()
+        );
+        assert!(
+            !record.refused.contains(TextLane::Preview),
+            "the page's words were the thing given up: refused={}",
+            record.refused.names()
+        );
+
+        let pixels = window.read_back(&gpu);
+        // `[b, g, r, a]`.
+        let page = pixels
+            .iter()
+            .filter(|pixel| pixel[2] > 120 && pixel[1] < 90 && pixel[0] < 90)
+            .count();
+        assert!(
+            page > 0,
+            "not one pixel of the page reached the glass (refused={})",
+            record.refused.names()
+        );
     }
 
     /// RED — **a card's text reaches the glass on the very frame its layout
