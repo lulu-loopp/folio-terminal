@@ -4441,6 +4441,34 @@ pub fn psreadline_row_current_in(lang: Lang, found: &str) -> String {
     }
 }
 
+/// The row's line when the machine's module is old **and Windows' execution
+/// policy would refuse the replacement** (§7.47).
+///
+/// **The row says why the switch will not move.** Before this line existed the
+/// obstacle was written down in exactly one place — the invitation's reason
+/// line — and a reader who had already answered that invitation could never see
+/// it again: the row said `2.0.0 on this machine · resizing still misplaces the
+/// input line`, the `On` item was dark, and a press on it did nothing and said
+/// nothing. That is the whole of the 2026-08-29 defect.
+///
+/// Two clauses and not three. `resizing still misplaces the input line` is the
+/// case *for* the module, and it is made by the row's own title and by the
+/// invitation; what this reader is owed instead is the reason the answer is not
+/// available to them, and a row that said all three would wrap past the height
+/// every row on this page shares.
+#[must_use]
+pub fn psreadline_row_blocked_in(lang: Lang, found: &str, policy: &str) -> String {
+    match lang {
+        Lang::English => format!(
+            "{found} on this machine · Windows' execution policy is {policy}, which refuses to \
+             load an unsigned module"
+        ),
+        Lang::Chinese => {
+            format!("本机为 {found} · Windows 的执行策略是 {policy}，不会加载未签名的模块")
+        }
+    }
+}
+
 /// The card raised when the module lands.
 #[must_use]
 pub fn psreadline_installed_toast(patched: &str) -> String {
@@ -4454,24 +4482,159 @@ pub fn psreadline_installed_toast(patched: &str) -> String {
     }
 }
 
+// ── the six sentences a refused press speaks (§7.47) ────────────────────────
+//
+// **Every one of them names the path.** A reader who is told an install did not
+// happen and not told where it would have gone has been handed a sentence they
+// can do nothing with; a reader who has the path can look, can copy it, and can
+// finish the job by hand. That is the whole of the copy-guide rule here, and it
+// is why `psreadline_install_failed`'s old one-argument shape is gone: it
+// carried Windows' own words and dropped the only other fact in the room.
+
 /// The card raised when writing the module failed, carrying what Windows said.
 ///
 /// The operating system's own sentence is passed through rather than
 /// summarised: it is the only text that distinguishes a full disk from a
 /// redirected Documents folder from a file another process is holding open.
 #[must_use]
-pub fn psreadline_install_failed(message: &str) -> String {
+pub fn psreadline_install_failed(path: &str, message: &str) -> String {
     match current() {
-        Lang::English => format!("Could not install PSReadLine: {message}"),
-        Lang::Chinese => format!("安装 PSReadLine 失败：{message}"),
+        Lang::English => format!("Could not write PSReadLine to {path}: {message}"),
+        Lang::Chinese => format!("无法把 PSReadLine 写入 {path}：{message}"),
     }
 }
 
 #[must_use]
-pub fn psreadline_remove_failed(message: &str) -> String {
+pub fn psreadline_remove_failed(path: &str, message: &str) -> String {
     match current() {
-        Lang::English => format!("Could not remove PSReadLine: {message}"),
-        Lang::Chinese => format!("移除 PSReadLine 失败：{message}"),
+        Lang::English => format!("Could not remove PSReadLine from {path}: {message}"),
+        Lang::Chinese => format!("无法从 {path} 移除 PSReadLine：{message}"),
+    }
+}
+
+/// The command that lifts the refusal, in the one scope that needs no
+/// administrator.
+///
+/// **`CurrentUser` and not `LocalMachine`, and that is measured rather than
+/// preferred**: on the clean Windows 10 of 2026-08-29,
+/// `Set-ExecutionPolicy -Scope LocalMachine` from an unelevated shell failed
+/// silently — the policy did not move — while the same command at
+/// `-Scope CurrentUser` took. A card that told a reader to run something their
+/// shell will refuse is a card that has sent them somewhere worse than nowhere.
+///
+/// `RemoteSigned` and not `Bypass` or `Unrestricted`: it is the weakest policy
+/// that loads the module, it is what Windows Server ships with, and it still
+/// asks for a signature on anything that came off the network.
+pub const POLICY_REMEDY_COMMAND: &str = "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned";
+
+/// The card raised when the execution policy is what stopped the install.
+///
+/// Measured on a clean Windows 10 Pro 22H2 on 2026-08-29: under `Restricted`
+/// the module writes perfectly well and then `Import-Module PSReadLine` loads
+/// **nothing** — `PSReadLine.format.ps1xml` is refused as a script, and the
+/// import fails with it. So the refusal is right and the silence was the bug.
+///
+/// **Three sentences, and the middle one is a way out** (§7.47). A card that
+/// names the obstacle and stops leaves its reader exactly where they were
+/// standing; the copy rule is that a sentence on screen says what can be done
+/// *now*, and what can be done now is one command in the shell already in front
+/// of them. It is on the card and deliberately not on the row: the row has one
+/// line to say what the machine is, and a command is not a state.
+///
+/// **The way out comes before the path, and that order is the whole of what a
+/// six-line cap costs.** `TOAST_MAX_LINES` drops what does not fit and marks
+/// the cut with an ellipsis, and this card carries the longest text this
+/// product raises — a module path under a redirected `Documents` can be a
+/// hundred characters on its own. Whatever falls off the end must therefore be
+/// the least actionable half, and between "here is the command that fixes it"
+/// and "here is where the file would have gone", the path is the half a reader
+/// can lose and still act. `the_way_out_survives_the_cards_six_line_cap` in
+/// `toast.rs` holds that.
+///
+/// The clause about *why* an unsigned module is refused is not repeated here:
+/// the row this card was raised from says it, one line above the picker that
+/// was just pressed.
+#[must_use]
+pub fn psreadline_policy_refused(patched: &str, policy: &str, path: &str) -> String {
+    let remedy = POLICY_REMEDY_COMMAND;
+    match current() {
+        Lang::English => format!(
+            "PSReadLine {patched} was not installed. Windows' execution policy is {policy}. Run \
+             {remedy} in PowerShell, then try again. The module goes to {path}."
+        ),
+        Lang::Chinese => format!(
+            "未安装 PSReadLine {patched}。Windows 的执行策略是 {policy}。在 PowerShell 中运行 \
+             {remedy} 后再试。模块本应写入 {path}。"
+        ),
+    }
+}
+
+/// The card raised when Windows would not say where Documents is.
+///
+/// No path in this one because there is no path to name — which is exactly what
+/// it says.
+#[must_use]
+pub fn psreadline_no_documents(patched: &str) -> String {
+    match current() {
+        Lang::English => format!(
+            "PSReadLine {patched} was not installed. Windows did not say where this user's \
+             Documents folder is, and PowerShell looks for the module under it."
+        ),
+        Lang::Chinese => format!(
+            "未安装 PSReadLine {patched}。Windows 没有给出本用户的 Documents 文件夹位置，而 \
+             PowerShell 在它下面找这个模块。"
+        ),
+    }
+}
+
+/// The card raised when the probe has not answered yet.
+#[must_use]
+pub fn psreadline_still_reading() -> String {
+    match current() {
+        Lang::English => {
+            "Still reading this machine's PSReadLine. Try again in a moment.".to_owned()
+        }
+        Lang::Chinese => "正在读取本机的 PSReadLine，请稍候再试。".to_owned(),
+    }
+}
+
+/// The card raised when `On` is pressed on a machine whose own module is already
+/// new enough.
+#[must_use]
+pub fn psreadline_already_current(found: &str, path: &str) -> String {
+    match current() {
+        Lang::English => format!(
+            "This machine's own PSReadLine {found} already keeps the input line in place, so \
+             nothing was written to {path}."
+        ),
+        Lang::Chinese => {
+            format!("本机自带的 PSReadLine {found} 已能守住输入行，未向 {path} 写入任何东西。")
+        }
+    }
+}
+
+/// The card raised when `On` is pressed over a directory that already holds it.
+#[must_use]
+pub fn psreadline_already_there(patched: &str, path: &str) -> String {
+    match current() {
+        Lang::English => format!("PSReadLine {patched} is already installed at {path}."),
+        Lang::Chinese => format!("PSReadLine {patched} 已经装在 {path}。"),
+    }
+}
+
+/// The card raised when `Off` is pressed and the guard kept its hands off.
+///
+/// **One sentence for two situations** — a directory holding somebody else's
+/// module, and a directory holding nothing at all — because it is true of both
+/// and because the distinction is not one a reader can act on differently. What
+/// they can act on is the path, which is in it.
+#[must_use]
+pub fn psreadline_not_ours(path: &str) -> String {
+    match current() {
+        Lang::English => {
+            format!("No module written by Folio is at {path}, so nothing was removed.")
+        }
+        Lang::Chinese => format!("{path} 没有 Folio 写的模块，未移除任何东西。"),
     }
 }
 

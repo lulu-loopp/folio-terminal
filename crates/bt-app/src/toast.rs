@@ -1692,6 +1692,57 @@ mod tests {
         assert!(tiny[0].frame[0] >= 0.0 && tiny[0].frame[2] <= 140.0);
     }
 
+    /// RED GATE (§7.47) — **the longest card this product raises keeps its way
+    /// out, whatever the six-line cap takes.**
+    ///
+    /// The PSReadLine policy card is the one text here that carries a command
+    /// *and* a filesystem path, and a module path under a redirected
+    /// `Documents` can be a hundred characters on its own. Past
+    /// [`TOAST_MAX_LINES`] the rest is dropped, so the order of the sentences
+    /// is what decides which half a reader loses — and between "here is the
+    /// command that fixes this" and "here is where the file would have gone",
+    /// only the first is something they can act on.
+    ///
+    /// Measured at ten pixels a character, which is the harshest measure this
+    /// file tests with and about half again what the real face costs: if the
+    /// command survives here it survives on a machine.
+    ///
+    /// MUTATION: put the path sentence back in front of the command and this
+    /// fails naming the words that fell off the end.
+    #[test]
+    fn the_way_out_survives_the_cards_six_line_cap() {
+        let start = Instant::now();
+        let long_path = r"C:\Users\a-rather-long-account-name\OneDrive - Some Organisation\Documents\WindowsPowerShell\Modules\PSReadLine\2.4.6";
+        let body = crate::i18n::psreadline_policy_refused("2.4.6", "Restricted", long_path);
+        assert!(
+            body.find(crate::i18n::POLICY_REMEDY_COMMAND) < body.find(long_path),
+            "the command has to come before the path, or the cap eats the way \
+             out: {body:?}"
+        );
+
+        let mut host = ToastHost::default();
+        host.raise(
+            ToastKind::Error,
+            ToastAnchor::Window,
+            None,
+            body,
+            None,
+            Motion::Full,
+            start,
+        );
+        let laid = placed(&host, None);
+        let drawn = laid[0]
+            .lines
+            .iter()
+            .map(|(_, line)| line.trim_end_matches('…').trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            drawn.contains(crate::i18n::POLICY_REMEDY_COMMAND),
+            "the command a reader is told to run is not on the card: {drawn:?}"
+        );
+    }
+
     /// PIN — the body wraps inside the card's own text column and stops at six
     /// lines, and the sixth says that it stopped.
     #[test]

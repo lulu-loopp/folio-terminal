@@ -5115,6 +5115,7 @@ impl SettingsPanel {
             // nothing. The pencil and the picker's own verb go the same way for
             // the same reason — both close the list they were pressed in.
             SettingsTarget::Choice(row, _)
+            | SettingsTarget::ChoiceRefused(row, _)
             | SettingsTarget::Menu(row)
             | SettingsTarget::MenuAction(row)
             | SettingsTarget::MenuItemEdit(row, _) => {
@@ -6307,6 +6308,17 @@ pub enum SettingsTarget {
     Menu(SettingsRow),
     /// One item of a row's open picker, by its index in that row's options.
     Choice(SettingsRow, usize),
+    /// The same item, greyed — a press that chose nothing (§7.47).
+    ///
+    /// **It is a target and not `Menu`, because "you pressed the thing that
+    /// cannot happen" is information and dropping it is how a switch goes
+    /// mute.** Nothing about the greying changed: the item is still dark, the
+    /// keyboard still steps over it, the picker still stays open, and the value
+    /// still does not move. What this carries is the identity of the item, so a
+    /// row that knows why it is dark can raise a card that says so — which the
+    /// PSReadLine row now does, and which is the whole of the 2026-08-29
+    /// defect. A row with nothing to say ignores it, exactly as before.
+    ChoiceRefused(SettingsRow, usize),
     /// The `Record` button on one line of the shortcut page, by that line's
     /// index in [`SettingsContent::shortcuts`].
     ///
@@ -6457,11 +6469,14 @@ pub enum DialogPopup {
 #[must_use]
 pub fn target_popup(target: SettingsTarget) -> Option<DialogPopup> {
     match target {
-        // The picker's own five answers. `Menu` is its body between the items,
-        // `Choice` an item, `MenuAction` the verb behind its last hairline, and
-        // the two `MenuItem*` the marks that live inside an item.
+        // The picker's own six answers. `Menu` is its body between the items,
+        // `Choice` an item, `ChoiceRefused` a greyed one (§7.47 — the press
+        // chooses nothing and the list stays standing, which is precisely a
+        // press *inside* this popup), `MenuAction` the verb behind its last
+        // hairline, and the two `MenuItem*` the marks that live inside an item.
         SettingsTarget::Menu(row)
         | SettingsTarget::Choice(row, _)
+        | SettingsTarget::ChoiceRefused(row, _)
         | SettingsTarget::MenuAction(row)
         | SettingsTarget::MenuItemEdit(row, _)
         | SettingsTarget::MenuItemDelete(row, _) => Some(DialogPopup::Choice(row)),
@@ -7044,6 +7059,7 @@ impl SettingsLayout {
             | SettingsTarget::Slider(row)
             | SettingsTarget::Menu(row) => self.row(row).map(|placed| placed.band),
             SettingsTarget::Choice(row, _)
+            | SettingsTarget::ChoiceRefused(row, _)
             | SettingsTarget::MenuAction(row)
             | SettingsTarget::MenuItemEdit(row, _)
             | SettingsTarget::MenuItemDelete(row, _) => self.row(row).map(|placed| placed.band),
@@ -7380,10 +7396,19 @@ pub fn dark_scheme_requested(target: SettingsTarget) -> Option<&'static str> {
 }
 
 /// Whether the patched PSReadLine was asked for or asked to go.
+///
+/// **A greyed item answers here too** (§7.47). The row's two items go dark on a
+/// machine that cannot honour them, and until 2026-08-29 a press on one was
+/// dropped by the hit test and never reached this function — so the product
+/// refused an install and said nothing, on any surface. The press now arrives,
+/// and the runtime hands it to the one door
+/// (`crate::psreadline::apply`), which either does the thing or returns the
+/// sentence that says why it did not.
 #[must_use]
 pub fn psreadline_requested(target: SettingsTarget) -> Option<bool> {
     match target {
-        SettingsTarget::Choice(SettingsRow::PsReadLine, index) => {
+        SettingsTarget::Choice(SettingsRow::PsReadLine, index)
+        | SettingsTarget::ChoiceRefused(SettingsRow::PsReadLine, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -9913,15 +9938,19 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
                 if layout.menu_action == Some(index) {
                     return SettingsTarget::MenuAction(row);
                 }
-                // **An item this machine cannot honour is menu body**, which is
-                // where the greying is enforced — one answer read by the hover
-                // and the click alike (`SettingsRow::option_enabled`). The menu
-                // stays open under such a press, exactly as it does over the gap
-                // between two items, because nothing was chosen.
+                // **An item this machine cannot honour is named, not
+                // swallowed** (§7.47). The greying is still enforced here —
+                // one answer read by the hover, the draw and the click alike
+                // (`SettingsRow::option_enabled`) — and the menu still stays
+                // open under such a press, because nothing was chosen. What
+                // changed on 2026-08-29 is that the press no longer arrives as
+                // `Menu`: it says *which* item was pressed, so a row that has a
+                // reason can say it out loud. A row that has none does what it
+                // always did, which is nothing.
                 return if row.option_enabled(index, values) {
                     SettingsTarget::Choice(row, index)
                 } else {
-                    SettingsTarget::Menu(row)
+                    SettingsTarget::ChoiceRefused(row, index)
                 };
             }
         }
@@ -18288,11 +18317,22 @@ mod tests {
             f64::from((item[1] + item[3]) / 2.0),
         );
 
+        // **The press names the item and still chooses nothing** (§7.47). It
+        // used to arrive as the menu's own body, which is what made a refusal
+        // impossible to explain; what has to stay true is the half that is
+        // about this row — no profile was asked for, so the runtime stores
+        // nothing and the menu stays up.
         assert_eq!(
             hit(&placed, &lacking, centre.0, centre.1),
-            SettingsTarget::Menu(SettingsRow::DefaultProfile),
-            "the press lands on the menu's body — nothing was chosen, and the \
-             menu stays up"
+            SettingsTarget::ChoiceRefused(SettingsRow::DefaultProfile, missing),
+            "the press lands on the item, greyed"
+        );
+        assert_eq!(
+            default_profile_requested(hit(&placed, &lacking, centre.0, centre.1)),
+            None,
+            "and nothing was chosen: a row with no reason to give says nothing \
+             and changes nothing, exactly as it did when the press was thrown \
+             away"
         );
         assert_eq!(
             hit(&placed, &values(), centre.0, centre.1),
@@ -19245,6 +19285,68 @@ mod tests {
             SettingsRow::LineWrapping.description(&off),
             "a description that describes the setting rather than the state is \
              the one line a reader has to find out what the picker is doing now"
+        );
+    }
+
+    /// RED GATE (§7.47) — **a press on a greyed item is named, not swallowed.**
+    ///
+    /// The 2026-08-29 report, in one assertion: on a machine whose execution
+    /// policy refuses an unsigned module the `On` item goes dark, and `hit`
+    /// used to answer `Menu(row)` over it — the press reached the runtime as
+    /// "somewhere in the open picker", carrying neither the row nor the item,
+    /// so nothing could be said about it. Nothing about the greying moves: the
+    /// item is still dark, still skipped by the arrows, and still chooses
+    /// nothing. What travels now is which item was pressed.
+    ///
+    /// MUTATION: put `SettingsTarget::Menu(row)` back in the hit test's greyed
+    /// arm and this fails on the first item.
+    #[test]
+    fn a_press_on_a_greyed_item_names_it_instead_of_being_swallowed() {
+        let placed = open_rows_measured(
+            1.0,
+            Some(SettingsRow::PsReadLine),
+            TabLayoutMode::Horizontal,
+            0.0,
+        );
+        // What a `Restricted` machine draws: the module is old, and neither
+        // verb is available.
+        let blocked = SettingsValues {
+            psreadline: crate::psreadline::RowState::Outdated,
+            psreadline_install_available: false,
+            psreadline_remove_available: false,
+            ..values()
+        };
+        assert_eq!(
+            SettingsRow::PsReadLine.option_count(),
+            FORMULA_OPTIONS.len()
+        );
+        for (index, wanted) in FORMULA_OPTIONS.into_iter().enumerate() {
+            assert!(
+                !SettingsRow::PsReadLine.option_enabled(index, &blocked),
+                "item {index} must be dark on this machine"
+            );
+            let (x, y) = centre(placed.items[index]);
+            let target = hit(&placed, &blocked, x, y);
+            assert_eq!(
+                target,
+                SettingsTarget::ChoiceRefused(SettingsRow::PsReadLine, index),
+                "a press on the dark item must name it"
+            );
+            assert_eq!(
+                psreadline_requested(target),
+                Some(wanted),
+                "and reach the one door, which is what answers with a reason"
+            );
+        }
+        // And the lit item is untouched: it still chooses.
+        let free = SettingsValues {
+            psreadline_install_available: true,
+            ..blocked
+        };
+        let (x, y) = centre(placed.items[0]);
+        assert_eq!(
+            hit(&placed, &free, x, y),
+            SettingsTarget::Choice(SettingsRow::PsReadLine, 0)
         );
     }
 

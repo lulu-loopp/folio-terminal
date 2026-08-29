@@ -1711,7 +1711,7 @@ mod windows_impl {
                 FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
                 FOF_WANTNUKEWARNING, FOLDERID_Documents, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
                 FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem,
-                ITaskbarList3, KF_FLAG_DEFAULT, RemoveWindowSubclass, SHAppBarMessage,
+                ITaskbarList3, KF_FLAG_DONT_VERIFY, RemoveWindowSubclass, SHAppBarMessage,
                 SHCreateItemFromParsingName, SHFILEOPSTRUCTW, SHFileOperationW,
                 SHGetKnownFolderPath, SIGDN_FILESYSPATH, SetWindowSubclass, ShellExecuteW,
                 TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL, TBPF_PAUSED,
@@ -5680,14 +5680,27 @@ mod windows_impl {
     /// PowerShell will never look, and the only symptom is a module that
     /// installs successfully and does nothing.
     ///
-    /// `KF_FLAG_DEFAULT` and not `KF_FLAG_CREATE`: this answers where the folder
-    /// *is*, and creating a user's Documents folder as a side effect of reading
-    /// a path is not this function's business. The caller creates the
+    /// `KF_FLAG_DONT_VERIFY` and not `KF_FLAG_CREATE`: this answers where the
+    /// folder *is*, and creating a user's Documents folder as a side effect of
+    /// reading a path is not this function's business. The caller creates the
     /// directories it is about to write into, which it has to do anyway.
+    ///
+    /// **And not `KF_FLAG_DEFAULT` either, since 2026-08-29 (§7.47).** Without
+    /// `DONT_VERIFY` the call goes and looks, and answers nothing at all for a
+    /// folder that is registered but not there — a freshly redirected profile,
+    /// a roaming one whose server is away. The only caller is the PSReadLine
+    /// module path, and **PowerShell does not verify either**: 5.1 composes
+    /// `PSModulePath` from this same known folder and puts
+    /// `…\Documents\WindowsPowerShell\Modules` on it whether or not the
+    /// directory exists — measured on a clean Windows 10 on 2026-08-29, where
+    /// the entry was on the path and neither `WindowsPowerShell` nor `Modules`
+    /// was on disk. So verifying here would make this product refuse to answer
+    /// about a path PowerShell is already searching, and the refusal was
+    /// silent.
     #[must_use]
     pub fn documents_directory() -> Option<PathBuf> {
         let raw =
-            unsafe { SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DEFAULT, None) }.ok()?;
+            unsafe { SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DONT_VERIFY, None) }.ok()?;
         if raw.is_null() {
             return None;
         }

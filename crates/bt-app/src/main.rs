@@ -40103,6 +40103,16 @@ impl Runtime<'_> {
                 self.window.settings.close_menu();
                 self.apply_settings_choice(target)?;
             }
+            // **A press on a greyed item leaves the picker standing and still
+            // speaks** (§7.47). Nothing was chosen, so nothing closes and no
+            // value moves — that half is exactly what it always was. What is
+            // new is that it leaves through the same door a chosen press
+            // leaves by, so a row that knows why its item is dark gets to say
+            // it. Rows with nothing to say answer `None` all the way down the
+            // chain and this is a press that did nothing, as before.
+            target @ settings::SettingsTarget::ChoiceRefused(..) => {
+                self.apply_settings_choice(target)?;
+            }
             // Turning a page puts the reader at the top of it. The distance
             // belonged to the page they were on, and carrying it across would
             // open the next one somewhere in its middle.
@@ -43050,67 +43060,86 @@ impl Runtime<'_> {
         changed
     }
 
+    /// Where this machine's `Documents` is, asked again if the launch could not
+    /// say (§7.47).
+    ///
+    /// The answer is cached because the row re-reads the disk three times a
+    /// session and a known-folder round trip per read is not free. **`None` is
+    /// not cached**, though, and that is the whole of this function: a launch
+    /// that could not resolve the folder used to freeze that "no" for the life
+    /// of the process, and every press on the row after it returned in silence.
+    /// A machine can grow the answer under a running window — a profile that
+    /// finishes redirecting, a network home that comes back — and the press is
+    /// exactly the moment worth asking again.
+    fn psreadline_documents(&mut self) -> Option<PathBuf> {
+        if self.app.psreadline_documents.is_none() {
+            self.app.psreadline_documents = psreadline::documents_directory();
+        }
+        self.app.psreadline_documents.clone()
+    }
+
     /// Write the module, or take Folio's own copy back off disk.
     ///
-    /// Both halves report: an install that silently did nothing and a removal
-    /// that silently refused are the two ways this row could lie. The refusal
-    /// carries the operating system's own sentence, because on the machine where
-    /// it fires nobody else can see it.
+    /// **Every road out of here says something** (§7.47). The decision itself
+    /// belongs to `psreadline::apply`, which has no silent exit; this function
+    /// is the two lines that turn its answer into a card and a line in
+    /// `diagnostics.log`. Before 2026-08-29 there were three ways for a press
+    /// on this row to change nothing and report nothing — a `Documents` folder
+    /// Windows would not name, a removal the guard refused, and (the one a user
+    /// met on a new machine) an execution policy that greyed the item so the
+    /// press never arrived at all.
     fn apply_psreadline(&mut self, install: bool) -> Result<bool> {
-        let Some(documents) = self.app.psreadline_documents.clone() else {
-            return Ok(false);
-        };
-        if install {
-            match psreadline::install_into(&documents) {
-                Ok(_) => {
-                    self.record_psreadline_invite(bt_persist::PsReadLineInviteV1::Installed);
-                    self.refresh_psreadline_installed();
-                    self.toast(
-                        toast::ToastKind::Ok,
-                        toast::ToastAnchor::Window,
-                        None,
-                        i18n::psreadline_installed_toast(psreadline::PATCHED_VERSION),
-                    )?;
-                }
-                Err(error) => {
-                    self.toast(
-                        toast::ToastKind::Error,
-                        toast::ToastAnchor::Window,
-                        None,
-                        i18n::psreadline_install_failed(&error.to_string()),
-                    )?;
-                    return Ok(false);
-                }
+        let documents = self.psreadline_documents();
+        let state = self.psreadline_row_state();
+        let outcome = psreadline::apply(install, documents.as_deref(), state, psreadline::probe());
+        match outcome {
+            psreadline::Outcome::Installed(root) => {
+                eprintln!(
+                    "BT_PSREADLINE installed {} to {}",
+                    psreadline::PATCHED_VERSION,
+                    root.display()
+                );
+                self.record_psreadline_invite(bt_persist::PsReadLineInviteV1::Installed);
+                self.refresh_psreadline_installed();
+                self.toast(
+                    toast::ToastKind::Ok,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::psreadline_installed_toast(psreadline::PATCHED_VERSION),
+                )?;
+                Ok(true)
             }
-        } else {
-            match psreadline::remove_from(&documents) {
-                // `Ok(false)` is the guard having refused: the directory holds
-                // something this build did not write. The picker greys that
-                // item, so reaching here means the two answers disagreed, and
-                // the honest report is that nothing was removed.
-                Ok(false) => return Ok(false),
-                Ok(true) => {
-                    self.record_psreadline_invite(bt_persist::PsReadLineInviteV1::Dismissed);
-                    self.refresh_psreadline_installed();
-                    self.toast(
-                        toast::ToastKind::Ok,
-                        toast::ToastAnchor::Window,
-                        None,
-                        i18n::Text::PsReadLineRemovedToast.text().to_owned(),
-                    )?;
-                }
-                Err(error) => {
-                    self.toast(
-                        toast::ToastKind::Error,
-                        toast::ToastAnchor::Window,
-                        None,
-                        i18n::psreadline_remove_failed(&error.to_string()),
-                    )?;
-                    return Ok(false);
-                }
+            psreadline::Outcome::Removed(root) => {
+                eprintln!("BT_PSREADLINE removed {}", root.display());
+                self.record_psreadline_invite(bt_persist::PsReadLineInviteV1::Dismissed);
+                self.refresh_psreadline_installed();
+                self.toast(
+                    toast::ToastKind::Ok,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::Text::PsReadLineRemovedToast.text().to_owned(),
+                )?;
+                Ok(true)
+            }
+            psreadline::Outcome::Refused(refusal) => {
+                // The log line and the card carry the same fact, and the log
+                // line is not the card: on the machine where this fires nobody
+                // can see the screen, and a tag is what a `diagnostics.log`
+                // can be grepped for in either language.
+                eprintln!(
+                    "BT_PSREADLINE refused install={install} why={} — {}",
+                    refusal.tag(),
+                    refusal.sentence()
+                );
+                self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    None,
+                    refusal.sentence(),
+                )?;
+                Ok(false)
             }
         }
-        Ok(true)
     }
 
     /// Put Folio's verb into Explorer's menu, or take it back out (§7.4).
