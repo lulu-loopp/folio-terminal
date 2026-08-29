@@ -6541,9 +6541,7 @@ pub enum PopupPress {
 #[must_use]
 pub fn popup_press(popup: Option<DialogPopup>, target: SettingsTarget) -> PopupPress {
     match popup {
-        Some(popup)
-            if target_popup(target) != Some(popup) && !target_raises_a_popup(target) =>
-        {
+        Some(popup) if target_popup(target) != Some(popup) && !target_raises_a_popup(target) => {
             PopupPress::Dismiss(popup)
         }
         _ => PopupPress::Through,

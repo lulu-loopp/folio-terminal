@@ -283,12 +283,7 @@ pub fn empty_width(body: [f32; 4], scale: f32) -> f32 {
 /// Measured in the face the block is **drawn** in, which is this page's own
 /// standing rule for every width it takes: a measurement in the wrong face is a
 /// box the ink does not fit.
-fn empty_lines(
-    sentence: &str,
-    column: f32,
-    scale: f32,
-    measure: &mut Measure<'_>,
-) -> Vec<String> {
+fn empty_lines(sentence: &str, column: f32, scale: f32, measure: &mut Measure<'_>) -> Vec<String> {
     let font = GIT_EMPTY_FONT_LOGICAL_PX * scale;
     crate::restore::wrap_anywhere(sentence, column, |text| {
         measure(text, font, MeasureFace::PLAIN)
@@ -4168,7 +4163,13 @@ mod tests {
     }
 
     fn rows_of(cache: &GitCache) -> GitPanelContent {
-        build(cache, GitPanelLook::default(), 1.0, TEST_COLUMN_PX, &mut ruler)
+        build(
+            cache,
+            GitPanelLook::default(),
+            1.0,
+            TEST_COLUMN_PX,
+            &mut ruler,
+        )
     }
 
     /// The page with one commit open.
@@ -4715,7 +4716,10 @@ mod tests {
             outcome: Err(GitFault::NotARepository),
         }));
         let content = rows_of(&cache);
-        assert_eq!(content.empty.as_deref(), Some(wrapped(git_not_a_repository()).as_slice()));
+        assert_eq!(
+            content.empty.as_deref(),
+            Some(wrapped(git_not_a_repository()).as_slice())
+        );
         assert!(content.rows.is_empty(), "and nothing else at all");
 
         // The other three faults keep git's own words, in the same place.
@@ -4769,7 +4773,9 @@ mod tests {
     #[test]
     fn the_git_panels_notice_wraps_inside_its_column() {
         let squashed = |text: &str| -> String {
-            text.chars().filter(|glyph| !glyph.is_whitespace()).collect()
+            text.chars()
+                .filter(|glyph| !glyph.is_whitespace())
+                .collect()
         };
         let sentence = crate::git::git_not_found();
         for pane in [170.0_f32, 240.0] {
@@ -4788,7 +4794,9 @@ mod tests {
                 outcome: Err(GitFault::GitMissing(sentence.to_owned())),
             }));
             let content = build(&cache, GitPanelLook::default(), 1.0, column, &mut ruler);
-            let lines = content.empty.expect("a machine with no git has a page to say so");
+            let lines = content
+                .empty
+                .expect("a machine with no git has a page to say so");
 
             assert!(
                 lines.len() > 1,
@@ -4814,7 +4822,11 @@ mod tests {
             let block = empty_block(body, lines.len(), 1.0);
             let line = (GIT_EMPTY_FONT_LOGICAL_PX * crate::seats::CHROME_LINE_HEIGHT).round();
             assert_eq!(block.line, line);
-            assert_eq!(block.right - block.left, column, "drawn in the box it was measured in");
+            assert_eq!(
+                block.right - block.left,
+                column,
+                "drawn in the box it was measured in"
+            );
             assert_eq!(
                 block.top,
                 body[1] + (body[3] - body[1] - line * lines.len() as f32) / 2.0,
