@@ -16795,9 +16795,11 @@ fn surface_subject_of(pane: Option<&PreviewPane>, stands_on_a_page: bool) -> Sur
     match pane.buffer.as_ref() {
         // A buffer with no path is a commit graph or a diff range: content, and
         // not this file's.
-        Some(source) => source.file_path().map_or(SurfaceSubject::Elsewhere, |path| {
-            SurfaceSubject::File(path.to_path_buf())
-        }),
+        Some(source) => source
+            .file_path()
+            .map_or(SurfaceSubject::Elsewhere, |path| {
+                SurfaceSubject::File(path.to_path_buf())
+            }),
         None => SurfaceSubject::Unfilled,
     }
 }
@@ -122944,9 +122946,10 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{surface:?} opens the fixture: {error:?}"));
         }
         assert_eq!(engines_settling_to(before + 3), before + 3);
-        for (surface, pane) in surfaces
-            .into_iter()
-            .zip([&after_a_document, &after_a_picture, &after_another])
+        for (surface, pane) in
+            surfaces
+                .into_iter()
+                .zip([&after_a_document, &after_a_picture, &after_another])
         {
             let seat = seats.get(surface).expect("the seat is still there");
             let subject = surface_subject_of(Some(pane), false);
