@@ -29,9 +29,9 @@
 //! for it by name ([`crate::WindowRenderer::set_glyph_census`]). A census frame
 //! is a slow frame on purpose; every other frame is untouched.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use glyphon::cosmic_text::CacheKey;
+use glyphon::cosmic_text::{CacheKey, SubpixelBin};
 use glyphon::{FontSystem, SwashCache, TextArea};
 
 use crate::TextLane;
@@ -158,6 +158,50 @@ impl GlyphCensus {
         self.lanes[lane.index()].rasters.keys().copied().collect()
     }
 
+    /// The same, with the subpixel bins collapsed: the face, glyph, size,
+    /// weight and flags a lane asked for, stripped of *where in the pixel* each
+    /// occurrence happened to land.
+    ///
+    /// What two lanes have in common at this resolution is what they *could*
+    /// share; what they share at full resolution is what they do share. Both
+    /// questions are worth asking separately, because only the second one is
+    /// about the atlas and only the first one is about the fonts.
+    #[must_use]
+    pub fn lane_faces_and_sizes(&self, lane: TextLane) -> HashSet<CacheKey> {
+        self.lanes[lane.index()]
+            .rasters
+            .keys()
+            .map(|key| {
+                let mut flattened = *key;
+                flattened.x_bin = SubpixelBin::Zero;
+                flattened.y_bin = SubpixelBin::Zero;
+                flattened
+            })
+            .collect()
+    }
+
+    /// Distinct rasters with the **subpixel bins collapsed** — one bitmap per
+    /// face, glyph, size, weight and flag set.
+    ///
+    /// The gap between this and [`Self::unique`] is the whole cost of drawing
+    /// text at fractional pen positions: cosmic-text bins the fractional part of
+    /// a glyph's origin into four steps on each axis, so one character at one
+    /// size can be as many as sixteen bitmaps in the atlas depending on where in
+    /// the pixel each of its occurrences happens to land. The ratio is a number
+    /// worth reporting on its own — it is the one multiplier on this ladder that
+    /// is not about how much text is on the screen.
+    #[must_use]
+    pub fn unique_without_subpixel(&self) -> usize {
+        let mut collapsed: HashSet<CacheKey> = HashSet::new();
+        for key in self.union().keys() {
+            let mut flattened = *key;
+            flattened.x_bin = SubpixelBin::Zero;
+            flattened.y_bin = SubpixelBin::Zero;
+            collapsed.insert(flattened);
+        }
+        collapsed.len()
+    }
+
     fn union(&self) -> HashMap<CacheKey, u64> {
         let mut all: HashMap<CacheKey, u64> = HashMap::new();
         for lane in &self.lanes {
@@ -184,11 +228,19 @@ impl GlyphCensus {
                 demand.unique
             ));
         }
+        let unique = self.unique();
+        let without_bins = self.unique_without_subpixel();
         format!(
-            "BT_GLYPH_CENSUS requested={} unique={} shared={} ink_px={} roof_px={} \
-             occupancy={:.1}% side={} {}",
+            "BT_GLYPH_CENSUS requested={} unique={} faces_sizes={} bins={:.2}x shared={} \
+             ink_px={} roof_px={} occupancy={:.1}% side={} {}",
             self.requested(),
-            self.unique(),
+            unique,
+            without_bins,
+            if without_bins == 0 {
+                0.0
+            } else {
+                unique as f64 / without_bins as f64
+            },
             self.shared_across_lanes(),
             self.ink_px(),
             self.atlas_px(),

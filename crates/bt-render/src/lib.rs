@@ -17613,6 +17613,180 @@ mod tests {
         );
     }
 
+    /// RED — **one ideograph at one size is one bitmap, however many lanes want
+    /// it and whatever colour each of them wants it in** (`docs/DESIGN.md`
+    /// §7.1.3m).
+    ///
+    /// The atlas is one texture for the whole process and a raster's identity is
+    /// cosmic-text's own `CacheKey` — face, glyph, size, weight, flags and the
+    /// subpixel bin the pen landed in. It carries **no lane** and **no colour**,
+    /// and both of those absences are load-bearing: a window whose interface,
+    /// terminal and document are all in Chinese draws the same few hundred
+    /// characters over and over, and an atlas that kept a copy per surface or
+    /// per ink would multiply the one number that has a ceiling.
+    ///
+    /// The chrome and an overlay layer are shaped by the same function from the
+    /// same geometry, so this can put the identical caption in both and demand
+    /// the strict answer: twice the instances, **once** the rasters. The page's
+    /// lane is shaped by a different function against a different metric, so of
+    /// it the honest question is the one about the fonts — the faces and sizes
+    /// it resolves to must be the chrome's, or the two surfaces are not even
+    /// candidates for sharing.
+    ///
+    /// Mutation: fold the lane or the label's colour into the shaping and
+    /// `shared` collapses to zero.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn one_ideograph_at_one_size_is_one_bitmap_in_every_lane() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        const WIDTH: u32 = 1600;
+        const HEIGHT: u32 = 1200;
+        const FONT_PX: f32 = 28.0;
+        const RECT: [f32; 4] = [40.0, 100.0, 1400.0, 160.0];
+
+        let text: String = (0..60)
+            .map(|index| char::from_u32(0x4E00 + index).expect("an ideograph"))
+            .collect();
+        let distinct = text.chars().count();
+
+        let mut gpu = on_this_machines_adapter(FORMAT);
+        let mut window =
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
+        window.set_glyph_census(true);
+
+        // The same caption in two lanes, in two inks, in one box.
+        window.set_chrome(
+            Vec::new(),
+            vec![stress_label(text.clone(), RECT, FONT_PX, None, false)],
+            Vec::new(),
+        );
+        let mut overlay = OverlayLayer::default();
+        let mut in_another_ink = stress_label(text.clone(), RECT, FONT_PX, None, false);
+        in_another_ink.color = [12, 200, 90];
+        overlay.labels.push(in_another_ink);
+        window.set_modal_overlay(vec![overlay]);
+        // And the same characters at the same size on a page, in the same face —
+        // a different shaper, a different lane, and the same fonts underneath.
+        window.set_preview_bodies(vec![PreviewBody {
+            clip: [40.0, 400.0, 1400.0, 800.0],
+            quads: Vec::new(),
+            paragraphs: vec![PreviewParagraph {
+                runs: vec![PreviewRun {
+                    text: text.clone(),
+                    color: [200, 40, 40],
+                    mono: false,
+                    bold: false,
+                    italic: false,
+                    font_scale: 1.0,
+                    inline_box_px: None,
+                }],
+                rect: [40.0, 400.0, 1400.0, 460.0],
+                font_size_px: FONT_PX,
+                line_height_px: 60.0,
+                wrap: false,
+                letter_spacing_em: 0.0,
+                align_right: false,
+                align_center: false,
+            }],
+            blocks: Vec::new(),
+            rasters: Vec::new(),
+        }]);
+
+        let frame = single_cell_cursor_frame(window.metrics());
+        window
+            .present_frame(
+                &mut gpu,
+                &[SeatFrame {
+                    seat: SeatViewport {
+                        x: 0,
+                        y: 0,
+                        width: WIDTH,
+                        height: HEIGHT,
+                    },
+                    clip: SeatViewport {
+                        x: 0,
+                        y: 0,
+                        width: WIDTH,
+                        height: HEIGHT,
+                    },
+                    frame: &frame,
+                    focused: true,
+                }],
+                FrameTrigger {
+                    occurred_at: Instant::now(),
+                    source: FrameSource::Expose,
+                },
+            )
+            .expect("one frame");
+        let census = window.glyph_census().expect("the census was asked for");
+        let chrome = census.lane(TextLane::Chrome);
+        let overlay_demand = census.lane(TextLane::Overlay);
+        assert_eq!(
+            (chrome.requested, overlay_demand.requested),
+            (distinct, distinct),
+            "both lanes must have asked for the whole caption: {}",
+            census.line()
+        );
+        assert_eq!(
+            chrome.unique,
+            distinct,
+            "the chrome's own caption is one bitmap per character: {}",
+            census.line()
+        );
+        assert_eq!(
+            census.shared_across_lanes(),
+            distinct,
+            "the same caption in two lanes and two inks is one set of bitmaps, not two: {}",
+            census.line()
+        );
+        let chrome_faces = census.lane_faces_and_sizes(TextLane::Chrome);
+        let page_faces = census.lane_faces_and_sizes(TextLane::Preview);
+        assert_eq!(
+            chrome_faces,
+            page_faces,
+            "the page resolved the same characters at the same size to different fonts than the \
+             chrome did, so the two surfaces can never share a raster: {}",
+            census.line()
+        );
+    }
+
+    /// PIN — **every lane prepares into the one shared atlas.**
+    ///
+    /// The sharing the gate above measures is only true while there is one
+    /// texture to share. `GpuContext` holds exactly one [`TextAtlas`] and every
+    /// prepare in the frame is handed `&mut gpu.atlas`; a second atlas — one per
+    /// lane, say, which is the obvious way to buy a lane its own ceiling — would
+    /// buy it by making every character the chrome and the page both set at the
+    /// same size into two bitmaps instead of one.
+    ///
+    /// Mutation: give any lane an atlas of its own.
+    #[test]
+    fn every_lane_prepares_into_the_one_shared_atlas() {
+        let source = source_without_prose();
+        let start = source.find("fncompose_frame(").expect("compose_frame");
+        let end = source[start..]
+            .find("fnprepare_text_rows(&mutself,")
+            .expect("prepare_text_rows follows compose_frame");
+        let body = &source[start..start + end];
+        assert_eq!(
+            body.matches("&mutgpu.atlas,").count(),
+            6,
+            "five prepares — the grid, the status chip, the chrome, the page and each overlay \
+             level — and the one `TextRenderer::new` a new overlay level needs, all naming \
+             `gpu.atlas` and nothing else"
+        );
+        let context = block_beginning_with(include_str!("lib.rs"), "pub struct GpuContext {");
+        assert!(
+            !context.is_empty(),
+            "the device context has to exist before anything can be held to it"
+        );
+        assert_eq!(
+            context.matches("TextAtlas").count(),
+            1,
+            "one device context, one atlas"
+        );
+    }
+
     /// RED — **a label nobody can see does not cast its bitmaps**
     /// (`docs/DESIGN.md` §7.1.3m, the first of §7.1.3l's two written-down
     /// debts).
