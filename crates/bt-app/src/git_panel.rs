@@ -254,6 +254,47 @@ pub fn git_reading() -> &'static str {
     Text::GitReading.text()
 }
 
+/// **The width the page's one sentence is wrapped to** (user report,
+/// 2026-08-29) — the column its rows already stand in, which is the body less
+/// `.git-view`'s own horizontal padding.
+///
+/// The rows' column and not the whole body, because a sentence that ran wider
+/// than the list under it would be a page with two left edges. It is derived
+/// from the same two numbers [`git_panel_geometry`] derives `left` and `right`
+/// from, which is what keeps the measure and the box one answer.
+#[must_use]
+pub fn empty_width(body: [f32; 4], scale: f32) -> f32 {
+    let pad_x = (GIT_VIEW_PADDING_X_LOGICAL_PX * scale).round();
+    ((body[2] - pad_x) - (body[0] + pad_x)).max(0.0)
+}
+
+/// Break the page's one sentence to the column it will be drawn in.
+///
+/// **[`crate::restore::wrap_anywhere`] and not a third wrapper** (user ruling,
+/// 2026-08-29). It is the same call §7.43 ① made of the preview card's fact
+/// line, and it is owed here for both of that function's reasons at once: two of
+/// these three sentences are the product's own prose, in two languages — so the
+/// wrap has to break English at its spaces and Chinese between its ideographs,
+/// which is what [`crate::restore::wrap`] underneath already does — and the
+/// third is git's own words about a repository it would not open, which is as
+/// often as not one unbroken path or one unbroken token, which is exactly the
+/// case `anywhere` is the last resort for.
+///
+/// Measured in the face the block is **drawn** in, which is this page's own
+/// standing rule for every width it takes: a measurement in the wrong face is a
+/// box the ink does not fit.
+fn empty_lines(
+    sentence: &str,
+    column: f32,
+    scale: f32,
+    measure: &mut Measure<'_>,
+) -> Vec<String> {
+    let font = GIT_EMPTY_FONT_LOGICAL_PX * scale;
+    crate::restore::wrap_anywhere(sentence, column, |text| {
+        measure(text, font, MeasureFace::PLAIN)
+    })
+}
+
 /// Who is speaking, on a notice raised by a refused verb (toast ruling,
 /// 2026-08-16).
 ///
@@ -1313,7 +1354,18 @@ pub struct GitPanelContent {
     /// nothing about it will change until the machine does — so it is not a
     /// toast, and it is not red either: it is simply what this page has to say,
     /// standing in the muted ink where the rows would have been.
-    pub empty: Option<String>,
+    ///
+    /// **And a list of lines rather than one** (user report, 2026-08-29). The
+    /// longest of these sentences is the one a machine with no git gets —
+    /// *git.exe was not found on this machine — install Git for Windows to use
+    /// this page* — and it was drawn as a single centred label in a column 240
+    /// pixels wide, so both ends of it were clipped away and the reader was left
+    /// with the middle of a sentence whose whole point is the instruction at its
+    /// end. That is §7.43 ①'s photograph of the preview card's fact line, one
+    /// surface along, and it gets that ruling's answer: wrapped by [`build`],
+    /// which holds the font, to the column the page's own rows stand in, and the
+    /// block is then as tall as the number of lines it took.
+    pub empty: Option<Vec<String>>,
 }
 
 // ── building one from a cache ──────────────────────────────────────────────
@@ -1421,6 +1473,7 @@ pub fn build(
     cache: &GitCache,
     look: GitPanelLook<'_>,
     scale: f32,
+    column: f32,
     measure: &mut Measure<'_>,
 ) -> GitPanelContent {
     let GitPanelLook {
@@ -1433,11 +1486,11 @@ pub fn build(
     // has, there is no root to ask anything else about.
     match cache.repo() {
         GitSlot::Idle | GitSlot::Pending => {
-            content.empty = Some(git_reading().to_owned());
+            content.empty = Some(empty_lines(git_reading(), column, scale, measure));
             return content;
         }
         GitSlot::Failed(GitFault::NotARepository) => {
-            content.empty = Some(git_not_a_repository().to_owned());
+            content.empty = Some(empty_lines(git_not_a_repository(), column, scale, measure));
             return content;
         }
         // A machine with no git, a repository git refuses to read, a question it
@@ -1448,7 +1501,7 @@ pub fn build(
         // is transient: nothing about a machine with no git will change while
         // you look at it, so none of them is a toast either.
         GitSlot::Failed(fault) => {
-            content.empty = Some(fault_sentence(fault));
+            content.empty = Some(empty_lines(&fault_sentence(fault), column, scale, measure));
             return content;
         }
         GitSlot::Ready(_) => {}
@@ -2138,6 +2191,45 @@ pub fn git_panel_geometry(
     }
 }
 
+/// Where the page's one sentence stands, once it is known how many lines it
+/// took (user ruling, 2026-08-29).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GitEmptyBlock {
+    pub left: f32,
+    pub right: f32,
+    /// The first line's top. The block grows downwards by [`Self::line`].
+    pub top: f32,
+    /// One line's height — the chrome's own line box at the empty state's size.
+    pub line: f32,
+}
+
+/// **The block the empty sentence's lines stand in**, centred in the column.
+///
+/// Its own function and public for [`preview_card_geometry`]'s reason one
+/// surface along: how tall the block is depends on how many lines the sentence
+/// wrapped to, which is a fact only the caller that measured it holds — so a
+/// claim about where the ink lands has to be able to be made without a window.
+#[must_use]
+pub fn empty_block(viewport: [f32; 4], lines: usize, scale: f32) -> GitEmptyBlock {
+    let pad_x = (GIT_VIEW_PADDING_X_LOGICAL_PX * scale).round();
+    let left = viewport[0] + pad_x;
+    let right = (viewport[2] - pad_x).max(left);
+    let line = (GIT_EMPTY_FONT_LOGICAL_PX * scale * crate::seats::CHROME_LINE_HEIGHT)
+        .round()
+        .max(1.0);
+    let height = line * lines as f32;
+    // Centred, and never above the column's own top: a sentence taller than the
+    // body it stands in starts at the top and is clipped at the bottom, which is
+    // the only reading under which the first words are the ones you can read.
+    let top = (viewport[1] + (viewport[3] - viewport[1] - height) / 2.0).max(viewport[1]);
+    GitEmptyBlock {
+        left,
+        right,
+        top,
+        line,
+    }
+}
+
 /// The only scroll a Git page is allowed to hold.
 ///
 /// Every write goes through here, on [`crate::seats::clamp_files_scroll`]'s own
@@ -2195,6 +2287,16 @@ fn nearest_place(rows: &[GitRow], row: usize, forward: bool) -> Option<usize> {
         .find(|index| !rows[*index].is_furniture())
 }
 
+/// **The column the fixtures below wrap their one sentence to** — a 240px Files
+/// pane at 1× less `.git-view`'s own padding, which is the width the user's
+/// screenshot was taken at.
+///
+/// A number and not a call to [`empty_width`], because a fixture that derived it
+/// from a body rect would be a fixture asserting the derivation it is standing
+/// on; the pins that are about the derivation name it directly.
+#[cfg(test)]
+const TEST_COLUMN_PX: f32 = 220.0;
+
 /// One page of a repository that has answered, for tests in **other** modules.
 ///
 /// It lives out here rather than in `mod tests` because the float's chassis has
@@ -2233,6 +2335,7 @@ pub fn sample_page_for_tests() -> GitPanelContent {
         &cache,
         GitPanelLook::default(),
         1.0,
+        TEST_COLUMN_PX,
         &mut |text: &str, size: f32, _: MeasureFace| text.chars().count() as f32 * size * 0.5,
     )
 }
@@ -2702,19 +2805,30 @@ pub fn push_git_panel(
     let geometry = git_panel_geometry(body, content, scale);
 
     if let Some(sentence) = content.empty.as_ref() {
-        labels.push(ChromeLabel {
-            mono: false,
-            text: sentence.clone(),
-            rect: geometry.viewport,
-            font_size_px: GIT_EMPTY_FONT_LOGICAL_PX * scale,
-            color: palette.git_head_muted,
-            align_right: false,
-            align_center: true,
-            letter_spacing_em: 0.0,
-            weight: ChromeLabelWeight::Regular,
-            tabular_numerals: false,
-            clip: Some(geometry.viewport),
-        });
+        // **One label per wrapped line, the block centred in the column**
+        // (§7.43 ①'s rule, user ruling 2026-08-29). The block is as tall as the
+        // sentence turned out to be and is centred on the viewport's own middle,
+        // which is what "centred" meant when it was one line and goes on meaning
+        // when it is three. The column is the one the lines were measured
+        // against — `empty_width`'s, which is the rows' own — so the box the ink
+        // is centred in is the box it was fitted to.
+        let block = empty_block(geometry.viewport, sentence.len(), scale);
+        for (index, line) in sentence.iter().enumerate() {
+            let top = block.top + block.line * index as f32;
+            labels.push(ChromeLabel {
+                mono: false,
+                text: line.clone(),
+                rect: [block.left, top, block.right, top + block.line],
+                font_size_px: GIT_EMPTY_FONT_LOGICAL_PX * scale,
+                color: palette.git_head_muted,
+                align_right: false,
+                align_center: true,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: Some(geometry.viewport),
+            });
+        }
         return;
     }
 
@@ -3994,6 +4108,17 @@ mod tests {
         text.chars().count() as f32 * size * 0.5
     }
 
+    /// One sentence, broken the way the fixtures' own column breaks it — what
+    /// [`GitPanelContent::empty`] holds since it became a list of lines
+    /// (2026-08-29).
+    ///
+    /// The pins that read it are about **which sentence the page chose**, and
+    /// that claim survives the wrap: a page that picked the other one still
+    /// fails, because the other one wraps to other lines.
+    fn wrapped(sentence: &str) -> Vec<String> {
+        empty_lines(sentence, TEST_COLUMN_PX, 1.0, &mut ruler)
+    }
+
     /// A cache that has been told everything, through the door every answer
     /// really comes through.
     ///
@@ -4043,7 +4168,7 @@ mod tests {
     }
 
     fn rows_of(cache: &GitCache) -> GitPanelContent {
-        build(cache, GitPanelLook::default(), 1.0, &mut ruler)
+        build(cache, GitPanelLook::default(), 1.0, TEST_COLUMN_PX, &mut ruler)
     }
 
     /// The page with one commit open.
@@ -4063,6 +4188,7 @@ mod tests {
                 remotes_open: true,
             },
             1.0,
+            TEST_COLUMN_PX,
             &mut ruler,
         )
     }
@@ -4589,7 +4715,7 @@ mod tests {
             outcome: Err(GitFault::NotARepository),
         }));
         let content = rows_of(&cache);
-        assert_eq!(content.empty.as_deref(), Some(git_not_a_repository()));
+        assert_eq!(content.empty.as_deref(), Some(wrapped(git_not_a_repository()).as_slice()));
         assert!(content.rows.is_empty(), "and nothing else at all");
 
         // The other three faults keep git's own words, in the same place.
@@ -4607,14 +4733,93 @@ mod tests {
             let content = rows_of(&cache);
             assert_ne!(
                 content.empty.as_deref(),
-                Some(git_not_a_repository()),
+                Some(wrapped(git_not_a_repository()).as_slice()),
                 "{fault:?} is not the same claim as 'there is no repository here'"
             );
             assert_eq!(
                 content.empty.as_deref(),
-                Some(fault_sentence(&fault).as_str())
+                Some(wrapped(&fault_sentence(&fault)).as_slice())
             );
             assert!(content.rows.is_empty(), "and the page is otherwise bare");
+        }
+    }
+
+    /// RED GATE (user report, 2026-08-29) — **the page's one sentence wraps
+    /// inside its column.**
+    ///
+    /// The report is a screenshot of a Files column switched to Git on a machine
+    /// with no `git.exe`: the sentence that tells you what to install was drawn
+    /// as a single centred line in a 240-pixel column, so both ends of it were
+    /// cut away and what was left was the middle of an instruction. That is
+    /// §7.43 ①'s photograph of the preview card's fact line, one surface along,
+    /// and it gets that ruling's answer rather than a shorter sentence.
+    ///
+    /// Two widths, because one would not tell a wrap from a coincidence: 170 is
+    /// about as narrow as a Files pane is dragged and 240 is its resting width,
+    /// and the sentence has to fit both.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① draw the sentence unwrapped — the first assertion, since one line at
+    ///    either width is wider than the column;
+    /// ② wrap to the body instead of to the rows' own column — the second, by
+    ///    the ten pixels of `.git-view` padding at each edge;
+    /// ③ drop or duplicate a piece at a break — the third;
+    /// ④ leave the block one line tall however many lines it holds — the
+    ///    fourth, which is what makes the centring answer the count.
+    #[test]
+    fn the_git_panels_notice_wraps_inside_its_column() {
+        let squashed = |text: &str| -> String {
+            text.chars().filter(|glyph| !glyph.is_whitespace()).collect()
+        };
+        let sentence = crate::git::git_not_found();
+        for pane in [170.0_f32, 240.0] {
+            let body = [0.0, 0.0, pane, 600.0];
+            let column = empty_width(body, 1.0);
+            assert_eq!(
+                column,
+                pane - 2.0 * GIT_VIEW_PADDING_X_LOGICAL_PX,
+                "the sentence is wrapped to the column the rows stand in"
+            );
+
+            let mut cache = GitCache::default();
+            cache.retarget(Path::new(ROOT));
+            assert!(cache.accept(GitAnswer::Repo {
+                dir: PathBuf::from(ROOT),
+                outcome: Err(GitFault::GitMissing(sentence.to_owned())),
+            }));
+            let content = build(&cache, GitPanelLook::default(), 1.0, column, &mut ruler);
+            let lines = content.empty.expect("a machine with no git has a page to say so");
+
+            assert!(
+                lines.len() > 1,
+                "a {pane}px column cannot hold this sentence on one line, so it \
+                 has to have been broken: {lines:?}"
+            );
+            for line in &lines {
+                let drawn = ruler(line, GIT_EMPTY_FONT_LOGICAL_PX, MeasureFace::PLAIN);
+                assert!(
+                    drawn <= column,
+                    "`{line}` is {drawn} wide in a {column}px column — the ends \
+                     of it would be cut off, which is the report"
+                );
+            }
+            assert_eq!(
+                squashed(&lines.concat()),
+                squashed(sentence),
+                "and every word of it survived the break"
+            );
+
+            // The block is as tall as the sentence turned out to be, and centred
+            // on that height rather than on one line's.
+            let block = empty_block(body, lines.len(), 1.0);
+            let line = (GIT_EMPTY_FONT_LOGICAL_PX * crate::seats::CHROME_LINE_HEIGHT).round();
+            assert_eq!(block.line, line);
+            assert_eq!(block.right - block.left, column, "drawn in the box it was measured in");
+            assert_eq!(
+                block.top,
+                body[1] + (body[3] - body[1] - line * lines.len() as f32) / 2.0,
+                "the whole block is centred, not its first line"
+            );
         }
     }
 
@@ -5342,7 +5547,7 @@ mod tests {
                 stat: None,
             }]),
         }));
-        let opened = build(&cache, look(&hash), 1.0, &mut ruler);
+        let opened = build(&cache, look(&hash), 1.0, TEST_COLUMN_PX, &mut ruler);
         let file = opened
             .rows
             .iter()
@@ -5425,7 +5630,7 @@ mod tests {
                 stat: None,
             }]),
         }));
-        let content = build(&cache, look(&open), 1.0, &mut ruler);
+        let content = build(&cache, look(&open), 1.0, TEST_COLUMN_PX, &mut ruler);
         let files: Vec<&GitCommitFileRow> = content
             .rows
             .iter()
@@ -5481,7 +5686,7 @@ mod tests {
                 stat: None,
             }]),
         }));
-        let content = build(&cache, look(&hash), 1.0, &mut ruler);
+        let content = build(&cache, look(&hash), 1.0, TEST_COLUMN_PX, &mut ruler);
         let row = content
             .rows
             .iter()
@@ -5567,7 +5772,7 @@ mod tests {
                 stat: None,
             }]),
         }));
-        let page = build(&cache, look(&hash), 1.0, &mut ruler);
+        let page = build(&cache, look(&hash), 1.0, TEST_COLUMN_PX, &mut ruler);
         let row = page
             .rows
             .iter()
@@ -6222,6 +6427,7 @@ mod tests {
             &cache,
             look("bbbbbbb0000000000000000000000000000000000"),
             1.0,
+            TEST_COLUMN_PX,
             &mut ruler,
         );
         let Some(row) = open.open_row else {

@@ -18769,7 +18769,11 @@ pub(crate) fn seat_short_caption<'a>(
 /// renderer fact behind all three. The day it moves, it moves to `bt-render`
 /// beside the function that decides it and all three call sites follow — which
 /// is a change to two modules this slice has no business touching.
-const CHROME_LINE_HEIGHT: f32 = 1.4;
+///
+/// `pub(crate)` since the Git page's empty state grew lines (2026-08-29): a
+/// fourth copy of the number would be the copy that stops agreeing with this
+/// one, and the three above are copies in modules that do not import this file.
+pub(crate) const CHROME_LINE_HEIGHT: f32 = 1.4;
 
 /// The drag ghost's box and the two things standing in it, in physical pixels
 /// (J114).

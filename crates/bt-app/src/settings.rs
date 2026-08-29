@@ -20630,6 +20630,265 @@ mod tests {
         );
     }
 
+    /// The `General` page with `Language`'s picker standing open — the dialog in
+    /// exactly the state the 2026-08-29 report was made against.
+    fn language_open() -> SettingsLayout {
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        layout_for_menu(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            Some(SettingsRow::Language),
+            None,
+            content(&rows, &lines),
+            SettingsCategory::General,
+            UNSCROLLED,
+            MENU_UNSCROLLED,
+            &mut flat(0.0),
+        )
+        .expect("this window can host the dialog")
+    }
+
+    /// RED GATE (user report and ruling, 2026-08-29) — **a press outside an open
+    /// dropdown closes it and goes no further.**
+    ///
+    /// The report: open `General ▸ Language`, click the dialog's own blank
+    /// background, and the list stays standing. Every other popup in this program
+    /// goes away on a press outside it, and this one could only be shut by
+    /// pressing its own button again or by picking something.
+    ///
+    /// The ruling is one rule for all of them: outside the rectangle takes it
+    /// down, **and that press is eaten** — it does not go on to reach the control
+    /// it landed on. So the second half of this gate presses things that are not
+    /// blank at all: the `×`, which would otherwise close the whole dialog, and a
+    /// word of the rail, which would otherwise turn the page. One layer per
+    /// gesture, which is what the first `Esc` already does.
+    ///
+    /// **The exception is an opener**, which every menu in this window already
+    /// makes for its own `⌄`: a press on a picker button is not outside, so a
+    /// second dropdown opens on the same press that shuts the first — the same
+    /// one-press switch a second right press makes of a context menu.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① `popup_press` answers `Through` for the panel — the report itself;
+    /// ② it answers `Through` for `Close` or for a rail word (the press leaks to
+    ///    the control under it, closing the dialog or turning the page);
+    /// ③ it answers `Dismiss` for a combo button (the switch becomes two
+    ///    presses, and a picker's own button can no longer toggle it shut);
+    /// ④ `target_popup` stops naming a picker item as the picker's, which makes
+    ///    choosing an option dismiss the list instead of picking from it.
+    #[test]
+    fn a_press_outside_an_open_dropdown_closes_it_and_goes_no_further() {
+        let layout = language_open();
+        let values = values();
+        let open = DialogPopup::Choice(SettingsRow::Language);
+        let up = Some(open);
+
+        // ① the list really is standing over the page, and a press in its body
+        // belongs to it.
+        let body = layout.menu.expect("the picker is open");
+        let (x, y) = centre(body);
+        assert_eq!(
+            popup_press(up, hit(&layout, &values, x, y)),
+            PopupPress::Through,
+            "the popup's own frame is not outside it"
+        );
+
+        // ② the dialog's own background — the press the report made.
+        let blank = (
+            f64::from(layout.frame[0]) + 4.0,
+            f64::from(layout.frame[3]) - 4.0,
+        );
+        assert_eq!(
+            hit(&layout, &values, blank.0, blank.1),
+            SettingsTarget::Panel,
+            "the foot of the dialog, away from every control"
+        );
+        assert_eq!(
+            popup_press(up, SettingsTarget::Panel),
+            PopupPress::Dismiss(open),
+            "and a press there takes the list down"
+        );
+
+        // ③ and a press on a live control is swallowed rather than run.
+        let (cx, cy) = centre(layout.close);
+        assert_eq!(
+            hit(&layout, &values, cx, cy),
+            SettingsTarget::Close,
+            "the ×, which is a control and not blank space"
+        );
+        for target in [
+            SettingsTarget::Close,
+            SettingsTarget::Scrim,
+            SettingsTarget::Nav(SettingsCategory::Shortcuts),
+            SettingsTarget::Slider(SettingsRow::Acrylic),
+        ] {
+            assert_eq!(
+                popup_press(up, target),
+                PopupPress::Dismiss(open),
+                "{target:?} is outside the open list, so the press ends there"
+            );
+        }
+
+        // ④ every opener is the exception, so one press switches lists.
+        for target in [
+            SettingsTarget::Combo(SettingsRow::Language),
+            SettingsTarget::Combo(SettingsRow::Theme),
+            SettingsTarget::ProfileMore(0),
+        ] {
+            assert_eq!(
+                popup_press(up, target),
+                PopupPress::Through,
+                "{target:?} raises a popup, so it owns the toggle"
+            );
+        }
+
+        // ⑤ and the panel really does put it away, leaving the dialog up.
+        let mut panel = keyboarded_on(SettingsCategory::General);
+        panel.toggle_menu(SettingsRow::Language);
+        assert_eq!(panel.popup_up(), Some(open));
+        panel.close_popup(open);
+        assert_eq!(panel.menu(), None, "the list is gone");
+        assert!(panel.is_open(), "and the dialog is not");
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Combo(SettingsRow::Language)),
+            "the keyboard goes back to the button it hung under, as Esc leaves it"
+        );
+        assert_eq!(panel.focus_ring(), None, "and a mouse leaves no ring");
+    }
+
+    /// RED GATE (2026-08-29) — **Escape closes an open dropdown**, and closes
+    /// only that.
+    ///
+    /// The pointer's door and the keyboard's are the same ruling read twice, so
+    /// the keyboard's is pinned beside it: one layer per press, the dialog still
+    /// standing afterwards, and the keyboard back on the button the list hung
+    /// under.
+    ///
+    /// Red gate: let `close_one_layer` fall through to `close()` while a picker
+    /// is open and the second assertion names a dialog that is already gone.
+    #[test]
+    fn escape_closes_an_open_dropdown() {
+        let mut panel = keyboarded_on(SettingsCategory::General);
+        panel.toggle_menu(SettingsRow::Language);
+        assert_eq!(
+            panel.popup_up(),
+            Some(DialogPopup::Choice(SettingsRow::Language))
+        );
+
+        assert_eq!(
+            keyed(&mut panel, SettingsKey::Escape),
+            SettingsKeyVerdict::Moved
+        );
+        assert_eq!(panel.popup_up(), None, "the list went");
+        assert!(panel.is_open(), "and the dialog stayed");
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Combo(SettingsRow::Language))
+        );
+    }
+
+    /// RED GATE (2026-08-29) — **a press inside the dropdown still picks**: the
+    /// reverse of the gate above, and the thing a click-away written one pixel
+    /// too wide would break.
+    ///
+    /// The whole list is asked, not one item: a rule that dismissed on `Menu`
+    /// (the body between the items) or on the scroll of a capped picker would
+    /// take the list down under the very hand reaching into it.
+    #[test]
+    fn a_press_inside_the_dropdown_still_picks() {
+        let layout = language_open();
+        let values = values();
+        let up = Some(DialogPopup::Choice(SettingsRow::Language));
+
+        assert!(
+            !layout.items.is_empty(),
+            "the Language picker draws its options"
+        );
+        for (index, item) in layout.items.iter().enumerate() {
+            let (x, y) = centre(*item);
+            let target = hit(&layout, &values, x, y);
+            assert_eq!(
+                target,
+                SettingsTarget::Choice(SettingsRow::Language, index),
+                "item {index} answers with its own choice"
+            );
+            assert_eq!(
+                popup_press(up, target),
+                PopupPress::Through,
+                "so the press reaches the picker's own verb"
+            );
+        }
+
+        // And every other answer a popup can give is its own too — the body
+        // between the items, the closing verb, and the marks that live inside an
+        // item.
+        for target in [
+            SettingsTarget::Menu(SettingsRow::Language),
+            SettingsTarget::MenuAction(SettingsRow::LightScheme),
+            SettingsTarget::MenuItemEdit(SettingsRow::LightScheme, 0),
+            SettingsTarget::MenuItemDelete(SettingsRow::LightScheme, 0),
+        ] {
+            let row = match target {
+                SettingsTarget::Menu(row)
+                | SettingsTarget::MenuAction(row)
+                | SettingsTarget::MenuItemEdit(row, _)
+                | SettingsTarget::MenuItemDelete(row, _) => row,
+                other => panic!("{other:?} is not one of the picker's answers"),
+            };
+            assert_eq!(
+                target_popup(target),
+                Some(DialogPopup::Choice(row)),
+                "{target:?} is the picker's own"
+            );
+            assert_eq!(
+                popup_press(Some(DialogPopup::Choice(row)), target),
+                PopupPress::Through
+            );
+        }
+    }
+
+    /// PIN (2026-08-29) — **the two popups this dialog raises are one at a
+    /// time**, which is E61's rule one layer in.
+    ///
+    /// The click-away that used to live inside [`SettingsPanel::press`] is what
+    /// kept them apart, and it is gone: the openers keep them apart now, which is
+    /// where the window's own menus keep it (`close_popups_except`).
+    #[test]
+    fn one_of_this_dialogs_popups_at_a_time() {
+        let mut panel = keyboarded_on(SettingsCategory::Profiles);
+        panel.toggle_row_menu(2);
+        assert_eq!(panel.popup_up(), Some(DialogPopup::RowMenu(2)));
+
+        panel.toggle_menu(SettingsRow::Language);
+        assert_eq!(
+            panel.popup_up(),
+            Some(DialogPopup::Choice(SettingsRow::Language)),
+            "the picker's opener put the row menu away"
+        );
+
+        panel.toggle_row_menu(1);
+        assert_eq!(
+            panel.popup_up(),
+            Some(DialogPopup::RowMenu(1)),
+            "and the row menu's opener put the picker away"
+        );
+        assert_eq!(panel.menu(), None);
+
+        // A row menu is the innermost rung, so it is what `popup_up` names while
+        // both fields somehow hold something — the same order `close_one_layer`
+        // unwinds in.
+        panel.close_popup(DialogPopup::RowMenu(1));
+        assert_eq!(panel.popup_up(), None);
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::ProfileMore(1)),
+            "the keyboard goes back to the ⋯ the list hung under"
+        );
+    }
+
     /// PIN: **an option this machine cannot start is skipped by the arrows and
     /// refused by Enter** — the same [`SettingsRow::option_enabled`] answer the
     /// hit test and the draw already read. A greyed item the keyboard could land
