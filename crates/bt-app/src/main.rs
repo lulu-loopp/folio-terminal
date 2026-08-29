@@ -60,6 +60,7 @@ mod git;
 mod git_graph;
 mod git_panel;
 mod git_watch;
+mod glyph_trace;
 mod hang_watch;
 mod hex_peek;
 mod highlight;
@@ -8879,6 +8880,9 @@ struct WindowRuntime {
     /// What `BT_PREVIEW_TRACE`'s frame station last said about this window, so
     /// that a still pane writes one line and not sixty a second.
     preview_trace_echo: preview_trace::FrameEcho,
+    /// The same for `BT_GLYPH_CENSUS`'s station — what this window's last frame
+    /// asked the shared glyph atlas for.
+    glyph_census_echo: glyph_trace::CensusEcho,
     /// The fraction of a wheel detent the card aim is holding, if any — see
     /// [`CardAim`].
     ///
@@ -10447,6 +10451,20 @@ struct WindowRuntime {
     /// what lets the two be told apart without guessing, and without a one-shot flag whose
     /// correctness would depend on winit's delivery order.
     lawful_client_size: Option<PhysicalSize<u32>>,
+}
+
+/// **What a present tells this window's traces**, travelling as one place.
+///
+/// Two stations ask the same frame two questions — `BT_PREVIEW_TRACE` what it
+/// did with the documents on it, `BT_GLYPH_CENSUS` what it asked the shared
+/// glyph atlas for — and each keeps a memory of its own so that a still window
+/// writes one line and not sixty a second. They arrive at the funnel together
+/// because they leave it together: a frame that says nothing new to one of them
+/// usually says nothing new to the other, and a caller that had to remember two
+/// separate borrows would be a caller that could forget one.
+struct FrameTraces<'a> {
+    preview: &'a mut preview_trace::FrameEcho,
+    census: &'a mut glyph_trace::CensusEcho,
 }
 
 impl WindowRuntime {
@@ -30039,6 +30057,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         web_thumbs: web_thumb::WebThumbs::default(),
         web_shrinker: None,
         preview_trace_echo: preview_trace::FrameEcho::default(),
+        glyph_census_echo: glyph_trace::CensusEcho::default(),
         card_aim: None,
         table_paints: HashMap::new(),
         preview_button_width: 0.0,
@@ -82440,15 +82459,31 @@ impl Runtime<'_> {
         renderer: &mut WindowRenderer,
         compositor: &bt_platform::Compositor,
         window: &Window,
-        echo: &mut preview_trace::FrameEcho,
+        traces: FrameTraces<'_>,
         seat_frames: &[bt_render::SeatFrame<'_>],
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome> {
+        let FrameTraces { preview, census } = traces;
+        // **What the frame is allowed to cost to measure**, decided at the one
+        // funnel because that is the one place every frame passes. Counting a
+        // frame's demand on the glyph atlas means rasterizing each distinct
+        // glyph a second time to learn its size, so it is off unless
+        // `BT_GLYPH_CENSUS` names a file to write it to; setting the flag is a
+        // bool store and asking the gate is a `OnceLock` read.
+        renderer.set_glyph_census(glyph_trace::wanted());
         let outcome = renderer.present_frame(gpu, seat_frames, trigger)?;
         // **What this frame did with the documents on it** — the one funnel is
         // also the one place that can say it, and it says it only when the
         // answer moved (`BT_PREVIEW_TRACE`).
-        preview_trace::frame(preview_trace::global(), echo, renderer.preview_text_frame());
+        preview_trace::frame(
+            preview_trace::global(),
+            preview,
+            renderer.preview_text_frame(),
+        );
+        // **And what it asked the shared glyph atlas for** (`BT_GLYPH_CENSUS`,
+        // `docs/DESIGN.md` §7.1.3m) — the ceiling §7.1.3l could only measure by
+        // hand, measurable on the machine that meets it.
+        glyph_trace::frame(glyph_trace::global(), census, renderer.glyph_census());
         // A textless present is still a present: an image went to the swapchain,
         // so the composition tree has to publish it or the glass keeps showing a
         // picture the swapchain no longer holds. What that frame *owes* is a
@@ -82594,7 +82629,10 @@ impl Runtime<'_> {
             &mut self.window.renderer,
             &self.window.compositor,
             &self.window.window,
-            &mut self.window.preview_trace_echo,
+            FrameTraces {
+                preview: &mut self.window.preview_trace_echo,
+                census: &mut self.window.glyph_census_echo,
+            },
             &seat_frames,
             trigger,
         )
@@ -82749,7 +82787,10 @@ impl Runtime<'_> {
             &mut self.window.renderer,
             &self.window.compositor,
             &self.window.window,
-            &mut self.window.preview_trace_echo,
+            FrameTraces {
+                preview: &mut self.window.preview_trace_echo,
+                census: &mut self.window.glyph_census_echo,
+            },
             &seat_frames,
             trigger,
         )
