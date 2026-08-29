@@ -16724,6 +16724,84 @@ fn preview_lane_after_landing(
     }
 }
 
+/// **What one preview surface is showing**, in the three shapes the recording
+/// sweep can act on (user report 2026-08-28; `docs/DESIGN.md` §7.44 ⑬).
+///
+/// [`WindowRuntime::sweep_video_seats`] keeps a recording alive while the
+/// surface it is keyed by is still about the file it was opened on. Until this
+/// type existed it asked that of the **picture lane alone**, and read a surface
+/// with no [`PreviewImageState`] as one that had not said yet — which is right
+/// about exactly one surface, a float one call old in the middle of a tear-off,
+/// and wrong about every surface that has been handed something that is not a
+/// picture. A pane playing a `.wmv` and then given a `.md` went on decoding it:
+/// the document rendered, and the recording's own violet stood over the middle
+/// of it with its control bar still on the picture.
+///
+/// So the three answers are the three facts, and the middle one is the mend:
+/// *nothing has landed here yet*, *this file has*, and *something that is not a
+/// file at all has*. A lane that arrives later must answer here or it will be
+/// answering `Unfilled` by default, which is the defect this type is named
+/// after.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SurfaceSubject {
+    /// No lane has filled this surface. The tear-off, and nothing else.
+    Unfilled,
+    /// A file, whichever lane is drawing it — a picture, a recording's still, a
+    /// document, a page turned to its source.
+    File(PathBuf),
+    /// Something with no path of its own: a live page at an address, a commit
+    /// graph, a diff range. Not this recording, whatever else it is.
+    Elsewhere,
+}
+
+impl SurfaceSubject {
+    /// **Whether a recording opened on `playing` is still what this surface is
+    /// about.**
+    ///
+    /// `Unfilled` answers yes and that is the whole of the tear-off's grace: a
+    /// window that has been given an engine and not yet been given its picture
+    /// must not have the engine taken back off it.
+    fn is_still(&self, playing: &Path) -> bool {
+        match self {
+            Self::Unfilled => true,
+            Self::File(path) => path == playing,
+            Self::Elsewhere => false,
+        }
+    }
+}
+
+/// [`SurfaceSubject`] read off the things that can fill a preview surface.
+///
+/// A free function over the pane and one fact about the page rather than a
+/// method on the runtime, because what this has to get right is *which fields
+/// are consulted* — and that is a claim a test can put a real [`PreviewPane`]
+/// to, while a `Runtime` is a thing no test in this file can build.
+///
+/// **The page is asked first** for [`WindowRuntime::preview_rail_kind`]'s own
+/// reason: an engine composed under this window's glass is what the reader is
+/// looking at, whatever else the pane still remembers. No recording is ever
+/// behind one — route B retired the shell page (§7.44 ④) — so a surface that has
+/// become a page has stopped being about the recording it was playing.
+fn surface_subject_of(pane: Option<&PreviewPane>, stands_on_a_page: bool) -> SurfaceSubject {
+    if stands_on_a_page {
+        return SurfaceSubject::Elsewhere;
+    }
+    let Some(pane) = pane else {
+        return SurfaceSubject::Unfilled;
+    };
+    if let Some(image) = pane.image.as_ref() {
+        return SurfaceSubject::File(image.path.clone());
+    }
+    match pane.buffer.as_ref() {
+        // A buffer with no path is a commit graph or a diff range: content, and
+        // not this file's.
+        Some(source) => source.file_path().map_or(SurfaceSubject::Elsewhere, |path| {
+            SurfaceSubject::File(path.to_path_buf())
+        }),
+        None => SurfaceSubject::Unfilled,
+    }
+}
+
 /// Whether the picture is sized by the body or by a number the user chose.
 ///
 /// **Fit is a mode and never a stored scale**, and that distinction is the whole
@@ -44332,12 +44410,12 @@ impl Runtime<'_> {
             .video
             .iter()
             .filter(|(surface, seat)| {
-                let showing = match surface {
+                let subject = match surface {
                     PreviewSurface::Peek => {
                         // A card with no subject is a card that has gone; a card
                         // over another row is another file.
                         match self.file_peek_subject().and_then(|it| it.path) {
-                            Some(path) => Some(path),
+                            Some(path) => SurfaceSubject::File(path),
                             None => return true,
                         }
                     }
@@ -44357,14 +44435,17 @@ impl Runtime<'_> {
                         if !alive.contains(surface) {
                             return true;
                         }
-                        match self.preview_picture(*surface) {
-                            Some(image) => Some(image.path.clone()),
-                            // Nothing filed yet — see the note above.
-                            None => return false,
-                        }
+                        // **Every lane, not the picture lane** (§7.44 ⑬). This
+                        // used to read `preview_picture`, so a pane handed a
+                        // markdown file — which fills no picture — looked exactly
+                        // like the tear-off that has not filed one yet, and kept
+                        // its decoder. `SurfaceSubject` is the distinction:
+                        // nothing filed anywhere is the grace, and something
+                        // filed that is not this file is the end of the seat.
+                        self.preview_subject(*surface)
                     }
                 };
-                showing.is_some_and(|path| path != seat.path())
+                !subject.is_still(seat.path())
             })
             .map(|(surface, _)| surface)
             .collect();
@@ -45624,6 +45705,13 @@ impl Runtime<'_> {
     /// on, and there is nowhere for a second answer to come from.
     fn video_playing_on(&self, surface: PreviewSurface) -> Option<&Path> {
         Some(self.window.video.get(surface)?.path())
+    }
+
+    /// **What one surface is showing**, asked of every lane that can fill it —
+    /// [`surface_subject_of`] with this window's two questions put to it
+    /// (§7.44 ⑬).
+    fn preview_subject(&self, surface: PreviewSurface) -> SurfaceSubject {
+        surface_subject_of(self.preview_pane(surface), self.web_of(surface).is_some())
     }
 
     /// The same as a yes or no, for the callers that only need the fork.
@@ -122724,6 +122812,172 @@ mod tests {
             engines_outstanding(),
             before,
             "and no engine outlives the surfaces it was opened for"
+        );
+    }
+
+    /// RED — **a surface handed something else stops playing what it was
+    /// playing** (user report on `next16`, 2026-08-28; `docs/DESIGN.md` §7.44
+    /// ⑬).
+    ///
+    /// The reader played a recording in a preview pane, then clicked a `.md` in
+    /// the files column. The markdown rendered — and a violet rectangle stood
+    /// across the middle of it with the player's control bar still under it,
+    /// counting. The violet was `folio-video-test.wmv`'s own colour: nothing was
+    /// broken about the *drawing*, the seat was simply never retired, so a
+    /// decoder went on handing frames to a layer that went on being drawn.
+    ///
+    /// `sweep_video_seats` is the one door that retires a seat and it asked the
+    /// right question of the wrong lane: "what picture is this surface showing".
+    /// A markdown file is not a picture, so the answer was `None` — which the
+    /// sweep reads as *this surface has not said yet* and keeps the seat for,
+    /// because that is exactly what a float looks like for one call in the
+    /// middle of a tear-off. One reading, two situations, and the grace written
+    /// for the second swallowed the first.
+    ///
+    /// Three assertions, and the middle one is the mend:
+    ///
+    /// ① **Every way a surface's content can change ends the recording.** The
+    /// three the reader can reach — another document, another picture, another
+    /// recording — plus the page lane, put to [`surface_subject_of`] over a real
+    /// [`PreviewPane`] mutated exactly the way the landing doors mutate it.
+    ///
+    /// ② **And the tear-off's grace survives.** A surface with nothing filed on
+    /// it keeps its seat, which is the one case the old reading was right about
+    /// and the case a blunter mend would have broken.
+    ///
+    /// ③ **The engine goes with the seat.** §7.42 ⑦'s process-wide counter comes
+    /// back to where it started, so "the decoder stopped" is arithmetic rather
+    /// than a hope.
+    ///
+    /// And a source pin, because the sweep itself is a closure over a `Runtime`
+    /// no test here can build: it asks `preview_subject` and no longer asks the
+    /// picture lane.
+    ///
+    /// RED GATE: delete the buffer arm from [`surface_subject_of`] — which is
+    /// the whole of what the sweep consulted before this commit — and the
+    /// markdown case in ① answers `Unfilled`, the seat lives, and ③'s counter
+    /// never comes back down.
+    #[test]
+    fn a_seat_that_changes_content_drops_its_video() {
+        use bt_platform::video::engine::engines_outstanding;
+        let _ledger = ledger_gate();
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets");
+        let recording = assets.join("folio-video-test.wmv");
+        let another = assets.join("folio-video-test.mp4");
+        let document = assets.join("md-image-check.md");
+        let picture = assets.join("folio-anim-test.gif");
+
+        // A pane playing the recording, filled the way `open_preview_image_on`
+        // fills it.
+        let playing = |path: &std::path::Path| PreviewPane {
+            image: Some(PreviewImageState::new(path.to_path_buf())),
+            ..PreviewPane::default()
+        };
+        let pane = playing(&recording);
+        assert_eq!(
+            surface_subject_of(Some(&pane), false),
+            SurfaceSubject::File(recording.clone()),
+            "a pane showing a recording is about that recording"
+        );
+        assert!(surface_subject_of(Some(&pane), false).is_still(&recording));
+
+        // ① the four ways it stops being about it.
+        //
+        // A document, landed the way `land_preview_source_on` lands one: the
+        // picture is cleared and a buffer takes its place.
+        let after_a_document = PreviewPane {
+            buffer: Some(preview::PreviewSource::file(document.clone())),
+            ..PreviewPane::default()
+        };
+        // Another picture and another recording both come down the picture
+        // lane, which is the one case the old reading did catch.
+        let after_a_picture = playing(&picture);
+        let after_another = playing(&another);
+        // A commit graph: content with no path of its own.
+        let after_a_graph = PreviewPane {
+            buffer: Some(preview::PreviewSource::GitGraph {
+                root: assets.clone(),
+            }),
+            ..PreviewPane::default()
+        };
+        for (what, pane, page) in [
+            ("a markdown document", &after_a_document, false),
+            ("another picture", &after_a_picture, false),
+            ("another recording", &after_another, false),
+            ("a commit graph", &after_a_graph, false),
+            // A page is the fourth lane, and it fills none of the fields above.
+            ("a live page", &PreviewPane::default(), true),
+        ] {
+            assert!(
+                !surface_subject_of(Some(pane), page).is_still(&recording),
+                "a surface showing {what} is still credited with the recording it \
+                 was playing — the decoder runs on and its last frame stands over \
+                 the new content"
+            );
+        }
+
+        // ② and a surface that has been given nothing yet keeps its seat: the
+        // tear-off, where the window has the engine and the picture is one call
+        // behind it.
+        assert_eq!(
+            surface_subject_of(Some(&PreviewPane::default()), false),
+            SurfaceSubject::Unfilled
+        );
+        assert!(surface_subject_of(None, false).is_still(&recording));
+        assert!(surface_subject_of(Some(&PreviewPane::default()), false).is_still(&recording));
+
+        // ③ the seat and its decoder really go, on each of the three surfaces.
+        let before = engines_outstanding();
+        let mut seats = video_seat::VideoSeats::default();
+        let surfaces = [
+            PreviewSurface::Seat(LeafId {
+                tab: TabId(1),
+                seat: SeatId(2),
+            }),
+            PreviewSurface::Float(9),
+            PreviewSurface::Peek,
+        ];
+        let now = Instant::now();
+        for surface in surfaces {
+            seats
+                .open(surface, &recording, now)
+                .unwrap_or_else(|error| panic!("{surface:?} opens the fixture: {error:?}"));
+        }
+        assert_eq!(engines_settling_to(before + 3), before + 3);
+        for (surface, pane) in surfaces
+            .into_iter()
+            .zip([&after_a_document, &after_a_picture, &after_another])
+        {
+            let seat = seats.get(surface).expect("the seat is still there");
+            let subject = surface_subject_of(Some(pane), false);
+            assert!(!subject.is_still(seat.path()));
+            // Which is what the sweep does with that answer.
+            assert!(seats.close(surface), "{surface:?} gives its seat up");
+            assert!(seats.get(surface).is_none(), "{surface:?}");
+        }
+        assert!(seats.is_empty(), "no surface is left holding a recording");
+        assert_eq!(
+            engines_settling_to(before),
+            before,
+            "a seat that was swept away left its decoder running"
+        );
+
+        // And the sweep asks that question rather than the picture lane's.
+        const SOURCE: &str = include_str!("main.rs");
+        let start = SOURCE
+            .find("    fn sweep_video_seats(")
+            .expect("the sweep is declared in this file");
+        let rest = &SOURCE[start + "    fn sweep_video_seats(".len()..];
+        let sweep = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+        assert!(
+            sweep.contains("self.preview_subject(*surface)"),
+            "the sweep no longer asks what the surface is showing across every \
+             lane, so a lane that is not the picture lane reads as silence"
+        );
+        assert!(
+            !sweep.contains("self.preview_picture("),
+            "the sweep still reads the picture lane, which is the reading that \
+             cannot tell a markdown file from a tear-off"
         );
     }
 
