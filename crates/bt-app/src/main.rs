@@ -87140,10 +87140,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 };
                 let now = Instant::now();
                 self.for_each_window(|runtime| {
-                    let place = sample_window_place(
-                        &runtime.window.window,
-                        runtime.window.window_focused,
-                    );
+                    let place =
+                        sample_window_place(&runtime.window.window, runtime.window.window_focused);
                     runtime.window.window_hidden = place.hidden;
                     runtime.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
                     let mut raised: Vec<AttentionDelivery> = Vec::new();

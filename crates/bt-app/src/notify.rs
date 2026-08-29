@@ -261,8 +261,9 @@ pub fn toast_title(carried: Option<&str>, pane_name: Option<&str>, profile_name:
 
 #[cfg(test)]
 mod tests {
-    use super::{Interruption, NotificationRoute, WindowPlace, desktop_reach, interruption,
-        toast_title};
+    use super::{
+        Interruption, NotificationRoute, WindowPlace, desktop_reach, interruption, toast_title,
+    };
     use crate::attention::Reach;
 
     /// A desktop with its taskbar on the screen, which is what Windows ships.
