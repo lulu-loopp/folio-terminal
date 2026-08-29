@@ -2425,11 +2425,33 @@ pub fn pane_notice_strip(
     }
     let viewport = pane_body_below_head(seats, layout, seat, scale)?;
     let consumed = notice_consumed(viewport.height, scale);
+    // **Under a preview's rail, and directly under a terminal's head** (user
+    // ruling 2026-08-29). Until this ruling no seat could wear both, and the
+    // order the two subtractions are made in was therefore only a tie-break
+    // nobody could see. Now a document wears both, and the *order of the
+    // arithmetic* and the *order on the glass* are allowed to differ: the
+    // heights are what they always were — the strip gets first claim on the room
+    // below the head and the rail takes what is left, which is exactly what
+    // `preview_body_viewport` computes — and only where the two bands are drawn
+    // has been chosen, in favour of the reading order a person actually has.
+    // Name of the file, where it lives, then what is wrong with it, then the
+    // document.
+    //
+    // `rail` below is the *same* number `preview_body_viewport` arrives at: the
+    // bar, clamped against the room the strip left. Derived rather than passed
+    // so that this row cannot come to disagree with the body under it.
+    let rail = if seats.seat_rail(seat).is_some() {
+        let bar = (PREVIEW_RAIL_BAR_LOGICAL_PX * scale).round().max(1.0) as u32;
+        bar.min(viewport.height.saturating_sub(consumed).saturating_sub(1))
+    } else {
+        0
+    };
+    let top = viewport.y.saturating_add(rail);
     Some([
         viewport.x as f32,
-        viewport.y as f32,
+        top as f32,
         (viewport.x + viewport.width) as f32,
-        (viewport.y + consumed) as f32,
+        (top + consumed) as f32,
     ])
 }
 
@@ -8918,6 +8940,7 @@ pub fn build_chrome_for_tabs(
                         head_box,
                         scale,
                         preview_rail.map(|rail| rail.measure.kind),
+                        seats.seat_wears_notice(placement.id),
                     )),
                     SeatKind::Files => Some(match files_view {
                         Some(_) => files_pane_geometry(head_box, scale, true),
@@ -15492,9 +15515,27 @@ pub fn preview_pane_geometry(
     rect: [f32; 4],
     scale: f32,
     rail: Option<PreviewRailKind>,
+    notice: bool,
 ) -> FilesPaneGeometry {
     let mut geometry = pane_foot_geometry(rect, SeatKind::Preview, scale);
+    // **And the strip, since the 2026-08-29 ruling.** The note above is why this
+    // has to be here rather than left to the one caller who would notice: this
+    // function and [`preview_body_viewport`] are two derivations of one number,
+    // and a pair that disagreed by the height of a band would fit a picture over
+    // somebody's sentence and put a click one row away from what it looks like
+    // it is on.
+    //
+    // Measured against the room **below the head**, which is the same input
+    // `pane_body_viewport` gives [`notice_consumed`], so the two clamps cannot
+    // part company in a pane too short for both bands.
+    let strip = if notice {
+        let below_head = (rect[3] - geometry.body[1]).max(0.0) as u32;
+        notice_consumed(below_head, scale) as f32
+    } else {
+        0.0
+    };
     if rail.is_none() {
+        geometry.body[1] = (geometry.body[1] + strip).min(geometry.body[3]);
         return geometry;
     }
     let band = preview_rail_band(rect, scale);
@@ -15518,6 +15559,10 @@ pub fn preview_pane_geometry(
     geometry.foot_mark = geometry.foot;
     geometry.foot_path = geometry.foot;
     geometry.body[3] = rect[3];
+    // The strip is drawn under the rail and subtracted after it, which is the
+    // same total either way round — see [`pane_notice_strip`], where the two
+    // orders are reconciled once.
+    geometry.body[1] = (geometry.body[1] + strip).min(geometry.body[3]);
     geometry.body[3] = geometry.body[3].max(geometry.body[1]);
     geometry
 }
@@ -15869,7 +15914,13 @@ pub fn hit_files_foot(
         };
         let foot = match placement.kind {
             SeatKind::Preview => {
-                preview_pane_geometry(rect, scale, seats.seat_rail(placement.id)).foot
+                preview_pane_geometry(
+                    rect,
+                    scale,
+                    seats.seat_rail(placement.id),
+                    seats.seat_wears_notice(placement.id),
+                )
+                .foot
             }
             _ => pane_foot_geometry(rect, placement.kind, scale).foot,
         };

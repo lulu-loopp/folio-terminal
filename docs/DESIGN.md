@@ -2952,6 +2952,27 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **为什么不是轮询**：这里没有一行代码在没有 `ReadDirectoryChangesW` 完成的情况下开始计时。一扇开着看一份没人写的文件的窗，不起时钟、不醒、不读盘——`a_file_nobody_touches_owes_no_wake_up_and_reads_no_disk` 把「不读盘」写成一个会 panic 的闭包，所以它是一句断言而不是一个愿望。
 
+**④′ 订阅跟着「池」走，不是跟着 pane 走；并且盘上的分歧要说出来（用户实机报缺陷 + 用户裁决 2026-08-29；`crates/bt-app/src/{main,preview,preview_watch,notice,seats,i18n}.rs`）。**
+
+**现象（实机，用户截图）。** 仓库根的 `README.md` 开在预览 pane 里，池里还有另外 7 份文档；这个文件随后被一次 `git merge` 在盘上整份改写，Typora 里已经是新内容，Folio 预览仍是旧的——**而且切换到别的文档再切回来还是旧的**。最后半句就是判决书。复现在隔离环境里跑通：`git merge` 改写 README，pane 停在 `doc1.md` 上，回到 README = 旧正文（`stderr` 同时印着 `preview watch: 1 previewed files`，池里两份只订了一份）。
+
+**真因（一句话）。** 上面 ④ 的第一条纪律写的是「订阅跟着**座位**走」，而 §7.1.3 的缓冲**归 tab 不归 pane**：一份 buffer 是内容，切回去时**按设计不重读**（这正是未保存修改能跨切换活下来的原因）。两条规矩叠在一起，一份「此刻没有 pane 站在上面」的池缓冲既没有被订阅、也永远不会被重读——旧正文就是这一整个会话。所以纪律一改写为**订阅跟着池走**：一个 tab 手上的每一份 buffer，无论此刻有没有 pane 站在它上面。代价有界且小，界限是池自己的两条事实——一个 tab 最多留 8 份干净未显示的缓冲（§7.1.3），而 Windows 订阅的是**文件夹**，所以同一个文件夹里的 8 份文档 = 8 个时钟 + 1 个句柄。悬停一瞥卡读的就是这个池，因此同样受益（实机已验：无人站在 README 上时改写它，卡片直接出新正文）。
+
+**裁决三条。**
+
+* **① 干净的缓冲跟着盘走**，重读并重排，**当前滚动位置保留**——重读只换 `content` 与 `revision`，pane 手上的 `scroll` 一个像素都不碰，超出的部分由既有的 `preview_document_max_scroll` 夹取。一个读到一半的人不会被送回文章开头。
+* **② 有未保存修改的缓冲不被覆盖，而且当场说出来。** 不覆盖是 `mark_stale` 早就有的裁决（人的文字是两者中更新的那一份）；新加的是**分歧在发生的那一刻被报告**，而不是留到有人按保存时才由裁决 8⑨ 的 `disk_mtime` 说。条带给两个动词：`Reload` / `重新加载`（本产品里唯一一个不再问第二遍就丢弃未保存修改的门——它**本身就是**第二遍问），`Keep my edits` / `保留我的修改`（条带落下，字一个不动，保存那一刻仍然是 `SaveOutcome::Conflict`）。
+* **③ 文件被删除时缓冲保留**，条带说「文件已被删除。你正在读的这一份还在。」**一个动词都不给**——没有东西可重载、没有东西可选，只剩一个「我看到了」的 `×`。此前一次删除会走 `mark_stale` 的老路，重读回来 `Refused(Fault)`，于是别人的一次 `rm` 会把读者正在看的文档换成一张「没有这个文件」的卡。
+
+**机制两条路，都要有。**
+
+* **主路 = 目录监视**，就是上面 ④ 的那一套，一字未改（`DirWatch::start_shallow`、`WatchClock`、§3 的「`start()` 阻塞到监视线程挂上」纪律）。变的只有两处：`due` 现在回答的是 `FileNews { path, present }` 而不是一个路径——戳记比较本来就知道文件还在不在，在门口把它扔掉会让每一个读者再问一次磁盘，而那时候的答案已经不描述正在被回答的那条通知了；以及 `sync` 的入集合来自池。
+* **退路 = 手动比对 mtime+size**，只对**这个进程开不出句柄的文件夹**（网络盘、`\wsl$`、没有权限）。`folders` 因此从「`Option<DirWatch>`」拆成两份户口：拿到句柄的一份、记下拿不到的一份——因为这个集合是**被读的**（退路问的正是「这些文件夹里的文件」），一个有人依赖的状态该有名字而不是一次对 `Option` 的解读。两条性质保证它不会变成轮询：只问没有句柄的文件夹（有内核替它说话的那些一律不问，闭包 panic 钉死这一条），并且只在**手势**上跑——**窗口获得焦点**（R31 给 git 面写的那句话读到这条道上：窗子不在的时候发生的事发生在别的进程里，回来就是读者有资格看到真页面的那一刻）与**文档被切到前台**（`land_preview_source_on`，每一份文档进门的那一扇）。全部文件夹都订上的窗子在这条路上一次盘都不读。
+
+**条带就是那一条条带。** 提示复用 `notice.rs`——PowerShell 整合那条 30px 带子——而不是另起一条：一个既见过终端那条又见过预览这条的读者，不该见到两个高度、两种地面、两个 `×` 的位置。`Notice` 从两句变四句、`NoticeVerb` 从三个词变五个词，布局/绘制/命中一行未动。几何上它站在**面包屑之下、正文之上**（名字 → 它住哪儿 → 它出了什么事 → 正文），而算术上仍然是「条带先扣、rail 后扣」——两个顺序在 `pane_notice_strip` 里对齐一次，因为 `preview_body_viewport` 与 `preview_pane_geometry` 是同一个数字的两份推导。**顺带修好一条早就歪着的路由**：条带的**按下**过去排在 chrome 路由**之后**，而终端的身子是格子不是 chrome，所以那条歪着没人看得见；预览的身子从上到下全是 chrome，于是那两个词能被 hover、能高亮、按不动。现在按下与 hover、与绘制层序一致，三个答案对齐。
+
+**红门。** `a_pooled_document_no_pane_is_on_still_follows_its_file`（真布局、真 tab、真磁盘：门里点名池中那一份、盘动了、正文换了、滚动没跳）、`a_body_with_unsaved_edits_is_not_overwritten_and_says_so`（两个动词各一半）、`a_deleted_file_keeps_the_body_that_was_read_from_it`、`a_preview_wearing_a_strip_gives_it_a_row_of_its_own_body`（两份几何推导对得上、条带站在 rail 之下）、`the_disk_news_reaches_the_glass_by_both_roads`（读源码钉住无头测试站不到的那几句接线）；退路自己的两条在 `preview_watch` 里：`a_folder_with_no_handle_is_asked_by_hand_and_a_watched_one_never_is` 与 `a_window_whose_folders_are_all_watched_reads_no_disk_on_focus`。**红证**：把 `files_a_tab_stands_on` 改回走 pane（也就是出事的那份代码）第一条当场红；`note_disk_moved` 的脏臂落到干净臂第二条红；删除臂落到干净臂第三条红；`preview_pane_geometry` 忘掉条带第四条差整整 30 逻辑像素；退路去掉「只问没句柄的」那一句，被监视的那一半当场 panic。
+
 **⑤ 一个座位展示一件事，两个方向都是。** 实机撞出来的：files 列双击 `page.html`，再双击 `notes.md`——头、脚、tab 名全都说 `notes.md`，而浏览器还在文档前面的玻璃上（证据 `w2-slice5-evidence/09`）。一直存在的那一半是 `open_web_page_on` 的（页面落地时下面的文档不再被指着）；反方向在片⑤ 之前走不通，因为进网页的唯一一扇门是 `BT_WEB_DEV`。现在的判据是 `a_page_was_replaced`，接在 `advance_web_page` 已有的「pane 离开树就带走页面」那道门上：**`None` 不算「别的东西」**——页面被要求到第一次提交之间 pane 故意指着空，把那读成替换会让每张网页在开出来的下一帧被关掉。
 
 这条修复自己又拖出两条，都记在这里因为它们是同一个机制的两半：**① 正在关闭的座位不该再挖洞**（`WebSeat::is_closing`）——`host.close()` 已经把它的 visual 摘出合成树，而等浏览器进程退出可以长达十秒（`w0p-evidence.md` §4.2），这段时间里那个洞就是从一块 pane 里看见的桌面；**② 一次退役欠一帧**——洞是在造帧的时候打的（`sync_web_page`），而这道退役门跑在一趟的尾巴上、在重绘**之后**，所以画出「替换上来的文档」的那一帧仍然带着页面的洞，而窗口随后就静止了，没有下一帧去把洞收掉。用 `present_chrome_change` 而不是裸 `request_redraw`，理由写在那个函数上：没有排队的帧时重绘会找不到东西画而跳过。

@@ -1,6 +1,14 @@
-//! The PowerShell integration notice — one sentence, two words and a close, in
-//! a strip across the top of one pane's body (`docs/DESIGN.md` §7.1.6j, user
-//! ruling 2026-08-21).
+//! **One strip: a sentence, some words and a close, across the top of one
+//! pane's body** (`docs/DESIGN.md` §7.1.6j, user ruling 2026-08-21; widened by
+//! the user ruling of 2026-08-29).
+//!
+//! It was written for the PowerShell integration offer and it is still shaped by
+//! it, but nothing below this line knows what a shell is. What it knows is a
+//! band: a sentence that gives way, a row of pressable words that never do, and
+//! an `×` that outlives both. The second thing that wears it is a **preview**
+//! whose file moved on the disk under unsaved edits — the same band, in the same
+//! row of the same body, because a reader who meets both must not meet two
+//! heights, two grounds and two ideas of where the close button lives.
 //!
 //! Spec authority is `design/ui-mockup.html`: the `.pnotice` block for the
 //! surface and its three design notes, and `psNoticeHtml` / `psNoticePress` for
@@ -68,6 +76,12 @@ pub enum NoticeVerb {
     Never,
     /// Start this pane's shell again, so the line that was just written is read.
     Restart,
+    /// Throw this window's unsaved edits away and take the file as it now is.
+    ReloadFromDisk,
+    /// Keep the edits and take the strip down. Nothing is written and nothing is
+    /// read; the disagreement is still there and [`crate::preview::PreviewBuffer::save`]
+    /// is still the thing that will report it.
+    KeepMyEdits,
 }
 
 impl NoticeVerb {
@@ -82,6 +96,8 @@ impl NoticeVerb {
             Self::Add => Text::PowerShellNoticeAdd.text(),
             Self::Never => Text::PowerShellNoticeNever.text(),
             Self::Restart => Text::TermMenuShellAgain.text(),
+            Self::ReloadFromDisk => Text::PreviewDiskReload.text(),
+            Self::KeepMyEdits => Text::PreviewDiskKeep.text(),
         }
     }
 }
@@ -96,6 +112,14 @@ pub enum Notice {
     /// a report of one thing that happened and the only thing left to decide is
     /// whether to make it true now or when the next shell starts.
     Added,
+    /// **A preview's file was rewritten under unsaved edits** (user ruling
+    /// 2026-08-29). Two verbs, and they are the two answers a person can give:
+    /// take the file, or keep what you typed.
+    DiskChanged,
+    /// **A preview's file is gone.** **No** verb at all: there is nothing to
+    /// reload and nothing to keep — the buffer is already kept, which is the
+    /// ruling — so the only control is the `×` that says "I have read this".
+    DiskDeleted,
 }
 
 impl Notice {
@@ -105,6 +129,8 @@ impl Notice {
         match self {
             Self::Offer => Text::PowerShellNoticeBody.text(),
             Self::Added => Text::PowerShellNoticeAdded.text(),
+            Self::DiskChanged => Text::PreviewDiskChanged.text(),
+            Self::DiskDeleted => Text::PreviewDiskDeleted.text(),
         }
     }
 
@@ -114,6 +140,13 @@ impl Notice {
         match self {
             Self::Offer => &[NoticeVerb::Add, NoticeVerb::Never],
             Self::Added => &[NoticeVerb::Restart],
+            // **Reload on the right**, nearest the `×`: it is the destructive
+            // one, and the layout drops words leftmost-first when the pane
+            // narrows — so the word that survives a narrow pane must be the one
+            // whose absence is recoverable. Keeping the edits is what happens
+            // anyway if nothing is pressed.
+            Self::DiskChanged => &[NoticeVerb::KeepMyEdits, NoticeVerb::ReloadFromDisk],
+            Self::DiskDeleted => &[],
         }
     }
 }
