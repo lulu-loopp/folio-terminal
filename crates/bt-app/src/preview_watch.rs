@@ -100,6 +100,21 @@ struct Watched {
     stamp: Option<Stamp>,
 }
 
+/// **One file moved, and whether it is still there.**
+///
+/// The stamp comparison already knows the difference — a `None` is what makes a
+/// delete news at all (rule 3) — and throwing it away at the door would make
+/// every reader ask the disk a second time to learn what this one already
+/// found out. It is also the *only* honest moment to ask: by the time the
+/// window has walked its pools, a file deleted and recreated has an answer that
+/// no longer describes the notification being answered.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileNews {
+    pub path: PathBuf,
+    /// `false` when the disk says the file is not there any more.
+    pub present: bool,
+}
+
 /// **Every file this window's preview seats are watching.**
 #[derive(Default)]
 pub struct PreviewWatch {
@@ -219,7 +234,7 @@ impl PreviewWatch {
     /// reason: a notification that arrived a moment ago may or may not have made
     /// its folder due, and the only way to find out is to give it to the clock
     /// first.
-    pub fn due(&mut self, now: Instant) -> Vec<PathBuf> {
+    pub fn due(&mut self, now: Instant) -> Vec<FileNews> {
         self.due_with(now, Stamp::of)
     }
 
@@ -227,7 +242,7 @@ impl PreviewWatch {
         &mut self,
         now: Instant,
         mut stamp: impl FnMut(&Path) -> Option<Stamp>,
-    ) -> Vec<PathBuf> {
+    ) -> Vec<FileNews> {
         if self.files.is_empty() {
             return Vec::new();
         }
@@ -251,7 +266,73 @@ impl PreviewWatch {
                 continue;
             }
             entry.stamp = fresh;
-            moved.push(path.clone());
+            moved.push(FileNews {
+                path: path.clone(),
+                present: fresh.is_some(),
+            });
+        }
+        moved
+    }
+
+    /// **Rule 4 — the files no kernel is speaking for** (user ruling
+    /// 2026-08-29).
+    ///
+    /// A folder on a network share, on a `\wsl$` mount, or one this process may
+    /// not open comes back from [`subscribe`] as `None`, and every rule above
+    /// this one is then silent about the files in it: nothing arrives in the
+    /// mailbox, no clock ever runs, and a document opened off such a folder is
+    /// the one document in this window that would go on showing the bytes it
+    /// was opened with for the rest of the session. That is the state the whole
+    /// of this module exists to end, so it needs a second road — and the ruling
+    /// names the two moments it is allowed to travel on: **the window is given
+    /// focus**, and **a document is brought to the front**.
+    ///
+    /// **It is not a poll and it must never become one.** Two properties keep
+    /// that true rather than promise it:
+    ///
+    /// * it asks **only** about files whose folder holds no handle. A watched
+    ///   folder has a kernel speaking for it, and asking it here as well would
+    ///   be exactly the schedule `watch_clock`'s header refuses;
+    /// * it is called **from a gesture** — an activation, a switch — and never
+    ///   from a clock. Nothing here asks for a wake-up, and
+    ///   [`Self::deadline`] is unchanged by it.
+    ///
+    /// So the cost is one `metadata` per unwatchable file per time somebody
+    /// comes back to this window, which is the price of the answer being right
+    /// on a share, and it is zero for every window whose files are all
+    /// watchable — which is every window on a local disk.
+    pub fn ask_the_unwatched(&mut self) -> Vec<FileNews> {
+        self.ask_the_unwatched_with(Stamp::of)
+    }
+
+    fn ask_the_unwatched_with(
+        &mut self,
+        mut stamp: impl FnMut(&Path) -> Option<Stamp>,
+    ) -> Vec<FileNews> {
+        // **A window whose folders are all watched touches no disk at all**, and
+        // this is the line that says so: the common case is that every handle is
+        // held, and then there is nothing here to walk.
+        if !self.folders.values().any(Option::is_none) {
+            return Vec::new();
+        }
+        let mut moved = Vec::new();
+        for (path, entry) in &mut self.files {
+            let unwatched = path
+                .parent()
+                .and_then(|directory| self.folders.get(directory))
+                .is_some_and(Option::is_none);
+            if !unwatched {
+                continue;
+            }
+            let fresh = stamp(path);
+            if fresh == entry.stamp {
+                continue;
+            }
+            entry.stamp = fresh;
+            moved.push(FileNews {
+                path: path.clone(),
+                present: fresh.is_some(),
+            });
         }
         moved
     }
@@ -361,6 +442,14 @@ mod tests {
         }
     }
 
+    /// The ordinary piece of news: this file moved and it is still there.
+    fn present(path: &Path) -> FileNews {
+        FileNews {
+            path: path.to_path_buf(),
+            present: true,
+        }
+    }
+
     /// PIN (rule 1) — **the subscription follows the seat**, and a window with
     /// no preview open holds nothing at all.
     #[test]
@@ -453,7 +542,7 @@ mod tests {
             watch.due_with(start + Duration::from_millis(9) + WATCH_QUIET, |path| {
                 stamps.get(path).copied()
             }),
-            vec![watched.clone()],
+            vec![present(&watched)],
             "one save, one refresh, a quiet window after the last thing that moved"
         );
         assert_eq!(watch.deadline(), None, "and then it is quiet again");
@@ -552,8 +641,11 @@ mod tests {
         lock(&watch.news).insert(folder.clone(), start);
         assert_eq!(
             watch.due_with(start + WATCH_QUIET, |path| stamps.get(path).copied()),
-            vec![watched.clone()],
-            "a file that is not there any more is news"
+            vec![FileNews {
+                path: watched.clone(),
+                present: false,
+            }],
+            "a file that is not there any more is news, and it says which kind"
         );
 
         let later = start + Duration::from_secs(10);
@@ -561,8 +653,108 @@ mod tests {
         lock(&watch.news).insert(folder, later);
         assert_eq!(
             watch.due_with(later + WATCH_QUIET, |path| stamps.get(path).copied()),
-            vec![watched],
+            vec![present(&watched)],
             "and so is one that comes back"
+        );
+    }
+
+    /// RED (rule 4) — **a folder this process could not subscribe to is asked
+    /// by hand, and a folder it could is not** (user ruling 2026-08-29).
+    ///
+    /// The second road, and both of its halves in one test because they are one
+    /// property seen from two sides. A share, a `\\wsl$` mount or a folder the
+    /// process may not open comes back from `subscribe` as `None`; every clock
+    /// in this file is then silent about the documents in it, and without this
+    /// road they would show the bytes they were opened with until the window
+    /// closed. What must be equally true is that the road is **closed** over a
+    /// folder that has a handle: asking a watched file here would be the poll
+    /// this module's header refuses, and the closure below panics rather than
+    /// answering, so "does not read the disk" is a claim and not a hope.
+    ///
+    /// RED GATE 1: drop the `is_some_and(Option::is_none)` filter in
+    /// [`PreviewWatch::ask_the_unwatched_with`] and the watched half panics —
+    /// the module has become a poll. RED GATE 2: make the function answer
+    /// `Vec::new()` unconditionally and the unwatched half goes red, which on
+    /// screen is a document on a share that never refreshes.
+    #[test]
+    fn a_folder_with_no_handle_is_asked_by_hand_and_a_watched_one_never_is() {
+        let mut watch = PreviewWatch::default();
+        let share = PathBuf::from(r"\\server\team").join("plan.md");
+        let local = file("a.md");
+        let mut stamps = BTreeMap::from([(share.clone(), stamp(10)), (local.clone(), stamp(20))]);
+        // The share refuses a handle; the local folder takes one. This is the
+        // one place in these tests where `open` answers differently per folder,
+        // because it is the one property that is *about* the difference.
+        let wanted = BTreeSet::from([share.clone(), local.clone()]);
+        watch.sync_with(
+            &wanted,
+            |directory| {
+                (!directory.starts_with(r"\\server")).then(|| unreachable!("no kernel in a test"))
+            },
+            |path| stamps.get(path).copied(),
+        );
+
+        assert!(
+            watch
+                .ask_the_unwatched_with(|path| stamps.get(path).copied())
+                .is_empty(),
+            "nothing has moved, so coming back to the window says nothing"
+        );
+
+        // Somebody on the other machine saves it. No notification exists, and no
+        // clock is running: the only thing that can find out is this road.
+        stamps.insert(share.clone(), stamp(11));
+        // And the local file moves too, to prove the road does not carry it —
+        // its own kernel does, through `due`.
+        stamps.insert(local.clone(), stamp(21));
+        assert_eq!(
+            watch.ask_the_unwatched_with(|path| stamps.get(path).copied()),
+            vec![present(&share)],
+            "the unwatchable file answers for itself; the watched one is not asked"
+        );
+        assert_eq!(
+            watch.deadline(),
+            None,
+            "and asking by hand owes the loop no wake-up — it is a gesture, not a clock"
+        );
+        assert!(
+            watch
+                .ask_the_unwatched_with(|path| stamps.get(path).copied())
+                .is_empty(),
+            "the answer was taken, so coming back again says nothing"
+        );
+
+        // The share's file is deleted, and the news says which kind it is.
+        stamps.remove(&share);
+        assert_eq!(
+            watch.ask_the_unwatched_with(|path| stamps.get(path).copied()),
+            vec![FileNews {
+                path: share,
+                present: false,
+            }]
+        );
+    }
+
+    /// PIN (rule 4) — **a window whose folders are all watched reads no disk
+    /// when it is given focus.**
+    ///
+    /// The other half of "this is not a poll", stated where it costs nothing to
+    /// check: the ordinary window, on a local disk, with every handle held. The
+    /// stamp reader panics.
+    #[test]
+    fn a_window_whose_folders_are_all_watched_reads_no_disk_on_focus() {
+        let mut watch = PreviewWatch::default();
+        let watched = file("a.md");
+        let stamps = BTreeMap::from([(watched.clone(), stamp(10))]);
+        watch.sync_with(
+            &BTreeSet::from([watched]),
+            |_| Some(unreachable!("no kernel in a test")),
+            |path| stamps.get(path).copied(),
+        );
+        assert!(
+            watch
+                .ask_the_unwatched_with(|path| panic!("asked the disk about {}", path.display()))
+                .is_empty()
         );
     }
 

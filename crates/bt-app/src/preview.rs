@@ -3558,6 +3558,21 @@ pub struct PreviewBuffer {
     /// through one door ([`Self::claim_head_read`]) and closed by the answer
     /// ([`Self::accept`], [`Self::decline`]).
     head_asked: bool,
+    /// **What this window last heard about the file under this body** (user
+    /// ruling 2026-08-29).
+    ///
+    /// [`Self::stale`]'s sibling and deliberately not a fourth bit beside it:
+    /// `stale` is a *question that has been asked* — a read is owed and the old
+    /// paragraphs stand until the new ones land — while this is a *sentence the
+    /// reader is owed*, and the two are owed in exactly the cases the other is
+    /// not. A clean buffer whose file moved is re-read and says nothing; a
+    /// dirty one is never re-read and must say so; a deleted file's buffer is
+    /// neither re-read nor thrown away, and saying so is the whole of what is
+    /// left to do about it.
+    ///
+    /// Written through one door ([`Self::note_disk_moved`]) and closed by three:
+    /// the two verbs on the strip and the answer to a read.
+    pub disk: DiskNews,
     /// **The disk moved under this body** (W2 slice 5, `preview_watch`).
     ///
     /// A third bit beside the load and beside [`Self::head_asked`], for the
@@ -3708,6 +3723,7 @@ impl PreviewBuffer {
             load,
             head_asked: false,
             stale: false,
+            disk: DiskNews::Level,
             max_columns: 0,
             content_says_text: false,
         }
@@ -3832,6 +3848,18 @@ impl PreviewBuffer {
             )
     }
 
+    /// **This body is behind its file** — [`Self::stale`] read from outside.
+    ///
+    /// The one caller is `Runtime::request_stale_previews`, which walks a pool
+    /// rather than a set of panes and therefore cannot use `wants_head_read`:
+    /// that predicate answers `true` for a buffer that has never been read at
+    /// all, and a pool full of those is exactly the eight-files-to-show-one read
+    /// the restore door refuses to make.
+    #[must_use]
+    pub fn is_behind_the_disk(&self) -> bool {
+        self.stale
+    }
+
     /// Whether a read of this buffer's head is **out with the worker right now**.
     ///
     /// [`Self::wants_head_read`]'s other side, and the one `BT_PREVIEW_TRACE`'s
@@ -3905,6 +3933,93 @@ impl PreviewBuffer {
         }
         self.stale = true;
         true
+    }
+
+    /// **The watcher says this file moved** — the one door onto [`Self::disk`]
+    /// (user ruling 2026-08-29).
+    ///
+    /// `present` is what the disk answered at the moment the stamp was compared
+    /// (`preview_watch::FileNews`), carried in rather than asked again here: a
+    /// file deleted and recreated between the two calls would give a second
+    /// answer that does not describe the notification being answered.
+    ///
+    /// The ruling's three cases, in the order they are decided:
+    ///
+    /// 1. **The file is gone.** The buffer is *kept* — the reader's document
+    ///    does not evaporate because something outside this window removed the
+    ///    file it came from — and the strip says so. Nothing is read: a read
+    ///    would answer `Refused(Fault)` and put "no such file" where a document
+    ///    is standing, which is the outcome this case exists to avoid.
+    /// 2. **The file moved under unsaved edits.** Not overwritten, and that is
+    ///    [`Self::mark_stale`]'s standing ruling; what is new is that the
+    ///    disagreement is *said* at the moment it happens rather than kept until
+    ///    somebody presses save. The verbs on the strip are the two answers a
+    ///    person can give it.
+    /// 3. **The file moved under a clean body.** Re-read, quietly, exactly as
+    ///    before — there is no disagreement to report, only a document that is
+    ///    now behind its file.
+    #[must_use]
+    pub fn note_disk_moved(&mut self, present: bool) -> DiskVerdict {
+        if self.source.file_path().is_none() {
+            return DiskVerdict::Nothing;
+        }
+        if !matches!(
+            self.ftype,
+            PreviewFtype::Text | PreviewFtype::Markdown | PreviewFtype::Table
+        ) {
+            return DiskVerdict::Nothing;
+        }
+        if !present {
+            return DiskVerdict::from_said(self.say(DiskNews::Deleted));
+        }
+        if self.dirty {
+            return DiskVerdict::from_said(self.say(DiskNews::Changed));
+        }
+        // The file is there and this body has nothing of its own to lose, so the
+        // sentence — if one was standing, from a delete that has been undone —
+        // comes down and the bytes are asked for.
+        let said = self.say(DiskNews::Level);
+        if self.mark_stale() {
+            DiskVerdict::ReadAgain
+        } else {
+            DiskVerdict::from_said(said)
+        }
+    }
+
+    /// Put a sentence up, take one down, or leave the standing one alone.
+    /// Answers whether the glass owes a frame.
+    fn say(&mut self, news: DiskNews) -> bool {
+        std::mem::replace(&mut self.disk, news) != news
+    }
+
+    /// **Take the disk's copy** — the strip's `Reload` (user ruling 2026-08-29).
+    ///
+    /// The one door in this product that discards an unsaved edit without being
+    /// asked twice, and it is allowed to be that because it *is* the second
+    /// asking: the strip that carries it exists only while this window is
+    /// telling the reader their copy and the file's have parted, and the other
+    /// verb beside it keeps the edits. Answers whether a head read is now owed.
+    pub fn take_the_disks_copy(&mut self) -> bool {
+        if self.source.file_path().is_none() {
+            return false;
+        }
+        self.disk = DiskNews::Level;
+        self.dirty = false;
+        self.mark_stale()
+    }
+
+    /// **Keep this body** — the strip's other verb, and its `×` (user ruling
+    /// 2026-08-29).
+    ///
+    /// Nothing is read and nothing is written: the sentence goes down and the
+    /// edits stand. The disagreement itself is not forgotten by the *product* —
+    /// [`Self::save`] still compares `disk_mtime` and still answers
+    /// [`SaveOutcome::Conflict`], which is ruling 8-9 and the thing that stops a
+    /// dismissal here from becoming an overwrite later.
+    ///
+    /// Answers whether the glass owes a frame.
+    pub fn keep_this_body(&mut self) -> bool {
+        self.say(DiskNews::Level)
     }
 
     /// Whether this buffer would be shown on a surface that edits, **as the
@@ -4111,6 +4226,9 @@ impl PreviewBuffer {
         // The question is closed by its answer, whichever lane answered it.
         self.head_asked = false;
         self.stale = false;
+        // And the sentence: a landed answer is the disk's own word, whatever it
+        // says, so nothing is left standing that claims the two have parted.
+        self.disk = DiskNews::Level;
         self.content = None;
         self.truncated = false;
         self.max_columns = 0;
@@ -4129,6 +4247,7 @@ impl PreviewBuffer {
         self.head_asked = false;
         // And so is the watcher's: the body on the glass is the disk's again.
         self.stale = false;
+        self.disk = DiskNews::Level;
         match outcome {
             HeadOutcome::Read {
                 text,
@@ -4561,6 +4680,52 @@ pub enum PreviewAnswer {
 /// How large a file is, without reading it.
 pub fn read_size(path: &Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|meta| meta.len())
+}
+
+/// **What this window last heard about the file under a buffer** (user ruling
+/// 2026-08-29).
+///
+/// Three states and not a pair of bools, because the two that are not `Level`
+/// are mutually exclusive by construction — a file cannot be both gone and
+/// rewritten — and a pair would let a caller ask about a fourth state that
+/// cannot happen.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DiskNews {
+    /// Nothing outstanding. The ordinary state of every buffer in this window.
+    #[default]
+    Level,
+    /// Somebody else wrote the file while this buffer held unsaved edits. The
+    /// edits stand; the strip offers the two answers.
+    Changed,
+    /// The file is not on the disk any more. The body stands; the strip says so.
+    Deleted,
+}
+
+/// What a caller owes after [`PreviewBuffer::note_disk_moved`].
+///
+/// Three answers rather than a `bool` because the two kinds of work are
+/// genuinely different and the caller does different things with them: a read
+/// goes out through the head worker's one-question ledger, while a sentence
+/// changes a rectangle in the chrome and owes a frame. A caller handed one bool
+/// would have to do both or guess.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiskVerdict {
+    /// Nothing moved that this buffer can act on.
+    Nothing,
+    /// The head is owed a read. **The strip is not involved** — a clean body
+    /// re-read is the quiet case, and the whole of what a reader sees is the
+    /// paragraphs changing under them.
+    ReadAgain,
+    /// The strip's sentence changed. Nothing is read; a frame is owed.
+    Say,
+}
+
+impl DiskVerdict {
+    /// A sentence that moved is [`Self::Say`]; one that did not is
+    /// [`Self::Nothing`].
+    const fn from_said(said: bool) -> Self {
+        if said { Self::Say } else { Self::Nothing }
+    }
 }
 
 /// A head either reads or it does not, and both are answers.

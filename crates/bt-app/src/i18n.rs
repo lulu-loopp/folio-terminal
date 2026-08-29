@@ -1530,6 +1530,28 @@ pub enum Text {
     /// and cannot see it.
     PowerShellNoticeAdded,
 
+    // ── the preview's disk strip (§7.1.3, user ruling 2026-08-29) ──────────
+    // The same strip and therefore the same block shape. **Four entries**: two
+    // sentences and two verbs, and no fifth for the deleted file's answer —
+    // there is nothing to decide about a file somebody else removed, so that
+    // state offers the `×` alone.
+    /// The sentence a document wears when the file under it was rewritten by
+    /// something outside this window **while it held unsaved edits**. States the
+    /// fact and nothing else: the two verbs beside it are what says what can be
+    /// done about it.
+    PreviewDiskChanged,
+    /// The verb that throws this window's edits away and takes the file. It says
+    /// what arrives rather than what goes, because the file is the thing the
+    /// reader is choosing.
+    PreviewDiskKeep,
+    /// The verb that keeps the edits and takes the strip down. Not "cancel" and
+    /// not "ignore": it names what survives.
+    PreviewDiskReload,
+    /// The sentence for a file that is not there any more. **The second half is
+    /// the point**: a reader who is told only that a file was deleted will
+    /// assume the window is about to empty itself.
+    PreviewDiskDeleted,
+
     // ── its settings row (Terminal page) ───────────────────────────────────
     /// `Terminal ▸ Offer PowerShell integration` — the row that turns the offer
     /// back on after `Don't show again`.
@@ -3372,6 +3394,21 @@ impl Text {
                 "Added to $PROFILE. Takes effect in a new shell.",
                 "已加进 $PROFILE。新开的 shell 生效。",
             ),
+            // 「文件在磁盘上已更改」 — the fact, said plainly. It does not say
+            // *who* changed it, because this window does not know and a guess
+            // ("another program") would be one more thing to disbelieve.
+            Self::PreviewDiskChanged => pick(
+                lang,
+                "This file changed on disk. Your unsaved edits are still here.",
+                "文件在磁盘上已更改。你未保存的修改还在。",
+            ),
+            Self::PreviewDiskReload => pick(lang, "Reload", "重新加载"),
+            Self::PreviewDiskKeep => pick(lang, "Keep my edits", "保留我的修改"),
+            Self::PreviewDiskDeleted => pick(
+                lang,
+                "This file was deleted. What you are reading is still here.",
+                "文件已被删除。你正在读的这一份还在。",
+            ),
             Self::RowPowerShellOffer => {
                 pick(lang, "Offer PowerShell integration", "PowerShell 整合提示")
             }
@@ -3683,7 +3720,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 526] = [
+    pub const ALL: [Self; 530] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4123,6 +4160,10 @@ impl Text {
         Self::PowerShellNoticeAdd,
         Self::PowerShellNoticeNever,
         Self::PowerShellNoticeAdded,
+        Self::PreviewDiskChanged,
+        Self::PreviewDiskKeep,
+        Self::PreviewDiskReload,
+        Self::PreviewDiskDeleted,
         Self::RowPowerShellOffer,
         Self::DescPowerShellOffer,
         Self::RowClaudeHooks,
