@@ -4259,7 +4259,27 @@ impl GpuContext {
     /// variable can only be told. On a machine that has one, the second call
     /// never happens and nothing about what these tests exercise changes.
     pub async fn headless(format: wgpu::TextureFormat) -> Result<Self, RenderError> {
-        Self::headless_on(format, false).await
+        Self::headless_on(format, false, None).await
+    }
+
+    /// The same context on a device that refuses to make a texture wider than
+    /// `ceiling` — the one thing a soak has to be able to say and cannot ask of
+    /// the machine it happens to be running on.
+    ///
+    /// **Not a synthetic device.** `wgpu` treats `required_limits` as a request
+    /// for *at most* this, and the roof named here is the roof glyphon reads out
+    /// of `device.limits()` and packs into — the same number, arrived at the
+    /// same way, as on a machine whose adapter simply offers less. What lowering
+    /// it buys is time: the illness in `docs/DESIGN.md` §7.1.3m is a *ratio*
+    /// between what a session keeps and what the packer can hold, so a roof a
+    /// thousand times smaller reaches in a minute the state a real session
+    /// reaches in days.
+    #[cfg(test)]
+    async fn headless_under_a_texture_ceiling(
+        format: wgpu::TextureFormat,
+        ceiling: u32,
+    ) -> Result<Self, RenderError> {
+        Self::headless_on(format, false, Some(ceiling)).await
     }
 
     /// The same context, on the adapter a machine with no graphics driver gets.
@@ -4272,12 +4292,13 @@ impl GpuContext {
     /// machine's own path on a developer's machine instead of only in a virtual
     /// one.
     pub async fn headless_fallback(format: wgpu::TextureFormat) -> Result<Self, RenderError> {
-        Self::headless_on(format, true).await
+        Self::headless_on(format, true, None).await
     }
 
     async fn headless_on(
         format: wgpu::TextureFormat,
         demand_fallback: bool,
+        texture_ceiling: Option<u32>,
     ) -> Result<Self, RenderError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let phase_started = Instant::now();
@@ -4303,10 +4324,14 @@ impl GpuContext {
         };
         let adapter_time = phase_started.elapsed();
         let phase_started = Instant::now();
+        let mut required_limits = limits_with_this_adapters_textures(&adapter);
+        if let Some(ceiling) = texture_ceiling {
+            required_limits.max_texture_dimension_2d = ceiling;
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Folio replay probe device"),
-                required_limits: limits_with_this_adapters_textures(&adapter),
+                required_limits,
                 ..Default::default()
             })
             .await
@@ -15466,12 +15491,15 @@ mod tests {
     fn headless_device(
         format: wgpu::TextureFormat,
         demand_software: bool,
+        texture_ceiling: Option<u32>,
     ) -> Result<HeadlessDevice, RenderError> {
         let lock = GPU_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let gpu = if demand_software {
             pollster::block_on(GpuContext::headless_fallback(format))?
+        } else if let Some(ceiling) = texture_ceiling {
+            pollster::block_on(GpuContext::headless_under_a_texture_ceiling(format, ceiling))?
         } else {
             pollster::block_on(GpuContext::headless(format))?
         };
@@ -15484,7 +15512,19 @@ mod tests {
     /// have nothing to say about it. They say so by failing rather than by
     /// quietly passing.
     fn on_this_machines_adapter(format: wgpu::TextureFormat) -> HeadlessDevice {
-        headless_device(format, false).expect("a headless device context on this machine's adapter")
+        headless_device(format, false, None)
+            .expect("a headless device context on this machine's adapter")
+    }
+
+    /// This machine's adapter, on a device that will not make a texture wider
+    /// than `ceiling` — see [`GpuContext::headless_under_a_texture_ceiling`] for
+    /// why a soak is allowed to ask for a smaller roof than the machine has.
+    fn on_a_device_whose_textures_stop_at(
+        format: wgpu::TextureFormat,
+        ceiling: u32,
+    ) -> HeadlessDevice {
+        headless_device(format, false, Some(ceiling))
+            .expect("a headless device context under a texture ceiling")
     }
 
     /// WARP by name — gate 5's device, and the only one that shows the defects
@@ -15494,7 +15534,7 @@ mod tests {
     /// tests that ask for this skip rather than fail there, because what would
     /// be red is the absence of a platform rather than a regression.
     fn on_the_software_adapter(format: wgpu::TextureFormat) -> Option<HeadlessDevice> {
-        headless_device(format, true).ok()
+        headless_device(format, true, None).ok()
     }
 
     /// Every `#[cfg(test)]` module in one file's source, joined — the region a
@@ -15605,6 +15645,7 @@ mod tests {
             concat!("headless", "("),
             concat!("headless_", "fallback("),
             concat!("headless_", "on("),
+            concat!("headless_under_a_", "texture_ceiling("),
         ];
         let doorway = block_beginning_with(
             &test_code_in(include_str!("lib.rs")),
@@ -15623,6 +15664,11 @@ mod tests {
             doorway.matches(constructors[1]).count(),
             1,
             "and for the software adapter exactly once"
+        );
+        assert_eq!(
+            doorway.matches(constructors[3]).count(),
+            1,
+            "and for a device under a texture ceiling exactly once"
         );
 
         for (name, source) in crate_sources() {
@@ -18210,6 +18256,213 @@ mod tests {
             worst, None,
             "a Chinese session went dumb after enough screens: the shared atlas kept every raster \
              the session had ever drawn and had no room left for the next one"
+        );
+    }
+
+    /// RED — **a session long enough to wear the packer out gets its text
+    /// back** (`docs/DESIGN.md` §7.1.3m, the true cause).
+    ///
+    /// The gate above walks a Chinese session and never sees a refusal, because
+    /// nothing it draws ever fills the atlas: it measures the *quantity* of ink,
+    /// which §7.1.3m put at 3.3% of the roof for a whole 4K window. What the
+    /// 2026-08-29 report ran out of was not quantity. glyphon packs into
+    /// `etagere`'s bucketed shelf allocator, and there room is a **geometry**: a
+    /// bucket gives its width back only when every item in it is gone, a shelf
+    /// is reclaimed only when it is the top-most one (or one of at most three
+    /// consecutive empty ones), and shelves are height-classed. A session that
+    /// draws at a ladder of sizes — the zoom rungs, a document's headings, the
+    /// chrome against the body against a card's mini face — lays down shelves of
+    /// many heights and pins nearly all of them with a glyph that is still being
+    /// drawn. Past some point there is nowhere left to put a tall raster, and
+    /// because nothing in glyphon ever rebuilds that layout, **`AtlasFull` from
+    /// then on is permanent** — with, when this was measured on a model of
+    /// glyphon's own allocator, close to half the atlas still free.
+    ///
+    /// So this fixture is about the ratio, not the count, and the two numbers it
+    /// controls are the two the disease reads:
+    ///
+    /// * **one frame against the roof.** A window's worth of dense text is a
+    ///   fixed fraction of the atlas whatever size it is set at — a bigger face
+    ///   means proportionally fewer cells — so a 1600×1000 page against a 2048²
+    ///   roof is about a fifth of it, in the same place on the scale as a 4K
+    ///   window against the 16384² this machine really offers. The frame is
+    ///   never the thing that does not fit, and the census below says so out
+    ///   loud rather than leaving it to be believed.
+    /// * **what the session keeps, against the roof.** Ten rungs over a pool of
+    ///   2500 ideographs is some ten times what the atlas can hold, so the
+    ///   packer is genuinely under eviction pressure for most of the run —
+    ///   which a real all-Chinese session reaches in hours and this reaches in
+    ///   a minute, by lowering the roof rather than by drawing more.
+    ///
+    /// **What is asserted is recovery, not perfection.** A refusal can still
+    /// happen: it is the packer saying it has worn out, and no caller can see
+    /// that coming. What must never happen again is the state the report was
+    /// sent from — the *next* frame refused in the same place, and the one after
+    /// that, for the rest of the process's life. So: no two consecutive frames
+    /// lose their text, and a refusal stays a stumble rather than the run's
+    /// normal condition.
+    ///
+    /// Mutation: take the refused arm out of `GpuContext::close_the_frame` — go
+    /// back to trimming whatever the frame's verdict was. Measured on this
+    /// fixture, at 19.8% of the roof for its busiest frame: the first refusal
+    /// lands in the same place either way (frame 191 of 1200), and after it the
+    /// unrepaired session loses its text on **ten frames in a row**, against a
+    /// repaired one that never loses two. Left running four times as long the
+    /// gap stops being a matter of degree — 2015 of 4000 frames refused, with
+    /// one unbroken stretch of **1122 frames** carrying a page with not one
+    /// character on it, against 8 of 4000, none of them consecutive. That
+    /// stretch is the report: not a frame that asked for too much, a packer that
+    /// had worn out and was never given a new one.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_session_long_enough_to_wear_the_packer_out_gets_its_text_back() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        const WIDTH: u32 = 1600;
+        const HEIGHT: u32 = 1000;
+        /// The roof this device will be held to. Lowering it is what turns days
+        /// into a minute — see
+        /// [`GpuContext::headless_under_a_texture_ceiling`] — and 2048 is not a
+        /// hypothetical number: it is `wgpu`'s own downlevel WebGL2 floor.
+        const CEILING: u32 = 2048;
+        const FRAMES: usize = 1200;
+        /// The ladder. Ten rungs, because the pinning is per height class and a
+        /// single rung wears the packer out an order of magnitude more slowly.
+        const LADDER: [f32; 10] = [24.0, 28.0, 32.0, 36.0, 40.0, 46.0, 52.0, 60.0, 68.0, 76.0];
+        /// The zoom rungs the session walks. Every one of them multiplies the
+        /// ladder into a fresh set of glyph heights, which is what a user who
+        /// changes the font size does to the packer.
+        const ZOOMS: [f32; 6] = [1.0, 1.125, 0.875, 1.25, 0.75, 1.375];
+        const FRAMES_PER_ZOOM: usize = 17;
+
+        let mut gpu = on_a_device_whose_textures_stop_at(FORMAT, CEILING);
+        assert_eq!(
+            gpu.max_texture_dimension_2d(),
+            CEILING,
+            "the fixture's whole clock is this roof"
+        );
+        let mut window =
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
+        window.set_glyph_census(true);
+        let metrics = window.metrics();
+        let mut han = HanStream::new(0x4C1D_9A37);
+        let mut refused_frames = 0usize;
+        let mut longest_run = 0usize;
+        let mut run_length = 0usize;
+        let mut first_refusal: Option<usize> = None;
+        let mut worst_occupancy = 0.0f64;
+        for frame_index in 0..FRAMES {
+            // The window this frame draws: one page carrying every rung of the
+            // ladder at once, the way a real one does — a body size, a stack of
+            // heading sizes, the chrome's own, a card's mini face — and the
+            // whole ladder standing at whichever zoom the session is on.
+            let zoom = ZOOMS[(frame_index / FRAMES_PER_ZOOM) % ZOOMS.len()];
+            let mut paragraphs = Vec::new();
+            let mut top = 0.0;
+            let mut rung = 0usize;
+            loop {
+                let font = (LADDER[rung % LADDER.len()] * zoom).round();
+                let line = (font * 1.5).ceil();
+                if top + line >= HEIGHT as f32 {
+                    break;
+                }
+                let columns = (WIDTH as f32 / font) as usize;
+                paragraphs.push(PreviewParagraph {
+                    runs: vec![PreviewRun {
+                        text: han.text(columns.max(1)),
+                        color: [235, 235, 235],
+                        mono: true,
+                        bold: false,
+                        italic: false,
+                        font_scale: 1.0,
+                        inline_box_px: None,
+                    }],
+                    rect: [0.0, top, WIDTH as f32, top + line],
+                    font_size_px: font,
+                    line_height_px: line,
+                    wrap: false,
+                    letter_spacing_em: 0.0,
+                    align_right: false,
+                    align_center: false,
+                });
+                top += line;
+                rung += 1;
+            }
+            window.set_preview_bodies(vec![PreviewBody {
+                clip: [0.0, 0.0, WIDTH as f32, HEIGHT as f32],
+                quads: Vec::new(),
+                paragraphs,
+                blocks: Vec::new(),
+                rasters: Vec::new(),
+            }]);
+            let frame = single_cell_cursor_frame(metrics);
+            window
+                .present_frame(
+                    &mut gpu,
+                    &[SeatFrame {
+                        seat: SeatViewport {
+                            x: 0,
+                            y: 0,
+                            width: WIDTH,
+                            height: HEIGHT,
+                        },
+                        clip: SeatViewport {
+                            x: 0,
+                            y: 0,
+                            width: WIDTH,
+                            height: HEIGHT,
+                        },
+                        frame: &frame,
+                        focused: true,
+                    }],
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .expect("one frame");
+            worst_occupancy = worst_occupancy.max(
+                window
+                    .glyph_census()
+                    .expect("the census was asked for")
+                    .occupancy(),
+            );
+            if window.preview_text_frame().refused.is_empty() {
+                run_length = 0;
+            } else {
+                refused_frames += 1;
+                first_refusal.get_or_insert(frame_index);
+                run_length += 1;
+                longest_run = longest_run.max(run_length);
+            }
+        }
+        assert!(
+            worst_occupancy < 0.5,
+            "the fixture is measuring the wrong illness: one frame of it wants {:.1}% of the \
+             roof, so a refusal here could be a frame that is simply too big rather than a \
+             packer that has worn out",
+            worst_occupancy * 100.0
+        );
+        assert!(
+            longest_run <= 1,
+            "the session lost its text on {longest_run} frames in a row (first at \
+             {first_refusal:?}): a refusal that the frame after it repeats is the state the \
+             2026-08-29 report was sent from — the atlas is never re-packed, so the retry meets \
+             the same refusal in the same place forever"
+        );
+        assert!(
+            refused_frames * 10 < FRAMES,
+            "{refused_frames} of {FRAMES} frames were drawn without their text (first at \
+             {first_refusal:?}): a refusal is meant to be a stumble the next frame recovers \
+             from, not the run's normal condition"
+        );
+        // And it recovered for the stated reason rather than by luck: one new
+        // packing per frame that lost its text, which is also the statement that
+        // the repair never fired on a frame that did not need it.
+        assert_eq!(
+            gpu.glyph_atlas_refits() as usize,
+            refused_frames,
+            "the session recovered without the atlas ever being re-packed, or was re-packed on a \
+             frame that kept its text"
         );
     }
 
