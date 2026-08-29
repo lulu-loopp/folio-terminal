@@ -16229,13 +16229,21 @@ fn rename_key(editor: &mut TabRename, key: &Key, modifiers: ModifiersState) -> R
 /// **What `Ctrl` would do with a settled link, when that is worth a sentence**
 /// (gesture audit 2026-08-26, 丙3).
 ///
-/// A web address already tells the reader that `Ctrl` changes the answer: the
-/// finger cursor lights only with the key down, which was designed that way. A
-/// printed **file** path does not — [`terminal_link_answers_a_press`] says yes
-/// with or without `Ctrl`, so the same finger stands over two destinations and
-/// the difference between "opens here" and "leaves for the system" has no
-/// projection anywhere on the glass. This is that projection, and it is one
-/// clause on a status line that was already being drawn.
+/// A printed **file** path wears the finger with or without `Ctrl`
+/// ([`terminal_link_answers_a_press`]), so the same finger stands over two
+/// destinations and the difference between "opens here" and "leaves for the
+/// system" has no projection anywhere on the glass. This is that projection,
+/// and it is one clause on a status line that was already being drawn.
+///
+/// **A web address joined that list on 2026-08-29** and its own reason for
+/// being off it is what put it on: the aside was skipped because "the finger
+/// cursor lights only with the key down, which was designed that way" — true
+/// only while a plain click on an address did nothing. Now that the plain half
+/// opens the page in this window, the finger says the same thing over both
+/// halves of that row too, and the row needs the same clause the file row
+/// needed. It is `DefaultApp`'s clause and not a third one: what `Ctrl` reaches
+/// is `ShellExecuteW` on the address, which is this machine's registered
+/// handler for `http(s)` — the same sentence about the same call.
 ///
 /// Derived from [`hyperlink_activation`] rather than written beside it, so the
 /// sentence cannot drift from the destination: a URI whose `Ctrl` answer is
@@ -16252,10 +16260,12 @@ enum ControlClickHint {
 impl ControlClickHint {
     fn of(uri: &str, is_directory: &dyn Fn(&Path) -> bool) -> Option<Self> {
         match hyperlink_activation(true, true, uri, is_directory) {
-            HyperlinkActivation::External(_) => Some(Self::DefaultApp),
+            HyperlinkActivation::External(_) | HyperlinkActivation::Browser => {
+                Some(Self::DefaultApp)
+            }
             HyperlinkActivation::Reveal(_) => Some(Self::Explorer),
             HyperlinkActivation::None
-            | HyperlinkActivation::Browser
+            | HyperlinkActivation::Page(_)
             | HyperlinkActivation::Preview(_, _)
             | HyperlinkActivation::FilesColumn(_)
             | HyperlinkActivation::Blocked => None,
@@ -18020,6 +18030,16 @@ enum HyperlinkActivation {
     None,
     /// A web address, handed to whatever this desk browses with.
     Browser,
+    /// A web address, opened the way this window opens every other page — the
+    /// preview seat's own engine, on this tab (§7.1.5g ①).
+    ///
+    /// **This is the half of the `http(s)` row W2 was landing for.** It carries
+    /// the address rather than a seat or a URL this arm normalised, because the
+    /// normalising is `webnav::address_bar`'s and that door is spent at the
+    /// call site: this table is a pure function of the URI's own text, and a
+    /// second opinion about what an address means is the one thing §7.1.5g ⑤
+    /// forbids in as many words.
+    Page(String),
     /// A local file, handed to whatever the system has registered for it — the
     /// files column's own way out ([`Runtime::open_local_path`]), which opens a
     /// document and refuses a program.
@@ -18118,8 +18138,30 @@ fn hyperlink_activation(
                 .chars()
                 .any(|character| character.is_control() || character.is_whitespace());
         return match intent {
-            // Nothing in this window renders a web page yet; W2 is where this
-            // half of the row stops being empty.
+            // **W2 landed, and this row is what it was landing for** (user
+            // report 2026-08-29, 实机). This arm read "Nothing in this window
+            // renders a web page yet; W2 is where this half of the row stops
+            // being empty" for as long as that was true. W2 landed on
+            // 2026-08-23; the `file:` page arm below was rewritten that day and
+            // now says, in its own words, that the table is "back to one
+            // sentence with no exception in it" — while this arm went on being
+            // the exception. What the reader saw was the shape 7.1.5f is about:
+            // an address wearing a mark that answered a hover and not a press,
+            // silently, with no way to tell a refusal from a click that never
+            // arrived.
+            //
+            // A remote address is not a special case of "somewhere this window
+            // can go" — it is the ordinary one. `Ctrl+L` has taken any address
+            // this door admits since W2, a pin and a restored session reach the
+            // same seat through the same gate, and every one of them is a
+            // string from outside judged by `webnav::address_bar`. So the plain
+            // half is the seat, the `Ctrl` half is the machine's browser, and
+            // the whole table is one sentence again.
+            ClickIntent::Here if allowed => HyperlinkActivation::Page(uri.to_owned()),
+            // An address whose own text does not parse keeps the silence every
+            // other unparsable row keeps: `Blocked` is an answer to a request
+            // the `Ctrl` half made, and the plain half of a malformed address
+            // has nothing to open and nothing to say about it.
             ClickIntent::Here => HyperlinkActivation::None,
             ClickIntent::System if allowed => HyperlinkActivation::Browser,
             ClickIntent::System => HyperlinkActivation::Blocked,
@@ -18235,9 +18277,15 @@ struct TerminalReference {
 ///   `Browser` and `Blocked` are `Ctrl`'s answers and can never be reached with
 ///   `control: false`; they are listed so that a future arm cannot be added
 ///   without someone deciding what a hand resting on it should see. `None` is
-///   the plain half of a row that has no destination inside this window at all —
-///   a remote `http(s)` address, a `mailto:` — and a card over one would be this
-///   window offering to show something it cannot fetch.
+///   the plain half of a row with no destination inside this window at all — a
+///   `mailto:`, a scheme with no arm — and a card over one would be this window
+///   offering to show something it cannot fetch. **`Page` is the one arm that
+///   acts and still raises nothing**, and that is a fact about the cards this
+///   window has rather than about the address: both of them — the glance and
+///   the folder flyout — are made of a thing on this disk, and a remote page is
+///   not one. Reading it to fill a card would mean fetching it, which is the
+///   press's business and not a resting hand's; the hover line already prints
+///   the address, which is everything this window knows about it before it goes.
 ///
 /// `control` is deliberately not a parameter. A modifier held during a hover is
 /// not a request; the card is what this window has to say about the reference,
@@ -18248,6 +18296,7 @@ fn reference_card(uri: &str, is_directory: &dyn Fn(&Path) -> bool) -> Option<Ref
         HyperlinkActivation::FilesColumn(path) => Some(ReferenceCard::Folder(path)),
         HyperlinkActivation::None
         | HyperlinkActivation::Browser
+        | HyperlinkActivation::Page(_)
         | HyperlinkActivation::External(_)
         | HyperlinkActivation::Reveal(_)
         | HyperlinkActivation::Blocked => None,
@@ -23022,10 +23071,11 @@ fn pointer_cursor(
 /// ruling 2026-08-20). A plain hover over a link to a readable file wears the
 /// hand, because a plain press opens it — and, since the folder ruling of
 /// 2026-08-21, so does a plain hover over a folder, because a plain press points
-/// the files column at it. A plain hover over a web address or a page does not,
-/// because a plain press on those does nothing — and holding `Ctrl` lights
-/// exactly them up, which is how a reader discovers that the modifier is what
-/// those rows want.
+/// the files column at it; since 2026-08-23 so does a page, and since
+/// 2026-08-29 so does a **web address**, because a plain press on one now draws
+/// it on the seat. The one shape left without the hand plainly is the row with
+/// nothing inside this window at all — a `mailto:`, a scheme with no arm — and
+/// that is the whole of what the modifier still lights up on its own.
 ///
 /// One expression rather than two agreeing ones, for the reason 7.1.5f wrote
 /// down: a pointer that promises a press the release then declines is this window
@@ -71026,6 +71076,32 @@ impl Runtime<'_> {
                     eprintln!("recoverable hyperlink open failure: {error:#}");
                 }
             }
+            // **The same address, kept in this window** (§7.1.5g ①). One door
+            // and not a second: `webnav::address_bar` is what an address typed
+            // into the head, restored from a session or read out of `pins.json`
+            // goes through, and `open_web_page`'s own contract is that every
+            // caller has passed it first. A link printed in the terminal is a
+            // string from outside exactly as those are, so it is judged by the
+            // same rule and lands on the same seat — which is also what keeps
+            // the terminal and the address field from giving two answers about
+            // one string.
+            HyperlinkActivation::Page(url) => match webnav::address_bar(&url) {
+                webnav::Decision::Navigate(url) => self.open_web_page(&url)?,
+                // **A refusal is said out loud, because a request was made.**
+                // The silence this whole slice is about was a plain click that
+                // asked for something and produced nothing at all; a plain
+                // click that asks for an address this window will not load owes
+                // the reader the same sentence `Ctrl` has always got. `Search`
+                // is unreachable from a string that already carries a scheme —
+                // `webnav::check` only offers one where there is none — and is
+                // folded in here rather than given a verb of its own, so that
+                // an arm which can never run cannot grow a behaviour nobody
+                // meant.
+                webnav::Decision::Refuse(_) | webnav::Decision::Search(_) => {
+                    self.window.hyperlink_hover.show_blocked(hyperlink);
+                    self.publish_interaction_frame()?;
+                }
+            },
             // The one door out of this window that takes a *path* — the same one
             // an unpreviewable file's card offers and a files row used to fall
             // through to, and the same one that will not start a program. A page
@@ -92499,13 +92575,15 @@ mod tests {
     /// ① give the directory arm to the glance (`Preview` and `FilesColumn` both
     ///    to [`ReferenceCard::File`]) — a folder gets a document card that can
     ///    only refuse it, and the flyout that *is* a folder's card never opens;
-    /// ② answer a card for [`HyperlinkActivation::None`] — a remote address
-    ///    raises a card this window cannot fill. It is `None` and **not**
+    /// ② answer a card for [`HyperlinkActivation::Page`] — a remote address
+    ///    raises a card this window cannot fill. It is `Page` and **not**
     ///    `Browser` that has to stay silent, which is worth knowing: `Browser`
-    ///    is `Ctrl`'s answer and is unreachable at `control: false`, so a
-    ///    remote address arrives down the empty plain half. The arm is spelled
-    ///    out beside it rather than folded into a wildcard so that a future
-    ///    reader has to decide about it rather than inherit a `_`;
+    ///    is `Ctrl`'s answer and is unreachable at `control: false`, so since
+    ///    2026-08-29 a remote address arrives down the plain half as a page —
+    ///    an arm that *acts*, and still has no card, because both of this
+    ///    window's cards are made of a file on this disk. The arms are spelled
+    ///    out rather than folded into a wildcard so that a future reader has to
+    ///    decide about them rather than inherit a `_`;
     /// ③ pass `control: true` — the table's other half is the system's, so
     ///    every local file stops raising a card the moment `Ctrl` is held down.
     #[test]
@@ -92555,9 +92633,10 @@ mod tests {
             )))
         );
 
-        // **And nothing at all for what this window cannot show.** A remote
-        // address is the row whose plain half is empty by ruling; a scheme with
-        // no arm at all is refused the same way.
+        // **And nothing at all for what this window has no card of.** A remote
+        // address opens on a plain click and still raises nothing: a card is
+        // built from a file, and the address names none. A scheme with no arm at
+        // all says nothing for the older reason — there is nowhere for it to go.
         for uri in [
             "https://example.com/report.pdf",
             "http://example.com",
@@ -99080,7 +99159,14 @@ mod tests {
         // A page is no longer one of them either: since the ruling of
         // 2026-08-23 its plain half names this window's own seat, and the seat
         // draws the page rather than its source.
-        for uri in ["https://example.test/path", "mailto:person@example.test"] {
+        //
+        // Nor is a **web address**, since 2026-08-29: the seat it draws on is
+        // the same one, and the discipline this list is about is untouched by
+        // it — opening a pane in the window already in front of the reader is
+        // what the plain half was always allowed to do, and what it must never
+        // do is start a *program*. That is still `Ctrl`'s, and the row below
+        // pins it.
+        for uri in ["mailto:person@example.test", "ftp://files.example.test/pub"] {
             assert_eq!(
                 hyperlink_activation(false, true, uri, &|path| path
                     == Path::new(r"C:\some\folder")),
@@ -99100,6 +99186,126 @@ mod tests {
                 == Path::new(r"C:\some\folder")),
             HyperlinkActivation::FilesColumn(PathBuf::from(r"C:\some\folder")),
             "and the folder that left it starts no program either — it opens a column"
+        );
+        assert_eq!(
+            hyperlink_activation(false, true, "https://example.test/path", &no_directories),
+            HyperlinkActivation::Page("https://example.test/path".to_owned()),
+            "and neither does a web address: its plain half is a pane, not a browser"
+        );
+        assert_eq!(
+            hyperlink_activation(true, true, "https://example.test/path", &no_directories),
+            HyperlinkActivation::Browser,
+            "the browser is still what `Ctrl` — and only `Ctrl` — reaches"
+        );
+    }
+
+    /// RED (user report 2026-08-29, 实机) — **a web address printed in the
+    /// terminal opens on a plain click, in this window** (§7.1.5g ①).
+    ///
+    /// The report: Claude Code printed
+    /// `https://claude.ai/code/artifact/04c0a133-…`, the application broke it
+    /// across two rows, both halves wore the underline — and a plain click did
+    /// nothing at all while `Ctrl`+click opened the browser as always. The
+    /// trace, one fixture, one cell, both modifiers:
+    ///
+    /// ```text
+    /// activate_hyperlink control=0 uri="https://github.com/…/latest" arm=None
+    /// activate_hyperlink control=1 uri="https://github.com/…/latest" arm=Browser
+    /// ```
+    ///
+    /// The wrap was not the fault and neither was the host: a one-line
+    /// `https://github.com/…` and a `http://localhost:5173/index.html` answered
+    /// `arm=None` in the same run. **The `http(s)` row's plain half was still
+    /// empty** — the one exception left in a table whose `file:` arm says, in
+    /// its own comment, that there is none. That arm's note names the event
+    /// that was supposed to fill this one: "Nothing in this window renders a
+    /// web page yet; W2 is where this half of the row stops being empty." W2
+    /// landed on 2026-08-23, the page arm was rewritten that day, and this row
+    /// was not.
+    ///
+    /// So the row is asserted the way the ruling reads it — **平点 = the
+    /// destination inside this window, `Ctrl`+点 = hand it to the system** — and
+    /// it is asserted about *every* address alike, because "wrapped",
+    /// "claude.ai" and "loopback" were three spellings of one empty arm and a
+    /// fix that named any of them would be a fourth.
+    ///
+    /// MUTATION: put `ClickIntent::Here => HyperlinkActivation::None` back in
+    /// the `http(s)` arm and every plain row below goes red while the `Ctrl`
+    /// rows stay green — which is the shape of the report exactly.
+    #[test]
+    fn a_web_address_printed_in_the_terminal_opens_in_this_window() {
+        // The reported address, and its two controls: the one-line link and the
+        // dev server's own. One arm, three hosts, no host named in the code.
+        for uri in [
+            "https://claude.ai/code/artifact/04c0a133-319b-4c8e-b988-7965fe063626",
+            "https://github.com/openai/codex/releases/latest",
+            "http://localhost:5173/index.html",
+            "HTTPS://EXAMPLE.TEST/Path?q=1#frag",
+        ] {
+            assert_eq!(
+                hyperlink_activation(false, true, uri, &no_directories),
+                HyperlinkActivation::Page(uri.to_owned()),
+                "a plain click on {uri:?} opens it in this window"
+            );
+            assert_eq!(
+                hyperlink_activation(true, true, uri, &no_directories),
+                HyperlinkActivation::Browser,
+                "and Ctrl still hands {uri:?} to the system"
+            );
+            // The finger is the same reading as the verb, so it lights plainly
+            // now — the half of 7.1.5f's complaint that was still true of this
+            // row: an underline that answered a hover and not a press.
+            assert!(
+                terminal_link_answers_a_press(false, Some(uri), &no_directories),
+                "and the hand is on {uri:?} without a modifier"
+            );
+        }
+        // **The gate the plain half is spent through is the address bar's own.**
+        // `open_web_page`'s contract is that every caller passes
+        // `webnav::address_bar` first, so the arm may only carry addresses that
+        // door admits — otherwise the terminal and the address field would give
+        // two answers about one string, which §7.1.5g ⑤ forbids in as many
+        // words.
+        for uri in [
+            "https://claude.ai/code/artifact/04c0a133-319b-4c8e-b988-7965fe063626",
+            "http://localhost:5173/index.html",
+        ] {
+            let HyperlinkActivation::Page(url) =
+                hyperlink_activation(false, true, uri, &no_directories)
+            else {
+                panic!("{uri} is a page");
+            };
+            assert!(
+                matches!(webnav::address_bar(&url), webnav::Decision::Navigate(_)),
+                "the one door admits what the arm carries: {uri:?}"
+            );
+        }
+        // A drag is still only a selection, and a scheme with no arm is still
+        // silent plainly and blocked under `Ctrl` — this row moved, the table
+        // did not.
+        assert_eq!(
+            hyperlink_activation(false, false, "https://example.test/x", &no_directories),
+            HyperlinkActivation::None
+        );
+        assert_eq!(
+            hyperlink_activation(false, true, "mailto:person@example.test", &no_directories),
+            HyperlinkActivation::None
+        );
+        assert_eq!(
+            hyperlink_activation(true, true, "mailto:person@example.test", &no_directories),
+            HyperlinkActivation::Blocked
+        );
+        // An address this window would refuse is refused under both modifiers,
+        // and refusing it plainly is not the same as opening it: `Blocked` is
+        // `Ctrl`'s word and the plain half stays silent, exactly as it does for
+        // every other row whose text does not parse.
+        assert_eq!(
+            hyperlink_activation(false, true, "http:8080/nohost", &no_directories),
+            HyperlinkActivation::None
+        );
+        assert_eq!(
+            hyperlink_activation(true, true, "http:8080/nohost", &no_directories),
+            HyperlinkActivation::Blocked
         );
     }
 
@@ -99175,18 +99381,26 @@ mod tests {
     /// ⑤ send the folder's plain half back to `None` — the shape it had until
     ///    2026-08-21 — and every prompt in the window wears a dotted cwd that
     ///    answers nothing, which is the promise the underline is not allowed to
-    ///    break.
+    ///    break;
+    /// ⑥ send the web address's plain half back to `None` — the shape it had
+    ///    until 2026-08-29, and the last cell in this table that still had it —
+    ///    and every printed address goes back to answering a hover and not a
+    ///    press. ④ and ⑥ are the two directions this row can be got wrong in
+    ///    and they are not the same mistake: ④ is a plain click starting a
+    ///    *program*, which it must never do, and ⑥ is a plain click doing
+    ///    nothing where this window has somewhere to go, which is the same
+    ///    half-lie ⑤ is about.
     #[test]
     fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
         assert_eq!(
             hyperlink_activation(true, true, "https://example.test/path", &no_directories),
             HyperlinkActivation::Browser,
-            "a web address is the browser's"
+            "a web address under `Ctrl` is the machine's browser"
         );
         assert_eq!(
             hyperlink_activation(false, true, "https://example.test/path", &no_directories),
-            HyperlinkActivation::None,
-            "and a plain click on one is still the selection's"
+            HyperlinkActivation::Page("https://example.test/path".to_owned()),
+            "and plainly it is this window's own seat (2026-08-29): the cell that              read `None` here for as long as nothing in this window drew a page"
         );
         assert_eq!(
             hyperlink_activation(
@@ -99626,8 +99840,13 @@ mod tests {
     /// the second destination visible, and the reason it is a clause and not a
     /// new surface is that the surface was already there.
     ///
-    /// A **web** address is deliberately silent: `Ctrl` lights its finger and
-    /// bare clicks do not, which is a projection this window already has.
+    /// A **web** address used to be deliberately silent here, on the ground
+    /// that `Ctrl` lit its finger and bare clicks did not. That ground went
+    /// away on 2026-08-29 — a plain click now opens the address on the seat —
+    /// so the row takes the clause for the reason the file row has it: two
+    /// destinations under one unchanging finger. It is the file row's own
+    /// clause, because `Ctrl` reaches the same call, this machine's registered
+    /// handler for the address.
     ///
     /// MUTATIONS: ① fold the folder into the file's sentence and the second
     /// assertion goes red — a folder does not open in a default app, it is
@@ -99662,7 +99881,7 @@ mod tests {
             settled("https://example.test/page", false)
                 .status_text(120)
                 .as_deref(),
-            Some("https://example.test/page"),
+            Some("https://example.test/page · Ctrl+click opens in default app"),
             "a web address already lights its own finger under Ctrl"
         );
         assert_eq!(
@@ -109910,9 +110129,11 @@ mod tests {
     /// file wears it plainly, because a plain press opens it — and since
     /// 2026-08-21 so does a folder, because a plain press points the files column
     /// at it, and since 2026-08-23 so does a page, because a plain press draws it
-    /// on the seat. A web address does not, because a plain press on one does
-    /// nothing — and holding `Ctrl` lights exactly those up, which is how
-    /// the rule is discovered. It must be the *same* expression the verb is spent from: a
+    /// on the seat. **Since 2026-08-29 so does a web address**, for the same
+    /// reason and by the same reading: the row's plain half stopped being empty,
+    /// so the finger over it stopped being a promise the release declines —
+    /// which is 7.1.5f's complaint, and this row was the last place it was still
+    /// true. It must be the *same* expression the verb is spent from: a
     /// pointer promising a press the release then declines is 7.1.5f's complaint
     /// wearing a different shape.
     ///
@@ -109927,9 +110148,15 @@ mod tests {
         // rows: the URI, then the hand plainly and the hand under Ctrl.
         for (uri, plainly, under_control) in [
             ("file:///C:/notes.md", true, true),
-            ("https://example.test/path", false, true),
+            ("https://example.test/path", true, true),
             ("file:///C:/repo/docs", true, true),
             ("file:///C:/page.html", true, true),
+            // The row that still needs the modifier to light anything at all:
+            // nothing inside this window plainly, and under `Ctrl` a refusal —
+            // which is an answer, and so wears the hand exactly as the rows
+            // that go somewhere do. The finger has never promised a
+            // destination; it promises that the press is spent on something.
+            ("mailto:person@example.test", false, true),
         ] {
             for (control, expected) in [(false, plainly), (true, under_control)] {
                 assert_eq!(

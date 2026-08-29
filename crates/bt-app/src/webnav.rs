@@ -559,23 +559,25 @@ pub fn is_loopback_host(host: &str) -> bool {
             .all(|part| part.parse::<u32>().is_ok_and(|value| value <= 255))
 }
 
-/// Whether a URL is one the **localhost entry** opens in the preview without
-/// being asked twice (a link clicked in the terminal, §7.1.5g ①).
-///
-/// RFC1918, the machine's own name and `hosts` aliases are excluded on purpose;
-/// they still open through an explicit verb. This answers "where does a plain
-/// click go by default", never "may this load" — that is [`check`]'s question
-/// and it has a different answer.
-pub fn opens_in_preview_by_default(url: &str) -> bool {
-    let Some((scheme, rest)) = split_scheme(url.trim()) else {
-        return false;
-    };
-    if scheme != "http" && scheme != "https" {
-        return false;
-    }
-    let (host, _) = split_host_port(authority(rest));
-    is_loopback_host(&host)
-}
+// **`opens_in_preview_by_default` was retired on 2026-08-29, and its absence is
+// the ruling.** It answered "which address does a link clicked in the terminal
+// open in the preview without being asked twice" with "the loopback ones", from
+// the plan's §3 — and it was never wired to anything: the arm it was written for
+// (§7.1.5g's `http(s)` plain half) still returned `None` for every address alike,
+// so a dev server's own URL did not open on a click either, and the predicate sat
+// here stating a default nothing consulted.
+//
+// The user's report of 2026-08-29 settled the row the other way, and it settled
+// it for every host: a plain click opens the address on this tab's seat, `Ctrl`
+// hands it to the machine. Keeping a public predicate that says loopback is
+// special would leave two written rules about one gesture, which is the thing
+// this module exists to prevent — and the loopback/elsewhere distinction it drew
+// still lives where it is load-bearing, in [`is_loopback_host`], which decides
+// what a *page* does with its own links.
+//
+// What was never this predicate's question, and still is not: **whether an
+// address may load**. That is [`check`]'s, it is asked of every address at every
+// door, and the test below is the half of the old one that outlived it.
 
 /// `0.0.0.0` is a bind address, not a destination — what a dev server prints
 /// about itself, not somewhere to go. Rewrite it, and keep the port, path,
@@ -1280,39 +1282,49 @@ mod tests {
         }
     }
 
-    /// §3's other half of the loopback sentence: what does **not** open in the
-    /// preview by itself. This is the entry default, not a permission — every
-    /// one of these still loads when a verb says so, which is why the second
-    /// half of the test checks that [`check`] admits them.
+    /// **Where a host stands on the network decides nothing about whether it may
+    /// load** (§3; the half of `only_loopback_opens_in_the_preview_without_being_asked`
+    /// that outlived the predicate it was written for, 2026-08-29).
+    ///
+    /// The retired predicate sorted these same addresses into "opens by itself"
+    /// and "needs a verb". That sorting is gone — a plain click on any of them
+    /// opens the seat now — and what is left is the sentence it was always
+    /// careful to say it was *not*: this door reads the address's own text, so a
+    /// dev server on the far side of the house, a private range and a public
+    /// host are one answer, and the whole of the difference between them is
+    /// where the reader chose to point.
+    ///
+    /// MUTATION: give [`check`] a host rule of any kind and the row for that
+    /// shape goes red while every other row still passes — which is how a
+    /// network-shaped exception would have got in unnoticed.
     #[test]
-    fn only_loopback_opens_in_the_preview_without_being_asked() {
-        for opens in [
+    fn no_address_is_admitted_or_refused_for_where_its_host_lives() {
+        for address in [
             "http://localhost:5173/",
             "https://localhost/",
             "http://app.localhost:3000/x",
             "http://127.0.0.1:8080/",
             "http://127.9.9.9/",
-            "http://0.0.0.0:5173/",
             "http://[::1]:5173/",
-        ] {
-            assert!(opens_in_preview_by_default(opens), "{opens}");
-        }
-        for elsewhere in [
             "http://192.168.1.5:5173/",
             "http://10.0.0.1/",
             "http://172.16.0.1/",
             "http://my-desktop:5173/",
             "http://localhost.evil.com/",
             "https://example.com/",
-            "file:///C:/x.html",
-            "about:blank",
+            "https://claude.ai/code/artifact/04c0a133-319b-4c8e-b988-7965fe063626",
         ] {
-            assert!(!opens_in_preview_by_default(elsewhere), "{elsewhere}");
+            assert_eq!(
+                address_bar(address),
+                Decision::Navigate(address.to_owned()),
+                "{address}"
+            );
         }
-        // …and "does not open by default" is not "may not load".
+        // The one host this door does rewrite, and it is not a judgement about
+        // the network either — `0.0.0.0` is a bind address and not a place.
         assert_eq!(
-            address_bar("http://192.168.1.5:5173/"),
-            Decision::Navigate("http://192.168.1.5:5173/".into())
+            address_bar("http://0.0.0.0:5173/"),
+            Decision::Navigate("http://127.0.0.1:5173/".into())
         );
     }
 

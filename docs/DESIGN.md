@@ -1109,6 +1109,33 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 **一处已知的重叠,记在这里。** `preview_ftype` 的文本扩展名表里有 `html` 而**没有** `htm`,于是一份 `.htm` 落的是「No preview for this file type」卡、卡上自带一枚 `Open in default app`,而头上这枚 ↗ 按同一个 `names_an_html_page` 也会出现——同一扇门,一个 pane 里两枚钮。这不是本片长出来的第二条规矩,是 `names_an_html_page`(两种拼法同一个对象)与 `preview_ftype`(只认一种拼法)之间**早就存在**的那道缝,本片照裁决用了前者。补法是把 `htm` 补进那张文本表,与小样 `previewFtype` 同步——挂账,不在本片。
 
+**⑥ 一条网址的平点臂,W2 落地之后还空着六天(用户实机报告 + 裁决 2026-08-29;`hyperlink_activation` / `HyperlinkActivation::Page` / `activate_hyperlink` / `webnav::address_bar`)。**
+
+**现象。** Claude Code 在一个 pane 里打出 `https://claude.ai/code/artifact/04c0a133-319b-4c8e-b988-7965fe063626`,被它自己按框宽切成两行(第一行止于 `…-b988-7`,第二行是缩进四格的 `965fe063626`),**两段都画着虚线下划线**——识别与拼接都是好的。用户单击这条链接,**终端里什么都没有开出来**;`Ctrl+点`照常交给系统浏览器。
+
+**折行、`⧉`、缩进、`claude.ai` 四件都不是成因,是四个障眼法。** `BT_MOUSE_TRACE` 在同一次运行、同一格、只换修饰键上把话说完:
+
+```text
+activate_hyperlink control=0 uri="https://github.com/openai/codex/releases/latest" arm=None
+activate_hyperlink control=1 uri="https://github.com/openai/codex/releases/latest" arm=Browser
+```
+
+同一次运行里,不折行的 `https://github.com/…/latest` 与本机的 `http://localhost:5173/index.html` 一样答 `arm=None`。**按下是到了的**(`pressed_target=Ours`、`opens_link=1`,§7.1.5f 那条闸门在正常工作),**站住的是路由表**:五臂表 `http(s)` 那一行的平点半边仍旧是 `HyperlinkActivation::None`,而 `None` 这条臂在 `activate_hyperlink` 里是一对空花括号。所以「完全无反应」是字面意义上的无反应,不是开了一张空 pane、也不是 WebView2 拒绝导航——**引擎连被问都没有被问过**。
+
+**真因写在那一行自己的注释里,而且是它自己预告的那一天到期没兑现。** 那条注释读作「Nothing in this window renders a web page yet; W2 is where this half of the row stops being empty」。W2 在 2026-08-23 落地,**同一天**表里 `file:` 页面那条例外被拿掉了(§7.10 ⑥),而拿掉它的那段注释写的是「全表回到一句话,没有例外」——这句话在写下的那一刻就是假的:远端网址就是剩下的那条例外,而且是这张表上唯一一条。**一个更硬的证据留在隔壁**:`webnav::opens_in_preview_by_default` 的文档写着「(a link clicked in the terminal, §7.1.5g ①)」——W2 片①**专为这一行**写的谓词——它在仓库里**没有任何生产调用点**,只有自己的测试在读它。为这一行准备的零件躺在盒子里,而这一行没装。
+
+**裁决:平点 = 在这扇窗里开出这一页,`Ctrl`+点 = 交给这台机器;对每一个地址一视同仁。** 不为 `claude.ai` 开特例,不为 `⧉` 开特例,也**不留 localhost 这条窄读法**。理由是 §7.1.5g 自己那句话的主语:一行被写进空名单,唯一的理由从来是「**这一行在本窗里没有去处**」——目录 2026-08-21 因为这条理由到期而回到表里,本机页面 2026-08-23 因为同一条理由到期而回来,而远端网址在 W2 之后同样有去处,并且是**同一个座位、同一扇门**:`Ctrl+L` 自 W2 起就收任何这扇门放行的地址,钉、会话恢复、命令面板走的都是它。终端里印出来的一条链接与打进地址框的一条地址是同一种东西——**一个来自外面的字符串**——所以它们必须过同一道 `webnav::address_bar`,拿同一个答案(§7.1.5g ⑤「终端里的一条链接与预览头里的一条地址不可以对同一个字符串给出两个答案」这次是正着用)。
+
+**修法:表上加一臂 `Page(String)`,花掉它的那一步只有一扇门。** `hyperlink_activation` 的 `http(s)` 行变成 `Here if allowed => Page(uri)`(文本本身不合格的地址两边照旧:平点静默、`Ctrl` 出 `Blocked`);`activate_hyperlink` 的新臂先过 `webnav::address_bar`,`Navigate` 交给 `open_web_page`(它自己的合同就是「每个调用点先过这扇门」),`Refuse` **出声**——挂 `show_blocked` 的悬停行,因为这一片治的病就是「提了要求却一声不吭」,一次被拒的平点欠读者的正是 `Ctrl` 一直都有的那句话。
+
+**三处跟着动,每一处都是同一条读法的别名而不是第二张清单。** ① **手形**:`terminal_link_answers_a_press` 一个字没改(它本来就是问这张表),但它的答案变了——网址现在不按 `Ctrl` 也戴手形,因为不按 `Ctrl` 的按下确实会做事;这是 7.1.5f 那句「记号是一句承诺」最后一块没兑现的地方。② **悬停行的 `Ctrl` 旁白**:`ControlClickHint` 当初跳过网址的理由原文是「a web address already tells the reader that `Ctrl` changes the answer: the finger cursor lights only with the key down」——这条理由随手形一起到期,于是网址拿的就是文件那一句(`HyperlinkControlOpensExternally`),不新造文案:`Ctrl` 够到的是同一个 `ShellExecuteW`,这台机器为 `http(s)` 注册的处理器。③ **一瞥卡仍旧不出**:`Page` 是表上**唯一一条会动作、却没有卡**的臂,这是关于本窗有几种卡的事实而不是关于地址的——两张卡(文件的与文件夹的)都是拿盘上的一个东西做的,而一页远端网页不是;要填它就得去取,而取是按下的事、不是一只停着的手的事。悬停行照写地址,那是本窗在动身之前对它知道的全部。
+
+**顺带撤掉一个从没被接上的默认。** `webnav::opens_in_preview_by_default`(「只有 loopback 的链接在终端里点一下就进预览」)随本片删除:它在这张表被修好之前一次都没有生效过——那时候**任何**地址平点都不动,dev server 自己的 URL 也不动——而修好之后它说的话与裁决相反。留着一个没人调用、又与手势规矩唱反调的公开谓词,正是这个模块存在的理由所要防的「两条写下来的规矩管同一个手势」。它划的 loopback/其余那条线在真正吃劲的地方还在:`is_loopback_host`,管的是**一张页面自己的链接**去哪里(W2 ③)。它的测试留下还成立的那一半,改名 `no_address_is_admitted_or_refused_for_where_its_host_lives`——一个主机在网络上站在哪里,从来不决定它能不能加载。
+
+**红门 `a_web_address_printed_in_the_terminal_opens_in_this_window`。** 报告里那条地址、一条不折行的、一条 loopback 的、一条带 query 与 fragment 的大写 scheme,四条一起断言:平点 = `Page(该地址)`、`Ctrl` = `Browser`、不按修饰键也戴手形;再断言这一臂交出去的字符串**那扇门收**(`address_bar` 答 `Navigate`),这样「臂里塞了一个地址栏不认的东西」不可能悄悄发生。拖拽仍只是选择、`mailto:` 平点仍静默 `Ctrl` 仍 `Blocked`、文本不合格的 `http:8080/nohost` 两边照旧——**动的是一格,不是一张表**。变异实测:把 `ClickIntent::Here => HyperlinkActivation::None` 放回去,四条平点行与三条手形断言全红,而 `Ctrl` 那几行全绿——正是用户报告的形状。
+
+**一件顺手查明、不属于本片的事,记为挂账。** 预览里**一份 markdown 文档正文中**的 `http(s)` 链接走的是 `preview::link_action` → `LinkAction::Browse` → `shell_execute`:平点就出去了,而且那条路根本不读 `control`。它比终端这条早(2026-08-13),早于 `ClickIntent` 存在。它不是「什么都不发生」,所以不在本次报告的范围里;但它与这条总规矩相反的方向一样明显,**下一次碰预览链接时按同一张表改**,不要在那边另写一个 `if control`。
+
 **7.1.5h 一条链接折了行,还是一条(用户实机报告 + 裁决 2026-08-20;`implicit_hyperlinks` / `ViewportFrame::link_span` / `rejoined_across_break`)。** 用户在窄 pane 里报了同一件事的两个样子:Claude Code 页脚里跨行的网址,hover 只有指针那一行变实线;以及在 PowerShell 提示行上手打的一条长网址,折行之后**第一行实线、第二行连点线都没有**。后一个不是画面缺陷:**活屏这条路上,裸网址是逐视觉行认的**,于是 `…> https://support.clau` 这一行自己就是一条语法完好的网址,它成了一条**指向别人域名**的链接并且真的能点开,而 `de.com/en/articles/15363606` 没有 scheme,压根不是链接。冻结行那条路从来没有这个毛病(`layout_frozen_line` 读的是整条 `FrozenLine::text`),所以这是**同一件事在两个平面上有两个答案**,而活屏那个答案会把用户送到他没有打过的地址去。
 
 **① 裸网址按逻辑行认,不按视觉行。** 分组依据是 `CapturedRow::continues`——终端自己记下的「这两行是一行」,与冻结平面按构造知道的是同一件事实,**是读来的不是猜来的**。识别跑在**完整的行序列**上而不是即将裁出的那一窗:一条尾巴掉在视口下沿的网址,若只认可见的那半,得到的又是那个短一截的错地址。staging 与活屏**接起来当一条序列读**,因为一条逻辑行确实可以头在 staging、尾还在活屏(`FreezeCandidate::live_tail`)。「静息不加记号」的纪律原样保留:`mark_osc_8_dotted` 先跑,只认 OSC 8 自己声明的那些格,推断出来的网址仍然一个记号都不带。
@@ -4882,6 +4909,8 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 **这没有动 2026-08-18 那条禁令。** 那条禁的是**应用盖的 id**:某个厂商给同一个 URL 的每一次出现盖同一个 id,那说的是「同一个目标」不是「同一次出现」,照它分组会把一整屏文件列表一起点亮。这里的 id 是**本 crate 为一道接缝铸的**,说的正是那个字段本来要说的窄的那句话;开头的 `U+0001` 让两类以确定性而不是以小概率区分开——OSC 8 的 `id=` 参数到达本 crate 的是 `id=` 与终止符之间的字节,而一个 C0 控制字节做不了其中之一,它会把串**结束掉**。
 
 红门 `a_reference_the_application_broke_across_rows_lights_up_whole_on_hover`:形状就是 agent 整天在印的那一种——带 `path:line:col` 的相对路径、前面有应用自己的 `[file]` 檐子、被应用的换行切在 `…\mai` 之后,而后半截长到**终端又把它软折了一次**,于是一条引用站在**三行**上,后面还印着尺寸列;指针放在**中间那一行**(读者最不可能去悬停的那一半,也是唯一能证明这个走法两个方向都走的那一半),断言三段的每一格都亮、而檐子和尺寸列一格都不亮。
+
+**这一条治的是「亮不亮」,不是「点不点得动」。** 2026-08-29 用户报的正是同一种形状的下一半:一条被应用切成两行的网址,两段都亮着,**点下去仍然什么都没有**——那不是本条的账,是五臂表里 `http(s)` 那一行的平点半边一直空着(见 §7.1.5g ⑥)。两件事在同一条引用上先后现形,记在这里免得下一个人从拼接这边开始挖。
 
 **日期:2026-08-28,四条同批。**
 
