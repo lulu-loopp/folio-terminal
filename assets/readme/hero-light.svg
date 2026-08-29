@@ -36,8 +36,8 @@
             transform="translate(10 0)"
             fill="none" stroke="#37352F" stroke-width="2.3"
             stroke-linecap="round"/>
-      <text x="15" y="-25" font-size="12">&#8734;</text>
-      <text x="11" y="21" font-size="12">&#8722;&#8734;</text>
+      <text x="22" y="-19" font-size="12">&#8734;</text>
+      <text x="12" y="24" font-size="12">&#8722;&#8734;</text>
       <text x="38" y="0" font-size="26" font-style="italic">e</text>
       <text x="50" y="-13" font-size="15" font-style="italic">&#8722;x&#178;</text>
       <text x="82" y="0" font-size="26" font-style="italic">dx</text>
