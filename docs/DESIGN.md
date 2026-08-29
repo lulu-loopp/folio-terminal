@@ -1399,11 +1399,13 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 **② 三档:`desktop_reach` 八行,而它读起来就是那三档(C2)。** 旧的 `reaches_the_desktop` 是一个谓词,论证是「它就是账本那条谓词的另一面」——**那句话在两档模型里对,在三档里不对**:中间那一档「在这台屏上,但不在你眼前」既不是「看过了」,也不是「桌面是唯一剩下的路」,它是第三个答案,而一个谓词只装得下两个。于是账本那条谓词 `attention_is_consumed` **一个参数都没加**(红线 4),桌面这一问另起了函数:
 
 ```text
-if window_is_hidden           { Toast }    // 够不到你,只能上桌面
-else if focused && active     { Nothing }  // 你正在看
-else if taskbar_is_auto_hidden { Toast }   // 没有可以瞄一眼的记号(⑩)
-else                          { Flash }    // 在这台屏上,但不在你眼前
+if window_is_hidden            { Toast }    // 够不到你,只能上桌面
+else if focused && active      { Nothing }  // 你正在看
+else if taskbar_is_auto_hidden { Toast }    // 没有可以瞄一眼的记号(⑩)
+else                           { Flash }    // 在这台屏上,但不在你眼前
 ```
+
+**第三行是 ⑩ 加的(2026-08-28)**,下面这段关于三个 bool 的算术它一个字都不改:那三个 bool 仍然欠八个答案,新那一位只把从前答 `Flash` 的那三行改判,别的一行都碰不到——理由与落地见 ⑩。
 
 三个 bool 欠八个输入八个答案,而「最小化的窗口还持着键盘」那两行不可达——把 `hidden` 写在最外层不是防御性编程,它同时**盖住了刚刚最小化、焦点位还没跟上的那一帧**。第二行是诚实而不是字面:`FlashWindowEx` 对前台窗口是 Win32 明文的 no-op,所以「有焦窗口的非活动 tab」这一格的可见产物是**窗内那两枚记号**;写成 `Flash` 而不是 `Nothing`,是因为它答的那句话与第 3/4 行一字不差,而你下一秒切走它就变成真的闪,**谓词一个字都不用改**。写成 `Nothing` 才是撒谎——那会让「隔壁 tab」和「你正盯着的那一格」在函数里长得一模一样。
 
