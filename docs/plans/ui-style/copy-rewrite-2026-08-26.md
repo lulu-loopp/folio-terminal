@@ -25,11 +25,13 @@
 
 | 对象 | 原先并存 | 收口为 | 涉及条目 |
 |---|---|---|---|
-| profile | 「档案」14 处 vs「配置文件」3 处 | **档案** | `RowDefaultProfile`、`ChooseProfile`、`unknown_profile_banner_text` |
-| integration | 「集成」vs「整合」 | **集成** | `RowPowerShellOffer` |
+| profile | 「档案」14 处 vs「配置文件」3 处 | ~~档案~~ → **配置文件**（用户 2026-08-29 推翻，见下） | `RowDefaultProfile`、`ChooseProfile`、`unknown_profile_banner_text` |
+| integration | 「集成」vs「整合」 | ~~集成~~ → **整合**（同上） | `RowPowerShellOffer` |
 | split | 「拆分」（菜单/快捷键）vs「分屏」（设置行） | **拆分** | `RowSplitDirection`、`DescSplitDirection`、`ShortcutSplitVertical`（纵向→竖向，跟 `OptionVertical` 走） |
 
 另有 `ProfilesInherit` 的中文里裸着一个英文 `pane`（「当前 pane 的文件夹」），已改「窗格」。
+
+**2026-08-29 用户推翻前两行。** `profile` 收口到 **「配置文件」**（行内指代「这个配置」「默认配置」），`integration` 收口到 **「整合」**。理由不是哪个词更好听，是**读者从哪儿来**：中文版 Windows Terminal 管同一个对象叫「配置文件」，而「整合」这个词在提示条上本来就已经在用了。同批还改了 `agent` 一族的中文口径（见本仓 §7.41 与 `copy-guide.md` §3b）。
 
 ---
 

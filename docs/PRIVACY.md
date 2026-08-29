@@ -103,11 +103,11 @@ Folio 记住的一切都在本机，分在两个目录里。
 | --- | --- |
 | `settings.json` | 你的设置。 |
 | `keybindings.json` | 你改过的快捷键。改过才会写。 |
-| `profiles.json` | Shell 档案，含你填的命令行与环境变量。 |
+| `profiles.json` | Shell 配置文件，含你填的命令行与环境变量。 |
 | `schemes\` | 你添加的配色。 |
 | `session.json`、`session.lock` | 待恢复的窗口、标签与窗格。见下。 |
 | `pins.json` | 收藏的文件夹、文件与地址。 |
-| `shell-integration\` | Folio 为 PowerShell 与 bash 集成写出的脚本。 |
+| `shell-integration\` | Folio 为 PowerShell 与 bash 整合写出的脚本。 |
 | `diagnostics.log`、`diagnostics.prev.log` | 无控制台启动时的程序输出。只在启动时查一次：到 4 MiB 就把当前这份转成 `.prev.log`，顶掉上一代。 |
 | `hang-reports\` | 只在窗口失去响应时写。记模块名与偏移，不记栈内容。 |
 
@@ -148,7 +148,7 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
 - 你在提交图里筛选用的 **git 分支名**。
 - **窗口几何、每显示器 DPI，以及一个显示器标识。**
 
-`profiles.json` 里有你写进档案的命令行与环境变量。不要往里面放密钥。
+`profiles.json` 里有你写进配置文件的命令行与环境变量。不要往里面放密钥。
 
 ### 其它位置
 
