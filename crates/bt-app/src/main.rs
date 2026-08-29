@@ -71316,23 +71316,24 @@ impl Runtime<'_> {
             // same rule and lands on the same seat — which is also what keeps
             // the terminal and the address field from giving two answers about
             // one string.
-            HyperlinkActivation::Page(url) => match webnav::address_bar(&url) {
-                webnav::Decision::Navigate(url) => self.open_web_page(&url)?,
+            //
+            // **The door itself moved out of this arm on 2026-08-29**
+            // (§7.1.5g ⑦) when a link written into a document turned out to be
+            // asking the same thing: it is [`Self::open_web_address_here`], and
+            // both surfaces call it rather than each spelling one judgement.
+            HyperlinkActivation::Page(url) => {
                 // **A refusal is said out loud, because a request was made.**
                 // The silence this whole slice is about was a plain click that
-                // asked for something and produced nothing at all; a plain
-                // click that asks for an address this window will not load owes
-                // the reader the same sentence `Ctrl` has always got. `Search`
-                // is unreachable from a string that already carries a scheme —
-                // `webnav::check` only offers one where there is none — and is
-                // folded in here rather than given a verb of its own, so that
-                // an arm which can never run cannot grow a behaviour nobody
-                // meant.
-                webnav::Decision::Refuse(_) | webnav::Decision::Search(_) => {
+                // asked for something and produced nothing at all; a plain click
+                // that asks for an address this window will not load owes the
+                // reader the same sentence `Ctrl` has always got — and on this
+                // surface that sentence is the hover line, under the very cells
+                // the address is printed in.
+                if !self.open_web_address_here(&url)? {
                     self.window.hyperlink_hover.show_blocked(hyperlink);
                     self.publish_interaction_frame()?;
                 }
-            },
+            }
             // The one door out of this window that takes a *path* — the same one
             // an unpreviewable file's card offers and a files row used to fall
             // through to, and the same one that will not start a program. A page
