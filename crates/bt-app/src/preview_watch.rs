@@ -123,14 +123,23 @@ pub struct PreviewWatch {
     /// for `git_watch`'s reason: the only thing worth keeping about ten of them
     /// is that there were some and when the last one was.
     news: Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
-    /// One subscription per directory, however many watched files are in it.
+    /// One live subscription per directory, however many watched files are in
+    /// it. **The handle is the subscription**: dropping it cancels.
+    folders: BTreeMap<PathBuf, bt_platform::DirWatch>,
+    /// **And the directories this process could not take one out on** — a
+    /// network share, a `\\wsl$` mount, a folder it may not open.
     ///
-    /// **`None` is a real state and not a failure to retry**: a file on a
-    /// network share, on a `\\wsl$` mount, or in a folder this process may not
-    /// open cannot be watched. The entry is kept anyway, holding no handle, so
-    /// that the attempt is made once per time the file is opened rather than
-    /// once per turn of the event loop.
-    folders: BTreeMap<PathBuf, Option<bt_platform::DirWatch>>,
+    /// A second membership rather than a `None` beside the handles, and the
+    /// reason is that this set is *read* and not merely recorded: rule 4's
+    /// second road is exactly "the files in these folders", and a state that
+    /// something depends on deserves a name rather than a reading of an
+    /// `Option`. Kept — rather than the folder simply being absent — so that the
+    /// attempt is made once per time a file in it is opened rather than once per
+    /// turn of the event loop.
+    ///
+    /// The two are exclusive by construction: one folder goes into exactly one
+    /// of them, in [`Self::sync_with`], and leaves both together.
+    unwatchable: BTreeSet<PathBuf>,
     files: BTreeMap<PathBuf, Watched>,
 }
 
@@ -209,16 +218,24 @@ impl PreviewWatch {
             .keys()
             .filter_map(|path| path.parent().map(Path::to_path_buf))
             .collect();
-        let held = self.folders.len();
+        let held = self.folders.len() + self.unwatchable.len();
         self.folders
             .retain(|directory, _| folders.contains(directory));
-        changed |= self.folders.len() != held;
+        self.unwatchable.retain(|directory| folders.contains(directory));
+        changed |= self.folders.len() + self.unwatchable.len() != held;
         for directory in &folders {
-            if self.folders.contains_key(directory) {
+            if self.folders.contains_key(directory) || self.unwatchable.contains(directory) {
                 continue;
             }
             changed = true;
-            self.folders.insert(directory.clone(), open(directory));
+            match open(directory) {
+                Some(watch) => {
+                    self.folders.insert(directory.clone(), watch);
+                }
+                None => {
+                    self.unwatchable.insert(directory.clone());
+                }
+            }
         }
         // A folder that stopped being watched left its unread news behind, and a
         // stale timestamp for it would be acted on the next time somebody opened
@@ -312,15 +329,14 @@ impl PreviewWatch {
         // **A window whose folders are all watched touches no disk at all**, and
         // this is the line that says so: the common case is that every handle is
         // held, and then there is nothing here to walk.
-        if !self.folders.values().any(Option::is_none) {
+        if self.unwatchable.is_empty() {
             return Vec::new();
         }
         let mut moved = Vec::new();
         for (path, entry) in &mut self.files {
             let unwatched = path
                 .parent()
-                .and_then(|directory| self.folders.get(directory))
-                .is_some_and(Option::is_none);
+                .is_some_and(|directory| self.unwatchable.contains(directory));
             if !unwatched {
                 continue;
             }
@@ -355,10 +371,7 @@ impl PreviewWatch {
     /// line.
     #[must_use]
     pub fn counts(&self) -> (usize, usize) {
-        (
-            self.files.len(),
-            self.folders.values().filter(|held| held.is_some()).count(),
-        )
+        (self.files.len(), self.folders.len())
     }
 }
 
@@ -442,6 +455,13 @@ mod tests {
         }
     }
 
+    /// How many folders this watch is following at all — the ones it holds a
+    /// handle on and the ones it has recorded it cannot. The tests' `open`
+    /// answers `None` for everything, so the second is where they all land.
+    fn subscribed(watch: &PreviewWatch) -> usize {
+        watch.folders.len() + watch.unwatchable.len()
+    }
+
     /// The ordinary piece of news: this file moved and it is still there.
     fn present(path: &Path) -> FileNews {
         FileNews {
@@ -480,7 +500,7 @@ mod tests {
             &stamps
         ));
         assert_eq!(watch.counts().0, 2);
-        assert_eq!(watch.folders.len(), 1, "one folder, one handle");
+        assert_eq!(subscribed(&watch), 1, "one folder, one subscription");
 
         // The seat is pointed at another file, or closed.
         assert!(sync_for_test(
@@ -492,7 +512,7 @@ mod tests {
         assert!(sync_for_test(&mut watch, &BTreeSet::new(), &stamps));
         assert_eq!(watch.counts().0, 0);
         assert_eq!(
-            watch.folders.len(),
+            subscribed(&watch),
             0,
             "and the folder went with the last file"
         );
@@ -682,17 +702,15 @@ mod tests {
         let share = PathBuf::from(r"\\server\team").join("plan.md");
         let local = file("a.md");
         let mut stamps = BTreeMap::from([(share.clone(), stamp(10)), (local.clone(), stamp(20))]);
-        // The share refuses a handle; the local folder takes one. This is the
-        // one place in these tests where `open` answers differently per folder,
-        // because it is the one property that is *about* the difference.
+        // A `DirWatch` is a kernel object and cannot be fabricated, so the
+        // difference the test is about is stated where this module keeps it:
+        // every folder arrives unwatchable, and the local one is then recorded
+        // as having taken a handle. That is exactly what `sync_with` writes on a
+        // real machine, said in one line instead of through a `CreateFileW`.
         let wanted = BTreeSet::from([share.clone(), local.clone()]);
-        watch.sync_with(
-            &wanted,
-            |directory| {
-                (!directory.starts_with(r"\\server")).then(|| unreachable!("no kernel in a test"))
-            },
-            |path| stamps.get(path).copied(),
-        );
+        watch.sync_with(&wanted, |_| None, |path| stamps.get(path).copied());
+        let local_folder = local.parent().expect("a folder").to_path_buf();
+        watch.unwatchable.remove(&local_folder);
 
         assert!(
             watch
@@ -748,9 +766,12 @@ mod tests {
         let stamps = BTreeMap::from([(watched.clone(), stamp(10))]);
         watch.sync_with(
             &BTreeSet::from([watched]),
-            |_| Some(unreachable!("no kernel in a test")),
+            |_| None,
             |path| stamps.get(path).copied(),
         );
+        // Every handle taken — see the test above for why this is written rather
+        // than opened.
+        watch.unwatchable.clear();
         assert!(
             watch
                 .ask_the_unwatched_with(|path| panic!("asked the disk about {}", path.display()))

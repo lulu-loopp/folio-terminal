@@ -30240,6 +30240,54 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
     }
 }
 
+/// **Every file one tab's preview surfaces stand on** (user ruling 2026-08-29).
+///
+/// [`Runtime::watched_preview_files`] is the fold of this over the window's
+/// tabs, and the split is not tidiness: what a tab stands on is answerable from
+/// a tab, and a free function is the only shape of that answer a test can put a
+/// real pool and a real pane in front of without a GPU. The reported defect was
+/// a claim about exactly this set — that a pooled document no pane was on was
+/// missing from it — so the set is the thing that has to be checkable.
+///
+/// Three kinds of thing answer, and they answer with the same thing, a path:
+///
+/// * **the pool**, which is the superset of what the panes show and is the half
+///   the ruling added. §7.1.3's buffers belong to the tab and are not re-read
+///   when a pane comes back to one, which is what makes an unsaved edit survive
+///   a switch — and is also why a buffer that was not watched while it was off
+///   the glass would never learn its file had moved;
+/// * **a page's file**, which the pool cannot answer for: a page's buffer is
+///   keyed by its URL, so the pane is the only thing that knows which file the
+///   engine is standing on;
+/// * **the pictures inside a markdown page** (§7.1.3k ④), which belong to the
+///   document rather than to a pane and are therefore read off the parsed page.
+///
+/// A git-backed document and a page on a *server* have no file behind them and
+/// contribute nothing.
+fn files_a_tab_stands_on(tab: &TabState) -> BTreeSet<PathBuf> {
+    let mut wanted = BTreeSet::new();
+    for buffer in tab.preview_pool.buffers() {
+        if let Some(path) = buffer.source.file_path() {
+            wanted.insert(path.to_path_buf());
+        }
+    }
+    for (_, pane) in tab.preview_panes.iter() {
+        if let PreviewDocument::Markdown { pictures, .. } = &pane.doc {
+            wanted.extend(pictures.files.iter().cloned());
+        }
+        let Some(source) = pane.buffer.as_ref() else {
+            continue;
+        };
+        if let Some((path, _)) = source
+            .web_url()
+            .and_then(webnav::Mint::path_and_tail_of_file_url)
+        {
+            wanted.insert(path);
+        }
+    }
+    wanted
+}
+
 impl Runtime<'_> {
     /// Open the process's device layer, its `App`, and its first window.
     ///
@@ -42900,35 +42948,21 @@ impl Runtime<'_> {
     /// **Across tabs, not only the tab on screen** - see
     /// [`preview_watch::PreviewWatch::sync`] for why.
     fn watched_preview_files(&self) -> BTreeSet<PathBuf> {
-        let mut wanted = self.markdown_picture_files();
-        for tab in &self.window.tabs {
-            // The pool first, because it is the superset: every pane's buffer is
-            // a pool entry, and the entries no pane is on are precisely the ones
-            // the pane-shaped gate used to lose.
-            for buffer in tab.preview_pool.buffers() {
-                if let Some(path) = buffer.source.file_path() {
-                    wanted.insert(path.to_path_buf());
-                }
-            }
-            // A page is not in the pool under its file's name — its buffer is
-            // keyed by the URL — so the seat is still the one thing that can say
-            // which file an engine is standing on.
-            for (_, pane) in tab.preview_panes.iter() {
-                let Some(source) = pane.buffer.as_ref() else {
-                    continue;
-                };
-                if let Some((path, _)) = source
-                    .web_url()
-                    .and_then(webnav::Mint::path_and_tail_of_file_url)
-                {
-                    wanted.insert(path);
-                }
-            }
-        }
-        wanted
+        self.window
+            .tabs
+            .iter()
+            .flat_map(files_a_tab_stands_on)
+            .collect()
     }
 
     /// **Every picture file a markdown page in this window is showing.**
+    ///
+    /// A second walk beside [`files_a_tab_stands_on`]'s picture arm rather than a
+    /// reading of it, because the two answer different questions with the same
+    /// paths: this one is asked of *one path that has just moved* — "is this a
+    /// picture some page is standing on, and therefore a decode to throw away" —
+    /// and that one is asked of the whole window. Deriving one from the other
+    /// would put the window's whole set on the path of a single notification.
     ///
     /// The picture the watch follows and the picture a decode landing asks about
     /// are the same set, so it is derived in one place from the documents
@@ -90537,16 +90571,17 @@ mod floated_page_tests {
         );
         let refresh = fn_body(concat!(
             "fn refresh_preview_file",
-            "(&mut self, path: &Path) -> Result<()> {"
+            "(&mut self, news: &preview_watch::FileNews) -> Result<()> {"
         ));
         assert!(
             refresh.contains("web.reload(&window.compositor)"),
             "and a watched file that a page is standing on takes an ordinary reload"
         );
-        let watched = fn_body(concat!(
-            "fn watched_preview_files",
-            "(&self) -> BTreeSet<PathBuf> {"
-        ));
+        // The watched set moved out to a free function on 2026-08-29 — the
+        // window's answer is the fold of one tab's — so the sentence is asked of
+        // the half that names files, which is where a page's own file is picked
+        // up.
+        let watched = fn_body("fn files_a_tab_stands_on(tab: &TabState) -> BTreeSet<PathBuf> {");
         assert!(
             watched.contains("path_and_tail_of_file_url"),
             "which requires a local page's own file to be on the watched list"
@@ -118497,6 +118532,395 @@ mod tests {
         };
         assert_eq!(read(here).as_deref(), Some("todo.txt"));
         assert_eq!(read(next_door).as_deref(), Some("README.md"));
+    }
+
+    /// A folder of this test's own, emptied first so a previous run cannot
+    /// answer for this one.
+    fn disk_scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("bt-disk-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch folder");
+        dir
+    }
+
+    /// Open a real file into a buffer the way this window does: name it, then
+    /// give it the head the disk answered.
+    fn buffer_read_from(path: &Path) -> preview::PreviewBuffer {
+        let mut buffer = preview::PreviewBuffer::new(
+            preview::PreviewSource::file(path),
+            files_row_display_name(path),
+        );
+        buffer.accept(preview::read_head(path));
+        buffer
+    }
+
+    /// RED ① — **a document in the pool follows the disk even while no pane is
+    /// on it** (user report on a real machine, 2026-08-29; user ruling the same
+    /// day).
+    ///
+    /// The defect, verbatim: a repository's `README.md` open in a preview pane
+    /// with seven other documents behind it in the pool, rewritten on disk by a
+    /// `git merge`, still showing the old body — **and still showing it after
+    /// switching to another document and back**. That last clause is the whole
+    /// diagnosis. `watched_preview_files` asked the *panes* what they were
+    /// showing, so a pooled buffer no pane was on was never subscribed to; and a
+    /// buffer is content that belongs to the tab, so coming back to one does not
+    /// re-read it — by design, and rightly, because that is what makes an
+    /// unsaved edit survive a switch. The two rules together meant the stale
+    /// body was the rest of the session.
+    ///
+    /// Three blocks, on real files in a real tab:
+    ///
+    /// **① The gate names the pooled document.** This is the fix and the whole
+    /// of it; everything below it already worked and had nothing to work on.
+    ///
+    /// **② The disk moves and the buffer takes it**, through the same door the
+    /// watcher's news goes through.
+    ///
+    /// **③ The scroll survives.** A reader half way down a document whose file
+    /// was rewritten must not be sent back to the top — the ruling's own clause.
+    /// The pane's scroll is a number the pane holds and the re-read never
+    /// touches it, and this is where that stops being an accident.
+    ///
+    /// RED GATE ①: make [`files_a_tab_stands_on`] walk `tab.preview_panes` for
+    /// its documents instead of `tab.preview_pool` — which is the code as it
+    /// shipped — and block ① fails on `elsewhere.md`, which on a real machine is
+    /// the reported defect exactly. RED GATE ②: make
+    /// [`preview::PreviewBuffer::note_disk_moved`] answer `Nothing` for a clean
+    /// buffer and block ② fails: the pane is subscribed and told, and does not
+    /// act.
+    #[test]
+    fn a_pooled_document_no_pane_is_on_still_follows_its_file() {
+        let dir = disk_scratch("pool");
+        let shown = dir.join("shown.md");
+        let elsewhere = dir.join("elsewhere.md");
+        std::fs::write(&shown, "# shown\n").expect("write");
+        std::fs::write(&elsewhere, "# version one\n\nthe first body.\n").expect("write");
+
+        let (mut tab, seat) = tab_with_a_preview(
+            1,
+            vec![buffer_read_from(&shown), buffer_read_from(&elsewhere)],
+        );
+        let leaf = seat_of(TabId(1), seat);
+        // A reader half way down the page they are *not* about to leave.
+        tab.preview_panes.entry(leaf).scroll = [0.0, 420.0];
+
+        // ① The gate. Both documents, and the one no pane is on is the point.
+        let watched = files_a_tab_stands_on(&tab);
+        assert!(
+            watched.contains(&shown),
+            "the document on the glass was never in doubt"
+        );
+        assert!(
+            watched.contains(&elsewhere),
+            "and the one behind it in the pool is the reported defect: \
+             a buffer no pane is on is still a buffer somebody will come back to"
+        );
+
+        // ② Something outside this window rewrites it, and the watcher's news
+        // reaches the buffer through the one door.
+        std::fs::write(&elsewhere, "# version two\n\nthe second body.\n").expect("rewrite");
+        let source = preview::PreviewSource::file(&elsewhere);
+        let buffer = tab
+            .preview_pool
+            .get_mut(&source)
+            .expect("the pool is holding it");
+        assert_eq!(
+            buffer.note_disk_moved(true),
+            preview::DiskVerdict::ReadAgain,
+            "a clean body behind its file is a head read, and nothing is said out loud"
+        );
+        assert!(
+            buffer.is_behind_the_disk(),
+            "which is what `request_stale_previews` walks the pool for"
+        );
+        buffer.accept(preview::read_head(&elsewhere));
+        assert!(
+            buffer
+                .content
+                .as_deref()
+                .is_some_and(|body| body.contains("version two")),
+            "and the body on the glass is the file's"
+        );
+        assert!(
+            !buffer.is_behind_the_disk(),
+            "the question is closed by its answer"
+        );
+
+        // ③ The scroll.
+        assert_eq!(
+            tab.preview_panes.entry(leaf).scroll,
+            [0.0, 420.0],
+            "a file rewritten under a reader does not send them back to the top"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED ② — **a body with unsaved edits is never overwritten, and the window
+    /// says so** (user ruling 2026-08-29).
+    ///
+    /// The standing half is `mark_stale`'s: the person's text is the newer of
+    /// the two. What the ruling adds is that the disagreement is *reported at
+    /// the moment it happens* rather than kept back until somebody presses save,
+    /// and that the two answers a person can give it are on the strip beside it.
+    ///
+    /// Both verbs, because they are the two halves of one promise: `Keep my
+    /// edits` must leave every character where it is, and `Reload` must be the
+    /// only thing in this product that throws them away.
+    ///
+    /// RED GATE ①: let `note_disk_moved` fall through to `mark_stale` for a
+    /// dirty buffer and the first block fails — the edits are gone and nothing
+    /// was said, which is the outcome the ruling exists to forbid. RED GATE ②:
+    /// make [`preview::PreviewBuffer::keep_this_body`] clear `dirty` as well and
+    /// the second block fails. RED GATE ③: make
+    /// [`preview::PreviewBuffer::take_the_disks_copy`] leave `dirty` standing
+    /// and the third block fails: `mark_stale` refuses a dirty buffer, so
+    /// `Reload` would take the strip down and change nothing.
+    #[test]
+    fn a_body_with_unsaved_edits_is_not_overwritten_and_says_so() {
+        let dir = disk_scratch("dirty");
+        let path = dir.join("notes.md");
+        std::fs::write(&path, "# one\n").expect("write");
+        let mut buffer = buffer_read_from(&path);
+        assert!(buffer.edit_content(|text| {
+            text.push_str("typed by hand\n");
+            true
+        }));
+        assert!(buffer.dirty);
+
+        // ① Somebody else writes the file.
+        std::fs::write(&path, "# two\n").expect("rewrite");
+        assert_eq!(
+            buffer.note_disk_moved(true),
+            preview::DiskVerdict::Say,
+            "a strip, not a read"
+        );
+        assert_eq!(buffer.disk, preview::DiskNews::Changed);
+        assert!(
+            !buffer.is_behind_the_disk(),
+            "nothing is owed to the worker: the body on the glass is not going anywhere"
+        );
+        assert!(
+            buffer
+                .content
+                .as_deref()
+                .is_some_and(|body| body.contains("typed by hand")),
+            "and the words that were typed are still there"
+        );
+        assert_eq!(
+            buffer.note_disk_moved(true),
+            preview::DiskVerdict::Nothing,
+            "a second notification about the same disagreement is not a second frame"
+        );
+        assert_eq!(
+            notice::Notice::DiskChanged.verbs(),
+            &[
+                notice::NoticeVerb::KeepMyEdits,
+                notice::NoticeVerb::ReloadFromDisk
+            ],
+            "and the strip offers exactly the two answers a person can give it"
+        );
+
+        // ② Keep my edits: the strip goes down, the text stays, and the save is
+        // still guarded.
+        assert!(buffer.keep_this_body());
+        assert_eq!(buffer.disk, preview::DiskNews::Level);
+        assert!(buffer.dirty, "keeping is not saving");
+        assert!(
+            buffer
+                .content
+                .as_deref()
+                .is_some_and(|body| body.contains("typed by hand"))
+        );
+        assert_eq!(
+            buffer.save(),
+            preview::SaveOutcome::Conflict,
+            "ruling 8-9 still stands: dismissing the strip is not permission to overwrite"
+        );
+
+        // ③ Reload: the one door that discards, and it really does read again.
+        assert_eq!(buffer.note_disk_moved(true), preview::DiskVerdict::Say);
+        assert!(buffer.take_the_disks_copy(), "a head read is now owed");
+        assert!(!buffer.dirty);
+        assert_eq!(buffer.disk, preview::DiskNews::Level);
+        buffer.accept(preview::read_head(&path));
+        assert_eq!(buffer.content.as_deref(), Some("# two\n"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED ③ — **a file that is deleted takes nothing with it** (user ruling
+    /// 2026-08-29).
+    ///
+    /// Before the ruling a delete arrived at `mark_stale` like any other change,
+    /// and the head read it asked for came back `Refused(Fault)` — so the window
+    /// answered somebody else's `rm` by replacing the document a reader was
+    /// looking at with "no such file". The buffer is what the reader has left of
+    /// that file, and it is kept.
+    ///
+    /// **No verb**, and that is the ruling read honestly: there is nothing to
+    /// reload and nothing to choose between, so the strip carries the sentence
+    /// and the `×` that says it has been read.
+    ///
+    /// RED GATE: give `note_disk_moved`'s absent arm the clean arm's body — a
+    /// `mark_stale` and a read — and both halves fail: the words go, and a
+    /// window that was showing a document is showing a fault card.
+    #[test]
+    fn a_deleted_file_keeps_the_body_that_was_read_from_it() {
+        let dir = disk_scratch("gone");
+        let path = dir.join("notes.md");
+        std::fs::write(&path, "# still here\n").expect("write");
+        let mut buffer = buffer_read_from(&path);
+        std::fs::remove_file(&path).expect("delete");
+
+        assert_eq!(buffer.note_disk_moved(false), preview::DiskVerdict::Say);
+        assert_eq!(buffer.disk, preview::DiskNews::Deleted);
+        assert!(
+            !buffer.is_behind_the_disk(),
+            "nothing is asked of a disk that has nothing to answer with"
+        );
+        assert_eq!(
+            buffer.content.as_deref(),
+            Some("# still here\n"),
+            "what the reader was reading is what the reader is still reading"
+        );
+        assert!(notice::Notice::DiskDeleted.verbs().is_empty());
+
+        // And a file that comes back is the ordinary case again.
+        std::fs::write(&path, "# back\n").expect("recreate");
+        assert_eq!(
+            buffer.note_disk_moved(true),
+            preview::DiskVerdict::ReadAgain,
+            "the sentence comes down and the bytes are asked for, in one move"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED — **the strip a preview wears takes a row of that preview's body, and
+    /// the two derivations of where the body starts agree** (user ruling
+    /// 2026-08-29).
+    ///
+    /// The band was written for a terminal and no seat had ever worn it and a
+    /// rail at once, so the order of the two subtractions was a tie-break nobody
+    /// could see. A document wears both. `seats::preview_body_viewport` and
+    /// `seats::preview_pane_geometry` are two derivations of one number — the
+    /// note on the second says so — and a pair that disagreed by the height of a
+    /// band would fit a picture over the sentence and put every click one row
+    /// away from what it looks like it is on.
+    ///
+    /// RED GATE: drop the `notice` argument's effect from
+    /// `seats::preview_pane_geometry` — which is that function as it shipped —
+    /// and the first assertion fails by exactly the strip's thirty logical
+    /// pixels. RED GATE ②: place the strip without the rail's offset in
+    /// `seats::pane_notice_strip` and the last block fails: the row is drawn
+    /// across the breadcrumbs.
+    #[test]
+    fn a_preview_wearing_a_strip_gives_it_a_row_of_its_own_body() {
+        let mut seats = seats::Seats::lone_terminal();
+        let seat = seats
+            .add_preview(&cross_metrics())
+            .expect("the preview seat lands");
+        let _ = seats.set_rails(BTreeMap::from([(seat, seats::PreviewRailKind::Crumbs)]));
+        let (layout, _) = cross_solve(&seats);
+        let scale = 1.0;
+        let rect = seats::full_pane_rect(&layout, seat).expect("a full pane");
+
+        let without = seats::preview_body_viewport(&seats, &layout, seat, scale)
+            .expect("a body")
+            .y;
+        assert!(seats.set_notices(BTreeSet::from([seat])));
+        let with = seats::preview_body_viewport(&seats, &layout, seat, scale)
+            .expect("a body")
+            .y;
+        let band = (notice::BAR_HEIGHT_LOGICAL_PX * scale).round() as u32;
+        assert_eq!(
+            with - without,
+            band,
+            "the strip is a row of the document and the document yields it"
+        );
+
+        let geometry =
+            seats::preview_pane_geometry(rect, scale, seats.seat_rail(seat), true);
+        assert_eq!(
+            geometry.body[1] as u32, with,
+            "and the rectangle derivation and the viewport one say the same number"
+        );
+
+        let strip = seats::pane_notice_strip(&seats, &layout, seat, scale).expect("a strip");
+        assert_eq!(
+            strip[3], geometry.body[1],
+            "the strip's foot is the body's head — no seam and no overlap"
+        );
+        let rail = seats::preview_rail_band(rect, scale);
+        assert!(
+            strip[1] >= rail[3],
+            "and it stands under the breadcrumbs rather than across them: \
+             name, then where it lives, then what is wrong with it, then the document"
+        );
+    }
+
+    /// RED — **the wiring the headless tests above cannot stand in front of.**
+    ///
+    /// Four sentences about a `Runtime`, which needs a device layer and a window
+    /// to exist, held against the source itself the way this file's other
+    /// structural promises are. Each of them is one half of a mechanism whose
+    /// other half is pinned by a real test above.
+    ///
+    /// RED GATE: delete any one of the four lines named and its assertion goes
+    /// red; on a real machine each is one of the two roads or one of the two
+    /// moments going quiet.
+    #[test]
+    fn the_disk_news_reaches_the_glass_by_both_roads() {
+        const SOURCE: &str = include_str!("main.rs");
+        fn fn_body(signature: &str) -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        }
+
+        let watched = fn_body("fn watched_preview_files(&self) -> BTreeSet<PathBuf> {");
+        assert!(
+            watched.contains("files_a_tab_stands_on"),
+            "the window's set is the fold of the per-tab answer the tests above check"
+        );
+        let refresh = fn_body(concat!(
+            "fn refresh_preview_file",
+            "(&mut self, news: &preview_watch::FileNews) -> Result<()> {"
+        ));
+        assert!(
+            refresh.contains("note_disk_moved(news.present)"),
+            "and the watcher's news goes through the one door that knows the three cases apart"
+        );
+        assert!(
+            refresh.contains("self.request_stale_previews(index)"),
+            "a pooled buffer no pane is on is asked for through the pool's own door"
+        );
+        let settle = fn_body("fn settle_pane_notices(&mut self) -> Result<()> {");
+        assert!(
+            settle.contains("self.seats.preview_seats()"),
+            "and a preview seat is one of the seats that can wear the strip"
+        );
+        // The fallback's two moments (rule 4).
+        assert!(
+            SOURCE.contains("runtime\n                        .ask_the_unwatched_preview_files()"),
+            "a window given focus asks about the files no kernel speaks for"
+        );
+        let land = fn_body(concat!(
+            "fn land_preview_source_on(\n",
+            "        &mut self,\n",
+            "        surface: PreviewSurface,\n",
+            "        source: preview::PreviewSource,\n",
+            "        name: String,\n",
+            "    ) -> Result<()> {"
+        ));
+        assert!(
+            land.contains("self.ask_the_unwatched_preview_files()?;"),
+            "and so does a document being brought to the front"
+        );
     }
 
     /// Every seat of `tab`, paired with the id it will answer to after the
