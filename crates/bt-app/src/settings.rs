@@ -18887,7 +18887,10 @@ mod tests {
             psreadline_remove_available: false,
             ..values()
         };
-        assert_eq!(SettingsRow::PsReadLine.option_count(), FORMULA_OPTIONS.len());
+        assert_eq!(
+            SettingsRow::PsReadLine.option_count(),
+            FORMULA_OPTIONS.len()
+        );
         for (index, wanted) in FORMULA_OPTIONS.into_iter().enumerate() {
             assert!(
                 !SettingsRow::PsReadLine.option_enabled(index, &blocked),
