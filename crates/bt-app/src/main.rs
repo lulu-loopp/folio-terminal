@@ -18231,10 +18231,21 @@ fn preview_link_activation(
 ) -> PreviewLinkActivation {
     match preview::link_action(target, document) {
         preview::LinkAction::Preview(path) => PreviewLinkActivation::Preview(path),
-        // MUTATION (2026-08-29): the arm as it stood before this slice — the
-        // 2026-08-13 verb, which never read the modifier and left for the system
-        // on a plain press.
-        preview::LinkAction::Web(url) => PreviewLinkActivation::Browser(url),
+        // **The terminal's own row, not a second reading of it.** This is the
+        // whole of §7.1.5g ⑦: the arm that stood here read
+        // `LinkAction::Browse(url) => shell_execute`, a verb minted on
+        // 2026-08-13 that never took `control` as an argument, and by the time
+        // `ClickIntent` settled the gesture the other way round nobody came back
+        // to it. The note ⑥ left behind is what this line obeys — 「按同一张表
+        // 改,不要在那边另写一个 `if control`」 — and obeying it means calling the
+        // row rather than restating it.
+        preview::LinkAction::Web(url) => match web_address_activation(ClickIntent::of(control), &url)
+        {
+            WebAddressActivation::None => PreviewLinkActivation::None,
+            WebAddressActivation::Page => PreviewLinkActivation::Page(url),
+            WebAddressActivation::Browser => PreviewLinkActivation::Browser(url),
+            WebAddressActivation::Blocked => PreviewLinkActivation::Blocked(url),
+        },
         preview::LinkAction::Nowhere => PreviewLinkActivation::None,
     }
 }
