@@ -1731,7 +1731,7 @@ fn resolve_document_pictures(
             None => preview::LinkAction::Nowhere,
         };
         let picture = match resolved {
-            preview::LinkAction::Browse(url) => MarkdownPicture::Remote(url),
+            preview::LinkAction::Web(url) => MarkdownPicture::Remote(url),
             preview::LinkAction::Nowhere => MarkdownPicture::Nowhere,
             preview::LinkAction::Preview(path) => {
                 let picture = ask(&path, image.fill);
@@ -2282,6 +2282,22 @@ pub(crate) enum PreviewSurface {
     ///   `press_preview_body` and `preview_edit_focus` — are reached through
     ///   [`Runtime::preview_surface_at`], which this is still not in.
     Peek,
+}
+
+impl PreviewSurface {
+    /// **Where a notice about this surface stands** (toast ruling 2026-08-16: a
+    /// notice appears where the attention already is).
+    ///
+    /// A seat is a pane on the glass and carries its own card; a float and the
+    /// glance card are not surfaces the toast host can anchor to — the card is
+    /// dismissed by the very pointer move that would read a notice on it — so
+    /// both take the window's corner, which is what that fallback is for.
+    fn toast_anchor(self) -> toast::ToastAnchor {
+        match self {
+            Self::Seat(leaf) => toast::ToastAnchor::PreviewSeat(leaf),
+            Self::Float(_) | Self::Peek => toast::ToastAnchor::Window,
+        }
+    }
 }
 
 /// **Where in the strip the tab a preview surface belongs to is standing** —
@@ -7907,7 +7923,14 @@ struct TabState {
     /// rather than by an index into that surface's list — so a rebuild that moves
     /// or removes it simply stops matching, and there is no stale subscript to
     /// invalidate.
-    preview_link_hover: Option<(PreviewSurface, [f32; 4])>,
+    ///
+    /// **And by its target too, since 2026-08-29** (§7.1.5g ⑦). The box is what
+    /// the underline is drawn from; the target is what the pointing finger is
+    /// decided from ([`preview_link_answers_a_press`]), and the two are held in
+    /// one place for `terminal_link_grasp`'s reason one surface along — so the
+    /// shape and the mark cannot come to disagree about which run is a link, nor
+    /// the shape and the verb about what that run would do.
+    preview_link_hover: Option<(PreviewSurface, PreviewLink)>,
     /// Which surface's quick edit holds the keyboard.
     ///
     /// **This is `InputOwner::PreviewEdit`** (`docs/DESIGN.md` §7.1.5), the
@@ -16280,6 +16303,26 @@ impl ControlClickHint {
     }
 }
 
+/// **One address, made safe to print.**
+///
+/// A URI is a string from outside and may carry control characters; a surface
+/// that printed them raw would let a target move a caret, clear a line or begin
+/// an escape in whatever is drawing it. Every place this window shows an address
+/// it was *asked about* — the hover line under the cells it was printed in, the
+/// notice a refused press raises on a preview — spells it through here, so there
+/// is one answer to "how is an address printed" rather than one per surface.
+fn printable_address(uri: &str) -> String {
+    uri.chars()
+        .map(|character| {
+            if character.is_control() {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 #[derive(Default)]
 struct HyperlinkHover {
     candidate: Option<HyperlinkHit>,
@@ -16362,18 +16405,8 @@ impl HyperlinkHover {
     }
 
     fn status_text(&self, columns: usize) -> Option<String> {
-        let uri = self
-            .active
-            .as_ref()?
-            .uri
+        let uri = printable_address(&self.active.as_ref()?.uri)
             .chars()
-            .map(|character| {
-                if character.is_control() {
-                    '\u{fffd}'
-                } else {
-                    character
-                }
-            })
             .collect::<Vec<_>>();
         if columns == 0 {
             return None;
@@ -17610,6 +17643,14 @@ struct PreviewTextDrag {
     latch: DragLatch,
     /// The markdown link the press landed on, if it landed on one.
     link: Option<String>,
+    /// The modifier **as it was when the button went down**, which is what
+    /// decides where the link goes (§7.1.5g ⑦).
+    ///
+    /// Recorded rather than read again at the release for
+    /// [`SelectionDrag::hyperlink_control`]'s reason, one surface along: a
+    /// `Ctrl` let go of during the click, or pressed during it, would otherwise
+    /// change the destination underneath a gesture already begun.
+    control: bool,
 }
 
 /// The press that may still turn out to be the second or third of a run.
@@ -18064,6 +18105,151 @@ enum HyperlinkActivation {
     Blocked,
 }
 
+/// **The `http(s)` row of §7.1.5g's table, standing on its own** (user ruling
+/// 2026-08-29, §7.1.5g ⑦).
+///
+/// It was lifted out of [`hyperlink_activation`] the day a second surface turned
+/// out to be answering the same question: a web address written into a markdown
+/// document is the same kind of string as one an application printed into the
+/// terminal — **a string from outside** — and until this ruling the two had
+/// opposite answers for one gesture. The document's link went to
+/// `ShellExecuteW` on a plain press and never read the modifier at all
+/// ([`preview::link_action`], written 2026-08-13, before [`ClickIntent`]
+/// existed), while the terminal's had just been settled the other way round:
+/// 平点 = 留在窗内, `Ctrl`+点 = 交给系统.
+///
+/// **So the row is one function and not two agreeing ones.** The note §7.1.5g ⑥
+/// left behind said it in advance — 「下一次碰预览链接时按同一张表改,不要在那边
+/// 另写一个 `if control`」 — and an `if control` in the preview is precisely what
+/// this type makes impossible: there is exactly one place in this program where
+/// a modifier and a web address meet.
+///
+/// No `PathBuf`, no disk, no `is_directory`: a web address names nothing on this
+/// machine, which is why this row can be read without the argument the rest of
+/// the table needs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebAddressActivation {
+    /// Nothing was asked for: a plain press on an address whose own text does
+    /// not parse. `Blocked` is the answer to a *request*, and the plain half of
+    /// a malformed address has nothing to open and nothing to say about it.
+    None,
+    /// Opened the way this window opens every other page — the preview seat's
+    /// own engine, on this tab (§7.1.5g ①).
+    Page,
+    /// Handed to whatever this desk browses with.
+    Browser,
+    /// A request this window refuses, said out loud.
+    Blocked,
+}
+
+/// Read the `http(s)` row: what a press with these modifiers on this address
+/// spends.
+///
+/// `uri` is the whole address including its scheme, and the caller has already
+/// established that the scheme is `http` or `https` — this function judges the
+/// rest of the text and nothing else.
+fn web_address_activation(intent: ClickIntent, uri: &str) -> WebAddressActivation {
+    // **W2 landed, and this row is what it was landing for** (user report
+    // 2026-08-29, 实机). The plain half read "Nothing in this window renders a
+    // web page yet; W2 is where this half of the row stops being empty" for as
+    // long as that was true. W2 landed on 2026-08-23; the `file:` page arm was
+    // rewritten that day and now says, in its own words, that the table is "back
+    // to one sentence with no exception in it" — while this arm went on being
+    // the exception. What the reader saw was the shape 7.1.5f is about: an
+    // address wearing a mark that answered a hover and not a press, silently,
+    // with no way to tell a refusal from a click that never arrived.
+    //
+    // A remote address is not a special case of "somewhere this window can go" —
+    // it is the ordinary one. `Ctrl+L` has taken any address this door admits
+    // since W2, a pin and a restored session reach the same seat through the
+    // same gate, and every one of them is a string from outside judged by
+    // `webnav::address_bar`. So the plain half is the seat, the `Ctrl` half is
+    // the machine's browser, and the whole table is one sentence again.
+    let allowed = uri
+        .split_once(':')
+        .is_some_and(|(_, remainder)| remainder.starts_with("//") && remainder.len() > 2)
+        && !uri
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace());
+    match intent {
+        ClickIntent::Here if allowed => WebAddressActivation::Page,
+        ClickIntent::Here => WebAddressActivation::None,
+        ClickIntent::System if allowed => WebAddressActivation::Browser,
+        ClickIntent::System => WebAddressActivation::Blocked,
+    }
+}
+
+/// **What a press on a link inside a document this window drew spends**
+/// (§7.1.5g ⑦, user ruling 2026-08-29).
+///
+/// The preview's own half of the one clicking rule. It is a *composition* and
+/// deliberately not a table: [`preview::link_action`] says which of three kinds
+/// of thing the author's string names — a file, a web address, nothing — and the
+/// web arm is then read out of [`web_address_activation`], which is the same
+/// function the terminal's `http(s)` row is. Nothing here reads `control` on its
+/// own.
+///
+/// Five arms and no unreachable one, which is why this is its own type rather
+/// than [`HyperlinkActivation`] borrowed: the file arm never asks the disk
+/// whether it is a folder and never leaves for Explorer, so `Reveal`,
+/// `FilesColumn` and `External` are things this surface cannot produce and must
+/// not be able to grow.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PreviewLinkActivation {
+    /// Nothing this window will act on: a bare `#fragment`, a scheme with no arm
+    /// (`mailto:`), a relative link in a document that has no folder — or the
+    /// plain half of an address whose own text does not parse.
+    None,
+    /// **The file this link names, on the preview seat** — the 2026-08-13 ruling,
+    /// and the one arm the modifier does not touch.
+    ///
+    /// 「指到文件=预览它」 is what a link, a files row and the file menu's first
+    /// item all say, and `Ctrl` is not offered a second answer here because
+    /// there is no second answer to offer: this arm is *already* 「在这扇窗里发生
+    /// 的那个目的地」, and what the reader is pointing at is a document being read
+    /// beside the one they are reading.
+    Preview(PathBuf),
+    /// A web address, opened on this window's own seat (§7.1.5g ⑥) — the plain
+    /// press.
+    Page(String),
+    /// The same address, handed to this machine's browser — `Ctrl`.
+    Browser(String),
+    /// A request `Ctrl` made that this window refuses, to be said out loud.
+    Blocked(String),
+}
+
+/// Read the preview's link row: [`PreviewLinkActivation`]'s one reader.
+///
+/// One expression and not two agreeing ones, which is 7.1.5f's rule and the
+/// reason the pointing finger over a preview link is drawn from this and from
+/// nothing else ([`preview_link_answers_a_press`]): a hand that promises a press
+/// the release then declines is this window lying about what it can do.
+fn preview_link_activation(
+    control: bool,
+    target: &str,
+    document: &Path,
+) -> PreviewLinkActivation {
+    match preview::link_action(target, document) {
+        preview::LinkAction::Preview(path) => PreviewLinkActivation::Preview(path),
+        // MUTATION (2026-08-29): the arm as it stood before this slice — the
+        // 2026-08-13 verb, which never read the modifier and left for the system
+        // on a plain press.
+        preview::LinkAction::Web(url) => PreviewLinkActivation::Browser(url),
+        preview::LinkAction::Nowhere => PreviewLinkActivation::None,
+    }
+}
+
+/// Whether the preview link under the pointer would answer a press right now —
+/// and therefore whether the pointer wears the hand.
+///
+/// [`terminal_link_answers_a_press`] one surface along, and the same sentence:
+/// the underline says "there is a link here", which is a fact about the
+/// document; the finger says "and *this* press, with the keys held the way they
+/// are held right now, is one that goes somewhere".
+fn preview_link_answers_a_press(control: bool, target: &str, document: &Path) -> bool {
+    preview_link_activation(control, target, document) != PreviewLinkActivation::None
+}
+
 /// Which door a click on a hyperlink goes through (§7.1.5g).
 ///
 /// # The two halves of the table
@@ -18128,43 +18314,20 @@ fn hyperlink_activation(
         ClickIntent::Here => HyperlinkActivation::None,
         ClickIntent::System => HyperlinkActivation::Blocked,
     };
-    let Some((scheme, remainder)) = uri.split_once(':') else {
+    let Some((scheme, _)) = uri.split_once(':') else {
         return refused;
     };
     if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
-        let allowed = remainder.starts_with("//")
-            && remainder.len() > 2
-            && !uri
-                .chars()
-                .any(|character| character.is_control() || character.is_whitespace());
-        return match intent {
-            // **W2 landed, and this row is what it was landing for** (user
-            // report 2026-08-29, 实机). This arm read "Nothing in this window
-            // renders a web page yet; W2 is where this half of the row stops
-            // being empty" for as long as that was true. W2 landed on
-            // 2026-08-23; the `file:` page arm below was rewritten that day and
-            // now says, in its own words, that the table is "back to one
-            // sentence with no exception in it" — while this arm went on being
-            // the exception. What the reader saw was the shape 7.1.5f is about:
-            // an address wearing a mark that answered a hover and not a press,
-            // silently, with no way to tell a refusal from a click that never
-            // arrived.
-            //
-            // A remote address is not a special case of "somewhere this window
-            // can go" — it is the ordinary one. `Ctrl+L` has taken any address
-            // this door admits since W2, a pin and a restored session reach the
-            // same seat through the same gate, and every one of them is a
-            // string from outside judged by `webnav::address_bar`. So the plain
-            // half is the seat, the `Ctrl` half is the machine's browser, and
-            // the whole table is one sentence again.
-            ClickIntent::Here if allowed => HyperlinkActivation::Page(uri.to_owned()),
-            // An address whose own text does not parse keeps the silence every
-            // other unparsable row keeps: `Blocked` is an answer to a request
-            // the `Ctrl` half made, and the plain half of a malformed address
-            // has nothing to open and nothing to say about it.
-            ClickIntent::Here => HyperlinkActivation::None,
-            ClickIntent::System if allowed => HyperlinkActivation::Browser,
-            ClickIntent::System => HyperlinkActivation::Blocked,
+        // **The row is read where it lives** ([`web_address_activation`],
+        // §7.1.5g ⑦). It was written out in full here until a link inside a
+        // preview turned out to be asking the same question, and a second
+        // spelling of one row is how the preview came to answer this gesture
+        // backwards in the first place.
+        return match web_address_activation(intent, uri) {
+            WebAddressActivation::None => HyperlinkActivation::None,
+            WebAddressActivation::Page => HyperlinkActivation::Page(uri.to_owned()),
+            WebAddressActivation::Browser => HyperlinkActivation::Browser,
+            WebAddressActivation::Blocked => HyperlinkActivation::Blocked,
         };
     }
     if scheme.eq_ignore_ascii_case("file") {
@@ -41541,10 +41704,7 @@ impl Runtime<'_> {
         // setting it before the head has landed is safe: it becomes true the
         // moment there is something to type into.
         self.preview_edit_focus = Some(surface);
-        let anchor = match surface {
-            PreviewSurface::Seat(leaf) => toast::ToastAnchor::PreviewSeat(leaf),
-            PreviewSurface::Float(_) | PreviewSurface::Peek => toast::ToastAnchor::Window,
-        };
+        let anchor = surface.toast_anchor();
         let file = path
             .file_name()
             .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
@@ -42032,10 +42192,7 @@ impl Runtime<'_> {
             return Ok(());
         }
         if let Err(error) = std::fs::rename(&old, &new) {
-            let anchor = match surface {
-                PreviewSurface::Seat(leaf) => toast::ToastAnchor::PreviewSeat(leaf),
-                PreviewSurface::Float(_) | PreviewSurface::Peek => toast::ToastAnchor::Window,
-            };
+            let anchor = surface.toast_anchor();
             return self.toast(
                 toast::ToastKind::Error,
                 anchor,
@@ -44969,7 +45126,8 @@ impl Runtime<'_> {
         }
         if self
             .preview_link_hover
-            .is_some_and(|(surface, _)| !alive.contains(&surface))
+            .as_ref()
+            .is_some_and(|(surface, _)| !alive.contains(surface))
         {
             self.preview_link_hover = None;
         }
@@ -45831,7 +45989,8 @@ impl Runtime<'_> {
         }
         if self
             .preview_link_hover
-            .is_some_and(|(hovered, _)| hovered == surface)
+            .as_ref()
+            .is_some_and(|(hovered, _)| *hovered == surface)
         {
             self.preview_link_hover = None;
         }
@@ -48527,7 +48686,21 @@ impl Runtime<'_> {
     /// press that travelled is the selection's, which is exactly the
     /// `click_no_drag` gate the terminal's own hyperlinks are opened through
     /// ([`hyperlink_activation`]). See [`preview_press_opens_its_link`].
-    fn open_preview_link(&mut self, surface: PreviewSurface, target: &str) -> Result<bool> {
+    ///
+    /// **And it reads the modifier since 2026-08-29** (§7.1.5g ⑦). It did not,
+    /// for the whole of its life before that day: a web address in a document
+    /// went to `ShellExecuteW` on a plain press, which is the answer §7.1.5g
+    /// settled *against* four months later and never came back here to change.
+    /// The modifier is [`PreviewTextDrag::control`], recorded when the button
+    /// went down for [`SelectionDrag::hyperlink_control`]'s own reason: a `Ctrl`
+    /// let go of during a click must not change the destination underneath a
+    /// gesture already begun.
+    fn open_preview_link(
+        &mut self,
+        surface: PreviewSurface,
+        target: &str,
+        control: bool,
+    ) -> Result<bool> {
         // A relative link is resolved against the document's **own folder**, so
         // a document that is not in a folder cannot resolve one.
         let Some(document) = self
@@ -48537,14 +48710,26 @@ impl Runtime<'_> {
         else {
             return Ok(false);
         };
-        match preview::link_action(target, &document) {
+        match preview_link_activation(control, target, &document) {
             // §7.1.3's one door, the same one the tree's Enter and the file
             // menu's first row go through — so a file reached by pointing at it
             // in prose lands exactly where a file reached any other way does,
             // pool and all. Anything unreadable arrives as the "no preview"
             // card, which carries its own way out to the system.
-            preview::LinkAction::Preview(path) => self.open_preview(path),
-            preview::LinkAction::Browse(url) => {
+            PreviewLinkActivation::Preview(path) => self.open_preview(path)?,
+            // **The same address, kept in this window** — the terminal's own
+            // `Page` arm, spent through the terminal's own door
+            // ([`Self::open_web_address_here`]). A refusal is said out loud
+            // because a request was made, and it is said *here*, on the surface
+            // the press landed on: the terminal's mouth for this is a status
+            // line under the cells the address is printed in, and a link inside
+            // a document has no cells.
+            PreviewLinkActivation::Page(url) => {
+                if !self.open_web_address_here(&url)? {
+                    self.say_address_refused(surface, &url)?;
+                }
+            }
+            PreviewLinkActivation::Browser(url) => {
                 let result = window_hwnd(&self.window.window).and_then(|hwnd| {
                     bt_platform::shell_execute(hwnd, &url)
                         .map_err(|error| anyhow!(error))
@@ -48553,14 +48738,69 @@ impl Runtime<'_> {
                 if let Err(error) = result {
                     eprintln!("recoverable markdown link open failure: {error:#}");
                 }
-                Ok(())
             }
+            PreviewLinkActivation::Blocked(url) => self.say_address_refused(surface, &url)?,
             // A scheme this window does not open, or an anchor it cannot yet
             // honour. The press is still the link's: it landed on a control,
             // and letting it fall through would put a caret in the prose.
-            preview::LinkAction::Nowhere => Ok(()),
+            PreviewLinkActivation::None => {}
         }
-        .map(|()| true)
+        Ok(true)
+    }
+
+    /// **Open one web address on this window's own seat**, or report that the
+    /// door would not have it (§7.1.5g ⑥).
+    ///
+    /// One door and not a second: `webnav::address_bar` is what an address typed
+    /// into the head, restored from a session or read out of `pins.json` goes
+    /// through, and [`Self::open_web_page`]'s own contract is that every caller
+    /// has passed it first. A link printed in the terminal and a link written
+    /// into a document are strings from outside exactly as those are, so they
+    /// are judged by the same rule and land on the same seat — which is also
+    /// what keeps two surfaces from giving two answers about one string.
+    ///
+    /// `false` means the door refused, and the *caller* says so: the two callers
+    /// have two mouths — the terminal's hover line under the cells the address
+    /// is printed in, and a notice standing on the preview surface — and neither
+    /// can speak for the other's surface. What must not differ, and does not, is
+    /// the judgement.
+    ///
+    /// `Search` is unreachable from a string that already carries a scheme —
+    /// `webnav::check` only offers one where there is none — and is folded in
+    /// with the refusal rather than given a verb of its own, so that an arm
+    /// which can never run cannot grow a behaviour nobody meant.
+    fn open_web_address_here(&mut self, url: &str) -> Result<bool> {
+        match webnav::address_bar(url) {
+            webnav::Decision::Navigate(url) => {
+                self.open_web_page(&url)?;
+                Ok(true)
+            }
+            webnav::Decision::Refuse(_) | webnav::Decision::Search(_) => Ok(false),
+        }
+    }
+
+    /// **Say that an address this window was asked to open is refused**, on the
+    /// preview surface that was asked (§7.1.5g ⑦).
+    ///
+    /// The window's one door for 「这件事刚刚发生」 ([`Self::toast`]), which is
+    /// also the one that makes the notice stand where the attention already is
+    /// rather than in a corner. It carries the same two facts the terminal's
+    /// hover line carries when it is blocked, in the same words and with the
+    /// same control characters made printable: the address, and that it was
+    /// blocked. No new sentence is minted for a fact this window already has one
+    /// for.
+    fn say_address_refused(&mut self, surface: PreviewSurface, url: &str) -> Result<()> {
+        let body = format!(
+            "{}{}",
+            printable_address(url),
+            i18n::Text::HyperlinkBlockedSuffix.text()
+        );
+        self.toast(
+            toast::ToastKind::Error,
+            surface.toast_anchor(),
+            None,
+            body,
+        )
     }
 
     /// **Which byte of a rendered page a point names**, in the document's own
@@ -48660,6 +48900,7 @@ impl Runtime<'_> {
             // answers, and a shift-click on one is not asking for the link.
             latch: DragLatch::new(position),
             link: link.filter(|_| standing.is_none()),
+            control: self.window.modifiers.control_key(),
         });
         self.repaint_preview()?;
         Ok(true)
@@ -48731,7 +48972,7 @@ impl Runtime<'_> {
             }
             self.repaint_preview()?;
             if let Some(target) = drag.link {
-                self.open_preview_link(drag.surface, &target)?;
+                self.open_preview_link(drag.surface, &target, drag.control)?;
                 // A press that has just been spent on a link is not a selection
                 // to write, whatever it was standing over.
                 return Ok(true);
@@ -48831,7 +49072,7 @@ impl Runtime<'_> {
     fn note_preview_link_hover(&mut self, position: Option<PhysicalPosition<f64>>) -> Result<()> {
         let over = position
             .and_then(|position| self.preview_link_at(position))
-            .map(|(surface, link)| (surface, link.rect));
+            .map(|(surface, link)| (surface, link.clone()));
         if over == self.preview_link_hover {
             return Ok(());
         }
@@ -51484,13 +51725,14 @@ impl Runtime<'_> {
         self.preview_pane_mut(surface).md_text = text_boxes;
         let links =
             measure_preview_links(&mut self.app.gpu, &mut self.window.renderer, &built, &sites);
-        if let Some((hovered_surface, hovered)) = self.preview_link_hover
-            && hovered_surface == surface
-            && links.iter().any(|link| link.rect == hovered)
+        if let Some((hovered_surface, hovered)) = self.preview_link_hover.as_ref()
+            && *hovered_surface == surface
+            && links.iter().any(|link| link.rect == hovered.rect)
         {
+            let rect = hovered.rect;
             let thickness = (scale).round().max(1.0);
             built.quads.push(bt_render::PreviewQuad {
-                rect: [hovered[0], hovered[3] - thickness, hovered[2], hovered[3]],
+                rect: [rect[0], rect[3] - thickness, rect[2], rect[3]],
                 color: palette.accent,
             });
         }
@@ -54497,7 +54739,7 @@ impl Runtime<'_> {
                     if let Some(view) = self.window.tabs[index].git_graph_view.get_mut(&surface) {
                         view.seek = None;
                     }
-                    let anchor = self.graph_toast_anchor(surface);
+                    let anchor = surface.toast_anchor();
                     self.toast(
                         toast::ToastKind::Info,
                         anchor,
@@ -54509,20 +54751,6 @@ impl Runtime<'_> {
             }
         }
         Ok(moved)
-    }
-
-    /// Where a graph's own toast hangs.
-    ///
-    /// A docked graph anchors on the pane that is showing it, exactly as it
-    /// always has. A floating one anchors on the window as a whole — the same
-    /// answer [`Self::git_toast_anchor`] already gives a floating Git page, and
-    /// for that answer's reason: a pinned window is in no tab and no seat, so
-    /// there is no pane rectangle for a card to point at.
-    fn graph_toast_anchor(&self, surface: PreviewSurface) -> toast::ToastAnchor {
-        match surface {
-            PreviewSurface::Seat(leaf) => toast::ToastAnchor::PreviewSeat(leaf),
-            PreviewSurface::Float(_) | PreviewSurface::Peek => toast::ToastAnchor::Window,
-        }
     }
 
     /// Which graph each preview **surface** is drawing, and how far down it is.
@@ -54924,7 +55152,7 @@ impl Runtime<'_> {
         if !recoverable_clipboard_write(result, "commit copy") {
             return Ok(());
         }
-        let anchor = self.graph_toast_anchor(surface);
+        let anchor = surface.toast_anchor();
         self.toast(
             toast::ToastKind::Ok,
             anchor,
@@ -72835,7 +73063,7 @@ impl Runtime<'_> {
             self.window.drag.is_some(),
             grasp,
             divider_axis,
-            self.preview_link_hover.is_some() || self.terminal_link_grasp(),
+            self.preview_link_grasp() || self.terminal_link_grasp(),
             self.window.command_rail_hover.is_some(),
             self.image_grasp(),
         ));
@@ -72870,6 +73098,36 @@ impl Runtime<'_> {
                 .underline_target()
                 .map(|hyperlink| hyperlink.uri.as_str()),
             &|path| path.is_dir(),
+        )
+    }
+
+    /// [`Self::terminal_link_grasp`] on the other surface links are drawn on
+    /// (§7.1.5g ⑦), read from the same hover the underline is drawn from and
+    /// through the same one expression the press is spent through.
+    ///
+    /// **It used to be `preview_link_hover.is_some()`**, which is the sentence
+    /// the underline makes and not the one the finger makes: a `mailto:` written
+    /// into a document wore the pointing hand over a press that did nothing,
+    /// which is 7.1.5f's complaint — a mark that answers a hover and not a
+    /// press — standing in the preview instead of the terminal.
+    ///
+    /// A document with no folder resolves no link and therefore answers no
+    /// press, which is [`Self::open_preview_link`]'s own first gate said as a
+    /// shape.
+    fn preview_link_grasp(&self) -> bool {
+        let Some((surface, link)) = self.preview_link_hover.as_ref() else {
+            return false;
+        };
+        let Some(document) = self
+            .preview_buffer_on(*surface)
+            .and_then(|buffer| buffer.source.file_path())
+        else {
+            return false;
+        };
+        preview_link_answers_a_press(
+            self.window.modifiers.control_key(),
+            &link.target,
+            document,
         )
     }
 
@@ -99307,6 +99565,147 @@ mod tests {
             hyperlink_activation(true, true, "http:8080/nohost", &no_directories),
             HyperlinkActivation::Blocked
         );
+    }
+
+    /// RED (§7.1.5g ⑦, user ruling 2026-08-29) — **a link inside a preview reads
+    /// the same table as a link in the terminal**.
+    ///
+    /// The debt §7.1.5g ⑥ booked, in its own words: a `http(s)` link in the body
+    /// of a markdown document went `preview::link_action` → `Browse` →
+    /// `shell_execute`, so **a plain press left for the system browser and that
+    /// path never read `control` at all**. It was written on 2026-08-13, four
+    /// months before [`ClickIntent`] existed, and by 2026-08-29 it was pointing
+    /// the opposite way from the rule the terminal had settled on: 平点 = 留在
+    /// 这扇窗里, `Ctrl`+点 = 交给系统. One product, one gesture, two answers —
+    /// which is the disagreement `ClickIntent` was minted to end, reappearing on
+    /// the surface nobody had gone back to.
+    ///
+    /// So the row is asserted here exactly as it is asserted for the terminal
+    /// one screen up, and about the same strings: **the two surfaces are given
+    /// the same addresses and must answer the same way**. What is *not* asserted
+    /// the same way is the file arm, and deliberately — a link naming a file
+    /// keeps the 2026-08-13 answer under both modifiers, because that arm is
+    /// already 「在这扇窗里发生的那个目的地」 and `Ctrl` has nothing to change it
+    /// to.
+    ///
+    /// MUTATION: put the old arm back — `LinkAction::Web(url) =>
+    /// PreviewLinkActivation::Browser(url)`, the 2026-08-13 verb that never read
+    /// the modifier — and every plain row below goes red while every `Ctrl` row
+    /// stays green, which is the shape of the debt exactly.
+    #[test]
+    fn a_link_inside_a_preview_reads_the_same_table_as_a_link_in_the_terminal() {
+        let document = Path::new(r"D:\repo\docs\DESIGN.md");
+        for uri in [
+            "https://claude.ai/code/artifact/04c0a133-319b-4c8e-b988-7965fe063626",
+            "https://github.com/openai/codex/releases/latest",
+            "http://localhost:5173/index.html",
+            "HTTPS://EXAMPLE.TEST/Path?q=1#frag",
+        ] {
+            assert_eq!(
+                preview_link_activation(false, uri, document),
+                PreviewLinkActivation::Page(uri.to_owned()),
+                "a plain click on {uri:?} in a document opens it in this window"
+            );
+            assert_eq!(
+                preview_link_activation(true, uri, document),
+                PreviewLinkActivation::Browser(uri.to_owned()),
+                "and Ctrl hands {uri:?} to the system"
+            );
+            // **The two surfaces, one answer.** Asserted as a pairing rather
+            // than as two lists, because two lists that agree today is exactly
+            // what these two were for four months.
+            assert_eq!(
+                hyperlink_activation(false, true, uri, &no_directories),
+                HyperlinkActivation::Page(uri.to_owned()),
+                "the terminal says the same about {uri:?}"
+            );
+            // The finger follows the verb on this surface too, and follows it
+            // under **both** modifiers, because both halves of this row act.
+            for control in [false, true] {
+                assert!(
+                    preview_link_answers_a_press(control, uri, document),
+                    "the hand is on {uri:?} with control={control}"
+                );
+            }
+            // The gate the plain half is spent through is the address bar's
+            // own: `open_web_page`'s contract is that every caller passes
+            // `webnav::address_bar` first, so this arm may only carry addresses
+            // that door admits — otherwise a document and the address field
+            // would give two answers about one string (§7.1.5g ⑤).
+            let PreviewLinkActivation::Page(url) = preview_link_activation(false, uri, document)
+            else {
+                panic!("{uri} is a page");
+            };
+            assert!(
+                matches!(webnav::address_bar(&url), webnav::Decision::Navigate(_)),
+                "the one door admits what the arm carries: {uri:?}"
+            );
+        }
+        // **The file arm is untouched by the modifier** — 2026-08-13's ruling,
+        // and the reason it is not a hole in 「Ctrl = 交出去」: this arm is
+        // already the destination inside the window, and a relative target is
+        // still resolved against the document's own folder.
+        for target in ["./notes.md", r"..\assets\a.png", "file:///C:/notes/a%20b.md"] {
+            for control in [false, true] {
+                assert!(
+                    matches!(
+                        preview_link_activation(control, target, document),
+                        PreviewLinkActivation::Preview(_)
+                    ),
+                    "{target:?} previews with control={control}"
+                );
+                assert!(preview_link_answers_a_press(control, target, document));
+            }
+        }
+        assert_eq!(
+            preview_link_activation(false, "./notes.md", document),
+            PreviewLinkActivation::Preview(PathBuf::from(r"D:\repo\docs\notes.md")),
+        );
+        // A scheme with no arm is silent on both halves *here*, because the
+        // preview refuses it before the row is reached: `link_action` answers
+        // `Nowhere` for every scheme but `http(s)` and `file:`, and a request
+        // this window never considered is not one it declined.
+        for target in ["mailto:person@example.test", "#section", "   "] {
+            for control in [false, true] {
+                assert_eq!(
+                    preview_link_activation(control, target, document),
+                    PreviewLinkActivation::None,
+                    "{target:?} does nothing with control={control}"
+                );
+                assert!(
+                    !preview_link_answers_a_press(control, target, document),
+                    "and wears no hand: {target:?} control={control}"
+                );
+            }
+        }
+        // An address whose own text does not parse: silent plainly, blocked
+        // under `Ctrl` — the terminal's answer, arrived at through the
+        // terminal's own reading of that row.
+        assert_eq!(
+            preview_link_activation(false, "http://", document),
+            PreviewLinkActivation::None
+        );
+        assert_eq!(
+            preview_link_activation(true, "http://", document),
+            PreviewLinkActivation::Blocked("http://".to_owned())
+        );
+        assert!(!preview_link_answers_a_press(false, "http://", document));
+        assert!(preview_link_answers_a_press(true, "http://", document));
+        // **A plain press the door refuses owes the reader a sentence.** This
+        // address parses as text — so the plain half really does reach the
+        // `Page` arm and really does make a request — and `webnav::address_bar`
+        // refuses it as the phishing shape. That pair is what makes the refusal
+        // reachable at all, and therefore what makes 「被拒出声」 a thing this
+        // window has to do rather than a case it can never be in.
+        let phishing = "https://claude.ai@evil.test/code";
+        assert_eq!(
+            preview_link_activation(false, phishing, document),
+            PreviewLinkActivation::Page(phishing.to_owned())
+        );
+        assert!(matches!(
+            webnav::address_bar(phishing),
+            webnav::Decision::Refuse(_)
+        ));
     }
 
     /// PIN — **one clicking rule, two kinds of reference** (§7.1.5g, user ruling

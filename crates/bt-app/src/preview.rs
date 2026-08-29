@@ -5110,13 +5110,28 @@ pub fn take_preview_worker_notice(notice_pending: &mut bool) -> Option<&'static 
     }
 }
 
-/// What a click on a markdown link does (user ruling, 2026-08-13).
+/// **What a link target written in a document names** (user ruling,
+/// 2026-08-13; the web arm re-read 2026-08-29, §7.1.5g ⑦).
+///
+/// A resolver and not a verb table, which is the whole of what changed on
+/// 2026-08-29. The web arm used to be called `Browse` and to *mean* it: a plain
+/// press on it went straight to `ShellExecuteW`, and this function was the only
+/// thing anybody asked. That was written before [`crate::ClickIntent`] existed
+/// (2026-08-13 against 2026-08-20) and it had drifted to the **opposite** answer
+/// from the terminal's — 平点 = 交出去 here, 平点 = 留在窗内 there, one product
+/// with two rules for one gesture, which is exactly the disagreement
+/// `ClickIntent` was minted to end.
+///
+/// So the modifier is not read here at all. This says which of three kinds of
+/// thing the string names; **which door a press on it leaves by** is
+/// [`crate::preview_link_activation`]'s question, and it answers it out of the
+/// terminal's own `http(s)` row rather than out of a second opinion.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinkAction {
     /// A file, resolved — it opens **here**, in this window's own preview.
     Preview(PathBuf),
-    /// A web address, for the system browser.
-    Browse(String),
+    /// A web address. **Not a verb**: see the note above.
+    Web(String),
     /// Nothing this window will act on.
     Nowhere,
 }
@@ -5134,12 +5149,14 @@ pub enum LinkAction {
 /// as an unknown buffer and the card offers 「Open in default app」, which is
 /// the escape hatch chosen rather than the fork fallen down.
 ///
-/// `http`/`https` keep going to the system browser, which is where the web
-/// has always gone. **Every other scheme is refused** — `mailto:`, `ftp:`,
-/// `javascript:` and whatever else a document may carry — for the reason the
-/// terminal's own OSC-8 handler refuses them: a document is untrusted text, and
-/// handing an arbitrary scheme to `ShellExecute` is handing it whatever the
-/// machine has registered for that scheme.
+/// `http`/`https` come back as [`LinkAction::Web`] and go no further here: what
+/// a press on a web address spends is the terminal's own `http(s)` row, read
+/// once for both surfaces ([`crate::web_address_activation`]). **Every other
+/// scheme is refused** — `mailto:`, `ftp:`, `javascript:` and whatever else a
+/// document may carry — for the reason the terminal's own OSC-8 handler refuses
+/// them: a document is untrusted text, and handing an arbitrary scheme to
+/// `ShellExecute` is handing it whatever the machine has registered for that
+/// scheme.
 ///
 /// **「Open the containing folder」 is not here**, deliberately. That is the
 /// foot's Reveal button and it stays the foot's: a link names a *file*, and
@@ -5168,7 +5185,7 @@ pub fn link_action(target: &str, document: &Path) -> LinkAction {
     }
     let lower = target.to_ascii_lowercase();
     if lower.starts_with("http://") || lower.starts_with("https://") {
-        return LinkAction::Browse(target.to_owned());
+        return LinkAction::Web(target.to_owned());
     }
     let path = if lower.starts_with("file:") {
         let Some(path) = file_url_path(target) else {
@@ -7817,7 +7834,7 @@ mod tests {
         // ③ The web leaves the window, and nothing else does.
         assert_eq!(
             link_action("https://example.com/x", document),
-            LinkAction::Browse("https://example.com/x".to_owned())
+            LinkAction::Web("https://example.com/x".to_owned())
         );
         for refused in [
             "mailto:someone@example.com",
