@@ -15499,7 +15499,9 @@ mod tests {
         let gpu = if demand_software {
             pollster::block_on(GpuContext::headless_fallback(format))?
         } else if let Some(ceiling) = texture_ceiling {
-            pollster::block_on(GpuContext::headless_under_a_texture_ceiling(format, ceiling))?
+            pollster::block_on(GpuContext::headless_under_a_texture_ceiling(
+                format, ceiling,
+            ))?
         } else {
             pollster::block_on(GpuContext::headless(format))?
         };
