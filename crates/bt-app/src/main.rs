@@ -85384,7 +85384,10 @@ mod textless_present_tests {
         );
 
         // A whole frame ends the run, so the next refusal is a new question.
-        assert!(!ask_again_after(&PresentOutcome::Presented(receipt()), &mut run));
+        assert!(!ask_again_after(
+            &PresentOutcome::Presented(receipt()),
+            &mut run
+        ));
         assert_eq!(run, 0);
         assert!(ask_again_after(
             &PresentOutcome::PresentedWithoutText(receipt()),
@@ -85396,7 +85399,10 @@ mod textless_present_tests {
         let mut swapchain = 0_u32;
         for _ in 0..(TEXTLESS_RETRY_BUDGET + 5) {
             assert!(ask_again_after(&PresentOutcome::Skipped, &mut swapchain));
-            assert!(ask_again_after(&PresentOutcome::Reconfigure, &mut swapchain));
+            assert!(ask_again_after(
+                &PresentOutcome::Reconfigure,
+                &mut swapchain
+            ));
         }
         assert_eq!(swapchain, 0, "no image is not a textless image");
     }
