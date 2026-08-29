@@ -23849,11 +23849,12 @@ fn landing_for_aim(
 /// *ruling*, and a ruling that needs a `Renderer` to state is a ruling no test
 /// ever reads back.
 ///
-/// * `offers` — [`seats::PaneOffers`], §7.1.6b′ ② as re-judged 2026-08-23. Two
-///   bits and not one since the user split ② in half: the card column now says
-///   yes to the hand-over and goes on saying no to the tear-out. It is asked
-///   per verb rather than once at the top because that is what the ruling now
-///   is — a statement about the two verbs and not about the source.
+/// * `offers` — [`seats::PaneOffers`], §7.1.6b′ ②, split in half on 2026-08-23
+///   and withdrawn outright on 2026-08-29. Every surface answers
+///   [`seats::PaneOffers::BOTH`] today; the two bits stay because the two verbs
+///   are still two questions about one pointer and this function still asks
+///   them one at a time. It is asked per verb rather than once at the top
+///   because a refusal of the *source* is exactly the shape the user threw out.
 /// * `over` — the tab whose own rectangle the pointer is standing on
 ///   ([`seats::TabRun::slot_at`]), and `None` for the run's padding.
 /// * `holding` — the tab the pane in the hand lives in.
@@ -23913,10 +23914,13 @@ fn pane_strip_landing(
     // is the silent refusal M147 forbids. Away from home the landing *does*
     // something you can watch — the stage comes back — so lighting the entry is
     // the truth. The tear-out that pointer has always been offered goes on being
-    // offered, and **a card column's own card therefore still answers nothing at
-    // all** while it is the card on the stage: both halves of the re-judged ②
-    // meeting, the hand-over refused because it would do nothing and the
-    // tear-out refused because the column does not make tabs.
+    // offered, and **since 2026-08-29 a card column's own card offers it too**:
+    // the column answers `BOTH` now, so a pane rested on the card it lives in
+    // while that card is the one on the stage gets the strip's own answer, which
+    // is the tear-out at that slot. The silence that used to stand here was ②'s
+    // and it went with ② — keeping it would have meant a branch that reads
+    // "unless this is a card column", which is the second set of rules ①
+    // forbids.
     if let Some(tab) = over
         && (tab != holding || showing != holding)
     {
@@ -32931,7 +32935,7 @@ impl Runtime<'_> {
         // just ran (§7.1.6b′ F2). A tab with no entry is a card the budget did
         // not project — off screen, or in a window where the mode is off — and
         // its slot is `None`.
-        let focus_thumbnails: Vec<Option<seats::FocusThumbnail<'_>>> = self
+        let mut focus_thumbnails: Vec<Option<seats::FocusThumbnail<'_>>> = self
             .window
             .tabs
             .iter()
@@ -32943,6 +32947,20 @@ impl Runtime<'_> {
                 })
             })
             .collect();
+        // **K124's stand-in is a guest in `tabs`, so it is a guest here too**
+        // (the card column's tear-out, user ruling 2026-08-29). This list and
+        // that one are walked by one index — `focus_card_mini_chrome` is handed
+        // `thumbnails[index]` — so a stand-in inserted into one and not the
+        // other would hand every card below the slot its neighbour's tree, and
+        // the stand-in itself a picture of a tab that is not the one it is
+        // standing in for.
+        //
+        // `None` and not a projection of the pane being torn out: what the
+        // stand-in draws is the *slot*, in the accent wash the landing wears,
+        // and the pane's own picture is the ghost under the pointer.
+        if let Some(slot) = strip_preview {
+            focus_thumbnails.insert(slot.min(focus_thumbnails.len()), None);
+        }
         let chrome = seats::build_chrome_for_tabs(
             &self.seats,
             &self.seat_layout,
@@ -72879,11 +72897,14 @@ impl Runtime<'_> {
     fn tab_run(&self, now: Instant) -> Option<seats::TabRun> {
         // **In focus mode the panel holds a card column, and the column is a
         // tab run like the other two** (§7.1.6b′ ④, 2026-08-20). It offers a card
-        // every slot the list has, and what it refuses — a pane torn into a new
-        // tab (②), a file (③) — it refuses through the run rather than beside
-        // it, so this branch stays a choice of surface and never becomes a
-        // second set of drag rules. `None` here would be the one wrong answer:
-        // it would hand every drop over the column to the pane behind it.
+        // every slot the list has, and since the user's ruling of 2026-08-29 it
+        // offers a pane both of the things the other two runs offer one — the
+        // hand-over onto a card, and the tear-out into the blank. The one drag
+        // it still turns away is a file row (③), and it turns that away through
+        // the run rather than beside it, so this branch stays a choice of
+        // surface and never becomes a second set of drag rules. `None` here
+        // would be the one wrong answer: it would hand every drop over the
+        // column to the pane behind it.
         if self.window.focus_mode {
             return self
                 .focus_rail_geometry_now(now)
@@ -73252,10 +73273,12 @@ impl Runtime<'_> {
             // its own field rather than "has no slots", because since 2026-08-20
             // the column has slots.
             //
-            // Since the user's 2026-08-23 ruling that field says the two offers
-            // separately: the column takes the hand-over and still refuses the
-            // tear-out. This arm did not have to learn that, which is the point
-            // of it living on the run.
+            // The user's 2026-08-23 ruling split that field into two offers and
+            // the ruling of 2026-08-29 granted the column both of them, so every
+            // surface in this build now answers `BOTH`. This arm did not have to
+            // learn either ruling, which is the point of it living on the run —
+            // a card column's blank makes a tab by walking the very same
+            // `insert_index_at` and `strip_insert_slot` below.
             //
             // **Two offers, and which one this pointer is asking for is
             // [`pane_strip_landing`]'s** (§7.1.6k). The run answers both questions
@@ -73423,8 +73446,12 @@ impl Runtime<'_> {
     /// [`Runtime::survey_strip`]'s counterpart for a pointer this window will
     /// never hear about, and it is deliberately the *same* table: the run's own
     /// [`seats::PaneOffers`], the run's own `slot_at`, and
-    /// [`pane_strip_landing`]. A card column that refuses a tear-out refuses it
-    /// to a visitor too, and it does not have to learn that this slice happened.
+    /// [`pane_strip_landing`]. Whatever a card column offers its own window's
+    /// panes it offers a visitor's, and it does not have to learn that this
+    /// slice happened — which is why the ruling of 2026-08-29 reached the other
+    /// window's column for free: [`Runtime::tab_run`] hands this function the
+    /// focus column in a window that is in focus mode, exactly as it hands
+    /// [`Runtime::survey_strip`] one.
     ///
     /// **The tab list is the whole door, and the body offers nothing.** That is
     /// F2's own shape — 「拖到另一扇 Folio 窗的 tab 条 = 移入」 — and the
@@ -110093,9 +110120,15 @@ mod tests {
     /// Red gate: answer `StripExtract` for a pointer over a foreign tab (which is
     /// what this file did until §7.1.6k) and the first row fails; let the pane's
     /// **own** tab answer `StripAdopt` *while it is the tab on screen* and the
-    /// second does; ask one `hosts` bit of both verbs — which is what this file
-    /// did until 2026-08-23 — and the card column's *first* row does; fall back
-    /// to the tear-out when the target will not fit and the last one does.
+    /// second does; fall back to the tear-out when the target will not fit and
+    /// the last one does.
+    ///
+    /// **Every surface hands these rows in as `BOTH` since 2026-08-29.** The
+    /// rows that used to be run a second time with the card column's own
+    /// `ADOPT_ONLY` are gone with that value: the user withdrew ② entire, so a
+    /// column's answers *are* the rows above rather than a second table beside
+    /// them, and the surface that answers them is pinned in `seats.rs` by
+    /// `the_card_column_takes_a_tab_reorder_and_a_panes_two_offers`.
     ///
     /// Every row here is a hand that is **still standing in the tab it picked
     /// the pane up from** (`showing == mine`). §7.1.6k″'s rows — the same
@@ -110106,7 +110139,6 @@ mod tests {
         let mine = TabId(1);
         let other = TabId(2);
         let both = seats::PaneOffers::BOTH;
-        let cards = seats::PaneOffers::ADOPT_ONLY;
         assert_eq!(
             pane_strip_landing(both, Some(other), mine, mine, true, Some(3)),
             Some(DropLanding::StripAdopt { tab: other }),
@@ -110123,25 +110155,6 @@ mod tests {
             Some(DropLanding::StripExtract { slot: 3 }),
             "and the run's padding is the gap between tabs, which is where a \
              new tab has always been made"
-        );
-        assert_eq!(
-            pane_strip_landing(cards, Some(other), mine, mine, true, Some(3)),
-            Some(DropLanding::StripAdopt { tab: other }),
-            "§7.1.6b′ ② as re-judged 2026-08-23: a card takes the pane, because \
-             focus mode hides the strip and ① forbids it having fewer verbs"
-        );
-        assert_eq!(
-            pane_strip_landing(cards, None, mine, mine, true, Some(3)),
-            None,
-            "and the blank between cards still makes no tab — the half of ② the \
-             user kept"
-        );
-        assert_eq!(
-            pane_strip_landing(cards, Some(mine), mine, mine, true, Some(3)),
-            None,
-            "so a pane over its own card is answered by nobody *while that card \
-             is the one on the stage*: the hand-over would do nothing and the \
-             column does not make tabs"
         );
         assert_eq!(
             pane_strip_landing(both, Some(other), mine, mine, false, Some(3)),
@@ -110189,7 +110202,6 @@ mod tests {
         let mine = TabId(1);
         let other = TabId(2);
         let both = seats::PaneOffers::BOTH;
-        let cards = seats::PaneOffers::ADOPT_ONLY;
 
         // The hand holds a pane of `mine`; the spring has left the stage on
         // `other`.
@@ -110251,47 +110263,45 @@ mod tests {
 
         // §7.1.6b′ ②'s silence was 「the hand-over would do nothing」, and that
         // premise is what the spring falsifies — so the card column gets the
-        // way home for the same reason and by the same line.
-        assert_eq!(
-            pane_strip_landing(cards, Some(mine), mine, other, true, Some(3)),
-            Some(DropLanding::StripAdopt { tab: mine }),
-            "focus mode hides the strip, so the card is the only way back \
-             there — and ① forbids the stage having fewer verbs than the \
-             ordinary one"
-        );
-        assert_eq!(
-            pane_strip_landing(cards, None, mine, other, true, Some(3)),
-            None,
-            "and the blank beside the cards still makes no tab, sprung or not \
-             — the half of ② the user kept is about the *blank*"
-        );
+        // way home for the same reason and by the same line. It needs no row of
+        // its own here any more: since 2026-08-29 the column hands this function
+        // the same `BOTH` the strip does, so the rows above *are* its rows.
     }
 
-    /// **§7.1.6b′ ② as re-judged 2026-08-23 — the card column's whole chain, end
-    /// to end, and the one nail the half that survives hangs on.**
+    /// **§7.1.6b′ ② as re-judged 2026-08-23 and withdrawn 2026-08-29 — the card
+    /// column's whole chain, end to end.**
     ///
-    /// The ruling: *"卡片接收 pane"* — rest a carried pane on a card for the
+    /// The first ruling: *"卡片接收 pane"* — rest a carried pane on a card for the
     /// chevron's own quarter second and the stage goes to that tab with the pane
     /// still in the air; let go on the card and the pane moves into that tab,
-    /// appended at the end of its tree, which is *"与 tab 条目同义"*. And the half
-    /// that stays: *"pane 在卡列空白处松手仍不撕新 tab"*.
+    /// appended at the end of its tree, which is *"与 tab 条目同义"*.
+    ///
+    /// The second took the other half. What stood here was *"pane 在卡列空白处
+    /// 松手仍不撕新 tab"*, and the user met it on the machine: a pane held over
+    /// the blank by the `+` row showed a ghost and did nothing when the hand
+    /// opened. The ruling is ① read literally — *"舞台就是真的那棵树,零新规、
+    /// 不禁任何动词"* — so the blank between two cards, and the tail below the
+    /// last one, make a tab at that slot exactly as the strip's gaps do, by the
+    /// same `Runtime::extract_pane_into_new_tab`.
     ///
     /// Every link is asserted against the machinery the strip already had rather
     /// than against a card-shaped copy of it, because that is the claim: the
     /// column answers `StripAdopt` like any run, the spring reads the survey's
     /// answer rather than the pointer's coordinates so it arms without being
-    /// told about cards, and the release verdict is the same `Adopt`.
+    /// told about cards, and both release verdicts are the strip's own.
     ///
     /// Red gate: give the column one bit for both verbs — which is what this file
     /// did until 2026-08-23 — and the first assertion answers `None`, the spring
-    /// never arms, and focus mode has no door to another tab at all; give it
-    /// `PaneOffers::BOTH` instead and the blank starts making tabs, which is the
-    /// half of ② the user kept.
+    /// never arms, and focus mode has no door to another tab at all; put it back
+    /// on `ADOPT_ONLY` and the blank stops making tabs, which is the user's
+    /// 2026-08-29 bug report word for word.
     #[test]
-    fn a_card_takes_a_pane_and_springs_while_the_blank_beside_it_still_makes_no_tab() {
+    fn a_card_takes_a_pane_and_springs_while_the_blank_beside_it_makes_a_new_tab() {
         let mine = TabId(1);
         let other = TabId(2);
-        let cards = seats::PaneOffers::ADOPT_ONLY;
+        // The very value `seats::focus_rail_run` puts on the column's run, which
+        // since 2026-08-29 is the value all three surfaces put on theirs.
+        let cards = seats::PaneOffers::BOTH;
 
         let on_a_card = pane_strip_landing(cards, Some(other), mine, mine, true, Some(3));
         assert_eq!(
@@ -110301,9 +110311,9 @@ mod tests {
         );
         assert_eq!(
             pane_strip_landing(cards, None, mine, mine, true, Some(3)),
-            None,
-            "and the blank between cards is not a room — ② keeps its tear-out \
-             refusal, so letting go there is J120's clean nothing"
+            Some(DropLanding::StripExtract { slot: 3 }),
+            "and the blank beside the cards is the gap between two tabs — the \
+             place a new one has always been made"
         );
 
         // The spring is told what the survey answered, never where the pointer
@@ -110337,8 +110347,17 @@ mod tests {
         );
         assert_eq!(
             release_verdict(pane_strip_landing(cards, None, mine, mine, true, Some(3))),
+            DragRelease::Extract { slot: 3 },
+            "while letting go in the blank tears the pane out into a card of \
+             its own at that slot — `Runtime::commit_pane_extract`, the strip's \
+             own door"
+        );
+        assert_eq!(
+            release_verdict(pane_strip_landing(cards, None, mine, mine, true, None)),
             DragRelease::Home,
-            "while letting go in the blank goes home"
+            "and the one pointer in the blank that still goes home is the one \
+             holding a pane that cannot become a tab at all (K124/G84) — a \
+             refusal of the *pane*, which every surface has always made"
         );
     }
 
