@@ -433,3 +433,26 @@ Win10 上同样的四次启动 60–80 毫秒就关了。两台机之间唯一�
 ## 复跑(2026-08-29,二进制 `0.1.0 (b66776f382)` = next17)
 
 两台干净机再各跑一轮冒烟,均 exit 0;`web.txt` 关闭 `exit code : 0`;Win10 缺席卡、Win11 真网页均拍到。视频①②、关窗协议、hover 卡、任务栏触达等今日改动均在此二进制内。**门 5 维持通过。**
+
+## 复跑(2026-08-30,二进制 `0.1.0 (57485c2b8f)` = next21,**两台机已回出厂 `Restricted`**)
+
+这一轮先把两台机的 `clean` 快照改回 Windows 出厂的执行策略(做法与证据见 `clean-vm.md` §3.4d),
+再拿 `dist\folio-next21.exe` 现打的 zip 各跑一遍冒烟 —— **这是发布路径上第一次在出厂 `Restricted`
+的机器上跑门 5**。
+
+| | Win10 | Win11 |
+| --- | --- | --- |
+| 机器 | `FOLIO-WIN10`,Windows 10 Pro 10.0.19045 build 19045 | `FOLIO-WIN11`,Windows 11 Enterprise Evaluation 10.0.26200 build 26200 |
+| 执行策略(开机后读) | 五个作用域全 `Undefined`,有效 **`Restricted`** | 同 |
+| zip | `folio-0.1.0-windows-x64.zip`,39,344,647 字节,sha256 `09922f0b…1e22f1e5` | 同一个字节、同一个哈希 |
+| `--version` | `Folio 0.1.0 (57485c2b8f)`,与 PE 资源一致 | 同 |
+| ConPTY | `source=sidecar version=1.25.260710002-preview` | 同 |
+| 冷启动 | `runtime_ready=1597ms` `first_text_present=4476ms` | `runtime_ready=2548ms` `first_text_present=9971ms` |
+| DPI | 窗口与显示器都是 96 | 同 |
+| 关闭 | 请它关就关,退出 0 | 同 |
+| WebView2 | `none` | `pv=151.0.4129.107` |
+| `web.txt` | `exit code : 0` | `exit code : 0` |
+| **冒烟退出码** | **0** | **0** |
+
+证据在 `D:\VMs\tmp\gate5\w10\` 与 `…\w11\`(不入库,截图里有账户名)。**门 5 维持通过**,并且这一轮
+之后它量的才是用户手上那台 Windows。
