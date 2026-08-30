@@ -82867,6 +82867,65 @@ impl Runtime<'_> {
         Ok(outcome)
     }
 
+    /// **What one present cost, printed once for every present this window
+    /// makes** (`BT_PERF_TRACE present`).
+    ///
+    /// The number a person feels — how long the event that asked for this
+    /// picture waited before the picture was handed to the compositor — beside
+    /// the two ratios that say whether the window is *doing* redundant work:
+    /// frames composed against frames presented (the slot's own overwrite count
+    /// is the difference), and notches taken from the platform against notches
+    /// routed.
+    ///
+    /// **Called from both present sites, and that is the whole of why it is a
+    /// function.** A window has two ways to put a picture on the glass —
+    /// [`Self::redraw`] presents a terminal frame somebody composed, and
+    /// [`Self::present_retained_picture`] presents the picture already there with
+    /// whatever the renderer has been told since — and **a tab with no shell only
+    /// ever takes the second** (§7.1.6h): `publish_frame_inner` composes no
+    /// terminal picture for it, so every frame it has is a retained present.
+    /// While this line was printed at the first site alone, the instrument said
+    /// such a tab drew *nothing at all*, and §7.10 ④″ had to write that down as a
+    /// known blind spot. It is also what hid §7.10 ④‴: a tab whose gestures
+    /// really were producing no frames read, in the trace, exactly like a tab
+    /// whose frames were merely not being printed.
+    ///
+    /// `retained=` is the field that tells the two apart; every other field is
+    /// what it always was. **`last_present_at` is written whichever kind of
+    /// present this was, and outside the trace gate** — `since_previous_us` is
+    /// about the gap between pictures reaching the glass, and a gap measured
+    /// against only some of them is not that gap.
+    fn trace_present(
+        &mut self,
+        source: FrameSource,
+        receipt: bt_render::PresentReceipt,
+        retained: bool,
+    ) {
+        let presented_at = Instant::now();
+        let since_previous = self
+            .window
+            .last_present_at
+            .map_or(Duration::ZERO, |previous| presented_at - previous);
+        self.window.last_present_at = Some(presented_at);
+        if !self.app.trace_perf {
+            return;
+        }
+        let Ok(latency) = receipt.latency() else {
+            return;
+        };
+        eprintln!(
+            "BT_PERF_TRACE present source={source:?} retained={} event_to_present_us={} event_to_submit_us={} since_previous_us={} composed={} slot_overwrites={} wheel_events={} wheel_routings={}",
+            u8::from(retained),
+            latency.event_to_present_call.as_micros(),
+            latency.event_to_submit.as_micros(),
+            since_previous.as_micros(),
+            self.window.composed_terminal_frames,
+            self.window.pending_frames.overwrites(),
+            self.window.wheel_events,
+            self.window.wheel_routings,
+        );
+    }
+
     /// Put the picture that is already on the glass back on the glass, with
     /// whatever the renderer has been told since.
     ///
@@ -82981,8 +83040,13 @@ impl Runtime<'_> {
         )
         .context("re-present the retained terminal picture")?
         {
-            PresentOutcome::Presented(_) => {
+            PresentOutcome::Presented(receipt) => {
                 self.window.textless_frames = 0;
+                // **The same line the composed path prints** — see
+                // [`Self::trace_present`] for why it has to be printed here as
+                // well, and for what a tab with no shell looked like to the
+                // instrument while it was not.
+                self.trace_present(trigger.source, receipt, true);
                 Ok(())
             }
             // The swapchain was not ready. The picture is unchanged and still
@@ -83158,35 +83222,7 @@ impl Runtime<'_> {
                     self.reconcile_authoritative_dpi("first-present")?;
                 }
                 let latency = receipt.latency();
-                // **The one number a user feels**, printed for every present and
-                // not only for a resize: how long the event that asked for this
-                // picture waited before the picture was handed to the
-                // compositor. Beside it, the two ratios that say whether the
-                // window is *doing* redundant work — frames composed against
-                // frames presented (the slot's own overwrite count is the
-                // difference), and notches taken from the platform against
-                // notches routed.
-                let presented_at = Instant::now();
-                let since_previous = self
-                    .window
-                    .last_present_at
-                    .map_or(Duration::ZERO, |previous| presented_at - previous);
-                self.window.last_present_at = Some(presented_at);
-                if self.app.trace_perf
-                    && let Ok(latency) = latency
-                {
-                    eprintln!(
-                        "BT_PERF_TRACE present source={:?} event_to_present_us={} event_to_submit_us={} since_previous_us={} composed={} slot_overwrites={} wheel_events={} wheel_routings={}",
-                        trigger.source,
-                        latency.event_to_present_call.as_micros(),
-                        latency.event_to_submit.as_micros(),
-                        since_previous.as_micros(),
-                        self.window.composed_terminal_frames,
-                        self.window.pending_frames.overwrites(),
-                        self.window.wheel_events,
-                        self.window.wheel_routings,
-                    );
-                }
+                self.trace_present(trigger.source, receipt, false);
                 if self.app.trace_startup
                     && matches!(trigger.source, FrameSource::Resize)
                     && let Ok(latency) = latency
