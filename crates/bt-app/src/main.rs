@@ -75446,6 +75446,29 @@ impl Runtime<'_> {
             self.window.tabs[index].sessions.is_empty(),
             "T226: the absorbed tab is leaving with shells still filed under it"
         );
+        // **And every page the merged tab was holding** (§7.10 ④‴). `arrived` is
+        // the renumbering the plan wrote down, which is exactly the list this
+        // needs; the two tabs are the one being absorbed and the one on screen.
+        // Without it, a tab merged into another one's layout has its browsers
+        // closed a frame later by `advance_web_page`, because it asks whether the
+        // page's own tab still has that seat and that tab has just left the strip.
+        let into_id = self.window.tabs[self.window.active_tab].id;
+        let moved: Vec<(LeafId, LeafId)> = arrived
+            .iter()
+            .map(|(was, now)| {
+                (
+                    LeafId {
+                        tab: source,
+                        seat: *was,
+                    },
+                    LeafId {
+                        tab: into_id,
+                        seat: *now,
+                    },
+                )
+            })
+            .collect();
+        self.carry_the_pages_of_moved_panes(&moved)?;
         absorb_tab_into_strip(
             &mut self.window.tabs,
             &mut self.window.active_tab,
@@ -75573,6 +75596,34 @@ impl Runtime<'_> {
                 .is_none_or(|stood_in| self.window.tabs[from].seats.tree().contains(stood_in)),
             "B4: the pane traded for is not in the tree the traveller left"
         );
+        // **Both journeys carry their pages** (§7.10 ④‴), and both are named
+        // here because both are one re-key of a table that is the window's and
+        // not a tab's. The trade's pair is read off the aim — a centre is the
+        // only landing that displaces anybody, and the seat it displaces is the
+        // one it aimed at — so there is no second search of a tree for it. One
+        // call and not two, because a trade fills the traveller's old id with the
+        // pane it traded with: the two re-keys have to be one transaction or the
+        // second one lands on the first one's key.
+        let mut moves = vec![(
+            leaf,
+            LeafId {
+                tab: target,
+                seat: moved.landed,
+            },
+        )];
+        if let (seats::LayoutAim::SeatCentre(displaced), Some(stood_in)) = (aim, moved.traded) {
+            moves.push((
+                LeafId {
+                    tab: target,
+                    seat: displaced,
+                },
+                LeafId {
+                    tab: leaf.tab,
+                    seat: stood_in,
+                },
+            ));
+        }
+        self.carry_the_pages_of_moved_panes(&moves)?;
         if moved.source_emptied {
             // The tab did not close — it was emptied by a move, and `close_tab`
             // would file a still-running shell into Recent and shut it down. This
@@ -75656,6 +75707,13 @@ impl Runtime<'_> {
         let Some(torn) = torn else {
             return Ok(None);
         };
+        // **The name the pane now answers to**, read off the tab that was just
+        // built rather than re-derived: `seats::Seats::lone_seat` mints it, and a
+        // tab with one pane has one seat, which is the seat its keyboard is on.
+        let landed = LeafId {
+            tab: id,
+            seat: torn.focused_leaf,
+        };
         // The survey already clamped this against the same strip (N158); the
         // `min` is the ordinary bound on an insertion index, not a second opinion
         // about the partition.
@@ -75664,6 +75722,10 @@ impl Runtime<'_> {
         if slot <= self.window.active_tab {
             self.window.active_tab += 1;
         }
+        // **And the half that does not live on a `TabState`** (§7.10 ④‴): a page
+        // is the window's, so `pane_into_new_tab` cannot have carried it and this
+        // is where it follows the pane it is drawn in.
+        self.carry_the_pages_of_moved_panes(&[(leaf, landed)])?;
         debug_assert!(
             self.sessions_match_terminals(),
             "item 6: a tear-out leaves the tab it left matching its own tree"
@@ -78209,6 +78271,89 @@ impl Runtime<'_> {
             self.window.web_thumbs.stats(),
         );
         self.arm_card_reads(unread_documents, unread_dirs);
+    }
+
+    /// **A pane that changed its address takes its page with it** (§7.10 ④‴).
+    ///
+    /// [`move_seat_content`] and [`pane_into_new_tab`] carry the seven tables a
+    /// pane can be holding, and a page is not one of them — it cannot be, because
+    /// [`WindowRuntime::web`] belongs to the **window** and those two are
+    /// functions over a [`TabState`]. So the pane's other half is carried here,
+    /// by the three window-level doors that know both ends of the journey:
+    /// [`Self::extract_pane_into_new_tab`], [`Self::move_pane_across_tabs`] and
+    /// [`Self::absorb_tab`].
+    ///
+    /// **Without it the browser is not merely misfiled — it is closed.** The map
+    /// is keyed by [`LeafId`] and both halves of that key change on a move (the
+    /// arriving tree re-mints its seat numbers from one, and the tab is a
+    /// different tab), so the page went on answering to a name whose tab no
+    /// longer has that seat; `advance_web_page` asks exactly that question of
+    /// exactly that tab, called the page orphaned and shut the controller down.
+    /// On the machine that is a preview pane dragged onto the tab strip whose
+    /// `.html` or `.pdf` goes **blank** while its head and address bar — which
+    /// travel with the pane — go on naming the file (user report on `next21`).
+    ///
+    /// **Taken out of the table before any of them is put back**, which is not
+    /// tidiness: a centre *trades* (§7.1.6k′ B4), and the pane that arrives is
+    /// filed under the id the pane that left was filed under, so an insert
+    /// interleaved with the removes would have one live browser overwrite the
+    /// other and lose it without going through the door that waits for its
+    /// process to exit.
+    ///
+    /// [`webhost::WebSeat::rehost`] and not a bare re-key, for the reason written
+    /// on it: the seat caches its own address, and the compositor's visual table
+    /// is keyed by that address too, so moving only the map entry would leave the
+    /// next rebuild asking for a controller under a name nothing answers to. Both
+    /// sides are this window's compositor because this is a move inside one
+    /// window — the same call the float's re-dock already makes.
+    ///
+    /// **The keyboard is not taken.** `transfer_tab` passes `take_focus` for the
+    /// pane the moved tab is standing on because a person carried that tab into
+    /// this window; a tear-out deliberately does not activate the tab it makes
+    /// (N157), and a pane dropped on another tab lands wherever the layout put
+    /// the focus. Whether the page is what typing goes into is then
+    /// `settle_the_web_keyboard`'s answer on the next frame, as it is for every
+    /// other page in this window.
+    fn carry_the_pages_of_moved_panes(&mut self, moves: &[(LeafId, LeafId)]) -> Result<()> {
+        let hosted: BTreeSet<LeafId> = self.window.web.keys().copied().collect();
+        let travelling = pages_that_move_with_their_panes(&hosted, moves);
+        if travelling.is_empty() {
+            return Ok(());
+        }
+        let hwnd = window_hwnd(&self.window.window)?;
+        let carried: Vec<(LeafId, webhost::WebSeat)> = travelling
+            .iter()
+            .filter_map(|(was, now)| {
+                let page = self.window.web.remove(was)?;
+                let picture = self.window.web_thumbs.take(*was);
+                if let Some(picture) = picture {
+                    self.window.web_thumbs.put(*now, picture);
+                }
+                Some((*now, page))
+            })
+            .collect();
+        for (now, mut page) in carried {
+            let mut outcomes = Vec::new();
+            let report = page.rehost(
+                &self.window.compositor,
+                &self.window.compositor,
+                webhost::SeatAddress {
+                    page: bt_platform::PageVisual {
+                        tab: now.tab.0,
+                        seat: now.seat.0,
+                    },
+                    hwnd,
+                },
+                false,
+                &mut outcomes,
+            );
+            if let Some(error) = report.error() {
+                eprintln!("BT_WEB the page could not follow its pane: {error}");
+            }
+            self.window.web.insert(now, page);
+            self.apply_web_outcomes(now, outcomes)?;
+        }
+        Ok(())
     }
 
     /// **Go and photograph the pages the cards could not draw** — the web half
@@ -81717,6 +81862,18 @@ impl Runtime<'_> {
                     })
             })
             .collect();
+        // **Which of them is being asked to go on *this* turn** (§7.10 ④‴).
+        // `WebSeat::close` is idempotent, so the set above stays non-empty for as
+        // long as the browser process takes to exit — up to ten seconds
+        // (`w0p-evidence.md` §4.2), and on the graceful path the event can fail
+        // to arrive at all. The frame the tail of this function asks for is owed
+        // by the *retirement*, which happens once; asking for it every turn is a
+        // window that spins at the top of its loop for ten seconds with nothing
+        // on the glass changing, because `present_chrome_change` asks for a
+        // redraw whether or not it found a picture to re-queue.
+        let retiring = orphaned
+            .iter()
+            .any(|leaf| self.window.web.get(leaf).is_some_and(|web| !web.is_closing()));
         let focus = self.shortcut_focus();
         let window = &mut *self.window;
         let mut outcomes: Vec<(LeafId, Vec<webhost::WebOutcome>)> = Vec::new();
@@ -81746,7 +81903,10 @@ impl Runtime<'_> {
         // reason written on that function: with no frame queued a redraw finds
         // nothing to draw and skips, and this is precisely a change that belongs
         // to the chrome rather than to a shell's output.
-        if !orphaned.is_empty() {
+        //
+        // **On the turn the retirement happens and not on every turn after it**
+        // — see `retiring` above for what the difference cost.
+        if retiring {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -83071,9 +83231,13 @@ impl Runtime<'_> {
 
     fn redraw(&mut self) -> Result<()> {
         let Some((frame, trigger)) = self.window.pending_frames.take() else {
-            // Nothing composed. If an animation owes the glass a present of
-            // what is already there, this is where that debt is paid.
-            if self.window.chrome_present_pending {
+            // Nothing composed. If an animation — or a tab that has no other
+            // kind of frame — owes the glass a present of what is already
+            // there, this is where that debt is paid.
+            if a_bare_redraw_still_owes_a_present(
+                self.window.chrome_present_pending,
+                self.focused().is_some(),
+            ) {
                 return self.present_retained_picture();
             }
             return Ok(());
@@ -92245,6 +92409,67 @@ struct PictureOnGlass {
 #[must_use]
 fn tick_owes_a_present(chrome_changed: bool, panes_owe: bool, pictures_owe: bool) -> bool {
     chrome_changed || panes_owe || pictures_owe
+}
+
+/// **Which of a seat move's re-keyings a page has to follow** (§7.10 ④‴).
+///
+/// `moves` is the whole transaction — every `(was, now)` pair the gesture
+/// produced, in the order it produced them — and this picks out the ones the
+/// window's page table has an entry for. A pair whose two halves are equal is
+/// not a move at all and is dropped here rather than at
+/// [`webhost::WebSeat::rehost`]'s door, which answers `AddressOnly` for it: the
+/// point of asking is that a pane which did not travel must not be taken out of
+/// the table and put back, because a *trade* interleaves two journeys and the
+/// second one's key is the first one's old key.
+///
+/// A pure function so the rule can be read without a browser: what a page is
+/// owed by a move is a fact about the two addresses, and the only thing that
+/// needs an engine is the handing over itself.
+#[must_use]
+fn pages_that_move_with_their_panes(
+    hosted: &BTreeSet<LeafId>,
+    moves: &[(LeafId, LeafId)],
+) -> Vec<(LeafId, LeafId)> {
+    moves
+        .iter()
+        .copied()
+        .filter(|(was, now)| was != now && hosted.contains(was))
+        .collect()
+}
+
+/// **Whether a redraw request that found nothing composed still owes the glass
+/// a present** (§7.10 ④‴).
+///
+/// [`Runtime::redraw`] used to answer this with `chrome_present_pending` alone,
+/// and for a tab with a shell that is the whole truth: everything that changes
+/// such a window either publishes a frame (which is then in the slot) or files
+/// this debt on its way to asking for a redraw.
+///
+/// **It is not the whole truth for a tab with no shell** (§7.1.6h), and that is
+/// the second half. Three funnels in this window answer a change that lives in
+/// retained renderer state by putting the picture that is *already on the glass*
+/// back into the slot and asking for a redraw —
+/// [`Runtime::present_chrome_change`], [`Runtime::present_peek_overlay`] and
+/// [`Runtime::represent_on_screen_frame`]. Each of them can only do the first
+/// half when there is a terminal picture to re-queue, and a tab made of a folder
+/// or a file has none, ever: `publish_frame_inner` composes none for it, and
+/// `activate_tab` empties `last_presented_frame` on the way in. So the redraw
+/// those funnels asked for arrived at a slot that was empty and a flag that was
+/// false, and was dropped — which on the machine is a preview pane, alone in a
+/// tab, whose wheel scrolls the document in memory and never draws it: **ten
+/// notches, ten scroll offsets, zero frames** (measured 2026-08-30).
+///
+/// The reading is the one `present_retained_picture` already writes down in its
+/// own words — "for it this is not the fallback path but the **only** path". A
+/// window with no shell in front of it has exactly one kind of frame, so every
+/// redraw it is asked for is that kind.
+///
+/// Costs a tab with a shell nothing: it is the same `chrome_present_pending`
+/// question it always was, and `present_retained_picture`'s own first guard
+/// turns straight back round for a shell that has not presented yet.
+#[must_use]
+fn a_bare_redraw_still_owes_a_present(chrome_present_pending: bool, tab_has_a_shell: bool) -> bool {
+    chrome_present_pending || !tab_has_a_shell
 }
 
 /// Whether a chrome animation's tick can be answered from the picture already
@@ -102273,6 +102498,58 @@ mod tests {
             content_revision: 9,
             presented_revision: 8,
         }));
+    }
+
+    /// RED — **a tab whose only pane is a preview draws like any other**
+    /// (§7.10 ④‴, user report on `next21`).
+    ///
+    /// The three funnels that answer a retained-state change —
+    /// `present_chrome_change`, `present_peek_overlay`,
+    /// `represent_on_screen_frame` — re-queue the picture already on the glass
+    /// and ask for a redraw; on a tab with no shell there is no such picture to
+    /// re-queue, ever, so all they leave behind is the bare request. Answering
+    /// that request with "nothing composed, nothing owed" is a preview pane
+    /// whose wheel moves the document in memory and never puts it on the glass.
+    ///
+    /// RED GATE: drop the `|| !tab_has_a_shell` and the second assertion goes
+    /// red — which is exactly the shipped build, measured at ten notches and
+    /// zero frames.
+    #[test]
+    fn a_redraw_asked_for_by_a_tab_with_no_shell_is_always_a_present() {
+        assert!(
+            !a_bare_redraw_still_owes_a_present(false, true),
+            "a tab with a shell and no filed debt owes nothing: everything that \
+             changes such a window publishes a frame or files the debt first"
+        );
+        assert!(
+            a_bare_redraw_still_owes_a_present(false, false),
+            "a tab with no shell has only one kind of frame, so every redraw it \
+             is asked for is that kind — without this its wheel scrolls a \
+             document nobody draws"
+        );
+        assert!(
+            a_bare_redraw_still_owes_a_present(true, true),
+            "and the debt a chrome animation files is still the debt it always was"
+        );
+        assert!(a_bare_redraw_still_owes_a_present(true, false));
+
+        // And the half a value cannot hold: that `redraw` really asks this
+        // question rather than the narrower one it asked before. A funnel that
+        // files no debt and a slot that is empty is the whole of the defect, and
+        // it is invisible from any value this function could be handed. The
+        // needle is split so that this assertion cannot find itself.
+        const SOURCE: &str = include_str!("main.rs");
+        let signature = concat!("    fn ", "redraw(&mut self) -> Result<()> {");
+        let start = SOURCE
+            .find(signature)
+            .expect("`redraw` is declared in this file");
+        let rest = &SOURCE[start + signature.len()..];
+        let redraw = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+        assert!(
+            redraw.contains("a_bare_redraw_still_owes_a_present("),
+            "`redraw` drops a bare request again, so a preview alone in a tab \
+             stops drawing:\n{redraw}"
+        );
     }
 
     fn frame_row_text(frame: &ViewportFrame, row: usize) -> String {
