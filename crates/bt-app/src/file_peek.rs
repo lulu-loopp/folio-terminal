@@ -2166,11 +2166,15 @@ mod tests {
         );
         assert_eq!(strip[1], laid.body[3], "and it stands under the body");
         assert!(strip[3] <= laid.foot[1] + 0.5, "and over the foot's rule");
+        // Everything that *overlaps* the gap between the body and the foot,
+        // rather than everything inside it: a second line stacked under the
+        // first hangs past the foot's rule, and a test that counted only what
+        // fits would call that card one line.
         let said: Vec<&str> = layer
             .labels
             .iter()
             .filter(|label| {
-                label.rect[1] >= laid.body[3] - 0.5 && label.rect[3] <= laid.foot[1] + 0.5
+                label.rect[3] > laid.body[3] + 0.5 && label.rect[1] < laid.foot[1] - 0.5
             })
             .map(|label| label.text.as_str())
             .collect();
