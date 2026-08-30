@@ -27063,6 +27063,73 @@ impl MenuPaint {
 /// [`arrival`] holds the rhythm and its own tests hold the curves. What these
 /// hold is the join — the half that a refactor of `refresh_overlay` can quietly
 /// drop while every test in that module goes on passing.
+/// **缺陷 #188 — the auto-scroll is wired to a clock, and to the same clock the
+/// spring is.**
+///
+/// The mechanism itself is pinned in `seats.rs`, against real solved geometry
+/// and with no window in sight. What cannot be pinned there is the half this
+/// ticket actually turned on: that something *turns* it. A perfect
+/// `autoscroll_speed` that nobody calls on a frame is the very bug the user
+/// reported — a list that does not move under a hand that has stopped — so the
+/// wiring is a claim in its own right and it is stated the way the arrival
+/// register's is: by reading the source and naming the function that holds the
+/// call.
+///
+/// The spring is the yardstick rather than a literal function name, and that is
+/// deliberate. Both are clocks that fire under a deliberately still hand, both
+/// belong to the drag and die with it, and the day the loop's shape changes they
+/// have to move together — a test that named `turn` would pass while the
+/// auto-scroll was left behind in a function the spring had already left.
+#[cfg(test)]
+mod drag_autoscroll_wiring_tests {
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// Which method holds the first call spelled `needle`.
+    ///
+    /// The needles are assembled rather than written out, for
+    /// `nothing_but_the_paint_and_the_frame_clock_reads_the_register`'s reason:
+    /// a literal here would be a call site of its own as far as a search over
+    /// this very file is concerned.
+    fn holder(needle: &str) -> &'static str {
+        let at = SOURCE
+            .find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is nowhere in this window"));
+        let head = SOURCE[..at]
+            .rfind("\n    fn ")
+            .expect("every call site is inside a method");
+        SOURCE[head + "\n    fn ".len()..]
+            .split('(')
+            .next()
+            .expect("a method's name ends at its parameter list")
+    }
+
+    /// RED GATE — the tick runs where the spring's tick runs, and the deadline
+    /// stands in the wake set the spring's deadline stands in.
+    ///
+    /// Mutation: delete either call and the `expect` inside [`holder`] names the
+    /// one that went; move either to a function of its own — a "drag pass", say
+    /// — and the two halves stop agreeing, which is exactly the drift this gate
+    /// exists to catch, because a clock the loop is not asked about is a clock
+    /// that never fires.
+    #[test]
+    fn the_auto_scroll_turns_on_the_clock_the_spring_turns_on() {
+        let tick = |name: &str| holder(&format!("self.{name}(now)?;"));
+        assert_eq!(
+            tick("advance_drag_autoscroll"),
+            tick("advance_drag_spring"),
+            "the edge scroll has to be advanced from the pass that advances the \
+             spring: both fire under a hand that has stopped moving, which is \
+             the one thing a pointer-driven path cannot do"
+        );
+        assert_eq!(
+            holder(&format!("self.{}(now),", "drag_autoscroll_deadline")),
+            holder(&format!("self.{}(),", "drag_spring_deadline")),
+            "and it has to be in the same wake set: a deadline nobody folds in \
+             is a frame the loop sleeps through"
+        );
+    }
+}
+
 #[cfg(test)]
 mod arrival_wiring_tests {
     use super::{Layered, ModalBand, Popup, Travel};
