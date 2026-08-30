@@ -58027,7 +58027,11 @@ impl Runtime<'_> {
     /// size alone until the pixels land, which is the same silence every other
     /// part of this body keeps.
     fn file_peek_native_pixels(&self, path: &Path) -> Option<(u32, u32)> {
-        match self.window.peek_cache.get(&normalized_local_image_path_key(path))? {
+        match self
+            .window
+            .peek_cache
+            .get(&normalized_local_image_path_key(path))?
+        {
             PeekCacheEntry::Ready {
                 width_px,
                 height_px,

@@ -1068,8 +1068,7 @@ pub fn layout(
     // cut them would have shown a document with nothing saying what it was.
     let natural = border * 2.0 + head_height + body_height + meta_height + foot_height;
     let height = natural.min(px(PEEK_MAX_HEIGHT_LOGICAL_PX).round());
-    let body_height =
-        (height - border * 2.0 - head_height - meta_height - foot_height).max(0.0);
+    let body_height = (height - border * 2.0 - head_height - meta_height - foot_height).max(0.0);
 
     let right = row[2] + px(PEEK_ROW_GAP_LOGICAL_PX);
     let left = if right + width > window.0 - margin {
@@ -2610,7 +2609,6 @@ mod tests {
             "the card is its head, the picture's box, the strip and the foot"
         );
     }
-
 
     /// RED (user rulings 2026-08-25 and 2026-08-26) — **the page card draws a
     /// column of pages over its two facts, scrolls it, and reserves the box for
