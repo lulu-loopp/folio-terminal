@@ -2709,6 +2709,41 @@ fn text_upload_refused(
     }
 }
 
+/// **One re-pack, one line, one number** — the counter and the sentence that
+/// reports it, minted together so that neither can happen without the other.
+///
+/// A frame that loses its text already leaves a line
+/// (`text_upload_refused`); this is the other half of that story, and the
+/// half a reader on the user's machine actually needs. A refusal says *the
+/// packer wore out*; this says *and here is the ledger*, because what tells
+/// the two illnesses apart is the **frequency**, not the event:
+///
+/// * one every few hundred frames is `etagere`'s shelf layout wearing out as it
+///   must on a long session, and the repair working (`docs/DESIGN.md` §7.1.3m —
+///   the soak measures eight in four thousand frames);
+/// * one a second is a window whose single frame does not fit under this
+///   device's largest texture, which no re-packing reaches. The latch in
+///   [`GpuContext::close_the_frame`] already stops that from re-packing on
+///   every frame, so a run of consecutive numbers here is itself the finding.
+///
+/// **Why the increment lives in here rather than beside the `eprintln!`.**
+/// Two statements that must always happen together are one statement: a
+/// counter bumped in one arm and a line printed under some `if` is exactly how
+/// the 2026-08-29 log came to name a lane nobody was looking at. There is one
+/// writer of `glyph_atlas_refits` in this crate and it is this function, so
+/// "one re-pack is one line" is a property of the code rather than a promise
+/// about it — and the number in the line is the value of the counter after the
+/// bump, so the first re-pack of a run is `#1`.
+///
+/// The wording follows the refusal line's: `Folio glyph atlas …`, present
+/// tense, no punctuation a log reader has to parse. `stderr` is
+/// `%APPDATA%\Folio\diagnostics.log` for a resident run — `SetStdHandle` moves
+/// the channel, so there is nothing between this call and that file.
+fn note_a_repack(refits: &mut u64) -> String {
+    *refits += 1;
+    format!("Folio glyph atlas was repacked after a textless frame (refit #{refits})")
+}
+
 /// What a frame that reached the glass *is*, given whether every seat's grid
 /// text reached it too.
 ///
@@ -2883,7 +2918,9 @@ pub struct GpuContext {
     ///
     /// A counter rather than a bit because the number is the diagnosis: one over
     /// a day's session is the packer wearing out as it must; one a second is a
-    /// window whose demand does not fit and whose retry is spinning.
+    /// window whose demand does not fit and whose retry is spinning. Written by
+    /// [`note_a_repack`] and by nothing else, which is what makes every increment
+    /// of it a line in `diagnostics.log`.
     glyph_atlas_refits: u64,
     rect_pipeline: wgpu::RenderPipeline,
     /// The same pipeline blending `Replace`, for the chrome quads that *are*
@@ -4560,6 +4597,16 @@ impl GpuContext {
     /// full into one that also re-rasterizes its whole corpus sixty times a
     /// second. The latch clears on the first frame that keeps all of its text.
     ///
+    /// # What it leaves behind
+    ///
+    /// One line per re-pack, numbered, on the channel a resident run points at
+    /// `%APPDATA%\Folio\diagnostics.log` — see [`note_a_repack`]. The
+    /// refusal that provoked it already writes its own line once per lane, and
+    /// the pair is what a reader on the machine needs: the first says a lane
+    /// went dumb, the second says how often this window has had to start its
+    /// packing over, and only the second tells the packer wearing out from a
+    /// frame that will never fit.
+    ///
     /// # Why the renderers that already hold coordinates are safe
     ///
     /// A `TextRenderer`'s prepared vertices carry positions **inside** the atlas
@@ -4578,9 +4625,13 @@ impl GpuContext {
             }
             Ok(PresentOutcome::PresentedWithoutText(_)) if !self.glyph_atlas_refitted => {
                 self.glyph_atlas_refitted = true;
-                self.glyph_atlas_refits += 1;
                 self.atlas =
                     TextAtlas::new(&self.device, &self.queue, &self.glyphon_cache, self.format);
+                // Unconditional, and numbered by the same statement that does
+                // the numbering — see [`note_a_repack`]. A re-pack the log does
+                // not carry is a re-pack nobody on the machine it happened on
+                // can count, and the count is the whole diagnosis.
+                eprintln!("{}", note_a_repack(&mut self.glyph_atlas_refits));
             }
             // A refused frame on a packing that is already fresh, and the three
             // ends that say nothing about text at all (a skipped or reconfigured
@@ -18261,6 +18312,98 @@ mod tests {
         );
     }
 
+    /// RED — **one re-pack is one line, and the line carries its number**
+    /// (`docs/DESIGN.md` §7.1.3m; coordinator's ask, 2026-08-29).
+    ///
+    /// The repair is invisible from outside by design: the frame after it
+    /// carries its text and nothing on screen says why. That is exactly the
+    /// state the 2026-08-29 report was sent from — something was happening
+    /// repeatedly on the user's machine and the only line it left named a lane
+    /// nobody was looking at. So the re-pack leaves a line of its own, and the
+    /// line carries the running count, because **frequency is the diagnosis**:
+    /// one every few hundred frames is the shelf layout wearing out as it must,
+    /// one a second is a window whose frame will never fit and whose retry is
+    /// spinning.
+    ///
+    /// Asked without a device, because none of it needs one: `note_a_repack` is
+    /// the sole writer of the counter and the sole author of the sentence, so
+    /// "one re-pack, one line" is a property of that pair and not of the GPU
+    /// underneath it.
+    ///
+    /// Mutation: bump `glyph_atlas_refits` anywhere else, or wrap the
+    /// `eprintln!` in a once-per-run guard the way the refusal line is wrapped,
+    /// and the numbers stop agreeing with the lines.
+    #[test]
+    fn one_repack_is_one_numbered_line() {
+        let mut refits = 0u64;
+        let lines: Vec<String> = (0..3).map(|_| note_a_repack(&mut refits)).collect();
+        assert_eq!(refits, 3, "three re-packs must have been counted three times");
+        assert_eq!(
+            lines,
+            vec![
+                "Folio glyph atlas was repacked after a textless frame (refit #1)".to_owned(),
+                "Folio glyph atlas was repacked after a textless frame (refit #2)".to_owned(),
+                "Folio glyph atlas was repacked after a textless frame (refit #3)".to_owned(),
+            ],
+            "a re-pack that leaves no line, or leaves one without its number, is a re-pack              nobody on the machine it happened on can count"
+        );
+        // The family the refusal line already belongs to, so that one `grep` over
+        // `diagnostics.log` finds both halves of the story.
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.starts_with("Folio glyph atlas ")),
+            "the two lines about this atlas must be found by one search: {lines:?}"
+        );
+    }
+
+    /// PIN — **the counter and the line are minted by the same statement.**
+    ///
+    /// [`one_repack_is_one_numbered_line`] holds the pair to its wording; this
+    /// holds the rest of the crate to the pair. `glyph_atlas_refits` may be
+    /// incremented in exactly one place, and that place is the function that
+    /// returns the sentence — a counter bumped in one arm and a line printed
+    /// under some `if` is precisely how the 2026-08-29 log came to report a lane
+    /// nobody was looking at while saying nothing about the one that mattered.
+    ///
+    /// Mutation: move the `*refits += 1` out of `note_a_repack` and up into
+    /// `close_the_frame` beside the `eprintln!`. It would still be correct
+    /// today, and it would be one edit away from not being.
+    #[test]
+    fn nothing_but_the_line_may_count_a_repack() {
+        let source = source_without_prose();
+        // Spelled in two pieces, so this gate is not its own counter-example.
+        assert_eq!(
+            source
+                .matches(concat!("glyph_atlas_", "refits+=1;"))
+                .count(),
+            0,
+            "the re-pack counter is bumped somewhere that is not the line that reports it"
+        );
+        let minting = block_beginning_with(
+            include_str!("lib.rs"),
+            concat!("fn note_a_", "repack(refits: &mut u64)"),
+        );
+        assert!(
+            minting.contains("*refits += 1;"),
+            "the one place that counts a re-pack has to be the one that names it: {minting}"
+        );
+        let closing = block_beginning_with(
+            include_str!("lib.rs"),
+            concat!("fn close_the_", "frame(&mut self,"),
+        );
+        assert_eq!(
+            minting.matches("format!(").count(),
+            1,
+            "one sentence, built once"
+        );
+        assert_eq!(
+            closing.matches(concat!("note_a_", "repack(")).count(),
+            1,
+            "the frame's closing verb spends the pair exactly once: {closing}"
+        );
+    }
+
     /// RED — **a session long enough to wear the packer out gets its text
     /// back** (`docs/DESIGN.md` §7.1.3m, the true cause).
     ///
@@ -18459,7 +18602,9 @@ mod tests {
         );
         // And it recovered for the stated reason rather than by luck: one new
         // packing per frame that lost its text, which is also the statement that
-        // the repair never fired on a frame that did not need it.
+        // the repair never fired on a frame that did not need it — and, because
+        // `note_a_repack` is the only thing that moves this counter, it is also
+        // the number of lines this run left in `diagnostics.log`.
         assert_eq!(
             gpu.glyph_atlas_refits() as usize,
             refused_frames,
