@@ -102978,9 +102978,16 @@ mod tests {
         let removed = carrier
             .find("self.window.web.remove(was)?")
             .expect("the pages are taken out of the window's table");
-        let collected = carrier
-            .find(".collect();")
-            .expect("and gathered before any of them is put back");
+        // Read from the remove and not from the start of the method: the first
+        // `.collect();` here is the one that reads the window's keys, and it
+        // stands *before* the removes begin. What the transaction promises is
+        // the collect that closes the pass the removes are made in — so that is
+        // the one this looks for, and a rewrite that removes and re-files a page
+        // in one loop has no `.collect();` between the two at all.
+        let collected = removed
+            + carrier[removed..]
+                .find(".collect();")
+                .expect("and gathered before any of them is put back");
         let inserted = carrier
             .find("self.window.web.insert(now,page);")
             .expect("and then filed under their new names");
