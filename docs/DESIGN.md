@@ -5990,4 +5990,6 @@ wgpu error: Validation Error
 
 **红门,三道,两道是把用户那两行原样立起来的。** `bt-term`:`a_one_column_terminal_dies_on_the_first_wide_character`——一列 24 行的会话喂一个「中」,`#[should_panic]` 断言的就是 `index out of bounds: the len is 1 but the index is 1`,跑出来的位置也逐字是 `vendor\alacritty_terminal\src\grid\mod.rs:493:30`。它**不是**要被修好的东西,它是那条地板的价钱,和它旁边的 `two_columns_is_the_narrowest_grid_a_wide_character_fits_in`(两列放得下、第三个字换行)一起说清楚地板为什么是 2 而不是 3。`bt-render`:`a_pane_squeezed_to_a_sliver_is_never_measured_at_one_column`(五个缩放比 × 0–256px,把 `clamp` 下界改回 `1.0`,0px 那一格当场红)、`a_pane_flying_off_the_edge_never_scissors_outside_the_render_target`(**314×50 的离屏窗**,预览 clip 依次取报告里那一块、贴右缘往外跑的、贴角往两边跑的、离得很远的、以及静止那一块;把门换回裸 `set_scissor_rect`,第一帧就红,且 wgpu 的原话与用户那一行逐字相同),外加不需要设备的 `a_scissor_is_intersected_with_its_target_and_refused_when_it_misses`。
 
+**实机复验(隔离 `APPDATA`/`LOCALAPPDATA`,`BT_PTY_DUMP` 全程录制)。** 用 `%APPDATA%\Folio\profiles.json` 把默认档的 `args` 改成一个**自己不停画的 alt 屏程序**(`?1049h`,每 150ms 重画 40 行 CJK 与 emoji)——不必往一扇后台 shell 拿不到前台的窗里注键,而这正是 btop4win 当时在做的事。窗被 `SetWindowPos` 压过 70 个尺寸,一路到 **36×34 客户区**(远小于报告里那扇 314×50),再在边界两侧 900↔44 来回振荡 40 次:**进程一次都没有掉**,干净退出 0,录下 613 KB 的 PTY 流(dump 里 `?1049h` 与「中文汉字宽字符」都在)。
+
 **挂账。** 门 5 的干净机烟测没有一台把窗拖到最小值以下——两桩都只有人的手能触发,而自动化里没有那只手。下一个动 `run-smoke-in-vm.ps1` 的人应当加一段:把窗压到 OS 允许的最小,喂一屏 CJK,再放开。
