@@ -5434,7 +5434,10 @@ pub struct FocusThumbnail<'a> {
 /// than defaulted for the reason that function's note gives: a guest moves the
 /// `+` row and therefore the clip this test answers `RailBody` outside of, so a
 /// hit test that did not know about one would answer about a column nobody is
-/// looking at.
+/// looking at. It is also the argument that took this list past the lint, and
+/// the judgement is [`hit_rail_chrome`]'s own, unchanged: folding these into a
+/// struct would move the argument list rather than shorten it.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn hit_focus_rail(
     height: f32,
@@ -36937,8 +36940,9 @@ mod tests {",
     /// equality goes by exactly the term that was dropped.
     #[test]
     fn the_reporters_four_cards_hang_below_the_fold_by_what_the_column_offers() {
-        let column = focus_rail_geometry(1080.0, 1.5, 4, 0, 0.0, focus_rail(TabLayoutMode::Vertical))
-            .expect("focus mode puts a column on screen");
+        let column =
+            focus_rail_geometry(1080.0, 1.5, 4, 0, 0.0, focus_rail(TabLayoutMode::Vertical))
+                .expect("focus mode puts a column on screen");
         assert!(
             column.max_scroll > 0.0,
             "four default cards outrun this window, which is what the report says"
@@ -38259,8 +38263,15 @@ mod tests {",
     /// opposite number, in a window of a chosen logical height so that geometry
     /// and paint agree the way [`rail_paint_of_in`] pairs them.
     fn painted_focus_column(height: f32, tabs: usize) -> FocusRailGeometry {
-        focus_rail_geometry(height, 1.0, tabs, 0, 0.0, focus_rail(TabLayoutMode::Vertical))
-            .expect("focus mode puts a column on screen")
+        focus_rail_geometry(
+            height,
+            1.0,
+            tabs,
+            0,
+            0.0,
+            focus_rail(TabLayoutMode::Vertical),
+        )
+        .expect("focus mode puts a column on screen")
     }
 
     /// **K124 on the third surface — the stand-in holds a whole card's slot and
@@ -38820,9 +38831,15 @@ mod tests {",
         // is a choice offered, not a redesign: a reader who never opens it must
         // get back exactly the column 2026-08-20 left them.
         for scale in [1.0_f32, 1.5, 2.0] {
-            let shipped =
-                focus_rail_geometry(2_400.0, scale, 3, 0, 0.0, focus_rail(TabLayoutMode::Vertical))
-                    .expect("focus mode puts a column on screen");
+            let shipped = focus_rail_geometry(
+                2_400.0,
+                scale,
+                3,
+                0,
+                0.0,
+                focus_rail(TabLayoutMode::Vertical),
+            )
+            .expect("focus mode puts a column on screen");
             let chosen = focus_rail_geometry(
                 2_400.0,
                 scale,

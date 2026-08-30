@@ -33489,17 +33489,15 @@ impl Runtime<'_> {
         // pane, and inventing something for it is the one thing worse than a
         // blank.
         if let Some(slot) = strip_preview {
-            let guest = stand_in_pane
-                .as_ref()
-                .and_then(|(leaf, tree)| {
-                    Some(seats::FocusThumbnail {
-                        tree,
-                        // The card is a tab of exactly this one pane, and in
-                        // that tab this pane is the one holding the keyboard.
-                        focused: leaf.seat,
-                        seats: self.window.focus_thumbs.seats(leaf.tab)?,
-                    })
-                });
+            let guest = stand_in_pane.as_ref().and_then(|(leaf, tree)| {
+                Some(seats::FocusThumbnail {
+                    tree,
+                    // The card is a tab of exactly this one pane, and in
+                    // that tab this pane is the one holding the keyboard.
+                    focused: leaf.seat,
+                    seats: self.window.focus_thumbs.seats(leaf.tab)?,
+                })
+            });
             focus_thumbnails.insert(slot.min(focus_thumbnails.len()), guest);
         }
         let chrome = seats::build_chrome_for_tabs(
@@ -38045,7 +38043,10 @@ impl Runtime<'_> {
         // Through the pane's **own** tab, by id, for `strip_stand_in`'s reason:
         // the spring may have moved the stage, and the seat this card is a
         // picture of is a fact about the tree it is still filed under.
-        self.tab_state(leaf.tab)?.seats.tree().find_seat(leaf.seat)?;
+        self.tab_state(leaf.tab)?
+            .seats
+            .tree()
+            .find_seat(leaf.seat)?;
         Some(leaf)
     }
 
@@ -78238,8 +78239,8 @@ impl Runtime<'_> {
             let Some(tab) = self.window.tabs.get(index) else {
                 continue;
             };
-            let on_the_glass = in_hand == Some(tab.id)
-                || (card.body[3] > list_top && card.body[1] < list_bottom);
+            let on_the_glass =
+                in_hand == Some(tab.id) || (card.body[3] > list_top && card.body[1] < list_bottom);
             if !on_the_glass {
                 continue;
             }
@@ -105319,8 +105320,7 @@ mod tests {
         };
         let strip_state =
             rail_state_for(seats::TabLayoutMode::Horizontal, seats::RailMode::Expanded);
-        let column =
-            seats::focus_rail_geometry(600.0, scale, trailers.len(), 0, 0.0, focus_state)
+        let column = seats::focus_rail_geometry(600.0, scale, trailers.len(), 0, 0.0, focus_state)
             .expect("a focus-mode window draws its card column");
         let rail = seats::rail_geometry(600.0, scale, &trailers, 0, 0.0, rail_state)
             .expect("an expanded rail holding one tab is on screen");
