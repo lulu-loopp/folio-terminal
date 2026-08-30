@@ -13223,7 +13223,7 @@ impl TabState {
     }
 
     /// **The file a preview seat's picture names** (user ruling 2026-08-30;
-    /// §7.1.6b‴) — [`Self::unread_card_document`]'s opposite number, over the
+    /// §7.1.6b⁵) — [`Self::unread_card_document`]'s opposite number, over the
     /// other of the two things a preview pane can be about.
     ///
     /// That one answers "which document is this seat on that nobody has read";
@@ -13276,7 +13276,7 @@ impl TabState {
         // nobody has looked at has never had a frame on any glass.
         page: Option<&'a web_thumb::Picture>,
         // **The decode this window is holding for the file this seat is showing,
-        // when it is showing a picture** (user ruling 2026-08-30; §7.1.6b‴).
+        // when it is showing a picture** (user ruling 2026-08-30; §7.1.6b⁵).
         //
         // Handed in for `page`'s reason and it is the same reason twice: the
         // store it comes from ([`WindowRuntime::peek_cache`]) belongs to the
@@ -17096,7 +17096,7 @@ fn preview_lane_after_landing(
 }
 
 /// **Who holds the one texture lane once the tab's set of panes has changed**
-/// (user report on `next22`, defects #202/#204; §7.1.6k″).
+/// (user report on `next22`, defects #202/#204; §7.1.6k⁗).
 ///
 /// [`preview_lane_after_landing`]'s opposite number, and the pair covers the two
 /// kinds of event there are: that one is asked when a *view* lands on a surface
@@ -28736,7 +28736,7 @@ fn assemble_tab_state(
     // The first picture in insertion order when a tab arrives with two, because
     // the slot is one; the tab merge already decides it that way.
     //
-    // **Through [`preview_raster_lane`] with no incumbent**, since §7.1.6k″: a
+    // **Through [`preview_raster_lane`] with no incumbent**, since §7.1.6k⁗: a
     // tab being born has nobody holding the lane, so the two callers of that
     // function differ in exactly that argument and the derivation itself is
     // written once. A second spelling of "which pane has the pixels" is how the
@@ -28963,7 +28963,7 @@ fn pane_into_new_tab(
         .remove(&was)
         .map(|view| BTreeMap::from([(now, view)]))
         .unwrap_or_default();
-    // **The lane the departing pane may have been holding** (§7.1.6k″). The tab
+    // **The lane the departing pane may have been holding** (§7.1.6k⁗). The tab
     // being built derives its own in [`assemble_tab_state`]; this is the other
     // end of the same journey, and without it the tab left behind names a
     // surface it no longer has — which the moment that pane is dragged back
@@ -29216,7 +29216,7 @@ fn move_seat_content(
         *target.preview_panes.entry(arrived) = pane;
     }
     // **And the texture lane on both sides of the journey** (user report on
-    // `next22`, defects #202/#204; §7.1.6k″).
+    // `next22`, defects #202/#204; §7.1.6k⁗).
     //
     // This used to be one line inside the block above — `target.preview_raster
     // .get_or_insert(arrived)` — and it was half of the rule. The half it stated
@@ -78878,7 +78878,7 @@ impl Runtime<'_> {
         let pages = &self.window.web;
         let page_pictures = &self.window.web_thumbs;
         // **And the pictures the cards can draw out of memory** (user ruling
-        // 2026-08-30; §7.1.6b‴). Read and never asked for: this is the window's
+        // 2026-08-30; §7.1.6b⁵). Read and never asked for: this is the window's
         // decode cache exactly as it stands, and a seat whose file is not in it
         // is the face it has always been. See [`card_picture_in`].
         let decodes = &self.window.peek_cache;
@@ -78945,7 +78945,7 @@ impl Runtime<'_> {
                             });
                         }
                         // **The picture on this seat, if this window has one**
-                        // (§7.1.6b‴) — the third reading in the same place and
+                        // (§7.1.6b⁵) — the third reading in the same place and
                         // the same split as the two above it: what a seat *has*
                         // goes into the projection, and nothing on this line
                         // asks for what it has not.
@@ -93331,7 +93331,7 @@ fn tick_owes_a_present(chrome_changed: bool, panes_owe: bool, pictures_owe: bool
 }
 
 /// **The pixels a card may draw for one file, and nothing else** (user ruling
-/// 2026-08-30; §7.1.6b‴).
+/// 2026-08-30; §7.1.6b⁵).
 ///
 /// The whole of the reading half of "a card draws the real thumbnail", and it is
 /// a free function over the cache rather than a method on [`Runtime`] for the
@@ -103965,7 +103965,7 @@ mod tests {
     }
 
     /// RED — **a card reads the picture this window already has and asks for
-    /// nothing** (defect #205; user ruling 2026-08-30; §7.1.6b‴).
+    /// nothing** (defect #205; user ruling 2026-08-30; §7.1.6b⁵).
     ///
     /// The asking side of "a card draws the real thumbnail", and the whole of
     /// what §7.1.6b′'s red line — *「缩略图不许向磁盘提问」* — costs it. A column
@@ -123973,7 +123973,7 @@ mod tests {
         assert_eq!(origin.preview_pool.len(), 0, "and it is a move");
     }
 
-    // ── §7.1.6k″: the picture follows its pane, and the lane follows with it ─
+    // ── §7.1.6k⁗: the picture follows its pane, and the lane follows with it ─
 
     /// A tab of one terminal and one preview pane **holding a picture** — the
     /// shape [`tab_with_a_preview`] cannot make, because a picture is not a

@@ -224,7 +224,7 @@ enum Damage {
     /// which is the whole difference between pixels and rows.
     Page { key: String },
     /// **A picture's identity** — the decode this window is already holding for
-    /// the file that pane is showing (user ruling 2026-08-30; §7.1.6b‴).
+    /// the file that pane is showing (user ruling 2026-08-30; §7.1.6b⁵).
     ///
     /// [`Self::Page`]'s reasoning word for word, and for the same two reasons:
     /// the identity and not the pixels, because a megabyte-wide memcmp answers
@@ -359,7 +359,7 @@ pub enum SeatSource<'a> {
         picture: &'a crate::web_thumb::Picture,
     },
     /// **A preview seat showing a picture, drawn as the picture it is** (user
-    /// ruling 2026-08-30, extending 0820's *「第二投影加高加忠实」*; §7.1.6b‴).
+    /// ruling 2026-08-30, extending 0820's *「第二投影加高加忠实」*; §7.1.6b⁵).
     ///
     /// v1 drew every picture pane as a [`Self::Face`] — two words, a name and
     /// `PNG` — and the argument was the one that condemned prose: pixels at
@@ -386,7 +386,7 @@ pub enum SeatSource<'a> {
 }
 
 /// **The pixels a card draws for one picture seat**, borrowed off the window's
-/// path-keyed decode (§7.1.6b‴).
+/// path-keyed decode (§7.1.6b⁵).
 ///
 /// A struct rather than four fields in the variant so that the one place that
 /// reads [`crate::PeekCacheEntry`] — which is private to the window's own module
@@ -697,7 +697,7 @@ impl SeatDemand<'_> {
             // reason: the decode happened once, on another thread, for the pane
             // this card is a picture of. Nothing here resamples — the painter is
             // handed the pixels and the box, and the sampler fits one into the
-            // other (§7.1.6b‴).
+            // other (§7.1.6b⁵).
             SeatSource::Picture(picture) => (
                 MiniSeatContent::Picture {
                     key: picture.key.to_owned(),
@@ -2205,7 +2205,7 @@ mod tests {
     }
 
     /// RED — **a preview seat showing a picture projects the picture** (defect
-    /// #205; user ruling 2026-08-30; §7.1.6b‴).
+    /// #205; user ruling 2026-08-30; §7.1.6b⁵).
     ///
     /// The projection half of "a card draws the real thumbnail", with the two
     /// properties the budget turns on:

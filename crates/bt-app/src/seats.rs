@@ -5402,7 +5402,7 @@ pub enum MiniSeatContent {
         height_px: u32,
     },
     /// **A picture, as the picture it is** (user ruling 2026-08-30; `DESIGN.md`
-    /// §7.1.6b‴) — the decode this window already holds for the file that
+    /// §7.1.6b⁵) — the decode this window already holds for the file that
     /// preview pane is showing, sampled into the seat's own box.
     ///
     /// The same four fields [`Self::Page`] carries and a different arm below,
@@ -13415,7 +13415,7 @@ fn focus_mini_seat_content(
             }
         }
         // **A picture, fitted inside its box rather than filling it** (user
-        // ruling 2026-08-30; §7.1.6b‴).
+        // ruling 2026-08-30; §7.1.6b⁵).
         //
         // The arm above and this one differ in one word and the word is *fit*.
         // A page's frame was captured at the seat's own shape, so the rectangle
@@ -39804,7 +39804,7 @@ mod tests {",
 
     /// RED — **a card draws the picture its pane is showing, fitted and not
     /// stretched** (user report on `next22`, defect #205; user ruling
-    /// 2026-08-30, extending 0820's *「第二投影加高加忠实」*; §7.1.6b‴).
+    /// 2026-08-30, extending 0820's *「第二投影加高加忠实」*; §7.1.6b⁵).
     ///
     /// A tab with a `.png` open on a preview pane, put into focus-card mode,
     /// drew two words — the file's name and `PNG` — over ground. The ruling is
