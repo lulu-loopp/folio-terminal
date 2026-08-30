@@ -127748,8 +127748,8 @@ mod cross_window_drag_tests {
 
     use super::{
         BrokerAim, BrokerRelease, DragBroker, DragGuard, DragSource, DropLanding, LeafId,
-        RowPayload, RowPayloadKind, TabId, TearGrip, WindowId, broker_verdict,
-        partition_clamped, profiles, seats, strip_insert_slot, tear_out_rect,
+        RowPayload, RowPayloadKind, TabId, TearGrip, WindowId, broker_verdict, partition_clamped,
+        profiles, seats, strip_insert_slot, tear_out_rect,
     };
 
     const SOURCE: &str = include_str!("main.rs");
@@ -127893,10 +127893,13 @@ mod cross_window_drag_tests {
              decides — the broker has nothing to say about a drag that never left"
         );
         assert_eq!(
-            broker_verdict(&pane, &BrokerAim::Window {
-                window: target,
-                landing: Some(DropLanding::StripExtract { slot: 2 }),
-            }),
+            broker_verdict(
+                &pane,
+                &BrokerAim::Window {
+                    window: target,
+                    landing: Some(DropLanding::StripExtract { slot: 2 }),
+                }
+            ),
             BrokerRelease::Into {
                 window: target,
                 landing: DropLanding::StripExtract { slot: 2 },
@@ -127904,10 +127907,13 @@ mod cross_window_drag_tests {
             "on another window's tab list, at the slot the stand-in was drawn in"
         );
         assert_eq!(
-            broker_verdict(&pane, &BrokerAim::Window {
-                window: target,
-                landing: Some(DropLanding::StripAdopt { tab: TabId(9) }),
-            }),
+            broker_verdict(
+                &pane,
+                &BrokerAim::Window {
+                    window: target,
+                    landing: Some(DropLanding::StripAdopt { tab: TabId(9) }),
+                }
+            ),
             BrokerRelease::Into {
                 window: target,
                 landing: DropLanding::StripAdopt { tab: TabId(9) },
@@ -127915,10 +127921,13 @@ mod cross_window_drag_tests {
             "and on one of its tabs, which is the hand-over the spring showed you"
         );
         assert_eq!(
-            broker_verdict(&pane, &BrokerAim::Window {
-                window: target,
-                landing: None,
-            }),
+            broker_verdict(
+                &pane,
+                &BrokerAim::Window {
+                    window: target,
+                    landing: None,
+                }
+            ),
             BrokerRelease::Nothing,
             "over another window's *body* there is no landing, so letting go is \
              J120's clean nothing — not a tear-out, which would make one pointer \
