@@ -8873,7 +8873,7 @@ struct WindowRuntime {
     /// card.
     web_thumbs: web_thumb::WebThumbs,
     /// **The pages a modal is standing over this frame, and where their last
-    /// frames are drawn** (§7.8 ⑨).
+    /// frames are drawn** (§7.8 ⑩).
     ///
     /// Written by `sync_web_page`, which is the one walk that knows all five
     /// reasons a page can be off the glass; read by the chrome pass and by the
@@ -26194,7 +26194,7 @@ struct WebPlacement {
 }
 
 /// **A page a modal has taken off the glass, and the box its last frame stands
-/// in** (§7.8 ⑨).
+/// in** (§7.8 ⑩).
 ///
 /// One of these is minted for a page hidden **only** by the modal — the same
 /// page that would have been on the glass with no dialog open. A page hidden for
@@ -26219,7 +26219,7 @@ struct PageKeepsake {
 }
 
 /// **One kept frame, as the textured quad both of its two hosts draw it with**
-/// (§7.8 ⑨).
+/// (§7.8 ⑩).
 ///
 /// A free function because the two hosts are a pane and a float and they differ
 /// in *which list* the quad joins, not in what it is — the same division of
@@ -67942,7 +67942,7 @@ impl Runtime<'_> {
             });
         }
         // **And the last frame of the page this window is carrying, while a
-        // modal stands over it** (§7.8 ⑨). On this layer for the picture's own
+        // modal stands over it** (§7.8 ⑩). On this layer for the picture's own
         // reason one paragraph above — the page is composed under wgpu and this
         // window is drawn in the overlay stack, so a frame handed to the pane
         // lane would be behind the very window that contains it — and under the
@@ -82006,7 +82006,7 @@ impl Runtime<'_> {
         let active = self.window.active_tab;
         let mut placements: Vec<WebPlacement> = Vec::with_capacity(pages.len());
         // **And the pages a modal is standing over**, gathered on the same walk
-        // because the answer is made of the same five facts (§7.8 ⑨). Empty on
+        // because the answer is made of the same five facts (§7.8 ⑩). Empty on
         // every frame no dialog is open.
         let mut keepsakes: Vec<PageKeepsake> = Vec::new();
         for leaf in pages {
@@ -82107,7 +82107,7 @@ impl Runtime<'_> {
             // looking at answers it the same way a page under a modal does.
             let rect = webhost::web_presence(body, false).bounds();
             // **The four reasons that are not the modal**, asked separately
-            // because the difference is what a pane draws (§7.8 ⑨): a page the
+            // because the difference is what a pane draws (§7.8 ⑩): a page the
             // dialog alone took away is a page the reader was looking at a
             // moment ago and expects to still be there under the scrim, and one
             // of the other four is a page that has no business on this glass at
@@ -82205,7 +82205,7 @@ impl Runtime<'_> {
     }
 
     /// **Every page in this window has its last frame kept, and a page a modal
-    /// covers draws it** (§7.8 ⑨).
+    /// covers draws it** (§7.8 ⑩).
     ///
     /// Called at the tail of [`Self::sync_web_page`], after every page has been
     /// told whether it is on the glass, because that is the fact the whole lane
@@ -82255,7 +82255,7 @@ impl Runtime<'_> {
     }
 
     /// **The pictures the panes under a modal draw** — one per page the dialog
-    /// took off the glass, at the rectangle the page itself had (§7.8 ⑨).
+    /// took off the glass, at the rectangle the page itself had (§7.8 ⑩).
     ///
     /// Empty on every frame with no dialog up, and empty for a page whose frame
     /// has not arrived — the first frame or two of a dialog, a page that has
@@ -103740,6 +103740,101 @@ mod tests {
             funnel.contains(".commit()"),
             "and nothing else in this window publishes the composition tree the \
              page's visual lives in:\n{funnel}"
+        );
+    }
+
+    /// RED — **a page a modal covers is drawn as the frame it last stood on the
+    /// glass with** (§7.8 ⑩, user report on `next22`, 缺陷 #203: a pane holding a
+    /// pdf or a web page went blank behind the settings dialog).
+    ///
+    /// A page is not drawn by this window — it is a DirectComposition visual
+    /// under the swapchain's — so when a modal takes it off the glass there is
+    /// nothing of it left anywhere except the photograph `web_thumb` keeps. Four
+    /// statements carry that photograph to the pane, and **breaking any one of
+    /// them is the blank pane verbatim**:
+    ///
+    /// * `sync_web_page` is the one walk that knows all five reasons a page can
+    ///   be off the glass, so it is where the page the modal *alone* took is
+    ///   named;
+    /// * `keep_what_the_modal_covers` photographs every page on the glass — on
+    ///   the clock, whether or not a card is looking — and asks for the one
+    ///   decode a dialog needs, because a hidden WebView never answers a
+    ///   capture and the ask therefore has to have happened *before*;
+    /// * `refresh_chrome` puts the frame down the chrome pass's own textured-quad
+    ///   channel, which is under every overlay layer and therefore under the
+    ///   scrim;
+    /// * `preview_float_layer` does the same for a page a float is carrying, on
+    ///   that window's own layer.
+    ///
+    /// The value half is the arithmetic that decides which page gets one: the
+    /// same predicate the presence answer is made of, asked a second time with
+    /// no modal standing over it.
+    ///
+    /// RED GATE: drop the `icons.extend(self.page_keepsake_icons())` — which is
+    /// the build as it shipped — and the third assertion fails; the pane then
+    /// draws its own ground, which is exactly what the report is a photograph
+    /// of.
+    #[test]
+    fn a_page_a_modal_covers_is_drawn_as_a_kept_frame() {
+        // ① Only the modal mints a keepsake. A page hidden for any of the other
+        // four reasons has something else to draw, or nobody looking at it.
+        assert!(
+            !a_page_is_off_the_glass(false, false, true, false, false),
+            "a page in the front tab with no card and no source face is on the \
+             glass, and that is the one kind a dialog takes away"
+        );
+        assert!(a_page_is_off_the_glass(true, false, true, false, false));
+        for (floated, in_front, carded, sourced) in [
+            (false, false, false, false),
+            (false, true, true, false),
+            (false, true, false, true),
+        ] {
+            assert!(
+                a_page_is_off_the_glass(false, floated, in_front, carded, sourced),
+                "this page is off the glass with no dialog open at all, so the \
+                 modal is not what took it and it is owed no standing-in frame"
+            );
+        }
+
+        // ② The walk that names them, and the pass that keeps them.
+        let sync = method_text(concat!("    fn ", "sync_web_page("));
+        assert!(
+            sync.contains("keepsakes.push(PageKeepsake{"),
+            "the one walk that knows all five reasons is where the page a modal \
+             alone took is named:\n{sync}"
+        );
+        assert!(
+            sync.contains("self.keep_what_the_modal_covers(keepsakes,now);"),
+            "and it hands them on:\n{sync}"
+        );
+        let keeping = method_text(concat!("    fn ", "keep_what_the_modal_covers("));
+        assert!(
+            keeping.contains("self.photograph_pages(demands,now);"),
+            "every page on the glass is photographed on the clock — a hidden \
+             WebView never answers, so the ask has to be older than the \
+             dialog:\n{keeping}"
+        );
+        assert!(
+            keeping.contains("self.window.web_thumbs.frame_job(keepsake.leaf)"),
+            "and the dialog asks for the one decode it needs:\n{keeping}"
+        );
+        assert!(
+            keeping.contains("self.window.web_thumbs.drop_frames();"),
+            "and lets the pixels go when it comes down:\n{keeping}"
+        );
+
+        // ③ The two places a kept frame reaches the glass.
+        let chrome = method_text(concat!("    fn ", "refresh_chrome("));
+        assert!(
+            chrome.contains("icons.extend(self.page_keepsake_icons());"),
+            "a docked pane draws its page's last frame in the chrome pass, \
+             under every overlay and therefore under the scrim:\n{chrome}"
+        );
+        let float = method_text(concat!("    fn ", "preview_float_layer("));
+        assert!(
+            float.contains("self.float_page_keepsake_icon(id)"),
+            "and a page a float is carrying draws it on that window's own \
+             layer, for the reason its picture already does:\n{float}"
         );
     }
 

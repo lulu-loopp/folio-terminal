@@ -2681,7 +2681,7 @@ impl WebSeat {
         match self.wanted {
             WebPresence::Hidden => {
                 // **A photograph in flight when the page leaves the glass is a
-                // photograph that never arrives** (§7.8 ⑨). It is the same
+                // photograph that never arrives** (§7.8 ⑩). It is the same
                 // measured fact the whole capture lane stands on, met from the
                 // other side: `CapturePreview` does not complete for a hidden
                 // WebView, and a modal can rise in the eighty milliseconds

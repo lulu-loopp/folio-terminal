@@ -56,7 +56,7 @@
 //! picture belongs to the *seat*, not to the card, and it dies when the seat does
 //! or when the page under it becomes a different page.
 //!
-//! # The second reader of the same photograph (§7.8 ⑨)
+//! # The second reader of the same photograph (§7.8 ⑩)
 //!
 //! A modal takes every page off the glass — a page is composed *under* wgpu and
 //! a scrim is painted *by* wgpu, so a page left standing would be read clearly
@@ -167,7 +167,7 @@ pub struct PageDemand {
     /// resample's target, so that what is uploaded is the size that is drawn
     /// rather than a pane's worth of pixels squeezed by the sampler.
     ///
-    /// **`None` when the asker is the pane itself** (§7.8 ⑨), which draws the
+    /// **`None` when the asker is the pane itself** (§7.8 ⑩), which draws the
     /// frame at the size it was taken and therefore asks for no resample at all.
     /// The two readers are two demands and one photograph: whichever of them the
     /// clock lets through takes the picture, and the products are decided by who
@@ -175,7 +175,7 @@ pub struct PageDemand {
     pub card: Option<(u32, u32)>,
 }
 
-/// **Which of one photograph's two products this job is for** (§7.8 ⑨).
+/// **Which of one photograph's two products this job is for** (§7.8 ⑩).
 ///
 /// A card's is resampled into its mini cell; a pane's is the decode alone, at
 /// the size the engine handed over — which is the pane's own size, because
@@ -211,7 +211,7 @@ pub struct Entry {
     /// The URL the picture — or the ask in flight — is of.
     url: String,
     picture: Option<Picture>,
-    /// **The frame the pane draws while a modal stands over the page** (§7.8 ⑨)
+    /// **The frame the pane draws while a modal stands over the page** (§7.8 ⑩)
     /// — the same photograph as [`Self::picture`], decoded and not resampled.
     ///
     /// Beside the card's rather than instead of it: the two are looked at through
@@ -329,7 +329,7 @@ pub struct WebThumbStats {
     /// was invalidated, between the ask and the answer.
     pub dropped_stale: u64,
     /// **Pane-sized frames kept**, one per modal a page was standing behind
-    /// (§7.8 ⑨). Beside `pictures` rather than folded into it because they are
+    /// (§7.8 ⑩). Beside `pictures` rather than folded into it because they are
     /// the two products of one photograph and a reader wants to know which of
     /// them a decode was spent on.
     pub frames: u64,
@@ -364,7 +364,7 @@ impl WebThumbs {
     }
 
     /// **This pane's last frame at the page's own size**, if it has one — what a
-    /// pane draws while a modal stands over its page (§7.8 ⑨).
+    /// pane draws while a modal stands over its page (§7.8 ⑩).
     #[must_use]
     pub fn frame(&self, leaf: LeafId) -> Option<&Picture> {
         self.pages.get(&leaf)?.frame.as_ref()
@@ -419,7 +419,7 @@ impl WebThumbs {
     /// `demands` is what the two readers of this lane are asking for: the web
     /// panes of the cards that are **visible in the column** (`card: Some`, the
     /// caller having already applied `focus_thumb`'s first two gates), and the
-    /// **pages this window holds** (`card: None`, §7.8 ⑨). Both go through one
+    /// **pages this window holds** (`card: None`, §7.8 ⑩). Both go through one
     /// clock, so a window in focus mode with a page on the stage takes one
     /// photograph every two seconds and not two.
     pub fn due(&mut self, demands: &[PageDemand], now: Instant) -> Vec<LeafId> {
@@ -568,7 +568,7 @@ impl WebThumbs {
         entry.source = source;
         // **The bytes are kept whether or not anybody wants them decoded**, and
         // that is the whole of what the pane's reader costs while no dialog is
-        // open (§7.8 ⑨): a page nobody is carding is photographed, compared and
+        // open (§7.8 ⑩): a page nobody is carding is photographed, compared and
         // filed, and the 18 ms behind a decode is spent the moment a modal takes
         // the page off the glass and not before.
         let target = entry.card.take()?;
@@ -784,7 +784,7 @@ impl PageShrinker {
 }
 
 /// **Decode a captured page and resample it to the box a card draws it in** — or
-/// decode it alone, when the reader is the pane the page stands in (§7.8 ⑨).
+/// decode it alone, when the reader is the pane the page stands in (§7.8 ⑩).
 ///
 /// A free function so that it can be tested without a thread, and so that the
 /// one expensive thing this module does has a name a profile can point at.
@@ -1425,7 +1425,7 @@ mod tests {
     }
 
     /// Red gate: **a page a modal covers keeps the frame it last stood on the
-    /// glass with, at the size the page itself was** (§7.8 ⑨, user report on
+    /// glass with, at the size the page itself was** (§7.8 ⑩, user report on
     /// `next22`: a pane holding a pdf or a web page went blank behind the
     /// settings dialog).
     ///
@@ -1501,7 +1501,7 @@ mod tests {
     }
 
     /// Red gate: **a page that left the glass lets go of the photograph it had
-    /// out** (§7.8 ⑨).
+    /// out** (§7.8 ⑩).
     ///
     /// A capture takes 84 ms to come back and a modal can rise inside it — and a
     /// hidden WebView never answers. The slot has to be released on the way out
@@ -1535,7 +1535,7 @@ mod tests {
     }
 
     /// Red gate: **a card and a pane asking about one page take one
-    /// photograph**, and the card still gets its own product (§7.8 ⑨).
+    /// photograph**, and the card still gets its own product (§7.8 ⑩).
     ///
     /// The two readers are two demands and one engine call. If the pane's demand
     /// were what the answer was filed against, a column open beside a dialog
@@ -1566,7 +1566,7 @@ mod tests {
     }
 
     /// Red gate: **a pane too large to keep a frame of is refused before the
-    /// engine is asked, and the pane draws its own ground** (§7.8 ⑨) — the same
+    /// engine is asked, and the pane draws its own ground** (§7.8 ⑩) — the same
     /// sentence [`an_impossible_box_is_refused_before_the_engine_is_asked`]
     /// makes about a cell, against the other ceiling.
     #[test]
