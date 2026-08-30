@@ -7402,12 +7402,12 @@ pub fn build_chrome_with_preview(
         .unwrap_or_default();
     // Spread the same way `preview_title` is, and stated as plainly: a test
     // about two panes saying two different things builds the list itself.
-    let preview_messages: Vec<(SeatId, &str)> = preview_message
+    let preview_messages: Vec<(SeatId, Vec<String>)> = preview_message
         .map(|message| {
             seats
                 .preview_seats()
                 .into_iter()
-                .map(|seat| (seat, message))
+                .map(|seat| (seat, vec![message.to_owned()]))
                 .collect()
         })
         .unwrap_or_default();
@@ -7925,7 +7925,13 @@ pub struct ChromeContent<'a> {
     /// two panes restoring two files both said "Loading README.md…" while one of
     /// them was waiting on `todo.txt`. A body that names a file it is not
     /// loading is the header bug wearing the body's clothes.
-    pub preview_messages: &'a [(SeatId, &'a str)],
+    /// **Already broken to the pane it will be drawn in** (user ruling
+    /// 2026-08-29; §7.43 ① and ⑤). It is a `Vec<String>` and not a `&str`
+    /// because this is the notice that grows with the data — a real file name
+    /// inside `Loading …`, a sentence naming the underline to look for — and
+    /// the one side that can break it is the side holding a font. See
+    /// [`pane_notice_width`].
+    pub preview_messages: &'a [(SeatId, Vec<String>)],
     /// Each preview pane's path strip — its foot (P32-P35), **by seat**.
     pub preview_feet: &'a [(SeatId, FootStrip<'a>)],
     /// Each preview head's own furniture, **by seat**.
@@ -9309,7 +9315,7 @@ pub fn build_chrome_for_tabs(
                     SeatKind::Preview => preview_messages
                         .iter()
                         .find(|(seat, _)| *seat == placement.id)
-                        .map(|(_, message)| *message),
+                        .map(|(_, lines)| lines.iter().map(String::as_str).collect::<Vec<&str>>()),
                     // T227: the degradation has to be *visible*. A leaf whose
                     // kind this build does not know keeps its place in the tree
                     // rather than taking the tree down with it (§2.1), but a
@@ -9317,38 +9323,60 @@ pub fn build_chrome_for_tabs(
                     // same on screen — and the second is the thing the rule
                     // exists to forbid. So it says what it is, in its own body,
                     // in the same quiet ink an empty preview uses.
-                    SeatKind::Placeholder => Some(placeholder_seat_notice()),
-                    SeatKind::Files => files_notice.as_deref(),
+                    SeatKind::Placeholder => Some(vec![placeholder_seat_notice()]),
+                    SeatKind::Files => files_notice.as_deref().map(|notice| vec![notice]),
                     SeatKind::Terminal => None,
                 };
-                if let Some(message) = body_notice {
+                if let Some(lines) = body_notice.filter(|lines| !lines.is_empty()) {
                     // A state notice, not content: quiet ink, centred in the
                     // body, so an empty pane reads as an invitation and a
                     // failure reads as a note rather than a wall of alarm.
-                    pane_labels.push(ChromeLabel {
-                        mono: false,
-                        text: message.to_owned(),
-                        rect: [
-                            head_box[0] + pad,
-                            // Padded from the *body's* top, which is where the
-                            // head's border box ends — not from its fill.
-                            head_bottom + pad,
-                            head_box[2] - pad,
-                            // And centred in the body, not in the pane: a files
-                            // column's floor is its foot's hairline, and a notice
-                            // measured to the pane's own bottom edge would sit
-                            // fourteen pixels low in every empty column.
-                            files_pane.map_or(head_box[3], |geometry| geometry.body[3]) - pad,
-                        ],
-                        font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
-                        color: palette.body_hint_text,
-                        align_right: false,
-                        align_center: true,
-                        letter_spacing_em: 0.0,
-                        weight: ChromeLabelWeight::Regular,
-                        tabular_numerals: false,
-                        clip: None,
-                    });
+                    //
+                    // **And it is a block of lines rather than one line** (user
+                    // ruling 2026-08-29; `docs/DESIGN.md` §7.43 ① and ⑤, said a
+                    // third time on the surface those two named and did not
+                    // reach). Every one of these is the "整页只剩一句话" shape
+                    // that ruling is about: one `ChromeLabel`, centred, shaped
+                    // with `Wrap::None` and clipped to its own box, so a
+                    // sentence wider than the pane loses its beginning *and* its
+                    // end and the reader is left with its middle. The preview's
+                    // is the one that grows with the data — `Loading <a real
+                    // file name>…`, an invitation that says which underline to
+                    // look for — so it arrives already broken to this pane by
+                    // the one side that holds a font ([`crate::restore::
+                    // wrap_anywhere`], the same call §7.43 ① and ⑤ make); the
+                    // other two are fixed labels of two or three words and are
+                    // one line by construction, which is why they are handed in
+                    // as a slice of one rather than measured.
+                    let notice = [
+                        head_box[0] + pad,
+                        // Padded from the *body's* top, which is where the
+                        // head's border box ends — not from its fill.
+                        head_bottom + pad,
+                        head_box[2] - pad,
+                        // And centred in the body, not in the pane: a files
+                        // column's floor is its foot's hairline, and a notice
+                        // measured to the pane's own bottom edge would sit
+                        // fourteen pixels low in every empty column.
+                        files_pane.map_or(head_box[3], |geometry| geometry.body[3]) - pad,
+                    ];
+                    let block = body_notice_block(notice, lines.len(), scale);
+                    for (index, line) in lines.iter().enumerate() {
+                        let top = block.top + block.line * index as f32;
+                        pane_labels.push(ChromeLabel {
+                            mono: false,
+                            text: (*line).to_owned(),
+                            rect: [notice[0], top, notice[2], top + block.line],
+                            font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
+                            color: palette.body_hint_text,
+                            align_right: false,
+                            align_center: true,
+                            letter_spacing_em: 0.0,
+                            weight: ChromeLabelWeight::Regular,
+                            tabular_numerals: false,
+                            clip: Some(notice),
+                        });
+                    }
                 }
             }
             // **The lone pane's corner ghost** (user ruling 2026-08-20,
@@ -13540,6 +13568,48 @@ pub(crate) fn seat_caption<'a>(
 /// no code for, which is what a session written by a newer build looks like.
 pub(crate) fn placeholder_seat_notice() -> &'static str {
     crate::i18n::Text::PlaceholderSeatNotice.text()
+}
+
+/// **The column a pane's body notice is set in** — `docs/DESIGN.md` §7.43 ⑤'s
+/// `git_panel::empty_width`, one surface over.
+///
+/// The pane's own box less the padding the notice is drawn inside, and it is
+/// derived here rather than at the wrap so that the side that *measures* the
+/// sentence and the side that *draws* it read one number. A measurement against
+/// any other width is a box the ink does not fit, which is the whole of the
+/// defect this exists to close.
+///
+/// The **solved** rectangle and not the card: a card is a hundred-millisecond
+/// paint (R2/R3 — nothing in flight is geometry), and a sentence that re-broke
+/// itself on every frame of a pane's landing would be a paragraph that reflows
+/// while you watch it.
+#[must_use]
+pub fn pane_notice_width(layout: &SeatLayout, seat: SeatId, scale: f32) -> Option<f32> {
+    let viewport = seat_viewport(layout, seat)?;
+    let pad = (SEAT_TITLE_PADDING_LOGICAL_PX * scale).round();
+    Some((viewport.width as f32 - pad * 2.0).max(0.0))
+}
+
+/// Where the lines of a pane's body notice stand, once there can be more than
+/// one of them.
+///
+/// [`crate::git_panel::GitEmptyBlock`]'s shape and its ruling: the block is
+/// centred on the body, and a block taller than the body it stands in starts at
+/// the body's own top and is clipped at the bottom — the only reading under
+/// which the first words are the ones you can read.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BodyNoticeBlock {
+    top: f32,
+    line: f32,
+}
+
+pub(crate) fn body_notice_block(notice: [f32; 4], lines: usize, scale: f32) -> BodyNoticeBlock {
+    let line = (SEAT_TITLE_FONT_LOGICAL_PX * scale * CHROME_LINE_HEIGHT)
+        .round()
+        .max(1.0);
+    let height = line * lines as f32;
+    let top = (notice[1] + (notice[3] - notice[1] - height) / 2.0).max(notice[1]);
+    BodyNoticeBlock { top, line }
 }
 
 // ── the file tree's own numbers, `.files-tree` and `.frow` (mock-up 774-799) ──
@@ -21112,6 +21182,13 @@ mod tests {
         let marks = all_powershell(&seats);
         let tabs = [TabContent::default()];
         let notices = |messages: &[(SeatId, &str)], cards: &[(SeatId, PreviewCardContent<'_>)]| {
+            // The paint takes its notices already broken to the pane they stand
+            // in (§7.43); every sentence in this fixture is one line at this
+            // width, which is what it is asserting about.
+            let messages: Vec<(SeatId, Vec<String>)> = messages
+                .iter()
+                .map(|(seat, message)| (*seat, vec![(*message).to_owned()]))
+                .collect();
             let chrome = build_chrome_for_tabs(
                 &seats,
                 &layout,
@@ -21144,7 +21221,7 @@ mod tests {
                     files_views: &NO_FILES_VIEWS,
                     git_pages: &NO_GIT_PAGES,
                     git_graphs: &NO_GIT_GRAPHS,
-                    preview_messages: messages,
+                    preview_messages: &messages,
                     preview_feet: &[],
                     preview_heads: &[],
                     preview_rails: &[],
@@ -21201,6 +21278,144 @@ mod tests {
         };
         let mixed = notices(&[(second, "Loading todo.txt\u{2026}")], &[(locked, card)]);
         assert_eq!(mixed, vec!["Loading todo.txt\u{2026}".to_owned()]);
+    }
+
+    /// RED — **a pane's body notice wraps inside the pane instead of running out
+    /// of both edges of it** (user ruling 2026-08-29; `docs/DESIGN.md` §7.43 ①
+    /// and ⑤, on the third surface that draws "整页只剩一句话").
+    ///
+    /// The same defect ⑤ found on the Git page, one pane over: this notice was
+    /// one `ChromeLabel`, centred, shaped with `Wrap::None` and clipped to its
+    /// own box, so a sentence wider than the pane lost its beginning **and** its
+    /// end and what a reader saw was its middle. Two of these sentences grow
+    /// with the data — `Loading <a real file name>…`, and the empty pane's
+    /// invitation now that it names the mark it is talking about — so the width
+    /// they are drawn at is not a constant anybody can eyeball.
+    ///
+    /// The sentence here is the empty state's own, and the widths are a pane at
+    /// the layout's floor (`MIN_PANE_W`) and a comfortable one.
+    ///
+    /// MUTATIONS: draw one label with `rect` spanning the whole body and the
+    /// first assertion goes red at the narrow width; centre each line on the
+    /// *body* rather than on the block and the lines pile up on one baseline;
+    /// leave the block's `top` unclamped and a notice taller than its pane
+    /// starts above its own head.
+    #[test]
+    fn a_panes_body_notice_wraps_inside_the_pane() {
+        // A stand-in for the face the notice is set in: every character the
+        // same width, which is what makes the arithmetic here checkable.
+        let measure = |text: &str| text.chars().count() as f32 * 6.9;
+        let said = crate::i18n::Text::PreviewEmptyState.text();
+        let metrics = seat_metrics(1_000);
+        let mut narrow = false;
+        for window_width in [700_u32, 1_600] {
+            let mut seats = Seats::lone_terminal();
+            let seat = seats.add_preview(&metrics).expect("the preview seat lands");
+            let layout = solved(&seats, viewport_of(window_width, 900, 1_000), &metrics);
+            let width = pane_notice_width(&layout, seat, 1.0).expect("the seat has a rectangle");
+            let lines = crate::restore::wrap_anywhere(said, width, measure);
+            assert!(
+                !lines.is_empty(),
+                "a {window_width}px window drew no notice"
+            );
+            narrow |= lines.len() > 1;
+
+            let chrome = build_chrome_for_tabs(
+                &seats,
+                &layout,
+                1.0,
+                ChromePointer::default(),
+                ChromeContent {
+                    head_ink: HeadInk::default(),
+                    active_ink: TabInk::default(),
+                    card_ink: TabInk::default(),
+                    tabs: &[TabContent::default()],
+                    active_tab: 0,
+                    grabbed: None,
+                    strip_preview: None,
+                    float_shown: &[],
+                    tab_scroll: 0.0,
+                    rail: RailState::default(),
+                    rail_scroll: 0.0,
+                    focus_reveal: 1.0,
+                    focus_card_nudge_rows: 0.0,
+                    focus_thumbnails: &[],
+                    preview_titles: &[],
+                    terminal_names: &NO_TERMINAL_NAMES,
+                    leaf_marks: &all_powershell(&seats),
+                    files_names: &NO_FILES_NAMES,
+                    files_name_widths: &NO_FILES_NAME_WIDTHS,
+                    files_root_open: None,
+                    files_trees: &NO_FILES_TREES,
+                    files_views: &NO_FILES_VIEWS,
+                    git_pages: &NO_GIT_PAGES,
+                    git_graphs: &NO_GIT_GRAPHS,
+                    preview_messages: &[(seat, lines.clone())],
+                    preview_feet: &[],
+                    preview_heads: &[],
+                    preview_rails: &[],
+                    preview_cards: &[],
+                    fit_overflow: None,
+                    profile_menu_open: false,
+                    chevron_turn: 0.0,
+                    pane_motion: PaneMotionFrame::default(),
+                    search_seat: None,
+                    head_raised: None,
+                    resizing_cards: None,
+                },
+            );
+            let drawn: Vec<&ChromeLabel> = chrome
+                .seats
+                .labels
+                .iter()
+                .filter(|label| lines.contains(&label.text))
+                .collect();
+            assert_eq!(
+                drawn.len(),
+                lines.len(),
+                "every wrapped line is a line that is drawn"
+            );
+            let pane = full_pane_rect(&layout, seat).expect("a full pane");
+            let mut baselines: Vec<f32> = Vec::new();
+            for label in &drawn {
+                assert!(
+                    measure(&label.text) <= width,
+                    "a {window_width}px window draws `{}` at {}px in a {width}px column",
+                    label.text,
+                    measure(&label.text)
+                );
+                assert!(
+                    label.rect[0] >= pane[0] && label.rect[2] <= pane[2],
+                    "and the box it is centred in is inside the pane: {:?} in {pane:?}",
+                    label.rect
+                );
+                baselines.push(label.rect[1]);
+            }
+            baselines.sort_by(f32::total_cmp);
+            baselines.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+            assert_eq!(
+                baselines.len(),
+                lines.len(),
+                "each line stands on its own row rather than on top of the last"
+            );
+            // The whole sentence is still there — a wrap that dropped a word
+            // would be the same defect wearing better clothes.
+            assert_eq!(
+                drawn
+                    .iter()
+                    .map(|label| label.text.as_str())
+                    .collect::<String>()
+                    .replace(' ', ""),
+                said.replace(' ', ""),
+                "the invitation lost characters on its way into the pane"
+            );
+        }
+        assert!(
+            narrow,
+            "the narrow pane has to be narrow enough to need the wrap, or this \
+             test is asserting nothing: `{said}` at {}px",
+            measure(said)
+        );
     }
 
     /// A head with one buffer, nothing dirty and nothing editable.

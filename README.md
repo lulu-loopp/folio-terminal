@@ -87,8 +87,8 @@ application.
 </picture>
 
 - A card comes up under the pointer when it rests on a name in the files column:
-  the first page of the PDF, the first frame of the video, the first lines of the
-  text, the image itself.
+  the PDF page by page, the video playing, the first lines of the text, the image
+  itself.
 - The preview pane opens the file beside the prompt — markdown typeset, PDF page
   by page, video playing, a web page with an address field and Back.
 - A path the terminal printed opens in the preview pane on a click, and goes to

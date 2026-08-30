@@ -1609,8 +1609,8 @@ mod windows_impl {
     use std::{
         cell::{Cell, RefCell},
         collections::BTreeMap,
-        ffi::c_void,
-        os::windows::ffi::OsStrExt,
+        ffi::{OsString, c_void},
+        os::windows::ffi::{OsStrExt, OsStringExt},
         path::{Path, PathBuf},
         sync::{
             Arc, Mutex, OnceLock,
@@ -6709,17 +6709,34 @@ mod windows_impl {
     /// allowed to exist under DESIGN §7.1.3g ② (R31) — a repository is not read
     /// because time passed, and a change notification is not time passing.
     ///
-    /// **It says only that something changed.** The `FILE_NOTIFY_INFORMATION`
-    /// records the kernel writes are read for nothing at all — not the names, not
-    /// the actions — because the caller's next move is to ask `git status`, which
-    /// is the one thing that can say what a change *means*. Parsing them here
-    /// would be a second, worse answer to a question this crate cannot answer:
+    /// **To a tree watcher it says only that something changed.** For
+    /// [`DirWatch::start`] the `FILE_NOTIFY_INFORMATION` records are read for
+    /// nothing at all — not the names, not the actions — because the caller's
+    /// next move is to ask `git status`, which is the one thing that can say
+    /// what a change *means*. Deciding it there would be a second, worse answer
+    /// to a question this crate cannot answer:
     /// whether a write to `target\debug\foo.pdb` matters is a question about a
     /// `.gitignore`, and a watcher that tried to decide it would be wrong on
-    /// somebody's repository and silent about it. A zero-length completion —
-    /// the kernel's way of saying the buffer overflowed and it has stopped
-    /// keeping track — is therefore not a special case but the ordinary one:
-    /// *something changed*, which is all any of them ever say.
+    /// somebody's repository and silent about it.
+    ///
+    /// **A shallow watcher may ask which entry** ([`DirWatch::start_shallow_named`],
+    /// user ruling 2026-08-29, defect #186). That caller is not asking "did
+    /// something in this tree change"; it is watching *one file* through the
+    /// only subscription Windows offers, and the kernel has already written the
+    /// name down. Measured on the machine that day: a README previewed out of a
+    /// repository root cost the window thread 188ms of CPU for 655ms of writes
+    /// into `target\` — no frame drawn, no page rebuilt, every wake-up about an
+    /// entry the reader is not looking at. NTFS moves a directory's own write
+    /// time when anything is added to it, so a *shallow* watch on a repository
+    /// root hears the whole build through the `target` entry. The names are
+    /// read only where the caller can say which one it means, which is why this
+    /// is a second door and not a change to the first.
+    ///
+    /// A zero-length completion — the kernel's way of saying the buffer
+    /// overflowed and it has stopped keeping track — is [`DirChange::Unknown`]:
+    /// *something changed and it will not say what*. A caller that filters by
+    /// name must treat it as a match, because a filter that dropped it would
+    /// drop exactly the burst that overflowed.
     ///
     /// **Dropping it cancels.** The watcher thread waits on the directory's
     /// completion and on a stop event at once, so `drop` is a `SetEvent` and a
@@ -6794,6 +6811,26 @@ mod windows_impl {
         pub fn recursive(self) -> bool {
             matches!(self, Self::Tree)
         }
+    }
+
+    /// **What one completion of `ReadDirectoryChangesW` said changed** (user
+    /// ruling 2026-08-29, defect #186).
+    ///
+    /// Two answers and not a list-that-may-be-empty, because the difference
+    /// between them is the whole point: an empty list would mean "nothing
+    /// changed", and the kernel never says that. It says either *these entries*
+    /// or *more than I could write down*.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum DirChange<'a> {
+        /// The entries the kernel named, relative to the watched directory and
+        /// in the order it wrote them. One record may name an entry more than
+        /// once and a rename names both halves; a reader that cares about one
+        /// file asks whether its name is in here.
+        Named(&'a [OsString]),
+        /// The buffer overflowed and the kernel stopped keeping track. Something
+        /// changed; nothing can say what. **A name filter must let this through**
+        /// — see [`DirWatch`].
+        Unknown,
     }
 
     /// **Test-only: a place to hold the watcher thread just short of a read.**
@@ -6987,7 +7024,7 @@ mod windows_impl {
             path: &Path,
             wake: impl Fn() + Send + 'static,
         ) -> Result<Self, std::io::Error> {
-            Self::start_scoped(path, WatchDepth::Tree, wake)
+            Self::start_scoped(path, WatchDepth::Tree, move |_| wake())
         }
 
         /// The same subscription over **this directory and no deeper**.
@@ -7004,13 +7041,33 @@ mod windows_impl {
             path: &Path,
             wake: impl Fn() + Send + 'static,
         ) -> Result<Self, std::io::Error> {
+            Self::start_scoped(path, WatchDepth::HereOnly, move |_| wake())
+        }
+
+        /// **The same shallow subscription, told which entry moved** (user
+        /// ruling 2026-08-29, defect #186).
+        ///
+        /// [`Self::start_shallow`]'s door for the caller that is watching a
+        /// *file*: `wake` is handed the [`DirChange`] the kernel wrote, so a
+        /// folder full of things nobody is reading can be answered on the
+        /// watcher thread and cost the loop nothing at all. See [`DirWatch`] for
+        /// why the tree watcher is deliberately not offered this.
+        ///
+        /// `wake` still runs on the watcher thread and still owes it the same
+        /// haste: this thread is the only thing between the kernel's buffer and
+        /// an overflow, and a filter is the cheapest possible thing to do here —
+        /// which is the point.
+        pub fn start_shallow_named(
+            path: &Path,
+            wake: impl Fn(DirChange<'_>) + Send + 'static,
+        ) -> Result<Self, std::io::Error> {
             Self::start_scoped(path, WatchDepth::HereOnly, wake)
         }
 
         fn start_scoped(
             path: &Path,
             depth: WatchDepth,
-            wake: impl Fn() + Send + 'static,
+            wake: impl Fn(DirChange<'_>) + Send + 'static,
         ) -> Result<Self, std::io::Error> {
             let mut units = path.as_os_str().encode_wide().collect::<Vec<u16>>();
             if units.contains(&0) {
@@ -7145,13 +7202,17 @@ mod windows_impl {
         stop: SendHandle,
         depth: WatchDepth,
         armed: std::sync::mpsc::Sender<Result<(), std::io::Error>>,
-        wake: impl Fn(),
+        wake: impl Fn(DirChange<'_>),
     ) {
         // `u32` and not `u8`: the kernel writes `FILE_NOTIFY_INFORMATION` records
         // into this and requires DWORD alignment, which a `Vec<u8>` does not
-        // promise. Nothing reads the records — see [`DirWatch`] — but the
-        // alignment is a precondition of the call, not of the parsing.
+        // promise. Since defect #186 the records are also *read* — see
+        // [`DirWatch`] — and the alignment the call requires is the same
+        // alignment that walk needs.
         let mut buffer = vec![0u32; DIR_WATCH_BUFFER_BYTES / std::mem::size_of::<u32>()];
+        // Reused across passes so that a busy folder does not allocate per
+        // notification. It is cleared and refilled by every walk.
+        let mut names: Vec<OsString> = Vec::new();
         // Declared once, outside the loop, so that its address is fixed for as
         // long as the kernel may be writing to it — and written afresh at the top
         // of every pass, because the kernel leaves its own status in the fields a
@@ -7223,10 +7284,87 @@ mod windows_impl {
                 return;
             }
             // `written == 0` is the kernel saying the buffer overflowed and it
-            // has stopped keeping track of what changed. It is reported exactly
-            // like every other notification, because it carries exactly the same
-            // information this watcher uses: something changed.
-            wake();
+            // has stopped keeping track of what changed. It is the one
+            // completion that can name nothing, and it is reported as itself —
+            // *something changed and I will not say what* — rather than as an
+            // empty list, which would read as "nothing changed" to the one
+            // caller that acts on the names.
+            if written == 0 {
+                wake(DirChange::Unknown);
+                continue;
+            }
+            names.clear();
+            // SAFETY: the kernel wrote `written` bytes of `FILE_NOTIFY_INFORMATION`
+            // records into `buffer`, which is `u32`-aligned as the call requires,
+            // and the walk below never steps past `written`.
+            unsafe { read_change_names(&buffer, written as usize, &mut names) };
+            if names.is_empty() {
+                // A completion whose records this walk could not make sense of
+                // is the overflow's twin: bytes arrived, so something moved, and
+                // the honest thing is to say so without naming anything.
+                wake(DirChange::Unknown);
+                continue;
+            }
+            wake(DirChange::Named(&names));
+        }
+    }
+
+    /// **Walk one completion's `FILE_NOTIFY_INFORMATION` chain and collect the
+    /// entry names.**
+    ///
+    /// The record is a `DWORD` next-offset, a `DWORD` action, a `DWORD` name
+    /// length **in bytes**, and then that many bytes of UTF-16 with no
+    /// terminator. A `NextEntryOffset` of zero ends the chain.
+    ///
+    /// Every bound is checked against `written` rather than trusted, because
+    /// this is a buffer another ring filled: a record that claims to run past
+    /// the end of what the kernel says it wrote ends the walk, and so does an
+    /// offset that does not move forward — which is the shape a malformed chain
+    /// would take, and an infinite loop on the one thread standing between the
+    /// kernel's buffer and an overflow.
+    ///
+    /// # Safety
+    ///
+    /// `written` must be the byte count the kernel reported for records it wrote
+    /// into `buffer`, and `buffer` must be `u32`-aligned — both of which
+    /// `ReadDirectoryChangesW` requires of the call that produced them.
+    unsafe fn read_change_names(buffer: &[u32], written: usize, names: &mut Vec<OsString>) {
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), std::mem::size_of_val(buffer))
+        };
+        let written = written.min(bytes.len());
+        let mut at = 0usize;
+        loop {
+            // Three `DWORD`s of header before the name, and the bound is
+            // `written` and not the buffer's length: past what the kernel says
+            // it wrote is last pass's leftovers.
+            let Some(header) = bytes.get(at..at + 12).filter(|_| at + 12 <= written) else {
+                return;
+            };
+            let next = u32::from_ne_bytes([header[0], header[1], header[2], header[3]]) as usize;
+            let name_bytes =
+                u32::from_ne_bytes([header[8], header[9], header[10], header[11]]) as usize;
+            let name_at = at + 12;
+            if name_at + name_bytes > written {
+                return;
+            }
+            if name_bytes >= 2 {
+                let units: Vec<u16> = bytes[name_at..name_at + name_bytes]
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+                    .collect();
+                names.push(OsString::from_wide(&units));
+            }
+            if next == 0 {
+                return;
+            }
+            let Some(step) = at.checked_add(next) else {
+                return;
+            };
+            if step <= at || step >= written {
+                return;
+            }
+            at = step;
         }
     }
 
@@ -7924,7 +8062,7 @@ impl TaskbarProgress {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    Compositor, CustomWindowFrame, DirWatch, FilePickKind, FolderPicker, ImagePicker,
+    Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
     ImeSystemCaret, MathContextMenu, Notifier, PROGRAM_REFUSED, SystemSettingsWatch, Taskbar,
     adopt_parent_console, client_area_animation_enabled, clipboard_text, cloaked_from_attribute,
     current_thread_priority, current_user_registry_string, current_user_registry_subkeys,
@@ -8464,6 +8602,73 @@ mod dir_watch_tests {
             first_read_gate::recursive_reads(),
             recursive_reads_before,
             "a shallow watch never asks the kernel for the tree below the directory it was given"
+        );
+        drop(watch);
+    }
+
+    /// RED — **a shallow watch can say which entry moved** (user ruling
+    /// 2026-08-29, defect #186).
+    ///
+    /// The fact the whole fix rests on: the kernel already writes the name into
+    /// the buffer this watcher was throwing away, so a window watching one file
+    /// in a folder full of somebody else's can answer the difference on the
+    /// watcher thread — before a mailbox is touched or a loop is woken.
+    ///
+    /// Two entries in one folder, written one after the other, and each has to
+    /// come back under its own name. The **directory** half is the one the
+    /// defect was about: NTFS moves a directory's write time when anything is
+    /// added to it, so `nested` is reported as a changed entry of the watched
+    /// folder — which is exactly how previewing a README out of a repository
+    /// root came to hear every object file a build wrote into `target`.
+    ///
+    /// MUTATIONS: hand the callback `DirChange::Unknown` unconditionally and the
+    /// name assertions go red; walk the records without bounding them by
+    /// `written` and the names come back with the previous pass's tail on them.
+    #[test]
+    fn a_named_watch_reports_the_entry_that_moved() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let scratch = Scratch::new("named");
+        let (tx, rx) = mpsc::channel::<Vec<String>>();
+        let watch = DirWatch::start_shallow_named(&scratch.0, move |change| {
+            let names = match change {
+                super::DirChange::Named(names) => names
+                    .iter()
+                    .map(|name| name.to_string_lossy().to_lowercase())
+                    .collect(),
+                super::DirChange::Unknown => Vec::new(),
+            };
+            let _ = tx.send(names);
+        })
+        .expect("watch a directory this process just made");
+
+        let heard_until = |rx: &mpsc::Receiver<Vec<String>>, wanted: &str| {
+            let deadline = Instant::now() + ARRIVES_WITHIN;
+            while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+                match rx.recv_timeout(left) {
+                    Ok(names) => {
+                        if names.iter().any(|name| name == wanted) {
+                            return true;
+                        }
+                    }
+                    Err(_) => return false,
+                }
+            }
+            false
+        };
+
+        std::fs::write(scratch.0.join("watched.md"), b"hello").expect("write the watched file");
+        assert!(
+            heard_until(&rx, "watched.md"),
+            "the kernel names the file that was written"
+        );
+
+        let nested = scratch.0.join("target");
+        std::fs::create_dir_all(&nested).expect("make a subdirectory");
+        std::fs::write(nested.join("object.o"), b"o").expect("write inside it");
+        assert!(
+            heard_until(&rx, "target"),
+            "and it names the *directory* whose write time a build moved, which \
+             is the entry a repository root hears the whole build through"
         );
         drop(watch);
     }

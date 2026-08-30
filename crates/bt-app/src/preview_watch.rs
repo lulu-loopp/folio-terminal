@@ -30,26 +30,56 @@
 //!    outright. Nothing else in this file decides to watch or stop watching
 //!    anything.
 //! 2. **One folder, not one tree.** Windows cannot subscribe to a file, so the
-//!    handle is on the file's directory — `bt_platform::DirWatch::start_shallow`,
-//!    which asks the kernel for that directory's own entries and nothing
-//!    deeper. A README previewed out of a repository root must not wake this
-//!    thread for every object file a build writes into `target\debug`.
-//! 3. **A notification is not an answer.** A shallow watch still speaks for
-//!    every *sibling* in the folder, and a folder of documents is the ordinary
-//!    case. So when the clock comes due the file itself is asked for its
-//!    modified time and its length, and only a file whose answer differs from
-//!    the one recorded when it was last read is news. That is one `metadata`
-//!    call per file per quiet window, made **because the kernel spoke** — the
-//!    difference from a poll that `watch_clock`'s own header states.
+//!    handle is on the file's directory —
+//!    `bt_platform::DirWatch::start_shallow_named`, which asks the kernel for
+//!    that directory's own entries and nothing deeper. A README previewed out
+//!    of a repository root must not wake this thread for every object file a
+//!    build writes into `target\debug`. (Depth alone does not finish that
+//!    sentence; rule 3 is the other half of it.)
+//! 3. **A notification about a sibling is not news, and since defect #186 it is
+//!    not a wake-up either.** A shallow watch speaks for every *entry* of the
+//!    folder, and a repository root's entries include `target`, `.git` and
+//!    `node_modules` — NTFS moves a directory's own write time whenever anything
+//!    is added to it, so a README previewed out of a repository root hears the
+//!    whole build. Measured on the machine (2026-08-29): 400 files written into
+//!    `target\` cost the window thread **188ms of CPU in 655ms**, with no frame
+//!    drawn and no page rebuilt — every millisecond of it spent waking a loop to
+//!    be told about an entry nobody is reading.
+//!
+//!    So the kernel's own record is read, on the watcher thread, before anything
+//!    is written down: [`bt_platform::DirChange::Named`] carries the entries that
+//!    moved, and a completion naming none of this window's files touches neither
+//!    the mailbox nor the event loop. An overflow ([`bt_platform::DirChange::Unknown`])
+//!    is let through — it is exactly the burst that must not be dropped.
+//!
+//!    What survives it unchanged is the second line: when the clock comes due
+//!    the file itself is asked for its modified time and its length, and only a
+//!    file whose answer differs from the one recorded when it was last read is
+//!    news. That is one `metadata` call per file per quiet window, made
+//!    **because the kernel spoke** — the difference from a poll that
+//!    `watch_clock`'s own header states. The name filter does not replace it: a
+//!    name arrives for a write that changed nothing, so the name says *maybe*
+//!    and the stamp says *yes*.
+//!
+//!    **The one thing the filter can be wrong about, recorded.** The kernel
+//!    reports the name the *operation* used, so a program that opened the file
+//!    by its 8.3 alias (`READ~1.MD`) would be filtered out. Every editor, every
+//!    build tool and git itself use the long name, and many volumes generate no
+//!    alias at all — but this is a real if narrow hole, and the honest place for
+//!    it is here rather than in a claim that the filter is exact.
 //!
 //! # What a change means here
 //!
-//! Nothing is parsed out of the notification — `git_watch`'s rule, one level
-//! down. A save, a rename and a delete cost the same thought, and the
-//! write-then-rename dance an editor performs arrives as one piece of news
-//! because [`WatchClock`] is what turns a burst into one. A file that has *gone*
-//! is a change like any other: the stamp moves from `Some` to `None`, the seat
-//! is told, and what an absent file looks like is the content lane's business.
+//! **The name is read and the action is not** — `git_watch`'s rule as far as it
+//! still holds, one level down. A save, a rename and a delete cost the same
+//! thought once the entry is this window's, and the write-then-rename dance an
+//! editor performs arrives as one piece of news because [`WatchClock`] is what
+//! turns a burst into one. A file that has *gone* is a change like any other:
+//! the stamp moves from `Some` to `None`, the seat is told, and what an absent
+//! file looks like is the content lane's business. What rule 3 added is a
+//! *filter* and not an interpretation — "is this one of my files" is a question
+//! this module can answer with certainty, and "what did this action mean" is
+//! the one it still declines to.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -123,6 +153,19 @@ pub struct PreviewWatch {
     /// for `git_watch`'s reason: the only thing worth keeping about ten of them
     /// is that there were some and when the last one was.
     news: Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
+    /// **Which entry names, per watched directory, are this window's business**
+    /// (defect #186).
+    ///
+    /// Shared with the watcher threads because that is the only place it can do
+    /// its job: the filter has to run *before* the mailbox and the event loop
+    /// are touched, and the set moves as the pool does, so a copy handed to each
+    /// subscription at the moment it opened would go stale the first time a
+    /// reader opened a second document in the same folder.
+    ///
+    /// Names are lower-cased on both sides. Windows compares paths without
+    /// regard to case and the kernel reports the entry as it is spelled on disk,
+    /// which is not necessarily how the reader spelled it.
+    listening_for: Arc<Mutex<BTreeMap<PathBuf, BTreeSet<String>>>>,
     /// One live subscription per directory, however many watched files are in
     /// it. **The handle is the subscription**: dropping it cancels.
     folders: BTreeMap<PathBuf, bt_platform::DirWatch>,
@@ -157,10 +200,11 @@ impl PreviewWatch {
     /// diagnostics line.
     pub fn sync(&mut self, wanted: &BTreeSet<PathBuf>, proxy: &EventLoopProxy<AppEvent>) -> bool {
         let news = Arc::clone(&self.news);
+        let listening_for = Arc::clone(&self.listening_for);
         let proxy = proxy.clone();
         let changed = self.sync_with(
             wanted,
-            move |directory| subscribe(&news, &proxy, directory),
+            move |directory| subscribe(&news, &listening_for, &proxy, directory),
             Stamp::of,
         );
         if changed {
@@ -218,6 +262,24 @@ impl PreviewWatch {
             .keys()
             .filter_map(|path| path.parent().map(Path::to_path_buf))
             .collect();
+        // **The filter, rebuilt from the same map the subscriptions are**
+        // (defect #186). Written before the handles are opened, so that a
+        // subscription is never listening with a set that does not yet name the
+        // file it was opened for — the notification that arrives between the two
+        // is the one about the reader's own save.
+        {
+            let mut listening = lock(&self.listening_for);
+            listening.clear();
+            for path in self.files.keys() {
+                let (Some(directory), Some(name)) = (path.parent(), path.file_name()) else {
+                    continue;
+                };
+                listening
+                    .entry(directory.to_path_buf())
+                    .or_default()
+                    .insert(name.to_string_lossy().to_lowercase());
+            }
+        }
         let held = self.folders.len() + self.unwatchable.len();
         self.folders
             .retain(|directory, _| folders.contains(directory));
@@ -383,14 +445,24 @@ impl PreviewWatch {
 /// and what it needs is the mailbox and the proxy rather than the registry.
 fn subscribe(
     news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
+    listening_for: &Arc<Mutex<BTreeMap<PathBuf, BTreeSet<String>>>>,
     proxy: &EventLoopProxy<AppEvent>,
     directory: &Path,
 ) -> Option<bt_platform::DirWatch> {
     let mailbox = Arc::clone(news);
+    let listening_for = Arc::clone(listening_for);
     let proxy = proxy.clone();
     let key = directory.to_path_buf();
-    // Shallow (rule 2): this folder's own entries, and nothing under it.
-    let started = bt_platform::DirWatch::start_shallow(directory, move || {
+    // Shallow (rule 2), and **named** (rule 3, defect #186): this folder's own
+    // entries, and the kernel's own word about which of them moved.
+    let started = bt_platform::DirWatch::start_shallow_named(directory, move |change| {
+        if !change_is_ours(&listening_for, &key, change) {
+            // The whole of the fix: a `target` that a build is writing into is an
+            // entry of this folder and says so on every object file. Nothing is
+            // recorded, no event is sent, and the loop this window is asleep in
+            // does not turn.
+            return;
+        }
         lock(&mailbox).insert(key.clone(), Instant::now());
         // The loop is woken, not told what to do: what a change means is decided
         // on the main thread, where the clocks and the seats are.
@@ -407,6 +479,40 @@ fn subscribe(
             None
         }
     }
+}
+
+/// **Does this completion name a file this window is reading?** (defect #186).
+///
+/// Split out of the closure so the rule can be stated over a table rather than
+/// over a live kernel: it is the whole of what runs on the watcher thread, and
+/// the whole of what a folder full of other people's files costs.
+///
+/// Three answers and each is a decision:
+///
+/// * [`bt_platform::DirChange::Unknown`] is **yes**. The kernel's buffer
+///   overflowed, so it cannot say what moved; a filter that read that as "not
+///   mine" would drop precisely the burst that was too big to write down.
+/// * a folder with no entry in the table is **yes** — the subscription is
+///   outliving the set by a turn, and answering "not mine" to a file this window
+///   is about to be told it is watching is how a save goes unseen.
+/// * otherwise, **the names**, compared without regard to case: the kernel
+///   spells the entry the way the disk does and the reader spelled it whichever
+///   way they typed it.
+fn change_is_ours(
+    listening_for: &Arc<Mutex<BTreeMap<PathBuf, BTreeSet<String>>>>,
+    directory: &Path,
+    change: bt_platform::DirChange<'_>,
+) -> bool {
+    let bt_platform::DirChange::Named(names) = change else {
+        return true;
+    };
+    let listening = lock(listening_for);
+    let Some(mine) = listening.get(directory) else {
+        return true;
+    };
+    names
+        .iter()
+        .any(|name| mine.contains(&name.to_string_lossy().to_lowercase()))
 }
 
 /// A mutex this crate never poisons on purpose, unwrapped without a panic path —
@@ -461,6 +567,91 @@ mod tests {
     /// answers `None` for everything, so the second is where they all land.
     fn subscribed(watch: &PreviewWatch) -> usize {
         watch.folders.len() + watch.unwatchable.len()
+    }
+
+    fn named(names: &[&str]) -> Vec<std::ffi::OsString> {
+        names.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    /// RED — **a change to an entry this window is not reading costs nothing at
+    /// all** (user ruling 2026-08-29, defect #186).
+    ///
+    /// The report was a preview pane on a repository's `README.zh-CN.md` going
+    /// sluggish. Measured on the machine: 400 files written into that
+    /// repository's `target\` cost the window thread **188ms of CPU in 655ms**,
+    /// with not one frame drawn and not one page rebuilt — because `target` is
+    /// an *entry* of the folder the README lives in, NTFS moves a directory's
+    /// write time when anything is added to it, and this watcher woke the loop
+    /// for every one of them. The same 400 writes into a folder nobody was
+    /// watching cost 0ms, which is what named the cause.
+    ///
+    /// The filter runs on the watcher thread, before the mailbox and before the
+    /// event loop, and the three answers below are the three the rule has.
+    ///
+    /// MUTATIONS: return `true` unconditionally and the first assertion goes
+    /// red; return `false` for `Unknown` and the third does — an overflowed
+    /// buffer is the one burst that must never be dropped; compare the names
+    /// without lower-casing and the fourth does, because the kernel spells the
+    /// entry the way the disk does.
+    #[test]
+    fn a_change_naming_no_file_this_window_reads_is_not_even_a_wake_up() {
+        let mut watch = PreviewWatch::default();
+        let wanted = BTreeSet::from([file("README.md")]);
+        sync_for_test(&mut watch, &wanted, &BTreeMap::new());
+        let folder = PathBuf::from(r"D:\notes");
+
+        assert!(
+            !change_is_ours(
+                &watch.listening_for,
+                &folder,
+                bt_platform::DirChange::Named(&named(&["target", ".git", "Cargo.lock"])),
+            ),
+            "a build writing into `target` is not news about the file on the glass"
+        );
+        assert!(
+            change_is_ours(
+                &watch.listening_for,
+                &folder,
+                bt_platform::DirChange::Named(&named(&["target", "README.md"])),
+            ),
+            "and the moment the file itself is named, it is"
+        );
+        assert!(
+            change_is_ours(
+                &watch.listening_for,
+                &folder,
+                bt_platform::DirChange::Unknown,
+            ),
+            "an overflowed buffer names nothing and must be let through — it is \
+             the burst that was too big to write down"
+        );
+        assert!(
+            change_is_ours(
+                &watch.listening_for,
+                &folder,
+                bt_platform::DirChange::Named(&named(&["ReadMe.MD"])),
+            ),
+            "Windows compares names without regard to case, and the kernel \
+             spells the entry the way the disk does"
+        );
+        assert!(
+            change_is_ours(
+                &watch.listening_for,
+                Path::new(r"D:\elsewhere"),
+                bt_platform::DirChange::Named(&named(&["target"])),
+            ),
+            "a folder the table has not caught up with yet is answered yes: a \
+             subscription outliving the set by a turn must not swallow the save \
+             that arrives in it"
+        );
+
+        // And the set follows the pool: the file leaves, and the entry that was
+        // news a moment ago stops being news.
+        sync_for_test(&mut watch, &BTreeSet::new(), &BTreeMap::new());
+        assert!(
+            watch.listening_for.lock().expect("the table").is_empty(),
+            "a window with no preview open is listening for nothing"
+        );
     }
 
     /// The ordinary piece of news: this file moved and it is still there.
