@@ -5059,7 +5059,26 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 - **红门 `a_chinese_settings_line_is_filled_before_it_breaks`**(`settings.rs`,紧挨着另外两道三行门)。三行门只数行数,所以一行在三分之一处就折、句子又刚好短到还能塞进三行的时候它照样过——实机拍到的正是这个。这道门量的是**贪心**而不是比例:除末行外,若下一行的头一个字是汉字,把那个字接到本行末尾必须**放不下**;放得下就说明换行器丢了一个断点。同一张 CJK 量尺(`bt_unicode::cluster_width`)、同一个 118px 控件列。百分比只进报错信息不进断言——它是看截图的人认得的那个数,写成阈值就是第二条要和第一条对齐的规矩。**红证(修前)**:`DescClaudeHooks` 46%、`DescCodexNotify` 36%、`DescCopilotHooks` 46%、`DescTurnEndNotifications` 49%、`DescPowerShellOffer` 70%、`DescContextMenu` 96%、`DescCopilotHooks` 第二行 78%,一共七行。禁则与悬挂另有 `linebreak.rs` 自己的三条单元钉(拉丁词整体、汉字逐字可断、标点不起行不收行),外加 `PathSeparators` 那条两个方向都量的钉。
 - **英文逐字不变**,这是这次改动的验收条件之一:没有 CJK、没有路径分隔符的句子,`linebreak::pieces` 返回的就是原来那份按空格切出来的词表,一个不多一个不少。`the_paragraph_breaks_where_the_words_run_out` 与 `no_settings_sentence_needs_a_fourth_line` 原样过。
 
-**日期:2026-08-29,⑤⑥ 两条,外加 08-29 晚的第五条。**
+**⑦ 选择器只列它起得动的 agent;配置文件页七条一条不少,而「出路」那句话挪到组末说一次(用户两条裁决 2026-08-29 晚)。**
+
+两条裁决冲着同一个东西来:⑤ 把内置 agent 加到十二条之后,一台什么都没装的机器打开新标签选择器,看到的是**七条灰行**,其中五条填满第一屏,而那一屏一个都点不动。
+
+**裁决 1(选择器):没找到的 agent 不再显示;五条 shell 维持 §7.27 的灰显不隐藏;读者自建的行一条都不动。** 这不是把 §7.27 重读了一遍,是给它记一条**有名字的例外**。那条规矩的论证原话仍然成立并且仍然只对 shell 成立:「一行灰着的 Git Bash 是产品在说*这是 Folio 能开的东西*,把它删掉就是把『你没装 Git』和『我们从没想过 Git』混成一句话」——五行这样的话,读者每一行都能动手。七行同样的话就不是这个意思了:那句话**值得说一次**,而说它的地方已经存在——配置文件页收着全部七条、写着这扇窗在哪儿找过。**选择器不是那一页**,它是一张「现在能起什么」的名单。自建行永远不筛:`agent_command` 只认 `AGENT_IDS` 这份**写下来的名单**,而一条自己建的、起不动的行是读者能修的行,被悄悄拿掉的那条却得他自己回去找。
+
+- 一处推导:`ProfileTable::offered_to_start(&programs)` = `offered()` 减去起不动的内置 agent。`profiles::layout` 因此多收一个 `&ProfilePrograms`(位置与 `build` 一样,第二个参数),而它拿到的是**探测那一次冻结的答案**而不是新问一次——菜单开着的时候名单不许变,这正是 `ProfilePrograms` 当初写成一个值的理由。
+- **顺带修一个在这条裁决之前一直只是「恰好对」的真 bug**:`ProfileMenuLayout::tips` 拿行序号当表下标用。表里没有隐藏行时两个数相等,所以它一直是对的;隐藏一行就会去问错一行,而现在选择器本来就短于表。改读 `layout.profiles`——画和命中测试早就读的那一份映射。
+
+**裁决 2(设置 → 配置文件页):七条 agent 行全留,缺席的行只剩两行,「装在 WSL 里怎么办」由组末一句话说一次。** 页是读者知道 Folio 认识哪些 agent 的唯一地方,所以行不能少;而 08-29 白天那一版把出路写进了**每一行**,于是缺席的行各占三行、同一句话换一个词印五遍。出路是关于**这一组**的一件事,所以它是组的一行,并且**句子里不带名字**——读者从上面那一行拿走自己缺的那个词。全部七条都在场时这一行没有主语,直接不画。
+
+- 文案(英文/中文,`Text::ProfilesAgentInsideWsl`):`An agent installed inside WSL can be started from the WSL profile, or from a new profile with program wsl.exe and arguments -e <command>` / 「安装在 WSL 内的 agent,可从 WSL 配置启动,或新建配置:程序 wsl.exe,参数 -e <命令名>」。行上那句「在 Windows 中未找到 X」一字未动。
+- 站在**最后一条 agent 行**之下,而不是第一条缺席行之下:行序读者可以用 `↑`/`↓` 改,所以 `agent_note_after` 找的是「最后一个是 agent 的行」而不是一个区间。
+- 高度只有一份推导:`agent_note_band` 被布局与 `page_height` 同时读,和 `shortcut_foot_band` 是同一条理由——两处各写一遍,就是这一段被按一个数留位、按另一个数画出来。行本身的高度一像素没动(那对框本来就是每一行都预留的)。这条高度**跟着机器变**,而它可以:窗框由 `everyday_cap` 用 `profiles: &[]` 解出来,名单的长度本来就是别人文件里的事,所以这里多出来的是滚动,而列表本来就有滚动。
+- `ProfileLine::capability` 从 `String` 变回 `&'static str`:让它变成 `String` 的那句话(句子里有命令名)已经不存在了。
+- `Text::ALL` **530 → 531**:加 `ProfilesAgentInsideWsl`;`i18n::agent_inside_wsl_hint` 连同它的 `_in` 与 tail 门里的那一行一起退休,它是函数、本来就不在 `ALL` 里,所以计数只加不减。
+
+**红门。** 选择器:`the_picker_offers_the_agents_it_can_start_and_every_shell_regardless`(全缺席=五条 shell 且四条仍是灰的、装了 claude+codex=七条且各在原位、自建行怎么都在);`a_row_is_tipped_with_what_its_caption_left_out_and_nothing_else` 改成在**它所量的那台机器**上布局,少了七条 agent 的 tip,并且按 `layout.profiles` 反查矩形。页:`the_page_keeps_every_agent_row_and_the_group_says_the_way_out_once`(十二行一行不少、缺席行 `capability` 为 `None`、组末位置=最后一条 agent、全在场为 `None`)、`a_missing_agent_is_two_lines_and_the_group_says_the_way_out_once`(带内画出来的字正好两句、说明行站在最后一条 agent 之下且在页脚之上、宽度就是行的文字列)、`the_agent_note_is_absent_where_every_agent_is_startable`(页脚跟着它上移,证明它是一段而不是一层装饰)、`the_agent_note_fits_the_column_it_stands_in`(中英两列都不超三行,中文用 CJK 量尺——一句更短的中文不等于一段更短的排版,第四条已经把这件事记过一次)。
+
+**日期:2026-08-29,⑤⑥⑦ 三条,外加 08-29 晚的第五条。**
 
 ### 7.43 一句话要么全在框里,要么带着省略号停下:四件「字和框谈不拢」,外加一条 panic 走的路(门 5 尾账四件,2026-08-28 用户裁决,已落地;`crates/bt-app/src/{seats,restore,webhost,notice,main}.rs`、`crates/bt-platform/src/lib.rs`)
 

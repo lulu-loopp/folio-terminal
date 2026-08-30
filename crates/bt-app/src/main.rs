@@ -36671,11 +36671,16 @@ impl Runtime<'_> {
         // of it — see `ProfileMenuLayout::files_pane_accel`.
         let shortcuts = &self.app.shortcuts;
         let recent = self.app.recent.entries();
+        // The machine, taken beside the two above and for their reason: it is
+        // read here as well as at the draw because since 2026-08-29 it decides
+        // which rows the list has (`ProfileTable::offered_to_start`).
+        let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::layout(
             anchor,
             side,
+            programs,
             (width as f32, height as f32),
             scale,
             recent,
