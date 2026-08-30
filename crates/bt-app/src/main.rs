@@ -92487,9 +92487,10 @@ fn a_bare_redraw_still_owes_a_present(chrome_present_pending: bool, tab_has_a_sh
 /// instead is a window that spends the whole ten seconds going round its own
 /// loop as fast as it can: [`Runtime::present_chrome_change`] requests a redraw
 /// whether or not it found a picture to re-queue, that redraw is answered at the
-/// tail of the same turn, and the next turn asks again. Measured as a window
-/// pinned at a core for ten seconds with nothing on the glass changing, on a
-/// machine where one present is a 4K one.
+/// tail of the same turn, and the next turn asks again. **Read off the three
+/// statements rather than timed on a machine** — it is a closed loop with no
+/// wait in it, and what that costs is whatever one present costs, which on the
+/// reporting machine is a 4K one.
 ///
 /// A pure function over the one bit that separates the two, so the rule can be
 /// read without a browser: whether a page is *going* is a question about the
