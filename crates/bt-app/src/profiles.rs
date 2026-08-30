@@ -1376,7 +1376,7 @@ pub fn shipped() -> Vec<Profile> {
 /// * **`Blue` is back in play, and only for this drawing.** §7.41 ⑤ held Blue
 ///   out of the agent rows because 「一枚蓝色中性 chassis 会被读成第四个
 ///   PowerShell」 — a statement about the *chassis*, which really is
-///   PowerShell's own silhouette. An asterisk is not, so the reason does not
+///   PowerShell's own silhouette. A speech box is not, so the reason does not
 ///   reach it. The reservation still stands wherever the panel is drawn.
 /// * **Nobody wears a brand's colour.** `claude` wore Anthropic's `#D97757`
 ///   until this ruling; the eight struck hexes are this window's own, so the
@@ -13707,11 +13707,11 @@ mod tests {
     /// colours, and the five shells are untouched.**
     ///
     /// The defect this pins was on the acceptance machine in two halves
-    /// (#197/#198). One row wore an asterisk and six wore the console chassis,
-    /// so a picker whose whole job is "which agent" said that six of the seven
-    /// were a kind of shell; and the one row that machine could actually start
-    /// was `codex`, painted `Slate` — `#4A5568`, a hue from the ink an
-    /// unavailable row is drawn in — so the live row read as a dead one.
+    /// (#197/#198). One row wore a mark of its own and six wore the console
+    /// chassis, so a picker whose whole job is "which agent" said that six of
+    /// the seven were a kind of shell; and the one row that machine could
+    /// actually start was `codex`, painted `Slate` — `#4A5568`, a hue from the
+    /// ink an unavailable row is drawn in — so the live row read as a dead one.
     ///
     /// Four claims, and each fails on its own:
     ///
@@ -13729,8 +13729,8 @@ mod tests {
     ///   family is the kind that reaches its neighbours by accident.
     ///
     /// MUTATIONS: give two agents one colour; give `codex` `Slate` back; put any
-    /// agent on [`ChromeMark::ProfileGeneric`]; strike the asterisk per row so
-    /// two of the seven differ by a pen.
+    /// agent on [`ChromeMark::ProfileGeneric`]; strike the family's mark per row
+    /// so two of the seven differ by a pen.
     #[test]
     fn every_agent_wears_one_mark_in_its_own_colour() {
         let rows = shipped_rows();
