@@ -3521,7 +3521,7 @@ Codex 找到而 Claude 一轮审计漏报的那一批：设置页 `↺`（恢复
 cargo test -p bt-app --bin folio -- --ignored --nocapture the_symbol_sheet
 ```
 
-写出 `target/icon-sheet.png`(74 枚画 × 14/26/64px 三档,窗口自己的底与墨)与 `target/icon-sheet.txt`(行列 → id → 变体名)。**纪律:新形入册必看表。** 光学红门管笔、`every_chrome_mark_rasterizes…` 管「有墨且不是一块实心」,两道都管不了「它像不像旁边那枚」——P1 一个下午被这张表抓到两次(`#i-split-right` 的胶囊、`#i-devtools` 的缺口环),P1 报告点名要它别再是一次性草稿。
+写出 `target/icon-sheet.png`(81 枚画 × 14/26/64px 三档(枚数由 `ActionIcon::ALL` + 转向族第二帧 + `the_chassis_family` 推出来,不是写死的;P2 写下 74 之后这张表长过,2026-08-30 的 agent 族标形只换名不加张,数字是那期间攒的),窗口自己的底与墨)与 `target/icon-sheet.txt`(行列 → id → 变体名)。**纪律:新形入册必看表。** 光学红门管笔、`every_chrome_mark_rasterizes…` 管「有墨且不是一块实心」,两道都管不了「它像不像旁边那枚」——P1 一个下午被这张表抓到两次(`#i-split-right` 的胶囊、`#i-devtools` 的缺口环),P1 报告点名要它别再是一次性草稿。
 
 它抓到的第三件是 P1 自己点名的那一对:**`#i-tab-new` 与 `#i-window-new` 在 14px 下仍读作同一张画**。两枚都是「左下一个盒子,右上一支箭」,而 tab 的盒子是 `5.6 × 7.4`——**高比宽大,那是窗的比例不是页签的**。P2 把 tab 切成 `5.0 × 4.6` 低而宽地站在通栏的横杠上,把窗的标题带从 `2.2` 收到 `1.6`(框顶边与标题线相距一支半笔 = 一条**粗顶边**,而不是一条空条纹)。
 
@@ -5118,6 +5118,40 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 **红门。** 选择器:`the_picker_offers_the_agents_it_can_start_and_every_shell_regardless`(全缺席=五条 shell 且四条仍是灰的、装了 claude+codex=七条且各在原位、自建行怎么都在);`a_row_is_tipped_with_what_its_caption_left_out_and_nothing_else` 改成在**它所量的那台机器**上布局,少了七条 agent 的 tip,并且按 `layout.profiles` 反查矩形。页:`the_page_keeps_every_agent_row_and_the_group_says_the_way_out_once`(十二行一行不少、缺席行 `capability` 为 `None`、组末位置=最后一条 agent、全在场为 `None`)、`a_missing_agent_is_two_lines_and_the_group_says_the_way_out_once`(带内画出来的字正好两句、说明行站在最后一条 agent 之下且在页脚之上、宽度就是行的文字列)、`the_agent_note_is_absent_where_every_agent_is_startable`(页脚跟着它上移,证明它是一段而不是一层装饰)、`the_agent_note_fits_the_column_it_stands_in`(中英两列都不超三行,中文用 CJK 量尺——一句更短的中文不等于一段更短的排版,第四条已经把这件事记过一次)。
 
 **日期:2026-08-29,⑤⑥⑦ 三条,外加 08-29 晚的第五条。**
+
+**⑧ 七条 agent 共用一枚标形,各穿自己的配置色;Claude Code 不再特殊(用户裁 2026-08-30,实机 #197/#198;`crates/bt-app/src/{marks,profiles,settings}.rs`)。**
+
+**看到的是什么。** 新建标签选择器和配置文件页里,Claude Code 一枚橙色星芒,Codex / Copilot CLI / Kimi Code / pi / Hermes / OpenCode 六枚 shell 的提示符面板。一张回答「我要开哪个 agent」的单子,却对其中六条说「这是一种控制台」——**它们不是**。同一屏上还有五条真的 shell 穿着同一块面板,于是这张单子唯一一处真正的分野(agent 还是 shell)恰好是它没画出来的那一处。
+
+**Codex 那半条的真因,和它看上去不一样。** 报的是「找到了的 Codex 也没穿它的配置色」。它穿了:③ 给它的是 `MarkColour::Slate` = `#4A5568`。这是一枚**灰蓝**,而**灰正是「这台机器上没有」的墨**——`ChromeSprite` 的 `grayscale` + 淡出就是这扇窗对「不在」的唯一说法。所以那台机器上唯一一条**装了**的 agent,画出来和六条**没装**的一模一样。不是取色的代码错了,是**配色分配错了**:一个颜色不能同时说「没有」和「就是这一条」。
+
+**裁决。**
+
+- **一枚「agent 族」标形。** `ChromeMark::ProfileClaude` 变成 `ChromeMark::ProfileAgent { colour }`。几何一个数没动——还是 mock-up 那枚 `#p-claude` 按 `12 / 13.9` 缩到 chassis 上的星芒,两支笔(`1.29` / `1.17`)照旧;**换的是它属于谁**。它不再是某一家的牌子,是这一族的。id 从 `p-claude` 改成 `p-agent`,线描版 `p-claude-line` → `p-agent-line`,`ProfileGlyph::Claude` → `ProfileGlyph::Agent`。
+- **每条穿自己的配置色**,七条七个颜色。Claude Code 也进这一族,**不再特殊**:`#D97757` 是 Anthropic 的,跟着名字一起离开这张表——这以后**没有任何一枚标穿第三方品牌色**,③ 末尾挂的那笔商标账在这条裁决下自己平了(`TRADEMARK.md`,以及「给它发明一个,就是这张清单在主张一个这一行并不具备的来历」)。
+- **不画任何第三方品牌标。** 一如既往:设计权威没画的,这个 crate 不发明。
+- **shell 五条一个字没动**;用户自建配置维持现状(通用 chassis + 自选色)。
+- **灰显走同一条路**:同一枚标形,`grayscale` + 未装淡出,和行文字同一个安静档——不是第二枚画,也不是第八种灰。
+
+**配色怎么落的(写在 `AGENT_IDS` 的注释里,不另立一张表——同样七个事实写两遍就是两处要维持的真相)。** 五条保留原色(Copilot 紫 / Kimi Teal / pi Green / Hermes Amber / OpenCode Magenta),两条重排:
+
+- **Slate 退出这一族**,理由如上——它是「不在」的那个灰。它回到读者手里,读者的列表里没有灰显的邻居可混。
+- **Blue 回到可用**,而且**只对这枚星芒**。⑤ 写着「Blue 留着不用——一枚蓝色中性 chassis 会被读成第四个 PowerShell」,那是一句**关于 chassis 的**话:那块面板确实就是 PowerShell 自己的轮廓。星芒不是,所以那条理由够不着它。**面板上的那条保留不变。**
+- 剩下两条空位按表自己的次序落:没色可穿的两行里 `claude` 在前,`MarkColour::ALL` 剩的两色里 `Blue` 在前 → **Claude Code = Blue,Codex = Red**。
+
+**一处连带,是好的那种。** `unworn_colour` 问的是「哪些 **chassis** 色被占了」,而现在没有任何内置行穿 chassis——**八色整个还给读者**。⑤ 当时六色被内置占掉、读者第三条自己的配置就开始撞色,那是七条 agent 借了别人轮廓的代价;轮廓分开之后代价也就没有了。一枚蓝面板和一枚蓝星芒不是一回事,这正是本条裁决的整个论点。读者的第一条是 Blue、第二条 Teal,撞色回到第九条——这个函数当初就是照第九条写的。
+
+**门。**
+
+- `every_agent_wears_one_mark_in_its_own_colour`(新):七条全是 `ProfileAgent` 同一 variant;**几何是量出来的**——七枚在 64px 上光栅化后 alpha 掩模**逐像素相等**(颜色渗进形状只会在这里露出来),失败时报**第一个分道的像素**而不是甩两个四千字节的数组;七色互不相同且**没有一枚是 Slate**;末尾点名断言 shell 五条的标一枚没动。红证两条:把 codex 放回 Slate → `codex is painted the colour a row that is not here wears`;让笔宽随这一行的 hex 走 → `codex draws a different shape from claude`。
+- `a_greyed_agent_keeps_the_shape_and_loses_the_hue`(新):七条灰显后每一个像素 `r == g == b`(留住十分之一色相,就会是一枚淡红的 codex 挨着一枚淡蓝的 claude,而它们同样都不在),仍有墨(灰显不是隐藏),淡出等于未装那一档。
+- **光学红门照旧走现有量法**:`the_brand_chassis_is_one_box_and_it_is_the_solids_own` 与 `a_line_rendition_is_the_same_size_as_the_mark_it_re_strikes` 的家族名单里,`ProfileClaude` 换成 `ProfileAgent`,`12 ± 0.5` 单位与线描版对齐两条都过——这枚标本来就是按 chassis 缩过的,换主人不动几何,所以它不该动,也确实没动。
+- `a_new_profile_wears_the_chassis_and_a_duplicate_wears_the_brand`:第二条自建配置 Red → **Teal**,「内置占了几色」6 → **0**。
+- 符号表 70 → 69:星芒的 body 搬去 `symbol_artwork` 的生成臂(和 chassis 并排,同一个理由:常量带不了参数),表尾留一段说明说清它去哪了,好让下一枚画心安理得地接手 69 这个位置。
+
+**盘上多一个词:`chassis: "agent"`。** `MarkV1` 的 `chassis` 键当初就是为「第二块 chassis 若被画出来,它应当作为一个**值**到达,而不是一次 schema 升版」留的,这是那个第二块。**不升 `schema_version`**:盘上每一份旧文件解析结果一字不变,而新词只可能出现在这个 build 写的文件里——内置行只写自己的 id,`set_colour` 拒绝内置行,所以唯一能把它写上盘的是**复制一条 agent 行**得到的用户配置(复制一条 Codex 得到的确实是一条 Codex)。没有这个词,那份复制过一趟文件就会穿着别的东西回来。
+
+**日期:2026-08-30,⑧ 一条。**
 
 ### 7.43 一句话要么全在框里,要么带着省略号停下:四件「字和框谈不拢」,外加一条 panic 走的路(门 5 尾账四件,2026-08-28 用户裁决,已落地;`crates/bt-app/src/{seats,restore,webhost,notice,main}.rs`、`crates/bt-platform/src/lib.rs`)
 
