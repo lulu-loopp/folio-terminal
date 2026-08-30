@@ -2603,7 +2603,7 @@ mod card_answer_route_tests {
     fn a_seat() -> PreviewSurface {
         PreviewSurface::Seat(LeafId {
             tab: TabId(1),
-            seat: bt_layout::SeatId(1),
+            seat: SeatId(1),
         })
     }
 
@@ -23475,6 +23475,16 @@ enum DropLanding {
     /// occupies, with an empty tab left behind (G84 forbids the tree being
     /// emptied), so the mock-up asks `paneCount > 1` before it will draw
     /// anything at all (6789).
+    ///
+    /// **What this landing has always named is "this run gains an entry at this
+    /// slot", and three different hands now ask for it.** A pane tears itself
+    /// out of its tree; a tab arriving from another window is handed over
+    /// ([`Runtime::foreign_strip_landing`]); and since §7.1.1's two tab-strip
+    /// verbs landed, a *row* let go over the run's padding makes a tab out of a
+    /// path — a file becomes a workspace holding one preview pane, a folder one
+    /// holding a files column. The stand-in
+    /// ([`Runtime::strip_stand_in`]) is the same picture for all three, because
+    /// it is a picture of the entry rather than of where it came from.
     StripExtract { slot: usize },
     /// **§7.1.6k (user ruling, 2026-08-20)** — a *pane* over one of the run's own
     /// entries: it leaves its tab's tree and joins **that** tab's, appended at
@@ -23502,6 +23512,15 @@ enum DropLanding {
     /// stage is somebody else's, the same entry is the way home: resting on it
     /// springs the view back, and letting go on it moves no pane at all, because
     /// the pane never left. See [`pane_strip_landing`].
+    ///
+    /// **And a row rested on an entry is opened *in* that tab** (§7.1.1's second
+    /// tab-strip verb, landed 2026-08-30): the pointer is aimed at a room and
+    /// asking for the payload to be put in it, which is the same sentence this
+    /// landing has always said. What "put in it" means is the tab's own ordinary
+    /// door — a file lands on that tab's landing preview pane or splits one out
+    /// at the fixed right seat, a folder re-roots that tab's column or gets it
+    /// one — so nothing about opening a file had to be written a second time for
+    /// the strip. See [`row_strip_landing`].
     StripAdopt { tab: TabId },
     /// **K130/G82** — the layout's own rim: the *root* splits on this side.
     ///
@@ -23718,10 +23737,16 @@ fn row_verb(
             }
             _ => RowVerb::Refused,
         },
-        // The strip is not this table's surface. A row over it has no landing at
-        // all — see [`Runtime::survey_strip`] for why the tab verbs are held
-        // back — so this arm is unreachable rather than a fifth column of the
-        // table, and it answers the same way an unreachable aim does.
+        // The strip is not this table's surface, and it still is not now that a
+        // row has two verbs there. This table is about *the layout* — every one
+        // of its columns names a pane — and the strip's two are read off
+        // [`row_strip_landing`] and committed by
+        // [`Runtime::commit_strip_extract`] and
+        // [`Runtime::commit_strip_adopt`], neither of which passes through here.
+        // So this arm is unreachable rather than a fifth column of the table,
+        // and it answers the same way an unreachable aim does — both callers
+        // reach it only behind [`DropLanding::layout_aim`], which is `None` for
+        // all three strip landings.
         DropLanding::StripReorder { .. }
         | DropLanding::StripExtract { .. }
         | DropLanding::StripAdopt { .. } => RowVerb::Refused,
@@ -24223,6 +24248,47 @@ fn pane_strip_landing(
         .map(|slot| DropLanding::StripExtract { slot })
 }
 
+/// **What a tab list offers a row, stated once** — §7.1.1's two tab-strip verbs
+/// (user ruling 2026-07-17, landed 2026-08-30), as three plain facts and no
+/// window.
+///
+/// [`pane_strip_landing`]'s sibling and deliberately the same shape: a run
+/// answers two questions about one pointer, and which of them is being asked is
+/// decided here rather than inside [`Runtime::survey_strip`], for
+/// [`landing_for_aim`]'s reason — this is a *ruling*, and a ruling that needs a
+/// `Renderer` to state is a ruling no test ever reads back.
+///
+/// * `over` — the tab whose own rectangle the pointer is standing on
+///   ([`seats::TabRun::slot_at`]), and `None` for the run's padding: the gap
+///   between two entries and the tail past the last one.
+/// * `adopt_fits` — whether that tab can actually take this payload
+///   ([`Runtime::row_adopt_fits`]). A tab that lights up under the pointer and
+///   then does nothing when the hand opens is the silent refusal M147 forbids,
+///   and the strip has no dashed form to wear instead — so it says no by not
+///   lighting up.
+/// * `slot` — where a new entry would land, already clamped past the pinned
+///   partition ([`strip_insert_slot`]), so the caret the reader watches and the
+///   slot the release inserts at are one number (N158).
+///
+/// **A row is never turned away from the padding, and a pane sometimes is.**
+/// That asymmetry is a fact about the two payloads rather than an oversight: a
+/// pane over the padding has to be able to *leave* the tree it is standing in,
+/// and G84 forbids emptying one, so `extract_slot` is an `Option` there. A row
+/// leaves nothing behind — it is a path, and the tab it becomes is built out of
+/// that path from nothing — so there is no such question to ask.
+///
+/// **A refused adopt does not fall through to the new tab**, exactly as it does
+/// not for a pane, and the argument is the one the mock-up makes about the
+/// centre zone: a gesture whose meaning depends on arithmetic nobody can see —
+/// the same pointer on the same tab meaning "open it in here" in a large window
+/// and "make a new tab" in a small one — is worse than a gesture that says no.
+fn row_strip_landing(over: Option<TabId>, adopt_fits: bool, slot: usize) -> Option<DropLanding> {
+    match over {
+        Some(tab) => adopt_fits.then_some(DropLanding::StripAdopt { tab }),
+        None => Some(DropLanding::StripExtract { slot }),
+    }
+}
+
 /// **Which end of a tree an arriving pane joins** — §7.1.6k's "追加为树末尾分屏".
 ///
 /// The direction is [`split_axis`]'s answer and never a second one: a user who
@@ -24489,7 +24555,15 @@ enum BrokerRelease {
 }
 
 /// The table [`BrokerRelease`] is, stated once and away from every window.
-fn broker_verdict(aim: &BrokerAim) -> BrokerRelease {
+///
+/// **The cargo is an argument because one cell of the table depends on it**
+/// (§7.1.1, 2026-08-30). F1's 「拖到无窗处=撕成新窗」 is a sentence about a *pane
+/// or a tab* — a thing that is already in this program and is being asked to
+/// live in a window of its own. A row is a path on the disk; there is no window
+/// for it to become, and tearing one off would be inventing a verb the ruling
+/// does not have. So a row let go over the desktop is J120's clean nothing,
+/// which is also what it was before a row could open a broker at all.
+fn broker_verdict(cargo: &DragSource, aim: &BrokerAim) -> BrokerRelease {
     match aim {
         BrokerAim::Home => BrokerRelease::Local,
         BrokerAim::Window {
@@ -24500,7 +24574,10 @@ fn broker_verdict(aim: &BrokerAim) -> BrokerRelease {
             landing: *landing,
         },
         BrokerAim::Window { landing: None, .. } => BrokerRelease::Nothing,
-        BrokerAim::Away => BrokerRelease::NewWindow,
+        BrokerAim::Away => match cargo {
+            DragSource::Row(_) => BrokerRelease::Nothing,
+            DragSource::Tab(_) | DragSource::Pane(_) => BrokerRelease::NewWindow,
+        },
     }
 }
 
@@ -24544,9 +24621,10 @@ fn broker_verdict(aim: &BrokerAim) -> BrokerRelease {
 struct DragBroker {
     /// The window holding the capture, and therefore the payload.
     source: WindowId,
-    /// What is in the air. Only a tab and a pane can leave a window: a row's
-    /// payload is a path, and there is no verb yet for a path let go over
-    /// another window ([`DragSource::Row`] never opens a broker).
+    /// What is in the air. All three payloads travel, and a row travels most
+    /// cheaply of the three: it is a *path*, so the other window opens it out of
+    /// the same string this one was carrying and nothing crosses the boundary
+    /// but the aim (§7.1.1, 2026-08-30).
     cargo: DragSource,
     /// The label the ghost says, refreshed from the source every move so that a
     /// tab renamed mid-gesture reads its new name over the target's glass.
@@ -37941,6 +38019,28 @@ impl Runtime<'_> {
         let DropLanding::StripExtract { slot } = drag.landing? else {
             return None;
         };
+        // **§7.1.1 — a row's stand-in is dressed as the tab it is about to
+        // become**, which for a path is the whole of what there is to say: the
+        // file's or folder's own name, and the mark of the one leaf that tab
+        // will hold. `pane_mark` is read here for the same reason the pane arm
+        // reads it — the ghost above the slot reads the very same call
+        // ([`Runtime::drag_label`]), so the two are one picture of one payload.
+        if let DragSource::Row(payload) = &drag.source {
+            return Some((
+                slot.min(self.window.tabs.len()),
+                seats::TabContent {
+                    title: payload.name.clone(),
+                    pane_count: 0,
+                    mark_kind: seats::pane_mark(
+                        payload.kind.leaf_kind(),
+                        None,
+                        bt_render::chrome_palette(),
+                    )
+                    .0,
+                    ..seats::TabContent::default()
+                },
+            ));
+        }
         let DragSource::Pane(leaf) = drag.source else {
             return None;
         };
@@ -74151,19 +74251,19 @@ impl Runtime<'_> {
     /// different ways is a clock that wakes up to be told there was nothing to
     /// do.
     ///
-    /// **A file row is turned away here**, and it is the same refusal §7.1.6b′ ③
-    /// makes in [`Runtime::survey_strip`] rather than a second one: no tab
-    /// surface will take a row, so no tab surface has any reason to move itself
-    /// under one. Everything the three surfaces *do* accept — a tab or a card
-    /// being reordered, a pane arriving from the layout — is offered the band.
+    /// **A file row is offered the band like everything else, since 2026-08-30.**
+    /// This used to turn one away, and it said so as §7.1.6b′ ③'s refusal rather
+    /// than a second one — *"没有任何 tab 面会接一个文件行,所以也没有任何 tab 面
+    /// 有理由为它挪动自己"*. The premise is what changed: every tab surface takes
+    /// a row now ([`row_strip_landing`]), so a hand carrying one to the foot of a
+    /// long card column has exactly the reason ③ said it did not have. The gate
+    /// is gone rather than inverted — this function asks nothing about what is in
+    /// the hand any more, which is the shape it had before ③ needed saying.
     fn drag_autoscroll_aim(
         &self,
         now: Instant,
     ) -> Option<(seats::TabRun, f32, PhysicalPosition<f64>)> {
         let drag = self.window.drag.as_ref()?;
-        if matches!(drag.source, DragSource::Row(_)) {
-            return None;
-        }
         let run = self.tab_run(now)?;
         Some((run, self.tab_run_scroll(), drag.pointer))
     }
@@ -74569,36 +74669,85 @@ impl Runtime<'_> {
                     }),
                 )
             }
-            // **P85/S3's tab-strip verbs are still held back, but the wall they
-            // were held back by is gone** (recorded 2026-08-13, revised with
-            // §7.1.6h).
+            // **P85/S3's tab-strip verbs, landed** (user ruling 2026-07-17;
+            // recorded as unbuilt 2026-08-13, revised with §7.1.6h, built
+            // 2026-08-30).
             //
             // The mock-up's `fileToTab` makes "a fresh workspace holding one
             // preview pane" and `folderToTab` makes one holding a files column.
-            // The old note said neither was representable, and listed the three
-            // layers that made it so: a hundred `Deref` sites resolving to *the
+            // The note that stood here listed the three layers that once made
+            // neither representable — a hundred `Deref` sites resolving to *the
             // focused shell*, a `Seats` carrying a mandatory `terminal: SeatId`,
-            // and a strip whose identity paths were all built out of a shell. The
-            // sessionless-tab slice took all three down — those are exactly the
-            // two tab shapes it built, and `pane_into_new_tab` makes both of them
-            // today from a pane rather than from a row.
+            // and a strip whose identity paths were all built out of a shell —
+            // and recorded that the sessionless-tab slice had taken all three
+            // down, leaving only the **gesture** missing. This is the gesture.
             //
-            // What is missing now is only the **gesture**, and that is a smaller
-            // and differently shaped thing: a row drag's payload is a *path*, not
-            // a seat, so the strip would have to mint a tab out of a string —
-            // which is `reopen_recent`'s job description, not this survey's — and
-            // the caret, the ghost and the slot rules would all have to be
-            // written for a source that has never had them. That is its own
-            // slice and it is unblocked, not blocked.
-            //
-            // Until it lands the strip **offers nothing** rather than offering
-            // something it cannot perform. It is exactly what a non-hostable pane
-            // gets one arm up, and M147 is satisfied the same way it is there:
-            // the strip has no dashed form to wear, so the honest refusal is to
-            // draw no insertion caret at all (6789's `paneCount > 1` guard is
-            // one sentence about a different limit). The ghost stays under the
-            // pointer saying what is in the hand, and letting go sends it home.
-            DragSource::Row(_) => None,
+            // It is read off the very same two questions a pane's is
+            // ([`pane_strip_landing`]), asked of the same run, so a card column
+            // gets both verbs without a line of its own: `slot_at` for "whose
+            // tab is under my hand" and `insert_index_at` for "between which two
+            // would a new one land". What the two mean for a path is
+            // [`row_strip_landing`]'s, and what a room will take is
+            // [`Runtime::row_adopt_fits`]'s — asked on every pointer move rather
+            // than at the release, which is M147's ordering: refuse at the
+            // release and the tab stays lit right up until the hand opens on
+            // nothing.
+            DragSource::Row(payload) => {
+                let over = run
+                    .slot_at(position.x, position.y)
+                    .and_then(|index| self.window.tabs.get(index))
+                    .map(|tab| tab.id);
+                row_strip_landing(
+                    over,
+                    over.is_some_and(|tab| self.row_adopt_fits(payload.kind, tab)),
+                    // N158's clamp, here rather than at the commit, so the caret
+                    // the user watches and the slot the release inserts at are
+                    // one number — see [`strip_insert_slot`].
+                    strip_insert_slot(
+                        seats::insert_index_at(&slot_mids, run.pos(position.x, position.y)),
+                        &self
+                            .window
+                            .tabs
+                            .iter()
+                            .map(|tab| tab.pinned)
+                            .collect::<Vec<_>>(),
+                    ),
+                )
+            }
+        }
+    }
+
+    /// **M147 for §7.1.1's second tab-strip verb** — whether `target` can
+    /// actually take this payload.
+    ///
+    /// [`Runtime::pane_adopt_fits`]'s counterpart, and it is a different
+    /// computation for the same reason the commits are: a pane joins a tree at
+    /// its rim through [`seats::Seats::plan_drop`], while a row goes through the
+    /// tab's own content doors — which either **reuse a pane that is already
+    /// there** or mint one by their own edit ([`seats::Seats::add_preview`]'s
+    /// `LandPreview`, [`seats::Seats::add_files_pane`]'s leading rim). Asking
+    /// `plan_drop` about a rim would be asking a question about a world the
+    /// gesture is not in.
+    ///
+    /// So the promise is the *same edit the release will run*, on a copy of that
+    /// tab's tree: `Seats` is cheap to clone, both edits leave the tree untouched
+    /// when they refuse, and the copy is dropped on the spot. One tree walk per
+    /// pointer move, on a tree of a few leaves, and only while a row is actually
+    /// resting on a tab.
+    ///
+    /// A file's reuse always fits and [`seats::Seats::add_preview`] answers it
+    /// first: a tab that already has an unlocked preview pane moves no rectangle
+    /// at all. A folder has no reuse — §7.1.1's folder verb on a strip entry is
+    /// the space one, so the column is always a new pane and always has to fit.
+    fn row_adopt_fits(&self, kind: RowPayloadKind, target: TabId) -> bool {
+        let Some(into) = self.tab_state(target) else {
+            return false;
+        };
+        let mut probe = into.seats.clone();
+        let metrics = self.seat_metrics();
+        match kind {
+            RowPayloadKind::File => probe.add_preview(&metrics).is_some(),
+            RowPayloadKind::Folder => probe.add_files_pane(&metrics, None).is_some(),
         }
     }
 
@@ -74809,9 +74958,22 @@ impl Runtime<'_> {
                     Some(slot),
                 )
             }
-            // A row's payload is a path, so it never opens a broker and never
-            // reaches here ([`Runtime::open_broker`]).
-            DragSource::Row(_) => None,
+            // **§7.1.1's two tab-strip verbs, over somebody else's glass** — and
+            // it is the same table asked the same way, because the payload is a
+            // *path*: nothing has to travel for this window to open it, and
+            // `cargo_tree` is `None` for a row precisely because there is no tree
+            // to bring.
+            DragSource::Row(payload) => {
+                let over = run
+                    .slot_at(position.x, position.y)
+                    .and_then(|index| self.window.tabs.get(index))
+                    .map(|tab| tab.id);
+                row_strip_landing(
+                    over,
+                    over.is_some_and(|tab| self.row_adopt_fits(payload.kind, tab)),
+                    slot,
+                )
+            }
         }
     }
 
@@ -74833,7 +74995,7 @@ impl Runtime<'_> {
         if broker.source != self.window_id() {
             return Ok(false);
         }
-        let verdict = broker_verdict(&broker.aim);
+        let verdict = broker_verdict(&broker.cargo, &broker.aim);
         // The road's second station ([`Runtime::foreign_strip_landing`] is the
         // first): **what the release decided, and off which aim**. Formatted
         // ahead of the closure because a `Debug` of the aim is real work — the
@@ -75000,23 +75162,19 @@ impl Runtime<'_> {
     /// **Open the broker for a payload that is allowed to leave this window**
     /// (multiwindow slice F2).
     ///
-    /// A tab and a pane may; a row may not, and that is [`DragSource::Row`]'s own
-    /// standing note rather than a rule invented here — a row travels as a
-    /// *path*, and there is no verb in this program for a path let go over
-    /// another window. No broker means no aim, which means every one of that
-    /// drag's answers is its own window's, exactly as it was before this slice.
+    /// **All three payloads may, since 2026-08-30.** A row used to be turned away
+    /// here with a standing note — *a row travels as a path, and there is no verb
+    /// in this program for a path let go over another window*. §7.1.1's two
+    /// tab-strip verbs are that verb, and they are the same two on any window's
+    /// tab list: the ruling's own reason is that a file is a **path**, so nothing
+    /// has to be carried across a boundary for the other window to open it. That
+    /// is why this is one line deleted rather than a second broker — the cargo,
+    /// the label, the spring and the deadline are the ones a pane already uses.
     ///
     /// F5's two numbers are read here and never again: the grip is where the hand
     /// closed on the window, and where the hand closed does not move because the
     /// tab list scrolled underneath it.
     fn open_broker(&mut self, source: &DragSource, position: PhysicalPosition<f64>) {
-        if matches!(source, DragSource::Row(_)) {
-            // Stated rather than left to the exits: "there is no broker" is what
-            // a row drag *means*, and a field that happened to be empty is a
-            // weaker way to say it than one that is emptied.
-            self.app.drag_broker = None;
-            return;
-        }
         let scale = self.window.renderer.metrics().scale_factor.max(0.01);
         let size = self.window.window.inner_size();
         let window = self.window_id();
@@ -75422,11 +75580,11 @@ impl Runtime<'_> {
             // landed nowhere. A pane going home is a no-op by construction — the
             // tree was never touched — which is why this can be tried and
             // abandoned safely.
-            DragRelease::Extract { slot } if self.commit_pane_extract(&drag, slot)? => {}
+            DragRelease::Extract { slot } if self.commit_strip_extract(&drag, slot)? => {}
             // §7.1.6k, and the same "one outcome, reached two ways" a third time:
             // a tab that stopped existing under a still hand, or a tree that
             // stopped fitting, has been landed on by nobody.
-            DragRelease::Adopt { tab } if self.commit_pane_adopt(&drag, tab)? => {}
+            DragRelease::Adopt { tab } if self.commit_strip_adopt(&drag, tab)? => {}
             DragRelease::Extract { .. }
             | DragRelease::Adopt { .. }
             | DragRelease::Land
@@ -75645,6 +75803,199 @@ impl Runtime<'_> {
             ejected,
         );
         Ok(())
+    }
+
+    /// **Let go over the run's padding** — [`DragRelease::Extract`]'s two hands.
+    ///
+    /// One verdict and two payloads, dispatched here rather than inside
+    /// [`release_verdict`], because the verdict is a fact about the *landing* and
+    /// this is a fact about the *hand*: the run gains an entry at this slot
+    /// either way, and what that entry is made of is the payload's business.
+    fn commit_strip_extract(&mut self, drag: &Drag, slot: usize) -> Result<bool> {
+        match &drag.source {
+            DragSource::Row(payload) => {
+                let payload = payload.clone();
+                self.commit_row_into_new_tab(&payload, slot)
+            }
+            DragSource::Pane(_) | DragSource::Tab(_) => self.commit_pane_extract(drag, slot),
+        }
+    }
+
+    /// **Let go on one of the run's own entries** — [`DragRelease::Adopt`]'s two
+    /// hands, and [`Runtime::commit_strip_extract`]'s argument one landing over.
+    fn commit_strip_adopt(&mut self, drag: &Drag, target: TabId) -> Result<bool> {
+        match &drag.source {
+            DragSource::Row(payload) => {
+                let payload = payload.clone();
+                self.commit_row_into_tab(&payload, target)
+            }
+            DragSource::Pane(_) | DragSource::Tab(_) => self.commit_pane_adopt(drag, target),
+        }
+    }
+
+    /// **§7.1.1 — a file row let go on the tab strip becomes a tab** (user
+    /// ruling 2026-07-17: 「文件/图片拖到标签条 = 成为新 tab(新工作区含单个预览
+    /// pane,缓冲生于新 tab 自己的池,插位钳在 pinned 分区之后)」), and a folder row
+    /// becomes a files tab rooted there (「拖到标签条=新 files tab(即刻激活)」).
+    ///
+    /// **The tab is built through [`create_tab_state`], which is the only door
+    /// there is.** The two shapes it is handed are the two `reopen_recent`
+    /// already hands it for a `Seed::Preview` and a `Seed::Files` — a lone
+    /// Preview leaf, or a lone Files leaf carrying `FILES_W` and the root the
+    /// payload names — so "a file tab" and "a folder tab" mean here exactly what
+    /// they mean when one comes back out of Recent, rather than nearly that.
+    ///
+    /// **The buffer is born in the new tab's own pool**, which is the ruling's
+    /// own clause and is true by construction rather than by arrangement: a pool
+    /// belongs to a `TabState`, this tab is a new one, and the page is opened
+    /// after the tab is on the strip and activated — through
+    /// [`Runtime::open_preview_onto`], the same door a double-click in the tree
+    /// takes. Nothing is taken out of the tab the row was dragged from, and there
+    /// is nothing there to take: a row is a *path*, and the tree it came out of
+    /// holds no buffer for it.
+    ///
+    /// **The new tab is activated, and that overrides half of a sentence.**
+    /// §7.1.1 says a folder dropped here makes a files tab 「即刻激活」 and says
+    /// nothing about a file's; N157's tear-out, the nearest precedent, explicitly
+    /// does *not* activate. The user's ruling of 2026-08-30 makes the two one:
+    /// dragging a row out of a tree onto the strip is asking to look at that
+    /// file, and a tab that opened somewhere behind you is a gesture that
+    /// appears to have done nothing. N157's own argument is untouched — a pane
+    /// torn out is already on screen, so "take me there" would be taking you
+    /// nowhere.
+    ///
+    /// The slot arrives already clamped past the pinned partition (N158, through
+    /// [`strip_insert_slot`]); the `min` here is the ordinary bound on an
+    /// insertion index and not a second opinion about the partition, exactly as
+    /// it is in [`Runtime::extract_pane_into_new_tab`].
+    fn commit_row_into_new_tab(&mut self, payload: &RowPayload, slot: usize) -> Result<bool> {
+        let id = self.app.tab_ids.mint();
+        // The id in the literal is a placeholder and the one that comes back is
+        // the tab's: [`seats::Seats::lone_seat`] mints its own from 1, and the
+        // content below has to be filed under the seat that will actually be
+        // drawn. It is the same discipline `plan_drop`'s `arrived` enforces one
+        // surface over — never spend a name the tree may not adopt.
+        let (seats, seat, files) = match payload.kind {
+            RowPayloadKind::File => {
+                let (seats, seat) = seats::Seats::lone_seat(&bt_layout::Seat::new(
+                    bt_layout::SeatId(1),
+                    bt_layout::SeatKind::Preview,
+                ));
+                (seats, seat, BTreeMap::new())
+            }
+            RowPayloadKind::Folder => {
+                let (seats, seat) = seats::Seats::lone_seat(
+                    &bt_layout::Seat::new(bt_layout::SeatId(1), bt_layout::SeatKind::Files)
+                        .with_fixed_extent(bt_layout::FILES_W),
+                );
+                (
+                    seats,
+                    seat,
+                    BTreeMap::from([(
+                        seat,
+                        seats::FilesLeafState {
+                            root: payload.path.display().to_string(),
+                            ..seats::FilesLeafState::default()
+                        },
+                    )]),
+                )
+            }
+        };
+        let render_physical =
+            presentation_physical_size(self.window.renderer.presentation_geometry());
+        let (tab, _) = create_tab_state(
+            id,
+            seats,
+            &self.window.renderer,
+            render_physical,
+            &self.window.pty_wake,
+            None,
+            &BTreeMap::new(),
+            &files,
+            // The page is opened after the tab is standing, through the door
+            // every other open goes through — see this function's own note on
+            // where the buffer is born.
+            &PreviewRestore::default(),
+            TabSeed {
+                manual_name: None,
+                // N158's argument, unchanged: a tab that has just been made by a
+                // gesture is not a tab the user has promised to bring back every
+                // time.
+                pinned: false,
+            },
+            &self.app.profile_programs,
+            self.default_profile(),
+            self.window.size_policy,
+            self.rail_posture(),
+            FormulaSwitches::from_settings(self.app.settings_store.loaded()),
+            scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
+            self.app.settings_store.loaded().line_wrapping,
+        )?;
+        let slot = slot.min(self.window.tabs.len());
+        self.window.tabs.insert(slot, tab);
+        if slot <= self.window.active_tab {
+            self.window.active_tab += 1;
+        }
+        self.apply_window_min_inner_size()?;
+        self.activate_tab(slot, true)?;
+        if payload.kind == RowPayloadKind::File {
+            let surface = self.preview_here(seat);
+            self.open_preview_onto(surface, payload.path.clone())?;
+        }
+        Ok(true)
+    }
+
+    /// **§7.1.1's second tab-strip verb — a row let go *on* a tab opens there**
+    /// (user ruling 2026-08-30, and §7.1.6k's spring is what carries the hand to
+    /// it: rest a quarter second on an entry and the view goes there with the
+    /// payload still in the air).
+    ///
+    /// **Neither half of this is written here.** A file goes through
+    /// [`Runtime::open_preview_file`] — the tree's own double-click — which is
+    /// precisely the ruling's two cases in one door: the tab's landing preview
+    /// pane if it has one (§7.1.1's 「预览 pane 中心=在该 pane 打开」), and a
+    /// fresh preview split out at the fixed right seat if it has not (§7.1.1's
+    /// 「预览固定右席」). A folder goes through
+    /// [`Runtime::seat_a_files_column`], which is §7.1.1's own space verb for a
+    /// folder — 「裂出新 files pane 根在该目录」 — arriving where and as wide as
+    /// `Ctrl+Shift+B` puts one: the **leading** side of the root rim at
+    /// `FILES_W`, never the trailing side the preview's fixed seat takes.
+    ///
+    /// **The two halves are asymmetric, and §7.1.1 is where the asymmetry comes
+    /// from rather than this function.** A file has a reuse target and it is a
+    /// ruling — P95's unlocked preview pane — so "open it in that tab" has
+    /// somewhere to land before it splits anything. A folder has none: the
+    /// drag's folder verbs are 「裂出新 files pane」 for a *space* and
+    /// 「重新扎根」 only at **a files pane's own centre**, and a strip entry is
+    /// not a pane centre. Re-rooting from here would also be the hard verb
+    /// reached without the question about range that the ruling of 2026-08-25
+    /// put in front of it (see `re_rooting_is_reached_only_after_the_question_
+    /// about_range`), which is a door this gesture has no business opening.
+    ///
+    /// **The target is activated first, and this is where §7.1.6k's "the target
+    /// is not activated" stops applying.** A pane adopted into another tab is a
+    /// *pane*: it is visible in that tab's strip badge and waits there. A
+    /// document opened into a tab you are not looking at is invisible, so the
+    /// ruling that activates the new-tab half activates this half by the same
+    /// sentence — you dragged a file out to look at it. It is also what makes
+    /// the two doors above reachable at all: both are written against the tab on
+    /// the stage, which is where every other reader of them means.
+    fn commit_row_into_tab(&mut self, payload: &RowPayload, target: TabId) -> Result<bool> {
+        let Some(index) = self.tab_slot_of(target) else {
+            return Ok(false);
+        };
+        self.activate_tab(index, false)?;
+        match payload.kind {
+            RowPayloadKind::File => self.open_preview_file(payload.path.clone())?,
+            RowPayloadKind::Folder => {
+                // `None` is the solver refusing, which the survey already asked
+                // about ([`Runtime::row_adopt_fits`]) — so it is reported the way
+                // every refusal between a survey and a release is, by the gesture
+                // having done nothing.
+                self.seat_a_files_column(payload.path.display().to_string())?;
+            }
+        }
+        Ok(true)
     }
 
     /// **N157/K123 — let go of a pane over the strip.**
@@ -88160,7 +88511,14 @@ impl FolioApp {
             // rebuilt from the broker rather than kept in step. `Away` and not
             // "not `Home`", because over another Folio window what happens on
             // release is that window's answer and not a new window at all.
-            let tearing_out = id == source && matches!(aim, BrokerAim::Away);
+            //
+            // **A row is never tearing out**, and that is [`broker_verdict`]'s
+            // own answer read on the drawing side rather than a second rule: a
+            // path let go over the desktop makes no window, so promising one
+            // would be the drag saying something the release will not do.
+            let tearing_out = id == source
+                && matches!(aim, BrokerAim::Away)
+                && !matches!(cargo, DragSource::Row(_));
             let was = runtime.window.foreign.is_some() || runtime.window.tearing_out;
             runtime.window.foreign = visit;
             runtime.window.tearing_out = tearing_out;
@@ -88230,8 +88588,39 @@ impl FolioApp {
                     None => (leaf.tab, false),
                 }
             }
-            // A row never opened a broker, so it never wrote one of these.
-            DragSource::Row(_) => return Ok(()),
+            // **A row has no first half of the journey** (§7.1.1, 2026-08-30):
+            // there is nothing in this window to promote and nothing to move,
+            // because the payload is a path and the target window can read a
+            // path for itself. So it skips the promotion, skips `transfer_tab`
+            // entirely, and is spent in the window the hand opened over — by the
+            // same two commits its own window's strip spends.
+            DragSource::Row(payload) => {
+                let payload = payload.clone();
+                let HandoverInto::Window { window, landing } = errand.into else {
+                    // `broker_verdict` never answers `NewWindow` for a row, so
+                    // this is unreachable rather than a refusal — and it is
+                    // written as the same nothing that arm would mean.
+                    return Ok(());
+                };
+                let Some(mut runtime) = self.runtime(window) else {
+                    return Ok(());
+                };
+                match landing {
+                    DropLanding::StripExtract { slot } => {
+                        runtime.commit_row_into_new_tab(&payload, slot)?;
+                    }
+                    DropLanding::StripAdopt { tab } => {
+                        runtime.commit_row_into_tab(&payload, tab)?;
+                    }
+                    // The tab list is the whole door, and those are the only two
+                    // landings it offers a row ([`row_strip_landing`]).
+                    DropLanding::StripReorder { .. }
+                    | DropLanding::RootRim { .. }
+                    | DropLanding::SeatEdge { .. }
+                    | DropLanding::SeatCentre { .. } => {}
+                }
+                return Ok(());
+            }
         };
         match errand.into {
             HandoverInto::NewWindow { pointer, grip } => {
@@ -124079,7 +124468,7 @@ mod tests {
     fn the_plan_stands_while_its_question_does_and_falls_when_anything_moves() {
         let pane = DragSource::Pane(LeafId {
             tab: TabId(1),
-            seat: bt_layout::SeatId(1),
+            seat: SeatId(1),
         });
         let landing = DropLanding::SeatEdge {
             target: bt_layout::SeatId(2),
@@ -124155,11 +124544,11 @@ mod tests {
         let target = bt_layout::SeatId(2);
         let pane = DragSource::Pane(LeafId {
             tab: TabId(1),
-            seat: bt_layout::SeatId(1),
+            seat: SeatId(1),
         });
         let elsewhere = DragSource::Pane(LeafId {
             tab: TabId(9),
-            seat: bt_layout::SeatId(1),
+            seat: SeatId(1),
         });
         let tab = DragSource::Tab(TabId(1));
         assert_eq!(
@@ -124707,6 +125096,295 @@ mod tests {
             })
             .row(),
             None
+        );
+    }
+
+    // ── §7.1.1: a row's two tab-strip verbs (user ruling 2026-07-17, built
+    //    2026-08-30 after the user's report #200) ─────────────────────────────
+
+    /// The body of a method declared at an `impl`'s own indentation.
+    fn row_strip_method(name: &str) -> &'static str {
+        const SOURCE: &str = include_str!("main.rs");
+        let head = format!("\n    fn {name}(");
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`fn {name}` is declared as a method"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find("\n    }\n")
+                .expect("a method is closed by a `}` at its `impl`'s indentation");
+        &SOURCE[start..end]
+    }
+
+    /// PIN — **§7.1.1: a row let go on the run's padding becomes a tab, and a
+    /// row let go on one of the run's entries opens in that tab.**
+    ///
+    /// The whole tab-strip half of the file-drag ruling, as a table over the two
+    /// questions a [`seats::TabRun`] answers about one pointer. It is
+    /// [`pane_strip_landing`]'s shape deliberately: the padding is "this run
+    /// gains an entry" ([`DropLanding::StripExtract`]) and an entry is "a room to
+    /// be put in" ([`DropLanding::StripAdopt`]) — which is what lets §7.1.6k's
+    /// spring arm itself over a row without having to learn a row exists, since
+    /// [`Runtime::drive_drag`] reads the survey's answer and never the pointer.
+    ///
+    /// RED EVIDENCE (user report #200, 2026-08-30): `survey_strip` answered
+    /// `DragSource::Row(_) => None`, so a `folio-pdf-test.pdf` dragged from the
+    /// tree onto the tab strip showed a ghost and did nothing when the hand
+    /// opened — over the padding and over every tab alike.
+    ///
+    /// Mutation: fall through from a refused adopt to the new tab, and the same
+    /// pointer on the same tab means "open it in here" in a large window and
+    /// "make a new tab" in a small one — arithmetic nobody can see.
+    #[test]
+    fn a_row_makes_a_tab_on_the_padding_and_opens_in_the_entry_it_rests_on() {
+        assert_eq!(
+            row_strip_landing(None, false, 3),
+            Some(DropLanding::StripExtract { slot: 3 }),
+            "the gap between two entries and the tail past the last one are one \
+             answer: a new tab at that slot"
+        );
+        assert_eq!(
+            row_strip_landing(Some(TabId(7)), true, 3),
+            Some(DropLanding::StripAdopt { tab: TabId(7) }),
+            "and an entry the pointer is standing on is a room to be put in"
+        );
+        assert_eq!(
+            row_strip_landing(Some(TabId(7)), false, 3),
+            None,
+            "a room that will not take it leaves nothing there, and never the \
+             new tab the padding beside it would have made"
+        );
+    }
+
+    /// PIN — **§7.1.6b′ ③ overturned (user ruling 2026-08-30): one arm, every
+    /// tab surface**, and the slot it reads is clamped past the pinned run.
+    ///
+    /// ③ read *"一份 tab 清单没有一个非任意的 tab 可以接住一个文件"* and was
+    /// implemented as `DragSource::Row(_) => None` in
+    /// [`Runtime::survey_strip`] — global to the strip, the vertical rail and
+    /// the card column alike. Cards *are* tabs, so the premise went the way ①
+    /// and ② went: what a card column offers is what its window's tab list
+    /// offers. This arm is what makes that free — it asks the run and never the
+    /// window, so a card on a card, the seam between two cards and the blank
+    /// below the last one are the strip's own three answers on the column's
+    /// rectangles.
+    ///
+    /// Mutation: read `window.focus_mode` here and the column grows a second set
+    /// of rules ①'s whole argument forbids; drop the `strip_insert_slot` and a
+    /// file dropped after a pinned tab makes an unpinned tab inside the pinned
+    /// run (N158).
+    #[test]
+    fn a_rows_strip_arm_asks_the_run_and_never_the_window() {
+        let survey = row_strip_method("survey_strip");
+        let arm = survey
+            .split_once("DragSource::Row(payload) => {")
+            .expect("survey_strip answers a row")
+            .1;
+        assert!(
+            arm.contains(".slot_at("),
+            "\"whose tab is under my hand\" is the run's own question:\n{arm}"
+        );
+        assert!(
+            arm.contains("seats::insert_index_at("),
+            "and so is \"between which two would a new one land\":\n{arm}"
+        );
+        assert!(
+            arm.contains("strip_insert_slot("),
+            "N158: the caret the reader watches is the slot the release inserts \
+             at, clamped on this run's own pinned partition:\n{arm}"
+        );
+        assert!(
+            !arm.contains("focus_mode"),
+            "the surface is chosen once, in `tab_run`, and never re-read here"
+        );
+    }
+
+    /// PIN — **the two landings are spent by the row's own two commits.**
+    ///
+    /// [`release_verdict`] is a fact about the *landing* and stays one — the run
+    /// gains an entry, or an entry is aimed at, whatever the hand holds — so the
+    /// payload is read one step further in. That split is what lets a row reuse
+    /// the whole strip: the verdict, the stand-in, the spring and the clamp were
+    /// all written about a landing.
+    ///
+    /// Mutation: send a row's verdict through `commit_pane_extract`, whose
+    /// `let DragSource::Pane(..) else` answers `false`, and the release goes to
+    /// J120's settle — a ghost that lands nowhere, which is report #200 again.
+    #[test]
+    fn a_rows_two_landings_are_spent_by_its_own_two_commits() {
+        assert_eq!(
+            release_verdict(Some(DropLanding::StripExtract { slot: 2 })),
+            DragRelease::Extract { slot: 2 }
+        );
+        assert_eq!(
+            release_verdict(Some(DropLanding::StripAdopt { tab: TabId(4) })),
+            DragRelease::Adopt { tab: TabId(4) }
+        );
+        let extract = row_strip_method("commit_strip_extract");
+        assert!(
+            extract.contains("self.commit_row_into_new_tab(&payload, slot)"),
+            "a row over the padding makes a tab out of a path:\n{extract}"
+        );
+        assert!(
+            extract.contains("self.commit_pane_extract(drag, slot)"),
+            "and a pane still tears out the way N157 says:\n{extract}"
+        );
+        let adopt = row_strip_method("commit_strip_adopt");
+        assert!(
+            adopt.contains("self.commit_row_into_tab(&payload, target)"),
+            "a row on an entry is opened in that tab:\n{adopt}"
+        );
+        assert!(
+            adopt.contains("self.commit_pane_adopt(drag, target)"),
+            "and a pane is still adopted the way §7.1.6k says:\n{adopt}"
+        );
+    }
+
+    /// PIN — **§7.1.1 ①: 「新工作区含单个预览 pane,缓冲生于新 tab 自己的池,插位钳
+    /// 在 pinned 分区之后」, plus the activation the user ruled on 2026-08-30.**
+    ///
+    /// Four clauses, and each is one line of this commit:
+    ///
+    /// * **one preview pane** — a lone `Preview` seat, which is exactly the
+    ///   shape `reopen_recent` hands `create_tab_state` for a `Seed::Preview`;
+    /// * **the buffer is born in the new tab's own pool** — the tab is built
+    ///   with an empty [`PreviewRestore`] and the page is opened *after* it is
+    ///   on the strip and activated, through
+    ///   [`Runtime::open_preview_onto`], the tree's own door. A pool belongs to
+    ///   a `TabState`, and this one is new, so there is nothing to fork;
+    /// * **the slot is clamped past the pins** — by the survey (N158), so the
+    ///   `min` here is the ordinary bound on an insertion index;
+    /// * **the tab is activated.** §7.1.1 says a folder's new tab activates
+    ///   「即刻」 and says nothing about a file's, while N157's tear-out
+    ///   explicitly does not. The ruling of 2026-08-30 makes the two one:
+    ///   dragging a row out to look at it and being left looking at something
+    ///   else is a gesture that appears to have failed.
+    ///
+    /// Mutation: pass the page in on a `PreviewRestore` instead and the buffer
+    /// is minted before the tab is on the strip — a pool filled behind a tab
+    /// nothing has activated, which is the one arrangement §7.1.3's reuse rule
+    /// cannot be asked about.
+    #[test]
+    fn the_tab_a_file_row_makes_is_activated_and_owns_the_buffer_it_opens() {
+        let text = row_strip_method("commit_row_into_new_tab");
+        assert!(
+            text.contains("bt_layout::SeatKind::Preview"),
+            "a file's tab is one preview pane:\n{text}"
+        );
+        assert!(
+            text.contains("&PreviewRestore::default()"),
+            "born with an empty pool:\n{text}"
+        );
+        let opened = text
+            .find("self.open_preview_onto(surface, payload.path.clone())")
+            .expect("the page goes through the ordinary door");
+        let activated = text
+            .find("self.activate_tab(slot, true)?")
+            .expect("and the tab the user dragged a file out to see is the one on screen");
+        assert!(
+            activated < opened,
+            "the tab is standing and on the stage before its pool is asked for \
+             anything, which is what makes the buffer the *new* tab's:\n{text}"
+        );
+        assert!(
+            text.contains("pinned: false"),
+            "N158: a tab a gesture just made is not one the user promised to \
+             bring back every time:\n{text}"
+        );
+        assert!(
+            text.contains("slot.min(self.window.tabs.len())"),
+            "the survey already clamped the partition; this is the ordinary \
+             bound on an insertion index:\n{text}"
+        );
+    }
+
+    /// PIN — **§7.1.1: 「目录行拖到标签条 = 新 files tab(即刻激活)」**, rooted
+    /// where the row was dragged from and as wide as a fresh column opens.
+    ///
+    /// Mutation: leave the `fixed_extent` off and the column arrives taking a
+    /// ratio share of the tab it is the whole of — a files leaf that is not a
+    /// fixed column is the one shape §7.1.1's fixed-column semantics has no word
+    /// for.
+    #[test]
+    fn a_folder_row_makes_a_files_tab_rooted_where_it_was_dragged_from() {
+        let text = row_strip_method("commit_row_into_new_tab");
+        assert!(
+            text.contains("bt_layout::SeatKind::Files"),
+            "a folder's tab is one files column:\n{text}"
+        );
+        assert!(
+            text.contains("with_fixed_extent(bt_layout::FILES_W)"),
+            "at the width a fresh column opens at (F62's 240):\n{text}"
+        );
+        assert!(
+            text.contains("root: payload.path.display().to_string()"),
+            "rooted at the folder the row named, and never at the tree it came \
+             out of:\n{text}"
+        );
+    }
+
+    /// PIN — **§7.1.1's second verb goes through the target tab's own two
+    /// doors** (user ruling 2026-08-30).
+    ///
+    /// A file takes [`Runtime::open_preview_file`], which is the tree's
+    /// double-click and therefore *is* the ruling's two cases already: the tab's
+    /// landing preview pane if it has one, and a fresh preview at the fixed
+    /// right seat if it has not. A folder takes
+    /// [`Runtime::seat_a_files_column`], which is §7.1.1's own space verb —
+    /// 「裂出新 files pane 根在该目录」 — landing where `Ctrl+Shift+B` puts one:
+    /// the **leading** side of the root rim, at `FILES_W`.
+    ///
+    /// **The folder half is deliberately not a re-root.** §7.1.1 gives a folder
+    /// exactly one content verb and it is at *a files pane's own centre*; a
+    /// strip entry is not a pane centre. Reaching the hard re-root from here
+    /// would also skip the question about range the ruling of 2026-08-25 put in
+    /// front of it — see `re_rooting_is_reached_only_after_the_question_about_
+    /// range`, which counts that door's callers.
+    ///
+    /// Mutation: drop the activation and the file opens into a tab nobody is
+    /// looking at, which from the outside is the drop having done nothing.
+    #[test]
+    fn a_row_on_an_entry_opens_through_that_tabs_own_doors() {
+        let text = row_strip_method("commit_row_into_tab");
+        assert!(
+            text.contains("self.activate_tab(index, false)?"),
+            "the tab you aimed at is the tab you are looking at:\n{text}"
+        );
+        assert!(
+            text.contains("self.open_preview_file(payload.path.clone())"),
+            "a file goes through the tree's own double-click:\n{text}"
+        );
+        assert!(
+            text.contains("self.seat_a_files_column("),
+            "and a folder through §7.1.1's own space verb:\n{text}"
+        );
+        assert!(
+            !text.contains("_in_files_column(&"),
+            "never the re-root doors, which name a root rather than ask for a \
+             pane:\n{text}"
+        );
+    }
+
+    /// PIN — **§7.1.6b‴'s band moves itself under a row now**, and ③'s copy of
+    /// the refusal went with ③.
+    ///
+    /// The auto-scroll used to turn a row away in its own words: *"没有任何 tab
+    /// 面会接一个文件行,所以也没有任何 tab 面有理由为它挪动自己"*. The premise is
+    /// what changed, so the gate is deleted rather than inverted — this function
+    /// asks nothing about what is in the hand, which is the shape it had before
+    /// ③ needed saying.
+    ///
+    /// Mutation: put the gate back and a file carried to the foot of a card
+    /// column taller than the window can only ever reach the cards already on
+    /// screen.
+    #[test]
+    fn the_edge_autoscroll_no_longer_asks_what_is_in_the_hand() {
+        let text = row_strip_method("drag_autoscroll_aim");
+        assert!(
+            !text.contains("DragSource::"),
+            "every payload the surfaces accept is offered the band, and they \
+             accept all three now:\n{text}"
         );
     }
 
@@ -127431,9 +128109,13 @@ otes.md"
 mod cross_window_drag_tests {
     use std::time::Instant;
 
+    use bt_layout::SeatId;
+    use std::path::PathBuf;
+
     use super::{
-        BrokerAim, BrokerRelease, DragBroker, DragGuard, DropLanding, TabId, TearGrip, WindowId,
-        broker_verdict, partition_clamped, profiles, seats, strip_insert_slot, tear_out_rect,
+        BrokerAim, BrokerRelease, DragBroker, DragGuard, DragSource, DropLanding, LeafId,
+        RowPayload, RowPayloadKind, TabId, TearGrip, WindowId, broker_verdict, partition_clamped,
+        profiles, seats, strip_insert_slot, tear_out_rect,
     };
 
     const SOURCE: &str = include_str!("main.rs");
@@ -127563,17 +128245,27 @@ mod cross_window_drag_tests {
     #[test]
     fn every_place_a_cross_window_release_can_land_has_one_verdict() {
         let target = WindowId::from(2_u64);
+        // A pane, because the table below is the one every payload shares. The
+        // one cell that reads the cargo is `Away`, and a row's answer there is
+        // this test's own last assertion.
+        let pane = DragSource::Pane(LeafId {
+            tab: TabId(1),
+            seat: SeatId(1),
+        });
         assert_eq!(
-            broker_verdict(&BrokerAim::Home),
+            broker_verdict(&pane, &BrokerAim::Home),
             BrokerRelease::Local,
             "over the window the gesture started in, that window's own survey \
              decides — the broker has nothing to say about a drag that never left"
         );
         assert_eq!(
-            broker_verdict(&BrokerAim::Window {
-                window: target,
-                landing: Some(DropLanding::StripExtract { slot: 2 }),
-            }),
+            broker_verdict(
+                &pane,
+                &BrokerAim::Window {
+                    window: target,
+                    landing: Some(DropLanding::StripExtract { slot: 2 }),
+                }
+            ),
             BrokerRelease::Into {
                 window: target,
                 landing: DropLanding::StripExtract { slot: 2 },
@@ -127581,10 +128273,13 @@ mod cross_window_drag_tests {
             "on another window's tab list, at the slot the stand-in was drawn in"
         );
         assert_eq!(
-            broker_verdict(&BrokerAim::Window {
-                window: target,
-                landing: Some(DropLanding::StripAdopt { tab: TabId(9) }),
-            }),
+            broker_verdict(
+                &pane,
+                &BrokerAim::Window {
+                    window: target,
+                    landing: Some(DropLanding::StripAdopt { tab: TabId(9) }),
+                }
+            ),
             BrokerRelease::Into {
                 window: target,
                 landing: DropLanding::StripAdopt { tab: TabId(9) },
@@ -127592,20 +128287,96 @@ mod cross_window_drag_tests {
             "and on one of its tabs, which is the hand-over the spring showed you"
         );
         assert_eq!(
-            broker_verdict(&BrokerAim::Window {
-                window: target,
-                landing: None,
-            }),
+            broker_verdict(
+                &pane,
+                &BrokerAim::Window {
+                    window: target,
+                    landing: None,
+                }
+            ),
             BrokerRelease::Nothing,
             "over another window's *body* there is no landing, so letting go is \
              J120's clean nothing — not a tear-out, which would make one pointer \
              mean two things depending on which window happened to be under it"
         );
         assert_eq!(
-            broker_verdict(&BrokerAim::Away),
+            broker_verdict(&pane, &BrokerAim::Away),
             BrokerRelease::NewWindow,
             "and over no window of ours at all, the payload becomes a window — \
              the plan's 「拖到无窗处=撕成新窗」"
+        );
+        // **§7.1.1 (2026-08-30) — the one cell of this table that reads the
+        // hand.** A row travels now, so `Away` is reachable holding one; it is
+        // still not a window, because there is no window a path could become.
+        //
+        // Red gate: answer `NewWindow` here and letting a file go over the
+        // desktop opens an empty window, which is a verb no ruling has.
+        assert_eq!(
+            broker_verdict(
+                &DragSource::Row(RowPayload {
+                    kind: RowPayloadKind::File,
+                    path: PathBuf::from("C:\\work\\notes.md"),
+                    name: "notes.md".to_owned(),
+                }),
+                &BrokerAim::Away
+            ),
+            BrokerRelease::Nothing,
+            "a path let go over the desktop is J120's clean nothing: there is no \
+             window for a file to become"
+        );
+    }
+
+    /// **§7.1.1 over another window's tab list** (user ruling 2026-08-30) — a
+    /// row crosses a boundary as a *path*, so nothing is carried and nothing is
+    /// promoted.
+    ///
+    /// The three payloads now differ only in what the far side does with them. A
+    /// tab is moved by [`FolioApp::transfer_tab`]; a pane is promoted where it
+    /// stands and then moved; a row is neither — the target window opens the
+    /// string with the same two commits its own strip spends, which is the whole
+    /// of why this cost one deleted refusal in `open_broker` rather than a second
+    /// broker.
+    ///
+    /// RED EVIDENCE (2026-08-30): `open_broker` answered
+    /// `if matches!(source, DragSource::Row(_)) { self.drag_broker = None; }`, so
+    /// a file carried onto a second Folio window had no aim at all — that
+    /// window's tab list never lit, and the release was the source window's J120.
+    ///
+    /// Mutation: hand the row's landing to `transfer_tab` and the gesture asks
+    /// for a tab that does not exist to be moved out of a window that is not
+    /// holding one.
+    #[test]
+    fn a_row_crosses_a_boundary_as_a_path_and_is_spent_by_the_far_window() {
+        let open = fn_body("open_broker");
+        assert!(
+            !open.contains("DragSource::Row"),
+            "every payload opens a broker now — a row's is the cheapest of the \
+             three, because a path needs nothing carried:\n{open}"
+        );
+        let foreign = fn_body("foreign_strip_landing");
+        assert!(
+            foreign.contains("row_strip_landing("),
+            "and the visitor's tab list answers it off the very same table its \
+             own window's does:\n{foreign}"
+        );
+        let settle = fn_body("settle_drag_handover");
+        assert!(
+            settle.contains("runtime.commit_row_into_new_tab(&payload, slot)")
+                && settle.contains("runtime.commit_row_into_tab(&payload, tab)"),
+            "spent in the window the hand opened over, by that window's own two \
+             commits:\n{settle}"
+        );
+        let promotion = settle
+            .split_once("DragSource::Row(payload) => {")
+            .expect("the handover reads the row arm")
+            .1
+            .split_once("\n        };")
+            .expect("and that arm ends where the match it is in does")
+            .0;
+        assert!(
+            !promotion.contains("transfer_tab"),
+            "there is no tab to move and no pane to promote — a row's first half \
+             of the journey does not exist:\n{promotion}"
         );
     }
 
