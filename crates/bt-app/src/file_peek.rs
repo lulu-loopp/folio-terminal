@@ -2210,8 +2210,17 @@ mod tests {
     /// and the empty-versus-full assertion still passes while the box assertions
     /// fail — the card shrinks to one line and the frame is drawn over the foot.
     /// RED GATE ②: give the recording's half of the sentence a line of its own
-    /// again (a second label above the strip) and [`stated`] reports two lines
-    /// where the ruling asks for one.
+    /// again (split the strip's words at the last dot and push the tail one line
+    /// down, which is exactly the shape the user photographed). Measured:
+    ///
+    /// ```text
+    /// the card states its facts on one line, and this one says
+    ///   ["0:06 · 1920 × 1080", "12.0 MB"]
+    /// ```
+    ///
+    /// RED GATE ③: leave the strip out of [`layout`]'s reservation (`meta_height
+    /// = 0.0`) and this test fails with the rest of the family — the foot climbs
+    /// onto the line the painter is still drawing.
     #[test]
     fn a_video_card_says_its_facts_on_one_line() {
         let window = (1200.0, 900.0);
@@ -2365,10 +2374,21 @@ mod tests {
     ///
     /// RED GATE ①: draw [`PeekBody::Facts`] through the `Refused | Page` arm —
     /// the card comes back with `Opens as a page.` in it and not one fact.
-    /// RED GATE ②: answer the `Web` arm of `type_label` with `ftype.label()` and
-    /// the chip says `web` again.
-    /// RED GATE ③: print the page count as a label of its own above the strip
-    /// and [`stated`] finds two lines.
+    /// RED GATE ②: answer the `Web` arm of `type_label` with `ftype.label()`.
+    /// Measured — the chip is back to naming the lane:
+    ///
+    /// ```text
+    /// the chip says what the file is:
+    ///   ["folio-pdf-test.pdf", "web", "3 pages · 81 KB",
+    ///    "Enter / double-click opens the preview pane"]
+    /// ```
+    ///
+    /// RED GATE ③: stack the size under the count again. Measured:
+    ///
+    /// ```text
+    /// the card states its facts on one line, and this one says
+    ///   ["3 pages", "81 KB"]
+    /// ```
     #[test]
     fn a_page_card_says_its_facts_on_one_line_and_its_chip_says_pdf() {
         let window = (1200.0, 900.0);
@@ -2493,9 +2513,24 @@ mod tests {
     /// the stat the card already makes to know the file is there.
     ///
     /// RED GATE ①: leave [`PeekContent::meta`] `None` for a picture — which is
-    /// what this card was — and the first assertion fails on a card with no
-    /// strip at all. RED GATE ②: leave the strip out of [`layout`]'s reservation
-    /// and the last assertion fails: the card is a line short of what it draws.
+    /// what this card was. Measured:
+    ///
+    /// ```text
+    /// panicked at file_peek.rs: the card reserved a strip for its facts
+    /// ```
+    ///
+    /// RED GATE ②: leave the strip out of [`layout`]'s reservation
+    /// (`meta_height = 0.0`) — the card is a line short of what it draws, and
+    /// this test fails together with the video's, the page's and
+    /// [`the_page_body_reserves_its_picture_and_the_card_reserves_its_line`]
+    /// (measured: four red, 2887 passed).
+    ///
+    /// RED GATE ③: stack the size under the pixels again. Measured:
+    ///
+    /// ```text
+    /// the card states its facts on one line, and this one says
+    ///   ["1180 × 800", "12 KB"]
+    /// ```
     #[test]
     fn a_picture_card_says_how_large_the_picture_is_and_how_large_the_file_is() {
         let window = (1200.0, 900.0);
