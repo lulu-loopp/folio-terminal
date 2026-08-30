@@ -3036,6 +3036,34 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **没做的,如实记。** ⓪ **名字有一个窄洞**:内核报的是**那次操作用的那个名字**,所以一个用 8.3 短名(`READ~1.MD`)打开文件的程序会被这道过滤挡掉。编辑器、构建工具与 git 一律用长名,很多卷根本不生成别名,但这是一个真实存在的洞,写在这里而不是写成一句「过滤是精确的」。① 这条只修了 `preview_watch`。`files_watch` / `git_watch` 看的是**一棵树或一个文件夹的内容**,「哪个条目动了」对它们不是一个可以据以丢弃的问题(一个新出现的文件正是它们要的新闻),所以两者一行未改。② 三条被排除的嫌疑是**在这台机器上、这个窗口尺寸下**被排除的:量到的窗口是 2813×1666 物理,用户的是 3840×2160,像素多 1.7 倍而三条判据留的余量都远不止 1.7 倍(纹理 27.3/64 MB),但这是推论不是实测。若用户在修好之后仍然说卡,下一步是带着 `BT_PERF_TRACE` 在他那台机器上再量一次同样这三个计数,而不是继续猜。
 
+**④‴ 无终端座的 tab 只有一种帧,而那一种被 `redraw` 丢掉了(用户实机报,`next21`,4K@200%;`crates/bt-app/src/main.rs`)。**
+
+**现象三条,同一句话的三种拼法。** 预览 pane **独占一个 tab** 时:图片缩放很卡、markdown 滚动很卡、`.html` / `.pdf` **整片空白**——而头、地址行、tab 名一个字不差地说着那份文件。同时段一扇 folio 卡死。④″ 修的是同一个用户、同一个手势下的**另一件**事(通知风暴),这一条是它下面压着的那件。
+
+**为什么它躲了一次。** ④″ 排除三条嫌疑靠的是 `BT_PERF_TRACE present`,而那行**只印在合成那扇门上**。一个 tab 若没有终端座,`publish_frame_inner` 不给它合成任何终端画面(§7.1.6h),它这辈子的每一帧都是**留存呈现**——于是仪表上它读作「一帧不画」,④″ 只能把这句写成一条已知盲点。**一个手势真的一帧不出的 tab,和一个出了帧但没人印的 tab,在那张表上长得一模一样。** 所以这一片的第一步是把那行搬进 `trace_present`,两扇门各调一次,多一列 `retained=`;`last_present_at` 写在 trace 闸门**之外**,因为「两张画面之间隔了多久」不是一个可以只统计其中一部分的量。
+
+**真因(一句话)。** 这扇窗里有三只漏斗回答「变的东西在留存的渲染状态里」——`present_chrome_change`(267 个调用点,预览滚轮就是其中之一)、`present_peek_overlay`、`represent_on_screen_frame`。三只都做同一件事:**把玻璃上那张画面重新塞进槽位,再要一次 redraw**。而一个没有终端座的 tab **永远没有那张画面**可塞:`publish_frame_inner` 不为它合成,`activate_tab` 进门时清掉 `last_presented_frame`。于是三只漏斗留下的只有一次**光秃秃的重绘请求**,而 `redraw` 当时对这种请求的判据是 `chrome_present_pending` 一个位——那三只漏斗谁都不记这笔账(它们记的是槽位)。请求被丢掉,手势落空。
+
+**页面为什么是「空白」而不是「卡」,也在这一句里。** 页不是本窗画的,它是 swapchain 底下的一枚 DirectComposition visual,从本窗自己surface 上挖的洞里看见。三件事才让它可见,而**三件都住在呈现这条路上**:`sync_web_page` 告诉引擎它的矩形、挖那个洞;它只从 `pane_draws` 走得到;而合成树只由 `present_seats_and_commit` 里那一次 `commit()` 发布(wgpu 的 dx12 后端对一枚不是它建的 visual 从不 commit,§A2)。所以对一个只有预览的 tab,「没有呈现」与「没有页面」是同一句话:引擎停在它出生时的尺寸,躲在一块从未为它变透明的surface 后面。
+
+**实机量到的(2026-08-30,隔离 APPDATA/LOCALAPPDATA,1920×1200 物理)。** 把开着 `README.zh-CN.md` 的预览 pane 拖上 tab 条、切过去、然后**在两次截屏之间对窗口不做任何别的事**,滚十格:**玻璃逐字节不变**(三张 PNG 的 SHA-256 完全相同),`BT_PERF_TRACE` 一行呈现没有。修好之后同样十格:**15 次呈现,全部 `retained=1`**,`wheel_events=10 wheel_routings=10`,每格 `event_to_present_us` 3.5–8 ms,文档滚到了它该到的地方。`design/files-miller-demo.html` 与 `test-assets/folio-pdf-test.pdf` 修前是**整片白**、修后分别画出 Miller 列原型与 PDF 阅读器的「1 of 3」。**图片那一道没有这么干净**:它另有一条会记账的漏斗,所以修前也出得了帧,用户看到的是断续而不是死寂——这一条如实写在这里,不假装四个症状是一个数字。
+
+**修法一行,判据是「这个 tab 有没有 shell」。** `a_bare_redraw_still_owes_a_present(chrome_present_pending, tab_has_a_shell)` = `chrome_present_pending || !tab_has_a_shell`。读法是 `present_retained_picture` 自己早就写下的那句——「对它这不是回退路径而是**唯一**路径」:一扇前面没有 shell 的窗只有一种帧,所以它被要求的每一次重绘都是那一种。对有 shell 的 tab 一分钱不花:还是那个 `chrome_present_pending`,而 `present_retained_picture` 自己的第一道闸对一个还没呈现过的 shell 当场折回。**没有去逐一给三只漏斗补记账**,因为那是三处要保持同步的判断,而下一只漏斗一定会忘——门口问一次,这条规矩就没有第四个地方可以漏。
+
+**卡死是另一半,同一段代码里。** `advance_web_page` 尾巴上那句「退役欠一帧」是对的(洞是在合成时挖的,退役发生在那一帧之后),但它当时问的是 `!orphaned.is_empty()` ——而 `WebSeat::close` 幂等,那个集合会在**整个等待浏览器进程退出的十秒**里一直非空(`w0p-evidence.md` §4.2;优雅路径上那个事件甚至可能一次都不来)。于是:漏斗无条件要一次 redraw → 同一轮的尾巴答掉它 → 下一轮再问一次。**一扇窗以循环最快的速度空转十秒**,而玻璃上什么都没变——在一台一次呈现就是一张 4K 的机器上,这就是「卡死」。判据改成**这一轮是不是退役发生的那一轮**:`a_retirement_happens_on_this_turn(每个 orphaned 页此刻是否已在关闭)`,在告诉它们之前读,因为告诉它们正是让答案变假的那件事。
+
+**页跟着它被画在的那个 pane 走,是空白的第二条路(同片一并修)。** `move_seat_content` 与 `pane_into_new_tab` 搬的是 pane 能拿着的七张表,页不在其中——也不可能在:`WindowRuntime::web` 是**窗口**的,那两个是 `TabState` 上的函数。一次搬家把页的名字两半都换掉(到达的树从 1 重新铸座位号,tab 也换了人),于是页继续用一个「那个 tab 已经没有这个座位」的名字答话,而 `advance_web_page` 问的正是这个问题:它判页是孤儿,**把浏览器关掉**。所以三扇窗口级的门——`extract_pane_into_new_tab`、`move_pane_across_tabs`、`absorb_tab`——各自调一次 `carry_the_pages_of_moved_panes`,它走 `webhost::WebSeat::rehost`(不是裸换键:座位缓存着自己的地址,合成器的视觉表也按那个地址索引)。**先全部取出再逐个放回**:中心落点会**换位**(§7.1.6k′ B4),到达的页要填的正是离开的页原来那个 id,取放交错会让一枚活着的浏览器覆盖掉另一枚,而且不经过那扇等进程退出的门。
+
+**红门五道,全部给出红证(把改动逐条回退,当场红)。**
+
+* `a_present_is_recorded_whichever_door_it_came_through` —— 两扇门各印一行,`last_present_at` 写在闸门之外。**红证**:从 `present_retained_picture` 拿掉 `trace_present`,第一条当场红(那正是用户手上那个构建)。
+* `a_redraw_asked_for_by_a_tab_with_no_shell_is_always_a_present` 与 `ten_notches_on_a_preview_alone_in_a_tab_are_ten_presents` —— 前者是判据本身加一条源码钉(`redraw` 真的在问这个更宽的问题),后者把漏斗与门按滚轮驱动它们的次序跑十遍。**红证**:把判据缩回 `chrome_present_pending` 一个位,第二条读作 `left: 0, right: 10` ——与实机量到的十格零帧同一个数字。
+* `an_engine_page_alone_in_a_tab_reaches_the_glass_through_the_retained_present` —— 从「这个形状真的没有 shell」一路钉到 `commit()`。**红证**:从 `pane_draws` 拿掉 `sync_web_page`,链子在指名它的那一条上断。
+* `a_retirement_asks_for_one_frame_and_not_one_per_turn` —— 四种取值加一条源码钉。**红证**:改回 `!orphaned.is_empty()`,最后一条当场红。
+* `a_page_follows_the_pane_it_is_drawn_in` —— 纯函数四条(不动的一对要被丢掉、换位的两趟要按顺序留下)加三扇门各一条钉,再加「取完再放」的次序。**红证**:任何一扇门去掉那次调用,指名它的那条钉当场红。
+
+**没做的,如实记。** ① **量到的机器不是用户的机器**:1920×1200@100%,用户是 3840×2160@200%。「十格零帧」与「整片空白」是**逻辑上的零**而不是一个会随像素数变化的阈值,所以这一条不需要按分辨率折算;但那句「一次 4K 呈现更贵所以空转十秒更痛」是推论,不是在他那台上实测的。② **图片那一道没有单独的红门**:它修前也出帧,症状是断续,而「断续」需要一个时间阈值才能写成断言,本片不替它编一个。③ **没有 W2 引擎夹具**:`.html` / `.pdf` 到帧这一条,机器上是截图,仓库里是从「这个形状没有 shell」到 `commit()` 的整条源码钉——引擎跑不进 `cargo test`(它要一个消息循环和一个真窗口),所以这里写的是那条链子而不是一个假的引擎。④ **`present_peek_overlay` 与 `represent_on_screen_frame` 没有各自的红门**:它们与 `present_chrome_change` 是同一条规矩的第二、第三个读者,而修在门口的那一条对三者同时成立——真正该钉的是门,已经钉了。
+
 **⑤ 一个座位展示一件事，两个方向都是。** 实机撞出来的：files 列双击 `page.html`，再双击 `notes.md`——头、脚、tab 名全都说 `notes.md`，而浏览器还在文档前面的玻璃上（证据 `w2-slice5-evidence/09`）。一直存在的那一半是 `open_web_page_on` 的（页面落地时下面的文档不再被指着）；反方向在片⑤ 之前走不通，因为进网页的唯一一扇门是 `BT_WEB_DEV`。现在的判据是 `a_page_was_replaced`，接在 `advance_web_page` 已有的「pane 离开树就带走页面」那道门上：**`None` 不算「别的东西」**——页面被要求到第一次提交之间 pane 故意指着空，把那读成替换会让每张网页在开出来的下一帧被关掉。
 
 这条修复自己又拖出两条，都记在这里因为它们是同一个机制的两半：**① 正在关闭的座位不该再挖洞**（`WebSeat::is_closing`）——`host.close()` 已经把它的 visual 摘出合成树，而等浏览器进程退出可以长达十秒（`w0p-evidence.md` §4.2），这段时间里那个洞就是从一块 pane 里看见的桌面；**② 一次退役欠一帧**——洞是在造帧的时候打的（`sync_web_page`），而这道退役门跑在一趟的尾巴上、在重绘**之后**，所以画出「替换上来的文档」的那一帧仍然带着页面的洞，而窗口随后就静止了，没有下一帧去把洞收掉。用 `present_chrome_change` 而不是裸 `request_redraw`，理由写在那个函数上：没有排队的帧时重绘会找不到东西画而跳过。

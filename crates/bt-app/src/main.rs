@@ -92496,7 +92496,9 @@ fn a_bare_redraw_still_owes_a_present(chrome_present_pending: bool, tab_has_a_sh
 /// tree, and whether it is going **now** is a question about what it was already
 /// told.
 #[must_use]
-fn a_retirement_happens_on_this_turn(mut orphaned_pages_closing: impl Iterator<Item = bool>) -> bool {
+fn a_retirement_happens_on_this_turn(
+    mut orphaned_pages_closing: impl Iterator<Item = bool>,
+) -> bool {
     orphaned_pages_closing.any(|already_closing| !already_closing)
 }
 
@@ -102810,8 +102812,9 @@ mod tests {
         );
 
         // The chain: the only path from that present to a page on the glass.
-        let publisher =
-            method_text("    fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {");
+        let publisher = method_text(
+            "    fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {",
+        );
         assert!(
             publisher.contains("ifself.focused().is_none(){self.window.chrome_present_pending=true;self.window.window.request_redraw();returnOk(false);}"),
             "a tab with no shell composes no terminal picture, and what it owes \
@@ -102881,6 +102884,109 @@ mod tests {
             !clock.contains("if!orphaned.is_empty(){"),
             "asking the wait for it is ten seconds of a window pinned at a core \
              with nothing on the glass changing:\n{clock}"
+        );
+    }
+
+    /// RED ⑤ — **a page follows the pane it is drawn in** (§7.10 ④‴).
+    ///
+    /// The other way the reported blank is reached, and the one that does not
+    /// need a single frame to go missing. [`Runtime::move_seat_content`] and
+    /// [`Runtime::pane_into_new_tab`] carry the seven tables a pane can be
+    /// holding, and a page is not one of them — it cannot be, because
+    /// `WindowRuntime::web` belongs to the **window** and those two are functions
+    /// over a `TabState`. Both halves of a page's key change on a move (the
+    /// arriving tree re-mints its seat numbers from one, and the tab is a
+    /// different tab), so a page left behind goes on answering to a name whose
+    /// tab no longer has that seat — and `advance_web_page` asks exactly that
+    /// question, calls the page orphaned, and **shuts the browser down**. On the
+    /// machine: a preview pane dragged onto the tab strip whose `.html` or
+    /// `.pdf` goes blank while its head and address bar, which travel with the
+    /// pane, go on naming the file.
+    ///
+    /// The last block is the trade, and it is why the removes are collected
+    /// before any insert: a centre landing *displaces* the pane that was there,
+    /// so the arriving page is filed under the id the departing one is filed
+    /// under, and an insert interleaved with the removes would have one live
+    /// browser overwrite the other — lost without going through the door that
+    /// waits for its process to exit.
+    ///
+    /// RED GATE: drop the `was != now` clause and a pane that did not travel is
+    /// taken out of the table and put back, which the trade case turns into a
+    /// lost controller. Take the call out of any one of the three doors and the
+    /// pin naming that door goes red — each of those three is the reported blank
+    /// by a different gesture.
+    #[test]
+    fn a_page_follows_the_pane_it_is_drawn_in() {
+        let at = |tab: u64, seat: u64| LeafId {
+            tab: TabId(tab),
+            seat: SeatId(seat),
+        };
+        let hosted: BTreeSet<LeafId> = [at(1, 2), at(4, 1)].into_iter().collect();
+
+        assert_eq!(
+            pages_that_move_with_their_panes(&hosted, &[(at(1, 2), at(9, 1))]),
+            vec![(at(1, 2), at(9, 1))],
+            "a pane holding a page takes it to its new address"
+        );
+        assert!(
+            pages_that_move_with_their_panes(&hosted, &[(at(1, 7), at(9, 1))]).is_empty(),
+            "a pane with no page on it has nothing to carry"
+        );
+        assert!(
+            pages_that_move_with_their_panes(&hosted, &[(at(1, 2), at(1, 2))]).is_empty(),
+            "and a pair whose two halves are the same is not a move at all — it \
+             must not be taken out of the table and put back, because the next \
+             pair in the transaction may be filing something under that key"
+        );
+        assert_eq!(
+            pages_that_move_with_their_panes(
+                &hosted,
+                &[(at(1, 2), at(4, 1)), (at(4, 1), at(1, 2))]
+            ),
+            vec![(at(1, 2), at(4, 1)), (at(4, 1), at(1, 2))],
+            "a trade is two journeys in one transaction, in the order the \
+             gesture produced them"
+        );
+
+        // The three window-level doors, because a page is the window's and the
+        // two tab-level carriers cannot reach it.
+        for (door, signature) in [
+            (
+                "a pane torn out into a tab of its own",
+                "    fn extract_pane_into_new_tab(&mut self, leaf: LeafId, slot: usize) -> Result<Option<TabId>> {",
+            ),
+            (
+                "a pane dropped on another tab",
+                "    fn move_pane_across_tabs(",
+            ),
+            ("a tab merged into another's layout", "    fn absorb_tab("),
+        ] {
+            let text = method_text(signature);
+            assert!(
+                text.contains("self.carry_the_pages_of_moved_panes("),
+                "{door} leaves its page behind, and a page left behind is closed \
+                 a frame later:\n{text}"
+            );
+        }
+
+        // And the transaction: every page out of the table before any of them
+        // goes back in.
+        let carrier = method_text(
+            "    fn carry_the_pages_of_moved_panes(&mut self, moves: &[(LeafId, LeafId)]) -> Result<()> {",
+        );
+        let removed = carrier
+            .find("self.window.web.remove(was)?")
+            .expect("the pages are taken out of the window's table");
+        let collected = carrier
+            .find(".collect();")
+            .expect("and gathered before any of them is put back");
+        let inserted = carrier
+            .find("self.window.web.insert(now,page);")
+            .expect("and then filed under their new names");
+        assert!(
+            removed < collected && collected < inserted,
+            "a trade files the arriving page under the departing page's own id, \
+             so an insert interleaved with the removes loses a live browser:\n{carrier}"
         );
     }
 
