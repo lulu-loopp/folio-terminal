@@ -30,10 +30,12 @@
 //!    outright. Nothing else in this file decides to watch or stop watching
 //!    anything.
 //! 2. **One folder, not one tree.** Windows cannot subscribe to a file, so the
-//!    handle is on the file's directory — `bt_platform::DirWatch::start_shallow`,
-//!    which asks the kernel for that directory's own entries and nothing
-//!    deeper. A README previewed out of a repository root must not wake this
-//!    thread for every object file a build writes into `target\debug`.
+//!    handle is on the file's directory —
+//!    `bt_platform::DirWatch::start_shallow_named`, which asks the kernel for
+//!    that directory's own entries and nothing deeper. A README previewed out
+//!    of a repository root must not wake this thread for every object file a
+//!    build writes into `target\debug`. (Depth alone does not finish that
+//!    sentence; rule 3 is the other half of it.)
 //! 3. **A notification about a sibling is not news, and since defect #186 it is
 //!    not a wake-up either.** A shallow watch speaks for every *entry* of the
 //!    folder, and a repository root's entries include `target`, `.git` and
