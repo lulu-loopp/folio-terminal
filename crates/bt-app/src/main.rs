@@ -75678,15 +75678,19 @@ impl Runtime<'_> {
     /// it is in [`Runtime::extract_pane_into_new_tab`].
     fn commit_row_into_new_tab(&mut self, payload: &RowPayload, slot: usize) -> Result<bool> {
         let id = self.app.tab_ids.mint();
-        let (seats, files) = match payload.kind {
-            RowPayloadKind::File => (
-                seats::Seats::lone_seat(&bt_layout::Seat::new(
+        // The id in the literal is a placeholder and the one that comes back is
+        // the tab's: [`seats::Seats::lone_seat`] mints its own from 1, and the
+        // content below has to be filed under the seat that will actually be
+        // drawn. It is the same discipline `plan_drop`'s `arrived` enforces one
+        // surface over — never spend a name the tree may not adopt.
+        let (seats, seat, files) = match payload.kind {
+            RowPayloadKind::File => {
+                let (seats, seat) = seats::Seats::lone_seat(&bt_layout::Seat::new(
                     bt_layout::SeatId(1),
                     bt_layout::SeatKind::Preview,
-                ))
-                .0,
-                BTreeMap::new(),
-            ),
+                ));
+                (seats, seat, BTreeMap::new())
+            }
             RowPayloadKind::Folder => {
                 let (seats, seat) = seats::Seats::lone_seat(
                     &bt_layout::Seat::new(bt_layout::SeatId(1), bt_layout::SeatKind::Files)
@@ -75694,6 +75698,7 @@ impl Runtime<'_> {
                 );
                 (
                     seats,
+                    seat,
                     BTreeMap::from([(
                         seat,
                         seats::FilesLeafState {
@@ -75742,7 +75747,7 @@ impl Runtime<'_> {
         self.apply_window_min_inner_size()?;
         self.activate_tab(slot, true)?;
         if payload.kind == RowPayloadKind::File {
-            let surface = self.preview_here(bt_layout::SeatId(1));
+            let surface = self.preview_here(seat);
             self.open_preview_onto(surface, payload.path.clone())?;
         }
         Ok(true)
