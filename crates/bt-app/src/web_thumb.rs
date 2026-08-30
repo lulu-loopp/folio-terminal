@@ -55,6 +55,30 @@
 //! every web card **permanently** — nothing could ever refill them. So the
 //! picture belongs to the *seat*, not to the card, and it dies when the seat does
 //! or when the page under it becomes a different page.
+//!
+//! # The second reader of the same photograph (§7.8 ⑨)
+//!
+//! A modal takes every page off the glass — a page is composed *under* wgpu and
+//! a scrim is painted *by* wgpu, so a page left standing would be read clearly
+//! through a dimmed window (§7.8 ②). That is right and it is not negotiable;
+//! what was wrong is what the pane showed instead, which was its own empty
+//! ground. The pane draws **the frame this lane already keeps**, at the page's
+//! own size, with the scrim over it like every other pane's content.
+//!
+//! It is the same capture, the same clock and the same store: a photograph is a
+//! photograph, and a second lane would be a second engine call, a second
+//! throttle and a second answer to "what did that page last look like". What the
+//! two readers differ in is the *product* made out of one PNG — a card wants it
+//! resampled into a 263-pixel cell, a pane wants it at the size it was taken —
+//! so [`Product`] names which, [`Entry`] holds one of each, and the decode that
+//! makes either happens on the worker.
+//!
+//! **The pane's product is decoded only when it is wanted**, which is the moment
+//! a modal rises. Until then the standing cost of the pane's reader is the ask
+//! itself (0.13 ms of this thread every two seconds per page on the glass) and
+//! the 40 KB comparison that refuses a decode for a page that has not changed;
+//! nothing is decoded, resampled or uploaded for a window nobody opens a dialog
+//! over.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -89,6 +113,18 @@ pub const CAPTURE_INTERVAL: Duration = Duration::from_secs(2);
 /// rule, and it is here rather than at the resample so that a demand asking for
 /// something absurd is refused *before* a browser is asked for a picture.
 const MAX_PICTURE_PIXELS: u32 = 526 * 640;
+
+/// The largest **pane-sized** frame this lane will keep for one seat, in pixels.
+///
+/// A separate ceiling because it is a separate question: a card's is "what is the
+/// biggest cell a column can ask for", and this one is "how big can the pane a
+/// page stands in be". 4096 × 2560 is a maximised window on a 4K display at 200%
+/// with the whole client area given to one page — 40 MB of RGBA, held only while
+/// a modal stands over that page and released when it goes.
+///
+/// Above it the pane draws its own ground under the scrim, which is this lane's
+/// honest answer everywhere else too: a frame that is not there is not invented.
+const MAX_FRAME_PIXELS: u32 = 4096 * 2560;
 
 /// Everything about one web seat that the capture decision is made of.
 ///
@@ -127,10 +163,27 @@ pub struct PageDemand {
     /// picture would be *of*, and therefore what makes an older one stale.
     pub url: String,
     pub facts: SeatFacts,
-    /// The mini cell this seat occupies on its card, in physical pixels. The
+    /// The mini cell this seat occupies on its card, in physical pixels — the
     /// resample's target, so that what is uploaded is the size that is drawn
     /// rather than a pane's worth of pixels squeezed by the sampler.
-    pub target: (u32, u32),
+    ///
+    /// **`None` when the asker is the pane itself** (§7.8 ⑨), which draws the
+    /// frame at the size it was taken and therefore asks for no resample at all.
+    /// The two readers are two demands and one photograph: whichever of them the
+    /// clock lets through takes the picture, and the products are decided by who
+    /// is waiting for one when it comes back.
+    pub card: Option<(u32, u32)>,
+}
+
+/// **Which of one photograph's two products this job is for** (§7.8 ⑨).
+///
+/// A card's is resampled into its mini cell; a pane's is the decode alone, at
+/// the size the engine handed over — which is the pane's own size, because
+/// `CapturePreview` has no target parameter and always returns the viewport.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Product {
+    Card,
+    Frame,
 }
 
 /// One page's last frame, at the size a card draws it.
@@ -158,6 +211,27 @@ pub struct Entry {
     /// The URL the picture — or the ask in flight — is of.
     url: String,
     picture: Option<Picture>,
+    /// **The frame the pane draws while a modal stands over the page** (§7.8 ⑨)
+    /// — the same photograph as [`Self::picture`], decoded and not resampled.
+    ///
+    /// Beside the card's rather than instead of it: the two are looked at through
+    /// boxes an order of magnitude apart and at the same time, so one slot would
+    /// be a 263-pixel cell stretched across a pane or a pane's worth of pixels
+    /// squeezed into a cell, depending on which reader asked last.
+    frame: Option<Picture>,
+    /// The frame job that is out, if there is one, and the serial that dates the
+    /// frames — the same pair [`Self::asked`] and [`Self::serial`] are for the
+    /// card, and separate for the same reason the pictures are.
+    frame_asked: Option<u64>,
+    frame_serial: u64,
+    /// The mini cell a card asked this page to be resampled into, held from the
+    /// demand that asked until the answer that fills it.
+    ///
+    /// On the entry rather than on the ask because the *asker* and the *reader*
+    /// need not be the same: a pane's demand may be what the clock lets through
+    /// on the frame a card is also waiting, and a card that gets nothing back
+    /// because the pane asked first would blank for two seconds at a time.
+    card: Option<(u32, u32)>,
     /// How many pictures this seat has had. Part of [`Picture::key`], and the
     /// whole of the projection's damage key: a card re-projects when, and only
     /// when, this moves.
@@ -194,17 +268,19 @@ pub struct Entry {
 struct Asked {
     ticket: u64,
     url: String,
-    target: (u32, u32),
 }
 
-/// A picture that has arrived and has not been shrunk yet — the unit of work the
+/// A picture that has arrived and has not been decoded yet — the unit of work the
 /// window hands to [`PageShrinker`].
 #[derive(Debug)]
 pub struct ShrinkJob {
     pub leaf: LeafId,
     pub ticket: u64,
     pub png: Vec<u8>,
-    pub target: (u32, u32),
+    /// The box to resample into, or `None` for the decode alone at the size the
+    /// bytes are already in — see [`Product`].
+    pub target: Option<(u32, u32)>,
+    pub product: Product,
 }
 
 /// A finished one, on its way back.
@@ -212,6 +288,7 @@ pub struct ShrinkJob {
 pub struct ShrunkPicture {
     pub leaf: LeafId,
     pub ticket: u64,
+    pub product: Product,
     /// `None` when the bytes would not decode. The slot is released either way;
     /// the pane keeps whatever picture it already had.
     pub rgba: Option<(Vec<u8>, u32, u32)>,
@@ -251,6 +328,11 @@ pub struct WebThumbStats {
     /// Answers thrown away because the seat had moved on — it navigated, or it
     /// was invalidated, between the ask and the answer.
     pub dropped_stale: u64,
+    /// **Pane-sized frames kept**, one per modal a page was standing behind
+    /// (§7.8 ⑨). Beside `pictures` rather than folded into it because they are
+    /// the two products of one photograph and a reader wants to know which of
+    /// them a decode was spent on.
+    pub frames: u64,
 }
 
 /// Every web pane's last frame, and the clock that refreshes them.
@@ -275,31 +357,93 @@ impl WebThumbs {
         self.stats
     }
 
-    /// This pane's last frame, if it has one.
+    /// This pane's last frame at card size, if it has one.
     #[must_use]
     pub fn picture(&self, leaf: LeafId) -> Option<&Picture> {
         self.pages.get(&leaf)?.picture.as_ref()
+    }
+
+    /// **This pane's last frame at the page's own size**, if it has one — what a
+    /// pane draws while a modal stands over its page (§7.8 ⑨).
+    #[must_use]
+    pub fn frame(&self, leaf: LeafId) -> Option<&Picture> {
+        self.pages.get(&leaf)?.frame.as_ref()
+    }
+
+    /// **The decode a pane needs before it can draw its page's last frame**, or
+    /// `None` when there is nothing to decode or the answer is already in hand.
+    ///
+    /// Asked at the moment a modal takes the page off the glass, and only then:
+    /// the bytes have been kept since the last photograph — at most
+    /// [`CAPTURE_INTERVAL`] old, because that is the clock the ask ran on — and
+    /// nothing can be photographed now, since a hidden WebView never completes a
+    /// capture. **A page with no bytes yet answers `None`**, and the pane draws
+    /// its own ground under the scrim: one open dialog is not worth inventing
+    /// pixels for.
+    pub fn frame_job(&mut self, leaf: LeafId) -> Option<ShrinkJob> {
+        let ticket = self.tickets + 1;
+        let entry = self.pages.get_mut(&leaf)?;
+        if entry.frame.is_some() || entry.frame_asked.is_some() {
+            return None;
+        }
+        let png = entry.encoded.clone()?;
+        entry.frame_asked = Some(ticket);
+        self.tickets = ticket;
+        Some(ShrinkJob {
+            leaf,
+            ticket,
+            png,
+            target: None,
+            product: Product::Frame,
+        })
+    }
+
+    /// **Every kept frame goes** — the modal came down and the pages are back on
+    /// the glass, so what these were standing in for is on screen again.
+    ///
+    /// Released rather than kept against the next dialog because they are the
+    /// largest thing this lane holds and the next dialog is owed a *current*
+    /// picture anyway; keeping them would be holding forty megabytes to save one
+    /// decode of bytes that will by then be older than the page.
+    pub fn drop_frames(&mut self) {
+        for entry in self.pages.values_mut() {
+            entry.frame = None;
+            entry.frame_asked = None;
+        }
     }
 
     /// **Which of these pages to photograph now.**
     ///
     /// The whole policy, as a pure function over facts the caller read off the
     /// engine, so that every refusal below is testable without a browser.
-    /// `demands` is the web panes of the cards that are **visible in the
-    /// column** — the caller has already applied `focus_thumb`'s first two
-    /// gates, and a window that is not in focus mode never calls this at all.
+    /// `demands` is what the two readers of this lane are asking for: the web
+    /// panes of the cards that are **visible in the column** (`card: Some`, the
+    /// caller having already applied `focus_thumb`'s first two gates), and the
+    /// **pages this window holds** (`card: None`, §7.8 ⑨). Both go through one
+    /// clock, so a window in focus mode with a page on the stage takes one
+    /// photograph every two seconds and not two.
     pub fn due(&mut self, demands: &[PageDemand], now: Instant) -> Vec<LeafId> {
         let mut asking = Vec::new();
         for demand in demands {
             let entry = self.pages.entry(demand.leaf).or_insert_with(|| Entry {
                 url: demand.url.clone(),
                 picture: None,
+                frame: None,
+                frame_asked: None,
+                frame_serial: 0,
+                card: None,
                 serial: 0,
                 asked: None,
                 started: None,
                 source: None,
                 encoded: None,
             });
+            // **What the card that asked wants back**, kept until the answer it
+            // is for arrives. A demand from the pane says nothing about it: the
+            // pane is not a card and has no opinion on a cell it does not draw.
+            if demand.card.is_some() {
+                entry.card = demand.card;
+            }
             // **A seat that navigated is a seat whose picture is of another
             // page.** Asked here as well as on `Committed`, because the two say
             // it at different moments and the cheaper of them is this one: a
@@ -313,6 +457,11 @@ impl WebThumbs {
                 entry.asked = None;
                 entry.source = None;
                 entry.encoded = None;
+                // And the pane's frame with it, for the card's own reason: a
+                // frame of the page that used to be here is the one thing a pane
+                // must not show while a dialog is open over the page that is.
+                entry.frame = None;
+                entry.frame_asked = None;
             }
             if demand.facts.closing {
                 self.stats.skipped_closing += 1;
@@ -327,6 +476,15 @@ impl WebThumbs {
             // been wasted" — it is a slot that would be held open until the
             // seat closed.
             if !demand.facts.on_glass {
+                // **And the ask that was out when it left goes with it.** The
+                // same measured fact says the completion is not coming — the
+                // page was hidden between the call and the answer, which is
+                // exactly what happens when a modal rises two seconds into a
+                // page's life. Left standing, that slot would be held until the
+                // seat closed and this page would never be photographed again.
+                // `webhost::WebSeat::apply_presence` clears the engine's side of
+                // the same fact on the same transition.
+                entry.asked = None;
                 self.stats.skipped_hidden += 1;
                 continue;
             }
@@ -334,7 +492,16 @@ impl WebThumbs {
                 self.stats.skipped_in_flight += 1;
                 continue;
             }
-            if !usable_target(demand.target) {
+            // **What this photograph could be made into, asked of whichever
+            // reader wants one.** A card cell too absurd to draw and a pane too
+            // large to keep a frame of are the same refusal — there is nothing
+            // this answer could be spent on — and it is made before a browser is
+            // asked for a picture rather than after.
+            let usable = match demand.card {
+                Some(target) => usable_target(target),
+                None => demand.facts.size.is_some_and(usable_frame),
+            };
+            if !usable {
                 self.stats.skipped_blank += 1;
                 continue;
             }
@@ -343,7 +510,8 @@ impl WebThumbs {
             // once: the old pixels are a true picture of a layout that is no
             // longer there, and unlike every other kind of card this one cannot
             // simply be re-projected from memory.
-            let reshaped = entry.picture.is_some() && entry.source != demand.facts.size;
+            let reshaped = (entry.picture.is_some() || entry.frame.is_some())
+                && entry.source != demand.facts.size;
             if !reshaped
                 && let Some(started) = entry.started
                 && now.duration_since(started) < CAPTURE_INTERVAL
@@ -355,7 +523,6 @@ impl WebThumbs {
             entry.asked = Some(Asked {
                 ticket: self.tickets,
                 url: demand.url.clone(),
-                target: demand.target,
             });
             entry.started = Some(now);
             self.stats.captures += 1;
@@ -399,11 +566,18 @@ impl WebThumbs {
         }
         entry.encoded = Some(png.clone());
         entry.source = source;
+        // **The bytes are kept whether or not anybody wants them decoded**, and
+        // that is the whole of what the pane's reader costs while no dialog is
+        // open (§7.8 ⑨): a page nobody is carding is photographed, compared and
+        // filed, and the 18 ms behind a decode is spent the moment a modal takes
+        // the page off the glass and not before.
+        let target = entry.card.take()?;
         Some(ShrinkJob {
             leaf,
             ticket: asked.ticket,
             png,
-            target: asked.target,
+            target: Some(target),
+            product: Product::Card,
         })
     }
 
@@ -413,6 +587,32 @@ impl WebThumbs {
         let Some(entry) = self.pages.get_mut(&shrunk.leaf) else {
             return false;
         };
+        if shrunk.product == Product::Frame {
+            // **The frame's own ticket**, and the same rule read off it: a frame
+            // that was asked for before the page navigated is a frame of another
+            // document, and `due`/`invalidate` cleared the ticket when they
+            // dropped what it was of.
+            if entry.frame_asked != Some(shrunk.ticket) {
+                self.stats.dropped_stale += 1;
+                return false;
+            }
+            entry.frame_asked = None;
+            let Some((rgba, width_px, height_px)) = shrunk.rgba else {
+                return false;
+            };
+            entry.frame_serial += 1;
+            entry.frame = Some(Picture {
+                key: format!(
+                    "web-frame:{}:{}:{}",
+                    shrunk.leaf.tab.0, shrunk.leaf.seat.0, entry.frame_serial
+                ),
+                rgba: Arc::from(rgba),
+                width_px,
+                height_px,
+            });
+            self.stats.frames += 1;
+            return true;
+        }
         // **The ticket is the whole of the staleness check.** A page that
         // navigated or was invalidated between the ask and this answer has had
         // its ask cleared and its serial moved, and a picture arriving for a
@@ -455,6 +655,9 @@ impl WebThumbs {
         entry.asked = None;
         entry.source = None;
         entry.encoded = None;
+        // The pane's frame is of the same page and is dropped by the same fact.
+        entry.frame = None;
+        entry.frame_asked = None;
         if held {
             entry.serial += 1;
         }
@@ -511,6 +714,12 @@ fn usable_target(target: (u32, u32)) -> bool {
     target.0 >= 1 && target.1 >= 1 && target.0.saturating_mul(target.1) <= MAX_PICTURE_PIXELS
 }
 
+/// Whether a page's own viewport is one this lane will keep a frame of — the same
+/// question [`usable_target`] asks of a cell, against [`MAX_FRAME_PIXELS`].
+fn usable_frame(size: (u32, u32)) -> bool {
+    size.0 >= 1 && size.1 >= 1 && size.0.saturating_mul(size.1) <= MAX_FRAME_PIXELS
+}
+
 // ── The worker ─────────────────────────────────────────────────────────────
 
 /// **Where the decode happens, which is nowhere near the frame.**
@@ -548,6 +757,7 @@ impl PageShrinker {
                         .send(ShrunkPicture {
                             leaf: job.leaf,
                             ticket: job.ticket,
+                            product: job.product,
                             rgba,
                         })
                         .is_err()
@@ -573,7 +783,8 @@ impl PageShrinker {
     }
 }
 
-/// **Decode a captured page and resample it to the box a card draws it in.**
+/// **Decode a captured page and resample it to the box a card draws it in** — or
+/// decode it alone, when the reader is the pane the page stands in (§7.8 ⑨).
 ///
 /// A free function so that it can be tested without a thread, and so that the
 /// one expensive thing this module does has a name a profile can point at.
@@ -582,11 +793,27 @@ impl PageShrinker {
 /// build cannot read, which is a fact about the answer and not a reason to
 /// invent pixels.
 #[must_use]
-pub fn shrink(png: &[u8], target: (u32, u32)) -> Option<(Vec<u8>, u32, u32)> {
-    if !usable_target(target) {
+pub fn shrink(png: &[u8], target: Option<(u32, u32)>) -> Option<(Vec<u8>, u32, u32)> {
+    if let Some(target) = target
+        && !usable_target(target)
+    {
         return None;
     }
     let decoded = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?;
+    // **A pane's frame is not resampled at all.** `CapturePreview` returns the
+    // viewport, and the viewport is the pane — so the picture is already the
+    // size it will be drawn at, and a resample to its own dimensions would be
+    // 14 ms spent to arrive back where it started. A frame past the ceiling is
+    // refused here as well as at the ask, because the two are asked at
+    // different moments and the second is the one holding the memory.
+    let Some(target) = target else {
+        let rgba = decoded.to_rgba8();
+        let (width, height) = (rgba.width(), rgba.height());
+        if !usable_frame((width, height)) {
+            return None;
+        }
+        return Some((rgba.into_raw(), width, height));
+    };
     // `Triangle` and not `Lanczos3`: this is a downscale by a factor of four or
     // more into a box 263 pixels wide, where the difference between the two
     // filters is not visible and the difference in cost is threefold. The
@@ -637,7 +864,7 @@ mod tests {
             leaf,
             url: String::from("http://127.0.0.1:8080/"),
             facts,
-            target: (263, 320),
+            card: Some((263, 320)),
         }
     }
 
@@ -746,6 +973,7 @@ mod tests {
         assert!(thumbs.settle(ShrunkPicture {
             leaf: seat(1),
             ticket: job.ticket,
+            product: Product::Card,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         }));
         assert!(
@@ -783,6 +1011,7 @@ mod tests {
         thumbs.settle(ShrunkPicture {
             leaf: seat(1),
             ticket: job.ticket,
+            product: Product::Card,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         });
         let before = thumbs.picture(seat(1)).expect("a picture").key.clone();
@@ -805,6 +1034,7 @@ mod tests {
         thumbs.settle(ShrunkPicture {
             leaf: seat(1),
             ticket: job.ticket,
+            product: Product::Card,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         });
         assert_ne!(
@@ -833,6 +1063,7 @@ mod tests {
         thumbs.settle(ShrunkPicture {
             leaf: seat(1),
             ticket: job.ticket,
+            product: Product::Card,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         });
         let mut moved = demand(1, facts());
@@ -880,6 +1111,7 @@ mod tests {
         thumbs.settle(ShrunkPicture {
             leaf: seat(1),
             ticket: job.ticket,
+            product: Product::Card,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         });
         let reshaped = demand(
@@ -915,6 +1147,7 @@ mod tests {
         thumbs.settle(ShrunkPicture {
             leaf: seat(1),
             ticket: job.ticket,
+            product: Product::Card,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         });
         let key = thumbs.picture(seat(1)).expect("a picture").key.clone();
@@ -970,6 +1203,7 @@ mod tests {
             thumbs.settle(ShrunkPicture {
                 leaf,
                 ticket: job.ticket,
+                product: Product::Card,
                 rgba: Some((vec![pixels; 263 * 320 * 4], 263, 320)),
             });
         }
@@ -1027,6 +1261,7 @@ mod tests {
         thumbs.settle(ShrunkPicture {
             leaf: seat(1),
             ticket: job.ticket,
+            product: Product::Card,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         });
         let key = thumbs.picture(seat(1)).expect("a picture").key.clone();
@@ -1044,10 +1279,10 @@ mod tests {
     /// really does refuse bytes it cannot read.
     #[test]
     fn the_shrinker_answers_the_box_it_was_asked_for_and_refuses_what_it_cannot_read() {
-        let (rgba, width, height) = shrink(&a_real_png(1146, 777), (263, 320)).expect("a picture");
+        let (rgba, width, height) = shrink(&a_real_png(1146, 777), Some((263, 320))).expect("a picture");
         assert_eq!((width, height), (263, 320));
         assert_eq!(rgba.len(), 263 * 320 * 4);
-        assert!(shrink(b"not a png at all", (263, 320)).is_none());
+        assert!(shrink(b"not a png at all", Some((263, 320))).is_none());
     }
 
     /// Red gate: **a page that has not changed is photographed and then let go**
@@ -1075,6 +1310,7 @@ mod tests {
         thumbs.settle(ShrunkPicture {
             leaf: seat(1),
             ticket: job.ticket,
+            product: Product::Card,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         });
         let key = thumbs.picture(seat(1)).expect("a picture").key.clone();
@@ -1141,7 +1377,7 @@ mod tests {
                 leaf: seat(id),
                 url: format!("http://127.0.0.1:8080/page-{id}"),
                 facts: facts(),
-                target: (263, 320),
+                card: Some((263, 320)),
             })
             .collect();
         let mut thumbs = WebThumbs::default();
@@ -1172,10 +1408,186 @@ mod tests {
     fn an_impossible_box_is_refused_before_the_engine_is_asked() {
         let mut thumbs = WebThumbs::default();
         let mut huge = demand(1, facts());
-        huge.target = (4000, 4000);
+        huge.card = Some((4000, 4000));
         assert!(thumbs.due(&[huge], Instant::now()).is_empty());
         let mut nothing = demand(2, facts());
-        nothing.target = (0, 40);
+        nothing.card = Some((0, 40));
         assert!(thumbs.due(&[nothing], Instant::now()).is_empty());
+    }
+
+    /// One page in a pane of its own size, which is what the pane's reader asks
+    /// about.
+    fn a_page_sized(width: u32, height: u32) -> SeatFacts {
+        SeatFacts {
+            size: Some((width, height)),
+            ..facts()
+        }
+    }
+
+    /// Red gate: **a page a modal covers keeps the frame it last stood on the
+    /// glass with, at the size the page itself was** (§7.8 ⑨, user report on
+    /// `next22`: a pane holding a pdf or a web page went blank behind the
+    /// settings dialog).
+    ///
+    /// The whole of the defect as this lane sees it. A modal hides the page —
+    /// that part is right and cannot change, because a page is composed under
+    /// wgpu and a scrim is painted by it — so the pane has to draw something,
+    /// and the only pixels of a page that exist anywhere are the ones taken
+    /// while it was still up. This walks the one road from there to the pane: a
+    /// photograph nobody decoded, a dialog that asks for the decode, and a frame
+    /// at the page's own size.
+    ///
+    /// RED GATE: give the frame job a target — a resample — and the size
+    /// assertion fails; stop keeping `entry.encoded` when no card wants a job
+    /// and `frame_job` answers `None`, which on screen is the blank pane the
+    /// report is about.
+    #[test]
+    fn a_page_a_modal_covers_keeps_the_frame_it_last_stood_on_the_glass_with() {
+        let mut thumbs = WebThumbs::default();
+        let mut pane = demand(1, a_page_sized(320, 200));
+        // The pane's own reader: no cell, because a pane is not a card.
+        pane.card = None;
+        assert_eq!(
+            thumbs.due(&[pane], Instant::now()),
+            vec![seat(1)],
+            "a page on the glass is photographed whether or not a card is up"
+        );
+        assert!(
+            thumbs
+                .arrived(
+                    seat(1),
+                    "http://127.0.0.1:8080/",
+                    Some(a_real_png(320, 200)),
+                    Some((320, 200)),
+                )
+                .is_none(),
+            "and nothing is decoded for it while nobody is drawing it"
+        );
+
+        let job = thumbs
+            .frame_job(seat(1))
+            .expect("the dialog rose, and the bytes for this pane are in hand");
+        assert_eq!(job.product, Product::Frame);
+        assert_eq!(job.target, None, "a pane's frame is not resampled at all");
+        assert!(
+            thumbs.frame_job(seat(1)).is_none(),
+            "and one dialog asks for one decode"
+        );
+        let (rgba, width, height) = shrink(&job.png, job.target).expect("the worker reads it");
+        assert_eq!(
+            (width, height),
+            (320, 200),
+            "which is the page's own size, because that is what the viewport was"
+        );
+        assert!(thumbs.settle(ShrunkPicture {
+            leaf: seat(1),
+            ticket: job.ticket,
+            product: Product::Frame,
+            rgba: Some((rgba, width, height)),
+        }));
+        let frame = thumbs.frame(seat(1)).expect("the pane has something to draw");
+        assert_eq!((frame.width_px, frame.height_px), (320, 200));
+        assert_eq!(thumbs.stats().frames, 1);
+        assert!(
+            thumbs.picture(seat(1)).is_none(),
+            "and the card's picture was never made, because no card asked"
+        );
+
+        thumbs.drop_frames();
+        assert!(
+            thumbs.frame(seat(1)).is_none(),
+            "the dialog came down and forty megabytes went with it"
+        );
+    }
+
+    /// Red gate: **a page that left the glass lets go of the photograph it had
+    /// out** (§7.8 ⑨).
+    ///
+    /// A capture takes 84 ms to come back and a modal can rise inside it — and a
+    /// hidden WebView never answers. The slot has to be released on the way out
+    /// or this seat is never photographed again, which is a pane that is blank
+    /// behind every dialog for the rest of its life.
+    ///
+    /// RED GATE: take `entry.asked = None` out of the off-glass refusal and the
+    /// last assertion fails with the ask still standing.
+    #[test]
+    fn a_page_that_left_the_glass_lets_go_of_the_photograph_it_had_out() {
+        let start = Instant::now();
+        let mut thumbs = WebThumbs::default();
+        assert_eq!(thumbs.due(&[demand(1, facts())], start), vec![seat(1)]);
+
+        let gone = SeatFacts {
+            on_glass: false,
+            capturing: true,
+            ..facts()
+        };
+        assert!(
+            thumbs.due(&[demand(1, gone)], start).is_empty(),
+            "nothing is asked of a page that is not on the glass"
+        );
+        assert_eq!(thumbs.stats().skipped_hidden, 1);
+
+        assert_eq!(
+            thumbs.due(&[demand(1, facts())], start + CAPTURE_INTERVAL * 2),
+            vec![seat(1)],
+            "and when it comes back it can be photographed again"
+        );
+    }
+
+    /// Red gate: **a card and a pane asking about one page take one
+    /// photograph**, and the card still gets its own product (§7.8 ⑨).
+    ///
+    /// The two readers are two demands and one engine call. If the pane's demand
+    /// were what the answer was filed against, a column open beside a dialog
+    /// would stop being refreshed; if the card's ask hid the pane's, a page
+    /// nobody has carded would never be photographed at all.
+    #[test]
+    fn a_card_and_a_pane_asking_about_one_page_take_one_photograph() {
+        let mut thumbs = WebThumbs::default();
+        let card = demand(1, facts());
+        let mut pane = demand(1, facts());
+        pane.card = None;
+        assert_eq!(
+            thumbs.due(&[card, pane], Instant::now()),
+            vec![seat(1)],
+            "one page, one ask"
+        );
+        assert_eq!(thumbs.stats().captures, 1);
+        let job = thumbs
+            .arrived(
+                seat(1),
+                "http://127.0.0.1:8080/",
+                Some(a_real_png(40, 30)),
+                Some((1200, 800)),
+            )
+            .expect("the card that asked is still owed its cell");
+        assert_eq!(job.product, Product::Card);
+        assert_eq!(job.target, Some((263, 320)));
+    }
+
+    /// Red gate: **a pane too large to keep a frame of is refused before the
+    /// engine is asked, and the pane draws its own ground** (§7.8 ⑨) — the same
+    /// sentence [`an_impossible_box_is_refused_before_the_engine_is_asked`]
+    /// makes about a cell, against the other ceiling.
+    #[test]
+    fn a_pane_past_the_frame_ceiling_is_refused_before_the_engine_is_asked() {
+        assert!(usable_frame((4096, 2560)), "a 4K pane at 200% is kept");
+        assert!(!usable_frame((4096, 2561)));
+        assert!(!usable_frame((0, 900)));
+
+        let mut thumbs = WebThumbs::default();
+        let mut pane = demand(1, a_page_sized(8192, 8192));
+        pane.card = None;
+        assert!(
+            thumbs.due(&[pane], Instant::now()).is_empty(),
+            "no browser is troubled for a picture nothing would keep"
+        );
+        assert_eq!(thumbs.stats().skipped_blank, 1);
+        assert!(
+            thumbs.frame_job(seat(1)).is_none(),
+            "and with no bytes there is no frame — the pane draws its own \
+             ground under the scrim, which is this lane's answer everywhere \
+             else too"
+        );
     }
 }

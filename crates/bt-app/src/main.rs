@@ -8872,6 +8872,15 @@ struct WindowRuntime {
     /// replaced. The picture belongs to the seat; the *asking* belongs to the
     /// card.
     web_thumbs: web_thumb::WebThumbs,
+    /// **The pages a modal is standing over this frame, and where their last
+    /// frames are drawn** (§7.8 ⑨).
+    ///
+    /// Written by `sync_web_page`, which is the one walk that knows all five
+    /// reasons a page can be off the glass; read by the chrome pass and by the
+    /// float layer, which are the two places a picture can be put on the glass
+    /// under a scrim. Empty on every frame with no dialog up, which is almost
+    /// all of them.
+    page_keepsakes: Vec<PageKeepsake>,
     /// The thread that turns a captured page into card-sized pixels.
     ///
     /// Lazily started, because a window that never opens a page never needs one
@@ -23043,14 +23052,15 @@ fn dump_focus_thumb_frame(
     // story of a column full of background tabs, and two files could not say it.
     let line = format!(
         "focus-thumb visible={visible} projections={} unchanged={} throttled={} dropped={} \
-         captures={} pictures={} page-hidden={} page-closing={} page-blank={} page-inflight={} \
-         page-throttled={} page-unchanged={} page-stale={}\n",
+         captures={} pictures={} page-frames={} page-hidden={} page-closing={} page-blank={} \
+         page-inflight={} page-throttled={} page-unchanged={} page-stale={}\n",
         stats.projections,
         stats.skipped_unchanged,
         stats.skipped_throttled,
         stats.dropped_offscreen,
         pages.captures,
         pages.pictures,
+        pages.frames,
         pages.skipped_hidden,
         pages.skipped_closing,
         pages.skipped_blank,
@@ -26181,6 +26191,59 @@ struct WebPlacement {
     /// pane is a seat, which is under the whole stack; the float's own layer for
     /// a page whose pane is a floating window.
     above: Option<usize>,
+}
+
+/// **A page a modal has taken off the glass, and the box its last frame stands
+/// in** (§7.8 ⑨).
+///
+/// One of these is minted for a page hidden **only** by the modal — the same
+/// page that would have been on the glass with no dialog open. A page hidden for
+/// any of the other four reasons has nothing to stand in for: a background tab
+/// is not being looked at, a fit-ladder casualty has no rectangle, a faulted
+/// seat is showing its card, and a pane turned over to the source is showing
+/// that file's markup.
+///
+/// The rectangle is the page's own — the one the hole would have been punched at
+/// — so the frame lands exactly where the reader last saw the document, and the
+/// scrim then dims it along with everything else in the window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PageKeepsake {
+    leaf: LeafId,
+    rect: [f32; 4],
+    /// The float carrying the page, when one is (§7.14a). Its picture rides that
+    /// window's own overlay layer, a whole pass above the panes, for the reason
+    /// [`Runtime::float_overlay_layer`] already gives about a float's document:
+    /// a picture handed to the pane lane would be drawn behind the very window
+    /// that contains it.
+    float: Option<float::FloatId>,
+}
+
+/// **One kept frame, as the textured quad both of its two hosts draw it with**
+/// (§7.8 ⑨).
+///
+/// A free function because the two hosts are a pane and a float and they differ
+/// in *which list* the quad joins, not in what it is — the same division of
+/// labour a preview picture already has between the seat lane and a float's own
+/// layer, and the reason a second spelling of these seven fields would be a
+/// second place for them to drift.
+///
+/// **Clipped to its own rectangle**, which is not redundant: the texture is the
+/// size the page's viewport was when it was photographed, and a pane resized
+/// while the dialog stands over it — the settings window is resizable — would
+/// otherwise paint the older, larger frame over its neighbours. Inside the box,
+/// the sampler stretches, which is §7.11 ⑪ⓒ's answer said again: a frame of the
+/// layout that has just gone is closer to the truth than a blank.
+fn page_keepsake_icon(picture: &web_thumb::Picture, rect: [f32; 4]) -> bt_render::ChromeIcon {
+    bt_render::ChromeIcon {
+        key: picture.key.clone(),
+        rect,
+        rgba: Arc::clone(&picture.rgba),
+        width_px: picture.width_px,
+        height_px: picture.height_px,
+        opacity: 1.0,
+        clip: Some(rect),
+        above_text: false,
+    }
 }
 
 /// **What a preview source can be written down as** — the one door between this
@@ -30264,6 +30327,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         focus_mini_face_advance: 0.0,
         focus_thumbs: focus_thumb::FocusThumbnails::default(),
         web_thumbs: web_thumb::WebThumbs::default(),
+        page_keepsakes: Vec::new(),
         web_shrinker: None,
         preview_trace_echo: preview_trace::FrameEcho::default(),
         glyph_census_echo: glyph_trace::CensusEcho::default(),
@@ -33642,7 +33706,18 @@ impl Runtime<'_> {
             flight,
         } = chrome;
         dump_chrome_frame(&seats);
-        let icons = self.window.chrome_marks.resolve(&seats.sprites);
+        let mut icons = self.window.chrome_marks.resolve(&seats.sprites);
+        // **And the last frame of every page a modal is standing over** (§7.8
+        // ⑨), which joins the same channel the marks just went down and is drawn
+        // in the same pass — under every overlay layer, and therefore under the
+        // scrim, which is the whole point: the page's pixels are dimmed by the
+        // dialog exactly as its neighbour pane's letters are.
+        //
+        // Not rasterized and not a mark: it is pixels that already exist, so it
+        // is appended to the resolved list rather than passed through
+        // `chrome_marks`, which is a cache of drawings this window makes.
+        icons.extend(self.page_keepsake_icons());
+        let icons = icons;
         let chrome_changed = self
             .window
             .renderer
@@ -67866,6 +67941,16 @@ impl Runtime<'_> {
                 above_text: false,
             });
         }
+        // **And the last frame of the page this window is carrying, while a
+        // modal stands over it** (§7.8 ⑨). On this layer for the picture's own
+        // reason one paragraph above — the page is composed under wgpu and this
+        // window is drawn in the overlay stack, so a frame handed to the pane
+        // lane would be behind the very window that contains it — and under the
+        // modal for the reason every keepsake is: `float` sits below `modal` in
+        // the stack, so the scrim dims this the way it dims the window round it.
+        if let Some(icon) = self.float_page_keepsake_icon(id) {
+            layer.images.push(icon);
+        }
         Some(layer)
     }
 
@@ -78812,10 +78897,10 @@ impl Runtime<'_> {
                                 leaf,
                                 url: web.identity().unwrap_or_default().to_owned(),
                                 facts: web.capture_facts(),
-                                target: (
+                                card: Some((
                                     (seat.rect[2] - seat.rect[0]).round().max(0.0) as u32,
                                     (seat.rect[3] - seat.rect[1]).round().max(0.0) as u32,
-                                ),
+                                )),
                             });
                         }
                         let source =
@@ -81920,6 +82005,10 @@ impl Runtime<'_> {
         let pages: Vec<LeafId> = self.window.web.keys().copied().collect();
         let active = self.window.active_tab;
         let mut placements: Vec<WebPlacement> = Vec::with_capacity(pages.len());
+        // **And the pages a modal is standing over**, gathered on the same walk
+        // because the answer is made of the same five facts (§7.8 ⑨). Empty on
+        // every frame no dialog is open.
+        let mut keepsakes: Vec<PageKeepsake> = Vec::new();
         for leaf in pages {
             let seat = leaf.seat;
             let transform = self.window.pane_motion.transform_of(seat, now, motion);
@@ -82017,16 +82106,25 @@ impl Runtime<'_> {
             // presence is the second question, and a page on a tab nobody is
             // looking at answers it the same way a page under a modal does.
             let rect = webhost::web_presence(body, false).bounds();
-            let presence = webhost::web_presence(
-                body,
-                a_page_is_off_the_glass(
-                    obstructed,
-                    floated.is_some(),
-                    index == active,
-                    carded,
-                    sourced,
-                ),
-            );
+            // **The four reasons that are not the modal**, asked separately
+            // because the difference is what a pane draws (§7.8 ⑨): a page the
+            // dialog alone took away is a page the reader was looking at a
+            // moment ago and expects to still be there under the scrim, and one
+            // of the other four is a page that has no business on this glass at
+            // all.
+            let elsewhere =
+                a_page_is_off_the_glass(false, floated.is_some(), index == active, carded, sourced);
+            let presence = webhost::web_presence(body, obstructed || elsewhere);
+            if obstructed
+                && !elsewhere
+                && let webhost::WebPresence::Shown(bounds) = webhost::web_presence(body, false)
+            {
+                keepsakes.push(PageKeepsake {
+                    leaf,
+                    rect: bounds.as_rect(),
+                    float: floated,
+                });
+            }
             // **And where in the stack the hole for it is punched** (§7.14c). A
             // float is not a surface standing *over* this page — it is the pane
             // the page is in — so the hole has to be punched above the float's
@@ -82103,6 +82201,93 @@ impl Runtime<'_> {
             holes.extend(hole_for(placement.presence, floored, placement.above));
         }
         window.renderer.set_web_holes(holes);
+        self.keep_what_the_modal_covers(keepsakes, now);
+    }
+
+    /// **Every page in this window has its last frame kept, and a page a modal
+    /// covers draws it** (§7.8 ⑨).
+    ///
+    /// Called at the tail of [`Self::sync_web_page`], after every page has been
+    /// told whether it is on the glass, because that is the fact the whole lane
+    /// stands on: a hidden WebView never answers a `CapturePreview`, so the ask
+    /// has to be made while the page is still up and the answer kept against the
+    /// moment it is not.
+    ///
+    /// The three things it does are one sentence each:
+    ///
+    /// * **ask** — every page on the glass is photographed on `web_thumb`'s own
+    ///   two-second clock, whether or not a card is looking at it. This is the
+    ///   line §7.11 ⑪ⓑ said would need a ruling ("真要抹掉它,得让模式关着的时候
+    ///   也照相"), and here is the ruling: the cost is the ask (0.115 ms) and a
+    ///   40 KB comparison, nothing is decoded for a page nobody is drawing, and
+    ///   what it buys is that no dialog ever opens onto a blank pane.
+    /// * **decode** — a page the dialog is standing over needs its frame *now*,
+    ///   and the bytes are already in hand. One job per page per modal, because
+    ///   `frame_job` refuses while one is out or one has landed.
+    /// * **let go** — the dialog came down, the pages are back, and forty
+    ///   megabytes of standing-in pixels are released.
+    fn keep_what_the_modal_covers(&mut self, keepsakes: Vec<PageKeepsake>, now: Instant) {
+        let demands: Vec<web_thumb::PageDemand> = self
+            .window
+            .web
+            .iter()
+            .map(|(leaf, web)| web_thumb::PageDemand {
+                leaf: *leaf,
+                url: web.identity().unwrap_or_default().to_owned(),
+                facts: web.capture_facts(),
+                card: None,
+            })
+            .collect();
+        self.photograph_pages(demands, now);
+        if keepsakes.is_empty() {
+            // Asked of the keepsakes and not of `a_modal_covers_the_window`,
+            // which would be a second reading of the same frame: a window with
+            // no page under a dialog is holding no frames for one, whichever of
+            // the two facts is the reason.
+            self.window.web_thumbs.drop_frames();
+        }
+        for keepsake in &keepsakes {
+            if let Some(job) = self.window.web_thumbs.frame_job(keepsake.leaf) {
+                self.page_shrinker().send(job);
+            }
+        }
+        self.window.page_keepsakes = keepsakes;
+    }
+
+    /// **The pictures the panes under a modal draw** — one per page the dialog
+    /// took off the glass, at the rectangle the page itself had (§7.8 ⑨).
+    ///
+    /// Empty on every frame with no dialog up, and empty for a page whose frame
+    /// has not arrived — the first frame or two of a dialog, a page that has
+    /// never been photographed, a capture the engine refused, a pane past the
+    /// ceiling. What those all draw is the pane's own ground with the scrim over
+    /// it, which is what this defect's *first* frame looks like and is the
+    /// honest picture: this window does not invent pixels for a page it has
+    /// never seen.
+    ///
+    /// Floats are left out here and drawn on their own layer — see
+    /// [`PageKeepsake::float`].
+    fn page_keepsake_icons(&self) -> Vec<bt_render::ChromeIcon> {
+        self.window
+            .page_keepsakes
+            .iter()
+            .filter(|keepsake| keepsake.float.is_none())
+            .filter_map(|keepsake| {
+                let picture = self.window.web_thumbs.frame(keepsake.leaf)?;
+                Some(page_keepsake_icon(picture, keepsake.rect))
+            })
+            .collect()
+    }
+
+    /// The same picture for a page a float is carrying, on that window's layer.
+    fn float_page_keepsake_icon(&self, float: float::FloatId) -> Option<bt_render::ChromeIcon> {
+        let keepsake = self
+            .window
+            .page_keepsakes
+            .iter()
+            .find(|keepsake| keepsake.float == Some(float))?;
+        let picture = self.window.web_thumbs.frame(keepsake.leaf)?;
+        Some(page_keepsake_icon(picture, keepsake.rect))
     }
 
     /// **Whether this page is what typing goes into right now** — the one
