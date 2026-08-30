@@ -269,11 +269,23 @@
           <Description>Show file extensions in Explorer</Description>
           <CommandLine>reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v HideFileExt /t REG_DWORD /d 0 /f</CommandLine>
         </SynchronousCommand>
-        <SynchronousCommand wcm:action="add">
-          <Order>2</Order>
-          <Description>Let the host drive PowerShell in this guest</Description>
-          <CommandLine>powershell -NoProfile -Command "Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned -Force"</CommandLine>
-        </SynchronousCommand>
+        <!--
+          **No Set-ExecutionPolicy here, deliberately.** This list used to carry
+
+            powershell -NoProfile -Command "Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned -Force"
+
+          under the heading "let the host drive PowerShell in this guest". The
+          host never needed it: every guest call run-smoke-in-vm.ps1 makes is
+          `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ...`, and
+          that flag is a setting of the one process it starts, which no machine
+          policy has to permit.
+
+          What the line did instead was give the gate a Windows nobody has. A
+          Windows client leaves the factory on Restricted, and DESIGN.md 7.47 is
+          about a switch that says nothing on exactly that machine. A clean
+          machine that has been moved off the shipped default is not a clean
+          machine, and it cannot show that class of fault at all.
+        -->
         <!--
           VMware Tools, from a third CD-ROM that new-vm.ps1 attaches: the
           Workstation installation directory's own windows.iso. Every vmrun
@@ -293,7 +305,7 @@
           list instead, which is what puts the Tools drivers in place.
         -->
         <SynchronousCommand wcm:action="add">
-          <Order>3</Order>
+          <Order>2</Order>
           <Description>Install VMware Tools silently from the third CD-ROM</Description>
           <CommandLine>cmd /c for %d in (D E F G H I J K L M N O P Q R S T U V W X Y Z) do @if exist %d:\VMwareToolsUpgrader.exe start /wait %d:\setup.exe /S /v&quot;/qn REBOOT=R&quot;</CommandLine>
         </SynchronousCommand>
@@ -304,12 +316,12 @@
           ready while it is still on its way down.
         -->
         <SynchronousCommand wcm:action="add">
-          <Order>4</Order>
+          <Order>3</Order>
           <Description>Arm the sentinel the host polls for, to be written after the restart</Description>
           <CommandLine>reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce" /v FolioOobeDone /t REG_SZ /d "cmd /c &gt;C:\folio-vm\oobe-done.txt echo unattended install finished" /f</CommandLine>
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add">
-          <Order>5</Order>
+          <Order>4</Order>
           <Description>Restart, so the Tools drivers are loaded before the clean snapshot</Description>
           <CommandLine>shutdown /r /t 20 /c "VMware Tools installed - restarting for the clean snapshot"</CommandLine>
         </SynchronousCommand>
