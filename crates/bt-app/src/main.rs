@@ -99944,6 +99944,65 @@ mod tests {
         }
     }
 
+    /// PIN (next22 #206): **one clock, one rate, and the wrap is not a seam.**
+    ///
+    /// The angle is a continuous monotone clock times a constant rate taken mod
+    /// one turn, and this is the arithmetic that says so: a run of frames at a
+    /// frame's own cadence, crossing twelve o'clock three times, where every
+    /// step is the same size as every other. Each of the four ways this goes
+    /// wrong shows up here as one step that is not the others — a phase that
+    /// restarts per turn closes short, an eased turn is fast in its middle and
+    /// slow at its ends, and a frame lost or repeated at the wrap is a step of
+    /// nothing or of two.
+    ///
+    /// One milliturn of slack, and it is the *unit's* slack rather than the
+    /// clock's: an angle stated in thousandths cannot advance by 15.15 of them,
+    /// so consecutive steps of 15 and 16 are the same rate written down. It is
+    /// a third of a degree, and the defect it has to stay clear of was a
+    /// quarter of the circle.
+    ///
+    /// The arc's *length* is checked here too, in the same loop, because the
+    /// second way a spin can seam is for the arc to breathe against the turn
+    /// and close its own period somewhere other than the top.
+    #[test]
+    fn the_spin_steps_the_same_angle_through_the_wrap() {
+        let palette = LIGHT_CHROME;
+        let period = Duration::from_millis(WINDOW_TAB_RING_SPIN_PERIOD_MS);
+        // One frame of a 60Hz pane, which is the cadence the ring is actually
+        // sampled at and no divisor of the period.
+        let frame = Duration::from_micros(16_667);
+        let step_milliturns = 1000.0 * frame.as_secs_f64() / period.as_secs_f64();
+        // Three whole turns, so the wrap is crossed three times over and no
+        // crossing is the first step of the run.
+        let frames = (3.0 * period.as_secs_f64() / frame.as_secs_f64()).ceil() as u32;
+
+        let at = |elapsed| {
+            ring_arc(
+                ProgressState::Indeterminate,
+                None,
+                elapsed,
+                Motion::Full,
+                &palette,
+            )
+        };
+        let sweep = at(Duration::ZERO).sweep_milliturns;
+        let mut previous = at(Duration::ZERO).start_milliturns;
+        for frame_index in 1..=frames {
+            let here = at(frame * frame_index);
+            let stepped = (u32::from(here.start_milliturns) + 1000 - u32::from(previous)) % 1000;
+            assert!(
+                (f64::from(stepped) - step_milliturns).abs() <= 1.0,
+                "frame {frame_index} turned {stepped} milliturns where every frame turns \
+                 {step_milliturns:.2} — the angle is not one clock at one rate"
+            );
+            assert_eq!(
+                here.sweep_milliturns, sweep,
+                "frame {frame_index} changed the arc's length; an indeterminate arc has one"
+            );
+            previous = here.start_milliturns;
+        }
+    }
+
     /// PIN (T2): every `OSC 9;4` state maps to the arc the mock-up gives it.
     ///
     /// The two states that may arrive *without* a percentage are the reason
