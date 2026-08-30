@@ -37737,9 +37737,8 @@ mod tests {",
     fn a_hand_out_of_the_band_leaves_the_list_exactly_where_it_was() {
         let column = scrolling_column(0.0);
         let run = focus_rail_run(&column);
-        let speed_at = |y: f32| {
-            autoscroll_speed(&run, 0.0, column_hand(&column, y), 1.0, crate::Motion::Full)
-        };
+        let speed_at =
+            |y: f32| autoscroll_speed(&run, 0.0, column_hand(&column, y), 1.0, crate::Motion::Full);
         let [top, foot] = run.viewport;
         assert_eq!(
             speed_at((top + foot) / 2.0),
@@ -37874,7 +37873,10 @@ mod tests {",
         let edge = bt_render::DRAG_AUTOSCROLL_EDGE_LOGICAL_PX;
         let deep = speed_at(foot - 1.0, 1.0);
         let shallow = speed_at(foot - edge + 1.0, 1.0);
-        assert!(deep > 0.0, "reduced motion is a slower list, not a still one");
+        assert!(
+            deep > 0.0,
+            "reduced motion is a slower list, not a still one"
+        );
         assert_eq!(
             deep, shallow,
             "and it is flat: the same rate wherever in the band the hand is"
