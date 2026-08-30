@@ -36752,11 +36752,16 @@ impl Runtime<'_> {
         // of it — see `ProfileMenuLayout::files_pane_accel`.
         let shortcuts = &self.app.shortcuts;
         let recent = self.app.recent.entries();
+        // The machine, taken beside the two above and for their reason: it is
+        // read here as well as at the draw because since 2026-08-29 it decides
+        // which rows the list has (`ProfileTable::offered_to_start`).
+        let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::layout(
             anchor,
             side,
+            programs,
             (width as f32, height as f32),
             scale,
             recent,
@@ -119052,6 +119057,19 @@ mod tests {
         buffer
     }
 
+    /// NTFS records the last-write time on a coarse tick, so two writes inside
+    /// one tick carry the same mtime and the rule under test never fires. The
+    /// disk is moved forward by hand so the test reads the rule, not the clock.
+    fn move_the_disk_forward(path: &Path) {
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open for touch")
+            .set_modified(later)
+            .expect("set mtime");
+    }
+
     /// RED ① — **a document in the pool follows the disk even while no pane is
     /// on it** (user report on a real machine, 2026-08-29; user ruling the same
     /// day).
@@ -119118,6 +119136,7 @@ mod tests {
         // ② Something outside this window rewrites it, and the watcher's news
         // reaches the buffer through the one door.
         std::fs::write(&elsewhere, "# version two\n\nthe second body.\n").expect("rewrite");
+        move_the_disk_forward(&elsewhere);
         let source = preview::PreviewSource::file(&elsewhere);
         let buffer = tab
             .preview_pool
@@ -119189,6 +119208,7 @@ mod tests {
 
         // ① Somebody else writes the file.
         std::fs::write(&path, "# two\n").expect("rewrite");
+        move_the_disk_forward(&path);
         assert_eq!(
             buffer.note_disk_moved(true),
             preview::DiskVerdict::Say,

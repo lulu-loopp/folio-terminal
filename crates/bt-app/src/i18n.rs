@@ -789,6 +789,18 @@ pub enum Text {
     /// machine has rather than because anybody picked it.
     ProfilesBadgeDefaultAutomatic,
     ProfilesBadgeHidden,
+    /// **The agent group's own line** — what to do about an agent this window
+    /// looked for on Windows and did not find (user ruling 2026-08-29).
+    ///
+    /// It carries no name, and that is the ruling rather than a shortening: the
+    /// rows above it each say which agent they are, the way out is the same for
+    /// all of them, and the sentence written seven times with one word changed
+    /// is what this replaced. `<command>` is a placeholder in both languages —
+    /// the reader takes it from the row they are missing.
+    ///
+    /// Drawn only while a row is missing, and never on a machine that has all
+    /// seven ([`crate::profiles::agent_note_after`]).
+    ProfilesAgentInsideWsl,
 
     // ── the honest capability sentences (J85) ──────────────────
     //
@@ -2617,6 +2629,17 @@ impl Text {
             Self::ProfilesBadgeDefault => pick(lang, "default", "默认"),
             Self::ProfilesBadgeDefaultAutomatic => pick(lang, "automatic default", "自动默认"),
             Self::ProfilesBadgeHidden => pick(lang, "hidden", "已隐藏"),
+            // **The Chinese is short between its Latin tokens**, which is a
+            // layout fact and not a style preference: a Chinese sentence has
+            // spaces only around its Latin words, so a run of Han between two of
+            // them is one piece the wrapper cannot break inside
+            // (`crate::linebreak`). Both wordings are written to the width of
+            // the column the rows' own sentences stand in.
+            Self::ProfilesAgentInsideWsl => pick(
+                lang,
+                "An agent installed inside WSL can be started from the WSL profile, or from a new profile with program wsl.exe and arguments -e <command>",
+                "安装在 WSL 内的 agent，可从 WSL 配置启动，或新建配置：程序 wsl.exe，参数 -e <命令名>",
+            ),
             // **The four capability sentences say what the reader gets, in the
             // reader's own words** (user ruling 2026-08-29). 「提示符标记」 was a
             // word-for-word rendering of "prompt marks" and named the wrong
@@ -3720,7 +3743,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 530] = [
+    pub const ALL: [Self; 531] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3904,6 +3927,7 @@ impl Text {
         Self::ProfilesBadgeDefault,
         Self::ProfilesBadgeDefaultAutomatic,
         Self::ProfilesBadgeHidden,
+        Self::ProfilesAgentInsideWsl,
         Self::CapFull,
         Self::CapPowerShell,
         Self::CapWslBash,
@@ -4807,35 +4831,10 @@ fn agent_not_found_on_windows_in(lang: Lang, profile_title: &str) -> String {
     }
 }
 
-/// The way out, under [`agent_not_found_on_windows`]: the profile that already
-/// starts a WSL shell, or a profile of the reader's own that starts this one
-/// command inside it.
-///
-/// `command` is what the reader types to start the agent — the name this table
-/// asks `PATH` for — so the arguments printed here are the arguments that work.
-#[must_use]
-pub fn agent_inside_wsl_hint(command: &str) -> String {
-    agent_inside_wsl_hint_in(current(), command)
-}
-
-fn agent_inside_wsl_hint_in(lang: Lang, command: &str) -> String {
-    match lang {
-        Lang::English => format!(
-            "If it is inside WSL, run the WSL profile, or add one with program wsl.exe and arguments -e {command}"
-        ),
-        // **The Chinese is short between its Latin tokens, and that is a
-        // layout fact rather than a style preference.** This pair of lines
-        // wraps at spaces, and a Chinese sentence has spaces only around its
-        // Latin words — so a run of Han characters between two of them is one
-        // unbreakable token. 「配置的窗格中运行，或新建配置：程序」 is 17 characters,
-        // 204px of a 339px line, which pushed the rest of the sentence onto the
-        // second line and cut `opencode` in half. 「配置启动，或新建配置：程序」 is
-        // four characters shorter and the whole sentence fits.
-        Lang::Chinese => format!(
-            "若安装在 WSL 内，可从 WSL 配置启动，或新建配置：程序 wsl.exe，参数 -e {command}"
-        ),
-    }
-}
+// `agent_inside_wsl_hint` is **retired** (user ruling 2026-08-29, the same day
+// it arrived): the way out is one fact about the whole agent group, so it is one
+// line under the group and it names no command — [`Text::ProfilesAgentInsideWsl`].
+// A composed string is what a *row* needs, and no row says this any more.
 
 /// Why a built-in's `Colour` row is dark — **the row's sentence becomes the
 /// reason**, which is this dialog's own idiom for a control that is not the
@@ -7223,10 +7222,6 @@ mod tests {
                 (
                     "agent_not_found_on_windows",
                     agent_not_found_on_windows_in(lang, "Codex"),
-                ),
-                (
-                    "agent_inside_wsl_hint",
-                    agent_inside_wsl_hint_in(lang, "codex"),
                 ),
                 (
                     "profiles_file_kept",

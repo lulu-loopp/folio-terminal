@@ -838,6 +838,12 @@ fn record_unusable_hint() -> &'static str {
 fn shortcut_undelivered_note() -> &'static str {
     Text::ShortcutUndelivered.text()
 }
+/// **The Profiles page's agent note** — the way out of an agent that lives
+/// inside WSL, said once under the group rather than on each of its rows (user
+/// ruling 2026-08-29). See [`Text::ProfilesAgentInsideWsl`].
+fn agent_wsl_note() -> &'static str {
+    Text::ProfilesAgentInsideWsl.text()
+}
 fn restore_all_label() -> &'static str {
     Text::ShortcutRestoreAll.text()
 }
@@ -6822,6 +6828,17 @@ pub struct SettingsLayout {
     profiles: Vec<ProfileLineLayout>,
     /// The list's foot — `+ New profile`. `None` on every other view.
     new_profile: Option<[f32; 4]>,
+    /// **The agent group's line**, under the last row that starts an agent (user
+    /// ruling 2026-08-29), or `None` when every agent this build knows is
+    /// startable here — and on every view that is not the list.
+    ///
+    /// Its own rect for [`Self::foot_note`]'s reason: the height is measured
+    /// where the page's height is solved, so the rows under it were pushed down
+    /// by the very number the sentence is drawn into.
+    ///
+    /// Not a focus stop and not a hit target. It is a statement, and this
+    /// dialog's ring only ever lands on things that answer a press.
+    agent_note: Option<[f32; 4]>,
     /// The open row menu, or `None`. At most one, for the reason at most one
     /// picker is open: this dialog unwinds one layer per `Esc`.
     row_menu: Option<RowMenuLayout>,
@@ -7909,6 +7926,94 @@ fn shortcut_foot_note_height(
         * scale
 }
 
+/// **Where a Profiles row's columns stand across it** — the action run solved
+/// from the trailing edge inwards, and the text column that is what it leaves.
+///
+/// Right to left, which is how the run is really built: the verbs sit against
+/// the trailing edge and the arrows sit against the verb. Laid out the other way
+/// a row would move its arrows whenever its neighbour's word changed length.
+///
+/// **One derivation with two readers**, on [`shortcut_foot_note_width`]'s
+/// footing: the rows are placed from it, and the group note that stands under
+/// the agents is wrapped to the column it names. Written out twice, the note
+/// would be measured at one width and reserved at another, and the difference
+/// is a line of it off the end of the page's own scroll.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ProfileRowColumns {
+    /// The `↑`, the `↓`, the `Edit` word and the `⋯`, each as (left, right).
+    up: (f32, f32),
+    down: (f32, f32),
+    edit: (f32, f32),
+    more: (f32, f32),
+    /// Where the name, the command line and the capability sentence stand.
+    text: (f32, f32),
+}
+
+fn profile_row_columns(
+    row_left: f32,
+    row_right: f32,
+    scale: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> ProfileRowColumns {
+    let px = |value: f32| value * scale;
+    let act = px(PROFILE_ACT_SIDE_LOGICAL_PX);
+    // **`⋯` is the trailing edge and `Edit` stands against it**, which is the
+    // mock-up's own run once the editor exists: one verb in the open and the
+    // rest behind the menu. `Edit` is the only word here, so it is the only box
+    // whose width is measured; everything else is the 26px square the design
+    // gives a glyph.
+    let more = (row_right - act, row_right);
+    let word = measure(
+        crate::i18n::Text::ProfilesEdit.text(),
+        px(PROFILE_ACT_FONT_LOGICAL_PX),
+    );
+    let edit_width = (word + 2.0 * px(PROFILE_ACT_PADDING_X_LOGICAL_PX)).max(act);
+    let edit_right = more.0 - px(PROFILE_ACT_GAP_LOGICAL_PX);
+    let edit = (edit_right - edit_width, edit_right);
+    let separator_right =
+        edit.0 - px(PROFILE_ACT_GAP_LOGICAL_PX + PROFILE_SEPARATOR_MARGIN_LOGICAL_PX);
+    let down_right = separator_right
+        - px(1.0 + PROFILE_SEPARATOR_MARGIN_LOGICAL_PX + PROFILE_ACT_GAP_LOGICAL_PX);
+    let down = (down_right - act, down_right);
+    let up_right = down.0 - px(PROFILE_ACT_GAP_LOGICAL_PX);
+    let up = (up_right - act, up_right);
+    let text_left = row_left + px(PROFILE_MARK_COLUMN_LOGICAL_PX) + px(PROFILE_ROW_GAP_LOGICAL_PX);
+    ProfileRowColumns {
+        up,
+        down,
+        edit,
+        more,
+        text: (text_left, up.0 - px(PROFILE_ROW_GAP_LOGICAL_PX)),
+    }
+}
+
+/// How tall the agent group's note stands, wrapped into that column.
+#[must_use]
+fn agent_note_height(width: f32, scale: f32, measure: &mut dyn FnMut(&str, f32) -> f32) -> f32 {
+    description_lines(
+        agent_wsl_note(),
+        width,
+        ROW_DESC_FONT_LOGICAL_PX * scale,
+        measure,
+    ) as f32
+        * ROW_DESC_LINE_LOGICAL_PX
+        * scale
+}
+
+/// **The whole band the note takes between two rows**: the sentence, plus the
+/// air a row keeps above its own first line on either side of it.
+///
+/// [`shortcut_foot_band`]'s twin, and it exists for that function's reason:
+/// `page_height` reserves this and the layout fills it, and a page whose note is
+/// measured by one rule and drawn by another is a page whose last row is off the
+/// end of its own scroll.
+#[must_use]
+fn agent_note_band(span: f32, scale: f32, measure: &mut dyn FnMut(&str, f32) -> f32) -> f32 {
+    let columns = profile_row_columns(0.0, span, scale, measure);
+    let text = columns.text.1 - columns.text.0;
+    2.0 * ROW_PADDING_Y_LOGICAL_PX * scale + agent_note_height(text, scale, measure)
+}
+
 /// **How tall the Shortcuts page's foot is**: the taller of its two occupants.
 ///
 /// The one place that answers it, for [`shortcut_foot_note_width`]'s reason
@@ -8727,6 +8832,7 @@ pub fn layout_for_menus(
     }
     let mut placed_profiles: Vec<ProfileLineLayout> = Vec::with_capacity(profile_lines.len());
     let mut new_profile: Option<[f32; 4]> = None;
+    let mut agent_note: Option<[f32; 4]> = None;
     if !profile_lines.is_empty() {
         cursor += px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX);
         let label = [
@@ -8750,59 +8856,25 @@ pub fn layout_for_menus(
             let top = cursor + px(ROW_PADDING_Y_LOGICAL_PX);
             cursor += metrics.profile_row_height;
             let middle = (band[1] + band[3]) / 2.0;
-            // **Right to left, which is how the run is really built**: the verbs
-            // sit against the trailing edge and the arrows sit against the verb.
-            // Laid out the other way a row would move its arrows whenever its
-            // neighbour's word changed length.
             let act = px(PROFILE_ACT_SIDE_LOGICAL_PX);
-            // **`⋯` is the trailing edge and `Edit` stands against it**, which is
-            // the mock-up's own run once the editor exists: one verb in the open
-            // and the rest behind the menu. `Edit` is the only word here, so it
-            // is the only box whose width is measured; everything else is the
-            // 26px square the design gives a glyph.
-            let more = [
-                row_right - act,
-                middle - act / 2.0,
-                row_right,
-                middle + act / 2.0,
-            ];
-            let word = measure(
-                crate::i18n::Text::ProfilesEdit.text(),
-                px(PROFILE_ACT_FONT_LOGICAL_PX),
+            // The run and the column it leaves, both from the one function that
+            // solves them — see [`profile_row_columns`].
+            let columns = profile_row_columns(row_left, row_right, scale, measure);
+            let run =
+                |(left, right): (f32, f32)| [left, middle - act / 2.0, right, middle + act / 2.0];
+            let (up, down, edit, more) = (
+                run(columns.up),
+                run(columns.down),
+                run(columns.edit),
+                run(columns.more),
             );
-            let edit_width = (word + 2.0 * px(PROFILE_ACT_PADDING_X_LOGICAL_PX)).max(act);
-            let edit_right = more[0] - px(PROFILE_ACT_GAP_LOGICAL_PX);
-            let edit = [
-                edit_right - edit_width,
-                middle - act / 2.0,
-                edit_right,
-                middle + act / 2.0,
-            ];
-            let separator_right =
-                edit[0] - px(PROFILE_ACT_GAP_LOGICAL_PX + PROFILE_SEPARATOR_MARGIN_LOGICAL_PX);
-            let down_right = separator_right
-                - px(1.0 + PROFILE_SEPARATOR_MARGIN_LOGICAL_PX + PROFILE_ACT_GAP_LOGICAL_PX);
-            let down = [
-                down_right - act,
-                middle - act / 2.0,
-                down_right,
-                middle + act / 2.0,
-            ];
-            let up_right = down[0] - px(PROFILE_ACT_GAP_LOGICAL_PX);
-            let up = [
-                up_right - act,
-                middle - act / 2.0,
-                up_right,
-                middle + act / 2.0,
-            ];
 
             let column = px(PROFILE_MARK_COLUMN_LOGICAL_PX);
             let side = px(PROFILE_MARK_LOGICAL_PX).round();
             let mark_left = ((row_left + row_left + column - side) / 2.0).round();
             let mark_top = ((band[1] + band[3] - side) / 2.0).round();
             let mark = [mark_left, mark_top, mark_left + side, mark_top + side];
-            let text_column_left = row_left + column + px(PROFILE_ROW_GAP_LOGICAL_PX);
-            let text_column_right = up[0] - px(PROFILE_ROW_GAP_LOGICAL_PX);
+            let (text_column_left, text_column_right) = columns.text;
 
             let title_width = measure(line.title, px(ROW_TITLE_FONT_LOGICAL_PX));
             let title = [
@@ -8827,7 +8899,7 @@ pub fn layout_for_menus(
                 text_column_right,
                 title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX),
             ];
-            let caps = line.capability.as_ref().map(|_| {
+            let caps = line.capability.map(|_| {
                 let line_of = |ordinal: f32| {
                     let top = desc[3]
                         + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX)
@@ -8854,6 +8926,19 @@ pub fn layout_for_menus(
                 edit,
                 more,
             });
+            // **The agent group's one line, under the last row that is one**
+            // (user ruling 2026-08-29). It stands in the very column the
+            // sentences above it stand in — it is what those rows would each
+            // have said — and it takes the air a row keeps above its own first
+            // line on either side, so the row under it is not crowded by a
+            // paragraph that belongs to the rows over it.
+            if crate::profiles::agent_note_after(profile_lines) == Some(index) {
+                cursor += px(ROW_PADDING_Y_LOGICAL_PX);
+                let height =
+                    agent_note_height(text_column_right - text_column_left, scale, measure);
+                agent_note = Some([text_column_left, cursor, text_column_right, cursor + height]);
+                cursor += height + px(ROW_PADDING_Y_LOGICAL_PX);
+            }
         }
         // **The list's foot, and the same `.sc-foot` every other page's verbs
         // stand on** — right-aligned, one button, the air above it the shortcut
@@ -9007,6 +9092,7 @@ pub fn layout_for_menus(
         shortcuts: placed_lines,
         profiles: placed_profiles,
         new_profile,
+        agent_note,
         row_menu,
         crumb: placed_crumb,
         browse: placed_browse,
@@ -9453,6 +9539,15 @@ impl StackMetrics {
             // dialog whose height depended on the machine — and the dialog is
             // one height, taken over every page, decided when it opens.
             stack += content.profiles.len() as f32 * self.profile_row_height;
+            // **And the agent group's line, when there is an agent to say it
+            // about** (user ruling 2026-08-29). This *is* a height that follows
+            // the machine, and it may be: the frame is not measured from here.
+            // [`everyday_cap`] solves the dialog's size with `profiles: &[]` —
+            // the list's length is already a fact about somebody's own file —
+            // so what this adds is scroll, which is what a list has.
+            if crate::profiles::agent_note_after(content.profiles).is_some() {
+                stack += agent_note_band(span, self.scale, measure);
+            }
         }
         px(CONTENT_PADDING_TOP_LOGICAL_PX) + stack + px(CONTENT_PADDING_BOTTOM_LOGICAL_PX)
     }
@@ -11243,7 +11338,7 @@ fn push_profile_page(
             tabular_numerals: false,
             clip: None,
         });
-        if let (Some(boxes), Some(text)) = (placed.caps, line.capability.as_deref()) {
+        if let (Some(boxes), Some(text)) = (placed.caps, line.capability) {
             let width = boxes[0][2] - boxes[0][0];
             for (box_, part) in boxes
                 .iter()
@@ -11349,6 +11444,36 @@ fn push_profile_page(
             stack
                 .quads
                 .extend(focus_ring(placed.more, scale, palette.accent));
+        }
+    }
+    // **The agent group's own line** (user ruling 2026-08-29), in the muted ink
+    // an unavailable row's sentence wears — it is about rows that cannot start,
+    // and it is not one of them.
+    //
+    // The same call on the same string at the same width the layout measured the
+    // band from, which is the shortcut foot note's rule met one page over.
+    if let Some(note) = layout.agent_note {
+        let font = px(ROW_DESC_FONT_LOGICAL_PX);
+        let line_height = px(ROW_DESC_LINE_LOGICAL_PX);
+        for (ordinal, line) in
+            wrapped_description(agent_wsl_note(), note[2] - note[0], font, measure)
+                .into_iter()
+                .enumerate()
+        {
+            let top = note[1] + ordinal as f32 * line_height;
+            stack.labels.push(ChromeLabel {
+                mono: false,
+                text: line,
+                rect: [note[0], top, note[2], top + line_height],
+                font_size_px: font,
+                color: palette.menu_item_hint_text,
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: None,
+            });
         }
     }
     // **`+ New profile` copies the default** rather than opening a blank one: a
@@ -22805,7 +22930,8 @@ mod tests {
                 mark: ChromeMark::ProfilePowerShell,
                 title: "PowerShell 7",
                 command: "pwsh.exe -NoLogo".to_owned(),
-                capability: Some(Text::CapPowerShell.text().to_owned()),
+                capability: Some(Text::CapPowerShell.text()),
+                is_agent: false,
                 is_default: true,
                 default_is_automatic: false,
                 is_fallback: false,
@@ -22818,7 +22944,8 @@ mod tests {
                 mark: ChromeMark::ProfileUbuntu,
                 title: "WSL",
                 command: "wsl.exe --cd ~".to_owned(),
-                capability: Some(Text::CapWslBash.text().to_owned()),
+                capability: Some(Text::CapWslBash.text()),
+                is_agent: false,
                 is_default: false,
                 default_is_automatic: false,
                 is_fallback: false,
@@ -22832,6 +22959,7 @@ mod tests {
                 title: "Git Bash",
                 command: "Git Bash is not installed".to_owned(),
                 capability: None,
+                is_agent: false,
                 is_default: false,
                 default_is_automatic: false,
                 is_fallback: false,
@@ -22844,7 +22972,8 @@ mod tests {
                 mark: ChromeMark::ProfileCmd,
                 title: "Command Prompt",
                 command: "cmd.exe".to_owned(),
-                capability: Some(Text::CapCmd.text().to_owned()),
+                capability: Some(Text::CapCmd.text()),
+                is_agent: false,
                 is_default: false,
                 default_is_automatic: false,
                 is_fallback: false,
@@ -22853,6 +22982,55 @@ mod tests {
                 available: true,
             },
         ]
+    }
+
+    /// Two shells with two **agent** rows under them: one this machine has, one
+    /// it has not.
+    ///
+    /// The pair of agents is the point — the group's note is about the missing
+    /// one, and the row after it is what proves the note is placed under the
+    /// *last* agent and not under the first one that was absent.
+    ///
+    /// **Four rows and not six**, which is a fact about this fixture rather than
+    /// about the page: the dialog is one height, and a page taller than it
+    /// scrolls — so a sixth row would put the note below the content box and a
+    /// pin about what is *drawn* would be asking after something the reader
+    /// cannot see either. The two shells kept are the two that can start; what
+    /// a greyed shell draws is [`an_unavailable_row_is_greyed_whole_and_says_only_why`]'s.
+    fn profile_lines_with_agents() -> Vec<crate::profiles::ProfileLine> {
+        let mut lines = profile_lines();
+        lines.truncate(2);
+        lines.push(crate::profiles::ProfileLine {
+            index: 2,
+            mark: ChromeMark::ProfileClaude,
+            title: "Claude Code",
+            command: "Claude Code was not found on Windows".to_owned(),
+            capability: None,
+            is_agent: true,
+            is_default: false,
+            default_is_automatic: false,
+            is_fallback: false,
+            deletable: false,
+            hidden: false,
+            available: false,
+        });
+        lines.push(crate::profiles::ProfileLine {
+            index: 3,
+            mark: ChromeMark::ProfileGeneric {
+                colour: crate::marks::MarkColour::Teal,
+            },
+            title: "Codex",
+            command: "codex.cmd".to_owned(),
+            capability: Some(Text::CapNone.text()),
+            is_agent: true,
+            is_default: false,
+            default_is_automatic: false,
+            is_fallback: false,
+            deletable: false,
+            hidden: false,
+            available: true,
+        });
+        lines
     }
 
     fn profiles_content<'a>(
@@ -23881,5 +24059,177 @@ mod tests {
             bands.windows(2).all(|pair| pair[1] > pair[0]),
             "and they stack downward"
         );
+    }
+
+    /// PIN (user ruling 2026-08-29) — **an agent this window did not find says
+    /// where it looked and nothing else; the way out is one line under the
+    /// group.**
+    ///
+    /// The three claims are one ruling. The row is two lines, like the greyed
+    /// shell above it, because the sentence it used to carry was the same
+    /// sentence on every missing agent with one word changed — five of them on
+    /// an ordinary machine, three lines apiece. The note stands under the
+    /// **last** agent row rather than under the first absent one, because it is
+    /// about the group. And it is absent entirely when every agent is startable,
+    /// because then it has no subject.
+    ///
+    /// Red gate: put the sentence back on the row and the first assertion counts
+    /// three lines under `Claude Code`; hang the note off the missing row
+    /// instead of the last one and it lands above `Codex`; drop the condition
+    /// and the all-present page grows a paragraph about nothing.
+    #[test]
+    fn a_missing_agent_is_two_lines_and_the_group_says_the_way_out_once() {
+        let lines = profile_lines_with_agents();
+        let placed = profiles_page(&lines);
+        let claude = placed
+            .profiles
+            .iter()
+            .find(|row| row.index == 2)
+            .expect("the agent row is on the page");
+        assert!(
+            claude.caps.is_none(),
+            "a missing agent has no capability boxes: {:?}",
+            claude.caps
+        );
+
+        // Two lines drawn inside its band, and they are the two the row knows.
+        let drawn_labels: Vec<ChromeLabel> = profiles_drawn(&placed, &lines, None, None)
+            .into_iter()
+            .flat_map(|layer| layer.labels)
+            .collect();
+        let inside: Vec<&str> = drawn_labels
+            .iter()
+            .filter(|label| label.rect[1] >= claude.band[1] && label.rect[3] <= claude.band[3])
+            .map(|label| label.text.as_str())
+            .collect();
+        assert_eq!(
+            inside,
+            vec!["Claude Code", "Claude Code was not found on Windows"],
+            "the name and where this window looked, and no third line"
+        );
+
+        // The note stands under the last agent row — the startable one — and
+        // above the foot.
+        let note = placed
+            .agent_note
+            .expect("an agent is missing, so it is said");
+        let codex = placed
+            .profiles
+            .iter()
+            .find(|row| row.index == 3)
+            .expect("the second agent row");
+        assert!(
+            note[1] >= codex.band[3],
+            "the group's line follows the last agent row: {note:?} vs {:?}",
+            codex.band
+        );
+        assert!(
+            note[3] <= placed.new_profile.expect("the list's foot")[1],
+            "and stands clear of the foot"
+        );
+        assert_eq!(
+            (note[0], note[2]),
+            (codex.desc[0], codex.desc[2]),
+            "in the very column the rows' own sentences stand in"
+        );
+
+        // It is drawn, at the width it was measured at, in the muted ink.
+        let drawn: Vec<&str> = drawn_labels
+            .iter()
+            .filter(|label| label.rect[1] >= note[1] && label.rect[3] <= note[3])
+            .map(|label| label.text.as_str())
+            .collect();
+        assert_eq!(
+            drawn.join(" "),
+            wrapped_description(
+                agent_wsl_note(),
+                note[2] - note[0],
+                ROW_DESC_FONT_LOGICAL_PX,
+                &mut measure
+            )
+            .join(" "),
+            "the same call on the same string at the same width"
+        );
+
+        // And the rows below it really were pushed down by it.
+        let without = profiles_page(&profile_lines());
+        assert!(
+            placed.agent_note.is_some() && without.agent_note.is_none(),
+            "a page with no agent row on it has nothing to say about agents"
+        );
+    }
+
+    /// PIN — **a machine with every agent on it is not told how to reach one
+    /// inside WSL.**
+    ///
+    /// The other half of the ruling above, and it is the half a condition can
+    /// lose silently: a note that appeared whatever the machine had would be a
+    /// paragraph of instructions under a list where nothing is missing.
+    #[test]
+    fn the_agent_note_is_absent_where_every_agent_is_startable() {
+        let mut lines = profile_lines_with_agents();
+        for line in &mut lines {
+            if line.is_agent {
+                line.available = true;
+                line.command = "claude.cmd".to_owned();
+                line.capability = Some(Text::CapNone.text());
+            }
+        }
+        let placed = profiles_page(&lines);
+        assert_eq!(placed.agent_note, None);
+        let shorter = placed.new_profile.expect("the list's foot")[1];
+        let taller = profiles_page(&profile_lines_with_agents())
+            .new_profile
+            .expect("the list's foot")[1];
+        assert!(
+            shorter < taller,
+            "the note is a band and not a decoration: the foot moves with it"
+        );
+    }
+
+    /// PIN — **the note fits three lines in both languages** (the same cap
+    /// every sentence in this dialog is written to).
+    ///
+    /// `wrapped_description` ellipsises the last line rather than dropping the
+    /// tail, so a sentence that outgrew the column would say so out loud — and
+    /// what is owed then is shorter copy, not a taller box. Measured in a CJK
+    /// face for the Chinese, because a shorter sentence is not a shorter wrap:
+    /// a run of Han between two Latin words is one unbreakable piece.
+    #[test]
+    fn the_agent_note_fits_the_column_it_stands_in() {
+        use crate::i18n::{Lang, Text};
+        fn measure_in_a_cjk_face(text: &str, font_size_px: f32) -> f32 {
+            bt_unicode::graphemes(text)
+                .map(|cluster| bt_unicode::cluster_width(cluster) as f32)
+                .sum::<f32>()
+                * font_size_px
+                * TEST_ADVANCE_PER_EM
+        }
+        let placed = profiles_page(&profile_lines_with_agents());
+        let note = placed.agent_note.expect("the note is on this page");
+        let width = note[2] - note[0];
+        for (lang, measure) in [
+            (
+                Lang::English,
+                &mut measure as &mut dyn FnMut(&str, f32) -> f32,
+            ),
+            (Lang::Chinese, &mut measure_in_a_cjk_face),
+        ] {
+            let lines = wrapped_description(
+                Text::ProfilesAgentInsideWsl.in_lang(lang),
+                width,
+                ROW_DESC_FONT_LOGICAL_PX,
+                measure,
+            );
+            assert!(
+                lines.len() <= ROW_DESC_MAX_LINES,
+                "{lang:?}: {} lines in {width}px",
+                lines.len()
+            );
+            assert!(
+                !lines.last().is_some_and(|last| last.ends_with(ELLIPSIS)),
+                "{lang:?}: the sentence does not fit the column: {lines:?}"
+            );
+        }
     }
 }

@@ -1438,6 +1438,43 @@ impl ProfileTable {
             .filter(|index| !self.profiles[*index].hidden)
             .collect()
     }
+
+    /// The rows the **new-tab picker** offers: [`Self::offered`], less the
+    /// built-in agents this machine has nowhere to start (user ruling
+    /// 2026-08-29).
+    ///
+    /// **§7.27 is unchanged and this is not a second reading of it.** A shell
+    /// this machine cannot start is still drawn greyed rather than hidden, for
+    /// the reason [`ProfilePrograms::is_available`] gives: the row is the
+    /// product saying "this is a thing Folio opens", and dropping it conflates
+    /// "you have not installed Git" with "we never thought of Git". Five rows
+    /// say that, and a reader who has not got PowerShell 7 can act on it.
+    ///
+    /// The agents are seven, and on the machine most readers open this menu on
+    /// they are seven rows of 「没找到」 — five of them filling the first screen
+    /// of a list whose whole job is to be pressed. The sentence the greying
+    /// makes is worth saying **once**, somewhere it can be read rather than
+    /// pressed, and that place exists: the Profiles page keeps all seven, says
+    /// where this window looked, and tells the reader what to do about a `codex`
+    /// that lives inside WSL. A picker is not that page — it is a list of what
+    /// can start now — so here the absent ones are simply not on it.
+    ///
+    /// A profile of the reader's own is never dropped whatever it resolves to.
+    /// [`agent_command`] answers for the built-in agents alone, and the rule
+    /// above is about a list *this build* wrote: a row somebody made and cannot
+    /// start is a row they can fix, and one this window quietly removed is a
+    /// row they would have to go looking for.
+    #[must_use]
+    pub fn offered_to_start(&self, programs: &ProfilePrograms) -> Vec<usize> {
+        self.offered()
+            .into_iter()
+            .filter(|index| {
+                self.profiles.get(*index).is_none_or(|profile| {
+                    agent_command(profile).is_none() || programs.is_available(*index)
+                })
+            })
+            .collect()
+    }
 }
 
 /// The table in force, and the number that says how many times it has moved.
@@ -2782,16 +2819,28 @@ pub struct ProfileLine {
     /// `.row.unavailable`'s existing rule applied to a row that happened to have
     /// two lines.
     ///
-    /// **An unavailable *agent* fills it with the way out instead** (user ruling
-    /// 2026-08-29): those two lines are already reserved on every row alike, and
-    /// what a reader whose codex lives inside WSL needs is not more silence but
-    /// the one profile and the two arguments that reach it. Nothing about the
-    /// row's height changes — the pair of boxes is laid out for whatever text
-    /// is here, and there was text on every startable row already.
+    /// **An unavailable agent drops it too, and the way out is said once under
+    /// the group** (user ruling 2026-08-29, re-decided the same day). It was
+    /// briefly this field: an agent this window could not find filled its two
+    /// lines with `wsl.exe -e codex`, which put three lines under every row of a
+    /// list where five of them are missing on the machine most readers open —
+    /// the same sentence, five times, with one word changed. It is one fact
+    /// about a group of rows, so the group says it: see [`agent_note_after`],
+    /// and `settings::agent_wsl_note` for the sentence itself.
     ///
-    /// A `String` and no longer a `&'static str`, because that sentence names
-    /// the command.
-    pub capability: Option<String>,
+    /// A `&'static str` again, with the sentence that named a command gone: the
+    /// four answers left are the table's own, and a `String` per row per frame
+    /// bought nothing but an allocation.
+    pub capability: Option<&'static str>,
+    /// Whether this row starts one of the built-in **agents** — [`AGENT_IDS`],
+    /// read through [`agent_command`].
+    ///
+    /// Carried on the line rather than asked of the table again, on
+    /// [`Self::is_default`]'s footing: the page is drawn from these lines and
+    /// nothing else, and the one thing it does with this answer — stand the
+    /// group's WSL sentence under the last of them ([`agent_note_after`]) — is a
+    /// question about the list in hand, not about the table it came from.
+    pub is_agent: bool,
     /// Whether the `default` badge is on this row. **It reports and is not a
     /// control**: the default is changed on the General page and nowhere else,
     /// because one field with two writers is the thing §7.1.6c-4a just avoided.
@@ -2840,24 +2889,24 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
             .enumerate()
             .map(|(index, profile)| {
                 let available = programs.is_available(index);
+                let is_agent = agent_command(profile).is_some();
                 ProfileLine {
                     index,
                     mark: profile.mark,
                     title: title(index),
-                    command: match (available, agent_command(profile)) {
+                    command: match (available, is_agent) {
                         (true, _) => command_line(profile, programs.program(index)),
                         // An agent this window did not find says **where it
                         // looked**, because the answer to "but I use it every
                         // day" is very often "inside WSL" and a row that only
-                        // said 「没找到」 left the reader with nothing to do.
-                        (false, Some(_)) => crate::i18n::agent_not_found_on_windows(title(index)),
-                        (false, None) => crate::i18n::profile_not_installed(title(index)),
+                        // said 「没找到」 left the reader with nothing to do. What
+                        // to do about it is the group's line and not this one's
+                        // — see [`agent_note_after`].
+                        (false, true) => crate::i18n::agent_not_found_on_windows(title(index)),
+                        (false, false) => crate::i18n::profile_not_installed(title(index)),
                     },
-                    capability: match (available, agent_command(profile)) {
-                        (true, _) => Some(capability_text(profile).text().to_owned()),
-                        (false, Some(command)) => Some(crate::i18n::agent_inside_wsl_hint(command)),
-                        (false, None) => None,
-                    },
+                    capability: available.then(|| capability_text(profile).text()),
+                    is_agent,
                     is_default: index == default,
                     default_is_automatic: automatic,
                     is_fallback: index == fallback,
@@ -2868,6 +2917,37 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
             })
             .collect()
     })
+}
+
+/// **Which line the agent group's WSL sentence stands under**, or `None` when
+/// there is nothing for it to say (user ruling 2026-08-29).
+///
+/// The answer is a position in `lines` and not a table index, because what the
+/// page does with it is put a band of text after that row.
+///
+/// **Said once, under the group, and only when a row is missing.** Every absent
+/// agent has the same way out and it differs by one word, so seven rows saying
+/// it are one sentence printed seven times — which is what the page did for a
+/// day, three lines to a row, five rows deep on an ordinary machine. It is
+/// therefore written without a name in it, and the reader supplies the one they
+/// are missing from the row above. On a machine that has all seven the sentence
+/// has no subject at all and is simply absent.
+///
+/// **After the last agent row wherever that row now is.** The rows can be
+/// reordered by the reader (`↑`/`↓`), so the group is not a range this function
+/// may assume; the note follows the last row that is one, which is the same
+/// sentence whatever order they are in.
+#[must_use]
+pub fn agent_note_after(lines: &[ProfileLine]) -> Option<usize> {
+    let mut last = None;
+    let mut missing = false;
+    for (position, line) in lines.iter().enumerate() {
+        if line.is_agent {
+            last = Some(position);
+            missing |= !line.available;
+        }
+    }
+    if missing { last } else { None }
 }
 
 /// `pwsh.exe -NoLogo`, `wsl.exe --cd ~`, `cmd.exe` — what this row starts, in
@@ -3909,6 +3989,12 @@ impl ProfilePrograms {
     /// Folio opens", and the grey is it saying "not on this machine".
     /// Dropping the row conflates "you have not installed Git" with "we never
     /// thought of Git", and only one of those is something the user can act on.
+    ///
+    /// **The built-in agents are the one exception and they are not a second
+    /// reading of that rule** (user ruling 2026-08-29): the picker leaves an
+    /// agent it cannot start off the list entirely, because seven of them say
+    /// the sentence at once and the Profiles page says it better. See
+    /// [`ProfileTable::offered_to_start`], which is the whole of that exception.
     #[must_use]
     pub fn is_available(&self, profile: usize) -> bool {
         self.program(profile).is_some()
@@ -4103,12 +4189,17 @@ impl ProfileMenuLayout {
         programs: &'a ProfilePrograms,
         recent: &'a [RecentEntry],
     ) -> impl Iterator<Item = (MenuRow, [f32; 4], String)> + 'a {
+        // **Through [`Self::profiles`], like the draw and the hit test**: a row's
+        // ordinal in this menu is not its index in the table, and a tip that
+        // read the ordinal would name the wrong profile the moment anything
+        // above it was hidden — or, since 2026-08-29, the moment an agent this
+        // machine has not got was left off the list.
         let profiles = self
-            .items
+            .profiles
             .iter()
-            .enumerate()
-            .filter(|(index, _)| !programs.is_available(*index))
-            .map(|(index, rect)| (MenuRow::Profile(index), *rect, unavailable_tip(index)));
+            .zip(&self.items)
+            .filter(|(index, _)| !programs.is_available(**index))
+            .map(|(index, rect)| (MenuRow::Profile(*index), *rect, unavailable_tip(*index)));
         let recents = self
             .recent
             .iter()
@@ -4180,10 +4271,27 @@ impl MenuSide {
 /// a fact about the moment it is *drawn*, so it belongs to [`build`], and a
 /// layout that took the time would change shape between two frames of one open
 /// menu.
+///
+/// `programs` is the machine, taken second exactly as [`build`] takes it, and it
+/// is here rather than only there because since 2026-08-29 it decides **which
+/// rows exist** and not merely how they are inked ([`ProfileTable::offered_to_start`]).
+/// It is the probe's frozen answer and not a fresh one, which is what keeps that
+/// safe: the list may not change between the frame a row was read on and the
+/// click aimed at it, and `ProfilePrograms` is a value for that very reason.
 #[must_use]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "eight, on [`build`]'s own footing and with seven of the same \
+              answers: where the button is, which side it hangs off, which \
+              shells this machine has, how big the surface is, how dense it is, \
+              what the vault remembers, which chords are bound, and the font. \
+              Every one is a fact the caller holds and this module has no way \
+              to ask for; a struct would move the list rather than shorten it"
+)]
 pub fn layout(
     anchor: [f32; 4],
     side: MenuSide,
+    programs: &ProfilePrograms,
     surface: (f32, f32),
     scale: f32,
     recent: &[RecentEntry],
@@ -4292,7 +4400,7 @@ pub fn layout(
         px(ITEM_FONT_LOGICAL_PX),
         0.0,
     ));
-    let offered = table().offered();
+    let offered = table().offered_to_start(programs);
     let content = offered
         .iter()
         // `title(index)` and not `Profile::display_title`: the qualifier is part
@@ -12677,6 +12785,7 @@ mod tests {
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             scale,
             &vault,
@@ -13211,6 +13320,7 @@ mod tests {
             let layout = layout(
                 button,
                 MenuSide::Below,
+                &equipped(),
                 (960.0 * scale, 600.0),
                 scale,
                 NO_RECENT,
@@ -13290,6 +13400,7 @@ mod tests {
         let open = layout(
             chevron,
             MenuSide::Beside,
+            &equipped(),
             (1400.0, 900.0),
             scale,
             NO_RECENT,
@@ -13309,6 +13420,7 @@ mod tests {
         let parked = layout(
             plus,
             MenuSide::Beside,
+            &equipped(),
             (1400.0, 900.0),
             scale,
             NO_RECENT,
@@ -13325,6 +13437,7 @@ mod tests {
         let strip = layout(
             chevron,
             MenuSide::Below,
+            &equipped(),
             (1400.0, 900.0),
             scale,
             NO_RECENT,
@@ -13346,6 +13459,7 @@ mod tests {
         let low = layout(
             [8.0, 470.0, 211.0, 500.0],
             MenuSide::Beside,
+            &equipped(),
             surface,
             scale,
             NO_RECENT,
@@ -13525,6 +13639,136 @@ mod tests {
                 if is_agent { "" } else { "not " }
             );
         }
+    }
+
+    /// PIN (user ruling 2026-08-29) — **the picker offers the agents it can
+    /// start, and goes on offering every shell whether it can start it or not.**
+    ///
+    /// Two rules that look like one and are not. §7.27 is untouched: a shell
+    /// this machine has not got is drawn greyed, because five rows saying so is
+    /// a product telling a reader what it opens and what they have not
+    /// installed. Seven agent rows saying it is half a screen of a menu whose
+    /// whole job is to be pressed — so an agent this window cannot start is left
+    /// off the list, and the Profiles page is where all seven are read.
+    ///
+    /// The third claim is the one that keeps the exception honest: it is about
+    /// the rows *this build wrote*. A profile of the reader's own is offered
+    /// whatever it resolves to, because a row somebody made and cannot start is
+    /// a row they can fix, and one this window quietly removed is a row they
+    /// have to go looking for.
+    ///
+    /// Red gate: drop the `agent_command` test from the filter and the bare
+    /// machine offers twelve rows, seven of them dead; extend the filter to
+    /// every row and the bare machine offers one.
+    #[test]
+    fn the_picker_offers_the_agents_it_can_start_and_every_shell_regardless() {
+        let offered = |programs: &ProfilePrograms| -> Vec<String> {
+            table()
+                .offered_to_start(programs)
+                .into_iter()
+                .map(|index| shipped_rows()[index].id.clone())
+                .collect()
+        };
+        assert_eq!(
+            offered(&bare()),
+            ["pwsh", "winps", "wsl", "gitbash", "cmd"],
+            "a machine with none of them offers the five shells and no agent"
+        );
+        assert!(
+            !bare().is_available(index_of_id("gitbash")),
+            "and four of those five are greyed rather than gone — §7.27 stands"
+        );
+        assert_eq!(
+            offered(&equipped()),
+            shipped_rows()
+                .iter()
+                .map(|profile| profile.id.clone())
+                .collect::<Vec<_>>(),
+            "a machine with everything offers everything, in the table's order"
+        );
+
+        // Two agents installed the way they really install, and they appear in
+        // their own places rather than at the end of the list.
+        let two = ProfilePrograms::probe(
+            &FakeMachine::bare_windows()
+                .with_var("PATH", r"C:\Users\dev\AppData\Roaming\npm")
+                .with_file(r"C:\Users\dev\AppData\Roaming\npm\claude.cmd")
+                .with_file(r"C:\Users\dev\AppData\Roaming\npm\codex.cmd"),
+        );
+        assert_eq!(
+            offered(&two),
+            ["pwsh", "winps", "wsl", "gitbash", "cmd", "claude", "codex"],
+        );
+
+        // And a row of the reader's own that resolves to nothing is still on the
+        // list, beside the shells and where their file put it.
+        let (built, faults) = merge(shipped(), &file(vec![mine("mine")]));
+        assert!(faults.is_empty(), "{faults:?}");
+        let table = ProfileTable { profiles: built };
+        let nothing_at_all = ProfilePrograms {
+            resolved: table.profiles().iter().map(|_| None).collect(),
+        };
+        assert_eq!(
+            table
+                .offered_to_start(&nothing_at_all)
+                .into_iter()
+                .map(|index| table.profiles()[index].id.as_str())
+                .collect::<Vec<_>>(),
+            ["mine", "pwsh", "winps", "wsl", "gitbash", "cmd"],
+            "the exception is this build's own agent rows and nothing else"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-29) — **the Profiles page keeps all seven agent
+    /// rows, says where this window looked, and leaves the way out to the
+    /// group.**
+    ///
+    /// The page is the other half of the picker's ruling above and it is why
+    /// that one is affordable: this is where a reader finds out which agents
+    /// Folio knows about at all. What it does not do is say the same sentence
+    /// seven times — [`agent_note_after`] names the one row the group's line
+    /// stands under, and answers `None` on a machine that has them all.
+    #[test]
+    fn the_page_keeps_every_agent_row_and_the_group_says_the_way_out_once() {
+        let missing = page_lines(&bare(), fallback_profile(), true);
+        assert_eq!(missing.len(), count(), "every row, agents included");
+        let claude = missing
+            .iter()
+            .find(|line| line.index == index_of_id("codex"))
+            .expect("Codex is a row on a machine that has not got it");
+        assert!(claude.is_agent && !claude.available);
+        assert_eq!(
+            claude.command, "Codex was not found on Windows",
+            "the row says where this window looked"
+        );
+        assert_eq!(
+            claude.capability, None,
+            "and nothing else — the way out is the group's line"
+        );
+        assert_eq!(
+            agent_note_after(&missing),
+            missing.iter().rposition(|line| line.is_agent),
+            "which stands under the last agent row"
+        );
+
+        let all_of_them = page_lines(&equipped(), fallback_profile(), false);
+        assert_eq!(
+            agent_note_after(&all_of_them),
+            None,
+            "a machine with every agent on it is told nothing about WSL"
+        );
+        assert!(
+            all_of_them
+                .iter()
+                .filter(|line| line.is_agent)
+                .all(|line| line.capability.is_some()),
+            "a startable agent says what it gives you, like every other row"
+        );
+        assert_eq!(
+            all_of_them.iter().filter(|line| line.is_agent).count(),
+            AGENT_IDS.len(),
+            "and the rows that answer to this are the ones on the list"
+        );
     }
 
     /// PIN — **the arguments are the profile's, not the spawn path's.**
@@ -13723,6 +13967,7 @@ mod tests {
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             scale,
             NO_RECENT,
@@ -13784,6 +14029,7 @@ mod tests {
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             scale,
             &vault,
@@ -13846,9 +14092,14 @@ mod tests {
     fn a_row_is_tipped_with_what_its_caption_left_out_and_nothing_else() {
         let scale = 1.0;
         let vault = [term(r"D:\Developer\folio-terminal\crates", None, 30)];
+        // **Laid out on the machine it is tipped on**, which since 2026-08-29 is
+        // not a formality: the list a bare box gets is the five shells, so a
+        // menu laid out as `equipped` and tipped as `bare` would be a fixture
+        // asking about rows that are not on the screen.
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
+            &bare(),
             (960.0, 600.0),
             scale,
             &vault,
@@ -13888,40 +14139,11 @@ mod tests {
                     index_of_id("cmd"),
                     "Command Prompt — not found on this machine".to_owned()
                 ),
-                // The agents (user rulings 2026-08-28 and 2026-08-29). A bare
-                // Windows box has none of them, and each says so **in its own
-                // name** — which is what this rule is worth on these rows in
-                // particular: six of the seven wear the same neutral chassis,
-                // so the name in the sentence is the only thing that tells a
-                // reader which of them they have not got.
-                (
-                    index_of_id("claude"),
-                    "Claude Code — not found on this machine".to_owned()
-                ),
-                (
-                    index_of_id("codex"),
-                    "Codex — not found on this machine".to_owned()
-                ),
-                (
-                    index_of_id("copilot"),
-                    "Copilot CLI — not found on this machine".to_owned()
-                ),
-                (
-                    index_of_id("kimi"),
-                    "Kimi Code — not found on this machine".to_owned()
-                ),
-                (
-                    index_of_id("pi"),
-                    "pi — not found on this machine".to_owned()
-                ),
-                (
-                    index_of_id("hermes"),
-                    "Hermes — not found on this machine".to_owned()
-                ),
-                (
-                    index_of_id("opencode"),
-                    "OpenCode — not found on this machine".to_owned()
-                ),
+                // **And no agent row, on the machine that has none of them**
+                // (user ruling 2026-08-29). Seven of these sentences is what the
+                // ruling removed: an agent this window cannot start is not on
+                // this list at all, so it has no row to be tipped over. The
+                // Profiles page is where the seven are read.
             ],
             "every greyed row says why, in its own name, and the startable one \
              says nothing"
@@ -13930,9 +14152,20 @@ mod tests {
         // The rectangles are the laid-out rows themselves — a tip registered
         // against a box computed a second way is a tip that appears where the
         // row is not.
+        //
+        // Found **through the layout's own mapping** and not by using a table
+        // index as an ordinal: they are two numbers now that this list can be
+        // shorter than the table.
         for (row, rect, _) in &bare_tips {
             let expected = match row {
-                MenuRow::Profile(index) => layout.items[*index],
+                MenuRow::Profile(index) => {
+                    let ordinal = layout
+                        .profiles
+                        .iter()
+                        .position(|offered| offered == index)
+                        .expect("a tipped row is a row of this menu");
+                    layout.items[ordinal]
+                }
                 MenuRow::Recent(index) => layout.recent[*index],
                 MenuRow::FilesPane => layout.files_pane,
                 MenuRow::NewInFolder => layout.new_in_folder,
@@ -13940,15 +14173,27 @@ mod tests {
             assert_eq!(*rect, expected);
         }
 
-        // And on a machine that has every one of them, no profile row has
-        // anything to add — but the Recent row still carries the path its
-        // caption cropped.
-        let equipped_tips: Vec<_> = layout.tips(&equipped(), &vault).collect();
+        // And on a machine that has every one of them — twelve rows, this time,
+        // because the agents are all startable — no profile row has anything to
+        // add, but the Recent row still carries the path its caption cropped.
+        // `super::` because the binding above has the function's own name here.
+        let whole = super::layout(
+            anchor(scale),
+            MenuSide::Below,
+            &equipped(),
+            (960.0, 600.0),
+            scale,
+            &vault,
+            &chord_table(),
+            &mut fake_measure,
+        );
+        assert_eq!(whole.profiles.len(), count());
+        let equipped_tips: Vec<_> = whole.tips(&equipped(), &vault).collect();
         assert_eq!(
             equipped_tips,
             vec![(
                 MenuRow::Recent(0),
-                layout.recent[0],
+                whole.recent[0],
                 r"D:\Developer\folio-terminal\crates".to_owned()
             )],
         );
@@ -14523,6 +14768,7 @@ mod tests {
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             scale,
             NO_RECENT,
@@ -14639,6 +14885,7 @@ mod tests {
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             scale,
             &vault,
@@ -14714,6 +14961,7 @@ mod tests {
         let layout = layout(
             button,
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             scale,
             NO_RECENT,
@@ -14774,6 +15022,7 @@ mod tests {
         let roomy = layout(
             [0.0, 9.0, 28.0, 37.0],
             MenuSide::Below,
+            &equipped(),
             (4_000.0, 600.0),
             scale,
             NO_RECENT,
@@ -14787,6 +15036,7 @@ mod tests {
         let layout = layout(
             anchor,
             MenuSide::Below,
+            &equipped(),
             (surface, 600.0),
             scale,
             NO_RECENT,
@@ -14838,6 +15088,7 @@ mod tests {
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             scale,
             NO_RECENT,
@@ -14965,6 +15216,7 @@ mod tests {
             let layout = layout(
                 anchor(scale),
                 MenuSide::Below,
+                &equipped(),
                 (960.0 * scale, 600.0),
                 scale,
                 NO_RECENT,
@@ -15002,6 +15254,7 @@ mod tests {
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             scale,
             NO_RECENT,
@@ -15077,6 +15330,7 @@ mod tests {
             let layout = layout(
                 anchor(scale),
                 MenuSide::Below,
+                &equipped(),
                 (960.0 * scale, 600.0),
                 scale,
                 NO_RECENT,
@@ -15145,6 +15399,7 @@ mod tests {
             let empty = layout(
                 anchor(scale),
                 MenuSide::Below,
+                &equipped(),
                 (960.0 * scale, 600.0),
                 scale,
                 NO_RECENT,
@@ -15186,6 +15441,7 @@ mod tests {
             let full = layout(
                 anchor(scale),
                 MenuSide::Below,
+                &equipped(),
                 (960.0 * scale, 600.0),
                 scale,
                 &vault,
@@ -15230,6 +15486,7 @@ mod tests {
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             scale,
             &vault,
@@ -15273,6 +15530,7 @@ mod tests {
             let empty = layout(
                 anchor(scale),
                 MenuSide::Below,
+                &equipped(),
                 (960.0 * scale, 600.0),
                 scale,
                 NO_RECENT,
@@ -15282,6 +15540,7 @@ mod tests {
             let full = layout(
                 anchor(scale),
                 MenuSide::Below,
+                &equipped(),
                 (960.0 * scale, 600.0),
                 scale,
                 &vault,
@@ -15368,6 +15627,7 @@ mod tests {
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             scale,
             &vault,
@@ -15419,6 +15679,7 @@ mod tests {
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             scale,
             &vault,
@@ -15474,6 +15735,7 @@ mod tests {
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             scale,
             &vault,
@@ -15566,6 +15828,7 @@ mod tests {
         let layout = layout(
             anchor(1.0),
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             1.0,
             &vault,
@@ -15602,6 +15865,7 @@ mod tests {
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             scale,
             &vault,
@@ -15682,6 +15946,7 @@ mod tests {
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             scale,
             &vault,
@@ -16680,6 +16945,7 @@ mod tests {
         let picker = layout(
             [0.0, 0.0, 100.0, 30.0],
             MenuSide::Below,
+            &equipped(),
             (960.0, 600.0),
             1.0,
             &[],
@@ -21224,7 +21490,7 @@ mod tests {
             .expect("the floor is always a row");
         assert!(floor.available && floor.is_default);
         assert_eq!(
-            floor.capability.as_deref(),
+            floor.capability,
             Some(crate::i18n::Text::CapPowerShell.text())
         );
         assert_eq!(
