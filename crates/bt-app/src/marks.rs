@@ -136,21 +136,24 @@ pub enum ProfileGlyph {
     Ubuntu,
     /// The lozenge with the branch and its three nodes — `#p-git`.
     Git,
-    /// The asterisk — `#p-agent`, every agent profile's one silhouette (user
-    /// ruling 2026-08-30).
+    /// The speech box with a terminal's two dots and a tail — `#p-agent`, every
+    /// agent profile's one silhouette (user rulings 2026-08-30 and 2026-08-30
+    /// C-case).
     ///
-    /// **It was `#p-claude` and it is nobody's now.** The drawing is unchanged
-    /// to the digit; what changed is who wears it. Until 2026-08-30 it named one
-    /// product and the other six agent rows wore the console chassis, which put
-    /// a spark beside six panels and said — wrongly — that one of the seven was
-    /// a different *kind* of thing. See [`ChromeMark::ProfileAgent`] for the
-    /// ruling and for what the colour now does.
+    /// **It was `#p-claude`'s asterisk and it is nobody's now.** The first
+    /// ruling moved who wears it; the second re-cut it, because a spark is one
+    /// firm's own picture of what a model is and this list needs a shape that
+    /// belongs to the *class*. What it draws now is the thing the class does —
+    /// something you talk to, in a terminal — and see
+    /// [`ChromeMark::ProfileAgent`] for both rulings and for what the colour
+    /// does.
     ///
-    /// The one member of this list whose coloured twin is **already nothing but
-    /// pen**: the asterisk is four strokes and no fill, so its line rendition is
-    /// that drawing with the row's own colour taken out of it and the column's
-    /// own weight put in. There is no silhouette to pull half a pen inside,
-    /// which is the step the three above it each owe.
+    /// The one member of this list whose coloured twin is **already the
+    /// silhouette itself**: its frame is a stroke and its dots and tail are
+    /// solids in both renditions, so the line version is that drawing with the
+    /// row's own colour taken out of it and the column's own weight put in.
+    /// There is no filled panel to pull half a pen inside, which is the step the
+    /// three above it each owe.
     Agent,
 }
 
@@ -170,6 +173,56 @@ pub enum ProfileGlyph {
 /// is describing, and the line mark would draw a pixel bigger than the coloured
 /// one it stands in for.
 const PROFILE_LINE_STROKE_UNITS: &str = "1.2";
+
+/// The pen `#p-agent` is struck with in its coloured rendition, in the same
+/// sixteen-unit box — **the family's own weight, where
+/// [`PROFILE_LINE_STROKE_UNITS`] is the column's.**
+///
+/// The mock-up draws the C-case mark on a twenty-unit grid with a `1.8` pen;
+/// [`agent_mark_body`] carries that grid onto the chassis by `0.8`, and the pen
+/// rides the same scale — `1.8 × 0.8`. A pen that did not scale with its
+/// drawing would be a frame of a different weight around the same box.
+const AGENT_MARK_STROKE_UNITS: &str = "1.44";
+
+/// **`#p-agent`'s one drawing**, struck in `ink` with `pen` — the speech box
+/// with a terminal's two dots in it and a tail under its left shoulder (user
+/// ruling 2026-08-30, C-case).
+///
+/// Written once and called twice, by [`ChromeMark::ProfileAgent`]'s coloured arm
+/// and by [`ProfileGlyph::Agent`]'s line rendition, because "the line version is
+/// the same shape" is a claim that a second copy of the coordinates breaks the
+/// day one of them is nudged. The two renditions differ in exactly the two
+/// arguments this takes.
+///
+/// **The conversion, in full.** The mock-up is a twenty-unit grid: a rounded
+/// frame from `3.5,3.5` to `16.5,14.5` with corners of `3`, two dots on
+/// `7.5,9` and `12.5,9` at `r=1.3`, a tail through `7,17.5 → 7,14.5 → 11,14.5`,
+/// and a `1.8` pen. Its ink — the frame and the tail grown by half that pen —
+/// runs `2.6 – 17.4` across and `2.6 – 17.5` down, so the drawing is scaled
+/// about that ink's own centre (`10, 10.05`) by **`0.8`** onto the chassis's
+/// centre, which lands `11.84 × 11.92` units of ink in the house's sixteen —
+/// the brand chassis's twelve, measured the way this module's own optical gate
+/// measures it. Every coordinate below is that one transform applied to
+/// the mock-up's, and nothing here is rounded to a friendlier number.
+///
+/// **The tail is a solid and the frame is a stroke, and the join is the point.**
+/// The tail's top edge lies *on* the frame's bottom edge — `11.56`, the stroke's
+/// own centre line — so the frame's pen covers that edge by half a pen on either
+/// side: there is no seam to show and nothing of the tail rises into the box.
+/// Drawn as an outline instead, a wedge this size would be a hollow sliver at
+/// the twelve pixels a menu row gives a mark; drawn a hair below the frame it
+/// would be a triangle floating under a box.
+fn agent_mark_body(ink: &str, pen: &str) -> String {
+    format!(
+        concat!(
+            r#"<rect x="2.8" y="2.76" width="10.4" height="8.8" rx="2.4" fill="none" stroke="{ink}" stroke-width="{pen}"/>"#,
+            r#"<g fill="{ink}"><circle cx="6" cy="7.16" r="1.04"/><circle cx="10" cy="7.16" r="1.04"/></g>"#,
+            r#"<path d="M5.6 13.96V11.56H8.8z" fill="{ink}"/>"#,
+        ),
+        ink = ink,
+        pen = pen,
+    )
+}
 
 /// One mark the chrome can wear. Every variant except [`ChromeMark::ActiveTab`]
 /// is a `<symbol>` lifted straight out of the mock-up.
@@ -421,8 +474,8 @@ pub enum ChromeMark {
     /// a `#606060` hairline and why nobody may "fix" it back to black.
     ProfileCmd,
     /// `#p-agent` — **the mark every agent profile wears**, in one of
-    /// [`MarkColour`]'s eight: the asterisk, spokes radiating from the centre
-    /// (user ruling 2026-08-30).
+    /// [`MarkColour`]'s eight: a speech box with a terminal's two dots in it and
+    /// a tail under its left shoulder (user rulings 2026-08-30).
     ///
     /// **One shape for the family, one colour per row.** Until this ruling the
     /// asterisk was `#p-claude` in Anthropic's `#D97757` and the other six agent
@@ -433,8 +486,18 @@ pub enum ChromeMark {
     /// choosing between there is *seven agents*, and a family is told apart by
     /// its colour, not by six members borrowing somebody else's silhouette.
     ///
-    /// So the drawing is re-seated rather than re-cut: the geometry below is the
-    /// mock-up's `#p-claude` to the digit, and what it names is now the class.
+    /// **And then the drawing itself, on the same day (C-case).** Re-seating the
+    /// asterisk left the family wearing a shape that is one firm's own picture
+    /// of a model — a spark is *Claude's* idea of what is inside, and a row
+    /// naming `codex` or `pi` wearing it is the sheet asserting the very
+    /// provenance the paragraph below refuses. So the geometry is now neutral
+    /// and it is about the *class*: **something you talk to, in a terminal** —
+    /// a speech box, two dots where a console's cursor and its prompt sit, a
+    /// tail. Nothing else about this variant moved: the id, the colour
+    /// allotment, the greying, `MarkV1`'s `chassis: "agent"` and every gate over
+    /// them are the first ruling's and stand. [`agent_mark_body`] holds the
+    /// coordinates and the arithmetic that put them on the chassis.
+    ///
     /// **The brand colour goes with the brand name** — `#D97757` is Anthropic's
     /// and this window no longer paints anybody's; every row of the seven takes
     /// one of the eight struck hexes the chassis family already draws from, so
@@ -449,12 +512,11 @@ pub enum ChromeMark {
     /// unavailable opacity), which is one register for the whole window rather
     /// than a second drawing here.
     ///
-    /// Scaled onto the chassis by `12 / 13.9` about its own centre, which is the
-    /// P2 step each of the four shell marks took. The `13.9` is this drawing's
-    /// own ink — `1.8` to `14.2` of path plus half a round cap at each end —
-    /// where the shell panels' was `14`. Nothing about the drawing is
-    /// re-invented: the spokes keep their lengths, their angles, and the ratio
-    /// between their two pens, to the digit.
+    /// Scaled onto the chassis about its own ink's centre, which is the P2 step
+    /// each of the four shell marks took — by `0.8` here, because the C-case
+    /// mock-up's ink is `14.9` of a twenty-unit grid where the shell panels' was
+    /// `14` of sixteen. The pen rides the same scale, and the arithmetic is
+    /// written out at [`agent_mark_body`] rather than twice.
     ProfileAgent { colour: MarkColour },
     /// `#p-shell` — the chassis a profile of the user's own wears, in one of
     /// [`MarkColour`]'s eight.
@@ -1286,7 +1348,7 @@ impl ChromeMark {
             Self::ProfileGit => "p-git",
             Self::ProfileCmd => "p-cmd",
             // One id for all eight colours, on the chassis's own precedent one
-            // line down: there is one asterisk, and what tells two agent rows
+            // line down: there is one speech box, and what tells two agent rows
             // apart is a parameter `mark_key` adds.
             Self::ProfileAgent { .. } => "p-agent",
             // One id for all eight colours, exactly as `Self::Chevron` has one
@@ -1455,7 +1517,7 @@ impl ChromeMark {
                 | Self::ProfileUbuntu
                 | Self::ProfileGit
                 | Self::ProfileCmd
-                // The asterisk states its own hex out of the eight, exactly as
+                // The speech box states its own hex out of the eight, exactly as
                 // the chassis below it does, and for the identical reason: the
                 // colour is what tells one agent row from another, so handing it
                 // to the theme would collapse seven rows onto one accent — and
@@ -2265,33 +2327,15 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 ),
             )
         }
-        // The asterisk, struck from the same eight. Generated for the chassis's
-        // reason directly above — a constant cannot carry a parameter — and its
-        // coordinates are the mock-up's `#p-claude` scaled onto the chassis by
-        // `12 / 13.9`, unchanged by the 2026-08-30 ruling that made it the
-        // family's mark: what that ruling moved was the *name* and the fill, and
-        // a drawing re-cut on the day it changed hands would be a second glyph
-        // wearing the first one's argument.
-        //
-        // **Two pens and not one**, `1.29` on the upright pair and `1.17` on the
-        // diagonals: that ratio is the drawing, and levelling it here would make
-        // an asterisk that is not this asterisk. The line rendition is where the
-        // two collapse to the column's single weight, and it says so.
+        // The speech box, struck from the same eight. Generated for the
+        // chassis's reason directly above — a constant cannot carry a parameter
+        // — and drawn by [`agent_mark_body`], which is the one place the family's
+        // geometry is written down for both of its renditions.
         ChromeMark::ProfileAgent { colour } => {
             let [r, g, b] = colour.hex();
             (
                 PROFILE_CHASSIS_VIEW_BOX.to_owned(),
-                format!(
-                    concat!(
-                        r##"<g stroke="#{r:02x}{g:02x}{b:02x}" stroke-linecap="round" fill="none">"##,
-                        r##"<path d="M8 2.65v10.7M2.65 8h10.7" stroke-width="1.29"/>"##,
-                        r##"<path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6" stroke-width="1.17"/>"##,
-                        r##"</g>"##,
-                    ),
-                    r = r,
-                    g = g,
-                    b = b,
-                ),
+                agent_mark_body(&format!("#{r:02x}{g:02x}{b:02x}"), AGENT_MARK_STROKE_UNITS),
             )
         }
         // The same three drawings with the colour taken out of them — generated
@@ -2358,23 +2402,16 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                     ),
                     pen = PROFILE_LINE_STROKE_UNITS,
                 ),
-                // The asterisk on its own `d`, and **no inset at all** — the
-                // coloured mark is four strokes and no fill, so its silhouette
-                // was a stroke's centre line to begin with, exactly as the
-                // lozenge above it was. What changes is the ink and the pen:
-                // the two weights `#p-agent` distinguishes its spokes with
-                // (`1.29` and `1.17`) collapse to this column's one, because a
-                // struck mark in the menu's icon column is read against its
-                // neighbours' weight and not against its own family's.
-                ProfileGlyph::Agent => format!(
-                    concat!(
-                        r#"<g stroke="currentColor" stroke-width="{pen}" fill="none" stroke-linecap="round">"#,
-                        r#"<path d="M8 2.65v10.7M2.65 8h10.7"/>"#,
-                        r#"<path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6"/>"#,
-                        r#"</g>"#,
-                    ),
-                    pen = PROFILE_LINE_STROKE_UNITS,
-                ),
+                // The speech box on the coloured mark's own coordinates, and
+                // **no inset at all** — that mark's frame is a stroke and its
+                // two dots and its tail are the same solids here as there, so
+                // its silhouette was a stroke's centre line to begin with,
+                // exactly as the lozenge above it was. One call, so the two
+                // renditions cannot drift: what changes between them is the ink
+                // and the pen, and the pen changes because a struck mark in the
+                // menu's icon column is read against its neighbours' weight and
+                // not against its own family's.
+                ProfileGlyph::Agent => agent_mark_body("currentColor", PROFILE_LINE_STROKE_UNITS),
             },
         ),
         ChromeMark::ProgressRing {
@@ -2840,8 +2877,9 @@ impl ChromeMark {
     pub fn is_struck(self) -> bool {
         match self {
             // The chassis family: the coloured panels carry an edge, the line
-            // renditions are nothing but edge, the agent asterisk is four
-            // strokes and nothing else, and all three are generated.
+            // renditions are nothing but edge, the agent mark's frame is a
+            // stroke with two dots and a tail hung on it, and all three are
+            // generated.
             Self::ProfileLine(_) | Self::ProfileGeneric { .. } | Self::ProfileAgent { .. } => true,
             mark if mark.is_quoted_symbol() => {
                 heaviest_stroke_units(SYMBOL_BODY[symbol_index(mark)]).is_some()
@@ -4015,6 +4053,12 @@ const SYMBOL_BODY: [&str; 69] = [
     // chassis's, for the reason stated there and at
     // `ChromeMark::ProfileGeneric`: a constant cannot carry a parameter.
     //
+    // **And later the same day it left the window too** (C-case): `#p-agent` is
+    // a speech box now, and the asterisk is drawn nowhere but in the red gate
+    // that keeps it from coming back — `the_agent_mark_is_a_speech_box_and_not_
+    // the_spark_it_replaced`, which is where its `d` is quoted for the last
+    // time.
+    //
     // Written here rather than left as a hole, because this table's own rule is
     // that an index is a position on the sheet: the next drawing struck takes
     // the index this one vacated, and a reader who finds `69` missing from
@@ -4780,16 +4824,19 @@ mod tests {
             (ChromeMark::ProfileGit, (8.0, 3.6), [0xf0, 0x50, 0x33]),
             // The charcoal panel — *not* console black, by the mock-up's ruling.
             (ChromeMark::ProfileCmd, (3.0, 8.0), [0x3a, 0x3a, 0x3a]),
-            // Dead centre of the asterisk, where all four spokes cross: the one
-            // point of that drawing that is solid whatever the pens are. Struck
-            // in Violet here — one of the seven `AGENT_IDS` hands out — because
-            // since 2026-08-30 this mark has no colour of its own to check
-            // against, which is the whole of what that ruling did to it.
+            // Dead centre of the speech box's left dot — a solid disc `2.08`
+            // units across, so the middle of it is the drawing's colour whatever
+            // the pen does. **Not the middle of the box**, which the C-case
+            // re-cut left bare: this mark's centre is the field the two dots
+            // stand in. Struck in Violet — one of the seven `AGENT_IDS` hands
+            // out — because since 2026-08-30 this mark has no colour of its own
+            // to check against, which is the whole of what that ruling did to
+            // it.
             (
                 ChromeMark::ProfileAgent {
                     colour: MarkColour::Violet,
                 },
-                (8.0, 8.0),
+                (6.0, 7.16),
                 [0x6b, 0x4e, 0x9e],
             ),
             // The chassis a profile of the user's own wears: the same panel
@@ -6477,6 +6524,128 @@ mod tests {
                 line.drawing_id(),
             );
         }
+    }
+
+    /// **The asterisk `#p-agent` used to be**, quoted here and nowhere else.
+    ///
+    /// It was the mock-up's `#p-claude` on the chassis, and the C-case ruling
+    /// (2026-08-30) retired it: a spark is one firm's own picture of what a
+    /// model is, and seven rows naming seven different products cannot all wear
+    /// it. Kept as a string so the gate below can *measure* the retirement
+    /// instead of taking the current drawing's word for it — a comparison
+    /// against a shape nobody holds on to is a comparison that quietly starts
+    /// passing the day somebody pastes the old `d` back in.
+    const RETIRED_AGENT_SPARK: &str = concat!(
+        r##"<g stroke="#7a99ff" stroke-linecap="round" fill="none">"##,
+        r##"<path d="M8 2.65v10.7M2.65 8h10.7" stroke-width="1.29"/>"##,
+        r##"<path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6" stroke-width="1.17"/>"##,
+        r##"</g>"##,
+    );
+
+    /// PIN (user ruling 2026-08-30, C-case) — **`#p-agent` is a speech box, and
+    /// it is not the spark it replaced.**
+    ///
+    /// The first ruling of that day made one drawing serve all seven agents;
+    /// this one changed *which* drawing, and for a reason the first one is the
+    /// argument for. An asterisk with spokes radiating from a centre is a
+    /// cognitive shape one vendor draws, so a family mark cut that way asserts
+    /// a provenance six of the seven rows do not have — the same objection
+    /// `ChromeMark::ProfileAgent` already raises against painting anybody's
+    /// brand hex. The neutral shape is the one the class actually shares:
+    /// something you talk to, in a terminal.
+    ///
+    /// The two gates over this mark (`profiles.rs`) hold the seven to *one*
+    /// shape and to seven colours; neither can tell which shape, so a revert
+    /// would pass both. This is the gate that says which, and it says it by
+    /// measurement rather than by naming coordinates a re-cut would simply
+    /// update alongside:
+    ///
+    /// * the two masks **disagree over most of what they cover** — this is not
+    ///   a nudge to the old drawing, it is a different one;
+    /// * they disagree **structurally**, at the two points that are the whole
+    ///   difference between a spark and a box: the spark's centre is where its
+    ///   four spokes cross and is solid, and the box's centre is the bare field
+    ///   its dots stand in; the box hangs a tail under its left shoulder where
+    ///   the spark drew nothing at all.
+    ///
+    /// MUTATION: put the spark's body back in `agent_mark_body` and every claim
+    /// here fails at once.
+    #[test]
+    fn the_agent_mark_is_a_speech_box_and_not_the_spark_it_replaced() {
+        /// Four pixels to the unit, so a sample point can be stated in the
+        /// chassis's own coordinates.
+        const SIDE: f32 = 64.0;
+        let unit = |u: f32| (u * SIDE / HOUSE_GRID_UNITS) as u32;
+
+        let ink = [0x7a, 0x99, 0xff];
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(&[sprite(
+            ChromeMark::ProfileAgent {
+                colour: MarkColour::Blue,
+            },
+            SIDE,
+            SIDE,
+            ink,
+        )]);
+        let box_mark = &icons[0];
+
+        let side_px = SIDE as u32;
+        let document = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{side_px}" height="{side_px}" viewBox="{view_box}">{RETIRED_AGENT_SPARK}</svg>"#,
+            view_box = PROFILE_CHASSIS_VIEW_BOX,
+        );
+        let spark = bt_math::rasterize_svg_document(document.as_bytes())
+            .expect("the retired spark still rasterizes");
+        assert_eq!((spark.width_px, spark.height_px), (side_px, side_px));
+        let spark_alpha = |x: u32, y: u32| -> u8 {
+            spark.rgba[((y * spark.width_px + x) * 4 + 3) as usize]
+        };
+
+        // How much of the ink the two put down is ink only one of them puts
+        // down: nought where the drawings coincide, one where they share
+        // nothing.
+        let (mut union, mut difference) = (0_u32, 0_u32);
+        for y in 0..side_px {
+            for x in 0..side_px {
+                let (here, there) = (
+                    u32::from(alpha_at(box_mark, x, y)),
+                    u32::from(spark_alpha(x, y)),
+                );
+                union += here.max(there);
+                difference += here.abs_diff(there);
+            }
+        }
+        let apart = f64::from(difference) / f64::from(union);
+        assert!(
+            apart > 0.6,
+            "the agent mark and the spark it replaced share {:.0}% of their ink \
+             — that is a nudge, not a new drawing",
+            (1.0 - apart) * 100.0,
+        );
+
+        // And the two structural claims, at the two points that are the whole
+        // of the difference.
+        assert_eq!(
+            spark_alpha(unit(8.0), unit(8.0)),
+            u8::MAX,
+            "the spark's centre is where its four spokes cross",
+        );
+        assert_eq!(
+            alpha_at(box_mark, unit(8.0), unit(8.0)),
+            0,
+            "the speech box's centre is the bare field its two dots stand in — \
+             ink there is a spark that came back",
+        );
+        assert_eq!(
+            alpha_at(box_mark, unit(6.2), unit(13.0)),
+            u8::MAX,
+            "the tail hangs under the box's left shoulder",
+        );
+        assert_eq!(
+            spark_alpha(unit(6.2), unit(13.0)),
+            0,
+            "and the spark drew nothing there",
+        );
     }
 
     /// **A tab and a window are not the same picture** — the one finding P1's
