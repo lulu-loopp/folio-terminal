@@ -81862,18 +81862,16 @@ impl Runtime<'_> {
                     })
             })
             .collect();
-        // **Which of them is being asked to go on *this* turn** (§7.10 ④‴).
-        // `WebSeat::close` is idempotent, so the set above stays non-empty for as
-        // long as the browser process takes to exit — up to ten seconds
-        // (`w0p-evidence.md` §4.2), and on the graceful path the event can fail
-        // to arrive at all. The frame the tail of this function asks for is owed
-        // by the *retirement*, which happens once; asking for it every turn is a
-        // window that spins at the top of its loop for ten seconds with nothing
-        // on the glass changing, because `present_chrome_change` asks for a
-        // redraw whether or not it found a picture to re-queue.
-        let retiring = orphaned
-            .iter()
-            .any(|leaf| self.window.web.get(leaf).is_some_and(|web| !web.is_closing()));
+        // **Which of them is being asked to go on *this* turn** (§7.10 ④‴), read
+        // before the loop below tells any of them, because the loop is what makes
+        // the answer false. See [`a_retirement_happens_on_this_turn`] for what
+        // asking it every turn instead cost.
+        let retiring = a_retirement_happens_on_this_turn(
+            orphaned
+                .iter()
+                .filter_map(|leaf| self.window.web.get(leaf))
+                .map(webhost::WebSeat::is_closing),
+        );
         let focus = self.shortcut_focus();
         let window = &mut *self.window;
         let mut outcomes: Vec<(LeafId, Vec<webhost::WebOutcome>)> = Vec::new();
@@ -92472,6 +92470,36 @@ fn a_bare_redraw_still_owes_a_present(chrome_present_pending: bool, tab_has_a_sh
     chrome_present_pending || !tab_has_a_shell
 }
 
+/// **Whether this turn is the one a page is retired on** (§7.10 ④‴).
+///
+/// The argument is "already closing?" for each of the pages this turn found
+/// orphaned — a page whose pane has left the tree, or whose pane is now showing
+/// something else. [`webhost::WebSeat::close`] is idempotent and the wait for
+/// the browser process to end runs for as long as ten seconds
+/// (`w0p-evidence.md` §4.2), so that set stays non-empty for the whole of the
+/// wait and, on the graceful path, can stay non-empty until the deadline
+/// because the exit event never arrives at all.
+///
+/// **What the retirement owes the glass is one frame, and one is a count.** The
+/// hole a page is seen through is punched while a frame is composed, and a
+/// retirement happens after that frame — so the picture on the glass still
+/// carries the hole and a frame has to be asked for. Asking on every turn
+/// instead is a window that spends the whole ten seconds going round its own
+/// loop as fast as it can: [`Runtime::present_chrome_change`] requests a redraw
+/// whether or not it found a picture to re-queue, that redraw is answered at the
+/// tail of the same turn, and the next turn asks again. Measured as a window
+/// pinned at a core for ten seconds with nothing on the glass changing, on a
+/// machine where one present is a 4K one.
+///
+/// A pure function over the one bit that separates the two, so the rule can be
+/// read without a browser: whether a page is *going* is a question about the
+/// tree, and whether it is going **now** is a question about what it was already
+/// told.
+#[must_use]
+fn a_retirement_happens_on_this_turn(mut orphaned_pages_closing: impl Iterator<Item = bool>) -> bool {
+    orphaned_pages_closing.any(|already_closing| !already_closing)
+}
+
 /// Whether a chrome animation's tick can be answered from the picture already
 /// on the glass instead of composing a new one.
 ///
@@ -102549,6 +102577,310 @@ mod tests {
             redraw.contains("a_bare_redraw_still_owes_a_present("),
             "`redraw` drops a bare request again, so a preview alone in a tab \
              stops drawing:\n{redraw}"
+        );
+    }
+
+    /// One method's text, from its signature to the next method at the same
+    /// indentation, with comments and whitespace taken out.
+    ///
+    /// The same reading [`resize_skirt_order_tests::body`] makes, and for the
+    /// same reason: the claims below are about which *statement* is there, and a
+    /// paragraph explaining why it is there is not a statement.
+    fn method_text(signature: &str) -> String {
+        const SOURCE: &str = include_str!("main.rs");
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        rest[..end]
+            .lines()
+            .map(|line| match line.find("//") {
+                Some(at) => &line[..at],
+                None => line,
+            })
+            .collect::<String>()
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    /// RED ① — **a present is printed wherever it happens** (§7.10 ④‴).
+    ///
+    /// The instrument is the reason this defect stood: while
+    /// `BT_PERF_TRACE present` was printed at the composed door alone, a tab
+    /// whose gestures were producing **no frames at all** read exactly like a
+    /// tab whose frames were merely not being printed — and §7.10 ④″ had to
+    /// write "a tab with no shell draws nothing" down as a known blind spot
+    /// rather than as the defect it was.
+    ///
+    /// A tab with no shell only ever takes the retained door
+    /// (`publish_frame_inner` composes no terminal picture for it), so a line
+    /// printed at the composed door alone is a line such a tab can never print.
+    ///
+    /// RED GATE: take `self.trace_present(` out of `present_retained_picture`
+    /// and the first assertion goes red — which is the build the user was on.
+    /// Move `last_present_at` below the `trace_perf` gate and the third does:
+    /// `since_previous_us` is the gap between pictures reaching the glass, and a
+    /// gap measured against only the presents somebody asked to be told about is
+    /// not that gap.
+    #[test]
+    fn a_present_is_recorded_whichever_door_it_came_through() {
+        let retained = method_text("    fn present_retained_picture(&mut self) -> Result<()> {");
+        assert!(
+            retained.contains("self.trace_present(trigger.source,receipt,true)"),
+            "the retained door is the only door a tab with no shell has, and an \
+             instrument that cannot see it says such a tab never draws:\n{retained}"
+        );
+        let composed = method_text(concat!("    fn ", "redraw(&mut self) -> Result<()> {"));
+        assert!(
+            composed.contains("self.trace_present(trigger.source,receipt,false)"),
+            "and the composed door goes on printing what it always printed:\n{composed}"
+        );
+        let instrument = method_text("    fn trace_present(");
+        let written = instrument
+            .find("self.window.last_present_at=Some(presented_at);")
+            .expect("the instrument records when this window last put a picture up");
+        let gated = instrument
+            .find("if!self.app.trace_perf{return;}")
+            .expect("and printing the line is what the flag buys");
+        assert!(
+            written < gated,
+            "the gap between pictures is a fact about the window and not about \
+             the trace, so it is measured over every present:\n{instrument}"
+        );
+    }
+
+    /// RED ② — **ten notches on a preview alone in a tab are ten presents**
+    /// (§7.10 ④‴, user report on `next21`).
+    ///
+    /// The funnel and the door, run against each other the way a wheel runs
+    /// them. `present_chrome_change` — which 267 call sites in this window
+    /// reach, the preview's own wheel among them — answers a change that lives
+    /// in retained renderer state by re-queueing the picture already on the
+    /// glass and asking for a redraw. **A tab with no shell has no such picture
+    /// to re-queue, ever**, so all it leaves behind is the bare request, and the
+    /// rule that answers a bare request is the whole of whether the notch is
+    /// drawn.
+    ///
+    /// Measured on the machine at ten notches and zero frames.
+    ///
+    /// RED GATE: run the same ten notches under the rule as it shipped —
+    /// `chrome_present_pending` alone — and the count is zero, which is the
+    /// second half of this test and the defect verbatim.
+    #[test]
+    fn ten_notches_on_a_preview_alone_in_a_tab_are_ten_presents() {
+        // The wheel reaches the funnel: a notch that moved the document ends in
+        // the funnel and in nothing else.
+        let wheel = method_text("    fn scroll_preview_body(");
+        assert!(
+            wheel.contains("self.present_chrome_change()"),
+            "a preview's wheel asks for its frame through the chrome funnel:\n{wheel}"
+        );
+        // And the funnel files no debt — it re-queues a picture, and a tab with
+        // no shell has none.
+        let funnel = method_text("    fn present_chrome_change(&mut self) -> Result<()> {");
+        assert!(
+            funnel.contains("letSome(frame)=self.window.last_presented_frame.clone()"),
+            "the funnel's whole answer is the picture already on the glass:\n{funnel}"
+        );
+        assert!(
+            !funnel.contains("chrome_present_pending=true"),
+            "and it files no debt, which is why the door has to know what kind \
+             of tab is asking:\n{funnel}"
+        );
+        assert!(
+            funnel.contains("self.window.window.request_redraw();"),
+            "what it always leaves behind is the bare request:\n{funnel}"
+        );
+
+        /// The two statements above, as the loop a wheel drives them in.
+        ///
+        /// `rule` is the question [`Runtime::redraw`] asks when it finds nothing
+        /// composed, and it is the only thing that differs between the shipped
+        /// build and this one.
+        fn notches(count: usize, rule: fn(bool, bool) -> bool) -> usize {
+            let tab_has_a_shell = false;
+            // A tab with no shell: `activate_tab` empties this on the way in and
+            // `publish_frame_inner` composes nothing to refill it with.
+            let last_presented_frame: Option<()> = None;
+            let mut chrome_present_pending = false;
+            let mut slot = None;
+            let mut presents = 0;
+            for _ in 0..count {
+                // `present_chrome_change`.
+                if slot.is_none() {
+                    slot = last_presented_frame;
+                }
+                let mut redraw_requested = true;
+                // `redraw`, at the tail of the same turn.
+                while redraw_requested {
+                    redraw_requested = false;
+                    match slot.take() {
+                        Some(()) => presents += 1,
+                        None => {
+                            if rule(chrome_present_pending, tab_has_a_shell) {
+                                chrome_present_pending = false;
+                                presents += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            presents
+        }
+
+        assert_eq!(
+            notches(10, a_bare_redraw_still_owes_a_present),
+            10,
+            "every notch a person spends on a document has to put that document \
+             back on the glass"
+        );
+        assert_eq!(
+            notches(10, |pending, _| pending),
+            0,
+            "and the narrower question is the shipped build: ten notches, ten \
+             scroll offsets, zero frames"
+        );
+    }
+
+    /// RED ③ — **an engine page in a tab with no shell reaches the glass**
+    /// (§7.10 ④‴, user report on `next21`: `.html` and `.pdf` came up blank).
+    ///
+    /// A page is not drawn by this window at all — it is a DirectComposition
+    /// visual under the swapchain's, seen through a hole cut in this window's
+    /// own surface. Three things have to happen for one to be visible, and
+    /// **all three of them live on the present path**:
+    ///
+    /// * `sync_web_page` tells the engine its rectangle and punches the hole,
+    /// * and it is reached only from `pane_draws`,
+    /// * and the composition tree is published only by `present_seats_and_commit`'s
+    ///   `commit()` — wgpu's dx12 backend never commits a visual it did not
+    ///   create the device for.
+    ///
+    /// So for a tab whose only pane is a preview, "no present" and "no page" are
+    /// the same sentence: the engine sits at the size it was born with, behind a
+    /// surface that was never made transparent over it, and nothing on the glass
+    /// says so — which is a blank pane wearing a head that correctly names the
+    /// file.
+    ///
+    /// The value half is the shape itself: such a tab really does answer "no
+    /// shell", which is what [`a_bare_redraw_still_owes_a_present`] is handed.
+    ///
+    /// RED GATE: take `self.pane_draws(now)` out of `present_retained_picture`
+    /// — or the `sync_web_page` call out of `pane_draws` — and the chain breaks
+    /// at the assertion that names it. Either break is a page that is never
+    /// placed, which is the reported blank.
+    #[test]
+    fn an_engine_page_alone_in_a_tab_reaches_the_glass_through_the_retained_present() {
+        // The shape: a tab whose only pane is a preview has no shell, which is
+        // the bit the redraw door reads.
+        let (seats, seat) = seats::Seats::lone_seat(&bt_layout::Seat::new(
+            SeatId(1),
+            bt_layout::SeatKind::Preview,
+        ));
+        let document = buffer_saying(r"D:\notes\report.html", "report.html", "<p>hi</p>");
+        let source = document.source.clone();
+        let mut pool = preview::PreviewPool::default();
+        pool.insert(document);
+        let mut panes = PreviewPanes::default();
+        panes.entry(seat_of(TabId(9), seat)).buffer = Some(source);
+        let (layout, overflow) = cross_solve(&seats);
+        let tab = assemble_tab_state(
+            TabId(9),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            pool,
+            panes,
+            BTreeMap::new(),
+            seat,
+            TabSeed::default(),
+            seats,
+            layout,
+            overflow,
+        );
+        assert!(
+            tab.focused().is_none(),
+            "a preview alone in a tab is a tab with nothing to type into, and \
+             that is the fact the redraw door is handed"
+        );
+        assert!(
+            a_bare_redraw_still_owes_a_present(false, tab.focused().is_some()),
+            "so a redraw it asks for with no debt filed is still a present"
+        );
+
+        // The chain: the only path from that present to a page on the glass.
+        let publisher =
+            method_text("    fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {");
+        assert!(
+            publisher.contains("ifself.focused().is_none(){self.window.chrome_present_pending=true;self.window.window.request_redraw();returnOk(false);}"),
+            "a tab with no shell composes no terminal picture, and what it owes \
+             instead is a present:\n{publisher}"
+        );
+        let retained = method_text("    fn present_retained_picture(&mut self) -> Result<()> {");
+        assert!(
+            retained.contains("letbodies=self.pane_draws(now);"),
+            "the retained present is where such a tab's panes are placed:\n{retained}"
+        );
+        let draws = method_text("    fn pane_draws(&mut self, now: Instant) -> Vec<PaneDraw> {");
+        assert!(
+            draws.contains("self.sync_web_page(now);"),
+            "and placing the panes is what tells the engine its rectangle and \
+             cuts the hole it is seen through:\n{draws}"
+        );
+        let funnel = method_text("    fn present_seats_and_commit(");
+        assert!(
+            funnel.contains(".commit()"),
+            "and nothing else in this window publishes the composition tree the \
+             page's visual lives in:\n{funnel}"
+        );
+    }
+
+    /// RED ④ — **a retirement asks for one frame, not one per turn** (§7.10 ④‴).
+    ///
+    /// The freeze beside the blank page. A page whose pane has gone owes the
+    /// glass one frame, because the hole it was seen through was cut while a
+    /// frame was composed and the retirement happens after that frame. But
+    /// `WebSeat::close` is idempotent and the wait for the browser process runs
+    /// to ten seconds, so the set of orphaned pages stays non-empty for the
+    /// whole wait — and asking for that frame off the *set* rather than off the
+    /// *event* is a window that goes round its own loop as fast as it can for
+    /// ten seconds: the funnel requests a redraw whether or not it found a
+    /// picture, the redraw is answered at the tail of the same turn, and the
+    /// next turn asks again.
+    ///
+    /// RED GATE: ask the question of `!orphaned.is_empty()` — the shipped build
+    /// — and the last assertion goes red. The three above it are the rule
+    /// itself: a page already told to go is not retiring again.
+    #[test]
+    fn a_retirement_asks_for_one_frame_and_not_one_per_turn() {
+        assert!(
+            !a_retirement_happens_on_this_turn(std::iter::empty()),
+            "a window with nothing orphaned owes no frame at all"
+        );
+        assert!(
+            a_retirement_happens_on_this_turn([false].into_iter()),
+            "the turn a page is first found orphaned is the turn it retires on"
+        );
+        assert!(
+            !a_retirement_happens_on_this_turn([true].into_iter()),
+            "and every turn after it is a page that has already been told, \
+             waiting for a process to exit — nothing on the glass is changing"
+        );
+        assert!(
+            a_retirement_happens_on_this_turn([true, false].into_iter()),
+            "a second page going while the first is still leaving owes its own frame"
+        );
+
+        let clock = method_text("    fn advance_web_page(&mut self, now: Instant) -> Result<()> {");
+        assert!(
+            clock.contains("ifretiring{self.present_chrome_change()?;}"),
+            "the frame is owed by the retirement and not by the wait:\n{clock}"
+        );
+        assert!(
+            !clock.contains("if!orphaned.is_empty(){"),
+            "asking the wait for it is ten seconds of a window pinned at a core \
+             with nothing on the glass changing:\n{clock}"
         );
     }
 
