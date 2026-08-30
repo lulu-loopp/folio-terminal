@@ -123558,6 +123558,167 @@ mod tests {
         assert_eq!(origin.preview_pool.len(), 0, "and it is a move");
     }
 
+    // ── §7.1.6k″: the picture follows its pane, and the lane follows with it ─
+
+    /// A tab of one terminal and one preview pane **holding a picture** — the
+    /// shape [`tab_with_a_preview`] cannot make, because a picture is not a
+    /// buffer and lives on [`PreviewPane::image`] instead of in the pool.
+    fn tab_with_a_picture(id: u64, path: &str) -> (TabState, SeatId) {
+        let mut seats = seats::Seats::lone_terminal();
+        let preview_seat = seats
+            .add_preview(&cross_metrics())
+            .expect("the preview seat lands");
+        let focused = seats.identity();
+        let mut panes = PreviewPanes::default();
+        panes.entry(seat_of(TabId(id), preview_seat)).image =
+            Some(PreviewImageState::new(PathBuf::from(path)));
+        let (layout, overflow) = cross_solve(&seats);
+        let tab = assemble_tab_state(
+            TabId(id),
+            BTreeMap::from([(focused, leaf_saying("SHELL"))]),
+            BTreeMap::new(),
+            preview::PreviewPool::default(),
+            panes,
+            BTreeMap::new(),
+            focused,
+            TabSeed::default(),
+            seats,
+            layout,
+            overflow,
+        );
+        (tab, preview_seat)
+    }
+
+    /// The file a lane is spent on, as the picture the pane is holding names it.
+    fn lane_shows(tab: &TabState) -> Option<&Path> {
+        let lane = tab.preview_raster?;
+        Some(tab.preview_panes.get(lane)?.image.as_ref()?.path.as_path())
+    }
+
+    /// RED ① — **the tab a picture left gives the texture lane back**
+    /// (user report on `next22`, defects #202/#204).
+    ///
+    /// [`TabState::preview_raster`] names the one seat whose pixels go down
+    /// `bt_render`'s single `set_preview_image` slot, and until this branch the
+    /// only doors that wrote it were the ones that *land* a view on a surface
+    /// ([`preview_lane_after_landing`]) and the constructor
+    /// ([`assemble_tab_state`], which derives it). A **move** is neither: it
+    /// changes which panes a tab holds without landing anything, so the tab a
+    /// picture was torn out of went on naming a surface it no longer has.
+    ///
+    /// RED GATE: take the `heal_preview_raster` call out of
+    /// [`pane_into_new_tab`] and the lane still names `SeatId(2)` of a tab whose
+    /// preview pane has gone.
+    #[test]
+    fn the_tab_a_picture_left_gives_the_texture_lane_back() {
+        let (mut origin, picture_seat) = tab_with_a_picture(1, r"D:\shots\B1-rest.png");
+        assert_eq!(
+            lane_shows(&origin),
+            Some(Path::new(r"D:\shots\B1-rest.png")),
+            "the starting state: the tab is spending its one lane on the picture"
+        );
+
+        let torn = tear_pane_into_tab(
+            &mut origin,
+            &cross_metrics(),
+            picture_seat,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a picture may become a tab of its own");
+
+        assert_eq!(
+            lane_shows(&torn),
+            Some(Path::new(r"D:\shots\B1-rest.png")),
+            "the tab it became draws it — `assemble_tab_state` derives the lane"
+        );
+        assert_eq!(
+            origin.preview_raster, None,
+            "and the tab it left is holding a lane for a pane that has gone"
+        );
+    }
+
+    /// RED ② — **the picture comes back with its pane** (defects #202/#204, the
+    /// gesture the user actually reported).
+    ///
+    /// Open a `.png` on a pane, tear the pane into a tab of its own, drag it
+    /// back. Both halves of the pane's address changed twice, and the tab it
+    /// returns to is still naming the address it had the first time — so
+    /// `get_or_insert` found an incumbent, kept it, and the arriving picture was
+    /// filtered straight out of [`Runtime::preview_picture_hosts`]. On the glass
+    /// that is a blank body under a head and a fact line that travelled with the
+    /// pane: *「1440 × 900 · PNG · 36 KB · Fit」* over nothing.
+    ///
+    /// RED GATE: put `target.preview_raster.get_or_insert(arrived)` back in
+    /// [`move_seat_content`] and the returning picture never reaches the lane.
+    #[test]
+    fn a_picture_dragged_back_into_the_tab_it_left_is_drawn_again() {
+        let (mut origin, picture_seat) = tab_with_a_picture(1, r"D:\shots\B1-rest.png");
+        let mut alone = tear_pane_into_tab(
+            &mut origin,
+            &cross_metrics(),
+            picture_seat,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a picture may become a tab of its own");
+        let lone_seat = alone.seats.preview_seats()[0];
+
+        let moved = cross_move(
+            &mut alone,
+            &mut origin,
+            lone_seat,
+            seats::DropEdge::Right,
+            true,
+        )
+        .expect("the lone pane of a tab may still be moved");
+
+        assert_eq!(
+            origin.preview_raster,
+            Some(seat_of(TabId(1), moved.landed)),
+            "the lane names the pane the picture is standing in now"
+        );
+        assert_eq!(
+            lane_shows(&origin),
+            Some(Path::new(r"D:\shots\B1-rest.png")),
+            "which is the picture being on the glass again rather than a head \
+             and a fact line over nothing"
+        );
+    }
+
+    /// **A picture that moves in does not take the lane off the picture that was
+    /// already there** — the rule §7.1.6k stated when it wrote `get_or_insert`,
+    /// kept while the stale half of it goes.
+    ///
+    /// RED GATE: drop the incumbent clause from [`preview_raster_lane`] and the
+    /// tab re-derives from insertion order, which the arriving pane can win.
+    #[test]
+    fn a_picture_moving_in_does_not_take_the_lane_from_the_one_already_there() {
+        let (mut from, travelling) = tab_with_a_picture(1, r"D:\shots\B1-rest.png");
+        let (mut into, _) = tab_with_a_picture(2, r"D:\shots\standing.png");
+
+        let moved = cross_move(
+            &mut from,
+            &mut into,
+            travelling,
+            seats::DropEdge::Right,
+            true,
+        )
+        .expect("the picture pane moves into the other tab");
+        assert!(into.preview_panes.get(into.preview_here(moved.landed)).is_some());
+
+        assert_eq!(
+            lane_shows(&into),
+            Some(Path::new(r"D:\shots\standing.png")),
+            "the incumbent keeps its pixels; the arriving picture keeps its \
+             head, its foot and its meta line and waits for the lane"
+        );
+    }
+
     /// **§7.1.6k — a target that cannot take another pane is refused before
     /// anything moves.**
     ///
