@@ -957,11 +957,18 @@ pub enum PresentOutcome {
     /// exactly as it is after [`Self::Skipped`], and the caller's answer is the
     /// same one: keep the frame and ask for it again.
     ///
-    /// The retry converges by construction. Whatever filled the atlas, the trim
-    /// at the end of [`WindowRenderer::present_frame`] unprotects it, and a
-    /// frame's own glyphs are bounded by the ink of one window — some twenty-
-    /// five times smaller than the atlas at the device limit — so the frame
-    /// after this one has room. That is why this is a retry and not a counter.
+    /// **The retry converges because something is changed between the two
+    /// attempts, and until §7.1.3m nothing was.** This used to say that the trim
+    /// at the end of [`WindowRenderer::present_frame`] unprotects whatever
+    /// filled the atlas and that a frame's own glyphs are bounded by one
+    /// window's ink, so the next frame has room. The second half is true and
+    /// measured (§7.1.3m: 3.3% of an 8192² atlas for a whole 4K window of
+    /// Chinese); the first half was the mistake. Trimming empties the *in-use*
+    /// set, and what a long session runs out of is the packer's shelf geometry —
+    /// so the same frame met the same refusal in the same place, forever, at
+    /// half the atlas still free. What answers this outcome now is
+    /// [`GpuContext::close_the_frame`], which gives the atlas a new packing on
+    /// the first refusal; the retry then lands on the frame after it.
     PresentedWithoutText(PresentReceipt),
     Skipped,
     Reconfigure,
@@ -2666,10 +2673,11 @@ fn accept_text_prepare(
 /// 2. **The frame is marked incomplete.** `text_complete` is what turns this
 ///    frame into [`PresentOutcome::PresentedWithoutText`], which is the caller's
 ///    instruction to put the frame back in the slot and ask for another one.
-///    **That is the retry**, and it is the only safe one: the atlas trim that
-///    frees the room is [`WindowRenderer::present_frame`]'s unconditional one on
-///    the way out, and trimming here instead would unprotect the glyphs the
-///    lanes *already prepared on this same frame* were handed coordinates for.
+///    **That is the retry**, and it is the only safe one: what frees the room is
+///    [`GpuContext::close_the_frame`], on the way out of
+///    [`WindowRenderer::present_frame`] and after the draw, and doing anything to
+///    the atlas *here* would move or unprotect the glyphs the lanes **already
+///    prepared on this same frame** were handed coordinates for.
 /// 3. **It is said once.** The console line is for the first refusal of a run,
 ///    not for each of sixty a second.
 ///
@@ -2699,6 +2707,41 @@ fn text_upload_refused(
             refused.insert(lane);
         }
     }
+}
+
+/// **One re-pack, one line, one number** — the counter and the sentence that
+/// reports it, minted together so that neither can happen without the other.
+///
+/// A frame that loses its text already leaves a line
+/// (`text_upload_refused`); this is the other half of that story, and the
+/// half a reader on the user's machine actually needs. A refusal says *the
+/// packer wore out*; this says *and here is the ledger*, because what tells
+/// the two illnesses apart is the **frequency**, not the event:
+///
+/// * one every few hundred frames is `etagere`'s shelf layout wearing out as it
+///   must on a long session, and the repair working (`docs/DESIGN.md` §7.1.3m —
+///   the soak measures eight in four thousand frames);
+/// * one a second is a window whose single frame does not fit under this
+///   device's largest texture, which no re-packing reaches. The latch in
+///   [`GpuContext::close_the_frame`] already stops that from re-packing on
+///   every frame, so a run of consecutive numbers here is itself the finding.
+///
+/// **Why the increment lives in here rather than beside the `eprintln!`.**
+/// Two statements that must always happen together are one statement: a
+/// counter bumped in one arm and a line printed under some `if` is exactly how
+/// the 2026-08-29 log came to name a lane nobody was looking at. There is one
+/// writer of `glyph_atlas_refits` in this crate and it is this function, so
+/// "one re-pack is one line" is a property of the code rather than a promise
+/// about it — and the number in the line is the value of the counter after the
+/// bump, so the first re-pack of a run is `#1`.
+///
+/// The wording follows the refusal line's: `Folio glyph atlas …`, present
+/// tense, no punctuation a log reader has to parse. `stderr` is
+/// `%APPDATA%\Folio\diagnostics.log` for a resident run — `SetStdHandle` moves
+/// the channel, so there is nothing between this call and that file.
+fn note_a_repack(refits: &mut u64) -> String {
+    *refits += 1;
+    format!("Folio glyph atlas was repacked after a textless frame (refit #{refits})")
 }
 
 /// What a frame that reached the glass *is*, given whether every seat's grid
@@ -2860,6 +2903,25 @@ pub struct GpuContext {
     /// mint its own viewport without rebuilding anything.
     glyphon_cache: Cache,
     atlas: TextAtlas,
+    /// **Whether the shelf layout under the atlas has already been thrown away
+    /// once for a refusal no complete frame has answered yet** — the latch that
+    /// makes [`GpuContext::close_the_frame`] a repair and not a reflex.
+    ///
+    /// See that function for the whole argument. In one line: a first refusal is
+    /// read as a packer that has run out of *geometry* and is answered by a
+    /// fresh one; a second refusal on a packer that is already fresh is read as
+    /// a frame that is genuinely bigger than the device's largest texture, which
+    /// no re-packing can cure and which must therefore not be paid for sixty
+    /// times a second.
+    glyph_atlas_refitted: bool,
+    /// How many times this process has thrown a fragmented glyph atlas away.
+    ///
+    /// A counter rather than a bit because the number is the diagnosis: one over
+    /// a day's session is the packer wearing out as it must; one a second is a
+    /// window whose demand does not fit and whose retry is spinning. Written by
+    /// [`note_a_repack`] and by nothing else, which is what makes every increment
+    /// of it a line in `diagnostics.log`.
+    glyph_atlas_refits: u64,
     rect_pipeline: wgpu::RenderPipeline,
     /// The same pipeline blending `Replace`, for the chrome quads that *are*
     /// the window's ground — see [`ChromeSurface::Ground`].
@@ -4234,7 +4296,27 @@ impl GpuContext {
     /// variable can only be told. On a machine that has one, the second call
     /// never happens and nothing about what these tests exercise changes.
     pub async fn headless(format: wgpu::TextureFormat) -> Result<Self, RenderError> {
-        Self::headless_on(format, false).await
+        Self::headless_on(format, false, None).await
+    }
+
+    /// The same context on a device that refuses to make a texture wider than
+    /// `ceiling` — the one thing a soak has to be able to say and cannot ask of
+    /// the machine it happens to be running on.
+    ///
+    /// **Not a synthetic device.** `wgpu` treats `required_limits` as a request
+    /// for *at most* this, and the roof named here is the roof glyphon reads out
+    /// of `device.limits()` and packs into — the same number, arrived at the
+    /// same way, as on a machine whose adapter simply offers less. What lowering
+    /// it buys is time: the illness in `docs/DESIGN.md` §7.1.3m is a *ratio*
+    /// between what a session keeps and what the packer can hold, so a roof a
+    /// thousand times smaller reaches in a minute the state a real session
+    /// reaches in days.
+    #[cfg(test)]
+    async fn headless_under_a_texture_ceiling(
+        format: wgpu::TextureFormat,
+        ceiling: u32,
+    ) -> Result<Self, RenderError> {
+        Self::headless_on(format, false, Some(ceiling)).await
     }
 
     /// The same context, on the adapter a machine with no graphics driver gets.
@@ -4247,12 +4329,13 @@ impl GpuContext {
     /// machine's own path on a developer's machine instead of only in a virtual
     /// one.
     pub async fn headless_fallback(format: wgpu::TextureFormat) -> Result<Self, RenderError> {
-        Self::headless_on(format, true).await
+        Self::headless_on(format, true, None).await
     }
 
     async fn headless_on(
         format: wgpu::TextureFormat,
         demand_fallback: bool,
+        texture_ceiling: Option<u32>,
     ) -> Result<Self, RenderError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let phase_started = Instant::now();
@@ -4278,10 +4361,14 @@ impl GpuContext {
         };
         let adapter_time = phase_started.elapsed();
         let phase_started = Instant::now();
+        let mut required_limits = limits_with_this_adapters_textures(&adapter);
+        if let Some(ceiling) = texture_ceiling {
+            required_limits.max_texture_dimension_2d = ceiling;
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Folio replay probe device"),
-                required_limits: limits_with_this_adapters_textures(&adapter),
+                required_limits,
                 ..Default::default()
             })
             .await
@@ -4342,6 +4429,8 @@ impl GpuContext {
             swash_cache,
             glyphon_cache,
             atlas,
+            glyph_atlas_refitted: false,
+            glyph_atlas_refits: 0,
             rect_pipeline,
             ground_rect_pipeline,
             ground_fade_rect_pipeline,
@@ -4446,6 +4535,110 @@ impl GpuContext {
     #[must_use]
     pub fn max_texture_dimension_2d(&self) -> u32 {
         self.max_texture_dimension_2d
+    }
+
+    /// How many times this process has thrown a fragmented glyph atlas away —
+    /// see [`GpuContext::close_the_frame`].
+    pub fn glyph_atlas_refits(&self) -> u64 {
+        self.glyph_atlas_refits
+    }
+
+    /// **The one place the shared atlas is told a frame is over** — called by
+    /// [`WindowRenderer::present_frame`] outside every way that frame can end,
+    /// and answering the frame's own verdict on its text.
+    ///
+    /// # Why a trim is not enough, and what a refusal actually means
+    ///
+    /// [`TextAtlas::trim`] empties `glyphs_in_use`, which is the set glyphon
+    /// refuses to evict. That is all it does, and until this function existed it
+    /// was all a frame ever asked for — on the reasoning, written into
+    /// [`PresentOutcome::PresentedWithoutText`], that "whatever filled the atlas,
+    /// the trim unprotects it, so the frame after this one has room". **The
+    /// second half of that sentence is false**, and the 2026-08-29 report is
+    /// what it costs (`docs/DESIGN.md` §7.1.3m, the true cause).
+    ///
+    /// glyphon packs into `etagere`'s `BucketedAtlasAllocator`: a shelf packer
+    /// whose shelves are height-classed, whose buckets give their space back
+    /// only when *every* item in them is gone, and which reclaims a shelf only
+    /// when it is the top-most one (or one of at most three consecutive empty
+    /// ones the same column can coalesce). Room in that packer is therefore not
+    /// a quantity, it is a *geometry*: a session that draws at a ladder of sizes
+    /// — zoom levels, heading sizes, chrome against body against a card's mini
+    /// face — lays down shelves of many heights, pins most of them with a
+    /// surviving glyph, and slowly loses the ability to place a tall raster
+    /// anywhere at all. Once that has happened `try_allocate` fails, growth is
+    /// already at `max_texture_dimension_2d`, and the answer is
+    /// [`PrepareError::AtlasFull`] **for every frame after it, for the life of
+    /// the process** — measured on the model of glyphon's own allocator at
+    /// roughly half the atlas's area still free. Trimming cannot touch it: the
+    /// in-use set was never what ran out.
+    ///
+    /// So a refusal is answered here by giving the atlas a *new packing*: a
+    /// fresh [`TextAtlas`], which is a fresh `BucketedAtlasAllocator` at 256²
+    /// that will grow again as it is asked to. The rasters it held are a pure
+    /// cache — every one of them is a swash call away — so nothing is lost but
+    /// the time to draw them again, and the frame that was refused is already
+    /// owed and already being asked for again by
+    /// [`PresentOutcome::PresentedWithoutText`]. **That is what makes the retry
+    /// a retry**: before this, the next attempt met the same packer in the same
+    /// state and was refused in the same place, which is the spin the report's
+    /// hung-watchdog line recorded.
+    ///
+    /// # Why it is not a periodic flush, and why it happens at most once
+    ///
+    /// Nothing here runs on a timer or a threshold: the atlas is thrown away
+    /// only when a frame has already lost its text, which is the one moment at
+    /// which the cache has provably stopped being a cache. And it is thrown away
+    /// **once per episode**. A second refusal while `glyph_atlas_refitted` still
+    /// stands is a refusal by a packer that was fresh a frame ago, and that is a
+    /// different illness with a different name: one frame's demand is larger
+    /// than the largest texture this device will make. Re-packing cannot cure
+    /// that, and doing it every frame would turn a window that is merely too
+    /// full into one that also re-rasterizes its whole corpus sixty times a
+    /// second. The latch clears on the first frame that keeps all of its text.
+    ///
+    /// # What it leaves behind
+    ///
+    /// One line per re-pack, numbered, on the channel a resident run points at
+    /// `%APPDATA%\Folio\diagnostics.log` — see [`note_a_repack`]. The
+    /// refusal that provoked it already writes its own line once per lane, and
+    /// the pair is what a reader on the machine needs: the first says a lane
+    /// went dumb, the second says how often this window has had to start its
+    /// packing over, and only the second tells the packer wearing out from a
+    /// frame that will never fit.
+    ///
+    /// # Why the renderers that already hold coordinates are safe
+    ///
+    /// A `TextRenderer`'s prepared vertices carry positions **inside** the atlas
+    /// texture, so replacing the atlas invalidates every batch prepared against
+    /// the old one. This is called from `present_frame` after the frame has been
+    /// drawn and presented, and every lane's draw is gated on a flag recomputed
+    /// by that same frame's prepare — a lane that does not prepare is not
+    /// issued — so no batch survives into a pass against a different atlas. The
+    /// pipeline each renderer holds is minted by the shared [`Cache`] from the
+    /// format, which does not change, so the renderers themselves stay valid.
+    fn close_the_frame(&mut self, outcome: &Result<PresentOutcome, RenderError>) {
+        match outcome {
+            Ok(PresentOutcome::Presented(_)) => {
+                self.glyph_atlas_refitted = false;
+                self.atlas.trim();
+            }
+            Ok(PresentOutcome::PresentedWithoutText(_)) if !self.glyph_atlas_refitted => {
+                self.glyph_atlas_refitted = true;
+                self.atlas =
+                    TextAtlas::new(&self.device, &self.queue, &self.glyphon_cache, self.format);
+                // Unconditional, and numbered by the same statement that does
+                // the numbering — see [`note_a_repack`]. A re-pack the log does
+                // not carry is a re-pack nobody on the machine it happened on
+                // can count, and the count is the whole diagnosis.
+                eprintln!("{}", note_a_repack(&mut self.glyph_atlas_refits));
+            }
+            // A refused frame on a packing that is already fresh, and the three
+            // ends that say nothing about text at all (a skipped or reconfigured
+            // swapchain, a frame that never composed): the trim every frame owes,
+            // and nothing else.
+            _ => self.atlas.trim(),
+        }
     }
 
     /// Make the device hold exactly the ground's picture, and answer whether a
@@ -5887,7 +6080,12 @@ impl WindowRenderer {
         // cells. A `max_texture_dimension_2d` of 8192 is 67 Mpx², some twenty-
         // five screens. Trimmed every frame the atlas cannot fill; not trimmed,
         // it is only a matter of time.
-        gpu.atlas.trim();
+        //
+        // **The trim is only what an ordinary frame owes.** A frame that lost
+        // its text owes something else, because what ran out was never the
+        // in-use set — see [`GpuContext::close_the_frame`], which is now the one
+        // place either debt is paid.
+        gpu.close_the_frame(&outcome);
         outcome
     }
 
@@ -15344,12 +15542,17 @@ mod tests {
     fn headless_device(
         format: wgpu::TextureFormat,
         demand_software: bool,
+        texture_ceiling: Option<u32>,
     ) -> Result<HeadlessDevice, RenderError> {
         let lock = GPU_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let gpu = if demand_software {
             pollster::block_on(GpuContext::headless_fallback(format))?
+        } else if let Some(ceiling) = texture_ceiling {
+            pollster::block_on(GpuContext::headless_under_a_texture_ceiling(
+                format, ceiling,
+            ))?
         } else {
             pollster::block_on(GpuContext::headless(format))?
         };
@@ -15362,7 +15565,19 @@ mod tests {
     /// have nothing to say about it. They say so by failing rather than by
     /// quietly passing.
     fn on_this_machines_adapter(format: wgpu::TextureFormat) -> HeadlessDevice {
-        headless_device(format, false).expect("a headless device context on this machine's adapter")
+        headless_device(format, false, None)
+            .expect("a headless device context on this machine's adapter")
+    }
+
+    /// This machine's adapter, on a device that will not make a texture wider
+    /// than `ceiling` — see [`GpuContext::headless_under_a_texture_ceiling`] for
+    /// why a soak is allowed to ask for a smaller roof than the machine has.
+    fn on_a_device_whose_textures_stop_at(
+        format: wgpu::TextureFormat,
+        ceiling: u32,
+    ) -> HeadlessDevice {
+        headless_device(format, false, Some(ceiling))
+            .expect("a headless device context under a texture ceiling")
     }
 
     /// WARP by name — gate 5's device, and the only one that shows the defects
@@ -15372,7 +15587,7 @@ mod tests {
     /// tests that ask for this skip rather than fail there, because what would
     /// be red is the absence of a platform rather than a regression.
     fn on_the_software_adapter(format: wgpu::TextureFormat) -> Option<HeadlessDevice> {
-        headless_device(format, true).ok()
+        headless_device(format, true, None).ok()
     }
 
     /// Every `#[cfg(test)]` module in one file's source, joined — the region a
@@ -15483,6 +15698,7 @@ mod tests {
             concat!("headless", "("),
             concat!("headless_", "fallback("),
             concat!("headless_", "on("),
+            concat!("headless_under_a_", "texture_ceiling("),
         ];
         let doorway = block_beginning_with(
             &test_code_in(include_str!("lib.rs")),
@@ -15501,6 +15717,11 @@ mod tests {
             doorway.matches(constructors[1]).count(),
             1,
             "and for the software adapter exactly once"
+        );
+        assert_eq!(
+            doorway.matches(constructors[3]).count(),
+            1,
+            "and for a device under a texture ceiling exactly once"
         );
 
         for (name, source) in crate_sources() {
@@ -16840,16 +17061,21 @@ mod tests {
     ///
     /// There is no way to ask glyphon what it is protecting, so the invariant is
     /// held where it is spent: `present_frame` may not fail, may not return
-    /// early, and must trim.
+    /// early, and must close the frame out on the shared atlas.
     ///
-    /// Mutation: move the trim back inside `compose_frame` and this fails,
+    /// Since §7.1.3m the closing verb is [`GpuContext::close_the_frame`] rather
+    /// than the bare trim — an ordinary frame's trim and a refused frame's
+    /// re-packing are the same debt paid in the same place, and the reason they
+    /// are one call is that either one skipped is the same defect.
+    ///
+    /// Mutation: move the call back inside `compose_frame` and this fails,
     /// because `present_frame` stops naming it.
     #[test]
     fn no_exit_from_a_frame_may_skip_the_atlas_trim() {
         let body = present_frame_source();
         assert!(
-            body.contains("gpu.atlas.trim();"),
-            "present_frame must trim the shared atlas: {body}"
+            body.contains("gpu.close_the_frame(&outcome);"),
+            "present_frame must close the frame out on the shared atlas: {body}"
         );
         assert!(
             !body.contains('?'),
@@ -18083,6 +18309,310 @@ mod tests {
             worst, None,
             "a Chinese session went dumb after enough screens: the shared atlas kept every raster \
              the session had ever drawn and had no room left for the next one"
+        );
+    }
+
+    /// RED — **one re-pack is one line, and the line carries its number**
+    /// (`docs/DESIGN.md` §7.1.3m; coordinator's ask, 2026-08-29).
+    ///
+    /// The repair is invisible from outside by design: the frame after it
+    /// carries its text and nothing on screen says why. That is exactly the
+    /// state the 2026-08-29 report was sent from — something was happening
+    /// repeatedly on the user's machine and the only line it left named a lane
+    /// nobody was looking at. So the re-pack leaves a line of its own, and the
+    /// line carries the running count, because **frequency is the diagnosis**:
+    /// one every few hundred frames is the shelf layout wearing out as it must,
+    /// one a second is a window whose frame will never fit and whose retry is
+    /// spinning.
+    ///
+    /// Asked without a device, because none of it needs one: `note_a_repack` is
+    /// the sole writer of the counter and the sole author of the sentence, so
+    /// "one re-pack, one line" is a property of that pair and not of the GPU
+    /// underneath it.
+    ///
+    /// Mutation: bump `glyph_atlas_refits` anywhere else, or wrap the
+    /// `eprintln!` in a once-per-run guard the way the refusal line is wrapped,
+    /// and the numbers stop agreeing with the lines.
+    #[test]
+    fn one_repack_is_one_numbered_line() {
+        let mut refits = 0u64;
+        let lines: Vec<String> = (0..3).map(|_| note_a_repack(&mut refits)).collect();
+        assert_eq!(
+            refits, 3,
+            "three re-packs must have been counted three times"
+        );
+        assert_eq!(
+            lines,
+            vec![
+                "Folio glyph atlas was repacked after a textless frame (refit #1)".to_owned(),
+                "Folio glyph atlas was repacked after a textless frame (refit #2)".to_owned(),
+                "Folio glyph atlas was repacked after a textless frame (refit #3)".to_owned(),
+            ],
+            "a re-pack that leaves no line, or leaves one without its number, is a re-pack              nobody on the machine it happened on can count"
+        );
+        // The family the refusal line already belongs to, so that one `grep` over
+        // `diagnostics.log` finds both halves of the story.
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.starts_with("Folio glyph atlas ")),
+            "the two lines about this atlas must be found by one search: {lines:?}"
+        );
+    }
+
+    /// PIN — **the counter and the line are minted by the same statement.**
+    ///
+    /// [`one_repack_is_one_numbered_line`] holds the pair to its wording; this
+    /// holds the rest of the crate to the pair. `glyph_atlas_refits` may be
+    /// incremented in exactly one place, and that place is the function that
+    /// returns the sentence — a counter bumped in one arm and a line printed
+    /// under some `if` is precisely how the 2026-08-29 log came to report a lane
+    /// nobody was looking at while saying nothing about the one that mattered.
+    ///
+    /// Mutation: move the `*refits += 1` out of `note_a_repack` and up into
+    /// `close_the_frame` beside the `eprintln!`. It would still be correct
+    /// today, and it would be one edit away from not being.
+    #[test]
+    fn nothing_but_the_line_may_count_a_repack() {
+        let source = source_without_prose();
+        // Spelled in two pieces, so this gate is not its own counter-example.
+        assert_eq!(
+            source
+                .matches(concat!("glyph_atlas_", "refits+=1;"))
+                .count(),
+            0,
+            "the re-pack counter is bumped somewhere that is not the line that reports it"
+        );
+        let minting = block_beginning_with(
+            include_str!("lib.rs"),
+            concat!("fn note_a_", "repack(refits: &mut u64)"),
+        );
+        assert!(
+            minting.contains("*refits += 1;"),
+            "the one place that counts a re-pack has to be the one that names it: {minting}"
+        );
+        let closing = block_beginning_with(
+            include_str!("lib.rs"),
+            concat!("fn close_the_", "frame(&mut self,"),
+        );
+        assert_eq!(
+            minting.matches("format!(").count(),
+            1,
+            "one sentence, built once"
+        );
+        assert_eq!(
+            closing.matches(concat!("note_a_", "repack(")).count(),
+            1,
+            "the frame's closing verb spends the pair exactly once: {closing}"
+        );
+    }
+
+    /// RED — **a session long enough to wear the packer out gets its text
+    /// back** (`docs/DESIGN.md` §7.1.3m, the true cause).
+    ///
+    /// The gate above walks a Chinese session and never sees a refusal, because
+    /// nothing it draws ever fills the atlas: it measures the *quantity* of ink,
+    /// which §7.1.3m put at 3.3% of the roof for a whole 4K window. What the
+    /// 2026-08-29 report ran out of was not quantity. glyphon packs into
+    /// `etagere`'s bucketed shelf allocator, and there room is a **geometry**: a
+    /// bucket gives its width back only when every item in it is gone, a shelf
+    /// is reclaimed only when it is the top-most one (or one of at most three
+    /// consecutive empty ones), and shelves are height-classed. A session that
+    /// draws at a ladder of sizes — the zoom rungs, a document's headings, the
+    /// chrome against the body against a card's mini face — lays down shelves of
+    /// many heights and pins nearly all of them with a glyph that is still being
+    /// drawn. Past some point there is nowhere left to put a tall raster, and
+    /// because nothing in glyphon ever rebuilds that layout, **`AtlasFull` from
+    /// then on is permanent** — with, when this was measured on a model of
+    /// glyphon's own allocator, close to half the atlas still free.
+    ///
+    /// So this fixture is about the ratio, not the count, and the two numbers it
+    /// controls are the two the disease reads:
+    ///
+    /// * **one frame against the roof.** A window's worth of dense text is a
+    ///   fixed fraction of the atlas whatever size it is set at — a bigger face
+    ///   means proportionally fewer cells — so a 1600×1000 page against a 2048²
+    ///   roof is about a fifth of it, in the same place on the scale as a 4K
+    ///   window against the 16384² this machine really offers. The frame is
+    ///   never the thing that does not fit, and the census below says so out
+    ///   loud rather than leaving it to be believed.
+    /// * **what the session keeps, against the roof.** Ten rungs over a pool of
+    ///   2500 ideographs is some ten times what the atlas can hold, so the
+    ///   packer is genuinely under eviction pressure for most of the run —
+    ///   which a real all-Chinese session reaches in hours and this reaches in
+    ///   a minute, by lowering the roof rather than by drawing more.
+    ///
+    /// **What is asserted is recovery, not perfection.** A refusal can still
+    /// happen: it is the packer saying it has worn out, and no caller can see
+    /// that coming. What must never happen again is the state the report was
+    /// sent from — the *next* frame refused in the same place, and the one after
+    /// that, for the rest of the process's life. So: no two consecutive frames
+    /// lose their text, and a refusal stays a stumble rather than the run's
+    /// normal condition.
+    ///
+    /// Mutation: take the refused arm out of `GpuContext::close_the_frame` — go
+    /// back to trimming whatever the frame's verdict was. Measured on this
+    /// fixture, at 19.8% of the roof for its busiest frame: the first refusal
+    /// lands in the same place either way (frame 191 of 1200), and after it the
+    /// unrepaired session loses its text on **ten frames in a row**, against a
+    /// repaired one that never loses two. Left running four times as long the
+    /// gap stops being a matter of degree — 2015 of 4000 frames refused, with
+    /// one unbroken stretch of **1122 frames** carrying a page with not one
+    /// character on it, against 8 of 4000, none of them consecutive. That
+    /// stretch is the report: not a frame that asked for too much, a packer that
+    /// had worn out and was never given a new one.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_session_long_enough_to_wear_the_packer_out_gets_its_text_back() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        const WIDTH: u32 = 1600;
+        const HEIGHT: u32 = 1000;
+        /// The roof this device will be held to. Lowering it is what turns days
+        /// into a minute — see
+        /// [`GpuContext::headless_under_a_texture_ceiling`] — and 2048 is not a
+        /// hypothetical number: it is `wgpu`'s own downlevel WebGL2 floor.
+        const CEILING: u32 = 2048;
+        const FRAMES: usize = 1200;
+        /// The ladder. Ten rungs, because the pinning is per height class and a
+        /// single rung wears the packer out an order of magnitude more slowly.
+        const LADDER: [f32; 10] = [24.0, 28.0, 32.0, 36.0, 40.0, 46.0, 52.0, 60.0, 68.0, 76.0];
+        /// The zoom rungs the session walks. Every one of them multiplies the
+        /// ladder into a fresh set of glyph heights, which is what a user who
+        /// changes the font size does to the packer.
+        const ZOOMS: [f32; 6] = [1.0, 1.125, 0.875, 1.25, 0.75, 1.375];
+        const FRAMES_PER_ZOOM: usize = 17;
+
+        let mut gpu = on_a_device_whose_textures_stop_at(FORMAT, CEILING);
+        assert_eq!(
+            gpu.max_texture_dimension_2d(),
+            CEILING,
+            "the fixture's whole clock is this roof"
+        );
+        let mut window =
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
+        window.set_glyph_census(true);
+        let metrics = window.metrics();
+        let mut han = HanStream::new(0x4C1D_9A37);
+        let mut refused_frames = 0usize;
+        let mut longest_run = 0usize;
+        let mut run_length = 0usize;
+        let mut first_refusal: Option<usize> = None;
+        let mut worst_occupancy = 0.0f64;
+        for frame_index in 0..FRAMES {
+            // The window this frame draws: one page carrying every rung of the
+            // ladder at once, the way a real one does — a body size, a stack of
+            // heading sizes, the chrome's own, a card's mini face — and the
+            // whole ladder standing at whichever zoom the session is on.
+            let zoom = ZOOMS[(frame_index / FRAMES_PER_ZOOM) % ZOOMS.len()];
+            let mut paragraphs = Vec::new();
+            let mut top = 0.0;
+            let mut rung = 0usize;
+            loop {
+                let font = (LADDER[rung % LADDER.len()] * zoom).round();
+                let line = (font * 1.5).ceil();
+                if top + line >= HEIGHT as f32 {
+                    break;
+                }
+                let columns = (WIDTH as f32 / font) as usize;
+                paragraphs.push(PreviewParagraph {
+                    runs: vec![PreviewRun {
+                        text: han.text(columns.max(1)),
+                        color: [235, 235, 235],
+                        mono: true,
+                        bold: false,
+                        italic: false,
+                        font_scale: 1.0,
+                        inline_box_px: None,
+                    }],
+                    rect: [0.0, top, WIDTH as f32, top + line],
+                    font_size_px: font,
+                    line_height_px: line,
+                    wrap: false,
+                    letter_spacing_em: 0.0,
+                    align_right: false,
+                    align_center: false,
+                });
+                top += line;
+                rung += 1;
+            }
+            window.set_preview_bodies(vec![PreviewBody {
+                clip: [0.0, 0.0, WIDTH as f32, HEIGHT as f32],
+                quads: Vec::new(),
+                paragraphs,
+                blocks: Vec::new(),
+                rasters: Vec::new(),
+            }]);
+            let frame = single_cell_cursor_frame(metrics);
+            window
+                .present_frame(
+                    &mut gpu,
+                    &[SeatFrame {
+                        seat: SeatViewport {
+                            x: 0,
+                            y: 0,
+                            width: WIDTH,
+                            height: HEIGHT,
+                        },
+                        clip: SeatViewport {
+                            x: 0,
+                            y: 0,
+                            width: WIDTH,
+                            height: HEIGHT,
+                        },
+                        frame: &frame,
+                        focused: true,
+                    }],
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .expect("one frame");
+            worst_occupancy = worst_occupancy.max(
+                window
+                    .glyph_census()
+                    .expect("the census was asked for")
+                    .occupancy(),
+            );
+            if window.preview_text_frame().refused.is_empty() {
+                run_length = 0;
+            } else {
+                refused_frames += 1;
+                first_refusal.get_or_insert(frame_index);
+                run_length += 1;
+                longest_run = longest_run.max(run_length);
+            }
+        }
+        assert!(
+            worst_occupancy < 0.5,
+            "the fixture is measuring the wrong illness: one frame of it wants {:.1}% of the \
+             roof, so a refusal here could be a frame that is simply too big rather than a \
+             packer that has worn out",
+            worst_occupancy * 100.0
+        );
+        assert!(
+            longest_run <= 1,
+            "the session lost its text on {longest_run} frames in a row (first at \
+             {first_refusal:?}): a refusal that the frame after it repeats is the state the \
+             2026-08-29 report was sent from — the atlas is never re-packed, so the retry meets \
+             the same refusal in the same place forever"
+        );
+        assert!(
+            refused_frames * 10 < FRAMES,
+            "{refused_frames} of {FRAMES} frames were drawn without their text (first at \
+             {first_refusal:?}): a refusal is meant to be a stumble the next frame recovers \
+             from, not the run's normal condition"
+        );
+        // And it recovered for the stated reason rather than by luck: one new
+        // packing per frame that lost its text, which is also the statement that
+        // the repair never fired on a frame that did not need it — and, because
+        // `note_a_repack` is the only thing that moves this counter, it is also
+        // the number of lines this run left in `diagnostics.log`.
+        assert_eq!(
+            gpu.glyph_atlas_refits() as usize,
+            refused_frames,
+            "the session recovered without the atlas ever being re-packed, or was re-packed on a \
+             frame that kept its text"
         );
     }
 
