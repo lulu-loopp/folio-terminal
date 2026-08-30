@@ -4279,6 +4279,15 @@ impl MenuSide {
 /// safe: the list may not change between the frame a row was read on and the
 /// click aimed at it, and `ProfilePrograms` is a value for that very reason.
 #[must_use]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "eight, on [`build`]'s own footing and with seven of the same \
+              answers: where the button is, which side it hangs off, which \
+              shells this machine has, how big the surface is, how dense it is, \
+              what the vault remembers, which chords are bound, and the font. \
+              Every one is a fact the caller holds and this module has no way \
+              to ask for; a struct would move the list rather than shorten it"
+)]
 pub fn layout(
     anchor: [f32; 4],
     side: MenuSide,
@@ -21481,7 +21490,7 @@ mod tests {
             .expect("the floor is always a row");
         assert!(floor.available && floor.is_default);
         assert_eq!(
-            floor.capability.as_deref(),
+            floor.capability,
             Some(crate::i18n::Text::CapPowerShell.text())
         );
         assert_eq!(
