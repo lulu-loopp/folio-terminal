@@ -23002,7 +23002,9 @@ mod tests {
         lines.truncate(2);
         lines.push(crate::profiles::ProfileLine {
             index: 2,
-            mark: ChromeMark::ProfileClaude,
+            mark: ChromeMark::ProfileAgent {
+                colour: crate::marks::MarkColour::Blue,
+            },
             title: "Claude Code",
             command: "Claude Code was not found on Windows".to_owned(),
             capability: None,
@@ -23016,8 +23018,12 @@ mod tests {
         });
         lines.push(crate::profiles::ProfileLine {
             index: 3,
-            mark: ChromeMark::ProfileGeneric {
-                colour: crate::marks::MarkColour::Teal,
+            // **The same drawing as the row above it**, since 2026-08-30: what
+            // separates the pair in this fixture is one greyed and one not, and
+            // a fixture where the missing agent also wore a different mark could
+            // not tell which of the two the page was reacting to.
+            mark: ChromeMark::ProfileAgent {
+                colour: crate::marks::MarkColour::Red,
             },
             title: "Codex",
             command: "codex.cmd".to_owned(),

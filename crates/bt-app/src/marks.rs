@@ -4604,9 +4604,17 @@ mod tests {
             (ChromeMark::ProfileUbuntu, 15.0),
             (ChromeMark::ProfileGit, 15.0),
             (ChromeMark::ProfileCmd, 15.0),
-            // The agent profiles' one brand mark wears the same `.pmark` slot
-            // (user ruling 2026-08-28).
-            (ChromeMark::ProfileClaude, 15.0),
+            // The agent family's one mark wears the same `.pmark` slot (user
+            // rulings 2026-08-28 and 2026-08-30) — asked for in one of the seven
+            // colours it is actually struck in, since the drawing is generated
+            // from that hex and a colour nobody ships would measure a glyph
+            // nobody draws.
+            (
+                ChromeMark::ProfileAgent {
+                    colour: MarkColour::Blue,
+                },
+                15.0,
+            ),
             // The three line renditions, at the menu icon column's fourteen —
             // the only place one is ever drawn (user ruling 2026-08-25). They
             // are in this list rather than beside it because the trap they can
@@ -4616,6 +4624,7 @@ mod tests {
             (ChromeMark::ProfileLine(ProfileGlyph::Console), 14.0),
             (ChromeMark::ProfileLine(ProfileGlyph::Ubuntu), 14.0),
             (ChromeMark::ProfileLine(ProfileGlyph::Git), 14.0),
+            (ChromeMark::ProfileLine(ProfileGlyph::Agent), 14.0),
             (ChromeMark::File, 14.0),
             // The page's mark, at the file mark's size: they share one column.
             (ChromeMark::Globe { favicon: None }, 14.0),
@@ -4772,8 +4781,17 @@ mod tests {
             // The charcoal panel — *not* console black, by the mock-up's ruling.
             (ChromeMark::ProfileCmd, (3.0, 8.0), [0x3a, 0x3a, 0x3a]),
             // Dead centre of the asterisk, where all four spokes cross: the one
-            // point of that drawing that is solid whatever the pens are.
-            (ChromeMark::ProfileClaude, (8.0, 8.0), [0xd9, 0x77, 0x57]),
+            // point of that drawing that is solid whatever the pens are. Struck
+            // in Violet here — one of the seven `AGENT_IDS` hands out — because
+            // since 2026-08-30 this mark has no colour of its own to check
+            // against, which is the whole of what that ruling did to it.
+            (
+                ChromeMark::ProfileAgent {
+                    colour: MarkColour::Violet,
+                },
+                (8.0, 8.0),
+                [0x6b, 0x4e, 0x9e],
+            ),
             // The chassis a profile of the user's own wears: the same panel
             // again, filled from the eight. It joins this list because it is a
             // profile mark and the rule is stated over the *family* — a mark
@@ -4812,7 +4830,7 @@ mod tests {
             );
         }
 
-        // And the four are four different drawings, not one drawing four times.
+        // And the five are five different drawings, not one drawing five times.
         let ink = [0x7a, 0x99, 0xff];
         let mut rasters = ChromeMarkRasters::default();
         let marks = [
@@ -4820,7 +4838,9 @@ mod tests {
             ChromeMark::ProfileUbuntu,
             ChromeMark::ProfileGit,
             ChromeMark::ProfileCmd,
-            ChromeMark::ProfileClaude,
+            ChromeMark::ProfileAgent {
+                colour: MarkColour::Violet,
+            },
         ];
         let icons = rasters.resolve(
             &marks
@@ -4829,7 +4849,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         let keys: std::collections::HashSet<_> = icons.iter().map(|icon| &icon.key).collect();
-        assert_eq!(keys.len(), marks.len(), "four profiles, four rasters");
+        assert_eq!(keys.len(), marks.len(), "five profiles, five rasters");
         for (index, left) in icons.iter().enumerate() {
             for right in &icons[index + 1..] {
                 assert_ne!(
@@ -6341,7 +6361,9 @@ mod tests {
             ChromeMark::ProfileUbuntu,
             ChromeMark::ProfileGit,
             ChromeMark::ProfileCmd,
-            ChromeMark::ProfileClaude,
+            ChromeMark::ProfileAgent {
+                colour: MarkColour::Blue,
+            },
             ChromeMark::ProfileGeneric {
                 colour: MarkColour::Teal,
             },
@@ -6351,7 +6373,7 @@ mod tests {
                 ProfileGlyph::Console,
                 ProfileGlyph::Ubuntu,
                 ProfileGlyph::Git,
-                ProfileGlyph::Claude,
+                ProfileGlyph::Agent,
             ]
             .map(ChromeMark::ProfileLine),
         );
@@ -6436,7 +6458,9 @@ mod tests {
             ChromeMark::ProfileCmd,
             ChromeMark::ProfileUbuntu,
             ChromeMark::ProfileGit,
-            ChromeMark::ProfileClaude,
+            ChromeMark::ProfileAgent {
+                colour: MarkColour::Red,
+            },
             ChromeMark::ProfileGeneric {
                 colour: MarkColour::Amber,
             },

@@ -13703,6 +13703,185 @@ mod tests {
         }
     }
 
+    /// PIN (user ruling 2026-08-30) — **the seven agents are one mark in seven
+    /// colours, and the five shells are untouched.**
+    ///
+    /// The defect this pins was on the acceptance machine in two halves
+    /// (#197/#198). One row wore an asterisk and six wore the console chassis,
+    /// so a picker whose whole job is "which agent" said that six of the seven
+    /// were a kind of shell; and the one row that machine could actually start
+    /// was `codex`, painted `Slate` — `#4A5568`, a hue from the ink an
+    /// unavailable row is drawn in — so the live row read as a dead one.
+    ///
+    /// Four claims, and each fails on its own:
+    ///
+    /// * **One variant.** Every agent is [`ChromeMark::ProfileAgent`].
+    /// * **One geometry**, measured and not assumed: the seven rasterize to the
+    ///   same alpha mask, pixel for pixel. A colour reaching the *shape* — a
+    ///   `stroke-width` written from the hex, a body quoted per row — shows up
+    ///   here and nowhere else.
+    /// * **Seven colours, all different, and none of them `Slate`.** The colour
+    ///   is the whole of what tells one agent from another once the shape is
+    ///   shared, so a repeat is two rows a reader cannot separate, and `Slate`
+    ///   is the repeat of the greyed register itself.
+    /// * **The shells did not move.** Five rows, five marks, and not one of them
+    ///   is an agent's — the ruling is about a family, and a ruling about a
+    ///   family is the kind that reaches its neighbours by accident.
+    ///
+    /// MUTATIONS: give two agents one colour; give `codex` `Slate` back; put any
+    /// agent on [`ChromeMark::ProfileGeneric`]; strike the asterisk per row so
+    /// two of the seven differ by a pen.
+    #[test]
+    fn every_agent_wears_one_mark_in_its_own_colour() {
+        let rows = shipped_rows();
+        let agents: Vec<&Profile> = rows
+            .iter()
+            .filter(|profile| AGENT_IDS.contains(&profile.id.as_str()))
+            .collect();
+        assert_eq!(agents.len(), AGENT_IDS.len(), "every agent id is a row");
+
+        let mut colours = Vec::new();
+        for agent in &agents {
+            let ChromeMark::ProfileAgent { colour } = agent.mark else {
+                panic!(
+                    "{} wears {:?}; every agent wears the family's own mark",
+                    agent.id, agent.mark
+                );
+            };
+            assert_ne!(
+                colour,
+                MarkColour::Slate,
+                "{} is painted the colour a row that is not here wears",
+                agent.id
+            );
+            assert!(
+                !colours.contains(&colour),
+                "{} repeats {colour:?}, and the colour is all that tells two \
+                 agents apart",
+                agent.id
+            );
+            colours.push(colour);
+            // And the line rendition is the family's one drawing as well, so a
+            // menu row naming an agent is not eight glyphs either.
+            assert_eq!(
+                agent.mark.in_line(),
+                ChromeMark::ProfileLine(crate::marks::ProfileGlyph::Agent),
+                "{}",
+                agent.id
+            );
+        }
+
+        // **One drawing, measured.** Rasterized big enough that a pen is many
+        // pixels wide, the seven must put their ink on exactly the same pixels;
+        // only the colour underneath may differ.
+        const SIDE: f32 = 64.0;
+        let mut rasters = crate::marks::ChromeMarkRasters::default();
+        let icons = rasters.resolve(
+            &agents
+                .iter()
+                .map(|agent| {
+                    crate::marks::ChromeSprite::new(
+                        agent.mark,
+                        [0.0, 0.0, SIDE, SIDE],
+                        [0x7a, 0x99, 0xff],
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        let alpha = |icon: &bt_render::ChromeIcon| -> Vec<u8> {
+            icon.rgba.chunks_exact(4).map(|pixel| pixel[3]).collect()
+        };
+        let first = alpha(&icons[0]);
+        for (agent, icon) in agents.iter().zip(&icons) {
+            // Reported as the first pixel that differs rather than as two masks:
+            // a `assert_eq!` on four thousand bytes prints four thousand bytes,
+            // and the number that says what happened is the one place they part.
+            let mine = alpha(icon);
+            let parts_at = mine
+                .iter()
+                .zip(&first)
+                .position(|(here, there)| here != there);
+            assert_eq!(
+                parts_at,
+                None,
+                "{} draws a different shape from {}: they part at pixel {:?} \
+                 ({:?} against {:?}) in a {SIDE}px raster",
+                agent.id,
+                agents[0].id,
+                parts_at,
+                parts_at.map(|at| mine[at]),
+                parts_at.map(|at| first[at]),
+            );
+        }
+        let keys: std::collections::HashSet<_> = icons.iter().map(|icon| &icon.key).collect();
+        assert_eq!(
+            keys.len(),
+            agents.len(),
+            "seven colours are seven rasters — a shared cache slot would make \
+             them one colour on screen"
+        );
+
+        // And the shells are where they were: five rows, five marks, no agent.
+        let shells: Vec<&Profile> = rows
+            .iter()
+            .filter(|profile| !AGENT_IDS.contains(&profile.id.as_str()))
+            .collect();
+        assert_eq!(
+            shells
+                .iter()
+                .map(|profile| (profile.id.as_str(), profile.mark))
+                .collect::<Vec<_>>(),
+            vec![
+                ("pwsh", ChromeMark::ProfilePowerShell),
+                ("winps", ChromeMark::ProfilePowerShell),
+                ("wsl", ChromeMark::ProfileUbuntu),
+                ("gitbash", ChromeMark::ProfileGit),
+                ("cmd", ChromeMark::ProfileCmd),
+            ],
+            "the shells keep their own marks; this ruling is the agents'"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-30 ②) — **a greyed agent keeps the shape and
+    /// loses the hue**, in the register this window already had for it.
+    ///
+    /// Not a second drawing and not a second grey: `ChromeSprite::grayscale`
+    /// plus the unavailable opacity is what every profile mark naming something
+    /// that is not here has worn since the chassis family was drawn, and the
+    /// agents join it rather than inventing an eighth quiet. What this asserts
+    /// is that nothing of the seven colours survives the trip — a mark that kept
+    /// a tenth of its hue would put a faintly red `codex` beside a faintly blue
+    /// `claude` in a run of rows that are all equally absent.
+    ///
+    /// MUTATION: drop the desaturation and keep the fade; the centre comes back
+    /// with three different bytes in it.
+    #[test]
+    fn a_greyed_agent_keeps_the_shape_and_loses_the_hue() {
+        const SIDE: f32 = 64.0;
+        let mut rasters = crate::marks::ChromeMarkRasters::default();
+        for id in AGENT_IDS {
+            let mark = row(index_of_id(id)).expect("the agent is a row").mark;
+            let mut sprite =
+                crate::marks::ChromeSprite::new(mark, [0.0, 0.0, SIDE, SIDE], [0x7a, 0x99, 0xff]);
+            sprite.opacity = UNAVAILABLE_MARK_OPACITY;
+            sprite.grayscale = true;
+            let icons = rasters.resolve(&[sprite]);
+            let icon = &icons[0];
+            for pixel in icon.rgba.chunks_exact(4) {
+                assert!(
+                    pixel[0] == pixel[1] && pixel[1] == pixel[2],
+                    "{id} kept a hue when it was greyed: {:?}",
+                    &pixel[..3]
+                );
+            }
+            assert!(
+                icon.rgba.chunks_exact(4).any(|pixel| pixel[3] > 0),
+                "{id} greyed is still drawn — greying is not hiding"
+            );
+            assert_eq!(icon.opacity, UNAVAILABLE_MARK_OPACITY, "{id}");
+        }
+    }
+
     /// PIN (user ruling 2026-08-29) — **the picker offers the agents it can
     /// start, and goes on offering every shell whether it can start it or not.**
     ///
@@ -21044,17 +21223,22 @@ mod tests {
             "the template supplies the program; it is the identity that is new"
         );
 
-        // **Red and not Teal since 2026-08-29**, and the change is the whole of
-        // what four more built-in agents cost: six of the eight colours are
-        // worn by a built-in now (Slate, Violet, Teal, Green, Amber, Magenta),
-        // so the two [`unworn_colour`] has left to hand out are Blue and Red.
-        // The number is asserted here rather than left to be discovered, since
-        // it is the point at which a reader's third profile starts sharing.
+        // **Teal again since 2026-08-30**, and the round trip is worth reading:
+        // it was Teal until 2026-08-29, when four more agents took four more
+        // chassis colours and pushed this to Red; the ruling that moved all
+        // seven agents onto `ChromeMark::ProfileAgent` handed every one of the
+        // eight back, because [`unworn_colour`] asks which *chassis* colours are
+        // taken and no shipped row wears a chassis any more.
+        //
+        // Asserted rather than left to be discovered, since it is the point at
+        // which a reader's own profiles start sharing a colour with each other —
+        // which is now the ninth of them, where the function was written to put
+        // it.
         let again = registry.create(0).expect("pwsh is a row");
         assert_eq!(
             registry.table().get(again).unwrap().mark,
             ChromeMark::ProfileGeneric {
-                colour: MarkColour::Red
+                colour: MarkColour::Teal
             },
             "two rows in one list must not wear one colour"
         );
@@ -21067,9 +21251,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            worn_by_a_builtin, 6,
-            "six of the eight are spoken for, so a third profile of the \
-             reader's own shares with their first"
+            worn_by_a_builtin, 0,
+            "no shipped row wears the chassis, so all eight are the reader's"
         );
     }
 
