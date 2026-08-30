@@ -38395,14 +38395,27 @@ mod tests {",
             "the list the hand is surveyed against and the list on the glass are \
              one column, or every number below is about two of them"
         );
-        // The hand, held still at the deepest point in the column that is still
-        // over something the column drew.
+        // **The hand is on the `+` row, below the list's own clip**, and that is
+        // the gesture rather than a convenient sample. [`focus_rail_run`]'s note
+        // says why the band is struck from `viewport` and not from the panel's
+        // outer box — "a hand that has reached it is a hand asking to see what
+        // is under the last card" — and it is also the only place in the column
+        // where [`TabRun::slot_at`] can answer `None` on a list whose cards fill
+        // the clip. A pointer one pixel *inside* the clip is over the last card,
+        // and a pointer over a card is naming that tab rather than asking for a
+        // card of its own.
+        let hand_of = |column: &FocusRailGeometry| column_hand(column, column.viewport[1] + 1.0);
         let run_to_the_end = |guests: usize| {
             let mut scroll = 0.0_f32;
             for _ in 0..2_400 {
                 let column = hosting_column(scroll, guests);
                 let run = focus_rail_run(&column);
-                let hand = column_hand(&column, column.viewport[1] - 1.0);
+                let hand = hand_of(&column);
+                assert!(
+                    run.contains(hand.0, hand.1),
+                    "the `+` row is inside the run's own band, which is what \
+                     puts a hand that has reached it at full speed"
+                );
                 let Some(next) = autoscroll_step(
                     &run,
                     scroll,
@@ -38419,8 +38432,24 @@ mod tests {",
         };
         // Claim 2.
         let scroll = run_to_the_end(1);
+        let settled = hosting_column(scroll, 1);
+        let hand = hand_of(&settled);
+        let run = focus_rail_run(&settled);
+        assert_eq!(
+            run.slot_at(hand.0, hand.1),
+            None,
+            "the hand names no tab at the end of the run, which is what keeps \
+             the tear-out on offer for as long as it rests there — a hand that \
+             went back to naming a card would take the stand-in away with it"
+        );
+        assert_eq!(
+            insert_index_at(&run.mids(), run.pos(hand.0, hand.1)),
+            TABS,
+            "and the slot it is offered is the end of the list, which is the \
+             one the guest is drawn in"
+        );
         let stand_in = painted(scroll).cards[TABS].body;
-        let [top, foot] = hosting_column(scroll, 1).viewport;
+        let [top, foot] = settled.viewport;
         assert!(
             stand_in[1] >= top && stand_in[3] <= foot,
             "the card the pane is about to become is whole inside the clip: \
