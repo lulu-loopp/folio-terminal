@@ -15417,6 +15417,59 @@ mod tests {
         }
     }
 
+    /// **The arithmetic under the scissor door**, checked without a device.
+    ///
+    /// `scissor_within` is an intersection and not `clamped_to`'s nearest
+    /// non-empty rectangle, and the difference is the whole repair: a box that
+    /// has left the surface permits no pixels, and pinning it to the last
+    /// column would paint a one-pixel stripe down an edge nobody asked to
+    /// paint.
+    #[test]
+    fn a_scissor_is_intersected_with_its_target_and_refused_when_it_misses() {
+        const WIDTH: u32 = 314;
+        const HEIGHT: u32 = 50;
+        let within = |x, y, width, height| {
+            SeatViewport {
+                x,
+                y,
+                width,
+                height,
+            }
+            .scissor_within(WIDTH, HEIGHT)
+        };
+        // The crash report's rectangle: it starts one column past the last one.
+        assert_eq!(within(314, 49, 1, 1), None);
+        assert_eq!(within(0, 50, 10, 10), None);
+        assert_eq!(within(WIDTH * 4, HEIGHT * 4, 200, 200), None);
+        assert_eq!(within(10, 10, 0, 5), None);
+        assert_eq!(within(10, 10, 5, 0), None);
+        // One pixel inside an edge keeps exactly the pixel it has.
+        assert_eq!(
+            within(313, 49, 64, 64),
+            Some(SeatViewport {
+                x: 313,
+                y: 49,
+                width: 1,
+                height: 1
+            })
+        );
+        // A rectangle already inside is handed back untouched.
+        let whole = SeatViewport::whole(WIDTH, HEIGHT);
+        assert_eq!(whole.scissor_within(WIDTH, HEIGHT), Some(whole));
+        assert_eq!(
+            within(100, 20, 50, 10),
+            Some(SeatViewport {
+                x: 100,
+                y: 20,
+                width: 50,
+                height: 10
+            })
+        );
+        // And nothing survives a target with no pixels in it.
+        assert_eq!(whole.scissor_within(0, HEIGHT), None);
+        assert_eq!(whole.scissor_within(WIDTH, 0), None);
+    }
+
     #[test]
     fn surface_config_size_clamps_each_axis_to_the_device_limit() {
         const LIMIT: u32 = 8192;
@@ -18363,6 +18416,113 @@ mod tests {
             "the chrome lane cast bitmaps for captions the clip had already closed over: {}",
             census.line()
         );
+    }
+
+    /// RED — **the scissor never leaves the render target** (`docs/DESIGN.md`
+    /// §7.10).
+    ///
+    /// The device error a released build took, verbatim:
+    ///
+    /// ```text
+    /// wgpu error: Validation Error
+    ///   In a RenderPass note: encoder = `Folio frame`
+    ///     In a set_scissor_rect command
+    ///       Scissor Rect { x: 314, y: 49, w: 1, h: 1 } is not contained in the render target (314, 50, 1)
+    /// ```
+    ///
+    /// A window dragged below its advisory minimum is 314x50 physical pixels,
+    /// and a pane FLIPping inside it is drawn through a box that has left the
+    /// surface by its own width. wgpu checks `x + w <= target.width` and makes
+    /// the failure a *device* error rather than a clipped-away pixel
+    /// (`wgpu-core-30.0.0`, `command/render.rs::set_scissor`), so the window
+    /// goes down over geometry that is merely off-screen.
+    ///
+    /// The exact rectangle off that report is the first case here, and the
+    /// others are its neighbours on all four edges: a box that starts one pixel
+    /// inside and runs off, one that starts exactly on the far corner, and one
+    /// that is nowhere near the surface at all. All of them are legitimate
+    /// answers from an animating layout, and none of them may reach the device
+    /// unclamped.
+    ///
+    /// Red gate: give the preview seat's clip back its raw `set_scissor_rect`
+    /// and the first case fails on the first frame.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_pane_flying_off_the_edge_never_scissors_outside_the_render_target() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        const WIDTH: u32 = 314;
+        const HEIGHT: u32 = 50;
+
+        let mut gpu = on_this_machines_adapter(FORMAT);
+        let mut window =
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
+        let frame = single_cell_cursor_frame(window.metrics());
+        let picture: Arc<[u8]> = Arc::from(vec![255_u8; 4 * 8 * 8].into_boxed_slice());
+        let escapes = [
+            // The crash report's own rectangle.
+            SeatViewport {
+                x: WIDTH,
+                y: HEIGHT - 1,
+                width: 1,
+                height: 1,
+            },
+            // One pixel inside the right edge, running off it.
+            SeatViewport {
+                x: WIDTH - 1,
+                y: 0,
+                width: 64,
+                height: HEIGHT,
+            },
+            // The far corner, running off both edges.
+            SeatViewport {
+                x: WIDTH - 1,
+                y: HEIGHT - 1,
+                width: 64,
+                height: 64,
+            },
+            // Nowhere near the surface.
+            SeatViewport {
+                x: WIDTH * 3,
+                y: HEIGHT * 3,
+                width: 200,
+                height: 200,
+            },
+            // And the resting case, which must still draw.
+            SeatViewport {
+                x: 0,
+                y: 0,
+                width: WIDTH,
+                height: HEIGHT,
+            },
+        ];
+        for clip in escapes {
+            window.set_preview_image(Some(PreviewImage {
+                seat: SeatViewport::whole(WIDTH, HEIGHT),
+                clip,
+                key: format!("escape-{}-{}", clip.x, clip.y),
+                rgba: Arc::clone(&picture),
+                width_px: 8,
+                height_px: 8,
+                display_width_px: 8,
+                display_height_px: 8,
+                pan_px: [0.0, 0.0],
+            }));
+            window
+                .present_frame(
+                    &mut gpu,
+                    &[SeatFrame {
+                        seat: SeatViewport::whole(WIDTH, HEIGHT),
+                        clip,
+                        frame: &frame,
+                        focused: true,
+                    }],
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .unwrap_or_else(|error| panic!("a frame clipped by {clip:?}: {error:?}"));
+        }
     }
 
     /// RED — **a long Chinese session does not run the shared atlas out of
