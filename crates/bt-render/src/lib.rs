@@ -18337,7 +18337,10 @@ mod tests {
     fn one_repack_is_one_numbered_line() {
         let mut refits = 0u64;
         let lines: Vec<String> = (0..3).map(|_| note_a_repack(&mut refits)).collect();
-        assert_eq!(refits, 3, "three re-packs must have been counted three times");
+        assert_eq!(
+            refits, 3,
+            "three re-packs must have been counted three times"
+        );
         assert_eq!(
             lines,
             vec![
