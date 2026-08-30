@@ -85115,6 +85115,101 @@ mod focus_mode_door_tests {
         );
     }
 
+    /// **The column asks one question about the guest, and every reading of it
+    /// comes back to that one answer** (缺陷 #189).
+    ///
+    /// K124's stand-in is a card the column draws that is not a tab, and the
+    /// defect the user reported was two readings of it disagreeing: the paint
+    /// was handed a list with the guest already in it while the *scroller* was
+    /// solved for the tabs alone, so the column ran out of travel a whole card
+    /// above the thing the hand was aiming at. There are now three places that
+    /// have to know — the geometry the drag is surveyed against, the hit test,
+    /// and the dressing itself — and this pin is that they read one door.
+    ///
+    /// Read as text for this module's standing reason: a fourth reading added
+    /// later would be one more expression and nothing about it would fail.
+    ///
+    /// MUTATION: count the guest off the drag at either call site — `drag`,
+    /// `landing`, a `matches!` on [`DropLanding::StripExtract`] — and the count
+    /// stops agreeing with `strip_stand_in`'s four refusals, which is a
+    /// scroll range reserved for a card nobody drew.
+    #[test]
+    fn the_guests_the_column_holds_room_for_are_counted_at_one_door() {
+        let needle = ["self", ".", "strip_guests", "("].concat();
+        let readers: Vec<&str> = SOURCE
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(needle.as_str()))
+            .collect();
+        assert_eq!(
+            readers.len(),
+            2,
+            "the geometry the drag is surveyed against and the hit test, and \
+             nothing else, ask how many slots are held: {readers:?}"
+        );
+        // And that door is the dressing's own answer rather than a second
+        // reading of the drag — which is what makes the room reserved and the
+        // card drawn the same card.
+        let counter = body("    fn strip_guests(");
+        assert!(
+            counter.contains("strip_stand_in"),
+            "the count is `is there a stand-in`, asked of the function that \
+             dresses one"
+        );
+    }
+
+    /// **The stand-in's slot in the thumbnail list is the pane in the hand, not
+    /// a hole** (缺陷 #189, user ruling).
+    ///
+    /// The card column's insertion mark is an entry *dressed as the tab that
+    /// would land there*, and on this surface a card is its picture: a slot
+    /// handed `None` drew `--termbg` on a panel of nearly that value, which is
+    /// the blank the user could not find. `seats` proves the painter draws the
+    /// picture when it is handed one; this proves the window hands it one, and
+    /// that the two parallel lists get their guest at the same index.
+    ///
+    /// MUTATION: put the literal `None` back into the insert and the first
+    /// assertion names it; insert into the thumbnail list without inserting into
+    /// the tab list (or at a different index) and the second goes — which is the
+    /// off-by-one that would hand every card below the slot its neighbour's
+    /// tree.
+    #[test]
+    fn the_stand_ins_thumbnail_slot_carries_the_pane_rather_than_a_hole() {
+        let pass = body("    fn refresh_chrome(");
+        let insert = ["focus_thumbnails", ".insert("].concat();
+        let at = pass
+            .find(insert.as_str())
+            .expect("the guest is inserted into the thumbnail list beside the tab list");
+        let line = &pass[at..pass[at..].find('\n').map_or(pass.len(), |end| at + end)];
+        assert!(
+            !line.contains("None"),
+            "the stand-in's slot is handed nothing, which is the blank card the \
+             report is about: {line}"
+        );
+        // Both lists, at one slot, from one `if let`: the tab list's insert and
+        // the thumbnail list's stand under the same binding of `strip_preview`.
+        let guard = ["if let Some(slot) = ", "strip_preview"].concat();
+        let opened = pass
+            .find(guard.as_str())
+            .expect("the guest's slot is bound once and spent on both lists");
+        let tabs_insert = pass
+            .find("tabs.insert(slot, stand_in)")
+            .expect("the tab list takes the guest at that slot");
+        assert!(
+            tabs_insert < opened && opened < at,
+            "the two parallel lists take the guest at one index, or every card \
+             below the slot is drawn with its neighbour's tree"
+        );
+        // And the picture is the projection the column already holds rather
+        // than a second one minted for the card in the air.
+        let dressing = body("    fn stand_in_pane(");
+        assert!(
+            dressing.contains("StripExtract") && dressing.contains("DragSource::Pane"),
+            "the pane whose picture the stand-in wears is the one the tear-out \
+             is aiming to place"
+        );
+    }
+
     /// **The projection layer did not move an inch.**
     ///
     /// §7.1.6b′'s red line — a thumbnail takes text only out of a buffer already
