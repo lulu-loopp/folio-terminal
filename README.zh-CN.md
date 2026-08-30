@@ -39,7 +39,7 @@ Folio 是一款 Windows 终端：命令输出的公式在其打印位置排版�
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/settings-agents-dark.png">
   <img src="docs/screenshots/settings-agents-light.png" width="100%"
-       alt="设置的 Agent 页：三行，分别对应 Claude Code、Codex 与 GitHub Copilot CLI，每行以一句话说明其开关向哪个文件写入通知 hook，三行均处于关闭状态。">
+       alt="设置的 Agent 页：Claude Code、Codex 与 GitHub Copilot CLI 各一行，每行以一句话说明其开关向哪个文件写入通知 hook，三行均处于关闭状态；第四行为回合结束提醒。">
 </picture>
 
 - 等待响应的 agent 在其标签页显示一个圆点；焦点位于其他程序时，任务栏闪烁；窗口最小化或位于其他桌面时，发出 Windows 通知。

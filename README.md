@@ -53,9 +53,10 @@ The agent that is waiting for you is marked on its tab, so there is nothing to g
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/settings-agents-dark.png">
   <img src="docs/screenshots/settings-agents-light.png" width="100%"
-       alt="The Agent page in Settings: three rows, for Claude Code, Codex and
+       alt="The Agent page in Settings: a row each for Claude Code, Codex and
        GitHub Copilot CLI, each with a sentence saying which file its switch
-       writes a notification hook into, and all three switched off.">
+       writes a notification hook into and all three switched off, and a fourth
+       row for notifications at the end of a turn.">
 </picture>
 
 - A waiting agent lights a dot on its tab, flashes the taskbar if another program
