@@ -6597,9 +6597,8 @@ mod tests {
         let spark = bt_math::rasterize_svg_document(document.as_bytes())
             .expect("the retired spark still rasterizes");
         assert_eq!((spark.width_px, spark.height_px), (side_px, side_px));
-        let spark_alpha = |x: u32, y: u32| -> u8 {
-            spark.rgba[((y * spark.width_px + x) * 4 + 3) as usize]
-        };
+        let spark_alpha =
+            |x: u32, y: u32| -> u8 { spark.rgba[((y * spark.width_px + x) * 4 + 3) as usize] };
 
         // How much of the ink the two put down is ink only one of them puts
         // down: nought where the drawings coincide, one where they share
