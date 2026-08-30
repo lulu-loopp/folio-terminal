@@ -7091,11 +7091,18 @@ pub fn rail_run(geometry: &RailGeometry) -> TabRun {
 ///   read literally: focus mode may not have fewer verbs than the window under
 ///   it, and *"两卡之间的缝不是屋子"* was a rule about the column that the tab
 ///   strip's own gaps disprove.
-/// * **③, file drops:** `DragSource::Row(_) => None` in
-///   `Runtime::survey_strip`, which is global to every tab surface, so a card
-///   has nothing to opt into. The refusal is the strip's own: no insertion caret
-///   is drawn, the ghost stays under the pointer saying what is in the hand, and
-///   letting go sends it home.
+/// * **③, file drops: overturned on 2026-08-30, and the column gained both
+///   verbs the same way it gained ②'s.** ③ read *"一份 tab 清单没有一个非任意的
+///   tab 可以接住一个文件"*, and it was `DragSource::Row(_) => None` in
+///   `Runtime::survey_strip` — global to every tab surface, so a card had
+///   nothing to opt into. §7.1.1's own ruling of 2026-07-17 is what the premise
+///   was measured against and lost to: 「文件/图片拖到标签条 = 成为新 tab」 and
+///   a tab is exactly what a card is, so a card *is* a non-arbitrary tab and the
+///   blank below it is exactly the tab strip's own padding. A row on a card
+///   opens in that card's tab; a row in the seam or the tail becomes a tab at
+///   that slot, by the same `insert_index_at` and `strip_insert_slot` ② spends.
+///   Nothing here is a second gesture, and nothing here had to be written: the
+///   arm reads a [`TabRun`] and cannot tell which surface handed it one.
 ///
 /// The slot is the card's whole outer box, hairline included — the very
 /// rectangle [`ChromeTarget::Tab`] is answered over, so the thing you took hold
@@ -37731,9 +37738,9 @@ mod tests {",
         );
     }
 
-    /// PIN (§7.1.6b′ ①, ② and ④) — **the card column takes a tab reorder and
-    /// both of a pane's offers, and the only drag it turns away is a file
-    /// row.**
+    /// PIN (§7.1.6b′ ①, ② and ④) — **the card column takes a tab reorder, both
+    /// of a pane's offers, and — since ③ went on 2026-08-30 — a file row's two
+    /// as well. It turns nothing away.**
     ///
     /// ④ used to read *"v1 不做卡片拖动排序"*, and it was a stated blank rather
     /// than an oversight: reordering by card had to arrive carrying the tab
@@ -37755,11 +37762,16 @@ mod tests {",
     ///   `extract_pane_into_new_tab`. The run therefore answers
     ///   [`PaneOffers::BOTH`], the same value the strip and the rail answer,
     ///   and no surface in this build answers anything else.
-    /// * **③ it still refuses file drops** — *"一份 tab 清单没有一个非任意的 tab
-    ///   可以接住一个文件"*. That one is `DragSource::Row(_) => None` in
-    ///   `Runtime::survey_strip`, global to every tab surface, so there is
-    ///   nothing here for a card to opt into and nothing here for the column to
-    ///   have withdrawn.
+    /// * **③ went too, on 2026-08-30, and the column gained a row's two verbs
+    ///   the way it gained a pane's.** ③ read *"一份 tab 清单没有一个非任意的 tab
+    ///   可以接住一个文件"*, and it lived as `DragSource::Row(_) => None` in
+    ///   `Runtime::survey_strip` — global to every tab surface, so a card had
+    ///   nothing to opt into. §7.1.1's own ruling of 2026-07-17 outranks the
+    ///   premise: 「文件/图片拖到标签条 = 成为新 tab」, and a card *is* a tab, so
+    ///   the seam between two cards and the tail below the last one are the
+    ///   strip's own padding while a card is a room. This test therefore names
+    ///   no drag the column turns away any more — all three sources are
+    ///   answered, and out of the very `slots` the first assertion checks.
     ///
     /// And the older half of this pin stands unchanged: a surface must not
     /// become a *hole*. The band covers the column, so whatever the run refuses
