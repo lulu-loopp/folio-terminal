@@ -518,8 +518,8 @@ pub enum PeekBody {
     /// it is the honest answer for the next page-class member whose bytes are
     /// neither text nor countable: one line saying what the row does.
     Page,
-    /// **A page this window drew for itself, and the two facts under it** (user
-    /// rulings 2026-08-25; [`crate::preview::PageGlance::Facts`]).
+    /// **A page this window drew for itself** (user rulings 2026-08-25;
+    /// [`crate::preview::PageGlance::Facts`]).
     ///
     /// A `.pdf` opens in the pane on WebView2's engine, and that engine hands
     /// this process no pixels — so for a day the card's answer was two sentences
@@ -528,9 +528,16 @@ pub enum PeekBody {
     ///
     /// The second ruling is that a reader hovering a report wants to see the
     /// report. The card still has no *engine*; what it grew is a rasteriser of
-    /// its own ([`crate::pdf::page_raster`]). So the body is a page over two
-    /// lines: the picture that says which document this is, and the facts that
-    /// say how much of it there is.
+    /// its own ([`crate::pdf::page_raster`]). So the body is a page: the picture
+    /// that says which document this is.
+    ///
+    /// **The facts left this body on 2026-08-29** (user ruling; §7.29 ⑬). They
+    /// were two stacked lines drawn here, under the column — how many pages, and
+    /// how large the file is — and they are now the one line every card in this
+    /// family says about its file, on the card's own strip between the body and
+    /// the foot ([`PeekLayout::meta`]). What is left here is the count, because
+    /// the count is not only a sentence: it is the length of the column, and
+    /// [`peek_page_column_height`] is a function of it.
     ///
     /// **And the picture is a *column* the reader can wind through** (user
     /// ruling 2026-08-26). One page was the second ruling's whole scope and the
@@ -557,15 +564,15 @@ pub enum PeekBody {
     /// page sizes lays out correctly without the column ever changing length
     /// underneath the hand that is scrolling it.
     ///
-    /// **All three parts are optional and the box is not.** The picture is
-    /// rastered on a worker and the facts are read on another, so both land a
-    /// frame or several after the card is up; a body that grew when they arrived
-    /// would be a card that jumped under the pointer. The height is the page box
-    /// plus two lines from the first frame, whether or not anything has filled
-    /// them. What never arrives is simply not drawn — the same silence
-    /// [`Self::Image`] keeps while a decode is in flight, and the whole of this
-    /// feature's degradation: a file that will not raster leaves an empty ground
-    /// with its size printed underneath.
+    /// **Both parts are optional and the box is not.** The picture is rastered
+    /// on a worker and the count is read on another, so both land a frame or
+    /// several after the card is up; a body that grew when they arrived would be
+    /// a card that jumped under the pointer. The height is the page box from the
+    /// first frame, whether or not anything has filled it. What never arrives is
+    /// simply not drawn — the same silence [`Self::Image`] keeps while a decode
+    /// is in flight, and the whole of this feature's degradation: a file that
+    /// will not raster leaves an empty ground with its size printed on the
+    /// card's own strip underneath.
     Facts {
         /// How far down the column of pages this card is wound, in physical
         /// pixels — always between zero and
@@ -579,18 +586,18 @@ pub enum PeekBody {
         /// The offset itself lives where every preview surface's does — on
         /// `PreviewPane::scroll`, through `PreviewSurface::Peek`.
         scroll: f32,
-        bytes: Option<u64>,
         pages: Option<u32>,
     },
-    /// **One frame of a video, and the two lines that say what it is** (user
+    /// **One frame of a video, and what the same open of it learned** (user
     /// ruling 2026-08-27; `docs/DESIGN.md` §7.23).
     ///
     /// [`Self::Facts`] with the column taken out of it, and every sentence about
     /// that body holds here: the box is reserved from the first frame whether or
-    /// not anything has filled it, all three parts are optional, and what never
+    /// not anything has filled it, both parts are optional, and what never
     /// arrives is simply not drawn. It takes the **page's** ground rather than
-    /// the picture's for the same reason a PDF does — there are two lines under
-    /// it, and the picture's box is sized for a body with nothing underneath.
+    /// the picture's for the same reason a PDF does — there is a line of facts
+    /// under it, and the picture's box is sized for a body with nothing
+    /// underneath.
     ///
     /// **There is no column, and that is the difference.** A PDF has pages and a
     /// reader winds through them; a video has *time*, and the frame this card
@@ -603,14 +610,14 @@ pub enum PeekBody {
     /// **`width`/`height` are the frame's own, already fitted**, exactly as
     /// [`Self::Image`]'s are; zero while the decode and the resample are in
     /// flight, which draws the ground and no picture.
-    Frame {
-        width: f32,
-        height: f32,
-        /// What the same open of the file learned besides its picture. Rendered
-        /// through [`crate::preview::video_fact_lines`], which is the one place
-        /// those two sentences are written for either surface that shows them.
-        facts: crate::preview::VideoFacts,
-    },
+    ///
+    /// **The recording's own facts are not a field here** since 2026-08-29
+    /// (§7.29 ⑬): how long it runs and how large its picture is are said on the
+    /// card's meta strip, out of [`crate::preview::video_fact_lines`] — the one
+    /// place those words are written for either surface that shows them — and a
+    /// copy of them riding a body that no longer draws them would be a second
+    /// author for one sentence.
+    Frame { width: f32, height: f32 },
 }
 
 impl PeekBody {
@@ -641,19 +648,23 @@ impl PeekBody {
                     + none_line(scale)
                     + px(PEEK_NONE_PADDING_BOTTOM_LOGICAL_PX)
             }
-            // **The page's whole box and two lines, always** — see
-            // [`Self::Facts`] for why none of the three waits to learn whether
-            // it has anything in it. The frame around the page is the picture's
-            // (2 above, 8 below the lot), because that is what it is.
+            // **The page's whole box, always** — see [`Self::Facts`] for why
+            // neither part waits to learn whether it has anything in it. The
+            // frame around the page is the picture's (2 above, 8 below), because
+            // that is what it is.
             //
             // **And a video's frame is that same box**, one sheet instead of a
-            // column: it is a picture with two lines under it, which is the
-            // shape this arm already describes.
+            // column.
+            //
+            // **The two fact lines that used to stand inside this box are gone
+            // from it** (2026-08-29; §7.29 ⑬). They are the card's own strip
+            // now, reserved by [`layout`] between every body and the foot, so
+            // the arithmetic that put them here would be the same arithmetic
+            // written twice — and the card is a line shorter because what was
+            // two lines is one.
             Self::Facts { .. } | Self::Frame { .. } => {
                 px(PEEK_BODY_PADDING_TOP_LOGICAL_PX)
                     + px(PEEK_PAGE_H_LOGICAL_PX)
-                    + px(PEEK_PAGE_GAP_LOGICAL_PX)
-                    + none_line(scale) * 2.0
                     + px(PEEK_BODY_PADDING_BOTTOM_LOGICAL_PX)
             }
         }
@@ -666,20 +677,43 @@ fn none_line(scale: f32) -> f32 {
     (PEEK_NONE_FONT_LOGICAL_PX * scale * 1.4).round()
 }
 
-/// **The two lines a `.pdf`'s card prints**, in the order a reader wants them
-/// (user ruling 2026-08-25).
+/// **The strip the card states its facts on**: one line of the card's own voice
+/// and the air under it, in physical pixels (user ruling 2026-08-29).
 ///
-/// The page count first, because it is the fact that is about the *document* —
-/// how much there is to read — and the size second, because it is about the
-/// file. Either may be missing and neither is replaced by a placeholder when it
-/// is: what is unknown is left unsaid, and the line below it does not move up to
-/// take its place, so the two facts always stand where the last card put them.
+/// The air *above* it is whatever the body already ends with — every body arm
+/// closes with [`PEEK_BODY_PADDING_BOTTOM_LOGICAL_PX`] or its own — so the strip
+/// is the line plus the same padding underneath, and the sentence sits between
+/// two equal margins whichever body it is standing under.
+///
+/// It is a band of the **card** and not part of any body, which is what makes
+/// one line one line: the six bodies would otherwise each have had to remember
+/// to reserve it, and the day a seventh is written is the day one of them
+/// forgets.
+fn meta_height(scale: f32) -> f32 {
+    none_line(scale) + (PEEK_BODY_PADDING_BOTTOM_LOGICAL_PX * scale)
+}
+
+/// **The one line a card says about its file** (user ruling 2026-08-29;
+/// `docs/DESIGN.md` §7.29 ⑬) — `<what this kind of file is> · <how large it is>`.
+///
+/// **One shape for every card, whatever is in it.** A video's card stacked
+/// `0:05 · 160 × 120` over `3 KB`, a page's stacked `3 pages` over `81 KB`, and a
+/// picture's said nothing at all — three answers to one question, and two of
+/// them spending a line of a 264-pixel card on a line break. So the facts about
+/// the *kind* come first, in whatever spelling that kind already had, and the
+/// size comes last because it is the one fact every file has: the reader's eye
+/// leaves the sentence on the fact that is about the file rather than about what
+/// is in it, which is the order [`crate::preview::video_fact_lines`] and the
+/// pane's own meta strip were already written in.
+///
+/// `subject` is that first half, already joined by whoever knows the kind — the
+/// page count, the recording's length and size, a picture's own pixels — and
+/// `None` for a kind with nothing of its own to say, which is a card that prints
+/// its size alone. Both missing is `None`: a card with nothing to state draws no
+/// strip rather than an empty one ([`crate::preview::join_facts`]).
 #[must_use]
-pub fn facts_lines(bytes: Option<u64>, pages: Option<u32>) -> [Option<String>; 2] {
-    [
-        pages.map(|pages| crate::i18n::peek_page_count(pages as usize)),
-        bytes.map(crate::preview::format_byte_size),
-    ]
+pub fn meta_line(subject: Option<String>, bytes: Option<u64>) -> Option<String> {
+    crate::preview::join_facts([subject, bytes.map(crate::preview::format_byte_size)])
 }
 
 /// How wide the card's body box is, in physical pixels — the card less its two
@@ -696,13 +730,19 @@ pub fn body_width(scale: f32) -> f32 {
 }
 
 /// The tallest the card's body can be: the cap, less the two hairlines and the
-/// head and the foot that are never what gets cut (P147).
+/// head, the meta strip and the foot that are never what gets cut (P147).
+///
+/// `meta` says whether this card has facts to state — the strip is reserved for
+/// it exactly as [`layout`] reserves it, so a document laid out against this
+/// number and a card laid out by that function cannot disagree about how much
+/// room the document has.
 #[must_use]
-pub fn body_max_height(scale: f32) -> f32 {
+pub fn body_max_height(scale: f32, meta: bool) -> f32 {
     let border = (PEEK_BORDER_LOGICAL_PX * scale).max(1.0).round();
     ((PEEK_MAX_HEIGHT_LOGICAL_PX * scale).round()
         - border * 2.0
         - head_height(scale)
+        - if meta { meta_height(scale) } else { 0.0 }
         - foot_height(scale))
     .max(0.0)
 }
@@ -936,6 +976,17 @@ pub struct PeekContent {
     pub ftype: String,
     /// Whether the tab's pool holds this file with unsaved edits (P147).
     pub dirty: bool,
+    /// **The one line this card states about its file** (user ruling
+    /// 2026-08-29; §7.29 ⑬) — [`meta_line`]'s answer, and `None` for a card
+    /// with nothing to state.
+    ///
+    /// `None` is the *absence of the strip* and not an empty one: a card over a
+    /// file that has gone, or over a share this window will not dial, has no
+    /// facts and reserves no room for any. Every other card has at least its
+    /// size from the first frame it is drawn — the card stats the file itself
+    /// (§7.29 ⑬) — so the strip never appears under a resting pointer, it only
+    /// gains words as the count or the duration lands in it.
+    pub meta: Option<String>,
     pub body: PeekBody,
 }
 
@@ -962,6 +1013,13 @@ pub struct PeekLayout {
     /// The body's own box, and what goes in it.
     pub body: [f32; 4],
     pub body_kind: PeekBody,
+    /// **Where the card's one line of facts stands** — under the body, over the
+    /// foot's rule, in the card's own voice (user ruling 2026-08-29).
+    ///
+    /// `None` when [`PeekContent::meta`] is, and then the card is exactly that
+    /// strip shorter: the two are decided together, in [`layout`], so a rectangle
+    /// held open for a sentence nobody will print cannot happen.
+    pub meta: Option<[f32; 4]>,
     pub foot: [f32; 4],
 }
 
@@ -994,14 +1052,24 @@ pub fn layout(
     let head_line = px(PEEK_HEAD_FONT_LOGICAL_PX) * 1.4;
     let head_height = head_height(scale);
     let foot_height = foot_height(scale);
+    // **The strip is reserved with the head and the foot and never cut**, for
+    // their reason (user ruling 2026-08-29): the head names the file, the strip
+    // says what the file is, and the foot says how to open it — three parts of
+    // the card's own sentence, and the body is the part that gives way.
+    let meta_height = if content.meta.is_some() {
+        meta_height(scale)
+    } else {
+        0.0
+    };
     let body_height = content.body.height(scale).round();
     // `max-height: 264px; overflow: hidden` — the card shrink-wraps and then
     // stops. The body is what gives way, because the head names the file and the
     // foot says how to open it: both are the card's *sentence*, and a card that
     // cut them would have shown a document with nothing saying what it was.
-    let natural = border * 2.0 + head_height + body_height + foot_height;
+    let natural = border * 2.0 + head_height + body_height + meta_height + foot_height;
     let height = natural.min(px(PEEK_MAX_HEIGHT_LOGICAL_PX).round());
-    let body_height = (height - border * 2.0 - head_height - foot_height).max(0.0);
+    let body_height =
+        (height - border * 2.0 - head_height - meta_height - foot_height).max(0.0);
 
     let right = row[2] + px(PEEK_ROW_GAP_LOGICAL_PX);
     let left = if right + width > window.0 - margin {
@@ -1070,6 +1138,17 @@ pub fn layout(
         frame[2] - border,
         body_top + body_height,
     ];
+    // Directly under the body, inset by the same margin every sentence the card
+    // says in its own voice keeps — one line tall, with the strip's remaining
+    // air below it.
+    let meta = content.meta.is_some().then(|| {
+        [
+            body[0] + px(PEEK_NONE_PADDING_X_LOGICAL_PX),
+            body[3],
+            body[2] - px(PEEK_NONE_PADDING_X_LOGICAL_PX),
+            body[3] + none_line(scale),
+        ]
+    });
     let foot = [
         frame[0] + border,
         frame[3] - border - foot_height,
@@ -1090,6 +1169,7 @@ pub fn layout(
         ftype,
         body,
         body_kind: content.body,
+        meta,
         foot,
     }
 }
@@ -1263,7 +1343,6 @@ pub fn build(
         // than shifting the other one, and a page that has not arrived leaves a
         // blank sheet rather than moving anything — see [`PeekBody::Facts`].
         PeekBody::Facts {
-            bytes,
             pages: count,
             scroll,
         } => {
@@ -1327,24 +1406,6 @@ pub fn build(
                     above_text: false,
                 });
             }
-            let left = layout.body[0] + px(PEEK_NONE_PADDING_X_LOGICAL_PX);
-            let right = layout.body[2] - px(PEEK_NONE_PADDING_X_LOGICAL_PX);
-            // Under the page's whole box rather than under the picture that
-            // landed in it: the lines stand where the last card put them.
-            let top = ground[3] + px(PEEK_PAGE_GAP_LOGICAL_PX);
-            let line = none_line(scale);
-            for (row, words) in facts_lines(*bytes, *count).into_iter().enumerate() {
-                let Some(words) = words else {
-                    continue;
-                };
-                let top = top + line * row as f32;
-                labels.push(label(
-                    &words,
-                    [left, top, right, (top + line).min(layout.body[3])],
-                    px(PEEK_NONE_FONT_LOGICAL_PX),
-                    palette.body_hint_text,
-                ));
-            }
         }
         // One frame over two lines. The ground, the fit and the ink are the two
         // bodies above put together — a picture's rounded window onto the
@@ -1355,11 +1416,7 @@ pub fn build(
         // nothing on it yet, while a video frame that has not arrived is not a
         // white rectangle of anything — so its ground stays the window's, which
         // is the same silence [`PeekBody::Image`] keeps.
-        PeekBody::Frame {
-            width,
-            height,
-            facts,
-        } => {
+        PeekBody::Frame { width, height } => {
             let ground = page_ground(layout.body, scale);
             quads.extend(bt_render::rounded_overlay_fill(
                 ground,
@@ -1381,35 +1438,26 @@ pub fn build(
                     above_text: false,
                 });
             }
-            let left = layout.body[0] + px(PEEK_NONE_PADDING_X_LOGICAL_PX);
-            let right = layout.body[2] - px(PEEK_NONE_PADDING_X_LOGICAL_PX);
-            // Under the frame's whole box rather than under the frame that
-            // landed in it: the lines stand where the last card put them.
-            let top = ground[3] + px(PEEK_PAGE_GAP_LOGICAL_PX);
-            let line = none_line(scale);
-            // **The extension comes off the card's own name**, which is the one
-            // spelling of this file the card already has. It is what
-            // `video_fact_lines` falls back to when the frame did not decode and
-            // there is no length or resolution to print.
-            let extension = std::path::Path::new(&content.name)
-                .extension()
-                .and_then(std::ffi::OsStr::to_str);
-            for (row, words) in crate::preview::video_fact_lines(extension, *facts)
-                .into_iter()
-                .enumerate()
-            {
-                let Some(words) = words else {
-                    continue;
-                };
-                let top = top + line * row as f32;
-                labels.push(label(
-                    &words,
-                    [left, top, right, (top + line).min(layout.body[3])],
-                    px(PEEK_NONE_FONT_LOGICAL_PX),
-                    palette.body_hint_text,
-                ));
-            }
         }
+    }
+
+    // **The card's one line about its file**, under whatever it drew and over
+    // the foot's rule (user ruling 2026-08-29; §7.29 ⑬). One place, because it
+    // is one sentence: the six bodies above draw what is *in* the file and this
+    // says what the file *is*, and while the two page-shaped bodies wrote it
+    // themselves a picture had nobody to write it at all.
+    //
+    // Laid out in its own box and never wrapped, so a line too long for a
+    // three-hundred-pixel card is cut by the box's own edge — the card's
+    // standing rule for a sentence that will not fit, and the one the name in
+    // its head has always followed.
+    if let (Some(rect), Some(words)) = (layout.meta, content.meta.as_deref()) {
+        labels.push(label(
+            words,
+            rect,
+            px(PEEK_NONE_FONT_LOGICAL_PX),
+            palette.body_hint_text,
+        ));
     }
 
     // `border-top: 1px solid var(--border-soft)` over the foot.

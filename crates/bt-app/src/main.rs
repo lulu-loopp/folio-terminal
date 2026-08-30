@@ -16698,7 +16698,7 @@ struct PeekThumbnail {
 /// ([`file_peek::PeekBody::Facts`]).
 struct PeekFacts {
     path: PathBuf,
-    answer: Option<preview::PageFacts>,
+    answer: Option<u32>,
 }
 
 /// **How many drawn pages of one document the window keeps** (user ruling 2026-08-26).
@@ -17950,23 +17950,17 @@ fn image_meta_sentence(
     bytes: Option<u64>,
     zoom: Option<&str>,
 ) -> Option<String> {
-    let mut fields = Vec::new();
-    if let Some((width, height)) = native {
-        fields.push(format!("{width} \u{00d7} {height}"));
-    }
-    if let Some(extension) = extension {
-        fields.push(extension.to_owned());
-    }
-    if let Some(bytes) = bytes {
-        fields.push(preview::format_byte_size(bytes));
-    }
-    if fields.is_empty() {
-        return None;
-    }
-    if let Some(zoom) = zoom {
-        fields.push(zoom.to_owned());
-    }
-    Some(fields.join(" \u{b7} "))
+    // The zoom is appended only to a sentence that already exists, which is what
+    // "never alone" means above — so the three fields about the file are joined
+    // first and the one about this pane rides on their answer. One joiner for
+    // all four ([`preview::join_facts`]), because a middle dot spelled at each
+    // site is a middle dot that can drift.
+    let file = preview::join_facts([
+        native.map(|(width, height)| preview::format_pixel_size(width, height)),
+        extension.map(str::to_owned),
+        bytes.map(preview::format_byte_size),
+    ])?;
+    preview::join_facts([Some(file), zoom.map(str::to_owned)])
 }
 
 /// Whether a surface may be zoomed at all.
@@ -54427,7 +54421,7 @@ impl Runtime<'_> {
                 // here or nowhere. Matched by path, because a pointer that has
                 // moved to another row has already replaced the question and the
                 // stale answer is the cancellation arriving as a dropped result.
-                preview::PreviewAnswer::PageFacts(facts) => {
+                preview::PreviewAnswer::PageCount(pages) => {
                     let Some(answered) = response.source.file_path() else {
                         continue;
                     };
@@ -54437,7 +54431,7 @@ impl Runtime<'_> {
                         .as_mut()
                         .filter(|slot| slot.path == answered)
                     {
-                        slot.answer = Some(facts);
+                        slot.answer = pages;
                         changed |= index == self.window.active_tab;
                     }
                 }
@@ -58000,11 +57994,7 @@ impl Runtime<'_> {
                 ),
             )
             .unwrap_or((0.0, 0.0));
-        file_peek::PeekBody::Frame {
-            width,
-            height,
-            facts: self.video_facts_of(path),
-        }
+        file_peek::PeekBody::Frame { width, height }
     }
 
     /// **What this window knows about the video at `path`** — three optional numbers, and the
@@ -58021,6 +58011,30 @@ impl Runtime<'_> {
             .get(&normalized_local_image_path_key(path))
             .copied()
             .unwrap_or_default()
+    }
+
+    /// **How large the picture in this file really is** — the decode's own
+    /// dimensions, or `None` while nothing has decoded it (user ruling
+    /// 2026-08-29; §7.29 ⑬).
+    ///
+    /// The card draws a *resample* fitted into 280×120, and the number a reader
+    /// wants beside it is the picture's own — the same fact the preview pane's
+    /// meta strip states off `PreviewImageState::native`, read here from the one
+    /// place a card has it: the path-keyed native decode
+    /// ([`WindowRuntime::peek_cache`]) that [`Self::file_peek_fitted_pixels`] is
+    /// already fitting. It asks for nothing: a card with a picture on it has
+    /// this entry by construction, and a card whose decode is still out says its
+    /// size alone until the pixels land, which is the same silence every other
+    /// part of this body keeps.
+    fn file_peek_native_pixels(&self, path: &Path) -> Option<(u32, u32)> {
+        match self.window.peek_cache.get(&normalized_local_image_path_key(path))? {
+            PeekCacheEntry::Ready {
+                width_px,
+                height_px,
+                ..
+            } => Some((*width_px, *height_px)),
+            PeekCacheEntry::Pending | PeekCacheEntry::Failed => None,
+        }
     }
 
     /// **This file's pixels, resampled into `fit`** — or `None` while there are none on the card.
@@ -58091,15 +58105,15 @@ impl Runtime<'_> {
         None
     }
 
-    /// **The card's whole body over a page**: its first page and its two facts,
-    /// each asked for once and each drawn whenever it gets home (user rulings
-    /// 2026-08-25).
+    /// **The card's whole body over a page**: its pages, and how many of them
+    /// there are (user rulings 2026-08-25; the size left this question on
+    /// 2026-08-29 for the card's own stat — §7.29 ⑬).
     ///
     /// Asked from the frame for [`Self::file_peek_picture`]'s reason and with the
-    /// same guard: the card is rebuilt whenever the chrome is, so each question is
+    /// same guard: the card is rebuilt whenever the chrome is, so the question is
     /// filed against the path the moment it is sent and a frame that finds it
-    /// already filed asks nothing. What comes back is three optional things, and
-    /// the body is the same shape whether or not any of them has arrived — see
+    /// already filed asks nothing. What comes back is one optional number, and
+    /// the body is the same shape whether or not it has arrived — see
     /// [`file_peek::PeekBody::Facts`].
     ///
     /// **Neither question is answered on the frame's own thread, and they are not
@@ -58112,7 +58126,7 @@ impl Runtime<'_> {
     /// Either one on the thread that draws is a hover over a large document
     /// freezing the window.
     fn file_peek_facts(&mut self, path: &Path, scale: f32) -> file_peek::PeekBody {
-        let facts = match self
+        let pages = match self
             .window
             .peek_facts
             .as_ref()
@@ -58129,14 +58143,13 @@ impl Runtime<'_> {
                     window,
                     tab,
                     source: preview::PreviewSource::file(path.to_owned()),
-                    want: preview::PreviewWant::PageFacts,
+                    want: preview::PreviewWant::PageCount,
                 }) {
                     self.disable_preview_worker();
                 }
                 None
             }
         };
-        let pages = facts.and_then(|facts| facts.pages);
         // **Clamped here, against the number this very line just read.** The
         // reach grows the frame a page count lands and shrinks the frame a file
         // turns out to be shorter than the one before it; both are answered by
@@ -58152,7 +58165,6 @@ impl Runtime<'_> {
         self.file_peek_pages(path, scale, pages.unwrap_or(1));
         file_peek::PeekBody::Facts {
             scroll: self.window.peek_pane.scroll[1],
-            bytes: facts.and_then(|facts| facts.bytes),
             pages,
         }
     }
@@ -58333,16 +58345,28 @@ impl Runtime<'_> {
         // *capped* height, and the scroll bar's arithmetic needs the uncapped one
         // to know what share of it is showing.
         let mut document = 0.0_f32;
-        // **Has the file gone since the reference was validated?** (§7.37) One
-        // stat, and only for a real local file — a network path is refused
-        // before it ever reaches here, and stat-ing one every frame would block
-        // the loop on a share. A card is up only while the pointer rests on it,
-        // so this is one existence check per frame of one hover, which is the
-        // same budget §7.29 spends on `is_dir()` per pointer move.
-        let gone = subject
+        // **Has the file gone since the reference was validated, and how large
+        // is it?** (§7.37, and §7.29 ⑬ for the second half.) One stat, and only
+        // for a real local file — a network path is refused before it ever
+        // reaches here, and stat-ing one every frame would block the loop on a
+        // share. A card is up only while the pointer rests on it, so this is one
+        // existence check per frame of one hover, which is the same budget §7.29
+        // spends on `is_dir()` per pointer move.
+        //
+        // **And the size is read off that same call** (user ruling 2026-08-29).
+        // `Path::exists` *is* a `metadata` whose answer is thrown away, so the
+        // card's own line about the file costs nothing it was not already
+        // spending — and the size is there on the very first frame the card is
+        // drawn, rather than a worker hop later under a resting pointer. It is
+        // one author for one number: the worker's page read stopped carrying a
+        // byte count on the same day ([`preview::PreviewWant::PageCount`]).
+        let stat = subject
             .path
             .as_deref()
-            .is_some_and(|path| !preview::is_network_path(path) && !path.exists());
+            .filter(|path| !preview::is_network_path(path))
+            .map(std::fs::metadata);
+        let gone = matches!(stat, Some(Err(_)));
+        let bytes = stat.and_then(Result::ok).map(|file| file.len());
         let body_kind = match peek_body_kind(
             subject.ftype,
             subject.path.as_deref(),
@@ -58383,27 +58407,84 @@ impl Runtime<'_> {
                 self.file_peek_frame(&path, scale)
             }
             PeekBodyKind::Document => {
+                // **Laid out against the room the card will actually give it**:
+                // a document card states its size on the strip like every other
+                // card (§7.29 ⑬), so the strip's line comes off the cap here as
+                // well — measured with the same predicate the content below is
+                // built with, because a document measured in a taller box than
+                // the card has is a document cut by a card that thought it fit.
                 let probe = [
                     0.0,
                     0.0,
                     file_peek::body_width(scale),
-                    file_peek::body_max_height(scale),
+                    file_peek::body_max_height(scale, bytes.is_some()),
                 ];
                 self.rebuild_preview_document(PreviewSurface::Peek, probe, scale);
                 document = self.preview_surface_document_height(PreviewSurface::Peek, probe, scale);
                 file_peek::PeekBody::Document(document.min(probe[3]))
             }
         };
+        // **What this kind of file has to say about itself**, which is the half
+        // of the card's one line that is not the size (user ruling 2026-08-29;
+        // §7.29 ⑬). Each arm is the spelling that kind already had — nothing is
+        // invented here and nothing new is read from the disk for it:
+        //
+        // * a **picture** says its own pixels, off the native decode the card is
+        //   already drawing a resample of;
+        // * a **page** says how many pages the worker counted;
+        // * a **recording** says how long it runs and how large its picture is,
+        //   through `preview::video_fact_lines` — the first of its two lines,
+        //   which is the half that is about the recording, while the half about
+        //   the file is the size every card states;
+        // * everything else says nothing of its own and prints its size alone.
+        //   A **document** would say how many lines it holds if this window knew
+        //   — it does not: a buffer holds at most the first 64 KB of a file
+        //   (`PREVIEW_HEAD_BYTES`), so a count off it would be a number about
+        //   the head rather than about the file, and reading the whole file to
+        //   learn it is a disk read this ruling explicitly did not ask for.
+        let stated = match &body_kind {
+            file_peek::PeekBody::Image { .. } => subject
+                .path
+                .as_deref()
+                .and_then(|path| self.file_peek_native_pixels(path))
+                .map(|(width, height)| preview::format_pixel_size(width, height)),
+            file_peek::PeekBody::Facts { pages, .. } => {
+                pages.map(|pages| i18n::peek_page_count(pages as usize))
+            }
+            file_peek::PeekBody::Frame { .. } => {
+                let path = subject
+                    .path
+                    .clone()
+                    .expect("a frame body is only chosen for a file");
+                let extension = path.extension().and_then(std::ffi::OsStr::to_str);
+                let [recording, _] =
+                    preview::video_fact_lines(extension, self.video_facts_of(&path));
+                recording
+            }
+            file_peek::PeekBody::Document(_)
+            | file_peek::PeekBody::Refused
+            | file_peek::PeekBody::Page
+            | file_peek::PeekBody::Gone => None,
+        };
         let content = file_peek::PeekContent {
-            name: subject.name,
+            // **The chip says what the *file* is, and never which lane draws
+            // it** (user ruling 2026-08-29; §7.29 ⑬). `PreviewFtype::Web` is a
+            // lane three spellings share, so a `.pdf` card wore `web` in its
+            // corner until `preview::type_label` asked the name inside the
+            // class.
+            //
             // A gone file has no type to name, and the card draws no chip for an
-            // empty one (§7.37) — every other body keeps the ftype's own label.
+            // empty one (§7.37) — every other body keeps its own word.
             ftype: if matches!(body_kind, file_peek::PeekBody::Gone) {
                 String::new()
             } else {
-                subject.ftype.label().to_owned()
+                preview::type_label(&subject.name, subject.ftype).to_owned()
             },
+            name: subject.name,
             dirty: subject.dirty,
+            // A card over a file that has gone has no size and states nothing —
+            // the strip is not reserved for it at all ([`file_peek::layout`]).
+            meta: file_peek::meta_line(stated, bytes),
             body: body_kind,
         };
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;

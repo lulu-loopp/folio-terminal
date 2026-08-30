@@ -142,6 +142,36 @@ impl PreviewFtype {
     }
 }
 
+/// **The word the type chip prints over a named file** — its *type*, and never
+/// the name of the lane that draws it (user ruling 2026-08-29).
+///
+/// [`PreviewFtype::label`] names the **class**, and for six of the seven the
+/// class and the type are one word. [`PreviewFtype::Web`] is the seventh and it
+/// is a lane: `html`, `htm` and `pdf` share it because one engine reads all
+/// three, and the chip printing that lane's name put `web` in the corner of a
+/// card over a report — the reader was told how this window draws the file
+/// instead of what the file is.
+///
+/// So the class is asked first and the **name** decides only inside it, out of
+/// [`PAGE_EXTENSIONS`]'s own third column. That order is what keeps a *page with
+/// no file* honest: a live page's name is its title, it is in no table, and the
+/// chip over it still says `web` — which is exactly what that thing is.
+#[must_use]
+pub fn type_label(name: &str, ftype: PreviewFtype) -> &'static str {
+    let PreviewFtype::Web = ftype else {
+        return ftype.label();
+    };
+    std::path::Path::new(name)
+        .extension()
+        .and_then(|extension| {
+            PAGE_EXTENSIONS
+                .iter()
+                .find(|(page, ..)| extension.eq_ignore_ascii_case(page))
+                .map(|(.., word)| *word)
+        })
+        .unwrap_or_else(|| ftype.label())
+}
+
 /// Extensions that name a picture — the mock-up's list (3090).
 const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "svg", "gif", "webp"];
 
@@ -198,10 +228,21 @@ const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "svg", "gif", "webp"]
 /// page's own developer tools and its `↗` hands the file to a browser — but it
 /// is no longer what a double-click does, because a double-click on a name that
 /// says "page" now means the page.
-const PAGE_EXTENSIONS: [(&str, PageGlance); 3] = [
-    ("html", PageGlance::Source),
-    ("htm", PageGlance::Source),
-    ("pdf", PageGlance::Facts),
+/// **The third column is the word the type chip prints** (user ruling
+/// 2026-08-29): the chip names the **file's type**, and `Web` is the name of the
+/// *lane* three spellings share. A `.pdf` card wore `web` in its corner for as
+/// long as the chip printed [`PreviewFtype::label`] — a reader hovering a report
+/// was told the name of an internal rendering route. The word rides this table
+/// for the reason the glance column does: what a `.pdf` is called and which
+/// reader opens it are facts about the same row, and written apart they drift.
+///
+/// `htm` prints `html` because the shortened spelling is the same object — the
+/// sentence already written above this table about why the two rows exist at
+/// all.
+const PAGE_EXTENSIONS: [(&str, PageGlance, &str); 3] = [
+    ("html", PageGlance::Source, "html"),
+    ("htm", PageGlance::Source, "html"),
+    ("pdf", PageGlance::Facts, "pdf"),
 ];
 
 /// **What the glance card shows of a page's own file** (user ruling 2026-08-25;
@@ -247,8 +288,8 @@ pub fn path_page_glance(path: &std::path::Path) -> Option<PageGlance> {
     let extension = path.extension()?;
     PAGE_EXTENSIONS
         .iter()
-        .find(|(page, _)| extension.eq_ignore_ascii_case(page))
-        .map(|(_, glance)| *glance)
+        .find(|(page, ..)| extension.eq_ignore_ascii_case(page))
+        .map(|(_, glance, _)| *glance)
 }
 
 /// Extensions that name a **video** — [`PreviewFtype::Video`] asked of a name
@@ -388,7 +429,7 @@ pub fn preview_ftype(name: &str) -> PreviewFtype {
     // `false` for it (§7.1.5j ⑦(e)) and this window opens it as a document. Ask
     // the page question first and the two would disagree about one name, which
     // is the thing this ruling exists to end.
-    if PAGE_EXTENSIONS.iter().any(|(page, _)| *page == ext) {
+    if PAGE_EXTENSIONS.iter().any(|(page, ..)| *page == ext) {
         return PreviewFtype::Web;
     }
     // **After the page question and before `Unknown`**, which is where a class
@@ -431,7 +472,7 @@ pub fn path_names_a_page(path: &std::path::Path) -> bool {
     path.extension().is_some_and(|extension| {
         PAGE_EXTENSIONS
             .iter()
-            .any(|(page, _)| extension.eq_ignore_ascii_case(page))
+            .any(|(page, ..)| extension.eq_ignore_ascii_case(page))
     })
 }
 
@@ -3022,6 +3063,38 @@ pub fn format_byte_size(bytes: u64) -> String {
     }
 }
 
+/// **The middle dot every fact line in this window is joined with**, and the
+/// join itself (user ruling 2026-08-29).
+///
+/// A picture's meta strip, a video's, and the one line a glance card says about
+/// its file are one sentence written at three sizes: *the facts this file has,
+/// in the order a reader wants them, separated by a dot*. They were three
+/// hand-rolled `Vec` pushes with the same literal in each of them, which is a
+/// separator that can drift — and the day it drifts the same file reads as two
+/// different files depending on which surface is showing it.
+///
+/// A field nothing has answered yet is left out rather than printed as a
+/// placeholder, and nothing moves up to take its place because there is nothing
+/// to move: the line is built out of the facts that exist. All of them missing
+/// is `None` — a card with nothing to say says nothing, rather than drawing an
+/// empty strip.
+#[must_use]
+pub fn join_facts(fields: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+    let fields: Vec<String> = fields.into_iter().flatten().collect();
+    (!fields.is_empty()).then(|| fields.join(" \u{b7} "))
+}
+
+/// **How large the thing in this file is, in its own pixels** — the one spelling
+/// of a picture's or a recording's size (user ruling 2026-08-29).
+///
+/// The multiplication sign is `×` and not the letter `x`, and it is written once
+/// here so that a photograph's card, a photograph's pane and a recording's
+/// control strip cannot come to spell one file's dimensions three ways.
+#[must_use]
+pub fn format_pixel_size(width: u32, height: u32) -> String {
+    format!("{width} \u{d7} {height}")
+}
+
 /// **What one open of a video learned besides its picture** (user ruling
 /// 2026-08-27; §7.23).
 ///
@@ -3096,20 +3169,17 @@ pub fn format_duration(milliseconds: u64) -> String {
 /// whose page count could not be read.
 #[must_use]
 pub fn video_fact_lines(extension: Option<&str>, facts: VideoFacts) -> [Option<String>; 2] {
-    let mut first: Vec<String> = Vec::new();
-    if let Some(duration_ms) = facts.duration_ms {
-        first.push(format_duration(duration_ms));
-    }
-    if let Some((width, height)) = facts.native {
-        first.push(format!("{width} \u{00d7} {height}"));
-    }
-    if first.is_empty() {
-        first.extend(
-            extension
-                .map(str::to_uppercase)
-                .filter(|extension| !extension.is_empty()),
-        );
-    }
+    let first = join_facts([
+        facts.duration_ms.map(format_duration),
+        facts
+            .native
+            .map(|(width, height)| format_pixel_size(width, height)),
+    ])
+    .or_else(|| {
+        extension
+            .map(str::to_uppercase)
+            .filter(|extension| !extension.is_empty())
+    });
     // **The second line says how large the file is, and nothing else any more**
     // (route B slice ②, 2026-08-28; §7.44 ⑥).
     //
@@ -3122,12 +3192,7 @@ pub fn video_fact_lines(extension: Option<&str>, facts: VideoFacts) -> [Option<S
     // error at the moment the file is opened (a Store codec that is not
     // installed), which is where a fact about a machine belongs; a constant
     // compiled on a build server was never able to know it.
-    let mut second: Vec<String> = Vec::new();
-    second.extend(facts.bytes.map(format_byte_size));
-    [
-        (!first.is_empty()).then(|| first.join(" \u{b7} ")),
-        (!second.is_empty()).then(|| second.join(" \u{b7} ")),
-    ]
+    [first, facts.bytes.map(format_byte_size)]
 }
 
 /// Whether a path names a share on another machine.
@@ -4559,43 +4624,21 @@ pub enum PreviewWant {
     /// (mock-up 4955), which is the only thing on that line the decoder cannot
     /// answer for itself.
     Size,
-    /// **The two facts a glance states about a page it cannot render** (user
-    /// ruling 2026-08-25) — see [`PageFacts`].
+    /// **How many pages a document holds** (user ruling 2026-08-25) — the one
+    /// fact a glance states about a page it cannot render that nothing on the
+    /// drawing thread can answer.
     ///
-    /// Its own want rather than [`Self::Size`] and a count asked elsewhere,
-    /// because the card prints one body out of both and a body assembled from
-    /// two answers landing on two frames is a card that changes under the
-    /// pointer.
-    PageFacts,
-}
-
-/// **What a glance says about a page whose bytes it cannot show** (user ruling
-/// 2026-08-25; `docs/DESIGN.md` §7.10 ⑥).
-///
-/// Both fields are optional and they are optional for the same reason: this is
-/// a card that would rather say less than say something untrue. A file the disk
-/// will not stat has no size to print, and a structure that will not yield a
-/// count has no page number to print — the ruling's own instruction for the
-/// second case is "then show the size alone", and the type is what makes that
-/// the ordinary path rather than an error case.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct PageFacts {
-    pub bytes: Option<u64>,
-    pub pages: Option<u32>,
-}
-
-/// [`PageFacts`] for one file, read on the worker's thread.
-///
-/// The size comes from a `metadata` call and the count from
-/// [`crate::pdf::page_count`], which checks the file's own header before it
-/// counts anything — so a `.pdf` that is not a PDF answers with its size and no
-/// number, exactly as a PDF whose page tree is out of reach does.
-#[must_use]
-pub fn read_page_facts(path: &Path) -> PageFacts {
-    PageFacts {
-        bytes: read_size(path),
-        pages: crate::pdf::page_count(path),
-    }
+    /// It reads the file's own structure ([`crate::pdf::page_count`]), which is
+    /// a walk over as many bytes as the file has, so it is a question for the
+    /// disk's lane and never for the frame.
+    ///
+    /// **It used to carry the file's size with it** and stopped on 2026-08-29:
+    /// the card states its facts on one line now, and the size on that line is
+    /// the card's *own* — read off the very `metadata` call the card already
+    /// makes on every frame to know the file is still there (§7.29 ⑬). A second
+    /// stat on a worker was a second author for one number, and the number
+    /// arrived a frame or two after the card that could have had it at once.
+    PageCount,
 }
 
 /// "Answer this about this file for this tab of this window."
@@ -4673,8 +4716,10 @@ pub enum PreviewAnswer {
     /// `None` when the file could not be stat'ed, which the meta line simply
     /// leaves out rather than turning into an error of its own.
     Size(Option<u64>),
-    /// What a glance card states about a page it cannot render.
-    PageFacts(PageFacts),
+    /// **How many pages the document at this path holds**, or `None` for a file
+    /// whose structure would not say — which the card leaves unsaid rather than
+    /// turning into an error of its own (user ruling 2026-08-25).
+    PageCount(Option<u32>),
 }
 
 /// How large a file is, without reading it.
@@ -5226,7 +5271,12 @@ impl PreviewWorker {
                     let answer = match request.want {
                         PreviewWant::Head => PreviewAnswer::Head(read_head(path)),
                         PreviewWant::Size => PreviewAnswer::Size(read_size(path)),
-                        PreviewWant::PageFacts => PreviewAnswer::PageFacts(read_page_facts(path)),
+                        // Straight off the file's structure: the wrapper that
+                        // used to stat the file beside this call is gone with
+                        // the size it read (see [`PreviewWant::PageCount`]).
+                        PreviewWant::PageCount => {
+                            PreviewAnswer::PageCount(crate::pdf::page_count(path))
+                        }
                     };
                     if response_tx
                         .send(PreviewResponse {
@@ -6538,7 +6588,7 @@ mod tests {
         // a rule somebody could get wrong.
         for video in VIDEO_EXTENSIONS {
             assert!(
-                !PAGE_EXTENSIONS.iter().any(|(page, _)| *page == video),
+                !PAGE_EXTENSIONS.iter().any(|(page, ..)| *page == video),
                 "{video} cannot be both a video and a page"
             );
         }
@@ -6703,7 +6753,7 @@ mod tests {
     /// RED GATE: give [`crate::path_opens_as_a_page`] a list of its own again.
     #[test]
     fn every_member_of_the_page_class_is_a_page_to_both_readings() {
-        for (extension, _) in PAGE_EXTENSIONS {
+        for (extension, ..) in PAGE_EXTENSIONS {
             let name = format!("subject.{extension}");
             assert_eq!(preview_ftype(&name), PreviewFtype::Web, "{name}");
             assert!(
@@ -6720,7 +6770,7 @@ mod tests {
         // A leading-dot whole name is not a page to either, and neither needs a
         // clause for it: `Path::extension` says it has no extension, and the
         // dotfile arm of `preview_ftype` runs before the page arm.
-        for (whole, _) in PAGE_EXTENSIONS {
+        for (whole, ..) in PAGE_EXTENSIONS {
             let name = format!(".{whole}");
             assert_eq!(preview_ftype(&name), PreviewFtype::Text, "{name}");
             assert!(
