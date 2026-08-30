@@ -33436,6 +33436,19 @@ impl Runtime<'_> {
             .iter()
             .map(|(seat, title)| (*seat, title.as_str()))
             .collect();
+        // **The pane in the hand, as the one-leaf tree the card it is about to
+        // become would hold** (缺陷 #189). Owned here, above the list it is
+        // borrowed into, because a stand-in is a picture of a tab that does not
+        // exist yet and so there is no tree in this window to point at: the
+        // subtree is cloned out of the tab the pane is still filed under —
+        // exactly as [`Runtime::publish_to_broker`] clones it for the other
+        // window — and a card of one seat is what a torn-out pane becomes.
+        let stand_in_pane: Option<(LeafId, bt_layout::LayoutNode)> =
+            self.stand_in_pane().and_then(|leaf| {
+                self.tab_state(leaf.tab)
+                    .and_then(|tab| tab.seats.tree().find_seat(leaf.seat).cloned())
+                    .map(|seat| (leaf, bt_layout::LayoutNode::seat(seat)))
+            });
         // One slot per tab, in the strip's order, borrowed off the budget that
         // just ran (§7.1.6b′ F2). A tab with no entry is a card the budget did
         // not project — off screen, or in a window where the mode is off — and
@@ -33460,11 +33473,34 @@ impl Runtime<'_> {
         // the stand-in itself a picture of a tab that is not the one it is
         // standing in for.
         //
-        // `None` and not a projection of the pane being torn out: what the
-        // stand-in draws is the *slot*, in the accent wash the landing wears,
-        // and the pane's own picture is the ghost under the pointer.
+        // **And it is the pane's own picture that goes in it** (缺陷 #189, user
+        // ruling). What stood here was `None` — "what the stand-in draws is the
+        // *slot*, and the pane's own picture is the ghost under the pointer" —
+        // and the ghost is a *label*: a mark and a name riding the cursor, which
+        // is the same two things the card's own head is already saying. So the
+        // slot drew a body of bare `--termbg` on a panel of nearly that value,
+        // and the user's report is the consequence — 「看不到即将落座的那张替身
+        // 卡」. Every other card in this column is its picture; the one the hand
+        // is aiming at may not be the exception.
+        //
+        // The projection is the seat's own, out of the cache the pane's home
+        // card is drawn from, so the two are one reading of one shell. A
+        // visitor's stand-in stays `None`: this window has never drawn that
+        // pane, and inventing something for it is the one thing worse than a
+        // blank.
         if let Some(slot) = strip_preview {
-            focus_thumbnails.insert(slot.min(focus_thumbnails.len()), None);
+            let guest = stand_in_pane
+                .as_ref()
+                .and_then(|(leaf, tree)| {
+                    Some(seats::FocusThumbnail {
+                        tree,
+                        // The card is a tab of exactly this one pane, and in
+                        // that tab this pane is the one holding the keyboard.
+                        focused: leaf.seat,
+                        seats: self.window.focus_thumbs.seats(leaf.tab)?,
+                    })
+                });
+            focus_thumbnails.insert(slot.min(focus_thumbnails.len()), guest);
         }
         let chrome = seats::build_chrome_for_tabs(
             &self.seats,
@@ -37969,6 +38005,48 @@ impl Runtime<'_> {
                 ..seats::TabContent::default()
             },
         ))
+    }
+
+    /// **The pane whose picture the stand-in wears** (缺陷 #189) — the local
+    /// half of [`Runtime::strip_stand_in`], as the leaf rather than as a face.
+    ///
+    /// The stand-in was a *blank* card until this existed, and on a card column
+    /// that is very nearly no card at all: the body is `--termbg` on a panel of
+    /// almost the same value, so what the reader saw where their pane was about
+    /// to land was an accent hairline around nothing. The head has said the
+    /// right name since K124 and it was never enough — the whole of a card in
+    /// this mode is its picture, and every other card in the column was showing
+    /// one.
+    ///
+    /// **The picture is the one the column already has** (user ruling
+    /// 2026-08-29): the seat's own projection, out of the very cache the pane's
+    /// home card is drawn from, so the stand-in and the stage cannot be two
+    /// readings of one shell. Nothing is projected a second time — see
+    /// [`Self::refresh_focus_thumbnails`] for the one thing that *is* arranged,
+    /// which is that the home tab goes on being projected while its card is
+    /// scrolled out from under the hand.
+    ///
+    /// `None` for a visitor's stand-in and that is the honest answer, not a gap:
+    /// the pane belongs to another window's process, this window has never drawn
+    /// it, and what travels on the broker is a label ([`GhostFace`]) and a tree.
+    fn stand_in_pane(&self) -> Option<LeafId> {
+        // The same door, read in the same order [`Runtime::strip_stand_in`]
+        // reads it: a visitor's slot is not this window's pane's.
+        if self.window.foreign.is_some() {
+            return None;
+        }
+        let drag = self.window.drag.as_ref()?;
+        let DropLanding::StripExtract { .. } = drag.landing? else {
+            return None;
+        };
+        let DragSource::Pane(leaf) = drag.source else {
+            return None;
+        };
+        // Through the pane's **own** tab, by id, for `strip_stand_in`'s reason:
+        // the spring may have moved the stage, and the seat this card is a
+        // picture of is a fact about the tree it is still filed under.
+        self.tab_state(leaf.tab)?.seats.tree().find_seat(leaf.seat)?;
+        Some(leaf)
     }
 
     /// **How many slots this window's tab list is holding for something that is
@@ -78146,13 +78224,25 @@ impl Runtime<'_> {
         let mut wanted_pictures: Vec<web_thumb::PageDemand> = Vec::new();
         let pages = &self.window.web;
         let page_pictures = &self.window.web_thumbs;
+        // **And the tab holding the pane that is in the air** (缺陷 #189). Its
+        // seat is being drawn twice while the gesture lasts — once on its own
+        // card and once as the stand-in ([`Self::stand_in_pane`]) — and the
+        // second of those is somewhere else in the column entirely, so the
+        // visibility gate above would drop the projection the moment the
+        // auto-scroll carried the home card past the clip and leave the reader
+        // watching the blank card this defect is about. It is one tab, for the
+        // length of one gesture, and the throttle is the same one every other
+        // card pays.
+        let in_hand = self.stand_in_pane().map(|leaf| leaf.tab);
         for (index, card) in geometry.cards.iter().enumerate() {
-            if card.body[3] <= list_top || card.body[1] >= list_bottom {
-                continue;
-            }
             let Some(tab) = self.window.tabs.get(index) else {
                 continue;
             };
+            let on_the_glass = in_hand == Some(tab.id)
+                || (card.body[3] > list_top && card.body[1] < list_bottom);
+            if !on_the_glass {
+                continue;
+            }
             visible.insert(tab.id);
             // The mini boxes are solved here rather than inside the budget
             // because they are *geometry*, and geometry is `seats`'s: what comes
