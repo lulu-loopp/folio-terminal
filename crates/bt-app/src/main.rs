@@ -123961,6 +123961,79 @@ mod tests {
         );
     }
 
+    /// **The third media lane, and the finding is that it needed nothing**
+    /// (§7.44 ⑮, 2026-08-30 — the `.gif` third of defects #202/#204).
+    ///
+    /// Three lanes were walked across a tab boundary and two of them were
+    /// broken. This is the one that was not, and it is written down because
+    /// "nothing to do here" is a claim that can stop being true: an animation is
+    /// keyed by the **file** and not by the surface
+    /// ([`WindowRuntime::animations`], §7.44 ⑤ — which is what puts three
+    /// surfaces showing one `loading.gif` on the same frame), and the file
+    /// travels with the pane on [`PreviewImageState::path`]. So a move re-keys
+    /// nothing, because there is no key with an address in it.
+    ///
+    /// Both halves are asserted: that the reader is by file, and that the file
+    /// crosses. Either one alone would go on passing while the pair stopped
+    /// being a reason.
+    ///
+    /// RED GATE: key `animations` by `PreviewSurface` and the first assertion
+    /// goes red — and the lane joins the other two, needing a carrier of its own.
+    #[test]
+    fn an_animation_crosses_a_tab_boundary_because_it_is_keyed_by_its_file() {
+        let running = method_text("    fn animation_running_on(&self, surface: PreviewSurface) -> bool {");
+        assert!(
+            running.contains("normalized_local_image_path_key"),
+            "the animation lane is read by file, which is why a move has \
+             nothing to re-key:\n{running}"
+        );
+        let names = method_text(
+            "    fn animation_path_of(&self, surface: PreviewSurface) -> Option<PathBuf> {",
+        );
+        assert!(
+            names.contains("self.preview_picture(surface)?.path"),
+            "and the file it is read by is the one on the pane, which travels \
+             with the pane:\n{names}"
+        );
+
+        let (mut origin, gif_seat) = tab_with_a_picture(1, r"D:\shots\folio-anim-test.gif");
+        let mut alone = tear_pane_into_tab(
+            &mut origin,
+            &cross_metrics(),
+            gif_seat,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("an animated picture may become a tab of its own");
+        let lone_seat = alone.seats.preview_seats()[0];
+        assert_eq!(
+            lane_shows(&alone),
+            Some(Path::new(r"D:\shots\folio-anim-test.gif")),
+            "the file crossed the tear-out"
+        );
+
+        let moved = cross_move(
+            &mut alone,
+            &mut origin,
+            lone_seat,
+            seats::DropEdge::Right,
+            true,
+        )
+        .expect("and comes back the way it went");
+        assert_eq!(
+            origin
+                .preview_panes
+                .get(seat_of(TabId(1), moved.landed))
+                .and_then(|pane| pane.image.as_ref())
+                .map(|picture| picture.path.as_path()),
+            Some(Path::new(r"D:\shots\folio-anim-test.gif")),
+            "and the surface the animation is asked about names the same file, \
+             so the clock it is on is the clock it was on"
+        );
+    }
+
     /// **§7.1.6k — a target that cannot take another pane is refused before
     /// anything moves.**
     ///
