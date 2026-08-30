@@ -75892,6 +75892,7 @@ impl Runtime<'_> {
             })
             .collect();
         self.carry_the_pages_of_moved_panes(&moved)?;
+        self.carry_the_recordings_of_moved_panes(&moved);
         absorb_tab_into_strip(
             &mut self.window.tabs,
             &mut self.window.active_tab,
@@ -76240,6 +76241,7 @@ impl Runtime<'_> {
             ));
         }
         self.carry_the_pages_of_moved_panes(&moves)?;
+        self.carry_the_recordings_of_moved_panes(&moves);
         if moved.source_emptied {
             // The tab did not close — it was emptied by a move, and `close_tab`
             // would file a still-running shell into Recent and shut it down. This
@@ -76340,8 +76342,10 @@ impl Runtime<'_> {
         }
         // **And the half that does not live on a `TabState`** (§7.10 ④‴): a page
         // is the window's, so `pane_into_new_tab` cannot have carried it and this
-        // is where it follows the pane it is drawn in.
+        // is where it follows the pane it is drawn in. A recording is the
+        // window's for the same reason and follows by the same door (§7.44 ⑮).
         self.carry_the_pages_of_moved_panes(&[(leaf, landed)])?;
+        self.carry_the_recordings_of_moved_panes(&[(leaf, landed)]);
         debug_assert!(
             self.sessions_match_terminals(),
             "item 6: a tear-out leaves the tab it left matching its own tree"
@@ -79012,6 +79016,71 @@ impl Runtime<'_> {
             self.apply_web_outcomes(now, outcomes)?;
         }
         Ok(())
+    }
+
+    /// **A pane that changed its address takes its recording with it** (user
+    /// report on `next22`, defects #202/#204; §7.44 ⑮).
+    ///
+    /// [`Self::carry_the_pages_of_moved_panes`] said one tab-level table apart
+    /// from the seven a pane carries; this is the second, and it is a separate
+    /// door rather than a second half of that one because the two tables are
+    /// different tables with different keys: [`WindowRuntime::web`] is keyed by
+    /// [`LeafId`] and [`WindowRuntime::video`] by [`PreviewSurface`], since a
+    /// recording plays on a pane, on a float and on the glance card while a page
+    /// only ever plays on a pane. Only the first of those three is a leaf, so
+    /// only the first of them can be part of a move at all — which is the whole
+    /// of the filter below.
+    ///
+    /// **Without it the recording does not merely lag — it is shut down.**
+    /// [`Runtime::sweep_video_seats`] keeps a seat while the surface it is keyed
+    /// by is still about the file it was opened on, and both halves of that key
+    /// change on a move; so the seat went on being keyed by an address the
+    /// window no longer has, the sweep read it as a surface that has stopped
+    /// existing, and the decoder was stopped on the next frame. On the machine
+    /// that is a video pane dragged onto the tab strip whose picture goes
+    /// **blank** while its head, its control bar and its fact line — which
+    /// travel with the pane — go on naming the recording.
+    ///
+    /// **Taken out of the table before any of them is put back**, which is the
+    /// page carrier's reason said again about a different map: a centre *trades*
+    /// (§7.1.6k′ B4), so the arriving recording is filed under the key the
+    /// departing one was filed under, and an insert interleaved with the removes
+    /// would have [`video_seat::VideoSeats::put`] shut down a live engine — the
+    /// one thing [`video_seat::VideoSeats::take`] and `put` exist to let this
+    /// function avoid.
+    ///
+    /// No `Result`, unlike its sibling: nothing here can fail. A rehome is one
+    /// key changing — the engine is not touched, the decoder does not restart,
+    /// the playhead does not go back and the texture keeps its name — so there
+    /// is no platform call to report on.
+    fn carry_the_recordings_of_moved_panes(&mut self, moves: &[(LeafId, LeafId)]) {
+        let hosted: BTreeSet<LeafId> = self
+            .window
+            .video
+            .iter()
+            .filter_map(|(surface, _)| match surface {
+                PreviewSurface::Seat(leaf) => Some(leaf),
+                PreviewSurface::Float(_) | PreviewSurface::Peek => None,
+            })
+            .collect();
+        // The same rule the page table asks, asked of the recording table: a
+        // pair whose two halves are equal is not a move and must not be lifted
+        // and put back, because the next pair in the transaction may be filing
+        // something under that key.
+        let travelling = pages_that_move_with_their_panes(&hosted, moves);
+        if travelling.is_empty() {
+            return;
+        }
+        let carried: Vec<(PreviewSurface, video_seat::VideoSeat)> = travelling
+            .iter()
+            .filter_map(|(was, now)| {
+                let seat = self.window.video.take(PreviewSurface::Seat(*was))?;
+                Some((PreviewSurface::Seat(*now), seat))
+            })
+            .collect();
+        for (now, seat) in carried {
+            self.window.video.put(now, seat);
+        }
     }
 
     /// **Go and photograph the pages the cards could not draw** — the web half
@@ -93214,6 +93283,12 @@ fn tick_owes_a_present(chrome_changed: bool, panes_owe: bool, pictures_owe: bool
 /// A pure function so the rule can be read without a browser: what a page is
 /// owed by a move is a fact about the two addresses, and the only thing that
 /// needs an engine is the handing over itself.
+///
+/// **The recording table asks it too** (§7.44 ⑮), which is why `hosted` is a set
+/// of leaves and not the page map itself: what this decides is a fact about two
+/// addresses and a list of the ones somebody is holding something for, and both
+/// window-level tables a pane can be behind — the browser and the decoder — ask
+/// exactly that. See [`Runtime::carry_the_recordings_of_moved_panes`].
 #[must_use]
 fn pages_that_move_with_their_panes(
     hosted: &BTreeSet<LeafId>,
@@ -103786,6 +103861,100 @@ mod tests {
             removed < collected && collected < inserted,
             "a trade files the arriving page under the departing page's own id, \
              so an insert interleaved with the removes loses a live browser:\n{carrier}"
+        );
+    }
+
+    /// RED — **a recording follows the pane it is drawn in** (user report on
+    /// `next22`, defects #202/#204; §7.44 ⑮).
+    ///
+    /// `a_page_follows_the_pane_it_is_drawn_in`'s sentence said about the second
+    /// window-level table a pane can be behind, and it is the same defect with a
+    /// different ending. [`WindowRuntime::video`] is keyed by
+    /// [`PreviewSurface`], both halves of a seat surface's name change on a
+    /// move, and [`Runtime::sweep_video_seats`] retires every seat whose surface
+    /// has stopped existing — so a video pane dragged into another tab lost its
+    /// decoder on the very next frame while its head, its control bar and its
+    /// fact line travelled with the pane.
+    ///
+    /// The three things stated here are the three the fix is:
+    ///
+    /// ① **Only a seat travels.** A float and the glance card are not leaves,
+    /// so a move cannot be about them, and a build that keyed the carrier by
+    /// leaf alone would have rehomed a card's recording onto a pane.
+    /// ② **The doors.** The same three the page carrier is called from, because
+    /// they are the three gestures that re-key a pane inside one window.
+    /// ③ **The transaction.** Every travelling recording off its surface before
+    /// any of them is put down — a trade files the arriving one under the
+    /// departing one's key, and `put` shuts down whatever it lands on.
+    ///
+    /// RED GATE: take the call out of any one of the three doors and that door's
+    /// pin goes red; run the carrier as a loop of `rehome` instead of
+    /// `take`-then-`put` and the `.collect();` between the two disappears, which
+    /// on a trade is a live engine shut down.
+    #[test]
+    fn a_recording_follows_the_pane_it_is_drawn_in() {
+        // ① a seat is a leaf and the other two surfaces are not, which is what
+        // makes "which of these moves is about a recording" answerable at all.
+        let leaf = LeafId {
+            tab: TabId(1),
+            seat: SeatId(2),
+        };
+        let surfaces = [
+            PreviewSurface::Seat(leaf),
+            PreviewSurface::Float(9),
+            PreviewSurface::Peek,
+        ];
+        let leaves: Vec<LeafId> = surfaces
+            .iter()
+            .filter_map(|surface| match surface {
+                PreviewSurface::Seat(leaf) => Some(*leaf),
+                PreviewSurface::Float(_) | PreviewSurface::Peek => None,
+            })
+            .collect();
+        assert_eq!(
+            leaves,
+            vec![leaf],
+            "a float and a glance card have no address a move could change"
+        );
+
+        // ② the three doors.
+        for (door, signature) in [
+            (
+                "a pane torn out into a tab of its own",
+                "    fn extract_pane_into_new_tab(&mut self, leaf: LeafId, slot: usize) -> Result<Option<TabId>> {",
+            ),
+            (
+                "a pane dropped on another tab",
+                "    fn move_pane_across_tabs(",
+            ),
+            ("a tab merged into another's layout", "    fn absorb_tab("),
+        ] {
+            let text = method_text(signature);
+            assert!(
+                text.contains("self.carry_the_recordings_of_moved_panes("),
+                "{door} leaves its recording behind, and a recording left behind \
+                 is swept away a frame later:\n{text}"
+            );
+        }
+
+        // ③ the transaction.
+        let carrier =
+            method_text("    fn carry_the_recordings_of_moved_panes(&mut self, moves: &[(LeafId, LeafId)]) {");
+        let removed = carrier
+            .find("self.window.video.take(")
+            .expect("the recordings are lifted off their surfaces");
+        let collected = removed
+            + carrier[removed..]
+                .find(".collect();")
+                .expect("and gathered before any of them is put down");
+        let put = carrier
+            .find("self.window.video.put(now,seat);")
+            .expect("and then put down under their new names");
+        assert!(
+            removed < collected && collected < put,
+            "a trade files the arriving recording under the departing one's own \
+             surface, so a put interleaved with the takes shuts down a live \
+             decoder:\n{carrier}"
         );
     }
 
@@ -128166,6 +128335,99 @@ mod tests {
         // ④ and the card is holding nothing.
         assert!(seats.get(PreviewSurface::Peek).is_none());
         seats.shutdown_all();
+    }
+
+    /// RED — **two recordings trading places keep both engines** (§7.44 ⑮,
+    /// 2026-08-30).
+    ///
+    /// The half of "a recording follows its pane" that a loop of
+    /// [`video_seat::VideoSeats::rehome`] cannot do. A pane dropped on the
+    /// *centre* of another tab's pane trades: two journeys in one gesture, and
+    /// the second one's destination is the first one's origin. Rehomed one at a
+    /// time, the second journey arrives at a surface the first has just filled
+    /// and the shutdown that `open` and `rehome` both owe a surface takes a live
+    /// decoder with it — on the glass, one of the two videos goes black while
+    /// the pane around it arrives intact.
+    ///
+    /// So the carrier lifts every travelling recording off its surface before it
+    /// puts any of them down, which is what
+    /// [`video_seat::VideoSeats::take`] and `put` are for, and this is that
+    /// sequence run over two real engines.
+    ///
+    /// RED GATE: replace the two `take`s and two `put`s with two `rehome`s in
+    /// the order the gesture produces them and `engines_shut_down` moves by one
+    /// while the second surface comes back holding the first one's texture.
+    #[test]
+    fn two_recordings_trading_places_keep_both_engines() {
+        use bt_platform::video::engine::{engines_outstanding, engines_shut_down};
+        let _ledger = ledger_gate();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-assets/folio-video-test.mp4");
+        let before = engines_outstanding();
+        let mut seats = video_seat::VideoSeats::default();
+        let now = Instant::now();
+        let travelling = PreviewSurface::Seat(LeafId {
+            tab: TabId(1),
+            seat: SeatId(2),
+        });
+        let standing = PreviewSurface::Seat(LeafId {
+            tab: TabId(4),
+            seat: SeatId(1),
+        });
+        for surface in [travelling, standing] {
+            seats
+                .open(surface, &fixture, now)
+                .unwrap_or_else(|error| panic!("{surface:?} opens the fixture: {error:?}"));
+        }
+        assert_eq!(
+            engines_settling_to(before + 2),
+            before + 2,
+            "two surfaces are two decoders"
+        );
+        let keys: Vec<String> = [travelling, standing]
+            .iter()
+            .map(|surface| {
+                seats
+                    .get(*surface)
+                    .expect("both surfaces hold a seat")
+                    .key()
+                    .to_owned()
+            })
+            .collect();
+        let stopped = engines_shut_down();
+
+        // The trade, as the carrier runs it: both off their surfaces first.
+        let lifted: Vec<(PreviewSurface, video_seat::VideoSeat)> =
+            [(travelling, standing), (standing, travelling)]
+                .iter()
+                .filter_map(|(was, to)| Some((*to, seats.take(*was)?)))
+                .collect();
+        for (to, seat) in lifted {
+            seats.put(to, seat);
+        }
+
+        assert_eq!(
+            engines_shut_down(),
+            stopped,
+            "a trade shut an engine down, which is one of the two pictures going \
+             black"
+        );
+        assert_eq!(engines_outstanding(), before + 2, "and both are still open");
+        assert_eq!(
+            seats.get(standing).expect("the traveller arrived").key(),
+            keys[0],
+            "the traveller kept its own texture"
+        );
+        assert_eq!(
+            seats
+                .get(travelling)
+                .expect("and the pane it traded with went the other way")
+                .key(),
+            keys[1],
+            "each recording is the one its pane was showing"
+        );
+        seats.shutdown_all();
+        assert_eq!(engines_settling_to(before), before);
     }
 
     /// RED — **the still and the first played frame land in the same rectangle**

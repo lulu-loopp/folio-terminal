@@ -1301,12 +1301,40 @@ impl VideoSeats {
         if from == to {
             return self.seats.contains_key(&from);
         }
-        let Some(seat) = self.seats.remove(&from) else {
+        let Some(seat) = self.take(from) else {
             return false;
         };
-        self.close(to);
-        self.seats.insert(to, seat);
+        self.put(to, seat);
         true
+    }
+
+    /// **A recording lifted off its surface, still running** — the half of
+    /// [`Self::rehome`] a *transaction* needs (§7.44 ⑮, 2026-08-30).
+    ///
+    /// A pane dropped on the centre of another tab's pane **trades**: two
+    /// journeys in one gesture, and the second one's destination is the first
+    /// one's origin. Run as two `rehome`s the second would arrive at a key the
+    /// first had just filled and `put` would shut that engine down — a live
+    /// decoder lost, with the reader watching one of the two pictures go black.
+    /// So the caller takes every travelling recording off its surface before it
+    /// puts any of them down, exactly as the page table's carrier does.
+    ///
+    /// Nothing is shut down here and nothing is started: what comes back is the
+    /// same engine at the same playhead holding the same texture name, and a
+    /// caller that dropped it on the floor would be caught by §7.42 ⑦'s
+    /// counters.
+    pub fn take(&mut self, surface: crate::PreviewSurface) -> Option<VideoSeat> {
+        self.seats.remove(&surface)
+    }
+
+    /// **A recording put down on a surface**, shutting down whatever was there.
+    ///
+    /// [`Self::take`]'s other half, and the shutdown is the same sentence
+    /// [`Self::open`] makes: a surface cannot hold two recordings, and the one
+    /// arriving is the one the reader asked for.
+    pub fn put(&mut self, surface: crate::PreviewSurface, seat: VideoSeat) {
+        self.close(surface);
+        self.seats.insert(surface, seat);
     }
 
     /// Take every new frame. `true` when any surface owes a redraw.
