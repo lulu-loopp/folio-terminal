@@ -17049,6 +17049,51 @@ fn preview_lane_after_landing(
     }
 }
 
+/// **Who holds the one texture lane once the tab's set of panes has changed**
+/// (user report on `next22`, defects #202/#204; §7.1.6k″).
+///
+/// [`preview_lane_after_landing`]'s opposite number, and the pair covers the two
+/// kinds of event there are: that one is asked when a *view* lands on a surface
+/// that already exists, this one when the *surfaces themselves* change. A move
+/// is the second kind and had no answer at all — it neither lands a view nor
+/// builds a tab, so the two doors that write the lane both missed it, and the
+/// tab a picture was torn out of went on naming a pane it no longer has.
+///
+/// The rule is one sentence: **the lane belongs to a seat of this tab whose pane
+/// is holding a picture, and it stays with the one that has it.** So:
+///
+/// * an incumbent that is still such a surface keeps the lane — which is
+///   §7.1.6k's own ruling that "a picture the target was already showing does
+///   not lose its pixels to one that has just moved in", now stated as a
+///   property of the tab rather than as a `get_or_insert` at one call site;
+/// * anything else is re-derived exactly the way [`assemble_tab_state`] derives
+///   it at birth — the first picture in insertion order, because the slot is one
+///   — which is what releases a lane pointing at a pane that has left and hands
+///   it to the picture that is actually standing there.
+///
+/// A float never holds it (it paints on its own overlay layer) and neither does
+/// the glance card, which is why the walk is over seats alone.
+#[must_use]
+fn preview_raster_lane(
+    panes: &PreviewPanes,
+    incumbent: Option<PreviewSurface>,
+) -> Option<PreviewSurface> {
+    let holds_a_picture = |surface: PreviewSurface| {
+        matches!(surface, PreviewSurface::Seat(_))
+            && panes
+                .get(surface)
+                .is_some_and(|pane| pane.image.is_some())
+    };
+    incumbent.filter(|held| holds_a_picture(*held)).or_else(|| {
+        panes
+            .iter()
+            .find(|(surface, pane)| {
+                matches!(surface, PreviewSurface::Seat(_)) && pane.image.is_some()
+            })
+            .map(|(surface, _)| surface)
+    })
+}
+
 /// **What one preview surface is showing**, in the three shapes the recording
 /// sweep can act on (user report 2026-08-28; `docs/DESIGN.md` §7.44 ⑬).
 ///
@@ -28646,10 +28691,13 @@ fn assemble_tab_state(
     //
     // The first picture in insertion order when a tab arrives with two, because
     // the slot is one; the tab merge already decides it that way.
-    let preview_raster = preview_panes
-        .iter()
-        .find(|(surface, pane)| matches!(surface, PreviewSurface::Seat(_)) && pane.image.is_some())
-        .map(|(surface, _)| surface);
+    //
+    // **Through [`preview_raster_lane`] with no incumbent**, since §7.1.6k″: a
+    // tab being born has nobody holding the lane, so the two callers of that
+    // function differ in exactly that argument and the derivation itself is
+    // written once. A second spelling of "which pane has the pixels" is how the
+    // constructor and the mover came to disagree in the first place.
+    let preview_raster = preview_raster_lane(&preview_panes, None);
     let tab = TabState {
         id,
         sessions,
@@ -28871,6 +28919,13 @@ fn pane_into_new_tab(
         .remove(&was)
         .map(|view| BTreeMap::from([(now, view)]))
         .unwrap_or_default();
+    // **The lane the departing pane may have been holding** (§7.1.6k″). The tab
+    // being built derives its own in [`assemble_tab_state`]; this is the other
+    // end of the same journey, and without it the tab left behind names a
+    // surface it no longer has — which the moment that pane is dragged back
+    // turns into an incumbent that refuses the picture. See
+    // [`preview_raster_lane`].
+    from.preview_raster = preview_raster_lane(&from.preview_panes, from.preview_raster);
     from.refocus_after_losing(seat.id);
     let (seat_layout, seat_overflow) = solve(&seats);
     let mut tab = assemble_tab_state(
@@ -29107,7 +29162,6 @@ fn move_seat_content(
     // it; this is the memory a *future* opening of that file in either tab
     // reads.
     if let Some(pane) = source.preview_panes.remove(left) {
-        let brought_a_picture = pane.image.is_some();
         if let Some(showing) = pane.buffer.as_ref() {
             let view = source.preview_views.restore(showing);
             target.preview_views.remember(showing, view);
@@ -29116,14 +29170,33 @@ fn move_seat_content(
             }
         }
         *target.preview_panes.entry(arrived) = pane;
-        // The texture lane if it was free, and not otherwise: a picture the
-        // target was already showing does not lose its pixels to one that has
-        // just moved in (`TabState::preview_raster`). The decode lane is per
-        // path and per window, so the image needs nothing but its new address.
-        if brought_a_picture {
-            target.preview_raster.get_or_insert(arrived);
-        }
     }
+    // **And the texture lane on both sides of the journey** (user report on
+    // `next22`, defects #202/#204; §7.1.6k″).
+    //
+    // This used to be one line inside the block above — `target.preview_raster
+    // .get_or_insert(arrived)` — and it was half of the rule. The half it stated
+    // is still stated, by [`preview_raster_lane`]'s incumbent clause: a picture
+    // the target was already showing does not lose its pixels to one that has
+    // just moved in. The half it left out is that **the tab a picture leaves
+    // goes on naming it**, because nothing here ever released the lane; so a
+    // picture torn into a tab of its own and dragged back met an incumbent that
+    // was its own departed address, `get_or_insert` kept it, and
+    // [`Runtime::preview_picture_hosts`] filtered the returning pane straight
+    // out. On the glass: a blank body under a head and a fact line that had
+    // travelled with the pane — *「1440 × 900 · PNG · 36 KB · Fit」* over nothing.
+    //
+    // Asked of both tabs and asked unconditionally, because both of them just
+    // changed which panes they hold and neither of them can answer for the
+    // other. It is a walk of a list that is never longer than a tab's preview
+    // panes, and it is idempotent — which is what lets [`absorb_tab_sessions`]
+    // call this function once per arriving seat without the answer depending on
+    // the order they arrive in.
+    //
+    // The decode lane needs nothing: it is keyed by path and belongs to the
+    // window, so the picture itself needs no more than its new address.
+    source.preview_raster = preview_raster_lane(&source.preview_panes, source.preview_raster);
+    target.preview_raster = preview_raster_lane(&target.preview_panes, target.preview_raster);
     forget_work_in_flight_for_seat(target, now);
 }
 
