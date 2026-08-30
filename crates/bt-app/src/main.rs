@@ -113734,6 +113734,122 @@ mod tests {
             .collect()
     }
 
+    /// RED — **the reported page's own screenshots fit the window's budget, and
+    /// a frame that changed nothing asks for nothing** (user report 2026-08-29,
+    /// defect #186: 「预览 pane 独占一个 tab 后很卡」).
+    ///
+    /// The document is `README.zh-CN.md` and the pictures are its own: five
+    /// 3200×2000 screenshots and one 3200×3240 plate, drawn into the 54em
+    /// measure a 4K screen at 200% gives a full-window pane — 1404 physical
+    /// pixels, which is what the report's geometry works out to and the number
+    /// the sizes below are derived from rather than typed.
+    ///
+    /// The claim is the one the report needs: **once the exact-size rasters have
+    /// landed, a page standing still or scrolling costs zero resamples, zero
+    /// uploads and zero re-flows.** Each of the three is a counter here rather
+    /// than a stopwatch:
+    ///
+    /// * a **re-flow** is [`PageArtKey::picture_generation`] moving, because that
+    ///   is the only thing about a picture a document key can notice;
+    /// * a **resample** is an entry in [`MarkdownPictures::owed`];
+    /// * an **upload** is an eviction — a raster that leaves this cache is one
+    ///   the next frame asks the GPU for again.
+    ///
+    /// The measurement behind it, taken on the machine the same day with
+    /// `BT_PERF_TRACE`: peak 27.3MB of the 64MB texture budget,
+    /// `math_texture_evictions=0`, `math_texture_refusals=0`, no atlas repack,
+    /// and zero CPU over six seconds of a page standing still.
+    ///
+    /// MUTATIONS: cut [`MARKDOWN_PICTURE_BUDGET_BYTES`] below this set and the
+    /// budget assertion goes red — and the eviction it lets in ticks the
+    /// generation, which re-flows the page, which asks for the raster again,
+    /// which evicts, for as long as the pane is open; drop the `.min(1.0)` out
+    /// of [`markdown_image_extent`] and every raster is the decode's own 25.6MB
+    /// and three of them do not fit anywhere.
+    #[test]
+    fn a_page_of_screenshots_costs_no_resample_and_no_reflow_the_second_time() {
+        // 54em of a 13px body at 200% — `preview::PREVIEW_PROSE_MEASURE_EM`
+        // through `preview::markdown_metrics`, which is where the number is
+        // decided.
+        let measure = seats::preview_markdown_metrics(2.0).measure;
+        let mut pictures = MarkdownPictures::default();
+        let mut keys = Vec::new();
+        for (index, native) in [
+            [3200_u32, 2000],
+            [3200, 2000],
+            [3200, 2000],
+            [3200, 2000],
+            [3200, 2000],
+            [3200, 3240],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // The very arithmetic `Runtime::resolve_document_pictures` does:
+            // the drawn box, capped at the decode's own pixels and at the share
+            // of the texture budget one picture may take.
+            let [drawn_width, drawn_height] = markdown_image_extent(native, measure, true);
+            let (cap_width, cap_height) = image_raster_cap(native);
+            let (width_px, height_px) = bt_render::preview_image_extent(
+                (drawn_width.round().max(1.0) as u32).min(cap_width),
+                (drawn_height.round().max(1.0) as u32).min(cap_height),
+                native[0],
+                native[1],
+            )
+            .expect("a picture the page can draw");
+            let key = MarkdownRasterKey {
+                content: format!("shot-{index}"),
+                width_px,
+                height_px,
+            };
+            pictures.land(
+                key.clone(),
+                MarkdownRaster::Ready {
+                    key: format!("texture-{index}"),
+                    rgba: Arc::from(
+                        vec![0_u8; (width_px as usize) * (height_px as usize) * 4]
+                            .into_boxed_slice(),
+                    ),
+                    width_px,
+                    height_px,
+                },
+            );
+            keys.push(key);
+        }
+
+        assert_eq!(
+            pictures.rasters.len(),
+            keys.len(),
+            "the whole page fits: nothing was evicted to make room for the last \
+             picture, at {} bytes resident",
+            pictures.resident_bytes
+        );
+        assert!(
+            pictures.resident_bytes <= MARKDOWN_PICTURE_BUDGET_BYTES,
+            "{} bytes resident against a {MARKDOWN_PICTURE_BUDGET_BYTES}-byte budget",
+            pictures.resident_bytes
+        );
+
+        // And now the frame that changed nothing.
+        let settled = pictures.generation;
+        for key in &keys {
+            assert!(
+                matches!(pictures.raster(key), Some(MarkdownRaster::Ready { .. })),
+                "every picture is in hand at the size the page draws it"
+            );
+        }
+        assert_eq!(
+            pictures.generation, settled,
+            "so nothing about the page came out differently, and no document key \
+             moved: zero re-flows"
+        );
+        assert!(pictures.owed.is_empty(), "zero resamples owed the worker");
+        assert!(
+            pictures.settle_deadline.is_none(),
+            "and therefore no wake-up asked for either"
+        );
+    }
+
     /// RED GATE (user report, 2026-08-28: 「md 预览不渲染图片」) — **a picture's
     /// source is resolved against the directory the document was read from**,
     /// and the block that carries it is as tall as the picture is drawn.

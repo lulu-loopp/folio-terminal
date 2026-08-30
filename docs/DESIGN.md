@@ -2175,6 +2175,8 @@ else                           { Flash }    // 在这台屏上,但不在你眼�
 
 **画法不新造词。** 被瞄准的 tab 穿的是 `.drop-preview` 与 `@keyframes tab-land` 的 `from` **同一对声明**(9% 强调色底 + 45% 强调色内描边):将被填的槽位、刚刚被填完的 tab、以及**正要**被交一枚 pane 的 tab,是同一件事在三个时刻的同一张图。**幽灵不让位**——那两个 strip 落点让位是因为 strip 画了一个**替身**(pane 的第二张画像,站在它将要占的槽位里);一枚只是亮起来的 tab 说的是**哪里**而从不说**什么**,把手上的标签拿走会让手在一个只是变亮了的东西上空着,那是 hover 的图。
 
+**一枚预览 pane 跨 tab 时带着它正在读的那份文档,这一条 2026-08-29 才补齐(用户实机报缺陷 #187;`crates/bt-app/src/main.rs`)。** 上一段那句「整份预览视图」搬的是**视图**,而视图按 `PreviewSource` 指名它的文档、文档住在 tab 的池里(§7.1.3),于是 pane 到了一个从没听说过这个 source 的池里——玻璃上就是空态那一句「点击带虚线下划线的路径,即可在此预览」,文件连同未保存修改留在了后面。缺口有两处,两处都是**读法**而不是遗漏:① `move_seat_content` 当时的注记写着「文档是缓冲,缓冲住在不迁移的池里」,而「池不迁移」这后半句自 §7.1.3 裁下「整池随行」那天起就不成立了——现在这枚 pane 手上那一份**跟着它走**(源池 `take`、目标池 `merge_buffer`,即既有的「一文件一缓冲、脏的赢、平局归原住民」那条法),读者读到哪一行是**抄**过去的(视图是关于文档的三个数,两个 tab 各记一份是 `absorb` 早就描述过的寻常事);pane 自己的 `scroll` 长在 `PreviewPane` 上,本来就随座位走。② 「整池随行」那条的判据 `preview_seats().is_empty()` 问的是**树**,而独 pane 那条路**故意不叫 `close_seat`**(G84 拒绝清空一棵树),于是一个即将被 `absorb_tab_into_strip` 从 run 里取走的 tab 回答「我还有门通向我的池」——池里剩下的全部随那个 tab 一起消失;更糟的是目标 tab 自己没有预览座时会走成**反向**那一臂,把目标的池搬进正在死去的那个 tab。判据因此加上「这次移动把源 tab 搬空了」,而「两边都没门就原地不动」那一句只对**还活着**的目标问——把东西留在一个马上要被移出 run 的 tab 里不是谨慎,是销毁。**逐出规则一字未改**:`insert`/`merge_buffer` 从不逐出,而 `open` 的上限本来就放过任何一个 pane 正在显示的 source,所以刚迁入的那一份不可能被之后的一次浏览挤掉。红门四格(`main.rs`,四条手势各一格:落在 tab 条、落在舞台并与人对调、`Move pane to new tab`/撕成新窗、独占 tab 拖回去),红证:抽掉 `take`/`merge_buffer` 那一对,①③ 当场红;抽掉 `source_emptied ||` 那一句,② 当场红。
+
 **日期:2026-08-20 裁决,2026-08-21 落地。**
 
 **7.1.6k′ 跨 tab 的落点开了——那枚政策位被兑现(用户实机撞上后裁决 2026-08-23,同日落地;`crates/bt-app/src/{main,seats}.rs`)。** 上一段是这条战线自己写下的留白,原话逐字是:「**离家的 pane 在这张舞台上没有落点,这是政策位不是墙(§7.0 法则③)** … 裁决给的跨 tab 门只有一扇并且指名了位置——「松在 **tab** 上」,不是松在 tab 底下的布局上——所以边缘/中心/rim 一概不给、不画框、松手是 J120 的干净的什么都没有 … 要把那扇门开出来是它自己的一片(从一棵树里摘下、落进另一棵),现在是**未做**而不是做不了。」**用户 2026-08-23 在自己机器上撞上了它**:拖着 pane 悬停切进目标 tab 之后,想在舞台上挑一个位置分屏,舞台**完全不响应**——截图里幽灵悬在舞台上,一个落点框也没有。裁决一句话:开掉。于是**从别的 tab 来的 pane 在这张舞台上拿到的落点,与本 tab 的 pane 逐字相同**:边缘 = 与那枚 pane 分屏(方向按落的那条边)、rim = 与全部分屏、中心 = 中心既有的意思、落点框照画、装不下照样按 M147 画虚线。与 §7.1.6b′ ② 同日的改判互为一半:那一半让聚焦态的卡片接得住 pane,这一半让切过去之后的舞台挑得了位置,合起来才是一条完整的路。
@@ -3010,6 +3012,18 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 **条带就是那一条条带。** 提示复用 `notice.rs`——PowerShell 整合那条 30px 带子——而不是另起一条：一个既见过终端那条又见过预览这条的读者，不该见到两个高度、两种地面、两个 `×` 的位置。`Notice` 从两句变四句、`NoticeVerb` 从三个词变五个词，布局/绘制/命中一行未动。几何上它站在**面包屑之下、正文之上**（名字 → 它住哪儿 → 它出了什么事 → 正文），而算术上仍然是「条带先扣、rail 后扣」——两个顺序在 `pane_notice_strip` 里对齐一次，因为 `preview_body_viewport` 与 `preview_pane_geometry` 是同一个数字的两份推导。**顺带修好一条早就歪着的路由**：条带的**按下**过去排在 chrome 路由**之后**，而终端的身子是格子不是 chrome，所以那条歪着没人看得见；预览的身子从上到下全是 chrome，于是那两个词能被 hover、能高亮、按不动。现在按下与 hover、与绘制层序一致，三个答案对齐。
 
 **红门。** `a_pooled_document_no_pane_is_on_still_follows_its_file`（真布局、真 tab、真磁盘：门里点名池中那一份、盘动了、正文换了、滚动没跳）、`a_body_with_unsaved_edits_is_not_overwritten_and_says_so`（两个动词各一半）、`a_deleted_file_keeps_the_body_that_was_read_from_it`、`a_preview_wearing_a_strip_gives_it_a_row_of_its_own_body`（两份几何推导对得上、条带站在 rail 之下）、`the_disk_news_reaches_the_glass_by_both_roads`（读源码钉住无头测试站不到的那几句接线）；退路自己的两条在 `preview_watch` 里：`a_folder_with_no_handle_is_asked_by_hand_and_a_watched_one_never_is` 与 `a_window_whose_folders_are_all_watched_reads_no_disk_on_focus`。**红证**：把 `files_a_tab_stands_on` 改回走 pane（也就是出事的那份代码）第一条当场红；`note_disk_moved` 的脏臂落到干净臂第二条红；删除臂落到干净臂第三条红；`preview_pane_geometry` 忘掉条带第四条差整整 30 逻辑像素；退路去掉「只问没句柄的」那一句，被监视的那一半当场 panic。
+
+**④″ 一次通知只对池里那几个名字花钱——仓库根下的 `target` 动了要零成本(用户实机报缺陷 #186 + 用户裁决 2026-08-29;`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/preview_watch.rs`)。**
+
+**现象与量法。** 用户把开着仓库根 `README.zh-CN.md` 的预览 pane 拖成独占一个 tab 之后说「很卡」。隔离环境按 4K/200% 复现,`BT_PERF_TRACE` + `BT_PREVIEW_TRACE` 逐条量下来,报告里点名的四条嫌疑有三条**当场被数字排除**:大图不每帧重解码/重上传(峰值 27.3 MB 占 64 MB 纹理预算,`math_texture_evictions=0`、`math_texture_refusals=0`)、图集一次也没重排(`repacked` 零行)、静止时**六秒零 CPU、零帧、零重排**,滚动时一次重建 build→built 中位数不到 1 ms、最坏 10 ms。第四条是真的,而且能被单独量出来:**往同一个仓库的 `target\` 里写 400 个文件,folio 的窗口线程在 655 ms 里烧掉 188 ms CPU**,同期一帧没画、一次页面没重建;把同样 400 次写到一个没人监视的文件夹里,**0 ms**。
+
+**真因。** 规则 2「一个文件夹,不是一棵树」挡住的是**子树**,挡不住**条目**:`target` 本身就是被监视文件夹的一个条目,而 NTFS 在任何东西被加进一个目录时都会动这个目录自己的写入时间,`DIR_WATCH_FILTER` 里有 `FILE_NOTIFY_CHANGE_LAST_WRITE`——所以一个从仓库根预览 README 的窗口,把整场构建都听了一遍。`bt-platform` 那一侧写着「记录一个字都不读」,于是每一条通知都变成一次 `send_event` 与一次事件循环空转,而循环转完发现无事可做。这不是去抖能治的:去抖治的是**一条新闻被说很多遍**,这里是**很多条与我无关的新闻**。
+
+**修法:内核已经写下了名字,读它。** `DirWatch` 多一扇门 `start_shallow_named`,回调拿到 `DirChange::Named(&[OsString])`——一次完成里内核写下的那几个条目名;缓冲区溢出(`written == 0`)与走不通的记录链答 `DirChange::Unknown`。**只给浅监视这一扇门,树监视一字未动**,理由是那一侧原话:一次写进 `target\debug\foo.pdb` 算不算数是 `.gitignore` 的问题,这个 crate 答不了;而**预览监视看的是一个具体的文件**,「这是不是我那份」它答得了、并且答得起——过滤跑在监视线程上,比它挡掉的那次唤醒便宜几个数量级。`preview_watch` 因此多一张与订阅同源的表(`listening_for`:目录 → 该目录下本窗在读的文件名,一律小写,因为内核按盘上的拼法报而读者按自己的拼法开),表在**开句柄之前**写好——否则刚订上的那一刻正好是读者自己那次保存,而那条会被一张还没写上他的表挡掉。三条判据:`Unknown` 一律放行(溢出正是那阵最不能丢的爆发)、表里没有这个目录一律放行(订阅比集合多活一轮,对一个马上要被告知在监视的文件答「不是我的」就是把一次保存吞掉)、其余按名字比。**戳记那一层原样保留**——名字便宜但不确定(8.3 短名、一次没改动任何东西的写),`metadata` 那一层才是「它真的动了吗」的答案。
+
+**红门两道。** `bt-platform` 的 `a_named_watch_reports_the_entry_that_moved`:真内核、真文件夹,写一个文件要它按名字报回来,再往一个**子目录**里写一个文件、要它把 `target` 这个**目录条目**报回来——那一格就是这条缺陷的形状本身。`preview_watch` 的 `a_change_naming_no_file_this_window_reads_is_not_even_a_wake_up`:`target`/`.git`/`Cargo.lock` 不是新闻、点到 `README.md` 就是、`Unknown` 放行、大小写不算差别、没进表的目录放行,末了池空掉时表也空掉。**红证**:让过滤恒答 `true`(也就是出事的那份代码)第一条断言当场红;让 `Unknown` 答 `false`,溢出那条红。
+
+**没做的,如实记。** ⓪ **名字有一个窄洞**:内核报的是**那次操作用的那个名字**,所以一个用 8.3 短名(`READ~1.MD`)打开文件的程序会被这道过滤挡掉。编辑器、构建工具与 git 一律用长名,很多卷根本不生成别名,但这是一个真实存在的洞,写在这里而不是写成一句「过滤是精确的」。① 这条只修了 `preview_watch`。`files_watch` / `git_watch` 看的是**一棵树或一个文件夹的内容**,「哪个条目动了」对它们不是一个可以据以丢弃的问题(一个新出现的文件正是它们要的新闻),所以两者一行未改。② 三条被排除的嫌疑是**在这台机器上、这个窗口尺寸下**被排除的:量到的窗口是 2813×1666 物理,用户的是 3840×2160,像素多 1.7 倍而三条判据留的余量都远不止 1.7 倍(纹理 27.3/64 MB),但这是推论不是实测。若用户在修好之后仍然说卡,下一步是带着 `BT_PERF_TRACE` 在他那台机器上再量一次同样这三个计数,而不是继续猜。
 
 **⑤ 一个座位展示一件事，两个方向都是。** 实机撞出来的：files 列双击 `page.html`，再双击 `notes.md`——头、脚、tab 名全都说 `notes.md`，而浏览器还在文档前面的玻璃上（证据 `w2-slice5-evidence/09`）。一直存在的那一半是 `open_web_page_on` 的（页面落地时下面的文档不再被指着）；反方向在片⑤ 之前走不通，因为进网页的唯一一扇门是 `BT_WEB_DEV`。现在的判据是 `a_page_was_replaced`，接在 `advance_web_page` 已有的「pane 离开树就带走页面」那道门上：**`None` 不算「别的东西」**——页面被要求到第一次提交之间 pane 故意指着空，把那读成替换会让每张网页在开出来的下一帧被关掉。
 
@@ -5148,6 +5162,16 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 **红门 `the_git_panels_notice_wraps_inside_its_column`**(`git_panel.rs`):170 与 240 两种列宽(一条拖窄的列与它的静息宽度),字符串就是那台机器的原话,断言每一行的画宽 ≤ 列宽、断了不止一行、去掉空白之后一个字都没丢、块高随行数、画的框与量的框是同一个。**红证**:让 `empty_lines` 原样返回一行,`a 170px column cannot hold this sentence on one line` 当场红。
 
 **日期:2026-08-29,用户截图报缺陷,当日裁决,当日落地。**
+
+#### ⑥ pane 正文中央那句话也在 pane 里换行(第三个表面,2026-08-29 随文案改口一并;`crates/bt-app/src/{main,seats,i18n}.rs`)
+
+**起因是一次改文案。** 预览空态原来说「点一条带点线的路径,在这里预览」/`Click a dotted path to preview it here`。两处都错了:`dotted_underline_segments` 铺的是 2 逻辑像素一段、隔 2 逻辑像素的**横杠**,不是点——代码自己的注释就写着 `dash and gap`;而中文那一句是口语的截断句。改成「点击带虚线下划线的路径,即可在此预览」/`Click a path with a dashed underline to preview it here` 之后,英文从 38 字变成 55 字,而 pane 的下限是 `MIN_PANE_W` 260 逻辑像素——**这就是 ① 与 ⑤ 那张照片的第三个表面**。
+
+**成因与 ⑤ 逐字相同,连形状都一样。** 座位正文中央那句话是**一枚**居中的 `ChromeLabel`,`shape_chrome_labels` 给它 `Wrap::None` 并按自己的框裁切,于是一句比 pane 宽的话**两头各被切掉一截**,读者看见的是中段。走这条路的有三句:预览的空态邀请、`Loading <文件名>…`(文件名是数据,长度不由本产品决定)、以及 `body_notice`。
+
+**修法照 ①/⑤ 那条分工:拿着字体的那一方在布局之前换好行。** `ChromeContent::preview_messages` 从 `&[(SeatId, &str)]` 变成 `&[(SeatId, Vec<String>)]`——**已经换好行的那几行**;`main.rs` 用 `restore::wrap_anywhere` 按 `seats::pane_notice_width`(pane 的**已解**矩形减两侧内边距,不是飞行中的卡片矩形——R2/R3,飞行中的东西不是几何)换行;`seats.rs` 每行一枚 label,整块按行数居中(`body_notice_block`,与 `git_panel::empty_block` 同形,并同样「块比正文高时从正文顶上开始、底下被裁」)。files 列与占位叶那两句是两三个词的定值,构造上就是一行,按一格切片交进去并在注记里说明为什么它们不必量。
+
+**红门** `a_panes_body_notice_wraps_inside_the_pane`(`seats.rs`):700 与 1600 两种窗宽(一枚窄 pane 与一枚宽 pane),字符串就是空态那一句,断言每行画宽 ≤ 列宽、行与行各站各的基线、去掉空白之后一个字都没丢、盒子在 pane 里、并且**窄的那一档确实需要换行**(否则这道门什么也没断言)。**红证**:把几行重新拼回一句再画,`every wrapped line is a line that is drawn` 当场红。
 
 **日期:2026-08-28,门 5 尾账四件,用户当日裁决,当日落地。**
 
