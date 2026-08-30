@@ -105890,7 +105890,8 @@ mod tests {
             .find("settings::PopupPress::DismissOnly(popup)")
             .expect("a press outside the list that landed on ground has an arm");
         assert_eq!(
-            arm.matches("self.window.settings.close_popup(popup)").count(),
+            arm.matches("self.window.settings.close_popup(popup)")
+                .count(),
             2,
             "both outside answers put the popup away: {arm}"
         );

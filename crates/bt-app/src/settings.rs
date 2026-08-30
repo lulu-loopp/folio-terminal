@@ -14188,7 +14188,9 @@ mod tests {
         let placed = shaped(SettingsCategory::Appearance, every_group_open(), Some(long));
         let frame = placed.menu.expect("the picker is open");
         let body = placed.menu_body().expect("an open picker has a body");
-        let bar = placed.menu_bar().expect("a list longer than its body wears one");
+        let bar = placed
+            .menu_bar()
+            .expect("a list longer than its body wears one");
         // These helpers lay the dialog out at scale 1, which is what lets the
         // logical constants below be read as pixels.
         let border = FLOAT_WINDOW_BORDER_LOGICAL_PX.max(1.0);
