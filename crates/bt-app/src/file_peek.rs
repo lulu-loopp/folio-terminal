@@ -1587,6 +1587,9 @@ mod tests {
             name: "main.rs".to_owned(),
             ftype: "text".to_owned(),
             dirty: false,
+            // Every card over a file that is there states at least its size
+            // (§7.29 ⑬) — the window reads it off the stat it already makes.
+            meta: meta_line(None, Some(3_072)),
             body,
         }
     }
@@ -1648,6 +1651,8 @@ mod tests {
             name: "notes.md".to_owned(),
             ftype: String::new(),
             dirty: false,
+            // A file that is not there has no size to state.
+            meta: None,
             body: PeekBody::Gone,
         };
         let gone_layout = layout(
@@ -1748,6 +1753,7 @@ mod tests {
             name: NAME.to_owned(),
             ftype: "text".to_owned(),
             dirty: false,
+            meta: meta_line(None, Some(3_072)),
             body: lines(6),
         };
         let card_layout = layout(
@@ -2143,49 +2149,91 @@ mod tests {
         );
     }
 
-    /// RED (user ruling 2026-08-27; `docs/DESIGN.md` §7.23) — **the card over a
-    /// video shows the video, says how long it is, and does not jump when either
-    /// arrives.**
+    /// **The card's one line of facts**, read off a painted card — asserted to
+    /// be exactly one line, standing in the strip the layout reserved for it
+    /// (user ruling 2026-08-29; §7.29 ⑬).
     ///
-    /// Until this ruling a `.mp4` row drew one line — "No preview for this file
-    /// type" — under a pointer, and the same sentence larger under a double
-    /// click. What this asserts is the whole of what replaced it: a frame in the
-    /// page's ground, two lines under it in the card's own voice, and a box that
-    /// was already that size before any of it landed.
+    /// It reads the *drawn* labels rather than [`PeekContent::meta`], because
+    /// what this ruling is about is what reaches the glass: a second sentence
+    /// painted anywhere between the body and the foot fails here whether the
+    /// card meant to say it or not.
+    fn stated(layer: &OverlayLayer, laid: &PeekLayout) -> String {
+        let strip = laid.meta.expect("the card reserved a strip for its facts");
+        assert_eq!(
+            strip[3] - strip[1],
+            none_line(SCALE),
+            "the strip is one line tall"
+        );
+        assert_eq!(strip[1], laid.body[3], "and it stands under the body");
+        assert!(strip[3] <= laid.foot[1] + 0.5, "and over the foot's rule");
+        let said: Vec<&str> = layer
+            .labels
+            .iter()
+            .filter(|label| {
+                label.rect[1] >= laid.body[3] - 0.5 && label.rect[3] <= laid.foot[1] + 0.5
+            })
+            .map(|label| label.text.as_str())
+            .collect();
+        assert_eq!(
+            said.len(),
+            1,
+            "the card states its facts on one line, and this one says {said:?}"
+        );
+        said[0].to_owned()
+    }
+
+    /// RED (user rulings 2026-08-27 and 2026-08-29; `docs/DESIGN.md` §7.23,
+    /// §7.29 ⑬) — **the card over a video shows the video and says what it is on
+    /// one line.**
     ///
-    /// **The last of those is not decoration.** The frame comes off a decoder on
-    /// another thread and the facts come with it; a body that grew when they
-    /// arrived would be a card jumping under a resting pointer, which is the one
-    /// thing a glance may never do. So the empty card is measured against the
-    /// full one and they are the same height.
+    /// Until the first of those rulings a `.mp4` row drew one line — "No preview
+    /// for this file type" — under a pointer, and the same sentence larger under
+    /// a double click. The second is the user's photograph of what replaced it:
+    /// `0:05 · 160 × 120` over `3 KB`, two lines of a 264-pixel card spent on a
+    /// line break. So the frame stands in the page's ground and everything this
+    /// window knows about the file is one sentence under it, in the order the
+    /// preview pane's own meta strip has always said it.
+    ///
+    /// **The box not moving is not decoration.** The frame comes off a decoder
+    /// on another thread and the duration comes with it; a card that grew when
+    /// they arrived would be a card jumping under a resting pointer, which is
+    /// the one thing a glance may never do. So the empty card is measured
+    /// against the full one and they are the same height — and the size, which
+    /// the card stats for itself, is on the strip from the first frame either
+    /// way.
     ///
     /// RED GATE ①: fold [`PeekBody::Frame`] into the `Refused | Page` height arm
-    /// and the empty-versus-full assertion still passes while the *first* one
-    /// fails — the card shrinks to one line and the frame is drawn over the
-    /// foot. RED GATE ②: draw the frame through the `Image` arm and the two fact
-    /// lines vanish, which is a card that shows a picture and cannot say what it
-    /// is a picture of.
+    /// and the empty-versus-full assertion still passes while the box assertions
+    /// fail — the card shrinks to one line and the frame is drawn over the foot.
+    /// RED GATE ②: give the recording's half of the sentence a line of its own
+    /// again (a second label above the strip) and [`stated`] reports two lines
+    /// where the ruling asks for one.
     #[test]
-    fn a_video_card_shows_a_frame_over_two_lines() {
+    fn a_video_card_says_its_facts_on_one_line() {
         let window = (1200.0, 900.0);
+        let facts = crate::preview::VideoFacts {
+            duration_ms: Some(6_200),
+            native: Some((1920, 1080)),
+            bytes: Some(12_582_912),
+        };
         let mut card = content(PeekBody::Frame {
             width: 280.0,
             height: 158.0,
-            facts: crate::preview::VideoFacts {
-                duration_ms: Some(6_200),
-                native: Some((1920, 1080)),
-                bytes: Some(12_582_912),
-            },
         });
         card.name = "clip.mp4".to_owned();
         card.ftype = "video".to_owned();
+        // Built exactly as the window builds it: the recording's own half out of
+        // the one function both surfaces say it with, and the size the card
+        // stat'ed for itself.
+        let [recording, _] = crate::preview::video_fact_lines(Some("mp4"), facts);
+        card.meta = meta_line(recording, facts.bytes);
         let row = [40.0, 300.0, 240.0, 320.0];
-        let stated = layout(&card, row, window, 120.0, 24.0, SCALE);
+        let laid = layout(&card, row, window, 120.0, 24.0, SCALE);
         let picture: std::sync::Arc<[u8]> = std::sync::Arc::from(vec![0_u8; 4].into_boxed_slice());
         let layer = build(
-            &stated,
+            &laid,
             &card,
-            &foot(&stated, ""),
+            &foot(&laid, ""),
             Some(PeekPicture {
                 key: "video-frame:clip",
                 rgba: &picture,
@@ -2196,50 +2244,43 @@ mod tests {
             &bt_render::chrome_palette(),
             SCALE,
         );
-        // **The box is a frame's box and not a sentence's**: the page's ground
-        // plus the gap plus two lines, which is exactly what a PDF's card
-        // reserves — and three times what the refusal it replaced took.
+        // **The box is a frame's box**: the page's whole ground, which is exactly
+        // what a PDF's card reserves — and three times what the refusal it
+        // replaced took.
         assert_eq!(
             PeekBody::Frame {
                 width: 280.0,
                 height: 158.0,
-                facts: crate::preview::VideoFacts::default(),
             }
             .height(SCALE),
             PeekBody::Facts {
                 scroll: 0.0,
-                bytes: None,
                 pages: None,
             }
             .height(SCALE),
-            "a frame over two lines is the same box a page over two lines is"
+            "a frame's box is a page's box"
         );
         assert!(
             PeekBody::Frame {
                 width: 0.0,
                 height: 0.0,
-                facts: crate::preview::VideoFacts::default(),
             }
             .height(SCALE)
                 > PeekBody::Refused.height(SCALE) * 2.0,
             "and it is not the one-line box the refusal used"
         );
-        let said = |text: &str| layer.labels.iter().find(|label| label.text == text);
-        let what =
-            said("0:06 \u{b7} 1920 \u{d7} 1080").expect("the card says how long and how big");
-        let size = said("12.0 MB").expect("and how large the file is");
-        assert!(
-            what.rect[1] < size.rect[1],
-            "the recording's fact stands above the file's: {:?} vs {:?}",
-            what.rect,
-            size.rect
+        assert_eq!(
+            stated(&layer, &laid),
+            "0:06 \u{b7} 1920 \u{d7} 1080 \u{b7} 12.0 MB",
+            "how long it runs, how large its picture is, how large the file is"
         );
+        let said = |text: &str| layer.labels.iter().find(|label| label.text == text);
         let frame = layer
             .images
             .iter()
             .find(|image| image.key == "video-frame:clip")
             .expect("the frame is drawn");
-        let ground = page_ground(stated.body, SCALE);
+        let ground = page_ground(laid.body, SCALE);
         assert!(
             frame.rect[1] >= ground[1] - 0.5 && frame.rect[3] <= ground[3] + 0.5,
             "the frame stands inside the ground it was fitted to: {:?} in {:?}",
@@ -2247,8 +2288,8 @@ mod tests {
             ground
         );
         assert!(
-            frame.rect[3] <= what.rect[1] + 0.5,
-            "and the lines stand under it, not over it"
+            frame.rect[3] <= laid.meta.expect("a strip")[1] + 0.5,
+            "and the line stands under it, not over it"
         );
         assert!(
             said(peek_unknown_text()).is_none(),
@@ -2257,19 +2298,22 @@ mod tests {
         assert!(said("clip.mp4").is_some(), "the head names the file");
         assert!(said("video").is_some(), "and the chip calls it a video");
 
-        // **The box does not wait to learn what is in it**, which is the same
+        // **The card does not wait to learn what is in it**, which is the same
         // sentence the facts body makes and for the same reason: a decoder
-        // answers a frame or two after the card is up.
-        let empty = content(PeekBody::Frame {
+        // answers a frame or two after the card is up. The size is not among
+        // what it waits for — the card read that off its own stat — so the
+        // pending card says the one fact it has, on the line it will keep.
+        let mut empty = content(PeekBody::Frame {
             width: 0.0,
             height: 0.0,
-            facts: crate::preview::VideoFacts::default(),
         });
+        empty.name = "clip.mp4".to_owned();
+        empty.meta = meta_line(None, facts.bytes);
         let pending = layout(&empty, row, window, 120.0, 24.0, SCALE);
         assert_eq!(
-            pending.body[3] - pending.body[1],
-            stated.body[3] - stated.body[1],
-            "the frame's box is the same height before the frame arrives"
+            pending.frame[3] - pending.frame[1],
+            laid.frame[3] - laid.frame[1],
+            "the card is the same height before the frame arrives"
         );
         let blank = build(
             &pending,
@@ -2279,6 +2323,11 @@ mod tests {
             &[],
             &bt_render::chrome_palette(),
             SCALE,
+        );
+        assert_eq!(
+            stated(&blank, &pending),
+            "12.0 MB",
+            "and says what it already knows, where it will go on saying it"
         );
         assert!(
             blank.images.is_empty(),
@@ -2290,64 +2339,60 @@ mod tests {
         );
     }
 
-    /// PIN (user ruling 2026-08-25; `docs/DESIGN.md` §7.10 ⑥) — **the card over a
-    /// page states the two facts a renderer is not needed for.**
+    /// RED (user rulings 2026-08-25 and 2026-08-29; `docs/DESIGN.md` §7.10 ⑥,
+    /// §7.29 ⑬) — **the card over a page states what it can read on one line,
+    /// and its chip says `pdf`.**
     ///
     /// A `.pdf` row used to draw one line — `Opens as a page.` — which told a
     /// reader what a double click does and nothing about the file they were
-    /// pointing at. The two facts here are the ones that can be read off the
-    /// file, and they are drawn in the card's own voice, in the box the refusal's
-    /// line stood in: this is the card *saying* something, not the card showing a
-    /// document, so it belongs on the layer that draws the head and the foot.
+    /// pointing at. The 2026-08-25 ruling replaced it with the two facts a
+    /// renderer is not needed for; this pins what the 2026-08-29 ruling made of
+    /// them, which is the user's screenshot: `3 pages` over `81 KB` becomes one
+    /// sentence, and the chip in the corner stops naming the *lane* that draws
+    /// the file.
     ///
-    /// The picture that later arrived above them is the next test's; every card
-    /// built here is one whose raster has not come home, which is also the shape
-    /// every `.pdf` card wears for its first frames.
+    /// **`web` was never wrong about the lane and was always wrong about the
+    /// file.** [`crate::preview::PreviewFtype::Web`] is one class holding
+    /// `html`, `htm` and `pdf` because one engine reads all three; the chip is a
+    /// **type**, so it asks the name inside the class
+    /// ([`crate::preview::type_label`]) — which is why this test builds the word
+    /// rather than spelling it, and fails the day the production path stops
+    /// agreeing with what a reader sees.
     ///
-    /// The head and the foot are asserted with them because they are the half of
-    /// the ruling that did **not** change: the chip still says `web` and the foot
-    /// still says how to open the row.
-    ///
-    /// RED GATE: draw [`PeekBody::Facts`] through the `Refused | Page` arm — the
-    /// card comes back with `Opens as a page.` in it and not one fact, which is
-    /// the state this ruling overturned.
+    /// RED GATE ①: draw [`PeekBody::Facts`] through the `Refused | Page` arm —
+    /// the card comes back with `Opens as a page.` in it and not one fact.
+    /// RED GATE ②: answer the `Web` arm of `type_label` with `ftype.label()` and
+    /// the chip says `web` again.
+    /// RED GATE ③: print the page count as a label of its own above the strip
+    /// and [`stated`] finds two lines.
     #[test]
-    fn a_page_card_states_the_two_facts_it_can_read() {
+    fn a_page_card_says_its_facts_on_one_line_and_its_chip_says_pdf() {
         let window = (1200.0, 900.0);
         let mut card = content(PeekBody::Facts {
             scroll: 0.0,
-            bytes: Some(83_387),
             pages: Some(3),
         });
         card.name = "folio-pdf-test.pdf".to_owned();
-        card.ftype = "web".to_owned();
+        card.ftype =
+            crate::preview::type_label(&card.name, crate::preview::PreviewFtype::Web).to_owned();
+        card.meta = meta_line(Some(crate::i18n::peek_page_count(3)), Some(83_387));
         let row = [40.0, 300.0, 240.0, 320.0];
-        let stated = layout(&card, row, window, 120.0, 24.0, SCALE);
+        let laid = layout(&card, row, window, 120.0, 24.0, SCALE);
         let layer = build(
-            &stated,
+            &laid,
             &card,
-            &foot(&stated, ""),
+            &foot(&laid, ""),
             None,
             &[],
             &bt_render::chrome_palette(),
             SCALE,
         );
         let said = |text: &str| layer.labels.iter().find(|label| label.text == text);
-        let pages = said("3 pages").expect("the card says how many pages there are");
-        let size = said("81 KB").expect("and how large the file is");
-        assert!(
-            pages.rect[1] < size.rect[1],
-            "the document's fact stands above the file's: {:?} vs {:?}",
-            pages.rect,
-            size.rect
+        assert_eq!(
+            stated(&layer, &laid),
+            "3 pages \u{b7} 81 KB",
+            "how much there is to read, then how large the file is"
         );
-        for fact in [pages, size] {
-            assert!(
-                fact.rect[1] >= stated.body[1] - 0.5 && fact.rect[3] <= stated.body[3] + 0.5,
-                "a fact stands outside the body box: {:?}",
-                fact.rect
-            );
-        }
         assert!(
             said(peek_page_text()).is_none(),
             "and it does not also say the sentence it replaced"
@@ -2356,27 +2401,42 @@ mod tests {
             said(peek_unknown_text()).is_none(),
             "nor the refusal, which was never true of a row that opens"
         );
-        // The half the ruling did not touch.
+        // The head, the chip and the foot.
         assert!(
             said("folio-pdf-test.pdf").is_some(),
             "the head names the file"
         );
-        assert!(said("web").is_some(), "the chip still calls it a page");
+        assert!(
+            said("pdf").is_some(),
+            "the chip says what the file is: {:?}",
+            layer
+                .labels
+                .iter()
+                .map(|label| label.text.as_str())
+                .collect::<Vec<&str>>()
+        );
+        assert!(
+            said("web").is_none(),
+            "and never the name of the lane that draws it"
+        );
         assert!(said(peek_foot_text()).is_some(), "the foot still says how");
 
-        // **The box does not wait to learn what is in it.** The facts arrive from
-        // a worker one or two frames after the card is up, and a body that grew
-        // when they landed would be a card that jumped under the pointer.
-        let empty = content(PeekBody::Facts {
+        // **The card does not wait to learn what is in it.** The count arrives
+        // from a worker one or two frames after the card is up, and a card that
+        // grew when it landed would be a card that jumped under the pointer. The
+        // size is already there — the card stat'ed the file itself — so the
+        // waiting card says the size alone, on the very same line.
+        let mut empty = content(PeekBody::Facts {
             scroll: 0.0,
-            bytes: None,
             pages: None,
         });
+        empty.name = card.name.clone();
+        empty.meta = meta_line(None, Some(83_387));
         let pending = layout(&empty, row, window, 120.0, 24.0, SCALE);
         assert_eq!(
-            pending.body[3] - pending.body[1],
-            stated.body[3] - stated.body[1],
-            "the facts box is the same height before its facts arrive"
+            pending.frame[3] - pending.frame[1],
+            laid.frame[3] - laid.frame[1],
+            "the card is the same height before its count arrives"
         );
         let blank = build(
             &pending,
@@ -2387,67 +2447,131 @@ mod tests {
             &bt_render::chrome_palette(),
             SCALE,
         );
-        let inside =
-            |rect: [f32; 4]| rect[1] >= pending.body[1] - 0.5 && rect[3] <= pending.body[3] + 0.5;
-        assert!(
-            !blank.labels.iter().any(|label| inside(label.rect)),
+        assert_eq!(
+            stated(&blank, &pending),
+            "81 KB",
             "a fact that has not arrived is silence, not a placeholder"
         );
-
-        // And a file the disk would not stat still says what it can: one fact is
-        // better than none, and it stands where it always stands.
-        let one = content(PeekBody::Facts {
-            scroll: 0.0,
-            bytes: None,
-            pages: Some(12),
-        });
-        let single = layout(&one, row, window, 120.0, 24.0, SCALE);
-        let layer = build(
-            &single,
-            &one,
-            &foot(&single, ""),
-            None,
-            &[],
-            &bt_render::chrome_palette(),
-            SCALE,
-        );
-        let lone = layer
-            .labels
-            .iter()
-            .find(|label| label.text == "12 pages")
-            .expect("the fact that is known is printed");
         assert_eq!(
-            lone.rect[1], pages.rect[1],
-            "and the surviving fact stands on the line it always stands on"
+            pending.meta.expect("a strip")[1],
+            laid.meta.expect("a strip")[1],
+            "and the line it is printed on has not moved"
         );
 
-        // The other way round: with only the size known, the size does **not**
-        // climb into the page count's line.
-        let other = content(PeekBody::Facts {
-            scroll: 0.0,
-            bytes: Some(83_387),
-            pages: None,
-        });
-        let sized = layout(&other, row, window, 120.0, 24.0, SCALE);
-        let layer = build(
-            &sized,
-            &other,
-            &foot(&sized, ""),
-            None,
-            &[],
-            &bt_render::chrome_palette(),
-            SCALE,
-        );
-        let lone = layer
-            .labels
-            .iter()
-            .find(|label| label.text == "81 KB")
-            .expect("the fact that is known is printed");
+        // **A card a line shorter than the one this ruling replaced.** Two
+        // stacked facts inside the body against one line on the card's own
+        // strip: the difference is exactly [`none_line`], measured against the
+        // body a page used to reserve.
+        let stacked = PEEK_BODY_PADDING_TOP_LOGICAL_PX * SCALE
+            + PEEK_PAGE_H_LOGICAL_PX * SCALE
+            + PEEK_PAGE_GAP_LOGICAL_PX * SCALE
+            + none_line(SCALE) * 2.0
+            + PEEK_BODY_PADDING_BOTTOM_LOGICAL_PX * SCALE;
         assert_eq!(
-            lone.rect[1], size.rect[1],
-            "the second line is still the second line with the first one missing"
+            stacked - (laid.body[3] - laid.body[1] + meta_height(SCALE)),
+            none_line(SCALE),
+            "the card is one line shorter than the card that stacked them"
         );
     }
+
+    /// RED (user ruling 2026-08-29; `docs/DESIGN.md` §7.29 ⑬) — **the card over
+    /// a picture says how large the picture is and how large the file is.**
+    ///
+    /// RED EVIDENCE (the user's machine, 2026-08-29). A `.png` card drew the
+    /// picture and **nothing else**: the one card in this family whose meta line
+    /// did not exist, while the recording beside it stacked two and the page
+    /// beside that stacked two more. Three answers to one question, and the
+    /// picture's answer was silence about a file whose dimensions this window
+    /// had already decoded.
+    ///
+    /// Neither fact costs a read: the pixels are the native decode the card is
+    /// already resampling (`Runtime::file_peek_native_pixels`) and the size is
+    /// the stat the card already makes to know the file is there.
+    ///
+    /// RED GATE ①: leave [`PeekContent::meta`] `None` for a picture — which is
+    /// what this card was — and the first assertion fails on a card with no
+    /// strip at all. RED GATE ②: leave the strip out of [`layout`]'s reservation
+    /// and the last assertion fails: the card is a line short of what it draws.
+    #[test]
+    fn a_picture_card_says_how_large_the_picture_is_and_how_large_the_file_is() {
+        let window = (1200.0, 900.0);
+        let row = [40.0, 300.0, 240.0, 320.0];
+        let mut card = content(PeekBody::Image {
+            width: 280.0,
+            height: 118.0,
+        });
+        card.name = "shot.png".to_owned();
+        card.ftype = "image".to_owned();
+        card.meta = meta_line(
+            Some(crate::preview::format_pixel_size(1180, 800)),
+            Some(12_288),
+        );
+        let laid = layout(&card, row, window, 120.0, 24.0, SCALE);
+        let pixels: std::sync::Arc<[u8]> = std::sync::Arc::from(vec![0_u8; 4].into_boxed_slice());
+        let layer = build(
+            &laid,
+            &card,
+            &foot(&laid, ""),
+            Some(PeekPicture {
+                key: "peek:shot",
+                rgba: &pixels,
+                width_px: 280,
+                height_px: 118,
+            }),
+            &[],
+            &bt_render::chrome_palette(),
+            SCALE,
+        );
+        assert_eq!(
+            stated(&layer, &laid),
+            "1180 \u{d7} 800 \u{b7} 12 KB",
+            "the picture's own pixels, then how large the file is"
+        );
+
+        // **The same sentence in the same place a page's card puts it**, which
+        // is the whole of what one format for every type means — asserted as
+        // geometry rather than by reading two strings.
+        let mut page = content(PeekBody::Facts {
+            scroll: 0.0,
+            pages: Some(3),
+        });
+        page.meta = meta_line(Some(crate::i18n::peek_page_count(3)), Some(83_387));
+        let page_laid = layout(&page, row, window, 120.0, 24.0, SCALE);
+        assert_eq!(
+            page_laid.frame[3] - page_laid.meta.expect("a strip")[3],
+            laid.frame[3] - laid.meta.expect("a strip")[3],
+            "every card says its facts the same distance above its own bottom edge"
+        );
+
+        // The picture is still the body, and the line stands under it.
+        let drawn = layer
+            .images
+            .iter()
+            .find(|image| image.key == "peek:shot")
+            .expect("the picture is drawn");
+        assert!(
+            drawn.rect[3] <= laid.meta.expect("a strip")[1] + 0.5,
+            "the line stands under the picture, not over it"
+        );
+        // And the card is its head, the picture's own box, the strip and the
+        // foot — nothing was taken out of the picture to pay for the sentence.
+        let border = (PEEK_BORDER_LOGICAL_PX * SCALE).max(1.0).round();
+        assert_eq!(
+            laid.frame[3] - laid.frame[1],
+            border * 2.0
+                + (laid.head[3] - laid.head[1])
+                + PeekBody::Image {
+                    width: 280.0,
+                    height: 118.0,
+                }
+                .height(SCALE)
+                .round()
+                + meta_height(SCALE)
+                + (laid.foot[3] - laid.foot[1]),
+            "the card is its head, the picture's box, the strip and the foot"
+        );
+    }
+
 
     /// RED (user rulings 2026-08-25 and 2026-08-26) — **the page card draws a
     /// column of pages over its two facts, scrolls it, and reserves the box for
@@ -2484,10 +2608,14 @@ mod tests {
     fn a_page_card_draws_a_column_of_pages_over_the_facts() {
         let window = (1200.0, 900.0);
         let row = [40.0, 300.0, 240.0, 320.0];
-        let card = |scroll: f32| {
-            content(PeekBody::Facts {
+        // The card the window builds for a three-page report: the column in
+        // the body, and the one line of facts on the card's own strip.
+        let facts = meta_line(Some(crate::i18n::peek_page_count(3)), Some(83_387))
+            .expect("a card that knows both facts states both");
+        let card = |scroll: f32| PeekContent {
+            meta: Some(facts.clone()),
+            ..content(PeekBody::Facts {
                 scroll,
-                bytes: Some(83_387),
                 pages: Some(3),
             })
         };
@@ -2546,10 +2674,10 @@ mod tests {
                 .rect
         };
         assert!(
-            first.rect[3] <= said(&layer, "3 pages")[1],
+            first.rect[3] <= said(&layer, &facts)[1],
             "the column stands above the facts: {:?} vs {:?}",
             first.rect,
-            said(&layer, "3 pages")
+            said(&layer, &facts)
         );
 
         // **The pages move and the sentences do not.** Half a slot of the column,
@@ -2577,9 +2705,9 @@ mod tests {
             moved.rect
         );
         assert_eq!(
-            said(&layer, "3 pages"),
-            said(&after, "3 pages"),
-            "and the facts underneath did not move at all"
+            said(&layer, &facts),
+            said(&after, &facts),
+            "and the line underneath did not move at all"
         );
         let second = after
             .images
@@ -2700,32 +2828,34 @@ mod tests {
         }
     }
 
-    /// PIN — **a page card reserves its page box and both of its lines, and
-    /// nothing else.**
+    /// PIN — **a page card reserves its page box, the card reserves its one
+    /// line, and neither reserves anything else.**
     ///
     /// The whole card shrink-wraps its body, so the body's own arithmetic is what
     /// decides the shape of every `.pdf` glance on screen — and that shape has to
     /// be settled before either worker answers, or the card changes size under
     /// the pointer twice ([`PeekBody::Facts`]).
     ///
+    /// **The two fact lines left this box on 2026-08-29** (§7.29 ⑬): the body is
+    /// the page's ground and nothing else, and the sentence stands on the card's
+    /// own strip below it — so this asserts both halves and the sum, which is
+    /// what a reader sees.
+    ///
     /// MUTATION ①: fold [`PeekBody::Facts`] into the `Refused | Page` height arm
-    /// — the page and the second fact are both drawn under the card's own bottom
-    /// edge.
+    /// — the page is drawn under the card's own bottom edge.
     /// MUTATION ②: size the box to the page that arrived rather than to
     /// [`PEEK_PAGE_H_LOGICAL_PX`] and the first assertion goes red, which is the
     /// jump.
+    /// MUTATION ③: leave the strip out of [`layout`]'s reservation and the last
+    /// assertion fails — the foot climbs onto the line.
     #[test]
-    fn the_page_body_reserves_its_picture_and_both_of_its_lines() {
+    fn the_page_body_reserves_its_picture_and_the_card_reserves_its_line() {
         let window = (1200.0, 900.0);
         let row = [40.0, 300.0, 240.0, 320.0];
         let refusal = layout(&content(PeekBody::Refused), row, window, 60.0, 24.0, SCALE);
         let facts = |pages, scroll| {
             layout(
-                &content(PeekBody::Facts {
-                    scroll,
-                    bytes: Some(1),
-                    pages,
-                }),
+                &content(PeekBody::Facts { scroll, pages }),
                 row,
                 window,
                 60.0,
@@ -2740,10 +2870,14 @@ mod tests {
             body,
             PEEK_BODY_PADDING_TOP_LOGICAL_PX
                 + PEEK_PAGE_H_LOGICAL_PX
-                + PEEK_PAGE_GAP_LOGICAL_PX
-                + line * 2.0
                 + PEEK_BODY_PADDING_BOTTOM_LOGICAL_PX,
-            "the page's whole box and two lines, before either has arrived"
+            "the page's whole box, before anything has arrived"
+        );
+        let strip = waiting.meta.expect("the card states its facts");
+        assert_eq!(
+            strip[3] - strip[1],
+            line,
+            "and one line of the card's own voice under it"
         );
         // **A one-page document and a two-hundred-page one are the same card, at
         // any offset**: the box is a window and the column is what moves behind
@@ -2769,8 +2903,15 @@ mod tests {
             "and it is taller than the one-line refusal it grew out of"
         );
         assert!(
-            waiting.foot[1] >= waiting.body[3],
-            "and the foot still stands below the body: {waiting:?}"
+            waiting.foot[1] >= strip[3],
+            "and the foot still stands below the line: {waiting:?}"
+        );
+        // The sum: nothing between the head and the foot but the page's box and
+        // the strip, and nothing of either cut.
+        assert_eq!(
+            waiting.foot[1] - waiting.body[1],
+            body + meta_height(SCALE),
+            "the card holds the page's box and the strip, and nothing else"
         );
     }
 

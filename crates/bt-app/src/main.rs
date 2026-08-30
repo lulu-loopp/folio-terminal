@@ -112997,7 +112997,7 @@ mod tests {
             0.0,
             0.0,
             file_peek::body_width(scale),
-            file_peek::body_max_height(scale),
+            file_peek::body_max_height(scale, true),
         ];
 
         // ① A csv is a table on both surfaces, because one predicate answers for
@@ -113161,7 +113161,7 @@ mod tests {
             0.0,
             0.0,
             file_peek::body_width(scale),
-            file_peek::body_max_height(scale),
+            file_peek::body_max_height(scale, true),
         ];
 
         let agree = |what: &str, document: &PreviewDocument, rows_height: f32, columns: usize| {
@@ -113171,6 +113171,7 @@ mod tests {
                 name: "sample".to_owned(),
                 ftype: "text".to_owned(),
                 dirty: false,
+                meta: Some("3 KB".to_owned()),
                 body: file_peek::PeekBody::Document(height),
             };
             let layout = file_peek::layout(&card, row, window, 60.0, 24.0, scale);
@@ -113321,7 +113322,7 @@ mod tests {
                     40.0,
                     300.0,
                     40.0 + file_peek::body_width(SCALE),
-                    300.0 + file_peek::body_max_height(SCALE),
+                    300.0 + file_peek::body_max_height(SCALE, true),
                 ],
             ),
         ];
@@ -114816,7 +114817,7 @@ mod tests {
             0.0,
             0.0,
             file_peek::body_width(scale),
-            file_peek::body_max_height(scale),
+            file_peek::body_max_height(scale, true),
         ];
         let blocks = [
             preview::MarkdownBlock::Heading {
