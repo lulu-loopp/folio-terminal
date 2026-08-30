@@ -2459,10 +2459,18 @@ impl Text {
             ),
 
             // ── the preview pane ───────────────────────────────────────────
+            // **The mark is a dashed underline, and both columns now say so**
+            // (user ruling 2026-08-29). The English called it "dotted" and the
+            // Chinese called it 带点线, while `dotted_underline_segments` lays
+            // down a run of 2-logical-pixel bars separated by 2-logical-pixel
+            // gaps under the text — a dash pattern, and a reader told to look
+            // for dots is a reader looking for something that is not on the
+            // screen. The Chinese is also the written form the rest of this
+            // table is in: 点击 … 即可 …, not the clipped 点一条 … , 在这里 … .
             Self::PreviewEmptyState => pick(
                 lang,
-                "Click a dotted path to preview it here",
-                "点一条带点线的路径，在这里预览",
+                "Click a path with a dashed underline to preview it here",
+                "点击带虚线下划线的路径，即可在此预览",
             ),
             Self::PreviewRefusalType => pick(
                 lang,

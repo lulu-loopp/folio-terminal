@@ -28920,8 +28920,48 @@ fn move_seat_content(
     // source or as page — for the same reason the shell beside it keeps its
     // scrollback and the files column keeps its open folders: **the pane is
     // moving, not being rebuilt.**
+    //
+    // **And the buffer itself travels, which is the half this used to leave
+    // behind** (user ruling 2026-08-29, defect #187). The pane names its
+    // document by [`preview::PreviewSource`] and the *document* lives in the
+    // tab's pool, so a view moved into a pool that has never heard of that
+    // source is a pane pointing at nothing — which on the glass is the empty
+    // state, "点击带虚线下划线的路径,即可在此预览", with the reader's file and
+    // any unsaved edit in it left in the tab behind. The pool half was written
+    // once, in [`pane_into_new_tab`], and reasoned about here only as the
+    // *whole-pool* rule below ("若是原 tab 最后一个预览 pane 则整池随行") —
+    // which is a rule about the buffers **nobody is looking at**. The one the
+    // traveller is showing is not one of those, and it is the only one whose
+    // absence is visible immediately.
+    //
+    // Taken rather than copied, for `pane_into_new_tab`'s reason: a second copy
+    // left behind is the fork the one-buffer-per-file law forbids, and an
+    // unsaved edit that existed in two places would be an edit a save could
+    // lose. Merged rather than inserted on the way in, because the target may
+    // already hold a buffer for the same file — that is [`preview::PreviewPool::
+    // merge_buffer`]'s law (dirty wins, a tie stays with the incumbent), and it
+    // is the same law a whole pool arriving is merged under.
+    //
+    // The **eviction** rule needs nothing said here: `insert`/`merge_buffer` do
+    // not evict, and `open`'s cap spares every source some pane is displaying,
+    // so the buffer that has just moved in cannot be the one a later browse
+    // throws out.
+    //
+    // Where the reader was in it is *copied* rather than moved — the asymmetry
+    // [`pane_into_new_tab`] states: a view is three numbers about a document and
+    // two tabs each remembering where you were in a file is ordinary. The
+    // pane's own live scroll is on the [`PreviewPane`] above and travels with
+    // it; this is the memory a *future* opening of that file in either tab
+    // reads.
     if let Some(pane) = source.preview_panes.remove(left) {
         let brought_a_picture = pane.image.is_some();
+        if let Some(showing) = pane.buffer.as_ref() {
+            let view = source.preview_views.restore(showing);
+            target.preview_views.remember(showing, view);
+            if let Some(buffer) = source.preview_pool.take(showing) {
+                target.preview_pool.merge_buffer(buffer);
+            }
+        }
         *target.preview_panes.entry(arrived) = pane;
         // The texture lane if it was free, and not otherwise: a picture the
         // target was already showing does not lose its pixels to one that has
@@ -29129,8 +29169,24 @@ fn pane_into_tab(
     // because a pool with no door onto it is a set of unsaved buffers nobody can
     // find. Both stranded at once means neither tab has a door, and the pool
     // stays where it is rather than being moved somewhere equally unreachable.
-    let source_stranded = from.seats.preview_seats().is_empty();
-    let target_stranded = into.seats.preview_seats().is_empty();
+    //
+    // **A tab the move emptied is stranded whatever its tree still says** (user
+    // ruling 2026-08-29, defect #187). The lone-pane path deliberately does not
+    // call `close_seat` — G84 refuses to empty a tree, so the seat is left
+    // standing in a tab the window is about to take out of the strip — and
+    // `preview_seats()` therefore answers with a seat that has already left.
+    // Read literally, this rule then said "the source still has a door onto its
+    // pool" about a tab with no door, no strip entry and, one line later in
+    // [`Runtime::move_pane_across_tabs`], no existence: every buffer in it went
+    // out with `absorb_tab_into_strip`. Worse than silent: with the target
+    // holding no preview seat of its own the *second* arm fired instead and
+    // moved the target's pool **into** the dying tab.
+    //
+    // Which is also why "both stranded, so leave it where it is" is asked of the
+    // target alone once the source is going: leaving something in a tab that is
+    // about to be removed is not the cautious answer, it is the destructive one.
+    let source_stranded = source_emptied || from.seats.preview_seats().is_empty();
+    let target_stranded = !source_emptied && into.seats.preview_seats().is_empty();
     if source_stranded && !target_stranded {
         into.preview_pool
             .merge_from(std::mem::take(&mut from.preview_pool));
@@ -33195,10 +33251,33 @@ impl Runtime<'_> {
         // Borrowed off the owned frames above, the same two-step the heads take:
         // the paint looks a placement up in this list rather than being handed
         // one answer for every preview seat.
-        let preview_messages: Vec<(SeatId, &str)> = preview_messages_owned
-            .iter()
-            .map(|(seat, message)| (*seat, message.as_str()))
-            .collect();
+        // **And each one broken to the pane it will stand in** (user ruling
+        // 2026-08-29; `docs/DESIGN.md` §7.43 ① and ⑤, on the third surface that
+        // draws "整页只剩一句话"). A body notice is shaped with `Wrap::None` and
+        // clipped to its own box, so a sentence wider than the pane loses both
+        // its ends and the reader gets its middle — which is exactly what
+        // `Loading <a real file name>…` did in a narrow column, and what the
+        // empty pane's invitation would do the moment it named the underline it
+        // is talking about. Wrapped here because this is the side holding a
+        // font, and against `pane_notice_width` because that is the box the
+        // paint will lay it out in.
+        let mut preview_messages: Vec<(SeatId, Vec<String>)> = Vec::new();
+        for (seat, message) in &preview_messages_owned {
+            let font = bt_render::SEAT_TITLE_FONT_LOGICAL_PX * scale;
+            let lines = match seats::pane_notice_width(&self.seat_layout, *seat, scale) {
+                Some(width) => {
+                    let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+                    restore::wrap_anywhere(message, width, |text| {
+                        renderer.measure_chrome_text(gpu, text, font)
+                    })
+                }
+                // A seat the solver has no rectangle for is a seat with no
+                // column to break against; the sentence stands whole rather
+                // than being broken to a width nobody measured.
+                None => vec![message.clone()],
+            };
+            preview_messages.push((*seat, lines));
+        }
         // The two lists the paint looks its placement up in, borrowed off the
         // owned frames above — the same two-step the head's `name` and `count`
         // have always taken, once per seat instead of once.
@@ -121213,6 +121292,350 @@ mod tests {
             into.focused_leaf, moved.landed,
             "which is the tab on screen here, so the keyboard follows the pane"
         );
+    }
+
+    // ── the document travels with the pane (defect #187, 2026-08-29) ─────────
+    //
+    // §7.1.3 has said "pane 拆出/被顶出时携带其当前缓冲(同一对象)" since it was
+    // written, and [`pane_into_new_tab`] has done it since it was written. The
+    // *other* door — [`pane_into_tab`], which every cross-tab move that is not a
+    // tear-out goes through — carried the view and left the buffer, on the older
+    // reading that "buffers live in the tab's pool, which does not migrate". A
+    // view is a `PreviewSource` and a pool lookup, so the pane arrived naming a
+    // document its new tab had never heard of: the empty state, and the file
+    // gone.
+    //
+    // The four cells below are the four ways a preview pane changes tab, and
+    // they are four because the user's ruling names four and not because the
+    // code has four paths — it has two, and the point of the last cell is to say
+    // which of them each gesture is.
+
+    /// A buffer with an unsaved edit in it, through the one door an edit takes.
+    fn edited_buffer(path: &str, name: &str, body: &str, added: &str) -> preview::PreviewBuffer {
+        let mut buffer = buffer_saying(path, name, body);
+        let added = added.to_owned();
+        assert!(
+            buffer.edit_content(|content| {
+                content.push_str(&added);
+                true
+            }),
+            "the fixture's own edit landed"
+        );
+        assert!(buffer.dirty, "so the buffer is dirty, which is the point");
+        buffer
+    }
+
+    /// What a preview pane is showing, read the way the window reads it: the
+    /// source the *pane* names, resolved in the pool the *tab* holds.
+    ///
+    /// `None` is exactly the defect — a pane naming a document nobody in this
+    /// tab can find is a pane that draws the empty state.
+    fn document_on(tab: &TabState, seat: SeatId) -> Option<&str> {
+        let pane = tab.preview_panes.get(tab.preview_here(seat))?;
+        let source = pane.buffer.as_ref()?;
+        tab.preview_pool.get(source)?.content.as_deref()
+    }
+
+    /// A tab of one terminal and **two** preview panes, each on its own file.
+    ///
+    /// The shape cell ① needs and [`tab_with_a_preview`] cannot make: a source
+    /// that still has a preview pane after one of them leaves, so the
+    /// whole-pool rule ("若是原 tab 最后一个预览 pane 则整池随行") does not fire
+    /// and the travelling pane is on its own. The lock is how a second preview
+    /// seat is asked for at all — `add_preview` reuses an unlocked one.
+    fn tab_with_two_previews(
+        id: u64,
+        buffers: Vec<preview::PreviewBuffer>,
+    ) -> (TabState, SeatId, SeatId) {
+        let mut seats = seats::Seats::lone_terminal();
+        let first = seats
+            .add_preview(&cross_metrics())
+            .expect("the first preview seat lands");
+        assert!(seats.toggle_preview_lock(first));
+        let second = seats
+            .add_preview(&cross_metrics())
+            .expect("a locked pane is not a reuse target");
+        let focused = seats.identity();
+        let mut pool = preview::PreviewPool::default();
+        let mut panes = PreviewPanes::default();
+        for (seat, buffer) in [first, second].into_iter().zip(buffers) {
+            panes.entry(seat_of(TabId(id), seat)).buffer = Some(buffer.source.clone());
+            pool.insert(buffer);
+        }
+        let (layout, overflow) = cross_solve(&seats);
+        let tab = assemble_tab_state(
+            TabId(id),
+            BTreeMap::from([(focused, leaf_saying("SHELL"))]),
+            BTreeMap::new(),
+            pool,
+            panes,
+            BTreeMap::new(),
+            focused,
+            TabSeed::default(),
+            seats,
+            layout,
+            overflow,
+        );
+        (tab, first, second)
+    }
+
+    /// **Cell ① — dropped on the tab list, source tab keeps its other panes.**
+    ///
+    /// The plain case, and the one that isolates the fix from the whole-pool
+    /// rule: the source still has a preview pane of its own after this one
+    /// leaves, so nothing sweeps the pool across and the document has to travel
+    /// **with the pane that is showing it** or not at all.
+    ///
+    /// Red gate: take the `preview_pool.take`/`merge_buffer` pair out of
+    /// [`move_seat_content`] and `document_on` answers `None` — the pane arrives
+    /// pointing at a source the target's pool does not hold, which on the glass
+    /// is the empty state.
+    #[test]
+    fn a_preview_pane_dropped_on_another_tab_arrives_showing_the_same_document() {
+        let (mut from, staying, preview_seat) = tab_with_two_previews(
+            1,
+            vec![
+                buffer_saying("D:\\work\\read.md", "read.md", "history"),
+                edited_buffer("D:\\work\\notes.md", "notes.md", "hello", " and unsaved"),
+            ],
+        );
+        from.preview_panes
+            .entry(seat_of(TabId(1), preview_seat))
+            .scroll = [0.0, 640.0];
+        let mut into = cross_tab(2, &["GAMMA"]);
+
+        let moved = cross_move(
+            &mut from,
+            &mut into,
+            preview_seat,
+            seats::DropEdge::Right,
+            false,
+        )
+        .expect("a preview pane may be moved into another tab");
+
+        assert_eq!(
+            document_on(&into, moved.landed),
+            Some("hello and unsaved"),
+            "the pane arrives showing the document it was showing, unsaved edit \
+             and all"
+        );
+        assert_eq!(
+            into.preview_panes
+                .get(into.preview_here(moved.landed))
+                .expect("the arrived pane")
+                .scroll,
+            [0.0, 640.0],
+            "and as far down it as the reader had scrolled"
+        );
+        assert!(
+            into.preview_pool
+                .get(&preview::PreviewSource::file("D:\\work\\notes.md"))
+                .is_some_and(|buffer| buffer.dirty),
+            "the dirty bit crossed with the bytes, so the gates that ask about \
+             unsaved work ask the tab the work is now in"
+        );
+        assert!(
+            from.preview_pool
+                .get(&preview::PreviewSource::file("D:\\work\\notes.md"))
+                .is_none(),
+            "and it is a move: a second copy left behind is the fork the \
+             one-buffer-per-file law forbids"
+        );
+        assert_eq!(
+            document_on(&from, staying),
+            Some("history"),
+            "while the pane that stayed keeps its own document — the whole pool \
+             did not travel, because the tab it left still has a door onto it"
+        );
+    }
+
+    /// **Cell ② — the pane that was alone in a tab, dragged back.**
+    ///
+    /// The user's own report (#187): a preview pane torn out into a tab of its
+    /// own and then dropped back on the tab it came from came back **empty**.
+    ///
+    /// Two things were wrong and both are here. `pane_into_tab` left the shown
+    /// buffer behind (cell ①), and the whole-pool rule read `preview_seats()` on
+    /// a tree whose seat had deliberately not been closed — so a tab that is
+    /// about to be taken out of the strip answered "I still have a door onto my
+    /// pool", and everything in it went out with the tab.
+    ///
+    /// Red gate: drop the `source_emptied ||` from `source_stranded` and the
+    /// second assertion goes red (the history is dropped with the tab); with the
+    /// target holding no preview seat of its own, the other arm fires and moves
+    /// the *target's* pool into the dying tab instead.
+    #[test]
+    fn the_lone_preview_pane_of_a_tab_brings_its_whole_pool_back_with_it() {
+        let (mut origin, preview_seat) = tab_with_a_preview(
+            1,
+            vec![
+                edited_buffer("D:\\work\\notes.md", "notes.md", "hello", " and unsaved"),
+                buffer_saying("D:\\work\\read.md", "read.md", "history"),
+            ],
+        );
+        // The gesture that made the tab: `Move pane to new tab`, which is also
+        // the drag onto the strip — one verb, [`pane_into_new_tab`].
+        let mut alone = tear_pane_into_tab(
+            &mut origin,
+            &cross_metrics(),
+            preview_seat,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a preview may become a tab of its own");
+        let lone_seat = alone.seats.preview_seats()[0];
+        assert_eq!(
+            document_on(&alone, lone_seat),
+            Some("hello and unsaved"),
+            "cell ④'s door already carried it — this is the starting state, not \
+             the claim"
+        );
+
+        let mut back = cross_tab(2, &["GAMMA"]);
+        let moved = cross_move(
+            &mut alone,
+            &mut back,
+            lone_seat,
+            seats::DropEdge::Right,
+            true,
+        )
+        .expect("the last pane of a tab may still be moved");
+        assert!(
+            moved.source_emptied,
+            "so the tab it left is about to leave the strip — which is the \
+             whole reason its pool may not be left in it"
+        );
+
+        assert_eq!(
+            document_on(&back, moved.landed),
+            Some("hello and unsaved"),
+            "the document is on the glass again, unsaved edit intact"
+        );
+        assert_eq!(
+            back.preview_pool
+                .get(&preview::PreviewSource::file("D:\\work\\read.md"))
+                .and_then(|buffer| buffer.content.as_deref()),
+            Some("history"),
+            "and the history behind it came too: 若是原 tab 最后一个预览 pane \
+             则整池随行"
+        );
+        assert_eq!(
+            back.preview_pool.len(),
+            2,
+            "two buffers, one door onto them"
+        );
+    }
+
+    /// **Cell ③ — the stage's door, and the trade that goes the other way.**
+    ///
+    /// §7.1.6k′ aims at a zone rather than at the end of the tree, and a centre
+    /// *trades*: the pane standing there goes back the way the traveller came.
+    /// Both journeys are [`move_seat_content`], so both owe their document, and
+    /// a fix written for the traveller alone would leave the returning pane
+    /// blank instead.
+    ///
+    /// Red gate: carry the buffer in `pane_into_tab` beside the first
+    /// `move_seat_content` instead of inside it, and the second assertion goes
+    /// red — the traded pane crosses with nothing.
+    #[test]
+    fn a_traded_preview_pane_and_its_traveller_each_keep_their_own_document() {
+        let (mut from, travelling) = tab_with_a_preview(
+            1,
+            vec![edited_buffer(
+                "D:\\work\\notes.md",
+                "notes.md",
+                "hello",
+                " and unsaved",
+            )],
+        );
+        let (mut into, standing) = tab_with_a_preview(
+            2,
+            vec![buffer_saying("D:\\work\\other.md", "other.md", "elsewhere")],
+        );
+
+        let moved = cross_move_at(
+            &mut from,
+            &mut into,
+            travelling,
+            seats::LayoutAim::SeatCentre(standing),
+            false,
+        )
+        .expect("a centre takes the pane and trades the one it landed on");
+        let traded = moved.traded.expect("a centre trades");
+
+        assert_eq!(
+            document_on(&into, moved.landed),
+            Some("hello and unsaved"),
+            "the traveller arrives showing what it was showing"
+        );
+        assert_eq!(
+            document_on(&from, traded),
+            Some("elsewhere"),
+            "and the pane it traded places with arrives showing what *it* was \
+             showing, rather than the empty state"
+        );
+    }
+
+    /// **Cell ④ — the tear-out and the tear-out-to-a-window, which are one
+    /// door.**
+    ///
+    /// `Move pane to new tab`, the drag onto this window's tab strip and
+    /// `Move pane to new window` all reach [`pane_into_new_tab`] — the last of
+    /// them by promoting the pane into a tab and then handing that whole
+    /// `TabState` to `transfer_tab`, so what the pane carries across a window
+    /// boundary is exactly what it carries here. This cell exists to say so and
+    /// to keep it said.
+    ///
+    /// Red gate: take the `preview_pool.take` out of `pane_into_new_tab` and the
+    /// torn-out tab shows nothing.
+    #[test]
+    fn a_preview_torn_into_a_tab_of_its_own_carries_the_document_and_the_history() {
+        let (mut origin, preview_seat) = tab_with_a_preview(
+            1,
+            vec![
+                edited_buffer("D:\\work\\notes.md", "notes.md", "hello", " and unsaved"),
+                buffer_saying("D:\\work\\read.md", "read.md", "history"),
+            ],
+        );
+        origin
+            .preview_panes
+            .entry(seat_of(TabId(1), preview_seat))
+            .scroll = [0.0, 640.0];
+
+        let torn = tear_pane_into_tab(
+            &mut origin,
+            &cross_metrics(),
+            preview_seat,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a preview may become a tab of its own");
+        let seat = torn.seats.preview_seats()[0];
+
+        assert_eq!(
+            document_on(&torn, seat),
+            Some("hello and unsaved"),
+            "the document rode across"
+        );
+        assert_eq!(
+            torn.preview_panes
+                .get(torn.preview_here(seat))
+                .expect("the torn pane")
+                .scroll,
+            [0.0, 640.0],
+            "and the reader is where the reader was"
+        );
+        assert_eq!(
+            torn.preview_pool.len(),
+            2,
+            "with the history behind it, because the tab it left has no preview \
+             pane to reach the pool from"
+        );
+        assert_eq!(origin.preview_pool.len(), 0, "and it is a move");
     }
 
     /// **§7.1.6k — a target that cannot take another pane is refused before
