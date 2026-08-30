@@ -75853,6 +75853,29 @@ impl Runtime<'_> {
         // grave and the highlight it was drawing in some other window is taken
         // down by that window's next turn — which is this one.
         self.app.drag_broker = None;
+        // **缺陷 #189 — the room the column was holding goes back, and the list
+        // comes back with it.**
+        //
+        // A card column reserves a slot's worth of scroll for the stand-in
+        // ([`Self::strip_guests`]), so a hand that ran the list to its end while
+        // a pane was in the air left `rail_scroll` one card-pitch past where a
+        // column with no guest can go. Where the drop *made* that card the two
+        // are already equal and this changes nothing — the list really is a card
+        // longer. Where it did not — the pane went into a tab, or the gesture
+        // was abandoned — the offset would outlive its reason and the column
+        // would stand with a card-tall blank under its last card until somebody
+        // turned the wheel.
+        //
+        // Asked of the geometry rather than of the drag, and asked *here*, which
+        // is the one place every ending passes through: the answer is "how far
+        // can this column go now", and now is after the drop has been committed
+        // and the drag has been taken down.
+        if let Some(max_scroll) = self
+            .focus_rail_geometry_now(Instant::now())
+            .map(|column| column.max_scroll)
+        {
+            self.window.rail_scroll = self.window.rail_scroll.min(max_scroll);
+        }
         // J117 in reverse: the pointer stops being pinned the instant the hand
         // is empty, and takes back the shape of whatever it is now over.
         self.apply_pointer_cursor();
