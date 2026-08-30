@@ -2584,12 +2584,33 @@ fn chevron_raster(width_px: u32, height_px: u32) -> ChevronRaster {
 ///
 /// * `fill: none; stroke-width: 2` and `stroke-linecap: round` are `.pring
 ///   circle` and `.pring .arc` (mock-up lines 277-279).
-/// * the dash pattern is how the mock-up itself states an arc — `stroke-dasharray`
-///   against `PRING_C`, with `stroke-dashoffset` walking it (line 4118-4130) —
+/// * the dash pattern is how the mock-up itself states an arc —
+///   `stroke-dasharray: 9.94 30.9` against `PRING_C = 40.84` (line 381) —
 ///   rather than a hand-built elliptical-arc path, which would have to
 ///   special-case the full turn that a dash pattern gets for free.
 /// * `rotate(-90 …)` is `.pring { transform: … rotate(-90deg) }` (line 273): an
 ///   SVG circle's own path begins at 3 o'clock, and progress begins at 12.
+/// * and the phase is **added to that rotation**, which is `@keyframes
+///   pring-spin { to { transform: … rotate(270deg) } }` (line 382) said at one
+///   instant instead of over 1.1 seconds: the ring turns, and the dash stays
+///   where it was cut.
+///
+/// **Why the phase turns the ring rather than walking the dash** (next22 #206).
+/// The obvious alternative — hold the ring still and slide `stroke-dashoffset`
+/// round it — draws the same picture for three quarters of every turn and a
+/// different one for the rest, because a dash pattern does not wrap a closed
+/// subpath: it is laid down from the contour's own start point and stops at its
+/// end. An arc that reaches past that point therefore loses the piece that
+/// should have come round, and the spin visibly eats itself down to nothing at
+/// twelve o'clock before snapping back to full length. Turning the ring cannot
+/// have that failure at any phase: the dash is always laid from the contour
+/// start, always in one piece, always the same shape — only pointed somewhere
+/// else. `the_indeterminate_arc_crosses_noon_without_a_seam` is the gate.
+///
+/// The dash and its gap therefore sum to exactly one circumference, which is
+/// what the mock-up states and what makes the pattern's period the path's own
+/// length: at that period there is no phase at which the pattern could disagree
+/// with itself across the contour's seam.
 ///
 /// The radius is the box's half-width less half the stroke, so the stroke —
 /// which straddles its path — lands exactly inside the box and clips nowhere.
@@ -2615,16 +2636,21 @@ fn progress_ring_body(
         return Some(String::new());
     }
     let (centre_x, centre_y) = (width_px as f32 / 2.0, height_px as f32 / 2.0);
+    let circle = format!(
+        r#"<circle cx="{centre_x}" cy="{centre_y}" r="{radius}" fill="none" stroke="currentColor" stroke-width="{stroke}""#
+    );
+    if sweep >= 1.0 {
+        // The full turn — the track under every arc. A circle with no ends has
+        // no dash to state and no caps to put on them, and where it starts is
+        // not a question a whole circle can be asked.
+        return Some(format!("{circle}/>"));
+    }
     let circumference = std::f32::consts::TAU * radius;
     let dash = circumference * sweep;
-    let start = circumference * f32::from(start_milliturns % 1000) / 1000.0;
-    // A round cap adds half a stroke beyond each end of the dash. On a full turn
-    // that overshoot would wrap the two caps past one another; on a partial arc
-    // it is the mock-up's own `stroke-linecap: round`.
-    let linecap = if sweep >= 1.0 { "butt" } else { "round" };
+    let gap = circumference - dash;
+    let turned = 360.0 * f32::from(start_milliturns % 1000) / 1000.0 - 90.0;
     Some(format!(
-        r#"<circle cx="{centre_x}" cy="{centre_y}" r="{radius}" fill="none" stroke="currentColor" stroke-width="{stroke}" stroke-linecap="{linecap}" stroke-dasharray="{dash} {circumference}" stroke-dashoffset="{offset}" transform="rotate(-90 {centre_x} {centre_y})"/>"#,
-        offset = -start,
+        r#"{circle} stroke-linecap="round" stroke-dasharray="{dash} {gap}" transform="rotate({turned} {centre_x} {centre_y})"/>"#
     ))
 }
 
@@ -4367,6 +4393,106 @@ mod tests {
                 window[1] > window[0],
                 "sweep coverage must be monotonic, got {inked:?}"
             );
+        }
+    }
+
+    /// The indeterminate arc parked at one phase of its spin.
+    fn spun_ring(start_milliturns: u16, stroke_px: u32, side: f32) -> ChromeSprite {
+        sprite(
+            ChromeMark::ProgressRing {
+                start_milliturns,
+                sweep_milliturns: (bt_render::WINDOW_TAB_RING_INDETERMINATE_TURNS * 1000.0).round()
+                    as u16,
+                stroke_px,
+            },
+            side,
+            side,
+            [0x7a, 0x99, 0xff],
+        )
+    }
+
+    /// Where the ink is, walked once round the ring's own centreline.
+    fn inked_ring_samples(icon: &ChromeIcon, stroke_px: f32, samples: usize) -> Vec<bool> {
+        (0..samples)
+            .map(|i| {
+                let (x, y) = on_ring(icon, i as f32 / samples as f32, stroke_px);
+                alpha_at(icon, x, y) > 128
+            })
+            .collect()
+    }
+
+    /// The one run of ink on a circle, as `(first sample, length)`, counted
+    /// **through** the wrap. `None` when the ink is in two pieces, or in none —
+    /// which is the shape a truncated arc takes and the shape this gate forbids.
+    fn one_arc(inked: &[bool]) -> Option<(usize, usize)> {
+        let n = inked.len();
+        let lit = inked.iter().filter(|on| **on).count();
+        if lit == 0 || lit == n {
+            return None;
+        }
+        let firsts: Vec<usize> = (0..n)
+            .filter(|&i| inked[i] && !inked[(i + n - 1) % n])
+            .collect();
+        match firsts.as_slice() {
+            [first] => Some((*first, lit)),
+            _ => None,
+        }
+    }
+
+    /// PIN (next22 #206 — **the wrap is not a seam**): the indeterminate arc
+    /// crosses noon at the same length and the same angular step it turns at
+    /// everywhere else on the circle.
+    ///
+    /// The failure this pins is invisible in any single frame and unmissable in
+    /// motion: an arc stated as a dash pattern whose period is longer than the
+    /// path it runs on cannot wrap, so the piece that should have come round
+    /// past twelve o'clock is simply not drawn, and the arc eats itself down to
+    /// nothing at the top of every turn before popping back to full length. The
+    /// phase clock is innocent — it is continuous and monotone and has its own
+    /// gate in `main.rs` — so the seam can only be caught in the pixels, which
+    /// is what this walks: one whole turn in exact steps, and at every step the
+    /// ink must be **one** unbroken run, of the length the sweep asks for, that
+    /// has advanced by exactly one step since the frame before.
+    #[test]
+    fn the_indeterminate_arc_crosses_noon_without_a_seam() {
+        const SAMPLES: usize = 2_000;
+        const STEP_MILLITURNS: u16 = 20;
+        const STEP_SAMPLES: usize = SAMPLES * STEP_MILLITURNS as usize / 1_000;
+        // A quarter of a step: the ring is 779 physical pixels round here, so a
+        // sample is a fifth of a pixel and an end can only be found to about
+        // one. Loose enough for antialiasing, an order tighter than the defect.
+        const TOLERANCE: usize = STEP_SAMPLES / 4;
+        let stroke = 8_u32;
+        let side = 256.0;
+
+        let mut previous: Option<(usize, usize)> = None;
+        for step in 0..=(1_000 / u32::from(STEP_MILLITURNS)) {
+            let start = (step * u32::from(STEP_MILLITURNS)) as u16 % 1_000;
+            let mut rasters = ChromeMarkRasters::default();
+            let icons = rasters.resolve(&[spun_ring(start, stroke, side)]);
+            let icon = &icons[0];
+            let inked = inked_ring_samples(icon, stroke as f32, SAMPLES);
+            let (first, length) = one_arc(&inked).unwrap_or_else(|| {
+                panic!(
+                    "at {start} milliturns the arc is not one unbroken run of ink — \
+                     {} of {SAMPLES} samples lit",
+                    inked.iter().filter(|on| **on).count()
+                )
+            });
+            if let Some((was_first, was_length)) = previous {
+                let advanced = (first + SAMPLES - was_first) % SAMPLES;
+                assert!(
+                    advanced.abs_diff(STEP_SAMPLES) <= TOLERANCE,
+                    "the arc must turn {STEP_SAMPLES} samples a step everywhere, but reaching \
+                     {start} milliturns it turned {advanced}"
+                );
+                assert!(
+                    length.abs_diff(was_length) <= TOLERANCE,
+                    "the arc must keep its length through the wrap, but at {start} milliturns \
+                     it is {length} samples where the frame before was {was_length}"
+                );
+            }
+            previous = Some((first, length));
         }
     }
 
