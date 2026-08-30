@@ -17126,9 +17126,7 @@ fn preview_raster_lane(
 ) -> Option<PreviewSurface> {
     let holds_a_picture = |surface: PreviewSurface| {
         matches!(surface, PreviewSurface::Seat(_))
-            && panes
-                .get(surface)
-                .is_some_and(|pane| pane.image.is_some())
+            && panes.get(surface).is_some_and(|pane| pane.image.is_some())
     };
     incumbent.filter(|held| holds_a_picture(*held)).or_else(|| {
         panes
@@ -104112,8 +104110,9 @@ mod tests {
         }
 
         // ③ the transaction.
-        let carrier =
-            method_text("    fn carry_the_recordings_of_moved_panes(&mut self, moves: &[(LeafId, LeafId)]) {");
+        let carrier = method_text(
+            "    fn carry_the_recordings_of_moved_panes(&mut self, moves: &[(LeafId, LeafId)]) {",
+        );
         let removed = carrier
             .find("self.window.video.take(")
             .expect("the recordings are lifted off their surfaces");
@@ -124125,7 +124124,11 @@ mod tests {
             true,
         )
         .expect("the picture pane moves into the other tab");
-        assert!(into.preview_panes.get(into.preview_here(moved.landed)).is_some());
+        assert!(
+            into.preview_panes
+                .get(into.preview_here(moved.landed))
+                .is_some()
+        );
 
         assert_eq!(
             lane_shows(&into),
@@ -124155,7 +124158,8 @@ mod tests {
     /// goes red — and the lane joins the other two, needing a carrier of its own.
     #[test]
     fn an_animation_crosses_a_tab_boundary_because_it_is_keyed_by_its_file() {
-        let running = method_text("    fn animation_running_on(&self, surface: PreviewSurface) -> bool {");
+        let running =
+            method_text("    fn animation_running_on(&self, surface: PreviewSurface) -> bool {");
         assert!(
             running.contains("normalized_local_image_path_key"),
             "the animation lane is read by file, which is why a move has \

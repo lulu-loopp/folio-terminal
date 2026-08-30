@@ -2258,18 +2258,17 @@ mod tests {
         let same_bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(vec![0x20; 16 * 4 * 4]);
         assert!(!std::sync::Arc::ptr_eq(&rgba, &same_bytes));
         let before = thumbs.stats();
-        thumbs.project(
-            tab(1),
-            &[demand(&key, &same_bytes)],
-            now + MIN_INTERVAL * 2,
-        );
+        thumbs.project(tab(1), &[demand(&key, &same_bytes)], now + MIN_INTERVAL * 2);
         assert_eq!(
             thumbs.stats().projections,
             before.projections,
             "a picture that has not changed re-projected, which is a card \
              flipping every frame"
         );
-        assert_eq!(thumbs.stats().skipped_unchanged, before.skipped_unchanged + 1);
+        assert_eq!(
+            thumbs.stats().skipped_unchanged,
+            before.skipped_unchanged + 1
+        );
 
         // A different file is a different card, once.
         let (other, other_rgba) = a_decode("D:\\shots\\other.png");

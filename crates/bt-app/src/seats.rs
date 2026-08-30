@@ -39929,7 +39929,10 @@ mod tests {",
             "a picture nothing has decoded drew pixels out of nothing"
         );
         assert!(
-            without.labels.iter().any(|label| label.text == "B1-rest.png"),
+            without
+                .labels
+                .iter()
+                .any(|label| label.text == "B1-rest.png"),
             "and it stopped saying which file it is"
         );
     }
