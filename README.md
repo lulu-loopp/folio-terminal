@@ -243,6 +243,6 @@ go through the private channel in [`SECURITY.md`](SECURITY.md), not an issue.
 - A terminal on a hotkey.
 - Markdown editing in the preview pane.
 - macOS and Linux.
-- Which agent is waiting, on a phone.
+- The terminal from a phone.
 
 These are directions, not dates.
