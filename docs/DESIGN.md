@@ -5958,3 +5958,36 @@ loaded: NOTHING
 **红门。** `bt-app`:`a_refused_install_says_why_instead_of_staying_off`(把 `WindowsPowerShell` 那一级做成一个**文件**,写入必失败 → 必须回一条带路径、带 Windows 原话的 `Refusal`,而不是 `Ok(false)`)、`the_module_directory_is_created_level_by_level`(根目录连同 `Documents` 自己都不存在 → 七级目录与九个文件全部落地;变异 `create_dir_all`→`create_dir` 即红)、`a_policy_that_refuses_the_module_says_which_policy_and_where`(**本节的根因门**:`Restricted`/`AllSigned` 下,行说明与卡片都必须点名这个策略,卡片还要点名路径,而且盘上不许多出一个字节)、`the_greyed_item_and_the_refusal_agree_on_every_state`(画出来的暗与按下去的拒必须是同一张表的两次读)、`a_documents_folder_windows_will_not_name_still_says_something`、`every_refusal_has_its_own_sentence_and_names_its_path`,以及 `settings.rs` 的 `a_press_on_a_greyed_item_names_it_instead_of_being_swallowed`(变异:把 `Menu(row)` 放回暗项那一臂,第一项就红)。
 
 **挂账,而且要紧。** `scripts/release/cleanvm/autounattend-win10.xml` 里给新机执行了 `Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned -Force`——**门 5 的「干净机」在这一格上从来不干净**,Windows 客户端自己的默认是 `Restricted`。这条缺陷能一路走到用户的新电脑上,一半的原因就在这里:开发机是 `RemoteSigned`,干净机被答案文件改成了 `RemoteSigned`,于是这条路上没有一台机器走过用户走的那条路。本节没有改那个答案文件——那是门 5 自己的机器构建,改了要重跑整条流水才敢算数——但下一次动它的人应当把这一行拿掉:`run-smoke-in-vm.ps1` 每一次进客体都显式带着 `-ExecutionPolicy Bypass`,并不靠机器的策略。
+
+### 7.48 一个只有一列的格子放不下一个占两格的字,一块已经离开画布的裁剪框不是「裁掉了」而是设备错误:一扇被拖到低于它自己最小值的窗,两条发布拦路虫(next22 / next21 用户实机 panic,已落地;`crates/bt-render/src/lib.rs`、`crates/bt-term/src/session.rs`)
+
+**用户报的两行,一字不改。** next22(`f70676d730`,4K@200%,主线程,当时在跑 btop4win 并把 pane 与窗口反复拖到极限):
+
+```
+panicked at vendor\alacritty_terminal\src\grid\mod.rs:493:30:
+index out of bounds: the len is 1 but the index is 1
+```
+
+next21(`57485c2b8f`):
+
+```
+wgpu error: Validation Error
+  In a set_scissor_rect command
+    Scissor Rect { x: 314, y: 49, w: 1, h: 1 } is not contained in the render target (314, 50, 1)
+```
+
+**这两行说的是同一件事的两半:一扇 314×50 物理像素的窗。** 在 200% 上那是 157×78 逻辑像素,远低于 `MIN_PANE_W = 260`——而「最小值对程序是法律,对用户是建议」是早就下过的裁决(手动拖窗放行)。于是**这条路上从来没有一台机器走过用户走的那条路**:布局求解器交出的座永远 ≥ 260×120,只有人的手能把窗拖到那以下。两桩都不是竞态,都不是 alt 屏,都不是 resize 与读行抢跑——两桩都是**几何走到了各自那条边界之外,而边界那一侧没有人接**。
+
+**第一桩的真因链,逐节。** `grid/mod.rs:493` 是 `Grid::cursor_cell` 的 `&mut self[point.line][point.column]`,而**第 30 列正是那个 `[point.column]`**(实测过:rustc 报的是外层下标那个 `[` 的列号,不是行下标的)。所以「len 是 1、index 是 1」说的是**一行只有一格,却被要第二格**——不是「一行高的格子被要第二行」。往上一节:一个占两格的字(任何 CJK 表意字、任何 emoji)在 `Term::write_grapheme_at_cursor` 里是**头格加它右边一格 spacer**;`columns == 1` 时,`column + 1 >= columns` 在光标位于 0 时就成立,于是先写 leading spacer、`wrapline()` 回到第 0 列,再把头格写在第 0 列,然后 `cursor.point.column += 1` 走到第 1 列去写 spacer——而这一行只有第 0 列。**一列宽的终端遇到的第一个宽字符就是它的死期**,与 alt 屏、与刷新率、与拖动全都无关;btop4win 只是恰好每 1500ms 就画满一屏的框线与文字。
+
+**修在哪一侧,是被 vendor 的身份定死的。** `vendor/alacritty_terminal` 是上游 0.26.0 的只读副本(`CHANGES-FOLIO.md` 是那份清单),而上游自己的前端对这道题只有一个答案:**一列宽的终端不是一个前端可以要求的尺寸**。所以这条地板落在**像素矩形变成格子的那唯一一扇门**——`CellMetrics::grid_for_pixels`,`crates/bt-render/src/lib.rs`。生产上只有三个调用点(`create_leaf_session` 与 `resize_leaves_to_layout` 的两臂),全都从这里出来,再经 `DualPlaneSession::resize_at` → `TerminalAdapter::resize` → `Term::resize`,以及去防抖后的 ConPTY。`CellMetrics::MIN_COLUMNS = 2`,`columns` 的 `clamp` 下界从 `1.0` 抬到它;**行没有这条地板**——一行是仿真器精确表示得了的尺寸,`wrapline` 会滚它。**这不是在读处兜底**:兜底会是在 `feed` 里吞掉宽字符,或者在读行时夹取;这里改的是**发尺寸的那一方**,而且是它唯一的出口。
+
+**第二桩的真因,一样短。** wgpu 校验的是 `x + w <= target.width`(`wgpu-core-30.0.0`,`command/render.rs::set_scissor`),**而且失败是设备错误,不是被裁掉的像素**。渲染器里带 clip 的 scissor 有三处:座(prepare 时 `clamped_to` 过)、视频层(prepare 时 `clamped_to` 过)、**以及预览座那一处——它一路裸着走到 `set_scissor_rect`**。而预览座的 clip 恰恰是**每一帧按时钟重算**的那一个(§U8 的 pane FLIP:`preview_image_placement` + `place_preview_image`),在一扇 314 宽的窗里飞到 `x = 314、w = 1` 完全合法。三处里两处有夹取、一处没有,这本身就是这条缺陷的形状。
+
+**裁决:一扇门,而且它认的是「渲染目标」而不是「配置」。** `set_scissor(pass, clip, target) -> bool` 是这个 crate 里**唯一**调 `set_scissor_rect` 的地方,座、预览、视频、以及每一处「把 scissor 复位成整面」都从它出去;它问 `SeatViewport::scissor_within(w, h) -> Option<Self>`,**取交集**,交集为空就回 `false`,调用方**一笔都不画**。这里刻意没有沿用 `clamped_to`:那个函数答的是另一道题——**一个座总得落在某处**,所以把它钉到最后一列是对的;而**一块 scissor 是一张许可**,一块完全离开画布的框许可的是零个像素,把它钉到边上会在一条谁也没要求画的边上漏一道一像素的条纹。两个函数因此都留着,各答各的题;`clamped_to` 仍旧只管座的矩形(`set_seat_viewport` / `resize`)。座与视频 prepare 里那两次 `clamped_to` 一并撤掉——**夹取只许有一处**,留着它们等于让门永远看不见空集。
+
+**`set_viewport` 不需要同样的处理,这是查过的而不是猜的。** 同一个文件里 `set_viewport` 只校验 `w`/`h` 不超过 `max_texture_dimension_2d`、`x`/`y` 在 ±2 倍范围内,**不要求落在附件里**。所以本节一个 viewport 都没有动:动它就是在没有规则的地方立一条自己的规则,而那会把 FLIP 中途的座画到别处去。
+
+**红门,三道,两道是把用户那两行原样立起来的。** `bt-term`:`a_one_column_terminal_dies_on_the_first_wide_character`——一列 24 行的会话喂一个「中」,`#[should_panic]` 断言的就是 `index out of bounds: the len is 1 but the index is 1`,跑出来的位置也逐字是 `vendor\alacritty_terminal\src\grid\mod.rs:493:30`。它**不是**要被修好的东西,它是那条地板的价钱,和它旁边的 `two_columns_is_the_narrowest_grid_a_wide_character_fits_in`(两列放得下、第三个字换行)一起说清楚地板为什么是 2 而不是 3。`bt-render`:`a_pane_squeezed_to_a_sliver_is_never_measured_at_one_column`(五个缩放比 × 0–256px,把 `clamp` 下界改回 `1.0`,0px 那一格当场红)、`a_pane_flying_off_the_edge_never_scissors_outside_the_render_target`(**314×50 的离屏窗**,预览 clip 依次取报告里那一块、贴右缘往外跑的、贴角往两边跑的、离得很远的、以及静止那一块;把门换回裸 `set_scissor_rect`,第一帧就红,且 wgpu 的原话与用户那一行逐字相同),外加不需要设备的 `a_scissor_is_intersected_with_its_target_and_refused_when_it_misses`。
+
+**挂账。** 门 5 的干净机烟测没有一台把窗拖到最小值以下——两桩都只有人的手能触发,而自动化里没有那只手。下一个动 `run-smoke-in-vm.ps1` 的人应当加一段:把窗压到 OS 允许的最小,喂一屏 CJK,再放开。

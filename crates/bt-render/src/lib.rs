@@ -18419,7 +18419,7 @@ mod tests {
     }
 
     /// RED — **the scissor never leaves the render target** (`docs/DESIGN.md`
-    /// §7.10).
+    /// §7.48).
     ///
     /// The device error a released build took, verbatim:
     ///
