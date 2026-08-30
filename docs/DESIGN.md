@@ -3507,7 +3507,7 @@ Codex 找到而 Claude 一轮审计漏报的那一批：设置页 `↺`（恢复
 cargo test -p bt-app --bin folio -- --ignored --nocapture the_symbol_sheet
 ```
 
-写出 `target/icon-sheet.png`(74 枚画 × 14/26/64px 三档,窗口自己的底与墨)与 `target/icon-sheet.txt`(行列 → id → 变体名)。**纪律:新形入册必看表。** 光学红门管笔、`every_chrome_mark_rasterizes…` 管「有墨且不是一块实心」,两道都管不了「它像不像旁边那枚」——P1 一个下午被这张表抓到两次(`#i-split-right` 的胶囊、`#i-devtools` 的缺口环),P1 报告点名要它别再是一次性草稿。
+写出 `target/icon-sheet.png`(81 枚画 × 14/26/64px 三档(枚数由 `ActionIcon::ALL` + 转向族第二帧 + `the_chassis_family` 推出来,不是写死的;P2 写下 74 之后这张表长过,2026-08-30 的 agent 族标形只换名不加张,数字是那期间攒的),窗口自己的底与墨)与 `target/icon-sheet.txt`(行列 → id → 变体名)。**纪律:新形入册必看表。** 光学红门管笔、`every_chrome_mark_rasterizes…` 管「有墨且不是一块实心」,两道都管不了「它像不像旁边那枚」——P1 一个下午被这张表抓到两次(`#i-split-right` 的胶囊、`#i-devtools` 的缺口环),P1 报告点名要它别再是一次性草稿。
 
 它抓到的第三件是 P1 自己点名的那一对:**`#i-tab-new` 与 `#i-window-new` 在 14px 下仍读作同一张画**。两枚都是「左下一个盒子,右上一支箭」,而 tab 的盒子是 `5.6 × 7.4`——**高比宽大,那是窗的比例不是页签的**。P2 把 tab 切成 `5.0 × 4.6` 低而宽地站在通栏的横杠上,把窗的标题带从 `2.2` 收到 `1.6`(框顶边与标题线相距一支半笔 = 一条**粗顶边**,而不是一条空条纹)。
 
