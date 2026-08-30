@@ -36229,10 +36229,14 @@ mod tests {",
     /// fixture below stops growing a parameter every time the column learns
     /// another tween.
     ///
-    /// No `strip_preview` here, and that is a boundary rather than a gap: the
-    /// stand-in the column gained on 2026-08-29 is a *guest in the list* and
-    /// [`rail_paint_of_in`] already names it, so a second door onto it would be
-    /// two ways to say one thing.
+    /// **`preview` is here since 缺陷 #189**, and the note that stood in its
+    /// place — *"a second door onto it would be two ways to say one thing"* —
+    /// was true only while the stand-in had no body. [`rail_paint_of_in`] names
+    /// the guest but hands the column no thumbnails at all, and the guest now
+    /// draws a picture out of that very list; a fixture that can say "the slot
+    /// is at index 1" but not "and this is what is in it" cannot state the
+    /// thing the defect was about. One door onto the guest per fixture, and this
+    /// is the thumbnail fixture's.
     #[derive(Clone, Copy, Debug)]
     struct FocusFrame<'a> {
         /// How far into its entrance the column is, `0.0..=1.0`.
@@ -36242,6 +36246,8 @@ mod tests {",
         /// How solid each card head's hover-revealed run is, by index — see
         /// [`ChromeContent::card_ink`].
         ink: &'a [(usize, f32)],
+        /// K124's stand-in slot — see [`ChromeContent::strip_preview`].
+        preview: Option<usize>,
     }
 
     impl FocusFrame<'_> {
@@ -36255,6 +36261,7 @@ mod tests {",
             reveal: 1.0,
             nudge_rows: 0.0,
             ink: &[],
+            preview: None,
         };
     }
 
@@ -36271,6 +36278,7 @@ mod tests {",
             reveal: focus_reveal,
             nudge_rows: focus_card_nudge_rows,
             ink: card_ink,
+            preview,
         } = frame;
         let metrics = seat_metrics(1_000);
         // **A split tree, so the stage has something in it.** A lone terminal
@@ -36306,7 +36314,7 @@ mod tests {",
                 tabs,
                 active_tab,
                 grabbed: None,
-                strip_preview: None,
+                strip_preview: preview,
                 float_shown: &[],
                 tab_scroll: 0.0,
                 rail,
@@ -38321,6 +38329,230 @@ mod tests {",
             worn(TAB_LAND_RING_ALPHA, true),
             "and its inset ring, the other half of the same pair of declarations"
         );
+    }
+
+    /// **RED GATE ① (缺陷 #189) — a pane carried to the foot of the column runs
+    /// the list until the card it is about to become is whole on screen.**
+    ///
+    /// The user's report verbatim: 「列现在会自动往下滚了，但看不到即将落座的那
+    /// 张替身卡」. Auto-scroll arrived on 2026-08-29 and stopped exactly one
+    /// card-pitch short, because [`focus_rail_geometry`] was asked for the
+    /// column's scroll range with the tab count while the paint was asked for
+    /// the column's picture with the tab count **plus the guest** — so the
+    /// scroller ran out of travel with the stand-in still below the clip and no
+    /// hand could bring it up.
+    ///
+    /// Three claims, and each is a different way for the fix to be wrong:
+    ///
+    /// 1. **The two geometries agree.** The column the survey reasons about
+    ///    (twelve tabs, one guest) and the column the painter draws (thirteen
+    ///    entries, no guest) answer the same `viewport` and the same
+    ///    `max_scroll`. That is the whole of what a guest *is*, and if it ever
+    ///    stops being true the other two claims are measuring two columns.
+    /// 2. **The hand gets there.** Frames at the foot band until the list stops,
+    ///    and the stand-in's own rectangle is inside the clip on both edges.
+    /// 3. **The guest is what got it there.** The same walk on a column that
+    ///    does not count the guest — which is the build the user reported —
+    ///    leaves the card a whole pitch below the clip's foot.
+    ///
+    /// Mutation: drop the `guests` pitch from the flow and claim 2 fails by
+    /// exactly the distance claim 3 measures; count the guest in `cards` as well
+    /// and claim 1 fails, because the survey would then be placing insertions
+    /// against a phantom tab.
+    #[test]
+    fn a_hand_at_the_columns_foot_runs_it_until_the_stand_in_is_whole_in_the_clip() {
+        const TABS: usize = 12;
+        // The column as the *painter* is handed it: the guest is already an
+        // entry in the list, which is what `Runtime::refresh_chrome` does before
+        // it draws.
+        let painted = |scroll: f32| {
+            focus_rail_geometry(
+                FIXTURE_HEIGHT,
+                1.0,
+                TABS + 1,
+                0,
+                scroll,
+                focus_rail(TabLayoutMode::Vertical),
+            )
+            .expect("focus mode puts a column on screen")
+        };
+        // Claim 1, before anything moves: one column, asked two ways.
+        let survey = hosting_column(0.0, 1);
+        assert_eq!(
+            (survey.viewport, survey.max_scroll),
+            (painted(0.0).viewport, painted(0.0).max_scroll),
+            "the list the hand is surveyed against and the list on the glass are \
+             one column, or every number below is about two of them"
+        );
+        // The hand, held still at the deepest point in the column that is still
+        // over something the column drew.
+        let run_to_the_end = |guests: usize| {
+            let mut scroll = 0.0_f32;
+            for _ in 0..2_400 {
+                let column = hosting_column(scroll, guests);
+                let run = focus_rail_run(&column);
+                let hand = column_hand(&column, column.viewport[1] - 1.0);
+                let Some(next) = autoscroll_step(
+                    &run,
+                    scroll,
+                    hand,
+                    1.0,
+                    crate::Motion::Full,
+                    AUTOSCROLL_FIXTURE_FRAME,
+                ) else {
+                    return scroll;
+                };
+                scroll = next;
+            }
+            panic!("a hand at the foot reaches the end of a twelve-card column");
+        };
+        // Claim 2.
+        let scroll = run_to_the_end(1);
+        let stand_in = painted(scroll).cards[TABS].body;
+        let [top, foot] = hosting_column(scroll, 1).viewport;
+        assert!(
+            stand_in[1] >= top && stand_in[3] <= foot,
+            "the card the pane is about to become is whole inside the clip: \
+             {stand_in:?} against [{top}, {foot}]"
+        );
+        // Claim 3 — the build the user reported, measured.
+        let blind = run_to_the_end(0);
+        let unreachable = painted(blind).cards[TABS].body;
+        assert!(
+            unreachable[1] >= foot,
+            "and a column that does not count the guest stops with the whole of \
+             it below the clip, which is the report: {unreachable:?} against \
+             [{top}, {foot}]"
+        );
+    }
+
+    /// **RED GATE ② (缺陷 #189) — the stand-in's body is the pane that is in the
+    /// hand, and a slot with no picture is the thing that went wrong.**
+    ///
+    /// `refresh_chrome` put `None` in the stand-in's thumbnail slot on the
+    /// argument that *"what the stand-in draws is the slot, and the pane's own
+    /// picture is the ghost under the pointer"*. The ghost is a **label** — a
+    /// mark and a name on the cursor — and the card's head is already saying
+    /// both, so what the slot actually drew was `--termbg` on a panel of nearly
+    /// that value: a card-shaped nothing, on the one surface where a card *is*
+    /// its picture.
+    ///
+    /// Two paints of one fixture, differing in one `Option`, so the assertion is
+    /// about the thumbnail and not about the geometry: with the projection the
+    /// guest's body carries the pane's rows, and without it the same rectangle
+    /// is empty.
+    ///
+    /// Mutation: put `None` back in the slot and the first assertion goes; hand
+    /// the guest its neighbour's entry — the off-by-one an insertion into one of
+    /// two parallel lists invites — and the rows land in another card, which the
+    /// rectangle filter catches.
+    #[test]
+    fn the_stand_in_draws_the_pane_in_the_hand_rather_than_an_empty_card() {
+        const SLOT: usize = 1;
+        let state = focus_rail(TabLayoutMode::Vertical);
+        // Three tabs and the guest at index 1 — the list `refresh_chrome` hands
+        // down, with the stand-in inserted rather than drawn beside it.
+        let mut tabs = three_cards();
+        tabs.insert(SLOT, TabContent::default());
+        let tree = lone_seat_tree(SeatKind::Terminal);
+        let seats = BTreeMap::from([(
+            SeatId(1),
+            MiniSeatContent::Transcript {
+                lines: vec!["> cargo build".to_owned(), "  Compiling bt-app".to_owned()],
+                more_below: false,
+            },
+        )]);
+        let rows_in_the_slot = |dressed: bool| {
+            let mut thumbnails: Vec<Option<FocusThumbnail<'_>>> = vec![None; tabs.len()];
+            if dressed {
+                thumbnails[SLOT] = Some(FocusThumbnail {
+                    tree: &tree,
+                    focused: SeatId(1),
+                    seats: &seats,
+                });
+            }
+            let column = window_chrome_with_thumbnails_in(
+                TALL_FIXTURE_HEIGHT,
+                &tabs,
+                0,
+                state,
+                None,
+                &thumbnails,
+                FocusFrame {
+                    preview: Some(SLOT),
+                    ..FocusFrame::SETTLED
+                },
+            )
+            .rail;
+            let card = focus_of_in(TALL_FIXTURE_HEIGHT, state, tabs.len()).cards[SLOT];
+            column
+                .labels
+                .into_iter()
+                .filter(|label| label.rect[1] >= card.mini[1] && label.rect[3] <= card.mini[3])
+                .count()
+        };
+        assert!(
+            rows_in_the_slot(true) > 0,
+            "the slot the pane is aiming at draws the pane's own rows — the card \
+             is its picture on this surface, and the head's name is not a \
+             substitute for one"
+        );
+        assert_eq!(
+            rows_in_the_slot(false),
+            0,
+            "and the empty slot is the defect, said as the difference one \
+             `Option` makes: this is what the reader was looking at"
+        );
+    }
+
+    /// **RED GATE ③ (缺陷 #189) — out of the band, the stand-in stays where it
+    /// is.**
+    ///
+    /// The other half of the ruling: the auto-scroll may only run while the hand
+    /// is asking for it. A guest that lengthened the scroller's range could have
+    /// bought gate ① at the price of a column that creeps under a hand resting
+    /// in the middle of it, and the slot the release lands in would then be a
+    /// different one every frame.
+    ///
+    /// Both halves are asserted over sixty frames rather than one, because
+    /// "creeps" is exactly the failure a single frame cannot see.
+    ///
+    /// Mutation: let `autoscroll_speed` answer anything but `0.0` between the
+    /// bands and the scroll assertion goes; solve the insertion against a
+    /// geometry that counts the guest in `cards` and the slot walks.
+    #[test]
+    fn a_hand_out_of_the_band_leaves_the_stand_in_exactly_where_it_stands() {
+        let start = hosting_column(0.0, 1).max_scroll / 2.0;
+        let opening = hosting_column(start, 1);
+        let opening_run = focus_rail_run(&opening);
+        let hand = column_hand(&opening, (opening.viewport[0] + opening.viewport[1]) / 2.0);
+        let first = insert_index_at(&opening_run.mids(), opening_run.pos(hand.0, hand.1));
+        let mut scroll = start;
+        for frame in 0..60 {
+            let column = hosting_column(scroll, 1);
+            let run = focus_rail_run(&column);
+            let step = autoscroll_step(
+                &run,
+                scroll,
+                hand,
+                1.0,
+                crate::Motion::Full,
+                AUTOSCROLL_FIXTURE_FRAME,
+            );
+            assert!(
+                step.is_none(),
+                "frame {frame}: a hand in the middle of the list is not asking \
+                 for anything"
+            );
+            assert_eq!(
+                insert_index_at(&run.mids(), run.pos(hand.0, hand.1)),
+                first,
+                "frame {frame}: and the slot it is offered is the one it was \
+                 offered on the first"
+            );
+            scroll = step.unwrap_or(scroll);
+        }
+        assert_eq!(scroll, start, "the list is where the hand left it");
     }
 
     /// **A card in hand is drawn where the drag put it, and over what it passes**
