@@ -33430,6 +33430,19 @@ impl Runtime<'_> {
             .iter()
             .map(|(seat, title)| (*seat, title.as_str()))
             .collect();
+        // **The pane in the hand, as the one-leaf tree the card it is about to
+        // become would hold** (缺陷 #189). Owned here, above the list it is
+        // borrowed into, because a stand-in is a picture of a tab that does not
+        // exist yet and so there is no tree in this window to point at: the
+        // subtree is cloned out of the tab the pane is still filed under —
+        // exactly as [`Runtime::publish_to_broker`] clones it for the other
+        // window — and a card of one seat is what a torn-out pane becomes.
+        let stand_in_pane: Option<(LeafId, bt_layout::LayoutNode)> =
+            self.stand_in_pane().and_then(|leaf| {
+                self.tab_state(leaf.tab)
+                    .and_then(|tab| tab.seats.tree().find_seat(leaf.seat).cloned())
+                    .map(|seat| (leaf, bt_layout::LayoutNode::seat(seat)))
+            });
         // One slot per tab, in the strip's order, borrowed off the budget that
         // just ran (§7.1.6b′ F2). A tab with no entry is a card the budget did
         // not project — off screen, or in a window where the mode is off — and
@@ -33454,11 +33467,32 @@ impl Runtime<'_> {
         // the stand-in itself a picture of a tab that is not the one it is
         // standing in for.
         //
-        // `None` and not a projection of the pane being torn out: what the
-        // stand-in draws is the *slot*, in the accent wash the landing wears,
-        // and the pane's own picture is the ghost under the pointer.
+        // **And it is the pane's own picture that goes in it** (缺陷 #189, user
+        // ruling). What stood here was `None` — "what the stand-in draws is the
+        // *slot*, and the pane's own picture is the ghost under the pointer" —
+        // and the ghost is a *label*: a mark and a name riding the cursor, which
+        // is the same two things the card's own head is already saying. So the
+        // slot drew a body of bare `--termbg` on a panel of nearly that value,
+        // and the user's report is the consequence — 「看不到即将落座的那张替身
+        // 卡」. Every other card in this column is its picture; the one the hand
+        // is aiming at may not be the exception.
+        //
+        // The projection is the seat's own, out of the cache the pane's home
+        // card is drawn from, so the two are one reading of one shell. A
+        // visitor's stand-in stays `None`: this window has never drawn that
+        // pane, and inventing something for it is the one thing worse than a
+        // blank.
         if let Some(slot) = strip_preview {
-            focus_thumbnails.insert(slot.min(focus_thumbnails.len()), None);
+            let guest = stand_in_pane.as_ref().and_then(|(leaf, tree)| {
+                Some(seats::FocusThumbnail {
+                    tree,
+                    // The card is a tab of exactly this one pane, and in
+                    // that tab this pane is the one holding the keyboard.
+                    focused: leaf.seat,
+                    seats: self.window.focus_thumbs.seats(leaf.tab)?,
+                })
+            });
+            focus_thumbnails.insert(slot.min(focus_thumbnails.len()), guest);
         }
         let chrome = seats::build_chrome_for_tabs(
             &self.seats,
@@ -37963,6 +37997,68 @@ impl Runtime<'_> {
                 ..seats::TabContent::default()
             },
         ))
+    }
+
+    /// **The pane whose picture the stand-in wears** (缺陷 #189) — the local
+    /// half of [`Runtime::strip_stand_in`], as the leaf rather than as a face.
+    ///
+    /// The stand-in was a *blank* card until this existed, and on a card column
+    /// that is very nearly no card at all: the body is `--termbg` on a panel of
+    /// almost the same value, so what the reader saw where their pane was about
+    /// to land was an accent hairline around nothing. The head has said the
+    /// right name since K124 and it was never enough — the whole of a card in
+    /// this mode is its picture, and every other card in the column was showing
+    /// one.
+    ///
+    /// **The picture is the one the column already has** (user ruling
+    /// 2026-08-29): the seat's own projection, out of the very cache the pane's
+    /// home card is drawn from, so the stand-in and the stage cannot be two
+    /// readings of one shell. Nothing is projected a second time — see
+    /// [`Self::refresh_focus_thumbnails`] for the one thing that *is* arranged,
+    /// which is that the home tab goes on being projected while its card is
+    /// scrolled out from under the hand.
+    ///
+    /// `None` for a visitor's stand-in and that is the honest answer, not a gap:
+    /// the pane belongs to another window's process, this window has never drawn
+    /// it, and what travels on the broker is a label ([`GhostFace`]) and a tree.
+    fn stand_in_pane(&self) -> Option<LeafId> {
+        // The same door, read in the same order [`Runtime::strip_stand_in`]
+        // reads it: a visitor's slot is not this window's pane's.
+        if self.window.foreign.is_some() {
+            return None;
+        }
+        let drag = self.window.drag.as_ref()?;
+        let DropLanding::StripExtract { .. } = drag.landing? else {
+            return None;
+        };
+        let DragSource::Pane(leaf) = drag.source else {
+            return None;
+        };
+        // Through the pane's **own** tab, by id, for `strip_stand_in`'s reason:
+        // the spring may have moved the stage, and the seat this card is a
+        // picture of is a fact about the tree it is still filed under.
+        self.tab_state(leaf.tab)?
+            .seats
+            .tree()
+            .find_seat(leaf.seat)?;
+        Some(leaf)
+    }
+
+    /// **How many slots this window's tab list is holding for something that is
+    /// not a tab** (缺陷 #189) — nought or one, and one exactly while
+    /// [`Runtime::strip_stand_in`] is dressing a guest.
+    ///
+    /// Read off that function rather than off the drag, and that is the whole
+    /// reason it exists: the stand-in has four ways not to be there — no drag
+    /// and no visitor, a landing that is not [`DropLanding::StripExtract`], a
+    /// source that is not a pane, a tab or a seat that has gone under the
+    /// gesture — and a second reading of any of them is a scroller that reserves
+    /// room for a card nobody drew, or draws a card the scroller cannot reach.
+    /// The dressing costs one short string on the frames a drag is actually in
+    /// flight and nothing at all on every other frame, because `strip_stand_in`
+    /// returns at its first two lines when no hand is over this window.
+    fn strip_guests(&self) -> usize {
+        usize::from(self.strip_stand_in().is_some())
     }
 
     /// Bring the dock drawing up to date with the pointer, the tree and the
@@ -73412,6 +73508,7 @@ impl Runtime<'_> {
                 height,
                 scale,
                 &trailers,
+                self.strip_guests(),
                 self.window.rail_scroll,
                 rail,
                 position.x,
@@ -75851,6 +75948,29 @@ impl Runtime<'_> {
         // grave and the highlight it was drawing in some other window is taken
         // down by that window's next turn — which is this one.
         self.app.drag_broker = None;
+        // **缺陷 #189 — the room the column was holding goes back, and the list
+        // comes back with it.**
+        //
+        // A card column reserves a slot's worth of scroll for the stand-in
+        // ([`Self::strip_guests`]), so a hand that ran the list to its end while
+        // a pane was in the air left `rail_scroll` one card-pitch past where a
+        // column with no guest can go. Where the drop *made* that card the two
+        // are already equal and this changes nothing — the list really is a card
+        // longer. Where it did not — the pane went into a tab, or the gesture
+        // was abandoned — the offset would outlive its reason and the column
+        // would stand with a card-tall blank under its last card until somebody
+        // turned the wheel.
+        //
+        // Asked of the geometry rather than of the drag, and asked *here*, which
+        // is the one place every ending passes through: the answer is "how far
+        // can this column go now", and now is after the drop has been committed
+        // and the drag has been taken down.
+        if let Some(max_scroll) = self
+            .focus_rail_geometry_now(Instant::now())
+            .map(|column| column.max_scroll)
+        {
+            self.window.rail_scroll = self.window.rail_scroll.min(max_scroll);
+        }
         // J117 in reverse: the pointer stops being pinned the instant the hand
         // is empty, and takes back the shape of whatever it is now over.
         self.apply_pointer_cursor();
@@ -78137,6 +78257,12 @@ impl Runtime<'_> {
 
     /// The focus column's live geometry — [`Self::rail_geometry_now`]'s opposite
     /// number, and `None` in exactly the case that one is `Some`.
+    ///
+    /// **Solved for the list that is on screen and indexed by the tabs that are
+    /// in it** (缺陷 #189) — see [`seats::focus_rail_geometry`]'s own note for
+    /// why those are two different counts while a pane is in the air, and
+    /// [`Self::strip_guests`] for the one door both this and the hit test read
+    /// the guest off.
     fn focus_rail_geometry_now(&self, now: Instant) -> Option<seats::FocusRailGeometry> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (_, height) = self.window.renderer.presentation_geometry().swapchain_size;
@@ -78144,6 +78270,7 @@ impl Runtime<'_> {
             height as f32,
             scale,
             self.window.tabs.len(),
+            self.strip_guests(),
             self.window.rail_scroll,
             self.sampled_rail(now),
         )
@@ -78216,13 +78343,25 @@ impl Runtime<'_> {
         let mut wanted_pictures: Vec<web_thumb::PageDemand> = Vec::new();
         let pages = &self.window.web;
         let page_pictures = &self.window.web_thumbs;
+        // **And the tab holding the pane that is in the air** (缺陷 #189). Its
+        // seat is being drawn twice while the gesture lasts — once on its own
+        // card and once as the stand-in ([`Self::stand_in_pane`]) — and the
+        // second of those is somewhere else in the column entirely, so the
+        // visibility gate above would drop the projection the moment the
+        // auto-scroll carried the home card past the clip and leave the reader
+        // watching the blank card this defect is about. It is one tab, for the
+        // length of one gesture, and the throttle is the same one every other
+        // card pays.
+        let in_hand = self.stand_in_pane().map(|leaf| leaf.tab);
         for (index, card) in geometry.cards.iter().enumerate() {
-            if card.body[3] <= list_top || card.body[1] >= list_bottom {
-                continue;
-            }
             let Some(tab) = self.window.tabs.get(index) else {
                 continue;
             };
+            let on_the_glass =
+                in_hand == Some(tab.id) || (card.body[3] > list_top && card.body[1] < list_bottom);
+            if !on_the_glass {
+                continue;
+            }
             visible.insert(tab.id);
             // The mini boxes are solved here rather than inside the budget
             // because they are *geometry*, and geometry is `seats`'s: what comes
@@ -85092,6 +85231,101 @@ mod focus_mode_door_tests {
         assert!(
             gate < call,
             "a window with no card column would arm a read before returning"
+        );
+    }
+
+    /// **The column asks one question about the guest, and every reading of it
+    /// comes back to that one answer** (缺陷 #189).
+    ///
+    /// K124's stand-in is a card the column draws that is not a tab, and the
+    /// defect the user reported was two readings of it disagreeing: the paint
+    /// was handed a list with the guest already in it while the *scroller* was
+    /// solved for the tabs alone, so the column ran out of travel a whole card
+    /// above the thing the hand was aiming at. There are now three places that
+    /// have to know — the geometry the drag is surveyed against, the hit test,
+    /// and the dressing itself — and this pin is that they read one door.
+    ///
+    /// Read as text for this module's standing reason: a fourth reading added
+    /// later would be one more expression and nothing about it would fail.
+    ///
+    /// MUTATION: count the guest off the drag at either call site — `drag`,
+    /// `landing`, a `matches!` on [`DropLanding::StripExtract`] — and the count
+    /// stops agreeing with `strip_stand_in`'s four refusals, which is a
+    /// scroll range reserved for a card nobody drew.
+    #[test]
+    fn the_guests_the_column_holds_room_for_are_counted_at_one_door() {
+        let needle = ["self", ".", "strip_guests", "("].concat();
+        let readers: Vec<&str> = SOURCE
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(needle.as_str()))
+            .collect();
+        assert_eq!(
+            readers.len(),
+            2,
+            "the geometry the drag is surveyed against and the hit test, and \
+             nothing else, ask how many slots are held: {readers:?}"
+        );
+        // And that door is the dressing's own answer rather than a second
+        // reading of the drag — which is what makes the room reserved and the
+        // card drawn the same card.
+        let counter = body("    fn strip_guests(");
+        assert!(
+            counter.contains("strip_stand_in"),
+            "the count is `is there a stand-in`, asked of the function that \
+             dresses one"
+        );
+    }
+
+    /// **The stand-in's slot in the thumbnail list is the pane in the hand, not
+    /// a hole** (缺陷 #189, user ruling).
+    ///
+    /// The card column's insertion mark is an entry *dressed as the tab that
+    /// would land there*, and on this surface a card is its picture: a slot
+    /// handed `None` drew `--termbg` on a panel of nearly that value, which is
+    /// the blank the user could not find. `seats` proves the painter draws the
+    /// picture when it is handed one; this proves the window hands it one, and
+    /// that the two parallel lists get their guest at the same index.
+    ///
+    /// MUTATION: put the literal `None` back into the insert and the first
+    /// assertion names it; insert into the thumbnail list without inserting into
+    /// the tab list (or at a different index) and the second goes — which is the
+    /// off-by-one that would hand every card below the slot its neighbour's
+    /// tree.
+    #[test]
+    fn the_stand_ins_thumbnail_slot_carries_the_pane_rather_than_a_hole() {
+        let pass = body("    fn refresh_chrome(");
+        let insert = ["focus_thumbnails", ".insert("].concat();
+        let at = pass
+            .find(insert.as_str())
+            .expect("the guest is inserted into the thumbnail list beside the tab list");
+        let line = &pass[at..pass[at..].find('\n').map_or(pass.len(), |end| at + end)];
+        assert!(
+            !line.contains("None"),
+            "the stand-in's slot is handed nothing, which is the blank card the \
+             report is about: {line}"
+        );
+        // Both lists, at one slot, from one `if let`: the tab list's insert and
+        // the thumbnail list's stand under the same binding of `strip_preview`.
+        let guard = ["if let Some(slot) = ", "strip_preview"].concat();
+        let opened = pass
+            .find(guard.as_str())
+            .expect("the guest's slot is bound once and spent on both lists");
+        let tabs_insert = pass
+            .find("tabs.insert(slot, stand_in)")
+            .expect("the tab list takes the guest at that slot");
+        assert!(
+            tabs_insert < opened && opened < at,
+            "the two parallel lists take the guest at one index, or every card \
+             below the slot is drawn with its neighbour's tree"
+        );
+        // And the picture is the projection the column already holds rather
+        // than a second one minted for the card in the air.
+        let dressing = body("    fn stand_in_pane(");
+        assert!(
+            dressing.contains("StripExtract") && dressing.contains("DragSource::Pane"),
+            "the pane whose picture the stand-in wears is the one the tear-out \
+             is aiming to place"
         );
     }
 
@@ -105204,7 +105438,7 @@ mod tests {
         };
         let strip_state =
             rail_state_for(seats::TabLayoutMode::Horizontal, seats::RailMode::Expanded);
-        let column = seats::focus_rail_geometry(600.0, scale, trailers.len(), 0.0, focus_state)
+        let column = seats::focus_rail_geometry(600.0, scale, trailers.len(), 0, 0.0, focus_state)
             .expect("a focus-mode window draws its card column");
         let rail = seats::rail_geometry(600.0, scale, &trailers, 0, 0.0, rail_state)
             .expect("an expanded rail holding one tab is on screen");
@@ -109255,6 +109489,7 @@ mod tests {
             618.0,
             1.0,
             tabs,
+            0,
             0.0,
             seats::RailState {
                 layout: seats::TabLayoutMode::Vertical,
