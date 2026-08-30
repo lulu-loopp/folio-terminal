@@ -5070,8 +5070,11 @@ impl SettingsPanel {
         // which is how the picker beside it came to have none, and how
         // `General ▸ Language` came to stand open under a press on the dialog's
         // own background. Both popups leave by one door now
-        // ([`popup_press`]), asked by the runtime *before* this function: a
-        // press that misses the popup that is up never reaches here at all.
+        // ([`popup_press`]), asked by the runtime *before* this function. A
+        // press that misses the popup and lands on **ground** never reaches
+        // here; one that lands on a **control** does, with the popup already
+        // gone (user ruling 2026-08-30), because that press is still the press
+        // on that control it always was.
         match target {
             SettingsTarget::Close
             | SettingsTarget::Combo(_)
@@ -6445,8 +6448,9 @@ pub enum SettingsTarget {
 /// neither of these two is on that list: a press inside this dialog never
 /// reaches `mouse_input`'s popup arms, because `settings_mouse_input` answers
 /// first and answers everything. What the two lists share is the **rule** — a
-/// press outside the rectangle takes the popup down, and that press goes no
-/// further — and this enum is what lets the rule be written once for both of
+/// press outside the rectangle takes the popup down, and then goes on to
+/// whatever it landed on ([`PopupPress`], user ruling 2026-08-30) — and this
+/// enum is what lets the rule be written once for both of
 /// them instead of once per opener. Written once per opener is what it was: the
 /// `⋯` list had a click-away of its own inside [`SettingsPanel::press`] and the
 /// picker had none at all, so a reader who opened `General ▸ Language` and
@@ -6547,23 +6551,102 @@ pub fn target_raises_a_popup(target: SettingsTarget) -> bool {
     )
 }
 
+/// **Whether this target is the dialog's own ground rather than a control on
+/// it** (user ruling 2026-08-30).
+///
+/// Two surfaces, and they are the two a press can land on without asking for
+/// anything: the panel's own blank between the rows, and the scrim outside the
+/// panel. A press there while a popup is up has already said everything it came
+/// to say — "put that away" — so it ends there, and the scrim's own verb does
+/// not run. Everything else on this page is a **control**, and a control the
+/// hand chose is a control the hand gets: the `×` closes, a rail word turns the
+/// page, a slider moves.
+///
+/// Exhaustive on [`SettingsTarget`] for [`target_popup`]'s reason one door over:
+/// a target added later does not compile until it has said which of the two it
+/// is, and answering "ground" is answering that a press on it is worth eating.
+#[must_use]
+pub fn target_is_ground(target: SettingsTarget) -> bool {
+    match target {
+        // The scrim does not close the dialog on this press, which is the one
+        // place the ruling costs a verb: one layer per gesture, exactly as the
+        // first `Esc` takes the list and the second takes the dialog.
+        SettingsTarget::Scrim | SettingsTarget::Panel => true,
+        // Every control the page, the rail, the header and the editor sub-page
+        // hold — each of them a thing the press asked for by name.
+        SettingsTarget::Close
+        | SettingsTarget::Nav(_)
+        | SettingsTarget::Combo(_)
+        | SettingsTarget::Slider(_)
+        | SettingsTarget::Menu(_)
+        | SettingsTarget::Choice(..)
+        | SettingsTarget::ChoiceRefused(..)
+        | SettingsTarget::MenuAction(_)
+        | SettingsTarget::MenuItemEdit(..)
+        | SettingsTarget::MenuItemDelete(..)
+        | SettingsTarget::Record(_)
+        | SettingsTarget::RestoreRow(_)
+        | SettingsTarget::RestoreAll
+        | SettingsTarget::ProfileUp(_)
+        | SettingsTarget::ProfileDown(_)
+        | SettingsTarget::ProfileRow(_)
+        | SettingsTarget::ProfileEdit(_)
+        | SettingsTarget::ProfileMore(_)
+        | SettingsTarget::ProfileMoreItem(..)
+        | SettingsTarget::ProfileNew
+        | SettingsTarget::EditorBack
+        | SettingsTarget::Field(_)
+        | SettingsTarget::EditorBrowse
+        | SettingsTarget::EnvName(_)
+        | SettingsTarget::EnvValue(_)
+        | SettingsTarget::EnvGhost(_)
+        | SettingsTarget::EnvRemove(_)
+        | SettingsTarget::EnvAdd
+        | SettingsTarget::EditorRestore
+        | SettingsTarget::EditorDelete
+        | SettingsTarget::Advanced(_)
+        | SettingsTarget::ResetAdvanced(_) => false,
+    }
+}
+
 /// **What a press on this dialog is, given the popup standing over it.**
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PopupPress {
     /// Nothing is up, or the press landed inside the popup or on a button that
     /// raises one: it goes on being the press it always was.
     Through,
-    /// The press landed outside: **this popup goes away and the press goes no
-    /// further** (user ruling 2026-08-29).
-    Dismiss(DialogPopup),
+    /// The press landed outside the popup and **on a control**: the popup goes
+    /// away *and the press still lands* on what it was aimed at (user ruling
+    /// 2026-08-30, overturning the 08-29 "the press is eaten").
+    ///
+    /// One gesture takes one layer down and does one thing, because those are
+    /// the same one thing: a hand that goes for the `×` with a list open is
+    /// closing the dialog, and asking it to say so twice is the report this
+    /// ruling came from.
+    DismissAndLand(DialogPopup),
+    /// The press landed outside the popup and on the dialog's **ground** — its
+    /// own blank, or the scrim: the popup goes away and that is the whole of it
+    /// ([`target_is_ground`]).
+    DismissOnly(DialogPopup),
 }
 
 /// The one door both of this dialog's popups leave by when a press misses them.
+///
+/// **Three answers and not two** (user ruling 2026-08-30). The 08-29 ruling made
+/// every press outside a popup a press that was eaten, and the machine it was
+/// tried on said what that costs: with `General ▸ Language` open, the `×` took
+/// two presses to close the dialog. So "outside" splits by what is *under* the
+/// press — ground, or a control — and only ground ends the gesture. The
+/// opener's exception is unchanged, and so is the one-press switch it buys.
 #[must_use]
 pub fn popup_press(popup: Option<DialogPopup>, target: SettingsTarget) -> PopupPress {
     match popup {
         Some(popup) if target_popup(target) != Some(popup) && !target_raises_a_popup(target) => {
-            PopupPress::Dismiss(popup)
+            if target_is_ground(target) {
+                PopupPress::DismissOnly(popup)
+            } else {
+                PopupPress::DismissAndLand(popup)
+            }
         }
         _ => PopupPress::Through,
     }
@@ -9740,7 +9823,12 @@ struct MenuGeometry {
     /// The hairlines between the runs, in the order they were asked for.
     separators: Vec<[f32; 4]>,
     frame: [f32; 4],
-    /// The frame less its border and its 4px padding — the scrollport.
+    /// The frame less its border and its 4px padding — the box the items are
+    /// laid in and cut to.
+    ///
+    /// **Not the box the bar rides**, which is the padding box: a gutter comes
+    /// out between the border and the content in every engine that draws one
+    /// (user ruling 2026-08-30).
     body: [f32; 4],
     items: Vec<[f32; 4]>,
     bar: Option<crate::preview::ScrollBar>,
@@ -9882,12 +9970,23 @@ fn menu_layout(
         item_top += item_height;
     }
     // The house's one scrollbar (`preview::scroll_bar`), not a second one: a
-    // 2px rule against the body's right edge, a thumb that is the visible share
-    // floored at something a hand can take, and `scroll_dragged_to` reading it
-    // backwards for the drag. `None` when the whole list fits, which is also how
-    // the wheel and the drag are told there is nothing to do.
+    // 2px rule, a thumb that is the visible share floored at something a hand
+    // can take, and `scroll_dragged_to` reading it backwards for the drag.
+    // `None` when the whole list fits, which is also how the wheel and the drag
+    // are told there is nothing to do.
+    //
+    // **It rides the list's inner edge, not the content box's** (user report
+    // #197 and ruling 2026-08-30). Built on `body` it stood `MENU_PADDING`
+    // inside the frame's hairline, which is the "floating in the middle of the
+    // list, a way off the right" the report photographed. Every engine draws a
+    // scrollbar in the *padding* box — the gutter comes out between the border
+    // and the content, never out of the content — and this popup's own
+    // stylesheet is one of them (`.combo-menu { padding: 4px; overflow-y:
+    // auto }`). So the box handed over is `body`'s own span **down** the axis,
+    // which leaves the page, the thumb's share and every number of the drag
+    // exactly as they were, with the popup's inner edge **across** it.
     let bar = crate::preview::scroll_bar(
-        body,
+        [body[0], body[1], frame[2] - border, body[3]],
         crate::preview::ScrollAxis::Vertical,
         menu_scroll,
         list,
@@ -11067,8 +11166,8 @@ pub fn build(
     }
 }
 
-/// **The bar down an open picker's body** when the cap is hiding items
-/// (§7.1.6c-5).
+/// **The bar down an open picker's inner edge** when the cap is hiding items
+/// (§7.1.6c-5, moved off the content box by the ruling of 2026-08-30).
 ///
 /// The house's one scrollbar, wearing the house's own three inks — the same
 /// pair of quads `main.rs`'s `scroll_bar_layer` paints, because it is the same
@@ -14057,6 +14156,93 @@ mod tests {
         assert!(
             short.menu_bar().is_none(),
             "a list that fits has nothing to say about scrolling"
+        );
+    }
+
+    /// RED GATE (user report #197 and ruling, 2026-08-30) — **a picker's bar
+    /// rides the list's inner edge.**
+    ///
+    /// The report is a photograph: the 2px rule hung *inside* the list with a
+    /// visible strip of popup to the right of it. It was built on the content
+    /// box, and a content box is the frame less its hairline **and** its four
+    /// pixels of padding — so the bar stopped five short of the edge it is
+    /// supposed to lie against. Every engine cuts a scrollbar's gutter out of
+    /// the *padding* box instead, this popup's own stylesheet included
+    /// (`.combo-menu { padding: 4px; overflow-y: auto }`).
+    ///
+    /// **Only the cross-axis moves.** The bar is still `preview::scroll_bar`'s,
+    /// wearing the house's own thickness, its floored thumb and its linear drag
+    /// — so this gate measures the vertical numbers against a bar built the old
+    /// way and requires them to be identical to the pixel. A fix that had
+    /// re-derived the geometry would move something down the axis too.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① hand `body` back to `scroll_bar` — the first assertion, which is the
+    ///    report, and the third, which names the gap as `MENU_PADDING`;
+    /// ② inset the new edge by a margin of its own — the first;
+    /// ③ re-derive the bar instead of moving its box, so the thumb's length or
+    ///    its travel changes — the fourth.
+    #[test]
+    fn a_pickers_bar_rides_the_lists_inner_edge() {
+        let long = SettingsRow::FontSize;
+        let placed = shaped(SettingsCategory::Appearance, every_group_open(), Some(long));
+        let frame = placed.menu.expect("the picker is open");
+        let body = placed.menu_body().expect("an open picker has a body");
+        let bar = placed.menu_bar().expect("a list longer than its body wears one");
+        // These helpers lay the dialog out at scale 1, which is what lets the
+        // logical constants below be read as pixels.
+        let border = FLOAT_WINDOW_BORDER_LOGICAL_PX.max(1.0);
+
+        // ① the rule lies against the popup's inner edge, with nothing between.
+        assert!(
+            (bar.track[2] - (frame[2] - border)).abs() < 0.01,
+            "the bar's right edge {} is not the list's inner edge {} \
+             (frame {frame:?})",
+            bar.track[2],
+            frame[2] - border,
+        );
+        // ② and the thumb lies on the track, which is what makes the picture and
+        // the target one rectangle.
+        assert!(
+            (bar.thumb[2] - bar.track[2]).abs() < 0.01,
+            "the thumb {:?} does not share the track's edge {:?}",
+            bar.thumb,
+            bar.track,
+        );
+        // ③ the strip the report photographed was exactly the content box's
+        // padding, and it is gone.
+        assert!(
+            (bar.track[2] - body[2] - MENU_PADDING_LOGICAL_PX).abs() < 0.01,
+            "the bar moved by {} rather than by the padding it was inset by",
+            bar.track[2] - body[2],
+        );
+        // ④ nothing down the axis moved: the same page, the same floored share,
+        // the same travel a drag reads backwards.
+        let old = crate::preview::scroll_bar(
+            body,
+            crate::preview::ScrollAxis::Vertical,
+            0.0,
+            placed.menu_max_scroll() + (body[3] - body[1]),
+            1.0,
+        )
+        .expect("the same list overflows the same body");
+        assert_eq!(
+            (bar.track[1], bar.track[3], bar.travel, bar.overflow),
+            (old.track[1], old.track[3], old.travel, old.overflow),
+            "moving the bar across its surface changed something down it"
+        );
+        assert!(
+            (bar.thumb[3] - bar.thumb[1] - (old.thumb[3] - old.thumb[1])).abs() < 0.01,
+            "the thumb's length changed with its lane"
+        );
+        // ⑤ and the target went with it — `grab` is the bar's own, never a
+        // second offset written by hand.
+        assert!(
+            bar.grab[2] > bar.track[2] && bar.grab[0] < bar.thumb[0],
+            "the hand's tolerance still surrounds the thumb it moved with: \
+             {:?} around {:?}",
+            bar.grab,
+            bar.thumb,
         );
     }
 
@@ -21122,20 +21308,27 @@ mod tests {
         .expect("this window can host the dialog")
     }
 
-    /// RED GATE (user report and ruling, 2026-08-29) — **a press outside an open
-    /// dropdown closes it and goes no further.**
+    /// RED GATE (user reports and rulings, 2026-08-29 and 2026-08-30) — **a
+    /// press outside an open dropdown closes it and still lands.**
     ///
-    /// The report: open `General ▸ Language`, click the dialog's own blank
+    /// The first report: open `General ▸ Language`, click the dialog's own blank
     /// background, and the list stays standing. Every other popup in this program
     /// goes away on a press outside it, and this one could only be shut by
-    /// pressing its own button again or by picking something.
+    /// pressing its own button again or by picking something. The ruling was one
+    /// rule for all of them — outside the rectangle takes it down — plus a second
+    /// half: that press is eaten.
     ///
-    /// The ruling is one rule for all of them: outside the rectangle takes it
-    /// down, **and that press is eaten** — it does not go on to reach the control
-    /// it landed on. So the second half of this gate presses things that are not
-    /// blank at all: the `×`, which would otherwise close the whole dialog, and a
-    /// word of the rail, which would otherwise turn the page. One layer per
-    /// gesture, which is what the first `Esc` already does.
+    /// **The second half is overturned (2026-08-30).** On the machine it cost
+    /// exactly what eating a press costs: with a list open, the `×` took two
+    /// presses to close the dialog, and the reader had spent the first one
+    /// aiming. So the press goes on to what it landed on: the `×` closes, a rail
+    /// word turns the page, a slider moves. Taking a layer down and doing the
+    /// thing the hand asked for are one gesture, because the hand made one.
+    ///
+    /// **What is still eaten is a press on ground** ([`target_is_ground`]) — the
+    /// panel's own blank, which has no verb anyway, and the scrim, which does:
+    /// pressing the scrim with a list up takes the list and leaves the dialog,
+    /// one layer per gesture, exactly as the first `Esc` does.
     ///
     /// **The exception is an opener**, which every menu in this window already
     /// makes for its own `⌄`: a press on a picker button is not outside, so a
@@ -21143,15 +21336,18 @@ mod tests {
     /// one-press switch a second right press makes of a context menu.
     ///
     /// MUTATIONS that must turn it red:
-    /// ① `popup_press` answers `Through` for the panel — the report itself;
-    /// ② it answers `Through` for `Close` or for a rail word (the press leaks to
-    ///    the control under it, closing the dialog or turning the page);
-    /// ③ it answers `Dismiss` for a combo button (the switch becomes two
-    ///    presses, and a picker's own button can no longer toggle it shut);
-    /// ④ `target_popup` stops naming a picker item as the picker's, which makes
+    /// ① `popup_press` answers `Through` for the panel — the 08-29 report;
+    /// ② it answers `DismissOnly` for `Close`, a rail word or a slider — the
+    ///    08-30 report, the `×` that needs pressing twice;
+    /// ③ it answers `DismissAndLand` for the scrim, so one press takes the list
+    ///    *and* the dialog;
+    /// ④ it answers `DismissAndLand`/`DismissOnly` for a combo button (the
+    ///    switch becomes two presses, and a picker's own button can no longer
+    ///    toggle it shut);
+    /// ⑤ `target_popup` stops naming a picker item as the picker's, which makes
     ///    choosing an option dismiss the list instead of picking from it.
     #[test]
-    fn a_press_outside_an_open_dropdown_closes_it_and_goes_no_further() {
+    fn a_press_outside_an_open_dropdown_closes_it_and_still_lands() {
         let layout = language_open();
         let values = values();
         let open = DialogPopup::Choice(SettingsRow::Language);
@@ -21179,11 +21375,20 @@ mod tests {
         );
         assert_eq!(
             popup_press(up, SettingsTarget::Panel),
-            PopupPress::Dismiss(open),
+            PopupPress::DismissOnly(open),
             "and a press there takes the list down"
         );
 
-        // ③ and a press on a live control is swallowed rather than run.
+        // ③ the scrim is the dialog's other ground: it takes the list and
+        // leaves the dialog, which is the one verb this ruling still eats.
+        assert_eq!(
+            popup_press(up, SettingsTarget::Scrim),
+            PopupPress::DismissOnly(open),
+            "a press on the scrim takes one layer, not two"
+        );
+
+        // ④ and a press on a live control takes the list down AND runs
+        // (user ruling 2026-08-30) — the `×` that used to need two presses.
         let (cx, cy) = centre(layout.close);
         assert_eq!(
             hit(&layout, &values, cx, cy),
@@ -21192,18 +21397,23 @@ mod tests {
         );
         for target in [
             SettingsTarget::Close,
-            SettingsTarget::Scrim,
             SettingsTarget::Nav(SettingsCategory::Shortcuts),
             SettingsTarget::Slider(SettingsRow::Acrylic),
+            SettingsTarget::ProfileRow(0),
         ] {
+            assert!(
+                !target_is_ground(target),
+                "{target:?} is a control the hand aimed at, not the dialog's ground"
+            );
             assert_eq!(
                 popup_press(up, target),
-                PopupPress::Dismiss(open),
-                "{target:?} is outside the open list, so the press ends there"
+                PopupPress::DismissAndLand(open),
+                "{target:?} is outside the open list, so the list goes and the \
+                 press still reaches it"
             );
         }
 
-        // ④ every opener is the exception, so one press switches lists.
+        // ⑤ every opener is the exception, so one press switches lists.
         for target in [
             SettingsTarget::Combo(SettingsRow::Language),
             SettingsTarget::Combo(SettingsRow::Theme),
@@ -21216,7 +21426,7 @@ mod tests {
             );
         }
 
-        // ⑤ and the panel really does put it away, leaving the dialog up.
+        // ⑥ and the panel really does put it away, leaving the dialog up.
         let mut panel = keyboarded_on(SettingsCategory::General);
         panel.toggle_menu(SettingsRow::Language);
         assert_eq!(panel.popup_up(), Some(open));

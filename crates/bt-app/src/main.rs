@@ -40582,36 +40582,46 @@ impl Runtime<'_> {
             return Ok(());
         }
         let target = settings::hit(layout, &self.settings_values(), position.x, position.y);
-        // **A press outside the popper that is up takes it down and goes no
-        // further** (user report and ruling, 2026-08-29) — the window's own menu
+        // **A press outside the popper that is up takes it down, and then goes
+        // on being the press it was** (user report and ruling, 2026-08-30,
+        // overturning 08-29's "and goes no further") — the window's own menu
         // rule, asked here because this dialog is a modal with a dispatch of its
         // own and nothing below `settings_mouse_input` will ever see this press.
         //
-        // **Before everything**, which is what "no further" means: before the
-        // focus moves, before the scrim closes the dialog, before a `Nav` word
-        // turns the page. A press that lands on the `×` while `Language` is open
-        // shuts the list and leaves the dialog standing, exactly as the first
-        // `Esc` does — one layer per gesture, at both doors.
+        // **Before everything**: before the focus moves, before the scrim
+        // answers, before a `Nav` word turns the page. That order is what lets
+        // the list be gone by the time the verb under the press runs — a press
+        // on the `×` with `Language` open closes both, in one press, which is
+        // the report this ruling came from.
+        //
+        // **Ground is the exception, and it is the whole exception**: the
+        // dialog's own blank and the scrim take the list down and stop there, so
+        // pressing the scrim while a list is up leaves the dialog standing —
+        // one layer per gesture, exactly as the first `Esc` does.
         //
         // **The judgement is `settings::popup_press`'s and the geometry is
         // `settings::hit`'s**: the popup was hit-tested before the page one line
         // above, so which target came back already says whether the pointer was
         // inside it. Nothing here measures a rectangle, which is the whole reason
         // this is one question rather than a second copy of the popup's frame.
-        if let settings::PopupPress::Dismiss(popup) =
-            settings::popup_press(self.window.settings.popup_up(), target)
-        {
-            self.window.settings.close_popup(popup);
-            if let Some(position) = self.window.pointer_position {
-                let hover = self.settings_layout().map(|layout| {
-                    settings::hit(&layout, &self.settings_values(), position.x, position.y)
-                });
-                self.window.settings.set_hover(hover);
+        match settings::popup_press(self.window.settings.popup_up(), target) {
+            settings::PopupPress::Through => {}
+            settings::PopupPress::DismissAndLand(popup) => {
+                self.window.settings.close_popup(popup);
             }
-            if self.refresh_chrome() {
-                self.present_chrome_change()?;
+            settings::PopupPress::DismissOnly(popup) => {
+                self.window.settings.close_popup(popup);
+                if let Some(position) = self.window.pointer_position {
+                    let hover = self.settings_layout().map(|layout| {
+                        settings::hit(&layout, &self.settings_values(), position.x, position.y)
+                    });
+                    self.window.settings.set_hover(hover);
+                }
+                if self.refresh_chrome() {
+                    self.present_chrome_change()?;
+                }
+                return Ok(());
             }
-            return Ok(());
         }
         // The focus follows the finger, with the ring off — the pointer half of
         // `:focus-visible`. Stated before the verb below, because closing the
@@ -105803,38 +105813,47 @@ mod tests {
         );
     }
 
-    /// RED GATE (user report and ruling, 2026-08-29) — **a press outside an
-    /// open dropdown closes it and goes no further.**
+    /// RED GATE (user reports and rulings, 2026-08-29 and 2026-08-30) — **a
+    /// press outside an open dropdown closes it and still lands.**
     ///
-    /// The report: open `General ▸ Language`, click the dialog's own blank
+    /// The first report: open `General ▸ Language`, click the dialog's own blank
     /// background, and the list stays standing — while every other popup in this
     /// window goes away on a press outside it. The ruling is one rule for all of
     /// them, and the dialog is where it had to be asked separately: it is a modal
     /// with a dispatch of its own, so a press inside it never reaches
     /// `mouse_input`'s popup arms.
     ///
-    /// **What is asserted is the position of the gate**, because that is what
-    /// "goes no further" is: the question stands between the hit test and every
-    /// verb, and it returns. Judged by `settings::popup_press`, whose own
-    /// answers are pinned beside it in `settings.rs`
-    /// (`a_press_outside_an_open_dropdown_closes_it_and_goes_no_further` there,
-    /// and `a_press_inside_the_dropdown_still_picks` for the reverse).
+    /// The second report is what that first fix cost: with a list open, the `×`
+    /// needed two presses. So the gate no longer ends every press — only the two
+    /// that land on the dialog's ground (`settings::target_is_ground`: the
+    /// panel's blank and the scrim). A press on a control takes the list down
+    /// and then goes on to that control.
+    ///
+    /// **What is asserted is the position of the gate**, because the position is
+    /// what makes "the list is already gone when the verb runs" true: the
+    /// question stands between the hit test and every verb, and its ground arm
+    /// returns. Judged by `settings::popup_press`, whose own answers are pinned
+    /// beside it in `settings.rs`
+    /// (`a_press_outside_an_open_dropdown_closes_it_and_still_lands` there, and
+    /// `a_press_inside_the_dropdown_still_picks` for the reverse).
     ///
     /// Read off the source for `a_right_press_on_a_tab_raises_its_menu_and_leaves_the_active_tab_alone`'s
     /// reason: raising this dialog needs a `Runtime`, and a `Runtime` needs a
     /// GPU device, a swapchain and a live window.
     ///
     /// MUTATIONS that must turn it red:
-    /// ① delete the gate — the first assertion, which is the report itself;
-    /// ② let it fall through instead of returning, so the press goes on to close
-    ///    the dialog or turn the page — the third;
-    /// ③ move it below `SettingsPanel::press` or below the verb match, where the
-    ///    focus has already moved and the scrim has already answered — the
-    ///    fourth and fifth;
-    /// ④ judge it against a rectangle of its own instead of the hit test's
+    /// ① delete the gate — the first assertion, which is the 08-29 report;
+    /// ② drop the `DismissAndLand` arm, or make it return like its neighbour —
+    ///    the third and fourth, which are the 08-30 report;
+    /// ③ let the ground arm fall through instead of returning, so a press on the
+    ///    scrim shuts the dialog under an open list — the fifth;
+    /// ④ move the gate below `SettingsPanel::press` or below the verb match,
+    ///    where the focus has already moved and the scrim has already answered —
+    ///    the sixth and seventh;
+    /// ⑤ judge it against a rectangle of its own instead of the hit test's
     ///    answer — the second, which pins that `hit` is asked first.
     #[test]
-    fn a_press_outside_an_open_dropdown_closes_it_and_goes_no_further() {
+    fn a_press_outside_an_open_dropdown_closes_it_and_still_lands() {
         const SOURCE: &str = include_str!("main.rs");
         let start = SOURCE
             .find("    fn settings_mouse_input(")
@@ -105859,22 +105878,42 @@ mod tests {
             "the gate reads the hit test's answer, which is where the popup's \
              own rectangle was already asked"
         );
-        // ③ and it ends the press.
+        // ③ the popup goes away on both of the outside answers.
         let press = router
             .find("self.window.settings.press(target);")
             .expect("the router moves the focus to what was pressed");
         let arm = &router[gate..press];
-        assert!(
-            arm.contains("self.window.settings.close_popup(popup);"),
-            "the popup goes away: {arm}"
+        let land = arm
+            .find("settings::PopupPress::DismissAndLand(popup)")
+            .expect("a press outside the list that landed on a control has an arm");
+        let ground = arm
+            .find("settings::PopupPress::DismissOnly(popup)")
+            .expect("a press outside the list that landed on ground has an arm");
+        assert_eq!(
+            arm.matches("self.window.settings.close_popup(popup)").count(),
+            2,
+            "both outside answers put the popup away: {arm}"
         );
         assert!(
-            arm.contains("return Ok(());"),
-            "and the press goes no further: {arm}"
+            land < ground,
+            "the arms read in the order the ruling does: land, then the ground \
+             that ends the gesture"
         );
-        // ④ before the focus moves.
+        // ④ and the one that landed on a control does NOT end the press — the
+        // × that used to need pressing twice (user report 2026-08-30).
+        assert!(
+            !arm[land..ground].contains("return Ok(());"),
+            "a press that landed on a control goes on to that control: {arm}"
+        );
+        // ⑤ while the one that landed on ground does, which is what leaves the
+        // dialog standing under a press on its own scrim.
+        assert!(
+            arm[ground..].contains("return Ok(());"),
+            "a press on the dialog's ground is the whole gesture: {arm}"
+        );
+        // ⑥ before the focus moves.
         assert!(gate < press, "the gate stands above `SettingsPanel::press`");
-        // ⑤ and before every verb, the scrim's close included.
+        // ⑦ and before every verb, the scrim's close included.
         let verbs = router
             .find("settings::SettingsTarget::Scrim => self.window.settings.close()")
             .expect("the scrim closes the dialog");
