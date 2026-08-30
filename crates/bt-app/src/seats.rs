@@ -4869,11 +4869,43 @@ fn focus_card_height(scale: f32, body_logical_px: f32) -> f32 {
 /// Returns `None` exactly when focus mode is off, which is the mirror of
 /// [`rail_geometry`]'s own `None`: between them, at most one panel is on screen,
 /// and the caller never has to decide which.
+///
+/// # `guests`, and why a card slot can belong to nobody (缺陷 #189)
+///
+/// K124's stand-in is a card in this column that is **not a tab** — it is the
+/// slot a torn-out pane is about to fill, dressed as the tab it would become
+/// ([`FocusRail::preview`]). The paint gets it for free, because the window
+/// inserts it into the list it hands down and this function is then asked about
+/// a list one entry longer. Every *other* reading of the column was asked about
+/// the tabs alone, and the scroll range is one of them: a column solved for `n`
+/// cards stops scrolling with the last of `n` at the clip's foot, so a stand-in
+/// held at the end of the list stood a whole card-pitch below the viewport and
+/// no amount of auto-scrolling could bring it up. That is the user's report —
+/// *"滚了也看不见替身"*.
+///
+/// So a guest is a slot that **takes room in the flow and gets no rectangle**.
+/// The two halves are the whole of the distinction this column has to make:
+///
+/// * [`Self::cards`] is indexed by *tab*, and everything downstream of
+///   [`focus_rail_run`] reads it that way — `slot_at` names a tab, `mids` places
+///   an insertion between two tabs, [`hit_focus_rail`] answers
+///   [`ChromeTarget::Tab`] by index. A guest in that list would be a phantom
+///   tab, and the insertion it is *previewing* would start moving under the hand
+///   that is holding it still.
+/// * [`Self::max_scroll`], the `+` row's own flow and therefore
+///   [`Self::viewport`] are about **what is drawn**, and what is drawn includes
+///   the guest.
+///
+/// The blank a guest opens at the foot of a fully-scrolled column is not a gap
+/// in the picture: it is exactly where the stand-in is painted, which is what
+/// makes "scroll to the end and the card you are about to make is in front of
+/// you" true by construction rather than by a second rule about visibility.
 #[must_use]
 pub fn focus_rail_geometry(
     height: f32,
     scale: f32,
     tab_count: usize,
+    guests: usize,
     scroll: f32,
     state: RailState,
 ) -> Option<FocusRailGeometry> {
@@ -4967,11 +4999,17 @@ pub fn focus_rail_geometry(
         });
         card_top += card_height + card_gap;
     }
+    // **The guest's own pitch, added to the flow and to nothing else.** One
+    // line, after the loop rather than inside it, because that is the shape of
+    // the fact: a stand-in occupies a slot's worth of the column's length and
+    // owns none of the column's rectangles.
+    card_top += guests as f32 * (card_height + card_gap);
+    let drawn = tab_count + guests;
 
     // `.rail .rail-new { position: sticky; bottom: -10px }`, unchanged — see
     // [`rail_geometry`] for why it is `min(flow, stuck)` and not either alone.
     let row_height = (RAIL_TAB_HEIGHT_LOGICAL_PX * scale).round();
-    let natural_top = if tab_count == 0 {
+    let natural_top = if drawn == 0 {
         card_top + RAIL_NEW_MARGIN_TOP_LOGICAL_PX * scale
     } else {
         // `card_top` carries the trailing card gap the loop left behind it; the
@@ -4995,7 +5033,7 @@ pub fn focus_rail_geometry(
     ];
 
     let list_bottom = (new_top - RAIL_NEW_MARGIN_TOP_LOGICAL_PX * scale - gap).max(list_top);
-    let content_height = if tab_count == 0 {
+    let content_height = if drawn == 0 {
         0.0
     } else {
         (card_top - card_gap) - (list_top - scroll)
@@ -5391,18 +5429,25 @@ pub struct FocusThumbnail<'a> {
 /// Total over its own rectangle for [`hit_rail_chrome`]'s reason: the column is
 /// opaque, so a point inside it that hits nothing is [`ChromeTarget::RailBody`]
 /// rather than a fall-through onto the pane underneath.
+///
+/// `guests` is [`focus_rail_geometry`]'s own, and it is threaded here rather
+/// than defaulted for the reason that function's note gives: a guest moves the
+/// `+` row and therefore the clip this test answers `RailBody` outside of, so a
+/// hit test that did not know about one would answer about a column nobody is
+/// looking at.
 #[must_use]
 pub fn hit_focus_rail(
     height: f32,
     scale: f32,
     tabs: &[TabTrailer],
+    guests: usize,
     scroll: f32,
     state: RailState,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
-    let geometry = focus_rail_geometry(height, scale, tabs.len(), scroll, state)?;
+    let geometry = focus_rail_geometry(height, scale, tabs.len(), guests, scroll, state)?;
     if !contains(geometry.body, x, y) {
         return None;
     }
@@ -12241,7 +12286,14 @@ fn focus_rail_chrome(
     // rail's answer with them: this picker opens beside its button too.
     let (chevron_turn, menu_lit) =
         profile_menu_tell(state.profile_menu_side(), profile_menu_open, chevron_turn);
-    let Some(geometry) = focus_rail_geometry(height, scale, tabs.len(), scroll, state) else {
+    // **No guests here, and the zero is the statement** (缺陷 #189). The window
+    // inserts K124's stand-in into [`FocusRail::tabs`] before handing the list
+    // down — that is what [`FocusRail::preview`] indexes into — so by the time
+    // the paint asks for a geometry the guest is already one of `tabs.len()`.
+    // Counting it twice would draw the column a card longer than the list it is
+    // holding; counting it *nowhere* is what left the scroller short, and that
+    // is the other caller's zero to fix.
+    let Some(geometry) = focus_rail_geometry(height, scale, tabs.len(), 0, scroll, state) else {
         return;
     };
     let ground = palette.title_bar;
@@ -35856,7 +35908,7 @@ mod tests {",
     /// enough for their cards; every test that is genuinely about capacity keeps
     /// [`FIXTURE_HEIGHT`].
     fn focus_of_in(height: f32, state: RailState, tabs: usize) -> FocusRailGeometry {
-        focus_rail_geometry(height, 1.0, tabs, 0.0, state)
+        focus_rail_geometry(height, 1.0, tabs, 0, 0.0, state)
             .expect("focus mode puts a column on screen")
     }
 
@@ -36437,7 +36489,7 @@ mod tests {",
                         ..RailState::default()
                     };
                     let case = format!("{layout:?}/{mode:?}/collapsed={collapsed}/dpi={dpi_milli}");
-                    let column = focus_rail_geometry(H as f32, scale, 3, 0.0, focused)
+                    let column = focus_rail_geometry(H as f32, scale, 3, 0, 0.0, focused)
                         .expect("focus mode puts a column on screen");
                     let stage = device_viewport(W, H, ppm, rail_inset_device_px(focused, ppm));
                     assert!(
@@ -36584,7 +36636,7 @@ mod tests {",
                 "{layout:?}: and the stage gives up exactly what the panel takes"
             );
             for scale in [1.0_f32, 1.25, 1.5, 2.0] {
-                let column = focus_rail_geometry(1_200.0, scale, 3, 0.0, state)
+                let column = focus_rail_geometry(1_200.0, scale, 3, 0, 0.0, state)
                     .expect("focus mode puts a column on screen");
                 assert_eq!(
                     column.body[2] - column.body[0],
@@ -36762,6 +36814,7 @@ mod tests {",
                     618.0,
                     1.0,
                     &trailers,
+                    0,
                     0.0,
                     state,
                     f64::from((rect[0] + rect[2]) / 2.0),
@@ -36829,6 +36882,7 @@ mod tests {",
                     FIXTURE_HEIGHT,
                     1.0,
                     &trailers,
+                    0,
                     0.0,
                     state,
                     f64::from(x),
@@ -36875,7 +36929,7 @@ mod tests {",
     /// equality goes by exactly the term that was dropped.
     #[test]
     fn the_reporters_four_cards_hang_below_the_fold_by_what_the_column_offers() {
-        let column = focus_rail_geometry(1080.0, 1.5, 4, 0.0, focus_rail(TabLayoutMode::Vertical))
+        let column = focus_rail_geometry(1080.0, 1.5, 4, 0, 0.0, focus_rail(TabLayoutMode::Vertical))
             .expect("focus mode puts a column on screen");
         assert!(
             column.max_scroll > 0.0,
@@ -36918,7 +36972,7 @@ mod tests {",
     fn the_offer_does_not_move_as_the_column_scrolls() {
         let state = focus_rail(TabLayoutMode::Vertical);
         let at = |scroll: f32| {
-            focus_rail_geometry(1080.0, 1.5, 4, scroll, state)
+            focus_rail_geometry(1080.0, 1.5, 4, 0, scroll, state)
                 .expect("focus mode puts a column on screen")
                 .max_scroll
         };
@@ -37324,7 +37378,7 @@ mod tests {",
              assertion worth making"
         );
         assert_eq!(
-            hit_focus_rail(618.0, 1.0, &trailers, 0.0, state, x, y),
+            hit_focus_rail(618.0, 1.0, &trailers, 0, 0.0, state, x, y),
             Some(ChromeTarget::Tab(1)),
             "and a press there still chooses the second tab: the target is a fact \
              about the mode, and the card is a picture of it arriving"
@@ -37396,7 +37450,7 @@ mod tests {",
         let (x, y) = centre_of(card.trailing);
 
         assert_eq!(
-            hit_focus_rail(FIXTURE_HEIGHT, 1.0, &trailers, 0.0, state, x, y),
+            hit_focus_rail(FIXTURE_HEIGHT, 1.0, &trailers, 0, 0.0, state, x, y),
             Some(ChromeTarget::TabPin(0)),
             "the pin stands where the `×` would have, so unpinning is where you \
              already are"
@@ -37439,7 +37493,7 @@ mod tests {",
         let card = focus_of(state, 1).cards[0];
         let (x, y) = centre_of(card.trailing);
         assert_eq!(
-            hit_focus_rail(FIXTURE_HEIGHT, 1.0, &trailers, 0.0, state, x, y),
+            hit_focus_rail(FIXTURE_HEIGHT, 1.0, &trailers, 0, 0.0, state, x, y),
             Some(ChromeTarget::TabClose(0)),
             "the `×` keeps the trailing slot on a tab that is not pinned"
         );
@@ -37467,7 +37521,7 @@ mod tests {",
         );
         let (x, y) = centre_of(pin.rect);
         assert_eq!(
-            hit_focus_rail(FIXTURE_HEIGHT, 1.0, &trailers, 0.0, state, x, y),
+            hit_focus_rail(FIXTURE_HEIGHT, 1.0, &trailers, 0, 0.0, state, x, y),
             Some(ChromeTarget::TabPin(0)),
             "and pressing it pins the tab — a mark with no verb behind it is the \
              defect this test is named after"
@@ -37854,10 +37908,17 @@ mod tests {",
     /// fits: this is a test about a list whose end you cannot see, and a fixture
     /// that fitted would be answering a different question.
     fn scrolling_column(scroll: f32) -> FocusRailGeometry {
+        hosting_column(scroll, 0)
+    }
+
+    /// The same column while a pane is in the air over it — twelve tabs and a
+    /// slot held open for the stand-in (缺陷 #189).
+    fn hosting_column(scroll: f32, guests: usize) -> FocusRailGeometry {
         focus_rail_geometry(
             FIXTURE_HEIGHT,
             1.0,
             12,
+            guests,
             scroll,
             focus_rail(TabLayoutMode::Vertical),
         )
@@ -38190,7 +38251,7 @@ mod tests {",
     /// opposite number, in a window of a chosen logical height so that geometry
     /// and paint agree the way [`rail_paint_of_in`] pairs them.
     fn painted_focus_column(height: f32, tabs: usize) -> FocusRailGeometry {
-        focus_rail_geometry(height, 1.0, tabs, 0.0, focus_rail(TabLayoutMode::Vertical))
+        focus_rail_geometry(height, 1.0, tabs, 0, 0.0, focus_rail(TabLayoutMode::Vertical))
             .expect("focus mode puts a column on screen")
     }
 
@@ -38361,7 +38422,7 @@ mod tests {",
                         "{layout:?}/{mode:?}: and no icon rail is drawn beside it"
                     );
                     assert!(
-                        focus_rail_geometry(618.0, 1.0, 3, 0.0, focused).is_some()
+                        focus_rail_geometry(618.0, 1.0, 3, 0, 0.0, focused).is_some()
                             && rail_geometry(618.0, 1.0, &resting(3), 0, 0.0, focused).is_none(),
                         "{layout:?}/{mode:?}: exactly one of the two panels is on screen"
                     );
@@ -38428,7 +38489,7 @@ mod tests {",
     fn a_cards_head_is_where_it_was_before_the_body_grew_under_it() {
         for scale in [1.0_f32, 1.5, 2.0] {
             let state = focus_rail(TabLayoutMode::Vertical);
-            let geometry = focus_rail_geometry(618.0, scale, 3, 0.0, state)
+            let geometry = focus_rail_geometry(618.0, scale, 3, 0, 0.0, state)
                 .expect("focus mode puts a column on screen");
             for card in &geometry.cards {
                 assert_eq!(
@@ -38489,7 +38550,7 @@ mod tests {",
         for rung in bt_render::FOCUS_CARD_HEIGHT_OPTIONS_LOGICAL_PX {
             for scale in [1.0_f32, 1.5, 2.0] {
                 let state = focus_rail_at(TabLayoutMode::Vertical, rung);
-                let geometry = focus_rail_geometry(2_400.0, scale, 3, 0.0, state)
+                let geometry = focus_rail_geometry(2_400.0, scale, 3, 0, 0.0, state)
                     .expect("focus mode puts a column on screen");
                 let head = focus_card_head_height(scale);
                 let border = (FOCUS_CARD_BORDER_LOGICAL_PX * scale).round().max(1.0);
@@ -38528,12 +38589,13 @@ mod tests {",
         // get back exactly the column 2026-08-20 left them.
         for scale in [1.0_f32, 1.5, 2.0] {
             let shipped =
-                focus_rail_geometry(2_400.0, scale, 3, 0.0, focus_rail(TabLayoutMode::Vertical))
+                focus_rail_geometry(2_400.0, scale, 3, 0, 0.0, focus_rail(TabLayoutMode::Vertical))
                     .expect("focus mode puts a column on screen");
             let chosen = focus_rail_geometry(
                 2_400.0,
                 scale,
                 3,
+                0,
                 0.0,
                 focus_rail_at(TabLayoutMode::Vertical, 160),
             )
@@ -38574,7 +38636,7 @@ mod tests {",
         let mut held = Vec::new();
         for rung in bt_render::FOCUS_CARD_HEIGHT_OPTIONS_LOGICAL_PX {
             let state = focus_rail_at(TabLayoutMode::Vertical, rung);
-            let geometry = focus_rail_geometry(2_400.0, 1.0, 3, 0.0, state)
+            let geometry = focus_rail_geometry(2_400.0, 1.0, 3, 0, 0.0, state)
                 .expect("focus mode puts a column on screen");
             let cell = lone_terminal_cell(&geometry.cards[0]);
             held.push(crate::focus_thumb::mini_rows(
@@ -38603,6 +38665,7 @@ mod tests {",
                         2_400.0,
                         1.0,
                         &trailers,
+                        0,
                         0.0,
                         state,
                         f64::from((second.body[0] + second.body[2]) / 2.0),
@@ -38627,6 +38690,7 @@ mod tests {",
                 618.0,
                 1.0,
                 6,
+                0,
                 0.0,
                 focus_rail_at(TabLayoutMode::Vertical, rung),
             )
@@ -39547,6 +39611,7 @@ mod tests {",
                         TALL_FIXTURE_HEIGHT,
                         1.0,
                         &tabs,
+                        0,
                         0.0,
                         state,
                         f64::from(middle),
@@ -39566,6 +39631,7 @@ mod tests {",
                     TALL_FIXTURE_HEIGHT,
                     1.0,
                     &tabs,
+                    0,
                     0.0,
                     state,
                     close.0,

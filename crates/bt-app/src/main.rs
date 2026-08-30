@@ -37971,6 +37971,23 @@ impl Runtime<'_> {
         ))
     }
 
+    /// **How many slots this window's tab list is holding for something that is
+    /// not a tab** (缺陷 #189) — nought or one, and one exactly while
+    /// [`Runtime::strip_stand_in`] is dressing a guest.
+    ///
+    /// Read off that function rather than off the drag, and that is the whole
+    /// reason it exists: the stand-in has four ways not to be there — no drag
+    /// and no visitor, a landing that is not [`DropLanding::StripExtract`], a
+    /// source that is not a pane, a tab or a seat that has gone under the
+    /// gesture — and a second reading of any of them is a scroller that reserves
+    /// room for a card nobody drew, or draws a card the scroller cannot reach.
+    /// The dressing costs one short string on the frames a drag is actually in
+    /// flight and nothing at all on every other frame, because `strip_stand_in`
+    /// returns at its first two lines when no hand is over this window.
+    fn strip_guests(&self) -> usize {
+        usize::from(self.strip_stand_in().is_some())
+    }
+
     /// Bring the dock drawing up to date with the pointer, the tree and the
     /// window — M155's plan, its cache, and the fade.
     ///
@@ -73317,6 +73334,7 @@ impl Runtime<'_> {
                 height,
                 scale,
                 &trailers,
+                self.strip_guests(),
                 self.window.rail_scroll,
                 rail,
                 position.x,
@@ -78042,6 +78060,12 @@ impl Runtime<'_> {
 
     /// The focus column's live geometry — [`Self::rail_geometry_now`]'s opposite
     /// number, and `None` in exactly the case that one is `Some`.
+    ///
+    /// **Solved for the list that is on screen and indexed by the tabs that are
+    /// in it** (缺陷 #189) — see [`seats::focus_rail_geometry`]'s own note for
+    /// why those are two different counts while a pane is in the air, and
+    /// [`Self::strip_guests`] for the one door both this and the hit test read
+    /// the guest off.
     fn focus_rail_geometry_now(&self, now: Instant) -> Option<seats::FocusRailGeometry> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (_, height) = self.window.renderer.presentation_geometry().swapchain_size;
@@ -78049,6 +78073,7 @@ impl Runtime<'_> {
             height as f32,
             scale,
             self.window.tabs.len(),
+            self.strip_guests(),
             self.window.rail_scroll,
             self.sampled_rail(now),
         )
@@ -105109,7 +105134,8 @@ mod tests {
         };
         let strip_state =
             rail_state_for(seats::TabLayoutMode::Horizontal, seats::RailMode::Expanded);
-        let column = seats::focus_rail_geometry(600.0, scale, trailers.len(), 0.0, focus_state)
+        let column =
+            seats::focus_rail_geometry(600.0, scale, trailers.len(), 0, 0.0, focus_state)
             .expect("a focus-mode window draws its card column");
         let rail = seats::rail_geometry(600.0, scale, &trailers, 0, 0.0, rail_state)
             .expect("an expanded rail holding one tab is on screen");
@@ -109130,6 +109156,7 @@ mod tests {
             618.0,
             1.0,
             tabs,
+            0,
             0.0,
             seats::RailState {
                 layout: seats::TabLayoutMode::Vertical,
