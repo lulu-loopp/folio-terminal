@@ -84,10 +84,9 @@ fn resource_bytes(icon: &Path, version: &str) -> Vec<u8> {
             // the Properties page rather than as an absence.
             ("CompanyName".to_owned(), "Folio".to_owned()),
             ("ProductName".to_owned(), "Folio".to_owned()),
-            (
-                "FileDescription".to_owned(),
-                "Folio — a terminal for Windows".to_owned(),
-            ),
+            // Task Manager and the Properties page print this field as the
+            // program's name, so it is the name and nothing after it.
+            ("FileDescription".to_owned(), "Folio".to_owned()),
             // The text form keeps whatever the manifest said, suffix and all;
             // the four numbers above cannot carry one.
             ("FileVersion".to_owned(), version.to_owned()),
