@@ -845,6 +845,100 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/release/smoke.ps
 > `new-vm.ps1` 的装机轮询里 `checkToolsState` 同样没带 `-vp`(第 809、831 行)。那里只是打进度,
 > 不影响判据,**本轮没改**。
 
+### 3.4d 出厂策略:两台机的 `clean` 快照回到 `Restricted`(2026-08-30)
+
+#### 为什么
+
+两份应答文件的 `FirstLogonCommands` 里原来有一条:
+
+```
+powershell -NoProfile -Command "Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned -Force"
+```
+
+理由写的是「让宿主能在这台机里驱动 PowerShell」。**宿主从来不需要它**:`run-smoke-in-vm.ps1` 每一次
+进客户机的调用都是 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File …`(`Invoke-GuestPowerShell`,
+该文件第 245 行),而 `-ExecutionPolicy` 是**只管它自己启动的那一个进程**的设定,不问机器策略要任何
+许可。`in-guest.ps1` 里 `& $script` 调 `smoke.ps1` 走的是同一个进程的 Process 作用域,同样在
+`Bypass` 之下。所以那一行删掉,**烟测本身一个字都不受影响**。
+
+它实际做的是另一件事:**把门 5 的两台机从「用户手上那台 Windows」上挪开了**。Windows 客户端出厂的
+执行策略是 `Restricted`,而 `docs/DESIGN.md` §7.47 正是「新电脑上 PSReadLine 开关点了没反应、
+一言不发」——那条缺陷的成因就是这个出厂默认。**发布路径上没有一台机器走过 `Restricted` 那条路**,
+于是这一类缺陷门 5 根本看不见。这就是改的理由。
+
+#### 快照怎么改的
+
+两台机各一趟,**没有重装**:回 `clean` → 开机 → 等一次能用的 guest 操作(§3.4c,不是 sleep)→
+以 `folio` 身份跑一段脚本 → 关机 → 原地重拍同名 `clean`。逐条:
+
+```powershell
+vmrun -T ws [-vp <口令>] revertToSnapshot <vmx> clean
+vmrun -T ws [-vp <口令>] start <vmx> nogui
+# readiness:fileExistsInGuest C:\Windows\System32\cmd.exe,五秒一次,和 run-smoke-in-vm.ps1 同一个探针
+vmrun -T ws [-vp <口令>] -gu folio -gp folio copyFileFromHostToGuest <vmx> <脚本> C:\folio-vm\factory-policy.ps1
+vmrun -T ws [-vp <口令>] -gu folio -gp folio runProgramInGuest <vmx> `
+    C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\folio-vm\factory-policy.ps1
+vmrun -T ws [-vp <口令>] -gu folio -gp folio copyFileFromGuestToHost <vmx> C:\folio-vm\execpolicy.txt D:\VMs\tmp\<机名>-execpolicy.txt
+vmrun -T ws [-vp <口令>] -gu folio -gp folio deleteFileInGuest <vmx> C:\folio-vm\factory-policy.ps1
+vmrun -T ws [-vp <口令>] stop <vmx> soft
+vmrun -T ws [-vp <口令>] snapshot <vmx> clean-restricted
+vmrun -T ws [-vp <口令>] deleteSnapshot <vmx> clean
+vmrun -T ws [-vp <口令>] snapshot <vmx> clean
+vmrun -T ws [-vp <口令>] deleteSnapshot <vmx> clean-restricted
+vmrun -T ws [-vp <口令>] listSnapshots <vmx>
+```
+
+放进去的两个文件在关机前用 `deleteFileInGuest` 删掉,快照里不留我们的东西;最后那一条
+`listSnapshots` 必须只答一行 `clean`。
+
+**`vmrun` 没有 rename**,所以「同名重拍」只能是删了再拍。中间那个 `clean-restricted` 是为了不出现
+「一个快照都没有」的时刻:删父快照 VMware 会把它并进子快照,顺序对了三步之后 `clean` 就是当前这个
+状态。快照名最终仍是 **`clean`** —— `run-smoke-in-vm.ps1` 按这个名字找,§3.5.5 也是这么写的。
+
+**客户机里跑的那一段**(一次性,不入库;5.1 方言 + UTF-8 BOM,§3.4a/§3.4b),关键只有一行:
+
+```powershell
+Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy Undefined -Force
+```
+
+`Undefined` 而不是 `Restricted`:出厂状态是**注册表里根本没有那个值**,而不是有一个写着 `Restricted`
+的值。改完 `HKLM\SOFTWARE\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell` 下的 `ExecutionPolicy`
+消失,五个作用域全部 `Undefined`,`Get-ExecutionPolicy` 于是答内置默认 `Restricted`。
+
+两条读法上的讲究,不注意就会量到假数:
+
+- **要在一个不带 `-ExecutionPolicy` 旗标的子进程里读。** 跑这段脚本的进程自己是
+  `-ExecutionPolicy Bypass` 起来的,`Get-ExecutionPolicy -List` 的 Process 一行会答 `Bypass`;而且
+  那个旗标是靠环境变量 `PSExecutionPolicyPreference` 传给子进程的,所以要先
+  `Remove-Item Env:PSExecutionPolicyPreference` 再起子 `powershell.exe`。
+- **写 HKLM 要完整令牌。** `runProgramInGuest` **不带** `-interactive` 时,Tools 服务(SYSTEM)用
+  `folio` 的完整令牌起进程,脚本自报 `elevated : True`,`Set-ExecutionPolicy -Scope LocalMachine`
+  一次就过。桌面上那个自动登录的 `folio` 拿的是被过滤的令牌。
+
+顺带一条 5.1 的写法坑:`powershell.exe -Command '… $_.Scope.ToString() + "=" + …'` 里那对双引号会被
+命令行吃掉,当场是语法错误;写成 `+ [char]61 +` 才对。
+
+#### 改完之后两台机是什么样(2026-08-30 实测)
+
+| | `folio-win10` | `folio-win11` |
+| --- | --- | --- |
+| 机器 | `FOLIO-WIN10`,Windows 10 Pro 10.0.19045,PS 5.1.19041.3803 | `FOLIO-WIN11`,Windows 11 Enterprise Evaluation 10.0.26200,PS 5.1.26100.6584 |
+| 改前 | LocalMachine `RemoteSigned`,其余四个 `Undefined`,有效 `RemoteSigned`,注册表 `RemoteSigned` | 同 |
+| 改后 | 五个作用域全 `Undefined`,有效 **`Restricted`**,注册表值不存在 | 同 |
+| 快照 | `listSnapshots` 只剩 `clean` | 同 |
+
+#### 又一条 `vmrun` 坑:加密机上 `deleteSnapshot` 会谎报失败
+
+Win11 那台(partial 加密,§3.5.1)两次 `deleteSnapshot` 都答
+
+```
+Error: Cannot read the virtual machine configuration file
+```
+
+并以 `-1` 退出 —— **而快照其实已经删掉了**,紧接着的 `listSnapshots` 答得干干净净。Win10 那台
+(不加密)四步一次没报错。所以在加密机上,`deleteSnapshot` 的判据是 `listSnapshots` 的结果,
+不是它的退出码。
+
 
 ## 8. 已知空白与未验证项(一处列全)
 
@@ -880,6 +974,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/release/smoke.ps
 | 已验证:`new-answer-iso.ps1` 能造出可挂载、内容正确的 ISO | 本机跑过并挂载核对 |
 | 已验证:四个 `.ps1` 语法、两个 `.xml` 格式(改后重新解析过)、`run-smoke-in-vm.ps1` 与 `new-vm.ps1` 的 `-WhatIf` 全流程 | 本机跑过 |
 | 已验证:`new-vm.ps1` 的幂等拒绝与 `-Stage install` 的前置检查 | 本机跑过(用临时目录) |
+| **已验证**:两台机的 `clean` 快照已回到出厂 `Restricted`(五个作用域全 `Undefined`) | 2026-08-30 逐台实测,§3.4d |
+| **已验证**:加密机上 `deleteSnapshot` 报「Cannot read the virtual machine configuration file」并退 `-1`,而快照确实删掉了 | 同上;判据用 `listSnapshots` |
 
 ### 参考链接(全部 2026-08-27 抓取)
 
