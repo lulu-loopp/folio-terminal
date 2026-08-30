@@ -190,6 +190,51 @@ pub const EASE_IN_OUT: [f32; 4] = [0.42, 0.0, 0.58, 1.0];
 /// press on the first frame rather than a fortieth of a second later.
 pub const GRAB_EASE: [f32; 4] = [0.2, 0.0, 0.0, 1.0];
 
+// ── the drag's auto-scroll: one band, one ramp, one slow rate ──────────────
+
+/// **How near a scroller's own edge a dragging hand has to come before the list
+/// starts moving under it**, in logical pixels.
+///
+/// Twenty-four, and it is the single number every scrollable list in this window
+/// reads: the card column, the vertical rail and the horizontal tab strip. There
+/// is no second band for a second surface, because "how close is close enough"
+/// is a fact about a hand and not about which list the hand is over.
+///
+/// It lives here rather than beside the hit boxes in `theme` on purpose. It is
+/// not a target — nothing is drawn in it and nothing can be pressed in it — it
+/// is the **domain of the ramp** below: the distance over which the speed goes
+/// from nothing to all of it. Separating the two would leave a ramp whose start
+/// and whose slope were decided in different files.
+pub const DRAG_AUTOSCROLL_EDGE_LOGICAL_PX: f32 = 24.0;
+
+/// **How fast the list runs when the hand is right at the edge**, in viewports
+/// per second.
+///
+/// Half a screenful a second at the very edge, falling linearly to nothing at
+/// the band's inner lip, so the hand chooses the speed by how far it reaches.
+/// Stated as a fraction of the viewport rather than as pixels because that is
+/// what makes one number right for all three surfaces: a 280px card column and a
+/// window-wide tab strip hold wildly different amounts of list, and a rate in
+/// pixels would crawl on one and bolt on the other.
+///
+/// Not a span and not a wait, so it is not in `bt-app`'s motion register: that
+/// register holds durations, and this is a speed. What it *does* obey is the
+/// same preference every span obeys — see
+/// [`DRAG_AUTOSCROLL_REDUCED_LOGICAL_PX_PER_S`].
+pub const DRAG_AUTOSCROLL_VIEWPORTS_PER_S: f32 = 0.5;
+
+/// **What the auto-scroll does under `prefers-reduced-motion`**: one steady slow
+/// rate, in logical pixels per second, instead of the ramp.
+///
+/// **Reduced is not "off", and that is the ruling.** A hand that reaches the
+/// bottom of a list it cannot see the end of has asked a question, and refusing
+/// to answer it would leave the reader who most needs the help with no way at
+/// all to drop a pane past the fold. What reduced motion objects to is motion
+/// that *accelerates and decelerates under you* — so the ramp goes and a flat
+/// 120 px/s stays, which is about one 160px card every second and a third: slow
+/// enough to read every card as it passes, fast enough to cross a long list.
+pub const DRAG_AUTOSCROLL_REDUCED_LOGICAL_PX_PER_S: f32 = 120.0;
+
 // ── the spans, by the name each surface knows them by ──────────────────────
 
 /// The rail's open/close (`width .18s ease, padding .18s ease, opacity .18s

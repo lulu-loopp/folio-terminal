@@ -19,6 +19,7 @@
 //! preview shows — those never enter a `LayoutNode`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use bt_layout::{
     Axis, DIVIDER, Edit, EditError, ExtentClass, FILES_W, KindMetrics, Landing, LayoutMode,
@@ -6868,6 +6869,22 @@ pub struct TabRun {
     /// come off — rather than a second place where the drag engine learns which
     /// mode the window is in.
     pub pane_offers: PaneOffers,
+    /// **How far this list can be scrolled along its axis**, in physical pixels
+    /// — `0.0` when everything it holds already fits.
+    ///
+    /// [`Self::viewport`]'s other half, and it has to be on the run for
+    /// [`Self::viewport`]'s reason: the auto-scroll under a drag
+    /// ([`autoscroll_speed`]) is one mechanism over all three surfaces, and a
+    /// mechanism that had to ask which geometry it was looking at to find out
+    /// how long the list was would be three mechanisms wearing one name.
+    ///
+    /// What is deliberately *not* here is the offset the list is currently at.
+    /// Every rectangle above has already been solved at that offset — a run is a
+    /// list as it stands, not a list plus a note about where it stands — so
+    /// carrying it would be a second copy of a number the slots already answer,
+    /// and the two could disagree. The callers that need it hold it themselves
+    /// and hand it in.
+    pub max_scroll: f32,
 }
 
 /// **The two offers a tab list makes a pane, said separately** (§7.1.6b′ ②, as
@@ -7021,6 +7038,7 @@ pub fn strip_run(geometry: &TabStripGeometry, scale: f32) -> TabRun {
         band: strip_band(geometry, scale),
         viewport: geometry.viewport,
         pane_offers: PaneOffers::BOTH,
+        max_scroll: geometry.max_scroll,
     }
 }
 
@@ -7038,6 +7056,7 @@ pub fn rail_run(geometry: &RailGeometry) -> TabRun {
         band: geometry.body,
         viewport: geometry.viewport,
         pane_offers: PaneOffers::BOTH,
+        max_scroll: geometry.max_scroll,
     }
 }
 
@@ -7091,7 +7110,117 @@ pub fn focus_rail_run(geometry: &FocusRailGeometry) -> TabRun {
         band: geometry.body,
         viewport: geometry.viewport,
         pane_offers: PaneOffers::BOTH,
+        max_scroll: geometry.max_scroll,
     }
+}
+
+/// **How fast this list should be running under a hand that is dragging near its
+/// edge**, in physical pixels per second, signed along the run's own axis
+/// (缺陷 #188, user ruling 2026-08-29).
+///
+/// Positive is "toward the end of the list" — down the card column and the rail,
+/// rightward along the strip — which is the direction a growing scroll offset
+/// reveals. `0.0` is the answer almost always, and it is the answer that costs
+/// nothing: a run that reports no speed asks for no wake-ups.
+///
+/// **One function, three surfaces, and that is the whole of the ruling.** A card
+/// column, a vertical rail and a horizontal tab strip differ here in exactly two
+/// numbers — which axis [`TabRun::pos`] projects onto, and how long
+/// [`TabRun::viewport`] is — and both of them are already on the run. So there
+/// is no branch in this function for which list it is looking at, and no second
+/// copy of it anywhere: adding auto-scroll to a fourth scroller is filling in a
+/// [`TabRun`], not writing this again.
+///
+/// **The four facts it is made of:**
+///
+/// 1. **The band is [`bt_render::DRAG_AUTOSCROLL_EDGE_LOGICAL_PX`] measured
+///    inward from the *scroller's* clip**, not from the surface's outer box. The
+///    column's `+` row stands below the list's foot, and a hand that has reached
+///    it is a hand asking to see what is under the last card — so the band is
+///    struck from `viewport` and a pointer past it, still inside the run, is at
+///    full speed rather than back at nothing.
+/// 2. **Linear in how deep the hand has reached**, nothing at the band's inner
+///    lip and everything at the clip's own edge. Linear and not eased: this is a
+///    control the hand is holding open, and a curve between the fingers and the
+///    speed is a control that answers a different amount each time you reach the
+///    same distance.
+/// 3. **A list already at the end it is heading for reports `0.0`.** Not a
+///    clamp applied afterwards by the caller — the answer itself, so that the
+///    clock this drives stops being wound rather than being woken forty times a
+///    second to move a list zero pixels.
+/// 4. **Reduced motion is a different rate, not silence**
+///    ([`bt_render::DRAG_AUTOSCROLL_REDUCED_LOGICAL_PX_PER_S`]). The ramp is
+///    what the preference objects to; the reaching is what the reader asked for.
+///
+/// The bands cannot overlap on a short list: the reach is capped at half the
+/// clip, so on a viewport narrower than two bands they meet exactly in the
+/// middle and the leading one wins.
+#[must_use]
+pub fn autoscroll_speed(
+    run: &TabRun,
+    scroll: f32,
+    pointer: (f64, f64),
+    scale: f32,
+    motion: crate::Motion,
+) -> f32 {
+    if run.max_scroll <= 0.0 || !run.contains(pointer.0, pointer.1) {
+        return 0.0;
+    }
+    let [start, end] = run.viewport;
+    let span = end - start;
+    if span <= 0.0 {
+        return 0.0;
+    }
+    let edge = (bt_render::DRAG_AUTOSCROLL_EDGE_LOGICAL_PX * scale).min(span / 2.0);
+    if edge <= 0.0 {
+        return 0.0;
+    }
+    let position = run.pos(pointer.0, pointer.1);
+    // How far into a band the hand has reached: `0.0` at its inner lip, `1.0` at
+    // the clip's own edge and beyond it.
+    let (reach, direction) = if position <= start + edge {
+        (((start + edge - position) / edge).clamp(0.0, 1.0), -1.0)
+    } else if position >= end - edge {
+        (((position - (end - edge)) / edge).clamp(0.0, 1.0), 1.0)
+    } else {
+        return 0.0;
+    };
+    if reach <= 0.0 {
+        return 0.0;
+    }
+    // Fact 3: at the end it is reaching for, this list has nothing to offer.
+    if (direction < 0.0 && scroll <= 0.0) || (direction > 0.0 && scroll >= run.max_scroll) {
+        return 0.0;
+    }
+    let speed = match motion {
+        crate::Motion::Full => reach * span * bt_render::DRAG_AUTOSCROLL_VIEWPORTS_PER_S,
+        crate::Motion::Reduced => bt_render::DRAG_AUTOSCROLL_REDUCED_LOGICAL_PX_PER_S * scale,
+    };
+    direction * speed
+}
+
+/// Where this list stands after `elapsed` of [`autoscroll_speed`] — `None` when
+/// it would not have moved at all.
+///
+/// `None` rather than "the same offset back again" because the caller's next
+/// step is a re-survey and a repaint, and both are wasted on a list that is
+/// where it was. One function answers "did anything happen" and "what is it now"
+/// together, so the two can never be asked of different instants.
+#[must_use]
+pub fn autoscroll_step(
+    run: &TabRun,
+    scroll: f32,
+    pointer: (f64, f64),
+    scale: f32,
+    motion: crate::Motion,
+    elapsed: Duration,
+) -> Option<f32> {
+    let speed = autoscroll_speed(run, scroll, pointer, scale, motion);
+    if speed == 0.0 {
+        return None;
+    }
+    let moved = (scroll + speed * elapsed.as_secs_f32()).clamp(0.0, run.max_scroll);
+    (moved != scroll).then_some(moved)
 }
 
 /// A divider's hit zone: the drawn band widened to something a hand can land
@@ -37493,6 +37622,353 @@ mod tests {",
             None,
             "a pointer beside the cards is on the column and on no card"
         );
+    }
+
+    // ══ 缺陷 #188: the list runs under a hand that has reached its edge ══
+    //
+    // The user's report is about the card column — many cards, a pane carried
+    // down to the column's foot, and no way to see or reach what was below the
+    // fold — but the ruling is about all three tab surfaces at once, so the
+    // gates below are stated against a [`TabRun`] and then walked over each of
+    // them. There is exactly one mechanism to break: `autoscroll_speed`.
+
+    /// The card column solved at a stated scroll — the fixture the auto-scroll's
+    /// gates step through, one frame at a time.
+    ///
+    /// Twelve cards in the house 618px window, which is many times more than
+    /// fits: this is a test about a list whose end you cannot see, and a fixture
+    /// that fitted would be answering a different question.
+    fn scrolling_column(scroll: f32) -> FocusRailGeometry {
+        focus_rail_geometry(
+            FIXTURE_HEIGHT,
+            1.0,
+            12,
+            scroll,
+            focus_rail(TabLayoutMode::Vertical),
+        )
+        .expect("focus mode puts a column on screen")
+    }
+
+    /// One frame of the clock this runs on — [`STRIP_ANIMATION_FRAME`] in
+    /// `main.rs`, spelled here because a `seats` test cannot see it and because
+    /// what the gate is about is the *integration*, not the cadence.
+    const AUTOSCROLL_FIXTURE_FRAME: Duration = Duration::from_millis(16);
+
+    /// Where in the column's own box a hand is, for a stated point on its axis.
+    fn column_hand(column: &FocusRailGeometry, y: f32) -> (f64, f64) {
+        (
+            f64::from((column.body[0] + column.body[2]) / 2.0),
+            f64::from(y),
+        )
+    }
+
+    /// **RED GATE ① — a hand held in the column's bottom band scrolls the list,
+    /// and only ever forwards** (缺陷 #188).
+    ///
+    /// The bug verbatim: the pointer is at the foot of a scrollable card column
+    /// and the column does not move, so the cards below the fold can be neither
+    /// seen nor dropped into. Forty frames of a still hand is the whole test —
+    /// nothing moves the pointer, which is exactly the condition that made a
+    /// pointer-driven scroll impossible.
+    ///
+    /// Monotone is asserted as well as non-zero, and it is the half that catches
+    /// the plausible wrong answer: a speed struck from the pointer's distance to
+    /// the *content* rather than to the viewport oscillates, because the content
+    /// moves and the viewport does not.
+    ///
+    /// Mutation: return `0.0` unconditionally from `autoscroll_speed` and the
+    /// first `expect` goes; strike the band from `run.band` instead of
+    /// `run.viewport` and the hand — which is above the `+` row and below the
+    /// list's foot — is out of the band, so it goes too; drop the sign and the
+    /// monotone assertion does.
+    #[test]
+    fn a_hand_at_the_columns_foot_runs_the_list_forwards_frame_after_frame() {
+        let mut scroll = 0.0_f32;
+        let mut track = vec![scroll];
+        for frame in 0..40 {
+            let column = scrolling_column(scroll);
+            let run = focus_rail_run(&column);
+            assert!(
+                run.max_scroll > 0.0,
+                "the fixture is a column with cards below the fold"
+            );
+            // One pixel inside the list's own foot: the deepest a hand can be
+            // and still be over a rectangle the column drew.
+            let hand = column_hand(&column, column.viewport[1] - 1.0);
+            let next = autoscroll_step(
+                &run,
+                scroll,
+                hand,
+                1.0,
+                crate::Motion::Full,
+                AUTOSCROLL_FIXTURE_FRAME,
+            )
+            .unwrap_or_else(|| panic!("frame {frame}: a hand in the band moves the list"));
+            assert!(next > scroll, "frame {frame}: {next} is not past {scroll}");
+            scroll = next;
+            track.push(scroll);
+        }
+        assert!(
+            scroll > 0.0,
+            "forty frames of a hand at the foot has shown the reader more list"
+        );
+        assert!(
+            track.windows(2).all(|pair| pair[1] > pair[0]),
+            "and it never went back: {track:?}"
+        );
+    }
+
+    /// **RED GATE ② — out of the band is a stopped list, not a slow one**
+    /// (缺陷 #188).
+    ///
+    /// Two claims in one, and they are the two halves of "边缘带": a hand in the
+    /// middle of the viewport gets nothing at all, and the band really does end
+    /// [`bt_render::DRAG_AUTOSCROLL_EDGE_LOGICAL_PX`] from the edge rather than
+    /// somewhere near it.
+    ///
+    /// The pair either side of the lip is what makes this a gate rather than a
+    /// smoke test: widen the band and the outer sample starts moving; narrow it
+    /// and the inner one stops.
+    ///
+    /// Mutation: drop the `return 0.0` for a hand between the bands and the
+    /// middle assertion goes; change 24 to any other number and one of the two
+    /// lip assertions does.
+    #[test]
+    fn a_hand_out_of_the_band_leaves_the_list_exactly_where_it_was() {
+        let column = scrolling_column(0.0);
+        let run = focus_rail_run(&column);
+        let speed_at =
+            |y: f32| autoscroll_speed(&run, 0.0, column_hand(&column, y), 1.0, crate::Motion::Full);
+        let [top, foot] = run.viewport;
+        assert_eq!(
+            speed_at((top + foot) / 2.0),
+            0.0,
+            "a hand in the middle of the list is not asking for anything"
+        );
+        let edge = bt_render::DRAG_AUTOSCROLL_EDGE_LOGICAL_PX;
+        assert_eq!(
+            speed_at(foot - edge - 0.5),
+            0.0,
+            "and neither is one half a pixel outside the band's inner lip"
+        );
+        assert!(
+            speed_at(foot - edge + 0.5) > 0.0,
+            "while one half a pixel inside it is"
+        );
+        // The band exists at the head too, and it is refused for the right
+        // reason: a list already at the top has nowhere above to show.
+        assert_eq!(
+            speed_at(top + 1.0),
+            0.0,
+            "a hand at the head of a list that is already at its start asks for \
+             nothing — which is what keeps the clock from being wound at rest"
+        );
+        let parked = scrolling_column(run.max_scroll);
+        let parked_run = focus_rail_run(&parked);
+        assert!(
+            autoscroll_speed(
+                &parked_run,
+                parked_run.max_scroll,
+                column_hand(&parked, parked_run.viewport[0] + 1.0),
+                1.0,
+                crate::Motion::Full,
+            ) < 0.0,
+            "but the same hand on a list that has been scrolled runs it back up"
+        );
+        assert_eq!(
+            autoscroll_speed(
+                &parked_run,
+                parked_run.max_scroll,
+                column_hand(&parked, parked_run.viewport[1] - 1.0),
+                1.0,
+                crate::Motion::Full,
+            ),
+            0.0,
+            "and a hand at the foot of a list that has reached its end asks for \
+             nothing at all"
+        );
+    }
+
+    /// **RED GATE ③ — the slot a still hand is offered follows the viewport the
+    /// scroll left it in** (缺陷 #188, the ruling's third clause).
+    ///
+    /// This is the half the user could not see: without it the list would move
+    /// and the insertion would go on being solved against the cards that used to
+    /// be there, so letting go would drop the pane somewhere other than where
+    /// the stand-in was drawn. The claim is that the index the pointer resolves
+    /// to is a function of the *current* geometry — so it advances as the list
+    /// does, and the card it names is one that is actually on screen.
+    ///
+    /// Mutation: solve the run once and keep it across the scroll — the very
+    /// mistake this clause forbids — and both the advance and the visibility
+    /// assertion go red.
+    #[test]
+    fn the_slot_under_a_still_hand_is_re_solved_against_the_list_that_moved() {
+        let mut scroll = 0.0_f32;
+        let start = scrolling_column(scroll);
+        let start_run = focus_rail_run(&start);
+        let hand = column_hand(&start, start.viewport[1] - 1.0);
+        let first = insert_index_at(&start_run.mids(), start_run.pos(hand.0, hand.1));
+        for _ in 0..60 {
+            let column = scrolling_column(scroll);
+            let run = focus_rail_run(&column);
+            let Some(next) = autoscroll_step(
+                &run,
+                scroll,
+                hand,
+                1.0,
+                crate::Motion::Full,
+                AUTOSCROLL_FIXTURE_FRAME,
+            ) else {
+                break;
+            };
+            scroll = next;
+        }
+        let now = scrolling_column(scroll);
+        let now_run = focus_rail_run(&now);
+        let later = insert_index_at(&now_run.mids(), now_run.pos(hand.0, hand.1));
+        assert!(
+            later > first,
+            "the hand has not moved, so a slot that did not move with the list \
+             would be the one the release lands in: {first} → {later}"
+        );
+        // And the card that slot is beside is one the reader can see, which is
+        // the whole of 「松手落在当时可见的槽位」.
+        let neighbour = now.cards[later - 1].body;
+        assert!(
+            neighbour[3] > now.viewport[0] && neighbour[1] < now.viewport[1],
+            "the card the insertion is beside is inside the clip the column \
+             draws: {neighbour:?} against {:?}",
+            now.viewport
+        );
+    }
+
+    /// **RED GATE ④ — reduced motion scrolls at one flat rate rather than not at
+    /// all** (缺陷 #188, the ruling's fourth clause).
+    ///
+    /// Two claims, and the first is the one that matters: `Reduced` is *not*
+    /// silence here. A reader who has asked for less motion still has to be able
+    /// to drop a pane past the fold, and refusing to move the list would leave
+    /// them the bug this ticket is about. What the preference buys is the second
+    /// claim — the speed no longer changes with how far the hand has reached, so
+    /// nothing accelerates under it.
+    ///
+    /// Mutation: return `0.0` for `Reduced` and the first assertion goes; leave
+    /// the ramp in and the two depths stop agreeing; drop the `scale` and the
+    /// last one does.
+    #[test]
+    fn reduced_motion_trades_the_ramp_for_a_flat_rate_and_not_for_stillness() {
+        let column = scrolling_column(0.0);
+        let run = focus_rail_run(&column);
+        let speed_at = |y: f32, scale: f32| {
+            autoscroll_speed(
+                &run,
+                0.0,
+                column_hand(&column, y),
+                scale,
+                crate::Motion::Reduced,
+            )
+        };
+        let foot = run.viewport[1];
+        let edge = bt_render::DRAG_AUTOSCROLL_EDGE_LOGICAL_PX;
+        let deep = speed_at(foot - 1.0, 1.0);
+        let shallow = speed_at(foot - edge + 1.0, 1.0);
+        assert!(
+            deep > 0.0,
+            "reduced motion is a slower list, not a still one"
+        );
+        assert_eq!(
+            deep, shallow,
+            "and it is flat: the same rate wherever in the band the hand is"
+        );
+        assert_eq!(
+            deep,
+            bt_render::DRAG_AUTOSCROLL_REDUCED_LOGICAL_PX_PER_S,
+            "and it is the stated rate rather than a second number"
+        );
+        assert_eq!(
+            speed_at(foot - 1.0, 2.0),
+            bt_render::DRAG_AUTOSCROLL_REDUCED_LOGICAL_PX_PER_S * 2.0,
+            "in logical pixels, so it covers the same amount of list on a \
+             200% display as on a 100% one"
+        );
+        assert_eq!(
+            speed_at((run.viewport[0] + foot) / 2.0, 1.0),
+            0.0,
+            "and the band is still the band — reduced motion widens nothing"
+        );
+    }
+
+    /// **RED GATE — one mechanism, three surfaces** (缺陷 #188, the ruling's
+    /// 「三张面同一常数同一钟」).
+    ///
+    /// The card column is where the user met the bug, but the horizontal strip
+    /// and the vertical rail are the same kind of list and had the same silence.
+    /// This walks all three through one function: each is asked at the end of
+    /// its own axis — the strip's right, the two columns' feet — and each has to
+    /// answer with a speed in the same direction and of the same shape.
+    ///
+    /// What it really pins is that there is no second implementation to write:
+    /// the strip is a `Row` run and the other two are `Col` runs, and the only
+    /// thing that differs in the answer is the axis
+    /// [`TabRun::pos`] projected onto.
+    ///
+    /// Mutation: branch on the axis anywhere in `autoscroll_speed` and the strip
+    /// and the columns stop agreeing; leave `max_scroll` off any one run
+    /// constructor and that surface answers `0.0` for a list that scrolls.
+    #[test]
+    fn all_three_tab_surfaces_run_under_a_hand_at_their_own_far_edge() {
+        let strip = tab_strip_geometry(960.0, 1.0, &resting(30), 0, 0.0);
+        let strip_run = strip_run(&strip, 1.0);
+        let rail = rail_of(expanded_rail(), &resting(30), 0);
+        let rail_run = rail_run(&rail);
+        let column = scrolling_column(0.0);
+        let column_run = focus_rail_run(&column);
+        for (name, run, hand) in [
+            (
+                "the horizontal strip",
+                &strip_run,
+                (
+                    f64::from(strip_run.viewport[1] - 1.0),
+                    f64::from((strip.tabs[0].body[1] + strip.tabs[0].body[3]) / 2.0),
+                ),
+            ),
+            (
+                "the vertical rail",
+                &rail_run,
+                (
+                    f64::from((rail.body[0] + rail.body[2]) / 2.0),
+                    f64::from(rail_run.viewport[1] - 1.0),
+                ),
+            ),
+            (
+                "the card column",
+                &column_run,
+                column_hand(&column, column_run.viewport[1] - 1.0),
+            ),
+        ] {
+            assert!(
+                run.max_scroll > 0.0,
+                "{name}: the fixture holds more than it can show"
+            );
+            let speed = autoscroll_speed(run, 0.0, hand, 1.0, crate::Motion::Full);
+            assert!(
+                speed > 0.0,
+                "{name}: a hand at the far end asks to be shown what is past it"
+            );
+            // And it is the *same* arithmetic on all three: half a screenful a
+            // second at the clip's own edge, taken at how far into the band this
+            // hand has reached — one pixel short of the edge, so twenty-three
+            // twenty-fourths of it.
+            let span = run.viewport[1] - run.viewport[0];
+            let edge = bt_render::DRAG_AUTOSCROLL_EDGE_LOGICAL_PX;
+            let want = span * bt_render::DRAG_AUTOSCROLL_VIEWPORTS_PER_S * ((edge - 1.0) / edge);
+            assert!(
+                (speed - want).abs() < 0.01,
+                "{name}: {speed} is not the one ramp's answer {want} for a \
+                 {span}px viewport"
+            );
+        }
     }
 
     /// The focus column exactly as [`rail_paint_of`] draws it — [`painted_rail`]'s

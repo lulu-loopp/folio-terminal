@@ -23841,6 +23841,20 @@ struct Drag {
     /// — [`profiles::CHEVRON_HOVER_OPEN_DELAY`] — because they are one hand doing one
     /// thing: stopping on something to say "this one".
     spring: SpringGate,
+    /// **缺陷 #188 — when the auto-scroll last moved the list under this hand**,
+    /// or `None` while the hand is not in an edge band.
+    ///
+    /// One instant and not a velocity, because the speed is never remembered: it
+    /// is re-read from the pointer on every tick ([`seats::autoscroll_speed`]),
+    /// so a hand that reaches deeper is answered on the very next frame rather
+    /// than on the next time something re-armed a stored rate.
+    ///
+    /// `None` is what makes the clock honest across a departure. Leaving the band
+    /// clears it, so a hand that wandered off for three seconds and came back
+    /// does not integrate those three seconds into one jump — it starts again
+    /// from the frame it came back on, which is the same reading of "resting
+    /// here" [`SpringGate::observe`] takes one field above.
+    autoscroll_ticked_at: Option<Instant>,
 }
 
 /// **The spring-loaded switch's clock** (§7.1.6k, user ruling 2026-08-20): rest a
@@ -27049,6 +27063,73 @@ impl MenuPaint {
 /// [`arrival`] holds the rhythm and its own tests hold the curves. What these
 /// hold is the join — the half that a refactor of `refresh_overlay` can quietly
 /// drop while every test in that module goes on passing.
+/// **缺陷 #188 — the auto-scroll is wired to a clock, and to the same clock the
+/// spring is.**
+///
+/// The mechanism itself is pinned in `seats.rs`, against real solved geometry
+/// and with no window in sight. What cannot be pinned there is the half this
+/// ticket actually turned on: that something *turns* it. A perfect
+/// `autoscroll_speed` that nobody calls on a frame is the very bug the user
+/// reported — a list that does not move under a hand that has stopped — so the
+/// wiring is a claim in its own right and it is stated the way the arrival
+/// register's is: by reading the source and naming the function that holds the
+/// call.
+///
+/// The spring is the yardstick rather than a literal function name, and that is
+/// deliberate. Both are clocks that fire under a deliberately still hand, both
+/// belong to the drag and die with it, and the day the loop's shape changes they
+/// have to move together — a test that named `turn` would pass while the
+/// auto-scroll was left behind in a function the spring had already left.
+#[cfg(test)]
+mod drag_autoscroll_wiring_tests {
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// Which method holds the first call spelled `needle`.
+    ///
+    /// The needles are assembled rather than written out, for
+    /// `nothing_but_the_paint_and_the_frame_clock_reads_the_register`'s reason:
+    /// a literal here would be a call site of its own as far as a search over
+    /// this very file is concerned.
+    fn holder(needle: &str) -> &'static str {
+        let at = SOURCE
+            .find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is nowhere in this window"));
+        let head = SOURCE[..at]
+            .rfind("\n    fn ")
+            .expect("every call site is inside a method");
+        SOURCE[head + "\n    fn ".len()..]
+            .split('(')
+            .next()
+            .expect("a method's name ends at its parameter list")
+    }
+
+    /// RED GATE — the tick runs where the spring's tick runs, and the deadline
+    /// stands in the wake set the spring's deadline stands in.
+    ///
+    /// Mutation: delete either call and the `expect` inside [`holder`] names the
+    /// one that went; move either to a function of its own — a "drag pass", say
+    /// — and the two halves stop agreeing, which is exactly the drift this gate
+    /// exists to catch, because a clock the loop is not asked about is a clock
+    /// that never fires.
+    #[test]
+    fn the_auto_scroll_turns_on_the_clock_the_spring_turns_on() {
+        let tick = |name: &str| holder(&format!("self.{name}(now)?;"));
+        assert_eq!(
+            tick("advance_drag_autoscroll"),
+            tick("advance_drag_spring"),
+            "the edge scroll has to be advanced from the pass that advances the \
+             spring: both fire under a hand that has stopped moving, which is \
+             the one thing a pointer-driven path cannot do"
+        );
+        assert_eq!(
+            holder(&format!("self.{}(now),", "drag_autoscroll_deadline")),
+            holder(&format!("self.{}(),", "drag_spring_deadline")),
+            "and it has to be in the same wake set: a deadline nobody folds in \
+             is a frame the loop sleeps through"
+        );
+    }
+}
+
 #[cfg(test)]
 mod arrival_wiring_tests {
     use super::{Layered, ModalBand, Popup, Travel};
@@ -63161,6 +63242,126 @@ impl Runtime<'_> {
         self.window.drag.as_ref()?.spring.deadline()
     }
 
+    /// **缺陷 #188 — the list runs under a hand that has reached its edge.**
+    ///
+    /// The user's report is the shape of the bug: a card column with more cards
+    /// than fit, a pane carried down to the column's foot, and nothing under the
+    /// pointer but the last card that happened to be on screen — no way to reach
+    /// the ones below it and no way to see whether the pane had become a card at
+    /// all. The window had no edge auto-scroll on any surface (§7.1.6g's own
+    /// note, 2026-08-27: *"本仓纵向也没有这样的东西"*), so this is the furniture
+    /// arriving rather than a hole being patched.
+    ///
+    /// **A clock and not a branch in [`Runtime::drive_drag`]**, for
+    /// [`Runtime::advance_drag_spring`]'s reason one function above: a hand held
+    /// at the edge of a list is a hand that has *stopped moving*, and a scroll
+    /// driven by pointer events alone would advance one step per twitch and stand
+    /// still under the very gesture it exists for.
+    ///
+    /// **Three things happen here and they happen in this order**, because each
+    /// is the ground the next stands on:
+    ///
+    /// 1. **The speed is re-read and the clock is wound or stopped.** A hand out
+    ///    of the band, or a list already at the end it was heading for, clears
+    ///    the instant outright — see [`Drag::autoscroll_ticked_at`] for why that
+    ///    is not the same as leaving it to go stale.
+    /// 2. **The list moves.** One integration, `speed × elapsed`, clamped by
+    ///    [`seats::autoscroll_step`] to the run's own `max_scroll` — so the
+    ///    distance travelled is a function of the time that really passed and
+    ///    not of how many frames the machine managed to draw.
+    /// 3. **The drag is surveyed again against the viewport that is now on
+    ///    screen** (the ruling's ③). The slots moved under a pointer that did
+    ///    not, so the landing, the insertion caret and — for a card being
+    ///    reordered — the carried card's own offset are all stale by exactly the
+    ///    distance the list travelled. [`Runtime::drive_drag`] is the one
+    ///    function that re-solves all three, and it is spent whole rather than
+    ///    partly copied, which is what makes "松手落在当时可见的槽位" true by
+    ///    construction instead of by agreement.
+    fn advance_drag_autoscroll(&mut self, now: Instant) -> Result<()> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let motion = self.app.motion;
+        let Some((run, scroll, pointer)) = self.drag_autoscroll_aim(now) else {
+            return Ok(());
+        };
+        let travelling =
+            seats::autoscroll_speed(&run, scroll, (pointer.x, pointer.y), scale, motion) != 0.0;
+        if !travelling {
+            if let Some(drag) = self.window.drag.as_mut() {
+                drag.autoscroll_ticked_at = None;
+            }
+            return Ok(());
+        }
+        let Some(last) = self
+            .window
+            .drag
+            .as_ref()
+            .and_then(|drag| drag.autoscroll_ticked_at)
+        else {
+            // The frame the hand arrived on winds the clock and moves nothing: a
+            // step is struck between two instants, and there is only one yet. The
+            // wake set has already asked for the second, one frame away.
+            if let Some(drag) = self.window.drag.as_mut() {
+                drag.autoscroll_ticked_at = Some(now);
+            }
+            return Ok(());
+        };
+        let Some(moved) = seats::autoscroll_step(
+            &run,
+            scroll,
+            (pointer.x, pointer.y),
+            scale,
+            motion,
+            now.saturating_duration_since(last),
+        ) else {
+            return Ok(());
+        };
+        self.set_tab_run_scroll(moved);
+        // Wound before the re-survey rather than after it, because
+        // `drive_drag` rebuilds the drag from a clone taken at its own door: an
+        // instant written afterwards would be written onto the struct this line
+        // is about to replace.
+        if let Some(drag) = self.window.drag.as_mut() {
+            drag.autoscroll_ticked_at = Some(now);
+        }
+        // The list moved under a stationary pointer, so what it is over changed
+        // without the pointer having done anything — [`Runtime::scroll_rail`]'s
+        // own line, for its own reason.
+        self.window.seat_pointer.hover = self.chrome_target_at(pointer);
+        self.drive_drag(pointer)?;
+        Ok(())
+    }
+
+    /// The auto-scroll's next wake-up, for the loop's set (缺陷 #188).
+    ///
+    /// Clamped to [`STRIP_ANIMATION_FRAME`] past the last tick on
+    /// [`Runtime::strip_animation_next_tick`]'s own terms: asking for anything
+    /// sooner would wake the loop to integrate a few microseconds and re-arm the
+    /// same deadline, which is a spin wearing a schedule's clothes.
+    ///
+    /// `None` for every drag that is not currently at an edge — and for every
+    /// window with no drag at all — so the ordinary gesture costs no wake-ups.
+    /// **And `None` at the ends of the list**, which is what stops a hand parked
+    /// at the foot of a fully-scrolled column from waking this window sixty times
+    /// a second for as long as it stays there: [`seats::autoscroll_speed`]
+    /// answers `0.0` there, and the clock and the deadline read the same answer.
+    fn drag_autoscroll_deadline(&self, now: Instant) -> Option<Instant> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (run, scroll, pointer) = self.drag_autoscroll_aim(now)?;
+        let speed =
+            seats::autoscroll_speed(&run, scroll, (pointer.x, pointer.y), scale, self.app.motion);
+        if speed == 0.0 {
+            return None;
+        }
+        Some(
+            self.window
+                .drag
+                .as_ref()
+                .and_then(|drag| drag.autoscroll_ticked_at)
+                .map_or(now, |last| last + STRIP_ANIMATION_FRAME)
+                .max(now),
+        )
+    }
+
     /// Which files flyout — if any — this point would raise.
     ///
     /// Its own function because two callers ask it now: the pointer's own move,
@@ -73634,6 +73835,63 @@ impl Runtime<'_> {
         }
     }
 
+    /// **Which of this window's two scroll offsets the run in
+    /// [`Runtime::tab_run`] was solved at** (缺陷 #188).
+    ///
+    /// The card column and the vertical rail share `rail_scroll` because they
+    /// share the panel — the same sentence [`Runtime::scroll_rail`] is built on
+    /// — and the horizontal strip has `tab_scroll` of its own. This pair mirrors
+    /// [`Runtime::tab_run`]'s branch and must go on mirroring it: reading the
+    /// offset off one surface while the run came from another would auto-scroll
+    /// a list nobody is pointing at.
+    ///
+    /// It is a pair and not a `&mut f32` so that the write stays a write to a
+    /// named field on the window rather than a borrow handed out of this
+    /// function, which is what lets the caller re-survey the drag in the same
+    /// breath.
+    fn tab_run_scroll(&self) -> f32 {
+        if self.window.focus_mode || self.window.rail.layout == seats::TabLayoutMode::Vertical {
+            self.window.rail_scroll
+        } else {
+            self.window.tab_scroll
+        }
+    }
+
+    /// [`Runtime::tab_run_scroll`]'s other half — put the run's list where the
+    /// auto-scroll says it now stands.
+    fn set_tab_run_scroll(&mut self, scroll: f32) {
+        if self.window.focus_mode || self.window.rail.layout == seats::TabLayoutMode::Vertical {
+            self.window.rail_scroll = scroll;
+        } else {
+            self.window.tab_scroll = scroll;
+        }
+    }
+
+    /// **What the auto-scroll is looking at this instant** — the run under the
+    /// hand, where its list currently stands, and where the hand is (缺陷 #188).
+    ///
+    /// Its own function because both the tick and the deadline ask exactly this,
+    /// and a clock whose "is anything owed" and "do it" read the geometry two
+    /// different ways is a clock that wakes up to be told there was nothing to
+    /// do.
+    ///
+    /// **A file row is turned away here**, and it is the same refusal §7.1.6b′ ③
+    /// makes in [`Runtime::survey_strip`] rather than a second one: no tab
+    /// surface will take a row, so no tab surface has any reason to move itself
+    /// under one. Everything the three surfaces *do* accept — a tab or a card
+    /// being reordered, a pane arriving from the layout — is offered the band.
+    fn drag_autoscroll_aim(
+        &self,
+        now: Instant,
+    ) -> Option<(seats::TabRun, f32, PhysicalPosition<f64>)> {
+        let drag = self.window.drag.as_ref()?;
+        if matches!(drag.source, DragSource::Row(_)) {
+            return None;
+        }
+        let run = self.tab_run(now)?;
+        Some((run, self.tab_run_scroll(), drag.pointer))
+    }
+
     /// K111 and J106 — the press has travelled 6px, so it is a drag now.
     ///
     /// The activation is not a side effect: "reordering IS commitment to the
@@ -73781,6 +74039,7 @@ impl Runtime<'_> {
             landing: None,
             home,
             spring: SpringGate::default(),
+            autoscroll_ticked_at: None,
         });
         // Hover goes quiet for the whole gesture: while something is in your hand
         // the chrome has nothing to offer the pointer, and a `×` lighting up
@@ -83039,6 +83298,14 @@ impl Runtime<'_> {
         // spring takes a whole tab off the screen, and the two menus above have
         // already been retired by the drag that armed this one.
         self.advance_drag_spring(now)?;
+        // And the drag's other clock, which is the same shape once more: a hand
+        // that has stopped at the edge of a list (缺陷 #188). Below the spring
+        // rather than above it, and the order is load-bearing: a spring that
+        // matures on this frame has changed which tab is on screen, and the
+        // auto-scroll's own re-survey should be struck against the stage the
+        // window is actually showing rather than the one it was showing a line
+        // ago.
+        self.advance_drag_autoscroll(now)?;
         self.clear_math_hover_if_due(now)?;
         // Ahead of the tip's own promotion, so §6's ordering is structural and
         // not merely a consequence of 350 being less than 380: on the frame both
@@ -83269,6 +83536,13 @@ impl Runtime<'_> {
             // every drag that is not resting a pane on somebody else's tab, which
             // is every drag most of the time.
             self.drag_spring_deadline(),
+            // And the auto-scroll's frame, which is the other clock that fires
+            // under a hand that has deliberately stopped — this one because it
+            // has stopped *at an edge* (缺陷 #188). Absent for every drag that is
+            // not in a band, and absent again the moment the list reaches the end
+            // it was running towards, so a hand parked at the foot of a
+            // fully-scrolled column asks for nothing.
+            self.drag_autoscroll_deadline(now),
             self.window.hyperlink_hover.show_at,
             self.window.peek_hover.show_at,
             self.window.math_hover_clear_at,
@@ -111285,6 +111559,7 @@ mod tests {
             landing,
             home: None,
             spring: SpringGate::default(),
+            autoscroll_ticked_at: None,
         }
     }
 
@@ -126654,6 +126929,10 @@ mod cross_window_drag_tests {
             viewport: [0.0, 4_000.0],
             band: [0.0, 0.0, 4_000.0, 4_000.0],
             pane_offers: seats::PaneOffers::BOTH,
+            // This fixture is a run that does not scroll: the journey it pins
+            // is about indices, and a list long enough to have a fold would be
+            // adding a second variable to a one-variable claim.
+            max_scroll: 0.0,
         }
     }
 
