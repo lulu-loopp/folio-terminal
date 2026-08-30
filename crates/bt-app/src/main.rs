@@ -13222,6 +13222,29 @@ impl TabState {
             .map(|_| source.clone())
     }
 
+    /// **The file a preview seat's picture names** (user ruling 2026-08-30;
+    /// §7.1.6b‴) — [`Self::unread_card_document`]'s opposite number, over the
+    /// other of the two things a preview pane can be about.
+    ///
+    /// That one answers "which document is this seat on that nobody has read";
+    /// this answers "which file is this seat showing pixels of", and the caller
+    /// turns it into pixels by asking the window's own path-keyed decode. It is
+    /// a path and not a picture because a `TabState` cannot reach that cache —
+    /// the same split [`Self::mini_source`]'s `page` argument already makes.
+    ///
+    /// The pane's [`PreviewImageState`] and not the pool: a picture is not a
+    /// buffer and a video is not either, and both of them are here.
+    fn card_picture_path(&self, seat: SeatId) -> Option<&Path> {
+        Some(
+            self.preview_panes
+                .get(self.preview_here(seat))?
+                .image
+                .as_ref()?
+                .path
+                .as_path(),
+        )
+    }
+
     /// **Where one seat's thumbnail content comes from** (§7.1.6b′ F2) — handed
     /// to the budget *unevaluated*, so that the walk it stands for happens only
     /// past the gates.
@@ -13252,9 +13275,32 @@ impl TabState {
         // seat is a face. That is the honest picture and not a fallback: a page
         // nobody has looked at has never had a frame on any glass.
         page: Option<&'a web_thumb::Picture>,
+        // **The decode this window is holding for the file this seat is showing,
+        // when it is showing a picture** (user ruling 2026-08-30; §7.1.6b‴).
+        //
+        // Handed in for `page`'s reason and it is the same reason twice: the
+        // store it comes from ([`WindowRuntime::peek_cache`]) belongs to the
+        // window and this type is a tab — a picture is keyed by *file*, so two
+        // tabs showing one screenshot are one decode, and a tab that kept its
+        // own copy would be the second account of that.
+        //
+        // `None` is not a special case and is not a failure: it is a file
+        // nothing in this window has decoded, which falls through to the face
+        // this seat has always been. Nothing here asks for a decode — that is
+        // §7.1.6b′'s red line, and a card that armed a read of the picture lane
+        // would be a column of cards putting a question to the disk for every
+        // tab you scrolled past.
+        picture: Option<focus_thumb::CardPicture<'a>>,
     ) -> Option<focus_thumb::SeatSource<'a>> {
         if let Some(picture) = page {
             return Some(focus_thumb::SeatSource::Page { picture });
+        }
+        // **Before the buffer and before the face**, because a pane holding a
+        // picture is holding no buffer at all: `PreviewPane::image` and
+        // `PreviewPane::buffer` are the two things a preview surface can be
+        // about, and the picture is the one this window has pixels for.
+        if let Some(picture) = picture {
+            return Some(focus_thumb::SeatSource::Picture(picture));
         }
         match kind {
             SeatKind::Terminal => {
@@ -78833,6 +78879,11 @@ impl Runtime<'_> {
         let mut wanted_pictures: Vec<web_thumb::PageDemand> = Vec::new();
         let pages = &self.window.web;
         let page_pictures = &self.window.web_thumbs;
+        // **And the pictures the cards can draw out of memory** (user ruling
+        // 2026-08-30; §7.1.6b‴). Read and never asked for: this is the window's
+        // decode cache exactly as it stands, and a seat whose file is not in it
+        // is the face it has always been. See [`card_picture_in`].
+        let decodes = &self.window.peek_cache;
         // **And the tab holding the pane that is in the air** (缺陷 #189). Its
         // seat is being drawn twice while the gesture lasts — once on its own
         // card and once as the stand-in ([`Self::stand_in_pane`]) — and the
@@ -78895,8 +78946,20 @@ impl Runtime<'_> {
                                 ),
                             });
                         }
-                        let source =
-                            tab.mini_source(seat.id, seat.kind, page_pictures.picture(leaf))?;
+                        // **The picture on this seat, if this window has one**
+                        // (§7.1.6b‴) — the third reading in the same place and
+                        // the same split as the two above it: what a seat *has*
+                        // goes into the projection, and nothing on this line
+                        // asks for what it has not.
+                        let picture = tab
+                            .card_picture_path(seat.id)
+                            .and_then(|path| card_picture_in(decodes, path));
+                        let source = tab.mini_source(
+                            seat.id,
+                            seat.kind,
+                            page_pictures.picture(leaf),
+                            picture,
+                        )?;
                         // **The seat's own face decides both counts.** A row's
                         // height and a column's width are two readings of the
                         // same face, so they are taken from one table
@@ -93269,6 +93332,45 @@ fn tick_owes_a_present(chrome_changed: bool, panes_owe: bool, pictures_owe: bool
     chrome_changed || panes_owe || pictures_owe
 }
 
+/// **The pixels a card may draw for one file, and nothing else** (user ruling
+/// 2026-08-30; §7.1.6b‴).
+///
+/// The whole of the reading half of "a card draws the real thumbnail", and it is
+/// a free function over the cache rather than a method on [`Runtime`] for the
+/// borrow the frame walk needs: `refresh_focus_thumbnails` holds the tab list
+/// immutably while it asks this of the window's decode cache, and a `&self`
+/// method would put both borrows on the same object.
+///
+/// **It asks for nothing.** `Pending`, `Failed` and an absent entry are one
+/// answer here — `None`, which the caller reads as "this seat is a face" — and
+/// none of the three inserts a `Pending` or sends a task. That is the ruling
+/// stated in code: *不起新解码、不拉新帧*. A file the window has decoded for some
+/// other surface is free; a file it has not is a face until something the reader
+/// did decodes it.
+///
+/// The key is [`normalized_local_image_path_key`], which is the key the picture
+/// lane, the glance card and the animation clock all use — so a card, a pane and
+/// a hover over one file are one decode and one texture.
+fn card_picture_in<'a>(
+    cache: &'a std::collections::HashMap<String, PeekCacheEntry>,
+    path: &Path,
+) -> Option<focus_thumb::CardPicture<'a>> {
+    match cache.get(&normalized_local_image_path_key(path))? {
+        PeekCacheEntry::Ready {
+            key,
+            rgba,
+            width_px,
+            height_px,
+        } => Some(focus_thumb::CardPicture {
+            key,
+            rgba,
+            width_px: *width_px,
+            height_px: *height_px,
+        }),
+        PeekCacheEntry::Pending | PeekCacheEntry::Failed => None,
+    }
+}
+
 /// **Which of a seat move's re-keyings a page has to follow** (§7.10 ④‴).
 ///
 /// `moves` is the whole transaction — every `(was, now)` pair the gesture
@@ -103861,6 +103963,78 @@ mod tests {
             removed < collected && collected < inserted,
             "a trade files the arriving page under the departing page's own id, \
              so an insert interleaved with the removes loses a live browser:\n{carrier}"
+        );
+    }
+
+    /// RED — **a card reads the picture this window already has and asks for
+    /// nothing** (defect #205; user ruling 2026-08-30; §7.1.6b‴).
+    ///
+    /// The asking side of "a card draws the real thumbnail", and the whole of
+    /// what §7.1.6b′'s red line — *「缩略图不许向磁盘提问」* — costs it. A column
+    /// of cards walks every seat of every visible tab on every frame; a lookup
+    /// that armed a decode would be that walk putting a question to the disk for
+    /// every picture you scrolled past, and the ruling is explicit that the card
+    /// draws what is already in memory and a face otherwise.
+    ///
+    /// Four states of one cache and three of them are the same answer, which is
+    /// the property: `Ready` is the picture, and `Pending`, `Failed` and *absent*
+    /// are each `None` — with nothing inserted and nothing sent on any of the
+    /// three.
+    ///
+    /// RED GATE: give the absent arm the `request_peek_pixels` /
+    /// `insert(Pending)` pair `file_peek_fitted_pixels` has — which is the
+    /// obvious way to write it and the way the glance card *does* — and the last
+    /// assertion goes red with a cache this function was only supposed to read.
+    #[test]
+    fn a_card_reads_the_picture_this_window_has_and_asks_for_nothing() {
+        let path = Path::new(r"D:\shots\B1-rest.png");
+        let key = normalized_local_image_path_key(path);
+        let rgba: Arc<[u8]> = Arc::from(vec![0x11; 8 * 2 * 4]);
+        let mut cache = std::collections::HashMap::new();
+
+        assert!(
+            card_picture_in(&cache, path).is_none(),
+            "a file nothing has decoded is a face"
+        );
+        cache.insert(key.clone(), PeekCacheEntry::Pending);
+        assert!(
+            card_picture_in(&cache, path).is_none(),
+            "a decode that is still out is a face, not a half-drawn picture"
+        );
+        cache.insert(key.clone(), PeekCacheEntry::Failed);
+        assert!(
+            card_picture_in(&cache, path).is_none(),
+            "and a decode that failed is the same face"
+        );
+        cache.insert(
+            key.clone(),
+            PeekCacheEntry::Ready {
+                key: key.clone(),
+                rgba: Arc::clone(&rgba),
+                width_px: 8,
+                height_px: 2,
+            },
+        );
+        let picture = card_picture_in(&cache, path).expect("a decoded file draws");
+        assert_eq!(picture.key, key, "under the decode's own identity");
+        assert_eq!((picture.width_px, picture.height_px), (8, 2));
+        assert!(
+            Arc::ptr_eq(picture.rgba, &rgba),
+            "and it is the same pixels the pane is drawing, not a copy"
+        );
+
+        // The three refusals left the cache exactly as they found it: this
+        // function reads and never asks.
+        const SOURCE: &str = include_str!("main.rs");
+        let at = SOURCE
+            .find("\nfn card_picture_in<'a>(")
+            .expect("the card's picture lookup is a free function in this file");
+        let rest = &SOURCE[at..];
+        let reader = &rest[..rest.find("\n}\n").expect("and it ends") + 3];
+        assert!(
+            !reader.contains("request_peek_pixels") && !reader.contains(".insert("),
+            "the card's picture lookup asks the worker or writes the cache, \
+             which is a column of cards reading the disk as you scroll:\n{reader}"
         );
     }
 

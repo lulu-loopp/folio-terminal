@@ -5401,6 +5401,31 @@ pub enum MiniSeatContent {
         width_px: u32,
         height_px: u32,
     },
+    /// **A picture, as the picture it is** (user ruling 2026-08-30; `DESIGN.md`
+    /// §7.1.6b‴) — the decode this window already holds for the file that
+    /// preview pane is showing, sampled into the seat's own box.
+    ///
+    /// The same four fields [`Self::Page`] carries and a different arm below,
+    /// and the difference is one word: a page's frame was captured **at the
+    /// seat's own shape**, so it fills its box; a picture has an aspect of its
+    /// own that nothing asked about, so it is fitted inside its box and centred.
+    /// Stretching a 1440×900 screenshot into a card cell would be a card that
+    /// lies about the one thing a thumbnail is for.
+    ///
+    /// A video reaches this variant too, holding its first frame: a frame is
+    /// pixels by the time a card sees it, which is the same sentence the glance
+    /// card's own body already makes ([`crate::Runtime::file_peek_frame`]).
+    ///
+    /// A picture whose decode has not landed is a [`Self::Face`], and always
+    /// was.
+    Picture {
+        /// The decode's own content key — two cards over one file are one
+        /// texture, because they name it the same way.
+        key: String,
+        rgba: std::sync::Arc<[u8]>,
+        width_px: u32,
+        height_px: u32,
+    },
 }
 
 /// One card's thumbnail: the tab's tree, and what each of its seats is showing.
@@ -13384,6 +13409,61 @@ fn focus_mini_seat_content(
                     width_px: *width_px,
                     height_px: *height_px,
                     opacity: 1.0,
+                    clip: Some(clip_to_list(inner)),
+                    above_text: false,
+                });
+            }
+        }
+        // **A picture, fitted inside its box rather than filling it** (user
+        // ruling 2026-08-30; §7.1.6b‴).
+        //
+        // The arm above and this one differ in one word and the word is *fit*.
+        // A page's frame was captured at the seat's own shape, so the rectangle
+        // it is drawn in is the rectangle it is of; a photograph, a screenshot
+        // and a video frame each have an aspect nobody asked about, and a card
+        // that stretched one to the cell would say the wrong thing about the one
+        // fact a thumbnail carries. So the extent is
+        // [`bt_render::preview_image_extent`] — the very function the pane's own
+        // `Fit` mode is sized by, which is what makes the card and the pane
+        // agree — and the result is centred in the cell.
+        //
+        // `preview_image_extent` never enlarges, and that is right here too: a
+        // 16×16 icon drawn at 16×16 in the middle of a card is the honest
+        // picture, and blowing it up to the cell would be this window inventing
+        // pixels for a thumbnail.
+        //
+        // `None` is a box or a decode with no extent, which draws nothing rather
+        // than a one-pixel smear — the same refusal `refit_preview_picture`
+        // makes about the same two facts.
+        MiniSeatContent::Picture {
+            key,
+            rgba,
+            width_px,
+            height_px,
+        } => {
+            if inner[2] > inner[0]
+                && inner[3] > inner[1]
+                && in_list(inner)
+                && let Some((fitted_w, fitted_h)) = bt_render::preview_image_extent(
+                    (inner[2] - inner[0]).round().max(0.0) as u32,
+                    (inner[3] - inner[1]).round().max(0.0) as u32,
+                    *width_px,
+                    *height_px,
+                )
+            {
+                let left = ((inner[0] + inner[2]) / 2.0 - fitted_w as f32 / 2.0).round();
+                let top = ((inner[1] + inner[3]) / 2.0 - fitted_h as f32 / 2.0).round();
+                images.push(bt_render::ChromeIcon {
+                    key: key.clone(),
+                    rect: [left, top, left + fitted_w as f32, top + fitted_h as f32],
+                    rgba: std::sync::Arc::clone(rgba),
+                    width_px: *width_px,
+                    height_px: *height_px,
+                    opacity: 1.0,
+                    // Clipped to the seat as well as to the list: the fit cannot
+                    // exceed the cell, but the cell can be half out of the
+                    // column, and one crop that is the intersection of both is
+                    // what the page above already states.
                     clip: Some(clip_to_list(inner)),
                     above_text: false,
                 });
@@ -39719,6 +39799,138 @@ mod tests {",
                 .iter()
                 .any(|label| label.text == "127.0.0.1:8080"),
             "and it stopped saying which page it is"
+        );
+    }
+
+    /// RED — **a card draws the picture its pane is showing, fitted and not
+    /// stretched** (user report on `next22`, defect #205; user ruling
+    /// 2026-08-30, extending 0820's *「第二投影加高加忠实」*; §7.1.6b‴).
+    ///
+    /// A tab with a `.png` open on a preview pane, put into focus-card mode,
+    /// drew two words — the file's name and `PNG` — over ground. The ruling is
+    /// that it draws the picture: the decode is already in the window's hands,
+    /// and a thumbnail of the photograph says *which tab this is* far better
+    /// than its extension in capitals.
+    ///
+    /// Three claims, and the third is the one that separates this arm from the
+    /// page's:
+    ///
+    /// ① the pixels reach `ChromeGroup::images` rather than the label channel;
+    /// ② they are inside the seat's own cell and cropped to the column;
+    /// ③ they keep the picture's **aspect** — a 4:1 texture in a cell that is
+    ///    not 4:1 is letterboxed and centred, where a page's frame fills its box.
+    ///
+    /// RED GATE: send the same seat through as a `Face` and `images` is empty
+    /// (the reported defect); paint `rect: inner` the way the page arm does and
+    /// ③ goes red with a stretched picture.
+    #[test]
+    fn a_card_draws_the_picture_its_pane_is_showing_without_stretching_it() {
+        let tabs = vec![card_tab("B1-rest.png", 1, TabMarkState::default(), false)];
+        let tree = lone_seat_tree(SeatKind::Preview);
+        // Four times as wide as it is tall, so "fitted" and "stretched" cannot
+        // give the same rectangle in any cell this column has.
+        let shown = BTreeMap::from([(
+            SeatId(1),
+            MiniSeatContent::Picture {
+                key: "D:\\shots\\b1-rest.png".to_owned(),
+                rgba: std::sync::Arc::from(vec![0x80; 128 * 32 * 4]),
+                width_px: 128,
+                height_px: 32,
+            },
+        )]);
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let with_picture = window_chrome_with_thumbnails_in(
+            TALL_FIXTURE_HEIGHT,
+            &tabs,
+            0,
+            state,
+            None,
+            &[Some(FocusThumbnail {
+                tree: &tree,
+                focused: SeatId(1),
+                seats: &shown,
+            })],
+            FocusFrame::SETTLED,
+        )
+        .rail;
+        // ① the pixels are on the picture channel.
+        let [picture] = with_picture.images.as_slice() else {
+            panic!(
+                "a card with a picture on it drew {} pictures",
+                with_picture.images.len()
+            );
+        };
+        assert_eq!(picture.key, "D:\\shots\\b1-rest.png");
+        assert_eq!((picture.width_px, picture.height_px), (128, 32));
+
+        // ② inside its cell, cropped to the column.
+        let geometry = focus_of_in(TALL_FIXTURE_HEIGHT, state, tabs.len());
+        let card = &geometry.cards[0];
+        let cell = focus_mini_seats(&tree, card.mini, 1.0)[0].rect;
+        assert!(
+            picture.rect[0] >= cell[0]
+                && picture.rect[1] >= cell[1]
+                && picture.rect[2] <= cell[2]
+                && picture.rect[3] <= cell[3],
+            "the picture {:?} left its cell {cell:?}",
+            picture.rect
+        );
+        let clip = picture.clip.expect("a picture is cropped to the list");
+        assert!(
+            clip[1] >= geometry.viewport[0] && clip[3] <= geometry.viewport[1],
+            "the crop {clip:?} runs outside the column's own viewport {:?}",
+            geometry.viewport
+        );
+
+        // ③ the aspect is the picture's, and it is centred in what it left over.
+        let drawn = [
+            picture.rect[2] - picture.rect[0],
+            picture.rect[3] - picture.rect[1],
+        ];
+        assert!(
+            (drawn[0] / drawn[1] - 4.0).abs() < 0.15,
+            "a 128×32 picture came out {drawn:?}, which is not four to one — a \
+             card that stretches is a card that lies about the one fact a \
+             thumbnail carries"
+        );
+        let slack = [
+            (picture.rect[0] - cell[0]) - (cell[2] - picture.rect[2]),
+            (picture.rect[1] - cell[1]) - (cell[3] - picture.rect[3]),
+        ];
+        assert!(
+            slack[0].abs() <= 1.0 && slack[1].abs() <= 1.0,
+            "the letterbox is one-sided: {slack:?} in cell {cell:?}"
+        );
+
+        // And the same seat with nothing decoded: the face it always drew.
+        let face = BTreeMap::from([(
+            SeatId(1),
+            MiniSeatContent::Face {
+                name: "B1-rest.png".to_owned(),
+                kind: "PNG".to_owned(),
+            },
+        )]);
+        let without = window_chrome_with_thumbnails_in(
+            TALL_FIXTURE_HEIGHT,
+            &tabs,
+            0,
+            state,
+            None,
+            &[Some(FocusThumbnail {
+                tree: &tree,
+                focused: SeatId(1),
+                seats: &face,
+            })],
+            FocusFrame::SETTLED,
+        )
+        .rail;
+        assert!(
+            without.images.is_empty(),
+            "a picture nothing has decoded drew pixels out of nothing"
+        );
+        assert!(
+            without.labels.iter().any(|label| label.text == "B1-rest.png"),
+            "and it stopped saying which file it is"
         );
     }
 

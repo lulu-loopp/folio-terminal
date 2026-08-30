@@ -223,6 +223,21 @@ enum Damage {
     /// that grew therefore draws a bigger picture without rebuilding anything,
     /// which is the whole difference between pixels and rows.
     Page { key: String },
+    /// **A picture's identity** — the decode this window is already holding for
+    /// the file that pane is showing (user ruling 2026-08-30; §7.1.6b‴).
+    ///
+    /// [`Self::Page`]'s reasoning word for word, and for the same two reasons:
+    /// the identity and not the pixels, because a megabyte-wide memcmp answers
+    /// nothing a content key does not; and **no rectangle**, because a picture
+    /// is sampled into the box the card gives it this frame rather than cut to
+    /// it, so a card that grew draws a bigger picture without rebuilding
+    /// anything.
+    ///
+    /// A separate variant from `Page` even though both are one string, because
+    /// the two are keyed in different vocabularies — a page's key counts frames
+    /// and a picture's names a decode — and a build where a seat could hold both
+    /// would compare a serial against a path and call them equal.
+    Picture { key: String },
 }
 
 /// **A directory one card's files seat had nothing in memory to draw** (user
@@ -343,6 +358,48 @@ pub enum SeatSource<'a> {
     Page {
         picture: &'a crate::web_thumb::Picture,
     },
+    /// **A preview seat showing a picture, drawn as the picture it is** (user
+    /// ruling 2026-08-30, extending 0820's *「第二投影加高加忠实」*; §7.1.6b‴).
+    ///
+    /// v1 drew every picture pane as a [`Self::Face`] — two words, a name and
+    /// `PNG` — and the argument was the one that condemned prose: pixels at
+    /// card scale are a smear. The ruling that reopened it is the ruling that
+    /// reopened prose: a card's job is to say *which tab this is*, and a
+    /// thumbnail of the photograph says it far better than the extension in
+    /// capitals — which is exactly what every file manager on the desk decided
+    /// about the same question thirty years ago.
+    ///
+    /// **It decodes nothing and pulls no frame**, which is the red line
+    /// §7.1.6b′ draws round this whole module said for a third kind of content:
+    /// what reaches this variant is the decode the *window* is already holding
+    /// for that file ([`crate::WindowRuntime::peek_cache`], keyed by path), and
+    /// a file nothing has decoded stays a `Face`. A video reaches it too and by
+    /// the same door: its first frame is filed in that same cache under that
+    /// same key, which is where the preview pane's own still comes from — so
+    /// "the card draws the first frame" needs no second lane and no second
+    /// answer to *which* frame.
+    ///
+    /// Borrowed, like [`Self::Page`] and for its reason: this is assembled per
+    /// seat of every visible card on every frame, and the expensive half
+    /// happens past the gates.
+    Picture(CardPicture<'a>),
+}
+
+/// **The pixels a card draws for one picture seat**, borrowed off the window's
+/// path-keyed decode (§7.1.6b‴).
+///
+/// A struct rather than four fields in the variant so that the one place that
+/// reads [`crate::PeekCacheEntry`] — which is private to the window's own module
+/// — can hand this module the four things it needs without this module learning
+/// what a decode cache is.
+#[derive(Clone, Copy, Debug)]
+pub struct CardPicture<'a> {
+    /// The shared texture cache's identity for these pixels — the decode's own
+    /// content key, which is what makes two cards over one file one texture.
+    pub key: &'a str,
+    pub rgba: &'a std::sync::Arc<[u8]>,
+    pub width_px: u32,
+    pub height_px: u32,
 }
 
 /// One seat of one visible card, and how wide its own rectangle is in characters.
@@ -575,6 +632,9 @@ impl SeatDemand<'_> {
             SeatSource::Page { picture } => Damage::Page {
                 key: picture.key.clone(),
             },
+            SeatSource::Picture(picture) => Damage::Picture {
+                key: picture.key.to_owned(),
+            },
         }
     }
 
@@ -628,6 +688,20 @@ impl SeatDemand<'_> {
                 MiniSeatContent::Page {
                     key: picture.key.clone(),
                     rgba: std::sync::Arc::clone(&picture.rgba),
+                    width_px: picture.width_px,
+                    height_px: picture.height_px,
+                },
+                Vec::new(),
+            ),
+            // The other cheapest projection in the module, and for the same
+            // reason: the decode happened once, on another thread, for the pane
+            // this card is a picture of. Nothing here resamples — the painter is
+            // handed the pixels and the box, and the sampler fits one into the
+            // other (§7.1.6b‴).
+            SeatSource::Picture(picture) => (
+                MiniSeatContent::Picture {
+                    key: picture.key.to_owned(),
+                    rgba: std::sync::Arc::clone(picture.rgba),
                     width_px: picture.width_px,
                     height_px: picture.height_px,
                 },
@@ -692,7 +766,12 @@ impl SeatSource<'_> {
             Self::Files { .. }
             | Self::Document { mono: false, .. }
             | Self::Face { .. }
-            | Self::Page { .. } => MiniMetrics::FACE,
+            | Self::Page { .. }
+            // A decoded picture is the other content with no rows and no
+            // columns, and it answers what a page answers for the same reason:
+            // a picture whose decode has not landed is a `Face`, and a seat must
+            // not change its own measurements on the way between the two.
+            | Self::Picture(_) => MiniMetrics::FACE,
         }
     }
 }
@@ -2117,6 +2196,92 @@ mod tests {
                 name: "127.0.0.1:8080".to_owned(),
                 kind: "Page".to_owned(),
             })
+        );
+    }
+
+    /// One decode, as the window's cache would hand it over.
+    fn a_decode(key: &str) -> (String, std::sync::Arc<[u8]>) {
+        (key.to_owned(), std::sync::Arc::from(vec![0x20; 16 * 4 * 4]))
+    }
+
+    /// RED — **a preview seat showing a picture projects the picture** (defect
+    /// #205; user ruling 2026-08-30; §7.1.6b‴).
+    ///
+    /// The projection half of "a card draws the real thumbnail", with the two
+    /// properties the budget turns on:
+    ///
+    /// ① the content is the decode itself — two `Arc` clones and a string, the
+    ///    same shape a page's frame arrives in, because the expensive half
+    ///    happened on the decode worker for the *pane*, not here;
+    /// ② the damage key is the decode's identity and **not** the pixels, so a
+    ///    card looked at sixty times a second re-projects nothing. That is the
+    ///    same discipline `Damage::Page` states, and it is what keeps this from
+    ///    becoming the per-frame flip §7.1.3m warns about.
+    ///
+    /// RED GATE: put the `rgba` in `Damage::Picture` and gate 3 becomes a
+    /// megabyte-wide memcmp per visible card per frame; hand the seat through as
+    /// a `Face` and the card goes back to two words over ground, which is the
+    /// defect.
+    #[test]
+    fn a_preview_seat_showing_a_picture_draws_it_and_re_projects_only_when_it_changes() {
+        fn demand<'a>(key: &'a str, rgba: &'a std::sync::Arc<[u8]>) -> SeatDemand<'a> {
+            SeatDemand {
+                id: seat(1),
+                columns: 40,
+                rows: 12,
+                source: SeatSource::Picture(CardPicture {
+                    key,
+                    rgba,
+                    width_px: 16,
+                    height_px: 4,
+                }),
+            }
+        }
+        let (key, rgba) = a_decode("D:\\shots\\b1-rest.png");
+        let mut thumbs = FocusThumbnails::default();
+        let now = Instant::now();
+        thumbs.project(tab(1), &[demand(&key, &rgba)], now);
+
+        // ① the decode itself, under its own name.
+        assert_eq!(
+            shown(&thumbs),
+            Some(&MiniSeatContent::Picture {
+                key: "D:\\shots\\b1-rest.png".to_owned(),
+                rgba: std::sync::Arc::clone(&rgba),
+                width_px: 16,
+                height_px: 4,
+            })
+        );
+
+        // ② and the key is what gate 3 answers on. The same decode, a *different
+        // allocation* of the same bytes: nothing re-projects.
+        let same_bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(vec![0x20; 16 * 4 * 4]);
+        assert!(!std::sync::Arc::ptr_eq(&rgba, &same_bytes));
+        let before = thumbs.stats();
+        thumbs.project(
+            tab(1),
+            &[demand(&key, &same_bytes)],
+            now + MIN_INTERVAL * 2,
+        );
+        assert_eq!(
+            thumbs.stats().projections,
+            before.projections,
+            "a picture that has not changed re-projected, which is a card \
+             flipping every frame"
+        );
+        assert_eq!(thumbs.stats().skipped_unchanged, before.skipped_unchanged + 1);
+
+        // A different file is a different card, once.
+        let (other, other_rgba) = a_decode("D:\\shots\\other.png");
+        thumbs.project(
+            tab(1),
+            &[demand(&other, &other_rgba)],
+            now + MIN_INTERVAL * 4,
+        );
+        assert_eq!(
+            thumbs.stats().projections,
+            before.projections + 1,
+            "and a card handed another file did not follow it"
         );
     }
 
