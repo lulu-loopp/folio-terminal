@@ -19,6 +19,7 @@
 //! preview shows — those never enter a `LayoutNode`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use bt_layout::{
     Axis, DIVIDER, Edit, EditError, ExtentClass, FILES_W, KindMetrics, Landing, LayoutMode,
@@ -6868,6 +6869,22 @@ pub struct TabRun {
     /// come off — rather than a second place where the drag engine learns which
     /// mode the window is in.
     pub pane_offers: PaneOffers,
+    /// **How far this list can be scrolled along its axis**, in physical pixels
+    /// — `0.0` when everything it holds already fits.
+    ///
+    /// [`Self::viewport`]'s other half, and it has to be on the run for
+    /// [`Self::viewport`]'s reason: the auto-scroll under a drag
+    /// ([`autoscroll_speed`]) is one mechanism over all three surfaces, and a
+    /// mechanism that had to ask which geometry it was looking at to find out
+    /// how long the list was would be three mechanisms wearing one name.
+    ///
+    /// What is deliberately *not* here is the offset the list is currently at.
+    /// Every rectangle above has already been solved at that offset — a run is a
+    /// list as it stands, not a list plus a note about where it stands — so
+    /// carrying it would be a second copy of a number the slots already answer,
+    /// and the two could disagree. The callers that need it hold it themselves
+    /// and hand it in.
+    pub max_scroll: f32,
 }
 
 /// **The two offers a tab list makes a pane, said separately** (§7.1.6b′ ②, as
@@ -7021,6 +7038,7 @@ pub fn strip_run(geometry: &TabStripGeometry, scale: f32) -> TabRun {
         band: strip_band(geometry, scale),
         viewport: geometry.viewport,
         pane_offers: PaneOffers::BOTH,
+        max_scroll: geometry.max_scroll,
     }
 }
 
@@ -7038,6 +7056,7 @@ pub fn rail_run(geometry: &RailGeometry) -> TabRun {
         band: geometry.body,
         viewport: geometry.viewport,
         pane_offers: PaneOffers::BOTH,
+        max_scroll: geometry.max_scroll,
     }
 }
 
@@ -7091,7 +7110,117 @@ pub fn focus_rail_run(geometry: &FocusRailGeometry) -> TabRun {
         band: geometry.body,
         viewport: geometry.viewport,
         pane_offers: PaneOffers::BOTH,
+        max_scroll: geometry.max_scroll,
     }
+}
+
+/// **How fast this list should be running under a hand that is dragging near its
+/// edge**, in physical pixels per second, signed along the run's own axis
+/// (缺陷 #188, user ruling 2026-08-29).
+///
+/// Positive is "toward the end of the list" — down the card column and the rail,
+/// rightward along the strip — which is the direction a growing scroll offset
+/// reveals. `0.0` is the answer almost always, and it is the answer that costs
+/// nothing: a run that reports no speed asks for no wake-ups.
+///
+/// **One function, three surfaces, and that is the whole of the ruling.** A card
+/// column, a vertical rail and a horizontal tab strip differ here in exactly two
+/// numbers — which axis [`TabRun::pos`] projects onto, and how long
+/// [`TabRun::viewport`] is — and both of them are already on the run. So there
+/// is no branch in this function for which list it is looking at, and no second
+/// copy of it anywhere: adding auto-scroll to a fourth scroller is filling in a
+/// [`TabRun`], not writing this again.
+///
+/// **The four facts it is made of:**
+///
+/// 1. **The band is [`bt_render::DRAG_AUTOSCROLL_EDGE_LOGICAL_PX`] measured
+///    inward from the *scroller's* clip**, not from the surface's outer box. The
+///    column's `+` row stands below the list's foot, and a hand that has reached
+///    it is a hand asking to see what is under the last card — so the band is
+///    struck from `viewport` and a pointer past it, still inside the run, is at
+///    full speed rather than back at nothing.
+/// 2. **Linear in how deep the hand has reached**, nothing at the band's inner
+///    lip and everything at the clip's own edge. Linear and not eased: this is a
+///    control the hand is holding open, and a curve between the fingers and the
+///    speed is a control that answers a different amount each time you reach the
+///    same distance.
+/// 3. **A list already at the end it is heading for reports `0.0`.** Not a
+///    clamp applied afterwards by the caller — the answer itself, so that the
+///    clock this drives stops being wound rather than being woken forty times a
+///    second to move a list zero pixels.
+/// 4. **Reduced motion is a different rate, not silence**
+///    ([`bt_render::DRAG_AUTOSCROLL_REDUCED_LOGICAL_PX_PER_S`]). The ramp is
+///    what the preference objects to; the reaching is what the reader asked for.
+///
+/// The bands cannot overlap on a short list: the reach is capped at half the
+/// clip, so on a viewport narrower than two bands they meet exactly in the
+/// middle and the leading one wins.
+#[must_use]
+pub fn autoscroll_speed(
+    run: &TabRun,
+    scroll: f32,
+    pointer: (f64, f64),
+    scale: f32,
+    motion: crate::Motion,
+) -> f32 {
+    if run.max_scroll <= 0.0 || !run.contains(pointer.0, pointer.1) {
+        return 0.0;
+    }
+    let [start, end] = run.viewport;
+    let span = end - start;
+    if span <= 0.0 {
+        return 0.0;
+    }
+    let edge = (bt_render::DRAG_AUTOSCROLL_EDGE_LOGICAL_PX * scale).min(span / 2.0);
+    if edge <= 0.0 {
+        return 0.0;
+    }
+    let position = run.pos(pointer.0, pointer.1);
+    // How far into a band the hand has reached: `0.0` at its inner lip, `1.0` at
+    // the clip's own edge and beyond it.
+    let (reach, direction) = if position <= start + edge {
+        (((start + edge - position) / edge).clamp(0.0, 1.0), -1.0)
+    } else if position >= end - edge {
+        (((position - (end - edge)) / edge).clamp(0.0, 1.0), 1.0)
+    } else {
+        return 0.0;
+    };
+    if reach <= 0.0 {
+        return 0.0;
+    }
+    // Fact 3: at the end it is reaching for, this list has nothing to offer.
+    if (direction < 0.0 && scroll <= 0.0) || (direction > 0.0 && scroll >= run.max_scroll) {
+        return 0.0;
+    }
+    let speed = match motion {
+        crate::Motion::Full => reach * span * bt_render::DRAG_AUTOSCROLL_VIEWPORTS_PER_S,
+        crate::Motion::Reduced => bt_render::DRAG_AUTOSCROLL_REDUCED_LOGICAL_PX_PER_S * scale,
+    };
+    direction * speed
+}
+
+/// Where this list stands after `elapsed` of [`autoscroll_speed`] — `None` when
+/// it would not have moved at all.
+///
+/// `None` rather than "the same offset back again" because the caller's next
+/// step is a re-survey and a repaint, and both are wasted on a list that is
+/// where it was. One function answers "did anything happen" and "what is it now"
+/// together, so the two can never be asked of different instants.
+#[must_use]
+pub fn autoscroll_step(
+    run: &TabRun,
+    scroll: f32,
+    pointer: (f64, f64),
+    scale: f32,
+    motion: crate::Motion,
+    elapsed: Duration,
+) -> Option<f32> {
+    let speed = autoscroll_speed(run, scroll, pointer, scale, motion);
+    if speed == 0.0 {
+        return None;
+    }
+    let moved = (scroll + speed * elapsed.as_secs_f32()).clamp(0.0, run.max_scroll);
+    (moved != scroll).then_some(moved)
 }
 
 /// A divider's hit zone: the drawn band widened to something a hand can land
