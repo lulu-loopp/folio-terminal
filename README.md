@@ -131,9 +131,7 @@ be seen at once.
 - `Ctrl+Shift+↑` and `Ctrl+Shift+↓` step between commands in the scrollback, and
   a command that failed is marked as having failed.
 
-### Windows, in detail
-
-The Windows-only parts are verified on real hardware.
+### Windows integration
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
@@ -144,21 +142,12 @@ The Windows-only parts are verified on real hardware.
        a preview pane on the right.">
 </picture>
 
-- Wide characters have a recorded corpus of width cases behind them, holding byte
-  by byte how many columns one occupies, where the cursor may land, and where a
-  selection may cut.
-- Microsoft Pinyin, WeType and Sogou were each driven by hand on real hardware.
-  Sogou does not report the syllables still being typed, so it draws them in its
-  own candidate window; the committed text arrives correct.
-- Two monitors at different scales are measured on real hardware — dragged
-  between, maximised, sized past the screen edge both ways. "Open Folio here" is
-  in the Explorer context menu, under "Show more options".
-- Windows PowerShell 5.1 still ships PSReadLine 2.0.0, which takes its edit anchor
-  from a cell count made before the resize, so narrowing the window redraws the
-  input line over text that has moved. Folio carries a patched 2.4.6 compiled into
-  the executable and installs it into your module path if you ask. On a machine
-  whose execution policy is still the stock `Restricted`, the switch says so and
-  hands you the `Set-ExecutionPolicy` command that lets the module load.
+- "Open Folio here" is in the Explorer context menu, under "Show more options".
+- Windows PowerShell 5.1 ships PSReadLine 2.0.0, which misplaces the input line
+  after the window is resized. Folio carries a patched 2.4.6 and installs it into
+  your module path on request. On a machine whose execution policy is still the
+  stock `Restricted`, the switch says so and hands you the `Set-ExecutionPolicy`
+  command that lets the module load.
 
 ---
 
@@ -225,15 +214,13 @@ What is in each file, and why a full address ends up in `session.json`, is in
 ## Known issues
 
 - **Not signed.** See [SmartScreen](#smartscreen) above.
-- **`.mov` does not play.** It gets a first frame, a length and a size, and the
-  pane says why there is no play button. `.mkv` and `.avi` get no preview at all.
 - **A window was once reported drawing its top half black** after a move to a
   second monitor, unreproduced. Attach `%APPDATA%\Folio\diagnostics.log` if you
   hit it.
 - **"Open Folio here" is not on the first page** of the Windows 11 context menu.
   That page needs a signed, packaged application, so it waits on signing.
-- **A `.webm` card can be blank on a stock Windows**, which may have no VP9 or AV1
-  decoder for the still. Length, size and playback are unaffected.
+- **`.webm` needs the VP9 or AV1 Video Extension** from the Microsoft Store. A
+  stock Windows has neither, and without one there is no still and no playback.
 - The rest are in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Licence
@@ -253,12 +240,9 @@ go through the private channel in [`SECURITY.md`](SECURITY.md), not an issue.
 
 ## What's next
 
-- A terminal on a hotkey: one key brings a window down from the top edge of the
-  screen and sends it back, with what was in it still there.
-- Markdown edited where it is typeset, in the preview pane.
-- macOS and Linux. The drawing, the layout and the typesetting do not know which
-  platform they are on; one crate does, and that is the one to swap. macOS first.
-- The desk from a phone: which agent is waiting, and an answer sent back to it.
-  Off unless you switch it on, and over your own network first.
+- A terminal on a hotkey.
+- Markdown editing in the preview pane.
+- macOS and Linux.
+- Which agent is waiting, on a phone.
 
 These are directions, not dates.
