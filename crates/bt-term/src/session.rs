@@ -12665,6 +12665,51 @@ mod tests {
         NonZeroU32::new(value).unwrap()
     }
 
+    /// **The panic a released build took, reproduced.**
+    ///
+    /// `panicked at vendor\alacritty_terminal\src\grid\mod.rs:493:30: index out
+    /// of bounds: the len is 1 but the index is 1` — column 30 of that line is
+    /// the `[point.column]` of `Grid::cursor_cell`, so the row that was one
+    /// cell long was asked for its second cell.
+    ///
+    /// A one-column grid cannot hold a two-cell grapheme, and the emulator does
+    /// not pretend otherwise: it writes the lead half at column 0 and then
+    /// steps the cursor to column 1 to write the wide char's spacer
+    /// (`Term::write_grapheme_at_cursor`), which is a column a one-cell row
+    /// does not have. The *first* wide character a one-column terminal is
+    /// handed takes the process down with it.
+    ///
+    /// This crate may not fix that: `vendor/alacritty_terminal` is a read-only
+    /// copy, and upstream's own frontend answers it the only way a frontend
+    /// can — by never asking for fewer than two columns. Folio applies the same
+    /// floor at its one measuring door, `CellMetrics::MIN_COLUMNS` in
+    /// `bt_render::CellMetrics::grid_for_pixels`, and this test is what that
+    /// floor is worth.
+    ///
+    /// Red gate: it is the fixture the fix is *not* allowed to touch. Delete
+    /// the floor in `grid_for_pixels` and a window dragged below its advisory
+    /// minimum reaches this panic through `create_leaf_session` /
+    /// `resize_leaves_to_layout`.
+    #[test]
+    #[should_panic(expected = "index out of bounds: the len is 1 but the index is 1")]
+    fn a_one_column_terminal_dies_on_the_first_wide_character() {
+        let mut session = DualPlaneSession::new(nz(1), nz(24));
+        let _ = session.feed("中".as_bytes());
+    }
+
+    /// Two columns is the narrowest grid that survives one, which is why the
+    /// floor is two and not three: a wide grapheme lands whole, and each of the
+    /// next ones wraps onto a row of its own.
+    #[test]
+    fn two_columns_is_the_narrowest_grid_a_wide_character_fits_in() {
+        let mut session = DualPlaneSession::new(nz(2), nz(24));
+        session.feed("中中中".as_bytes()).unwrap();
+        let text = session.terminal.visible_text();
+        assert_eq!(text[0], "中", "the first wide character owns both cells");
+        assert_eq!(text[1], "中", "and the next wraps onto a row of its own");
+        assert_eq!(text[2], "中");
+    }
+
     /// **P0, the allocator half.** A captured grid must not touch the heap.
     ///
     /// Every cell used to carry a `String`, so capturing an 80x30 grid made

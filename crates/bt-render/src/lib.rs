@@ -438,17 +438,40 @@ impl CellMetrics {
         })
     }
 
+    /// **The narrowest grid a terminal may be given, and why it is two.**
+    ///
+    /// A two-cell grapheme — every CJK ideograph, every emoji — is written as a
+    /// lead cell plus a spacer in the column after it. In a one-column grid
+    /// there is no column after it: the emulator writes the lead at column 0,
+    /// steps the cursor to column 1 and indexes a row that is one cell long,
+    /// which is `index out of bounds: the len is 1 but the index is 1` at
+    /// `vendor/alacritty_terminal/src/grid/mod.rs:493:30` — the panic a
+    /// released build took on a window dragged below its advisory minimum while
+    /// a full-screen TUI was drawing into it.
+    ///
+    /// `vendor/alacritty_terminal` is a read-only copy of an upstream crate, so
+    /// the answer is the one upstream's own frontend gives: a one-column
+    /// terminal is not a size a frontend may ask for, and the floor belongs at
+    /// the single place a pixel rectangle becomes a grid. Rows have no such
+    /// floor — one row is a size the emulator represents exactly, and
+    /// `wrapline` scrolls it.
+    ///
+    /// Red gate: `bt_term`'s `a_one_column_terminal_dies_on_the_first_wide_character`
+    /// is the panic this floor stands between the product and.
+    pub const MIN_COLUMNS: u16 = 2;
+
     pub fn grid_for_pixels(&self, width: u32, height: u32) -> GridSize {
         let usable_width = (width as f32 - 2.0 * self.padding_px).max(self.cell_width_px);
         let usable_height = (height as f32 - 2.0 * self.padding_px).max(self.cell_height_px);
         let columns = (usable_width / self.cell_width_px)
             .floor()
-            .clamp(1.0, u16::MAX as f32);
+            .clamp(f32::from(Self::MIN_COLUMNS), u16::MAX as f32);
         let rows = (usable_height / self.cell_height_px)
             .floor()
             .clamp(1.0, u16::MAX as f32);
         GridSize {
-            columns: NonZeroU16::new(columns as u16).expect("grid columns are clamped above zero"),
+            columns: NonZeroU16::new(columns as u16)
+                .expect("grid columns are clamped to at least MIN_COLUMNS"),
             rows: NonZeroU16::new(rows as u16).expect("grid rows are clamped above zero"),
         }
     }
@@ -3359,6 +3382,56 @@ impl SeatViewport {
             width: self.width.clamp(1, width.saturating_sub(x).max(1)),
             height: self.height.clamp(1, height.saturating_sub(y).max(1)),
         }
+    }
+
+    /// The part of this rectangle that lies **inside** a `width` x `height`
+    /// render target, or `None` when none of it does.
+    ///
+    /// This is the intersection and not [`Self::clamped_to`]'s nearest
+    /// non-empty rectangle, because the two answer different questions.
+    /// `clamped_to` keeps a *seat* on the surface — a seat has to land
+    /// somewhere, so pinning it to the edge is the right answer. A scissor is
+    /// a permission, and a box entirely off the target permits nothing: the
+    /// honest answer is to draw nothing, not to leak a one-pixel sliver onto
+    /// the edge of a target the caller never asked to paint.
+    ///
+    /// It exists because wgpu validates `x + w <= target.width` and
+    /// `y + h <= target.height` and makes a failure a *device* error rather
+    /// than a clipped-away pixel (`wgpu-core-30.0.0`
+    /// `command/render.rs::set_scissor`). A window dragged below its advisory
+    /// minimum can put a pane's box exactly on the right edge — `x` equal to
+    /// the target width, `w` floored to one — and that is the arithmetic that
+    /// took the window down.
+    #[must_use]
+    pub(crate) fn scissor_within(self, width: u32, height: u32) -> Option<Self> {
+        if self.x >= width || self.y >= height {
+            return None;
+        }
+        let clipped_width = self.width.min(width - self.x);
+        let clipped_height = self.height.min(height - self.y);
+        if clipped_width == 0 || clipped_height == 0 {
+            return None;
+        }
+        Some(Self {
+            x: self.x,
+            y: self.y,
+            width: clipped_width,
+            height: clipped_height,
+        })
+    }
+}
+
+/// **The one door every scissor in this crate goes through.**
+///
+/// Returns whether a scissor was set — `false` is a box with no pixels on this
+/// target, and the caller draws nothing rather than drawing it somewhere else.
+fn set_scissor(pass: &mut wgpu::RenderPass<'_>, clip: SeatViewport, target: (u32, u32)) -> bool {
+    match clip.scissor_within(target.0, target.1) {
+        Some(clip) => {
+            pass.set_scissor_rect(clip.x, clip.y, clip.width, clip.height);
+            true
+        }
+        None => false,
     }
 }
 
@@ -6334,14 +6407,15 @@ impl WindowRenderer {
             }
             prepared.push(PreparedSeat {
                 seat: entry.seat,
-                // Clamped here rather than trusted, and only this one of the
-                // pair: `seat` is the solver's own answer travelling under a
-                // translation that keeps both of its ends on the surface, while
-                // `clip` is what the scissor is validated against and a scissor
-                // outside the attachment is a device error rather than a
-                // clipped-away pixel. `clamped_to` never returns an empty
-                // rectangle, which is the other half of that validation.
-                clip: entry.clip.clamped_to(self.config.width, self.config.height),
+                // Carried as the caller drew it, and put through the surface's
+                // extent at the one place a scissor is issued: [`set_scissor`].
+                // It used to be clamped here, which is *nearly* the same thing
+                // and was not the same thing — a clip that has left the surface
+                // entirely was pinned to the last column and drawn there, and a
+                // clip that had left it by a fraction was clamped against
+                // `self.config` while the attachment is what wgpu validates
+                // against. One door, applied to the real target, is both.
+                clip: entry.clip,
                 slot: index,
                 ground_rect_buffer,
                 ground_rect_count: ground_rects.len(),
@@ -6996,7 +7070,17 @@ impl WindowRenderer {
                 // at rest — for `N = 1` they are both the whole surface — and
                 // differ only while a pane is mid-FLIP, where the difference is
                 // precisely the mock-up's counter-scale (see [`SeatFrame::clip`]).
-                pass.set_scissor_rect(seat.clip.x, seat.clip.y, seat.clip.width, seat.clip.height);
+                //
+                // Through [`set_scissor`], which is where the surface's extent
+                // is applied: a seat whose box has no pixels on this target
+                // draws none.
+                if !set_scissor(
+                    &mut pass,
+                    seat.clip,
+                    (self.config.width, self.config.height),
+                ) {
+                    continue;
+                }
                 let slot = &self.seat_slots[seat.slot];
                 // The paper a program declared, before the ink printed on it: the
                 // same order the one list had, drawn with the clear's own
@@ -7064,7 +7148,11 @@ impl WindowRenderer {
                     0.0,
                     1.0,
                 );
-                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+                set_scissor(
+                    &mut pass,
+                    SeatViewport::whole(self.config.width, self.config.height),
+                    (self.config.width, self.config.height),
+                );
                 // The grounds first, and with the clear's own blend: each one
                 // *is* the window at its rectangle, so it supersedes whatever is
                 // there rather than sitting on it. Everything below is struck on
@@ -7134,15 +7222,18 @@ impl WindowRenderer {
                     0.0,
                     1.0,
                 );
-                pass.set_scissor_rect(clip.x, clip.y, clip.width, clip.height);
-                pass.set_pipeline(&gpu.math_pipeline);
-                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                for draw in &preview_draws {
-                    if let Some(texture) = gpu.math_textures.get(&draw.key)
-                        && let Some(tile) = texture.tiles.get(draw.tile_index)
-                    {
-                        pass.set_bind_group(0, &tile.bind_group, &[]);
-                        pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                // The scissor through [`set_scissor`], and the draws behind it:
+                // a preview whose box has no pixels on this surface paints none.
+                if set_scissor(&mut pass, clip, (self.config.width, self.config.height)) {
+                    pass.set_pipeline(&gpu.math_pipeline);
+                    pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                    for draw in &preview_draws {
+                        if let Some(texture) = gpu.math_textures.get(&draw.key)
+                            && let Some(tile) = texture.tiles.get(draw.tile_index)
+                        {
+                            pass.set_bind_group(0, &tile.bind_group, &[]);
+                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                        }
                     }
                 }
             }
@@ -7185,7 +7276,11 @@ impl WindowRenderer {
                     0.0,
                     1.0,
                 );
-                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+                set_scissor(
+                    &mut pass,
+                    SeatViewport::whole(self.config.width, self.config.height),
+                    (self.config.width, self.config.height),
+                );
                 // Fills first: a diff's line tint, a fence's ground, a table's
                 // grid — every one of them is *under* the text of the very same
                 // body, and both are drawn in the document's own scrolled
@@ -7231,7 +7326,11 @@ impl WindowRenderer {
                     0.0,
                     1.0,
                 );
-                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+                set_scissor(
+                    &mut pass,
+                    SeatViewport::whole(self.config.width, self.config.height),
+                    (self.config.width, self.config.height),
+                );
                 pass.set_pipeline(&gpu.ground_rect_pipeline);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..6, 0..web_hole_rects.len() as u32);
@@ -7254,7 +7353,11 @@ impl WindowRenderer {
                     0.0,
                     1.0,
                 );
-                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+                set_scissor(
+                    &mut pass,
+                    SeatViewport::whole(self.config.width, self.config.height),
+                    (self.config.width, self.config.height),
+                );
                 if let Some(rect_buffer) = peek_rect_buffer.as_ref() {
                     pass.set_pipeline(&gpu.rect_pipeline);
                     pass.set_vertex_buffer(0, rect_buffer.slice(..));
@@ -7288,7 +7391,11 @@ impl WindowRenderer {
                     0.0,
                     1.0,
                 );
-                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+                set_scissor(
+                    &mut pass,
+                    SeatViewport::whole(self.config.width, self.config.height),
+                    (self.config.width, self.config.height),
+                );
                 // Bottom layer first, and each one's three channels closed before
                 // the next one's open: this loop *is* the overlay's z-order, and
                 // it is the reason a picker's popup covers the row under it
@@ -7894,8 +8001,12 @@ impl WindowRenderer {
         let mut draws = Vec::new();
         let mut vertices = Vec::new();
         for layer in &self.video_layers {
-            let clip = layer.clip.clamped_to(surface_width, surface_height);
-            if clip.width == 0 || clip.height == 0 || layer.opacity <= 0.0 {
+            // The clip travels as the caller drew it and meets the surface's
+            // extent at [`set_scissor`]; asked here only so a layer with no
+            // pixels on this surface — or none to give — costs no vertices.
+            let clip = layer.clip;
+            if clip.scissor_within(surface_width, surface_height).is_none() || layer.opacity <= 0.0
+            {
                 continue;
             }
             let box_ = [
@@ -12335,7 +12446,11 @@ fn draw_video_stage(
             pass.set_vertex_buffer(0, vertex_buffer.slice(..));
             opened = true;
         }
-        pass.set_scissor_rect(draw.clip.x, draw.clip.y, draw.clip.width, draw.clip.height);
+        // Through [`set_scissor`] like every other scissor in this crate: a
+        // layer whose box has no pixels on this surface draws none.
+        if !set_scissor(pass, draw.clip, surface) {
+            continue;
+        }
         // A pipeline whose layout names a texture must have one bound whether
         // the fragment samples it or not, and a ground quad samples nothing.
         let bound = draw
@@ -12347,7 +12462,11 @@ fn draw_video_stage(
         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
     }
     if opened {
-        pass.set_scissor_rect(0, 0, surface_width, surface_height);
+        set_scissor(
+            pass,
+            SeatViewport::whole(surface_width, surface_height),
+            surface,
+        );
     }
 }
 
@@ -13979,7 +14098,50 @@ mod tests {
                 rows: NonZeroU16::new(24).unwrap(),
             }
         );
-        assert_eq!(metrics.grid_for_pixels(0, 0).columns.get(), 1);
+        assert_eq!(metrics.grid_for_pixels(0, 0).rows.get(), 1);
+        assert_eq!(
+            metrics.grid_for_pixels(0, 0).columns.get(),
+            CellMetrics::MIN_COLUMNS
+        );
+    }
+
+    /// **The floor a released build was missing.**
+    ///
+    /// A window can be dragged below its advisory minimum — that is a ruling,
+    /// not an accident — and the pane inside it goes down with it. What may not
+    /// happen is that the grid measured from that sliver is one column wide:
+    /// the emulator writes a two-cell grapheme as a lead plus a spacer in the
+    /// next column, and in a one-column row there is no next column. It panics,
+    /// on the main thread, at the first CJK character or emoji a full-screen
+    /// TUI paints — `vendor/alacritty_terminal/src/grid/mod.rs:493:30`, `the
+    /// len is 1 but the index is 1`. `bt_term`'s
+    /// `a_one_column_terminal_dies_on_the_first_wide_character` is that panic,
+    /// standing still so this floor can be read against it.
+    ///
+    /// Red gate: restore the `1.0` this clamp used to carry and the first case
+    /// fails, at every scale a real display runs at.
+    #[test]
+    fn a_pane_squeezed_to_a_sliver_is_never_measured_at_one_column() {
+        let mut font_system = terminal_font_system();
+        for scale_factor in [1.0, 1.25, 1.5, 2.0, 3.0] {
+            let metrics = CellMetrics::measure(&mut font_system, scale_factor).unwrap();
+            for width in 0..=256_u32 {
+                let grid = metrics.grid_for_pixels(width, 400);
+                assert!(
+                    grid.columns.get() >= CellMetrics::MIN_COLUMNS,
+                    "{width}px at {scale_factor}x measured {} columns",
+                    grid.columns.get()
+                );
+            }
+            // A pane wide enough to have an opinion still gets the count the
+            // arithmetic gives it: the floor is a floor and not a rounding.
+            let roomy = metrics.grid_for_pixels(2000, 400);
+            assert_eq!(
+                u32::from(roomy.columns.get()),
+                ((2000.0 - 2.0 * metrics.padding_px) / metrics.cell_width_px).floor() as u32,
+                "the floor must not move a grid that clears it"
+            );
+        }
     }
 
     #[test]
@@ -15253,6 +15415,59 @@ mod tests {
             );
             assert!(clamped.width >= 1 && clamped.height >= 1);
         }
+    }
+
+    /// **The arithmetic under the scissor door**, checked without a device.
+    ///
+    /// `scissor_within` is an intersection and not `clamped_to`'s nearest
+    /// non-empty rectangle, and the difference is the whole repair: a box that
+    /// has left the surface permits no pixels, and pinning it to the last
+    /// column would paint a one-pixel stripe down an edge nobody asked to
+    /// paint.
+    #[test]
+    fn a_scissor_is_intersected_with_its_target_and_refused_when_it_misses() {
+        const WIDTH: u32 = 314;
+        const HEIGHT: u32 = 50;
+        let within = |x, y, width, height| {
+            SeatViewport {
+                x,
+                y,
+                width,
+                height,
+            }
+            .scissor_within(WIDTH, HEIGHT)
+        };
+        // The crash report's rectangle: it starts one column past the last one.
+        assert_eq!(within(314, 49, 1, 1), None);
+        assert_eq!(within(0, 50, 10, 10), None);
+        assert_eq!(within(WIDTH * 4, HEIGHT * 4, 200, 200), None);
+        assert_eq!(within(10, 10, 0, 5), None);
+        assert_eq!(within(10, 10, 5, 0), None);
+        // One pixel inside an edge keeps exactly the pixel it has.
+        assert_eq!(
+            within(313, 49, 64, 64),
+            Some(SeatViewport {
+                x: 313,
+                y: 49,
+                width: 1,
+                height: 1
+            })
+        );
+        // A rectangle already inside is handed back untouched.
+        let whole = SeatViewport::whole(WIDTH, HEIGHT);
+        assert_eq!(whole.scissor_within(WIDTH, HEIGHT), Some(whole));
+        assert_eq!(
+            within(100, 20, 50, 10),
+            Some(SeatViewport {
+                x: 100,
+                y: 20,
+                width: 50,
+                height: 10
+            })
+        );
+        // And nothing survives a target with no pixels in it.
+        assert_eq!(whole.scissor_within(0, HEIGHT), None);
+        assert_eq!(whole.scissor_within(WIDTH, 0), None);
     }
 
     #[test]
@@ -18201,6 +18416,113 @@ mod tests {
             "the chrome lane cast bitmaps for captions the clip had already closed over: {}",
             census.line()
         );
+    }
+
+    /// RED — **the scissor never leaves the render target** (`docs/DESIGN.md`
+    /// §7.48).
+    ///
+    /// The device error a released build took, verbatim:
+    ///
+    /// ```text
+    /// wgpu error: Validation Error
+    ///   In a RenderPass note: encoder = `Folio frame`
+    ///     In a set_scissor_rect command
+    ///       Scissor Rect { x: 314, y: 49, w: 1, h: 1 } is not contained in the render target (314, 50, 1)
+    /// ```
+    ///
+    /// A window dragged below its advisory minimum is 314x50 physical pixels,
+    /// and a pane FLIPping inside it is drawn through a box that has left the
+    /// surface by its own width. wgpu checks `x + w <= target.width` and makes
+    /// the failure a *device* error rather than a clipped-away pixel
+    /// (`wgpu-core-30.0.0`, `command/render.rs::set_scissor`), so the window
+    /// goes down over geometry that is merely off-screen.
+    ///
+    /// The exact rectangle off that report is the first case here, and the
+    /// others are its neighbours on all four edges: a box that starts one pixel
+    /// inside and runs off, one that starts exactly on the far corner, and one
+    /// that is nowhere near the surface at all. All of them are legitimate
+    /// answers from an animating layout, and none of them may reach the device
+    /// unclamped.
+    ///
+    /// Red gate: give the preview seat's clip back its raw `set_scissor_rect`
+    /// and the first case fails on the first frame.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_pane_flying_off_the_edge_never_scissors_outside_the_render_target() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        const WIDTH: u32 = 314;
+        const HEIGHT: u32 = 50;
+
+        let mut gpu = on_this_machines_adapter(FORMAT);
+        let mut window =
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
+        let frame = single_cell_cursor_frame(window.metrics());
+        let picture: Arc<[u8]> = Arc::from(vec![255_u8; 4 * 8 * 8].into_boxed_slice());
+        let escapes = [
+            // The crash report's own rectangle.
+            SeatViewport {
+                x: WIDTH,
+                y: HEIGHT - 1,
+                width: 1,
+                height: 1,
+            },
+            // One pixel inside the right edge, running off it.
+            SeatViewport {
+                x: WIDTH - 1,
+                y: 0,
+                width: 64,
+                height: HEIGHT,
+            },
+            // The far corner, running off both edges.
+            SeatViewport {
+                x: WIDTH - 1,
+                y: HEIGHT - 1,
+                width: 64,
+                height: 64,
+            },
+            // Nowhere near the surface.
+            SeatViewport {
+                x: WIDTH * 3,
+                y: HEIGHT * 3,
+                width: 200,
+                height: 200,
+            },
+            // And the resting case, which must still draw.
+            SeatViewport {
+                x: 0,
+                y: 0,
+                width: WIDTH,
+                height: HEIGHT,
+            },
+        ];
+        for clip in escapes {
+            window.set_preview_image(Some(PreviewImage {
+                seat: SeatViewport::whole(WIDTH, HEIGHT),
+                clip,
+                key: format!("escape-{}-{}", clip.x, clip.y),
+                rgba: Arc::clone(&picture),
+                width_px: 8,
+                height_px: 8,
+                display_width_px: 8,
+                display_height_px: 8,
+                pan_px: [0.0, 0.0],
+            }));
+            window
+                .present_frame(
+                    &mut gpu,
+                    &[SeatFrame {
+                        seat: SeatViewport::whole(WIDTH, HEIGHT),
+                        clip,
+                        frame: &frame,
+                        focused: true,
+                    }],
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .unwrap_or_else(|error| panic!("a frame clipped by {clip:?}: {error:?}"));
+        }
     }
 
     /// RED — **a long Chinese session does not run the shared atlas out of
