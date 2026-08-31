@@ -3008,6 +3008,8 @@ W0′ 的双向矩阵在这里落成三条:
 
 **抓帧未到、抓不到、抓不下的退路是同一件事:pane 自己的底色 + 遮罩。** 三种情形——解码还在 worker 上(一两帧)、这一页从来没被照过、pane 大过 `MAX_FRAME_PIXELS`(4096×2560,一块 4K 屏 200% 下的整窗)——都不画,**不闪白、不卡、不发明像素**。同一条纪律还落在两处松手上:**页一离开玻璃,在飞的那次抓帧当场作废**(`WebSeat::apply_presence` 清引擎那半,`WebThumbs::due` 清 store 那半)——不然模态恰好升在那 84 毫秒里的座位会**永远**再照不了相,以后每一张对话框它都是空白;**模态一撤,留存帧当场释放**,四十兆的像素不留到下一次。
 
+**仪表照旧只有一行。** 计数并进 §7.11 ⑧ 那条 `BT_FOCUS_THUMB_DUMP`,只多一列 `page-frames`(真存下来的留存帧张数),排在 `pictures` 后面——一张照片两个产品,读的人要的正是这两个数并排。取证另一头是 `BT_WEB_TRACE` 的 `place` 站:模态开着那一行读作 `presence=Hidden … obstructed=1`,而那一刻屏幕上有像素,这两件事**必须同时成立**,否则不是这条修好了,是页面根本没藏。
+
 **红门。** `a_page_a_modal_covers_keeps_the_frame_it_last_stood_on_the_glass_with`(照一次、不解码、模态来了讨一次解码、尺寸是页自己的、`drop_frames` 收得干净);`a_page_that_left_the_glass_lets_go_of_the_photograph_it_had_out`(红证:拿掉 `entry.asked = None`,页再也照不了);`a_card_and_a_pane_asking_about_one_page_take_one_photograph`(两个读者一次引擎调用,卡片仍拿到自己那份);`a_pane_past_the_frame_ceiling_is_refused_before_the_engine_is_asked`;`a_page_a_modal_covers_is_drawn_as_a_kept_frame`(源码钉:`sync_web_page` → `keep_what_the_modal_covers` → `refresh_chrome` 的 `page_keepsake_icons` → 浮窗那一层,四段链子任一断开就是那张空白 pane)。
 
 **视频 pane 不在这条里,而且是因为它本来就不同病。** 一段录像不是浏览器画的:`IMFMediaEngine` 走 frame-server 模式,每一帧 `TransferVideoFrame` 之后**读回系统内存**再交给渲染器(§7.42),也就是说它一直画在**本窗自己的玻璃上**。模态遮罩压在它上面,和压在一段文字上是同一件事——**一行代码都不动**。

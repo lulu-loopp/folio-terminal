@@ -33708,7 +33708,7 @@ impl Runtime<'_> {
         dump_chrome_frame(&seats);
         let mut icons = self.window.chrome_marks.resolve(&seats.sprites);
         // **And the last frame of every page a modal is standing over** (§7.8
-        // ⑨), which joins the same channel the marks just went down and is drawn
+        // ⑩), which joins the same channel the marks just went down and is drawn
         // in the same pass — under every overlay layer, and therefore under the
         // scrim, which is the whole point: the page's pixels are dimmed by the
         // dialog exactly as its neighbour pane's letters are.
@@ -33717,7 +33717,6 @@ impl Runtime<'_> {
         // is appended to the resolved list rather than passed through
         // `chrome_marks`, which is a cache of drawings this window makes.
         icons.extend(self.page_keepsake_icons());
-        let icons = icons;
         let chrome_changed = self
             .window
             .renderer
