@@ -73776,7 +73776,21 @@ impl Runtime<'_> {
 
     /// Repaint the chrome when the pointer moves onto or off a divider, a close
     /// affordance or a collapsed bar.
-    fn chrome_target_at(&self, position: PhysicalPosition<f64>) -> Option<seats::ChromeTarget> {
+    /// **The tab list, on whichever axis this window is wearing it** — the
+    /// strip, the icon rail, or the focus column, asked as one surface.
+    ///
+    /// Lifted out of [`Self::chrome_target_at`] so that a second caller can ask
+    /// the very same question: [`Self::web_page_at`] has to subtract it, and a
+    /// subtraction written a second time there would be a second answer to
+    /// "where is the tab list" for the two to drift apart on. It is the head of
+    /// the chrome ladder and nothing else moved.
+    ///
+    /// **Total over its own rectangle and `None` everywhere else** — all three
+    /// hit tests promise that (`hit_focus_rail`, `hit_rail_chrome`,
+    /// `hit_tab_chrome` each answer `None` before they answer anything), which
+    /// is what makes `is_some()` a usable reading of "the list covers this
+    /// pixel".
+    fn tab_list_target_at(&self, position: PhysicalPosition<f64>) -> Option<seats::ChromeTarget> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
@@ -73835,220 +73849,229 @@ impl Runtime<'_> {
                 position.y,
             ),
         }
-        .or_else(|| seats::hit_window_chrome(width, scale, rail, position.x, position.y))
-        // Before the pane heads, because the root button lives *inside* one:
-        // B17's judgement that a single element can be both a drag handle and a
-        // button only holds if the button answers first.
-        .or_else(|| {
-            seats::hit_files_root(
-                &self.seat_layout,
-                &self.window.files_name_widths,
-                scale,
-                position.x,
-                position.y,
-            )
-        })
-        // And before them for the same reason: the preview head's four controls
-        // live inside the drag handle too, and three of them are dead zones in it
-        // (the mock-up's `.pane-close, .pane-files, .pv-tool` exclusion, 5874).
-        .or_else(|| {
-            // Every preview seat's own tools, so the head the walk is standing on
-            // is laid out to the name *it* is drawn with. One set for all of them
-            // put the second head's buttons wherever the first head's name
-            // happened to end.
-            let tools: Vec<(SeatId, seats::PreviewHeadTools)> = self
-                .seats
-                .preview_seats()
-                .into_iter()
-                .map(|seat| (seat, self.preview_head_tools(seat)))
-                .collect();
-            // The reveal, on [`seats::hit_chrome`]'s own terms and for its own
-            // reason: these five are the split head's run in another head.
-            seats::hit_preview_head(
-                &self.seat_layout,
-                scale,
-                &tools,
-                self.head_run(),
-                position.x,
-                position.y,
-            )
-        })
-        // And the row under it (user ruling 2026-08-24), on the same terms: its
-        // controls stand inside a band the pane head's drag would otherwise
-        // claim, and the band itself answers for what its controls leave over —
-        // see [`seats::ChromeTarget::PreviewRail`]. Asked after the head only
-        // because the two never overlap; either order gives the same answers,
-        // and this one reads in the order the rows are drawn.
-        .or_else(|| {
-            let rails: Vec<(SeatId, seats::PreviewRailMeasure)> = self
-                .seats
-                .preview_seats()
-                .into_iter()
-                .filter_map(|seat| {
-                    Some((seat, self.preview_rail_measure(self.preview_here(seat))?))
-                })
-                .collect();
-            seats::hit_preview_rail(&self.seat_layout, scale, &rails, position.x, position.y)
-        })
-        // The lone pane's corner ghost (§7.1.6i), before the pane heads for the
-        // same smallest-target-first reason everything above it is asked first:
-        // it floats *over* the terminal's own body, and the body is not chrome,
-        // so nothing below would ever return it to the head's arm to be
-        // out-ranked.
-        .or_else(|| {
-            seats::hit_pane_ghost(
-                &self.seats,
-                &self.seat_layout,
-                scale,
-                self.window.search.seat(),
-                position.x,
-                position.y,
-            )
-        })
-        .or_else(|| {
-            seats::hit_chrome(
-                &self.seats,
-                &self.seat_layout,
-                scale,
-                // **The run that is on screen, not the run the rectangles
-                // allow** (user report, 2026-08-26). A pane head's `×`, `⌄`,
-                // folder and pop-out are drawn only while the hand is inside
-                // that pane, and this hit test used to answer for them whatever
-                // the hand had done — so a press that arrived without a hover
-                // first (a probe's injected click, or the press right after a
-                // resize, which clears `pane_hover` because the border being
-                // dragged is non-client) tore a column out into a floating
-                // window from a head showing nothing but a drag handle.
-                //
-                // It is the *stored* hover and not a fresh `pane_at` of this
-                // very position, which is what makes it the same fact the paint
-                // used: this is asked on the press as well as on the move, and
-                // on the press the only honest question is "what is the reader
-                // looking at".
-                //
-                // And since 裁4 (2026-08-26) it is the *pair*: a head whose own
-                // menu is standing is showing its run even though `pane_hover`
-                // was cleared the instant the hand reached the list, so the
-                // `✕` beside the `⌄` that opened it goes on taking a press.
-                self.head_run(),
-                position.x,
-                position.y,
-            )
-        })
-        // Last, and only for what the pane heads left over: a files column's
-        // head carries the same `×` and the same drag handle every other pane
-        // has, and the tree lives strictly below it. Asking the rows first would
-        // put a row where the close button is on any column scrolled far enough.
-        // The foot before the rows, and before the rows can even reach it: the
-        // tree's body now stops at the strip, so the two cannot overlap. Asked
-        // first anyway, for the reason the root button is asked before the head
-        // it lives in — a control's claim on its own rectangle should not depend
-        // on a *second* rectangle happening to have been shortened correctly.
-        .or_else(|| {
-            seats::hit_files_foot(
-                &self.seats,
-                &self.seat_layout,
-                scale,
-                position.x,
-                position.y,
-            )
-        })
-        // The card's button, asked only while the card is up: a control that
-        // answers a hit test it is not on screen for is an invisible button.
-        .or_else(|| {
-            let seat = self.seats.preview()?;
-            let button = self.window.preview_card_verbs.get(&seat).copied()?;
-            seats::hit_preview_card_button(
-                &self.seats,
-                &self.seat_layout,
-                button,
-                scale,
-                position.x,
-                position.y,
-            )
-        })
-        // **The switch before the page it switches**, and before the tree too:
-        // it stands between the head and the body, and a thirty-pixel strip the
-        // body also claimed would be a control you cannot press.
-        .or_else(|| {
-            seats::hit_files_seg(
-                &self.seat_layout,
-                &self.files_seg_widths(),
-                scale,
-                position.x,
-                position.y,
-            )
-        })
-        .or_else(|| {
-            seats::hit_git_panel(
-                &self.seat_layout,
-                &self.window.git_pages_shown,
-                scale,
-                position.x,
-                position.y,
-            )
-        })
-        // **The play button, in the preview seat's own body** (user ruling
-        // 2026-08-27; §7.23 ⑩) — asked here for the graph's own reason one
-        // rung down, and asked *before* it because the two cannot both be on
-        // one pane and the cheaper question reads first: a set membership
-        // against a solved rectangle.
-        //
-        // Answering here rather than in `chrome_mouse_input`'s fallback ladder
-        // is the ruling: this pane's body is a picture, and every rung of that
-        // ladder — the body thumb, a link, a block's scrollbar, the picture's
-        // own pan — is a gesture *on* the picture. A control standing on it
-        // out-ranks all of them, exactly as the graph's toolbar does.
-        .or_else(|| {
-            seats::hit_preview_play(
-                &self.seats,
-                &self.seat_layout,
-                &self.seats_wearing_a_play_button(),
-                scale,
-                position.x,
-                position.y,
-            )
-        })
-        // The graph, in the preview seat's own body. Asked here rather than
-        // among the preview pane's controls because it *is* the body: nothing
-        // else claims that rectangle while a graph is on it, and the document
-        // underneath has no text to place a caret in.
-        .or_else(|| {
-            seats::hit_git_graph(
-                &self.seats,
-                &self.seat_layout,
-                // The docked ones. A window's graph is answered by the float
-                // host's own hit test, which runs before this whole chain.
-                // **And this tab's,** which the key now says rather than the
-                // hit test assuming: `git_graphs_shown` is the window's map and
-                // spans every tab, so before §7.12 ⓑ a graph standing on a
-                // background tab offered its rows to a press on the seat of the
-                // same number in front of you.
-                self.window.git_graphs_shown.iter().filter_map(
-                    |(surface, content)| match surface {
-                        PreviewSurface::Seat(leaf) if leaf.tab == self.id => {
-                            Some((leaf.seat, content))
-                        }
-                        PreviewSurface::Seat(_)
-                        | PreviewSurface::Float(_)
-                        | PreviewSurface::Peek => None,
-                    },
-                ),
-                scale,
-                position.x,
-                position.y,
-            )
-        })
-        .or_else(|| {
-            seats::hit_files_tree(
-                &self.seat_layout,
-                &self.files_tree_contents(),
-                scale,
-                self.git_panel_on(),
-                position.x,
-                position.y,
-            )
-        })
+    }
+
+    fn chrome_target_at(&self, position: PhysicalPosition<f64>) -> Option<seats::ChromeTarget> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, _) = self.window.renderer.presentation_geometry().swapchain_size;
+        let width = width as f32;
+        let rail = self.sampled_rail(Instant::now());
+        self.tab_list_target_at(position)
+            .or_else(|| seats::hit_window_chrome(width, scale, rail, position.x, position.y))
+            // Before the pane heads, because the root button lives *inside* one:
+            // B17's judgement that a single element can be both a drag handle and a
+            // button only holds if the button answers first.
+            .or_else(|| {
+                seats::hit_files_root(
+                    &self.seat_layout,
+                    &self.window.files_name_widths,
+                    scale,
+                    position.x,
+                    position.y,
+                )
+            })
+            // And before them for the same reason: the preview head's four controls
+            // live inside the drag handle too, and three of them are dead zones in it
+            // (the mock-up's `.pane-close, .pane-files, .pv-tool` exclusion, 5874).
+            .or_else(|| {
+                // Every preview seat's own tools, so the head the walk is standing on
+                // is laid out to the name *it* is drawn with. One set for all of them
+                // put the second head's buttons wherever the first head's name
+                // happened to end.
+                let tools: Vec<(SeatId, seats::PreviewHeadTools)> = self
+                    .seats
+                    .preview_seats()
+                    .into_iter()
+                    .map(|seat| (seat, self.preview_head_tools(seat)))
+                    .collect();
+                // The reveal, on [`seats::hit_chrome`]'s own terms and for its own
+                // reason: these five are the split head's run in another head.
+                seats::hit_preview_head(
+                    &self.seat_layout,
+                    scale,
+                    &tools,
+                    self.head_run(),
+                    position.x,
+                    position.y,
+                )
+            })
+            // And the row under it (user ruling 2026-08-24), on the same terms: its
+            // controls stand inside a band the pane head's drag would otherwise
+            // claim, and the band itself answers for what its controls leave over —
+            // see [`seats::ChromeTarget::PreviewRail`]. Asked after the head only
+            // because the two never overlap; either order gives the same answers,
+            // and this one reads in the order the rows are drawn.
+            .or_else(|| {
+                let rails: Vec<(SeatId, seats::PreviewRailMeasure)> = self
+                    .seats
+                    .preview_seats()
+                    .into_iter()
+                    .filter_map(|seat| {
+                        Some((seat, self.preview_rail_measure(self.preview_here(seat))?))
+                    })
+                    .collect();
+                seats::hit_preview_rail(&self.seat_layout, scale, &rails, position.x, position.y)
+            })
+            // The lone pane's corner ghost (§7.1.6i), before the pane heads for the
+            // same smallest-target-first reason everything above it is asked first:
+            // it floats *over* the terminal's own body, and the body is not chrome,
+            // so nothing below would ever return it to the head's arm to be
+            // out-ranked.
+            .or_else(|| {
+                seats::hit_pane_ghost(
+                    &self.seats,
+                    &self.seat_layout,
+                    scale,
+                    self.window.search.seat(),
+                    position.x,
+                    position.y,
+                )
+            })
+            .or_else(|| {
+                seats::hit_chrome(
+                    &self.seats,
+                    &self.seat_layout,
+                    scale,
+                    // **The run that is on screen, not the run the rectangles
+                    // allow** (user report, 2026-08-26). A pane head's `×`, `⌄`,
+                    // folder and pop-out are drawn only while the hand is inside
+                    // that pane, and this hit test used to answer for them whatever
+                    // the hand had done — so a press that arrived without a hover
+                    // first (a probe's injected click, or the press right after a
+                    // resize, which clears `pane_hover` because the border being
+                    // dragged is non-client) tore a column out into a floating
+                    // window from a head showing nothing but a drag handle.
+                    //
+                    // It is the *stored* hover and not a fresh `pane_at` of this
+                    // very position, which is what makes it the same fact the paint
+                    // used: this is asked on the press as well as on the move, and
+                    // on the press the only honest question is "what is the reader
+                    // looking at".
+                    //
+                    // And since 裁4 (2026-08-26) it is the *pair*: a head whose own
+                    // menu is standing is showing its run even though `pane_hover`
+                    // was cleared the instant the hand reached the list, so the
+                    // `✕` beside the `⌄` that opened it goes on taking a press.
+                    self.head_run(),
+                    position.x,
+                    position.y,
+                )
+            })
+            // Last, and only for what the pane heads left over: a files column's
+            // head carries the same `×` and the same drag handle every other pane
+            // has, and the tree lives strictly below it. Asking the rows first would
+            // put a row where the close button is on any column scrolled far enough.
+            // The foot before the rows, and before the rows can even reach it: the
+            // tree's body now stops at the strip, so the two cannot overlap. Asked
+            // first anyway, for the reason the root button is asked before the head
+            // it lives in — a control's claim on its own rectangle should not depend
+            // on a *second* rectangle happening to have been shortened correctly.
+            .or_else(|| {
+                seats::hit_files_foot(
+                    &self.seats,
+                    &self.seat_layout,
+                    scale,
+                    position.x,
+                    position.y,
+                )
+            })
+            // The card's button, asked only while the card is up: a control that
+            // answers a hit test it is not on screen for is an invisible button.
+            .or_else(|| {
+                let seat = self.seats.preview()?;
+                let button = self.window.preview_card_verbs.get(&seat).copied()?;
+                seats::hit_preview_card_button(
+                    &self.seats,
+                    &self.seat_layout,
+                    button,
+                    scale,
+                    position.x,
+                    position.y,
+                )
+            })
+            // **The switch before the page it switches**, and before the tree too:
+            // it stands between the head and the body, and a thirty-pixel strip the
+            // body also claimed would be a control you cannot press.
+            .or_else(|| {
+                seats::hit_files_seg(
+                    &self.seat_layout,
+                    &self.files_seg_widths(),
+                    scale,
+                    position.x,
+                    position.y,
+                )
+            })
+            .or_else(|| {
+                seats::hit_git_panel(
+                    &self.seat_layout,
+                    &self.window.git_pages_shown,
+                    scale,
+                    position.x,
+                    position.y,
+                )
+            })
+            // **The play button, in the preview seat's own body** (user ruling
+            // 2026-08-27; §7.23 ⑩) — asked here for the graph's own reason one
+            // rung down, and asked *before* it because the two cannot both be on
+            // one pane and the cheaper question reads first: a set membership
+            // against a solved rectangle.
+            //
+            // Answering here rather than in `chrome_mouse_input`'s fallback ladder
+            // is the ruling: this pane's body is a picture, and every rung of that
+            // ladder — the body thumb, a link, a block's scrollbar, the picture's
+            // own pan — is a gesture *on* the picture. A control standing on it
+            // out-ranks all of them, exactly as the graph's toolbar does.
+            .or_else(|| {
+                seats::hit_preview_play(
+                    &self.seats,
+                    &self.seat_layout,
+                    &self.seats_wearing_a_play_button(),
+                    scale,
+                    position.x,
+                    position.y,
+                )
+            })
+            // The graph, in the preview seat's own body. Asked here rather than
+            // among the preview pane's controls because it *is* the body: nothing
+            // else claims that rectangle while a graph is on it, and the document
+            // underneath has no text to place a caret in.
+            .or_else(|| {
+                seats::hit_git_graph(
+                    &self.seats,
+                    &self.seat_layout,
+                    // The docked ones. A window's graph is answered by the float
+                    // host's own hit test, which runs before this whole chain.
+                    // **And this tab's,** which the key now says rather than the
+                    // hit test assuming: `git_graphs_shown` is the window's map and
+                    // spans every tab, so before §7.12 ⓑ a graph standing on a
+                    // background tab offered its rows to a press on the seat of the
+                    // same number in front of you.
+                    self.window
+                        .git_graphs_shown
+                        .iter()
+                        .filter_map(|(surface, content)| match surface {
+                            PreviewSurface::Seat(leaf) if leaf.tab == self.id => {
+                                Some((leaf.seat, content))
+                            }
+                            PreviewSurface::Seat(_)
+                            | PreviewSurface::Float(_)
+                            | PreviewSurface::Peek => None,
+                        }),
+                    scale,
+                    position.x,
+                    position.y,
+                )
+            })
+            .or_else(|| {
+                seats::hit_files_tree(
+                    &self.seat_layout,
+                    &self.files_tree_contents(),
+                    scale,
+                    self.git_panel_on(),
+                    position.x,
+                    position.y,
+                )
+            })
     }
 
     /// How wide each column's switch is, for the hit test.
@@ -83638,8 +83661,27 @@ impl Runtime<'_> {
     /// not at [`Self::point_is_on_the_web_page`]'s, so that the forwarders which
     /// ask *which* page also get it — a click on the capsule that is forwarded
     /// to the page underneath is the same bug read the other way round.
+    ///
+    /// **And the tab list is a third such surface** (user report, next23 #211).
+    /// An icon rail *opens over* the panes rather than reflowing them — the
+    /// stage keeps only `--railpark` clear (Q179,
+    /// [`seats::RailState::terminal_inset_logical_px`]) — so the panel's whole
+    /// trailing run, the `×` on every row included, stands inside the rectangle
+    /// a page in the tab underneath was given. The press ladder asks the page
+    /// before it asks the chrome router, so every one of those pixels was being
+    /// handed to the engine: a preview-only tab's row could be hovered and lit
+    /// and its `×` pressed, and the click went into the document. Nothing about
+    /// the close verb was broken — `close_tab` never sees the press at all.
+    ///
+    /// This is [`seats::ChromeTarget::RailBody`]'s own sentence said to the one
+    /// surface that is not drawn by wgpu: *a surface drawn over another surface
+    /// answers for every pixel it covers*. It was already true of the files tree
+    /// the rail covers; a page is the same case with a different painter.
     fn web_page_at(&self, position: PhysicalPosition<f64>) -> Option<LeafId> {
         let (x, y) = (position.x as f32, position.y as f32);
+        if self.tab_list_target_at(position).is_some() {
+            return None;
+        }
         if self
             .window
             .web_sheet_layout
