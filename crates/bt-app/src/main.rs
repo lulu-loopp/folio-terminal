@@ -82211,6 +82211,11 @@ impl Runtime<'_> {
     /// a page peeping out beside its own pane, and there is no third place the
     /// two could be reconciled.
     fn sync_web_page(&mut self, now: Instant) {
+        // **A station inside a frame** (see [`hang_watch::Station::WebPlace`]).
+        // This runs from `pane_draws`, which is inside whatever the frame's own
+        // station is, so the one being left is put back below rather than the
+        // rest of the frame being charged here. The empty-window arm returns
+        // before it, because a window with no page makes no call worth timing.
         if self.window.web.is_empty() {
             self.window.renderer.set_web_holes(Vec::new());
             // A window with no page has no page holding its keyboard, and the
@@ -82220,6 +82225,7 @@ impl Runtime<'_> {
             self.settle_the_web_keyboard();
             return;
         }
+        let leaving_station = hang_watch::enter(hang_watch::Station::WebPlace);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let motion = self.app.motion;
         let obstructed = self.a_modal_covers_the_window();
@@ -82427,6 +82433,7 @@ impl Runtime<'_> {
         }
         window.renderer.set_web_holes(holes);
         self.keep_what_the_modal_covers(keepsakes, now);
+        hang_watch::at(leaving_station);
     }
 
     /// **Every page in this window has its last frame kept, and a page a modal
@@ -82876,7 +82883,17 @@ impl Runtime<'_> {
             // focus changes without anything telling the engine so.
             web.set_claims(&self.app.shortcuts, focus);
             if orphaned.contains(leaf) {
+                // **The one synchronous call into the browser on this path.**
+                // Everything else in this function is arithmetic over maps and
+                // a deadline comparison; `WebSeat::close` reaches
+                // `ICoreWebView2Controller::Close`, which runs the page's own
+                // teardown in the browser process while this thread waits. It
+                // is stationed on its own so that a hold the ledger blames on
+                // this turn names four lines of code rather than a hundred —
+                // see [`hang_watch::Station::WebRetire`].
+                let leaving = hang_watch::enter(hang_watch::Station::WebRetire);
                 theirs.extend(web.close(&window.compositor));
+                hang_watch::at(leaving);
             }
             theirs.extend(web.tick(now, &window.compositor));
             outcomes.push((*leaf, theirs));
