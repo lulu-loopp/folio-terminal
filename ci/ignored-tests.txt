@@ -9,8 +9,8 @@
 #
 #     cargo test --workspace --locked -- --ignored --list
 #
-# Why any of them are ignored at all — the policy this list exists to state — is
-# that all twenty-two are **probes**, not regressions:
+# Why any of them are ignored at all — the policy this list exists to state.
+# Twenty-two of the twenty-four are **probes**, not regressions:
 #
 #   * nineteen in `bt-pty` drive real ConPTY sessions against a real PowerShell
 #     and read what comes back. Their assertions are about host timing and about
@@ -21,11 +21,31 @@
 #   * one in `bt-app` writes a picture for a person to look at.
 #
 # A test that belongs in CI does not go on this list; it stops being ignored.
+#
+# **The last two are the exception, and they are on this list under protest.**
+# `bt-render`'s two atlas soaks are RED gates for a user's 2026-08-29 report, not
+# probes — they belong in CI and cannot be there, because CI's only adapter is
+# the software one `ci/install-warp.ps1` installs. Measured on WARP on
+# 2026-08-31: it holds about three bytes per rendered pixel per frame for the
+# life of the process, so the first soak dies at frame 67 of 240 with the glyph
+# atlas still on its first packing, before the packer either of them exists to
+# examine is under any pressure. Nothing the caller does reaches it — a lower
+# atlas roof, retiring each submission, and waiting the device out between frames
+# were each measured and each died in the same place. On a real adapter both run
+# green in about seventy seconds. Each carries the whole measurement in its own
+# doc comment.
+#
+# So: this line of defence is currently held by whoever runs
+# `cargo test -p bt-render -- --ignored` on a machine with a graphics card, and
+# by nothing else. If a runner with a real adapter ever becomes available, these
+# two come off this list first.
 
 marks::tests::the_symbol_sheet_is_written_for_a_person_to_look_at
 paths::tests::a_scrollback_relative_reference_keeps_the_directory_it_was_printed_under
 paths::tests::an_unquoted_path_cut_at_a_space_does_not_link_its_prefix
+tests::a_long_chinese_session_never_runs_the_atlas_out_of_room
 tests::a_recall_carved_into_the_prompt_is_the_child_s_own_console_buffer
+tests::a_session_long_enough_to_wear_the_packer_out_gets_its_text_back
 tests::empty_prompt_committed_resize_chain_reanchor_pair_probe
 tests::empty_prompt_resize_invoke_prompt_pair_probe
 tests::exact_right_edge_widen_reanchor_pair_probe
