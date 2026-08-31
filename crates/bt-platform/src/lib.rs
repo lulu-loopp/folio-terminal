@@ -297,7 +297,10 @@ mod dpi_suggestion_tests {
             },
         )
         .expect("a rectangle that is not the suggestion is corrected");
-        assert_eq!((held.x, held.y, held.cx, held.cy), (-2791, 1050, 1590, 2230));
+        assert_eq!(
+            (held.x, held.y, held.cx, held.cy),
+            (-2791, 1050, 1590, 2230)
+        );
 
         // The program's own floor, re-entering with SWP_NOMOVE set. A rewrite
         // that did not clear the flag would move nothing and size to a number
@@ -314,8 +317,14 @@ mod dpi_suggestion_tests {
             },
         )
         .expect("a second rectangle inside one suggestion is corrected too");
-        assert_eq!((held.x, held.y, held.cx, held.cy), (-2791, 1050, 1590, 2230));
-        assert!(!held.no_move && !held.no_size, "a held rectangle is applied");
+        assert_eq!(
+            (held.x, held.y, held.cx, held.cy),
+            (-2791, 1050, 1590, 2230)
+        );
+        assert!(
+            !held.no_move && !held.no_size,
+            "a held rectangle is applied"
+        );
 
         // And the leg back, from exactly where the leg out left the window.
         let back = hold_pending_pos_to(
@@ -330,7 +339,10 @@ mod dpi_suggestion_tests {
             },
         )
         .expect("the return leg is corrected as well");
-        assert_eq!((back.x, back.y, back.cx, back.cy), (-3178, 1050, 2090, 2898));
+        assert_eq!(
+            (back.x, back.y, back.cx, back.cy),
+            (-3178, 1050, 2090, 2898)
+        );
 
         // Nothing to correct is not corrected: no third adjustment is invented
         // for a message that already carries the suggestion.
