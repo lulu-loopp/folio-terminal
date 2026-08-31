@@ -5768,10 +5768,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             "every commit has a full hash and an abbreviation"
         );
         assert!(
-            first
-                .commits
-                .iter()
-                .all(|commit| commit.parents.len() == 1),
+            first.commits.iter().all(|commit| commit.parents.len() == 1),
             "every commit above the root has exactly one parent on a linear history"
         );
         assert!(
@@ -5786,7 +5783,10 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             .iter()
             .filter(|commit| second.commits.iter().any(|later| later.hash == commit.hash))
             .count();
-        assert_eq!(overlap, 0, "the second page picks up where the first stopped");
+        assert_eq!(
+            overlap, 0,
+            "the second page picks up where the first stopped"
+        );
     }
 
     /// T4 (v2 ③) — a search is an **OR** of the message and the author, plus a
