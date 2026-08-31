@@ -111,6 +111,246 @@ pub fn custom_frame_hit_test(metrics: CustomFrameMetrics, x: i32, y: i32) -> Cus
     }
 }
 
+/// A pending move/size, as `WM_WINDOWPOSCHANGING` states one.
+///
+/// The two flags are the reason this is a struct and not four numbers: a
+/// `SetWindowPos` that asked for neither a move nor a size carries whatever
+/// `x`/`cx` happen to be in the structure, and rewriting those without clearing
+/// the flags rewrites nothing at all.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PendingWindowPos {
+    pub x: i32,
+    pub y: i32,
+    pub cx: i32,
+    pub cy: i32,
+    pub no_move: bool,
+    pub no_size: bool,
+}
+
+/// Hold a pending move/size to the rectangle Windows suggested for a DPI change.
+///
+/// # Why a suggestion has to be held rather than merely obeyed
+///
+/// `WM_DPICHANGED` carries the rectangle the window should occupy on the display
+/// it has just been judged to belong to, and Windows' own contract is that the
+/// program adopts it. Two parties inside this process would otherwise each
+/// compute a rectangle of their own during that one message: winit 0.30 rescales
+/// the *old* client rectangle and then re-adds a non-client margin through
+/// `AdjustWindowRectExForDpi` — a margin a window whose `WM_NCCALCSIZE` has made
+/// the client area the entire outer rect does not wear — and the application's
+/// own `ScaleFactorChanged` handler can re-enter `SetWindowPos` through its
+/// minimum-size floor. Each of them adds a few pixels the reader did not ask
+/// for; a window nudged wider is a window whose majority area lands back on the
+/// display it was leaving, which is a fresh `WM_DPICHANGED`, which grows it
+/// again. Measured on the reporter's machine at 2026-08-31: +56 physical pixels
+/// of width and +146 of height per 200%↔150% round trip, fifteen round trips in
+/// one drag, and a window that never crossed.
+///
+/// So every position change made while one suggestion is being applied resolves
+/// to that one rectangle. Not "the first one wins" and not "the last one wins":
+/// there is one rectangle for the whole message, it came from the OS, and no
+/// arithmetic of ours is laid on top of it.
+/// `None` when the pending position already *is* the suggestion, so a message
+/// nobody has to correct is not corrected.
+#[must_use]
+pub fn hold_pending_pos_to(
+    suggested: WindowRect,
+    pending: PendingWindowPos,
+) -> Option<PendingWindowPos> {
+    let held = PendingWindowPos {
+        x: suggested.left,
+        y: suggested.top,
+        cx: suggested.right.saturating_sub(suggested.left),
+        cy: suggested.bottom.saturating_sub(suggested.top),
+        no_move: false,
+        no_size: false,
+    };
+    (held != pending).then_some(held)
+}
+
+#[cfg(test)]
+mod dpi_suggestion_tests {
+    use super::{PendingWindowPos, WindowRect, hold_pending_pos_to};
+
+    /// winit 0.30's `WM_DPICHANGED` arithmetic, transcribed from
+    /// `platform_impl/windows/event_loop.rs`: the size Windows suggested is
+    /// discarded ("we calculate our own size because the default suggested rect
+    /// doesn't do a great job of preserving the window's logical size"), the old
+    /// *client* extent is rescaled, and then `AdjustWindowRectExForDpi` re-adds a
+    /// non-client margin.
+    ///
+    /// Kept only as a model. Nothing in this program computes a rectangle this
+    /// way, and the point of writing it down is that the reason a window could
+    /// not cross a monitor seam is then a thing a test can state rather than a
+    /// thing a comment asserts.
+    fn recomputed_extent(old: i32, old_dpi: u32, new_dpi: u32, margin: i32) -> i32 {
+        let rescaled = f64::from(old) / f64::from(old_dpi) * f64::from(new_dpi);
+        rescaled.round() as i32 + margin
+    }
+
+    /// **RED — the ping-pong is a ratchet, and the ratchet is the phantom frame.**
+    ///
+    /// The numbers are the reporter's, not invented: `%APPDATA%\Folio\
+    /// diagnostics.log` of 2026-08-31, a 4K display at 200% beside a portrait
+    /// 2.8K at 150%, one window dragged at the seam. Every extent below is a
+    /// `swapchain_size` copied out of that file, and the model reproduces all
+    /// four of them from the two margins alone — which is what makes the
+    /// diagnosis a measurement instead of a story.
+    ///
+    /// The window's client area *is* its outer rect (`WM_NCCALCSIZE`), so the
+    /// margin `AdjustWindowRectExForDpi` adds is a frame this window does not
+    /// wear. It is added once per leg and never taken off, so a round trip is
+    /// not a round trip: +56 px of width and +146 of height, every time, until
+    /// the window fills the display it was trying to leave.
+    #[test]
+    fn a_round_trip_under_the_recomputed_rule_grows_the_window() {
+        // The margin at each DPI, solved from the log and then used to predict
+        // the rest of it.
+        let (margin_144, margin_192) = ((22, 56), (26, 71));
+
+        let (mut width, mut height) = (2090, 2898);
+        assert_eq!(
+            (
+                recomputed_extent(width, 192, 144, margin_144.0),
+                recomputed_extent(height, 192, 144, margin_144.1),
+            ),
+            (1590, 2230),
+            "the 150% leg, as measured"
+        );
+        (width, height) = (1590, 2230);
+        assert_eq!(
+            (
+                recomputed_extent(width, 144, 192, margin_192.0),
+                recomputed_extent(height, 144, 192, margin_192.1),
+            ),
+            (2146, 3044),
+            "and the 200% leg, as measured"
+        );
+
+        // Six more round trips, against six more measured pairs. Nothing here is
+        // fitted: the same two margins produce the whole run.
+        let measured = [
+            ((1632, 2339), (2202, 3190)),
+            ((1674, 2449), (2258, 3336)),
+            ((1716, 2558), (2314, 3482)),
+            ((1758, 2668), (2370, 3628)),
+        ];
+        let (mut width, mut height) = (2146, 3044);
+        for (narrow, wide) in measured {
+            let leg = (
+                recomputed_extent(width, 192, 144, margin_144.0),
+                recomputed_extent(height, 192, 144, margin_144.1),
+            );
+            assert_eq!(leg, narrow, "the 150% leg of a later round trip");
+            let back = (
+                recomputed_extent(leg.0, 144, 192, margin_192.0),
+                recomputed_extent(leg.1, 144, 192, margin_192.1),
+            );
+            assert_eq!(back, wide, "and its 200% leg");
+            assert_eq!(
+                (back.0 - width, back.1 - height),
+                (56, 146),
+                "a round trip that returns nothing"
+            );
+            (width, height) = back;
+        }
+    }
+
+    /// **RED — the suggestion is adopted word for word, so a round trip is one.**
+    ///
+    /// Two rectangles out of the same log, in the order the drag produced them.
+    /// Whatever a `SetWindowPos` inside the message asked for — winit's
+    /// recomputed rectangle, this program's own minimum-size floor re-entering
+    /// through `ScaleFactorChanged`, a request that named neither a move nor a
+    /// size — the window ends the message on the rectangle Windows named. So the
+    /// leg back lands exactly where the leg out started, and there is no third
+    /// adjustment for the seam to answer.
+    ///
+    /// Red gate: leave `no_size` alone instead of clearing it and the extent
+    /// assertions go red at the ratcheted size; return `pending` unchanged and
+    /// every assertion here goes red at once.
+    #[test]
+    fn every_move_inside_one_suggestion_lands_on_the_rectangle_windows_named() {
+        let home = WindowRect {
+            left: -3178,
+            top: 1050,
+            right: -1088,
+            bottom: 3948,
+        };
+        let across = WindowRect {
+            left: -2791,
+            top: 1050,
+            right: -1201,
+            bottom: 3280,
+        };
+
+        // winit's recomputed rectangle, arriving as a full move/size.
+        let held = hold_pending_pos_to(
+            across,
+            PendingWindowPos {
+                x: -2791,
+                y: 1050,
+                cx: 1612,
+                cy: 2286,
+                no_move: false,
+                no_size: false,
+            },
+        )
+        .expect("a rectangle that is not the suggestion is corrected");
+        assert_eq!((held.x, held.y, held.cx, held.cy), (-2791, 1050, 1590, 2230));
+
+        // The program's own floor, re-entering with SWP_NOMOVE set. A rewrite
+        // that did not clear the flag would move nothing and size to a number
+        // nobody suggested.
+        let held = hold_pending_pos_to(
+            across,
+            PendingWindowPos {
+                x: 0,
+                y: 0,
+                cx: 1700,
+                cy: 2400,
+                no_move: true,
+                no_size: false,
+            },
+        )
+        .expect("a second rectangle inside one suggestion is corrected too");
+        assert_eq!((held.x, held.y, held.cx, held.cy), (-2791, 1050, 1590, 2230));
+        assert!(!held.no_move && !held.no_size, "a held rectangle is applied");
+
+        // And the leg back, from exactly where the leg out left the window.
+        let back = hold_pending_pos_to(
+            home,
+            PendingWindowPos {
+                x: held.x,
+                y: held.y,
+                cx: held.cx,
+                cy: held.cy,
+                no_move: false,
+                no_size: false,
+            },
+        )
+        .expect("the return leg is corrected as well");
+        assert_eq!((back.x, back.y, back.cx, back.cy), (-3178, 1050, 2090, 2898));
+
+        // Nothing to correct is not corrected: no third adjustment is invented
+        // for a message that already carries the suggestion.
+        assert_eq!(
+            hold_pending_pos_to(
+                home,
+                PendingWindowPos {
+                    x: back.x,
+                    y: back.y,
+                    cx: back.cx,
+                    cy: back.cy,
+                    no_move: false,
+                    no_size: false,
+                },
+            ),
+            None,
+        );
+    }
+}
+
 /// Scale a logical chrome measurement using Win32's 96-DPI baseline.
 #[must_use]
 pub fn logical_px_for_dpi(logical_px: u32, dpi: u32) -> i32 {
@@ -1614,7 +1854,7 @@ mod windows_impl {
         path::{Path, PathBuf},
         sync::{
             Arc, Mutex, OnceLock,
-            atomic::{AtomicI32, Ordering},
+            atomic::{AtomicBool, AtomicI32, Ordering},
         },
     };
     use windows::core::{HRESULT, HSTRING, IUnknown, Interface, PCWSTR, PWSTR};
@@ -1729,17 +1969,20 @@ mod windows_impl {
                 SM_YVIRTUALSCREEN, SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES,
                 SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
                 SWP_NOZORDER, SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW,
-                TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE, WM_GETMINMAXINFO,
-                WM_NCCALCSIZE, WM_NCHITTEST, WM_SETTINGCHANGE, WM_THEMECHANGED, WindowFromPoint,
+                TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE,
+                WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_NCCALCSIZE,
+                WM_NCHITTEST, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_WINDOWPOSCHANGING,
+                WindowFromPoint,
             },
         },
     };
 
     use super::{
         CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, GroundBand,
-        INSERT_ABOVE_REFERENCE, NonZeroIsize, PageVisual, TaskbarProgress, TaskbarProgressState,
-        ThreadPriority, VisualLayer, WheelScrollAmount, WindowRect, composition_visual_offset,
-        custom_frame_hit_test, logical_px_for_dpi, window_skirt,
+        INSERT_ABOVE_REFERENCE, NonZeroIsize, PageVisual, PendingWindowPos, TaskbarProgress,
+        TaskbarProgressState, ThreadPriority, VisualLayer, WheelScrollAmount, WindowRect,
+        composition_visual_offset, custom_frame_hit_test, hold_pending_pos_to, logical_px_for_dpi,
+        window_skirt,
     };
 
     /// GDI brush currently owned by this process and installed on winit's shared window class.
@@ -2893,6 +3136,55 @@ mod windows_impl {
         /// constraint survives a DPI change without anyone recomputing it.
         min_client_logical_width: AtomicI32,
         min_client_logical_height: AtomicI32,
+        /// Whether a `WM_DPICHANGED` suggestion is being applied right now, and
+        /// the rectangle it named. Every move/size that happens between the
+        /// arming and the disarming resolves to that rectangle — see
+        /// [`hold_pending_pos_to`], which holds the whole argument.
+        ///
+        /// Four numbers and a flag rather than one guarded rectangle because the
+        /// only reader is the subclass procedure on the window's own thread; the
+        /// atomics are here for the same reason the two above them are, which is
+        /// that the state is reached through a raw pointer and must not need a
+        /// lock to be sound.
+        adopting: AtomicBool,
+        adopting_left: AtomicI32,
+        adopting_top: AtomicI32,
+        adopting_right: AtomicI32,
+        adopting_bottom: AtomicI32,
+        /// Whether the frame is inside the OS's modal move/size loop — the hand
+        /// is on the title bar or on a resize edge and has not let go.
+        ///
+        /// winit surfaces no event for either end of that loop, and a DPI change
+        /// that arrives inside it is a fact about a window that is still moving.
+        /// The application reads this to decide whether to pay for one now or to
+        /// write it down (`Runtime::settle_deferred_dpi`).
+        in_size_move: AtomicBool,
+    }
+
+    impl CustomFrameState {
+        fn arm_adoption(&self, rect: WindowRect) {
+            self.adopting_left.store(rect.left, Ordering::Relaxed);
+            self.adopting_top.store(rect.top, Ordering::Relaxed);
+            self.adopting_right.store(rect.right, Ordering::Relaxed);
+            self.adopting_bottom.store(rect.bottom, Ordering::Relaxed);
+            self.adopting.store(true, Ordering::Release);
+        }
+
+        fn disarm_adoption(&self) {
+            self.adopting.store(false, Ordering::Release);
+        }
+
+        fn adoption(&self) -> Option<WindowRect> {
+            if !self.adopting.load(Ordering::Acquire) {
+                return None;
+            }
+            Some(WindowRect {
+                left: self.adopting_left.load(Ordering::Relaxed),
+                top: self.adopting_top.load(Ordering::Relaxed),
+                right: self.adopting_right.load(Ordering::Relaxed),
+                bottom: self.adopting_bottom.load(Ordering::Relaxed),
+            })
+        }
     }
 
     impl CustomWindowFrame {
@@ -2903,6 +3195,12 @@ mod windows_impl {
                 tab_strip_right_px: AtomicI32::new(0),
                 min_client_logical_width: AtomicI32::new(0),
                 min_client_logical_height: AtomicI32::new(0),
+                adopting: AtomicBool::new(false),
+                adopting_left: AtomicI32::new(0),
+                adopting_top: AtomicI32::new(0),
+                adopting_right: AtomicI32::new(0),
+                adopting_bottom: AtomicI32::new(0),
+                in_size_move: AtomicBool::new(false),
             });
             let reference_data = (&*state as *const CustomFrameState) as usize;
             let installed = unsafe {
@@ -2956,6 +3254,20 @@ mod windows_impl {
                 )
             };
             Ok(Self { hwnd, state })
+        }
+
+        /// Whether the hand is on this frame right now — the OS's modal
+        /// move/size loop is running.
+        ///
+        /// The only reading of it in the program is the one the DPI settlement
+        /// makes (`Runtime::settle_deferred_dpi`): a scale change that lands
+        /// mid-drag is written down and paid for when the hand lets go, so a
+        /// window crossing a monitor seam is not made to remeasure its font,
+        /// rebuild every grid and re-state its minimum size once per flip while
+        /// it is still moving.
+        #[must_use]
+        pub fn in_size_move(&self) -> bool {
+            self.state.in_size_move.load(Ordering::Acquire)
         }
 
         pub fn set_tab_strip_right_px(&self, tab_strip_right_px: i32) {
@@ -3047,6 +3359,89 @@ mod windows_impl {
         reference_data: usize,
     ) -> LRESULT {
         match message {
+            // **The rectangle Windows suggests is the rectangle the window
+            // takes** (user ruling 2026-08-31). The suggestion is read here,
+            // held for the whole of the message, and every move/size made while
+            // it is held — winit's own recomputed rectangle, and any this
+            // program's `ScaleFactorChanged` handler makes re-entrantly — is
+            // resolved to it by the `WM_WINDOWPOSCHANGING` arm below.
+            // [`hold_pending_pos_to`] carries the argument and the measurements.
+            //
+            // The message itself is *not* consumed: winit's own handler is what
+            // updates the cached scale factor and delivers `ScaleFactorChanged`,
+            // and a program that swallowed this to place the window itself would
+            // be a program whose window is on the right monitor at the wrong
+            // font size.
+            WM_DPICHANGED => {
+                // SAFETY: `CustomWindowFrame` owns this allocation and removes the subclass
+                // before dropping it, so the reference-data pointer is live for every callback.
+                let state = unsafe { &*(reference_data as *const CustomFrameState) };
+                // SAFETY: for WM_DPICHANGED the OS passes a live RECT in `lparam`,
+                // checked non-null here and copied out before anything else runs.
+                let suggested = (lparam.0 != 0).then(|| {
+                    let rect = unsafe { *(lparam.0 as *const RECT) };
+                    WindowRect {
+                        left: rect.left,
+                        top: rect.top,
+                        right: rect.right,
+                        bottom: rect.bottom,
+                    }
+                });
+                // A degenerate suggestion is not a suggestion. Nothing to adopt
+                // is not a reason to hold every later move to an empty rectangle.
+                let Some(suggested) =
+                    suggested.filter(|rect| rect.right > rect.left && rect.bottom > rect.top)
+                else {
+                    return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+                };
+                state.arm_adoption(suggested);
+                let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+                state.disarm_adoption();
+                result
+            }
+            WM_WINDOWPOSCHANGING => {
+                // SAFETY: as above.
+                let state = unsafe { &*(reference_data as *const CustomFrameState) };
+                if lparam.0 != 0
+                    && let Some(suggested) = state.adoption()
+                {
+                    // SAFETY: for WM_WINDOWPOSCHANGING the OS passes a live,
+                    // writable WINDOWPOS in `lparam`, checked non-null above.
+                    // Writing it is the documented way to alter a pending
+                    // position, and it is exclusively borrowed for these writes.
+                    let pending = unsafe { &mut *(lparam.0 as *mut WINDOWPOS) };
+                    let held = hold_pending_pos_to(
+                        suggested,
+                        PendingWindowPos {
+                            x: pending.x,
+                            y: pending.y,
+                            cx: pending.cx,
+                            cy: pending.cy,
+                            no_move: pending.flags.contains(SWP_NOMOVE),
+                            no_size: pending.flags.contains(SWP_NOSIZE),
+                        },
+                    );
+                    if let Some(held) = held {
+                        pending.x = held.x;
+                        pending.y = held.y;
+                        pending.cx = held.cx;
+                        pending.cy = held.cy;
+                        pending.flags &= !(SWP_NOMOVE | SWP_NOSIZE);
+                    }
+                }
+                unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+            }
+            // The two ends of the OS's modal move/size loop, which winit does not
+            // surface. Recorded and passed straight on: this is a reading, not a
+            // decision, and the decision it feeds is the application's.
+            WM_ENTERSIZEMOVE | WM_EXITSIZEMOVE => {
+                // SAFETY: as above.
+                let state = unsafe { &*(reference_data as *const CustomFrameState) };
+                state
+                    .in_size_move
+                    .store(message == WM_ENTERSIZEMOVE, Ordering::Release);
+                unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+            }
             WM_NCCALCSIZE => {
                 // A zoomed overlapped window deliberately extends its outer
                 // resize frame beyond the monitor. With the entire outer rect
