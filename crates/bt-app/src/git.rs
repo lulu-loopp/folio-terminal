@@ -5606,6 +5606,16 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
     /// that it has branches, that `HEAD` is on one of them, and that the status
     /// parses. It deliberately does not assert a clean tree: the repository is
     /// dirty exactly when somebody is working in it, which is whenever this runs.
+    ///
+    /// **And "any checkout" includes the shallow ones.** This used to ask this
+    /// workspace for a full first page and for `has_more`, which is not a fact
+    /// about the code: it is a fact about how deep somebody's clone happens to
+    /// be. `actions/checkout` fetches depth 1, so the first CI run answered with
+    /// one commit — one whose parents a shallow graft has taken away — and the
+    /// two assertions that read a *page boundary* rather than a page were red for
+    /// a repository that was answering perfectly. They are put to
+    /// [`a_repository_deep_enough_to_have_a_page_boundary_pages_at_fifty`]
+    /// instead, which builds the history it measures.
     #[test]
     fn this_workspace_answers_all_three_page_questions() {
         let git = real_git();
@@ -5649,19 +5659,134 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             panic!("a log question is answered with a log");
         };
         let page = outcome.expect("this workspace's history reads");
-        assert_eq!(page.commits.len(), GIT_LOG_PAGE, "a full first page");
-        assert!(page.has_more, "this repository has more than fifty commits");
+        assert!(
+            !page.commits.is_empty(),
+            "a repository with a HEAD has at least one commit on its first page"
+        );
+        assert!(
+            page.commits.len() <= GIT_LOG_PAGE,
+            "a page of {GIT_LOG_PAGE} never comes back longer than it asked for"
+        );
         assert!(
             page.commits
                 .iter()
                 .all(|commit| commit.hash.len() == 40 && !commit.short.is_empty()),
             "every commit has a full hash and an abbreviation"
         );
+    }
+
+    /// PIN — **a page is fifty, and the fifty-first is behind `has_more`.**
+    ///
+    /// The half of [`this_workspace_answers_all_three_page_questions`] that is
+    /// about a *boundary* rather than about a page, asked of a repository built
+    /// to have one. Depth is the whole of what this measures, so depth is the one
+    /// thing it may not inherit from whatever clone it is running inside — a
+    /// shallow checkout, a fresh repository, or a fork somebody made this
+    /// morning each answer differently and none of them is a defect.
+    ///
+    /// Fifty-one commits, which is the smallest history that can tell a full page
+    /// from a finished one. It is built with `--allow-empty`, because what is
+    /// under test is the paging arithmetic and not what any commit contains, and
+    /// with its identity set on the repository itself, because a machine with no
+    /// `user.email` configured is a machine `git commit` refuses — a runner, for
+    /// one.
+    ///
+    /// MUTATION: pass `count` through as `count` rather than `count + 1` when
+    /// [`answer`] asks git for a page, and `has_more` can no longer be told from
+    /// a page that ends exactly on the boundary — the first assertion below stays
+    /// green and the second goes red.
+    #[test]
+    fn a_repository_deep_enough_to_have_a_page_boundary_pages_at_fifty() {
+        const DEPTH: usize = GIT_LOG_PAGE + 1;
+
+        let git = real_git();
+        let root = std::env::temp_dir().join(format!(
+            "folio-git-pages-{}-{}",
+            std::process::id(),
+            RECORDED_AT
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch folder can be made");
+        let run = |arguments: &[&str]| {
+            let owned: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
+            run_git(git_command(&git, &root, &owned), GIT_COMMAND_TIMEOUT)
+                .expect("the scratch repository is built with the same git under test")
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.name", "folio-test"]);
+        run(&["config", "user.email", "folio@example.invalid"]);
+        for index in 0..DEPTH {
+            run(&[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                &format!("commit {index}"),
+            ]);
+        }
+
+        let ask = |skip: usize| {
+            let GitAnswer::Log { outcome, .. } = answer(
+                &git,
+                &GitQuestion::Log {
+                    root: root.clone(),
+                    refs: Vec::new(),
+                    skip,
+                    count: GIT_LOG_PAGE,
+                },
+                GIT_COMMAND_TIMEOUT,
+                RECORDED_AT,
+            ) else {
+                panic!("a log question is answered with a log");
+            };
+            outcome.expect("the scratch repository's history reads")
+        };
+
+        let first = ask(0);
+        let second = ask(GIT_LOG_PAGE);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(first.commits.len(), GIT_LOG_PAGE, "a full first page");
         assert!(
-            page.commits.iter().any(|commit| commit.parents.len() > 1)
-                || page.commits.iter().all(|commit| !commit.parents.is_empty()),
-            "every commit but the root has a parent"
+            first.has_more,
+            "fifty-one commits is one more than a page, and the page says so"
         );
+        assert_eq!(
+            second.commits.len(),
+            DEPTH - GIT_LOG_PAGE,
+            "the rest of the history is on the second page"
+        );
+        assert!(
+            !second.has_more,
+            "and the page that reaches the root says there is nothing behind it"
+        );
+        assert!(
+            first
+                .commits
+                .iter()
+                .all(|commit| commit.hash.len() == 40 && !commit.short.is_empty()),
+            "every commit has a full hash and an abbreviation"
+        );
+        assert!(
+            first
+                .commits
+                .iter()
+                .all(|commit| commit.parents.len() == 1),
+            "every commit above the root has exactly one parent on a linear history"
+        );
+        assert!(
+            second
+                .commits
+                .last()
+                .is_some_and(|root_commit| root_commit.parents.is_empty()),
+            "and the root, which only the second page reaches, has none"
+        );
+        let overlap = first
+            .commits
+            .iter()
+            .filter(|commit| second.commits.iter().any(|later| later.hash == commit.hash))
+            .count();
+        assert_eq!(overlap, 0, "the second page picks up where the first stopped");
     }
 
     /// T4 (v2 ③) — a search is an **OR** of the message and the author, plus a
