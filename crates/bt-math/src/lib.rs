@@ -939,7 +939,10 @@ mod tests {
         // And the one condition that is genuinely `MissingCjkGlyph`: a character
         // no installed font draws, however many fonts are installed.
         assert_eq!(
-            covering_cjk_families(&book_of(&[("DeadOnly", "死"), ("AlsoDeadOnly", "死")]), &requested),
+            covering_cjk_families(
+                &book_of(&[("DeadOnly", "死"), ("AlsoDeadOnly", "死")]),
+                &requested
+            ),
             None,
         );
         assert_eq!(covering_cjk_families(&book_of(&[]), &requested), None);
@@ -1300,10 +1303,7 @@ mod cjk_probe {
             let chosen = engine.cjk_fonts_for(&converted);
             eprintln!("PROBE covering families = {chosen:?}");
             let mut inputs = Dict::new();
-            inputs.insert(
-                "cjk_fonts".into(),
-                Value::Array(chosen.unwrap_or_default()),
-            );
+            inputs.insert("cjk_fonts".into(), Value::Array(chosen.unwrap_or_default()));
             inputs.insert("source".into(), Value::Str(Str::from(converted)));
             inputs.insert("font_size".into(), 24.0_f64.into_value());
             inputs.insert("red".into(), 255_u8.into_value());
