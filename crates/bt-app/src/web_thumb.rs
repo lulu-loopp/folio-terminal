@@ -1279,7 +1279,8 @@ mod tests {
     /// really does refuse bytes it cannot read.
     #[test]
     fn the_shrinker_answers_the_box_it_was_asked_for_and_refuses_what_it_cannot_read() {
-        let (rgba, width, height) = shrink(&a_real_png(1146, 777), Some((263, 320))).expect("a picture");
+        let (rgba, width, height) =
+            shrink(&a_real_png(1146, 777), Some((263, 320))).expect("a picture");
         assert_eq!((width, height), (263, 320));
         assert_eq!(rgba.len(), 263 * 320 * 4);
         assert!(shrink(b"not a png at all", Some((263, 320))).is_none());
@@ -1485,7 +1486,9 @@ mod tests {
             product: Product::Frame,
             rgba: Some((rgba, width, height)),
         }));
-        let frame = thumbs.frame(seat(1)).expect("the pane has something to draw");
+        let frame = thumbs
+            .frame(seat(1))
+            .expect("the pane has something to draw");
         assert_eq!((frame.width_px, frame.height_px), (320, 200));
         assert_eq!(thumbs.stats().frames, 1);
         assert!(
