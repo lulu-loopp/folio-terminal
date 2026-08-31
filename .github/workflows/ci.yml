@@ -37,11 +37,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, read 2026-08-27
-        with:
-          # no toolchain given: rust-toolchain.toml is the single source of
-          # truth. Naming a channel here would silently win over it.
-          toolchain: none
+      # rust-toolchain.toml is the single source of truth: rustup reads it when
+      # `rustup toolchain install` is given no name (rustup 1.28+, preinstalled
+      # on the runner). Naming a channel here would silently win over the file.
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # adapter.rs/cell_capture.rs are the vendor compatibility seam. Their job is to report
@@ -112,9 +111,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, read 2026-08-27
-        with:
-          toolchain: none
+      # rust-toolchain.toml is the single source of truth: rustup reads it when
+      # `rustup toolchain install` is given no name (rustup 1.28+, preinstalled
+      # on the runner). Naming a channel here would silently win over the file.
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: adapter modules do not import policy crates
@@ -224,9 +224,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, read 2026-08-27
-        with:
-          toolchain: none
+      # rust-toolchain.toml is the single source of truth: rustup reads it when
+      # `rustup toolchain install` is given no name (rustup 1.28+, preinstalled
+      # on the runner). Naming a channel here would silently win over the file.
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # These spawn cmd.exe and powershell.exe through the sidecar ConPTY that
@@ -261,9 +262,10 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, read 2026-08-27
-        with:
-          toolchain: none
+      # rust-toolchain.toml is the single source of truth: rustup reads it when
+      # `rustup toolchain install` is given no name (rustup 1.28+, preinstalled
+      # on the runner). Naming a channel here would silently win over the file.
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # The test binaries have to exist before WARP can be put beside them:
@@ -291,9 +293,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, read 2026-08-27
-        with:
-          toolchain: none
+      # rust-toolchain.toml is the single source of truth: rustup reads it when
+      # `rustup toolchain install` is given no name (rustup 1.28+, preinstalled
+      # on the runner). Naming a channel here would silently win over the file.
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: build folio.exe
