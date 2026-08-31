@@ -294,19 +294,32 @@ fn requested_cjk_characters(source: &str) -> BTreeSet<char> {
     source.chars().filter(|c| is_cjk_character(*c)).collect()
 }
 
-/// Installed families that, read in this order, draw every character in
-/// `requested` — or `None` when some character is drawn by no installed font.
+/// Every installed family that claims a character of `requested`, ordered so
+/// that reading them in turn draws all of it — or `None` when some character is
+/// claimed by no installed font.
 ///
-/// Greedy set cover: take the family that draws the most of what is still
-/// unanswered, strike those characters off, repeat. One family usually answers
-/// for the whole request in one step; a machine whose CJK support is split
-/// across a partial face and a fuller one gets both, in the order that leaves
-/// the fewest characters to the second.
+/// The head of the list is a greedy set cover: take the family that claims the
+/// most of what is still unanswered, strike those characters off, repeat. One
+/// family usually answers for the whole request in one step; a machine whose CJK
+/// support is split across a partial face and a fuller one gets both, in the
+/// order that leaves the fewest characters to the second.
 ///
-/// Ties go to the family the font book lists first, which is the order this
-/// machine's own fonts were discovered in. Folio deliberately expresses no taste
-/// here: a formula's ideographs are drawn by whichever installed face can draw
-/// them, and no font is embedded or redistributed to make that true.
+/// **The tail is the rest of the claimants, and it is not redundant.** A `cmap`
+/// is a claim, not a promise: the GitHub Windows runner's `Gulim` lists U+6D3B
+/// 活 in its coverage and shapes it to `.notdef` anyway. Typst walks a font list
+/// per tofu run — a character its current family cannot draw is re-shaped with
+/// the next one — so handing it every claimant is what turns a broken claim into
+/// one wasted step instead of a missing glyph. A minimal cover has no slack for
+/// that, and the tail costs nothing on a machine whose first family is honest:
+/// families past the first are consulted only for characters that came back
+/// `.notdef`.
+///
+/// Ties go to the family the font book names first, which is its own order —
+/// alphabetical, by lowercased family name. Folio deliberately expresses no
+/// taste here. Which Han face a formula is set in is a real design question and
+/// this is not the place it gets answered; what this owes the reader is that the
+/// characters appear at all, drawn by whichever installed face can draw them,
+/// with no font embedded or redistributed to make that true.
 fn covering_cjk_families(book: &FontBook, requested: &BTreeSet<char>) -> Option<Vec<String>> {
     // Families in book order, each with the characters of the request it draws.
     // A family's faces are pooled: naming a family lets Typst pick the variant,
@@ -329,18 +342,26 @@ fn covering_cjk_families(book: &FontBook, requested: &BTreeSet<char>) -> Option<
         .collect::<Vec<_>>();
 
     let mut remaining = requested.clone();
-    let mut families = Vec::new();
+    let mut families: Vec<String> = Vec::new();
     while !remaining.is_empty() {
         // `min_by_key` over the negated count and not `max_by_key`, because the
         // tiebreak is the point: `max_by_key` keeps the *last* of equal keys and
         // this has to keep the first, which is the book's own order.
         let (family, drawn) = candidates
             .iter()
+            .filter(|(family, _)| !families.contains(family))
             .min_by_key(|(_, drawn)| std::cmp::Reverse(drawn.intersection(&remaining).count()))
             .filter(|(_, drawn)| !drawn.is_disjoint(&remaining))?;
         remaining.retain(|c| !drawn.contains(c));
         families.push(family.clone());
     }
+    let tail = candidates
+        .iter()
+        .map(|(family, _)| family)
+        .filter(|family| !families.contains(family))
+        .cloned()
+        .collect::<Vec<_>>();
+    families.extend(tail);
     Some(families)
 }
 
@@ -891,6 +912,16 @@ mod tests {
             families.iter().any(|f| f == "WholeBehind"),
             "the family that draws 活 has to be named, whatever is in front of it: {families:?}"
         );
+        assert_eq!(
+            families.first().map(String::as_str),
+            Some("WholeBehind"),
+            "the family that answers for most of the request leads: {families:?}"
+        );
+        assert!(
+            families.iter().any(|f| f == "PartialFront"),
+            "and every other claimant is still behind it, because a cmap is a \
+             claim and the leader's may be the one that breaks: {families:?}"
+        );
 
         // No one face covers the request; two between them do, and both are named.
         let shared = book_of(&[("DeadOnly", "死"), ("LivingOnly", "活")]);
@@ -1219,6 +1250,41 @@ mod cjk_probe {
                     }
                 }
                 eprintln!("PROBE font count = {index}");
+                // A cmap is a claim. Ask each claimant whether the loaded face
+                // can actually produce a glyph for the character it claims.
+                let mut index = 0;
+                while let Some(info) = book.info(index) {
+                    let claimed: String = chars
+                        .iter()
+                        .filter(|c| info.coverage.contains(**c as u32))
+                        .copied()
+                        .collect();
+                    if !claimed.is_empty() {
+                        let loaded = world.font(index);
+                        let shaped: String = loaded
+                            .as_ref()
+                            .map(|font| {
+                                let face = font.clone().instantiate(
+                                    info.variant,
+                                    typst_library::layout::Abs::pt(24.0),
+                                    &Default::default(),
+                                );
+                                claimed
+                                    .chars()
+                                    .filter(|c| face.ttf().glyph_index(*c).is_some())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if shaped != claimed {
+                            eprintln!(
+                                "PROBE LIAR font[{index}] {:?} loaded={:?} claims=[{claimed}] shapes=[{shaped}]",
+                                info.family,
+                                loaded.as_ref().map(|f| f.info().family.clone()),
+                            );
+                        }
+                    }
+                    index += 1;
+                }
             })
             .unwrap();
 
@@ -1247,6 +1313,20 @@ mod cjk_probe {
             let compiled = engine.engine.compile_with_input::<_, PagedDocument>(inputs);
             let document = compiled.output.unwrap();
             dump(&document.pages()[0].frame, 0);
+            eprintln!(
+                "PROBE render = {:?}",
+                engine
+                    .render(
+                        source,
+                        MathRenderKey {
+                            dpi_milli: NonZeroU32::new(2000).unwrap(),
+                            font_milli_pt: NonZeroU32::new(24_000).unwrap(),
+                            foreground_rgb: [255, 255, 255],
+                            mode: MathMode::Display,
+                        },
+                    )
+                    .map(|raster| (raster.width_px, raster.height_px))
+            );
         }
     }
 }
