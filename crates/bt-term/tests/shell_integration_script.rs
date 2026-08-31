@@ -83,7 +83,15 @@ fn temporary_directory() -> PathBuf {
         std::process::id()
     ));
     std::fs::create_dir(&directory).unwrap();
-    directory
+    // The shell names its location in long form; on a host whose %TEMP% is
+    // spelled with an 8.3 short component (RUNNER~1), the path just joined is
+    // not the path the shell will report. Canonicalize to the long spelling
+    // and drop the verbatim prefix, which no file:// URI carries.
+    let canonical = std::fs::canonicalize(&directory).unwrap();
+    match canonical.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(plain) => PathBuf::from(plain),
+        None => canonical,
+    }
 }
 
 /// PIN (relative path ruling, 2026-08-03 (f)): the script emits one OSC 7 report per prompt, ahead
