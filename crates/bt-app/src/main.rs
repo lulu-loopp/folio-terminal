@@ -86540,6 +86540,90 @@ mod focus_column_notch_tests {
     }
 }
 
+/// **A page does not answer for the pixels the tab list is standing on**
+/// (user report, next23 #211).
+///
+/// These read this file as text for [`focus_mode_door_tests`]' reason and it is
+/// the same failure mode: the whole of the repair is *where one question is
+/// asked*, and a call that wandered back out of `web_page_at` would still
+/// compile, still pass every geometry test the rail owns, and still hand every
+/// press on an open icon rail's close box to the engine underneath it — which
+/// is precisely the defect this slice repairs.
+#[cfg(test)]
+mod page_under_the_tab_list_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// **The tab list is asked, and asked before the pages are.**
+    ///
+    /// Red gate: this is the defect. Before the repair `web_page_at` subtracted
+    /// the search capsule and the download sheet and nothing else, so an icon
+    /// rail — which opens *over* the panes rather than reflowing them (Q179) —
+    /// left its whole trailing run inside a rectangle the press ladder had
+    /// already given away.
+    #[test]
+    fn the_tab_list_is_asked_before_any_page_is() {
+        let web_page_at = body("    fn web_page_at(");
+        let asked = web_page_at
+            .find("tab_list_target_at")
+            .expect("the page's door subtracts the tab list");
+        let scan = web_page_at
+            .find("self.window.web")
+            .expect("the page's door scans the pages it knows about");
+        assert!(
+            asked < scan,
+            "a page was claimed before anybody asked whether the tab list was over it"
+        );
+    }
+
+    /// **One door, so the hit test and the subtraction cannot drift.**
+    ///
+    /// Each axis' hit test is reached from exactly one place in this file, and
+    /// that place is [`Runtime::tab_list_target_at`] — which is what makes
+    /// "the tab list is over this pixel" one answer rather than two.
+    #[test]
+    fn every_axis_of_the_tab_list_is_reached_from_one_place() {
+        let door = body("    fn tab_list_target_at(");
+        for hit in ["hit_rail_chrome", "hit_tab_chrome", "hit_focus_rail"] {
+            let needle = ["seats", "::", hit, "("].concat();
+            let calls = SOURCE.matches(needle.as_str()).count();
+            assert_eq!(calls, 1, "{hit} is called from {calls} places, not one");
+            assert!(
+                door.contains(needle.as_str()),
+                "{hit} is called from somewhere other than the tab list's own door",
+            );
+        }
+    }
+
+    /// **And the chrome ladder still begins with it**, which is the half the
+    /// two above cannot say: a router that asked the panes first would hand
+    /// every click on an open rail to whatever is underneath it (R1).
+    #[test]
+    fn the_chrome_ladder_still_begins_with_the_tab_list() {
+        let chrome_target_at = body("    fn chrome_target_at(");
+        let list = chrome_target_at
+            .find("tab_list_target_at")
+            .expect("the chrome ladder asks the tab list");
+        let window = chrome_target_at
+            .find("hit_window_chrome")
+            .expect("the chrome ladder asks the window's own chrome");
+        assert!(
+            list < window,
+            "the tab list is no longer the head of the chrome ladder"
+        );
+    }
+}
+
 #[cfg(test)]
 mod window_registry_tests {
     use super::Windows;

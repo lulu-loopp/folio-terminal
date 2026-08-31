@@ -35962,6 +35962,49 @@ mod tests {",
         rail_geometry(618.0, 1.0, trailers, pinned, 0.0, state).expect("a rail is on screen")
     }
 
+    /// **An open icon rail's `×` stands *over* a pane, not beside it** (user
+    /// report, next23 #211).
+    ///
+    /// Q179 spelled as a number: the panel opens `position: absolute` and the
+    /// stage keeps only `--railpark` clear
+    /// ([`RailState::terminal_inset_logical_px`]), so every pixel the panel
+    /// draws to the right of 46px is drawn on top of a pane that still owns it.
+    /// For a pane holding a hosted page that pane's rectangle *is* the page's,
+    /// which is what makes `Runtime::web_page_at`'s subtraction of the tab list
+    /// load-bearing rather than defensive — without it the press ladder hands
+    /// this very point to the engine and the row's close box does nothing.
+    ///
+    /// The hit test is asked at the same point, because "the box is over the
+    /// pane" and "the box answers there" are two facts and only the pair says
+    /// the defect was in who *received* the press.
+    #[test]
+    fn an_open_icon_rails_close_box_stands_over_the_pane_beneath_it() {
+        let state = icon_rail(1.0);
+        let trailers = vec![TabTrailer::default(); 3];
+        let rail = rail_of(state, &trailers, 0);
+        let inset = state.terminal_inset_logical_px();
+        assert_eq!(
+            inset, RAIL_PARK_LOGICAL_PX,
+            "an icon rail costs the stage its parked width and no more"
+        );
+        assert_eq!(rail.tabs.len(), 3, "three rows were asked for");
+        for (index, tab) in rail.tabs.iter().enumerate() {
+            let close = tab.close.expect("an unpinned row wears its ×");
+            assert!(
+                close[0] > inset,
+                "row {index}'s × starts at {}, which is inside the stage that begins at {inset}",
+                close[0],
+            );
+            let x = f64::from((close[0] + close[2]) / 2.0);
+            let y = f64::from((close[1] + close[3]) / 2.0);
+            assert_eq!(
+                hit_rail_chrome(618.0, 1.0, &trailers, 0, 0.0, state, x, y),
+                Some(ChromeTarget::TabClose(index)),
+                "the rail answers for its own close box at {x},{y}",
+            );
+        }
+    }
+
     // ── §7.1.6b′: focus mode, slice F1 ──────────────────────────────────────
 
     /// A window in focus mode, on whichever tab layout the caller names, with
