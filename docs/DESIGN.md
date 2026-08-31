@@ -3012,6 +3012,8 @@ W0′ 的双向矩阵在这里落成三条:
 
 **红门。** `a_page_a_modal_covers_keeps_the_frame_it_last_stood_on_the_glass_with`(照一次、不解码、模态来了讨一次解码、尺寸是页自己的、`drop_frames` 收得干净);`a_page_that_left_the_glass_lets_go_of_the_photograph_it_had_out`(红证:拿掉 `entry.asked = None`,页再也照不了);`a_card_and_a_pane_asking_about_one_page_take_one_photograph`(两个读者一次引擎调用,卡片仍拿到自己那份);`a_pane_past_the_frame_ceiling_is_refused_before_the_engine_is_asked`;`a_page_a_modal_covers_is_drawn_as_a_kept_frame`(源码钉:`sync_web_page` → `keep_what_the_modal_covers` → `refresh_chrome` 的 `page_keepsake_icons` → 浮窗那一层,四段链子任一断开就是那张空白 pane)。
 
+**实机(2026-08-30,debug,隔离 `APPDATA`/`LOCALAPPDATA`,本机静态服务器 127.0.0.1:8642,不访问外网;1920×1200 物理像素、scale 2)。** 网页与 pdf 各一跑,五张照片与 `BT_WEB_TRACE` 的对照行存在 `docs/plans/web-preview/modal-keepsake-evidence/`:对话框开着时露出来的那一条是页/阅读器的最后一帧、压着遮罩(修之前是 pane 底色),关掉之后网页能导航能后退、pdf 一滚就到 `2 of 3`。同一跑里还落了一行 `obstructed=0 carded=1`——地址打错导航失败、座位换上失败卡——**那一格不画留存帧**,正是上一段那条规矩在实机上的样子。
+
 **视频 pane 不在这条里,而且是因为它本来就不同病。** 一段录像不是浏览器画的:`IMFMediaEngine` 走 frame-server 模式,每一帧 `TransferVideoFrame` 之后**读回系统内存**再交给渲染器(§7.42),也就是说它一直画在**本窗自己的玻璃上**。模态遮罩压在它上面,和压在一段文字上是同一件事——**一行代码都不动**。
 
 ### 7.9 网页是一个预览缓冲（Web 预览块 W2 片③，2026-08-22，已落地；`crates/bt-persist/src/{session,migrate,lib}.rs`、`crates/bt-app/src/{preview,main,seed,profiles,restore,pins,marks,webnav,webhost}.rs`、`crates/bt-platform/src/{lib,webview}.rs`）
