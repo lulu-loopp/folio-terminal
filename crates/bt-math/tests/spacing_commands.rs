@@ -55,6 +55,12 @@ fn a_stripped_backslash_degrades_to_a_printed_semicolon() {
 }
 
 #[test]
+/// `\text{死} \; + \; \text{活}` is here because a runner refused it (2026-08-31,
+/// CI run `33397648409`, `docs/DESIGN.md` §7.1.3i′ ⑫) on a machine that drew
+/// 中, 文 and 项目数 in the same suite. The whole formula now renders there —
+/// 死 from `Dotum`, 活 from `Malgun Gothic`, measured on that runner — because
+/// the CJK judgment is made against the whole font book and every family that
+/// answers is named to Typst, rather than one face having to answer alone.
 fn spacing_commands_render_including_alongside_cjk() {
     let engine = MathEngine::new();
     let key = MathRenderKey {

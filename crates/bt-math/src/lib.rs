@@ -331,9 +331,10 @@ fn requested_cjk_characters(source: &str) -> BTreeSet<char> {
 /// characters appear at all, drawn by whichever installed face can draw them,
 /// with no font embedded or redistributed to make that true.
 fn covering_cjk_families(book: &FontBook, requested: &BTreeSet<char>) -> Option<Vec<String>> {
-    // Families in book order, each with the characters of the request it draws.
-    // A family's faces are pooled: naming a family lets Typst pick the variant,
-    // and any of them carrying the character is the family carrying it.
+    // Every family the book knows, in the book's own order, each with the
+    // characters of the request it claims. A family's faces are pooled: what
+    // reaches Typst is a family *name*, and it picks the variant itself, so a
+    // family claims a character when any of its faces does.
     let candidates = book
         .families()
         .map(|(family, faces)| {
@@ -903,13 +904,21 @@ mod tests {
     /// The CI failure this pins was a judgment that split down the middle on one
     /// machine: `\text{中}`, `\text{文}` and `\text{项目数}` drew on a GitHub
     /// Windows runner while `\text{死} \; + \; \text{活}` in the same suite came
-    /// back `MissingCjkGlyph`. Nothing was missing — the first face Typst's
-    /// name-similarity fallback reached carried some of those characters and not
-    /// the rest, and the old check read that one face's `.notdef` as a fact
-    /// about the machine.
+    /// back `MissingCjkGlyph`. Nothing was missing. One face — the single one
+    /// Typst's name-similarity fallback reaches — had to answer for all of it,
+    /// and it could not: the runner's `Gulim` shapes 死 and returns `.notdef`
+    /// for 活, whose codepoint its own `cmap` claims. The old check read that
+    /// one face's `.notdef` as a fact about the machine.
+    ///
+    /// A face that carries part of a request and a face that *claims* part of a
+    /// request are the same defect from here, because both make one candidate
+    /// decide the answer. The book below is the first shape, which is the one a
+    /// constructed `Coverage` can state; the second is why the tail of the list
+    /// exists, and it is measured on the runner rather than modelled here.
     ///
     /// MUTATION: stop at the first family that draws anything — return
-    /// `["PartialFront"]` here — and 活 has no font, which is the defect.
+    /// `["PartialFront"]` here — and 活 has no font, which is the defect
+    /// (verified red, 2026-08-31).
     #[test]
     fn a_partial_font_read_first_does_not_answer_for_the_glyphs_it_lacks() {
         let requested = BTreeSet::from(['死', '活']);
