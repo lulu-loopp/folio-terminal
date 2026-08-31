@@ -98,6 +98,50 @@
 //!   file write, all on the watchdog thread. Nothing is ever written from the
 //!   window thread.
 //!
+//! # The stall that is over before this watchdog looks
+//!
+//! Everything above is built for a wedge — five seconds of silence from a thread
+//! that will not answer. **The fault a person actually reports is smaller than
+//! that and it heals**: the window goes dead for two or three seconds, the tab
+//! they clicked does not switch, and by the time they have looked at the log it
+//! is working again. Two separate rules above make that invisible. It may not
+//! reach [`HANG_THRESHOLD`] at all; and even when it does, a thread blocked
+//! inside a cross-apartment COM call is *pumping messages while it waits*, so it
+//! answers the watchdog's `WM_NULL` and is filed as [`Verdict::Excused`] —
+//! which says nothing out loud, on purpose, because that is also what a window
+//! being dragged looks like from the outside.
+//!
+//! So there is a second instrument, and it measures from the inside. The window
+//! thread already tells this module when it takes control ([`Heartbeat::woke`])
+//! and when it hands it back ([`Heartbeat::park`]); between those two it passes
+//! through the stations. Timing the stations turns "the last call it entered"
+//! — a floor, and the honest floor for a thread that cannot be asked — into an
+//! **account of where a hold's milliseconds went**, and a hold that ran past
+//! [`SLOW_HOLD_THRESHOLD`] is written to the diagnostics log as one line naming
+//! the stations in order of what they cost.
+//!
+//! Three things follow from measuring it this way rather than from outside:
+//!
+//! * **It cannot be excused.** The measurement is taken by the thread that was
+//!   blocked, so a COM call that pumped, a modal loop and a wedge all read the
+//!   same: control was held this long, and here is where.
+//! * **It reports after the fact.** The line is produced at [`Heartbeat::park`],
+//!   which is the first moment the length of the hold is known — so a stall that
+//!   heals leaves a line and one that never heals leaves the watchdog's report
+//!   instead. The two instruments cover each other exactly.
+//! * **It is not a verdict.** A window being dragged by its edge really does
+//!   hold control for as long as the drag, and a line saying so is a true
+//!   sentence about a program that is working. This is a hunting instrument, and
+//!   a hunting instrument that hid true measurements to keep its log tidy would
+//!   be the reason the next report has nothing in it either.
+//!
+//! The bill: [`at`] grows from two relaxed stores to one clock read, one
+//! `fetch_add` and three stores — still no allocation, no fence and no branch
+//! that can block, and still far less than the call it stands in front of. The
+//! line itself is formatted and written on the watchdog thread, never on the
+//! window thread; the window thread's whole part is a `try_lock` it never waits
+//! on and a `push`.
+//!
 //! The watchdog runs in the `BelowNormal` band with every other worker (§1.4).
 //! That is the right band even though its job is to run when the window thread
 //! cannot: the hangs in question are a thread that is *blocked*, not a machine
@@ -108,8 +152,8 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use bt_platform::hang::Answer;
@@ -150,6 +194,43 @@ const HANG_THRESHOLD: Duration = Duration::from_secs(5);
 /// stuck reaches it; short enough that "I double-clicked it and nothing
 /// happened" still produces a file.
 const STARTUP_THRESHOLD: Duration = Duration::from_secs(30);
+
+/// **How long the window thread may hold control before the run writes down
+/// where the time went.**
+///
+/// Half a second, which is two orders of magnitude below [`HANG_THRESHOLD`] and
+/// deliberately so: this instrument is not looking for a wedge — that one has
+/// its own — but for the stall a person notices and the watchdog above either
+/// misses or excuses. Half a second is also comfortably past everything the
+/// loop legitimately does per turn (the longest measured ordinary turn in the
+/// perf-resilience work was 1.25 s, and that was a debug build under a 24-way
+/// `cargo`, which is exactly the kind of hold worth a line).
+const SLOW_HOLD_THRESHOLD: Duration = Duration::from_millis(500);
+
+/// How many slow holds may wait for the watchdog to write them.
+///
+/// The queue is drained every [`WATCH_INTERVAL`], so it only fills when the
+/// window thread is producing slow holds faster than one every 60 ms for two
+/// solid seconds — a program that is on fire, where the thirty-third line adds
+/// nothing the first thirty-two did not. Overflow is counted rather than
+/// silently dropped.
+const SLOW_HOLDS_KEPT: usize = 32;
+
+/// [`SLOW_HOLD_THRESHOLD`], in the milliseconds a [`Heartbeat`] counts.
+///
+/// One conversion in one place, so the constant above is the only number and
+/// the ledger cannot come to be compared against a different one.
+#[must_use]
+fn slow_hold_threshold_ms() -> u64 {
+    u64::try_from(SLOW_HOLD_THRESHOLD.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// How many stations there are, and therefore how wide one hold's ledger is.
+///
+/// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
+/// further variant added without widening this would have its milliseconds
+/// charged to nobody, and the line would silently stop adding up.
+const STATION_COUNT: usize = 15;
 
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
@@ -199,6 +280,28 @@ pub enum Station {
     /// `Runtime::advance_web_page` — a call into WebView2 and therefore into
     /// another process.
     WebPage = 7,
+    /// `Runtime::sync_web_page` — the placement calls a **frame** makes into
+    /// every page whose rectangle moved: `SetRasterizationScale`, `SetBounds`,
+    /// `SetIsVisible`. Its own station rather than [`Self::WebPage`]'s because
+    /// the two are reached on different clocks and would be repaired
+    /// differently: this one is paid per animated frame per moving page, and
+    /// [`Self::WebRetire`] is paid once when a page goes.
+    WebPlace = 12,
+    /// `ICoreWebView2Controller::Close` — the one synchronous call into the
+    /// browser on the path a closing tab takes. Everything else in
+    /// [`Self::WebPage`] is arithmetic and a deadline comparison, so a hold
+    /// that lands here has named a very short piece of code.
+    WebRetire = 13,
+    /// `Runtime::apply_web_outcomes` — what a turn does with what the engine
+    /// said since the last one. **The heavy arm is a controller arriving**: a
+    /// fresh one is configured with a dozen synchronous property calls and then
+    /// navigated, all on this thread.
+    ///
+    /// Its own station because of what the first machine run of this ledger
+    /// caught: 659 ms charged to `advance_web_page` on the turn a PDF's engine
+    /// came up, with no way to tell the lifecycle clock from the configuring
+    /// burst. Two stations is the difference between a measurement and a repair.
+    WebOutcomes = 14,
     /// `SessionStore::flush_if_due` — the autosave's own door.
     Autosave = 8,
     /// The deliberate hang of [`run_selftest_if_due`]. Debug builds only.
@@ -232,7 +335,19 @@ impl Station {
             Self::SelfTest => "BT_HANG_SELFTEST",
             Self::Parked => "parked",
             Self::Woken => "woken",
+            Self::WebPlace => "sync_web_page",
+            Self::WebRetire => "CoreWebView2Controller::Close",
+            Self::WebOutcomes => "apply_web_outcomes",
         }
+    }
+
+    /// This station's slot in a hold's ledger — the `repr`, read as an index.
+    ///
+    /// The same byte the atomic carries, so the ledger and the station can never
+    /// be indexed by two different numbers.
+    #[must_use]
+    fn slot(self) -> usize {
+        self as u8 as usize
     }
 
     /// The inverse of the `repr`, for reading the atomic back.
@@ -255,6 +370,9 @@ impl Station {
             9 => Self::SelfTest,
             10 => Self::Parked,
             11 => Self::Woken,
+            12 => Self::WebPlace,
+            13 => Self::WebRetire,
+            14 => Self::WebOutcomes,
             _ => Self::Starting,
         }
     }
@@ -341,6 +459,77 @@ pub struct Pulse {
     pub park: Park,
 }
 
+/// **One hold of the window thread that ran long, and where its time went.**
+///
+/// A hold is `woke` → `park`: everything between the platform handing this
+/// thread control and this thread handing it back, events and turn together.
+/// `spent_ms` is indexed by [`Station::slot`] and is the account of that hold —
+/// what the ledger could not attribute to a named call shows up against the
+/// station the thread was last in, which is the same honesty [`Station`] itself
+/// carries.
+///
+/// `Copy` and plain integers, because the thread that fills it in is the one
+/// this module exists to diagnose: nothing here allocates, and the formatting
+/// happens on the watchdog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SlowHold {
+    /// The turn counter as it stood when control was handed back.
+    pub turn: u64,
+    /// How long control was held, measured end to end rather than summed —
+    /// so a gap the ledger failed to attribute shows up as the line not adding
+    /// up rather than as time that never existed.
+    pub held_ms: u64,
+    /// Milliseconds per station, indexed by [`Station::slot`].
+    pub spent_ms: [u64; STATION_COUNT],
+}
+
+impl SlowHold {
+    /// The one line this hold writes to the diagnostics log.
+    ///
+    /// Stations in order of what they cost, silent ones left out: the reader's
+    /// question is *what took the time*, and a line that spelled out eleven
+    /// zeroes to say "`advance_web_page`" would bury its own answer.
+    ///
+    /// Pure, and taking nothing but itself, so the shape of the line is a thing
+    /// a test can state — [`crate::diagnostics::run_header`]'s own rule.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let mut spent: Vec<(Station, u64)> = self
+            .spent_ms
+            .iter()
+            .enumerate()
+            .filter(|(_, spent)| **spent > 0)
+            .map(|(slot, spent)| {
+                (
+                    Station::from_byte(u8::try_from(slot).unwrap_or_default()),
+                    *spent,
+                )
+            })
+            .collect();
+        // Longest first, and ties broken by the station's own order so that two
+        // runs of the same program print the same line.
+        spent.sort_by(|left, right| {
+            right
+                .1
+                .cmp(&left.1)
+                .then(left.0.slot().cmp(&right.0.slot()))
+        });
+        let where_ = if spent.is_empty() {
+            String::from("no station held it")
+        } else {
+            spent
+                .iter()
+                .map(|(station, spent)| format!("{station} {spent} ms"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!(
+            "Folio: the window thread held control for {} ms on turn {} — {where_}",
+            self.held_ms, self.turn
+        )
+    }
+}
+
 /// The window thread's own three words, and the clock they are measured on.
 ///
 /// Not a `Mutex` and not a channel: the writer is the thread this exists to
@@ -356,6 +545,31 @@ pub struct Heartbeat {
     /// see [`Park::to_bits`] for the encoding and the module comment for why the
     /// facility is wrong without it.
     park: AtomicU64,
+    /// **When the hold in progress began, plus one** — or zero while the thread
+    /// is parked.
+    ///
+    /// Offset by one for [`Park::to_bits`]' reason, one field over: zero has to
+    /// mean *no hold is open*, which is what makes [`Self::close_hold`]
+    /// idempotent on the paths that park twice, and a hold that opened on
+    /// millisecond zero of the run is a real hold rather than the absence of
+    /// one. It is a real case and not a hypothetical — the origin is taken at
+    /// the first touch of the heartbeat, and the loop's first wake can land
+    /// inside that same millisecond.
+    held_since_ms: AtomicU64,
+    /// When the station in progress was entered.
+    station_since_ms: AtomicU64,
+    /// The hold in progress, by station. See [`SlowHold::spent_ms`].
+    spent_ms: [AtomicU64; STATION_COUNT],
+    /// Holds that ran past [`SLOW_HOLD_THRESHOLD`], waiting to be written.
+    ///
+    /// A `Mutex` the window thread only ever `try_lock`s. The rule the rest of
+    /// this struct keeps — the writer is the thread this exists to diagnose, so
+    /// the write cannot itself block — is kept here by never waiting: a hold
+    /// that arrives while the watchdog is draining is counted rather than
+    /// waited for.
+    slow: Mutex<Vec<SlowHold>>,
+    /// Slow holds that found the queue full or busy.
+    slow_dropped: AtomicU64,
 }
 
 impl Default for Heartbeat {
@@ -373,6 +587,11 @@ impl Heartbeat {
             turn: AtomicU64::new(0),
             station: AtomicU8::new(Station::Starting as u8),
             park: AtomicU64::new(PARK_RUNNING),
+            held_since_ms: AtomicU64::new(0),
+            station_since_ms: AtomicU64::new(0),
+            spent_ms: std::array::from_fn(|_| AtomicU64::new(0)),
+            slow: Mutex::new(Vec::new()),
+            slow_dropped: AtomicU64::new(0),
         }
     }
 
@@ -403,10 +622,98 @@ impl Heartbeat {
     /// turn's — which, at a two-second poll against a five-second threshold,
     /// would be the difference between "quiet" and a report.
     pub fn beat(&self) {
-        self.at_ms.store(self.now_ms(), Ordering::Relaxed);
-        self.station.store(Station::Wait as u8, Ordering::Relaxed);
+        self.beat_at(self.now_ms());
+    }
+
+    /// [`Self::beat`] on a clock the caller holds. See [`Self::park_at`].
+    pub fn beat_at(&self, now_ms: u64) {
+        // A turn reached without a wake before it — the run's first, and every
+        // turn on a platform that delivers no `StartCause` — still opens a hold,
+        // or the ledger would measure this one from an origin belonging to a
+        // hold that has already been written down.
+        if self.held_since_ms.load(Ordering::Relaxed) == 0 {
+            self.open_hold(now_ms);
+        }
+        self.move_to(Station::Wait, now_ms);
+        self.at_ms.store(now_ms, Ordering::Relaxed);
         self.park.store(PARK_RUNNING, Ordering::Relaxed);
         self.turn.fetch_add(1, Ordering::Release);
+    }
+
+    /// **Close the station in progress and open `station`'s**, charging the
+    /// milliseconds between them to the one that is ending.
+    ///
+    /// The one place the ledger is written. It charges the station the thread
+    /// was *in*, which is what makes untagged code between two stations show up
+    /// against the last named call rather than vanishing — [`Station`]'s own
+    /// rule, now counted instead of merely labelled.
+    fn move_to(&self, station: Station, now_ms: u64) {
+        let leaving = Station::from_byte(self.station.load(Ordering::Relaxed));
+        let since = self.station_since_ms.load(Ordering::Relaxed);
+        self.spent_ms[leaving.slot()].fetch_add(now_ms.saturating_sub(since), Ordering::Relaxed);
+        self.station_since_ms.store(now_ms, Ordering::Relaxed);
+        self.station.store(station as u8, Ordering::Relaxed);
+    }
+
+    /// **A hold begins**: the ledger is emptied and the clock started.
+    fn open_hold(&self, now_ms: u64) {
+        for spent in &self.spent_ms {
+            spent.store(0, Ordering::Relaxed);
+        }
+        self.station_since_ms.store(now_ms, Ordering::Relaxed);
+        self.held_since_ms
+            .store(now_ms.saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// **A hold ends**, and if it ran long it is queued for the watchdog.
+    ///
+    /// Idempotent by way of the swap: a second park with no wake between them
+    /// finds no hold open and has nothing to say, which is what keeps the two
+    /// parkings a failed turn can leave from being counted as two holds.
+    fn close_hold(&self, now_ms: u64) {
+        let began = self.held_since_ms.swap(0, Ordering::Relaxed);
+        if began == 0 {
+            return;
+        }
+        let held_ms = now_ms.saturating_sub(began - 1);
+        let mut spent_ms = [0; STATION_COUNT];
+        for (slot, cell) in spent_ms.iter_mut().zip(&self.spent_ms) {
+            *slot = cell.swap(0, Ordering::Relaxed);
+        }
+        if held_ms < slow_hold_threshold_ms() {
+            return;
+        }
+        let hold = SlowHold {
+            turn: self.turn.load(Ordering::Relaxed),
+            held_ms,
+            spent_ms,
+        };
+        // `try_lock` and never `lock`: see [`Self::slow`].
+        if let Ok(mut queue) = self.slow.try_lock()
+            && queue.len() < SLOW_HOLDS_KEPT
+        {
+            queue.push(hold);
+        } else {
+            self.slow_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// **Take every slow hold recorded since the last ask**, and how many were
+    /// dropped. Called from the watchdog thread.
+    ///
+    /// Answers nothing at all rather than waiting when the window thread has the
+    /// queue: the next poll is two seconds away and the records are not going
+    /// anywhere, while a watchdog that blocked on the thread it is watching
+    /// would be the one thing this facility must never be.
+    #[must_use]
+    pub fn take_slow_holds(&self) -> (Vec<SlowHold>, u64) {
+        let Ok(mut queue) = self.slow.try_lock() else {
+            return (Vec::new(), 0);
+        };
+        (
+            std::mem::take(&mut *queue),
+            self.slow_dropped.swap(0, Ordering::Relaxed),
+        )
     }
 
     /// **The window thread entered a named call.** Two relaxed stores.
@@ -422,7 +729,12 @@ impl Heartbeat {
     /// wedge inside that event would be excused by a deadline that had nothing
     /// to do with it.
     pub fn at(&self, station: Station) {
-        self.station.store(station as u8, Ordering::Relaxed);
+        self.at_station(station, self.now_ms());
+    }
+
+    /// [`Self::at`] on a clock the caller holds. See [`Self::park_at`].
+    pub fn at_station(&self, station: Station, now_ms: u64) {
+        self.move_to(station, now_ms);
         self.park.store(PARK_RUNNING, Ordering::Relaxed);
     }
 
@@ -434,7 +746,19 @@ impl Heartbeat {
     /// stamped before the parking so that a watchdog which reads the two in
     /// either order never sees a park without the station that explains it.
     pub fn park(&self, park: Park) {
-        self.station.store(Station::Parked as u8, Ordering::Relaxed);
+        self.park_at(park, self.now_ms());
+    }
+
+    /// [`Self::park`] on a clock the caller holds.
+    ///
+    /// The four verbs are split this way for [`crate::diagnostics::run_header`]'s
+    /// reason: the ledger's arithmetic is the thing worth pinning, and an
+    /// instrument whose only clock is the real one can be exercised by a test
+    /// only by sleeping — which is how a facility ends up with a test that
+    /// passes on a fast machine.
+    pub fn park_at(&self, park: Park, now_ms: u64) {
+        self.move_to(Station::Parked, now_ms);
+        self.close_hold(now_ms);
         self.park.store(park.to_bits(), Ordering::Relaxed);
     }
 
@@ -446,6 +770,18 @@ impl Heartbeat {
     /// thread that wedges inside that event is a thread holding control, not a
     /// thread parked.
     pub fn woke(&self) {
+        self.woke_at(self.now_ms());
+    }
+
+    /// [`Self::woke`] on a clock the caller holds. See [`Self::park_at`].
+    ///
+    /// This is where a hold opens, because this is where the platform hands
+    /// control over — everything the thread then does, events included, belongs
+    /// to one hold and is accounted for together. A stall inside `window_event`
+    /// is exactly the shape the report of 2026-08-30 describes, and a ledger
+    /// that only opened at `about_to_wait` would have nothing to say about it.
+    pub fn woke_at(&self, now_ms: u64) {
+        self.open_hold(now_ms);
         self.station.store(Station::Woken as u8, Ordering::Relaxed);
         self.park.store(PARK_RUNNING, Ordering::Relaxed);
     }
@@ -493,6 +829,30 @@ pub fn beat() {
 /// The window thread entered `station`. See [`Heartbeat::at`].
 pub fn at(station: Station) {
     HEARTBEAT.at(station);
+}
+
+/// **Enter `station`, and answer the one being left** so the caller can put it
+/// back on the way out.
+///
+/// For a station that stands *inside* another station's function — a single
+/// call worth timing on its own, where charging the rest of the enclosing
+/// function to it afterwards would be a lie the ledger tells quietly. The
+/// caller pairs this with [`at`]:
+///
+/// ```ignore
+/// let leaving = hang_watch::enter(Station::WebRetire);
+/// web.close(compositor);
+/// hang_watch::at(leaving);
+/// ```
+///
+/// Not a guard type: a guard would run on the unwind path too, and the one
+/// thing this module must never do is add a `Drop` to a thread that is already
+/// in trouble.
+#[must_use]
+pub fn enter(station: Station) -> Station {
+    let leaving = HEARTBEAT.sample().station;
+    HEARTBEAT.at(station);
+    leaving
 }
 
 /// The window thread is handing control back. See [`Heartbeat::park`].
@@ -933,6 +1293,18 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32) {
     loop {
         std::thread::sleep(WATCH_INTERVAL);
         let heart = heartbeat();
+        // **The other instrument, drained first**: a hold that ran long and
+        // then healed is exactly what the poll below is about to call `Quiet`,
+        // and printing it before that verdict is what puts the two facts in the
+        // log in the order they happened. Formatting and writing happen here,
+        // on this thread, for the same reason a report does.
+        let (slow, dropped) = heart.take_slow_holds();
+        for hold in slow {
+            eprintln!("{}", hold.line());
+        }
+        if dropped > 0 {
+            eprintln!("Folio: {dropped} more slow turns went unrecorded");
+        }
         // Four atomic loads and a clock read. This is the entire steady-state
         // cost of the facility.
         match watch.poll(heart.now_ms(), heart.sample(), &mut ask) {
@@ -1122,8 +1494,9 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{
-        Answer, HangWatch, Heartbeat, Park, Pulse, ReportFacts, Station, Verdict, prune_reports,
-        render_healed, render_report, report_filename, utc_timestamp,
+        Answer, HangWatch, Heartbeat, Park, Pulse, ReportFacts, STATION_COUNT, SlowHold, Station,
+        Verdict, prune_reports, render_healed, render_report, report_filename,
+        slow_hold_threshold_ms, utc_timestamp,
     };
 
     /// A thread holding control at `station`: it has not handed anything back to
@@ -1963,5 +2336,157 @@ mod tests {
             "a directory already at the cap loses nothing"
         );
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    // ══ The ledger: a hold that ran long, and where its milliseconds went ══
+    //
+    // Every one of these drives the `_at` verbs, so the arithmetic is stated in
+    // numbers rather than reproduced by sleeping — which is the whole reason
+    // those verbs take a clock.
+
+    /// **An ordinary hold says nothing.** Sixty of these a second, and the
+    /// instrument has to be silent through all of them or it is not an
+    /// instrument, it is the log.
+    #[test]
+    fn an_ordinary_hold_is_never_written_down() {
+        let heart = Heartbeat::new();
+        heart.woke_at(1_000);
+        heart.at_station(Station::Event, 1_001);
+        heart.beat_at(1_002);
+        heart.at_station(Station::Present, 1_004);
+        heart.park_at(Park::Indefinite, 1_012);
+        assert_eq!(heart.take_slow_holds(), (Vec::new(), 0));
+    }
+
+    /// **A slow hold names the station that spent the time**, and names it
+    /// first.
+    ///
+    /// Red gate: this is the report of 2026-08-30 — a window dead for a couple
+    /// of seconds with a hosted page on it, healing on its own, and nothing in
+    /// `diagnostics.log`, because the wedge watchdog above neither fires under
+    /// five seconds nor says anything about a thread that answered.
+    #[test]
+    fn a_slow_hold_names_the_station_that_spent_the_time() {
+        let heart = Heartbeat::new();
+        heart.woke_at(1_000);
+        heart.at_station(Station::Event, 1_010);
+        heart.at_station(Station::WebPage, 1_020);
+        heart.park_at(Park::Indefinite, 2_900);
+        let (slow, dropped) = heart.take_slow_holds();
+        assert_eq!(dropped, 0);
+        let [hold] = slow.as_slice() else {
+            panic!("one hold ran long, so one hold was recorded: {slow:?}");
+        };
+        assert_eq!(hold.held_ms, 1_900, "measured end to end, not summed");
+        assert_eq!(hold.spent_ms[Station::WebPage.slot()], 1_880);
+        assert_eq!(hold.spent_ms[Station::Event.slot()], 10);
+        assert_eq!(hold.spent_ms[Station::Woken.slot()], 10);
+        assert_eq!(
+            hold.line(),
+            "Folio: the window thread held control for 1900 ms on turn 0 — \
+             advance_web_page 1880 ms, window_event 10 ms, woken 10 ms",
+        );
+    }
+
+    /// **The ledger is emptied between holds**, or the next slow line would be
+    /// this one's arithmetic said twice.
+    #[test]
+    fn the_ledger_is_emptied_between_holds() {
+        let heart = Heartbeat::new();
+        heart.woke_at(0);
+        heart.at_station(Station::WebPage, 10);
+        heart.park_at(Park::Indefinite, 3_000);
+        assert_eq!(heart.take_slow_holds().0.len(), 1);
+        heart.woke_at(4_000);
+        heart.at_station(Station::Drain, 4_005);
+        heart.park_at(Park::Indefinite, 4_020);
+        assert_eq!(
+            heart.take_slow_holds(),
+            (Vec::new(), 0),
+            "the short hold after a long one carries none of its milliseconds"
+        );
+    }
+
+    /// **Parking twice with no wake between them is one hold, not two.** The
+    /// turn's body leaves early in six places and every one of them parks.
+    #[test]
+    fn a_second_park_with_no_wake_between_records_nothing() {
+        let heart = Heartbeat::new();
+        heart.woke_at(0);
+        heart.at_station(Station::WebPage, 10);
+        heart.park_at(Park::Indefinite, 2_000);
+        heart.park_at(Park::Indefinite, 9_000);
+        let (slow, _) = heart.take_slow_holds();
+        assert_eq!(slow.len(), 1, "one hold was open, so one hold is written");
+        assert_eq!(slow[0].held_ms, 2_000);
+    }
+
+    /// **A turn reached with no wake before it opens its own hold.** The run's
+    /// first turn is exactly that, and a hold measured from an origin belonging
+    /// to nothing would file the whole of startup as a stall.
+    #[test]
+    fn a_turn_with_no_wake_before_it_opens_its_own_hold() {
+        let heart = Heartbeat::new();
+        heart.beat_at(8_000);
+        heart.at_station(Station::Drain, 8_010);
+        heart.park_at(Park::Indefinite, 8_030);
+        assert_eq!(
+            heart.take_slow_holds(),
+            (Vec::new(), 0),
+            "thirty milliseconds is thirty milliseconds, not eight seconds"
+        );
+    }
+
+    /// **The threshold is the one this module states**, read from the constant
+    /// rather than from a number written down a second time.
+    #[test]
+    fn the_threshold_is_the_one_the_module_states() {
+        let heart = Heartbeat::new();
+        let bound = slow_hold_threshold_ms();
+        heart.woke_at(0);
+        heart.park_at(Park::Indefinite, bound - 1);
+        assert_eq!(heart.take_slow_holds().0, Vec::new(), "one short of it");
+        heart.woke_at(10_000);
+        heart.park_at(Park::Indefinite, 10_000 + bound);
+        assert_eq!(heart.take_slow_holds().0.len(), 1, "exactly it");
+    }
+
+    /// **Every station has a slot in the ledger**, which is the whole of what
+    /// `STATION_COUNT` promises: a thirteenth variant added without widening
+    /// the array would charge its milliseconds to nobody, and the line would
+    /// quietly stop adding up.
+    #[test]
+    fn every_station_has_a_slot_in_the_ledger() {
+        let mut seen = Vec::new();
+        for slot in 0..STATION_COUNT {
+            let station = Station::from_byte(u8::try_from(slot).expect("a slot is one byte"));
+            assert_eq!(
+                station.slot(),
+                slot,
+                "{station} answers a slot it is not at"
+            );
+            seen.push(station);
+        }
+        seen.dedup();
+        assert_eq!(seen.len(), STATION_COUNT, "two stations share one slot");
+        assert_eq!(
+            Station::from_byte(u8::try_from(STATION_COUNT).expect("one byte")),
+            Station::Starting,
+            "a station past the ledger's width would be charged to `starting`",
+        );
+    }
+
+    /// A hold whose stations all rounded to nothing still states its length.
+    #[test]
+    fn a_hold_with_no_named_station_still_states_its_length() {
+        let hold = SlowHold {
+            turn: 7,
+            held_ms: 900,
+            spent_ms: [0; STATION_COUNT],
+        };
+        assert_eq!(
+            hold.line(),
+            "Folio: the window thread held control for 900 ms on turn 7 — no station held it",
+        );
     }
 }
