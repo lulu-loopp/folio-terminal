@@ -150,6 +150,7 @@ pub struct PendingWindowPos {
 /// to that one rectangle. Not "the first one wins" and not "the last one wins":
 /// there is one rectangle for the whole message, it came from the OS, and no
 /// arithmetic of ours is laid on top of it.
+///
 /// `None` when the pending position already *is* the suggestion, so a message
 /// nobody has to correct is not corrected.
 #[must_use]

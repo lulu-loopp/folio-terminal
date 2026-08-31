@@ -82009,7 +82009,13 @@ impl Runtime<'_> {
         {
             return Ok(());
         }
-        self.claim_lawful_layout();
+        // **No claim is made here**, and that is deliberate. `claim_lawful_layout`
+        // says "the next rectangle to arrive is one this program asked for", and
+        // this settlement asks for none: the rectangle arrived during the drag
+        // and the `ScaleFactorChanged` that started it claimed it then. A second
+        // standing claim would swallow the first rectangle of whatever the reader
+        // does next, which is the one thing the provenance rule exists to get
+        // right (§7.50, and `size_authority_for_rectangle`).
         self.reconcile_authoritative_dpi("size-move-settled")?;
         Ok(())
     }
