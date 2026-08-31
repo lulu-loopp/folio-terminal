@@ -6,9 +6,11 @@
 # compare each vendored file with the crates.io archive of the same version, and
 # demand that "differs" and "carries the notice" are the same set.
 #
-# The upstream copy comes from the local cargo registry, which every machine that
-# has built this tree already has. If it is not unpacked, `cargo fetch` puts it
-# there.
+# The upstream copy comes from the local cargo registry when it is there — but a
+# workspace that carries this crate only as a path dependency never asks cargo to
+# unpack it, so a machine that has built this tree may still not have the source.
+# Then the pristine archive is taken instead, from the registry cache or from
+# crates.io, and held to a pinned checksum either way.
 
 $ErrorActionPreference = "Stop"
 
@@ -22,7 +24,25 @@ $candidates = @(Get-ChildItem -Path (Join-Path $cargoHome "registry\src") -Direc
     Where-Object { Test-Path $_ })
 
 if ($candidates.Count -eq 0) {
-    throw "no unpacked alacritty_terminal-$version under $cargoHome\registry\src — run ``cargo fetch`` first"
+    # sha256 of alacritty_terminal-0.26.0.crate as published on crates.io.
+    $pinned = "BDA177466B9524D59F1B12F0DD30B68696788E9992A7E959021C4A0ED96FCF59"
+    $work = Join-Path ([System.IO.Path]::GetTempPath()) "folio-vendor-gate-alacritty_terminal-$version"
+    if (Test-Path $work) { Remove-Item -Recurse -Force $work }
+    New-Item -ItemType Directory -Path $work | Out-Null
+    $file = Join-Path $work "alacritty_terminal-$version.crate"
+    $cached = Get-ChildItem -Path (Join-Path $cargoHome "registry\cache") -Recurse `
+        -Filter "alacritty_terminal-$version.crate" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cached) {
+        Copy-Item $cached.FullName $file
+    } else {
+        Invoke-WebRequest -Uri "https://static.crates.io/crates/alacritty_terminal/alacritty_terminal-$version.crate" -OutFile $file
+    }
+    if ((Get-FileHash $file -Algorithm SHA256).Hash -ne $pinned) {
+        throw "alacritty_terminal-$version.crate does not match the pinned crates.io checksum"
+    }
+    tar -xzf $file -C $work
+    if ($LASTEXITCODE -ne 0) { throw "could not unpack alacritty_terminal-$version.crate" }
+    $candidates = @(Join-Path $work "alacritty_terminal-$version")
 }
 $upstream = $candidates[0]
 
