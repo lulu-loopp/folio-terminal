@@ -256,16 +256,20 @@ impl MathEngine {
     /// book.** It used to be answered by looking at the finished page: compile,
     /// then declare the glyph missing if any ideograph came back `.notdef`.
     /// That reads a *shaping outcome* as a *fact about the machine*, and the two
-    /// are not the same thing. Typst's fallback picks one font per tofu run by
-    /// the coverage of that run's first character, scored by how much the
-    /// family's name resembles the math font's — so which face an ideograph
-    /// lands on is decided by name similarity and, at the last tiebreak, by
-    /// which family name is shorter. A machine whose best-scoring face carries
-    /// some of a formula's characters and not the rest therefore rendered some
-    /// formulas and refused others, with no font missing from it at all. That is
-    /// what a GitHub Windows runner did on 2026-08-31: `\text{中}`, `\text{文}`
-    /// and `\text{项目数}` drew, and `\text{死} \; + \; \text{活}` in the very
-    /// same suite came back `MissingCjkGlyph`.
+    /// are not the same thing. Left to itself Typst gets exactly one attempt per
+    /// ideograph: `select_fallback` returns the single best-scoring installed
+    /// font covering that character — scored by how much the family's name
+    /// resembles the math font's, with "shorter family name" as the last
+    /// tiebreak — and when the character comes back `.notdef` the recursion asks
+    /// the same question, gets the same font, finds it already used, and stops.
+    /// One face therefore has to answer for a formula's ideographs alone, and a
+    /// machine whose best-scoring face carries some of them and not the rest
+    /// renders some formulas and refuses others with no font missing from it at
+    /// all. That is what a GitHub Windows runner did on 2026-08-31: `\text{中}`,
+    /// `\text{文}` and `\text{项目数}` drew, and `\text{死} \; + \; \text{活}`
+    /// in the very same suite came back `MissingCjkGlyph` — because 活's
+    /// best-scoring face was `Gulim`, whose `cmap` claims 活 and whose outlines
+    /// do not contain it.
     ///
     /// Asked here instead, the answer does not depend on which face gets tried
     /// first, because no single face has to answer for all of it: the families
@@ -305,14 +309,20 @@ fn requested_cjk_characters(source: &str) -> BTreeSet<char> {
 /// order that leaves the fewest characters to the second.
 ///
 /// **The tail is the rest of the claimants, and it is not redundant.** A `cmap`
-/// is a claim, not a promise: the GitHub Windows runner's `Gulim` lists U+6D3B
-/// 活 in its coverage and shapes it to `.notdef` anyway. Typst walks a font list
-/// per tofu run — a character its current family cannot draw is re-shaped with
-/// the next one — so handing it every claimant is what turns a broken claim into
-/// one wasted step instead of a missing glyph. A minimal cover has no slack for
-/// that, and the tail costs nothing on a machine whose first family is honest:
-/// families past the first are consulted only for characters that came back
-/// `.notdef`.
+/// is a claim, not a promise, and the machine that proved it is the very runner
+/// this defect came from: all four faces of its `gulim.ttc` — `Gulim`,
+/// `GulimChe`, `Dotum`, `DotumChe` — list U+6D3B 活 in their coverage and have
+/// no glyph for it (measured 2026-08-31: `coverage.contains` yes,
+/// `glyph_index` none, while 死 中 文 目 shape from the same faces). Typst
+/// walks a font list per tofu run — a character the current family cannot draw
+/// is re-shaped with the *next* family — so handing it every claimant is what
+/// turns a broken claim into one wasted step instead of a missing glyph. Its own
+/// fallback cannot do that on its own: `select_fallback` returns the single
+/// best-scoring font covering the character, so on the recursion it returns the
+/// same font again, finds it already used, and gives up. A minimal cover has no
+/// slack for that either, and the tail costs nothing on a machine whose first
+/// family is honest: families past the first are consulted only for characters
+/// that came back `.notdef`.
 ///
 /// Ties go to the family the font book names first, which is its own order —
 /// alphabetical, by lowercased family name. Folio deliberately expresses no
@@ -887,7 +897,7 @@ mod tests {
         }))
     }
 
-    /// RED GATE (2026-08-31, `docs/DESIGN.md` §7.1.3l) — **a partial font in
+    /// RED GATE (2026-08-31, `docs/DESIGN.md` §7.1.3i′ ⑫) — **a partial font in
     /// front does not decide the answer for the ones behind it.**
     ///
     /// The CI failure this pins was a judgment that split down the middle on one
@@ -1191,143 +1201,6 @@ mod tests {
             MathEngine::new().render(r"\input{secret}", key()),
             Err(MathRenderError::UnsafeCommand)
         );
-    }
-}
-
-#[cfg(test)]
-mod cjk_probe {
-    use super::*;
-    use typst_library::World;
-
-    fn dump(frame: &Frame, depth: usize) {
-        for (_, item) in frame.items() {
-            match item {
-                FrameItem::Text(text) => {
-                    eprintln!(
-                        "{:indent$}TEXT font={:?} text={:?} glyphs={:?}",
-                        "",
-                        text.font.info().family,
-                        text.text,
-                        text.glyphs.iter().map(|g| g.id).collect::<Vec<_>>(),
-                        indent = depth * 2,
-                    );
-                }
-                FrameItem::Group(group) => {
-                    eprintln!("{:indent$}GROUP", "", indent = depth * 2);
-                    dump(&group.frame, depth + 1);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    #[test]
-    fn probe_font_book_and_frames() {
-        let engine = MathEngine::new();
-        let chars = ['死', '活', '中', '文', '项', '目', '数'];
-        engine
-            .engine
-            .with_world(|world| {
-                let book = world.book();
-                let mut index = 0;
-                while let Some(info) = book.info(index) {
-                    index += 1;
-                    let hits: String = chars
-                        .iter()
-                        .map(|c| {
-                            if info.coverage.contains(*c as u32) {
-                                *c
-                            } else {
-                                '.'
-                            }
-                        })
-                        .collect();
-                    if hits.chars().any(|c| c != '.') {
-                        eprintln!(
-                            "PROBE font[{}] {:?} variant={:?} flags={:?} covers=[{hits}]",
-                            index - 1,
-                            info.family,
-                            info.variant,
-                            info.flags
-                        );
-                    }
-                }
-                eprintln!("PROBE font count = {index}");
-                // A cmap is a claim. Ask each claimant whether the loaded face
-                // can actually produce a glyph for the character it claims.
-                let mut index = 0;
-                while let Some(info) = book.info(index) {
-                    let claimed: String = chars
-                        .iter()
-                        .filter(|c| info.coverage.contains(**c as u32))
-                        .copied()
-                        .collect();
-                    if !claimed.is_empty() {
-                        let loaded = world.font(index);
-                        let shaped: String = loaded
-                            .as_ref()
-                            .map(|font| {
-                                let face = font.clone().instantiate(
-                                    info.variant,
-                                    typst_library::layout::Abs::pt(24.0),
-                                    &Default::default(),
-                                );
-                                claimed
-                                    .chars()
-                                    .filter(|c| face.ttf().glyph_index(*c).is_some())
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        if shaped != claimed {
-                            eprintln!(
-                                "PROBE LIAR font[{index}] {:?} loaded={:?} claims=[{claimed}] shapes=[{shaped}]",
-                                info.family,
-                                loaded.as_ref().map(|f| f.info().family.clone()),
-                            );
-                        }
-                    }
-                    index += 1;
-                }
-            })
-            .unwrap();
-
-        for source in [
-            r"\text{死}",
-            r"\text{活}",
-            r"\text{中}",
-            r"\text{死} \; + \; \text{活}",
-        ] {
-            eprintln!("PROBE ===== {source}");
-            let converted = mitex::convert_math(source, Some(DEFAULT_SPEC.clone())).unwrap();
-            eprintln!("PROBE converted={converted:?}");
-            let chosen = engine.cjk_fonts_for(&converted);
-            eprintln!("PROBE covering families = {chosen:?}");
-            let mut inputs = Dict::new();
-            inputs.insert("cjk_fonts".into(), Value::Array(chosen.unwrap_or_default()));
-            inputs.insert("source".into(), Value::Str(Str::from(converted)));
-            inputs.insert("font_size".into(), 24.0_f64.into_value());
-            inputs.insert("red".into(), 255_u8.into_value());
-            inputs.insert("green".into(), 255_u8.into_value());
-            inputs.insert("blue".into(), 255_u8.into_value());
-            inputs.insert("display".into(), true.into_value());
-            let compiled = engine.engine.compile_with_input::<_, PagedDocument>(inputs);
-            let document = compiled.output.unwrap();
-            dump(&document.pages()[0].frame, 0);
-            eprintln!(
-                "PROBE render = {:?}",
-                engine
-                    .render(
-                        source,
-                        MathRenderKey {
-                            dpi_milli: NonZeroU32::new(2000).unwrap(),
-                            font_milli_pt: NonZeroU32::new(24_000).unwrap(),
-                            foreground_rgb: [255, 255, 255],
-                            mode: MathMode::Display,
-                        },
-                    )
-                    .map(|raster| (raster.width_px, raster.height_px))
-            );
-        }
     }
 }
 
