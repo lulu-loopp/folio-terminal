@@ -6102,3 +6102,61 @@ Folio: the window thread held control for 660 ms on turn 323 — advance_web_pag
 **第一次实机跑就抓到了东西。** 同一扇 icon 竖栏的 PDF 窗,起来的过程中 `turn 323 — advance_web_page 659 ms`——**这是这个产品第一次量到 web 这条路真的把窗线程按住了**。659ms 不是「几秒」,但它是同一扇门:那一转正是一个 PDF 的 controller 上来的时候,而 `advance_web_page` 里除了算术和一次 deadline 比较之外,能花掉时间的只有跨进程的同步 COM。所以又拆了两个站牌——`CoreWebView2Controller::Close`(关 tab 那条路上唯一的同步调用)与 `apply_web_outcomes`(controller 到货时那一打配置属性调用加一次导航)——**两个站牌的差别就是一份测量和一次修理的差别**。同一台机器上,关掉一个持着活网页的 tab **没有**留下任何一行:`Close()` 在这台机器上不是数秒级的阻塞,这一条排除掉了。
 
 **没修的。** 用户那一次的成因**没有查实**——它发生在 next22(`f70676d`)、发生在一台已经跑了一会儿的机器上、而且自愈了,而 §7.35 的教训逐字适用:**一个能自圆其说的成因不等于这一台机器上的成因**。本片交出的是那条能在**用户自己机器上**指名的仪表,和一份按可疑程度排过的名单(都在窗线程上,都同步):`sync_web_page` 每一个有页面在动的帧发出的 `SetBounds`/`SetIsVisible`/`SetRasterizationScale`;每一次指针移过页面的 `SendMouseInput`(而竖栏那一段现在已经不再发了——见上半篇);`WebHost::rehost` 一次拖拽里 9–16 个连续的同步调用;`Close()`;controller 的配置突发。下一次它再卡,`diagnostics.log` 里会有一行写着是哪一个。
+
+### 7.50 一扇窗过不了两块屏之间那条缝:系统建议的矩形就是这扇窗要站的矩形(跨 DPI 节;next22 用户实机「拖过去 DPI 一直来回跳、窗过不去」,已落地;`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/main.rs`)
+
+**现象与铁证。** 4K@200% 与一块竖过来的 2.8K@150% 并排,把窗从一块拖到另一块——窗**过不去**,DPI 在 1.5 与 2 之间连续来回十余次。`%APPDATA%\Folio\diagnostics.log`(next22,`f70676d`)第 682–724 行原文,节选四个来回:
+
+```
+BT_DPI stage=scale-factor-changed winit_scale=1.5 win32_dpi=144 authoritative_scale=1.5 metrics_scale=2   rect=-3178,1050,-1088,3948 swapchain_size=2090x2898 inner_size=2090x2898
+BT_DPI stage=resized              winit_scale=1.5 win32_dpi=144 authoritative_scale=1.5 metrics_scale=1.5 rect=-3178,1050,-1088,3948 swapchain_size=2090x2898 inner_size=2090x2898
+BT_DPI stage=resized              winit_scale=1.5 win32_dpi=144 authoritative_scale=1.5 metrics_scale=1.5 rect=-2791,1050,-1201,3280 swapchain_size=1590x2230 inner_size=1590x2230
+BT_DPI stage=scale-factor-changed winit_scale=2   win32_dpi=192 authoritative_scale=2   metrics_scale=1.5 rect=-2791,1050,-1201,3280 swapchain_size=1590x2230 inner_size=1590x2230
+BT_DPI stage=resized              winit_scale=2   win32_dpi=192 authoritative_scale=2   metrics_scale=2   rect=-2791,1050,-1201,3280 swapchain_size=1590x2230 inner_size=1590x2230
+BT_DPI stage=resized              winit_scale=2   win32_dpi=192 authoritative_scale=2   metrics_scale=2   rect=-3318,1115,-1172,4159 swapchain_size=2146x3044 inner_size=2146x3044
+BT_DPI stage=scale-factor-changed winit_scale=1.5 win32_dpi=144 authoritative_scale=1.5 metrics_scale=2   rect=-3318,1115,-1172,4159 swapchain_size=2146x3044 inner_size=2146x3044
+BT_DPI stage=resized              winit_scale=1.5 win32_dpi=144 authoritative_scale=1.5 metrics_scale=1.5 rect=-3318,1115,-1172,4159 swapchain_size=2146x3044 inner_size=2146x3044
+BT_DPI stage=resized              winit_scale=1.5 win32_dpi=144 authoritative_scale=1.5 metrics_scale=1.5 rect=-2901,1115,-1269,3454 swapchain_size=1632x2339 inner_size=1632x2339
+BT_DPI stage=scale-factor-changed winit_scale=2   win32_dpi=192 authoritative_scale=2   metrics_scale=1.5 rect=-2901,1115,-1269,3454 swapchain_size=1632x2339 inner_size=1632x2339
+BT_DPI stage=resized              winit_scale=2   win32_dpi=192 authoritative_scale=2   metrics_scale=2   rect=-2901,1115,-1269,3454 swapchain_size=1632x2339 inner_size=1632x2339
+BT_DPI stage=resized              winit_scale=2   win32_dpi=192 authoritative_scale=2   metrics_scale=2   rect=-3355,1127,-1153,4317 swapchain_size=2202x3190 inner_size=2202x3190
+```
+
+**这不是一个乒乓,是一个棘轮。** 把每个来回的宽高排出来:2090 → 1590 → 2146 → 1632 → 2202 → 1674 → 2258 → …,高 2898 → 2230 → 3044 → 2339 → 3190 → …。**每一个完整来回,窗宽长 56 物理像素、窗高长 146**,一次不落,直到它宽到 1800——那正是那块竖屏的物理宽度,窗撑满了它本来想离开的那块屏。窗过不去不是因为判定摇摆,是因为**每判定一次它就长大一点**,长大的窗重新横跨那条缝,于是又判定一次。
+
+**成因(四条假设逐条验,只有第一条成立)。**
+
+- **① 我们没有原样采用 `WM_DPICHANGED` 的建议矩形——成立,而且它就是整个棘轮。** `WindowEvent::ScaleFactorChanged { .. }` 这个 `..` 里是 winit 的 `inner_size_writer`,我们从来没写过它;而 winit 0.30 的 `WM_DPICHANGED` 处理**根本不用**系统给的那个矩形的尺寸,它自己算(源码原话:*"We calculate our own size because the default suggested rect doesn't do a great job of preserving the window's logical size."*)——把旧的 client 矩形按新旧缩放比换算,再经 `AdjustWindowRectExForDpi` **补一圈非客户区边框**,然后 `SetWindowPos`。而这扇窗的 `WM_NCCALCSIZE` 早已把客户区做成了整个外框:那圈边框是它**不穿的**。于是每一条腿都白加一次边框,而且从不脱下来。量出来:144 dpi 那圈是 `(22, 56)`,192 dpi 那圈是 `(26, 71)`;一个来回长 `22×(4/3) + 26 ≈ 56`、`56×(4/3) + 71 ≈ 146`——**和日志上的 56/146 逐位对上**。红门 `a_round_trip_under_the_recomputed_rule_grows_the_window` 把 winit 那段算术抄成一个模型,只喂这两圈边框,把日志上**八个**实测尺寸一个不差地算了出来。这条论断因此是一次测量,不是一个故事。(这也正是 `apply_window_min_inner_size` 那段注释早就写下过的同一个陷阱——winit 的 `set_min_inner_size` 会把同一圈边框喂回客户区——只是那一次修的是最小值那条路,`WM_DPICHANGED` 这条路没人看过。)
+- **② 处理里有再入——没在这份日志上验实,但确实存在,已随修法一并关掉。** `ScaleFactorChanged` 的处理里 `apply_window_min_inner_size` → `set_min_client_size` 会发一次 `SetWindowPos`,而那是**在 `WM_DPICHANGED` 里面**再入地发的。它只在窗小于新最小值时真的动手,所以这份日志上没有它单独的一行;但它是同一条路上的第二个作者,下面的裁决把它和 winit 的那一次一起收进同一个矩形里。
+- **③ 拖动中额外的 `SetWindowPos` 抢在系统移动之前——就是 ② 那一次,已推迟到手松开。** 见裁决二。
+- **④ `authoritative_scale` 与 `metrics_scale` 在边界上答案不同、谁赢没定死——不成立,如实记下。** 日志上**每一行**的 `winit_scale` 与 `authoritative_scale` 都相等(1.5/144、2/192,一次例外都没有);`metrics_scale` 之所以看起来「相反」,是因为 `scale-factor-changed` 那一行是在 `apply_scale_factor` **之前**打的,它按定义就是上一次的值——下一行 `resized` 立刻就跟上了。权威从 M0-β 起就只有一个,并且写在类型上:`dpi_snapshot` 的 `authoritative_scale = GetDpiForWindow / 96`,`ensure_metrics_match_authoritative_scale` 在每一条改 metrics 的路上强制 metrics 跟着它,`winit_scale` 只是打在日志里供对账的第二只眼。**这条不必改,只需要写明它已经定了。**
+
+**裁决一:系统建议的矩形一个字不改地采用(用户裁决 2026-08-31)。** `WM_DPICHANGED` 的 `lParam` 就是 Windows 说这扇窗此刻该站的地方,而这是一个**它比我们更有资格回答**的问题——它知道指针在哪、两块屏怎么接、这扇窗刚才有多少面积压在哪一边。所以自绘边框的子类过程读下这个矩形、**在整条消息期间把它扣住**,并由 `WM_WINDOWPOSCHANGING` 把这期间发生的**每一次**移动/改尺寸解析到它身上——winit 自己算的那一个、以及我们从 `ScaleFactorChanged` 里再入发出的那一个,都是。不是「第一个赢」也不是「最后一个赢」:**一条消息只有一个矩形,它来自系统,我们不在它上面叠任何算术**。`hold_pending_pos_to` 是那条规则的纯函数形态,连 `SWP_NOMOVE`/`SWP_NOSIZE` 一起清掉——一次不清标志的改写等于什么都没改写;而已经就是那个矩形的一次请求**不改**,一条不必纠正的消息不该被纠正。消息本身**不吞**:更新缓存缩放、派发 `ScaleFactorChanged` 的是 winit 自己的处理,一个把消息吞掉自己摆窗的程序,是一扇站对了屏幕、字号却还是错的窗。
+
+**裁决二:拖动会话里 DPI 变化只记账,重活等手松开。** 一次 `WM_DPICHANGED` 的**便宜那一半**——swapchain 与客户区对齐、座位矩形按新表面重解——每一次判定都欠,因为表面真的变了。**贵的那一半**不欠:重量字体、把新格宽格高说给每一张 tab 里的每一枚叶、重建每一张网格,以及**真正跟拖动打架的那一件**——把本窗最小尺寸重新说给 OS,那是一次 `SetWindowPos`,发给一扇读者正握着的窗。所以 `DpiSettlement` 把它**记下来**,由 `Runtime::turn` 在手松开后的第一转花掉,**一次**,无论那条缝在中间改过多少次主意。为什么记在「转」上而不是记在一个事件上:winit **两端都不上报** OS 的模态 move/size 循环,`WM_ENTERSIZEMOVE`/`WM_EXITSIZEMOVE` 由自绘边框的子类记下来给 `CustomWindowFrame::in_size_move()` 读,而循环转回来是手松开之后唯一必然发生的事。
+
+**代价照直写。** 拖动过程中这扇窗的字号还是它离开那块屏时的字号,直到手松开——中间那几帧由 DWM 按整张后备缓冲拉伸,也就是这份文档在 resize 那条路上早已写下的全帧兜底。用户裁决取的是「过得去」而不是「过程中每一帧的字号都对」。
+
+**红门四条(各自 MUTATION 验过会红,单跑留档)。**
+
+- `bt_platform::dpi_suggestion_tests::a_round_trip_under_the_recomputed_rule_grows_the_window` —— 棘轮的算术,喂两圈边框、对上日志八个实测尺寸,并逐轮断言「一个来回返还的是 0」。
+- `bt_platform::dpi_suggestion_tests::every_move_inside_one_suggestion_lands_on_the_rectangle_windows_named` —— 一条消息里三次不同的请求(winit 的全量移动+改尺寸、我们带 `SWP_NOMOVE` 的最小值、以及回程那一次)都落在系统说的矩形上,而已经就是那个矩形的一次不改。红证:把 `hold_pending_pos_to` 改成原样返回 `pending`,当场红在 `(-2791,1050,1612,2286)` vs `(-2791,1050,1590,2230)`。
+- `bt_app::tests::a_seam_that_flips_twenty_times_under_one_hand_is_settled_once` —— 手按着翻二十次,付 0 次;手一松,付 1 次,再转一次是静的;而**没人握着**的窗一次也不推迟(两次相反的 scale-factor-changed 各答各的,不生第三次)。红证:让 `arrived` 恒真,当场红在 `left: 20 / right: 0`。
+- `bt_app::tests::the_deferred_half_of_a_dpi_change_is_asked_about_late_and_spent_on_a_turn` —— 形状钉:`resolve_seat_layout` < 问拖动 < `apply_scale_factor`,并且 `Runtime::turn` 里有那一句花账。红证:把那个问句挪到 `apply_scale_factor` 之下,当场红。
+
+**实机对照(debug 版,`APPDATA`/`LOCALAPPDATA` 隔离到临时目录,`BT_PTY_DUMP`,不出外网;探针 `SetWindowPos` 一律 `SWP_NOACTIVATE|SWP_NOZORDER`,不抢前台,只 `WM_CLOSE` 自己那扇窗)。** 这台机器有那条缝:`2880×1800 @192`(主)、`3840×2160 @192`、`1920×1080 @144`,后者接在 `y = 1938` 那条横缝下面——**正是出日志那次的 200%/150% 那一对**。修前(`558dfb5`,本片开工前的 main)与修后各跑同一支探针:十次跨缝往返,外加一次「停在缝上六秒不碰它」。
+
+**探针教训先记下来,因为它差点把整条实机腿判死。** 第一次枚举显示器用的是一个**没有声明 DPI 感知**的 PowerShell,`Screen.AllScreens` 给回 1440×900/1280×720/1920×1080、`GetDpiForMonitor` 三块全答 96——**三个数字全是虚拟化出来的**,据此差点写下「这台机器没有那条缝」。`SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` 之后同一段代码答的是上面那三块真屏。这正是 `ui-probe` 那条既有铁律的第二次现形:**每一个探针进程必须自己声明 PER_MONITOR_AWARE_V2**,否则它读到的和写下去的坐标都不是被测程序活在的那个空间。
+
+**一次跨缝,两个数,修前修后逐位对照:**
+
+| 请求 | 期望(纯比例) | 修前实测 | 超出 | 修后实测 | 超出 |
+| --- | --- | --- | --- | --- | --- |
+| 1650×960 @200% → 150% | 1238×720 | **1260×776** | **+22, +56** | **1238×720** | **0, 0** |
+| 2000×1400 @150% → 200% | 2667×1867 | **2693×1938** | **+26, +71** | **2667×1867** | **0, 0** |
+
+**那两对超出量,就是本节开头从用户日志里解出来的 `(22, 56) @144` 与 `(26, 71) @192`,一个像素不差。** 一份三天前在另一套显示配置下写下的日志,和一台今天在这里的机器,给出同一圈不存在的边框——成因到此不再是推断。
+
+**停在缝上六秒不碰它:** 修前 `1400×900` 落成 `1072×731`(比正确答案 `1050×675` 大 `+22, +56`),而且**位置也漂了**——窗顶从 `y=1500` 被推到 `y=1573`(winit 的 `conservative_rect` 加那圈 nudge);修后 `1400×900` 落成 `1050×675`,位置 `-2700,1500` 一动不动,此后六秒**一行 `BT_DPI` 都没有**。两跑都是**十一次变化十一行 `scale-factor-changed`,一次连环都没有**,两跑收尾都是 `exit code 0`、属于本次运行的 `folio` **0 个**、`diagnostics.log` 里除 `BT_DPI` 只有一行启动首转的窗线程占用(debug 版的常态)。
+
+**没做的,如实写。** ① **那个「一次拖动里翻十五次」的失控本身没有在这里复现**,复现的是**它每一步的增量**。探针每次都自己指定矩形,于是每一次跨缝都被重新摆正,棘轮攒不起来;而用户那次是**一只手**把窗拖在缝上,每长大一次就重新横跨、再判定一次。要的证据是那圈边框存不存在、有多大——上面那张表把它按住了,失控只是它乘以 N 的后果。② **`stage=size-move-settled` 在这两跑里是 0 行**:`SetWindowPos` 不进 OS 的模态 move/size 循环,`in_size_move` 全程为假,所以裁决二那条路**实机没有被走过**,它由 `a_seam_that_flips_twenty_times_under_one_hand_is_settled_once` 与那条形状钉按住。真手拖动的那一趟留给下一个握着这台机器的人,判据是一行:一次跨屏拖动里 `stage=size-move-settled` **恰好一行**。
