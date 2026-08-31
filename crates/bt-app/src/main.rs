@@ -13222,6 +13222,29 @@ impl TabState {
             .map(|_| source.clone())
     }
 
+    /// **The file a preview seat's picture names** (user ruling 2026-08-30;
+    /// §7.1.6b⁵) — [`Self::unread_card_document`]'s opposite number, over the
+    /// other of the two things a preview pane can be about.
+    ///
+    /// That one answers "which document is this seat on that nobody has read";
+    /// this answers "which file is this seat showing pixels of", and the caller
+    /// turns it into pixels by asking the window's own path-keyed decode. It is
+    /// a path and not a picture because a `TabState` cannot reach that cache —
+    /// the same split [`Self::mini_source`]'s `page` argument already makes.
+    ///
+    /// The pane's [`PreviewImageState`] and not the pool: a picture is not a
+    /// buffer and a video is not either, and both of them are here.
+    fn card_picture_path(&self, seat: SeatId) -> Option<&Path> {
+        Some(
+            self.preview_panes
+                .get(self.preview_here(seat))?
+                .image
+                .as_ref()?
+                .path
+                .as_path(),
+        )
+    }
+
     /// **Where one seat's thumbnail content comes from** (§7.1.6b′ F2) — handed
     /// to the budget *unevaluated*, so that the walk it stands for happens only
     /// past the gates.
@@ -13252,9 +13275,32 @@ impl TabState {
         // seat is a face. That is the honest picture and not a fallback: a page
         // nobody has looked at has never had a frame on any glass.
         page: Option<&'a web_thumb::Picture>,
+        // **The decode this window is holding for the file this seat is showing,
+        // when it is showing a picture** (user ruling 2026-08-30; §7.1.6b⁵).
+        //
+        // Handed in for `page`'s reason and it is the same reason twice: the
+        // store it comes from ([`WindowRuntime::peek_cache`]) belongs to the
+        // window and this type is a tab — a picture is keyed by *file*, so two
+        // tabs showing one screenshot are one decode, and a tab that kept its
+        // own copy would be the second account of that.
+        //
+        // `None` is not a special case and is not a failure: it is a file
+        // nothing in this window has decoded, which falls through to the face
+        // this seat has always been. Nothing here asks for a decode — that is
+        // §7.1.6b′'s red line, and a card that armed a read of the picture lane
+        // would be a column of cards putting a question to the disk for every
+        // tab you scrolled past.
+        picture: Option<focus_thumb::CardPicture<'a>>,
     ) -> Option<focus_thumb::SeatSource<'a>> {
         if let Some(picture) = page {
             return Some(focus_thumb::SeatSource::Page { picture });
+        }
+        // **Before the buffer and before the face**, because a pane holding a
+        // picture is holding no buffer at all: `PreviewPane::image` and
+        // `PreviewPane::buffer` are the two things a preview surface can be
+        // about, and the picture is the one this window has pixels for.
+        if let Some(picture) = picture {
+            return Some(focus_thumb::SeatSource::Picture(picture));
         }
         match kind {
             SeatKind::Terminal => {
@@ -17047,6 +17093,49 @@ fn preview_lane_after_landing(
         PreviewSurface::Seat(_) if landed_a_picture => Some(landing),
         PreviewSurface::Seat(_) => lane.filter(|held| *held != landing),
     }
+}
+
+/// **Who holds the one texture lane once the tab's set of panes has changed**
+/// (user report on `next22`, defects #202/#204; §7.1.6k⁗).
+///
+/// [`preview_lane_after_landing`]'s opposite number, and the pair covers the two
+/// kinds of event there are: that one is asked when a *view* lands on a surface
+/// that already exists, this one when the *surfaces themselves* change. A move
+/// is the second kind and had no answer at all — it neither lands a view nor
+/// builds a tab, so the two doors that write the lane both missed it, and the
+/// tab a picture was torn out of went on naming a pane it no longer has.
+///
+/// The rule is one sentence: **the lane belongs to a seat of this tab whose pane
+/// is holding a picture, and it stays with the one that has it.** So:
+///
+/// * an incumbent that is still such a surface keeps the lane — which is
+///   §7.1.6k's own ruling that "a picture the target was already showing does
+///   not lose its pixels to one that has just moved in", now stated as a
+///   property of the tab rather than as a `get_or_insert` at one call site;
+/// * anything else is re-derived exactly the way [`assemble_tab_state`] derives
+///   it at birth — the first picture in insertion order, because the slot is one
+///   — which is what releases a lane pointing at a pane that has left and hands
+///   it to the picture that is actually standing there.
+///
+/// A float never holds it (it paints on its own overlay layer) and neither does
+/// the glance card, which is why the walk is over seats alone.
+#[must_use]
+fn preview_raster_lane(
+    panes: &PreviewPanes,
+    incumbent: Option<PreviewSurface>,
+) -> Option<PreviewSurface> {
+    let holds_a_picture = |surface: PreviewSurface| {
+        matches!(surface, PreviewSurface::Seat(_))
+            && panes.get(surface).is_some_and(|pane| pane.image.is_some())
+    };
+    incumbent.filter(|held| holds_a_picture(*held)).or_else(|| {
+        panes
+            .iter()
+            .find(|(surface, pane)| {
+                matches!(surface, PreviewSurface::Seat(_)) && pane.image.is_some()
+            })
+            .map(|(surface, _)| surface)
+    })
 }
 
 /// **What one preview surface is showing**, in the three shapes the recording
@@ -28646,10 +28735,13 @@ fn assemble_tab_state(
     //
     // The first picture in insertion order when a tab arrives with two, because
     // the slot is one; the tab merge already decides it that way.
-    let preview_raster = preview_panes
-        .iter()
-        .find(|(surface, pane)| matches!(surface, PreviewSurface::Seat(_)) && pane.image.is_some())
-        .map(|(surface, _)| surface);
+    //
+    // **Through [`preview_raster_lane`] with no incumbent**, since §7.1.6k⁗: a
+    // tab being born has nobody holding the lane, so the two callers of that
+    // function differ in exactly that argument and the derivation itself is
+    // written once. A second spelling of "which pane has the pixels" is how the
+    // constructor and the mover came to disagree in the first place.
+    let preview_raster = preview_raster_lane(&preview_panes, None);
     let tab = TabState {
         id,
         sessions,
@@ -28871,6 +28963,13 @@ fn pane_into_new_tab(
         .remove(&was)
         .map(|view| BTreeMap::from([(now, view)]))
         .unwrap_or_default();
+    // **The lane the departing pane may have been holding** (§7.1.6k⁗). The tab
+    // being built derives its own in [`assemble_tab_state`]; this is the other
+    // end of the same journey, and without it the tab left behind names a
+    // surface it no longer has — which the moment that pane is dragged back
+    // turns into an incumbent that refuses the picture. See
+    // [`preview_raster_lane`].
+    from.preview_raster = preview_raster_lane(&from.preview_panes, from.preview_raster);
     from.refocus_after_losing(seat.id);
     let (seat_layout, seat_overflow) = solve(&seats);
     let mut tab = assemble_tab_state(
@@ -29107,7 +29206,6 @@ fn move_seat_content(
     // it; this is the memory a *future* opening of that file in either tab
     // reads.
     if let Some(pane) = source.preview_panes.remove(left) {
-        let brought_a_picture = pane.image.is_some();
         if let Some(showing) = pane.buffer.as_ref() {
             let view = source.preview_views.restore(showing);
             target.preview_views.remember(showing, view);
@@ -29116,14 +29214,33 @@ fn move_seat_content(
             }
         }
         *target.preview_panes.entry(arrived) = pane;
-        // The texture lane if it was free, and not otherwise: a picture the
-        // target was already showing does not lose its pixels to one that has
-        // just moved in (`TabState::preview_raster`). The decode lane is per
-        // path and per window, so the image needs nothing but its new address.
-        if brought_a_picture {
-            target.preview_raster.get_or_insert(arrived);
-        }
     }
+    // **And the texture lane on both sides of the journey** (user report on
+    // `next22`, defects #202/#204; §7.1.6k⁗).
+    //
+    // This used to be one line inside the block above — `target.preview_raster
+    // .get_or_insert(arrived)` — and it was half of the rule. The half it stated
+    // is still stated, by [`preview_raster_lane`]'s incumbent clause: a picture
+    // the target was already showing does not lose its pixels to one that has
+    // just moved in. The half it left out is that **the tab a picture leaves
+    // goes on naming it**, because nothing here ever released the lane; so a
+    // picture torn into a tab of its own and dragged back met an incumbent that
+    // was its own departed address, `get_or_insert` kept it, and
+    // [`Runtime::preview_picture_hosts`] filtered the returning pane straight
+    // out. On the glass: a blank body under a head and a fact line that had
+    // travelled with the pane — *「1440 × 900 · PNG · 36 KB · Fit」* over nothing.
+    //
+    // Asked of both tabs and asked unconditionally, because both of them just
+    // changed which panes they hold and neither of them can answer for the
+    // other. It is a walk of a list that is never longer than a tab's preview
+    // panes, and it is idempotent — which is what lets [`absorb_tab_sessions`]
+    // call this function once per arriving seat without the answer depending on
+    // the order they arrive in.
+    //
+    // The decode lane needs nothing: it is keyed by path and belongs to the
+    // window, so the picture itself needs no more than its new address.
+    source.preview_raster = preview_raster_lane(&source.preview_panes, source.preview_raster);
+    target.preview_raster = preview_raster_lane(&target.preview_panes, target.preview_raster);
     forget_work_in_flight_for_seat(target, now);
 }
 
@@ -75819,6 +75936,7 @@ impl Runtime<'_> {
             })
             .collect();
         self.carry_the_pages_of_moved_panes(&moved)?;
+        self.carry_the_recordings_of_moved_panes(&moved);
         absorb_tab_into_strip(
             &mut self.window.tabs,
             &mut self.window.active_tab,
@@ -76167,6 +76285,7 @@ impl Runtime<'_> {
             ));
         }
         self.carry_the_pages_of_moved_panes(&moves)?;
+        self.carry_the_recordings_of_moved_panes(&moves);
         if moved.source_emptied {
             // The tab did not close — it was emptied by a move, and `close_tab`
             // would file a still-running shell into Recent and shut it down. This
@@ -76267,8 +76386,10 @@ impl Runtime<'_> {
         }
         // **And the half that does not live on a `TabState`** (§7.10 ④‴): a page
         // is the window's, so `pane_into_new_tab` cannot have carried it and this
-        // is where it follows the pane it is drawn in.
+        // is where it follows the pane it is drawn in. A recording is the
+        // window's for the same reason and follows by the same door (§7.44 ⑮).
         self.carry_the_pages_of_moved_panes(&[(leaf, landed)])?;
+        self.carry_the_recordings_of_moved_panes(&[(leaf, landed)]);
         debug_assert!(
             self.sessions_match_terminals(),
             "item 6: a tear-out leaves the tab it left matching its own tree"
@@ -78756,6 +78877,11 @@ impl Runtime<'_> {
         let mut wanted_pictures: Vec<web_thumb::PageDemand> = Vec::new();
         let pages = &self.window.web;
         let page_pictures = &self.window.web_thumbs;
+        // **And the pictures the cards can draw out of memory** (user ruling
+        // 2026-08-30; §7.1.6b⁵). Read and never asked for: this is the window's
+        // decode cache exactly as it stands, and a seat whose file is not in it
+        // is the face it has always been. See [`card_picture_in`].
+        let decodes = &self.window.peek_cache;
         // **And the tab holding the pane that is in the air** (缺陷 #189). Its
         // seat is being drawn twice while the gesture lasts — once on its own
         // card and once as the stand-in ([`Self::stand_in_pane`]) — and the
@@ -78818,8 +78944,20 @@ impl Runtime<'_> {
                                 ),
                             });
                         }
-                        let source =
-                            tab.mini_source(seat.id, seat.kind, page_pictures.picture(leaf))?;
+                        // **The picture on this seat, if this window has one**
+                        // (§7.1.6b⁵) — the third reading in the same place and
+                        // the same split as the two above it: what a seat *has*
+                        // goes into the projection, and nothing on this line
+                        // asks for what it has not.
+                        let picture = tab
+                            .card_picture_path(seat.id)
+                            .and_then(|path| card_picture_in(decodes, path));
+                        let source = tab.mini_source(
+                            seat.id,
+                            seat.kind,
+                            page_pictures.picture(leaf),
+                            picture,
+                        )?;
                         // **The seat's own face decides both counts.** A row's
                         // height and a column's width are two readings of the
                         // same face, so they are taken from one table
@@ -78939,6 +79077,71 @@ impl Runtime<'_> {
             self.apply_web_outcomes(now, outcomes)?;
         }
         Ok(())
+    }
+
+    /// **A pane that changed its address takes its recording with it** (user
+    /// report on `next22`, defects #202/#204; §7.44 ⑮).
+    ///
+    /// [`Self::carry_the_pages_of_moved_panes`] said one tab-level table apart
+    /// from the seven a pane carries; this is the second, and it is a separate
+    /// door rather than a second half of that one because the two tables are
+    /// different tables with different keys: [`WindowRuntime::web`] is keyed by
+    /// [`LeafId`] and [`WindowRuntime::video`] by [`PreviewSurface`], since a
+    /// recording plays on a pane, on a float and on the glance card while a page
+    /// only ever plays on a pane. Only the first of those three is a leaf, so
+    /// only the first of them can be part of a move at all — which is the whole
+    /// of the filter below.
+    ///
+    /// **Without it the recording does not merely lag — it is shut down.**
+    /// [`Runtime::sweep_video_seats`] keeps a seat while the surface it is keyed
+    /// by is still about the file it was opened on, and both halves of that key
+    /// change on a move; so the seat went on being keyed by an address the
+    /// window no longer has, the sweep read it as a surface that has stopped
+    /// existing, and the decoder was stopped on the next frame. On the machine
+    /// that is a video pane dragged onto the tab strip whose picture goes
+    /// **blank** while its head, its control bar and its fact line — which
+    /// travel with the pane — go on naming the recording.
+    ///
+    /// **Taken out of the table before any of them is put back**, which is the
+    /// page carrier's reason said again about a different map: a centre *trades*
+    /// (§7.1.6k′ B4), so the arriving recording is filed under the key the
+    /// departing one was filed under, and an insert interleaved with the removes
+    /// would have [`video_seat::VideoSeats::put`] shut down a live engine — the
+    /// one thing [`video_seat::VideoSeats::take`] and `put` exist to let this
+    /// function avoid.
+    ///
+    /// No `Result`, unlike its sibling: nothing here can fail. A rehome is one
+    /// key changing — the engine is not touched, the decoder does not restart,
+    /// the playhead does not go back and the texture keeps its name — so there
+    /// is no platform call to report on.
+    fn carry_the_recordings_of_moved_panes(&mut self, moves: &[(LeafId, LeafId)]) {
+        let hosted: BTreeSet<LeafId> = self
+            .window
+            .video
+            .iter()
+            .filter_map(|(surface, _)| match surface {
+                PreviewSurface::Seat(leaf) => Some(leaf),
+                PreviewSurface::Float(_) | PreviewSurface::Peek => None,
+            })
+            .collect();
+        // The same rule the page table asks, asked of the recording table: a
+        // pair whose two halves are equal is not a move and must not be lifted
+        // and put back, because the next pair in the transaction may be filing
+        // something under that key.
+        let travelling = pages_that_move_with_their_panes(&hosted, moves);
+        if travelling.is_empty() {
+            return;
+        }
+        let carried: Vec<(PreviewSurface, video_seat::VideoSeat)> = travelling
+            .iter()
+            .filter_map(|(was, now)| {
+                let seat = self.window.video.take(PreviewSurface::Seat(*was))?;
+                Some((PreviewSurface::Seat(*now), seat))
+            })
+            .collect();
+        for (now, seat) in carried {
+            self.window.video.put(now, seat);
+        }
     }
 
     /// **Go and photograph the pages the cards could not draw** — the web half
@@ -93127,6 +93330,45 @@ fn tick_owes_a_present(chrome_changed: bool, panes_owe: bool, pictures_owe: bool
     chrome_changed || panes_owe || pictures_owe
 }
 
+/// **The pixels a card may draw for one file, and nothing else** (user ruling
+/// 2026-08-30; §7.1.6b⁵).
+///
+/// The whole of the reading half of "a card draws the real thumbnail", and it is
+/// a free function over the cache rather than a method on [`Runtime`] for the
+/// borrow the frame walk needs: `refresh_focus_thumbnails` holds the tab list
+/// immutably while it asks this of the window's decode cache, and a `&self`
+/// method would put both borrows on the same object.
+///
+/// **It asks for nothing.** `Pending`, `Failed` and an absent entry are one
+/// answer here — `None`, which the caller reads as "this seat is a face" — and
+/// none of the three inserts a `Pending` or sends a task. That is the ruling
+/// stated in code: *不起新解码、不拉新帧*. A file the window has decoded for some
+/// other surface is free; a file it has not is a face until something the reader
+/// did decodes it.
+///
+/// The key is [`normalized_local_image_path_key`], which is the key the picture
+/// lane, the glance card and the animation clock all use — so a card, a pane and
+/// a hover over one file are one decode and one texture.
+fn card_picture_in<'a>(
+    cache: &'a std::collections::HashMap<String, PeekCacheEntry>,
+    path: &Path,
+) -> Option<focus_thumb::CardPicture<'a>> {
+    match cache.get(&normalized_local_image_path_key(path))? {
+        PeekCacheEntry::Ready {
+            key,
+            rgba,
+            width_px,
+            height_px,
+        } => Some(focus_thumb::CardPicture {
+            key,
+            rgba,
+            width_px: *width_px,
+            height_px: *height_px,
+        }),
+        PeekCacheEntry::Pending | PeekCacheEntry::Failed => None,
+    }
+}
+
 /// **Which of a seat move's re-keyings a page has to follow** (§7.10 ④‴).
 ///
 /// `moves` is the whole transaction — every `(was, now)` pair the gesture
@@ -93141,6 +93383,12 @@ fn tick_owes_a_present(chrome_changed: bool, panes_owe: bool, pictures_owe: bool
 /// A pure function so the rule can be read without a browser: what a page is
 /// owed by a move is a fact about the two addresses, and the only thing that
 /// needs an engine is the handing over itself.
+///
+/// **The recording table asks it too** (§7.44 ⑮), which is why `hosted` is a set
+/// of leaves and not the page map itself: what this decides is a fact about two
+/// addresses and a list of the ones somebody is holding something for, and both
+/// window-level tables a pane can be behind — the browser and the decoder — ask
+/// exactly that. See [`Runtime::carry_the_recordings_of_moved_panes`].
 #[must_use]
 fn pages_that_move_with_their_panes(
     hosted: &BTreeSet<LeafId>,
@@ -103772,6 +104020,173 @@ mod tests {
             removed < collected && collected < inserted,
             "a trade files the arriving page under the departing page's own id, \
              so an insert interleaved with the removes loses a live browser:\n{carrier}"
+        );
+    }
+
+    /// RED — **a card reads the picture this window already has and asks for
+    /// nothing** (defect #205; user ruling 2026-08-30; §7.1.6b⁵).
+    ///
+    /// The asking side of "a card draws the real thumbnail", and the whole of
+    /// what §7.1.6b′'s red line — *「缩略图不许向磁盘提问」* — costs it. A column
+    /// of cards walks every seat of every visible tab on every frame; a lookup
+    /// that armed a decode would be that walk putting a question to the disk for
+    /// every picture you scrolled past, and the ruling is explicit that the card
+    /// draws what is already in memory and a face otherwise.
+    ///
+    /// Four states of one cache and three of them are the same answer, which is
+    /// the property: `Ready` is the picture, and `Pending`, `Failed` and *absent*
+    /// are each `None` — with nothing inserted and nothing sent on any of the
+    /// three.
+    ///
+    /// RED GATE: give the absent arm the `request_peek_pixels` /
+    /// `insert(Pending)` pair `file_peek_fitted_pixels` has — which is the
+    /// obvious way to write it and the way the glance card *does* — and the last
+    /// assertion goes red with a cache this function was only supposed to read.
+    #[test]
+    fn a_card_reads_the_picture_this_window_has_and_asks_for_nothing() {
+        let path = Path::new(r"D:\shots\B1-rest.png");
+        let key = normalized_local_image_path_key(path);
+        let rgba: Arc<[u8]> = Arc::from(vec![0x11; 8 * 2 * 4]);
+        let mut cache = std::collections::HashMap::new();
+
+        assert!(
+            card_picture_in(&cache, path).is_none(),
+            "a file nothing has decoded is a face"
+        );
+        cache.insert(key.clone(), PeekCacheEntry::Pending);
+        assert!(
+            card_picture_in(&cache, path).is_none(),
+            "a decode that is still out is a face, not a half-drawn picture"
+        );
+        cache.insert(key.clone(), PeekCacheEntry::Failed);
+        assert!(
+            card_picture_in(&cache, path).is_none(),
+            "and a decode that failed is the same face"
+        );
+        cache.insert(
+            key.clone(),
+            PeekCacheEntry::Ready {
+                key: key.clone(),
+                rgba: Arc::clone(&rgba),
+                width_px: 8,
+                height_px: 2,
+            },
+        );
+        let picture = card_picture_in(&cache, path).expect("a decoded file draws");
+        assert_eq!(picture.key, key, "under the decode's own identity");
+        assert_eq!((picture.width_px, picture.height_px), (8, 2));
+        assert!(
+            Arc::ptr_eq(picture.rgba, &rgba),
+            "and it is the same pixels the pane is drawing, not a copy"
+        );
+
+        // The three refusals left the cache exactly as they found it: this
+        // function reads and never asks.
+        const SOURCE: &str = include_str!("main.rs");
+        let at = SOURCE
+            .find("\nfn card_picture_in<'a>(")
+            .expect("the card's picture lookup is a free function in this file");
+        let rest = &SOURCE[at..];
+        let reader = &rest[..rest.find("\n}\n").expect("and it ends") + 3];
+        assert!(
+            !reader.contains("request_peek_pixels") && !reader.contains(".insert("),
+            "the card's picture lookup asks the worker or writes the cache, \
+             which is a column of cards reading the disk as you scroll:\n{reader}"
+        );
+    }
+
+    /// RED — **a recording follows the pane it is drawn in** (user report on
+    /// `next22`, defects #202/#204; §7.44 ⑮).
+    ///
+    /// `a_page_follows_the_pane_it_is_drawn_in`'s sentence said about the second
+    /// window-level table a pane can be behind, and it is the same defect with a
+    /// different ending. [`WindowRuntime::video`] is keyed by
+    /// [`PreviewSurface`], both halves of a seat surface's name change on a
+    /// move, and [`Runtime::sweep_video_seats`] retires every seat whose surface
+    /// has stopped existing — so a video pane dragged into another tab lost its
+    /// decoder on the very next frame while its head, its control bar and its
+    /// fact line travelled with the pane.
+    ///
+    /// The three things stated here are the three the fix is:
+    ///
+    /// ① **Only a seat travels.** A float and the glance card are not leaves,
+    /// so a move cannot be about them, and a build that keyed the carrier by
+    /// leaf alone would have rehomed a card's recording onto a pane.
+    /// ② **The doors.** The same three the page carrier is called from, because
+    /// they are the three gestures that re-key a pane inside one window.
+    /// ③ **The transaction.** Every travelling recording off its surface before
+    /// any of them is put down — a trade files the arriving one under the
+    /// departing one's key, and `put` shuts down whatever it lands on.
+    ///
+    /// RED GATE: take the call out of any one of the three doors and that door's
+    /// pin goes red; run the carrier as a loop of `rehome` instead of
+    /// `take`-then-`put` and the `.collect();` between the two disappears, which
+    /// on a trade is a live engine shut down.
+    #[test]
+    fn a_recording_follows_the_pane_it_is_drawn_in() {
+        // ① a seat is a leaf and the other two surfaces are not, which is what
+        // makes "which of these moves is about a recording" answerable at all.
+        let leaf = LeafId {
+            tab: TabId(1),
+            seat: SeatId(2),
+        };
+        let surfaces = [
+            PreviewSurface::Seat(leaf),
+            PreviewSurface::Float(9),
+            PreviewSurface::Peek,
+        ];
+        let leaves: Vec<LeafId> = surfaces
+            .iter()
+            .filter_map(|surface| match surface {
+                PreviewSurface::Seat(leaf) => Some(*leaf),
+                PreviewSurface::Float(_) | PreviewSurface::Peek => None,
+            })
+            .collect();
+        assert_eq!(
+            leaves,
+            vec![leaf],
+            "a float and a glance card have no address a move could change"
+        );
+
+        // ② the three doors.
+        for (door, signature) in [
+            (
+                "a pane torn out into a tab of its own",
+                "    fn extract_pane_into_new_tab(&mut self, leaf: LeafId, slot: usize) -> Result<Option<TabId>> {",
+            ),
+            (
+                "a pane dropped on another tab",
+                "    fn move_pane_across_tabs(",
+            ),
+            ("a tab merged into another's layout", "    fn absorb_tab("),
+        ] {
+            let text = method_text(signature);
+            assert!(
+                text.contains("self.carry_the_recordings_of_moved_panes("),
+                "{door} leaves its recording behind, and a recording left behind \
+                 is swept away a frame later:\n{text}"
+            );
+        }
+
+        // ③ the transaction.
+        let carrier = method_text(
+            "    fn carry_the_recordings_of_moved_panes(&mut self, moves: &[(LeafId, LeafId)]) {",
+        );
+        let removed = carrier
+            .find("self.window.video.take(")
+            .expect("the recordings are lifted off their surfaces");
+        let collected = removed
+            + carrier[removed..]
+                .find(".collect();")
+                .expect("and gathered before any of them is put down");
+        let put = carrier
+            .find("self.window.video.put(now,seat);")
+            .expect("and then put down under their new names");
+        assert!(
+            removed < collected && collected < put,
+            "a trade files the arriving recording under the departing one's own \
+             surface, so a put interleaved with the takes shuts down a live \
+             decoder:\n{carrier}"
         );
     }
 
@@ -123617,6 +124032,245 @@ mod tests {
         assert_eq!(origin.preview_pool.len(), 0, "and it is a move");
     }
 
+    // ── §7.1.6k⁗: the picture follows its pane, and the lane follows with it ─
+
+    /// A tab of one terminal and one preview pane **holding a picture** — the
+    /// shape [`tab_with_a_preview`] cannot make, because a picture is not a
+    /// buffer and lives on [`PreviewPane::image`] instead of in the pool.
+    fn tab_with_a_picture(id: u64, path: &str) -> (TabState, SeatId) {
+        let mut seats = seats::Seats::lone_terminal();
+        let preview_seat = seats
+            .add_preview(&cross_metrics())
+            .expect("the preview seat lands");
+        let focused = seats.identity();
+        let mut panes = PreviewPanes::default();
+        panes.entry(seat_of(TabId(id), preview_seat)).image =
+            Some(PreviewImageState::new(PathBuf::from(path)));
+        let (layout, overflow) = cross_solve(&seats);
+        let tab = assemble_tab_state(
+            TabId(id),
+            BTreeMap::from([(focused, leaf_saying("SHELL"))]),
+            BTreeMap::new(),
+            preview::PreviewPool::default(),
+            panes,
+            BTreeMap::new(),
+            focused,
+            TabSeed::default(),
+            seats,
+            layout,
+            overflow,
+        );
+        (tab, preview_seat)
+    }
+
+    /// The file a lane is spent on, as the picture the pane is holding names it.
+    fn lane_shows(tab: &TabState) -> Option<&Path> {
+        let lane = tab.preview_raster?;
+        Some(tab.preview_panes.get(lane)?.image.as_ref()?.path.as_path())
+    }
+
+    /// RED ① — **the tab a picture left gives the texture lane back**
+    /// (user report on `next22`, defects #202/#204).
+    ///
+    /// [`TabState::preview_raster`] names the one seat whose pixels go down
+    /// `bt_render`'s single `set_preview_image` slot, and until this branch the
+    /// only doors that wrote it were the ones that *land* a view on a surface
+    /// ([`preview_lane_after_landing`]) and the constructor
+    /// ([`assemble_tab_state`], which derives it). A **move** is neither: it
+    /// changes which panes a tab holds without landing anything, so the tab a
+    /// picture was torn out of went on naming a surface it no longer has.
+    ///
+    /// RED GATE: take the `heal_preview_raster` call out of
+    /// [`pane_into_new_tab`] and the lane still names `SeatId(2)` of a tab whose
+    /// preview pane has gone.
+    #[test]
+    fn the_tab_a_picture_left_gives_the_texture_lane_back() {
+        let (mut origin, picture_seat) = tab_with_a_picture(1, r"D:\shots\B1-rest.png");
+        assert_eq!(
+            lane_shows(&origin),
+            Some(Path::new(r"D:\shots\B1-rest.png")),
+            "the starting state: the tab is spending its one lane on the picture"
+        );
+
+        let torn = tear_pane_into_tab(
+            &mut origin,
+            &cross_metrics(),
+            picture_seat,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a picture may become a tab of its own");
+
+        assert_eq!(
+            lane_shows(&torn),
+            Some(Path::new(r"D:\shots\B1-rest.png")),
+            "the tab it became draws it — `assemble_tab_state` derives the lane"
+        );
+        assert_eq!(
+            origin.preview_raster, None,
+            "and the tab it left is holding a lane for a pane that has gone"
+        );
+    }
+
+    /// RED ② — **the picture comes back with its pane** (defects #202/#204, the
+    /// gesture the user actually reported).
+    ///
+    /// Open a `.png` on a pane, tear the pane into a tab of its own, drag it
+    /// back. Both halves of the pane's address changed twice, and the tab it
+    /// returns to is still naming the address it had the first time — so
+    /// `get_or_insert` found an incumbent, kept it, and the arriving picture was
+    /// filtered straight out of [`Runtime::preview_picture_hosts`]. On the glass
+    /// that is a blank body under a head and a fact line that travelled with the
+    /// pane: *「1440 × 900 · PNG · 36 KB · Fit」* over nothing.
+    ///
+    /// RED GATE: put `target.preview_raster.get_or_insert(arrived)` back in
+    /// [`move_seat_content`] and the returning picture never reaches the lane.
+    #[test]
+    fn a_picture_dragged_back_into_the_tab_it_left_is_drawn_again() {
+        let (mut origin, picture_seat) = tab_with_a_picture(1, r"D:\shots\B1-rest.png");
+        let mut alone = tear_pane_into_tab(
+            &mut origin,
+            &cross_metrics(),
+            picture_seat,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a picture may become a tab of its own");
+        let lone_seat = alone.seats.preview_seats()[0];
+
+        let moved = cross_move(
+            &mut alone,
+            &mut origin,
+            lone_seat,
+            seats::DropEdge::Right,
+            true,
+        )
+        .expect("the lone pane of a tab may still be moved");
+
+        assert_eq!(
+            origin.preview_raster,
+            Some(seat_of(TabId(1), moved.landed)),
+            "the lane names the pane the picture is standing in now"
+        );
+        assert_eq!(
+            lane_shows(&origin),
+            Some(Path::new(r"D:\shots\B1-rest.png")),
+            "which is the picture being on the glass again rather than a head \
+             and a fact line over nothing"
+        );
+    }
+
+    /// **A picture that moves in does not take the lane off the picture that was
+    /// already there** — the rule §7.1.6k stated when it wrote `get_or_insert`,
+    /// kept while the stale half of it goes.
+    ///
+    /// RED GATE: drop the incumbent clause from [`preview_raster_lane`] and the
+    /// tab re-derives from insertion order, which the arriving pane can win.
+    #[test]
+    fn a_picture_moving_in_does_not_take_the_lane_from_the_one_already_there() {
+        let (mut from, travelling) = tab_with_a_picture(1, r"D:\shots\B1-rest.png");
+        let (mut into, _) = tab_with_a_picture(2, r"D:\shots\standing.png");
+
+        let moved = cross_move(
+            &mut from,
+            &mut into,
+            travelling,
+            seats::DropEdge::Right,
+            true,
+        )
+        .expect("the picture pane moves into the other tab");
+        assert!(
+            into.preview_panes
+                .get(into.preview_here(moved.landed))
+                .is_some()
+        );
+
+        assert_eq!(
+            lane_shows(&into),
+            Some(Path::new(r"D:\shots\standing.png")),
+            "the incumbent keeps its pixels; the arriving picture keeps its \
+             head, its foot and its meta line and waits for the lane"
+        );
+    }
+
+    /// **The third media lane, and the finding is that it needed nothing**
+    /// (§7.44 ⑮, 2026-08-30 — the `.gif` third of defects #202/#204).
+    ///
+    /// Three lanes were walked across a tab boundary and two of them were
+    /// broken. This is the one that was not, and it is written down because
+    /// "nothing to do here" is a claim that can stop being true: an animation is
+    /// keyed by the **file** and not by the surface
+    /// ([`WindowRuntime::animations`], §7.44 ⑤ — which is what puts three
+    /// surfaces showing one `loading.gif` on the same frame), and the file
+    /// travels with the pane on [`PreviewImageState::path`]. So a move re-keys
+    /// nothing, because there is no key with an address in it.
+    ///
+    /// Both halves are asserted: that the reader is by file, and that the file
+    /// crosses. Either one alone would go on passing while the pair stopped
+    /// being a reason.
+    ///
+    /// RED GATE: key `animations` by `PreviewSurface` and the first assertion
+    /// goes red — and the lane joins the other two, needing a carrier of its own.
+    #[test]
+    fn an_animation_crosses_a_tab_boundary_because_it_is_keyed_by_its_file() {
+        let running =
+            method_text("    fn animation_running_on(&self, surface: PreviewSurface) -> bool {");
+        assert!(
+            running.contains("normalized_local_image_path_key"),
+            "the animation lane is read by file, which is why a move has \
+             nothing to re-key:\n{running}"
+        );
+        let names = method_text(
+            "    fn animation_path_of(&self, surface: PreviewSurface) -> Option<PathBuf> {",
+        );
+        assert!(
+            names.contains("self.preview_picture(surface)?.path"),
+            "and the file it is read by is the one on the pane, which travels \
+             with the pane:\n{names}"
+        );
+
+        let (mut origin, gif_seat) = tab_with_a_picture(1, r"D:\shots\folio-anim-test.gif");
+        let mut alone = tear_pane_into_tab(
+            &mut origin,
+            &cross_metrics(),
+            gif_seat,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("an animated picture may become a tab of its own");
+        let lone_seat = alone.seats.preview_seats()[0];
+        assert_eq!(
+            lane_shows(&alone),
+            Some(Path::new(r"D:\shots\folio-anim-test.gif")),
+            "the file crossed the tear-out"
+        );
+
+        let moved = cross_move(
+            &mut alone,
+            &mut origin,
+            lone_seat,
+            seats::DropEdge::Right,
+            true,
+        )
+        .expect("and comes back the way it went");
+        assert_eq!(
+            origin
+                .preview_panes
+                .get(seat_of(TabId(1), moved.landed))
+                .and_then(|pane| pane.image.as_ref())
+                .map(|picture| picture.path.as_path()),
+            Some(Path::new(r"D:\shots\folio-anim-test.gif")),
+            "and the surface the animation is asked about names the same file, \
+             so the clock it is on is the clock it was on"
+        );
+    }
+
     /// **§7.1.6k — a target that cannot take another pane is refused before
     /// anything moves.**
     ///
@@ -127991,6 +128645,99 @@ mod tests {
         // ④ and the card is holding nothing.
         assert!(seats.get(PreviewSurface::Peek).is_none());
         seats.shutdown_all();
+    }
+
+    /// RED — **two recordings trading places keep both engines** (§7.44 ⑮,
+    /// 2026-08-30).
+    ///
+    /// The half of "a recording follows its pane" that a loop of
+    /// [`video_seat::VideoSeats::rehome`] cannot do. A pane dropped on the
+    /// *centre* of another tab's pane trades: two journeys in one gesture, and
+    /// the second one's destination is the first one's origin. Rehomed one at a
+    /// time, the second journey arrives at a surface the first has just filled
+    /// and the shutdown that `open` and `rehome` both owe a surface takes a live
+    /// decoder with it — on the glass, one of the two videos goes black while
+    /// the pane around it arrives intact.
+    ///
+    /// So the carrier lifts every travelling recording off its surface before it
+    /// puts any of them down, which is what
+    /// [`video_seat::VideoSeats::take`] and `put` are for, and this is that
+    /// sequence run over two real engines.
+    ///
+    /// RED GATE: replace the two `take`s and two `put`s with two `rehome`s in
+    /// the order the gesture produces them and `engines_shut_down` moves by one
+    /// while the second surface comes back holding the first one's texture.
+    #[test]
+    fn two_recordings_trading_places_keep_both_engines() {
+        use bt_platform::video::engine::{engines_outstanding, engines_shut_down};
+        let _ledger = ledger_gate();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-assets/folio-video-test.mp4");
+        let before = engines_outstanding();
+        let mut seats = video_seat::VideoSeats::default();
+        let now = Instant::now();
+        let travelling = PreviewSurface::Seat(LeafId {
+            tab: TabId(1),
+            seat: SeatId(2),
+        });
+        let standing = PreviewSurface::Seat(LeafId {
+            tab: TabId(4),
+            seat: SeatId(1),
+        });
+        for surface in [travelling, standing] {
+            seats
+                .open(surface, &fixture, now)
+                .unwrap_or_else(|error| panic!("{surface:?} opens the fixture: {error:?}"));
+        }
+        assert_eq!(
+            engines_settling_to(before + 2),
+            before + 2,
+            "two surfaces are two decoders"
+        );
+        let keys: Vec<String> = [travelling, standing]
+            .iter()
+            .map(|surface| {
+                seats
+                    .get(*surface)
+                    .expect("both surfaces hold a seat")
+                    .key()
+                    .to_owned()
+            })
+            .collect();
+        let stopped = engines_shut_down();
+
+        // The trade, as the carrier runs it: both off their surfaces first.
+        let lifted: Vec<(PreviewSurface, video_seat::VideoSeat)> =
+            [(travelling, standing), (standing, travelling)]
+                .iter()
+                .filter_map(|(was, to)| Some((*to, seats.take(*was)?)))
+                .collect();
+        for (to, seat) in lifted {
+            seats.put(to, seat);
+        }
+
+        assert_eq!(
+            engines_shut_down(),
+            stopped,
+            "a trade shut an engine down, which is one of the two pictures going \
+             black"
+        );
+        assert_eq!(engines_outstanding(), before + 2, "and both are still open");
+        assert_eq!(
+            seats.get(standing).expect("the traveller arrived").key(),
+            keys[0],
+            "the traveller kept its own texture"
+        );
+        assert_eq!(
+            seats
+                .get(travelling)
+                .expect("and the pane it traded with went the other way")
+                .key(),
+            keys[1],
+            "each recording is the one its pane was showing"
+        );
+        seats.shutdown_all();
+        assert_eq!(engines_settling_to(before), before);
     }
 
     /// RED — **the still and the first played frame land in the same rectangle**
