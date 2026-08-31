@@ -5534,6 +5534,22 @@ RES 容器是一串对齐的记录,`VS_VERSIONINFO` 是一棵对齐的块树,两
 
 `GpuContext::headless` 也改了一处:第一次 `request_adapter` 拿不到东西时,用允许 fallback 的同一个请求再问一次。写成重试而不是写成一个构建去设的开关,是因为「这台机器有没有 GPU」是机器能回答的问题,而环境变量只能被告知;有 GPU 的机器上第二次调用根本不会发生。
 
+#### 12.8.1 第一次真的在别人的机器上跑:四份环境差异,和它们各自的根因(2026-08-31,run `33381039310`)
+
+CI 头一回开跑,四个 job 全红:`logic` 66 条、`conpty` 1 条、`gpu` 2 条、`gates-can-fail` 的 lint 金丝雀自己。**成片的红从来不是成片的 bug**——把 panic 文本聚类之后是四类,其中一类占了 67 条。逐条记下来的不是「怎么修好的」,而是**跑器与本机差在哪一格**,因为下一个新环境会从同一格开始。
+
+**① 换行符:`core.autocrlf=true` 把 754 个文件改写了(67 条,`.gitattributes`)。** Git for Windows 的安装默认就是 `autocrlf=true`,GitHub 的 Windows 镜像原样留着,于是 `actions/checkout` 签出的 1074 个文件里有 754 个(其中 254 个 `.rs`)与提交进去的字节不同。工作区里没有任何东西会察觉——除了**读自己源码**的那批测试:`include_str!("main.rs")` 拿 `"\n    }\n"` 去找一个方法在哪结束,CRLF 下这根针根本不在草垛里,于是它以一句关于花括号的 panic 报出来,而那句话与换行符毫无关系。同一个成因还打中了另一族:把产品写出来的字节与仓里那份 fixture 逐字节相比的测试(`folio-dark.json`、`codex-notify.toml`、copilot 与 claude-code 的钩子块)——产品写 LF,fixture 被抹成了 CRLF。
+
+修法是把「这棵树是 LF」写进仓库而不是写进每个 clone 的 config:`* text=auto eol=lf` 打头,后面跟着**不是我们的字节**的例外(`assets/psreadline/**` 被 `include_bytes!` 装进 exe 并与安装出去的那份比对;`licenses/**` 是 Apache 4(b) 要求原样复制的声明;取证记录与 spike 探针)。验证方式是拿 `core.autocrlf=true` 把 index 签出到别处再逐字节对:修之前 754 个文件不一致,修之后 1074 个文件 0 个不一致。
+
+**② clone 深度:`actions/checkout` 只抓 depth 1(1 条,`crates/bt-app/src/git.rs`)。** `this_workspace_answers_all_three_page_questions` 自己的注释就写着「只断言任何一次签出都为真的事」,然后断言了满满一页 50 条提交和 `has_more`——那不是关于代码的事实,是关于别人的 clone 有多深的事实。浅签出还有第二层:浅嫁接会把边界提交的父亲拿掉,所以「除根提交外每条都有父亲」也红。分页边界移给一条**自己造 51 条提交**的测试,它反而说得更多(第二页接着第一页、走到无父的根、并说身后没有东西了);用 `--allow-empty` 且把身份 config 在仓库自己身上,所以它既不需要工作树也不需要一台配好 `user.email` 的机器——跑器两样都没有。
+
+**③ shell 退出码:金丝雀把探针的红当成了自己的红(1 条,`.github/workflows/ci.yml`)。** GitHub 的 `pwsh` shell 会在脚本尾部追加 `if (Test-Path variable:\LASTEXITCODE) { exit $LASTEXITCODE }`。lint 金丝雀的最后一条命令是一个**它希望失败**的 `cargo clippy`,于是 clippy 如设计所愿拒绝了那个种下去的 `todo!()`、门自己的逻辑通过了,然后这一步带着 clippy 的退出码红了——一条唯一证据是「什么都没打印」的红。现在探针的退出码进它自己的变量,三道金丝雀都以显式 `exit 0` 结束:这一步的判决只可能是这道门的判决。
+
+**④ 没有显卡:WARP 每渲染一个像素每帧留下约三个字节(2 条,移入 `ci/ignored-tests.txt`)。** `gpu` job 靠 `ci/install-warp.ps1` 把 WARP 放到测试二进制旁边,而 WARP 是**软件**光栅器——它的每一块内存都是本进程的 RAM。两条 atlas soak 在上面丢了设备并报 `Out of Memory`,但 atlas 是错的嫌疑人:实测(2026-08-31)第一条在 WARP 上于**第 67 帧 / 共 240 帧**因访问违例死掉,常驻 1.6 GB,而 `glyph_atlas_refits` 还是 0、atlas 还在第一张 packing 上——也就是说,死在它要考察的那个 packer 承受任何压力**之前**。把它砍到 1280×720(九分之一的像素)能走到第 237 帧再以同样方式死,把软件 adapter 的预算钉在约 550 Mpx 的绘制上,不管这些像素以什么形状到来;这两条要 2.0 Gpx 和 1.9 Gpx。调用方这边够不着:换 8192 天花板(原本读机器的 16384)死在同一处、`PollType::Poll` 退役每帧提交到第 77 帧、`PollType::Wait` 把设备等空到第 60 帧,三次都单独量过。真 adapter 上同样 240 帧 25 秒跑完,常驻平着 214 MB 不涨。
+
+所以它们上了 ignored 名单,**并且名单里写明这两条不是那份名单至今装的东西**:它们是一份用户报告的红门而不是探针,在跑器有真 adapter 之前,这条防线由「在有显卡的机器上跑 `cargo test -p bt-render -- --ignored`」的人守着,别无其他。第一条同时把 `CEILING` 定死在 8192——这一条与 CI 无关,是它自己该有的:标题里那句话是 §7.1.3m 的「8192² 的 3.3%」,一个把天花板读自机器的 fixture 在任何提供 16384 的 adapter 上都在回答一道容易四倍的题。
+
 ### 12.9 SBOM
 
 `scripts/release/sbom.ps1`,CycloneDX 1.5,从 `cargo metadata --locked --filter-platform x86_64-pc-windows-msvc` 出。`--filter-platform` 是让它成为一份**关于实际发出去那个东西**的清单的原因:lock file 里带着每个平台要的每个 crate,一份列着 `nix` 和 `wayland-client` 的 Windows 归档描述的是一个不存在的构建。

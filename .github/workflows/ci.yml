@@ -25,10 +25,20 @@ env:
 jobs:
   # ── the three gates that prove themselves ──────────────────────────────────
   #
-  # Both of these plant a violation, demand red, and put the file back. This
+  # Each of these plants a violation, demands red, and puts the file back. This
   # repository has shipped a gate that could not fail, plus a comment that lied
   # about it, plus a lint table that inherited into nothing; a green run means
   # nothing until the red one has been seen.
+  #
+  # **Every step here ends with an explicit `exit 0`, and that is load-bearing.**
+  # A canary runs a command whose *failure is the thing it is checking for*, and
+  # GitHub's `pwsh` shell appends `if (Test-Path variable:\LASTEXITCODE) { exit
+  # $LASTEXITCODE }` to the script it runs. Without the explicit exit, the probe's
+  # refusal becomes the step's own — the lint canary proved on the first CI run
+  # that clippy does reject a planted `todo!()`, and then reported that proof as
+  # a red step with nothing in its log, because clippy's 101 was still sitting in
+  # `$LASTEXITCODE` when the script ran out. The probe's exit code is read into a
+  # variable of its own and never left where the shell will find it.
   gates-can-fail:
     runs-on: windows-2025
     # The ignored-test probe has to build the whole workspace before it can ask
@@ -68,21 +78,26 @@ jobs:
           } finally {
             [IO.File]::WriteAllText($file, $original)
           }
+          exit 0
 
       - name: the lint gate can actually fail
         shell: pwsh
         run: |
           $file = "crates/bt-doc/src/lib.rs"
           $original = [IO.File]::ReadAllText($file)
+          $clippy = $null
           try {
             [IO.File]::AppendAllText($file, "`nfn _lint_gate_probe() { todo!() }`n")
             cargo clippy -p bt-doc --locked -- -D warnings 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-              throw "clippy passed a planted todo!() - workspace lints are not reaching this crate ([lints] workspace = true missing?)"
-            }
+            $clippy = $LASTEXITCODE
           } finally {
             [IO.File]::WriteAllText($file, $original)
           }
+          if ($clippy -eq 0) {
+            throw "clippy passed a planted todo!() - workspace lints are not reaching this crate ([lints] workspace = true missing?)"
+          }
+          Write-Host "clippy refused the planted todo!() with exit $clippy, which is this gate passing."
+          exit 0
 
       # A newly ignored test has to be a newly listed test. Planting one proves
       # the comparison is two-way and that the exit code is read before the
@@ -107,6 +122,7 @@ jobs:
           } finally {
             [IO.File]::WriteAllText($file, $original)
           }
+          exit 0
 
   # ── everything that is decided by reading, not by hardware ────────────────
   logic:

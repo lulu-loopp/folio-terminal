@@ -1,5 +1,35 @@
+# **This tree's line ending is LF, in the working copy as well as in the object
+# store, on every machine that checks it out.**
+#
+# Not a style preference — a correctness rule this repository leans on in three
+# different ways, all of which a CRLF checkout breaks silently:
+#
+#   * Dozens of tests read *this source* as text and assert on its shape:
+#     `include_str!("main.rs")` and friends look for `"\n    }\n"` to find where a
+#     method ends, for `"\nstruct App {\n"` to find a declaration. Under CRLF none
+#     of those needles is in the haystack, and the failure is a `panic!` about
+#     braces rather than anything about line endings — 67 of them, in one run.
+#   * Fixtures are compared byte for byte against what the product writes:
+#     `assets/schemes/folio-dark.json` against `bt_persist::write_scheme`,
+#     `docs/plans/attention/codex-notify.toml` against the line the codex
+#     installer adds. Folio writes LF; a fixture smudged to CRLF on checkout is a
+#     fixture that no longer says what it was written to say.
+#   * `scripts/shell-integration/*.bash` is read by POSIX shells, which take a CR
+#     as part of the command.
+#
+# Git for Windows installs `core.autocrlf=true` by default and the GitHub Windows
+# runners keep it, so this is the difference between "passes here" and "passes on
+# a machine nobody configured". `eol=lf` states it in the repository instead of
+# asking every clone to be set up the same way.
+#
+# Order matters below: `.gitattributes` is last-match-wins, so this general line
+# comes first and every exception to it comes after.
+* text=auto eol=lf
+
 # The bash integration script is read by POSIX shells and must keep LF endings
-# whatever `core.autocrlf` is set to — see `shell_integration::tests`.
+# whatever `core.autocrlf` is set to — see `shell_integration::tests`. Implied by
+# the line above now; kept because it is the case that taught us the rule, and
+# because it should survive any future narrowing of that line.
 *.bash text eol=lf
 
 # The ref recordings are raw terminal byte streams. CR is data in them, not a line
@@ -14,3 +44,28 @@
 # Saying it outright also keeps `git grep` honest about them: a file Git calls
 # binary is a file `git grep` skips, and these are the ones worth searching.
 *.btcr binary
+
+# ── bytes that are not ours to normalise ──────────────────────────────────────
+#
+# Everything below was committed with CRLF because that is how its author wrote
+# it, and each is a file whose *bytes* are the point. `-text` — not `binary`, so
+# `git grep` and diffs still read them — turns off every conversion in both
+# directions: they check out as they were committed, and `git status` does not
+# report them as modified for a difference this file would otherwise introduce.
+
+# Microsoft's PSReadLine 2.4.6, shipped verbatim. `bt_app::psreadline` carries
+# `PSReadLine.psm1` in the executable with `include_bytes!` and compares the
+# installed copy against it; a checkout that rewrote its line endings would make
+# the shipped module and the repaired one different files.
+assets/psreadline/** -text
+
+# The upstream notices Apache-2.0 §4(b) requires to be reproduced. A notice is
+# reproduced or it is not.
+licenses/** -text
+
+# Captured evidence and the spike probes: transcripts of what a tool printed and
+# source that was written and run outside this workspace. Both are records of
+# something that happened, and a record is not edited to match house style.
+docs/plans/attention/evidence/** -text
+docs/plans/web-preview/codex-final-pass.md -text
+docs/spikes/artifacts/win-landing/probes/** -text
