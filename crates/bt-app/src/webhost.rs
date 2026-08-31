@@ -2679,7 +2679,21 @@ impl WebSeat {
         // so that a page is never made visible at a rectangle it has not been
         // given — and so that a page with no engine is still given one.
         match self.wanted {
-            WebPresence::Hidden => self.host.set_visible(false),
+            WebPresence::Hidden => {
+                // **A photograph in flight when the page leaves the glass is a
+                // photograph that never arrives** (§7.8 ⑩). It is the same
+                // measured fact the whole capture lane stands on, met from the
+                // other side: `CapturePreview` does not complete for a hidden
+                // WebView, and a modal can rise in the eighty milliseconds
+                // between the call and the answer. Left standing, this flag
+                // would refuse every future ask for this seat — a page that
+                // could never be photographed again, and so a pane that would
+                // be blank behind every dialog for the rest of its life.
+                // `web_thumb::WebThumbs::due` lets go of the store's half of the
+                // same ask on the same transition.
+                self.capturing = false;
+                self.host.set_visible(false)
+            }
             WebPresence::Shown(_) => self.host.set_visible(true),
         }
     }

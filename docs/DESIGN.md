@@ -3011,6 +3011,30 @@ W0′ 的双向矩阵在这里落成三条:
 
 **所以侦测关掉,宿主认账。** `SetShouldDetectMonitorScaleChanges(false)` 不是省一次调用,是**一个数只许有一个作者**:窗口在 scale factor 变化的那一刻就知道这个数(`Runtime::reconcile_authoritative_dpi` 已经为终端字号做同一件事),而引擎知道得晚且由别的事情触发,两个作者留着就是「有时候谁先说」。落点三处,与本节其余的缓存同一条纪律——**记下窗口要的,只有真的变了才说,说成了才记**:①`WebSeat::set_device_scale` 走 `Runtime::apply_scale_factor`,**当场说**而不是等下一帧(窗口已经在另一块屏上了,一张等帧的页面就是一张按旧屏栅格摆着直到有人要求重画的页面);②`apply_presence` 里**倍率在矩形之前**,这一条覆盖「DPI 变化时 controller 还没出生」——页面出生即按本窗当前倍率,不吃引擎的默认值;③`the_controller_has_been_told_nothing` 把「告诉过 controller 的三件事」——矩形、可见性、倍率——**一起忘掉**,因为 controller 没了(浏览器崩溃重建、Evergreen 换版、拆卸)或者换了窗口(F1a rehost)之后,新的那个什么都没被告诉过。**第三条顺手补上了一个既有的洞**:此前只忘 `presence`,`bounded` 留着,于是崩溃重建出来的 controller **不会被重新给矩形**——正是 `apply_presence` 自己那段注记描述的「按零乘零排版」从另一头再来一次。红测:`rasterization_owed` 三条(出生即欠、变了欠一次、没变永不欠)、`a_seat_with_no_engine_still_knows_which_display_it_is_on`、`an_engine_that_was_rebuilt_is_owed_all_three_numbers_again`、以及 `a_moved_seat_forgets_what_the_old_window_was_told` 多按住的那一句。
 
+**⑩ 藏起来的那一页,pane 画它最后一帧(用户报 `next22` 缺陷 #203,2026-08-30 落地;`crates/bt-app/src/{web_thumb,webhost,main}.rs`)。**
+
+**现象。** 开着 pdf 或网页的 pane,打开设置对话框,**那一片 pane 整个空白**——头还在、脚还在、地址行还在,中间什么都没有;关掉对话框,页面回来。Quit 卡、启动时的恢复提示、脏文件闸门、PSReadLine 邀请卡四张同规,因为它们和设置读的是同一个谓词(`Runtime::a_modal_covers_the_window`,五张全表)。
+
+**成因是层级,不是绘制。** 一张页是 DirectComposition 树里 wgpu **底下**那个孩子(①),而模态遮罩是 wgpu **画的**(②)。所以「模态开着还让页留在玻璃上」不是一个选项:那是一张在暗下来的窗口里被看得清清楚楚的网页,而遮罩之上还立着对话框——页会盖住它。⑧ 因此让模态一开就 `SetIsVisible(false)`,**这一条一毫米没松**。松的是另一句:**藏起来的 pane 该画什么。** 它画的是自己的底色,而底色在一片被压暗的窗里读作「这个 pane 空了」。
+
+**留存帧不是新机制,是 §7.11 那张照片的第二个读者。** 先查后选:§7.10 ④‴ 的「留存呈现」重发的是**本窗自己合成过的上一帧**,而页面根本不在那张画里(它在 wgpu 底下),那条路对这件事一个像素也拿不出来;`CapturePreview` 是 `plan.md` §1 点名的唯一像素通道,而 §7.11 已经用它把「每一页最后一次在玻璃上的样子」照下来、比过、留在 `web_thumb::WebThumbs` 里了。于是本条**不开第二条抓帧线**:同一次 `CapturePreview`、同一口两秒的钟、同一个 store,只是一张照片有了**两个产品**——卡片要的是缩到 263 格子里的那一份,pane 要的是**照片本身的尺寸**(`CapturePreview` 没有目标尺寸参数,交回的永远是视口,而视口就是这个 pane)。`Product::{Card,Frame}` 命名的是这件事,两份各有各的 ticket 与 serial,因为它们同时被两个相差一个数量级的框看着。
+
+**必须先照后藏,所以钟要一直转。** ② 那条实测事实——**隐藏的 WebView 根本不回答 `CapturePreview`**——决定了「模态开的那一刻抓一帧」这条路不存在:那一刻页面已经该藏了,而不藏就是让它盖住对话框 84 毫秒。所以照相改成**只要页在玻璃上就照**,不再只在聚焦模式开着时照(这正是 §7.11 ⑪ⓑ 写下的那条「真要抹掉它,得让模式关着的时候也照相,那是另一条裁决」——裁决在这里)。代价是**发起方线程每两秒 0.115ms + 一次 40KB memcmp**,一个字都没有被解码:`arrived` 存下编码字节就走,**解码只在模态真的升起来时发生一次**(片⑥ 门 3 那条「逐字节相同就整张丢掉」照旧挡在前面)。于是没人开对话框的窗,这条新读者花的就是那 0.115ms。**留存帧因此最旧两秒**,这是照实说的一笔账:一张文档大部分时间不动(片⑥ ⑥ 那条「逐字节相同」的门就是在数这件事),而一个人按下设置的前两秒里页面若真的变了,他看到的是两秒前的那一帧——比一片空白近得多,也是这条通道能给的全部。
+
+**画在哪:chrome 那一趟,遮罩之下。** 留存帧走 `bt_render::ChromeIcon` ——已经存在的「不经光栅器的贴图四边形」通道,formula 光栅与卡片缩图同一条——由 `refresh_chrome` 接在解析出来的 marks 之后,画在座位自己那一趟里,**在每一个 overlay 层之下**,所以模态遮罩照常压在它上面:**页的像素和隔壁 pane 的字被同一层暗压暗**,这就是「与其它 pane 观感一致」的全部含义。矩形取的正是那张页本来的矩形(洞会开在那儿的地方),clip 取它自己,因为纹理是照相那一刻的视口尺寸而对话框开着时窗还能被拉大。浮窗带着的页同规,只是它的帧挂在浮窗自己那一层(`preview_float_layer`)——理由与浮窗的图片一模一样:浮窗画在 overlay 里,交给座位那一趟就是画在装着它的窗背后。
+
+**五个理由里只有模态这一个画帧。** `a_page_is_off_the_glass` 的另外四个(后台 tab、被 fit 阶梯挤掉、失败卡占座、翻到源码)各自已经有该画的东西,或者根本没有人在看;**留存帧只补「读者上一秒还在看着、这一秒被对话框拿走」的那一格**,判据就是同一个谓词按 `obstructed=false` 再问一次(`sync_web_page` 一趟里两次调用,`PageKeepsake` 是它的产物)。
+
+**抓帧未到、抓不到、抓不下的退路是同一件事:pane 自己的底色 + 遮罩。** 三种情形——解码还在 worker 上(一两帧)、这一页从来没被照过、pane 大过 `MAX_FRAME_PIXELS`(4096×2560,一块 4K 屏 200% 下的整窗)——都不画,**不闪白、不卡、不发明像素**。同一条纪律还落在两处松手上:**页一离开玻璃,在飞的那次抓帧当场作废**(`WebSeat::apply_presence` 清引擎那半,`WebThumbs::due` 清 store 那半)——不然模态恰好升在那 84 毫秒里的座位会**永远**再照不了相,以后每一张对话框它都是空白;**模态一撤,留存帧当场释放**,四十兆的像素不留到下一次。
+
+**仪表照旧只有一行。** 计数并进 §7.11 ⑧ 那条 `BT_FOCUS_THUMB_DUMP`,只多一列 `page-frames`(真存下来的留存帧张数),排在 `pictures` 后面——一张照片两个产品,读的人要的正是这两个数并排。取证另一头是 `BT_WEB_TRACE` 的 `place` 站:模态开着那一行读作 `presence=Hidden … obstructed=1`,而那一刻屏幕上有像素,这两件事**必须同时成立**,否则不是这条修好了,是页面根本没藏。
+
+**红门。** `a_page_a_modal_covers_keeps_the_frame_it_last_stood_on_the_glass_with`(照一次、不解码、模态来了讨一次解码、尺寸是页自己的、`drop_frames` 收得干净);`a_page_that_left_the_glass_lets_go_of_the_photograph_it_had_out`(红证:拿掉 `entry.asked = None`,页再也照不了);`a_card_and_a_pane_asking_about_one_page_take_one_photograph`(两个读者一次引擎调用,卡片仍拿到自己那份);`a_pane_past_the_frame_ceiling_is_refused_before_the_engine_is_asked`;`a_page_a_modal_covers_is_drawn_as_a_kept_frame`(源码钉:`sync_web_page` → `keep_what_the_modal_covers` → `refresh_chrome` 的 `page_keepsake_icons` → 浮窗那一层,四段链子任一断开就是那张空白 pane)。
+
+**实机(2026-08-30,debug,隔离 `APPDATA`/`LOCALAPPDATA`,本机静态服务器 127.0.0.1:8642,不访问外网;1920×1200 物理像素、scale 2)。** 网页与 pdf 各一跑,五张照片与 `BT_WEB_TRACE` 的对照行存在 `docs/plans/web-preview/modal-keepsake-evidence/`:对话框开着时露出来的那一条是页/阅读器的最后一帧、压着遮罩(修之前是 pane 底色),关掉之后网页能导航能后退、pdf 一滚就到 `2 of 3`。同一跑里还落了一行 `obstructed=0 carded=1`——地址打错导航失败、座位换上失败卡——**那一格不画留存帧**,正是上一段那条规矩在实机上的样子。
+
+**视频 pane 不在这条里,而且是因为它本来就不同病。** 一段录像不是浏览器画的:`IMFMediaEngine` 走 frame-server 模式,每一帧 `TransferVideoFrame` 之后**读回系统内存**再交给渲染器(§7.42),也就是说它一直画在**本窗自己的玻璃上**。模态遮罩压在它上面,和压在一段文字上是同一件事——**一行代码都不动**。
+
 ### 7.9 网页是一个预览缓冲（Web 预览块 W2 片③，2026-08-22，已落地；`crates/bt-persist/src/{session,migrate,lib}.rs`、`crates/bt-app/src/{preview,main,seed,profiles,restore,pins,marks,webnav,webhost}.rs`、`crates/bt-platform/src/{lib,webview}.rs`）
 
 **这一片没有画一个新表面,它把网页塞进已经有的每一张表里。** §7.7 ① 早就裁定「网页是一个预览缓冲,不是第四种叶」;本片是那句话的落地,而落地的判据只有一条:**代码里不该有一处先问「这是不是网页」再决定怎么办**。所以 `PreviewSource` 多了一臂、`session.json` 每个预览字段多了一个词、`pins.json` 的第三类第一次有人消费,除此之外切换器、Recent、恢复提示、tab 命名、卡片动词一行没有为网页分岔。
