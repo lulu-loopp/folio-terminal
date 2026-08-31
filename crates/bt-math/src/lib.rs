@@ -1,6 +1,6 @@
 //! Sandboxed MiTeX -> Typst -> SVG -> resvg math-block rendering.
 
-use std::{num::NonZeroU32, sync::OnceLock, time::Duration};
+use std::{collections::BTreeSet, num::NonZeroU32, sync::OnceLock, time::Duration};
 
 pub use bt_doc::{InlineRunPlacement, MathMode};
 use mitex_spec_gen::DEFAULT_SPEC;
@@ -8,8 +8,10 @@ use thiserror::Error;
 use typst_as_lib::{TypstEngine, typst_kit_options::TypstKitFontOptions};
 use typst_layout::PagedDocument;
 use typst_library::{
-    foundations::{Dict, IntoValue, Str, Value},
+    World,
+    foundations::{Array, Dict, IntoValue, Str, Value},
     layout::{Frame, FrameItem, Point, Transform},
+    text::FontBook,
 };
 
 pub const MAX_SOURCE_BYTES: usize = 8 * 1024;
@@ -22,6 +24,13 @@ const TYPST_TEMPLATE: &str = r#"
 #import "specs/mod.typ": mitex-scope as base-mitex-scope
 #set page(width: auto, height: auto, margin: (x: 0pt, y: sys.inputs.font_size * 1pt), fill: none)
 #set text(size: sys.inputs.font_size * 1pt, fill: rgb(sys.inputs.red, sys.inputs.green, sys.inputs.blue))
+// The math font, and behind it the installed families this particular source's
+// CJK characters were found in (see `covering_cjk_families`). Typst's equation
+// element show-sets the math font alone; naming it again here keeps it first —
+// every Latin letter, operator and symbol still comes from it — and appends the
+// faces that answer for the ideographs it does not carry. The list is empty for
+// a source with no CJK in it, which is then byte-for-byte the Typst default.
+#show math.equation: set text(font: ("New Computer Modern Math",) + sys.inputs.cjk_fonts)
 #let mitex-scope = base-mitex-scope + (
   diff: math.partial,
   sect: math.inter,
@@ -206,7 +215,9 @@ impl MathEngine {
         validate_source(source)?;
         let converted = mitex::convert_math(source, Some(DEFAULT_SPEC.clone()))
             .map_err(|error| MathRenderError::Convert(error.to_string()))?;
+        let cjk_fonts = self.cjk_fonts_for(&converted)?;
         let mut inputs = Dict::new();
+        inputs.insert("cjk_fonts".into(), Value::Array(cjk_fonts));
         inputs.insert("source".into(), Value::Str(Str::from(converted)));
         inputs.insert(
             "font_size".into(),
@@ -236,6 +247,101 @@ impl MathEngine {
             .ok_or(MathRenderError::InvalidDimensions)?;
         rasterize_svg(&svg, key, metrics, started.elapsed())
     }
+
+    /// The installed families that draw this source's ideographs, in the order
+    /// Typst should read them — or [`MathRenderError::MissingCjkGlyph`] when
+    /// some character in it is drawn by nothing this machine has.
+    ///
+    /// **This is where the question is asked, and it is asked of the whole font
+    /// book.** It used to be answered by looking at the finished page: compile,
+    /// then declare the glyph missing if any ideograph came back `.notdef`.
+    /// That reads a *shaping outcome* as a *fact about the machine*, and the two
+    /// are not the same thing. Typst's fallback picks one font per tofu run by
+    /// the coverage of that run's first character, scored by how much the
+    /// family's name resembles the math font's — so which face an ideograph
+    /// lands on is decided by name similarity and, at the last tiebreak, by
+    /// which family name is shorter. A machine whose best-scoring face carries
+    /// some of a formula's characters and not the rest therefore rendered some
+    /// formulas and refused others, with no font missing from it at all. That is
+    /// what a GitHub Windows runner did on 2026-08-31: `\text{中}`, `\text{文}`
+    /// and `\text{项目数}` drew, and `\text{死} \; + \; \text{活}` in the very
+    /// same suite came back `MissingCjkGlyph`.
+    ///
+    /// Asked here instead, the answer does not depend on which face gets tried
+    /// first, because no single face has to answer for all of it: the families
+    /// are chosen to cover the request between them and handed to Typst as a
+    /// list, which it walks per character. `MissingCjkGlyph` then means what it
+    /// says — nothing installed provides that glyph.
+    fn cjk_fonts_for(&self, source: &str) -> Result<Array, MathRenderError> {
+        let requested = requested_cjk_characters(source);
+        if requested.is_empty() {
+            return Ok(Array::new());
+        }
+        let families = self
+            .engine
+            .with_world(|world| covering_cjk_families(world.book(), &requested))
+            .expect("the engine's own template resolves")
+            .ok_or(MathRenderError::MissingCjkGlyph)?;
+        Ok(families
+            .into_iter()
+            .map(|family| Value::Str(Str::from(family)))
+            .collect())
+    }
+}
+
+/// The CJK characters a Typst source asks to see drawn.
+fn requested_cjk_characters(source: &str) -> BTreeSet<char> {
+    source.chars().filter(|c| is_cjk_character(*c)).collect()
+}
+
+/// Installed families that, read in this order, draw every character in
+/// `requested` — or `None` when some character is drawn by no installed font.
+///
+/// Greedy set cover: take the family that draws the most of what is still
+/// unanswered, strike those characters off, repeat. One family usually answers
+/// for the whole request in one step; a machine whose CJK support is split
+/// across a partial face and a fuller one gets both, in the order that leaves
+/// the fewest characters to the second.
+///
+/// Ties go to the family the font book lists first, which is the order this
+/// machine's own fonts were discovered in. Folio deliberately expresses no taste
+/// here: a formula's ideographs are drawn by whichever installed face can draw
+/// them, and no font is embedded or redistributed to make that true.
+fn covering_cjk_families(book: &FontBook, requested: &BTreeSet<char>) -> Option<Vec<String>> {
+    // Families in book order, each with the characters of the request it draws.
+    // A family's faces are pooled: naming a family lets Typst pick the variant,
+    // and any of them carrying the character is the family carrying it.
+    let candidates = book
+        .families()
+        .map(|(family, faces)| {
+            let drawn = faces
+                .filter_map(|face| book.info(face))
+                .flat_map(|info| {
+                    requested
+                        .iter()
+                        .copied()
+                        .filter(|c| info.coverage.contains(*c as u32))
+                })
+                .collect::<BTreeSet<char>>();
+            (family.to_owned(), drawn)
+        })
+        .filter(|(_, drawn)| !drawn.is_empty())
+        .collect::<Vec<_>>();
+
+    let mut remaining = requested.clone();
+    let mut families = Vec::new();
+    while !remaining.is_empty() {
+        // `min_by_key` over the negated count and not `max_by_key`, because the
+        // tiebreak is the point: `max_by_key` keeps the *last* of equal keys and
+        // this has to keep the first, which is the book's own order.
+        let (family, drawn) = candidates
+            .iter()
+            .min_by_key(|(_, drawn)| std::cmp::Reverse(drawn.intersection(&remaining).count()))
+            .filter(|(_, drawn)| !drawn.is_disjoint(&remaining))?;
+        remaining.retain(|c| !drawn.contains(c));
+        families.push(family.clone());
+    }
+    Some(families)
 }
 
 impl Default for MathEngine {
@@ -343,6 +449,15 @@ fn fallback_math_metrics(frame: &Frame, margin_pt: f64) -> Option<MathMetrics> {
     })
 }
 
+/// The backstop behind [`MathEngine::cjk_fonts_for`]: a page that still drew a
+/// `.notdef` where an ideograph belongs.
+///
+/// This is no longer how the question is decided — see that method for why a
+/// shaping outcome is not a fact about the machine — and after the covering
+/// families reach the template it can only fire for a font whose `cmap` claims a
+/// character it cannot actually shape. That is still a machine that cannot draw
+/// the formula, so it is still `MissingCjkGlyph`; it is just no longer the thing
+/// that decides whether the machine has the font.
 fn frame_has_missing_cjk_glyph(frame: &Frame) -> bool {
     frame.items().any(|(_, item)| match item {
         FrameItem::Text(text) => {
@@ -738,6 +853,96 @@ mod tests {
         );
     }
 
+    /// A font book that answers exactly the coverage written here, and nothing
+    /// else about a font is needed to decide which families draw a request.
+    fn book_of(faces: &[(&str, &str)]) -> FontBook {
+        use typst_library::text::{Coverage, FontFlags, FontInfo, FontVariant};
+        FontBook::from_infos(faces.iter().map(|(family, covers)| FontInfo {
+            family: (*family).to_owned(),
+            variant: FontVariant::default(),
+            flags: FontFlags::empty(),
+            axes: Vec::new(),
+            coverage: Coverage::from_vec(covers.chars().map(|c| c as u32).collect()),
+        }))
+    }
+
+    /// RED GATE (2026-08-31, `docs/DESIGN.md` §7.1.3l) — **a partial font in
+    /// front does not decide the answer for the ones behind it.**
+    ///
+    /// The CI failure this pins was a judgment that split down the middle on one
+    /// machine: `\text{中}`, `\text{文}` and `\text{项目数}` drew on a GitHub
+    /// Windows runner while `\text{死} \; + \; \text{活}` in the same suite came
+    /// back `MissingCjkGlyph`. Nothing was missing — the first face Typst's
+    /// name-similarity fallback reached carried some of those characters and not
+    /// the rest, and the old check read that one face's `.notdef` as a fact
+    /// about the machine.
+    ///
+    /// MUTATION: stop at the first family that draws anything — return
+    /// `["PartialFront"]` here — and 活 has no font, which is the defect.
+    #[test]
+    fn a_partial_font_read_first_does_not_answer_for_the_glyphs_it_lacks() {
+        let requested = BTreeSet::from(['死', '活']);
+
+        // The runner's shape: the face that gets tried first carries half of it.
+        let split = book_of(&[("PartialFront", "死中文"), ("WholeBehind", "死活中文")]);
+        let families =
+            covering_cjk_families(&split, &requested).expect("both characters are installed here");
+        assert!(
+            families.iter().any(|f| f == "WholeBehind"),
+            "the family that draws 活 has to be named, whatever is in front of it: {families:?}"
+        );
+
+        // No one face covers the request; two between them do, and both are named.
+        let shared = book_of(&[("DeadOnly", "死"), ("LivingOnly", "活")]);
+        assert_eq!(
+            covering_cjk_families(&shared, &requested),
+            Some(vec!["DeadOnly".to_owned(), "LivingOnly".to_owned()]),
+        );
+
+        // One face answering for everything is one family, not two.
+        assert_eq!(
+            covering_cjk_families(&book_of(&[("Whole", "死活中文")]), &requested),
+            Some(vec!["Whole".to_owned()]),
+        );
+
+        // And the one condition that is genuinely `MissingCjkGlyph`: a character
+        // no installed font draws, however many fonts are installed.
+        assert_eq!(
+            covering_cjk_families(&book_of(&[("DeadOnly", "死"), ("AlsoDeadOnly", "死")]), &requested),
+            None,
+        );
+        assert_eq!(covering_cjk_families(&book_of(&[]), &requested), None);
+    }
+
+    /// The families this machine's own book offers for a request draw all of it
+    /// — the same claim as the gate above, made against real installed fonts
+    /// rather than a constructed book.
+    #[test]
+    fn the_families_named_for_a_request_draw_every_character_of_it() {
+        let engine = MathEngine::new();
+        let requested = BTreeSet::from(['死', '活', '中', '文', '项', '目', '数']);
+        let names = engine
+            .engine
+            .with_world(|world| covering_cjk_families(world.book(), &requested))
+            .unwrap()
+            .expect("a machine that renders CJK has fonts for these seven characters");
+        engine
+            .engine
+            .with_world(|world| {
+                let book = world.book();
+                for character in &requested {
+                    assert!(
+                        names.iter().any(|name| book
+                            .select_family(&name.to_lowercase())
+                            .filter_map(|face| book.info(face))
+                            .any(|info| info.coverage.contains(*character as u32))),
+                        "{character} is in the request and in no named family: {names:?}"
+                    );
+                }
+            })
+            .unwrap();
+    }
+
     #[test]
     fn baseline_is_measured_from_the_page_top_for_each_formula() {
         let engine = MathEngine::new();
@@ -1026,7 +1231,13 @@ mod cjk_probe {
             eprintln!("PROBE ===== {source}");
             let converted = mitex::convert_math(source, Some(DEFAULT_SPEC.clone())).unwrap();
             eprintln!("PROBE converted={converted:?}");
+            let chosen = engine.cjk_fonts_for(&converted);
+            eprintln!("PROBE covering families = {chosen:?}");
             let mut inputs = Dict::new();
+            inputs.insert(
+                "cjk_fonts".into(),
+                Value::Array(chosen.unwrap_or_default()),
+            );
             inputs.insert("source".into(), Value::Str(Str::from(converted)));
             inputs.insert("font_size".into(), 24.0_f64.into_value());
             inputs.insert("red".into(), 255_u8.into_value());
