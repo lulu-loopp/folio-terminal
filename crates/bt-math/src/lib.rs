@@ -283,8 +283,10 @@ impl MathEngine {
         }
         let families = self
             .engine
+            // The only way building a world fails is injecting inputs into the
+            // library, and this one is asked for the font book alone.
             .with_world(|world| covering_cjk_families(world.book(), &requested))
-            .expect("the engine's own template resolves")
+            .expect("a world built with no inputs")
             .ok_or(MathRenderError::MissingCjkGlyph)?;
         Ok(families
             .into_iter()
