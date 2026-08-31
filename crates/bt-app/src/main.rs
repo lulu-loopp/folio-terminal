@@ -129231,8 +129231,11 @@ mod tests {
             .open(PreviewSurface::Peek, &fixture, now)
             .expect("the card opens the fixture");
         // Let the clock get off zero, so that "the playhead did not go back" is
-        // a claim with something in it.
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // a claim with something in it. The wait ends the moment the playhead
+        // moves; the ceiling only has to outlast a cold decoder on a loaded
+        // shared runner, where the first frame has taken longer than five
+        // seconds.
+        let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
             if seats
                 .get(PreviewSurface::Peek)
