@@ -10460,6 +10460,9 @@ struct WindowRuntime {
     /// what lets the two be told apart without guessing, and without a one-shot flag whose
     /// correctness would depend on winit's delivery order.
     lawful_client_size: Option<PhysicalSize<u32>>,
+    /// Whether a scale change arrived while the hand was on the frame and has
+    /// not been paid for yet. See [`DpiSettlement`], which holds the argument.
+    dpi_settlement: DpiSettlement,
 }
 
 /// **What a present tells this window's traces**, travelling as one place.
@@ -12478,6 +12481,53 @@ fn size_authority_for_rectangle(
         None => (current, Some(rectangle)),
         Some(claimed) if claimed != rectangle => (SizePolicy::Sovereign, Some(claimed)),
         Some(claimed) => (current, Some(claimed)),
+    }
+}
+
+/// **What a DPI change owes while the hand is still on the frame** (user ruling
+/// 2026-08-31).
+///
+/// A window carried across a monitor seam is judged to belong to one display or
+/// the other several times before it settles, and each judgement is a
+/// `WM_DPICHANGED`. The cheap half of answering one — bringing the swapchain
+/// level with the client size and re-solving the seat rectangles — is owed on
+/// every one of them, because the surface really did change. The expensive half
+/// is not: remeasuring the terminal font, telling every leaf in every tab its
+/// new cell, re-stating the window's minimum size to the frame and rebuilding
+/// every grid is work whose only reader is a window that has stopped moving.
+///
+/// Worse than expensive: re-stating the minimum is a `SetWindowPos`, and a
+/// program that moves a window the reader is dragging is a program arguing with
+/// the hand. §7.50.
+///
+/// So a scale change that arrives inside the OS's modal move/size loop is
+/// *written down* and paid for once when the hand lets go, however many times
+/// the display changed its mind in between. Pure, so the rule is pinned by tests
+/// rather than by a drag nobody can replay.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DpiSettlement {
+    owed: bool,
+}
+
+impl DpiSettlement {
+    /// A scale change has arrived. `true` when the expensive half runs now.
+    fn arrived(&mut self, in_size_move: bool) -> bool {
+        if in_size_move {
+            self.owed = true;
+            return false;
+        }
+        self.owed = false;
+        true
+    }
+
+    /// One turn of the loop. `true` when a change written down during a drag is
+    /// now due — which is the first turn after the hand let go, and no other.
+    fn due(&mut self, in_size_move: bool) -> bool {
+        if in_size_move || !self.owed {
+            return false;
+        }
+        self.owed = false;
+        true
     }
 }
 
@@ -30687,6 +30737,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // has been asked for and not yet answered, and the first one to arrive is it.
         size_policy: SizePolicy::Lawful,
         lawful_client_size: None,
+        dpi_settlement: DpiSettlement::default(),
         pending_restore,
     }
 }
@@ -81941,6 +81992,28 @@ impl Runtime<'_> {
         self.resize(self.window.window.inner_size())
     }
 
+    /// **Pay for a DPI change the drag deferred** (§7.50, user ruling
+    /// 2026-08-31).
+    ///
+    /// One turn of the loop asks one question: is there a scale change written
+    /// down, and has the hand let go? [`DpiSettlement`] holds why the answer is
+    /// worth waiting for. Run from [`Runtime::turn`] rather than from an event,
+    /// because the end of the OS's modal move/size loop is not one — winit
+    /// surfaces neither end of it, and the loop coming back round is the one
+    /// thing that is guaranteed to happen after the hand lets go.
+    fn settle_deferred_dpi(&mut self) -> Result<()> {
+        if !self
+            .window
+            .dpi_settlement
+            .due(self.window.custom_window_frame.in_size_move())
+        {
+            return Ok(());
+        }
+        self.claim_lawful_layout();
+        self.reconcile_authoritative_dpi("size-move-settled")?;
+        Ok(())
+    }
+
     /// The *program* is about to change the rectangle, so the layout it produces is held to the
     /// minima in full.
     ///
@@ -81987,6 +82060,21 @@ impl Runtime<'_> {
             self.window.renderer.metrics().scale_factor,
             snapshot.authoritative_scale,
         ) {
+            return Ok(false);
+        }
+        // **A hand still on the frame is told nothing and asked for nothing**
+        // (§7.50). The swapchain and the seat rectangles above are already level
+        // with the surface, which is everything this frame needs to be drawn; the
+        // font remeasure, the per-leaf cells, the grids and — the one that
+        // actually fought the drag — this window's minimum size going back to the
+        // OS as a `SetWindowPos` all wait for the hand to let go. Written down
+        // once however many times the seam changed its mind, and spent by
+        // `settle_deferred_dpi` on the first turn after `WM_EXITSIZEMOVE`.
+        if !self
+            .window
+            .dpi_settlement
+            .arrived(self.window.custom_window_frame.in_size_move())
+        {
             return Ok(false);
         }
 
@@ -84518,6 +84606,13 @@ impl Runtime<'_> {
         // the queue has just run dry, so whatever the wheel collected while the
         // loop was away is one burst and gets one frame. See [`WheelBurst`].
         self.flush_wheel()?;
+        // **Directly after it, and before anything that reads a cell** (§7.50).
+        // A DPI change the drag wrote down is a window whose font is still
+        // measured for the display it left; every clock below this line that
+        // publishes a frame would publish that one. The hand has let go by the
+        // time this returns true, so nothing here is done to a window that is
+        // still moving.
+        self.settle_deferred_dpi()?;
         self.apply_math_context_menu_result();
         self.apply_folder_pick_result()?;
         self.apply_image_pick_result()?;
@@ -101117,6 +101212,108 @@ mod tests {
             PhysicalSize::new(800, 1200),
         );
         assert_eq!(policy, SizePolicy::Lawful);
+    }
+
+    /// **RED — a seam that changes its mind twenty times is paid for once**
+    /// (§7.50, user ruling 2026-08-31).
+    ///
+    /// The reporter's log has fifteen `stage=scale-factor-changed` lines inside
+    /// one drag, alternating 1.5 and 2. Each of them used to remeasure the
+    /// terminal font, walk every leaf in every tab, rebuild every grid — and
+    /// re-state this window's minimum size to the OS, which is a `SetWindowPos`
+    /// aimed at a window the reader still had hold of.
+    ///
+    /// Two claims, and the second is the one worth the type: outside a drag
+    /// nothing is deferred at all, so a scale change on a settled window is
+    /// answered on the spot exactly as it always was.
+    ///
+    /// Red gate: return `true` unconditionally from `arrived` and the count goes
+    /// to twenty; return `true` unconditionally from `due` and the settled-window
+    /// half fires a payment nobody owes.
+    #[test]
+    fn a_seam_that_flips_twenty_times_under_one_hand_is_settled_once() {
+        let mut settlement = DpiSettlement::default();
+
+        // Twenty flips with the hand on the frame. None of them buys the
+        // expensive half, and the turns of the loop that happen in between —
+        // Windows pumps its own message loop while the modal move/size loop runs
+        // — do not smuggle it in either.
+        let mut paid = 0;
+        for _ in 0..20 {
+            if settlement.arrived(true) {
+                paid += 1;
+            }
+            if settlement.due(true) {
+                paid += 1;
+            }
+        }
+        assert_eq!(paid, 0, "nothing is paid for while the window is moving");
+
+        // The hand lets go. One payment, on the first turn after it, and the
+        // turn after that is quiet.
+        assert!(settlement.due(false), "the deferred change comes due once");
+        assert!(!settlement.due(false), "and only once");
+        assert_eq!(settlement, DpiSettlement::default());
+
+        // And a window nobody is holding is not deferred at all: two opposite
+        // changes, two payments, and no third adjustment invented between them.
+        let mut settlement = DpiSettlement::default();
+        assert!(settlement.arrived(false), "1.5 is answered on the spot");
+        assert!(!settlement.due(false), "and owes nothing afterwards");
+        assert!(settlement.arrived(false), "so is 2");
+        assert!(!settlement.due(false), "and it owes nothing either");
+    }
+
+    /// **RED (shape) — the two halves of a DPI change are on either side of the
+    /// question, and the deferred half has somewhere to be spent** (§7.50).
+    ///
+    /// Two facts about where a line sits relative to another line, which no
+    /// value in the program carries — so they are held against the source, the
+    /// way this file's other structural promises are.
+    ///
+    /// ① The swapchain and the seat solve happen *before* the drag is asked
+    /// about, because they are owed on every judgement; the font remeasure and
+    /// everything downstream of it happen *after*, because they are owed only by
+    /// a window that has stopped moving. A check that drifted below
+    /// `apply_scale_factor` would defer nothing at all.
+    ///
+    /// ② A change written down during a drag is paid for from `Runtime::turn`.
+    /// There is no event at the end of the OS's modal move/size loop, so a
+    /// settlement with no turn to be spent on is a window that keeps the font it
+    /// left the other display with, forever.
+    #[test]
+    fn the_deferred_half_of_a_dpi_change_is_asked_about_late_and_spent_on_a_turn() {
+        const SOURCE: &str = include_str!("main.rs");
+
+        let body = |signature: &str| {
+            let start = SOURCE
+                .find(signature)
+                .expect("the method is declared in this file");
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        };
+
+        let reconcile = body("    fn reconcile_authoritative_dpi(&mut self, stage: &'static str)");
+        let solved = reconcile
+            .find("self.resolve_seat_layout(render_physical);")
+            .expect("the seat rectangles are re-solved against the new surface");
+        let asked = reconcile
+            .find(".arrived(self.window.custom_window_frame.in_size_move())")
+            .expect("the drag is asked whether the expensive half may run");
+        let remeasured = reconcile
+            .find("self.apply_scale_factor(snapshot.authoritative_scale)?;")
+            .expect("the terminal font is remeasured at the new scale");
+        assert!(
+            solved < asked && asked < remeasured,
+            "the cheap half is owed on every judgement and the expensive half only \
+             by a window that has stopped moving"
+        );
+
+        assert!(
+            body("    fn turn(&mut self, now: Instant, application_clocks: bool)")
+                .contains("self.settle_deferred_dpi()?;"),
+            "a deferred DPI change is spent on the first turn after the hand lets go"
+        );
     }
 
     #[test]
