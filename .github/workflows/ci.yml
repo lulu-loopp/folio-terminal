@@ -38,9 +38,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # rust-toolchain.toml is the single source of truth: rustup reads it when
-      # `rustup toolchain install` is given no name (rustup 1.28+, preinstalled
-      # on the runner). Naming a channel here would silently win over the file.
-      - run: rustup toolchain install
+      # the channel is read out of the file and named explicitly: the runner's
+      # bare install rejects a channel carrying a target triple; the explicit
+      # form takes the full toolchain name.
+      - run: |
+          $c = (Select-String -Path rust-toolchain.toml -Pattern 'channel = "(.+)"').Matches[0].Groups[1].Value
+          rustup toolchain install $c --component rustfmt --component clippy --no-self-update
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # adapter.rs/cell_capture.rs are the vendor compatibility seam. Their job is to report
@@ -112,9 +115,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # rust-toolchain.toml is the single source of truth: rustup reads it when
-      # `rustup toolchain install` is given no name (rustup 1.28+, preinstalled
-      # on the runner). Naming a channel here would silently win over the file.
-      - run: rustup toolchain install
+      # the channel is read out of the file and named explicitly: the runner's
+      # bare install rejects a channel carrying a target triple; the explicit
+      # form takes the full toolchain name.
+      - run: |
+          $c = (Select-String -Path rust-toolchain.toml -Pattern 'channel = "(.+)"').Matches[0].Groups[1].Value
+          rustup toolchain install $c --component rustfmt --component clippy --no-self-update
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: adapter modules do not import policy crates
@@ -225,9 +231,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # rust-toolchain.toml is the single source of truth: rustup reads it when
-      # `rustup toolchain install` is given no name (rustup 1.28+, preinstalled
-      # on the runner). Naming a channel here would silently win over the file.
-      - run: rustup toolchain install
+      # the channel is read out of the file and named explicitly: the runner's
+      # bare install rejects a channel carrying a target triple; the explicit
+      # form takes the full toolchain name.
+      - run: |
+          $c = (Select-String -Path rust-toolchain.toml -Pattern 'channel = "(.+)"').Matches[0].Groups[1].Value
+          rustup toolchain install $c --component rustfmt --component clippy --no-self-update
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # These spawn cmd.exe and powershell.exe through the sidecar ConPTY that
@@ -263,9 +272,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # rust-toolchain.toml is the single source of truth: rustup reads it when
-      # `rustup toolchain install` is given no name (rustup 1.28+, preinstalled
-      # on the runner). Naming a channel here would silently win over the file.
-      - run: rustup toolchain install
+      # the channel is read out of the file and named explicitly: the runner's
+      # bare install rejects a channel carrying a target triple; the explicit
+      # form takes the full toolchain name.
+      - run: |
+          $c = (Select-String -Path rust-toolchain.toml -Pattern 'channel = "(.+)"').Matches[0].Groups[1].Value
+          rustup toolchain install $c --component rustfmt --component clippy --no-self-update
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # The test binaries have to exist before WARP can be put beside them:
@@ -294,9 +306,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # rust-toolchain.toml is the single source of truth: rustup reads it when
-      # `rustup toolchain install` is given no name (rustup 1.28+, preinstalled
-      # on the runner). Naming a channel here would silently win over the file.
-      - run: rustup toolchain install
+      # the channel is read out of the file and named explicitly: the runner's
+      # bare install rejects a channel carrying a target triple; the explicit
+      # form takes the full toolchain name.
+      - run: |
+          $c = (Select-String -Path rust-toolchain.toml -Pattern 'channel = "(.+)"').Matches[0].Groups[1].Value
+          rustup toolchain install $c --component rustfmt --component clippy --no-self-update
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: build folio.exe
