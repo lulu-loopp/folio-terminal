@@ -372,7 +372,15 @@ impl Probe {
             let file = self
                 .out_dir
                 .join(format!("{name}-{:.1}s.png", state.position_secs));
-            write_png(offscreen.read_back(gpu), WIDTH, HEIGHT, &file);
+            // A probe whose device has gone away has no evidence to write down,
+            // and saying so is more use than a PNG of nothing.
+            match offscreen.read_back(gpu) {
+                Ok(pixels) => write_png(pixels, WIDTH, HEIGHT, &file),
+                Err(error) => {
+                    eprintln!("PROBE could not read the frame back: {error}");
+                    return;
+                }
+            }
             eprintln!(
                 "PROBE shot {} position={:.3}s playing={} frames={} picture={:?} cost={:?}",
                 file.display(),

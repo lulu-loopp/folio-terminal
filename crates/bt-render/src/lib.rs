@@ -17,6 +17,7 @@ use std::{
     num::{NonZeroI64, NonZeroU16, NonZeroU32},
     ops::Range,
     sync::Arc,
+    sync::OnceLock,
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
     time::{Duration, Instant},
 };
@@ -928,6 +929,23 @@ pub enum RenderError {
     Wgpu(String),
     #[error("glyph rendering failed: {0}")]
     GlyphRender(String),
+    /// **The driver took this process's device away**, and everything built on
+    /// it — the atlas, the pipelines, every window's swapchain — went with it.
+    ///
+    /// A first-class error rather than a `Wgpu(String)` because it is the one
+    /// failure that is *about the machine* rather than about the frame: a driver
+    /// update, a `DXGI_ERROR_DEVICE_REMOVED` out of a resume, a GPU reset. The
+    /// string is what the driver said, verbatim, because that sentence is the
+    /// whole of what anyone reading `diagnostics.log` has to go on.
+    ///
+    /// See [`GpuContext::device_loss`] for why it has to be *latched* rather
+    /// than discovered: wgpu reports a device that has gone away exactly once,
+    /// through the callback, and then answers every later call by handing back
+    /// resources that are quietly invalid — which is how a lost device used to
+    /// surface as a validation panic naming a readback buffer, in a function
+    /// that had nothing to do with what went wrong.
+    #[error("the GPU device was lost: {0}")]
+    DeviceLost(String),
     #[error("no usable monospace font metrics were produced")]
     MissingMonospaceMetrics,
     #[error("no usable chrome sans-serif font metrics were produced")]
@@ -2946,6 +2964,24 @@ pub struct GpuContext {
     /// [`note_a_repack`] and by nothing else, which is what makes every increment
     /// of it a line in `diagnostics.log`.
     glyph_atlas_refits: u64,
+    /// **What the driver said when it took this device away, once it has.**
+    ///
+    /// Shared with the closure `wgpu` calls on the way out, which is why it is
+    /// an [`Arc`] and a [`OnceLock`] rather than a field: the notice arrives
+    /// from inside whatever call happened to notice, and it arrives **once**.
+    /// After it, wgpu does not fail loudly — `create_buffer` on a departed
+    /// device hands back a *quietly invalid* buffer, because a device-lost error
+    /// is delivered through this callback instead of through the error sink
+    /// (`wgpu_core.rs`: `ErrorType::DeviceLost => return`). The first thing that
+    /// then *uses* that buffer raises a validation error and the process dies
+    /// naming it — which is how a removed GPU came to be reported as
+    /// `Buffer with 'Folio frame readback' label is invalid`, in a readback that
+    /// was not what went wrong (2026-08-31, `docs/DESIGN.md` §7.1.3m, 「重排与读者」).
+    ///
+    /// So the notice is caught and kept, and the three doors that would
+    /// otherwise carry on over a corpse ask this first: composing a frame,
+    /// closing one out on the shared atlas, and reading one back.
+    device_loss: Arc<OnceLock<String>>,
     rect_pipeline: wgpu::RenderPipeline,
     /// The same pipeline blending `Replace`, for the chrome quads that *are*
     /// the window's ground — see [`ChromeSurface::Ground`].
@@ -4469,6 +4505,21 @@ impl GpuContext {
         device_time: Duration,
     ) -> Result<Self, RenderError> {
         let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
+        // **Armed before anything is built on the device**, because the notice
+        // arrives once and from inside whatever call happens to notice — see
+        // the field. The line it leaves belongs to the `Folio …` family the rest
+        // of `diagnostics.log` is read with, and it is the only place in this
+        // process that will ever say the device went away in so many words.
+        let device_loss: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+        {
+            let latch = Arc::clone(&device_loss);
+            device.set_device_lost_callback(move |reason, message| {
+                let said = format!("{reason:?}: {message}");
+                if latch.set(said.clone()).is_ok() {
+                    eprintln!("Folio lost the GPU device — {said}");
+                }
+            });
+        }
         let phase_started = Instant::now();
         let mut font_system = terminal_font_system();
         let font_system_time = phase_started.elapsed();
@@ -4505,6 +4556,7 @@ impl GpuContext {
             atlas,
             glyph_atlas_refitted: false,
             glyph_atlas_refits: 0,
+            device_loss,
             rect_pipeline,
             ground_rect_pipeline,
             ground_fade_rect_pipeline,
@@ -4617,6 +4669,30 @@ impl GpuContext {
         self.glyph_atlas_refits
     }
 
+    /// **What the driver said when it took this device away**, or `None` while
+    /// the device is still here.
+    ///
+    /// Latched, never polled: see the `device_loss` field for why asking wgpu is
+    /// not an option. A caller that has one of these has a context whose atlas,
+    /// pipelines and swapchains are all rubble, and the only honest thing left
+    /// to do with it is to say so.
+    #[must_use]
+    pub fn device_loss(&self) -> Option<&str> {
+        self.device_loss.get().map(String::as_str)
+    }
+
+    /// The same question asked the way the frame path spends it.
+    ///
+    /// **The one gate all three doors go through** — composing a frame, closing
+    /// one out on the shared atlas, reading one back — so that "a lost device is
+    /// an error and not a later panic" is one statement rather than three.
+    fn still_has_its_device(&self) -> Result<(), RenderError> {
+        match self.device_loss.get() {
+            Some(said) => Err(RenderError::DeviceLost(said.clone())),
+            None => Ok(()),
+        }
+    }
+
     /// **The one place the shared atlas is told a frame is over** — called by
     /// [`WindowRenderer::present_frame`] outside every way that frame can end,
     /// and answering the frame's own verdict on its text.
@@ -4691,7 +4767,27 @@ impl GpuContext {
     /// issued — so no batch survives into a pass against a different atlas. The
     /// pipeline each renderer holds is minted by the shared [`Cache`] from the
     /// format, which does not change, so the renderers themselves stay valid.
+    ///
+    /// # And why a departed device is answered before any of that
+    ///
+    /// A re-pack is the one moment this context knowingly throws a live cache
+    /// away and mints device resources to replace it, so it is also the one
+    /// moment at which "the device is gone" stops being somebody else's problem.
+    /// On a device the driver has taken away, `TextAtlas::new` does not fail: it
+    /// hands back a texture and a bind group that are *quietly invalid*, and the
+    /// atlas this window draws every later frame from is that. It would also
+    /// write a numbered `refit` line for a repair that repaired nothing, which
+    /// is the opposite of what that number is for — the count is a diagnosis,
+    /// and a count that includes re-packs onto rubble diagnoses nothing.
+    ///
+    /// So the first thing this asks is whether there is still a device, and on a
+    /// lost one it does nothing at all: no trim, no re-pack, no line. The frame
+    /// that comes after says what actually happened, once, by name
+    /// ([`RenderError::DeviceLost`]).
     fn close_the_frame(&mut self, outcome: &Result<PresentOutcome, RenderError>) {
+        if self.device_loss.get().is_some() {
+            return;
+        }
         match outcome {
             Ok(PresentOutcome::Presented(_)) => {
                 self.glyph_atlas_refitted = false;
@@ -5760,11 +5856,25 @@ impl WindowRenderer {
     /// nothing anyone can check. The video probe (§7.42) takes its evidence
     /// through here. It **panics** on a window with a swapchain, which is not a
     /// mistake a caller makes twice.
-    #[must_use]
-    pub fn read_back(&self, gpu: &GpuContext) -> Vec<[u8; 4]> {
+    ///
+    /// # Why a departed device is an error here and not a panic
+    ///
+    /// It is fallible for exactly one reason, and the reason is worth the
+    /// signature: [`RenderError::DeviceLost`]. On a device the driver has taken
+    /// away, `create_buffer` does not fail — it returns a buffer that is
+    /// *quietly invalid*, because wgpu delivers a device-lost error through the
+    /// device's callback instead of through the error sink. The next call that
+    /// touches that buffer raises a validation error against the sink's default
+    /// handler, which panics; and the sentence it panics with names the readback
+    /// buffer, in the readback, for a device that went away several calls
+    /// earlier and somewhere else entirely. That is the panic the 2026-08-31
+    /// investigation started from. Asking after the buffer is minted is what
+    /// makes the answer name the machine instead of the messenger.
+    pub fn read_back(&self, gpu: &GpuContext) -> Result<Vec<[u8; 4]>, RenderError> {
         let FrameTarget::Offscreen(texture) = &self.target else {
             panic!("only an offscreen window can be read back");
         };
+        gpu.still_has_its_device()?;
         let (width, height) = (self.config.width, self.config.height);
         // `copy_texture_to_buffer` wants each row padded to 256 bytes.
         let unpadded = width * 4;
@@ -5775,6 +5885,13 @@ impl WindowRenderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
+        // **Minting a resource is the call that notices**, so this is where the
+        // question is asked a second time: a device that went away during the
+        // frame just presented is still, to every appearance, here — until
+        // something asks it for memory. The buffer above is that ask, and the
+        // buffer it hands back on a departed device is the invalid one whose
+        // first use used to end the process.
+        gpu.still_has_its_device()?;
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -5803,11 +5920,15 @@ impl WindowRenderer {
                 submission_index: None,
                 timeout: None,
             })
-            .expect("the readback copy completes");
+            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        // And once more, because the copy itself is work the device had to
+        // survive: a mapping that never happened is not a readback of black
+        // pixels, it is a device that is gone.
+        gpu.still_has_its_device()?;
         let view = buffer
             .slice(..)
             .get_mapped_range()
-            .expect("the readback buffer maps");
+            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
         let mut pixels = Vec::with_capacity((width * height) as usize);
         for row in 0..height {
             let start = (row * padded) as usize;
@@ -5818,7 +5939,7 @@ impl WindowRenderer {
         }
         drop(view);
         buffer.unmap();
-        pixels
+        Ok(pixels)
     }
 
     /// Place the terminal seat. Returns whether the rectangle changed.
@@ -6175,6 +6296,15 @@ impl WindowRenderer {
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome, RenderError> {
         let frame_started = Instant::now();
+        // **Nothing is drawn on a device that is not there any more.** The
+        // notice arrives once, through a callback, from inside whichever call
+        // first noticed; from then on every wgpu door answers with resources
+        // that are silently invalid, and a frame composed out of those is a
+        // frame whose first *user* — a readback, a screen capture, the next
+        // window to bind the atlas — takes the blame for it. This is where that
+        // stops, and it is above `validate_shape` because a lost device is a
+        // fact about the machine and not about the frame it was asked for.
+        gpu.still_has_its_device()?;
         for entry in seats {
             entry.frame.validate_shape()?;
         }
@@ -17585,6 +17715,37 @@ mod tests {
     /// chrome asks for more distinct glyph rasters than the device will hold and
     /// checks that the page's line is on the glass anyway.
     ///
+    /// And it carries a second square, because the frame that gives its labels
+    /// up is only half of what §7.1.3m promises: the frame **after** it gets its
+    /// text back, on a packing that was minted between the two. So the fixture
+    /// presents twice — once with a demand no packing holds, once with one that
+    /// fits — and the second read-back has to carry both inks. See
+    /// [`GpuContext::close_the_frame`] for why a re-pack is what makes the
+    /// second frame's answer different from the first's.
+    ///
+    /// # Why this fixture names the roof it is measured against
+    ///
+    /// The ceiling is `CEILING` and not whatever adapter the machine happens to
+    /// have, and that is the difference between a gate and a coin toss. What is
+    /// under test is an *order* — which lane meets a full atlas first — and the
+    /// only way to have a full atlas is to ask for more distinct rasters than
+    /// the roof will hold. Asked of the machine's own roof, the same ladder is
+    /// three different experiments: against 4096 **both** lanes are refused and
+    /// there is no order left to observe; against 16384 it takes twenty-four
+    /// stacked sheets to reach the roof at all, and this adapter's D3D12 device
+    /// is *removed* by the frame that gets there (2026-08-31 — a mask atlas
+    /// grown to 16384², ten gigabytes of video memory free, no TDR in the
+    /// system log; the same fixture at 8192 draws it and reads it back). A gate
+    /// whose verdict is a property of the tester's graphics card is not a gate.
+    ///
+    /// 8192 is the roof named because it is the one every device wgpu supports
+    /// has: it is `wgpu::Limits::default().max_texture_dimension_2d`, the floor
+    /// of the specification rather than a number chosen to make this pass. The
+    /// door is the same one §7.1.3m's soak uses and for the same stated reason —
+    /// `required_limits` asks for *at most* this, so what glyphon reads out of
+    /// `device.limits()` is the number a machine that simply offers less would
+    /// have handed it (see [`GpuContext::headless_under_a_texture_ceiling`]).
+    ///
     /// Mutation: move the preview lane's `prepare` back below the chrome lane's
     /// and the red line disappears from the read-back, exactly as it did from
     /// the report's screenshot.
@@ -17594,8 +17755,15 @@ mod tests {
         const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
         const WIDTH: u32 = 3840;
         const HEIGHT: u32 = 2160;
+        /// The roof this fixture is measured against — see the note above for
+        /// why it is named here rather than read off the machine.
+        const CEILING: u32 = 8192;
         // The page's ink, and nothing else in the frame is allowed to be it.
         const PAGE_INK: [u8; 3] = [255, 0, 0];
+        // The labels' ink on the second frame, when they are asked for few
+        // enough to fit: a third colour, so "both lanes reached the glass" is a
+        // question about pixels rather than about the record.
+        const LABEL_INK: [u8; 3] = [0, 255, 0];
         // Twenty-four sheets of Han characters each side, each sheet at its own
         // size so that the same ideograph is a *different* raster on every one
         // of them - which is what a window whose interface, terminal and
@@ -17617,7 +17785,12 @@ mod tests {
             char::from_u32(0x4E00 + index as u32).expect("an ideograph")
         }
 
-        let mut gpu = on_this_machines_adapter(FORMAT);
+        let mut gpu = on_a_device_whose_textures_stop_at(FORMAT, CEILING);
+        assert_eq!(
+            gpu.max_texture_dimension_2d(),
+            CEILING,
+            "the order this gate measures is an order against a stated roof"
+        );
         let mut window =
             WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
         let seat = SeatViewport {
@@ -17709,16 +17882,93 @@ mod tests {
             record.refused.names()
         );
 
-        let pixels = window.read_back(&gpu);
         // `[b, g, r, a]`.
-        let page = pixels
-            .iter()
-            .filter(|pixel| pixel[2] > 120 && pixel[1] < 90 && pixel[0] < 90)
-            .count();
+        let red = |pixel: &&[u8; 4]| pixel[2] > 120 && pixel[1] < 90 && pixel[0] < 90;
+        let green = |pixel: &&[u8; 4]| pixel[1] > 120 && pixel[2] < 90 && pixel[0] < 90;
+
+        // **And the read-back happens after the frame was closed out**, which is
+        // where the re-pack lives: a textless frame is a frame that is meant to
+        // be seen, so whatever the closing verb does to the shared atlas it may
+        // not reach into this frame's picture or the buffer it is read through.
+        let pixels = window.read_back(&gpu).expect("the frame reads back");
+        let page = pixels.iter().filter(red).count();
         assert!(
             page > 0,
             "not one pixel of the page reached the glass (refused={})",
             record.refused.names()
+        );
+        assert_eq!(
+            gpu.glyph_atlas_refits(),
+            1,
+            "a frame that lost its text is owed a new packing, and exactly one"
+        );
+
+        // **The other half of §7.1.3m: the retry is a retry.** The window asks
+        // again with a demand one packing holds — the same page, and a few
+        // sheets of labels rather than sixty-four — and this time nothing may be
+        // given up. Without the re-pack above, the packer this meets is the worn
+        // one the first frame was refused by; with it, the shelves are new.
+        let mut kept = Vec::new();
+        for sheet in 0..2 {
+            let size = 20.0 + sheet as f32;
+            for row in 0..ROWS {
+                let label_top = LABEL_TOP + row as f32 * 50.0;
+                kept.push(ChromeLabel {
+                    mono: false,
+                    text: (0..COLUMNS)
+                        .map(|column| ideograph(0, sheet, row, column))
+                        .collect(),
+                    rect: [0.0, label_top, WIDTH as f32, label_top + 48.0],
+                    font_size_px: size,
+                    color: LABEL_INK,
+                    align_right: false,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: None,
+                });
+            }
+        }
+        window.set_chrome(Vec::new(), kept, Vec::new());
+        let retry = window
+            .present_frame(
+                &mut gpu,
+                &[SeatFrame {
+                    seat,
+                    clip: seat,
+                    frame: &frame,
+                    focused: true,
+                }],
+                FrameTrigger {
+                    occurred_at: Instant::now(),
+                    source: FrameSource::Expose,
+                },
+            )
+            .expect("the frame after a textless one");
+        let after = window.preview_text_frame();
+        assert!(
+            after.refused.is_empty(),
+            "the frame after the re-pack met the same worn packing: refused={} outcome={retry:?}",
+            after.refused.names()
+        );
+        assert!(
+            matches!(retry, PresentOutcome::Presented(_)),
+            "a frame that kept all of its text is not a frame that owes another one: {retry:?}"
+        );
+        let pixels = window.read_back(&gpu).expect("the frame after reads back");
+        assert!(
+            pixels.iter().filter(red).count() > 0,
+            "the page lost its words on the frame that was supposed to get them back"
+        );
+        assert!(
+            pixels.iter().filter(green).count() > 0,
+            "the labels never came back, so the new packing bought the page nothing"
+        );
+        assert_eq!(
+            gpu.glyph_atlas_refits(),
+            1,
+            "a frame that kept its text must not be paid for with a second re-pack"
         );
     }
 
@@ -19064,7 +19314,7 @@ mod tests {
             "the head and the line of words are the two batches the card handed over"
         );
 
-        let pixels = window.read_back(&gpu);
+        let pixels = window.read_back(&gpu).expect("the frame reads back");
         // `[b, g, r, a]`.
         let mut head = 0_usize;
         let mut words = 0_usize;
@@ -21737,7 +21987,7 @@ mod tests {
                     },
                 )
                 .expect("one frame");
-            let pixels = window.read_back(&gpu);
+            let pixels = window.read_back(&gpu).expect("the frame reads back");
             // `[b, g, r, a]`: red ink over a dark ground, at whatever coverage
             // the antialiasing gave it.
             let mut inked: Vec<(u32, u32)> = Vec::new();
@@ -21875,7 +22125,7 @@ mod tests {
                     },
                 )
                 .expect("one frame");
-            let pixels = window.read_back(&gpu);
+            let pixels = window.read_back(&gpu).expect("the frame reads back");
             let at = |x: u32, y: u32| pixels[(y * WIDTH + x) as usize];
 
             // ① The picture fills the width and keeps 2:1, so it is 640×320 and
@@ -22058,7 +22308,7 @@ mod tests {
                         },
                     )
                     .expect("one frame");
-                window.read_back(gpu)
+                window.read_back(gpu).expect("the frame reads back")
             };
             // The pane on its own, with no recording anywhere near it.
             window.set_video_layers(Vec::new());
