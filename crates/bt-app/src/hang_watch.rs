@@ -230,7 +230,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 14;
+const STATION_COUNT: usize = 15;
 
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
@@ -292,6 +292,16 @@ pub enum Station {
     /// [`Self::WebPage`] is arithmetic and a deadline comparison, so a hold
     /// that lands here has named a very short piece of code.
     WebRetire = 13,
+    /// `Runtime::apply_web_outcomes` — what a turn does with what the engine
+    /// said since the last one. **The heavy arm is a controller arriving**: a
+    /// fresh one is configured with a dozen synchronous property calls and then
+    /// navigated, all on this thread.
+    ///
+    /// Its own station because of what the first machine run of this ledger
+    /// caught: 659 ms charged to `advance_web_page` on the turn a PDF's engine
+    /// came up, with no way to tell the lifecycle clock from the configuring
+    /// burst. Two stations is the difference between a measurement and a repair.
+    WebOutcomes = 14,
     /// `SessionStore::flush_if_due` — the autosave's own door.
     Autosave = 8,
     /// The deliberate hang of [`run_selftest_if_due`]. Debug builds only.
@@ -327,6 +337,7 @@ impl Station {
             Self::Woken => "woken",
             Self::WebPlace => "sync_web_page",
             Self::WebRetire => "CoreWebView2Controller::Close",
+            Self::WebOutcomes => "apply_web_outcomes",
         }
     }
 
@@ -361,6 +372,7 @@ impl Station {
             11 => Self::Woken,
             12 => Self::WebPlace,
             13 => Self::WebRetire,
+            14 => Self::WebOutcomes,
             _ => Self::Starting,
         }
     }

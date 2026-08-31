@@ -82898,9 +82898,15 @@ impl Runtime<'_> {
             theirs.extend(web.tick(now, &window.compositor));
             outcomes.push((*leaf, theirs));
         }
+        // **The other half of this turn's cost, stationed apart from the
+        // first** — see [`hang_watch::Station::WebOutcomes`] for the 659 ms
+        // measurement that made the two worth telling apart. A controller
+        // arriving is configured and navigated from here, on this thread.
+        let leaving = hang_watch::enter(hang_watch::Station::WebOutcomes);
         for (leaf, theirs) in outcomes {
             self.apply_web_outcomes(leaf, theirs)?;
         }
+        hang_watch::at(leaving);
         // **A retirement owes a frame** (W2 slice 5, found on the machine). The
         // hole a page is seen through is punched while a frame is being composed
         // (`sync_web_page`), and this loop runs at the tail of a turn — *after*
