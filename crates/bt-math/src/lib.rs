@@ -956,6 +956,91 @@ mod tests {
 }
 
 #[cfg(test)]
+mod cjk_probe {
+    use super::*;
+    use typst_library::World;
+
+    fn dump(frame: &Frame, depth: usize) {
+        for (_, item) in frame.items() {
+            match item {
+                FrameItem::Text(text) => {
+                    eprintln!(
+                        "{:indent$}TEXT font={:?} text={:?} glyphs={:?}",
+                        "",
+                        text.font.info().family,
+                        text.text,
+                        text.glyphs.iter().map(|g| g.id).collect::<Vec<_>>(),
+                        indent = depth * 2,
+                    );
+                }
+                FrameItem::Group(group) => {
+                    eprintln!("{:indent$}GROUP", "", indent = depth * 2);
+                    dump(&group.frame, depth + 1);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn probe_font_book_and_frames() {
+        let engine = MathEngine::new();
+        let chars = ['死', '活', '中', '文', '项', '目', '数'];
+        engine
+            .engine
+            .with_world(|world| {
+                let book = world.book();
+                let mut index = 0;
+                while let Some(info) = book.info(index) {
+                    index += 1;
+                    let hits: String = chars
+                        .iter()
+                        .map(|c| {
+                            if info.coverage.contains(*c as u32) {
+                                *c
+                            } else {
+                                '.'
+                            }
+                        })
+                        .collect();
+                    if hits.chars().any(|c| c != '.') {
+                        eprintln!(
+                            "PROBE font[{}] {:?} variant={:?} flags={:?} covers=[{hits}]",
+                            index - 1,
+                            info.family,
+                            info.variant,
+                            info.flags
+                        );
+                    }
+                }
+                eprintln!("PROBE font count = {index}");
+            })
+            .unwrap();
+
+        for source in [
+            r"\text{死}",
+            r"\text{活}",
+            r"\text{中}",
+            r"\text{死} \; + \; \text{活}",
+        ] {
+            eprintln!("PROBE ===== {source}");
+            let converted = mitex::convert_math(source, Some(DEFAULT_SPEC.clone())).unwrap();
+            eprintln!("PROBE converted={converted:?}");
+            let mut inputs = Dict::new();
+            inputs.insert("source".into(), Value::Str(Str::from(converted)));
+            inputs.insert("font_size".into(), 24.0_f64.into_value());
+            inputs.insert("red".into(), 255_u8.into_value());
+            inputs.insert("green".into(), 255_u8.into_value());
+            inputs.insert("blue".into(), 255_u8.into_value());
+            inputs.insert("display".into(), true.into_value());
+            let compiled = engine.engine.compile_with_input::<_, PagedDocument>(inputs);
+            let document = compiled.output.unwrap();
+            dump(&document.pages()[0].frame, 0);
+        }
+    }
+}
+
+#[cfg(test)]
 mod display_page_margin {
     use super::*;
     use std::num::NonZeroU32;
