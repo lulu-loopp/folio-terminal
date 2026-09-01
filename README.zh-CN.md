@@ -129,7 +129,9 @@ Folio 是一款 Windows 终端：命令输出的公式在其打印位置排版�
 
 ## 隐私
 
-Folio 不向任何位置发送数据：无遥测、无统计、无崩溃上报、无更新检查，亦无自有网络客户端。唯一联网行为为用户在网页预览中打开的页面。Folio 内不含模型或 API key，其服务对象为用户已运行的 agent。
+Folio 不向任何位置发送与用户有关的数据：无遥测、无统计、无崩溃上报。Folio 内不含模型或 API key，其服务对象为用户已运行的 agent。联网行为共两项：用户在网页预览中打开的页面，以及更新检查。
+
+更新检查为对 `https://api.github.com/repos/lulu-loopp/folio-terminal/releases` 的一次 `GET`，本机所有窗口合计每天至多一次，只携带 `User-Agent: Folio`，不含版本号、标识符与 query。对返回结果，Folio 只做两件事：在设置齿轮上画一个标记，在设置中显示一行；不下载任何内容，也不替换任何文件。关闭方式为设置 > General > **检查新版**，或在 `settings.json` 中写 `"update_check": false`。
 
 其保存的数据位于两个目录：`%APPDATA%\Folio` 存放设置、配置文件、配色与会话，`%LOCALAPPDATA%\Folio\WebView2` 存放网页预览的 cookie 与缓存。删除前者后，Folio 恢复至首次启动状态。
 

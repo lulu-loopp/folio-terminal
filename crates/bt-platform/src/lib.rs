@@ -1846,6 +1846,11 @@ pub mod attention_pipe;
 #[cfg(windows)]
 pub mod video;
 
+/// One `GET`, over the operating system's own HTTP stack — the update check's
+/// only call, and the only socket this program opens (DESIGN §7.51).
+#[cfg(windows)]
+pub mod http;
+
 #[cfg(windows)]
 mod webview;
 

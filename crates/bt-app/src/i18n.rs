@@ -363,6 +363,9 @@ pub enum Text {
     /// Names the surface it changes — Explorer's menu — rather than the thing it
     /// writes, which is a registry key nobody asked to hear about.
     RowContextMenu,
+    /// **The one row in this dialog that governs a network request** (§7.51),
+    /// last on the General page.
+    RowUpdateCheck,
     RowTabLayout,
     RowSidebar,
     RowSplitDirection,
@@ -385,6 +388,10 @@ pub enum Text {
     /// Where the entry will be found, which on Windows 11 is the surprising
     /// half — see [`Self::ContextMenuVerb`].
     DescContextMenu,
+    /// The sentence the row wears while there is nothing newer — what the check
+    /// does, and the bound on what it can do. The other sentence names a version
+    /// and is composed by [`update_row_available_in`].
+    DescUpdateCheck,
     DescTabLayout,
     DescSidebar,
     DescSplitDirection,
@@ -720,6 +727,9 @@ pub enum Text {
     /// force is the item ticked two rows above the verb, so the verb no longer
     /// has to say which scheme it will copy — the reader can see it. The
     /// ellipsis stays: pressing it does not finish the job, it hands you a file.
+    /// The verb at the foot of the update row's picker. **No ellipsis**: it hands
+    /// an address to the browser rather than opening a second asking.
+    OpenReleasesPage,
     AddScheme,
     /// **The verb the font picker ends with**, on the same terms and behind the
     /// same hairline: it opens the system's own Fonts page, where a font is
@@ -2208,6 +2218,16 @@ impl Text {
                 "Typesets $…$ in command output. Off, the source is shown as it was printed.",
                 "排版命令输出里的 $…$。关闭时显示源码原文。",
             ),
+            // **What it does, then the bound on what it can do.** The second
+            // sentence is the one a reader of a terminal's settings actually
+            // wants: a row about a version check reads as the front half of an
+            // updater until something says it is not.
+            Self::RowUpdateCheck => pick(lang, "Update check", "检查新版"),
+            Self::DescUpdateCheck => pick(
+                lang,
+                "Asks the releases page once a day whether a newer version is out. It downloads                  nothing.",
+                "每天问一次发布页有没有更新的版本。不下载任何内容。",
+            ),
             Self::DescGitPanel => pick(
                 lang,
                 "Adds a Git page to the files column. Off, Folio never reads a repository.",
@@ -2612,6 +2632,7 @@ impl Text {
             // ── the Advanced disclosure and its Reset ──────────────────────
             Self::AdvancedGroup => pick(lang, "ADVANCED", "高级"),
             Self::ResetAdvanced => pick(lang, "Reset to defaults", "恢复默认值"),
+            Self::OpenReleasesPage => pick(lang, "Open releases page", "打开发布页"),
             Self::AddScheme => pick(lang, "Add scheme…", "添加配色…"),
             Self::InstallFonts => pick(lang, "Install fonts…", "安装字体…"),
             Self::SchemeInUseBroken => pick(lang, "Colour scheme not reloaded", "配色未重新载入"),
@@ -3751,7 +3772,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 531] = [
+    pub const ALL: [Self; 534] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3788,6 +3809,7 @@ impl Text {
         Self::RowFormulas,
         Self::RowInlineFormulas,
         Self::RowGitPanel,
+        Self::RowUpdateCheck,
         Self::RowContextMenu,
         Self::RowTabLayout,
         Self::RowSidebar,
@@ -3802,6 +3824,7 @@ impl Text {
         Self::DescFormulas,
         Self::DescInlineFormulas,
         Self::DescGitPanel,
+        Self::DescUpdateCheck,
         Self::DescContextMenu,
         Self::DescTabLayout,
         Self::DescSidebar,
@@ -3923,6 +3946,7 @@ impl Text {
         Self::FilesViewGit,
         Self::AdvancedGroup,
         Self::ResetAdvanced,
+        Self::OpenReleasesPage,
         Self::AddScheme,
         Self::InstallFonts,
         Self::SchemeInUseBroken,
@@ -4502,6 +4526,24 @@ pub fn psreadline_row_update_in(lang: Lang, installed: &str, available: &str) ->
     match lang {
         Lang::English => format!("{installed} · installed by Folio · {available} available"),
         Lang::Chinese => format!("{installed} · 由 Folio 安装 · 有 {available} 可用"),
+    }
+}
+
+/// **The update row's sentence when the releases page has named a newer build**
+/// (§7.51).
+///
+/// Composed rather than picked, because the one fact worth having on this row is
+/// the number — a sentence that said "a newer version is out" would send the
+/// reader to the page to find out which. The second half names this row's own
+/// printed verb, which is what the copy guide's §3b permits a sentence to point
+/// at.
+#[must_use]
+pub fn update_row_available_in(lang: Lang, version: &str) -> String {
+    match lang {
+        Lang::English => {
+            format!("{version} is available. Open releases page opens it in your browser.")
+        }
+        Lang::Chinese => format!("{version} 已发布。打开发布页会在浏览器里打开它。"),
     }
 }
 

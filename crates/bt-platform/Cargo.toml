@@ -27,6 +27,16 @@ windows = { version = "0.62.2", features = [
     "UI_Notifications",
     "Win32_Foundation",
     "Win32_Globalization",
+    # `WinHttpOpen` and the eight calls beside it: the update check's one `GET`
+    # (`src/http.rs`, DESIGN §7.51). A **feature**, not a package — `windows` is
+    # already here, so turning the namespace on adds not one line to
+    # `Cargo.lock` or to `THIRD-PARTY-NOTICES.md`, which is `docs/DESIGN.md`
+    # §8's bar and the same door `Win32_Media_MediaFoundation` below came
+    # through. What it buys is the operating system's own TLS, certificate
+    # store and proxy configuration — including the PAC file a managed laptop
+    # is handed — rather than a Rust HTTP client and the forty packages its own
+    # trust store arrives with.
+    "Win32_Networking_WinHttp",
     # `IMFSourceReader` and the platform under it: the first frame of a video,
     # for the hover card and the preview pane (`src/video.rs`, DESIGN §7.23).
     # This is a **feature**, not a package — `windows` is already in the lock

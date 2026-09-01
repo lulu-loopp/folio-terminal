@@ -60,6 +60,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (22, migrate_settings_v22_to_v23),
     (23, migrate_settings_v23_to_v24),
     (24, migrate_settings_v24_to_v25),
+    (25, migrate_settings_v25_to_v26),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -541,6 +542,33 @@ fn migrate_settings_v24_to_v25(mut value: Value) -> Value {
     value
 }
 
+/// v25 -> v26: whether the releases page is asked once a day whether a newer build exists,
+/// defaulted **on** (`docs/DESIGN.md` §7.51).
+///
+/// **The one step in this ladder that turns something on that had never happened**, and the
+/// distinction the step above draws is the reason it has to be written out rather than assumed.
+/// v25 carried a habit forward; there is no habit here. Every build that could have written a file
+/// this step reads made no network request of any kind, so `true` is this migration *starting*
+/// something, which is the thing a silent default is least allowed to do.
+///
+/// It is written that way anyway, and the argument is the same one the key's own default is made
+/// under. What the switch permits is one `GET` of one fixed address, at most once a day, carrying
+/// nothing about the machine or the person at it, and answered by a mark on the gear that
+/// downloads nothing. What `false` would cost is the thing the switch exists for: a reader still
+/// running the preview they installed in August has no other way to be told that the crash they
+/// worked around was fixed in September. `docs/PRIVACY.md` and both READMEs say what is asked and
+/// how to switch it off, in the same commit as this line, because a default that starts a request
+/// is only defensible if it is documented before it ships.
+///
+/// See `SettingsV1::update_check`.
+fn migrate_settings_v25_to_v26(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(26));
+        object.insert("update_check".to_owned(), Value::from(true));
+    }
+    value
+}
+
 /// Migration table for `keybindings.json`. Empty, and it will stay empty for as
 /// long as the file's *shape* holds: a schema step is owed when the document
 /// changes, and adding, renaming or retiring a shortcut row does not change this
@@ -565,6 +593,14 @@ pub const PROFILES_MIGRATIONS: &[(u32, MigrationStep)] = &[];
 /// `PinEntryV1` already does per row without a version. A step is owed only if
 /// the row itself stops being `{kind, target}`.
 pub const PINS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
+
+/// Migration table for `update-check.json`. Empty because the document is v1 and
+/// there is nothing behind it: a table registers steps between shapes that have
+/// both existed, and this file is born with the check it belongs to. The two
+/// halves of the fallback chain still apply — a file written by a *newer* build
+/// is refused rather than misread, which for this document means one extra
+/// question asked of the releases page and nothing else.
+pub const UPDATE_CHECK_MIGRATIONS: &[(u32, MigrationStep)] = &[];
 
 /// Migration table for `session.json`. Schema v2 adds the runtime theme and maps every v1 session
 /// to the historical dark default.

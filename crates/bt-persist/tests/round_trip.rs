@@ -880,7 +880,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 25,
+        SETTINGS_SCHEMA_VERSION, 26,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -907,7 +907,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          hints the v21-to-v22, and the Terminal page's own Turn finished the \
          v22-to-v23, and the Cards column's own first-arrival hint the v23-to-v24, \
          and the terminal's own silent write to the clipboard on a dragged \
-         selection the v24-to-v25 — one key on one day, fifteen times running"
+         selection the v24-to-v25 — one key on one day, fifteen times running \n         and the one key in this file that lets this build ask a server anything, the v25-to-v26: sixteen"
     );
     assert!(
         defaults.copy_on_select,
@@ -2515,6 +2515,58 @@ fn settings_v24_migrates_with_copy_on_select_on_and_v25_keeps_the_habit_it_alway
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert!(
         on_disk.contains(r#""copy_on_select": false"#),
+        "the answer is written as its own key: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, opted_out);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The v25 to v26 rung: the one key in this file that lets this build ask a server anything.
+///
+/// It is the only step in the ladder that **starts** something rather than carrying a habit or
+/// naming one - every build that could write a v25 file made no network request at all - so the
+/// `true` it writes is asserted here beside the two things that make it defensible: nothing else
+/// on the reader's page moves, and a reader who had already switched it off keeps that answer.
+#[test]
+fn settings_v25_migrates_with_the_update_check_on_and_v26_keeps_an_answer_already_given() {
+    let (migrated, report) = read_settings(&fixture_path("settings_v25_copy_on_select_off.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        migrated.update_check,
+        "the check is on by default, and a migration is where that default reaches an existing          install"
+    );
+    assert!(
+        !migrated.copy_on_select,
+        "the sibling added one version ago is the one a copy-paste of the step above would most          plausibly reset"
+    );
+    assert!(!migrated.cards_gesture_hint_offer);
+    assert!(!migrated.turn_end_notification);
+
+    // And the whole ladder, from a file fourteen steps down.
+    let (from_v11, report) = read_settings(&fixture_path("settings_v11_advanced_open.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(from_v11.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(from_v11.update_check);
+    assert!(from_v11.copy_on_select);
+
+    let opted_out = SettingsV1 {
+        update_check: false,
+        ..SettingsV1::default()
+    };
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v26-update-check-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &opted_out).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""update_check": false"#),
         "the answer is written as its own key: {on_disk}"
     );
     let (round_tripped, report) = read_settings(&path);

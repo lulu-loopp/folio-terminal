@@ -103,6 +103,7 @@ mod text_field;
 mod toast;
 mod tooltip;
 mod trace;
+mod update;
 mod version;
 mod video_seat;
 mod watch_clock;
@@ -342,6 +343,19 @@ enum AppEvent {
     /// Agents page, the page is only reachable through a modal, and a modal is exactly the state in
     /// which no shell output, no hover and no keystroke is coming.
     CopilotProbed,
+    /// **The update check answered** (§7.51).
+    ///
+    /// The eighth of the same family, and the one whose wake is owed in the most
+    /// literal form: what its answer changes is a mark on the **title bar**, and
+    /// a window whose reader has walked away produces no frame at all. Without
+    /// this the dot would appear the next time somebody moved the pointer, which
+    /// for a check that runs seconds after launch means "when you come back to
+    /// the machine" — a mark that arrives silently at an unrelated moment.
+    ///
+    /// Carries nothing, on `AttentionSpoke`'s footing: the answer is in
+    /// `update::known()` by the time this is sent, and this says only that there
+    /// is one.
+    UpdateChecked,
     /// **Something spoke into this process's attention endpoint** (`attention_wire`).
     ///
     /// The same family again and the same reason for a wake of its own, in its strongest form: the
@@ -30997,6 +31011,20 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::CopilotProbed);
             });
         }
+        // **And the update check's**, which is the fourth of these and the only
+        // one whose answer comes off a socket rather than off this machine. Its
+        // three parts are deliberately three calls rather than one: the file is
+        // read on this thread so the first frame draws the right gear, the wake
+        // is installed before anything can finish, and the request is started
+        // last and only if the reader has left it on (§7.51).
+        {
+            let proxy = proxy.clone();
+            update::install_wake(move || {
+                let _ = proxy.send_event(AppEvent::UpdateChecked);
+            });
+        }
+        update::load(&persist::storage_dir());
+        update::begin(persist::storage_dir(), settings_store.loaded().update_check);
         // **The attention endpoint, before the first shell exists to be told about it.**
         //
         // Ordering that has to be this way round: `create_leaf_session` writes the endpoint's name
@@ -33995,6 +34023,13 @@ impl Runtime<'_> {
                 ..self.window.seat_pointer
             },
             seats::ChromeContent {
+                // **Read here rather than in `seats.rs`** — that file draws what
+                // this one has decided is true, and "is there a newer release"
+                // is a fact about a file on the disk. `known()` is a lock and a
+                // clone of three small fields; it is on the frame path for the
+                // reason `i18n::current()` is, and like that one it answers the
+                // same thing all frame.
+                update_mark: update::mark_is_lit(&update::known(), version::VERSION),
                 tabs: &tabs,
                 head_ink: seats::HeadInk::new(&head_ink),
                 active_ink: seats::TabInk::new(&active_ink),
@@ -37612,6 +37647,19 @@ impl Runtime<'_> {
         if content.probes_copilot(self.window.settings.category()) {
             attention_copilot::begin_probe();
         }
+        // **And the mark on the gear is answered on the same door** (§7.51),
+        // for the two probes' argument read the other way round: this is the one
+        // place that knows the reader is looking at the page the row is on, and
+        // "looking at it" is the whole of what the mark was asking for. The row
+        // is not behind a disclosure and it is not the twelfth of twelve, so a
+        // reader on this page has been shown it.
+        //
+        // Idempotent, and a disk write on exactly one frame — see
+        // `update::answer_mark`, which is also where the gear's own repaint is
+        // argued about.
+        if self.window.settings.category() == settings::SettingsCategory::General {
+            update::answer_mark(&persist::storage_dir());
+        }
         let category = self.window.settings.category();
         let menu = self.window.settings.menu();
         let scroll = self.window.settings_scroll;
@@ -37856,6 +37904,7 @@ impl Runtime<'_> {
                 .loaded()
                 .powershell_integration_offer,
             git_panel: self.app.settings_store.loaded().git_panel,
+            update_check: self.app.settings_store.loaded().update_check,
             key_hints: self.app.settings_store.loaded().key_hints,
             // The machine's own answer, cached at the three moments it can
             // change — see `App::context_menu_installed`.
@@ -40115,6 +40164,16 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::git_panel_requested(target) {
             self.apply_git_panel(enabled)?;
         }
+        if let Some(enabled) = settings::update_check_requested(target) {
+            self.apply_update_check(enabled);
+        }
+        // **The one press in this dialog that leaves the window.** It is a foot
+        // verb and not a choice, so it is answered here beside the choices for
+        // `apply_settings_choice`'s founding reason rather than in a second
+        // dispatcher of its own.
+        if settings::releases_page_requested(target) {
+            self.hand_url_to_the_browser(update::RELEASES_PAGE)?;
+        }
         if let Some(enabled) = settings::key_hints_requested(target) {
             self.apply_key_hints(enabled)?;
         }
@@ -40428,6 +40487,12 @@ impl Runtime<'_> {
             // `Reset to defaults` on a page is not a licence to change another
             // program's menu.
             | Row::ContextMenu
+            // Not advanced, and it is on a page whose Advanced group it is not
+            // in — but it is named here for this arm's own rule: a row swept
+            // into a `_` is a row that silently starts resetting the day
+            // somebody moves it, and this is the one row in the dialog whose
+            // reset would switch a network request back on.
+            | Row::UpdateCheck
             | Row::PsReadLine
             | Row::Scrollback
             | Row::LineWrapping
@@ -45027,6 +45092,26 @@ impl Runtime<'_> {
     fn apply_copy_on_select(&mut self, enabled: bool) {
         let mut settings = self.app.settings_store.loaded().clone();
         settings.copy_on_select = enabled;
+        self.app.settings_store.store(settings);
+    }
+
+    /// Store the reader's answer about the update check (§7.51).
+    ///
+    /// **Nothing is started or stopped here**, and that is deliberate rather
+    /// than an omission. The check is a one-shot taken at launch: by the time
+    /// this row can be pressed the thread has either run or was never started,
+    /// so `On` takes effect at the next launch and `Off` has nothing to cancel.
+    /// A build that started the thread from this press would be a build where
+    /// pressing `On` makes a network request the same second — which is the one
+    /// thing a reader auditing this row is checking for.
+    ///
+    /// The state file is left where it is on `Off`. It holds a stamp and two
+    /// tags, all three of which are only read by a check that is not going to
+    /// happen; deleting it would be this row reaching for a file the row is not
+    /// about, and a reader who wants it gone has `docs/PRIVACY.md`'s one line.
+    fn apply_update_check(&mut self, enabled: bool) {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.update_check = enabled;
         self.app.settings_store.store(settings);
     }
 
@@ -90972,6 +91057,17 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::PowerShellProfileProbed => {
                 self.for_each_window(|runtime| runtime.settle_pane_notices())
             }
+            // The answer is already in `update::known()`; what is owed is a
+            // frame that reads it — the mark on the gear, and the sentence on
+            // the row if a dialog happens to be standing on the General page.
+            // Every window, because a release is a release in all of them.
+            AppEvent::UpdateChecked => self.for_each_window(|runtime| {
+                if runtime.refresh_chrome() {
+                    runtime.present_chrome_change()
+                } else {
+                    Ok(())
+                }
+            }),
             // The answer is in `attention_copilot::probe()`, and unlike the two above it there is
             // something to *apply*: the readiness the row reads is a fact about this machine, held
             // on `App` so that a page redrawn on hover does not re-ask a question that costs a

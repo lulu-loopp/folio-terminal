@@ -379,10 +379,21 @@ const MENU_ACT_RADIUS_LOGICAL_PX: f32 = 4.0;
 /// The whole trailing run, which is what the popup's width has to hold.
 const MENU_ACT_RUN_LOGICAL_PX: f32 =
     MENU_ACT_INSET_LOGICAL_PX + 2.0 * MENU_ACT_SIDE_LOGICAL_PX + MENU_ACT_GAP_LOGICAL_PX;
-/// The mark an ACTION carries where a value carries its tick: a `+` in a column
-/// of exactly the tick's width, so `Add scheme…` starts on the same x as `Nord`
+/// The mark an ACTION carries where a value carries its tick — in a column of
+/// exactly the tick's width, so `Add scheme…` starts on the same x as `Nord`
 /// above it.
+///
+/// **A `+` for a verb that adds something, and it is no longer the only one**:
+/// see [`SettingsRow::menu_action_mark`], which is where the choice is made and
+/// why.
 const MENU_ACTION_MARK: &str = "+";
+/// The same column, for a verb that **leaves this window**.
+///
+/// The `↗` a preview head wears, meaning here exactly what it means there: the
+/// press is answered somewhere that is not this window. `icons.rs`'s header
+/// warns about this arrow having once meant four things; the guard against that
+/// is that it means one thing here and that thing is the same one.
+const MENU_ACTION_MARK_AWAY: &str = "↗";
 /// `.combo-item.act .actmark { font-size: 12px }`.
 const MENU_ACTION_MARK_FONT_LOGICAL_PX: f32 = 12.0;
 const TICK_FONT_LOGICAL_PX: f32 = 11.0;
@@ -2272,6 +2283,26 @@ pub enum SettingsRow {
     /// at all, it is another program's menu. `General` is where the rows about
     /// what this product *is on this machine* already are.
     ContextMenu,
+    /// **Whether this build asks the releases page whether a newer one exists**
+    /// (§7.51) — the General page's last row.
+    ///
+    /// **The only row in this dialog whose Off stops a network request**, which
+    /// is why it is a switch at all: nothing else this product does reaches off
+    /// the machine, so a reader who wants to know what Folio talks to has
+    /// exactly one row to read and exactly one to press. Off, no thread is
+    /// started and no file is written — it is not a quieter check.
+    ///
+    /// Its picker carries [`Text::OpenReleasesPage`] at its foot, on the footing
+    /// `Add scheme…` and `Install fonts…` are there: a verb that belongs to this
+    /// row and is not one of its two answers. It is offered whether or not there
+    /// is anything new, because "show me the releases" is a sentence that is
+    /// true on any day; what changes with an answer is the row's own
+    /// description, which names the version.
+    ///
+    /// On `General` and last on it. The three rows above say what this product
+    /// does on this machine and `Explorer context menu` says what it does to
+    /// another program's menu; this is the only one that leaves the machine.
+    UpdateCheck,
     /// **Which way a split with no direction of its own cuts** (user ruling,
     /// 2026-08-16).
     ///
@@ -2682,7 +2713,10 @@ impl SettingsRow {
             | Self::Language
             | Self::KeyHints
             | Self::SearchEngine
-            | Self::ContextMenu => SettingsCategory::General,
+            | Self::ContextMenu
+            // And the row that is about what this product does off this machine
+            // rather than on it — see the variant.
+            | Self::UpdateCheck => SettingsCategory::General,
             // The editor's eight, which are the Profiles page's second view.
             Self::ProfileName
             | Self::ProfileProgram
@@ -2736,6 +2770,7 @@ impl SettingsRow {
             Self::GitPanel => Text::RowGitPanel.text(),
             Self::KeyHints => Text::RowKeyHints.text(),
             Self::ContextMenu => Text::RowContextMenu.text(),
+            Self::UpdateCheck => Text::RowUpdateCheck.text(),
             // Mock-up 2360.
             Self::TabLayout => Text::RowTabLayout.text(),
             // Mock-up 4154.
@@ -2887,6 +2922,12 @@ impl SettingsRow {
             // because without it a reader switches this on, right-clicks a
             // folder, sees the short menu, and concludes the switch is broken.
             Self::ContextMenu => crate::context_menu::row_description(),
+            // **Not a constant**, on the row above's footing: the sentence names
+            // the version the releases page named, and a row that only said "a
+            // newer version is out" would send the reader to the page to find
+            // out which one. See `update::row_description`, which is also where
+            // the `&'static str` a `String` becomes is argued for.
+            Self::UpdateCheck => crate::update::row_description(),
             // Mock-up 2361.
             Self::TabLayout => Text::DescTabLayout.text(),
             // Mock-up 4155.
@@ -3101,6 +3142,9 @@ impl SettingsRow {
             // reader who wants Folio in their right-click menu has no reason to
             // guess that the answer is behind a disclosure.
             | Self::ContextMenu
+            // A reader who wants to know what this product talks to must not
+            // have to open a disclosure to find the row that answers it.
+            | Self::UpdateCheck
             | Self::PsReadLine
             | Self::PowerShellOffer
             // On the row above's test, said again for the reader who has just watched an agent
@@ -3213,6 +3257,7 @@ impl SettingsRow {
             | Self::ClaudeHooks
             | Self::CodexNotify
             | Self::CopilotHooks
+            | Self::UpdateCheck
             | Self::LineWrapping => FORMULA_OPTIONS.len(),
             Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.len(),
             Self::Scrollback => SCROLLBACK_OPTIONS.len(),
@@ -3283,6 +3328,7 @@ impl SettingsRow {
             | Self::ClaudeHooks
             | Self::CodexNotify
             | Self::CopilotHooks
+            | Self::UpdateCheck
             | Self::LineWrapping => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
             // The one item that is a word goes through the i18n table and the
             // three that are quantities do not — the table's own header lists
@@ -3389,7 +3435,28 @@ impl SettingsRow {
         match self {
             Self::LightScheme | Self::DarkScheme => Some(Text::AddScheme.text()),
             Self::TerminalFont => Some(Text::InstallFonts.text()),
+            // No ellipsis, unlike the two above: those two open a further asking
+            // and this one hands an address to the browser and is over — which
+            // is also why it wears a different mark, see
+            // [`menu_action_mark`](Self::menu_action_mark).
+            Self::UpdateCheck => Some(Text::OpenReleasesPage.text()),
             _ => None,
+        }
+    }
+
+    /// **Which mark that verb wears** — the `+` of something being added, or the
+    /// `↗` of something being answered outside this window.
+    ///
+    /// A second reader beside [`menu_action`](Self::menu_action) rather than a
+    /// pair returned from it, because the two answer different questions and one
+    /// of them has a default that is right for almost every row: a foot verb
+    /// added tomorrow is far more likely to add a thing than to leave.
+    #[must_use]
+    pub fn menu_action_mark(self) -> &'static str {
+        match self {
+            // The one verb in this dialog that hands an address to the browser.
+            Self::UpdateCheck => MENU_ACTION_MARK_AWAY,
+            _ => MENU_ACTION_MARK,
         }
     }
 
@@ -3585,6 +3652,9 @@ impl SettingsRow {
             Self::GitPanel => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.git_panel),
+            Self::UpdateCheck => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.update_check),
             Self::KeyHints => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.key_hints),
@@ -3822,10 +3892,16 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // this machine, before the table of things it can start.
     rows.push(SettingsRow::SearchEngine);
     rows.push(SettingsRow::DefaultProfile);
-    // Last on its page, because it is the only row here that changes something
-    // **outside this window**: the three above it say how Folio behaves, and
-    // this one says what another program's menu contains.
+    // Second from last on its page, because it is the only row here that changes
+    // something **outside this window**: the three above it say how Folio
+    // behaves, and this one says what another program's menu contains.
     rows.push(SettingsRow::ContextMenu);
+    // **Last**, on the row above's measure taken one step further: that row
+    // reaches another program on this machine, and this one is the only row in
+    // the whole dialog that reaches off it. A reader who opens this page to find
+    // out what Folio talks to should find that row where a page ends rather than
+    // among the rows about what the window says and does.
+    rows.push(SettingsRow::UpdateCheck);
     rows.push(SettingsRow::PsReadLine);
     // **Beside it**, because the two are this page's two PowerShell rows and
     // they answer one reader's two questions in the order they arrive: what is
@@ -4246,6 +4322,8 @@ pub struct SettingsValues {
     /// `attention_copilot::begin_probe`, and `SettingsRow::description`'s own note on why a
     /// sentence that varies with the machine may still only ever be one of a few literals.
     pub copilot_readiness: crate::attention_copilot::Readiness,
+    /// Whether the releases page is asked once a day (§7.51).
+    pub update_check: bool,
     /// Which way a split with no direction of its own cuts.
     pub split_direction: SplitDirectionV1,
     /// Where a web preview's address field sends a non-address.
@@ -4396,6 +4474,7 @@ impl SettingsValues {
             codex_notify: false,
             copilot_hooks: false,
             copilot_readiness: crate::attention_copilot::Readiness::Unknown,
+            update_check: true,
             split_direction: SplitDirectionV1::Auto,
             search_engine: SearchEngineV1::DuckDuckGo,
             minimum_contrast: MinimumContrastV1::Off,
@@ -7657,6 +7736,28 @@ pub fn key_hints_requested(target: SettingsTarget) -> Option<bool> {
     }
 }
 
+/// Whether the releases page is asked once a day, as a press on this row's
+/// picker (§7.51).
+#[must_use]
+pub fn update_check_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::UpdateCheck, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Whether the press was this row's picker foot — `Open releases page`.
+///
+/// Its own reader rather than a `match` at the call site, so the one place that
+/// knows which row carries which foot verb is this file, where
+/// [`SettingsRow::menu_action`] already says so.
+#[must_use]
+pub fn releases_page_requested(target: SettingsTarget) -> bool {
+    matches!(target, SettingsTarget::MenuAction(SettingsRow::UpdateCheck))
+}
+
 /// The Git panel's master switch, as a press on its picker.
 #[must_use]
 pub fn git_panel_requested(target: SettingsTarget) -> Option<bool> {
@@ -10858,7 +10959,7 @@ pub fn build(
                 let mark_right = mark_left + px(TICK_WIDTH_LOGICAL_PX);
                 menu_stack.labels.push(ChromeLabel {
                     mono: false,
-                    text: MENU_ACTION_MARK.to_owned(),
+                    text: row.menu_action_mark().to_owned(),
                     rect: [mark_left, item[1], mark_right, item[3]],
                     font_size_px: px(MENU_ACTION_MARK_FONT_LOGICAL_PX),
                     color: if lit {
@@ -20526,6 +20627,9 @@ mod tests {
                 SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
                 SettingsRow::ContextMenu,
+                // Last on General: the only row in the dialog that reaches off
+                // the machine (§7.51).
+                SettingsRow::UpdateCheck,
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
                 SettingsRow::Scrollback,
@@ -20569,6 +20673,9 @@ mod tests {
                 SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
                 SettingsRow::ContextMenu,
+                // Last on General: the only row in the dialog that reaches off
+                // the machine (§7.51).
+                SettingsRow::UpdateCheck,
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
                 SettingsRow::Scrollback,
@@ -21589,11 +21696,13 @@ mod tests {
         lacking.default_profile = profiles::fallback_profile();
 
         let mut panel = keyboarded_on(SettingsRow::DefaultProfile.category());
-        // `End` and then one step back: `Explorer context menu` closes this page
-        // (§7.4) and `Default profile` is the row above it. The assertion below
-        // is what keeps the two presses honest — a page reordered under this
-        // test lands the ring somewhere else and says so.
+        // `End` and then two steps back: `Update check` closes this page
+        // (§7.51), `Explorer context menu` stands above it (§7.4), and
+        // `Default profile` above that. The assertion below is what keeps the
+        // presses honest — a page reordered under this test lands the ring
+        // somewhere else and says so.
         panel.key(SettingsKey::End, content(&flat, &lines), &lacking);
+        panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
         panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
         assert_eq!(
             panel.focus(),

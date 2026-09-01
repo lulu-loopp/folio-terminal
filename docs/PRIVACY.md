@@ -7,12 +7,31 @@ vulnerability privately.
 
 ## English
 
-Folio sends nothing anywhere. There is no telemetry, no analytics, no crash
-reporting, no update check, and no network client of its own. The only thing that
-reaches the network is a page you open in the web preview, fetched by the
-WebView2 engine that Windows provides.
+Folio sends nothing about you anywhere. There is no telemetry, no analytics and
+no crash reporting. Two things reach the network: a page you open in the web
+preview, fetched by the WebView2 engine that Windows provides, and the update
+check below.
 
 Everything Folio remembers is on your machine, in two directories.
+
+### The update check
+
+Folio asks GitHub whether a newer release exists, and does nothing else with the
+answer: it draws a mark on the settings gear and a line in Settings > General.
+Nothing is downloaded and nothing is replaced.
+
+| | |
+| --- | --- |
+| **Address** | `https://api.github.com/repos/lulu-loopp/folio-terminal/releases` |
+| **Method** | `GET`. No query string, no request body. |
+| **What is sent** | One header: `User-Agent: Folio`. No version, no build, no operating system, no identifier, no cookie. GitHub refuses a request with no user agent at all, which is why the header is not empty. |
+| **How often** | At most once every 24 hours, across every Folio window on the machine. A failure - no network, a proxy, a rate limit - counts as the attempt for that day and is not retried. |
+| **Where the answer goes** | `%APPDATA%\Folio\update-check.json`: when the page was last asked, the tag it named, and the tag you have already been shown. |
+| **How to switch it off** | Settings > General > **Update check**, or `"update_check": false` in `settings.json`. Off, no thread is started, no request is made and `update-check.json` is never written. |
+
+GitHub receives the request the way it receives any request: your IP address and
+the time. Folio adds nothing to that. The request goes through Windows' own HTTP
+stack, so it follows your machine's proxy settings and certificate store.
 
 ### `%APPDATA%\Folio` — settings and session
 
@@ -26,6 +45,7 @@ Roaming configuration. Delete it and Folio starts as it did the first time.
 | `schemes\` | Colour schemes you added. |
 | `session.json`, `session.lock` | The windows, tabs and panes to restore. See below. |
 | `pins.json` | Pinned folders, files and addresses. |
+| `update-check.json` | When the releases page was last asked, and the two version tags that answer whether the gear wears a mark. Written only while the update check is on. |
 | `shell-integration\` | The scripts Folio writes for PowerShell and bash integration. |
 | `diagnostics.log`, `diagnostics.prev.log` | Program output for a run started without a console. Checked once at startup: at 4 MiB the current log becomes `.prev.log`, replacing the older one. |
 | `hang-reports\` | Written only when the window stops answering. Module names and offsets, not stack contents. |
@@ -89,11 +109,28 @@ profile. Do not put a secret in one.
 
 ## 中文
 
-Folio 不向任何地方发送数据。没有遥测、没有统计、没有崩溃上报、没有更新检查，自己也没有
-网络客户端。唯一联网的是你在网页预览里打开的那个页面，由 Windows 自带的 WebView2 引擎
-抓取。
+Folio 不向任何地方发送与你有关的数据。没有遥测、没有统计、没有崩溃上报。联网的只有两
+件事：你在网页预览里打开的那个页面，由 Windows 自带的 WebView2 引擎抓取；以及下面这个
+更新检查。
 
 Folio 记住的一切都在本机，分在两个目录里。
+
+### 更新检查
+
+Folio 向 GitHub 询问是否存在更新的版本，对答案只做一件事：在设置齿轮上画一个标记，并在
+设置 > General 里显示一行。不下载任何内容，也不替换任何文件。
+
+| | |
+| --- | --- |
+| **地址** | `https://api.github.com/repos/lulu-loopp/folio-terminal/releases` |
+| **方法** | `GET`。无 query，无请求体。 |
+| **发送的内容** | 一个请求头：`User-Agent: Folio`。不含版本号、构建号、操作系统、任何标识符或 cookie。GitHub 拒绝不带 user agent 的请求，这是该请求头不为空的原因。 |
+| **频率** | 每 24 小时至多一次，本机所有 Folio 窗口合计。失败——无网络、代理、限流——计入当天的那一次，不重试。 |
+| **答案存放位置** | `%APPDATA%\Folio\update-check.json`：上次询问的时间、返回的 tag，以及你已看到过的 tag。 |
+| **如何关闭** | 设置 > General > **检查新版**，或在 `settings.json` 中写 `"update_check": false`。关闭后不启动线程、不发出请求，也不写 `update-check.json`。 |
+
+GitHub 收到该请求的方式与收到任何请求相同：你的 IP 地址与时间。Folio 不在此之上附加任何
+内容。请求走 Windows 自带的 HTTP 栈，因此遵循本机的代理设置与证书存储。
 
 ### `%APPDATA%\Folio` —— 设置与会话
 
@@ -107,6 +144,7 @@ Folio 记住的一切都在本机，分在两个目录里。
 | `schemes\` | 你添加的配色。 |
 | `session.json`、`session.lock` | 待恢复的窗口、标签与窗格。见下。 |
 | `pins.json` | 收藏的文件夹、文件与地址。 |
+| `update-check.json` | 上次询问发布页的时间，以及决定齿轮是否带标记的两个版本 tag。仅在更新检查开启时写入。 |
 | `shell-integration\` | Folio 为 PowerShell 与 bash 整合写出的脚本。 |
 | `diagnostics.log`、`diagnostics.prev.log` | 无控制台启动时的程序输出。只在启动时查一次：到 4 MiB 就把当前这份转成 `.prev.log`，顶掉上一代。 |
 | `hang-reports\` | 只在窗口失去响应时写。记模块名与偏移，不记栈内容。 |

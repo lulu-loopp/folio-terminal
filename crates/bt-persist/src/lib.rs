@@ -29,6 +29,8 @@
 //!   departures from the shipped five plus the user's own profiles.
 //! - [`pins`] / [`PinsV1`] — `pins.json`, the one table of folders, files and
 //!   URLs the user said to keep.
+//! - [`update`] / [`UpdateCheckV1`] — `update-check.json`, when the releases
+//!   page was last asked and what it said.
 //! - [`scheme`] — one Windows Terminal colour-scheme object, parsed. The one
 //!   reader here that is not versioned by this crate, because the format is
 //!   somebody else's; where scheme files live and which of them exist is
@@ -46,6 +48,7 @@ mod scheme;
 mod sentinel;
 mod session;
 mod settings;
+mod update;
 mod write_tracker;
 
 pub use atomic::atomic_write;
@@ -58,7 +61,7 @@ pub use layout::{
 };
 pub use migrate::{
     FallbackReason, KEYBINDINGS_MIGRATIONS, MigrationStep, PINS_MIGRATIONS, PROFILES_MIGRATIONS,
-    ReadReport, SESSION_MIGRATIONS, SETTINGS_MIGRATIONS,
+    ReadReport, SESSION_MIGRATIONS, SETTINGS_MIGRATIONS, UPDATE_CHECK_MIGRATIONS,
 };
 pub use pins::{PINS_SCHEMA_VERSION, PinEntryV1, PinKind, PinsV1};
 pub use profiles::{
@@ -81,6 +84,7 @@ pub use settings::{
     MINIMUM_BACKGROUND_OPACITY, MinimumContrastV1, PsReadLineInviteV1, SETTINGS_SCHEMA_VERSION,
     SearchEngineV1, SettingsV1, SplitDirectionV1, ThemeModeV1,
 };
+pub use update::{UPDATE_CHECK_SCHEMA_VERSION, UpdateCheckV1};
 pub use write_tracker::{WriteAlertAction, WriteFailureTracker};
 
 use std::path::Path;
@@ -180,6 +184,29 @@ pub fn read_pins(path: &Path) -> (PinsV1, ReadReport) {
 pub fn write_pins_atomic(path: &Path, pins: &PinsV1) -> Result<(), WriteError> {
     let bytes = serde_json::to_vec_pretty(pins).map_err(|source| WriteError::Serialize {
         what: "PinsV1",
+        source,
+    })?;
+    atomic_write(path, &bytes)
+}
+
+/// Reads `update-check.json` from `path`, on the same §5.4 fallback chain as the
+/// rest. A missing file is [`ReadReport::NotFound`] and is what every machine
+/// reads before the first check; a damaged one falls back to the default, whose
+/// `checked_at_ms` of zero means *ask now*. Both are the same outcome — one
+/// question to the releases page — which is why neither is worth telling anybody
+/// about.
+pub fn read_update_check(path: &Path) -> (UpdateCheckV1, ReadReport) {
+    migrate::read_with_fallback(path, UPDATE_CHECK_SCHEMA_VERSION, UPDATE_CHECK_MIGRATIONS)
+}
+
+/// Serializes `state` and writes it to `path` via [`atomic_write`].
+///
+/// Atomic for the reason every other document here is: two windows can reach
+/// this at once, and a half-written stamp read by the second one is a check that
+/// either never happens again or happens every launch.
+pub fn write_update_check_atomic(path: &Path, state: &UpdateCheckV1) -> Result<(), WriteError> {
+    let bytes = serde_json::to_vec_pretty(state).map_err(|source| WriteError::Serialize {
+        what: "UpdateCheckV1",
         source,
     })?;
     atomic_write(path, &bytes)
