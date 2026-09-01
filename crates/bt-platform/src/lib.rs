@@ -5719,6 +5719,113 @@ mod windows_impl {
         NonZeroIsize::new(root.0 as isize)
     }
 
+    /// **The three screen points a window's exposure is asked about** (user
+    /// ruling 2026-09-01).
+    ///
+    /// The centre first and then two corners drawn a quarter of the way in from
+    /// each edge. Every part of that is a decision:
+    ///
+    /// * **The centre leads** because it is the point most likely to answer
+    ///   "this window" when any of them does, and [`exposed_from_probe`] stops
+    ///   at the first one that says so — the ordinary case is one hit test and
+    ///   not three.
+    /// * **A quarter in, rather than at the corner**, because the corner is not
+    ///   the window: Windows 11 rounds it, this build wears a resize skirt
+    ///   outside the glass it draws, and a hit test on either lands on the
+    ///   desktop or on whatever is behind. A quarter of the width is well clear
+    ///   of both and is still far enough out to notice a window that covers only
+    ///   the middle.
+    /// * **Opposite corners**, because that is the widest separation the set
+    ///   allows: half the width and half the height apart. Two adjacent ones
+    ///   would sample a single band.
+    ///
+    /// **The rectangle is half-open on the right and the bottom**, which is what
+    /// `GetWindowRect` hands back, so the last pixel the window owns is one in
+    /// from each and the far point is measured from there. A degenerate
+    /// rectangle — nothing this call is expected to see, but the function is
+    /// total — collapses its three points together and answers about the one
+    /// place there is.
+    #[must_use]
+    pub fn exposure_probe_points(rect: WindowRect) -> [(i32, i32); 3] {
+        let width = rect.right.saturating_sub(rect.left).max(0);
+        let height = rect.bottom.saturating_sub(rect.top).max(0);
+        let last_x = rect.left.saturating_add(width.saturating_sub(1).max(0));
+        let last_y = rect.top.saturating_add(height.saturating_sub(1).max(0));
+        let inset_x = width / 4;
+        let inset_y = height / 4;
+        [
+            (
+                rect.left.saturating_add(width / 2),
+                rect.top.saturating_add(height / 2),
+            ),
+            (
+                rect.left.saturating_add(inset_x),
+                rect.top.saturating_add(inset_y),
+            ),
+            (
+                last_x.saturating_sub(inset_x),
+                last_y.saturating_sub(inset_y),
+            ),
+        ]
+    }
+
+    /// **Whether the window manager puts this window under any of its own
+    /// sample points**, with the failure policy written where a test can walk it
+    /// (user ruling 2026-09-01).
+    ///
+    /// [`cloaked_from_attribute`]'s shape, and the same three parts: a reading
+    /// that can fail, a policy for the failure, and the arithmetic in between.
+    /// The reading is [`get_window_rect`]; `probe` is
+    /// [`top_level_window_at`] in the one caller that is not a test.
+    ///
+    /// **A window this process cannot get a rectangle for is reported exposed.**
+    /// That is the direction the whole attention block takes and for its reason:
+    /// of the two wrong answers, one leaves the reader with the marks inside the
+    /// window they are looking at, and the other puts a toast on a desktop they
+    /// can see. Only the second is an interruption.
+    ///
+    /// **One point is enough**, because the question is whether the reader can
+    /// see this window at all rather than how much of it. A window with a
+    /// corner showing is a window whose tab strip may well be that corner.
+    ///
+    /// **It is three samples and not a proof.** A covering window that threads
+    /// between all three reads as exposed; that is the under-reporting direction
+    /// again, and it is the price of asking the window manager three questions
+    /// instead of differencing regions over the whole z-order.
+    ///
+    /// **`GA_ROOT` and not the owner chain**, which [`top_level_window_at`]
+    /// already fixes: a hit that lands on a hosted browser's child HWND belongs
+    /// to this window and is counted, while one that lands on a *different*
+    /// top-level window of this same process — a torn-off preview floating over
+    /// the main window — is not. The second is right as well as convenient: the
+    /// marks this answer is about are behind that window either way.
+    #[must_use]
+    pub fn exposed_from_probe(
+        own: NonZeroIsize,
+        rect: Option<WindowRect>,
+        mut probe: impl FnMut(i32, i32) -> Option<NonZeroIsize>,
+    ) -> bool {
+        let Some(rect) = rect else {
+            return true;
+        };
+        exposure_probe_points(rect)
+            .into_iter()
+            .any(|(x, y)| probe(x, y) == Some(own))
+    }
+
+    /// **Is this window actually showing?** — the reading behind
+    /// [`exposed_from_probe`], made against the live desktop.
+    ///
+    /// Between one and three `WindowFromPoint`/`GetAncestor` pairs on top of one
+    /// `GetWindowRect`, and it is charged **per delivery decision** rather than
+    /// per frame: `bt_app::sample_window_place` is the one caller, beside the
+    /// `IsIconic` / `DwmGetWindowAttribute` / `SHAppBarMessage` it already makes
+    /// on the same turn.
+    #[must_use]
+    pub fn window_is_exposed(hwnd: NonZeroIsize) -> bool {
+        exposed_from_probe(hwnd, get_window_rect(hwnd).ok(), top_level_window_at)
+    }
+
     /// **Which window in this thread holds the Win32 mouse capture, if any**
     /// (multiwindow slice F2/F4).
     ///
@@ -8474,18 +8581,19 @@ pub use windows_impl::{
     ImeSystemCaret, MathContextMenu, Notifier, PROGRAM_REFUSED, SystemSettingsWatch, Taskbar,
     adopt_parent_console, client_area_animation_enabled, clipboard_text, cloaked_from_attribute,
     current_thread_priority, current_user_registry_string, current_user_registry_subkeys,
-    detach_console, documents_directory, dpi_at, file_product_version, flash_window,
-    get_dpi_for_window, get_window_rect, get_work_area, hide_every_window_of_this_process,
-    install_console_ctrl_handler, install_context_menu, install_window_class_background,
-    is_window_cloaked, is_window_minimized, leave_process, message_box, monospace_font_families,
-    open_local_file, open_local_path, open_system_fonts_page, os_ui_language, read_context_menu,
-    recycle, redirect_std_streams_to_file, remove_context_menu, request_window_close,
-    reveal_in_explorer, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
-    set_window_dark_mode, set_window_outer_rect, set_window_topmost, shell_execute,
-    silence_std_streams, spawn_at_priority, std_error_is_console, system_backdrop_available,
-    system_uses_light_apps, take_keyboard_focus, taskbar_auto_hidden_from_state,
-    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
-    virtual_screen_rect, wheel_scroll_amount, work_area_at, write_to_console,
+    detach_console, documents_directory, dpi_at, exposed_from_probe, exposure_probe_points,
+    file_product_version, flash_window, get_dpi_for_window, get_window_rect, get_work_area,
+    hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
+    install_window_class_background, is_window_cloaked, is_window_minimized, leave_process,
+    message_box, monospace_font_families, open_local_file, open_local_path, open_system_fonts_page,
+    os_ui_language, read_context_menu, recycle, redirect_std_streams_to_file, remove_context_menu,
+    request_window_close, reveal_in_explorer, set_clipboard_text, set_current_thread_priority,
+    set_system_backdrop, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
+    shell_execute, silence_std_streams, spawn_at_priority, std_error_is_console,
+    system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
+    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
+    top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
+    window_is_exposed, work_area_at, write_to_console,
 };
 
 /// **The one decision in the system-preference watch.**
@@ -8588,6 +8696,175 @@ mod taskbar_state_tests {
             taskbar_auto_hidden_from_state(autohide | always_on_top),
             "both bits set is still a bar that slides away"
         );
+    }
+}
+
+/// **The two decisions in the exposure probe** (user ruling 2026-09-01).
+///
+/// Everything else about [`window_is_exposed`] is `GetWindowRect` and
+/// `WindowFromPoint`; these are the geometry that picks the points and the
+/// policy that reads the answers, and neither of them calls Win32.
+#[cfg(all(test, windows))]
+mod exposure_probe_tests {
+    use super::{WindowRect, exposed_from_probe, exposure_probe_points};
+    use std::num::NonZeroIsize;
+
+    /// A window at a plain place on a plain screen: 800 x 600 at (100, 100).
+    const WINDOW: WindowRect = WindowRect {
+        left: 100,
+        top: 100,
+        right: 900,
+        bottom: 700,
+    };
+
+    fn handle(value: isize) -> NonZeroIsize {
+        NonZeroIsize::new(value).expect("the fixture's handle is not null")
+    }
+
+    /// PIN — **the three points stand where the ruling put them: the centre and
+    /// two opposite corners a quarter of the way in.**
+    ///
+    /// The failure this pins is a probe that samples the window's corners. A
+    /// Windows 11 window is rounded there and this build wears a resize skirt
+    /// outside the glass it draws, so a hit test on the literal corner answers
+    /// about the desktop or about whatever is behind — a window in plain sight
+    /// reported as covered, on every machine, forever.
+    ///
+    /// MUTATIONS: measure the far point from `right`/`bottom` rather than from
+    /// the last pixel and it lands one outside the window Win32 describes; drop
+    /// the inset to zero and the corner rows go red; take two *adjacent* corners
+    /// and the third assertion goes red — the sample collapses into one band.
+    #[test]
+    fn the_probe_samples_the_centre_and_two_opposite_quarter_points() {
+        let [centre, near, far] = exposure_probe_points(WINDOW);
+        assert_eq!(centre, (500, 400), "the middle of the window");
+        assert_eq!(near, (300, 250), "a quarter in from the left and the top");
+        assert_eq!(
+            far,
+            (699, 549),
+            "a quarter in from the last pixel on the right and the bottom"
+        );
+
+        for (x, y) in [centre, near, far] {
+            assert!(
+                (WINDOW.left..WINDOW.right).contains(&x)
+                    && (WINDOW.top..WINDOW.bottom).contains(&y),
+                "({x}, {y}) is outside the window it is meant to sample"
+            );
+        }
+        assert!(
+            near.0 != far.0 && near.1 != far.1,
+            "the two corners are opposite, which is the widest the set gets"
+        );
+    }
+
+    /// PIN — **a rectangle with no area still answers, and answers about the one
+    /// place there is.**
+    ///
+    /// Not a case this call is expected to meet: it exists because
+    /// [`exposure_probe_points`] is total over `WindowRect` and an empty or
+    /// inside-out one must not underflow its way to a point on another monitor.
+    #[test]
+    fn a_rectangle_with_no_area_collapses_rather_than_wandering() {
+        for rect in [
+            WindowRect {
+                left: 10,
+                top: 20,
+                right: 10,
+                bottom: 20,
+            },
+            WindowRect {
+                left: 10,
+                top: 20,
+                right: 4,
+                bottom: 8,
+            },
+        ] {
+            for (x, y) in exposure_probe_points(rect) {
+                assert_eq!((x, y), (rect.left, rect.top), "{rect:?} wandered");
+            }
+        }
+        for (x, y) in exposure_probe_points(WindowRect {
+            left: i32::MIN,
+            top: i32::MIN,
+            right: i32::MAX,
+            bottom: i32::MAX,
+        }) {
+            assert!(x > i32::MIN && y > i32::MIN, "the whole plane overflowed");
+        }
+    }
+
+    /// RED GATE — **one point that answers "this window" is exposure, none of
+    /// them is cover, and a rectangle that could not be read is exposure.**
+    ///
+    /// # The bug this is the gate for
+    ///
+    /// Before the probe there was no fact here at all: a window buried under a
+    /// full-screen editor was indistinguishable from one sitting in plain sight
+    /// on a second monitor, so the reader with an auto-hiding taskbar was told
+    /// on the desktop about a window they were looking at. The probe is the
+    /// fact, and these are the three answers it owes.
+    ///
+    /// MUTATIONS: require *every* point to answer this window and the
+    /// partly-covered row goes red — a window with its tab strip showing
+    /// reported as buried. Answer `false` for an unreadable rectangle and the
+    /// last row goes red, in the loud direction: a toast on a desktop the reader
+    /// can see. Compare against the hit rather than its `GA_ROOT` and a click
+    /// through to a hosted browser's own child HWND would read as somebody
+    /// else's window — that half is [`super::top_level_window_at`]'s and is why
+    /// the probe is written in terms of it.
+    #[test]
+    fn any_one_point_of_this_window_is_exposure_and_none_of_them_is_cover() {
+        let ours = handle(0x1234);
+        let theirs = handle(0x5678);
+
+        assert!(
+            exposed_from_probe(ours, Some(WINDOW), |_, _| Some(ours)),
+            "a window in front of everything is exposed"
+        );
+        assert!(
+            !exposed_from_probe(ours, Some(WINDOW), |_, _| Some(theirs)),
+            "a window covered at every sample is not exposed"
+        );
+        assert!(
+            !exposed_from_probe(ours, Some(WINDOW), |_, _| None),
+            "a point no window covers is not this window either"
+        );
+
+        // Covered everywhere except the bottom-right quarter point — a window
+        // with one corner still showing, which is a window the reader can see.
+        let [_, _, far] = exposure_probe_points(WINDOW);
+        assert!(
+            exposed_from_probe(ours, Some(WINDOW), |x, y| Some(if (x, y) == far {
+                ours
+            } else {
+                theirs
+            })),
+            "one corner showing is showing"
+        );
+
+        assert!(
+            exposed_from_probe(ours, None, |_, _| Some(theirs)),
+            "a rectangle this process cannot read is reported exposed, which is \
+             the quiet way to be wrong"
+        );
+    }
+
+    /// PIN — **the ordinary answer costs one hit test, not three.**
+    ///
+    /// The probe rides on the pass that decides what the reader is owed, so the
+    /// case that runs constantly — a window nothing is covering — must not pay
+    /// for the case that almost never does. The centre leads for exactly this,
+    /// and `any` stops at it.
+    #[test]
+    fn a_window_in_front_is_answered_by_its_first_point() {
+        let ours = handle(0x1234);
+        let mut asked = 0_u32;
+        assert!(exposed_from_probe(ours, Some(WINDOW), |_, _| {
+            asked += 1;
+            Some(ours)
+        }));
+        assert_eq!(asked, 1, "the centre settled it");
     }
 }
 

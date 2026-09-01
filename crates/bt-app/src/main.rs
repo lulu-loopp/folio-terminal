@@ -9293,6 +9293,24 @@ struct WindowRuntime {
     /// never seeded hopefully. A window is born visible and this starts `false`,
     /// which is the same answer the first sample gives.
     window_hidden: bool,
+    /// **Whether the reader can actually see this window** (user ruling
+    /// 2026-09-01).
+    ///
+    /// The fourth fact [`notify::desktop_reach`] answers from, and the one that
+    /// separates a window standing in plain sight on a second monitor from one
+    /// buried under a full-screen editor. Until it existed those two were one
+    /// row, which is the defect the ruling is about: a reader whose taskbar
+    /// hides itself got a desktop toast about a window they were looking at.
+    ///
+    /// Cached for [`window_hidden`]'s reason and sampled on the same turns —
+    /// [`sample_window_place`] writes all four together, and the doors that fire
+    /// *inside* a turn read them back from here rather than asking the desktop
+    /// twice about one instant. Born `true`, which is the same answer the first
+    /// sample gives for a window that has just opened, and the quiet direction
+    /// if it somehow is not.
+    ///
+    /// [`window_hidden`]: Self::window_hidden
+    window_exposed: bool,
     /// **Whether this desktop's taskbar hides itself** (user ruling 2026-08-28).
     ///
     /// The fourth fact [`notify::desktop_reach`] answers from, and the one that
@@ -10499,8 +10517,8 @@ impl WindowRuntime {
         ask_again_after(outcome, &mut self.textless_frames)
     }
 
-    /// **Where this window is, as the three facts [`notify::desktop_reach`] reads together**
-    /// (`attention` plan §5.2; user ruling 2026-08-28).
+    /// **Where this window is, as the four facts [`notify::desktop_reach`] reads together**
+    /// (`attention` plan §5.2; user rulings 2026-08-28 and 2026-09-01).
     ///
     /// The cached reading, for the doors that are not a pass over the window's shells: closing a
     /// tab, closing a pane, answering a request, looking at a tab. Every one of them happens
@@ -10508,11 +10526,12 @@ impl WindowRuntime {
     /// again here would be asking it twice about one instant.
     ///
     /// The passes themselves take a place built from a fresh sample — see
-    /// [`sample_window_place`], which is what writes the two fields this reads.
+    /// [`sample_window_place`], which is what writes the three fields this reads.
     fn place(&self) -> notify::WindowPlace {
         notify::WindowPlace {
             focused: self.window_focused,
             hidden: self.window_hidden,
+            exposed: self.window_exposed,
             taskbar_is_auto_hidden: self.taskbar_auto_hidden,
         }
     }
@@ -19387,25 +19406,53 @@ fn window_is_hidden(window: &Window) -> bool {
 /// **Ask the desktop where this window is, on the turn that is about to decide what the reader is
 /// owed** (`attention` plan §5.2; user ruling 2026-08-28).
 ///
-/// The one place the three facts of [`notify::WindowPlace`] are *read* rather than remembered, and
+/// The one place the four facts of [`notify::WindowPlace`] are *read* rather than remembered, and
 /// it exists so that "sampled together, on one turn" is a call and not a convention three passes
 /// each keep on their own. Focus is the caller's, because the two passes that run this disagree
 /// about where it comes from and both are right: `drain_pty` asks the window itself, the animation
 /// tick uses the answer `WM_SETFOCUS` left behind.
 ///
-/// Three syscalls a turn — `IsIconic`, `DwmGetWindowAttribute`, `SHAppBarMessage` — against a pass
-/// that walks every leaf of every tab. That is why the answers land in `WindowRuntime`'s fields on
-/// the way past: the doors that fire *inside* a turn read them back from there rather than asking
-/// again about the same instant.
+/// Between four and eight syscalls a turn — `IsIconic`, `DwmGetWindowAttribute`,
+/// `SHAppBarMessage`, and the `GetWindowRect` plus one to three `WindowFromPoint`/`GetAncestor`
+/// pairs the exposure probe costs — against a pass that walks every leaf of every tab. That is why
+/// the answers land in `WindowRuntime`'s fields on the way past: the doors that fire *inside* a turn
+/// read them back from there rather than asking again about the same instant. **This is the pass
+/// that decides a delivery**, which is what the probe is priced against; nothing on the drawing path
+/// asks any of these.
 fn sample_window_place(window: &Window, focused: bool) -> notify::WindowPlace {
+    let hidden = window_is_hidden(window);
     notify::WindowPlace {
         focused,
-        hidden: window_is_hidden(window),
+        hidden,
+        // **Not asked of a window that is on no screen** (user ruling 2026-09-01). While a window
+        // is iconic, `GetWindowRect` describes the icon Windows parked off-screen rather than the
+        // window — `bt_platform::is_window_minimized` says so in its own doc — so a hit test
+        // against that rectangle would be an answer about somewhere the window is not. A cloaked
+        // window is on no screen by definition. Either way the honest answer is that nothing of it
+        // is showing, and `desktop_reach` tests the hidden bit outermost anyway.
+        exposed: !hidden && window_is_exposed(window),
         // **Every turn, never cached across them.** The reader can turn auto-hide on in Settings
         // between one wait and the next, and Windows tells this process nothing when they do — so
         // the only honest reading is the one taken at the delivery it decides.
         taskbar_is_auto_hidden: bt_platform::taskbar_is_auto_hidden(),
     }
+}
+
+/// **Whether the window manager puts this window under any of its own sample points** (user ruling
+/// 2026-09-01).
+///
+/// The window-handle half of [`bt_platform::window_is_exposed`], and it is here for
+/// [`window_is_hidden`]'s reason: the composition is one line, and where it lives is where the
+/// failure policy is stated. **A window whose handle cannot be got is reported exposed**, which is
+/// the same direction that function takes and the same direction
+/// [`bt_platform::cloaked_from_attribute`] argues for — of the two wrong answers, one leaves the
+/// reader with the marks inside a window they are looking at, and the other puts a toast on a
+/// desktop they can see.
+fn window_is_exposed(window: &Window) -> bool {
+    let Ok(hwnd) = window_hwnd(window) else {
+        return true;
+    };
+    bt_platform::window_is_exposed(hwnd)
 }
 
 /// The pane a tab's `Awaiting` is about: **the oldest place it holds.**
@@ -30567,6 +30614,11 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // from `IsIconic` and `DWMWA_CLOAKED`, and both answer the same `false`
         // for a window that has just opened.
         window_hidden: false,
+        // And a window that has just been created is one nothing is on top of.
+        // Corrected by the first pass that probes; seeding it `false` would be
+        // this process assuming it is buried under something it has not looked
+        // for yet, and the assumption would cost a toast rather than a mark.
+        window_exposed: true,
         // The shipped setting, corrected by the first pass that asks the shell.
         // Seeding it `true` would be this process assuming a desktop it has not
         // looked at yet, and the assumption would cost a toast rather than a
@@ -70412,6 +70464,7 @@ impl Runtime<'_> {
         // transition is a cached answer about a window that has since been minimised.
         let place = sample_window_place(&self.window.window, window_focused);
         self.window.window_hidden = place.hidden;
+        self.window.window_exposed = place.exposed;
         self.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
         let switches = self.notification_switches();
         let owner_is_a_shell = self.keyboard_owner_is_a_shell();
@@ -70682,6 +70735,7 @@ impl Runtime<'_> {
         // owed.
         let place = sample_window_place(&self.window.window, self.window.window_focused);
         self.window.window_hidden = place.hidden;
+        self.window.window_exposed = place.exposed;
         self.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
         let mut raised: Vec<AttentionDelivery> = Vec::new();
         let switches = self.notification_switches();
@@ -90467,6 +90521,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     let place =
                         sample_window_place(&runtime.window.window, runtime.window.window_focused);
                     runtime.window.window_hidden = place.hidden;
+                    runtime.window.window_exposed = place.exposed;
                     runtime.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
                     let mut raised: Vec<AttentionDelivery> = Vec::new();
                     let switches = runtime.notification_switches();
@@ -100194,12 +100249,19 @@ mod tests {
     /// A window that is on a screen and a turn-end lane that is switched on, which is what a fresh
     /// install is. The deliveries are collected and dropped: what these tests are about is the
     /// ledger's own bookkeeping, and `raise_attention` is the window's.
-    /// A window on a screen, on a desktop whose taskbar is where Windows puts it — which is what
-    /// these fixtures are about when they say nothing about either.
+    /// A window on a screen with something on top of it, on a desktop whose taskbar is where
+    /// Windows puts it — which is what these fixtures are about when they say nothing about any of
+    /// them.
+    ///
+    /// **Covered rather than in plain sight**, deliberately: these tests are about the ledger's own
+    /// bookkeeping and use the reach only as an observable, and the covered row is the one that
+    /// still tells `Flash` and `Toast` apart. A window the reader can see answers `Marks` for every
+    /// unfocused position and would flatten the very distinction they read.
     fn on_a_screen(focused: bool) -> notify::WindowPlace {
         notify::WindowPlace {
             focused,
             hidden: false,
+            exposed: false,
             taskbar_is_auto_hidden: false,
         }
     }

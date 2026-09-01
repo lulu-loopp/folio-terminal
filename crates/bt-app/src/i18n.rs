@@ -3377,10 +3377,21 @@ impl Text {
             // 「minimised」 alone and is the shorter half-truth of the pair; the
             // sentence a reader on such a machine reads must not be wrong about
             // the machine they are on.
+            //
+            // **The condition is「out of sight」and no longer「not in the
+            // foreground」** (§7.1.5o ⑪, user ruling 2026-09-01). Both languages
+            // said the flash happened whenever the window was not in front, and
+            // since the exposure probe that is false: a window standing in plain
+            // sight on another monitor gets the marks inside it and nothing
+            // else. It is one clause each, and it is the clause that decides
+            // whether a reader can predict what this row does. The English pays
+            // for it by shortening「this window's」to「its」and「the window is
+            // minimised」to「it is minimised」— the row's sentence has three
+            // lines and no fourth (`no_settings_sentence_needs_a_fourth_line`).
             Self::DescTurnEndNotifications => pick(
                 lang,
-                "When an agent finishes a turn, this window's taskbar button flashes, or a message goes to your desktop if the window is minimised. Marks inside the window are unaffected.",
-                "回合结束时同样提醒，即使 agent 并非在等待输入：窗口不在前台时闪烁任务栏按钮；窗口最小化或任务栏自动隐藏时发送系统通知。关闭后仅在等待输入时提醒。",
+                "When an agent finishes a turn and the window is out of sight, its taskbar button flashes, or a message goes to your desktop if it is minimised. Marks inside the window are unaffected.",
+                "回合结束时同样提醒，即使 agent 并非在等待输入：窗口不在你看得见的地方时闪烁任务栏按钮；窗口最小化或任务栏自动隐藏时发送系统通知。关闭后仅在等待输入时提醒。",
             ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
             Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),

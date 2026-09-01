@@ -1517,15 +1517,16 @@ activate_hyperlink control=1 uri="https://github.com/openai/codex/releases/lates
 
 **7.1.5o 三档、一扇门、一次投递:注意力块的收官(注意力块片 C1/C2/C3;方案 `docs/plans/attention/plan.md` §5.2 / §10.7 / §11.2 / §11.7 / §13.2.2 / §13.3,五轮评审全过,A4/A8 用户裁 2026-08-25;`crates/bt-{platform,term,render,app}`)。** 前面四片把三条真信号源接到了同一本账上,而那本账一直在对着空气说话:`Raised` 造出来就被丢掉,`Reach` 只有两档,`turn_end_notification` 那个开关在两处代码里被硬写成 `true` 并各自留了一行「等 C2」。这一片把这三件事一次做完,外加红线 3 那笔从 §7.1.5b 起就欠着的账。
 
-**① 事实源:窗口在不在人眼睛够得着的地方(C1)。** Windows 上这个问题只有一半答得可靠,而这一片只收可靠的那一半:`IsIconic`(最小化)与 `DWMWA_CLOAKED`(切到了别的虚拟桌面、被 shell 藏起来、进程被挂起)。**「被另一个窗口整个盖住」明确不做**——winit 的 `Occluded` 在 Windows 后端根本不发,自己算要每帧枚举 z 序再求区域差,那是启发式而且按帧收费。代价写出来:一扇被全屏编辑器压在下面的窗口只闪任务栏、不弹 toast,而任务栏在那种情形下正是看得见的。**读不到就报「够得着」**(`cloaked_from_attribute`),方向与 A3 那条原则同向:低报只是闪一个没人看的按钮,高报是把 toast 拍在正盯着那个 pane 的人脸上。
+**① 事实源:窗口在不在人眼睛够得着的地方(C1)。** Windows 上这个问题只有一半答得可靠,而这一片只收可靠的那一半:`IsIconic`(最小化)与 `DWMWA_CLOAKED`(切到了别的虚拟桌面、被 shell 藏起来、进程被挂起)。**「被另一个窗口整个盖住」当时明确不做**——winit 的 `Occluded` 在 Windows 后端根本不发,自己算要每帧枚举 z 序再求区域差,那是启发式而且按帧收费。代价当时就写了出来:一扇被全屏编辑器压在下面的窗口只闪任务栏、不弹 toast,而任务栏在那种情形下正是看得见的。**这一句 2026-09-01 由 ⑪ 改写,而改写的是它的理由不是它的判断**:当初不做的理由是价钱,而那个价钱是「自己算」与「按帧」两条**一起**才贵的。⑪ 两条都不走——它问的是窗口管理器自己(`WindowFromPoint` 三点各取 `GA_ROOT`),收的是**每次投递决策**而不是每帧。于是 C1 写下的那笔代价付清了一半:被压住的窗口现在测得出来,落回它本来就该落的那两行;而 C1 那句「任务栏在那种情形下正是看得见的」原样成立,也正是它保住了「可见任务栏 + 被压住」那一行仍然是闪而不是 toast。**读不到就报「够得着」**(`cloaked_from_attribute`),方向与 A3 那条原则同向:低报只是闪一个没人看的按钮,高报是把 toast 拍在正盯着那个 pane 的人脸上。
 
 **② 三档:`desktop_reach` 八行,而它读起来就是那三档(C2)。** 旧的 `reaches_the_desktop` 是一个谓词,论证是「它就是账本那条谓词的另一面」——**那句话在两档模型里对,在三档里不对**:中间那一档「在这台屏上,但不在你眼前」既不是「看过了」,也不是「桌面是唯一剩下的路」,它是第三个答案,而一个谓词只装得下两个。于是账本那条谓词 `attention_is_consumed` **一个参数都没加**(红线 4),桌面这一问另起了函数:
 
 ```text
 if window_is_hidden            { Toast }    // 够不到你,只能上桌面
 else if focused && active      { Nothing }  // 你正在看
-else if taskbar_is_auto_hidden { Toast }    // 没有可以瞄一眼的记号(⑩)
-else                           { Flash }    // 在这台屏上,但不在你眼前
+else if window_is_exposed      { Marks }    // 你看得见这扇窗,窗内的记号已经说了(⑪)
+else if taskbar_is_auto_hidden { Toast }    // 被压住了,而且没有可以瞄一眼的记号(⑩)
+else                           { Flash }    // 被压住了,但任务栏还在,能把你叫过来
 ```
 
 **第三行是 ⑩ 加的(2026-08-28)**,下面这段关于三个 bool 的算术它一个字都不改:那三个 bool 仍然欠八个答案,新那一位只把从前答 `Flash` 的那三行改判,别的一行都碰不到——理由与落地见 ⑩。
@@ -1578,6 +1579,22 @@ else                           { Flash }    // 在这台屏上,但不在你眼�
 **三条臂从 `match` 变成一个值。** `Reach` 与它引发的动作之间那对否定——**toast 不闪、flash 不上桌面**——正是本条裁决转的那个弯,而一个没有名字的形状是测试拿不住的形状。于是 `notify::interruption(reach, desktop_messages)` 交回 `Interruption::{Nothing, FlashTheTaskbarButton, PutItOnTheDesktop}`,`raise_attention` 只**执行**它交回的那一臂(不是第二道闸,红线 12);`Notifications` 关着时被拒的 toast 是 `Nothing` 而**不是降级成闪**——那一行说的是「不许往桌面写」,没说「换个方式打扰」,而在本条治的那种桌面上,降级正好就是刚被撤掉的那次顶出。
 
 红门:`notify::an_auto_hidden_taskbar_makes_the_second_tier_unreachable`(桩 true,窗口**未最小化**、不在前台 → 三行皆 `Toast`、`interruption` 答 `PutItOnTheDesktop` 且不是 `FlashTheTaskbarButton`;并钉住盯着 pane 的那格仍是 `Nothing`)、`notify::a_visible_taskbar_keeps_the_flash`(桩 false → 第二档照旧,且 `Notifications` 关着也照闪)、`notify::a_refused_toast_is_silence_and_not_a_flash`、`bt_platform::only_the_autohide_bit_takes_the_taskbar_off_the_screen`(`0`=有 bar、`ABS_ALWAYSONTOP`=有 bar)。实机两态各验一次。
+
+**⑪ 投递时刻问一句「这扇窗露着没有」,露着就只留窗内记号(用户裁 2026-09-01;`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/{attention,notify,main}.rs`)。** 用户实况:多屏 + 任务栏自动隐藏,Folio 亮在副屏上人一眼就看得见,而每次回合结束都是一条系统 toast。按 ② 那张表,这扇窗**不 hidden**(没最小化、没被 cloak)、**没焦点**,于是 ⑩ 那一行把它直接送上桌面——三个事实里,没有一个是「他正看得见它」。**加的就是这一个事实**:窗矩形取三个采样点(中心 + 两个各向内 1/4 宽高的对角),每点 `WindowFromPoint` 再取 `GetAncestor(GA_ROOT)`,任一点的根窗是自己 → 露着。露着 → `Reach::Marks`。
+
+**为什么是「1/4 内缩的对角」而不是角。** 角不是窗:Windows 11 把它圆掉了,这扇窗自己还在画出来的玻璃外面戴着一圈可拖的裙边,打在角上的命中落到桌面或落到后面那扇窗上。1/4 宽高离这两样都远,同时又足够外,能发现一扇只盖住中间的窗。取**对角**是因为那是这组点里能拉开的最大距离(半宽半高);相邻两角只采到一条带。中心排第一,因为它是「有一点是自己」时最可能命中的那一点,而判定在第一个命中处停——常见情形是**一次**命中测试而不是三次。
+
+**三点是采样,不是证明。** 一扇正好从三点之间穿过去的遮挡窗会被读成「露着」;那是**低报**方向,与 `cloaked_from_attribute` / `taskbar_auto_hidden_from_state` 同向,也是不去枚举 z 序求区域差所付的价。读不到窗矩形同样报「露着」——两个错法里,一个是让读者继续看着他窗里的记号,另一个是把 toast 拍在他看得见的桌面上,只有后者是打断。**hidden 的窗不问**:窗一旦 iconic,`GetWindowRect` 描述的是 Windows 停在屏外的那个图标而不是窗(`is_window_minimized` 自己的注释就这么写),对着那个矩形做命中测试是在问一个窗不在的地方;cloaked 的窗按定义不在任何屏上。判据里 hidden 仍写在最外层,那 16 行照答 `Toast`。
+
+**新加的是 `Reach` 的一档,不是 `Interruption` 的一档。** 露着但没焦点这一格,**要拿掉的只有任务栏闪和 toast,窗内记号照常**——而 `Interruption::Nothing` 的定义原话就是「窗内那些记号,以及此外什么都没有」,所以它**问窗口要的东西**与 `Nothing` 那一格确实一模一样,再加一个枚举值等于给同一件事起两个名。分开的是**关于读者的那句话**:`Nothing` 说「你正看着这个 pane」(账本会为它花掉一次注视),`Marks` 说「你看得见这扇窗」(不花)。两者合并,trace 就再也说不出一次沉默是哪一种。名字取 `Marks` 并按「从轻到重」排在 `Nothing` 与 `Flash` 之间。
+
+**位置:焦点对之后,任务栏位之前。** 在焦点对之后,因为「你正盯着这个 pane」比「你看得见这扇窗」强,而账本只为前者花掉注视;在任务栏位之前,因为任务栏那两行讲的是**怎么把一个没在看的人叫过来**,而一个看得见这扇窗的人根本不需要被叫——这一行正是把用户报的那个缺陷从表上拿掉的那一行。**② 那条「第二行是诚实而不是字面」的旧辩护随之退休**:它当年写 `Flash` 是靠 `FlashWindowEx` 对前台窗是 no-op 撑着的,`Marks` 把那个可见产物直接说了出来,既保住了与 `Nothing` 的区别,也不再依赖一条 Win32 的 no-op 才正确。
+
+**代价与收费口径。** 探针挂在 `sample_window_place`——那是**决定投递的那一趟**,不是画帧那一趟;一轮 syscall 从三个(`IsIconic` / `DwmGetWindowAttribute` / `SHAppBarMessage`)变成四到八个(多一个 `GetWindowRect` 与一到三对 `WindowFromPoint`/`GetAncestor`)。四个事实一起落进 `WindowRuntime` 的字段,turn 内开的那些门照旧读回来,不会对同一瞬间问两遍。`window_exposed` 出生种子 `true`,与 `window_hidden` 出生 `false` 同一个理由:刚开的窗上面没有东西,而万一有,`true` 是安静的那一边。
+
+**设置行文案跟着改一个词。** `DescTurnEndNotifications` 两语原来都写「窗口不在前台时闪烁任务栏按钮」,这句话自 ⑪ 起是**假的**——露在副屏上的窗不闪。现在写「窗口不在你看得见的地方时」/「the window is not where you can see it」。不加行、不加开关:⑩ 的理由在这里同样成立,一个开关等于请用户把自己的桌面描述给程序听。
+
+红门:`notify::a_window_standing_in_plain_sight_is_told_nothing_it_is_not_already_showing`(露着的窗在两种任务栏 × 三种焦点位下皆 `Marks`,且 `interruption` 答 `Nothing`、既不是闪也不是 toast)、`notify::a_covered_window_still_takes_the_road_that_was_always_under_it`(被压住:有任务栏 → `Flash`,自动隐藏 → `Toast`,有焦点 → `Nothing`)、`notify::every_one_of_the_thirty_two_positions_a_reader_can_be_in_has_an_answer`(五个 bool 全枚举,在屏的 16 行逐行写死,不在屏的 16 行一句话钉住,访问过的组合计数必须等于 32)、`bt_platform::the_probe_samples_the_centre_and_two_opposite_quarter_points`、`bt_platform::any_one_point_of_this_window_is_exposure_and_none_of_them_is_cover`(含「只露一角也是露着」与「读不到矩形报露着」)、`bt_platform::a_window_in_front_is_answered_by_its_first_point`(常见情形一次命中测试)、`bt_platform::a_rectangle_with_no_area_collapses_rather_than_wandering`。变异红证四条:去掉探针臂 → 六行 `Marks` 回落 `Flash`/`Toast`(用户那条报告原样复现);探针臂提到焦点对之前 → 「正盯着的那一格」与「只是看得见」不再分得开;探针臂降到任务栏位之后 → 自动隐藏那台机的 `Marks` 回落 `Toast`;`any` 改 `all` → 「只露一角」判成被压住;读不到矩形改报 `false` → 高报方向那一格红。
 
 **7.1.6c 设置面板的分组(用户裁决 2026-08-10,已落地)。** 小样字面就是**分组平铺**:`.content` 是一列 `.group-label` 各带自己的行(`design/ui-mockup.html` 2343/2406/2421/2452),不是一张扁平表。原生实现照此升级——组标题由**走一遍行表、在 `SettingsRow::group()` 变化处生成**,而不是在行表旁边另立一张组清单:高度、堆叠偏移、命中测试、绘制**四处同出一个推导**(R4 的教训:有一处忘了教,就是一个「能点不能见」的行),没有行的组自然不出标题也不占高度。行归组:Theme/Cursor/Tab layout/Sidebar → **Appearance**;Display formulas → **Rendered blocks**(小样把「排版对块做了什么」归在这一组,与它的 Maximum height 同列)。组间距照小样:首个标题 `margin-top:10px`(基础规则),其后每个标题 `margin-top:16px`(小样逐个内联覆盖)——多出的六个像素正是「隔开两组」与「隔开两行」的区别。行序仍守旧约:Sidebar 紧贴它依赖的 Tab layout 之下,Formulas 落在末尾作第二组的全部。**左侧类目导航本期不做**(既定裁决):它归 Settings 扩展块,与快捷键自定义面板同日出生——等这里的内容多到需要导航,再升级并回写小样。**2026-08-17 兑现,见 §7.1.6c-2**:组升为类目、类目各占一页、组标题成为页标题,导航由行表推导(没有行的类目不出词),小样同日回写。
 
