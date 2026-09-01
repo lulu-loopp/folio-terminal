@@ -7497,6 +7497,7 @@ pub fn build_chrome_with_preview(
         scale,
         pointer,
         ChromeContent {
+            update_mark: false,
             head_ink: HeadInk::default(),
             active_ink: TabInk::default(),
             card_ink: TabInk::default(),
@@ -7750,6 +7751,15 @@ pub struct TabRing {
 }
 
 pub struct ChromeContent<'a> {
+    /// **Whether the gear wears the update mark** (`docs/DESIGN.md` §7.51).
+    ///
+    /// A bool decided in `main.rs` and not a fact this module reads for itself,
+    /// which is this file's own division: `main.rs` reads the state file and
+    /// says *what is true*, this says *what to draw*, and `seats.rs` says
+    /// *where*. It also keeps the geometry testable without a state file — the
+    /// dot's box is asserted by handing this a `true`, not by writing a JSON
+    /// document into a temporary directory.
+    pub update_mark: bool,
     pub tabs: &'a [TabContent],
     /// How far each pane's hover-revealed head furniture has come up — see
     /// [`HeadInk`], which is also where the rule about the hit test is written.
@@ -8346,6 +8356,7 @@ pub fn build_chrome_for_tabs(
     content: ChromeContent<'_>,
 ) -> WindowChrome {
     let ChromeContent {
+        update_mark,
         tabs,
         head_ink,
         active_ink,
@@ -8448,6 +8459,7 @@ pub fn build_chrome_for_tabs(
             chevron_turn,
             rail,
         },
+        update_mark,
         (&mut quads, &mut labels, &mut sprites),
         &mut flight_group,
     );
@@ -10133,6 +10145,13 @@ fn window_chrome(
     scale: f32,
     hover: Option<ChromeTarget>,
     strip: TabStrip<'_>,
+    // Whether the gear wears the update mark — see
+    // `ChromeContent::update_mark`. A parameter of its own and not a field of
+    // `TabStrip`, because it has nothing to do with the tabs: the caption run
+    // stands in the same place whatever the strip is doing, and a bool routed
+    // through a struct that is then handed on to a function which must ignore
+    // it is a field that will eventually be read by the wrong reader.
+    update_mark: bool,
     output: (
         &mut Vec<ChromeQuad>,
         &mut Vec<ChromeLabel>,
@@ -10305,6 +10324,31 @@ fn window_chrome(
                 palette.title_text
             },
         ));
+        // **The update mark** (`docs/DESIGN.md` §7.51) — the same 6px accent
+        // disc a tab wears when something it holds is unread, on the corner of
+        // the gear.
+        //
+        // Not a fifth caption button and not a word: what it has to say is *go
+        // and look at the settings*, and that is precisely the sentence a dot on
+        // a control already says everywhere else in this window. It is drawn
+        // after the glyph so it stands on top of it, and it is deliberately not
+        // affected by hover — a mark that vanished under the pointer would go
+        // out exactly as the reader reached for it.
+        if update_mark && target == ChromeTarget::Settings {
+            let dot = (crate::marks::DIRTY_DOT_LOGICAL_PX * scale)
+                .round()
+                .max(1.0);
+            // The gear's top-right, overlapping its own corner by half a dot:
+            // the glyph is a wheel with teeth and a dot tucked outside it reads
+            // as a speck on the title bar rather than as a mark on the control.
+            let slot_left = (glyph_left + glyph - dot / 2.0).round();
+            let slot_top = (glyph_top - dot / 2.0).round();
+            sprites.push(crate::marks::dirty_dot_sprite(
+                [slot_left, slot_top, slot_left + dot, slot_top + dot],
+                palette.accent,
+                scale,
+            ));
+        }
     }
 }
 
@@ -20399,6 +20443,104 @@ mod tests {
         assert!(hit_chrome(&seats, &layout, 1.0, HeadRun::default(), 480.0, 300.0).is_none());
     }
 
+    /// PIN (§7.51) — **the gear wears the update mark only when it is handed
+    /// one, and the mark stands on the gear rather than beside it.**
+    ///
+    /// Two things this has to say at once. The first is that nothing is drawn
+    /// on a machine that has not been told about a newer build, which is every
+    /// machine on the day its build was the newest — a dot that appeared by
+    /// default would be a permanent unread badge on a settings button. The
+    /// second is *where*: a disc on the title bar that does not overlap the
+    /// glyph reads as a speck rather than as a mark on a control, so its box is
+    /// asserted against the gear's own, not merely counted.
+    ///
+    /// MUTATION: hand `update_mark: false` and the sprite is still there;
+    /// centre the dot on the button box instead of the glyph's corner and the
+    /// overlap assertions go red.
+    #[test]
+    fn the_gear_wears_the_update_mark_only_when_it_is_handed_one() {
+        let pill_count = |mark_lit: bool| {
+            caption_sprites(mark_lit)
+                .iter()
+                .filter(|sprite| matches!(sprite.mark, ChromeMark::ControlPill { .. }))
+                .count()
+        };
+        let unmarked = pill_count(false);
+        assert_eq!(
+            pill_count(true),
+            unmarked + 1,
+            "the mark is one disc, and only a build that was told about a newer one draws it"
+        );
+
+        // And it is on the gear. The gear is the first of the four caption
+        // boxes, and its glyph is 14 logical pixels centred in that box.
+        let sprites = caption_sprites(true);
+        let gear = sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::Gear)
+            .expect("the caption run carries a gear");
+        let dot = sprites
+            .iter()
+            .find(|sprite| matches!(sprite.mark, ChromeMark::ControlPill { .. }))
+            .expect("and the mark this build was handed");
+        assert!(
+            dot.rect[0] < gear.rect[2] && dot.rect[2] > gear.rect[2],
+            "the disc straddles the gear's right edge: gear {:?}, dot {:?}",
+            gear.rect,
+            dot.rect
+        );
+        assert!(
+            dot.rect[1] < gear.rect[1] && dot.rect[3] > gear.rect[1],
+            "and its top edge: gear {:?}, dot {:?}",
+            gear.rect,
+            dot.rect
+        );
+    }
+
+    /// The window's own bar with the update mark on or off, and nothing else
+    /// said.
+    ///
+    /// [`window_chrome`] directly rather than through `build_chrome`, because
+    /// the caption run is what is under test and it stands in the same place
+    /// whatever the tabs and the seats are doing — a whole `ChromeContent` here
+    /// would be a page of fields the assertions never read.
+    fn caption_sprites(update_mark: bool) -> Vec<ChromeSprite> {
+        let tabs = [TabContent {
+            flight: 0.0,
+            mark_kind: ChromeMark::ProfilePowerShell,
+            title: "PowerShell".to_owned(),
+            pane_count: 1,
+            badge_text_width: 0.0,
+            mark: TabMarkState::default(),
+            trailer: TabTrailer::default(),
+            offset: 0.0,
+            landing: 0.0,
+            edit: None,
+        }];
+        let (mut quads, mut labels, mut sprites) = (Vec::new(), Vec::new(), Vec::new());
+        let mut flight = ChromeGroup::default();
+        window_chrome(
+            1600.0,
+            1.0,
+            None,
+            TabStrip {
+                tabs: &tabs,
+                active_tab: 0,
+                active_ink: TabInk::default(),
+                grabbed: None,
+                strip_preview: None,
+                scroll: 0.0,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                rail: RailState::default(),
+            },
+            update_mark,
+            (&mut quads, &mut labels, &mut sprites),
+            &mut flight,
+        );
+        sprites
+    }
+
     /// PIN (visual fidelity pass): the caption glyphs are the mock-up's own
     /// `<symbol>`s at the sizes `.capbtn svg` gives them — 14px for the gear,
     /// 10px for the three window buttons — centred in their 46x40 box, and the
@@ -21251,6 +21393,7 @@ mod tests {
             1.0,
             pointer,
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -21337,6 +21480,7 @@ mod tests {
                 1.0,
                 ChromePointer::default(),
                 ChromeContent {
+                    update_mark: false,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -21468,6 +21612,7 @@ mod tests {
                 1.0,
                 ChromePointer::default(),
                 ChromeContent {
+                    update_mark: false,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -24789,6 +24934,7 @@ mod tests {",
                     ..ChromePointer::default()
                 },
                 ChromeContent {
+                    update_mark: false,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -25016,6 +25162,7 @@ mod tests {",
                 ..ChromePointer::default()
             },
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -25125,6 +25272,7 @@ mod tests {",
                 ..ChromePointer::default()
             },
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -26858,6 +27006,7 @@ mod tests {",
             1.0,
             ChromePointer::default(),
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -29303,6 +29452,7 @@ mod tests {",
                 ..ChromePointer::default()
             },
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -29512,6 +29662,7 @@ mod tests {",
                     ..ChromePointer::default()
                 },
                 ChromeContent {
+                    update_mark: false,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -29626,6 +29777,7 @@ mod tests {",
                     ..ChromePointer::default()
                 },
                 ChromeContent {
+                    update_mark: false,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -29859,6 +30011,7 @@ mod tests {",
             scale,
             pointer,
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -33405,6 +33558,7 @@ mod tests {",
             1.0,
             ChromePointer::default(),
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -33476,6 +33630,7 @@ mod tests {",
             1.0,
             pointer,
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -34282,6 +34437,7 @@ mod tests {",
             scale,
             ChromePointer::default(),
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -34561,6 +34717,7 @@ mod tests {",
                 ..ChromePointer::default()
             },
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -34824,6 +34981,7 @@ mod tests {",
             1.0,
             ChromePointer::default(),
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -34992,6 +35150,7 @@ mod tests {",
             1.0,
             ChromePointer::default(),
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -36441,6 +36600,7 @@ mod tests {",
                 ..ChromePointer::default()
             },
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::new(card_ink),
@@ -40657,6 +40817,7 @@ mod tests {",
             1.0,
             ChromePointer::default(),
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -42416,6 +42577,7 @@ mod tests {",
                 1.0,
                 ChromePointer::default(),
                 ChromeContent {
+                    update_mark: false,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -42557,6 +42719,7 @@ mod tests {",
             1.0,
             pointer,
             ChromeContent {
+                update_mark: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),

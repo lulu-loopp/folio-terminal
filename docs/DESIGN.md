@@ -6188,3 +6188,102 @@ BT_DPI stage=resized              winit_scale=2   win32_dpi=192 authoritative_sc
 **停在缝上六秒不碰它:** 修前 `1400×900` 落成 `1072×731`(比正确答案 `1050×675` 大 `+22, +56`),而且**位置也漂了**——窗顶从 `y=1500` 被推到 `y=1573`(winit 的 `conservative_rect` 加那圈 nudge);修后 `1400×900` 落成 `1050×675`,位置 `-2700,1500` 一动不动,此后六秒**一行 `BT_DPI` 都没有**。两跑都是**十一次变化十一行 `scale-factor-changed`,一次连环都没有**,两跑收尾都是 `exit code 0`、属于本次运行的 `folio` **0 个**、`diagnostics.log` 里除 `BT_DPI` 只有一行启动首转的窗线程占用(debug 版的常态)。
 
 **没做的,如实写。** ① **那个「一次拖动里翻十五次」的失控本身没有在这里复现**,复现的是**它每一步的增量**。探针每次都自己指定矩形,于是每一次跨缝都被重新摆正,棘轮攒不起来;而用户那次是**一只手**把窗拖在缝上,每长大一次就重新横跨、再判定一次。要的证据是那圈边框存不存在、有多大——上面那张表把它按住了,失控只是它乘以 N 的后果。② **`stage=size-move-settled` 在这两跑里是 0 行**:`SetWindowPos` 不进 OS 的模态 move/size 循环,`in_size_move` 全程为假,所以裁决二那条路**实机没有被走过**,它由 `a_seam_that_flips_twenty_times_under_one_hand_is_settled_once` 与那条形状钉按住。真手拖动的那一趟留给下一个握着这台机器的人,判据是一行:一次跨屏拖动里 `stage=size-move-settled` **恰好一行**。
+
+
+### 7.51 一个已经装好的 preview 没有任何途径知道自己过期了：一次 GET、一张 24 小时的邮戳、一枚齿轮上的点(v0.1.1 新版提示单，2026-09-01，已落地；`crates/bt-platform/src/http.rs`(新)、`crates/bt-app/src/update.rs`(新)、`crates/bt-persist/src/{update.rs(新),settings,migrate,lib}.rs`、`crates/bt-app/src/{settings,seats,i18n,main}.rs`、`docs/PRIVACY.md`、`README.md`、`README.zh-CN.md`)
+
+**问题只有一句：v0.1.0-preview 已经在别人机器上跑着，而 0.1.1 出来的时候没有任何东西会告诉他们。** 装了就装了，除非那个人自己想起来去翻 releases 页。
+
+这一节写的是**最轻的那一版**，边界先立在这里，往后每一条都是从这条边界推出来的：
+
+> 每 24 小时至多一次、本机所有窗口合计，向一个写死的地址发一次 `GET`，请求里除了 `User-Agent: Folio` 不带任何东西，失败完全静默，拿到答案只做两件事——齿轮上画一个点、设置里多一行字。**不下载、不替换、不重启。**
+
+#### ① 为什么是齿轮上一个点，而不是提示条、toast 或弹窗
+
+仓里已经有三种说话的语汇，三种都试着往这件事上套过：
+
+- **系统 toast**(`bt_platform::Notifier`)——出局。它会跳到桌面上，而「有新版」不是一件需要打断人的事；一个终端为了自己的版本号弹一次系统通知，和它整页 PRIVACY 想说的话是相反的。
+- **pane 提示条**(`notice.rs`)——出局，但差一点。那条 strip 本来就是为「没人要求过、答了才走」的话写的，PowerShell 整合与预览文件被移走都在穿它，穿第三次并不难。它输在**位置**：strip 要从 pane 正文里吃掉一行 30px，而正文是别人在干活的地方。为一件「这个月看不看都行」的事，每次开窗都占掉一行输出，不成比例。
+- **齿轮角标 + 设置里一行**——采用。理由是它把「打扰」和「找得到」拆开了：点本身不占任何人的空间、不动布局、不抢焦点，它要说的整句话只是**去设置看一眼**；而具体是哪个版本、去哪儿看，是设置那一行的事。这正是这扇窗里一个控件上的点在别处已经说过的那句话(tab 上的 `.unreaddot`、卡头的脏点)，所以它连新语汇都不是——`marks::dirty_dot_sprite` 原样复用，`--accent`、6px、压在齿轮右上角、**不随 hover 变化**(一个在手伸过去的时候熄灭的标记等于没有)。
+
+那一行本身走 General 页最后一行 `Update check`：行名说这是什么，说明句说打开时发生什么和它**不会**做什么，而picker 脚下挂一个 `Open releases page`——就是 `Add scheme…`、`Install fonts…` 已经站着的那个位置(「属于这一行、但不是这一行的两个答案之一」的动词)。没有省略号，因为它不再问第二次，直接把地址交给浏览器。
+
+**点什么时候熄。** 不是「点过链接」，是**读者站到了那一行所在的页上**。判定挂在 `settings_layout` 里那个「唯一既知道正在显示哪一页、又被所有通向显示它的路都经过」的位置——PSReadLine 探针和 copilot 探针已经挂在那儿，理由同一条。已看到的版本按 **tag** 记(`seen_tag`)，不是记一个 bool：下一个版本自己会把点重新点亮，没有任何东西需要去清。
+
+#### ② 为什么没有新依赖：WinHTTP 是一个 feature，不是一个包
+
+仓里**一个 HTTP 客户端都没有**——569 个包的 lock file 里没有 ureq/reqwest/hyper/curl，第一方代码里连一个 socket 都没开过(唯一联网的是 WebView2 自己抓页面)。所以这一单的第一个问题是「引哪个」，答案是**一个都不引**：`bt-platform` 已经带着 `windows` 0.62，打开 `Win32_Networking_WinHttp` 这个 **feature** 之后 `Cargo.lock` **一行都没变**(已验：`cargo update --offline` 报 `Locking 0 packages`，`git diff Cargo.lock` 只多了 bt-app 依赖表里的一行 `serde`)。这是 §8 那条门槛，和 `Win32_Media_MediaFoundation`(视频块)、`hayro`、`serde_json` 进来时是同一扇门。
+
+除了包的数量，还有两条更重要的：**代理和证书是机器自己的答案**。`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` 会读本机的静态代理、PAC 与 WPAD，证书走系统 store、吊销走系统策略——一个自带 root store 的 Rust 客户端等于对「这个人信任谁」给出第二个、而且更陈旧的意见，在一台被管的笔记本上还会以「在写代码的人那台机器上看起来是对的」这种最坏的分布失败。
+
+`crates/bt-platform/src/http.rs` 是这个 crate 的**第五道 unsafe 边界**(前四道：Win32 给窗口用、WebView2、Win32 对着本进程、命名管道)，也是全产品**唯一一个本进程自己开的 socket**。它刻意**不是一个客户端**：没有重定向、没有 keep-alive、没有 POST、没有请求体、没有调用方能指定的 header、没有 `http://`。一个函数，长成产品实际要发的那一次调用的形状。
+
+**时限是两层的。** WinHTTP 的四个超时是**按阶段**的(解析/连接/发送/接收各 5s)，也就是说它们**合起来不构成一个上界**——一个一字节一字节滴的响应永远待在接收超时以内。所以读循环自己带一个 15s 的 deadline，那个数才是调用方能拿去推理的数。
+
+#### ③ 那个 404：`/releases/latest` 会把 pre-release 全部排除
+
+**这条不是想出来的，是撞出来的，而且它差点让整个功能在所有机器上静默地不存在。** 第一版按最显然的写法调 `/repos/lulu-loopp/folio-terminal/releases/latest`，真机实测答 **404**。原因是 GitHub 的 `latest` 定义里**同时排除 draft 和 pre-release**——而 Folio 至今发布过的每一个 release 都是 pre-release。也就是说：那个看起来最对的端点，会让这个功能在每一台机器上都拿不到答案，而且是以本模块**刻意设计成的**那种失败方式——不报错、不亮点、什么都不发生，没有任何人会注意到。
+
+改成 `/releases`(列表)。同一次实测：18179 字节、`tag_name: "v0.1.0-preview"`。列表没有那条规则，它带回每一个已发布的 release；draft 不用过滤，因为 draft 只对有 push 权限的人可见，而这个请求不带任何凭据——写一个 draft 过滤器是在防一件按协议不可能发生的事。
+
+由此还多出一条**必须取最大值而不是取第一个**：GitHub 这个列表按**创建时间**倒序，而创建时间序不等于版本序。今天为一条还在维护的老线发一个 `0.1.4`，它会排在上个月的 `0.2.0` 前面，取第一个就等于请一个 `0.2.0` 的读者降级。所以 `newest_tag` 是「全部解析得动的 tag 里取 semver 最大」，解析不动的那个(比如一个 `nightly`)**跳过而不是让整个答案失败**。
+
+响应上限从 256 KB 提到 1 MiB，也是这次量出来的：一个 release 对象连 release notes 带四个 asset 是 18 KB，一页 30 个约 540 KB。
+
+#### ④ 版本比较：预发布后缀那一条，正好是这个产品自己的处境
+
+`Version` 实现的是 semver 的 precedence，不是自造的比较。三条里最要紧的是「**pre-release 低于同号正式版**」——因为发布页上的 tag 是 `v0.1.0-preview`，而它装出来的那个二进制里的 `CARGO_PKG_VERSION` 是 `0.1.0`。方向写反的话，**现有的每一个安装在第一次启动时都会宣布自己有更新，而那个更新就是它自己**。测试把 14 个 tag 排成一条升序链两两断言(`0.1.0-alpha < …-alpha.1 < …-alpha.beta < …-beta < …-preview < …-rc.2 < …-rc.10 < 0.1.0 < 0.1.1 < …`)。
+
+`+hash` 是 build metadata，**不参与比较**，所以同一个版本换个 commit 构建出来不算新版——这条单独断言(`0.1.0+abc == 0.1.0`)。类型里干脆**不存** build 段：一个「谁都不许拿来比」的字段，早晚会有人拿来比。
+
+比较不出来就是 `None`，`None` 与「连不上」走同一条路：什么都不画。**绝不猜**——一个会猜的实现能凭空造出一个更新。
+
+#### ⑤ 两扇窗只问一次：邮戳回答「到点了吗」，claim 回答「有人在问了吗」
+
+两个问题，两个文件，缺一个都不成立：
+
+- `update-check.json` 的 `checked_at_ms` 回答**顺序**上的重复：今天已经问过了，今晚再开十扇窗也不问。
+- `update-check.lock` 回答**并发**上的重复：两扇窗同时启动，各自读到一份还没被谁改过的邮戳，于是各自决定去问。
+
+`run` 里三步的**顺序本身**就是这条规矩：**先抢 claim，再读邮戳，再写邮戳**(写在请求**之前**)。倒过来写——先判断再抢——两扇窗会在任何一方落笔之前读到同一份旧邮戳。claim 用 `create_new` 打开一个文件，那是内核的一次原子操作,所以它是一把真锁，而不是一次「读一下然后满怀希望地写」。
+
+抢不到的那扇窗**不等**：这一趟它什么都不做，齿轮画的是它开窗时文件里的那份答案。另一条路——挂一个线程等对面的请求回来再读答案——买到的是「点早一次启动出现」，付出的是「一个能被别人的网络卡住的线程」。
+
+claim 里写着它被拿走的那一毫秒，`CLAIM_STALE_MS`(5 分钟)以上就当成**被进程猝死留下的**并接管。接管本身不是原子的，代价是有界的：崩溃之后、在同一瞬间恢复同一个 claim 的两扇窗，会多发一次请求，一次。要把这个也堵上就得再来一把锁，而那把锁的猝死又得第三把。
+
+**邮戳在失败时照样前进**,这就是「不重试风暴」的全部：记的是**什么时候问的**，不是**什么时候被答复的**。一台在火车上的笔记本因此是一天一次尝试，而不是每扇窗每次启动一次——受害最深的本来正是最答不上来的那台机器。
+
+#### ⑥ 开关、schema 与隐私：默认开的那一格，是同一个 commit 里必须被写下来的那一格
+
+`settings.json` 加 `update_check`，schema **v25→v26**,走仓里既有的迁移阶梯(`migrate_settings_v25_to_v26`)。它是这条阶梯上**唯一一级「打开了一件以前从不发生的事」**——v25 是把一个既有习惯写上名字，而这一级是**开始**做一件事，正是一个静默默认最不该做的动作。
+
+默认仍然是**开**，理由和代价都写在那一级的注释里：它准许的是一次固定地址的 `GET`、一天至多一次、不带关于这台机器或这个人的任何东西；而 `false` 的代价是这个开关存在的全部意义——一个还在跑八月那版 preview 的人，没有别的途径被告知他绕开的那个崩溃九月已经修了。**同一个 commit 里 `docs/PRIVACY.md` 与两份 README 的隐私节全部改完**：查什么地址、带什么(只有 `User-Agent: Folio`，无版本号无标识符)、多久一次、答案存在哪、怎么关。一个会发起请求的默认，只有在它先被写进文档之后才站得住。
+
+这里有一条**必须如实说的取舍**：`User-Agent` 不能为空。GitHub 的 API 会用 403 拒绝不带 user agent 的请求，所以问题不是「要不要标识这个程序」，而是「标识到什么程度」——现在是产品名，**不带版本、不带构建、不带操作系统、不带任何标识符**。带上版本号就等于把「按版本统计安装量」这件本产品自己不做的事，交给别人去做。
+
+文档不是门，所以另加了一道：`the_question_carries_nothing_about_the_machine` 把四个常量与三份文档对起来钉住——地址、路径里没有 query、agent 是 `Folio` 且不含 `VERSION`/`COMMIT`，并且三份文档都写着这个 host 和 `update_check` 这个键名。一个悄悄开始上报版本号的构建，得先改这条测试才发得出去。
+
+#### ⑦ 红门与变异红证
+
+十条，全部对着可注入的 `Releases` trait 与假时钟跑，**一次都不打真 GitHub**。每条的变异都实跑过、都见了红：
+
+| 门 | 变异 | 红 |
+|---|---|---|
+| `a_tag_is_ordered_the_way_semantic_versioning_says` | pre-release 那一臂答 `Equal` | ✓ |
+| `only_a_strictly_newer_tag_is_an_update` | `>` 放成 `>=` | ✓ |
+| `a_mark_that_has_been_answered_stays_out_until_the_next_release` | 去掉 `latest != seen` | ✓ |
+| `the_releases_page_is_asked_at_most_once_a_day` | `due` 恒真 | ✓ |
+| `a_refused_question_is_silent_and_is_not_asked_again_until_tomorrow` | 邮戳只在 `Ok` 臂写 | ✓ |
+| `a_second_window_asking_at_the_same_instant_does_not_ask` | `Claim::take` 不碰文件恒答 `Some` | ✓ |
+| `an_abandoned_claim_is_recovered_rather_than_waited_on` | 同上 | ✓ |
+| `a_release_list_yields_its_highest_version_or_nothing` | `max_by` 换成 `next` | ✓ |
+| `the_gear_wears_the_update_mark_only_when_it_is_handed_one` | 传进去的旗子写死 `false` | ✓ |
+| `the_rows_sentence_names_the_version_in_both_languages` | 任一列去掉 `{version}` | — |
+
+「两扇窗」那条是**从第一扇窗的请求内部**发起第二扇窗的——那是两者唯一真能撞上的时刻：假 source 在第一扇窗握着 claim 的时候产生答案，并在那里再调一次 `run`。任何比真锁弱的东西(读一下邮戳再写、进程内的一个 flag)都会放这次内层调用过去。
+
+#### ⑧ 挂账
+
+- **抢不到 claim 的那扇窗这一趟不会显示对面刚拿到的答案**，要到下次启动。这是 ⑤ 里那笔明账，不是缺陷。
+- **点熄灭的那一帧齿轮不重画。** 那一刻齿轮在 modal 的 scrim 后面，没人在看；关掉对话框会整块重建 chrome，那才是齿轮下一次成为可见物的时刻。
+- **`Reset to defaults` 不碰这一行**(它不在任何 Advanced 组里，且在 `reset_advanced_row` 里被点名而不是被 `_` 扫掉)：一个页面的重置不是把网络请求重新打开的许可。

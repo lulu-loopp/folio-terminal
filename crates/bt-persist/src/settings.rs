@@ -166,7 +166,16 @@ use serde::{Deserialize, Serialize};
 /// `main` first. Two keys cannot share a rung — `SETTINGS_MIGRATIONS` is the only map of the road
 /// from an old file to this one — so the later slice takes the later number, which is a rule and
 /// not a judgement about which key mattered more.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 25;
+///
+/// **v26 carries `update_check`**, whether this build asks the releases page once a day whether a
+/// newer one exists. It is the first key in this file that governs a network request, and it is
+/// the only one, which is why it defaults **on** rather than off: a reader who has installed a
+/// preview has no other way to learn that the bug they hit was fixed a month ago, and the whole
+/// of what the switch permits is one `GET` of one address that carries nothing about them
+/// (`docs/PRIVACY.md`). It lands the way v13-v16, v19 and v21 did — a default chosen for a thing
+/// that did not exist before, stated here so that the choice is a decision somebody reads rather
+/// than `bool::default()` answering by accident.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 26;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -329,7 +338,8 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "key_hints": true | false,
 ///   "turn_end_notification": true | false,
 ///   "cards_gesture_hint_offer": true | false,
-///   "copy_on_select": true | false
+///   "copy_on_select": true | false,
+///   "update_check": true | false
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -834,6 +844,19 @@ pub struct SettingsV1 {
     /// closes it.
     #[serde(default = "default_copy_on_select")]
     pub copy_on_select: bool,
+    /// **Whether this build asks the releases page whether a newer one exists** (v26,
+    /// `docs/DESIGN.md` §7.51).
+    ///
+    /// The only key in this file that governs a network request, and the request it governs is
+    /// one `GET` of one fixed address, at most once a day, carrying nothing about the machine or
+    /// the person at it. What comes back is a version number; what is done with it is a mark on
+    /// the gear and a line in this dialog. Nothing is downloaded and nothing is replaced, whatever
+    /// this key says.
+    ///
+    /// Off, the thread is never started and `update-check.json` is never written. It is not a
+    /// quieter check — there is no check.
+    #[serde(default = "default_update_check")]
+    pub update_check: bool,
 }
 
 /// `serde`'s door for a v14 key that is missing from a file this build is reading.
@@ -913,6 +936,15 @@ fn default_copy_on_select() -> bool {
     true
 }
 
+/// `serde`'s door for a v26 key missing from a file this build is reading.
+///
+/// A function and not `#[serde(default)]` for the reason every `bool` above it has one: `false` is
+/// what a `bool` answers on its own, and `false` here is a reader who switched the check off — an
+/// answer they never gave, arrived at from an absent line.
+fn default_update_check() -> bool {
+    true
+}
+
 impl Default for SettingsV1 {
     fn default() -> Self {
         Self {
@@ -967,6 +999,8 @@ impl Default for SettingsV1 {
             // A drag that lets go of a selection has always written it to the clipboard; the row
             // gives that habit a name rather than choosing it.
             copy_on_select: true,
+            // A preview has no other way to say that it has been superseded.
+            update_check: true,
         }
     }
 }

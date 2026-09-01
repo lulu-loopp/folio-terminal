@@ -269,6 +269,7 @@ dependencies = [
  "hayro",
  "image",
  "pollster",
+ "serde",
  "serde_json",
  "syntect",
  "toml_edit 0.22.27",

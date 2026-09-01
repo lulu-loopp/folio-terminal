@@ -70,6 +70,18 @@ winit.workspace = true
 # no new package — `docs/DESIGN.md` §8's bar, met by a dependency that was
 # present and is now also compiled into the product.
 serde_json.workspace = true
+# **The one field this build reads out of a release object** (`update`,
+# `docs/DESIGN.md` §7.51). The answer to the update check is somebody else's
+# JSON arriving from outside this process, and it is read into a struct with a
+# `tag_name` in it and nothing else — so a response shaped like anything at all
+# other than that is a parse failure, which is the silence this feature fails
+# into. `serde_json::Value` would have made every one of those shapes a `None`
+# indistinguishable from a missing key.
+#
+# Already in the lock file — `bt-persist` next door has carried it since the
+# first settings file — so naming it here costs no new package, which is
+# `docs/DESIGN.md` §8's bar.
+serde.workspace = true
 # **And the third document that is not ours**: `~/.codex/config.toml`
 # (`attention_codex`). Same contract as the settings file above and a stronger
 # reason for the crate chosen — TOML carries comments, and a round trip through

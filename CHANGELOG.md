@@ -4,6 +4,20 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **Update check.** Folio asks the releases page once a day whether a newer
+  version exists. When there is one, the settings gear wears a dot and
+  Settings > General names the version, with `Open releases page` at the foot of
+  that row's picker. Nothing is downloaded and nothing is replaced. The request
+  is one `GET` of a fixed address carrying `User-Agent: Folio` and nothing else;
+  it is at most once every 24 hours across every window on the machine, and any
+  failure is silent. Switch it off at Settings > General > **Update check**, or
+  with `"update_check": false` in `settings.json`. What is asked and what is
+  stored is written out in [`docs/PRIVACY.md`](docs/PRIVACY.md).
+
 ## 0.1.0-preview (unreleased)
 
 The first public build. Everything below is new, so it is grouped by what part of

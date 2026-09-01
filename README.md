@@ -206,10 +206,18 @@ read Off.
 
 ## Privacy
 
-Folio sends nothing anywhere: no telemetry, no analytics, no crash reporting, no
-update check, and no network client of its own. There is no model and no API key
-in it; it serves the agents you already run. The only thing that reaches the
-network is a page you open in the web preview.
+Folio sends nothing about you anywhere: no telemetry, no analytics, no crash
+reporting. There is no model and no API key in it; it serves the agents you
+already run. Two things reach the network: a page you open in the web preview,
+and the update check.
+
+The update check is one `GET` of
+`https://api.github.com/repos/lulu-loopp/folio-terminal/releases`, at most
+once a day across every window, carrying a `User-Agent` of `Folio` and nothing
+else - no version, no identifier, no query string. What it can do with the answer
+is draw a mark on the settings gear and a line in Settings; it downloads nothing
+and replaces nothing. Switch it off at Settings > General > **Update check**, or
+with `"update_check": false` in `settings.json`.
 
 What it remembers lives in two directories: `%APPDATA%\Folio` for settings,
 profiles, schemes and the session, and `%LOCALAPPDATA%\Folio\WebView2` for the web

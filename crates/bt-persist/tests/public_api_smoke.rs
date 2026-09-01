@@ -65,6 +65,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         turn_end_notification: false,
         cards_gesture_hint_offer: false,
         copy_on_select: false,
+        update_check: false,
     };
     write_settings_atomic(&path, &settings).unwrap();
 
