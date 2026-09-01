@@ -96,28 +96,47 @@ impl fmt::Display for Site {
     }
 }
 
-/// **How far a request gets on this desktop** (`attention` plan §10.7's eight-row table).
+/// **How far a request gets on this desktop** (`attention` plan §10.7's table; the fourth tier is
+/// the user ruling of 2026-09-01).
 ///
 /// Named here because it is the ledger's own vocabulary — every `toast` line carries one, and both
-/// doors evaluate the same three-way answer. The *function* that computes it from the window's
-/// facts is [`crate::notify::desktop_reach`]; this is the answer's shape, and the shape is what the
-/// ledger and its trace need to agree on first.
+/// doors evaluate the same answer. The *function* that computes it from the window's facts is
+/// [`crate::notify::desktop_reach`]; this is the answer's shape, and the shape is what the ledger
+/// and its trace need to agree on first.
+///
+/// **Written from quietest to loudest**, which is the only order the four have: each one asks more
+/// of the reader than the one above it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Reach {
     /// You are looking at it. Adding anything would be telling you what you can already see.
     Nothing,
-    /// On this screen but not in front of your eyes: the in-window marks, and a taskbar flash
+    /// **This window is on a screen you can see, and the marks inside it are the whole of what is
+    /// owed** (user ruling 2026-09-01).
+    ///
+    /// The tier the exposure probe bought. Its neighbours above and below both say something this
+    /// one does not: [`Self::Nothing`] says the reader is looking at *this pane*, and [`Self::Flash`]
+    /// says the window is somewhere they would have to be called to. This says the window is in
+    /// plain sight and the dot on its tab is therefore already in plain sight, so calling out to
+    /// the taskbar or to the desktop would be pointing at something the reader can see.
+    ///
+    /// It is separate from `Nothing` rather than folded into it because the two are different
+    /// sentences about the reader — one has seen it, the other could — and the ledger's own
+    /// `attention_is_consumed` retires a latch on the first and not on the second. Folding them
+    /// would make the trace unable to say which happened.
+    Marks,
+    /// Not in front of your eyes and not in sight either: the in-window marks, and a taskbar flash
     /// where Windows will honour one.
     Flash,
-    /// Out of reach of the window entirely — minimised or on a virtual desktop the reader has
-    /// switched away from. The desktop is what is left.
+    /// Out of reach of the window entirely — minimised, on a virtual desktop the reader has
+    /// switched away from, or buried under somebody else's window on a desktop with no taskbar to
+    /// flash. The desktop is what is left.
     ///
-    /// The two facts behind it are `IsIconic` and `DWMWA_CLOAKED`, and "completely covered by
-    /// another window" is deliberately **not** one of them: winit's `Occluded` is never delivered
-    /// by the Windows backend, and computing it here would mean walking the z-order and
-    /// differencing regions every frame — a heuristic, priced per frame. The cost of leaving it
-    /// out is that a window buried under a full-screen editor flashes its taskbar button instead
-    /// of raising a toast, and a taskbar button is visible in exactly that situation.
+    /// **"Completely covered by another window" used to be deliberately absent and is now
+    /// answered** (user ruling 2026-09-01). What ruled it out was the price — winit's `Occluded` is
+    /// never delivered by the Windows backend, and differencing regions over the z-order *every
+    /// frame* is a heuristic on a hot path. The probe is neither: it asks the window manager itself
+    /// (`WindowFromPoint`) about three points, and it asks **on the pass that decides a delivery**
+    /// rather than on the pass that draws. See [`crate::notify::WindowPlace::exposed`].
     Toast,
 }
 
@@ -125,6 +144,7 @@ impl fmt::Display for Reach {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Nothing => "nothing",
+            Self::Marks => "marks",
             Self::Flash => "flash",
             Self::Toast => "toast",
         })
