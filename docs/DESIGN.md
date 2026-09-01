@@ -3473,7 +3473,7 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
   - `Runtime::hole_for(presence, floored)` 是那句裁决本身，纯函数：`Shown` 且 `floored` 才有洞。摆放失败只打 stderr 而洞照挖，正是修前的形状。
   - **每帧摆放的代价用第三个缓存抵掉**：`WebSeat::placed` 记住上次给 compositor 的矩形，没动就一次比较——和 `sized`、`presence` 是同一类东西，也和它们一起在 `take_address` 里跟着地址走。它在**唯一改变「地板+页」这一对**的地方被清掉：`InstallEvents` 里 visual 刚进树的那一句。
 - **红测三扇门**。`a_hole_is_only_cut_where_a_floor_already_stands`（bt-app，纯值）——让 `hole_for` 不看 `floored` 就红，而那正是用户拍到的那个 build。`a_pages_floor_is_minted_by_whoever_first_places_it_and_not_by_the_engine`（bt-platform，源钉）——把 `let Some(web) … else { return }` 挪到 `ensure_page_ground` 之前第一句红，给 `attach_web_visual` 塞回一次自己的 `create_page_ground` 最后一句红。上一片的 `a_pages_floor_is_placed_and_removed_with_the_page_and_never_alone` 原样仍绿：一次调用摆两个、一次调用撤两个，这一片只是把「摆」提前到了引擎之前。
-- **挂账**。ⓐ `place_web_visual` 每帧新建 `IDCompositionRectangleClip` 的旧账（上一片的 ⓑ）**没有加重也没有清**：摆放现在按帧问，但 `placed` 让没动的帧一次都不进去，所以真正建 clip 的次数仍然是「矩形变了几次」。要清得把 clip 对象存下来原地改，那是另一张单。ⓑ ~~**引擎一直起不来的窗口**现在显示的是一块纯地面色的 pane，而不是桌面——这是裁决要的，但「页起不来该显示什么」（卡片？文案？）是 §7.7 ④ 那条道上的产品问题，本片不替它作答。~~ **已结清（用户裁 2026-08-25）：画第六张卡，见 §7.7 ④′。** 纯地面色仍是**背景**（那条裁决没被翻），站在它上面的现在是一枚地球、一句 `The web engine did not start.`、一行 SDK 自己的错误码和一枚 `Retry`。**留下的那一半写清楚**：这张卡的触发是引擎**回了一个错**；引擎**一次都不回答**（环境或 controller 的回调永不到达）仍然是一块空地面色，因为本窗此刻手上没有任何事实可写，给它一个超时就是给它一个编出来的边界——那是另一张单。ⓒ 本片顺手清掉了 `docs/DESIGN.md` 里 §7.14 那一段**遗留在仓库里的合并冲突标记**（` / `=======` / `>>>>>>> opaque-flight-and-web-ground`），因为要改的正是这一段；**第 84 行附近还有一组同样的标记没有动**，那不在本单范围里。
+- **挂账**。ⓐ `place_web_visual` 每帧新建 `IDCompositionRectangleClip` 的旧账（上一片的 ⓑ）**没有加重也没有清**：摆放现在按帧问，但 `placed` 让没动的帧一次都不进去，所以真正建 clip 的次数仍然是「矩形变了几次」。要清得把 clip 对象存下来原地改，那是另一张单。ⓑ ~~**引擎一直起不来的窗口**现在显示的是一块纯地面色的 pane，而不是桌面——这是裁决要的，但「页起不来该显示什么」（卡片？文案？）是 §7.7 ④ 那条道上的产品问题，本片不替它作答。~~ **已结清（用户裁 2026-08-25）：画第六张卡，见 §7.7 ④′。** 纯地面色仍是**背景**（那条裁决没被翻），站在它上面的现在是一枚地球、一句 `The web engine did not start.`、一行 SDK 自己的错误码和一枚 `Retry`。**留下的那一半写清楚**：这张卡的触发是引擎**回了一个错**；引擎**一次都不回答**（环境或 controller 的回调永不到达）仍然是一块空地面色，因为本窗此刻手上没有任何事实可写，给它一个超时就是给它一个编出来的边界——那是另一张单。ⓒ 本片顺手清掉了 `docs/DESIGN.md` 里 §7.14 那一段**遗留在仓库里的合并冲突标记**（`<<<<<<< HEAD` / `=======` / `>>>>>>> opaque-flight-and-web-ground`），因为要改的正是这一段；**第 84 行附近还有一组同样的标记没有动**，那不在本单范围里。
 
 ### 7.15 树里的一行有两张脸的菜单（files 列右键补全，2026-08-25，已落地；`crates/bt-app/src/{profiles,main,files,i18n}.rs`）
 
@@ -6395,3 +6395,84 @@ claim 里写着它被拿走的那一毫秒，`CLAIM_STALE_MS`(5 分钟)以上就
 - **抢不到 claim 的那扇窗这一趟不会显示对面刚拿到的答案**，要到下次启动。这是 ⑤ 里那笔明账，不是缺陷。
 - **点熄灭的那一帧齿轮不重画。** 那一刻齿轮在 modal 的 scrim 后面，没人在看；关掉对话框会整块重建 chrome，那才是齿轮下一次成为可见物的时刻。
 - **`Reset to defaults` 不碰这一行**(它不在任何 Advanced 组里，且在 `reset_advanced_row` 里被点名而不是被 `_` 扫掉)：一个页面的重置不是把网络请求重新打开的许可。
+### 7.53 图标的矩形不是窗的矩形:一次最小化把每个 shell 的宽度改成两列(v0.1.1 用户实机「恢复出的 pane 里 TUI 按 2-4 列排版」,已落地;`crates/bt-app/src/main.rs`)
+
+**报告与铁证。** 一次「设备丢失优雅退出 → 5 秒后重开恢复会话」之后,恢复出的三 pane 布局里,中间那个 pane 的 TUI(Claude Code)**按两到四列的宽度排版**——每行画两三个字符竖着流,而 pane 实际有几十列宽。窗口整体渲染正常,只有那个 pane 里的内容窄。用户补的两条把「渲染侧错觉」这个可能性关死了:① 那个 pane 里的 Claude Code 自报 `fullscreen renderer didn't finish starting last time, falling back to classic renderer`——它问 console 尺寸拿到的是极小值;② 事故期间程序**按 2-3 列真实输出了带换行的文本并烧进了 scrollback**,resize 之后历史不可能重排。所以子进程在**相当长的一段时间里**确实一直被告知它只有两三列宽。
+
+`%APPDATA%\Folio\diagnostics.log`(`a58baaf9fd`,pid 35228)把机制原样写在那里:
+
+```
+BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inner_size=2880x1800
+Folio: the window thread held control for 1848 ms on turn 1 — ...
+BT_DPI stage=resized ... rect=-32000,-32000,-31686,-31950 swapchain_size=314x50   inner_size=314x50
+BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inner_size=2880x1800
+BT_DPI stage=resized ... rect=-32000,-32000,-31686,-31950 swapchain_size=314x50   inner_size=314x50
+BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inner_size=2880x1800
+```
+
+一次运行里**两次最小化、两次还原**。`-32000,-32000` 是 Windows 停放图标化窗口的地方,`314x50` 是那个图标的客户区。**这不是那一天的意外**:同一份 `diagnostics.log` 里带 `-32000` 的行一共九条,分布在**至少六次不同的运行**里,数值一字不差——最小化是个日常手势,所以这条路每天都在走。这两个数已经在这份代码里被认过一次了:`bt_platform::is_window_minimized` 的文档写着「窗口图标化时 `GetWindowRect` 不再描述窗口而是描述图标」,而 `recorded_window_placement` 就是照这条把它挡在 `session.json` 之外的(2026-08-10,`ccd7f31`)。**存盘那一侧早就修好了;读同一份假话的另一个消费者从来没有被告诉过。**
+
+**病灶只有一行:`Runtime::resize` 只拒绝零面积。** `WindowEvent::Resized(314x50)` 于是走完 §4.2 那条链的全程——按 314 像素的窗解 seat、每个 pane 的 actor 当场重排到 `CellMetrics::MIN_COLUMNS` 那个 2 列的地板、200ms 静默窗一到就把这个宽度告诉每一个 pane 的 ConPTY。窗口最小化多久,子进程就被告知自己有两三列宽多久:用户去泡杯茶回来,那段时间里 shell 写下的每一行都是照两三列换行写的,而**重排不是撤销**——回到真宽度只会把已经在两三列上折过的行按新宽度再折一次,留下满屏两个字符一行的历史。
+
+**同一份假话有第二个读者,一并按住。** `reconcile_authoritative_dpi` 自己读 `inner_size()`,而进它的门不止 `Resized` 一个——`scale_factor_changed` 与 `settle_deferred_dpi` 都直接调它。它里面那三段几何(swapchain、`resolve_seat_layout`、`resize_leaves_to_layout` + 最小尺寸)原本各自守着「宽高非零」,现在守的是同一个 `resize_worth_solving`:**不真实的矩形就是不真实的矩形**,零面积与图标化在这里是同一格,零面积那条路的既有行为一个字没变。DPI 那一半(`apply_scale_factor`)不在闸内——它不吃矩形——所以 §7.50 那套 `dpi_settlement` 的时序不受影响:被拖过缝的窗不是图标化的窗,这道闸对它永远是开的。
+
+**同一次报告的第二根:一次手势只欠 shell 一句话,而它欠在手放开的时候。**
+
+用户把范围从「恢复出来的窗」扩到了「任何一次挤窄」——拖分隔条进去再出来、开预览再关掉,都复现;而**对照组把嫌疑钉死了**:同一个手势下,pane 里跑 `codex`(同为 TUI)什么事都没有,只有 Claude Code 卡在窄列。末值没送达的话两个都得坏,所以**末值是送达的**,剩下能区分两者的只有**序列**。
+
+先把一个假设证伪:**没有「逐帧发给 PTY」这回事,而且结构上不可能**。全 app 里 `ResizePseudoConsole` 只有**一个**调用点(`commit_leaf_resize` 里的 `pty.resize(pty_size(...))`),另加 spawn 时的初始尺寸;窗口 resize、分隔条、预览开关、切 tab、DPI 变化、最小化——每一条路都汇进 `plan_grid_change` 的 200ms 合并器,再由 `flush_pending_pty_resize` 放行。而合并器的 deadline 是 `observed_at + 200ms` 且**每一次 solve 都重置**,所以一次连续拖动期间它一个字都不发。
+
+真正发生的不是洪水,是**一次巡游**:合并器量的是「静了 200ms」,而一只手停在分隔条行程尽头想停多久停多久——于是**手势中间的每一次停顿都放行一次 `ResizePseudoConsole`**,用的是 pane 在那一瞬的宽度。那个宽度可以低到 `CellMetrics::MIN_COLUMNS` 的两列:「最小值主权」裁决把 pane 最小值对**手动**拖动降为建议,所以分隔条真的能拖到那儿。子进程因此收到的是一串「手路过的地方」,两列也在其中。一次性的布局变化(开关预览、关 tab)则只发一次,而且值是对的。
+
+修法:**放行等手放开,而不是等一个数字。** 判据是程序自己已经在用的那两位:`custom_window_frame.in_size_move()`(窗框在 OS 的 modal move/size 循环里)与 `WindowRuntime::divider_drag`。§7.50 早就为 DPI 结算读过第一位,原话是「**一只还按在框上的手,什么都不告诉它、什么都不问它**」——这里只是发现**子进程也是「被告诉」的那些东西之一**。手按着的时候不放行,**也不申请唤醒**:放开本身就是一个事件,它带来的那一轮发现 deadline 早已过去,当场付清。**一次手势,一次 `ResizePseudoConsole`,值是手放开的那个。**
+
+这不是 2026-08-06 被否决的「冻结」:那条裁决管的是**画面**,而画面照旧每一次 solve 当场跟手(`plan_grid_change` 里 actor 的 reflow 一个字没改,红门逐步读回)。等的只有说给子进程的那一句。
+
+**没做的那一半,和为什么不做。** 另一个方向是「低于可用下限的瞬时值不发给 PTY」——把告诉子进程的列数夹到某个下限。**没有做**,两条理由都写下来:①它是**对子进程撒谎说它比自己宽**,而这正是 `resize_leaves_to_layout` 那段注释里记着的旧缺陷的形状(pane 窄而 shell 以为自己宽 → 停止换行、PSReadLine 报「值必须大于等于零且小于控制台缓冲区大小」);②那个下限是一个**没人裁过的数字**,而本仓库不许现编。手势闸已经把「路过的极窄值」整类消掉,所以这一条即使要做也应当另立单子、由用户裁。
+
+**上游那一半,如实记。** Claude Code 在这串序列后卡在窄列并自报 `fullscreen renderer didn't finish starting last time, falling back to classic renderer`;`codex` 在同一串序列下完好。**我们修我们这一半**(不发路过的宽度),对面那一半是上游的:一个终端合法可以在一次手势里改变尺寸多次,一个 TUI 不应当被这件事打进死角。**没有证据说手势闸能治好 Claude Code**——它减少的是暴露面,不是对面的健壮性;实机复验按本节末尾的步骤走。
+
+**量它的仪器,现在有了。** `BT_RESIZE_TRACE=1` 除了原有的表面裁剪行,现在**每发出一次 ConPTY resize 打一行**:`BT_RESIZE_TRACE conpty tab=<i> seat=<n> cols=<c> rows=<r>`。一次拖动之后 grep 这一行,序列就在眼前——「中间发了几个极窄值」不必再靠推理回答。
+
+**这一根的红门。**
+
+- `a_gesture_says_one_thing_to_the_shell_and_says_it_at_the_end` —— 一次在里面停了四次的拖动(第三次停在 `MIN_COLUMNS` 的两列上),每一步都读回**画面跟了手**,同时读回**子进程一个字都没听到**;手放开之后,请求列表恰好是一条,且是放开时的那个。变异:去掉 `hand_on_the_geometry` 这一项——当场红,子进程拿到整趟巡游,两列在内。
+- `letting_go_releases_the_size_on_the_next_turn` —— 手按着时静默窗早已过去也不放行;抬手之后**不需要第二次等待**,下一轮当场付清。变异:手按着时照旧上报 deadline,或抬手那一轮不放行。
+- `a_layout_change_no_hand_is_holding_still_reaches_the_shell_at_the_quiet_boundary` —— 没有手按着的布局变化(开预览、关 tab、一次到位的 OS resize)行为一个字没变。变异:把闸的方向写反。
+- `a_pane_squeezed_narrow_and_let_go_leaves_its_shell_wide` —— 「窄→宽」三种时序(慢手势跨过静默窗、快手势没跨过、来回游走)各读回整条送达序列。**这一条在改动之前就是绿的**,如实记:它证伪的是「合并器有方向性、把变宽那一拍吞了」这个假设——`conpty_grid` 是唯一的去重键,它只在告诉子进程的那一行里被写,两个方向对称。
+
+**判据是姿态,不是数字。** 挡的是 `IsIconic`,不是 `-32000`、不是「小于某个像素数」:`-32000` 是经典 shell 的停车位而不是契约,而 314x50 是一扇窗**真的可以有**的矩形,一个按尺寸挡的守卫会把一扇用户真的拖到那么小的窗也一并挡掉。`resize_worth_solving(minimized, physical)` 因此是两项:非图标化,且有客户区。
+
+**拒绝它不欠任何人东西。** winit 在窗口回来的路上会再送一次真矩形(上面那份日志里每一条图标行后面都跟着一条 `2880x1800`),所以没有需要追平的状态、没有需要补发的 resize。
+
+**恢复路径本身是干净的,这一条被查证并证伪了原假设。** PTY 的列数从来不从盘上读——`create_leaf_session` 里就一句 `grid_for_pixels(body.width, body.height)`,恢复与新建同一条路,`session.json` 里根本没有 cols/rows 这一格(schema 只存树形状与 `ratio`,L11「只存布局意图」)。**「恢复后首次 resize 到达 PTY 的时延」量出来是这样**:
+
+- **恢复一扇 normal 窗(同 DPI)** —— spawn 时的 grid 就是 seat 解出来的 grid,随后那几条 `Resized` 都落回同一个 grid,`coalesce_pty_resize_on_grid_change` 一条都不排队。**零次 ConPTY resize,没有首次可言。**
+- **恢复一扇 maximized 窗**(用户这份 `session.json` 正是) —— pane 是按存下来的 *normal* 尺寸出生的(日志 `stage=create` inner `1852x2160`),`set_maximized` 之后才送来真尺寸(`stage=show` / 首条 `stage=resized` inner `2880x1800`)。这里确有一次真 resize,**名义时延 200ms**(`RESIZE_REQUEST_QUIET`),实际由观察到 deadline 的那一轮事件循环兜底——同一份日志里 `turn 1` 占了 1848ms,所以最坏是**一轮的长度**。两位数毫秒到两秒,与用户看到的「烧进 scrollback 的历史」差着几个数量级,不是伤害面。
+- **最小化那条路才是伤害面**:最小化后 200ms 子进程被改成两三列,然后**一直窄到窗口还原之后再 200ms**——中间隔着用户离开的整段时间。用户报的两条(TUI 起不来全屏渲染器、竖排文本烧进 scrollback)量级只对得上这一条。
+
+**同一张单子的第二半:一扇恢复出来的窗不许挂在唯一那块屏的下面。** 同一次运行的 `stage=create rect=49,49,1901,2209`,而那台机器当时只有一块 2880x1800 的屏——**窗底在屏底下面 409 个物理像素**。角是正确地放弃了的(存的矩形在一块没接的外接屏上,§3.1「不落到屏幕外」),而**尺寸被原样采纳了**,理由写在老注释里:「a size is never off-screen」。这句话错了一半:尺寸自己确实不在屏外,**比屏还大的尺寸除了屏外没有别的地方可去**。它这次没有被看见,只因为那份会话同时是 maximized,十分之一秒后就被最大化盖过去了。
+
+修法:`choose_restored_placement` 把记下的尺寸**收进它真正会落到的那块屏的工作区**——能看见这个矩形最多的那一块,一块都看不见时就是主屏(放弃角之后窗实际会开在那里)。三条边界写清楚:
+
+- **收是天花板不是地板。** 小屏上存的小窗到了大屏上仍然是小窗;`min` 不是 `max`。
+- **只在尺寸真的被收小时才动角。** 用户故意把窗停在屏边、露一半在外面,那是他停的矩形,原样还给他;而一个已经不是那个矩形的窗,连带那个角也不欠了——不然收完的窗标题栏正好在刚刚收它的那块屏外面。
+- **跨缝的窗归压着它最多的那块屏。** 判定从「有没有一块屏碰得到」升成「哪块屏碰得最多」(面积),因为这两个问题本来就是同一个问题问得精不精细的差别。
+
+工作区而不是整块屏,理由与 `bt_platform::get_work_area` 那一条一样:按整块屏定尺寸的窗,有一条任务栏那么宽的带子用户永远看不全。枚举来自 winit(`available_monitors`,主屏排头),工作区来自 Win32(`work_area_at` 打在每块屏的中心点上,因为共享边界上的点 `MonitorFromPoint` 判给谁都行)——这一段是 `restore_monitors`,是整个判决里唯一不纯的一半;判决本身 `choose_restored_placement` 收一张显示器表,所以测试可以直接把表写下来。
+
+**说清楚这次没能证实的那一条。** 用户报的「窗出现在主屏、而我平时把它放副屏」,在这份日志里查到的直接原因是**那一刻 `available_monitors()` 里没有那块副屏**——存的角落在 `x=-1360`(逻辑),那是外接屏的地盘,而那台机器当时(现在也)只枚举得到一块 2880x1800 的内屏。判据本身是对的(屏在就原样用,不在才放弃角),**没修的是问的时机**:拓扑只在窗口被创建之前问一次,答案就此定案,而冷启动之后显示器枚举晚到几秒是常事。要修它得有一条「placement 还欠着」的账,加上 `WM_DISPLAYCHANGE` 到达时**在用户自己动过窗之前**把这笔账还掉——那是一张自己的单子,不是这一张;这里只把它记成明账。
+
+**红门。**
+
+- `minimizing_a_window_never_tells_its_shell_the_width_of_the_icon` —— 用户那台机器的两个真矩形(2880x1800 与 314x50)喂进 `ResizeGateHarness`,最小化后停留远超静默窗再还原。钉三件:pane 自己的 grid 没动、`conpty_grid` 没动、**一次 ConPTY 请求都没有发出**。变异:把 `minimized` 这一项从 `resize_worth_solving` 里去掉——当场红,shell 被要求变成 5 列,pane 自己的 grid 跟着掉下去。
+- `a_genuinely_tiny_window_is_still_a_window` —— 同一个 314x50,**没有**最小化。钉住它照常送到 shell。变异:改成按尺寸/按 `-32000` 挡——当场红,请求列表空了。
+- `a_window_with_no_client_area_is_not_a_rectangle_to_solve_for` —— 零面积那半条守卫没有在这次改动里被顺手丢掉。
+- `a_window_saved_on_a_bigger_screen_does_not_open_off_the_bottom_of_a_smaller_one` —— 用户 `session.json` 里的原始矩形(`-1360,429,926x1080`)对一块 1440x900 的屏。变异:尺寸不收——当场红,高度回到 1080。
+- `a_window_comes_back_untouched_when_the_monitor_it_was_left_on_is_still_there` —— 屏还在就一个像素都不许动(这一条同时是上一条的反向变异证:按主屏收尺寸的话高度会变成 900)。
+- `fitting_a_restored_window_never_makes_it_bigger` / `a_window_parked_half_off_a_monitor_is_left_where_it_was_parked` / `a_window_that_had_to_shrink_is_seated_on_the_monitor_that_shrank_it` / `a_window_across_a_seam_is_fitted_to_the_monitor_holding_most_of_it` —— 上面三条边界各一条,变异分别是 `min`→`max`、无条件座正、取第一块相交的屏而不是相交最多的。
+- `a_machine_that_reports_no_monitors_fits_nothing` / `a_saved_window_with_no_tabs_asks_for_nothing` —— 两个全域边界。
+
+**存盘那一侧这次是被证伪的,如实写。** 怀疑 A(最小化时把 `-32000` 或它派生的 314x50 存了盘)在这份代码上**不成立**:`window_snapshot` 先问姿态,`WindowPosture::Minimized` 根本不去读 `GetWindowRect`,而 `recorded_window_placement` 把上一次的真矩形交回去;`quitting_while_minimized_starts_again_at_the_rectangle_the_user_chose` 从 2026-08-10 起就按着这一条。第一扇窗的 `window_pictures` 在开窗处就用恢复出来的 `SessionWindowV1` 播过种,所以「一扇恢复出来的窗还没来得及照第一张相就被最小化」也拿不到占位。
+
+**但顺着那条 fallback 链往下查,尽头上还有一个洞,一并补了。** 「上一次说过的话」的兜底是 `WindowStateV1::default()`——100,100,1280,800——而那是「**根本没有上一次会话**」的答案,不是「**这扇窗还没照过相**」的答案。**第二扇窗恰好就是后者**:`Runtime::open_window` 从不播种,而一扇从文件里恢复出来、一出生就是 maximized 的第二扇窗,它的第一张相没有可量的 normal 矩形,于是文件里为它记的角与尺寸在**它之后的第一次启动**就被换成了那个占位。`resumed` 那一句 `window_pictures: vec![(window.id(), opening.clone())]` 就是第一扇窗从没中招的原因;现在另一扇门也说同一句话,用它唯一能说的形式——**它正站着的那个矩形**,而对一扇恢复出来的窗,那正是存下来的那个。三行的先后就是全部:先入库、再造 runtime、再在**还没 `SW_MAXIMIZE`** 之前照第一张全相。红门 `a_window_is_in_the_vault_before_it_is_asked_what_it_looks_like` 按住这个先后(变异:删掉 `record_window`,或把它挪到 `new_window_runtime` 之后;把第一张相挪到 `show_new_window` 之后则第二条断言红)。**明账**:这一条只在多窗下才伤人,而它是照着「一个没有自己矩形的姿态,兜底应当是这扇窗开在哪里,而不是产品的占位」这句话修的——这句话现在两扇门都遵守。
