@@ -24585,6 +24585,35 @@ struct ForeignDrag {
     /// over its body — where F2 offers nothing at all.
     landing: Option<DropLanding>,
     face: GhostFace,
+    /// **The picture of the pane that is arriving** (B2, 2026-09-01), when the
+    /// payload is a pane and the window holding it has one to send.
+    ///
+    /// `None` is still a real answer and still draws the card the report
+    /// photographed — a window whose source has no projection of that pane has
+    /// nothing honest to draw in it — but it is now the *exceptional* answer
+    /// rather than the only one.
+    pane: Option<ForeignPane>,
+}
+
+/// **A pane's projection, owned, as it crosses to another window** (B2,
+/// 2026-09-01).
+///
+/// [`seats::FocusThumbnail`] with its two borrows made into the things they
+/// borrow, because a visitor's card is drawn out of a payload this window was
+/// handed rather than out of a tab it holds. Everything in it is what the local
+/// stand-in already draws from: the one-leaf subtree the broker was carrying
+/// anyway, the seat inside it, and that seat's own
+/// [`seats::MiniSeatContent`] — terminal rows as text, a document's first lines,
+/// a page's or a picture's pixels behind an `Arc`. Nothing here is a GPU
+/// resource, which is why the device being shared is beside the point: what
+/// travels is what the projection *is*.
+#[derive(Clone, Debug)]
+struct ForeignPane {
+    tree: bt_layout::LayoutNode,
+    /// The seat inside that subtree — the card's one pane, and the one holding
+    /// its keyboard, because a pane torn into a tab of its own is both.
+    focused: SeatId,
+    seats: BTreeMap<SeatId, seats::MiniSeatContent>,
 }
 
 /// **Where a torn-out window stands, in the terms it has to be stated in**
@@ -24829,6 +24858,28 @@ struct DragBroker {
     /// whether its tree can actually take this pane (H93/M147). `None` for a tab,
     /// which the tab list never adopts.
     cargo_tree: Option<bt_layout::LayoutNode>,
+    /// **The picture of the pane in the air** (B2, 2026-09-01) — the source
+    /// window's own projection of it, refreshed from that window every turn
+    /// beside [`Self::face`] and for its reason.
+    ///
+    /// §7.1.6b⁗ gave the stand-in card the pane's real picture and left a
+    /// visitor's blank, on the stated ground that 「那枚 pane 属于另一个进程」.
+    /// That premise is false and always was: this broker exists precisely
+    /// because both windows are one process's `FolioApp`, and the projection is
+    /// CPU-side text and `Arc`'d pixels — the very things a label and a subtree
+    /// already cross on. So it crosses too, and a card in the target draws the
+    /// pane in the hand rather than a card-shaped nothing.
+    cargo_pane: Option<ForeignPane>,
+    /// **What the target's own card would be, so the source can project into
+    /// it** (B2) — the mini box's size in the *target's* physical pixels.
+    ///
+    /// The other direction of the same round trip the landing already makes, and
+    /// the same discipline: 「目标窗按**自己的**客户区像素、**自己的**缩放回答
+    /// 它给什么」. It is needed only for a source window that has **no** card
+    /// column of its own — one that has never projected the pane it is carrying
+    /// — and it is what lets that window make a picture at the size the picture
+    /// will actually be drawn at, instead of inventing a card nobody has.
+    guest_mini: Option<(f32, f32)>,
     /// Where the pointer is, in screen physical pixels.
     pointer: (f64, f64),
     /// F5's two numbers, read at the press.
@@ -24884,6 +24935,8 @@ impl DragBroker {
             cargo: DragSource::Tab(TabId(1)),
             face: None,
             cargo_tree: None,
+            cargo_pane: None,
+            guest_mini: None,
             pointer: (0.0, 0.0),
             grip: TearGrip {
                 grab_logical: (0.0, 0.0),
@@ -33894,20 +33947,35 @@ impl Runtime<'_> {
         // is aiming at may not be the exception.
         //
         // The projection is the seat's own, out of the cache the pane's home
-        // card is drawn from, so the two are one reading of one shell. A
-        // visitor's stand-in stays `None`: this window has never drawn that
-        // pane, and inventing something for it is the one thing worse than a
-        // blank.
+        // card is drawn from, so the two are one reading of one shell.
+        //
+        // **And a visitor's stand-in draws the pane too** (B2, 2026-09-01). What
+        // stood here was "this window has never drawn that pane, and inventing
+        // something for it is the one thing worse than a blank" — true of the
+        // second half and false of the first. It rested on §7.1.6b⁗'s 「那枚
+        // pane 属于另一个进程」, and there is no other process: the broker exists
+        // because one `FolioApp` holds both windows. So nothing is invented — the
+        // window that *does* hold the pane sends its own projection across, the
+        // same one its home card is drawn from, and this window draws what it
+        // was handed ([`ForeignPane`]). `None` survives as the honest answer for
+        // a payload nobody has looked at yet, and it is now the exception.
         if let Some(slot) = strip_preview {
-            let guest = stand_in_pane.as_ref().and_then(|(leaf, tree)| {
-                Some(seats::FocusThumbnail {
-                    tree,
-                    // The card is a tab of exactly this one pane, and in
-                    // that tab this pane is the one holding the keyboard.
-                    focused: leaf.seat,
-                    seats: self.window.focus_thumbs.seats(leaf.tab)?,
-                })
-            });
+            let guest = match self.window.foreign.as_ref() {
+                Some(foreign) => foreign.pane.as_ref().map(|pane| seats::FocusThumbnail {
+                    tree: &pane.tree,
+                    focused: pane.focused,
+                    seats: &pane.seats,
+                }),
+                None => stand_in_pane.as_ref().and_then(|(leaf, tree)| {
+                    Some(seats::FocusThumbnail {
+                        tree,
+                        // The card is a tab of exactly this one pane, and in
+                        // that tab this pane is the one holding the keyboard.
+                        focused: leaf.seat,
+                        seats: self.window.focus_thumbs.seats(leaf.tab)?,
+                    })
+                }),
+            };
             focus_thumbnails.insert(slot.min(focus_thumbnails.len()), guest);
         }
         let chrome = seats::build_chrome_for_tabs(
@@ -38617,6 +38685,78 @@ impl Runtime<'_> {
             .tree()
             .find_seat(leaf.seat)?;
         Some(leaf)
+    }
+
+    /// **The pane this window has in its hand, wherever the hand has gone** (B2,
+    /// 2026-09-01).
+    ///
+    /// [`Self::stand_in_pane`] answers about a stand-in *this* window is
+    /// drawing, so it goes quiet the moment the pointer crosses onto another
+    /// window's glass — which is exactly when the picture is wanted most. This
+    /// is the other half: the payload the broker says this window is holding, as
+    /// long as it is holding it and whatever is under the pointer.
+    ///
+    /// Read off the broker rather than off the drag, because the broker is the
+    /// one register of "a gesture is in flight and this window owns it" that
+    /// survives the pointer leaving — the same reason `strip_guests` reads
+    /// `strip_stand_in` instead of re-deriving it.
+    fn carried_pane(&self) -> Option<LeafId> {
+        let broker = self.app.drag_broker.as_ref()?;
+        if broker.source != self.window_id() {
+            return None;
+        }
+        let leaf = broker.cargo.pane()?;
+        // Still in the tree it is filed under: a gesture whose seat was reaped
+        // mid-flight carries nothing, which is `stand_in_pane`'s own last line.
+        self.tab_state(leaf.tab)?
+            .seats
+            .tree()
+            .find_seat(leaf.seat)?;
+        Some(leaf)
+    }
+
+    /// **The picture of the pane in this window's hand, ready to travel** (B2).
+    ///
+    /// [`seats::FocusThumbnail`]'s three fields, owned. It is the projection the
+    /// pane's *own* card is drawn from — one reading of one shell, which is
+    /// §7.1.6b⁗'s own sentence — so a visitor's card in another window and the
+    /// home card in this one cannot come to show two different things.
+    ///
+    /// `None` while this window holds no projection of that seat, and that is
+    /// the honest answer rather than a gap: there is a difference between "the
+    /// pane looks like this" and "nobody has looked". What removes most of that
+    /// silence is [`Self::refresh_focus_thumbnails`], which projects a carried
+    /// pane even in a window with no column of its own.
+    fn carried_pane_picture(&self) -> Option<ForeignPane> {
+        let leaf = self.carried_pane()?;
+        let tab = self.tab_state(leaf.tab)?;
+        let tree = bt_layout::LayoutNode::seat(tab.seats.tree().find_seat(leaf.seat)?.clone());
+        let content = self
+            .window
+            .focus_thumbs
+            .seats(leaf.tab)?
+            .get(&leaf.seat)?
+            .clone();
+        Some(ForeignPane {
+            tree,
+            focused: leaf.seat,
+            seats: BTreeMap::from([(leaf.seat, content)]),
+        })
+    }
+
+    /// **The box a card's picture is drawn in, in this window's own pixels** —
+    /// what a window carrying a pane needs to be told before it can make one
+    /// (B2).
+    ///
+    /// Every card in a column has the same mini box, so the first one answers
+    /// for all of them; the slot the guest will take is not yet solved when this
+    /// is asked, and it does not have to be. `None` for a window with no card
+    /// column, which is the same window that would not be offering a card
+    /// landing either.
+    fn card_mini_size(&self) -> Option<(f32, f32)> {
+        let card = self.focus_rail_geometry_now(Instant::now())?;
+        let mini = card.cards.first()?.mini;
+        Some((mini[2] - mini[0], mini[3] - mini[1]))
     }
 
     /// **How many slots this window's tab list is holding for something that is
@@ -75848,6 +75988,8 @@ impl Runtime<'_> {
             cargo: source.clone(),
             face: None,
             cargo_tree: None,
+            cargo_pane: None,
+            guest_mini: None,
             pointer: self.to_screen(position).unwrap_or((position.x, position.y)),
             grip: TearGrip {
                 grab_logical: ((position.x / scale) as f32, (position.y / scale) as f32),
@@ -79406,11 +79548,63 @@ impl Runtime<'_> {
     /// memory, and the next pass finds the body there because somebody else put
     /// it there.
     fn refresh_focus_thumbnails(&mut self, now: Instant, scale: f32) {
-        let Some(geometry) = self.focus_rail_geometry_now(now) else {
+        let geometry = self.focus_rail_geometry_now(now);
+        // **The tab holding the pane that is in the air** (缺陷 #189, widened by
+        // B2 on 2026-09-01). Its seat is being drawn twice while the gesture
+        // lasts — once on its own card and once as the stand-in — and the second
+        // of those may be somewhere else in this column, or in **another
+        // window's** column entirely. `carried_pane` is what makes the second
+        // case answerable: `stand_in_pane` goes quiet the instant the pointer
+        // crosses off this glass, which is exactly when the picture is wanted.
+        // It is one tab, for the length of one gesture, and the throttle is the
+        // same one every other card pays.
+        let in_hand = self
+            .carried_pane()
+            .or_else(|| self.stand_in_pane())
+            .map(|leaf| leaf.tab);
+        // And the box the picture will be drawn in, when the window it is going
+        // into is the only one that has a card (B2) — see [`DragBroker::guest_mini`].
+        let guest_mini = self
+            .app
+            .drag_broker
+            .as_ref()
+            .filter(|broker| broker.source == self.window_id())
+            .and_then(|broker| broker.guest_mini);
+        if geometry.is_none() && !(in_hand.is_some() && guest_mini.is_some()) {
             self.window.focus_thumbs.clear();
             return;
-        };
-        let [list_top, list_bottom] = geometry.viewport;
+        }
+        // **Which cards are projected this frame, and into what box.** One list
+        // rather than two walks, because a window with no column of its own
+        // still owes a picture of the pane it is carrying, and a second walk to
+        // say so would be a second copy of everything below — the demands, the
+        // unread documents, the pages asked for.
+        let mut boxes: Vec<(usize, [f32; 4])> = Vec::new();
+        if let Some(geometry) = geometry.as_ref() {
+            let [list_top, list_bottom] = geometry.viewport;
+            for (index, card) in geometry.cards.iter().enumerate() {
+                let Some(tab) = self.window.tabs.get(index) else {
+                    continue;
+                };
+                if in_hand == Some(tab.id)
+                    || (card.body[3] > list_top && card.body[1] < list_bottom)
+                {
+                    boxes.push((index, card.mini));
+                }
+            }
+        }
+        // The carried pane's tab, when this window drew no card for it — which
+        // is every window not in focus mode, and it is most of them. The box is
+        // the target's own, at the target's scale, so what is projected is the
+        // size it will be drawn: the source has no card to take a size from, and
+        // inventing one would be this window guessing at another's column.
+        if let Some(tab) = in_hand
+            && let Some((width, height)) = guest_mini
+            && let Some(index) = self.window.tabs.iter().position(|state| state.id == tab)
+            && !boxes.iter().any(|(at, _)| *at == index)
+        {
+            boxes.push((index, [0.0, 0.0, width, height]));
+        }
         let mono_advance = self.window.focus_mini_advance;
         let face_advance = self.window.focus_mini_face_advance;
         let mut visible = BTreeSet::new();
@@ -79431,24 +79625,13 @@ impl Runtime<'_> {
         // is the face it has always been. See [`card_picture_in`].
         let decodes = &self.window.peek_cache;
         // **And the tab holding the pane that is in the air** (缺陷 #189). Its
-        // seat is being drawn twice while the gesture lasts — once on its own
-        // card and once as the stand-in ([`Self::stand_in_pane`]) — and the
-        // second of those is somewhere else in the column entirely, so the
-        // visibility gate above would drop the projection the moment the
-        // auto-scroll carried the home card past the clip and leave the reader
-        // watching the blank card this defect is about. It is one tab, for the
-        // length of one gesture, and the throttle is the same one every other
-        // card pays.
-        let in_hand = self.stand_in_pane().map(|leaf| leaf.tab);
-        for (index, card) in geometry.cards.iter().enumerate() {
+        // seat is being drawn twice while the gesture lasts — see the walk above,
+        // which is where a card's visibility and the pane in the hand are
+        // reconciled into the one list this loop is handed.
+        for (index, mini) in boxes {
             let Some(tab) = self.window.tabs.get(index) else {
                 continue;
             };
-            let on_the_glass =
-                in_hand == Some(tab.id) || (card.body[3] > list_top && card.body[1] < list_bottom);
-            if !on_the_glass {
-                continue;
-            }
             visible.insert(tab.id);
             // The mini boxes are solved here rather than inside the budget
             // because they are *geometry*, and geometry is `seats`'s: what comes
@@ -79458,7 +79641,7 @@ impl Runtime<'_> {
             // room for — and, since 2026-08-20, its vertical twin: how many rows
             // that rectangle holds is how many rows it is handed.
             let demands: Vec<focus_thumb::SeatDemand<'_>> =
-                seats::focus_mini_seats(tab.seats.tree(), card.mini, scale)
+                seats::focus_mini_seats(tab.seats.tree(), mini, scale)
                     .into_iter()
                     .filter_map(|seat| {
                         // **The document this seat is on, if nobody has read
@@ -86780,6 +86963,15 @@ mod focus_mode_door_tests {
     ///
     /// Read as text for this module's reason: an arming written into some other
     /// per-frame method would be one more call and nothing about it would fail.
+    ///
+    /// **The gate has one way past it since B2 (2026-09-01), and it does not
+    /// widen the ruling** — it is the ruling read across two windows. A window
+    /// carrying a pane onto *another* window's card column has that seat drawn
+    /// into a card that is on screen; the card is simply not this window's. So
+    /// the return is skipped for exactly one tab, for the length of one gesture,
+    /// and only when the window it is going into has published a card to draw it
+    /// in. Every other window with no column still returns before either read
+    /// exists.
     #[test]
     fn the_card_arms_its_reads_only_behind_the_mode_gate() {
         let arming = body("    fn arm_card_reads(");
@@ -86813,6 +87005,14 @@ mod focus_mode_door_tests {
         assert!(
             gate < call,
             "a window with no card column would arm a read before returning"
+        );
+        // And the one way past that return is a pane this window is carrying
+        // into a column another window has — both halves, so neither alone can
+        // open it (B2).
+        assert!(
+            pass.contains("if geometry.is_none() && !(in_hand.is_some() && guest_mini.is_some())"),
+            "the mode gate's one exception is not the pane in the hand and the \
+             card it is going into:\n{pass}"
         );
     }
 
@@ -89762,15 +89962,45 @@ impl FolioApp {
         let cargo = broker.cargo.clone();
         let cargo_tree = broker.cargo_tree.clone();
         let face = broker.face.clone();
+        // **The picture of the pane in the air, taken from the window holding
+        // it** (B2, 2026-09-01). Pulled here rather than pushed from the source's
+        // pointer handler, because a hand that crosses onto another window's
+        // glass and then *stops* sends no more pointer events — and a card that
+        // filled in only while the hand kept moving would be blank in exactly the
+        // moment a reader stops to look at it.
+        let cargo_pane = self
+            .runtime(source)
+            .and_then(|runtime| runtime.carried_pane_picture());
+        if let Some(app) = self.app.as_mut()
+            && let Some(broker) = app.drag_broker.as_mut()
+        {
+            broker.cargo_pane = cargo_pane.clone();
+        }
         let under =
             bt_platform::top_level_window_at(pointer.0.round() as i32, pointer.1.round() as i32)
                 .and_then(|hwnd| self.window_holding(hwnd));
         let aim = match under {
             Some(window) if window == source => BrokerAim::Home,
             Some(window) => {
-                let landing = self.runtime(window).and_then(|runtime| {
-                    runtime.foreign_strip_landing(&cargo, cargo_tree.as_ref(), pointer)
+                // **And, in the same breath, the box that window's cards are
+                // drawn in** (B2) — the other direction of the round trip this
+                // landing already is. A source window with no column of its own
+                // has never projected the pane it is carrying, and this is the
+                // only honest size for it to project at: the one the picture
+                // will be drawn in, in the target's pixels at the target's
+                // scale, which is the same discipline the landing itself
+                // follows.
+                let (landing, guest_mini) = self.runtime(window).map_or((None, None), |runtime| {
+                    (
+                        runtime.foreign_strip_landing(&cargo, cargo_tree.as_ref(), pointer),
+                        runtime.card_mini_size(),
+                    )
                 });
+                if let Some(app) = self.app.as_mut()
+                    && let Some(broker) = app.drag_broker.as_mut()
+                {
+                    broker.guest_mini = guest_mini;
+                }
                 BrokerAim::Window { window, landing }
             }
             // The desktop, somebody else's application, or a window of ours that
@@ -89817,6 +90047,7 @@ impl FolioApp {
                         pointer,
                         landing: *landing,
                         face: face.clone(),
+                        pane: cargo_pane.clone(),
                     }),
                 _ => None,
             };
@@ -131759,6 +131990,71 @@ mod cross_window_drag_tests {
             ghost.contains("self.window.foreign"),
             "and the ghost over this window's glass is built here, at this \
              window's scale — 「混合 DPI 下幽灵尺寸随所在窗」:\n{ghost}"
+        );
+    }
+
+    /// RED — **a visitor's stand-in card draws the pane that is in the hand**
+    /// (B2, backlog 「跨窗替身不画画面」, 2026-09-01).
+    ///
+    /// §7.1.6b⁗ gave the local stand-in the pane's real picture and wrote the
+    /// visitor's blank down as honesty: 「那枚 pane 属于另一个进程,本窗从没画过
+    /// 它,替它编一张画面比空着更糟」. **The premise is false.** There is no
+    /// other process — the broker exists precisely because one `FolioApp` holds
+    /// every window, one `wgpu::Device` serves them all, and the projection is
+    /// not a GPU resource at all but CPU-side text and `Arc`'d pixels, the same
+    /// kind of thing the label and the arriving subtree already cross on. So
+    /// nothing has to be invented: the window that *does* hold the pane sends
+    /// the projection its own card is drawn from, and the target draws what it
+    /// was handed.
+    ///
+    /// Four joints, and the arm whose removal is the shipped build:
+    ///
+    /// ① the picture is taken from the window holding the payload and put on the
+    ///    broker — **pulled** every turn rather than pushed from the source's
+    ///    pointer handler, because a hand that crosses and then stops sends no
+    ///    more pointer events, and a card that filled in only while the hand kept
+    ///    moving would be blank exactly when a reader stopped to look at it;
+    /// ② it rides to the target on `ForeignDrag`, beside the label;
+    /// ③ the guest slot in the thumbnail list is filled from it, so the painter
+    ///    already proven by
+    ///    `the_stand_in_draws_the_pane_in_the_hand_rather_than_an_empty_card`
+    ///    draws rows where it drew nothing;
+    /// ④ the source keeps projecting the pane it is carrying — `stand_in_pane`
+    ///    goes quiet the instant the pointer leaves this glass, so the pass that
+    ///    keeps the home card alive asks `carried_pane` as well, and a window
+    ///    with **no** column of its own projects into the box the target
+    ///    published (`guest_mini`), which is the size the picture will be drawn.
+    #[test]
+    fn a_visitors_stand_in_card_draws_the_pane_in_the_hand() {
+        // ① and ②.
+        let broker = fn_body("drive_drag_broker");
+        assert!(
+            broker.contains("runtime.carried_pane_picture()")
+                && broker.contains("pane: cargo_pane.clone()"),
+            "the pane's picture is not taken off the window holding it and handed \
+             to the window drawing it, so the visitor's card has nothing in it:\n{broker}"
+        );
+        // ③ — the slot the drop is aiming at, filled from the payload rather than
+        // from a tab this window does not have.
+        let chrome = fn_body("refresh_chrome");
+        assert!(
+            chrome.contains("foreign.pane.as_ref().map(|pane| seats::FocusThumbnail {"),
+            "the visitor's slot is still handed a hole, which is the card the \
+             report photographed"
+        );
+        // ④ — the projection outlives the pointer leaving, and exists at all in a
+        // window that draws no cards.
+        let carried = fn_body("carried_pane");
+        assert!(
+            carried.contains("self.app.drag_broker") && carried.contains("broker.cargo.pane()"),
+            "the pane in the hand is read off this window's own stand-in, which is \
+             `None` from the moment the hand crosses onto another window:\n{carried}"
+        );
+        let pass = fn_body("refresh_focus_thumbnails");
+        assert!(
+            pass.contains(".carried_pane()") && pass.contains("broker.guest_mini"),
+            "the window holding the pane stops projecting it the moment the hand \
+             leaves, or never starts because it draws no cards of its own:\n{pass}"
         );
     }
 }
