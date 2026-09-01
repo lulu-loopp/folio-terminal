@@ -19436,8 +19436,12 @@ fn next_attention_stop<T: Copy>(queue: &[(T, u64)], standing_on: Option<u64>) ->
 ///
 /// Two facts and one `||`, and the composition is here rather than in `bt-platform` because it is
 /// a *policy* — "hidden" is the name this product gives to the union of them — while the two calls
-/// underneath are readings. A third condition, "completely covered by another window", is
-/// deliberately absent and its absence is argued at [`attention::Reach::Toast`].
+/// underneath are readings. A third condition, "completely covered by another window", used to be
+/// deliberately absent from every fact this module held; it is now [`window_is_exposed`]'s, and it
+/// is a **separate** bit rather than a third arm of this `||`. Minimised and cloaked are the window
+/// telling us where it is; covered is somebody else's window standing in front of one that is
+/// perfectly on screen, and [`notify::desktop_reach`] answers the two differently — see
+/// [`attention::Reach::Toast`].
 ///
 /// A window whose handle cannot be got is reported reachable, on
 /// [`bt_platform::cloaked_from_attribute`]'s reasoning: under-stating flashes a taskbar button
