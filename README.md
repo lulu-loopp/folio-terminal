@@ -112,10 +112,16 @@ application.
 The layout changes while the sessions inside it keep running, and all of them can
 be seen at once.
 
-<img src="docs/screenshots/tab-into-pane.gif" width="100%"
-     alt="A tab is pressed and dragged down out of the tab strip; over the right
-     half of the window a landing preview appears, and on release the tab's
-     shell becomes the right-hand pane, still running.">
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/tab-into-pane-dark.gif">
+  <img src="docs/screenshots/tab-into-pane-light.gif" width="100%"
+       alt="A tab is pressed and dragged down out of the tab strip; over the
+       right half of the window a landing preview appears, and on release the
+       tab's shell becomes the right-hand pane, still running. Then the new
+       pane's own header is dragged to the bottom edge, and the side-by-side
+       layout becomes two full-width bands.">
+</picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
