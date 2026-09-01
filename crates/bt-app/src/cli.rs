@@ -398,10 +398,30 @@ pub struct AttentionCall {
     /// `<family>:<event>`, exactly as the hook's own configuration spelled it.
     pub event: String,
     /// The hook's payload, if the caller passed one. **It does not leave this process** — see
-    /// `crate::attention_wire`'s header — and today nothing is ever taken out of it, because no
-    /// row of the mapping table declares an identifier to take.
-    pub payload: Option<String>,
+    /// `crate::attention_wire`'s header — and the only things ever taken out of it are the two
+    /// fields a row of the mapping table declared.
+    pub payload: Option<AttentionPayload>,
 }
+
+/// **Where one call's payload is**, which is a question two upstreams answer differently.
+///
+/// codex appends its payload to the `notify` array it spawns, so it arrives as an argument. Claude
+/// Code writes its own onto the hook process's standard input and closes the handle. Neither is
+/// wrong and neither can be talked out of it, so the command line says which, and the grammar stays
+/// a grammar: nothing is read off a handle while a command line is being parsed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AttentionPayload {
+    /// `--json <text>`: the payload itself, on the command line.
+    Inline(String),
+    /// `--json -`: the payload is on this process's standard input.
+    Stdin,
+}
+
+/// What `--json` is given when the payload is on standard input.
+///
+/// The oldest spelling there is for it, and the reason to use it rather than a flag of our own: a
+/// person reading a hook entry in their own settings file has seen this one before.
+pub const STDIN_PAYLOAD: &str = "-";
 
 /// Why a call of the verb stops before it says anything.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -458,7 +478,12 @@ fn attention_arguments(
                 }
                 let value = value_for(JSON_FLAG, flag, &arg, &mut args)
                     .map_err(|_| AttentionFault::MissingValue(JSON_FLAG))?;
-                payload = Some(value.to_string_lossy().into_owned());
+                let value = value.to_string_lossy().into_owned();
+                payload = Some(if value == STDIN_PAYLOAD {
+                    AttentionPayload::Stdin
+                } else {
+                    AttentionPayload::Inline(value)
+                });
             }
             Some(flag) if flag.starts_with("--") => {
                 return Err(AttentionFault::UnknownFlag(flag.to_owned()));
@@ -1095,5 +1120,47 @@ mod tests {
         let text = refusal_text(&CliFault::UnknownFlag("--nope".to_owned()));
         assert!(text.contains("--nope"), "{text}");
         assert!(text.contains("--cwd"), "the usage is still there: {text}");
+    }
+
+    /// PIN — **`--json -` says where the payload is; every other value *is* the payload.**
+    ///
+    /// The two upstreams hand their payload over differently and neither can be talked out of it,
+    /// so the difference lives in one word on a command line and is decided here, in a grammar,
+    /// rather than by a reader guessing from a handle.
+    ///
+    /// MUTATION: read `-` as an inline payload and Claude Code's hook parses one byte of JSON,
+    /// finds no `transcript_path` and quietly goes back to saying "Turn finished" — with nothing
+    /// anywhere reporting that it failed, because a payload that does not parse is an ordinary
+    /// state on this path.
+    #[test]
+    fn a_payload_is_either_on_the_command_line_or_on_the_handle_it_names() {
+        let call = |list: &[&str]| {
+            attention(args(list))
+                .expect("the verb")
+                .expect("a call and not a fault")
+        };
+        assert_eq!(
+            call(&["attention", "claude-code:Stop", "--json", "-"]).payload,
+            Some(AttentionPayload::Stdin)
+        );
+        let inline = r#"{"transcript_path":"D:\\x.jsonl"}"#;
+        assert_eq!(
+            call(&["attention", "codex:agent-turn-complete", "--json", inline]).payload,
+            Some(AttentionPayload::Inline(inline.to_owned()))
+        );
+        // A call that asks for nothing gets nothing, which is every other hook this build installs.
+        assert_eq!(
+            call(&["attention", "claude-code:PostToolUse"]).payload,
+            None
+        );
+        // `--json` with nothing after it is still a mistake, and `-` is still not a second event.
+        assert_eq!(
+            attention(args(&["attention", "claude-code:Stop", "--json"])).expect("the verb"),
+            Err(AttentionFault::MissingValue(JSON_FLAG))
+        );
+        assert_eq!(
+            call(&["attention", "claude-code:Stop", "--json", "-"]).event,
+            "claude-code:Stop"
+        );
     }
 }

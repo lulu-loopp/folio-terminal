@@ -132,7 +132,7 @@
         "hooks": [
           {
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Stop",
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Stop --json -",
             "type": "command"
           }
         ]

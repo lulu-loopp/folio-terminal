@@ -209,12 +209,21 @@ pub(crate) fn rows_to_install() -> Vec<MappingRow> {
 /// The executable is quoted and the event is the qualified `<family>:<event>` spelling, so the
 /// receiving end never has to work out which upstream a bare `Stop` came from.
 ///
-/// **The payload is not passed.** Nothing in the shipped tables declares an identifier to take out
-/// of one, so there is nothing to send — and a command line that interpolated a hook payload would
-/// be a command line an upstream could put a quote character into.
+/// **The payload is never interpolated**, and that clause has not moved: a command line carrying a
+/// hook payload would be a command line an upstream could put a quote character into. What the
+/// line may say is *where* the payload will be — `--json -`, standard input, which is where Claude
+/// Code writes it and where nothing has to be quoted at all.
+///
+/// It is said only for a row that has somewhere to look ([`attention_map::Words`]). Every other
+/// event's hook is spawned with nothing to read and reads nothing, which is what it did before.
 #[must_use]
 pub(crate) fn command_for(exe: &Path, event: &str) -> String {
-    format!("\"{}\" attention {CLAUDE_CODE}:{event}", exe.display())
+    let mut command = format!("\"{}\" attention {CLAUDE_CODE}:{event}", exe.display());
+    if attention_map::turn_end_row(CLAUDE_CODE, event).is_some_and(|row| row.words.are_somewhere())
+    {
+        command.push_str(&format!(" --json {}", crate::cli::STDIN_PAYLOAD));
+    }
+    command
 }
 
 /// Write Folio's hooks into a settings value, replacing any it had before.
@@ -706,6 +715,21 @@ mod tests {
         let stop = settings["hooks"]["Stop"].as_array().expect("array");
         assert_eq!(stop.len(), 2);
         assert_eq!(stop[0]["hooks"][0]["command"], Value::from("say done"));
+        // **And ours is the one that asks for a payload**, which is what makes the removal below
+        // an assertion about the *new* command line rather than about the one this test was
+        // written for: an entry recognised by the mark is recognised whatever follows it, and this
+        // is the entry that has something following it.
+        assert_eq!(
+            stop[1]["hooks"][0]["command"]
+                .as_str()
+                .expect("our command"),
+            command_for(&exe(), "Stop")
+        );
+        assert!(
+            stop[1]["hooks"][0]["command"]
+                .as_str()
+                .is_some_and(|command| command.ends_with(" --json -"))
+        );
         assert!(remove_from(&mut settings));
         assert_eq!(
             settings, original,
@@ -764,6 +788,13 @@ mod tests {
     }
 
     /// The command carries the family, so a bare `Stop` is never ambiguous.
+    ///
+    /// **And it asks for a payload exactly where the table says there is something in one.** The
+    /// bar is the mapping table's own column rather than a list written here, so a row that gains
+    /// or loses a [`attention_map::Words`] source is a row whose command line follows it without
+    /// anybody remembering to come back — and a row that declares nothing gets the command line it
+    /// always had, which is the property this half is really about: nothing is spawned holding a
+    /// handle it has no reason to read.
     #[test]
     fn every_command_says_which_upstream_it_speaks_for() {
         for row in rows_to_install() {
@@ -773,11 +804,28 @@ mod tests {
                 command.contains(&format!("{CLAUDE_CODE}:{}", row.event)),
                 "{command}"
             );
+            let wants_payload = attention_map::turn_end_row(CLAUDE_CODE, row.event)
+                .is_some_and(|end| end.words.are_somewhere());
+            assert_eq!(
+                command.ends_with(&format!(" --json {}", crate::cli::STDIN_PAYLOAD)),
+                wants_payload,
+                "the payload is asked for where — and only where — a row has somewhere to look: \
+                 {command}"
+            );
+            // **The payload is never interpolated**, whichever way it is asked for. `-` is a name
+            // for a handle; a hook payload's own bytes have never been on a command line and the
+            // day they were, an upstream would be choosing this process's arguments.
             assert!(
-                !command.contains("--json"),
-                "no shipped row declares an identifier, so no payload is passed: {command}"
+                !command.contains('{'),
+                "a payload's bytes must never reach a command line: {command}"
             );
         }
+        // The one row this is about today, named, so that a table edit that silently drops it is a
+        // failure here rather than a notification that quietly goes back to saying nothing.
+        assert!(
+            command_for(&exe(), "Stop").ends_with(" --json -"),
+            "`Stop` is the event whose payload names the transcript"
+        );
     }
 
     /// **The block this writes into somebody's own file, spelled out.**
