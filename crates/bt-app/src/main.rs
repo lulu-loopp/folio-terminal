@@ -14559,7 +14559,31 @@ fn pty_resize_wake_deadline(pending: Option<PendingPtyResize>, now: Instant) -> 
 fn service_pending_pty_resize(
     pending: &mut Option<PendingPtyResize>,
     now: Instant,
+    hand_on_the_geometry: bool,
 ) -> (Option<PendingPtyResize>, Option<Instant>) {
+    // **A hand still on the geometry is told nothing and asked for nothing.**
+    //
+    // The sentence is §7.50's, said about the same window by the same program; what is new is
+    // that the *child* is one of the things that was being told. The quiet window is 200 ms from
+    // the last solve, and a hand that rests that long half way through a gesture — a divider held
+    // at the edge of its travel, a window border paused mid-drag — releases the size the pane has
+    // **at that instant**, which is a size the gesture is in the middle of and nobody has chosen.
+    // A divider can legitimately be somewhere that leaves a pane at
+    // `CellMetrics::MIN_COLUMNS`, so the size released can be two columns, and every one of those
+    // is a `ResizePseudoConsole` re-entering conhost and reflowing a screen buffer over a width
+    // the user is on their way past.
+    //
+    // Deferring it is not the freeze the 2026-08-06 ruling struck down: that ruling is about the
+    // *picture*, and the picture still follows the hand in the very same turn — `plan_grid_change`
+    // reflows this pane's own actor on every solve, exactly as before. What waits is only the
+    // sentence said to the child, and it waits for the end of the gesture rather than for a
+    // number. One gesture, one `ResizePseudoConsole`.
+    //
+    // **No wake-up is asked for while the hand is down**, and none is needed: letting go is an
+    // event, the turn it produces finds the deadline already past, and the release happens there.
+    if hand_on_the_geometry {
+        return (None, None);
+    }
     let due = take_due_pty_resize(pending, now);
     let wake = pty_resize_wake_deadline(*pending, now);
     (due, wake)
@@ -14740,8 +14764,10 @@ fn schedule_leaf_grid_change(
 fn release_due_leaf_resize(
     leaf: &mut LeafSession,
     now: Instant,
+    hand_on_the_geometry: bool,
 ) -> Result<(Option<LeafResizeCommit>, Option<Instant>)> {
-    let (due, wake) = service_pending_pty_resize(&mut leaf.pending_pty_resize, now);
+    let (due, wake) =
+        service_pending_pty_resize(&mut leaf.pending_pty_resize, now, hand_on_the_geometry);
     let Some(pending) = due else {
         return Ok((None, wake));
     };
@@ -31836,14 +31862,14 @@ impl Runtime<'_> {
                 );
                 rect
             });
-        bt_platform::set_window_outer_rect(
-            hwnd,
-            standing.unwrap_or_else(|| {
-                startup_window_rect(placement, opened_at.rect, opened_at.authoritative_scale)
-            }),
-        )
-        .map_err(|error| anyhow!(error))
-        .context("state the new window's outer rectangle")?;
+        // Kept, because this rectangle is also the one this window goes into the vault holding —
+        // see the `record_window` below.
+        let stood_at = standing.unwrap_or_else(|| {
+            startup_window_rect(placement, opened_at.rect, opened_at.authoritative_scale)
+        });
+        bt_platform::set_window_outer_rect(hwnd, stood_at)
+            .map_err(|error| anyhow!(error))
+            .context("state the new window's outer rectangle")?;
         let physical = window.inner_size();
         let scale_factor = dpi_snapshot(&window)?.authoritative_scale;
         // The visual tree first, because the swapchain hangs off it — §2.3's
@@ -32023,6 +32049,38 @@ impl Runtime<'_> {
         renderer.set_seat_viewport(terminal_seat);
         let maximized = placement.is_some_and(|placement| placement.maximized);
         let id = window.id();
+        // **This window's own rectangle is in the vault before anything can ask it for one.**
+        //
+        // [`Runtime::window_snapshot`] measures a rectangle only while a window is *normal*; the
+        // other two postures fall back to what this window last said about itself, and a window
+        // that had never said anything fell back to `WindowStateV1::default()` — the product's
+        // 100,100,1280,800 placeholder, which is the right answer for "there was no prior session
+        // at all" and a wrong one for "this window has not been photographed yet".
+        //
+        // A **second window restored maximized** is exactly that case: it is maximized from the
+        // moment it is shown, so its first snapshot has no measured rectangle, and the corner and
+        // extent the file recorded for it were replaced by the placeholder on the first launch
+        // after it. The first window never had this because `FolioApp::resumed` seeds its picture
+        // with the paragraph it was opened from (`window_pictures: vec![(window.id(), …)]`); this
+        // is that same seeding said at the other door, in the one form this door can say it —
+        // the rectangle it is standing at, which for a restored window *is* the saved one.
+        //
+        // The tabs are filled in a few lines below, by `mark_session_dirty` on a runtime that has
+        // them; an entry with none is momentary and, were a write to catch it, `plan_windows`
+        // drops a window with no tabs on the way back in.
+        app.record_window(
+            id,
+            SessionWindowV1 {
+                placement: WindowStateV1 {
+                    bounds: persisted_window_bounds(stood_at, scale_factor),
+                    dpi: renderer.metrics().dpi_milli().get(),
+                    maximized,
+                    monitor_id: None,
+                },
+                ..SessionWindowV1::default()
+            },
+            Instant::now(),
+        );
         let mut window = new_window_runtime(NewWindowParts {
             favicons: Rc::clone(&app.favicons),
             renderer,
@@ -32064,6 +32122,11 @@ impl Runtime<'_> {
             window: &mut window,
         };
         runtime.dress_new_window(hwnd)?;
+        // The seed above with this window's tabs written into it, taken here rather than left to
+        // the caller so that no turn of the loop can find a paragraph with nothing in it. The
+        // fallback it reads is the seed, which is what makes a maximized window's first snapshot
+        // carry the rectangle it would unmaximize to instead of the placeholder.
+        runtime.mark_session_dirty(Instant::now());
         // **A window that is about to be handed a tab is not shown holding the
         // stand-in** (user report 2026-08-27).
         //
@@ -71923,6 +71986,18 @@ impl Runtime<'_> {
         hang_watch::at(hang_watch::Station::PtyResize);
         let active = self.window.active_tab;
         let focused_seat = self.window.tabs[active].focused_leaf;
+        // **Is a hand still on the geometry** — see [`service_pending_pty_resize`]. The two
+        // gestures that move a pane's rectangle while a button is held: this window's own frame in
+        // the OS's modal move/size loop, and a divider. §7.50 already reads the first of them for
+        // the DPI settlement's sake; the child's notification is the other thing a gesture in
+        // flight should not be interrupted to say.
+        let hand_on_the_geometry =
+            self.window.divider_drag.is_some() || self.window.custom_window_frame.in_size_move();
+        // Every `ResizePseudoConsole` this window actually issues, one line each, so a report of
+        // the shape "a resize sequence wedged the program in this pane" can be answered with the
+        // sequence instead of with an argument about it. `BT_RESIZE_TRACE`, beside the surface
+        // clamp trace it is read with.
+        let trace = self.app.trace_resize;
         let mut wake_deadline: Option<Instant> = None;
         let mut committed_any = false;
         let mut active_tab_wants_a_frame = false;
@@ -71939,11 +72014,19 @@ impl Runtime<'_> {
                 // accumulated; the send happens in `finish_resize_if_quiescent`, after ConPTY
                 // output has also been silent, so a closed input region still writes exactly zero
                 // private bytes.
-                let (commit, leaf_wake) = release_due_leaf_resize(leaf, now)?;
+                let (commit, leaf_wake) = release_due_leaf_resize(leaf, now, hand_on_the_geometry)?;
                 wake_deadline = earliest_deadline([wake_deadline, leaf_wake]);
                 let Some(commit) = commit else {
                     continue;
                 };
+                if trace {
+                    eprintln!(
+                        "BT_RESIZE_TRACE conpty tab={index} seat={} cols={} rows={}",
+                        seat.0,
+                        leaf.conpty_grid.columns.get(),
+                        leaf.conpty_grid.rows.get()
+                    );
+                }
                 committed_any = true;
                 if index == active {
                     active_tab_wants_a_frame |= commit.worth_a_frame();
@@ -82439,12 +82522,23 @@ impl Runtime<'_> {
         }
     }
 
+    /// Whether this window is iconic — Win32's own answer, and the same one
+    /// [`Runtime::window_snapshot`] asks before it believes a rectangle.
+    fn window_is_iconic(&self) -> bool {
+        window_hwnd(&self.window.window)
+            .ok()
+            .is_some_and(bt_platform::is_window_minimized)
+    }
+
     fn resize(&mut self, physical: PhysicalSize<u32>) -> Result<()> {
-        if physical.width == 0 || physical.height == 0 {
+        // **A minimized window has no geometry to solve for**, and the size Win32 hands over with
+        // `SIZE_MINIMIZED` is the icon's, not the window's — see [`resize_worth_solving`].
+        if !resize_worth_solving(self.window_is_iconic(), physical) {
             return Ok(());
         }
-        // **First statement in the handler, and that is the whole of it**
-        // (§7.1.6c-4b, re-judged 2026-08-24). Everything below this line —
+        // **The first thing done with a rectangle that is the window's, and that is the whole of
+        // it** (§7.1.6c-4b, re-judged 2026-08-24; the gate above is the only thing in front of it,
+        // and it decides whether there is a rectangle here at all). Everything below this line —
         // the solve, every pane's ConPTY, the frame — happens between the
         // window becoming bigger and the swapchain becoming bigger, and for
         // the whole of that gap the strip the window grew by is a region
@@ -82610,7 +82704,13 @@ impl Runtime<'_> {
 
     fn reconcile_authoritative_dpi(&mut self, stage: &'static str) -> Result<bool> {
         let physical = self.window.window.inner_size();
-        if physical.width > 0 && physical.height > 0 {
+        // **The second reader of the same rectangle**, held to the same rule
+        // ([`resize_worth_solving`]): `inner_size()` on an iconic window is the icon's client
+        // area, and every geometry step below — the swapchain, the solve, the per-leaf grids —
+        // would take it for the window's. `WindowEvent::Resized` is not the only way in here;
+        // `scale_factor_changed` and `settle_deferred_dpi` reach it directly.
+        let worth = resize_worth_solving(self.window_is_iconic(), physical);
+        if worth {
             self.window
                 .renderer
                 .resize(&self.app.gpu, physical.width, physical.height)
@@ -82628,7 +82728,7 @@ impl Runtime<'_> {
         // terminal came to be drawn over its neighbour's seat. `solve` is pure
         // and the tree has not changed, so on the common no-op path this is the
         // same answer arrived at again.
-        if physical.width > 0 && physical.height > 0 {
+        if worth {
             self.resolve_seat_layout(render_physical);
         }
         let snapshot = dpi_snapshot(&self.window.window)?;
@@ -82662,7 +82762,7 @@ impl Runtime<'_> {
         }
 
         self.apply_scale_factor(snapshot.authoritative_scale)?;
-        if physical.width > 0 && physical.height > 0 {
+        if worth {
             // A DPI change is a similarity transform: the same tree solved again
             // on a new rectangle. Red line L5 — not one ratio, not one fixed
             // extent is rewritten on this path, and `resolve_seat_layout` writes
@@ -87786,6 +87886,50 @@ mod quit_transaction_tests {
             .unwrap_or_else(|| panic!("{signature} is declared in this file"));
         let rest = &SOURCE[start + signature.len()..];
         &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+    }
+
+    /// **RED (shape) — a window is in the vault before it is asked what it looks like** (§7.52).
+    ///
+    /// [`Runtime::window_snapshot`] measures a rectangle only while a window is normal; the other
+    /// two postures fall back to what this window last said about itself, and a window that has
+    /// said nothing falls back to `WindowStateV1::default()`. So the order of these three lines
+    /// *is* whether a second window restored **maximized** keeps the rectangle the file recorded
+    /// for it: seeded first, that is what its first snapshot falls back to; seeded after — or not
+    /// at all — the answer is the product's 100,100,1280,800 placeholder and the user's corner is
+    /// gone on the first launch after it. The first window never had the defect because
+    /// `FolioApp::resumed` seeds its picture with the paragraph it opened from.
+    ///
+    /// Held against the source for this module's own reason: it is a claim about *when* something
+    /// is written, which no value in the program carries.
+    ///
+    /// Red gate: delete the `record_window` call, or move it below `new_window_runtime`, and this
+    /// goes red. Move the snapshot after `show_new_window` and the last assertion does — a
+    /// maximized window photographed after `SW_MAXIMIZE` has no normal rectangle left to measure.
+    #[test]
+    fn a_window_is_in_the_vault_before_it_is_asked_what_it_looks_like() {
+        let door = body(&["fn open_", "window(\n        event_loop: &ActiveEventLoop,"]);
+        let seeded = door
+            .find("app.record_window(")
+            .expect("the door puts this window's opening rectangle in the vault");
+        let built = door
+            .find("new_window_runtime(NewWindowParts {")
+            .expect("and then builds the window runtime around it");
+        let photographed = door
+            .find("runtime.mark_session_dirty(")
+            .expect("and takes this window's first full picture");
+        let shown = door
+            .find("runtime.show_new_window(maximized)?;")
+            .expect("and only then puts it on the glass");
+        assert!(
+            seeded < built,
+            "a window photographed before it is in the vault falls back to the product's \
+             placeholder rectangle instead of the one it opened at"
+        );
+        assert!(
+            built < photographed && photographed < shown,
+            "the first picture is taken while the window is still normal — after `SW_MAXIMIZE` \
+             there is no normal rectangle left for it to measure"
+        );
     }
 
     /// RED (multiwindow slice E2, acceptance gate: 「三窗 Quit → 文件 windows[] =
@@ -93087,13 +93231,14 @@ mod resize_skirt_order_tests {
              worth of work stands between the window growing and the swapchain \
              growing"
         );
-        // Nothing may stand in front of it either: the guard above it is the
-        // zero-size early return, and that is all.
+        // Nothing may stand in front of it either: the one guard above it is
+        // `resize_worth_solving`, which answers whether this rectangle is the
+        // window's at all — a zero extent, or the icon's (§7.52).
         assert!(
             told < 150,
             "the call is the first statement of the handler, not merely an early \
              one — it stands {told} characters in, and the only thing allowed in \
-             front of it is the zero-size early return"
+             front of it is the unreal-rectangle early return"
         );
     }
 
@@ -95053,6 +95198,35 @@ fn recorded_window_placement(
     }
 }
 
+/// **Whether a `WindowEvent::Resized` describes a rectangle anything should be solved for.**
+///
+/// Two rectangles arrive here that are not the window's, and only one of them was ever refused.
+///
+/// * **A zero extent** is a window with no client area, which every solve below divides by.
+/// * **The icon's rectangle.** Win32 sends `WM_SIZE` with `SIZE_MINIMIZED` and a client size that
+///   belongs to the *icon* — the same fiction [`bt_platform::is_window_minimized`] documents on
+///   the `GetWindowRect` side, parked at `-32000,-32000`. On this machine it measures 314x50
+///   physical, and the whole of §4.2's chain ran on it: the seats were solved for a 314-pixel
+///   window, every pane's terminal actor reflowed into the two or three columns that fits, and
+///   after the 200 ms quiet window every pane's ConPTY was told its shell was three columns wide.
+///   Un-minimizing solves the real rectangle again and tells ConPTY again — but a reflow is not an
+///   undo, and what the user gets back is a full-width pane holding a TUI that was re-wrapped at
+///   three columns. Measured: `BT_DPI stage=resized rect=-32000,-32000,-31686,-31950
+///   inner_size=314x50` in `diagnostics.log`, twice in one run, either side of the restore.
+///
+/// Refusing it costs nothing, because nothing was ever owed: winit delivers the real rectangle
+/// again on the way back up (the same log line, `inner_size=2880x1800`, follows each icon one), so
+/// there is no state to catch up and no resize to replay. This is the same rule the snapshot path
+/// already keeps — *a rectangle nobody chose must never displace the one somebody did* — applied
+/// to the other consumer of the same fiction.
+///
+/// The test is the platform's own (`IsIconic`) and not the numbers: `-32000` is the classic
+/// shell's parking spot rather than a contract, and a magic-number guard would refuse a genuinely
+/// tiny window on a machine that parks its icons somewhere else.
+fn resize_worth_solving(minimized: bool, physical: PhysicalSize<u32>) -> bool {
+    !minimized && physical.width > 0 && physical.height > 0
+}
+
 /// A saved size, or the product's opening size when the saved one is not a size
 /// a window could have been left at.
 ///
@@ -95080,8 +95254,9 @@ fn sane_restored_size(bounds: WindowBoundsV1) -> LogicalSize<f64> {
 /// What the session file asks the next window to open as.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RestoredPlacement {
-    /// Logical size to reopen at. Always honoured, because a size is never
-    /// off-screen.
+    /// Logical size to reopen at — the recorded one, **fitted to the monitor this window will
+    /// actually land on**. See [`choose_restored_placement`] for why a size is not exempt from
+    /// §3.1's floor after all.
     size: LogicalSize<f64>,
     /// Logical top-left, or `None` when no monitor this machine currently has
     /// can see the recorded rectangle and the OS should choose the spot instead.
@@ -95089,16 +95264,123 @@ struct RestoredPlacement {
     maximized: bool,
 }
 
+/// **One monitor, as the restore judgment needs it**: the logical rectangle of its *work area*.
+///
+/// The work area rather than the whole monitor, for [`bt_platform::get_work_area`]'s own reason —
+/// a window sized to the full monitor is a window one taskbar strip of which the user can never
+/// see. The same rectangle the layout solver's minimum is already computed against.
+///
+/// A struct rather than a `MonitorHandle` so the judgment below is a pure function of a list a
+/// test can write down: winit's handle can only come from a live event loop, and the two facts
+/// that used to be read off it here (where the monitor is, how big it is) are the two facts in
+/// this type.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RestoreMonitor {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+}
+
+impl RestoreMonitor {
+    fn width(self) -> f64 {
+        (self.right - self.left).max(0.0)
+    }
+
+    fn height(self) -> f64 {
+        (self.bottom - self.top).max(0.0)
+    }
+
+    /// How much of a logical rectangle this monitor can show. Zero is "cannot show any of it".
+    ///
+    /// An area rather than a boolean, because "can this monitor see the window at all" and "which
+    /// monitor is the window *on*" are the same question asked with two different amounts of
+    /// precision, and a window straddling a seam belongs to the screen holding most of it.
+    fn overlap(self, position: LogicalPosition<f64>, size: LogicalSize<f64>) -> f64 {
+        let width = (self.right.min(position.x + size.width) - self.left.max(position.x)).max(0.0);
+        let height =
+            (self.bottom.min(position.y + size.height) - self.top.max(position.y)).max(0.0);
+        width * height
+    }
+}
+
+/// Every monitor this machine currently has, **primary first**.
+///
+/// The order is load-bearing rather than tidy: [`choose_restored_placement`] fits a rectangle no
+/// monitor can see to the first entry, because a window that forfeits its corner opens wherever
+/// the OS puts it, and that is the primary.
+///
+/// The one impure half of the restore judgment, and all it does is read. `available_monitors`
+/// gives the arrangement, and Win32 gives each monitor's work area — the taskbar's strip is not a
+/// fact winit reports, and it is exactly the strip a restored window must not open under.
+fn restore_monitors(event_loop: &ActiveEventLoop) -> Vec<RestoreMonitor> {
+    let primary = event_loop.primary_monitor();
+    primary
+        .clone()
+        .into_iter()
+        .chain(
+            event_loop
+                .available_monitors()
+                .filter(|monitor| Some(monitor) != primary.as_ref()),
+        )
+        .map(|monitor| {
+            let scale = monitor.scale_factor().max(f64::MIN_POSITIVE);
+            let origin = monitor.position();
+            let extent = monitor.size();
+            let full = bt_platform::WindowRect {
+                left: origin.x,
+                top: origin.y,
+                right: origin
+                    .x
+                    .saturating_add(extent.width.min(i32::MAX as u32) as i32),
+                bottom: origin
+                    .y
+                    .saturating_add(extent.height.min(i32::MAX as u32) as i32),
+            };
+            // The centre, because that is the one point of a monitor that is certainly on it —
+            // `MonitorFromPoint` resolves a shared edge to whichever neighbour it likes.
+            let work = bt_platform::work_area_at(
+                full.left + (full.right - full.left) / 2,
+                full.top + (full.bottom - full.top) / 2,
+            )
+            .unwrap_or(full);
+            RestoreMonitor {
+                left: f64::from(work.left) / scale,
+                top: f64::from(work.top) / scale,
+                right: f64::from(work.right) / scale,
+                bottom: f64::from(work.bottom) / scale,
+            }
+        })
+        .collect()
+}
+
 /// Where a restored window should open, or `None` on a first run.
 ///
-/// docs/M2-persistence-schema-v1.md §3.1: hitting the recorded monitor and the
-/// recorded logical coordinates is best effort, but "does not crash, does not
-/// land off-screen" is the hard floor. So a rectangle that no monitor can see
-/// forfeits its position — the size is still honoured, because a size is never
-/// off-screen.
-fn restore_window_placement(
-    event_loop: &ActiveEventLoop,
+/// docs/M2-persistence-schema-v1.md §3.1: hitting the recorded monitor and the recorded logical
+/// coordinates is best effort, but "does not crash, does not land off-screen" is the hard floor.
+/// So a rectangle that no monitor can see forfeits its position.
+///
+/// **The size used to be exempt from that floor** — "always honoured, because a size is never
+/// off-screen" — and the exemption was wrong by half. A size is never off-screen *by itself*; a
+/// size larger than the screen it is being put on is nothing but off-screen. Measured on the real
+/// machine: a session saved on a 3840x2160 external monitor reopened on the 2880x1800 laptop panel
+/// alone as `rect=49,49,1901,2209`, which is 409 physical pixels of window below the bottom of the
+/// only display there was. It was invisible only because that session also happened to be
+/// maximized, which covered the evidence a tenth of a second later.
+///
+/// So the recorded size is fitted to the work area of **the monitor the window will actually land
+/// on** — the one that can see most of the recorded rectangle, or, when none can, the primary,
+/// which is where forfeiting the corner puts it. Fitting never grows a window: a small window
+/// saved on a small screen stays small on a large one.
+///
+/// A corner is moved only when the size had to shrink. "Some of the window is reachable" rather
+/// than "all of it fits" is deliberate for a rectangle that still fits — a window whose title bar
+/// is on screen can always be dragged the rest of the way, and demanding containment would move
+/// windows the user parked half off a monitor on purpose. A window that no longer fits is not the
+/// rectangle they parked, so its corner is not owed either.
+fn choose_restored_placement(
     window: &SessionWindowV1,
+    monitors: &[RestoreMonitor],
 ) -> Option<RestoredPlacement> {
     // An empty tab list is a window that is not a window: on a first run there
     // are no entries at all, and an entry with nothing in it describes nothing to
@@ -95110,30 +95392,60 @@ fn restore_window_placement(
     // Corrected before the visibility test below, not after: the test asks
     // whether *this rectangle* is reachable, and it should be asking about the
     // rectangle the window will actually open at.
-    let size = sane_restored_size(bounds);
-    let position = LogicalPosition::new(f64::from(bounds.x), f64::from(bounds.y));
-    let visible = event_loop.available_monitors().any(|monitor| {
-        let scale = monitor.scale_factor().max(f64::MIN_POSITIVE);
-        let origin = monitor.position();
-        let extent = monitor.size();
-        let left = f64::from(origin.x) / scale;
-        let top = f64::from(origin.y) / scale;
-        let right = left + f64::from(extent.width) / scale;
-        let bottom = top + f64::from(extent.height) / scale;
-        // "Some of the window is reachable" rather than "all of it fits": a
-        // window whose title bar is on screen can always be dragged the rest of
-        // the way, and demanding containment would move windows the user
-        // deliberately parked half off a monitor.
-        position.x < right
-            && position.y < bottom
-            && position.x + size.width > left
-            && position.y + size.height > top
-    });
+    let recorded = sane_restored_size(bounds);
+    let corner = LogicalPosition::new(f64::from(bounds.x), f64::from(bounds.y));
+    let seen = monitors
+        .iter()
+        .copied()
+        .map(|monitor| (monitor, monitor.overlap(corner, recorded)))
+        .filter(|(_, area)| *area > 0.0)
+        .max_by(|(_, one), (_, other)| one.total_cmp(other))
+        .map(|(monitor, _)| monitor);
+    let maximized = window.placement.maximized;
+    // No topology at all to judge against is not a machine with no screens — it is a machine that
+    // would not say. Nothing is fitted and the corner is forfeit, which is the same answer this
+    // gave before any of it could be asked.
+    let Some(target) = seen.or_else(|| monitors.first().copied()) else {
+        return Some(RestoredPlacement {
+            size: recorded,
+            position: None,
+            maximized,
+        });
+    };
+    let fit = |recorded: f64, extent: f64| {
+        if extent > 0.0 {
+            recorded.min(extent)
+        } else {
+            recorded
+        }
+    };
+    let size = LogicalSize::new(
+        fit(recorded.width, target.width()),
+        fit(recorded.height, target.height()),
+    );
+    let shrank = size != recorded;
     Some(RestoredPlacement {
         size,
-        position: Some(position).filter(|_| visible),
-        maximized: window.placement.maximized,
+        position: seen.map(|_| {
+            if shrank {
+                LogicalPosition::new(
+                    corner.x.min(target.right - size.width).max(target.left),
+                    corner.y.min(target.bottom - size.height).max(target.top),
+                )
+            } else {
+                corner
+            }
+        }),
+        maximized,
     })
+}
+
+/// [`choose_restored_placement`] asked of the machine this process is running on.
+fn restore_window_placement(
+    event_loop: &ActiveEventLoop,
+    window: &SessionWindowV1,
+) -> Option<RestoredPlacement> {
+    choose_restored_placement(window, &restore_monitors(event_loop))
 }
 
 /// The physical outer rectangle a window must be given at startup.
@@ -102395,6 +102707,240 @@ mod tests {
             (rect.right - rect.left, rect.bottom - rect.top),
             ((INITIAL_WIDTH * 2.0) as i32, (INITIAL_HEIGHT * 2.0) as i32)
         );
+    }
+
+    /// A saved window with something in it, which is the only kind
+    /// [`choose_restored_placement`] has an opinion about.
+    fn saved_window(bounds: WindowBoundsV1, maximized: bool) -> SessionWindowV1 {
+        SessionWindowV1 {
+            placement: WindowStateV1 {
+                bounds,
+                dpi: 2000,
+                maximized,
+                monitor_id: None,
+            },
+            tabs: vec![TabV1 {
+                root: LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                    profile_id: "pwsh".to_owned(),
+                    cwd: String::new(),
+                    manual_name: None,
+                    card_skip: 0,
+                })),
+                pinned: false,
+                focused_leaf: "leaf-0".to_owned(),
+                preview: None,
+            }],
+            ..SessionWindowV1::default()
+        }
+    }
+
+    fn monitor(left: f64, top: f64, width: f64, height: f64) -> RestoreMonitor {
+        RestoreMonitor {
+            left,
+            top,
+            right: left + width,
+            bottom: top + height,
+        }
+    }
+
+    /// The laptop panel this bug was measured on: 2880x1800 at 200%, so 1440x900 logical, with
+    /// nothing taken off it for a taskbar so the arithmetic below is the placement's and not a
+    /// work area's.
+    const LAPTOP: RestoreMonitor = RestoreMonitor {
+        left: 0.0,
+        top: 0.0,
+        right: 1440.0,
+        bottom: 900.0,
+    };
+
+    /// The 3840x2160 external, also at 200%, parked to the left of it — where this session was
+    /// saved.
+    const EXTERNAL: RestoreMonitor = RestoreMonitor {
+        left: -1920.0,
+        top: -120.0,
+        right: 0.0,
+        bottom: 960.0,
+    };
+
+    /// The rectangle out of the user's own `session.json` on 2026-09-01: a window last left
+    /// normal on the external monitor, and maximized when the process ended.
+    const SAVED_ON_THE_EXTERNAL: WindowBoundsV1 = WindowBoundsV1 {
+        x: -1360,
+        y: 429,
+        width: 926,
+        height: 1080,
+    };
+
+    /// A monitor that is still there is still where the window goes — corner and size both
+    /// exactly as recorded, with nothing fitted, nudged or clamped on the way.
+    ///
+    /// Red gate: fit the size against the *primary* rather than against the monitor the rectangle
+    /// is on, and the height comes back 900 instead of 1080.
+    #[test]
+    fn a_window_comes_back_untouched_when_the_monitor_it_was_left_on_is_still_there() {
+        let placement = choose_restored_placement(
+            &saved_window(SAVED_ON_THE_EXTERNAL, true),
+            &[LAPTOP, EXTERNAL],
+        )
+        .expect("a window with a tab in it has a placement");
+        assert_eq!(
+            placement.position,
+            Some(LogicalPosition::new(-1360.0, 429.0)),
+            "a rectangle on a monitor that exists was moved"
+        );
+        assert_eq!(
+            placement.size,
+            LogicalSize::new(926.0, 1080.0),
+            "a rectangle that fits its own monitor was resized"
+        );
+        assert!(placement.maximized);
+    }
+
+    /// **PIN (user report, 2026-09-01) — a restored window does not hang off the bottom of the
+    /// only screen there is.**
+    ///
+    /// The report was "窗口出现在主屏上", and the log line under it is `BT_DPI stage=create
+    /// rect=49,49,1901,2209` on a machine whose only display is 2880x1800: the corner was
+    /// forfeited correctly, because the external monitor the rectangle names was not attached —
+    /// and then the *size* was honoured anyway, putting 409 physical pixels of window below the
+    /// bottom of the screen. The old contract said a size is never off-screen. A size bigger than
+    /// the screen is nothing but off-screen.
+    ///
+    /// Red gate: return `sane_restored_size(bounds)` unfitted — the height comes back 1080 on a
+    /// 900-tall display.
+    #[test]
+    fn a_window_saved_on_a_bigger_screen_does_not_open_off_the_bottom_of_a_smaller_one() {
+        let placement =
+            choose_restored_placement(&saved_window(SAVED_ON_THE_EXTERNAL, true), &[LAPTOP])
+                .expect("a window with a tab in it has a placement");
+        assert_eq!(
+            placement.position, None,
+            "a rectangle no monitor can see kept its corner"
+        );
+        assert_eq!(
+            placement.size,
+            LogicalSize::new(926.0, 900.0),
+            "the window opened taller than the only display there was"
+        );
+    }
+
+    /// Fitting is a ceiling and never a floor: a small window saved on a small screen stays small
+    /// when it is reopened on a large one.
+    ///
+    /// Red gate: fit with `max` instead of `min`, or seat every restored window at the work area,
+    /// and a 600x400 window comes back 1920x1080.
+    #[test]
+    fn fitting_a_restored_window_never_makes_it_bigger() {
+        let small = WindowBoundsV1 {
+            x: 40,
+            y: 60,
+            width: 600,
+            height: 400,
+        };
+        let placement = choose_restored_placement(
+            &saved_window(small, false),
+            &[monitor(0.0, 0.0, 1920.0, 1080.0)],
+        )
+        .expect("a window with a tab in it has a placement");
+        assert_eq!(placement.size, LogicalSize::new(600.0, 400.0));
+        assert_eq!(placement.position, Some(LogicalPosition::new(40.0, 60.0)));
+    }
+
+    /// A window the user deliberately parked half off the side of a monitor comes back parked
+    /// half off the side of that monitor. Fitting is about rectangles that no longer *fit*; a
+    /// rectangle that fits is none of its business.
+    ///
+    /// Red gate: seat every restored window fully inside the target work area, and this corner
+    /// jumps from 1300 to 1040.
+    #[test]
+    fn a_window_parked_half_off_a_monitor_is_left_where_it_was_parked() {
+        let parked = WindowBoundsV1 {
+            x: 1300,
+            y: 100,
+            width: 400,
+            height: 300,
+        };
+        let placement = choose_restored_placement(&saved_window(parked, false), &[LAPTOP])
+            .expect("a window with a tab in it has a placement");
+        assert_eq!(placement.size, LogicalSize::new(400.0, 300.0));
+        assert_eq!(
+            placement.position,
+            Some(LogicalPosition::new(1300.0, 100.0)),
+            "a rectangle that still fits was pulled back onto the screen"
+        );
+    }
+
+    /// When the size *did* have to shrink, the corner goes with it: the rectangle is no longer
+    /// the one anybody chose, so the top-left it was chosen with is not owed either, and leaving
+    /// it there would put a fitted window's title bar off the screen it was just fitted to.
+    ///
+    /// Red gate: keep `corner` when the size shrinks and the window opens at x = 1200 on a
+    /// 1440-wide display it now spans the whole of.
+    #[test]
+    fn a_window_that_had_to_shrink_is_seated_on_the_monitor_that_shrank_it() {
+        let oversized = WindowBoundsV1 {
+            x: 1200,
+            y: 800,
+            width: 1600,
+            height: 1200,
+        };
+        let placement = choose_restored_placement(&saved_window(oversized, false), &[LAPTOP])
+            .expect("a window with a tab in it has a placement");
+        assert_eq!(placement.size, LogicalSize::new(1440.0, 900.0));
+        assert_eq!(placement.position, Some(LogicalPosition::new(0.0, 0.0)));
+    }
+
+    /// A window straddling a seam belongs to the screen holding most of it, and that is the
+    /// screen whose size it is fitted to.
+    ///
+    /// Red gate: take the first monitor that overlaps at all rather than the one that overlaps
+    /// most, and the height is fitted to the 400-tall strip instead of left alone.
+    #[test]
+    fn a_window_across_a_seam_is_fitted_to_the_monitor_holding_most_of_it() {
+        let straddling = WindowBoundsV1 {
+            x: -100,
+            y: 0,
+            width: 900,
+            height: 700,
+        };
+        // A short screen on the left that catches 100 columns of the window, and the real one on
+        // the right that catches the other 800.
+        let sliver = monitor(-1000.0, 0.0, 1000.0, 400.0);
+        let placement =
+            choose_restored_placement(&saved_window(straddling, false), &[sliver, LAPTOP])
+                .expect("a window with a tab in it has a placement");
+        assert_eq!(
+            placement.size,
+            LogicalSize::new(900.0, 700.0),
+            "the window was fitted to the monitor it is barely on"
+        );
+        assert_eq!(placement.position, Some(LogicalPosition::new(-100.0, 0.0)));
+    }
+
+    /// A machine that reports no monitors at all is a machine that would not say, not a machine
+    /// with no screens: nothing is fitted against nothing, and the corner is forfeited exactly as
+    /// it is for a rectangle no monitor can see.
+    #[test]
+    fn a_machine_that_reports_no_monitors_fits_nothing() {
+        let placement = choose_restored_placement(&saved_window(SAVED_ON_THE_EXTERNAL, false), &[])
+            .expect("a window with a tab in it has a placement");
+        assert_eq!(placement.position, None);
+        assert_eq!(placement.size, LogicalSize::new(926.0, 1080.0));
+    }
+
+    /// A window with nothing in it is not a window, whatever its rectangle says.
+    #[test]
+    fn a_saved_window_with_no_tabs_asks_for_nothing() {
+        let empty = SessionWindowV1 {
+            placement: WindowStateV1 {
+                bounds: SAVED_ON_THE_EXTERNAL,
+                dpi: 2000,
+                maximized: false,
+                monitor_id: None,
+            },
+            ..SessionWindowV1::default()
+        };
+        assert_eq!(choose_restored_placement(&empty, &[LAPTOP, EXTERNAL]), None);
     }
 
     #[test]
@@ -110009,7 +110555,7 @@ mod tests {
                 leaf.conpty_grid, born,
                 "and the child has heard nothing yet — it is the notification that waits"
             );
-            let (commit, wake) = release_due_leaf_resize(&mut leaf, at).unwrap();
+            let (commit, wake) = release_due_leaf_resize(&mut leaf, at, false).unwrap();
             assert!(
                 commit.is_none(),
                 "mid-drag there is nothing due: every event pushed the quiet boundary out"
@@ -110023,7 +110569,7 @@ mod tests {
         }
 
         let quiet = start + FRAME * (EVENTS - 1) + WINDOW_RESIZE_QUIET;
-        let (commit, wake) = release_due_leaf_resize(&mut leaf, quiet).unwrap();
+        let (commit, wake) = release_due_leaf_resize(&mut leaf, quiet, false).unwrap();
         let commit = commit.expect("the quiet boundary releases the one notification a drag owes");
         assert!(
             !commit.reflowed,
@@ -110038,7 +110584,8 @@ mod tests {
             "nothing is owed, so nothing has to be woken for"
         );
 
-        let (again, _) = release_due_leaf_resize(&mut leaf, quiet + WINDOW_RESIZE_QUIET).unwrap();
+        let (again, _) =
+            release_due_leaf_resize(&mut leaf, quiet + WINDOW_RESIZE_QUIET, false).unwrap();
         assert!(
             again.is_none(),
             "one drag is one notification; a second turn finds the queue empty"
@@ -110522,6 +111069,9 @@ mod tests {
         grid: GridSize,
         conpty: GridSize,
         requests: Vec<GridSize>,
+        /// Whether a button is still held on the thing that is moving this rectangle — a
+        /// divider, or the window's own frame in the OS's modal loop.
+        hand_down: bool,
     }
 
     impl ResizeGateHarness {
@@ -110536,6 +111086,7 @@ mod tests {
                 grid,
                 conpty: grid,
                 requests: Vec::new(),
+                hand_down: false,
             }
         }
 
@@ -110565,9 +111116,31 @@ mod tests {
             }
         }
 
+        /// One `WindowEvent::Resized` **from the top**: the gate `Runtime::resize` opens with,
+        /// then the solve, then everything [`Self::drag_to`] already models.
+        ///
+        /// The solve is stood in for rather than run — it wants a GPU — by the arithmetic it
+        /// actually performed on the machine this bug came off: this pane is the middle third of
+        /// a three-pane window, and a cell of the shipped face at 200% is 19 physical pixels
+        /// wide. `CellMetrics::grid_for_pixels`' own floor is applied, because the floor is where
+        /// the reported "约 2-4 列" came from.
+        fn window_resized(&mut self, physical: PhysicalSize<u32>, minimized: bool, at: Instant) {
+            if !resize_worth_solving(minimized, physical) {
+                return;
+            }
+            let columns = ((physical.width / 3) / 19)
+                .clamp(
+                    u32::from(bt_render::CellMetrics::MIN_COLUMNS),
+                    u32::from(u16::MAX),
+                )
+                .try_into()
+                .expect("clamped into u16 immediately above");
+            self.drag_to(columns, at);
+        }
+
         /// One `about_to_wait`: drain has already happened, and this is what the loop then owes.
         fn tick(&mut self, at: Instant) {
-            let (pending, _) = service_pending_pty_resize(&mut self.pending, at);
+            let (pending, _) = service_pending_pty_resize(&mut self.pending, at, self.hand_down);
             let Some(pending) = pending else {
                 return;
             };
@@ -110601,6 +111174,276 @@ mod tests {
             columns: std::num::NonZeroU16::new(columns).unwrap(),
             rows: std::num::NonZeroU16::new(rows).unwrap(),
         }
+    }
+
+    /// **PIN (user report, 2026-09-01) — a shell is never told the width of an icon.**
+    ///
+    /// The report was a restored three-pane window whose middle pane held a TUI drawing itself
+    /// two to four columns wide inside a pane dozens of columns across. The recordings name the
+    /// cause without ambiguity: `BT_DPI stage=resized rect=-32000,-32000,-31686,-31950
+    /// inner_size=314x50`, twice in that one run, each time followed by the real
+    /// `inner_size=2880x1800` — a minimize and a restore. `-32000` is where Windows parks an
+    /// iconic window, and 314x50 is the client area of the icon. `Runtime::resize` refused a zero
+    /// extent and nothing else, so the whole of §4.2's chain ran on the icon's rectangle: the
+    /// seats were solved for a 314-pixel window, every pane's actor reflowed into the two columns
+    /// `CellMetrics::MIN_COLUMNS` floors at, and one quiet window later every pane's ConPTY was
+    /// told its shell was that wide.
+    ///
+    /// What the user sees afterwards is this test's subject: a reflow is not an undo. Going back
+    /// up re-wraps at the real width the lines that were re-wrapped at three, and the pane comes
+    /// back full of two-character rows.
+    ///
+    /// Red gate: drop the `minimized` term from [`resize_worth_solving`] — the shell is asked to
+    /// become five columns wide and the pane's own grid follows it down.
+    #[test]
+    fn minimizing_a_window_never_tells_its_shell_the_width_of_the_icon() {
+        let start = Instant::now();
+        // The window this session was restored into: 2880 physical pixels across three panes.
+        let window = PhysicalSize::new(2880, 1800);
+        // And the rectangle Win32 hands over with `SIZE_MINIMIZED`, off the same machine.
+        let icon = PhysicalSize::new(314, 50);
+        let mut harness = ResizeGateHarness::new(50, 50);
+        harness.window_resized(window, false, start);
+        harness.tick(start + WINDOW_RESIZE_QUIET);
+        let settled = harness.grid;
+        assert_eq!(settled, grid_of(50, 50));
+
+        // Minimized, and left minimized for far longer than the coalescing window — the whole
+        // point of the report is that the icon's rectangle had all the time it needed to be
+        // believed.
+        harness.window_resized(icon, true, start + Duration::from_secs(1));
+        harness.tick(start + Duration::from_secs(2));
+        assert_eq!(
+            harness.grid, settled,
+            "the pane's own actor reflowed to the icon's width"
+        );
+
+        // And back.
+        harness.window_resized(window, false, start + Duration::from_secs(3));
+        harness.tick(start + Duration::from_secs(4));
+        assert_eq!(harness.grid, settled);
+        assert_eq!(harness.conpty, settled);
+        assert_eq!(
+            harness.requests,
+            Vec::new(),
+            "a window that went away and came back the same size owes its shell nothing"
+        );
+    }
+
+    /// The other half of the same rule, and the reason it is stated as a posture rather than as a
+    /// size: 314x50 is a rectangle a window can genuinely have, and a window that has it gets its
+    /// shell told about it like any other.
+    ///
+    /// Red gate: refuse small rectangles instead of iconic ones — by pixel count, by the
+    /// `-32000` corner, by anything that is not `IsIconic` — and the request list comes back
+    /// empty.
+    #[test]
+    fn a_genuinely_tiny_window_is_still_a_window() {
+        let start = Instant::now();
+        let mut harness = ResizeGateHarness::new(50, 50);
+        harness.window_resized(PhysicalSize::new(314, 50), false, start);
+        harness.tick(start + WINDOW_RESIZE_QUIET);
+        assert_eq!(
+            harness.requests,
+            vec![grid_of(5, 50)],
+            "a window the user really did make this small was not passed on"
+        );
+    }
+
+    /// **PIN (user report, 2026-09-01, second reading) — a pane that was made narrow and then
+    /// made wide again leaves its shell at the wide width, on every timing.**
+    ///
+    /// The report widened the search from "a restored window" to "any narrowing": a divider
+    /// dragged in and out, a preview opened and closed, a window minimized and restored — all of
+    /// them squeeze a pane and let it go, and the complaint is that the shell does not come back.
+    /// The suspicion that goes with it is a *directional* one: that the coalescer keeps the
+    /// shrink and drops the grow.
+    ///
+    /// This drives the shipping decision functions — `plan_grid_change`, which is the only thing
+    /// that ever queues a ConPTY resize, and `service_pending_pty_resize`, which is the only
+    /// thing that ever releases one — over both timings a gesture can have, and reads back the
+    /// **whole sequence** the fake ConPTY was handed. There is no third timing: either the quiet
+    /// window elapsed while the pane was narrow or it did not.
+    ///
+    /// * **The gesture outlives the quiet window** (a slow drag, a preview left open, a window
+    ///   left minimized). The narrow size is committed on the way down, so the sequence must end
+    ///   with the wide one on the way back up.
+    /// * **The gesture is over inside the quiet window** (a flick of the divider). Nothing was
+    ///   ever sent, and nothing must be: what the child holds is already right.
+    ///
+    /// Red gate: make `coalesce_pty_resize_on_grid_change` refuse to queue a grid wider than
+    /// `conpty_grid` — the shape the report's own hypothesis describes — and the first case's
+    /// last element stays at 20 columns while the second case is untouched. Make it *not* cancel
+    /// a pending request that has come back to where the child already is, and the second case
+    /// grows an entry.
+    #[test]
+    fn a_pane_squeezed_narrow_and_let_go_leaves_its_shell_wide() {
+        let start = Instant::now();
+        let wide = PhysicalSize::new(2880, 1800);
+        // A third of the window, which is what a divider dragged well over is worth.
+        let narrow = PhysicalSize::new(960, 1800);
+
+        // ① The squeeze outlasts the quiet window.
+        let mut slow = ResizeGateHarness::new(50, 50);
+        slow.window_resized(narrow, false, start);
+        slow.tick(start + WINDOW_RESIZE_QUIET);
+        slow.window_resized(wide, false, start + Duration::from_secs(2));
+        slow.tick(start + Duration::from_secs(2) + WINDOW_RESIZE_QUIET);
+        assert_eq!(
+            slow.requests,
+            vec![grid_of(16, 50), grid_of(50, 50)],
+            "the shell was left holding the width the pane no longer has"
+        );
+        assert_eq!(slow.conpty, grid_of(50, 50));
+        assert_eq!(slow.grid, grid_of(50, 50));
+
+        // ② The squeeze is over before the quiet window is.
+        let mut quick = ResizeGateHarness::new(50, 50);
+        quick.window_resized(narrow, false, start);
+        quick.window_resized(wide, false, start + Duration::from_millis(50));
+        quick.tick(start + Duration::from_secs(1));
+        assert_eq!(
+            quick.requests,
+            Vec::new(),
+            "a squeeze the child never heard about needs no undoing"
+        );
+        assert_eq!(quick.conpty, grid_of(50, 50));
+        assert_eq!(quick.grid, grid_of(50, 50));
+
+        // ③ And the drag that wanders: narrow, narrower, back out, all inside one quiet window,
+        // then held wide past it. The child hears the last word and nothing else.
+        let mut wandering = ResizeGateHarness::new(50, 50);
+        wandering.window_resized(narrow, false, start);
+        wandering.window_resized(
+            PhysicalSize::new(600, 1800),
+            false,
+            start + Duration::from_millis(30),
+        );
+        wandering.window_resized(
+            PhysicalSize::new(1920, 1800),
+            false,
+            start + Duration::from_millis(60),
+        );
+        wandering.tick(start + Duration::from_millis(60) + WINDOW_RESIZE_QUIET);
+        assert_eq!(wandering.requests, vec![grid_of(33, 50)]);
+        assert_eq!(wandering.conpty, grid_of(33, 50));
+    }
+
+    /// **PIN (user report, 2026-09-01, third reading) — one gesture, one `ResizePseudoConsole`.**
+    ///
+    /// The control group is what named this: the same squeeze-and-release over a pane running
+    /// `codex` leaves nothing behind, and over a pane running Claude Code it does. A final size
+    /// that never arrived would have broken both, so the final size arrives — and what is left to
+    /// account for is the *sequence*, which is where the two TUIs can differ.
+    ///
+    /// A gesture is not a series of chosen sizes. It has exactly one chosen size, at the end;
+    /// every rectangle before that is somewhere the hand was passing through. The quiet window
+    /// alone cannot tell the two apart — it measures 200 ms of stillness, and a hand resting at
+    /// the far end of a divider's travel is still for as long as it likes — so a slow gesture
+    /// released a `ResizePseudoConsole` for every pause it contained, at whatever width the pane
+    /// happened to have, down to `CellMetrics::MIN_COLUMNS`.
+    ///
+    /// This drives the shipping decision function over a drag that pauses three times on the way
+    /// in and once on the way out. The picture follows the hand throughout — that is the
+    /// 2026-08-06 ruling and this test reads it back on every step — and the child hears exactly
+    /// one size, the one the hand let go at.
+    ///
+    /// Red gate: drop the `hand_on_the_geometry` term from `service_pending_pty_resize` and the
+    /// child is handed the whole tour, two columns and all.
+    #[test]
+    fn a_gesture_says_one_thing_to_the_shell_and_says_it_at_the_end() {
+        let start = Instant::now();
+        let mut harness = ResizeGateHarness::new(50, 50);
+        harness.hand_down = true;
+
+        // Four rests, each far longer than the quiet window, on the way in and back out. The
+        // first of them is at `MIN_COLUMNS` — a divider really can be dragged that far.
+        let tour = [
+            (PhysicalSize::new(960, 1800), grid_of(16, 50)),
+            (PhysicalSize::new(300, 1800), grid_of(5, 50)),
+            (PhysicalSize::new(60, 1800), grid_of(2, 50)),
+            (PhysicalSize::new(1500, 1800), grid_of(26, 50)),
+        ];
+        let mut at = start;
+        for (physical, expected) in tour {
+            harness.window_resized(physical, false, at);
+            assert_eq!(
+                harness.grid, expected,
+                "the picture stopped following the hand at {physical:?}"
+            );
+            at += Duration::from_secs(1);
+            harness.tick(at);
+            assert_eq!(
+                harness.requests,
+                Vec::new(),
+                "the shell was told about a width the hand was only passing through"
+            );
+            at += Duration::from_secs(1);
+        }
+
+        // The hand lets go where it means to — somewhere that is not where it started, because a
+        // gesture that ends where it began owes the shell nothing at all and that is
+        // `coalesce_pty_resize_on_grid_change`'s own rule, read back by
+        // `a_pane_squeezed_narrow_and_let_go_leaves_its_shell_wide` ③.
+        harness.window_resized(PhysicalSize::new(1920, 1800), false, at);
+        harness.hand_down = false;
+        harness.tick(at + WINDOW_RESIZE_QUIET);
+        assert_eq!(
+            harness.requests,
+            vec![grid_of(33, 50)],
+            "one gesture owes the shell exactly one size, and it is the last one"
+        );
+        assert_eq!(harness.conpty, grid_of(33, 50));
+    }
+
+    /// The other half of that rule: **letting go is what releases it, not a timer that outlives
+    /// the gesture.** A hand that comes up after the quiet window has already passed is answered
+    /// on the very next turn, with no second wait.
+    ///
+    /// Red gate: return the pending deadline while the hand is down instead of `None` and the
+    /// wake asked for is one this loop does not need; refuse to release on the turn the hand comes
+    /// up and the assertion below goes red naming an empty request list.
+    #[test]
+    fn letting_go_releases_the_size_on_the_next_turn() {
+        let start = Instant::now();
+        let mut harness = ResizeGateHarness::new(50, 50);
+        harness.hand_down = true;
+        harness.window_resized(PhysicalSize::new(960, 1800), false, start);
+        // Long past the quiet window, and still nothing, because the hand is still down.
+        harness.tick(start + Duration::from_secs(5));
+        assert_eq!(harness.requests, Vec::new());
+        // The button comes up. No further solve — the rectangle has not moved — and the very next
+        // turn pays what is owed.
+        harness.hand_down = false;
+        harness.tick(start + Duration::from_secs(5) + Duration::from_millis(1));
+        assert_eq!(harness.requests, vec![grid_of(16, 50)]);
+    }
+
+    /// And a rectangle nobody is holding is unchanged by any of it: a preview opening, a tab
+    /// closing, an OS resize that arrives all at once still reach the child at the ordinary quiet
+    /// boundary.
+    ///
+    /// Red gate: gate the release on the hand being *down* rather than up and this goes red.
+    #[test]
+    fn a_layout_change_no_hand_is_holding_still_reaches_the_shell_at_the_quiet_boundary() {
+        let start = Instant::now();
+        let mut harness = ResizeGateHarness::new(50, 50);
+        harness.window_resized(PhysicalSize::new(1500, 1800), false, start);
+        harness.tick(start + WINDOW_RESIZE_QUIET);
+        assert_eq!(harness.requests, vec![grid_of(26, 50)]);
+    }
+
+    /// A window with no client area is still refused, and by the same gate.
+    #[test]
+    fn a_window_with_no_client_area_is_not_a_rectangle_to_solve_for() {
+        for empty in [
+            PhysicalSize::new(0, 600),
+            PhysicalSize::new(960, 0),
+            PhysicalSize::new(0, 0),
+        ] {
+            assert!(!resize_worth_solving(false, empty), "{empty:?}");
+        }
+        assert!(resize_worth_solving(false, PhysicalSize::new(1, 1)));
     }
 
     /// POLICY PIN (user ruling 2026-08-06, machine retired 2026-08-16): **typed input does not
@@ -110671,7 +111514,7 @@ mod tests {
             pty_resize_wake_deadline(pending, due_at).is_none(),
             "ControlFlow::WaitUntil must never receive an already-due PTY deadline"
         );
-        let (released, wake_deadline) = service_pending_pty_resize(&mut pending, due_at);
+        let (released, wake_deadline) = service_pending_pty_resize(&mut pending, due_at, false);
         assert_eq!(
             released.map(|released| released.grid),
             Some(grid_of(80, 24)),
