@@ -128,15 +128,17 @@ use bt_persist::{
 };
 use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtyError, PtySession, PtySize};
 use bt_render::{
-    ChromePalette, CursorStyle, FrameSource, FrameTrigger, GpuContext, GridSize, ImeCursorArea,
-    LatestFrameSlot, MathHit, MathHitTarget, PREVIEW_BODY_INSET_LOGICAL_PX, PeekImageOverlay,
-    Preedit, PresentOutcome, PreviewImage, SeatViewport, Theme, ThemeChange, Travel,
+    ChromePalette, CursorStyle, DEVICE_REBUILD_ATTEMPTS, DeviceLossPilot, Flight, FrameSource,
+    FrameTrigger, GpuContext, GridSize, ImeCursorArea, LatestFrameSlot, LostDevice, MathHit,
+    MathHitTarget, PREVIEW_BODY_INSET_LOGICAL_PX, PeekImageOverlay, Preedit, PresentOutcome,
+    PreviewImage, RebuiltWindow, RenderError, SeatViewport, Theme, ThemeChange, Travel,
     WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_PERIOD_MS,
     WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_PIN_FADE_MS, WINDOW_TAB_PIN_REVEAL_MS,
     WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
-    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, WindowRenderer, background_rgb, compose_preedit,
-    current_cursor_style, foreground_rgb, frame_content_digest, frame_is_alternate_screen,
-    preview_image_extent, scheme_in_force, set_cursor_style, set_theme, theme_revision,
+    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, WindowRenderer, WindowTarget, background_rgb,
+    compose_preedit, current_cursor_style, foreground_rgb, frame_content_digest,
+    frame_is_alternate_screen, preview_image_extent, scheme_in_force, set_cursor_style, set_theme,
+    theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
@@ -8229,6 +8231,15 @@ struct App {
     /// window — which would have made every later window's device the property
     /// of whichever window happened to open first.
     gpu: GpuContext,
+    /// **Who decides what a lost device costs** (§7.1.3m ⑤′).
+    ///
+    /// On the application layer for the reason the device is: there is one
+    /// device in this process, so there is one episode of losing it however many
+    /// windows notice, and the ledger of how often it has been got back is the
+    /// process's rather than any window's. A pilot per window would number the
+    /// same rebuild twice and would let two windows each fetch a device, the
+    /// second one thrown away with every surface the first had just built.
+    device_loss_pilot: DeviceLossPilot,
     /// **Every icon this session has been told a site wears** (the favicon
     /// slice, §7.7 ②).
     ///
@@ -10745,6 +10756,13 @@ struct {name} {{
             // atlas and — the saving that is not on the GPU at all — one
             // `FontSystem` for every window in the process (§2.2).
             "GpuContext",
+            // And with it, who decides what losing that device costs
+            // (§7.1.3m ⑤′). There is one device, so there is one episode of
+            // losing it however many windows notice; a pilot per window would
+            // number the same rebuild twice and would let two windows each fetch
+            // a device, the second thrown away with every surface the first had
+            // just built.
+            "DeviceLossPilot",
             "persist::SessionStore",
             "persist::SettingsStore",
             "persist::KeybindingsStore",
@@ -10790,6 +10808,11 @@ struct {name} {{
         assert!(
             struct_fields("WindowRuntime").contains("renderer: WindowRenderer,"),
             "a surface and the caches keyed by its pixel sizes are one window's"
+        );
+        assert!(
+            struct_fields("App").contains("device_loss_pilot: DeviceLossPilot,"),
+            "and one device is one episode of losing it, however many windows notice \
+             (§7.1.3m ⑤′)"
         );
     }
 
@@ -31545,6 +31568,7 @@ impl Runtime<'_> {
         let git_worker = git::GitWorker::spawn(proxy.clone())?;
         let mut app = App {
             gpu,
+            device_loss_pilot: DeviceLossPilot::new(),
             favicons: Rc::new(RefCell::new(favicon::Favicons::default())),
             favicons_changed: false,
             tab_ids,
@@ -85051,6 +85075,11 @@ impl Runtime<'_> {
         {
             PresentOutcome::Presented(receipt) => {
                 self.window.textless_frames = 0;
+                // A picture on the glass is the only proof a device is real, and
+                // it is what closes a device-loss episode — see
+                // [`DeviceLossPilot::a_frame_reached_the_glass`] for the livelock
+                // that stands behind that sentence.
+                self.app.device_loss_pilot.a_frame_reached_the_glass();
                 // **The same line the composed path prints** — see
                 // [`Self::trace_present`] for why it has to be printed here as
                 // well, and for what a tab with no shell looked like to the
@@ -85221,6 +85250,10 @@ impl Runtime<'_> {
                 // what makes the next refusal a new question rather than the
                 // continuation of an old one ([`WindowRuntime::may_ask_again`]).
                 self.window.textless_frames = 0;
+                // And it ends a device-loss episode for the same kind of reason:
+                // a device that has drawn is a device this process is willing to
+                // lose again ([`DeviceLossPilot::a_frame_reached_the_glass`]).
+                self.app.device_loss_pilot.a_frame_reached_the_glass();
                 // The glass now holds the newest picture anyone composed. This
                 // is the equality [`chrome_tick_reuses_picture`] reads as its
                 // licence to answer the next animation tick from the screen.
@@ -86108,6 +86141,36 @@ impl<K: Copy + Eq + std::hash::Hash, W> Windows<K, W> {
     /// The key of the window at `index` in the opening order.
     fn key_at(&self, index: usize) -> Option<K> {
         self.order.get(index).copied()
+    }
+
+    /// **Every window at once, all of them mutable, in the opening order.**
+    ///
+    /// The one walk [`FolioApp::for_each_window`] cannot do, and the one caller
+    /// that needs it is the device rebuild: it has to hold every window's
+    /// renderer *simultaneously*, because each of them must let go of its
+    /// swapchain before any of them is given a new one. A walk that lent one
+    /// window at a time would build the second surface while the first was still
+    /// the visual's content, which is the collision the ordering exists to
+    /// avoid.
+    ///
+    /// The map is iterated and then put back in order rather than the order
+    /// being walked, because walking the order would ask the map for one entry
+    /// at a time and hand back a borrow between each — which is exactly what
+    /// this cannot do.
+    fn in_order_mut(&mut self) -> Vec<&mut W> {
+        let order = &self.order;
+        let mut windows: Vec<(usize, &mut W)> = self
+            .open
+            .iter_mut()
+            .filter_map(|(key, window)| {
+                order
+                    .iter()
+                    .position(|opened| opened == key)
+                    .map(|place| (place, window))
+            })
+            .collect();
+        windows.sort_by_key(|(place, _)| *place);
+        windows.into_iter().map(|(_, window)| window).collect()
     }
 
     fn len(&self) -> usize {
@@ -89030,6 +89093,47 @@ struct FolioApp {
     cli: cli::CliRequest,
 }
 
+/// **The process's one device and every window standing on it**, handed to the
+/// pilot as the thing that was lost.
+///
+/// The pair and not the device alone, because a rebuilt device is not a repair
+/// until every window is on it: the surfaces are the windows' and each one has
+/// to be built again from the visual `bt-platform` owns. The visual pointer is
+/// read here, at the moment it is used, and never stored — see
+/// [`bt_render::WindowTarget::CompositionVisual`], whose whole contract is that
+/// the visual must be live at the instant the surface is made and that the
+/// `Compositor` the caller is holding is what makes it so.
+struct TheDeviceAndItsWindows<'a> {
+    gpu: &'a mut GpuContext,
+    windows: &'a mut Windows<WindowId, WindowRuntime>,
+}
+
+impl LostDevice for TheDeviceAndItsWindows<'_> {
+    type Error = RenderError;
+
+    fn is_lost(&self) -> bool {
+        self.gpu.device_loss().is_some()
+    }
+
+    fn rebuild(&mut self) -> std::result::Result<(), RenderError> {
+        let rebuilt: Vec<RebuiltWindow<'_>> = self
+            .windows
+            .in_order_mut()
+            .into_iter()
+            .map(|window| {
+                // Read before the renderer is borrowed, and it is a `*mut c_void`
+                // copied out of a `Compositor` this window goes on owning.
+                let visual = window.compositor.gpu_visual_ptr();
+                RebuiltWindow::OnScreen(
+                    &mut window.renderer,
+                    WindowTarget::CompositionVisual(visual),
+                )
+            })
+            .collect();
+        pollster::block_on(self.gpu.rebuild_after_device_loss(rebuilt))
+    }
+}
+
 impl FolioApp {
     fn new(proxy: EventLoopProxy<AppEvent>, cli: cli::CliRequest) -> Self {
         Self {
@@ -90644,7 +90748,76 @@ impl FolioApp {
         })
     }
 
+    /// **A device the driver took away is not a program that has to stop**
+    /// (§7.1.3m ⑤′, user report 2026-09-01).
+    ///
+    /// This is asked of every failure rather than of the ones that look like a
+    /// device loss, and the reason is that on a departed device *everything*
+    /// fails: a frame, a chrome present, a readback, a thumbnail. The error that
+    /// happens to reach [`Self::fail`] first is whichever call the loop made
+    /// next, and the honest question is not "what does this error say" but "is
+    /// there still a device". The latch answers that, once, and it is the only
+    /// thing in this process that knows.
+    ///
+    /// Every truth this program holds is on the CPU — the shells, the grids, the
+    /// layout, the settings, the pictures waiting to be uploaded — so a device
+    /// that can be got back costs a re-upload and a repaint. One that cannot
+    /// falls through to the exit that was already here, with the words it always
+    /// had.
+    fn recovered_from_a_lost_device(&mut self) -> bool {
+        let Some(app) = self.app.as_mut() else {
+            return false;
+        };
+        if app.gpu.device_loss().is_none() {
+            return false;
+        }
+        let mut machine = TheDeviceAndItsWindows {
+            gpu: &mut app.gpu,
+            windows: &mut self.windows,
+        };
+        match app
+            .device_loss_pilot
+            .answer(&mut machine, std::thread::sleep)
+        {
+            // Somebody else's frame already flew this one. There is a device and
+            // nothing else to do — the error that brought us here was raised
+            // against the device that is gone, and the frame it belonged to is
+            // owed again either way.
+            Flight::AlreadyBack => true,
+            Flight::Rebuilt(_) => {
+                // Every swapchain in this process is new and every one of them
+                // is blank. Nothing else asks for these frames — the loss came
+                // in through a failure, not through an expose — and a bare
+                // redraw only presents what it is already owed, so the debt is
+                // filed as well as the request: what the window was showing a
+                // moment ago is exactly what it owes the new glass.
+                for window in self.windows.in_order_mut() {
+                    window.chrome_present_pending = true;
+                    window.window.request_redraw();
+                }
+                true
+            }
+            Flight::GaveUp(Some(error)) => {
+                eprintln!("{APP_NAME} could not open another GPU device: {error}");
+                false
+            }
+            // Every attempt in the episode was granted and not one of the
+            // devices survived long enough to draw. There is no refusal to
+            // quote, and the pattern is the finding.
+            Flight::GaveUp(None) => {
+                eprintln!(
+                    "{APP_NAME} opened {DEVICE_REBUILD_ATTEMPTS} GPU devices and lost \
+                     every one of them before a frame reached the screen"
+                );
+                false
+            }
+        }
+    }
+
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: anyhow::Error) {
+        if self.recovered_from_a_lost_device() {
+            return;
+        }
         eprintln!("{APP_NAME} stopped: {error:#}");
         // Every window, because the failure is the process's: a shell left
         // running behind a window nobody can see is the one outcome worse than
