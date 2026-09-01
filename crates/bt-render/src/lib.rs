@@ -2786,6 +2786,201 @@ fn note_a_repack(refits: &mut u64) -> String {
     format!("Folio glyph atlas was repacked after a textless frame (refit #{refits})")
 }
 
+/// One line per device this process has had to get back, numbered, in the
+/// `Folio …` family every other line in `diagnostics.log` belongs to.
+///
+/// The same shape as [`note_a_repack`] and for the same reason: the counter is
+/// bumped by the statement that prints it, so "one rebuild is one line" is a
+/// property of the code. And the number is the diagnosis in the same way — one
+/// on the afternoon a laptop was plugged in is the driver changing power tier
+/// and this program surviving it; one a minute is a machine whose GPU is
+/// resetting over and over, which is a fact about the hardware that no amount of
+/// rebuilding cures but which the ledger is the only way to see.
+fn note_a_rebuilt_device(rebuilds: &mut u64) -> String {
+    *rebuilds += 1;
+    format!("Folio rebuilt the GPU device after it was lost (#{rebuilds})")
+}
+
+/// How many times a single episode of device loss may ask for a new device
+/// before this process gives up on the machine.
+///
+/// Three, and not more, because the cost of being wrong in each direction is
+/// asymmetric only up to a point. Too few and a driver that is still halfway
+/// through a reset — the adapter list momentarily empty, which is exactly what a
+/// power-tier switch looks like from userspace — takes the window down for a
+/// condition that would have cleared in a tenth of a second. Too many and a
+/// machine whose GPU is genuinely gone spends seconds pretending otherwise, in
+/// front of somebody who is watching a frozen window.
+pub const DEVICE_REBUILD_ATTEMPTS: u32 = 3;
+
+/// How long to wait before the second attempt; the third waits three times as
+/// long again.
+///
+/// Nothing here is tuned to a benchmark, because the thing being waited for is a
+/// driver finishing a reset and no measurement on this machine predicts another
+/// one's. What the two numbers buy is a total of 600 ms of patience spread
+/// unevenly — most of a retry budget spent on the last try, so the common case
+/// (a device that is there again the moment we ask) costs nothing at all.
+const DEVICE_REBUILD_FIRST_REST: Duration = Duration::from_millis(150);
+
+/// **What the pilot needs of the thing that lost a device**, and nothing else.
+///
+/// Two questions and one of them changes the answer to the other, which is why
+/// they arrive on one object rather than as two closures: a caller whose device
+/// and whose windows are fields of the same structure cannot hand out a shared
+/// borrow for "is it still gone" and an exclusive one for "get me another"
+/// at the same time. One `&mut`, asked twice, is the shape that fits.
+pub trait LostDevice {
+    /// What a refused rebuild has to say for itself.
+    type Error;
+
+    /// Whether the device is still gone. Asked before the first attempt and
+    /// again after every wait, because a device can come back without this
+    /// caller being the one who fetched it.
+    fn is_lost(&self) -> bool;
+
+    /// Ask the machine for a new device, and put everything back on it.
+    fn rebuild(&mut self) -> Result<(), Self::Error>;
+}
+
+/// What one report of a lost device came to.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Flight<E> {
+    /// The device was already back when this report was answered — somebody
+    /// else's frame had already flown the recovery, and nothing was rebuilt.
+    ///
+    /// **This is what makes two windows one rebuild.** Both windows' frames fail
+    /// on the same lost device in the same beat; the first one through here
+    /// rebuilds, and the second finds a context whose latch is clear and pays
+    /// for nothing. The gate is the context's own answer rather than a flag kept
+    /// here, because the context is the thing that knows.
+    AlreadyBack,
+    /// A new device, and this is the process's Nth.
+    Rebuilt(u64),
+    /// The budget ran out and the caller's business is now stopping.
+    ///
+    /// `Some` is the last refusal, verbatim, because that sentence is what a
+    /// reader of `diagnostics.log` has to go on. `None` is the other way an
+    /// episode can end: every attempt in it *succeeded*, and the device died
+    /// again each time before it drew anything — there is no refusal to quote,
+    /// and the finding is the pattern rather than any one sentence.
+    GaveUp(Option<E>),
+}
+
+/// **Whether a device this process lost can be got back**, and the ledger of how
+/// often it has been.
+///
+/// # Why a device loss is not the same thing as a fault
+///
+/// §7.1.3m ⑤ armed the loss callback before anything was built on the device and
+/// made three doors refuse to work over a corpse, on a day when the corpse was
+/// one this program had made itself: a 16384² atlas allocation that took the
+/// device down. Stopping was the right answer to *that*, because a program that
+/// carries on after it has killed its own device is a program that will kill it
+/// again.
+///
+/// A driver switching power tiers when a laptop is plugged in is not that. The
+/// device goes away for reasons that have nothing to do with this process, every
+/// truth in the program is on the CPU — the sessions, the grid, the layout, the
+/// settings, the pictures waiting to be uploaded — and everything that died was
+/// a *projection* of those onto hardware that can be asked for again. So the
+/// fate of a lost device is decided here rather than at the door: rebuild, and
+/// only stop when rebuilding is itself refused.
+///
+/// # Why the pilot is a state machine and not a loop at the call site
+///
+/// Because the four things it decides are the four ways this can go, and each of
+/// them is a sentence a test has to be able to hold: a rebuild that works, a
+/// rebuild that will not work however many times it is asked, a second window
+/// reporting a loss that has already been answered, and a device handed over
+/// again and again that never survives long enough to draw. A loop written
+/// inline at the one call site would make all four unreachable except through a
+/// real GPU that a test cannot make fail on demand.
+///
+/// # What an episode is, and why it does not end when a device is handed over
+///
+/// The budget is spent per *episode*, and an episode ends when a device has
+/// actually **drawn** — not when one was handed over. The difference is a
+/// livelock: a machine that gives out a device and takes it away again before a
+/// frame reaches the glass would, on a per-attempt budget, be rebuilt for ever,
+/// three times a second, behind a window that never paints and a log that grows
+/// without ever saying anything is wrong. So [`Self::a_frame_reached_the_glass`]
+/// is what closes an episode, and until it is called the next loss continues the
+/// last one.
+#[derive(Debug, Default)]
+pub struct DeviceLossPilot {
+    /// How many devices this process has been given back. Written by
+    /// [`note_a_rebuilt_device`] and by nothing else.
+    rebuilds: u64,
+    /// Attempts already spent in the episode that is still open.
+    spent: u32,
+}
+
+impl DeviceLossPilot {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many times this process has got a device back.
+    #[must_use]
+    pub fn rebuilds(&self) -> u64 {
+        self.rebuilds
+    }
+
+    /// **A frame reached the glass**, which is the only proof a device is real.
+    ///
+    /// Called on every present, so it is a store of zero on all but the handful
+    /// of frames after a loss — and that is what makes it the right signal: the
+    /// question "did the last rebuild actually buy anything" has exactly one
+    /// honest answer, and it is a picture.
+    pub fn a_frame_reached_the_glass(&mut self) {
+        self.spent = 0;
+    }
+
+    /// Answer one report that the device has gone.
+    ///
+    /// The machine is asked whether it is still lost first, and again after
+    /// every wait, because that is the only honest way to know whether there is
+    /// still anything to do: a context whose latch is clear has a device,
+    /// whoever fetched it.
+    ///
+    /// `rest` is handed the wait between attempts rather than taking it here, so
+    /// that the caller on the event loop spends a real `sleep` and a test spends
+    /// nothing. The line a successful attempt leaves is printed here, once, by
+    /// the statement that numbers it.
+    pub fn answer<M: LostDevice>(
+        &mut self,
+        machine: &mut M,
+        mut rest: impl FnMut(Duration),
+    ) -> Flight<M::Error> {
+        if !machine.is_lost() {
+            return Flight::AlreadyBack;
+        }
+        let mut last = None;
+        while self.spent < DEVICE_REBUILD_ATTEMPTS {
+            if self.spent > 0 {
+                rest(DEVICE_REBUILD_FIRST_REST * 3_u32.pow(self.spent - 1));
+                // A driver that finished its reset while this thread was asleep
+                // is a device somebody else's frame may already have taken; the
+                // question is therefore asked again rather than assumed.
+                if !machine.is_lost() {
+                    return Flight::AlreadyBack;
+                }
+            }
+            self.spent += 1;
+            match machine.rebuild() {
+                Ok(()) => {
+                    eprintln!("{}", note_a_rebuilt_device(&mut self.rebuilds));
+                    return Flight::Rebuilt(self.rebuilds);
+                }
+                Err(error) => last = Some(error),
+            }
+        }
+        Flight::GaveUp(last)
+    }
+}
+
 /// What a frame that reached the glass *is*, given whether every seat's grid
 /// text reached it too.
 ///
@@ -3202,6 +3397,48 @@ fn create_surface(
     .map_err(|error| RenderError::Wgpu(error.to_string()))
 }
 
+/// Settle what a freshly created surface will be presented as, and configure it.
+///
+/// **One statement for a window's first surface and for the one it is given
+/// after a device loss.** Everything decided here is decided from the surface
+/// and the adapter in front of it — the format, the composite alpha mode, the
+/// swapchain size under the device's texture ceiling — so a rebuilt window
+/// asking the same question of a new adapter gets the new adapter's answer
+/// rather than a remembered one.
+fn configure_window_surface(
+    gpu: &mut GpuContext,
+    surface: &wgpu::Surface<'static>,
+    target: WindowTargetKind,
+    width: u32,
+    height: u32,
+) -> Result<(wgpu::SurfaceConfiguration, SurfaceAlphaReport, (u32, u32)), RenderError> {
+    let swapchain_size = surface_config_size(width, height, gpu.max_texture_dimension_2d);
+    let mut config = surface
+        .get_default_config(&gpu.adapter, swapchain_size.0, swapchain_size.1)
+        .ok_or_else(|| RenderError::Wgpu("surface has no default configuration".to_owned()))?;
+    let capabilities = surface.get_capabilities(&gpu.adapter);
+    config.format = capabilities
+        .formats
+        .iter()
+        .copied()
+        .find(wgpu::TextureFormat::is_srgb)
+        .ok_or_else(|| RenderError::Wgpu("surface has no sRGB format".to_owned()))?;
+    gpu.accept_format(config.format)?;
+    // The gate, before the surface is configured rather than after: a
+    // visual target that cannot be `PreMultiplied` is not this program's
+    // window, and configuring it anyway would leave a swapchain on screen
+    // that looks right and is not.
+    config.alpha_mode = choose_alpha_mode(target, &capabilities.alpha_modes)?;
+    let alpha_report = SurfaceAlphaReport {
+        target,
+        offered: capabilities.alpha_modes.clone(),
+        chosen: config.alpha_mode,
+    };
+    config.desired_maximum_frame_latency = 1;
+    surface.configure(&gpu.device, &config);
+    Ok((config, alpha_report, swapchain_size))
+}
+
 /// Where one [`WindowRenderer`] puts its frame.
 ///
 /// A swapchain image and an offscreen attachment differ in exactly two places —
@@ -3212,6 +3449,18 @@ fn create_surface(
 enum FrameTarget {
     Surface(Box<wgpu::Surface<'static>>),
     Offscreen(wgpu::Texture),
+    /// **Between one device and the next**: this window has let its swapchain go
+    /// and has not been given the replacement yet.
+    ///
+    /// It exists for one ordering constraint and no other. A composition-visual
+    /// surface is published by `IDCompositionVisual::SetContent`, so the visual
+    /// holds exactly one swapchain at a time and the new one may not be created
+    /// while the old one is still the visual's content. Every window therefore
+    /// surrenders before any window adopts — see
+    /// [`GpuContext::rebuild_after_device_loss`], which is the only code that
+    /// can put a window in this state and does it inside one call, so no frame
+    /// is ever asked for while a window is standing here.
+    Surrendered,
 }
 
 /// What a window owes the compositor once its pass closes: a swapchain image is
@@ -4303,6 +4552,121 @@ fn limits_with_this_adapters_textures(adapter: &wgpu::Adapter) -> wgpu::Limits {
     }
 }
 
+/// **Everything on [`GpuContext`] that is made out of a device**, and nothing
+/// that outlives one.
+///
+/// A carrier and not a layer: it is destructured into `GpuContext`'s own fields
+/// the moment it is minted, so no hot path pays an extra hop. What it buys is
+/// that the list exists *once* — the first device and every replacement are
+/// built by [`Self::mint`], and the two places that take one apart destructure
+/// it exhaustively, so a field added here cannot be minted for the first device
+/// and forgotten for the next.
+///
+/// The division it draws is the whole of the rebuild's argument. On this side:
+/// the atlas, the pipelines, the samplers, the bind-group layouts, the loss
+/// latch. On the other, staying put across a rebuild: the [`FontSystem`] and its
+/// thirteen files, the swash cache, the chrome's cap-height ratio, the grid's
+/// font size, and the counters that are this process's ledger rather than this
+/// device's.
+struct DeviceResources {
+    device_loss: Arc<OnceLock<String>>,
+    glyphon_cache: Cache,
+    atlas: TextAtlas,
+    rect_pipeline: wgpu::RenderPipeline,
+    ground_rect_pipeline: wgpu::RenderPipeline,
+    ground_fade_rect_pipeline: wgpu::RenderPipeline,
+    math_pipeline: wgpu::RenderPipeline,
+    math_bind_group_layout: wgpu::BindGroupLayout,
+    math_sampler: wgpu::Sampler,
+    background_pipeline: wgpu::RenderPipeline,
+    background_bind_group_layout: wgpu::BindGroupLayout,
+    background_sampler: wgpu::Sampler,
+    video_pipeline: wgpu::RenderPipeline,
+    video_bind_group_layout: wgpu::BindGroupLayout,
+    video_sampler: wgpu::Sampler,
+    video_blank: wgpu::BindGroup,
+}
+
+impl DeviceResources {
+    /// Build the whole set against a device, **arming the loss callback before
+    /// anything else is built on it**.
+    ///
+    /// The order is the one §7.1.3m ⑤ fixed and it holds for a replacement
+    /// device exactly as it held for the first: the notice arrives once, from
+    /// inside whichever call happens to notice, so a device that goes away
+    /// during its own pipeline compilation has to have somewhere to say so.
+    fn mint(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        let device_loss: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+        {
+            let latch = Arc::clone(&device_loss);
+            device.set_device_lost_callback(move |reason, message| {
+                let said = format!("{reason:?}: {message}");
+                if latch.set(said.clone()).is_ok() {
+                    eprintln!("Folio lost the GPU device — {said}");
+                }
+            });
+        }
+        let glyphon_cache = Cache::new(device);
+        let atlas = TextAtlas::new(device, queue, &glyphon_cache, format);
+        let rect_pipeline = create_rect_pipeline(device, format);
+        let ground_rect_pipeline = create_ground_rect_pipeline(device, format);
+        let ground_fade_rect_pipeline = create_ground_fade_rect_pipeline(device, format);
+        let (math_pipeline, math_bind_group_layout, math_sampler) =
+            create_math_pipeline(device, format);
+        let (background_pipeline, background_bind_group_layout, background_sampler) =
+            create_background_pipeline(device, format);
+        let (video_pipeline, video_bind_group_layout, video_sampler) =
+            create_video_pipeline(device, format);
+        let video_blank =
+            create_blank_bind_group(device, queue, &video_bind_group_layout, &video_sampler);
+        Self {
+            device_loss,
+            glyphon_cache,
+            atlas,
+            rect_pipeline,
+            ground_rect_pipeline,
+            ground_fade_rect_pipeline,
+            math_pipeline,
+            math_bind_group_layout,
+            math_sampler,
+            background_pipeline,
+            background_bind_group_layout,
+            background_sampler,
+            video_pipeline,
+            video_bind_group_layout,
+            video_sampler,
+            video_blank,
+        }
+    }
+}
+
+/// A window on a context whose device has gone, and where its next surface has
+/// to come from.
+///
+/// The target comes in from the caller rather than being kept on the window,
+/// because it is not the window's to keep: a composition visual is a COM object
+/// `bt-platform` owns and this crate holds a raw pointer to for the length of
+/// one call (see [`WindowTarget::CompositionVisual`]). A pointer stored here
+/// across a session would be this crate quietly holding a reference it has no
+/// way to know is still live.
+pub enum RebuiltWindow<'a> {
+    /// A window on screen: its surface is built again from the visual or HWND
+    /// named here.
+    OnScreen(&'a mut WindowRenderer, WindowTarget),
+    /// A window drawing into a texture — the replay probe's shape. It needs no
+    /// target: its size and format are already on its own configuration, and the
+    /// texture is simply made again.
+    Offscreen(&'a mut WindowRenderer),
+}
+
+impl RebuiltWindow<'_> {
+    fn renderer(&mut self) -> &mut WindowRenderer {
+        match self {
+            Self::OnScreen(renderer, _) | Self::Offscreen(renderer) => renderer,
+        }
+    }
+}
+
 impl GpuContext {
     /// Open the process's device layer and its first window in one call.
     ///
@@ -4381,6 +4745,180 @@ impl GpuContext {
             adapter_time,
             device_time,
         )
+    }
+
+    /// **Throw the lost device away and open another one**, keeping every
+    /// window's picture and nothing of the hardware's.
+    ///
+    /// # Why this exists at all, and what §7.1.3m ⑤ actually settled
+    ///
+    /// That ruling armed the loss callback before anything was built on the
+    /// device, put a gate on the three doors that would otherwise carry on over
+    /// a corpse, and had the process stop. It was written on the day a 16384²
+    /// atlas allocation took a device down — a corpse this program had made
+    /// itself, where stopping is the only honest answer, because a program that
+    /// carries on after it has killed its own device kills the next one too.
+    ///
+    /// The report of 2026-09-01 is the other kind. A laptop's power adapter goes
+    /// in or comes out, the driver switches power tier, D3D12 resets the device,
+    /// and this process — which did nothing, and whose every truth is on the CPU
+    /// — closes the window. Two devices, two fates: what this function adds is
+    /// the second one, and the exit is still there behind it for the machine
+    /// that will not give a device back.
+    ///
+    /// # The order, and why each step is where it is
+    ///
+    /// 1. **Every window surrenders its swapchain, before any window is given a
+    ///    new one.** A composition visual publishes exactly one swapchain
+    ///    (`IDCompositionVisual::SetContent`), so a second surface created over
+    ///    a live one is two swapchains fighting for one visual.
+    /// 2. **A new [`wgpu::Instance`], not the old one.** On Windows a removed
+    ///    device retires the DXGI factory that made it, and a surface may only
+    ///    be presented on a device from the same instance that created it. The
+    ///    chain is therefore rebuilt from the top: instance, adapter, device.
+    /// 3. **The first on-screen window's surface chooses the adapter**, exactly
+    ///    as it did at startup — `compatible_surface` is not decoration on a
+    ///    hybrid-GPU laptop, and a hybrid-GPU laptop is the machine this whole
+    ///    function is for. With no window on screen (the replay probe's shape)
+    ///    the adapter is asked for without one and the format stands.
+    /// 4. **The shared caches go empty.** The glyph atlas starts at 256² again
+    ///    and re-rasterizes what it is asked for; the video, ground and
+    ///    content-keyed texture caches are dropped, and the frame path refills
+    ///    each of them from the bytes the windows are already holding, the first
+    ///    time it looks for one and finds nothing. A cold cache is a cost, not a
+    ///    loss.
+    /// 5. **Each window adopts.** Its surface is built again from the target the
+    ///    caller named, its text objects are minted again in the counts it
+    ///    already had, and everything it was saying is still there to say.
+    ///
+    /// The windows arrive by value so that a target can be moved out of the
+    /// list; nothing about a window is consumed but the borrow.
+    pub async fn rebuild_after_device_loss(
+        &mut self,
+        windows: Vec<RebuiltWindow<'_>>,
+    ) -> Result<(), RenderError> {
+        let mut windows = windows;
+        for window in &mut windows {
+            window.renderer().surrender_target();
+        }
+        let mut on_screen = Vec::new();
+        let mut offscreen = Vec::new();
+        for window in windows {
+            match window {
+                RebuiltWindow::OnScreen(renderer, target) => on_screen.push((renderer, target)),
+                RebuiltWindow::Offscreen(renderer) => offscreen.push(renderer),
+            }
+        }
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let bootstrap = if on_screen.is_empty() {
+            None
+        } else {
+            let (renderer, target) = on_screen.remove(0);
+            let kind = target.kind();
+            Some((renderer, create_surface(&instance, target)?, kind))
+        };
+        let phase_started = Instant::now();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                compatible_surface: bootstrap.as_ref().map(|(_, surface, _)| surface),
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        let adapter_time = phase_started.elapsed();
+        let phase_started = Instant::now();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("Folio device"),
+                required_limits: limits_with_this_adapters_textures(&adapter),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        let device_time = phase_started.elapsed();
+        // A new adapter names its own swapchain format, and every pipeline and
+        // atlas below is about to be baked for whatever it says. With no surface
+        // to ask, the format this context already carries stands — it is the one
+        // the offscreen windows' textures are made at.
+        let format = match bootstrap.as_ref() {
+            Some((_, surface, _)) => surface
+                .get_capabilities(&adapter)
+                .formats
+                .into_iter()
+                .find(wgpu::TextureFormat::is_srgb)
+                .ok_or_else(|| RenderError::Wgpu("surface has no sRGB format".to_owned()))?,
+            None => self.format,
+        };
+        let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
+        let DeviceResources {
+            device_loss,
+            glyphon_cache,
+            atlas,
+            rect_pipeline,
+            ground_rect_pipeline,
+            ground_fade_rect_pipeline,
+            math_pipeline,
+            math_bind_group_layout,
+            math_sampler,
+            background_pipeline,
+            background_bind_group_layout,
+            background_sampler,
+            video_pipeline,
+            video_bind_group_layout,
+            video_sampler,
+            video_blank,
+        } = DeviceResources::mint(&device, &queue, format);
+        self.instance = instance;
+        self.adapter = adapter;
+        self.device = device;
+        self.queue = queue;
+        self.format = format;
+        self.max_texture_dimension_2d = max_texture_dimension_2d;
+        // The latch is a new one, and that is what says the device is back:
+        // `OnceLock` cannot be un-set, and a context that kept the old one would
+        // refuse every frame it was ever asked for again.
+        self.device_loss = device_loss;
+        self.glyphon_cache = glyphon_cache;
+        self.atlas = atlas;
+        // A fresh packing is not a repair of a fragmented one, so the episode
+        // the re-pack latch was in ends with the device it was in.
+        self.glyph_atlas_refitted = false;
+        self.rect_pipeline = rect_pipeline;
+        self.ground_rect_pipeline = ground_rect_pipeline;
+        self.ground_fade_rect_pipeline = ground_fade_rect_pipeline;
+        self.math_pipeline = math_pipeline;
+        self.math_bind_group_layout = math_bind_group_layout;
+        self.math_sampler = math_sampler;
+        self.background_pipeline = background_pipeline;
+        self.background_bind_group_layout = background_bind_group_layout;
+        self.background_sampler = background_sampler;
+        self.video_pipeline = video_pipeline;
+        self.video_bind_group_layout = video_bind_group_layout;
+        self.video_sampler = video_sampler;
+        self.video_blank = video_blank;
+        // Every content texture on this context was a projection of bytes some
+        // window is still holding. The frame path uploads each of them the first
+        // time it looks one up and finds nothing, so emptying the caches here is
+        // the whole of what "the pictures come back" needs.
+        self.video_textures.clear();
+        self.background_texture = None;
+        self.math_textures.clear();
+        self.init_timings.adapter = adapter_time;
+        self.init_timings.device = device_time;
+        if let Some((renderer, surface, kind)) = bootstrap {
+            renderer.adopt_new_device(self, Some((surface, kind)))?;
+        }
+        for (renderer, target) in on_screen {
+            let kind = target.kind();
+            let surface = create_surface(&self.instance, target)?;
+            renderer.adopt_new_device(self, Some((surface, kind)))?;
+        }
+        for renderer in offscreen {
+            renderer.adopt_new_device(self, None)?;
+        }
+        Ok(())
     }
 
     /// The device layer with no window at all: `compatible_surface: None` and
@@ -4505,21 +5043,6 @@ impl GpuContext {
         device_time: Duration,
     ) -> Result<Self, RenderError> {
         let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
-        // **Armed before anything is built on the device**, because the notice
-        // arrives once and from inside whatever call happens to notice — see
-        // the field. The line it leaves belongs to the `Folio …` family the rest
-        // of `diagnostics.log` is read with, and it is the only place in this
-        // process that will ever say the device went away in so many words.
-        let device_loss: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
-        {
-            let latch = Arc::clone(&device_loss);
-            device.set_device_lost_callback(move |reason, message| {
-                let said = format!("{reason:?}: {message}");
-                if latch.set(said.clone()).is_ok() {
-                    eprintln!("Folio lost the GPU device — {said}");
-                }
-            });
-        }
         let phase_started = Instant::now();
         let mut font_system = terminal_font_system();
         let font_system_time = phase_started.elapsed();
@@ -4529,19 +5052,27 @@ impl GpuContext {
             .ok_or(RenderError::MissingChromeSansMetrics)?;
         let font_metrics_time = phase_started.elapsed();
         let phase_started = Instant::now();
-        let glyphon_cache = Cache::new(&device);
-        let atlas = TextAtlas::new(&device, &queue, &glyphon_cache, format);
-        let rect_pipeline = create_rect_pipeline(&device, format);
-        let ground_rect_pipeline = create_ground_rect_pipeline(&device, format);
-        let ground_fade_rect_pipeline = create_ground_fade_rect_pipeline(&device, format);
-        let (math_pipeline, math_bind_group_layout, math_sampler) =
-            create_math_pipeline(&device, format);
-        let (background_pipeline, background_bind_group_layout, background_sampler) =
-            create_background_pipeline(&device, format);
-        let (video_pipeline, video_bind_group_layout, video_sampler) =
-            create_video_pipeline(&device, format);
-        let video_blank =
-            create_blank_bind_group(&device, &queue, &video_bind_group_layout, &video_sampler);
+        // Exhaustive on purpose, here and in `rebuild_after_device_loss`: a
+        // resource this destructure does not name will not compile, which is
+        // what makes the first device and every later one provably the same set.
+        let DeviceResources {
+            device_loss,
+            glyphon_cache,
+            atlas,
+            rect_pipeline,
+            ground_rect_pipeline,
+            ground_fade_rect_pipeline,
+            math_pipeline,
+            math_bind_group_layout,
+            math_sampler,
+            background_pipeline,
+            background_bind_group_layout,
+            background_sampler,
+            video_pipeline,
+            video_bind_group_layout,
+            video_sampler,
+            video_blank,
+        } = DeviceResources::mint(&device, &queue, format);
         let render_resources_time = phase_started.elapsed();
         Ok(Self {
             instance,
@@ -4669,6 +5200,22 @@ impl GpuContext {
         self.glyph_atlas_refits
     }
 
+    /// **The one place in this crate a glyphon [`Viewport`] is made** (§7.36).
+    ///
+    /// A window has exactly one, and every batch of text it draws is handed
+    /// that one — the gate
+    /// `a_window_divides_every_glyph_it_draws_by_one_resolution` is what keeps
+    /// that true, by counting the constructor in this file and requiring it to
+    /// stand once. There are two callers and both are constructors of the same
+    /// window's single viewport: [`WindowRenderer::assemble`] makes it, and
+    /// [`WindowRenderer::adopt_new_device`] makes it again on a device that
+    /// replaced the one it was made on. Routing both through here is what lets
+    /// the count stay at one while the *number of moments* a viewport is minted
+    /// grew from one to two.
+    fn mint_text_viewport(&self) -> Viewport {
+        Viewport::new(&self.device, &self.glyphon_cache)
+    }
+
     /// **What the driver said when it took this device away**, or `None` while
     /// the device is still here.
     ///
@@ -4679,6 +5226,29 @@ impl GpuContext {
     #[must_use]
     pub fn device_loss(&self) -> Option<&str> {
         self.device_loss.get().map(String::as_str)
+    }
+
+    /// **Take this context's device away for real**, the way a driver would.
+    ///
+    /// Not a simulation and not a flag: `wgpu::Device::destroy` marks the device
+    /// invalid, releases its GPU resources and hands the loss callback to the
+    /// next poll, which is the same callback and the same latch a
+    /// `DXGI_ERROR_DEVICE_REMOVED` arrives through (`wgpu-core-30.0.0`
+    /// `device/resource.rs`: `destroy` posts `DeviceLostReason::Destroyed`,
+    /// `handle_hal_error` posts `Unknown`). Everything downstream of the latch —
+    /// the gates, the pilot, the rebuild — therefore runs against a device that
+    /// is genuinely gone rather than one a test said was.
+    ///
+    /// The poll is what fires the callback, and its own answer is nothing to go
+    /// on: polling a device that has just been destroyed is expected to fail,
+    /// and the fact the test is after is the latch.
+    #[cfg(test)]
+    fn lose_the_device_on_purpose(&self) {
+        self.device.destroy();
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
     }
 
     /// The same question asked the way the frame path spends it.
@@ -5134,30 +5704,8 @@ impl WindowRenderer {
         scale_factor: f64,
     ) -> Result<Self, RenderError> {
         let phase_started = Instant::now();
-        let swapchain_size = surface_config_size(width, height, gpu.max_texture_dimension_2d);
-        let mut config = surface
-            .get_default_config(&gpu.adapter, swapchain_size.0, swapchain_size.1)
-            .ok_or_else(|| RenderError::Wgpu("surface has no default configuration".to_owned()))?;
-        let capabilities = surface.get_capabilities(&gpu.adapter);
-        config.format = capabilities
-            .formats
-            .iter()
-            .copied()
-            .find(wgpu::TextureFormat::is_srgb)
-            .ok_or_else(|| RenderError::Wgpu("surface has no sRGB format".to_owned()))?;
-        gpu.accept_format(config.format)?;
-        // The gate, before the surface is configured rather than after: a
-        // visual target that cannot be `PreMultiplied` is not this program's
-        // window, and configuring it anyway would leave a swapchain on screen
-        // that looks right and is not.
-        config.alpha_mode = choose_alpha_mode(target, &capabilities.alpha_modes)?;
-        let alpha_report = SurfaceAlphaReport {
-            target,
-            offered: capabilities.alpha_modes.clone(),
-            chosen: config.alpha_mode,
-        };
-        config.desired_maximum_frame_latency = 1;
-        surface.configure(&gpu.device, &config);
+        let (config, alpha_report, swapchain_size) =
+            configure_window_surface(gpu, &surface, target, width, height)?;
         let surface_configure_time = phase_started.elapsed();
         let mut window = Self::assemble(
             gpu,
@@ -5169,6 +5717,138 @@ impl WindowRenderer {
         )?;
         window.alpha_report = Some(alpha_report);
         Ok(window)
+    }
+
+    /// **Let go of the swapchain**, and keep every word this window was saying.
+    ///
+    /// The first half of a rebuild, and the reason it is a half rather than the
+    /// whole: a composition visual publishes exactly one swapchain, so the new
+    /// one may not be created while the old one is still the visual's content.
+    /// Every window on the device therefore surrenders before any window adopts
+    /// — see [`GpuContext::rebuild_after_device_loss`], the only caller.
+    ///
+    /// The glyphon objects are deliberately *not* dropped here. They are minted
+    /// again by [`Self::adopt_new_device`] and nothing between the two calls can
+    /// touch them, so releasing them early would buy nothing but a second state
+    /// this type can be in.
+    fn surrender_target(&mut self) {
+        self.target = FrameTarget::Surrendered;
+    }
+
+    /// **Take the new device**, and go on saying the same thing on it.
+    ///
+    /// What is rebuilt is what was made out of a device: the target, the
+    /// resolution uniform every glyph is divided by, and the five families of
+    /// text renderer — one pair per seat, the chrome's, the preview body's and
+    /// one per overlay layer. They are rebuilt *in the counts this window
+    /// already has*, because those counts are a fact about what is on screen and
+    /// not about the hardware underneath it.
+    ///
+    /// What is not rebuilt is everything else, and that is the whole point. The
+    /// composed rows, the shaping caches, the seat rectangle, the chrome's
+    /// quads, labels and icons, the overlay stack, the preview bodies and their
+    /// pictures, this frame's videos, the metrics measured for this window's
+    /// scale factor: none of them is a GPU object, and a window that threw them
+    /// away would come back blank and stay blank until something happened to
+    /// make it speak again. They are the picture; the device was only ever where
+    /// it was being drawn.
+    ///
+    /// The content textures those descriptors name are gone with the old device,
+    /// and are not re-uploaded here either — every one of them is uploaded by
+    /// the frame path from bytes the window is already holding, on the first
+    /// frame that finds the shared cache empty. A rebuilt device is, to that
+    /// path, a cold cache and nothing more.
+    fn adopt_new_device(
+        &mut self,
+        gpu: &mut GpuContext,
+        surface: Option<(wgpu::Surface<'static>, WindowTargetKind)>,
+    ) -> Result<(), RenderError> {
+        match surface {
+            Some((surface, kind)) => {
+                let (config, alpha_report, configured_size) = configure_window_surface(
+                    gpu,
+                    &surface,
+                    kind,
+                    self.config.width,
+                    self.config.height,
+                )?;
+                self.target = FrameTarget::Surface(Box::new(surface));
+                self.config = config;
+                self.alpha_report = Some(alpha_report);
+                self.configured_size = configured_size;
+            }
+            None => {
+                gpu.accept_format(self.config.format)?;
+                self.target =
+                    FrameTarget::Offscreen(gpu.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Folio offscreen window target"),
+                        size: wgpu::Extent3d {
+                            width: self.config.width,
+                            height: self.config.height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: self.config.format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::COPY_SRC,
+                        view_formats: &[],
+                    }));
+                self.configured_size = (self.config.width, self.config.height);
+            }
+        }
+        // The seat was solved against the old swapchain's size, and a new
+        // adapter's texture ceiling can put the new one somewhere else. Pinning
+        // it back inside is not a repair of the layout — the layout is the
+        // caller's and arrives again on the next solve — it is what keeps this
+        // window's own scissor arithmetic answerable in the frames before that.
+        self.seat = self
+            .seat
+            .clamped_to(self.configured_size.0, self.configured_size.1);
+        let seats = self.seat_slots.len();
+        let overlays = self.overlay_text_renderers.len();
+        self.text_viewport = gpu.mint_text_viewport();
+        self.seat_slots = (0..seats)
+            .map(|_| SeatTextSlot {
+                text_renderer: TextRenderer::new(
+                    &mut gpu.atlas,
+                    &gpu.device,
+                    wgpu::MultisampleState::default(),
+                    None,
+                ),
+                status_text_renderer: TextRenderer::new(
+                    &mut gpu.atlas,
+                    &gpu.device,
+                    wgpu::MultisampleState::default(),
+                    None,
+                ),
+            })
+            .collect();
+        self.chrome_text_renderer = TextRenderer::new(
+            &mut gpu.atlas,
+            &gpu.device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+        self.preview_text_renderer = TextRenderer::new(
+            &mut gpu.atlas,
+            &gpu.device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+        self.overlay_text_renderers = (0..overlays)
+            .map(|_| {
+                TextRenderer::new(
+                    &mut gpu.atlas,
+                    &gpu.device,
+                    wgpu::MultisampleState::default(),
+                    None,
+                )
+            })
+            .collect();
+        self.max_texture_dimension_2d = gpu.max_texture_dimension_2d;
+        Ok(())
     }
 
     /// A window renderer with a texture where its swapchain would be.
@@ -5242,9 +5922,8 @@ impl WindowRenderer {
         let phase_started = Instant::now();
         let metrics = CellMetrics::measure(&mut gpu.font_system, scale_factor)?;
         let font_metrics_time = phase_started.elapsed();
+        let text_viewport = gpu.mint_text_viewport();
         let device = &gpu.device;
-        let cache = &gpu.glyphon_cache;
-        let text_viewport = Viewport::new(device, cache);
         // Slot 0: the seat a lone terminal leaf draws into on every frame it
         // ever draws. Built here rather than on demand so that shape never pays
         // an allocation mid-frame.
@@ -8447,6 +9126,11 @@ impl WindowRenderer {
     fn configure_surface(&mut self, gpu: &GpuContext) -> Result<(), RenderError> {
         match &mut self.target {
             FrameTarget::Surface(surface) => surface.configure(&gpu.device, &self.config),
+            // Nothing to bring up to a size. The window is between two devices,
+            // and the adopt that hands it its next surface configures that
+            // surface at exactly the size `config` already names — so leaving
+            // `configured_size` alone here is what keeps the two agreeing.
+            FrameTarget::Surrendered => return Ok(()),
             FrameTarget::Offscreen(texture) => {
                 *texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("Folio offscreen window target"),
@@ -8499,6 +9183,10 @@ impl WindowRenderer {
             FrameTarget::Offscreen(texture) => {
                 SurfaceAcquisition::Offscreen(texture.create_view(&Default::default()))
             }
+            // A window with no target has no back buffer, which is what
+            // `Unavailable` means — and the skip it turns into is the right
+            // answer, because the picture is unchanged and still owed.
+            FrameTarget::Surrendered => SurfaceAcquisition::Failed(SurfaceFailure::Unavailable),
         }
     }
 
@@ -17331,6 +18019,14 @@ mod tests {
     /// Every needle is spelled in two pieces so that this test can never be its
     /// own counter-example.
     ///
+    /// **The one construction site is [`GpuContext::mint_text_viewport`]**, and
+    /// it became a named function when §7.1.3m ⑤′ gave a window a second moment
+    /// at which it needs its viewport built: `assemble` makes one, and
+    /// `adopt_new_device` makes it again on the device that replaced the one it
+    /// was made on. Two moments, still one site — which is the shape that keeps
+    /// this count honest instead of making it a rule about how many times a
+    /// window can be born.
+    ///
     /// MUTATION: give any text batch a second viewport and this says so.
     #[test]
     fn a_window_divides_every_glyph_it_draws_by_one_resolution() {
@@ -22438,6 +23134,532 @@ mod tests {
                 "the first frame of a video numbered from zero was never written \
                  to the texture it was bound to: {:?}",
                 written[(HEIGHT / 2 * WIDTH + WIDTH / 2) as usize]
+            );
+        }
+    }
+
+    /// **What a lost device costs** (§7.1.3m ⑤′, the report of 2026-09-01).
+    ///
+    /// The user's evidence is two runs of `diagnostics.log` on the same
+    /// afternoon, each of them a laptop's power adapter going in or coming out:
+    ///
+    /// ```text
+    /// Folio lost the GPU device — Unknown: Device is lost
+    /// Folio stopped: render terminal frame: the GPU device was lost: Unknown: Device is lost
+    /// ```
+    ///
+    /// Nothing in this program did anything. The driver switched power tier,
+    /// D3D12 reset the device, and a terminal full of live shells closed itself
+    /// — every time, on every unplug. These tests are the two halves of the
+    /// answer: the policy that decides a lost device's fate, held against a
+    /// device that can be made to refuse on demand; and the mechanism, held
+    /// against a device that is really taken away.
+    mod a_lost_device {
+        use super::*;
+        use std::{cell::Cell, rc::Rc};
+
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+
+        /// A device that is gone until somebody gets it back, and the ledger of
+        /// what the pilot asked of it.
+        ///
+        /// It stands in for a [`GpuContext`] in the four tests that are about
+        /// the *policy*: what happens to a rebuild that works, one that never
+        /// will, a second window's report of a loss already answered, and a
+        /// driver that finishes its reset while the pilot is waiting. Not one of
+        /// those is reachable through a real adapter, which cannot be made to
+        /// refuse a device to order — and a policy whose failure arms are
+        /// untestable is a policy nobody can say is right.
+        #[derive(Debug)]
+        struct FakeDevice {
+            /// Whether the device is gone, held the way the real latch is held:
+            /// shared, because the notice arrives from outside — wgpu's callback
+            /// there, and here whoever else got a device back first.
+            lost: Rc<Cell<bool>>,
+            /// How many new devices have been asked for.
+            asked: u32,
+            /// The attempt that succeeds, counting from one. `None` refuses
+            /// every attempt there will ever be.
+            succeeds_on: Option<u32>,
+        }
+
+        impl FakeDevice {
+            fn lost_until(succeeds_on: Option<u32>) -> Self {
+                Self {
+                    lost: Rc::new(Cell::new(true)),
+                    asked: 0,
+                    succeeds_on,
+                }
+            }
+        }
+
+        impl LostDevice for FakeDevice {
+            type Error = String;
+
+            fn is_lost(&self) -> bool {
+                self.lost.get()
+            }
+
+            fn rebuild(&mut self) -> Result<(), String> {
+                self.asked += 1;
+                match self.succeeds_on {
+                    Some(attempt) if self.asked >= attempt => {
+                        self.lost.set(false);
+                        Ok(())
+                    }
+                    _ => Err(format!("no adapter answered on attempt {}", self.asked)),
+                }
+            }
+        }
+
+        /// Fly one report of a loss against a fake, spending no real time.
+        ///
+        /// The waits are recorded on the side rather than on the machine,
+        /// because the pilot holds the machine exclusively while it flies — and
+        /// that exclusivity is the point of [`LostDevice`] being one object.
+        fn answer(
+            pilot: &mut DeviceLossPilot,
+            machine: &mut FakeDevice,
+        ) -> (Flight<String>, Vec<Duration>) {
+            let mut rests = Vec::new();
+            let flight = pilot.answer(machine, |wait| rests.push(wait));
+            (flight, rests)
+        }
+
+        /// PIN (user report, 2026-09-01) — **the ordinary unplug**.
+        ///
+        /// A device goes away for reasons that have nothing to do with this
+        /// process, is asked for again, and is there. The window lives, one line
+        /// is written, and the process's ledger of rebuilt devices reads one.
+        ///
+        /// MUTATION: have the pilot return `GaveUp` for any loss at all — which
+        /// is the behaviour of the day the report came in, where a lost device
+        /// was a lost program — and this goes red on the flight and on the
+        /// counter both.
+        #[test]
+        fn a_device_that_comes_back_on_the_first_ask_costs_one_rebuild_and_no_exit() {
+            let mut pilot = DeviceLossPilot::new();
+            let mut machine = FakeDevice::lost_until(Some(1));
+
+            let (flight, rests) = answer(&mut pilot, &mut machine);
+
+            assert_eq!(
+                flight,
+                Flight::Rebuilt(1),
+                "a device that was there on the first ask is the first rebuild of this process"
+            );
+            assert_eq!(pilot.rebuilds(), 1);
+            assert_eq!(machine.asked, 1, "and it was asked for exactly once");
+            assert!(
+                rests.is_empty(),
+                "nothing waits for a device that is already there: {rests:?}"
+            );
+            assert!(
+                !machine.is_lost(),
+                "the latch is clear, which is what says it is back"
+            );
+        }
+
+        /// **A machine whose GPU is genuinely gone still stops the program** —
+        /// the exit §7.1.3m ⑤ built is not repealed, it is moved behind a budget.
+        ///
+        /// The waits are asserted by value because they are the whole of what
+        /// "short backoff" means: a driver halfway through a reset is given two
+        /// more chances spread over six hundred milliseconds, and a person
+        /// watching a window that is about to close is not made to wait longer
+        /// than that for the news.
+        ///
+        /// MUTATION: make the budget unbounded and this hangs instead of failing,
+        /// which is the failure this number exists to prevent.
+        #[test]
+        fn a_device_that_never_comes_back_is_asked_three_times_and_then_given_up() {
+            let mut pilot = DeviceLossPilot::new();
+            let mut machine = FakeDevice::lost_until(None);
+
+            let (flight, rests) = answer(&mut pilot, &mut machine);
+
+            assert!(
+                matches!(flight, Flight::GaveUp(Some(said)) if said.contains("attempt 3")),
+                "giving up carries the last refusal, because that sentence is what \
+                 the reader of diagnostics.log has to go on"
+            );
+            assert_eq!(
+                pilot.rebuilds(),
+                0,
+                "a rebuild that never happened must not be numbered"
+            );
+            assert_eq!(machine.asked, DEVICE_REBUILD_ATTEMPTS);
+            assert_eq!(
+                rests,
+                vec![Duration::from_millis(150), Duration::from_millis(450)],
+                "two waits between three attempts, the second three times the first"
+            );
+        }
+
+        /// **Two windows, one device, one rebuild** — the single pilot.
+        ///
+        /// Both windows' frames fail on the same beat, because they are frames
+        /// on the same device. The first report through rebuilds; the second
+        /// finds the device already back and pays for nothing. The gate is the
+        /// context's own answer rather than a flag the pilot keeps, which is why
+        /// it holds however many windows are open and whatever order they report
+        /// in.
+        ///
+        /// MUTATION: drop the `still_lost` question at the top of `answer` and
+        /// the second window rebuilds a device that is already there — two
+        /// devices for one loss, the second one thrown away with every surface
+        /// the first had just built.
+        #[test]
+        fn two_windows_reporting_one_lost_device_rebuild_it_once() {
+            let mut pilot = DeviceLossPilot::new();
+            let mut machine = FakeDevice::lost_until(Some(1));
+
+            let (first, _) = answer(&mut pilot, &mut machine);
+            let (second, _) = answer(&mut pilot, &mut machine);
+
+            assert_eq!(first, Flight::Rebuilt(1));
+            assert_eq!(
+                second,
+                Flight::AlreadyBack,
+                "the second window's report of the same loss is not a second loss"
+            );
+            assert_eq!(pilot.rebuilds(), 1);
+            assert_eq!(
+                machine.asked, 1,
+                "and the device was asked for once, not twice"
+            );
+        }
+
+        /// A driver that finishes its reset while the pilot is waiting has given
+        /// the device back to whoever asks next — so the pilot asks again rather
+        /// than assuming the answer it had before it slept.
+        ///
+        /// MUTATION: ask `still_lost` only at the top and this spends all three
+        /// attempts on a device that came back after the first.
+        #[test]
+        fn a_device_that_returns_during_the_wait_is_not_asked_for_again() {
+            let mut pilot = DeviceLossPilot::new();
+            let mut machine = FakeDevice::lost_until(None);
+            // The other window's frame, arriving while this one waits: the latch
+            // is shared exactly as the real one is, so somebody else clearing it
+            // is a thing that can happen mid-flight.
+            let elsewhere = Rc::clone(&machine.lost);
+
+            let flight = pilot.answer(&mut machine, |_| elsewhere.set(false));
+
+            assert_eq!(flight, Flight::AlreadyBack);
+            assert_eq!(pilot.rebuilds(), 0, "nobody here rebuilt anything");
+            assert_eq!(
+                machine.asked, 1,
+                "one attempt was made, and the wait after it ended the episode"
+            );
+        }
+
+        /// **A device that is handed over and dies again before drawing anything
+        /// is not a device**, and the program stops rather than spinning.
+        ///
+        /// The failure this closes is not a crash: it is a window that never
+        /// paints behind a process that rebuilds three times a second for ever,
+        /// writing a numbered line each time and never once saying anything is
+        /// wrong. The budget is therefore spent per *episode*, and an episode
+        /// ends when a frame has reached the glass — not when a device was
+        /// handed over.
+        ///
+        /// MUTATION: reset `spent` on a successful rebuild instead of on a
+        /// presented frame, and this never returns.
+        #[test]
+        fn a_device_that_is_handed_over_and_dies_before_drawing_is_given_up_on() {
+            let mut pilot = DeviceLossPilot::new();
+            let mut machine = FakeDevice::lost_until(Some(1));
+            // Three losses in a row with no frame between them: each rebuild
+            // works, and the device is gone again before anything is drawn.
+            let mut flights = Vec::new();
+            for _ in 0..4 {
+                machine.lost.set(true);
+                flights.push(answer(&mut pilot, &mut machine).0);
+            }
+
+            assert_eq!(
+                flights[..3],
+                [Flight::Rebuilt(1), Flight::Rebuilt(2), Flight::Rebuilt(3)],
+                "the budget is three attempts and every one of them was granted"
+            );
+            assert_eq!(
+                flights[3],
+                Flight::GaveUp(None),
+                "and the fourth loss in an episode nothing ever drew in is where it stops — \
+                 with no refusal to quote, because nothing refused anything"
+            );
+            assert_eq!(
+                machine.asked, 3,
+                "the exhausted budget is not spent again on the way out"
+            );
+
+            // And one frame is the whole of what re-opens the budget.
+            pilot.a_frame_reached_the_glass();
+            machine.lost.set(true);
+            assert_eq!(
+                answer(&mut pilot, &mut machine).0,
+                Flight::Rebuilt(4),
+                "a device that drew is a device this process is willing to lose again"
+            );
+        }
+
+        /// The ink of the one label these tests draw, counted off the readback.
+        /// `[b, g, r, a]`.
+        fn ink_pixels(pixels: &[[u8; 4]]) -> usize {
+            pixels
+                .iter()
+                .filter(|pixel| {
+                    let (blue, green, red) = (
+                        u32::from(pixel[0]),
+                        u32::from(pixel[1]),
+                        u32::from(pixel[2]),
+                    );
+                    red > 70 && blue * 3 < red && green * 3 < red
+                })
+                .count()
+        }
+
+        /// One red label, said once and never said again.
+        fn a_sentence_this_window_keeps() -> Vec<OverlayLayer> {
+            vec![OverlayLayer {
+                labels: vec![ChromeLabel {
+                    mono: false,
+                    text: "the device was only where it was being drawn".to_owned(),
+                    rect: [12.0, 12.0, 300.0, 44.0],
+                    font_size_px: 18.0,
+                    color: [255, 0, 0],
+                    align_right: false,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: None,
+                }],
+                ..OverlayLayer::default()
+            }]
+        }
+
+        fn one_frame(
+            window: &mut WindowRenderer,
+            gpu: &mut GpuContext,
+            frame: &ViewportFrame,
+        ) -> Result<PresentOutcome, RenderError> {
+            let seat = SeatViewport::whole(window.config.width, window.config.height);
+            window.present_frame(
+                gpu,
+                &[SeatFrame {
+                    seat,
+                    clip: seat,
+                    frame,
+                    focused: true,
+                }],
+                FrameTrigger {
+                    occurred_at: Instant::now(),
+                    source: FrameSource::Expose,
+                },
+            )
+        }
+
+        /// PIN (user report, 2026-09-01) — **the whole of the fix, against a
+        /// device that is really gone.**
+        ///
+        /// `wgpu::Device::destroy` is not a simulation: it marks the device
+        /// invalid, releases its GPU resources and posts the loss through the
+        /// same callback and into the same latch a `DXGI_ERROR_DEVICE_REMOVED`
+        /// arrives through (`wgpu-core-30.0.0` `device/resource.rs`). So every
+        /// step below is the real one — the gate refusing a frame, the chain
+        /// rebuilt from a new instance, the atlas starting again at 256², the
+        /// window taking a target it did not have a moment ago.
+        ///
+        /// And the claim being made is the strong one. The label is set **once**,
+        /// before the device dies, and is never set again: what draws it after
+        /// the rebuild is the window's own retained state over a device that has
+        /// nothing in common with the one it was first drawn on.
+        ///
+        /// MUTATIONS, both run: ① have the rebuild keep the old `device_loss`
+        /// latch and the frame after it is refused by name — an `OnceLock`
+        /// cannot be un-set, so the latch has to be *replaced*; ② return from
+        /// `adopt_new_device` before it re-mints the window's device side, and
+        /// this panics inside `wgpu-core`'s own storage — `Cannot get
+        /// non-existent resource BufferId(1,1)` — which is exactly the shape
+        /// §7.1.3m named: a resource handed out quietly and the *use* of it
+        /// blamed, several calls away from what actually went wrong.
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn a_device_that_is_really_taken_away_is_rebuilt_and_the_window_says_it_again() {
+            const WIDTH: u32 = 360;
+            const HEIGHT: u32 = 200;
+
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
+            window.set_modal_overlay(a_sentence_this_window_keeps());
+            let frame = single_cell_cursor_frame(window.metrics());
+
+            one_frame(&mut window, &mut gpu, &frame).expect("the frame before the loss");
+            let before = ink_pixels(&window.read_back(&gpu).expect("it reads back"));
+            assert!(before > 0, "the label has to be on the glass to be lost");
+
+            gpu.lose_the_device_on_purpose();
+            assert!(
+                gpu.device_loss().is_some(),
+                "wgpu's own callback is the only thing that says a device went away"
+            );
+            assert!(
+                matches!(
+                    one_frame(&mut window, &mut gpu, &frame),
+                    Err(RenderError::DeviceLost(_))
+                ),
+                "§7.1.3m ⑤'s gate still refuses to draw on a corpse — that part is not repealed"
+            );
+
+            pollster::block_on(
+                gpu.rebuild_after_device_loss(vec![RebuiltWindow::Offscreen(&mut window)]),
+            )
+            .expect("a machine that has one device has another");
+
+            assert!(
+                gpu.device_loss().is_none(),
+                "the new device carries a new latch, or every later frame is refused"
+            );
+            assert_eq!(
+                gpu.glyph_atlas_refits(),
+                0,
+                "a device rebuilt is not an atlas re-packed; the two ledgers are different \
+                 diagnoses and must not bleed into each other"
+            );
+
+            one_frame(&mut window, &mut gpu, &frame).expect("the frame after the rebuild");
+            let after = ink_pixels(&window.read_back(&gpu).expect("it reads back"));
+            assert_eq!(
+                after, before,
+                "the same words, in the same place, on a device that did not exist when \
+                 they were last said"
+            );
+        }
+
+        /// **A content texture is a projection too** — the shared caches go
+        /// empty with the device, and the frame path fills them again from bytes
+        /// the window never stopped holding.
+        ///
+        /// This is the lane audit written as a test. The picture is uploaded
+        /// once, by the frame before the loss, into the device's own
+        /// content-keyed cache; the window keeps only the key and the bytes. If
+        /// the cache survived the rebuild it would answer the next lookup with a
+        /// bind group belonging to a device that no longer exists — the exact
+        /// shape of failure §7.1.3m named, where the resource is handed out
+        /// quietly and the *use* of it is what dies.
+        ///
+        /// MUTATION: drop `math_textures.clear()` from the rebuild and this
+        /// panics inside `wgpu-core`'s storage naming a resource id, which is
+        /// the failure a reader of the log cannot trace back to a device.
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn a_picture_uploaded_before_the_loss_is_uploaded_again_after_it() {
+            const WIDTH: u32 = 200;
+            const HEIGHT: u32 = 120;
+            // Eight by eight of one colour nothing else in the frame wears.
+            let picture: Arc<[u8]> = Arc::from(
+                std::iter::repeat_n([255_u8, 0, 0, 255], 64)
+                    .flatten()
+                    .collect::<Vec<u8>>()
+                    .into_boxed_slice(),
+            );
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
+            let seat = SeatViewport::whole(WIDTH, HEIGHT);
+            window.set_preview_image(Some(PreviewImage {
+                seat,
+                clip: seat,
+                key: "the picture that outlives its device".to_owned(),
+                rgba: Arc::clone(&picture),
+                width_px: 8,
+                height_px: 8,
+                display_width_px: 80,
+                display_height_px: 80,
+                pan_px: [0.0, 0.0],
+            }));
+            let frame = single_cell_cursor_frame(window.metrics());
+
+            one_frame(&mut window, &mut gpu, &frame).expect("the frame that uploads it");
+            let before = ink_pixels(&window.read_back(&gpu).expect("it reads back"));
+            assert!(before > 0, "the picture has to be on the glass to be lost");
+
+            gpu.lose_the_device_on_purpose();
+            pollster::block_on(
+                gpu.rebuild_after_device_loss(vec![RebuiltWindow::Offscreen(&mut window)]),
+            )
+            .expect("another device");
+
+            one_frame(&mut window, &mut gpu, &frame).expect("the frame that uploads it again");
+            assert_eq!(
+                ink_pixels(&window.read_back(&gpu).expect("it reads back")),
+                before,
+                "the same picture, uploaded again from the same bytes, with nobody \
+                 outside this crate having been told anything happened"
+            );
+        }
+
+        /// **Every window is surrendered before any window adopts**, and one
+        /// rebuild serves them all.
+        ///
+        /// The ordering is not decoration on Windows: a composition visual
+        /// publishes exactly one swapchain, so a second surface built over a
+        /// live one is two swapchains fighting for one visual. An offscreen
+        /// window cannot show that particular collision, but it can hold the
+        /// half of the claim that a test can hold — that a rebuild takes *every*
+        /// window through, and that a window which was never the one to notice
+        /// the loss comes back drawing.
+        ///
+        /// MUTATION, run: rebuild only the first window and the second one is
+        /// left holding a target and a text pipeline from a device that is gone
+        /// — its next frame panics inside `wgpu-core`'s storage rather than
+        /// drawing anything at all.
+        ///
+        /// One thing this deliberately does **not** claim: emptying
+        /// `overlay_text_renderers` in `adopt_new_device` cannot be seen from
+        /// here, because that lane grows a renderer per layer on demand and a
+        /// short vector simply grows again. What is fatal is a *stale* renderer,
+        /// and that is what mutation ② of the test above holds.
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn every_window_on_a_rebuilt_device_comes_back_from_one_call() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let mut first =
+                WindowRenderer::offscreen(&mut gpu, 320, 200, 1.0, FORMAT).expect("first window");
+            let mut second =
+                WindowRenderer::offscreen(&mut gpu, 240, 160, 2.0, FORMAT).expect("second window");
+            first.set_modal_overlay(a_sentence_this_window_keeps());
+            second.set_modal_overlay(a_sentence_this_window_keeps());
+            let frame = single_cell_cursor_frame(first.metrics());
+            one_frame(&mut first, &mut gpu, &frame).expect("the first window's frame");
+            one_frame(&mut second, &mut gpu, &frame).expect("the second window's frame");
+            let (before_first, before_second) = (
+                ink_pixels(&first.read_back(&gpu).expect("it reads back")),
+                ink_pixels(&second.read_back(&gpu).expect("it reads back")),
+            );
+            assert!(before_first > 0 && before_second > 0);
+
+            gpu.lose_the_device_on_purpose();
+            pollster::block_on(gpu.rebuild_after_device_loss(vec![
+                RebuiltWindow::Offscreen(&mut first),
+                RebuiltWindow::Offscreen(&mut second),
+            ]))
+            .expect("one device for both windows");
+
+            one_frame(&mut first, &mut gpu, &frame).expect("the first window draws again");
+            one_frame(&mut second, &mut gpu, &frame).expect("the second window draws again");
+            assert_eq!(
+                ink_pixels(&first.read_back(&gpu).expect("it reads back")),
+                before_first
+            );
+            assert_eq!(
+                ink_pixels(&second.read_back(&gpu).expect("it reads back")),
+                before_second,
+                "a window that never reported the loss is a window the rebuild still owes"
             );
         }
     }
