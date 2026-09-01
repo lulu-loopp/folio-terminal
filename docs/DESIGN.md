@@ -6188,3 +6188,48 @@ BT_DPI stage=resized              winit_scale=2   win32_dpi=192 authoritative_sc
 **停在缝上六秒不碰它:** 修前 `1400×900` 落成 `1072×731`(比正确答案 `1050×675` 大 `+22, +56`),而且**位置也漂了**——窗顶从 `y=1500` 被推到 `y=1573`(winit 的 `conservative_rect` 加那圈 nudge);修后 `1400×900` 落成 `1050×675`,位置 `-2700,1500` 一动不动,此后六秒**一行 `BT_DPI` 都没有**。两跑都是**十一次变化十一行 `scale-factor-changed`,一次连环都没有**,两跑收尾都是 `exit code 0`、属于本次运行的 `folio` **0 个**、`diagnostics.log` 里除 `BT_DPI` 只有一行启动首转的窗线程占用(debug 版的常态)。
 
 **没做的,如实写。** ① **那个「一次拖动里翻十五次」的失控本身没有在这里复现**,复现的是**它每一步的增量**。探针每次都自己指定矩形,于是每一次跨缝都被重新摆正,棘轮攒不起来;而用户那次是**一只手**把窗拖在缝上,每长大一次就重新横跨、再判定一次。要的证据是那圈边框存不存在、有多大——上面那张表把它按住了,失控只是它乘以 N 的后果。② **`stage=size-move-settled` 在这两跑里是 0 行**:`SetWindowPos` 不进 OS 的模态 move/size 循环,`in_size_move` 全程为假,所以裁决二那条路**实机没有被走过**,它由 `a_seam_that_flips_twenty_times_under_one_hand_is_settled_once` 与那条形状钉按住。真手拖动的那一趟留给下一个握着这台机器的人,判据是一行:一次跨屏拖动里 `stage=size-move-settled` **恰好一行**。
+
+### 7.51 一条回合结束的通知必须带上 agent 最后说的那句话:管道里从第一天起就没有装那句话的那一格(v0.1.0 用户原话「毫无信息的通知」,已落地;`crates/bt-app/src/{attention_words,attention_map,attention_wire,attention_hooks,cli,main}.rs`、`docs/plans/attention/claude-hooks.json`)
+
+**由头。** 装了 hook 的 Claude Code 回合一结束,桌面上弹出的是:第一行 tab 名+目录,第二行 `Turn finished`。用户看完发布版的第一批反馈里有这一条,原话是「毫无信息的通知」——而它准确:那两行里没有一个字是关于刚刚发生了什么的。
+
+**根因不在文案,在线上没有那一格。** `AttentionLedger::announce_turn_end` 从 §11.7 写下的那天起就有 `words: Option<&str>` 这个形参,`Raised.body` 也一直会把它带到 toast 正文去——**OSC 那条道一直在用**(`OSC 9;<text>` 里程序自己写了一句话,那句话就是正文)。hook 那条道三个调用点全部**写死 `None`**,而这不是疏忽:`attention_wire::Message` 只有四个字段(`cap`/`family`/`event`/`id`),**根本没有一格能装一句话**。于是「程序原话优先」这条早就裁过的规矩,在最常走的那条道上从来没有可能成立。修的是管道,不是措辞。
+
+**裁决一:信息来源按优先级,四条臂,宁缺毋滥。** ① 事件自带文字(`OSC 9`/`777`)——本来就在,一个字没动。② Claude Code 的 `Stop`:payload 里的 `transcript_path` 指着一份 JSONL,末尾那条**主线**(非 `isSidechain`)assistant 消息就是它刚说完的话。③ codex 的 `notify`:payload 里 `last-assistant-message` **就是那句话本身**——`evidence-cli-survey-2026-08-25.md` 第 214 行早把这个 payload 逐字录下来了,而 `attention_codex` 的安装模板从那一片起就把 `notify` 数组结在 `--json` 上,**payload 一直在到达这个动词,一直没人读**。④ 都没有,`Turn finished` 原样。
+
+**裁决二:摘首句,不摘末句(35 份真 transcript 实测,2026-09-01;逐条方法与计数见 `docs/plans/attention/evidence-turn-end-words-2026-09-01.md` §1)。** 本项目与另外四个项目的真实会话文件,逐个取末条主线 assistant 消息,首句与末句各摘一遍对照。**首句 33/35 是「这一轮做完了什么」**;末句超过一半是收尾的邀请或旁白(「想再展开哪部分?」「现在可以 /clear 了。」「说一声就行。」),消息以表格结尾时末句摘出来的是**一个表格单元格**。原因不是巧合:一条回合末尾的消息是**先给结论再给细节**写的,首句就是作者自己已经写好的那句摘要,末句是写给已经读完前面的人看的。
+
+**裁决三:第三臂「屏幕尾行启发式」否决,证据在此(三屏逐字与复现命令见同一份证据文件 §2)。** 单子里第三臂原本是「从 pane 屏幕尾部往上找第一行有实义的文本」,并要求先实测再定收不收。实测了:用仓里的 `bt-record`/`bt-replay` 录了两段真 codex TUI(0.144.4,120×30,ConPTY),各截在回合刚结束、composer 空闲的那一帧,外加一帧生成中的忙屏,共三屏。**codex 的屏底是一条常驻的 `模型 · cwd` 状态行**,它非空、无框线、不是 spinner——**朴素读法三屏三中,每一次摘到的都是 `gpt-5.6-sol medium fast · D:\Developer\BetterTerminal`**;把状态行与 `› …` 占位行也手工认成装饰之后,三屏里只有一屏摘对(而那一屏之所以对,是因为提问被特意写成「最后给一句结论」),另两屏一屏摘到生成中的工具状态行、一屏摘到答案被折行后的**后半截**。结论:这条臂要靠一家一版的屏底形状知识才能不摘到垃圾,而那恰好推翻了「屏幕启发式是通用的」这个立这条臂的理由。**不收**。它本来要救的那一家(codex)由裁决一 ③ 从 payload 里救得更准。
+
+**裁决四:词从哪儿来是数据,不是代码。** `TURN_END` 从三元组升成 `TurnEnd` 结构,第四列 `Words`:`None` / `Field(键)` / `Transcript(键)`。今天两行有源、四行是 `None`,而这四行各有各的理由写在行上——`StopFailure` 有 `transcript_path` 却仍是 `None`(**一个没走完的回合,文件末尾那句话是出事之前说的,拿它当结语是替 agent 编话**);copilot 的 `agentStop` 有 `transcriptPath` 却仍是 `None`(**那份文件的格式没有任何一处上游原文可引**,照本模块「取证过才写行」的老规矩,没取证就不写)。**安装器的命令行跟着这一列走**:`command_for` 只给 `words.are_somewhere()` 的那一行补 ` --json -`,别的 hook 命令一个字节没变。**payload 的字节永远不上命令行**,这条老规矩一个字没动——`-` 是一个句柄的名字,不是一段内容。
+
+**裁决五:摘不到一律不许吃掉通知。** 这是整片的承重条款,写成了纯函数 `attention_wire::message_for`:它**返回 `Message` 而不是 `Option<Message>`**,摘取的每一种失败——没 payload、没那个字段、文件不在、指到一个目录、末条消息全是工具调用、只有 subagent 说过话——都只让 `text` 是 `None`,那一行照发。`transcript_lede` 与 `lede` 全链条 `Option`,没有一处 `unwrap`/`expect`。**stdin 那一读还多一道时间界**(`STDIN_BUDGET` = 200 ms,读在自己的线程上、`recv_timeout` 收):写端什么时候关是**别人**的决定,而一个写完对象却把管子留到 hook 退出才关的 runner——一种很常见的写法,本 build 从这边修不了——会让 `read_to_end` 永久阻塞,于是这个动词存在的唯一目的(发出那条通知)一次也不会发生。**超时不是失败**,它只是「没摘到」的又一种,走的是同一条路。
+
+**入口那一读的两道界,和那道 `is_terminal`。** 64 KiB 的字节界防的是一个变成消防栓的句柄;`is_terminal` 防的是**人在提示符下手打这个动词**——那时 stdin 是控制台,一次读会坐在那儿等他敲一段 JSON 给一个本该已经退出的程序。三道加起来,这个动词在任何一种句柄上都会很快退出。
+
+**裁决六:正文不加前缀标签。** 摘到句子就**替换** `Turn finished` 那一行,不写「Claude:」「回合结束:」之类的前缀。标题那三层链(carried → pane 名 → profile 名)一个字没动,读者已经从标题知道是哪一扇 pane 里的哪一个东西在说话。
+
+**markdown 用解析器而不是擦除。** 摘出来的那段是 markdown,清洗走 `preview::parse_markdown`——本 build 自己的 CommonMark 读者——取第一个是散文的块(标题/段落/列表首项/引用首行算,代码块、表格、公式、图片、分隔线不算,跳到下一块)。手写一遍「删掉 `*`、反引号、`#`」是第二个、而且更差的实现:它会留下 `3 * 4` 里的星号、把链接拆成目标、把围栏里的内容当散文读。**句末判定按脚本分**:`.` `!` `?` 只有后面跟空白或到头才算句末(`0.1.1`、`folio.exe`、`§7.1` 因此不被腰斩),`。``!``?``…` 在哪儿都是句末——中文句号从来不是缩写点。**截断按字符不按字节**,80 字 + 一枚 `…`(那枚记号不算在 80 里,因为限的是「带走对方多少字」)。
+
+**几百兆的文件要在一个 hook 里读完。** 实测集里最大的一份 transcript 是 287 MB,而这段代码跑在 hook 里,整个调用要在用户察觉之前结束。所以读的是**有界的尾巴**:64 KiB 起,不够就 ×8,8 MiB 封顶;倒着逐行看,第一条主线 assistant 消息就是答案。同一批文件上实测 **0.1 ms – 0.8 ms**(含那份 287 MB 的),Python 原型量的,Rust 只会更快。读到一半开始的那一行**丢掉**——这不是优化,是尾读一个行式文件的通用算法本来就该做的事(否则「一行的后半截碰巧是一个完整对象」这件事就要靠 JSON 解析器碰巧拒绝它)。
+
+**红门与变异红证(逐条单跑留档)。**
+
+- `attention_words::a_shortened_sentence_is_cut_between_characters` —— 变异:`shortened` 改成 `sentence[..limit]` 按字节切。当场红(在中文串上 panic 于字符边界)。
+- `attention_words::the_transcript_is_quoted_from_its_last_main_thread_message` —— 变异:不再跳过 `isSidechain`。当场红,摘到的是 subagent 的最后一句。
+- `attention_wire::a_sentence_that_could_not_be_found_still_sends_the_line` —— 变异:`transcript_lede` 把 `File::open` 的失败改成 `expect`。当场红——**这条红的正是「摘取失败吃掉通知」那个形状**。
+- `attention_words::a_full_stop_ends_a_sentence_only_where_a_sentence_ends` —— 变异:`.` 一律算句末。当场红在 `Released 0.1.1` 被切成 `Released 0.`。
+- `attention_words::a_message_buried_behind_a_large_entry_is_still_found` —— 变异:窗口不再增长。当场红。
+- `attention_words::a_line_the_read_began_inside_is_never_quoted` —— 变异:不丢半行。**第一版测试没红,如实记**:padding 的后半截根本不是合法 JSON,黑盒看不出差别;改成直接调 `lede_in_tail` 并把 `from` 指在一行中段那个 `{` 上(模拟一次撕裂写入留下的前缀),变异才红。
+- `attention_wire::a_line_whose_words_are_not_ones_this_build_wrote_is_refused` —— 变异:去掉控制字符那一条。当场红(带 `\n`、`\r`、`ESC ] 9` 的 text 被放行)。
+- `attention_wire::a_row_that_declares_a_source_is_the_only_row_that_quotes` —— 变异:不看 `Words` 列,谁的 payload 里有 `last-assistant-message` 就摘谁。当场红。
+- `attention_hooks::every_command_says_which_upstream_it_speaks_for` —— 变异:`command_for` 不补 `--json -`。当场红。
+- `cli::a_payload_is_either_on_the_command_line_or_on_the_handle_it_names` —— 变异:`-` 当成内联 payload。当场红。
+- `attention_wire::a_turn_that_ended_with_words_says_them_on_the_desktop` —— 变异:线与账本之间把 words 丢成 `None`。当场红。这一条是**从磁盘上一份 transcript 一路到 toast 正文**的整链钉:声明、读取、上线、下线、借给 announcement,五个各自正确的环节仍然可能在拼五个不同的词。
+- `attention_hooks::taking_them_back_out_leaves_what_was_there` —— 装卸对称,这次连**新的那条命令行**一起钉:装出来的 `Stop` 项逐字等于 `command_for(exe, "Stop")` 且以 ` --json -` 结尾,拆完之后文件与原来结构逐位相同。撤回按 `MARK`(`attention claude-code:`)认账,而 `MARK` 站在 `--json` 前面,所以命令行加长不影响撤回——这条由这个测试按住,不由注释按住。
+
+**没做的与没验的,如实写。**
+
+- **`async: true` 的 hook 在 Windows 上到底给不给 stdin,没有在实机上验过。** 上游文档说 command hook 的 payload 走 stdin 并随即关闭;检索到的唯一一条相关缺陷是 **macOS 专有**的「async hook 收到空 stdin」(anthropics/claude-code#38162),Windows/Linux 不在其中,而本产品只有 Windows。**没有改成同步**:所有 hook 一律 `async` 是 §10.4.3 的老裁决(`PermissionRequest` 是一道同步决策闸,任何一条卡住的 hook 都会站在用户和每一次批准之间),为一条通知正文去动那条规矩不划算。**万一将来真收到空 stdin,后果是 `text` 为 `None`、toast 回到 `Turn finished`**,一条通知都不会少——这正是裁决五买下的东西。实机验收判据一行:装好 hook 的窗里跑完一个回合,toast 第二行是那句话而不是 `Turn finished`。
+- **`main.rs` 里 `message.text.as_deref()` 那一句本身没有单测。** `deliver_attention` 要一整棵带真实 session 的 `TabState` 才能驱动,而它上下游两侧都钉住了(线这一侧 `message_for` + `decode`,账本那一侧 `announce_turn_end`)。这一句由上面那条实机判据兜。
+- **Claude Code 的 `Stop` payload 里可能另有一个 `last_assistant_message` 字段**(第三方文档说有,上游参考文档里没找到)。**没有读它**:本模块「取证过才写行」的规矩不因为省事而破,而且就算它在,读 transcript 拿到的是同一句话。哪天从上游原文里引到了,那是 `Words` 那一列多一个变体的事。

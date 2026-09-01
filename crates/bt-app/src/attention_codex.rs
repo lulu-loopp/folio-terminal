@@ -396,7 +396,11 @@ mod tests {
             .expect("the verb")
             .expect("a call and not a fault");
         assert_eq!(call.event, format!("{CODEX}:{EVENT}"));
-        assert_eq!(call.payload.as_deref(), Some(payload));
+        assert_eq!(
+            call.payload,
+            Some(crate::cli::AttentionPayload::Inline(payload.to_owned())),
+            "codex hands its payload over as an argument, and it is read as one"
+        );
         // And the event named is one this build has a turn-end row for, so an install that
         // succeeded is an install that reaches something.
         assert_eq!(

@@ -44,6 +44,7 @@ mod attention_hooks;
 mod attention_map;
 mod attention_trace;
 mod attention_wire;
+mod attention_words;
 mod cardhint;
 mod cli;
 mod cmdrail;
@@ -19870,16 +19871,19 @@ fn deliver_attention(
                 allowed.extend(outcome.raised.map(|one| (seat, one)));
             }
             if let Some(via) = asks.turn_end {
-                // **A hook that says a turn ended writes no sentence**, which is exactly why the
-                // sentence this raises comes from the i18n table: `Stop` carries a session id and
-                // a transcript path, and nothing anybody would want read out to them.
+                // **The sentence the arrival brought, when it brought one.** A hook event carries
+                // no words of its own — `Stop` is a session id and a path — so what is on the wire
+                // is what `attention_wire`'s verb went and quoted from the source that event's row
+                // declared, already cleaned and bounded. `None` is the ordinary answer and the one
+                // every row had until this slice: the toast then says it in its own voice, out of
+                // the i18n table, exactly as before.
                 let outcome = leaf.attention.announce_turn_end(
                     at,
                     reach,
                     switches,
                     attention_map::PIPE_TRANSPORT,
                     via,
-                    None,
+                    message.text.as_deref(),
                 );
                 emit_attention_lines(trace, outcome.lines);
                 allowed.extend(outcome.raised.map(|one| (seat, one)));

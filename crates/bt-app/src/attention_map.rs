@@ -494,21 +494,111 @@ pub(crate) const ROWS: &[MappingRow] = &[
 /// `Via` is the field that keeps this table worth having. Four sources say the same sentence, and
 /// telling them apart in the trace is how "did the adapter actually install?" becomes a question
 /// with an answer.
-pub(crate) const TURN_END: &[(&str, &str, Via)] = &[
-    (CLAUDE_CODE, "Stop", Via::Stop),
-    (CLAUDE_CODE, "StopFailure", Via::StopFailure),
-    (CODEX, "stop", Via::Stop),
+pub(crate) const TURN_END: &[TurnEnd] = &[
+    // **The one row that can quote.** `Stop`'s payload carries `transcript_path`, and the file it
+    // names ends with what the agent just said — which is the only place in this family's whole
+    // interface that sentence exists. See [`Words::Transcript`].
+    TurnEnd {
+        family: CLAUDE_CODE,
+        event: "Stop",
+        via: Via::Stop,
+        words: Words::Transcript("transcript_path"),
+    },
+    // **And this one deliberately cannot**, though its payload names the same file. A turn that
+    // ended in failure did not end on the sentence the transcript ends with: that sentence is from
+    // before whatever went wrong, and quoting it would put words in an agent's mouth about a turn
+    // it never finished. `Turn finished` is the honest thing to say about a turn that did not.
+    TurnEnd {
+        family: CLAUDE_CODE,
+        event: "StopFailure",
+        via: Via::StopFailure,
+        words: Words::None,
+    },
+    TurnEnd {
+        family: CODEX,
+        event: "stop",
+        via: Via::Stop,
+        words: Words::None,
+    },
     // codex's `notify` program, whose only observed `type` is `agent-turn-complete` — and which the
     // survey found **silent** while a real approval box was on screen. It says "I have finished
     // talking", which is exactly the sentence this block refuses to promote.
-    (CODEX, "agent-turn-complete", Via::Notify),
+    //
+    // **It also says what was said**, and that has been in the recording since the day it was made:
+    // `evidence-cli-survey-2026-08-25.md` line 214 has the payload verbatim, `last-assistant-message`
+    // and all. The installer already ends codex's `notify` array on `--json`, so the payload has
+    // been arriving at the verb since that slice shipped with nothing reading it.
+    TurnEnd {
+        family: CODEX,
+        event: "agent-turn-complete",
+        via: Via::Notify,
+        words: Words::Field("last-assistant-message"),
+    },
     // pi's whole contribution. "Fires only once a run fully settles."
-    (PI, "agent_settled", Via::AgentSettled),
+    TurnEnd {
+        family: PI,
+        event: "agent_settled",
+        via: Via::AgentSettled,
+        words: Words::None,
+    },
     // copilot's, and the only one of its thirteen hook events that says a turn is over: "The main
     // agent finishes a turn." Its payload's `stopReason` is quoted as the single value `"end_turn"`.
     // In both tables for `Stop`'s reason, which the header states.
-    (COPILOT, "agentStop", Via::Stop),
+    //
+    // **`Words::None` although its payload has a `transcriptPath`**, and this is the column's own
+    // rule rather than an omission: what is at the end of that file has not been quoted from
+    // upstream anywhere, and a reader written to Claude Code's shape and pointed at a format nobody
+    // has read would either find nothing or find the wrong line. The day the format is quoted, this
+    // is one word.
+    TurnEnd {
+        family: COPILOT,
+        event: "agentStop",
+        via: Via::Stop,
+        words: Words::None,
+    },
 ];
+
+/// One row of [`TURN_END`]: an event that says a turn is over, and where its last sentence is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TurnEnd {
+    pub(crate) family: &'static str,
+    pub(crate) event: &'static str,
+    /// Which of the two doors this arrival knocks on, and what the trace records it as.
+    pub(crate) via: Via,
+    /// Where the words are, when there are any.
+    pub(crate) words: Words,
+}
+
+/// **Where a turn's last sentence is to be found**, declared per row (§12.1 R1's fifth column).
+///
+/// Declared and never inferred, for the reason every other column here is: two families put the
+/// same thing in differently-named fields, and a build that went looking for `message` in whatever
+/// arrived would one day quote a tool name, a file path or a prompt into somebody's desktop. A row
+/// that has not had its source quoted from upstream says [`Words::None`] and the toast says what it
+/// always said.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Words {
+    /// Nowhere. The event reports that a turn ended and says nothing about what was said in it.
+    None,
+    /// **The payload's own field holds the sentence.** codex's `last-assistant-message`.
+    Field(&'static str),
+    /// **The payload's field names a JSONL transcript**, and the sentence is the lede of the last
+    /// message in it that the main agent wrote — see [`crate::attention_words::transcript_lede`].
+    ///
+    /// The shape read is Claude Code's own (`type`, `isSidechain`, `message.content`). A family
+    /// whose transcript is written differently gets a variant of its own, at compile time, rather
+    /// than this one and a hope.
+    Transcript(&'static str),
+}
+
+impl Words {
+    /// Whether this row has anywhere to look — which is also whether its hook needs a payload at
+    /// all, and therefore what the installer's command line says (`attention_hooks::command_for`).
+    #[must_use]
+    pub(crate) fn are_somewhere(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
 
 /// The row a `<family>:<event>` names, if this build knows one.
 #[must_use]
@@ -524,10 +614,18 @@ pub(crate) fn row(
 /// Whether a `<family>:<event>` is one of the turn-end announcements.
 #[must_use]
 pub(crate) fn turn_end(family: &str, event: &str) -> Option<Via> {
+    turn_end_row(family, event).map(|row| row.via)
+}
+
+/// The same lookup, whole — for the one caller that needs the row's other columns.
+///
+/// A wrapper rather than a second scan, so that "is this a turn end" and "where are its words"
+/// can never come to disagree about which row they are reading.
+#[must_use]
+pub(crate) fn turn_end_row(family: &str, event: &str) -> Option<&'static TurnEnd> {
     TURN_END
         .iter()
-        .find(|(row_family, row_event, _)| *row_family == family && *row_event == event)
-        .map(|(_, _, via)| *via)
+        .find(|row| row.family == family && row.event == event)
 }
 
 /// **R2, made a function**: the rows one machine actually has installed.
@@ -898,14 +996,72 @@ mod tests {
         }
     }
 
+    /// **Where a sentence may be quoted from is a column, and it is closed.**
+    ///
+    /// Two families declare a source today and the other four declare none, and this walks the
+    /// whole table rather than the two — because the failure this is about is not a row that says
+    /// the wrong thing, it is a row that ends up saying *something* when nobody decided it should.
+    /// A `Words` inherited by a family whose payload was never read would put a tool name, a file
+    /// path or a prompt on somebody's desktop.
+    #[test]
+    fn only_the_rows_that_were_quoted_from_upstream_may_quote() {
+        let words = |family: &str, event: &str| turn_end_row(family, event).map(|row| row.words);
+        assert_eq!(
+            words(CLAUDE_CODE, "Stop"),
+            Some(Words::Transcript("transcript_path")),
+            "the field Claude Code's `Stop` payload names its transcript with"
+        );
+        assert_eq!(
+            words(CODEX, "agent-turn-complete"),
+            Some(Words::Field("last-assistant-message")),
+            "the field codex's `notify` payload has carried since the survey recorded it"
+        );
+        // Everything else, named one by one so that adding a source is a line typed on purpose.
+        for silent in [
+            (CLAUDE_CODE, "StopFailure"),
+            (CODEX, "stop"),
+            (PI, "agent_settled"),
+            (COPILOT, "agentStop"),
+        ] {
+            assert_eq!(
+                words(silent.0, silent.1),
+                Some(Words::None),
+                "{}:{} has had no source quoted from upstream and must quote nothing",
+                silent.0,
+                silent.1
+            );
+        }
+        assert_eq!(
+            TURN_END
+                .iter()
+                .filter(|row| row.words.are_somewhere())
+                .count(),
+            2,
+            "two rows can quote; a third is a decision, not a refactor"
+        );
+        // **A row that only ever raises a wait has nowhere to declare a source**, because this is
+        // the announcement lane's table and it is not on it. That is red line 14 read from the
+        // other side: a sentence is lent to an announcement and never to a request.
+        // `PermissionRequest` is the row it would be most tempting to give words to, and it cannot
+        // be given any — there is no field on it to write them in.
+        assert_eq!(words(CLAUDE_CODE, "PermissionRequest"), None);
+        assert!(
+            row(ROWS, CLAUDE_CODE, "Stop").is_some_and(|row| !row.is_wait()),
+            "`Stop` is on both tables, and its queue-lane half is a clear — a wait that also \
+             announced would be the promotion this block exists to refuse"
+        );
+    }
+
     /// **The turn's end is never a wait**, in either table, for any family.
     #[test]
     fn nothing_that_ends_a_turn_is_mapped_to_a_wait() {
-        for (family, event, _) in TURN_END {
-            let mapped = row(ROWS, family, event);
+        for end in TURN_END {
+            let mapped = row(ROWS, end.family, end.event);
             assert!(
                 mapped.is_none_or(|row| !row.is_wait()),
-                "{family}:{event} ends a turn and must not also raise a wait"
+                "{}:{} ends a turn and must not also raise a wait",
+                end.family,
+                end.event
             );
         }
         // And the two spellings a survey would be tempted by are absent entirely.
