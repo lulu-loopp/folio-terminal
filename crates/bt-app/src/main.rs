@@ -2301,6 +2301,43 @@ impl PreviewSurface {
     }
 }
 
+/// **Which host is wearing a notice strip** (B1, 2026-09-01).
+///
+/// The strip is one band with two hosts, exactly as a document is one picture
+/// with two hosts (§7.39: 一份内容在浮窗与 pane 里是同一张画、同一套手势). It
+/// was keyed by [`SeatId`] alone from the day it was written, and for as long as
+/// the only thing that could wear it was a shell that is nothing but a seat that
+/// was the whole truth. The 2026-08-29 ruling gave it to previews as well, and a
+/// preview is the one kind of content this window can tear off its layout — so
+/// from that day the news reached a floated document's buffer and there was no
+/// row for it to stand in, because a float is not in the tree and has no seat.
+///
+/// A [`SeatId`] and a [`float::FloatId`] are both `u64`-shaped and would answer
+/// for one another if either were used bare — [`PreviewSurface`]'s own reason
+/// for being a type rather than a number, one band along.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum NoticeHost {
+    /// A leaf of the tab's layout tree — a terminal wearing its shell's offer,
+    /// or a preview pane wearing its document's disk news.
+    Seat(SeatId),
+    /// A preview float, wearing its document's disk news and nothing else: a
+    /// window is torn off a *preview*, so a shell's offer can never arrive here.
+    Float(float::FloatId),
+}
+
+/// One host's strip as it was last drawn: the boxes a press is tested against,
+/// and the sentence measured to fit them.
+///
+/// The two travel together because they are made together and by one pass —
+/// `notice::sentence` cuts the prose to the room `notice::lay_out` left it, so a
+/// bar kept without its sentence would have to be measured twice to be painted
+/// twice, and the second measurement is the one that can disagree.
+#[derive(Clone, Debug)]
+struct NoticeStrip {
+    bar: notice::NoticeBar,
+    say: String,
+}
+
 /// **Where in the strip the tab a preview surface belongs to is standing** —
 /// found by the tab's own name and by nothing else (§7.12 ⓑ).
 ///
@@ -9555,23 +9592,33 @@ struct WindowRuntime {
     search_layout: Option<search::Capsule>,
     /// Which of the capsule's controls the pointer is on.
     search_hover: Option<search::SearchElement>,
-    /// **Where each pane's integration notice was drawn last frame** — what a
-    /// press is tested against (§7.1.6j).
+    /// **Where each host's notice strip was drawn last frame** — what a press is
+    /// tested against, and the sentence that was cut to fit it (§7.1.6j).
     ///
     /// Beside [`Self::search_layout`] and for its reason: this is a function of
-    /// the *rectangle*, and the rectangle belongs to the solve. Keyed by seat and
+    /// the *rectangle*, and the rectangle belongs to the solve. Keyed by host and
     /// not a singleton, because two PowerShell panes in one tab each owe their
     /// own — the offer is about one shell's startup file, and the pane is the
-    /// only place a sentence about one shell can honestly be put.
-    notice_layouts: std::collections::BTreeMap<SeatId, notice::NoticeBar>,
+    /// only place a sentence about one shell can honestly be put — and because a
+    /// torn-off window owes the same sentence about the file it is showing
+    /// ([`NoticeHost`]).
+    ///
+    /// **Written in one place** ([`Runtime::notice_layers`]) and read in three:
+    /// the pane lane's paint, the float lane's paint, and the press router. The
+    /// float's paint reads rather than measures because a second measurement is
+    /// a second answer to "where is this row", and the box you can press is the
+    /// box you can see.
+    notice_layouts: std::collections::BTreeMap<NoticeHost, NoticeStrip>,
     /// Which strip's control the pointer is on. One, because there is one
     /// pointer.
-    notice_hover: Option<(SeatId, notice::NoticeElement)>,
-    /// **The strip each pane showed last time this was settled** — the content
+    notice_hover: Option<(NoticeHost, notice::NoticeElement)>,
+    /// **The strip each host showed last time this was settled** — the content
     /// half of the projection, kept so that a change from `Offer` to `Added`
     /// repaints even though it adds and removes no seat (§7.1.6j). The presence
-    /// half lives on `Seats`, because that is the half a body's height reads.
-    notice_states: std::collections::BTreeMap<SeatId, notice::Notice>,
+    /// half lives on `Seats`, because that is the half a body's height reads —
+    /// and for a float it lives nowhere, because a window's body is derived from
+    /// its frame every frame and has no solve to be told about.
+    notice_states: std::collections::BTreeMap<NoticeHost, notice::Notice>,
     /// What the last scan was of, so the next one can skip the part that has not
     /// moved. See [`SearchScanCache`].
     search_scan: Option<SearchScanCache>,
@@ -36244,7 +36291,7 @@ impl Runtime<'_> {
         // between the two lines can reach the field.
         let mut already_asked = self.app.powershell_integration_asked;
         let mut presence = std::collections::BTreeSet::new();
-        let mut states: std::collections::BTreeMap<SeatId, notice::Notice> =
+        let mut states: std::collections::BTreeMap<NoticeHost, notice::Notice> =
             std::collections::BTreeMap::new();
         for (seat, leaf) in &mut self.sessions {
             if leaf.integration_offer.is_none() {
@@ -36275,7 +36322,7 @@ impl Runtime<'_> {
                 });
             if let Some(state) = showing {
                 presence.insert(*seat);
-                states.insert(*seat, state);
+                states.insert(NoticeHost::Seat(*seat), state);
             }
         }
         self.app.powershell_integration_asked = already_asked;
@@ -36291,11 +36338,33 @@ impl Runtime<'_> {
         // seat can never be a terminal seat, so the two passes cannot disagree
         // about one seat.
         for seat in self.seats.preview_seats() {
-            let Some(state) = self.preview_disk_notice(seat) else {
+            let Some(state) = self.preview_disk_notice_on(self.preview_here(seat)) else {
                 continue;
             };
             presence.insert(seat);
-            states.insert(seat, state);
+            states.insert(NoticeHost::Seat(seat), state);
+        }
+        // **And the windows torn off them, on exactly the same terms** (B1,
+        // 2026-09-01, §7.39's 总则).
+        //
+        // The news already arrived here — `refresh_preview_file` walks the
+        // *pool*, and a floated document reads its tab's pool through
+        // `PreviewSurface::Float` like any other surface — so what was missing
+        // was never the fact. It was the row: the two loops above are the tree's
+        // two kinds of leaf, a float is in neither, and a window whose file had
+        // been replaced under unsaved edits went on showing the old body with
+        // nothing said about it.
+        //
+        // No `presence` entry, and that is not an omission: `Seats::set_notices`
+        // is what makes a *pane's* body one bar shorter, and a float's body is
+        // derived from its frame every frame by `float_head_tools` →
+        // `float_geometry`, which asks this same question directly. One answer,
+        // two ways of spending it — the tree is told, and the window simply reads.
+        for id in self.preview_float_ids() {
+            let Some(state) = self.preview_disk_notice_on(PreviewSurface::Float(id)) else {
+                continue;
+            };
+            states.insert(NoticeHost::Float(id), state);
         }
         // **Two changes, not one, and they gate different work.** Whether a seat
         // *wears* a strip decides the pane's height, so a change to that set is a
@@ -36320,28 +36389,52 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// What one pane's strip is saying, or nothing when it wears none.
+    /// What one host's strip is saying, or nothing when it wears none.
     ///
-    /// **Two kinds of seat answer and a seat is only ever one of them**: a
-    /// terminal from its shell's offer, a preview from the buffer under it.
-    fn pane_notice(&self, seat: SeatId) -> Option<notice::Notice> {
+    /// **Three kinds of host and each answers with one of two facts**: a
+    /// terminal seat from its shell's offer, a preview seat and a preview float
+    /// from the buffer under them. A window can never answer with the first —
+    /// it is torn off a preview — which is why its arm asks only the second.
+    fn notice_on(&self, host: NoticeHost) -> Option<notice::Notice> {
+        let NoticeHost::Seat(seat) = host else {
+            return self.preview_disk_notice_on(self.notice_surface(host));
+        };
         if let Some(leaf) = self.sessions.get(&seat) {
             return leaf.integration_offer.as_ref()?.showing(
                 leaf.output_revision > 0,
                 leaf.session.shell_integration_seen(),
             );
         }
-        self.preview_disk_notice(seat)
+        self.preview_disk_notice_on(self.preview_here(seat))
     }
 
-    /// **What the document on this seat has to say about its file** (user ruling
-    /// 2026-08-29).
+    /// **Which preview surface a notice host is about.**
+    ///
+    /// The one translation between the two vocabularies, so that every verb a
+    /// strip offers a document — `Reload`, `Keep`, the `×` that means the same
+    /// as `Keep` — is written once and reaches the buffer whichever host was
+    /// pressed. A terminal seat resolves to its tab's preview leaf, which holds
+    /// no buffer, and the preview verbs it can never show therefore find none.
+    fn notice_surface(&self, host: NoticeHost) -> PreviewSurface {
+        match host {
+            NoticeHost::Seat(seat) => self.preview_here(seat),
+            NoticeHost::Float(id) => PreviewSurface::Float(id),
+        }
+    }
+
+    /// **What the document on this surface has to say about its file** (user
+    /// ruling 2026-08-29).
     ///
     /// The projection of [`preview::DiskNews`] onto the strip, and the whole of
     /// it. `Level` — the ordinary state of every buffer in this window — wears
     /// nothing, which is what keeps this row off every pane that has no news.
-    fn preview_disk_notice(&self, seat: SeatId) -> Option<notice::Notice> {
-        let buffer = self.preview_buffer_on(self.preview_here(seat))?;
+    ///
+    /// Asked of a *surface* rather than of a seat since B1 (2026-09-01), because
+    /// the second host has no seat: a torn-off window is a `PreviewSurface` and
+    /// nothing else, and a question that could only be asked about a seat was
+    /// the whole of why its reader was never told.
+    fn preview_disk_notice_on(&self, surface: PreviewSurface) -> Option<notice::Notice> {
+        let buffer = self.preview_buffer_on(surface)?;
         match buffer.disk {
             preview::DiskNews::Level => None,
             preview::DiskNews::Changed => Some(notice::Notice::DiskChanged),
@@ -36364,27 +36457,47 @@ impl Runtime<'_> {
     /// Every strip's own level of the overlay stack, and the rectangles a press
     /// is tested against — stored here for the capsule's reason: the box you can
     /// press is the box you can see.
+    ///
+    /// **The one pass that settles the band, for every host** (B1, 2026-09-01).
+    /// It returns the *panes'* layers, because they are drawn in the pane lane;
+    /// a float's strip is drawn in that window's own lane, above its face and
+    /// under any window in front of it, and is built from the row this pass
+    /// wrote ([`Self::float_notice_layer`]). Measuring it a second time over
+    /// there would be a second answer to "where is this row and how much of the
+    /// sentence fits", which is the disagreement between what is drawn and what
+    /// is pressed that this map exists to prevent.
     fn notice_layers(&mut self) -> Vec<marks::OverlayLayer> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let palette = bt_render::chrome_palette();
         let font = notice::FONT_LOGICAL_PX * scale;
         // Both kinds of seat, because both kinds wear this band since the
-        // 2026-08-29 ruling. `pane_notice` is what tells them apart, and a seat
-        // that is neither answers `None` and costs one lookup.
-        let wearers: Vec<SeatId> = self
+        // 2026-08-29 ruling, and every preview float, because a window torn off
+        // a preview wears it too. `notice_on` is what tells them apart, and a
+        // host that wears none answers `None` and costs one lookup.
+        let wearers: Vec<NoticeHost> = self
             .seats
             .terminals()
             .into_iter()
             .chain(self.seats.preview_seats())
+            .map(NoticeHost::Seat)
+            .chain(self.preview_float_ids().into_iter().map(NoticeHost::Float))
             .collect();
         let mut layouts = std::collections::BTreeMap::new();
         let mut layers = Vec::new();
-        for seat in wearers {
-            let Some(showing) = self.pane_notice(seat) else {
+        for host in wearers {
+            let Some(showing) = self.notice_on(host) else {
                 continue;
             };
-            let Some(strip) = seats::pane_notice_strip(&self.seats, &self.seat_layout, seat, scale)
-            else {
+            // Each host's own complement of the subtraction that made room for
+            // it: the pane's out of the solved seat, the window's out of the
+            // chassis it is laid out with.
+            let strip = match host {
+                NoticeHost::Seat(seat) => {
+                    seats::pane_notice_strip(&self.seats, &self.seat_layout, seat, scale)
+                }
+                NoticeHost::Float(id) => self.float_notice_strip(id, scale),
+            };
+            let Some(strip) = strip else {
                 continue;
             };
             // Measured against the font that will draw them, which is what keeps
@@ -36410,16 +36523,49 @@ impl Runtime<'_> {
                     renderer.measure_chrome_text(gpu, text, size)
                 })
             };
-            let hover = self
-                .window
-                .notice_hover
-                .filter(|(hovered, _)| *hovered == seat)
-                .map(|(_, element)| element);
-            layers.push(notice::build(&bar, &say, hover, &palette, scale));
-            layouts.insert(seat, bar);
+            // A pane's band is drawn here; a window's is drawn in its own lane
+            // from the same row, so only the panes' layers go back.
+            if let NoticeHost::Seat(_) = host {
+                let hover = self
+                    .window
+                    .notice_hover
+                    .filter(|(hovered, _)| *hovered == host)
+                    .map(|(_, element)| element);
+                layers.push(notice::build(&bar, &say, hover, &palette, scale));
+            }
+            layouts.insert(host, NoticeStrip { bar, say });
         }
         self.window.notice_layouts = layouts;
         layers
+    }
+
+    /// **One floating window's strip, drawn** (B1, 2026-09-01).
+    ///
+    /// Built from the row [`Self::notice_layers`] settled earlier in this same
+    /// frame rather than measured again, which is that pass's own note: the box
+    /// you can press is the box you can see, and two measurements are two boxes.
+    ///
+    /// A layer of its own, chained after this window's face for
+    /// [`Self::preview_float_bar_layers`]'s reason exactly — above the window it
+    /// belongs to, and under any window standing in front of it, because a float
+    /// in front covers this one whole. It is not passed through the notice
+    /// band's own passage (`Layered::Notice`, the downward arrival a pane's
+    /// strip is staged with): a float's chassis has no passages at all (P49 ③ —
+    /// a preview window is simply there at full strength), and a band inside a
+    /// window's layer cannot arrive on a clock the window itself does not keep.
+    fn float_notice_layer(&mut self, id: float::FloatId) -> Option<marks::OverlayLayer> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let palette = bt_render::chrome_palette();
+        let host = NoticeHost::Float(id);
+        let strip = self.window.notice_layouts.get(&host)?.clone();
+        let hover = self
+            .window
+            .notice_hover
+            .filter(|(hovered, _)| *hovered == host)
+            .map(|(_, element)| element);
+        Some(notice::build(
+            &strip.bar, &strip.say, hover, &palette, scale,
+        ))
     }
 
     /// Which strip's control the pointer is on, and whether it is on a strip at
@@ -36430,8 +36576,8 @@ impl Runtime<'_> {
     /// not standing on a cell, and the pane must not be told about it.
     fn drive_notice_hover(&mut self, position: Option<PhysicalPosition<f64>>) -> Result<bool> {
         let hover = position.and_then(|at| {
-            self.window.notice_layouts.iter().find_map(|(seat, bar)| {
-                notice::hit(bar, at.x as f32, at.y as f32).map(|element| (*seat, element))
+            self.window.notice_layouts.iter().find_map(|(host, strip)| {
+                notice::hit(&strip.bar, at.x as f32, at.y as f32).map(|element| (*host, element))
             })
         });
         if self.window.notice_hover != hover {
@@ -36444,16 +36590,31 @@ impl Runtime<'_> {
     }
 
     /// A press on a strip.
+    ///
+    /// **One door for both hosts** (B1, 2026-09-01). The three shell verbs are
+    /// asked of a seat because only a seat can show them — a window is torn off
+    /// a preview and its band can only ever say what a document's file did — and
+    /// the two document verbs are asked of the *surface*, which both hosts have.
     fn press_notice(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let hit = self.window.notice_layouts.iter().find_map(|(seat, bar)| {
-            notice::hit(bar, position.x as f32, position.y as f32).map(|it| (*seat, it))
+        let hit = self.window.notice_layouts.iter().find_map(|(host, strip)| {
+            notice::hit(&strip.bar, position.x as f32, position.y as f32).map(|it| (*host, it))
         });
-        let Some((seat, element)) = hit else {
+        let Some((host, element)) = hit else {
             return Ok(false);
         };
+        // Which seat, when the host is one. `None` is a float, and every arm
+        // below that needs a seat is an arm a float's strip cannot show.
+        let seat = match host {
+            NoticeHost::Seat(seat) => Some(seat),
+            NoticeHost::Float(_) => None,
+        };
         match element {
-            notice::NoticeElement::Close => self.close_pane_notice(seat)?,
-            notice::NoticeElement::Verb(notice::NoticeVerb::Add) => self.add_to_profile(seat)?,
+            notice::NoticeElement::Close => self.close_pane_notice(host)?,
+            notice::NoticeElement::Verb(notice::NoticeVerb::Add) => {
+                if let Some(seat) = seat {
+                    self.add_to_profile(seat)?;
+                }
+            }
             notice::NoticeElement::Verb(notice::NoticeVerb::Never) => {
                 self.apply_powershell_integration_offer(false)?;
             }
@@ -36461,14 +36622,16 @@ impl Runtime<'_> {
                 // The strip goes first: `restart_shell` builds a whole new leaf
                 // for this seat, and the offer that one carries is decided from
                 // the file as it now stands.
-                self.close_pane_notice(seat)?;
-                self.restart_shell(seat)?;
+                self.close_pane_notice(host)?;
+                if let Some(seat) = seat {
+                    self.restart_shell(seat)?;
+                }
             }
             notice::NoticeElement::Verb(notice::NoticeVerb::ReloadFromDisk) => {
-                self.reload_preview_from_disk(seat)?;
+                self.reload_preview_from_disk(host)?;
             }
             notice::NoticeElement::Verb(notice::NoticeVerb::KeepMyEdits) => {
-                self.close_pane_notice(seat)?;
+                self.close_pane_notice(host)?;
             }
             // The strip's own width. It takes the press and answers nothing — a
             // bar with a hole in it lets a click through onto a cell that is
@@ -36487,8 +36650,10 @@ impl Runtime<'_> {
     /// writes the setting and ends the asking for good. Before that ruling the
     /// difference was the next PowerShell pane, which is how a reader with four
     /// of them was asked four times.
-    fn close_pane_notice(&mut self, seat: SeatId) -> Result<()> {
-        if let Some(leaf) = self.sessions.get_mut(&seat) {
+    fn close_pane_notice(&mut self, host: NoticeHost) -> Result<()> {
+        if let NoticeHost::Seat(seat) = host
+            && let Some(leaf) = self.sessions.get_mut(&seat)
+        {
             if leaf.integration_offer.is_none() {
                 return Ok(());
             }
@@ -36500,7 +36665,11 @@ impl Runtime<'_> {
         // and the edits were never in danger from anything but a press on the
         // other word. A deleted file's strip has no other word, so this is the
         // whole of what can be said back to it.
-        let surface = self.preview_here(seat);
+        //
+        // **And a torn-off window's `×` is the same sentence** (B1,
+        // 2026-09-01): `notice_surface` is what makes the two hosts spend one
+        // verb on one buffer.
+        let surface = self.notice_surface(host);
         if !self
             .preview_buffer_on_mut(surface)
             .is_some_and(preview::PreviewBuffer::keep_this_body)
@@ -36510,22 +36679,26 @@ impl Runtime<'_> {
         self.settle_pane_notices()
     }
 
-    /// **Take the disk's copy of this seat's document** — the strip's `Reload`
+    /// **Take the disk's copy of this host's document** — the strip's `Reload`
     /// (user ruling 2026-08-29).
     ///
     /// The strip goes down in the same breath as the read goes out, because the
     /// sentence it carries has been answered; the *body* stays on the glass
     /// until the new one lands, which is `mark_stale`'s own rule and the reason
     /// nothing flashes.
-    fn reload_preview_from_disk(&mut self, seat: SeatId) -> Result<()> {
-        let surface = self.preview_here(seat);
+    ///
+    /// Asked of a host and resolved through `notice_surface`, so that the pane
+    /// and the window re-read one buffer out of one pool by one door (B1).
+    fn reload_preview_from_disk(&mut self, host: NoticeHost) -> Result<()> {
+        let surface = self.notice_surface(host);
         if !self
             .preview_buffer_on_mut(surface)
             .is_some_and(preview::PreviewBuffer::take_the_disks_copy)
         {
             return Ok(());
         }
-        // The pool this seat reads, which is the tab the seat is on.
+        // The pool this host reads, which is the tab the seat is on — or, for a
+        // window, the tab it was torn off (`FloatPreview::tab`).
         let index = self.preview_tab_index(surface);
         self.request_stale_previews(index);
         self.settle_pane_notices()
@@ -36533,7 +36706,8 @@ impl Runtime<'_> {
 
     /// Whether the focused pane has a strip up — the Esc ladder's question.
     fn focused_pane_wears_notice(&self) -> bool {
-        self.pane_notice(self.focused_leaf).is_some()
+        self.notice_on(NoticeHost::Seat(self.focused_leaf))
+            .is_some()
     }
 
     /// Write the line into this pane's `$PROFILE`.
@@ -66272,6 +66446,17 @@ impl Runtime<'_> {
             float::FloatPart::Foot => self.reveal_float_root(id)?,
             float::FloatPart::Save => self.save_preview_on(PreviewSurface::Float(id))?,
             float::FloatPart::Flip => self.flip_preview_source_on(PreviewSurface::Float(id))?,
+            // **The disk notice's band, pressed through the pane's own door**
+            // (B1, 2026-09-01, §7.39's 总则). `press_notice` resolves which word
+            // out of `notice_layouts`, which is the very row this band was drawn
+            // from — one hit test for one strip, so `Reload` in a window and
+            // `Reload` in a pane are the same press of the same button and not
+            // two implementations that agree by hand. A press on the band's own
+            // padding is claimed and does nothing, which is the strip's rule on
+            // both hosts: a bar with a hole in it lets a click through.
+            float::FloatPart::Notice => {
+                self.press_notice(position)?;
+            }
             // **The one way out of a file this window cannot show** (§7.39), the
             // docked card's own verb (`ChromeTarget::PreviewOpenButton`) one
             // surface over. It breaks a click chain for `.files-foot`'s reason: a
@@ -67189,6 +67374,14 @@ impl Runtime<'_> {
         // the wrong thing.
         let rail = self.preview_rail_kind(surface);
         float::FloatHeadTools {
+            // **And the disk notice's band, asked with the docked seat's own
+            // predicate** (B1, 2026-09-01). `Seats::set_notices` is what makes a
+            // pane one bar shorter; this is the same decision spent the other
+            // way — a window has no solve to be told about, so the answer is
+            // read here, every frame, out of the same buffer.
+            notice: self
+                .preview_disk_notice_on(PreviewSurface::Float(id))
+                .is_some(),
             dirty: true,
             save: self.preview_is_editable(surface),
             // **And the flip goes down to that row when there is one**, which is
@@ -67327,18 +67520,55 @@ impl Runtime<'_> {
     /// frame every frame, so the engine's bounds and the scrollbar both follow
     /// the drag with nothing else asked ([`float::FloatGeometry::content_body`]).
     fn float_body_rect(&self, id: float::FloatId, scale: f32) -> Option<[f32; 4]> {
+        Some(self.float_chassis(id, scale)?.content_body(scale))
+    }
+
+    /// **This float's chassis, asked without a font** — the derivation
+    /// [`Self::float_body_rect`] and [`Self::float_notice_strip`] both read.
+    ///
+    /// One derivation and not two, for `seats::pane_notice_strip`'s own stated
+    /// reason one host over: the band and the body it was taken out of are the
+    /// two halves of one subtraction, and a strip arrived at by adding a bar
+    /// back onto a body would disagree with it wherever a clamp bit — a
+    /// disagreement that shows as a seam and puts every press one row off.
+    ///
+    /// `dock_label_px` is zero here on purpose: the caption's width moves the
+    /// `DOCK` button inside the head and moves nothing below it, so every
+    /// `&self` question about where this window's *content* is can be answered
+    /// without borrowing the face to measure a word.
+    fn float_chassis(&self, id: float::FloatId, scale: f32) -> Option<float::FloatGeometry> {
         let win = self.window.float.drawn().find(|win| win.epoch == id)?;
         let fade = self.float_fade_of(win, Instant::now(), scale);
-        Some(
-            float::float_geometry(
-                risen_frame(win.frame, fade),
-                win.mode,
-                scale,
-                0.0,
-                self.float_head_tools(id),
-            )
-            .content_body(scale),
-        )
+        Some(float::float_geometry(
+            risen_frame(win.frame, fade),
+            win.mode,
+            scale,
+            0.0,
+            self.float_head_tools(id),
+        ))
+    }
+
+    /// **The row this window's notice strip stands in**, or `None` when it wears
+    /// none (B1, 2026-09-01).
+    ///
+    /// `seats::pane_notice_strip`'s answer on the second host, out of the same
+    /// chassis its body comes out of.
+    fn float_notice_strip(&self, id: float::FloatId, scale: f32) -> Option<[f32; 4]> {
+        self.float_chassis(id, scale)?.notice
+    }
+
+    /// **Every preview float this window is drawing**, bottom to top.
+    ///
+    /// Read off `drawn` rather than `live` for [`Self::float_holding_the_page`]'s
+    /// reason: a window on its way out is still on the glass, and a band taken
+    /// off it a frame early would leave a hole in a window still drawing itself.
+    fn preview_float_ids(&self) -> Vec<float::FloatId> {
+        self.window
+            .float
+            .drawn()
+            .filter(|win| win.preview().is_some())
+            .map(|win| win.epoch)
+            .collect()
     }
 
     /// How wide the `DOCK` caption is — only the font knows, so it is measured
@@ -67453,11 +67683,17 @@ impl Runtime<'_> {
             // offering no way to start it would be the surface that knows least
             // about what it is holding.
             let play = self.video_play_mark_layer(PreviewSurface::Float(id));
+            // **And the disk notice's band** (B1, 2026-09-01), on the scroll
+            // bar's terms exactly: above this window's own layer, because a
+            // layer paints its quads before whatever it carries, and below the
+            // next window, because a float in front covers this one whole.
+            let notice = self.float_notice_layer(id);
             layers.extend(
                 self.preview_float_bar_layers(id)
                     .into_iter()
                     .chain(play)
                     .chain(bar)
+                    .chain(notice)
                     .map(|mut bar| {
                         bar.opacity = opacity;
                         bar
@@ -81540,7 +81776,7 @@ impl Runtime<'_> {
             && !event.repeat
             && self.focused_pane_wears_notice()
         {
-            self.close_pane_notice(self.focused_leaf)?;
+            self.close_pane_notice(NoticeHost::Seat(self.focused_leaf))?;
             return Ok(());
         }
         // **The ladder ends there** (user ruling 2026-08-20). Focus
@@ -85947,6 +86183,96 @@ mod files_locate_door_tests {
                 && press.contains("open_preview_externally_on(PreviewSurface::Float(id))"),
             "the float's no-preview button does not hand the file to the default app"
         );
+    }
+
+    /// RED — **a document in a float says what the disk did the way a pane
+    /// does** (B1, backlog since 2026-08-29, §7.39's 总则).
+    ///
+    /// The strip was written for a shell and widened to previews on 2026-08-29,
+    /// and both of its halves were keyed by `SeatId`. A float is not in the tree
+    /// and has no seat, so a window whose file was replaced under unsaved edits
+    /// had **no row to stand a sentence in** — while the very same buffer, read
+    /// through a docked pane, wore `Reload / Keep`. The news was never the
+    /// missing part: `refresh_preview_file` walks the pool and a float reads its
+    /// tab's pool through `PreviewSurface::Float` like every other surface.
+    ///
+    /// The fix is one key and no second strip. `NoticeHost` names the two hosts
+    /// the way `PreviewSurface` names the three surfaces, the settle writes both
+    /// kinds into one map, the paint reads that one map from both lanes, and the
+    /// press resolves the word through the same `notice::hit` in both.
+    ///
+    /// Five joints, each with the arm whose removal is the shipped build:
+    ///
+    /// ① the settle asks the floats as well as the seats;
+    /// ② the chassis reserves the row, asked with the seat's own predicate — so
+    ///    the body gives way for it rather than the row standing on the document;
+    /// ③ the paint takes the window's row out of the map the settle wrote,
+    ///    instead of measuring a second one;
+    /// ④ the press is claimed by the float's own router and handed to
+    ///    `press_notice` — the pane's door — rather than to the drag handle;
+    /// ⑤ `Reload` and `Keep` reach one buffer through `notice_surface`, so the
+    ///    two hosts spend one verb rather than two implementations of it.
+    #[test]
+    fn a_document_in_a_float_says_what_the_disk_did_the_way_a_pane_does() {
+        // ① Both registers of what exists, in the one settle. A second settler
+        // for the window half would be a second answer to "who is wearing this".
+        let settle = body("    fn settle_pane_notices(");
+        assert!(
+            settle.contains("self.seats.preview_seats()")
+                && settle.contains("self.preview_float_ids()")
+                && settle.contains("NoticeHost::Float(id)"),
+            "the settle asks the tree and not the float host, so a torn-off document \
+             owes a sentence nobody writes down:\n{settle}"
+        );
+        // ② The chassis makes room, asked with the docked seat's own predicate.
+        let tools = body("    fn float_head_tools(");
+        assert!(
+            tools.contains("notice: self")
+                && tools.contains("preview_disk_notice_on(PreviewSurface::Float(id))"),
+            "the window's chassis reserves no row for the strip, so the row would stand \
+             on the document:\n{tools}"
+        );
+        // ③ One measurement, two lanes. The float's layer is *built* from the row
+        // the settle wrote — the box you can press is the box you can see.
+        let layers = body("    fn notice_layers(");
+        assert!(
+            layers.contains("NoticeHost::Float(id) => self.float_notice_strip(id, scale)"),
+            "the pass that lays the band out does not lay out the window's:\n{layers}"
+        );
+        let float_layer = body("    fn float_notice_layer(");
+        assert!(
+            float_layer.contains("self.window.notice_layouts.get(&host)"),
+            "the window's band is measured a second time instead of read, so what is drawn \
+             and what is pressed can disagree:\n{float_layer}"
+        );
+        // And the band is chained onto that window's own lane — above its face,
+        // under any window in front of it. The pane lane is *below* the floats,
+        // so a strip left there would be drawn under the very window it is about.
+        let lane = body("    fn float_layer(");
+        assert!(
+            lane.contains("self.float_notice_layer(id)"),
+            "the window's band is not drawn in the float's own lane, so it lands under \
+             the window it belongs to:\n{lane}"
+        );
+        // ④ The press. `float_hit` answers `Head` for anything it cannot name, so
+        // without this arm a press on `Reload` takes hold of the window.
+        let press = body("    fn press_float(");
+        assert!(
+            press.contains("float::FloatPart::Notice") && press.contains("self.press_notice("),
+            "the float's press does not reach the strip's own door, so the words on it \
+             drag the window instead of answering it:\n{press}"
+        );
+        // ⑤ One verb, one buffer, whichever host was pressed.
+        for signature in [
+            "    fn close_pane_notice(",
+            "    fn reload_preview_from_disk(",
+        ] {
+            assert!(
+                body(signature).contains("self.notice_surface(host)"),
+                "{signature} resolves its buffer from a seat, so the window's own verb \
+                 finds nothing to spend"
+            );
+        }
     }
 
     /// RED — **a document in a float selects the way it does in a pane** (user

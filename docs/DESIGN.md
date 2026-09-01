@@ -5091,7 +5091,20 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 
 **⑦ 一个不可预览的文件(`folio.exe`),浮窗里画和 pane 里同一张卡、同一个「Open in default app」、同样可点。** pane 里画的是「No preview for this file type」+一个交给系统默认程序的按钮那张卡;同一文件在浮窗里曾是一片空白(只有头和地址轨)。根因:那张卡是**座位 chrome**(inline 在座位画家里),浮窗的 `preview_float_layer` 的 `PreviewChrome::Document` 一臂只画空 diff/仓库那句居中提示,没有 `Refused` 那一臂。**修:把座位画家里那段卡的绘制抽成一支公用函数 `seats::push_preview_card`,座位与浮窗都调它**(别复制一份),按钮的矩形因此两处都由同一个 `preview_card_geometry` 定,命中不会落在没画的地方。浮窗侧:`Document` 臂遇到 `refusal()` 就用这支函数把卡画进 body;新增 `FloatPart::CardButton`,`float_hit_at` 用同一个 `preview_card_geometry` 算出按钮矩形来命中(按钮标签宽度像 `dock_label` 一样在循环外量一次);`press_float` 接它 → `open_preview_externally_on(Float)` 把文件交给系统默认程序(和座位那枚 `PreviewOpenButton` 同一扇门 `open_path_in_default_app`,1300ms「Opened」回执同一个窗级计时器)。红门 `a_file_nobody_previews_wears_the_same_card_in_a_float_as_in_a_pane`。
 
-**日期:2026-08-28 用户七件实证,派单方裁定,当日落地。**
+**⑧ 浮窗里的文档也说它的文件在磁盘上出了什么事(挂账自 2026-08-29,B1 于 2026-09-01 落地;`crates/bt-app/src/{main,float,notice}.rs`)。** 提示条(`Reload / Keep`,§7.1.6j)是给 PowerShell 整合写的,2026-08-29 的裁决把它同时给了预览——「一份内容在浮窗与 pane 里是同一张画」这条总则从那天起就欠着第八件,而欠的方式很具体:**这条带的两半都按 `SeatId` 记账**。`settle_pane_notices` 走 `seats.preview_seats()`、`notice_layers` 走 `terminals() + preview_seats()`、矩形由 `seats::pane_notice_strip` 给,而**浮窗不在树里、没有座位**。于是一份文件在坞里的 pane 上被外部改写会长出提示条,同一份文件在撕出去的那扇窗里什么都不说,读者盯着一份已经过期的正文而没有一个字提醒他。
+
+**消息从来不是缺的那一半。** `refresh_preview_file` 走的是**池**,`note_disk_moved` 把 `DiskNews::Changed` 写在 buffer 上,而浮窗和 pane 读的是同一个池里的同一个 buffer(`PreviewSurface::Float` 与 `PreviewSurface::Seat` 是同一扇门 `preview_buffer_on` 的两个参数)。缺的是**一行可站的地方**。
+
+**修法是一把钥匙,不是第二条带。** 新类型 `NoticeHost{ Seat(SeatId), Float(FloatId) }`,和 `PreviewSurface` 是同一个理由——两个 `u64` 会互相冒充答案,所以它是个类型而不是个数。四处各改一句,没有第二份实现:
+
+- **落位**:`FloatHeadTools` 多一个 `notice: bool`,`float_geometry` 因此在**轨之下、正文之上**留出一条带(`FloatGeometry::notice`),高度读的是 `notice::BAR_HEIGHT_LOGICAL_PX` 那一个常量——和 pane 的是同一件家具,一个人把窗停靠回去时不该看见句子换个高度。**正文让位**,不是条压在文档上:`content_body` 从缩过的 `body` 派生,于是页、字、滚动条(②③⑤ 那条「一处内容框」)一起跟着下来。谁答「这扇窗要不要这条带」是 `float_head_tools` 问 `preview_disk_notice_on(Float(id))`——和座位问 `Seats::seat_wears_notice` 是同一个判据的两种花法:树要被告知(重解、通知 shell 新尺寸),窗每帧自己读(窗的正文本来就是从 frame 每帧派生的,没有解可通知)。
+- **量一次,画两处**:`notice_layers` 现在把两种宿主一起量进 `notice_layouts`(`NoticeStrip{ bar, say }`),返回的只有 pane 那一批(它们画在 `pane_notices` 那条泳道里)。浮窗那一条由 `float_notice_layer` **读**这张表再 `notice::build`,不重新量——**能按的盒子就是看得见的盒子**,量第二遍就是给同一行两个答案。z 序:它作为**兄弟层**排在那扇窗自己的层之上、下一扇窗之下(和浮窗的滚动条、控件条同一条论证:一层先画自己的 quad 再画它托的画;前面那扇窗盖住这扇窗的全部)。`pane_notices` 泳道在 `float` **之下**,所以把浮窗的条留在那条泳道里等于把它画到它所说的那扇窗底下。它**不过** `Layered::Notice` 那道下行入场:浮窗底盘一道过场都没有(P49 ③,预览浮窗出生即满强度),一条画在窗自己层里的带不可能按窗自己不走的钟到场。
+- **命中**:`float_hit` 认这条带(`FloatPart::Notice`)。这一条是**最尖的一处**——这个函数末尾的兜底答的是 `FloatPart::Head`,所以一条没被命名的带不是「按不着」,是**按 `Reload` 会把窗拖走**。带里按了哪个词不在这里决定:词是在字体旁边排的,而排它的只有 `notice::lay_out` 一处,所以 `press_float` 的这一臂把位置交给 `press_notice`——docked pane 的那扇门——由它按同一张 `notice_layouts` 认词。
+- **动词**:`close_pane_notice` / `reload_preview_from_disk` 改收 `NoticeHost`,经 `notice_surface(host)` 落到 buffer 上。于是浮窗的 `×`(= `Keep my edits`)、`Reload`、以及删除提示那条只有 `×` 的带,和 pane 里是同一次 `keep_this_body` / `take_the_disks_copy`,重读走同一条 `request_stale_previews`。三个 shell 动词(`Add` / `Never` / `Restart`)只对座位问,因为**浮窗是从预览撕出来的,它的带永远只会说文件的事**。
+
+**红门 `a_float_that_owes_a_notice_gives_it_a_row_of_its_own_body`**(几何+命中,三段:正文正好让出一条带高、带站在面包屑之下正文之上、带中央按下去答 `Notice` 而不是 `Head`,再按共用的 `notice::lay_out` 取 `Reload` 的盒子命中它)与 **`a_document_in_a_float_says_what_the_disk_did_the_way_a_pane_does`**(五处接线各一钉)。**变异红证四道**:①`float_geometry` 不留带 → 正文让位 `0.0 ≠ 30.0`(用户看到的那扇窗);②`float_hit` 去掉那一臂 → 带中央答 `Some(Head)`(按 Reload 拖窗);③settle 只问树 → 接线门红;④`press_float` 那一臂改成空 `{}` → 接线门红(而把整臂删掉根本编译不过,`press_float` 的 `match` 是穷举的)。
+
+**日期:2026-08-28 用户七件实证,派单方裁定,当日落地;⑧ 于 2026-09-01 补上,同一条总则的第八处漏。**
 ### 7.40 一个终端不许在启动时开另一个终端,也不许为了写自己的标题去开一台虚拟机(启动弹 Windows Terminal 窗 + 启动慢,2026-08-28 用户实证 next15,已落地;`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/{wsl,profiles,git,psreadline,shell_integration,attention_copilot,main}.rs`)
 
 **报上来的病。** 「启动 Folio 很慢,而且**每次先弹出一扇 Windows Terminal 窗口**,标签叫 `C:\WINDOWS\System32\wsl.exe`,过一会 Folio 的窗才出来。」

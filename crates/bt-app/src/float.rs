@@ -203,6 +203,22 @@ pub struct FloatGeometry {
     /// document with no address is this row asking a question the content cannot
     /// answer).
     pub rail: Option<[f32; 4]>,
+    /// **The disk notice's band, when the document in this window owes its
+    /// reader a sentence** (B1, 2026-09-01) — under [`Self::rail`] and over
+    /// [`Self::body`].
+    ///
+    /// The docked pane's strip arriving on the second host, and reserved by the
+    /// *layout* for [`Self::rail`]'s reason exactly: the body is what gives way
+    /// for it, so a window that drew this row without having taken its height
+    /// off the body would be a row standing on the document. `None` for a window
+    /// whose content has no news — which is every window most of the time, and
+    /// which is what keeps the row off them.
+    ///
+    /// Its height is [`crate::notice::BAR_HEIGHT_LOGICAL_PX`] and not a second
+    /// number, because this band and the pane's are the same piece of furniture
+    /// answering the same question: a reader who docks a window must not watch
+    /// the sentence change height on the way in.
+    pub notice: Option<[f32; 4]>,
     /// What the tenant fills — the tree, for this slice.
     pub body: [f32; 4],
     /// The hairline over the foot.
@@ -311,6 +327,15 @@ pub struct FloatHeadTools {
     /// is the one this field exists to keep true of a whole row rather than of
     /// one button.
     pub rail: bool,
+    /// **Reserve the disk notice's band** — [`FloatGeometry::notice`] (B1,
+    /// 2026-09-01).
+    ///
+    /// Beside [`Self::rail`] and for its stated reason: it is the same question
+    /// asked of the same tenant at the same moment — *what does this window's
+    /// content need the chassis to make room for* — and the answer is the very
+    /// one a docked seat gives through `Seats::seat_wears_notice`, asked here of
+    /// the float's own surface instead of a seat.
+    pub notice: bool,
 }
 
 /// Lay the chassis out inside `frame`.
@@ -357,7 +382,25 @@ pub fn float_geometry(
         let top = head_edge[3];
         snap([inner[0], top, inner[2], (top + bar).min(inner[3]).max(top)])
     });
-    let under_head = rail.map_or(head_edge[3], |rail| rail[3]);
+    let under_rail = rail.map_or(head_edge[3], |rail| rail[3]);
+    // **And the disk notice's band under it** (B1, 2026-09-01) — the docked
+    // pane's strip on this chassis, laid out from
+    // `crate::notice::BAR_HEIGHT_LOGICAL_PX` for the rail's reason one line up:
+    // the two hosts draw one piece of furniture, so they read one height.
+    //
+    // Under the rail and over the body, which is the order
+    // `crate::seats::pane_notice_strip` puts the two rows in and the reading
+    // order it names: the name of the file, where it lives, then what is wrong
+    // with it, then the document. Clamped against the window's own floor exactly
+    // as the rail is — a window squeezed past both bands keeps the head and the
+    // `×` and loses the body, which is §3.4's rule and not a special case for
+    // this row.
+    let notice = tools.notice.then(|| {
+        let bar = px(crate::notice::BAR_HEIGHT_LOGICAL_PX).round().max(1.0);
+        let top = under_rail;
+        snap([inner[0], top, inner[2], (top + bar).min(inner[3]).max(top)])
+    });
+    let under_head = notice.map_or(under_rail, |band| band[3]);
     // **The foot is retired where the rail took the question over** (user ruling
     // 2026-08-25), which is `preview_pane_geometry`'s own sentence arriving on
     // the second host — 「去掉整条脚」.
@@ -547,6 +590,7 @@ pub fn float_geometry(
         flip,
         close,
         rail,
+        notice,
         body,
         foot_edge,
         foot,
@@ -1029,6 +1073,14 @@ pub enum FloatPart {
     Flip,
     /// The `×`.
     Close,
+    /// **The disk notice's band** — [`FloatGeometry::notice`] (B1, 2026-09-01).
+    ///
+    /// The whole row and not one word of it, unlike [`Self::Rail`]: the strip's
+    /// words are laid out beside a font, and the one place that lays them out is
+    /// `crate::notice::lay_out`, which the window and the pane both go through.
+    /// Naming the band here is what stops the fall-through at the foot of
+    /// [`float_hit`] from reading a press on `Reload` as a press on the handle.
+    Notice,
     /// A row of whatever list is in the body, by visible index — the tree's, or
     /// the Git page's.
     Row(usize),
@@ -1142,6 +1194,17 @@ pub fn float_hit(
             rail.and_then(|rail| crate::seats::preview_rail_part(rail, x, y))
                 .unwrap_or(crate::seats::PreviewRailPart::Band),
         ));
+    }
+    // **And the disk notice's band swallows its own row** (B1, 2026-09-01), on
+    // the rail's terms one line up and for a sharper version of its reason: the
+    // fall-through at the foot of this function answers `Head`, so a row left
+    // unnamed here would not merely miss — a press on `Reload` would *drag the
+    // window*. Which word was pressed is not decided here: the strip is laid out
+    // beside a font this module does not hold, so the band is named and
+    // `Runtime::press_notice` — the door a docked pane's strip is pressed
+    // through — resolves the word inside it.
+    if geometry.notice.is_some_and(hit) {
+        return Some(FloatPart::Notice);
     }
     if hit(geometry.foot) {
         return Some(FloatPart::Foot);
@@ -2626,6 +2689,123 @@ mod tests {
             "the bar's floor {} reaches into the window's rounded corner (frame floor {}, radius {radius})",
             bar.track[3],
             geometry.frame[3],
+        );
+    }
+
+    /// RED — **a floated document's disk notice gets a row of its own body, and
+    /// the row is pressable** (B1, 2026-09-01; §7.39's 总则).
+    ///
+    /// The report: a file open in a torn-off window, replaced on disk under
+    /// unsaved edits, and the window went on showing the old body with nothing
+    /// said about it — while the same file in a docked pane wore the
+    /// `Reload / Keep` strip. The news had always arrived (`refresh_preview_file`
+    /// walks the *pool*, and a float reads its tab's pool like any surface);
+    /// what was missing was a row for it to stand in, because the strip was a
+    /// seat's furniture and a float is not in the tree.
+    ///
+    /// Three facts, and the two red gates below are what each of them costs:
+    ///
+    /// ① the band is a row the **body yields**, exactly as a pane's is — so the
+    ///    content box moves down by the strip's own height and by nothing else;
+    /// ② it stands **under the breadcrumbs and over the document**, which is the
+    ///    reading order `pane_notice_strip` names: the name of the file, where it
+    ///    lives, what is wrong with it, then the document;
+    /// ③ a press inside it is answered as the **band** — and this is the sharp
+    ///    one, because [`float_hit`]'s fall-through answers [`FloatPart::Head`]:
+    ///    without the band's own arm a press on `Reload` drags the window.
+    ///
+    /// RED GATE ①: drop the `notice` band from [`float_geometry`] and the first
+    /// block fails by exactly the strip's thirty logical pixels — the window the
+    /// user photographed. RED GATE ②: drop the band's arm from [`float_hit`] and
+    /// the last block reads `Head` where it asked for `Notice`.
+    #[test]
+    fn a_float_that_owes_a_notice_gives_it_a_row_of_its_own_body() {
+        let tools = |notice: bool| FloatHeadTools {
+            dirty: true,
+            rail: true,
+            notice,
+            ..FloatHeadTools::default()
+        };
+        let lay = |notice: bool| {
+            float_geometry(
+                frame(100.0, 100.0, 430.0, 400.0),
+                FloatMode::Pinned,
+                SCALE,
+                30.0,
+                tools(notice),
+            )
+        };
+        let quiet = lay(false);
+        let telling = lay(true);
+        assert!(
+            quiet.notice.is_none(),
+            "a window whose file has not moved wears a band anyway"
+        );
+
+        let band = (crate::notice::BAR_HEIGHT_LOGICAL_PX * SCALE).round();
+        assert_eq!(
+            telling.body[1] - quiet.body[1],
+            band,
+            "the strip is a row of the document and the document yields it"
+        );
+        // And the box every tenant actually fills follows the body down, which is
+        // §7.39 ②③'s one content box: the page, the text and the scrollbar cannot
+        // disagree about where this window's document begins.
+        assert_eq!(
+            telling.content_body(SCALE)[1] - quiet.content_body(SCALE)[1],
+            band,
+            "the content box the tenants are given did not follow the body"
+        );
+
+        let strip = telling.notice.expect("a strip");
+        let rail = telling.rail.expect("a breadcrumb row");
+        assert_eq!(
+            strip[3], telling.body[1],
+            "the strip's foot is the body's head — no seam and no overlap"
+        );
+        assert!(
+            strip[1] >= rail[3],
+            "and it stands under the breadcrumbs rather than across them: \
+             name, then where it lives, then what is wrong with it, then the document"
+        );
+        assert_eq!(
+            [strip[0], strip[2]],
+            [telling.body[0], telling.body[2]],
+            "the band claims the window's whole width, as the pane's claims the pane's"
+        );
+
+        // ③ The press. The fall-through at the foot of `float_hit` answers
+        // `Head`, so a band nobody named is a band that *drags the window* when
+        // its words are pressed — which is why this is asserted against `Head`
+        // by name rather than merely against `is_some`.
+        let middle = ((strip[0] + strip[2]) / 2.0, (strip[1] + strip[3]) / 2.0);
+        let hit = float_hit(&telling, middle.0, middle.1, None, |_, _| None);
+        assert_eq!(
+            hit,
+            Some(FloatPart::Notice),
+            "a press on the strip is not the strip's"
+        );
+        assert_ne!(
+            hit,
+            Some(FloatPart::Head),
+            "a press on Reload takes hold of the window instead"
+        );
+
+        // And the word inside it is where the shared layout put it — one
+        // `notice::lay_out` for both hosts, so `Reload` in a window is the same
+        // button as `Reload` in a pane rather than two that agree by hand.
+        let showing = crate::notice::Notice::DiskChanged;
+        let widths: Vec<f32> = showing.verbs().iter().map(|_| 60.0).collect();
+        let bar = crate::notice::lay_out(strip, showing, &widths, SCALE);
+        let (verb, box_) = *bar
+            .verbs
+            .iter()
+            .find(|(verb, _)| *verb == crate::notice::NoticeVerb::ReloadFromDisk)
+            .expect("the disk's copy is on offer");
+        assert_eq!(
+            crate::notice::hit(&bar, (box_[0] + box_[2]) / 2.0, (box_[1] + box_[3]) / 2.0),
+            Some(crate::notice::NoticeElement::Verb(verb)),
+            "the word drawn in the window's band cannot be pressed"
         );
     }
 
@@ -4191,6 +4371,7 @@ mod tests {
                 save: true,
                 flip: true,
                 rail: false,
+                notice: false,
             },
         );
         let dirty = dressed.dirty.expect("the dot's slot is reserved");
@@ -4232,6 +4413,7 @@ mod tests {
                 save: true,
                 flip: true,
                 rail: false,
+                notice: false,
             },
         );
         let middle = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
@@ -4273,6 +4455,7 @@ mod tests {
             save: false,
             flip: false,
             rail: true,
+            notice: false,
         };
         let dressed = float_geometry(
             frame(100.0, 100.0, 430.0, 400.0),
@@ -4357,6 +4540,7 @@ mod tests {
             save: false,
             flip: false,
             rail: true,
+            notice: false,
         };
         let railed = float_geometry(
             frame(100.0, 100.0, 430.0, 400.0),
@@ -4457,6 +4641,7 @@ mod tests {
                 save: false,
                 flip: false,
                 rail: true,
+                notice: false,
             },
         );
         assert!(!geometry.wears_a_foot(), "this is the window with no strip");
@@ -4504,6 +4689,7 @@ mod tests {
                 save: false,
                 flip: false,
                 rail: true,
+                notice: false,
             },
         );
         let band = geometry.rail.expect("a band");
