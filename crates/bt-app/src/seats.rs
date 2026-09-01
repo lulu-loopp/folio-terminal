@@ -38424,6 +38424,86 @@ mod tests {",
         }
     }
 
+    /// **RED GATE — switching which tab is active cannot change what the edge
+    /// auto-scroll is doing** (§7.1.6k 挂账「弹簧连发时边缘自动滚动变慢」,
+    /// 独立审因 2026-09-01).
+    ///
+    /// The backlog line reads as cause and effect — springs fire, the list slows
+    /// — and an audit went looking for the mechanism and **found that there
+    /// cannot be one**. This gate is that finding written down so the hypothesis
+    /// cannot come back.
+    ///
+    /// A spring's entire effect on this window's geometry is that a different
+    /// tab becomes the active one ([`Runtime::activate_tab`]). And
+    /// [`autoscroll_speed`] reads exactly five things — `run.max_scroll`,
+    /// `run.band`, `run.viewport`, `run.pos(pointer)` and `scroll` — of which
+    /// the first three come out of [`tab_strip_geometry`], where `active_tab`
+    /// is bound once and consumed once, to decide whether a squeezed tab keeps
+    /// its `×`. It reaches no `body`, no `viewport`, no `max_scroll`, and
+    /// [`strip_band`] is struck from `viewport` itself. **The active tab is not
+    /// in the run**, so the ramp answers the same number whoever is active. The
+    /// other two surfaces are safe by signature rather than by arithmetic —
+    /// [`rail_geometry`] and [`focus_rail_geometry`] are handed no active index
+    /// at all — which is why only the strip needs a test here.
+    ///
+    /// What the report is instead is recorded in §7.1.6b‴: the spring can only
+    /// ever mature where the list is slow, because the dwell restarts every time
+    /// the moving list brings a new tab under the pointer.
+    ///
+    /// Mutation, and it was **run** rather than imagined, because the first one
+    /// written here did not work: make `max_scroll` (or `viewport`, or `band`)
+    /// depend on *which* tab is active — `+ active_tab as f32` on `max_scroll`
+    /// is enough — and this goes red on tab 1 with `703.0` against `702.0`.
+    ///
+    /// **What does *not* redden it, and why that is the right answer rather
+    /// than a hole**: giving the active tab a real 8px skirt in the per-tab
+    /// loop, neighbours shifted over and all. Tried, still green — and it
+    /// should be, because a skirt every active tab wears equally moves the
+    /// geometry by the same amount whoever is active, so the ramp still answers
+    /// one number across a whole run of springs. This gate is about the claim
+    /// that matters ("a spring cannot change the speed"), not about the strip
+    /// being pixel-identical, and those are genuinely different claims.
+    #[test]
+    fn a_spring_switching_tabs_cannot_change_what_the_edge_auto_scroll_is_doing() {
+        const WIDTH: f32 = 960.0;
+        let trailers = resting(30);
+        let reference = tab_strip_geometry(WIDTH, 1.0, &trailers, 0, 0.0);
+        let reference_run = strip_run(&reference, 1.0);
+        assert!(
+            reference.max_scroll > 0.0,
+            "the fixture is a strip that actually scrolls, or the ramp is zero \
+             everywhere and this gate proves nothing"
+        );
+        // The hand the spring is supposed to be stealing from: parked in the
+        // trailing band, one pixel inside the clip.
+        let hand = (
+            f64::from(reference_run.viewport[1] - 1.0),
+            f64::from((reference.tabs[0].body[1] + reference.tabs[0].body[3]) / 2.0),
+        );
+        let want = autoscroll_speed(&reference_run, 0.0, hand, 1.0, crate::Motion::Full);
+        assert!(want > 0.0, "and the hand is really in the band");
+        for active in 0..trailers.len() {
+            let geometry = tab_strip_geometry(WIDTH, 1.0, &trailers, active, 0.0);
+            let run = strip_run(&geometry, 1.0);
+            assert_eq!(
+                (run.viewport, run.max_scroll, run.band),
+                (
+                    reference_run.viewport,
+                    reference_run.max_scroll,
+                    reference_run.band
+                ),
+                "tab {active} active: the three geometry facts the ramp is made \
+                 of are not the active tab's to change"
+            );
+            assert_eq!(
+                autoscroll_speed(&run, 0.0, hand, 1.0, crate::Motion::Full),
+                want,
+                "tab {active} active: the same hand at the same depth gets the \
+                 same speed — a spring switching tabs is not an input to this"
+            );
+        }
+    }
+
     /// The focus column exactly as [`rail_paint_of`] draws it — [`painted_rail`]'s
     /// opposite number, in a window of a chosen logical height so that geometry
     /// and paint agree the way [`rail_paint_of_in`] pairs them.
