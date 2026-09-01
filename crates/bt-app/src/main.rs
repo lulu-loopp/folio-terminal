@@ -30762,7 +30762,18 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
 ///   keyed by its URL, so the pane is the only thing that knows which file the
 ///   engine is standing on;
 /// * **the pictures inside a markdown page** (§7.1.3k ④), which belong to the
-///   document rather than to a pane and are therefore read off the parsed page.
+///   document rather than to a pane and are therefore read off the parsed page;
+/// * **the picture a pane is itself showing** (user report 2026-08-31). A
+///   picture is not a pool buffer — it does not come through the head worker, it
+///   comes down the decode lane, and `create_tab_state` says so in one line —
+///   so the pool arm above cannot answer for it and this set used to leave it
+///   out. That omission *was* the report: a PNG open in a preview pane,
+///   replaced on disk by a `mv` in another shell, went on showing the old
+///   picture and the old meta line, because no folder was ever subscribed to on
+///   its behalf. A picture is a file a seat is standing on exactly as a document
+///   is, and this arm says nothing about pictures in particular: it is
+///   [`PreviewPane::image`], which is the picture lane whatever the extension —
+///   a `.png` and a `.webm` arrive on it on identical terms.
 ///
 /// A git-backed document and a page on a *server* have no file behind them and
 /// contribute nothing.
@@ -30777,6 +30788,9 @@ fn files_a_tab_stands_on(tab: &TabState) -> BTreeSet<PathBuf> {
         if let PreviewDocument::Markdown { pictures, .. } = &pane.doc {
             wanted.extend(pictures.files.iter().cloned());
         }
+        if let Some(picture) = pane.image.as_ref() {
+            wanted.insert(picture.path.clone());
+        }
         let Some(source) = pane.buffer.as_ref() else {
             continue;
         };
@@ -30788,6 +30802,35 @@ fn files_a_tab_stands_on(tab: &TabState) -> BTreeSet<PathBuf> {
         }
     }
     wanted
+}
+
+/// **Everything one window remembers about the picture in one file, forgotten**
+/// (user report 2026-08-31).
+///
+/// [`Runtime::forget_the_picture_in`]'s mechanism, a free function for
+/// [`files_a_tab_stands_on`]'s reason: what has to be checkable is that all
+/// three caches let go together, and three real caches are exactly what a test
+/// can build without a GPU.
+///
+/// The three are keyed two different ways and both are why this is one function.
+/// `peek_cache` and `video_facts` are keyed by the **path**, normalized once by
+/// [`bt_term::normalized_local_image_path_key`] so that the two agree about what
+/// "the same file" is; the exact-size rasters are keyed by a hash of the file's
+/// own **bytes**, so they cannot serve the old picture for the new file and what
+/// has to move is the generation every page reads.
+///
+/// Nothing here touches a disk. It ends the window's right to answer from
+/// memory; the asking belongs to the frame, down the lane it already has.
+fn forget_a_picture(
+    peek_cache: &mut std::collections::HashMap<String, PeekCacheEntry>,
+    video_facts: &mut BTreeMap<String, preview::VideoFacts>,
+    pictures: &mut MarkdownPictures,
+    path: &Path,
+) {
+    let key = bt_term::normalized_local_image_path_key(path);
+    peek_cache.remove(&key);
+    video_facts.remove(&key);
+    pictures.forget(path);
 }
 
 impl Runtime<'_> {
@@ -32515,6 +32558,22 @@ impl Runtime<'_> {
                     .map(|_| (source.clone(), preview::PreviewWant::Head))
             })
             .collect();
+        // **A revived tab's pictures are opened, not remembered** (user report
+        // 2026-08-31) — [`Self::open_preview_image_on`]'s line, at the other door
+        // a `PreviewImageState` is born. A window that restores a tab it closed
+        // an hour ago may still be holding the decode that tab was showing, and
+        // the file behind it is an hour older than anything this window knows.
+        let pictures: Vec<PathBuf> = self
+            .window
+            .tabs
+            .get(index)
+            .into_iter()
+            .flat_map(|tab| tab.preview_panes.iter())
+            .filter_map(|(_, pane)| Some(pane.image.as_ref()?.path.clone()))
+            .collect();
+        for path in pictures {
+            self.forget_the_picture_in(&path);
+        }
         for (source, want) in wants {
             // The head lane's one door, for [`Self::arm_card_reads`]'s reason: a
             // buffer whose read is already out with the worker is not asked
@@ -43606,12 +43665,14 @@ impl Runtime<'_> {
     /// subscribes to *folders*, so eight documents in one folder are eight
     /// clocks behind one handle.
     ///
-    /// Three kinds of buffer answer and they answer with the same thing — a path
+    /// Four kinds of thing answer and they answer with the same thing — a path
     /// on a disk: a document through `PreviewSource::file_path`, a page through
     /// the URL its buffer is keyed by decoded back to the path it was minted
-    /// from, and a picture a markdown page is showing. A page on a *server* and
-    /// a git-backed document have no file behind them and contribute nothing,
-    /// which is why this is one function and not three.
+    /// from, a picture a markdown page is showing, and — since the report of
+    /// 2026-08-31 — the picture a pane is *itself* showing, which is in no pool
+    /// and was the one file this set left out. A page on a *server* and a
+    /// git-backed document have no file behind them and contribute nothing,
+    /// which is why this is one function and not four.
     ///
     /// **Across tabs, not only the tab on screen** - see
     /// [`preview_watch::PreviewWatch::sync`] for why.
@@ -43653,6 +43714,73 @@ impl Runtime<'_> {
         files
     }
 
+    /// **Which tabs hold a pane standing on the picture in this file** (user
+    /// report 2026-08-31).
+    ///
+    /// [`Self::markdown_picture_files`]'s opposite number, for the *other* place
+    /// a picture is shown: the picture lane's own pane, whose file is
+    /// [`PreviewImageState::path`] and is in no pool. Tabs and not surfaces
+    /// because the one thing the caller does with the answer is address a
+    /// question to the worker, and a `PreviewRequest` is addressed to a tab —
+    /// two panes of one tab on one file are one question, which is what a
+    /// deduplicated set of ids says.
+    ///
+    /// Every surface, seat and float alike: a picture popped out into a window
+    /// of its own is the same file on the same disk.
+    fn tabs_showing_the_picture_in(&self, path: &Path) -> BTreeSet<TabId> {
+        self.window
+            .tabs
+            .iter()
+            .filter(|tab| {
+                tab.preview_panes
+                    .iter()
+                    .any(|(_, pane)| pane.image.as_ref().is_some_and(|it| it.path == path))
+            })
+            .map(|tab| tab.id)
+            .collect()
+    }
+
+    /// **Forget everything this window remembers about the picture in one file**
+    /// (user report 2026-08-31).
+    ///
+    /// One door and three callers, because the memo is one memo: the watcher's
+    /// news about a file, a picture being opened onto a pane, and a restored tab
+    /// coming back holding one. What each of those has in common is that this
+    /// window is about to draw a file it has not looked at since it last wrote
+    /// something down about it.
+    ///
+    /// Three things are written down and all three go:
+    ///
+    /// * the **native decode** ([`WindowRuntime::peek_cache`]), which is keyed by
+    ///   the path and would otherwise hand out the old picture for the new file.
+    ///   Removing it is what makes the next frame ask —
+    ///   [`Self::refit_preview_picture`] requests a decode for a picture the
+    ///   cache has no entry for, and refills `native` from the answer, so the
+    ///   dimensions on the meta line follow the pixels without being told;
+    /// * the **sentence a video's own container states**
+    ///   ([`WindowRuntime::video_facts`]), keyed identically and stale on exactly
+    ///   the same terms;
+    /// * the **generation of the exact-size rasters**
+    ///   ([`MarkdownPictures::forget`]), which is how every markdown page
+    ///   standing on this file is told to ask again.
+    ///
+    /// It asks no disk and reads no file. What it does is end this window's
+    /// right to answer from memory; the asking is the frame's, down the lane it
+    /// already has.
+    ///
+    /// The mechanism is [`forget_a_picture`], on
+    /// [`files_a_tab_stands_on`]'s own argument: a `Runtime` needs a device
+    /// layer and a window to exist, and what a test has to be able to put in
+    /// front of this is three real caches.
+    fn forget_the_picture_in(&mut self, path: &Path) {
+        forget_a_picture(
+            &mut self.window.peek_cache,
+            &mut self.window.video_facts,
+            &mut self.window.markdown_pictures,
+            path,
+        );
+    }
+
     /// **One watched file moved: tell whatever is showing it** (W2 slice 5).
     ///
     /// Two lanes and the plan names both:
@@ -43672,17 +43800,30 @@ impl Runtime<'_> {
     /// one file are two buffers and both are behind the disk.
     fn refresh_preview_file(&mut self, news: &preview_watch::FileNews) -> Result<()> {
         let path = news.path.as_path();
-        // **A picture inside a document is watched too** (§7.1.3k ④). What has
-        // to be thrown away is the *decode*: the exact-size rasters are keyed by
-        // a hash of the file's own bytes, so they cannot serve the old picture
-        // for the new file, while `peek_cache` is keyed by the path and would.
-        // Ticking the generation is what tells every page standing on this file
-        // to ask again — the same sentence a formula's arrival makes.
-        if self.markdown_picture_files().contains(path) {
-            self.window
-                .peek_cache
-                .remove(&bt_term::normalized_local_image_path_key(path));
-            self.window.markdown_pictures.forget(path);
+        // **A picture is a picture wherever it is standing** (§7.1.3k ④; user
+        // report 2026-08-31). Two surfaces show one, and until the report they
+        // were treated as two different questions: a picture *inside* a markdown
+        // page was forgotten here, and a picture a pane was itself showing was
+        // not mentioned at all — so a PNG replaced under its own name went on
+        // being drawn from a decode nothing would ever throw away.
+        //
+        // They are one question, and the answer is one door
+        // ([`Self::forget_the_picture_in`]). What is left over is the byte count
+        // on a pane's meta line, which is the one field of it no decoder can
+        // answer and which therefore has to be asked again by name.
+        let pictured = self.tabs_showing_the_picture_in(path);
+        if !pictured.is_empty() || self.markdown_picture_files().contains(path) {
+            self.forget_the_picture_in(path);
+            for tab in pictured {
+                if !self.app.preview_worker.request(preview::PreviewRequest {
+                    window: self.window_id(),
+                    tab,
+                    source: preview::PreviewSource::file(path.to_path_buf()),
+                    want: preview::PreviewWant::Size,
+                }) {
+                    self.disable_preview_worker();
+                }
+            }
             self.refresh_preview_for_layout();
             self.refresh_chrome();
             self.present_chrome_change()?;
@@ -46275,6 +46416,19 @@ impl Runtime<'_> {
     /// *filling* of a surface were one function until this slice, which meant
     /// every door had to accept `landing_preview()`'s answer.
     fn open_preview_image_on(&mut self, surface: PreviewSurface, path: PathBuf) -> Result<()> {
+        // **Opening a picture reads it** (user report 2026-08-31), which until
+        // this ticket was the one thing about a picture that was not true. A
+        // document opened onto a pane goes to the disk for its head; a picture
+        // was served out of [`WindowRuntime::peek_cache`], keyed by its path and
+        // never invalidated, so the plainest gesture a reader has — close the
+        // pane, open the same file again — showed the picture that file used to
+        // hold. The memo goes, the frame asks, and the answer is whatever is on
+        // the disk now.
+        //
+        // It is cheap when nothing moved: the decoder's own memo is keyed by the
+        // file's modified time and length since this ticket, so an unchanged
+        // file costs one `metadata` on a worker thread and no decode at all.
+        self.forget_the_picture_in(&path);
         // The one field of the meta line no decoder can answer, asked on the
         // same lane a document's head goes down.
         let tab = self.id;
@@ -122187,6 +122341,215 @@ mod tests {
         );
     }
 
+    /// RED — **the file a preview pane's picture stands on is a file this tab
+    /// stands on** (user report 2026-08-31, `dist\folio-*.exe`).
+    ///
+    /// The report: `card-3.png` open in a preview pane, replaced on disk by a
+    /// `mv` in another shell — 1037×735 out, 1242×1656 in — and the pane went on
+    /// showing the old picture and the old meta line (`1037 × 735 · PNG ·
+    /// 202 KB`) for good. No `Reload/Keep` strip either, and there could not
+    /// have been one: the news never arrived, because **no folder was ever
+    /// subscribed to on that file's behalf**. A picture is not a pool buffer —
+    /// `create_tab_state` says so in one line, and it is right, the pixels come
+    /// down the decode lane — so the pool arm of this set could not answer for
+    /// it, and nothing else mentioned it.
+    ///
+    /// The watch is a set of *files*, not a set of documents, and this is where
+    /// that is said. A picture, a video, a document, a page and a picture inside
+    /// a page all answer with a path and are all subscribed to on identical
+    /// terms.
+    ///
+    /// MUTATIONS: drop the `pane.image` arm from
+    /// [`files_a_tab_stands_on`] and the two picture lines go red — the report,
+    /// reproduced, and with it the reason the reader saw no strip. Read the
+    /// picture off the *pool* instead and the same two go red, because a picture
+    /// was never in one.
+    #[test]
+    fn the_picture_a_pane_is_showing_is_a_file_this_tab_stands_on() {
+        let seats = seats::Seats::lone_terminal();
+        let identity = seats.identity();
+        let (layout, overflow) = cross_solve(&seats);
+        let card = PathBuf::from(r"D:\folio-social\cards\card-3.png");
+        // The picture lane is not the *image* lane: a video arrives on it on
+        // identical terms, and a fix written against `.png` would say so.
+        let reel = PathBuf::from(r"D:\folio-social\cards\reel.webm");
+        let notes = PathBuf::from(r"D:\folio-social\notes.md");
+
+        let mut panes = PreviewPanes::default();
+        panes.entry(seat_of(TAB_ONE, identity)).image = Some(PreviewImageState::new(card.clone()));
+        panes.entry(seat_of(TAB_ONE, SeatId(9))).image = Some(PreviewImageState::new(reel.clone()));
+        let mut pool = preview::PreviewPool::default();
+        pool.insert(preview::PreviewBuffer::new(
+            preview::PreviewSource::file(notes.clone()),
+            "notes.md".to_owned(),
+        ));
+        let tab = assemble_tab_state(
+            TAB_ONE,
+            BTreeMap::from([(identity, leaf_saying("SHELL"))]),
+            BTreeMap::new(),
+            pool,
+            panes,
+            BTreeMap::new(),
+            identity,
+            TabSeed::default(),
+            seats,
+            layout,
+            overflow,
+        );
+
+        let watched = files_a_tab_stands_on(&tab);
+        assert!(
+            watched.contains(&card),
+            "the picture on the glass is the file the reader is looking at, and \
+             it was the one file this set left out"
+        );
+        assert!(
+            watched.contains(&reel),
+            "and the lane is the picture lane, not the `.png` lane"
+        );
+        assert!(
+            watched.contains(&notes),
+            "without disturbing the pooled document the ruling of 2026-08-29 added"
+        );
+        assert_eq!(watched.len(), 3, "and nothing else was invented");
+    }
+
+    /// RED — **a picture opened again after its file was replaced is read off
+    /// the disk, not out of this window's memory** (user report 2026-08-31, the
+    /// second half).
+    ///
+    /// The plainest gesture a reader has, and the one that named the second
+    /// cause: the pane was closed, the file was replaced by a `mv`, the pane was
+    /// opened again on the very same path — and the old picture came back. Two
+    /// caches keyed by a path alone were holding it, and only one of them is in
+    /// this crate. The other is [`bt_term::InlineImageDecoder`]'s, which its own
+    /// test answers for; this one drives **both**, in the order the app drives
+    /// them, over a real file that a real `std::fs::rename` really replaces —
+    /// because each road can regress on its own and a window served by a correct
+    /// decoder is still wrong if it never asks it.
+    ///
+    /// MUTATIONS: take [`forget_a_picture`]'s `peek_cache.remove` away and the
+    /// reopened picture is 4×2 again — the report. Take the decoder's stamp
+    /// guard away (`bt-term`) and the same line goes red one layer down. Leave
+    /// the neighbouring file out of the removal — i.e. clear the whole cache —
+    /// and the last assertion goes red: forgetting one picture is not forgetting
+    /// every picture.
+    #[test]
+    fn a_picture_opened_again_after_a_rename_is_read_off_the_disk() {
+        fn png_of(width: u32, height: u32, colour: [u8; 4]) -> Vec<u8> {
+            let picture = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                width,
+                height,
+                image::Rgba(colour),
+            ));
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            picture
+                .write_to(&mut bytes, image::ImageFormat::Png)
+                .expect("a PNG this process wrote");
+            bytes.into_inner()
+        }
+
+        /// Opening a picture onto a pane, as far as the caches are concerned:
+        /// the decode lane is asked, and the answer is remembered under the
+        /// file's normalized path.
+        fn open(
+            decoder: &mut bt_term::InlineImageDecoder,
+            peek_cache: &mut std::collections::HashMap<String, PeekCacheEntry>,
+            path: &Path,
+        ) {
+            let decoded = decoder
+                .decode(bt_term::InlineImageTask {
+                    occurrence_id: 0,
+                    source: bt_term::InlineImageSource::LocalPath(path.to_path_buf()),
+                })
+                .expect("the picture decodes");
+            peek_cache.insert(
+                normalized_local_image_path_key(path),
+                PeekCacheEntry::Ready {
+                    key: decoded.key,
+                    rgba: decoded.rgba,
+                    width_px: decoded.width_px,
+                    height_px: decoded.height_px,
+                },
+            );
+        }
+
+        fn size_of(
+            peek_cache: &std::collections::HashMap<String, PeekCacheEntry>,
+            path: &Path,
+        ) -> Option<(u32, u32)> {
+            match peek_cache.get(&normalized_local_image_path_key(path))? {
+                PeekCacheEntry::Ready {
+                    width_px,
+                    height_px,
+                    ..
+                } => Some((*width_px, *height_px)),
+                PeekCacheEntry::Pending | PeekCacheEntry::Failed => None,
+            }
+        }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("a clock after 1970")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "folio-picture-reopen-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("a scratch folder");
+        let card = directory.join("card-3.png");
+        let neighbour = directory.join("card-4.png");
+        std::fs::write(&card, png_of(4, 2, [255, 0, 0, 255])).expect("the first card");
+        std::fs::write(&neighbour, png_of(9, 9, [255, 255, 0, 255])).expect("its neighbour");
+
+        let mut decoder = bt_term::InlineImageDecoder::default();
+        let mut peek_cache = std::collections::HashMap::new();
+        let mut video_facts = BTreeMap::new();
+        let mut pictures = MarkdownPictures::default();
+
+        open(&mut decoder, &mut peek_cache, &card);
+        open(&mut decoder, &mut peek_cache, &neighbour);
+        assert_eq!(size_of(&peek_cache, &card), Some((4, 2)));
+        let generation = pictures.generation;
+
+        // The pane is closed. Nothing forgets anything, and nothing should:
+        // this is a picture a hover card or a markdown page may still be drawing.
+        // Then another shell replaces the file — `mv` over an existing name is a
+        // rename, so the bytes at that path are a different file entirely.
+        let replacement = directory.join("card-3.new.png");
+        std::fs::write(&replacement, png_of(6, 5, [0, 0, 255, 255])).expect("the new card");
+        std::fs::rename(&replacement, &card).expect("the replacement lands on the name");
+
+        // And the pane is opened again on the same path.
+        forget_a_picture(&mut peek_cache, &mut video_facts, &mut pictures, &card);
+        assert!(
+            size_of(&peek_cache, &card).is_none(),
+            "opening a picture ends this window's right to answer from memory"
+        );
+        assert!(
+            pictures.generation > generation,
+            "and every markdown page standing on that file is told to ask again"
+        );
+        open(&mut decoder, &mut peek_cache, &card);
+
+        assert_eq!(
+            size_of(&peek_cache, &card),
+            Some((6, 5)),
+            "the reader opened the file that is on the disk, so that is the \
+             picture and that is the size the meta line states"
+        );
+        assert_eq!(
+            size_of(&peek_cache, &neighbour),
+            Some((9, 9)),
+            "and the file nobody touched kept its decode: forgetting one picture \
+             is not forgetting every picture"
+        );
+
+        std::fs::remove_file(&card).expect("the card goes");
+        std::fs::remove_file(&neighbour).expect("its neighbour goes");
+        std::fs::remove_dir(&directory).expect("and the folder with them");
+    }
+
     /// RED — **the wiring the headless tests above cannot stand in front of.**
     ///
     /// Four sentences about a `Runtime`, which needs a device layer and a window
@@ -122225,6 +122588,30 @@ mod tests {
             refresh.contains("self.request_stale_previews(index)"),
             "a pooled buffer no pane is on is asked for through the pool's own door"
         );
+        // **And the picture lane, which has no buffer to put the news through**
+        // (user report 2026-08-31). What a document does with `note_disk_moved`
+        // a picture does by having this window forget what it remembers of it;
+        // the byte count beside it is the one field of the meta line no decoder
+        // answers, so it is asked again by name.
+        assert!(
+            refresh.contains("self.forget_the_picture_in(path)"),
+            "a picture whose file moved is forgotten, so the next frame asks the disk"
+        );
+        assert!(
+            refresh.contains("want: preview::PreviewWant::Size"),
+            "and the meta line's byte count is asked again with it"
+        );
+        // The other two doors a picture arrives by. Both are gestures, and both
+        // are moments this window is about to draw a file it has not looked at.
+        for door in [
+            "fn open_preview_image_on(&mut self, surface: PreviewSurface, path: PathBuf) -> Result<()> {",
+            "fn request_revived_previews(&mut self, index: usize) {",
+        ] {
+            assert!(
+                fn_body(door).contains("self.forget_the_picture_in("),
+                "{door} draws a picture out of memory instead of off the disk"
+            );
+        }
         let settle = fn_body("fn settle_pane_notices(&mut self) -> Result<()> {");
         assert!(
             settle.contains("self.seats.preview_seats()"),

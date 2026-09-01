@@ -5,6 +5,7 @@ use std::{
     io::{Cursor, Read},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
+    time::SystemTime,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -463,12 +464,63 @@ struct DecodedImagePayload {
     animated: bool,
 }
 
+/// **What the file looked like when these pixels were decoded out of it.**
+///
+/// `preview_watch::Stamp`'s twin, one crate down and for the same argument: two
+/// fields and not a hash, because a hash is a read of the whole file and the
+/// read is the very thing the memo beside it exists to avoid. Length alone
+/// misses an edit that keeps the size; a modified time alone misses a write
+/// inside the filesystem's own resolution while the length changed. The cost of
+/// being wrong is one decode that finds identical pixels.
+///
+/// `None` is a real answer — the file is not there — and it compares equal to
+/// itself, which is what lets a refusal about a missing file be remembered
+/// rather than re-asked on every occurrence of it in a screenful.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LocalImageStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl LocalImageStamp {
+    fn of(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        })
+    }
+}
+
+/// One remembered decode, and the file it was a decode *of*.
+#[derive(Clone, Debug)]
+struct CachedLocalImage {
+    /// Read **before** the bytes, deliberately. A file replaced between this
+    /// stat and the read is then remembered under the *older* stamp, so the next
+    /// caller stats, disagrees and reads again — one wasted decode. Stamping
+    /// after the read would put the *newer* stamp on the older bytes, which is
+    /// the same race resolved the wrong way: a stale picture nobody would ever
+    /// ask about again.
+    stamp: Option<LocalImageStamp>,
+    decoded: Result<DecodedImagePayload, InlineImageDecodeError>,
+}
+
 /// Stateful decoration-worker decoder. Local paths are keyed lexically after slash/case
 /// normalization, so repeated occurrences reuse the one bounded read and decoded pixel artifact.
-/// The cache deliberately has no invalidation: file watching belongs to the later M2 buffer model.
+///
+/// **The memo names the file it came from** (user report 2026-08-31). It used to
+/// be keyed by the path alone and to say so — "the cache deliberately has no
+/// invalidation: file watching belongs to the later M2 buffer model" — and that
+/// sentence was the whole of a reported defect: a picture replaced on disk under
+/// its own name (`mv` over it, an export written again, a delete and a recreate)
+/// went on being served from here for the rest of the session, so a preview pane
+/// closed and reopened over the new file showed the old one. A path is not an
+/// identity; a path *and* what the file at it looked like is. One `metadata` per
+/// request answers it, on a worker thread, against a read of the whole file that
+/// it replaces whenever the answer is "unchanged".
 #[derive(Debug, Default)]
 pub struct InlineImageDecoder {
-    local_path_cache: HashMap<String, Result<DecodedImagePayload, InlineImageDecodeError>>,
+    local_path_cache: HashMap<String, CachedLocalImage>,
 }
 
 impl InlineImageDecoder {
@@ -480,12 +532,20 @@ impl InlineImageDecoder {
             InlineImageSource::Osc1337(encoded) => decode_osc_payload(encoded)?,
             InlineImageSource::LocalPath(path) => {
                 let cache_key = normalized_local_path_key(path);
-                if let Some(cached) = self.local_path_cache.get(&cache_key) {
-                    cached.clone()?
-                } else {
-                    let decoded = read_and_decode_local_image(path);
-                    self.local_path_cache.insert(cache_key, decoded.clone());
-                    decoded?
+                let stamp = LocalImageStamp::of(path);
+                match self.local_path_cache.get(&cache_key) {
+                    Some(cached) if cached.stamp == stamp => cached.decoded.clone()?,
+                    _ => {
+                        let decoded = read_and_decode_local_image(path);
+                        self.local_path_cache.insert(
+                            cache_key,
+                            CachedLocalImage {
+                                stamp,
+                                decoded: decoded.clone(),
+                            },
+                        );
+                        decoded?
+                    }
                 }
             }
         };
@@ -2845,8 +2905,45 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// A PNG of a stated size, written by the same crate that reads it back.
+    fn png_of(width: u32, height: u32, colour: [u8; 4]) -> Vec<u8> {
+        let picture = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            width,
+            height,
+            image::Rgba(colour),
+        ));
+        let mut bytes = Cursor::new(Vec::new());
+        picture
+            .write_to(&mut bytes, ImageFormat::Png)
+            .expect("a PNG this crate wrote");
+        bytes.into_inner()
+    }
+
+    /// RED — **a picture replaced under its own name is a different picture**
+    /// (user report 2026-08-31, `dist\folio-*.exe`).
+    ///
+    /// The reported gesture, exactly: a 1037×735 PNG open in a preview pane,
+    /// and a `mv` in another shell putting a 1242×1656 one at the same path.
+    /// `mv` over an existing file is `MoveFileEx` with `REPLACE_EXISTING` — a
+    /// **rename**, not a write — so the bytes at that path are a wholly
+    /// different file with the same name, and this memo, keyed by the name
+    /// alone, went on serving the old pixels for the rest of the session.
+    /// Closing the pane and opening the very same file again showed the old
+    /// picture, which is the sentence that names the cause: nothing here was
+    /// ever going to look at the disk again.
+    ///
+    /// The memo is still a memo — the second decode of an untouched file is the
+    /// same allocation, and that is what `Arc::ptr_eq` says — but its key is now
+    /// the name **and** what the file at it looked like.
+    ///
+    /// MUTATIONS: drop the `cached.stamp == stamp` guard and the replaced
+    /// picture keeps the old size — the report, reproduced. Take the stamp
+    /// *after* the read instead of before and this stays green while the race
+    /// it papers over gets worse. Delete the memo altogether and the
+    /// `Arc::ptr_eq` line goes red: a screenful of one picture would be a
+    /// screenful of reads.
     #[test]
-    fn local_decoder_reads_once_and_reuses_content_identity_for_each_occurrence() {
+    fn local_decoder_reads_once_but_never_serves_a_file_that_has_been_replaced() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -2856,27 +2953,57 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir(&directory).unwrap();
-        let path = directory.join("image.png");
-        std::fs::write(&path, STANDARD.decode(PNG).unwrap()).unwrap();
+        let path = directory.join("card-3.png");
+        std::fs::write(&path, png_of(4, 2, [255, 0, 0, 255])).unwrap();
 
         let mut decoder = InlineImageDecoder::default();
-        let first = decoder
-            .decode(InlineImageTask {
-                occurrence_id: 31,
+        let ask = |decoder: &mut InlineImageDecoder, occurrence| {
+            decoder.decode(InlineImageTask {
+                occurrence_id: occurrence,
                 source: InlineImageSource::LocalPath(path.clone()),
             })
-            .unwrap();
-        std::fs::remove_file(&path).unwrap();
-        let second = decoder
-            .decode(InlineImageTask {
-                occurrence_id: 32,
-                source: InlineImageSource::LocalPath(path),
-            })
-            .unwrap();
+        };
+        let first = ask(&mut decoder, 31).unwrap();
+        assert_eq!((first.width_px, first.height_px), (4, 2));
+
+        // The same file again, untouched: one read, one artifact, one identity.
+        let second = ask(&mut decoder, 32).unwrap();
         assert_eq!(first.key, second.key);
-        assert_eq!(first.rgba, second.rgba);
-        assert_eq!(first.occurrence_id, 31);
+        assert!(
+            Arc::ptr_eq(&first.rgba, &second.rgba),
+            "a second occurrence of an unchanged file is the memo, not a read"
+        );
         assert_eq!(second.occurrence_id, 32);
+
+        // And now the report: a *rename* puts a different file at that name.
+        let replacement = directory.join("card-3.new.png");
+        std::fs::write(&replacement, png_of(6, 5, [0, 0, 255, 255])).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        let after = ask(&mut decoder, 33).unwrap();
+        assert_eq!(
+            (after.width_px, after.height_px),
+            (6, 5),
+            "the name is the same file to a filesystem and a different picture to a reader"
+        );
+        assert_ne!(
+            first.key, after.key,
+            "and the content identity moved with the bytes, so nothing downstream \
+             can serve the old raster for the new file"
+        );
+        assert_eq!(&after.rgba[..4], &[0, 0, 255, 255]);
+
+        // A file that goes away is not remembered as though it were still there,
+        // and one that comes back is read again.
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            ask(&mut decoder, 34).is_err(),
+            "a memo does not outlive the file it is a memo of"
+        );
+        std::fs::write(&path, png_of(3, 7, [0, 255, 0, 255])).unwrap();
+        let returned = ask(&mut decoder, 35).unwrap();
+        assert_eq!((returned.width_px, returned.height_px), (3, 7));
+
+        std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
     }
 

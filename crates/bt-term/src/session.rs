@@ -23368,9 +23368,19 @@ mod tests {
         }
         assert_eq!(tasks.len(), 2);
         let first = decoder.decode(tasks[0].clone()).unwrap();
-        std::fs::remove_file(&path).unwrap();
         let second = decoder.decode(tasks[1].clone()).unwrap();
         assert_eq!(first.key, second.key);
+        // **One read, said without deleting the file.** This used to prove the
+        // memo by removing the picture between the two decodes and watching the
+        // second one succeed anyway — which stopped being true, and rightly, on
+        // the day the memo learned that a path is not an identity (user report
+        // 2026-08-31; `inline_image::InlineImageDecoder`). What the test is
+        // about is unchanged and is now said directly: the second occurrence is
+        // handed the *same allocation*, so no second read happened.
+        assert!(
+            std::sync::Arc::ptr_eq(&first.rgba, &second.rgba),
+            "two occurrences of one unchanged file are one read and one artifact"
+        );
         assert_ne!(first.occurrence_id, second.occurrence_id);
         assert!(session.complete_inline_image_result(tasks[0].clone(), Ok(first)));
         assert!(session.complete_inline_image_result(tasks[1].clone(), Ok(second)));
@@ -23388,6 +23398,7 @@ mod tests {
                 .count(),
             2
         );
+        std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
     }
 
