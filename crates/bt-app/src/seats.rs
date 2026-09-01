@@ -7094,8 +7094,38 @@ impl TabRun {
     ///
     /// First match wins and there is never a second: the solver lays slots out
     /// end to end without overlap on either surface.
+    ///
+    /// **What the scroller cropped away is not there to be pointed at**
+    /// (§7.1.6k 挂账「卡上/缝间动词随滚动摇摆」). The three chrome hit tests each
+    /// state this already and in the same words — [`hit_tab_chrome`]: 「What is
+    /// cropped away is not there to be clicked」; [`hit_rail_chrome`]:
+    /// 「Scrolled-off rows are not clickable … the clip box is the surface, and a
+    /// row outside it is not on screen」; [`hit_focus_rail`], which answers
+    /// [`ChromeTarget::RailBody`] for anything outside `viewport` **before** it
+    /// walks the cards. The painter agrees with all three: `focus_rail_chrome`
+    /// clips its cards to the same rectangle. This function is the *fourth*
+    /// reader of that geometry — the drag engine's — and it is the one that
+    /// never got the sentence, so it alone would name a card that is drawn
+    /// nowhere near the pointer and cannot be clicked by it.
+    ///
+    /// That divergence is the whole of the wobble. A card body straddles the
+    /// clip's foot for part of every card pitch and does not for the rest, so a
+    /// hand parked below the foot while the edge auto-scroll runs the list
+    /// (缺陷 #188 — and the band is struck from `viewport`, so that is exactly
+    /// where such a hand is) flips between naming a card and naming none, which
+    /// downstream is `StripAdopt` flipping to `StripExtract` and back under a
+    /// pointer that never moved.
+    ///
+    /// The test is on the run's own axis and not on the slot rectangles,
+    /// because that is the question the clip settles: the cross-axis is the
+    /// surface's width and is already the slots' own business.
     #[must_use]
     pub fn slot_at(&self, x: f64, y: f64) -> Option<usize> {
+        let [start, end] = self.viewport;
+        let position = self.pos(x, y);
+        if position < start || position >= end {
+            return None;
+        }
         self.slots
             .iter()
             .position(|slot| contains(*slot, x as f32, y as f32))
@@ -38598,6 +38628,144 @@ mod tests {",
             "and a column that does not count the guest stops with the whole of \
              it below the clip, which is the report: {unreachable:?} against \
              [{top}, {foot}]"
+        );
+    }
+
+    /// **RED GATE — 卡上/缝间的动词不随列表滚动摇摆**(§7.1.6k 挂账,
+    /// `docs/HANDOFF-2026-08-21.md` 「§7.1.6k 卡上/缝间动词随滚动摇摆」;
+    /// §7.1.6b⁗ 「没做的,如实记」③ 是同一条的文字记录).
+    ///
+    /// The backlog line is the whole specification: a hand parked below a
+    /// scrolled card column flips between `StripAdopt`（落进那张卡）and
+    /// `StripExtract`（自成一卡）as the list runs under it. The verb is decided
+    /// by exactly one bit — [`TabRun::slot_at`] answering `Some` or `None` — so
+    /// this gate is stated over that bit, at the one place the hand can be while
+    /// the list is moving on its own: the `+` row, one pixel below the clip's
+    /// foot, which is where [`autoscroll_speed`]'s band puts a dragging hand and
+    /// where the previous gate already pins the *settled* answer.
+    ///
+    /// **What makes it the right claim rather than a convenient one**: the two
+    /// other readers of this same geometry already refuse that pixel. The
+    /// painter clips its cards to `viewport` ([`focus_rail_chrome`]'s
+    /// `clip_to_list`), and [`hit_focus_rail`] answers
+    /// [`ChromeTarget::RailBody`] for any `y` outside `viewport` *before* it
+    /// walks the cards — 「the clip box is the surface, and a row outside it is
+    /// not on screen」, the sentence [`hit_tab_chrome`] and [`hit_rail_chrome`]
+    /// state for the other two surfaces. So a card is drawn nowhere near this
+    /// pointer and cannot be clicked by it, and the drag engine naming it
+    /// anyway is the drag engine holding a different opinion about one
+    /// rectangle from the one on the glass.
+    ///
+    /// The walk is the whole run rather than its end because that is the shape
+    /// of the report: the answer today is not merely wrong, it **alternates**
+    /// with the card pitch, `Some` while a card body straddles the clip's foot
+    /// and `None` while the gap between two of them does.
+    ///
+    /// Mutation: drop the viewport guard from [`TabRun::slot_at`] and this goes
+    /// red on the first card that crosses the foot; narrow the guard to the
+    /// column alone (an `if axis == Axis::Col`) and
+    /// [`a_hand_at_the_strips_far_edge_names_no_tab_the_strip_has_cropped_away`]
+    /// goes instead.
+    #[test]
+    fn a_still_hand_below_the_clip_names_no_card_however_far_the_list_has_run() {
+        let mut scroll = 0.0_f32;
+        let mut named: Vec<(f32, Option<usize>)> = Vec::new();
+        for _ in 0..2_400 {
+            let column = hosting_column(scroll, 1);
+            let run = focus_rail_run(&column);
+            // The very hand the previous gate settles with, asked on every frame
+            // of the journey rather than only where it stops.
+            let hand = column_hand(&column, column.viewport[1] + 1.0);
+            named.push((scroll, run.slot_at(hand.0, hand.1)));
+            let Some(next) = autoscroll_step(
+                &run,
+                scroll,
+                hand,
+                1.0,
+                crate::Motion::Full,
+                AUTOSCROLL_FIXTURE_FRAME,
+            ) else {
+                break;
+            };
+            scroll = next;
+        }
+        assert!(
+            named.len() > 1,
+            "the fixture has to actually travel, or this gate is vacuous"
+        );
+        let wobbled: Vec<_> = named
+            .iter()
+            .filter(|(_, slot)| slot.is_some())
+            .copied()
+            .collect();
+        assert!(
+            wobbled.is_empty(),
+            "a hand below the list's clip names no card on any frame of the run, \
+             because nothing is drawn there and nothing there can be clicked — \
+             but it named one on {} of {} frames, which is the verb flipping \
+             between `StripAdopt` and `StripExtract` under a hand that never \
+             moved: {:?}",
+            wobbled.len(),
+            named.len(),
+            &wobbled[..wobbled.len().min(6)]
+        );
+    }
+
+    /// **RED GATE — the rail crops its tail away from the drag engine too, and
+    /// the strip needs no crop because its band never left its clip**
+    /// (§7.1.6k 挂账, the other two surfaces).
+    ///
+    /// The sibling of the gate above, and it is here so the repair cannot be
+    /// made surface by surface — [`autoscroll_speed`]'s own note is that there
+    /// is 「one mechanism over all three surfaces」, and a hit test that is right
+    /// on one of them is the shape this file spent §7.1.6b‴ refusing.
+    ///
+    /// **The two halves are different claims, and the difference is a fact
+    /// about the geometry rather than about the rule.** The vertical rail's band
+    /// is [`RailGeometry::body`] — the whole panel, `+` row included — so a hand
+    /// below the list's clip is a question the drag engine really does ask, and
+    /// it must answer it the way [`hit_rail_chrome`] does: 「Scrolled-off rows
+    /// are not clickable … the clip box is the surface, and a row outside it is
+    /// not on screen」. The horizontal strip's band is
+    /// [`strip_band`] = `[viewport[0], 0, viewport[1], title_bar]`, i.e. its
+    /// clip exactly, so the pointer can never be outside the viewport and
+    /// inside the band at once; the guard is inert there, and this asserts that
+    /// rather than leaving a reader to wonder why the strip is missing.
+    ///
+    /// Mutation: drop the viewport guard from [`TabRun::slot_at`] and the rail's
+    /// scrolled-off row answers again; widen [`strip_band`] past the viewport
+    /// and the second half starts being a live claim instead of a recorded one.
+    #[test]
+    fn a_hand_below_the_rails_clip_names_no_row_the_rail_has_cropped_away() {
+        let rail = rail_of(expanded_rail(), &resting(30), 0);
+        let run = rail_run(&rail);
+        assert!(
+            run.max_scroll > 0.0,
+            "the fixture is a rail with rows past its clip"
+        );
+        let x = f64::from((rail.body[0] + rail.body[2]) / 2.0);
+        let outside = f64::from(run.viewport[1]) + 1.0;
+        assert!(
+            run.contains(x, outside),
+            "the pixel is still inside the run's own band — that is what makes \
+             it a question the drag engine actually asks"
+        );
+        assert_eq!(
+            run.slot_at(x, outside),
+            None,
+            "a pointer below the rail's clip names no tab, for the reason \
+             `hit_rail_chrome` already gives: the clip box is the surface, and \
+             the drag engine may not hold a second opinion about it"
+        );
+        // And the strip, where the same guard is inert because the band was
+        // struck from the clip in the first place.
+        let strip = tab_strip_geometry(960.0, 1.0, &resting(30), 0, 0.0);
+        let strip_run = strip_run(&strip, 1.0);
+        assert!(strip.max_scroll > 0.0, "the strip fixture overflows too");
+        assert!(
+            !strip_run.contains(f64::from(strip.viewport[1]) + 1.0, 1.0),
+            "the strip's band is its clip, so there is no pixel this guard has \
+             to refuse on it — `strip_band` is struck from `viewport` itself"
         );
     }
 
