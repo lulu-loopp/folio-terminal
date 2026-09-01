@@ -74,6 +74,9 @@ Folio 是一款 Windows 终端：命令输出的公式在其打印位置排版�
 
 布局可随时调整，会话不中断，所有会话均可同时查看。
 
+<img src="docs/screenshots/tab-into-pane.gif" width="100%"
+     alt="按住标签并向下拖出标签条，窗口右半出现落点预览；松手后该标签的 shell 成为右侧窗格，会话保持运行。">
+
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/cards-dark.png">
