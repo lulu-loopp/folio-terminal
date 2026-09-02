@@ -9,7 +9,7 @@ Folio 是一款 Windows 终端：命令输出的公式在其打印位置排版�
 
 [English](README.md) · [快捷键](docs/shortcuts.md) · [安全](SECURITY.md) · [更新记录](CHANGELOG.md)
 
-> **预览版。** 0.1.0 为第一个公开版本，未进行代码签名，详见下方 [SmartScreen](#smartscreen)。
+> **预览版。** 0.1.1 为预览版本，未进行代码签名，详见下方 [SmartScreen](#smartscreen)。
 
 ---
 
@@ -109,13 +109,13 @@ Folio 是一款 Windows 终端：命令输出的公式在其打印位置排版�
 
 ## 下载
 
-从 releases 页面获取 `folio-0.1.0-windows-x64.zip`，解压至存放程序的目录，运行 `folio.exe`。无安装程序；运行之前，解压目录之外不会写入任何内容。`SHA256SUMS.txt` 为所下载文件的哈希值。需 **Windows 10 1809 或更高版本，或 Windows 11，64 位**。
+从 releases 页面获取 `folio-0.1.1-windows-x64.zip`，解压至存放程序的目录，运行 `folio.exe`。无安装程序；运行之前，解压目录之外不会写入任何内容。`SHA256SUMS.txt` 为所下载文件的哈希值。需 **Windows 10 1809 或更高版本，或 Windows 11，64 位**。
 
 网页预览需 **WebView2 运行时**。Windows 11 自带该运行时；Windows 10 通常亦已安装，若未安装，可从此处获取 [Evergreen 运行时](https://developer.microsoft.com/microsoft-edge/webview2/)。缺少该运行时，除网页预览外的所有功能均正常，预览窗格会说明缺失项。
 
 ## SmartScreen
 
-0.1.0 未进行代码签名，首次运行时可能出现「Windows 已保护你的电脑」提示。请点击「更多信息」，确认所列程序名为 `folio.exe`，再点击「仍要运行」。请勿为此关闭 SmartScreen。
+0.1.1 未进行代码签名，首次运行时可能出现「Windows 已保护你的电脑」提示。请点击「更多信息」，确认所列程序名为 `folio.exe`，再点击「仍要运行」。请勿为此关闭 SmartScreen。
 
 ## 第一次运行
 

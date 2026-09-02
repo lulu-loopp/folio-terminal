@@ -2225,7 +2225,7 @@ impl Text {
             Self::RowUpdateCheck => pick(lang, "Update check", "检查新版"),
             Self::DescUpdateCheck => pick(
                 lang,
-                "Asks the releases page once a day whether a newer version is out. It downloads                  nothing.",
+                "Asks the releases page once a day whether a newer version is out. It downloads nothing.",
                 "每天问一次发布页有没有更新的版本。不下载任何内容。",
             ),
             Self::DescGitPanel => pick(
