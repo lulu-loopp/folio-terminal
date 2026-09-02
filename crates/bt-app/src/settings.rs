@@ -2303,6 +2303,16 @@ pub enum SettingsRow {
     /// does on this machine and `Explorer context menu` says what it does to
     /// another program's menu; this is the only one that leaves the machine.
     UpdateCheck,
+    /// **How much of the screen the summoned terminal covers** (§7.54).
+    ///
+    /// A slider and not a picker, on [`SettingsControl`]'s own division: a combo
+    /// answers a question with a small named set and a slider answers one with a
+    /// percentage, and there is no list of heights a reader would recognise the
+    /// way they recognise a scrollback of 50,000 lines.
+    QuakeHeight,
+    /// Whether the summoned terminal goes away when the keyboard leaves it
+    /// (§7.54).
+    QuakeDismiss,
     /// **Which way a split with no direction of its own cuts** (user ruling,
     /// 2026-08-16).
     ///
@@ -2716,7 +2726,9 @@ impl SettingsRow {
             | Self::ContextMenu
             // And the row that is about what this product does off this machine
             // rather than on it — see the variant.
-            | Self::UpdateCheck => SettingsCategory::General,
+            | Self::UpdateCheck
+            | Self::QuakeHeight
+            | Self::QuakeDismiss => SettingsCategory::General,
             // The editor's eight, which are the Profiles page's second view.
             Self::ProfileName
             | Self::ProfileProgram
@@ -2803,6 +2815,8 @@ impl SettingsRow {
             Self::BackgroundOpacity => Text::RowBackgroundOpacity.text(),
             Self::Acrylic => Text::RowAcrylic.text(),
             Self::AlwaysOnTop => Text::RowAlwaysOnTop.text(),
+            Self::QuakeHeight => Text::RowQuakeHeight.text(),
+            Self::QuakeDismiss => Text::RowQuakeDismiss.text(),
         }
     }
 
@@ -3028,6 +3042,21 @@ impl SettingsRow {
                 }
             }
             Self::AlwaysOnTop => Text::DescAlwaysOnTop.text(),
+            // **The third row that says why instead of saying what it does**, on
+            // the two above it's ruling: there is one muted line under a title,
+            // and a window no key can call up has exactly one thing worth putting
+            // on it. The refusal is reported here rather than beside the chord
+            // because it is not a fault in the chord — the reader chose a key
+            // Windows had already given away, and the place that fact matters is
+            // the place the window is described.
+            Self::QuakeHeight => {
+                if values.quake_hotkey_taken {
+                    Text::DescQuakeHotkeyTaken.text()
+                } else {
+                    Text::DescQuakeHeight.text()
+                }
+            }
+            Self::QuakeDismiss => Text::DescQuakeDismiss.text(),
         }
     }
 
@@ -3051,6 +3080,14 @@ impl SettingsRow {
             }),
             Self::BackgroundOpacity => SettingsControl::Slider(SliderRange {
                 min: bt_persist::MINIMUM_BACKGROUND_OPACITY,
+                max: 100,
+            }),
+            Self::QuakeHeight => SettingsControl::Slider(SliderRange {
+                // A floor and not zero, for the ground opacity's reason turned on
+                // a different axis: below about a fifth of a screen there is a
+                // tab strip and no room for a shell under it, and a summon that
+                // produced one would read as a window that failed to open.
+                min: bt_persist::MINIMUM_QUAKE_HEIGHT,
                 max: 100,
             }),
             Self::ProfileName | Self::ProfileArgs => SettingsControl::Field,
@@ -3145,6 +3182,12 @@ impl SettingsRow {
             // A reader who wants to know what this product talks to must not
             // have to open a disclosure to find the row that answers it.
             | Self::UpdateCheck
+            // Neither is advanced, on the shortcut hints' measure: a reader who
+            // has just bound a key and watched a terminal come down over their
+            // editor is looking for exactly these two, and a row behind a
+            // disclosure is a row they report as missing.
+            | Self::QuakeHeight
+            | Self::QuakeDismiss
             | Self::PsReadLine
             | Self::PowerShellOffer
             // On the row above's test, said again for the reader who has just watched an agent
@@ -3229,6 +3272,7 @@ impl SettingsRow {
         let value = match self {
             Self::ImageOpacity => values.background_image_opacity,
             Self::BackgroundOpacity => values.background_opacity,
+            Self::QuakeHeight => values.quake_height,
             _ => return None,
         };
         // Clamped on the way out, because a hand-edited `settings.json` is
@@ -3280,7 +3324,7 @@ impl SettingsRow {
             Self::DefaultProfile => profiles::count(),
             Self::BackgroundImage => IMAGE_SOURCE_OPTIONS.len(),
             Self::ImageFit => IMAGE_FIT_OPTIONS.len(),
-            Self::Acrylic | Self::AlwaysOnTop => FORMULA_OPTIONS.len(),
+            Self::Acrylic | Self::AlwaysOnTop | Self::QuakeDismiss => FORMULA_OPTIONS.len(),
             // A slider has no items. Zero rather than a refusal, because
             // `option_labels` is what the layout measures the control column
             // against, and the honest measurement of a control that never opens
@@ -3295,6 +3339,7 @@ impl SettingsRow {
             // control with no items is no words at all.
             Self::ImageOpacity
             | Self::BackgroundOpacity
+            | Self::QuakeHeight
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
@@ -3387,7 +3432,7 @@ impl SettingsRow {
                 .copied()
                 .map(image_source_label),
             Self::ImageFit => IMAGE_FIT_OPTIONS.get(index).copied().map(image_fit_label),
-            Self::Acrylic | Self::AlwaysOnTop => {
+            Self::Acrylic | Self::AlwaysOnTop | Self::QuakeDismiss => {
                 FORMULA_OPTIONS.get(index).copied().map(on_off_label)
             }
             Self::ProfileStartAt => START_AT_OPTIONS.get(index).copied().map(start_at_label),
@@ -3406,6 +3451,7 @@ impl SettingsRow {
                 .map(integration_label),
             Self::ImageOpacity
             | Self::BackgroundOpacity
+            | Self::QuakeHeight
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
@@ -3767,12 +3813,16 @@ impl SettingsRow {
             Self::AlwaysOnTop => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.always_on_top),
+            Self::QuakeDismiss => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.quake_dismiss_on_blur),
             Self::ProfileStartAt => values.editor.map(|editor| editor.start_at),
             Self::ProfileColour => values.editor.and_then(|editor| editor.colour),
             Self::ProfileHyperlink => values.editor.map(|editor| editor.hyperlink),
             Self::ProfileIntegration => values.editor.map(|editor| editor.integration),
             Self::ImageOpacity
             | Self::BackgroundOpacity
+            | Self::QuakeHeight
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
@@ -3892,6 +3942,14 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // this machine, before the table of things it can start.
     rows.push(SettingsRow::SearchEngine);
     rows.push(SettingsRow::DefaultProfile);
+    // **The pair the summon key needs**, directly under `Default profile`
+    // (§7.54): the row above says what a new terminal starts as, and these two
+    // say what the one a key calls up looks like when it arrives. The height
+    // first, because it is the fact a reader who has just watched the window come
+    // down wants to change, and the dismissal under it, because it is the
+    // question the height raises — how big it is, then how long it stays.
+    rows.push(SettingsRow::QuakeHeight);
+    rows.push(SettingsRow::QuakeDismiss);
     // Second from last on its page, because it is the only row here that changes
     // something **outside this window**: the three above it say how Folio
     // behaves, and this one says what another program's menu contains.
@@ -4435,6 +4493,23 @@ pub struct SettingsValues {
     /// and the file this verb would send to the bin is the one whose colours
     /// are on screen.
     pub scheme_in_force_is_user_file: bool,
+    /// How much of the screen the summoned terminal covers, 20–100 whole
+    /// percent (§7.54).
+    pub quake_height: u8,
+    /// Whether it goes away when the keyboard leaves it.
+    pub quake_dismiss_on_blur: bool,
+    /// **Whether another program already holds the chord that summons it.**
+    ///
+    /// A fact about the machine and not about the file, which is why it is read
+    /// here beside `acrylic_available` rather than off the settings: Windows
+    /// hands one chord to one claimant, and the claim is refused at the moment it
+    /// is made. `true` turns the height row's sentence into the reason, on
+    /// [`Self::acrylic_available`]'s own arrangement.
+    ///
+    /// It is also what a **second** copy of this program sees, always: the
+    /// running one holds the chord, and the row is where that stops being
+    /// mysterious.
+    pub quake_hotkey_taken: bool,
 }
 
 #[cfg(test)]
@@ -4496,6 +4571,9 @@ impl SettingsValues {
             background_opacity: bt_persist::DEFAULT_BACKGROUND_OPACITY,
             acrylic: false,
             always_on_top: false,
+            quake_height: bt_persist::DEFAULT_QUAKE_HEIGHT,
+            quake_dismiss_on_blur: true,
+            quake_hotkey_taken: false,
             // Both capabilities present, for `profile_available`'s reason: a
             // geometry test must not quietly become a test of which Windows the
             // suite is running on. The tests that are *about* the greying inject
@@ -7633,6 +7711,18 @@ pub fn acrylic_requested(target: SettingsTarget) -> Option<bool> {
 pub fn always_on_top_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::AlwaysOnTop, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Whether the summoned terminal goes away when the keyboard leaves it, as a
+/// press on its picker (§7.54).
+#[must_use]
+pub fn quake_dismiss_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::QuakeDismiss, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -17830,17 +17920,22 @@ mod tests {
     fn the_capped_dialog_holds_every_everyday_page_and_only_the_long_ones_scroll() {
         // **`Appearance` is no longer in this list** (2026-08-21). `shaped`
         // builds the page with the tabs across the top, where `Appearance` held
-        // eight everyday rows and fit; §7.1.6b′ made nine under the rail and this
+        // eight everyday rows and fit; §7.1.6b′ made nine under the rail and that
         // day's card-height row made nine across the top too, so even the
         // horizontal page now overflows the cap and joins the two things below
-        // the fold. The pages that still fit are the three short ones, and the
-        // cap itself is still derived from `Appearance` — the tallest — so the
-        // frame is 600 for every page including the ones that overflow it.
-        for category in [
-            SettingsCategory::General,
-            SettingsCategory::Terminal,
-            SettingsCategory::RenderedBlocks,
-        ] {
+        // the fold.
+        //
+        // **And `General` is no longer in it either** (2026-09-02, §7.54). The
+        // summoned terminal's two rows are the eighth and ninth on that page, and
+        // nine rows is what the cap stopped holding the day `Appearance` reached
+        // it — the same arithmetic, on the second page to reach the same number.
+        // It is a consequence and not a regression: the cap is
+        // `DIALOG_MAX_HEIGHT_LOGICAL_PX`'s own sentence — *"a page that one day
+        // grows past 600 must scroll rather than swallow the window"* — and this
+        // is a page having that day. The frame is still 600 for every page,
+        // including the ones that overflow it, and the sweep below still holds
+        // every page that does fit to fitting whole.
+        for category in [SettingsCategory::Terminal, SettingsCategory::RenderedBlocks] {
             let placed = shaped(category, AdvancedOpen::default(), None);
             assert_eq!(
                 height(placed.frame),
@@ -20583,6 +20678,56 @@ mod tests {
         );
     }
 
+    /// RED (§7.54) — **a summon nobody can call up says so on its own row, and
+    /// says nothing when the key is fine.**
+    ///
+    /// The fourth refusal, and the one place it is said. `chord_verdict` cannot
+    /// carry it — it is not a fact about the table but about what another program
+    /// on this machine has already taken — so the row the window is described by
+    /// carries it instead, on `DescAcrylicUnavailable`'s own arrangement.
+    ///
+    /// MUTATION: drop the conditional and a reader whose chord Windows refused
+    /// reads a row describing a window that will never appear, with nothing
+    /// anywhere saying why. Put the sentence on unconditionally and a working
+    /// summon accuses an innocent program.
+    #[test]
+    fn a_summon_no_key_can_reach_says_so_where_the_window_is_described() {
+        let mut values = SettingsValues::sample();
+        assert!(!values.quake_hotkey_taken);
+        assert_eq!(
+            SettingsRow::QuakeHeight.description(&values),
+            Text::DescQuakeHeight.text(),
+            "a claim nobody refused describes the window"
+        );
+        values.quake_hotkey_taken = true;
+        assert_eq!(
+            SettingsRow::QuakeHeight.description(&values),
+            Text::DescQuakeHotkeyTaken.text(),
+            "and a refused one says why instead"
+        );
+        assert_eq!(
+            SettingsRow::QuakeDismiss.description(&values),
+            Text::DescQuakeDismiss.text(),
+            "the row below it is not the place the reason belongs — one muted \
+             line under one title, said once"
+        );
+        // And the height row is a slider over the range the file's floor names,
+        // which is what makes a hand-edited `settings.json` land somewhere a
+        // person can see.
+        let range = SettingsRow::QuakeHeight
+            .control()
+            .range()
+            .expect("the height is a percentage, so it is a slider");
+        assert_eq!(range.min, bt_persist::MINIMUM_QUAKE_HEIGHT);
+        assert_eq!(range.max, 100);
+        let mut hand_edited = SettingsValues::sample();
+        hand_edited.quake_height = 3;
+        assert_eq!(
+            SettingsRow::QuakeHeight.slider_value(&hand_edited),
+            Some(bt_persist::MINIMUM_QUAKE_HEIGHT)
+        );
+    }
+
     /// PIN (Q191, mock-up 5644): `$("row-railmode").style.display =
     /// state.layoutMode === "vertical" ? "" : "none"` — Sidebar is a dependent
     /// of Tab layout and is not in the dialog at all while the tabs run across
@@ -20626,6 +20771,8 @@ mod tests {
                 SettingsRow::GitPanel,
                 SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
+                SettingsRow::QuakeHeight,
+                SettingsRow::QuakeDismiss,
                 SettingsRow::ContextMenu,
                 // Last on General: the only row in the dialog that reaches off
                 // the machine (§7.51).
@@ -20672,6 +20819,8 @@ mod tests {
                 SettingsRow::GitPanel,
                 SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
+                SettingsRow::QuakeHeight,
+                SettingsRow::QuakeDismiss,
                 SettingsRow::ContextMenu,
                 // Last on General: the only row in the dialog that reaches off
                 // the machine (§7.51).
@@ -21696,14 +21845,15 @@ mod tests {
         lacking.default_profile = profiles::fallback_profile();
 
         let mut panel = keyboarded_on(SettingsRow::DefaultProfile.category());
-        // `End` and then two steps back: `Update check` closes this page
-        // (§7.51), `Explorer context menu` stands above it (§7.4), and
-        // `Default profile` above that. The assertion below is what keeps the
-        // presses honest — a page reordered under this test lands the ring
-        // somewhere else and says so.
+        // `End` and then four steps back: `Update check` closes this page
+        // (§7.51), `Explorer context menu` stands above it (§7.4), the summoned
+        // terminal's two stand above that (§7.54), and `Default profile` above
+        // them. The assertion below is what keeps the presses honest — a page
+        // reordered under this test lands the ring somewhere else and says so.
         panel.key(SettingsKey::End, content(&flat, &lines), &lacking);
-        panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
-        panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
+        for _ in 0..4 {
+            panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
+        }
         assert_eq!(
             panel.focus(),
             Some(SettingsTarget::Combo(SettingsRow::DefaultProfile))

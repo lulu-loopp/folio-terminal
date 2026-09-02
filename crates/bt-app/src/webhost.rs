@@ -539,7 +539,12 @@ pub(crate) fn claims_chord(
 }
 
 /// The Win32 virtual key a chord's key half is pressed on **this layout**.
-fn chord_virtual_key(key: &ChordKey) -> Option<u16> {
+///
+/// `pub(crate)` since the summoned terminal (§7.54): a chord claimed from
+/// Windows with `RegisterHotKey` needs exactly this answer, and a second reader
+/// of the same question would be a second opinion about which key a chord is —
+/// see `quake::hotkey_for`.
+pub(crate) fn chord_virtual_key(key: &ChordKey) -> Option<u16> {
     match key {
         ChordKey::Character(text) => {
             // Asked of the layout rather than of a table: `Alt+Shift+-` is

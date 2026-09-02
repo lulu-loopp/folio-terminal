@@ -32,7 +32,11 @@ use crate::layout::LayoutNodeV1;
 /// one that was closed. The consequence is stated rather than hidden: **a URL carrying a session
 /// token is stored in the clear**, and a restore whose token has expired lands on a login page,
 /// which is the normal outcome and not a failure of this file.
-pub const SESSION_SCHEMA_VERSION: u32 = 11;
+/// **v12 adds `quake` to a window** (0.2 快捷终端, `docs/DESIGN.md` §7.54): whether this
+/// paragraph describes the one window a global key summons rather than an ordinary one. It is v7's
+/// and v10's shape at the level above them — a fact about the *window's kind* rather than about
+/// what is in it, and one a reader sets once and expects to find again.
+pub const SESSION_SCHEMA_VERSION: u32 = 12;
 
 /// **What a preview row's string names** — schema v11.
 ///
@@ -187,6 +191,42 @@ pub struct SessionWindowV1 {
     pub sidebar_mode: SessionSidebarModeV1,
     pub tabs: Vec<TabV1>,
     pub active_tab: u32,
+    /// **Whether this is the window a global key summons** — schema v12
+    /// (`docs/DESIGN.md` §7.54).
+    ///
+    /// The one fact about a window that is neither its placement nor its
+    /// contents but its *kind*, and it has to be in the file for the reason
+    /// every other durable window fact is: a reader who arranged a quake
+    /// terminal and quit expects the next launch to have one, and a document
+    /// that recorded only its tabs would bring it back as an ordinary window
+    /// standing across the top of the screen.
+    ///
+    /// **Its placement is written and never read.** `placement` above says where
+    /// the window was, because `window_snapshot` writes one paragraph for every
+    /// window and does not special-case this one; but a summon computes its
+    /// rectangle afresh from the monitor the pointer is over, every time, so the
+    /// saved corner is a record and not an instruction. See
+    /// `bt_app::quake::summoned_rect`.
+    ///
+    /// `#[serde(default)]` is `false`, which is what every window in every
+    /// document before v12 was: the flag's absence and "an ordinary window" are
+    /// the same sentence, so no v11 document has to be rewritten to mean what it
+    /// already meant.
+    #[serde(default, skip_serializing_if = "is_not_quake")]
+    pub quake: bool,
+}
+
+/// Whether this window's kind is the one that is not written down.
+///
+/// [`PreviewSourceV1::is_file`]'s rule at the level above it: a document with no
+/// quake window in it is byte for byte the document a v11 build wrote, so the
+/// key appears only on the window it is true of.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "`skip_serializing_if` hands serde a reference to the field"
+)]
+fn is_not_quake(quake: &bool) -> bool {
+    !*quake
 }
 
 impl SessionV1 {

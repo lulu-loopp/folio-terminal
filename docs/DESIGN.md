@@ -6476,3 +6476,70 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 **存盘那一侧这次是被证伪的,如实写。** 怀疑 A(最小化时把 `-32000` 或它派生的 314x50 存了盘)在这份代码上**不成立**:`window_snapshot` 先问姿态,`WindowPosture::Minimized` 根本不去读 `GetWindowRect`,而 `recorded_window_placement` 把上一次的真矩形交回去;`quitting_while_minimized_starts_again_at_the_rectangle_the_user_chose` 从 2026-08-10 起就按着这一条。第一扇窗的 `window_pictures` 在开窗处就用恢复出来的 `SessionWindowV1` 播过种,所以「一扇恢复出来的窗还没来得及照第一张相就被最小化」也拿不到占位。
 
 **但顺着那条 fallback 链往下查,尽头上还有一个洞,一并补了。** 「上一次说过的话」的兜底是 `WindowStateV1::default()`——100,100,1280,800——而那是「**根本没有上一次会话**」的答案,不是「**这扇窗还没照过相**」的答案。**第二扇窗恰好就是后者**:`Runtime::open_window` 从不播种,而一扇从文件里恢复出来、一出生就是 maximized 的第二扇窗,它的第一张相没有可量的 normal 矩形,于是文件里为它记的角与尺寸在**它之后的第一次启动**就被换成了那个占位。`resumed` 那一句 `window_pictures: vec![(window.id(), opening.clone())]` 就是第一扇窗从没中招的原因;现在另一扇门也说同一句话,用它唯一能说的形式——**它正站着的那个矩形**,而对一扇恢复出来的窗,那正是存下来的那个。三行的先后就是全部:先入库、再造 runtime、再在**还没 `SW_MAXIMIZE`** 之前照第一张全相。红门 `a_window_is_in_the_vault_before_it_is_asked_what_it_looks_like` 按住这个先后(变异:删掉 `record_window`,或把它挪到 `new_window_runtime` 之后;把第一张相挪到 `show_new_window` 之后则第二条断言红)。**明账**:这一条只在多窗下才伤人,而它是照着「一个没有自己矩形的姿态,兜底应当是这扇窗开在哪里,而不是产品的占位」这句话修的——这句话现在两扇门都遵守。
+
+### 7.54 一扇没人能看见的窗才需要一把不在任何窗里的钥匙:快捷终端(0.2 功能单,2026-09-02,已落地;`crates/bt-platform/src/hotkey.rs`(新)、`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/quake.rs`(新)、`crates/bt-app/src/{main,settings,shortcuts,i18n,webhost}.rs`、`crates/bt-persist/src/{session,settings,migrate,lib}.rs`)
+
+**它是一扇普通的窗,只有三件事不普通。** 有自己的 tab 与 pane,进 `windows[]`,窗里的每一个动词照常。不普通的那三件写在 `crates/bt-app/src/quake.rs` 的头上,这一节是它们的理由。
+
+**① 它是从外面被叫的,所以钥匙不在这张表里读。** 一把在别的程序占着键盘时还要生效的键,不可能靠「窗口收到按键 → 查 `BINDINGS`」来到;它必须向 Windows **认领**(`RegisterHotKey`)。而认领来的和弦是从输入流里被**摘走**的——任何窗口都拿不到,包括我们自己的——这就是为什么 `Action::SummonQuake` 这一行的键平时根本不走 `Shortcuts::lookup`。
+
+那它为什么还是一行?两个理由其实是同一个。录制面板读的是这张表,所以**没有行就没人能绑**;而认领**可能被拒**——别的程序先拿了这把键,而本程序的第二份实例**永远**会被拒——被拒之后那把键就照常送到聚焦着的窗口,这一行就是接住它的那个。两条路是关于一把和弦的一句话,不是兜底:表里有这一行,就说明这个窗口认这把键;在哪里读到它,取决于谁认领成功。
+
+**出厂不绑,而且这是全书里这条规矩最强的一次。** `Action::SummonPip` 的裁决写着「2026 年 7 月的教训是:替用户选一把 summon 键,就是多选了一把」。一把在别的程序里也生效的键把这句话推到极限:一个默认值就是本程序从别人的编辑器里拿走一把键。所以出厂什么都不绑,`summon-quake` 是 `BINDINGS` 里唯一一行「有机器、没钥匙」的行(`is_pending` 不认它——机器在这里了)。
+
+**② 它的矩形是算出来的,从来不是记住的。** 每一次呼出都现读**鼠标所在那块屏**的工作区,横贯它,取工作区高度的那个百分比(`quake::summoned_rect`,纯函数,三枚钉子)。工作区而不是显示器:任务栏是屏幕上唯一一件「也永远在最前」的东西,一扇横在顶栏任务栏那块屏顶部的终端会开在它下面。左右不夹逼,因为横贯就是这扇窗的形状——没有宽度设置,也不会有。
+
+**它存下来的矩形写了但从不读回。** `window_snapshot` 为每一扇窗写同一段,不为这一扇开特例;而两块屏的人是在自己正干活的那块屏上按键的,从文件里取一个角就是把它开在昨天干活的那块屏上。所以 session 里那个 `placement` 对这扇窗是一份记录,不是一条指令。
+
+**③ 它是被藏起来而不是被关掉的。** 两次呼出之间它是一扇活窗,身上挂着 `set_visible(false)`:第二次呼出因此是瞬时的,pane 里的 build 在没人看的时候照跑。**于是它在恢复时也是生下来就藏着的**,并且**完全不参加恢复提示的选举**——那张卡问的是「要不要把你其他的 tab 打开」,问的是读者马上会看见的窗;一扇按键才出现的窗,读者看不见,也就无从回答。`plan_windows` 在选举开始之前就把它拎出去(`WindowLaunchPlan::quake`),所以下面那段选举的代码和从前一字不差。
+
+**热键是线程的事,不是窗的事。** `RegisterHotKey(None, …)` 把 `WM_HOTKEY` 投到**调用线程**的队列里,`UnregisterHotKey` 也只有那条线程能调——所以 `GlobalHotkey` 既不 `Send` 也不 `Sync`,一份跑到别的线程上的认领是一把到进程结束都放不掉的键。挂在窗口的 `HWND` 上则会死得更难看:这扇窗被读者关掉时认领就跟着没了,**召唤它的那把键留在了它自己手里**。
+
+`MOD_NOREPEAT` 是这条路上唯一一个「不写就错」的位:这把键的动词是**切换**,按住半秒会以键盘重复率显隐十几次,最后停在手指抬起那一刻的奇偶上。
+
+**闸门只认三件事同时成立的消息。** `WM_HOTKEY` 是**线程消息**——hwnd 为 0——所以带窗口的那些是别人的,必须原样放行;`wparam` 是认领时给的 id。`bt_platform::hotkey::is_our_hotkey` 是这三条的纯函数版本,钉在测试里,理由和 `is_system_preference_message` 一样:钩子里的判断是会错的那一半,而钩子不是测试进得去的地方。
+
+**为什么绕开 `ApplicationHandler`。** 一条没有窗口的消息永远到不了窗口过程,`ApplicationHandler` 通篇是关于窗口的,所以它没有任何一格能接住这个。winit 自己的 `PeekMessageW` 循环是它唯一经过的地方,`EventLoopBuilderExtWindows::with_msg_hook` 是那个循环上的门。钩子**只 wake**——`SystemSettingsWatch` 的纪律在第二扇门上、而且理由更强:它跑在 winit 还没为这一转决定任何事情之前,手上没有任何借用。往哪边走是读到那一位的那一转决定的(`FolioApp::settle_quake`)。钩子本身住在 `bt-platform`,因为读一个裸 `MSG` 是 `unsafe`,而 `bt-app` 在工作区的 `unsafe_code = "deny"` 之下。
+
+**归还前台是这一片最大的风险,而它有一套配方。** Windows 拒绝一个不在前台的进程调 `SetForegroundWindow`,而且**用返回 `false` 来拒绝**,不抛。`AttachThreadInput` 挂上前台线程的输入队列是文档里那条合法绕法,`scripts/release/smoke.ps1` 与 `scripts/dev/ui-probe.ps1` 从八月起就在真窗上用它。搬进 `bt_platform::hotkey::give_foreground_to` 时改了一件事:**脚本每次之间睡 400ms,这里一次都不睡**——脚本是在拍照,一张半途的照片没用;这里跑在事件循环自己的线程上,400 毫秒的睡眠就是 400 毫秒不答键盘、不出帧、不读 shell,比前台跑掉严重得多。结果**读回来**核对,不假设。
+
+**失败对读者是静默的。** 前台锁不是人能做点什么的东西,为它在别人的编辑器上弹一张卡,比它报告的那件事更打扰。日志里有一行 `BT_QUAKE`。
+
+**顺序上有两条不能反。** 呼出时**先读前台再显示**——显示之后就没得读了,前台就是这扇窗;收起时**先藏窗再交还**——一扇前台窗被藏起来的那一刻 Windows 会自己把前台给某个东西,先交还会被那一下抹掉。
+
+**失焦收起是一位和一转,不是当场动手。** 在「窗口失去焦点」这个事件里去藏窗,是在 Windows 正告诉你焦点的时候请它改焦点。所以 `Focused(false)` 那格只置一位,下一转的 `settle_quake` 花掉它——和这扇窗其他所有出格的动作花在同一个地方。开关是在花的时候读的、不是在置位的时候读的:那一格知道的事实是「键盘走了」,这句话不因为开关怎么摆而改变。
+
+**姿态是按窗读的,不是按设置读的。** `dress_new_window` 从前问的是全局的 `always_on_top`;现在它先问这扇窗是不是被召唤的那一扇。一扇跑到编辑器**后面**去的快捷终端等于没出来,所以这一行对这一扇窗没有投票权。反过来,`apply_always_on_top` 也不碰它——偏好照写(那是整个程序的),但从这扇窗里把「总在最前」关掉的读者,关掉的会是让它出现时看得见的那件事。
+
+**认领每一转对账,几乎从不重问。** 三扇门能移动这把和弦(录制器、手改 `keybindings.json`、`Restore all defaults`),一句「每转读表」把三扇一起覆盖了;和 `claimed_for` 一比,平常那一转什么也不做。**被拒是记住而不是重试**:只要第一份实例还在跑,Windows 就会对第二份一直说 `ERROR_HOTKEY_ALREADY_REGISTERED`,每转再问一次就是每秒六十次系统调用去听同一句话。
+
+**「第二份实例静默、但设置页看得见」就是这么落的。** 拒绝不弹任何东西;General 页「快捷终端高度」那一行的说明句换成 `Another program is already using the key that summons it.`——`DescAcrylicUnavailable` 那套排布的第三例,理由也是那一条:标题下面只有一行淡字,而一扇没有键能叫出来的窗,那一行只有一件事值得说。它落在高度那一行而不是开关那一行,因为那是这一对里读者眼睛先到的一行,而它报告的事对两行都成立。
+
+**schema。** `session.json` 走到 **v12**:`SessionWindowV1` 多一个 `quake`,`#[serde(default)]` 是 `false`——v12 之前每一扇窗都是那个意思,所以没有哪份 v11 文档需要被改写才能表达它本来就在表达的事;`skip_serializing_if` 让一份没有快捷终端的 v12 文档与它来自的那份 v11 文档逐字节相同。迁移函数只升版本号(规则 3)。版本号本身仍然欠着,而且这里比 v11 那次更实:一个 v11 的 build 读到 v12 文档会把这扇窗当普通窗打开——看得见、站在存下来的矩形上、没有键能收起它——那不是人能诊断出来的误读,版本号是把它变成 §5.4 那句「这份文件是更新的 Folio 写的」的东西。
+
+`settings.json` 走到 **v27**,两把钥匙一格:`quake_height`(40)与 `quake_dismiss_on_blur`(on)。一格装两把是这道梯子上的第一次,而它是这里诚实的形状——它们是同一扇窗描述的两半,同一个版本发出去,而 v26.5 是给一份从来没人写过的文档编号。两把都不承接旧习惯、也都不开启任何东西:它们描述的那扇窗在读者绑上一把键之前根本不存在,而召唤出厂不绑。
+
+**失焦收起默认开**,理由是这扇窗按构造在所有窗之上:点回自己编辑器的读者已经说了他要什么,一条留在它前面的横条盖住的正是他刚要求去看的东西。关掉它是为「叫出一个 shell 盯着它干活」这个真实用法留的门,那不是这把键常被按下的理由。
+
+**高度有地板(20%)。** 和 `MINIMUM_BACKGROUND_OPACITY` 同一条道理换一根轴:五分之一屏以下只剩一条 tab 条,下面没有 shell 的位置,一次产出那种东西的召唤读起来就是「窗没开出来」。夹逼在**摆窗的地方**做,不在读文件的门口——`bt_persist` 按设计存它收到的东西。
+
+**红门(变异证在各自的文档注释里)。**
+
+- `bt-platform/src/hotkey.rs`:`every_modifier_reaches_its_own_bit`(换掉 `MOD_ALT`/`MOD_CONTROL` 两个字面量,绑 Ctrl 的和弦按 Alt 注册)、`a_hotkey_never_repeats_while_it_is_held`(去掉 `MOD_NOREPEAT`)、`a_chord_with_no_key_is_refused_before_windows_sees_it`(把 0 号虚拟键放过去)、`only_a_thread_wm_hotkey_carrying_our_id_is_ours`(去掉 `hwnd == 0` 或 id 两条中的任一条)、`the_numbers_written_down_are_the_numbers_windows_publishes`(改这个文件里六个字面量中的任何一个)。
+- `bt-app/src/quake.rs`:`a_summon_spans_the_work_area_and_takes_its_share_of_the_top`(改按显示器算,顶栏任务栏那块屏上它开在任务栏底下)、`a_screen_left_of_the_primary_one_keeps_its_own_negative_origin`(改用虚拟屏,窗横跨所有显示器)、`a_height_no_row_offers_is_clamped_into_the_one_that_is`(去掉夹逼)、`only_a_rival_claim_is_a_sentence_the_dialog_carries`(把所有拒绝都报成「被别的程序占了」)、`a_chord_that_has_not_moved_is_left_alone`(去掉 `reconcile` 顶上的相等判断,每转注销重注册)、`the_window_owed_the_keyboard_is_handed_back_exactly_once`(不清 `give_back`,第二次收起把键盘交给第一次呼出前那扇早就关了的窗)、`a_blur_is_taken_once_and_showing_the_window_clears_it`(在事件里直接藏窗)。
+- `bt-platform/src/lib.rs`:`stand_window_at` 本身需要一扇真窗，所以按的是调用地——把 `show_quake_window` 里的它换回 `set_window_outer_rect(hwnd, rect)`，`a_summoned_window_is_not_shown_by_the_door_that_opens_it` 当场红（已实验）。
+- `bt-app/src/main.rs`:`a_summoned_window_is_not_shown_by_the_door_that_opens_it`(拆掉 `open_window` 里那半个条件,恢复出来的快捷终端一启动就横在屏幕顶上)、`the_summoned_window_takes_no_part_in_the_restore_election`(拆掉 `plan_windows` 的分流,那扇窗成为第一扇打开的窗或进恢复提示)。
+- `bt-persist`:`real_session_v11_to_v12_migration_takes_the_number_and_leaves_every_window_ordinary`(在迁移里插 `"quake": true`,旧文件里每扇窗都变成没人找得到的隐藏条)、`real_settings_v26_to_v27_migration_writes_the_summoned_windows_two_keys`(漏掉任一个 `insert`)。
+
+**实机抬出来的那一条：跨 DPI 屏的召唤矩形真的被改了，而改它的正是 §7.50 自己那条裁决。** 开工单里写着「留意」，它真的在那里。其他每一个调用 `set_window_outer_rect` 的人都是把窗摆在**它已经所在的那块屏**上；召唤不是——它按鼠标在哪块屏就报哪块屏的矩形，于是那一次 `SetWindowPos` 不是一次移动，而是**引发 `WM_DPICHANGED` 的那件事**。接下来 §7.50 的裁决逐字生效：那条消息期间系统说的矩形就是这扇窗要站的矩形，而我们自己那一次请求也被解析到了它身上。**实测（本机，2026-09-02）**：站在 192 dpi 上向 144 dpi 那块屏要 `1920x432`，落成 `1440x324`——恰好四分之三；站在 144 上向 192 那块要 `3840x864`，落成 `5120x1152`——恰好四分之三的倒数。主屏（同 dpi）一像素不差。
+
+**修法是再说一遍，不是换个说法。** 不和那条裁决打架：第一次陈述确实落在一次 dpi 变化里，那一段时间里 Windows 确实比我们更有资格回答。第二次陈述发在那条消息已经被答完之后，窗已经在目标屏上、以目标 dpi 站着，于是它不再引发任何消息，也就没有任何东西来挖它。`bt_platform::stand_window_at` 是这句话：说一遍、`GetWindowRect` 读回来对一遍，不对就再说，上限三次（一次是同屏的常态，二次是跨缝的常态，第三次留给“第二次之后仍旧横跨两屏”那一种）。**读回来对**是关键：没有它，三次就只是一个迷信。三次之后仍不对，写一行 `BT_QUAKE` 然后照常把窗放出来：它总得站在某处，而一次偏了几像素的召唤远好过一次拒绝下来的召唤。
+
+**实机三项的读数。** 这台机器三块屏：`2880×1800 @192`（主）、`3840×2160 @192`（work 在 `-3840,-176`）、`1920×1080 @144`（work 在 `-2885,1984`）。
+① **归还前台**（隔离 `APPDATA`、`Ctrl+Shift+F9` 绑在 `keybindings.json`、对面窗是 `charmap.exe`）。**程序自己的读回是权威的那一份**——`give_foreground_to` 就是 `SetForegroundWindow` 之后立即 `GetForegroundWindow` 对一遍——修后一跑 **11 次召唤，`could not take the keyboard` 0 行、`could not be handed back` 0 行**；另一跑控制得更死的五轮外部对账 **5/5**（每轮 `before=2297364 → summoned=331444（took_keyboard=True）→ after=2297364`）。**不好看的那一跑也写上**：八轮快节奏重复测到 6/8，两次失败都是探针在它采样的那一瞬没看到召唤窗拿着前台，而同一跑的日志里程序一行失败也没报——三个进程（探针、charmap、folio）同时用 `AttachThreadInput` 抢前台，那个中间态是探针的而不是产品的。**这一条值得一双人眼再走一遍**，判据就是那两行日志。
+② **闪帧：10 轮显隐 × 每轮 10 张截图 = 100 帧，均亮度最小值与最大值相等（都是 0.9894）**——一帧也没偏离稳态，既无黑帧也无白帧。（那个 0.99 是亮色主题下终端本身的亮度，不是白闪。）**局限写明**：`CopyFromScreen` 一张要十几毫秒，一帧级的闪可能拍不到；结构上不应当有，因为 `show_quake_window` 把两次 present 都放在 `set_visible(true)` **之前**，这正是启动那扇门一直在用的顺序。
+③ **跨 DPI：修前三块屏中两块 FAIL（上面那两个比例），修后三块全 PASS**：`GetWindowRect` 与 `BT_QUAKE` 那一行请求的矩形逐位相等。
+
+**一扇没人能看见的窗不能把进程护着。** 这是本片自己引入的唯一真风险，写在这里。快捷终端是这个程序能拿在手里的唯一一扇「既不在屏上、也不在退场中」的窗。读者关掉自己看得见的最后一扇窗之后，剩下就是一个留在任务列表里、屏上无物、任务栏上无按钮的 `folio.exe`，而回去的路只剩一把他可能几周前绑的键。所以 `open_window_count` 把它排除在外——那句注释本来就写着「没有一扇是人看得见、移得进 tab、关得掉的窗」，这只是把同一条标准用到了第二种情形上——而它在最后一扇可见窗被告知的那一转跟着走，走的是每一扇窗都走的那扇门（`close_window(true)`）。**它一点东西也不会丢**：它的那一段和每一扇窗一样写进了文档，下一次启动它带着原样回来。红门 `a_window_nobody_can_see_does_not_keep_the_run_alive`（变异：拆掉 `open_window_count` 那个 filter，最后一扇可见窗的关闭不再是一次运行的结束，它把自己归了 Recent 而进程不退；拆掉 `close` 里的那一句，数对了却没人告诉它）。**明账**：想要一个常驻的快捷终端的人会发现它随最后一扇窗一起走，那需要的是一枚托盘图标而不是一扇看不见的窗，本单不做。
+
+**没做的:下拉动画。** 第一刀直切显隐,先量闪帧。理由是量得到:一扇透明、置顶、反复显隐的窗到底有没有黑白帧,是一件用真机看得出来的事,而一条动画会把它盖住。

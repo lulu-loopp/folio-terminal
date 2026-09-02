@@ -175,7 +175,19 @@ use serde::{Deserialize, Serialize};
 /// (`docs/PRIVACY.md`). It lands the way v13-v16, v19 and v21 did — a default chosen for a thing
 /// that did not exist before, stated here so that the choice is a decision somebody reads rather
 /// than `bool::default()` answering by accident.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 26;
+///
+/// **v27 carries the two keys the quake terminal has** (0.2 shortcut terminal, `docs/DESIGN.md`
+/// §7.54): `quake_height`, how much of the monitor's work area the summoned window covers, and
+/// `quake_dismiss_on_blur`, whether it goes away when the keyboard leaves it. One bump for two
+/// keys, because they arrive together and a rung is a rung — `SETTINGS_MIGRATIONS` is the only map
+/// of the road from an old file to this one, and two steps for one release would put a version
+/// number on a document nobody ever wrote.
+///
+/// Both land the v13-v16 way: a default chosen for a thing that did not exist before. `quake_height`
+/// is 40 percent, which is what the window opens as until somebody moves it; `quake_dismiss_on_blur`
+/// is **on**, because a terminal that hangs across the top of the screen after you have clicked back
+/// into your editor is a terminal covering the thing you clicked into.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 27;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -274,6 +286,25 @@ pub const DEFAULT_BACKGROUND_OPACITY: u8 = 100;
 /// made unreadable.
 pub const MINIMUM_BACKGROUND_OPACITY: u8 = 30;
 
+/// **How much of the monitor's work area a summoned terminal covers**, as a whole
+/// percentage, when nobody has said otherwise (v27, `docs/DESIGN.md` §7.54).
+///
+/// Forty, which is the proportion the window has to be to be worth summoning:
+/// tall enough that a command's output does not scroll away as it arrives, and
+/// short enough that the window it came down over is still readable underneath —
+/// which is the whole reason a person reaches for this shape rather than opening
+/// an ordinary window.
+pub const DEFAULT_QUAKE_HEIGHT: u8 = 40;
+
+/// The floor under [`DEFAULT_QUAKE_HEIGHT`].
+///
+/// Twenty percent, and a floor rather than zero for [`MINIMUM_BACKGROUND_OPACITY`]'s
+/// reason turned on a different axis: below about a fifth of a screen the window
+/// is a strip with a tab bar and no room for a shell under it, and a summon that
+/// produced one would read as a window that failed to open. There is no setting
+/// from which this window can be made useless.
+pub const MINIMUM_QUAKE_HEIGHT: u8 = 20;
+
 /// The height cap a `settings.json` that has never named one is read as: **none**.
 ///
 /// Zero is the value and "no limit" is the sentence, and it is the default because it is what
@@ -339,7 +370,9 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "turn_end_notification": true | false,
 ///   "cards_gesture_hint_offer": true | false,
 ///   "copy_on_select": true | false,
-///   "update_check": true | false
+///   "update_check": true | false,
+///   "quake_height": 20..=100,
+///   "quake_dismiss_on_blur": true | false
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -857,6 +890,29 @@ pub struct SettingsV1 {
     /// quieter check — there is no check.
     #[serde(default = "default_update_check")]
     pub update_check: bool,
+    /// **How much of the monitor's work area the summoned terminal covers**, as a whole
+    /// percentage of its height (v27, `docs/DESIGN.md` §7.54).
+    ///
+    /// A percentage and not a pixel count, because the window this describes is not placed by a
+    /// hand: it is computed afresh at every summon against whichever monitor the pointer is over,
+    /// and a height in pixels would mean one thing on the laptop panel and another on the desk
+    /// screen. The width is not a setting at all — the window spans the work area, which is what
+    /// makes it the shape it is.
+    ///
+    /// Out-of-range values are the reader's problem and not this crate's, on
+    /// [`Self::background_image_opacity`]'s own terms: a file written by hand may say 400, and the
+    /// answer is to clamp at the surface that has to place the window.
+    #[serde(default = "default_quake_height")]
+    pub quake_height: u8,
+    /// **Whether the summoned terminal goes away when the keyboard leaves it** (v27).
+    ///
+    /// On, because the window is above every other window by construction: a reader who clicks
+    /// back into the editor they summoned the terminal over has said what they want, and a strip
+    /// that stays in front of it afterwards is covering the thing they just asked to look at. Off
+    /// is for the reader who summons a shell to watch it while they work — a real use, which is
+    /// why the row exists, and not the one the key is usually pressed for.
+    #[serde(default = "default_quake_dismiss_on_blur")]
+    pub quake_dismiss_on_blur: bool,
 }
 
 /// `serde`'s door for a v14 key that is missing from a file this build is reading.
@@ -866,6 +922,22 @@ pub struct SettingsV1 {
 /// come back as a pane that keeps nothing.
 fn default_scrollback_lines() -> u32 {
     DEFAULT_SCROLLBACK_LINES
+}
+
+/// `serde`'s door for the v27 height key, missing from every file written before it.
+///
+/// A function and not `#[serde(default)]`, for [`default_scrollback_lines`]'s reason: a `u8`'s own
+/// default is `0`, and a window nought percent of the screen tall is not a smaller window, it is
+/// no window at all.
+fn default_quake_height() -> u8 {
+    DEFAULT_QUAKE_HEIGHT
+}
+
+/// And the v27 dismissal key. A function because the answer is `true` and `bool::default()` is
+/// `false` — a file that had lost this key would come back with a terminal standing in front of
+/// whatever the reader turned to next.
+fn default_quake_dismiss_on_blur() -> bool {
+    true
 }
 
 /// `serde`'s door for a v15 key missing from a file this build is reading.
@@ -1001,6 +1073,12 @@ impl Default for SettingsV1 {
             copy_on_select: true,
             // A preview has no other way to say that it has been superseded.
             update_check: true,
+            // Tall enough to read a command's output, short enough that the window it came down
+            // over is still there under it.
+            quake_height: DEFAULT_QUAKE_HEIGHT,
+            // A window that is above every other window goes away when the reader turns to one of
+            // them.
+            quake_dismiss_on_blur: true,
         }
     }
 }
