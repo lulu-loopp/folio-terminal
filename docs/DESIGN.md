@@ -6251,7 +6251,6 @@ BT_DPI stage=resized              winit_scale=2   win32_dpi=192 authoritative_sc
 
 **没做的,如实写。** ① **那个「一次拖动里翻十五次」的失控本身没有在这里复现**,复现的是**它每一步的增量**。探针每次都自己指定矩形,于是每一次跨缝都被重新摆正,棘轮攒不起来;而用户那次是**一只手**把窗拖在缝上,每长大一次就重新横跨、再判定一次。要的证据是那圈边框存不存在、有多大——上面那张表把它按住了,失控只是它乘以 N 的后果。② **`stage=size-move-settled` 在这两跑里是 0 行**:`SetWindowPos` 不进 OS 的模态 move/size 循环,`in_size_move` 全程为假,所以裁决二那条路**实机没有被走过**,它由 `a_seam_that_flips_twenty_times_under_one_hand_is_settled_once` 与那条形状钉按住。真手拖动的那一趟留给下一个握着这台机器的人,判据是一行:一次跨屏拖动里 `stage=size-move-settled` **恰好一行**。
 
-<<<<<<< HEAD
 ### 7.51 一条回合结束的通知必须带上 agent 最后说的那句话:管道里从第一天起就没有装那句话的那一格(v0.1.0 用户原话「毫无信息的通知」,已落地;`crates/bt-app/src/{attention_words,attention_map,attention_wire,attention_hooks,cli,main}.rs`、`docs/plans/attention/claude-hooks.json`)
 
 **由头。** 装了 hook 的 Claude Code 回合一结束,桌面上弹出的是:第一行 tab 名+目录,第二行 `Turn finished`。用户看完发布版的第一批反馈里有这一条,原话是「毫无信息的通知」——而它准确:那两行里没有一个字是关于刚刚发生了什么的。
