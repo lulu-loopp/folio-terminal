@@ -4,7 +4,11 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.1.1-preview (unreleased)
+
+A fixes-and-polish release for 0.1.0-preview. Nothing below changes how anything
+is driven; what changes is what the window tells you, and what it tells the
+programs running inside it.
 
 ### Added
 
@@ -17,6 +21,108 @@ All notable changes to Folio are recorded here. The format follows
   failure is silent. Switch it off at Settings > General > **Update check**, or
   with `"update_check": false` in `settings.json`. What is asked and what is
   stored is written out in [`docs/PRIVACY.md`](docs/PRIVACY.md).
+- **A finished turn says what the agent said.** The notice raised when an agent
+  finishes a turn now carries that agent's own first sentence instead of the
+  words "Turn finished". Claude Code's comes from the transcript its `Stop` hook
+  names, Codex's from the `last-assistant-message` field of the payload it hands
+  its notify command, and a program that supplied its own text through `OSC 9` or
+  `OSC 777` is quoted as it always was. Nothing is read off the screen. The
+  sentence is cut at 80 characters, and a turn that ended without prose — a
+  table, a tool call, nothing at all — raises the notice it used to.
+
+### Changed
+
+- **A window you can see is not interrupted.** When the window holding a waiting
+  agent is somewhere you can see it, a second monitor included, the wait is
+  marked inside that window and nowhere else: no taskbar flash and no message on
+  the desktop. A window covered by another one, minimised, or on another desktop
+  escalates as before, and a pane you are typing in stays silent as before. The
+  description under Turn finished in Settings is worded for this.
+
+### Fixed
+
+- **A picture pane went on showing the file it first read.** An image opened in a
+  pane is now watched on disk like every other kind of file a tab stands on:
+  writing a different file over the same name is a change, and so is deleting it
+  and writing it again. Opening an image always reads the disk rather than a
+  remembered decode, so closing a pane and opening the same name again shows what
+  is there now. The hover card, an image inside a typeset markdown page, and an
+  image torn out into a floating window are fixed by the same change.
+- **A lost graphics device ended the run.** A laptop changing power source makes
+  the driver reset the device, and that used to close the window and every shell
+  in it. The device is now rebuilt where it stood — a new adapter, every window
+  taking the new device — with the sessions, the terminal contents, the layout
+  and the open documents untouched, because none of them were ever on the card.
+  Three failed rebuilds in a row still end the run, as does a device Folio
+  destroys itself. A rebuild writes `Folio rebuilt the GPU device after it was
+  lost (#N)` to `%APPDATA%\Folio\diagnostics.log`, and the first frames after one
+  send their pictures to the card again.
+- **A minimised window left every shell in it two columns wide.** Windows
+  describes a minimised window with the rectangle of its icon — 314x50, parked
+  far off the screen — and that rectangle was being laid out like any other: the
+  panes were solved for it, and a fifth of a second later every pane's ConPTY was
+  told it was two or three columns wide. It stayed that way for as long as the
+  window was minimised, so a shell wrote its output at that width the whole time,
+  and text already wrapped at three columns cannot be unwrapped by a later
+  resize. A minimised window is now refused by its posture rather than by its
+  size, so a window somebody really has dragged down to 314x50 is still a window.
+- **Dragging a divider told the shell every width the hand passed through.** The
+  quiet mark that decides when to tell a shell its new size is reached at every
+  pause in a drag, so a child process was sent the whole tour, the two-column
+  floor included. A hand still on a divider or on the window frame is now told
+  nothing at all: one gesture sends one size, and it is the size at the moment
+  the hand lets go. What is drawn still follows the hand frame by frame, and a
+  change no hand is holding — opening a preview, closing a tab — arrives exactly
+  as it did. `BT_RESIZE_TRACE=1` now prints a line for every size sent to a
+  ConPTY.
+- **A restored window could open below the bottom of the screen.** A size
+  recorded on a larger display was taken as it stood, on the reasoning that a
+  size cannot be off-screen. It is now fitted to the work area of the display it
+  will actually land on — the one that would hold most of it, or the primary
+  display when none would. Fitting only ever makes a window smaller, and a window
+  whose size was not touched keeps the corner it was parked at, half off a
+  monitor included.
+- **A second window's recorded place was replaced by a default one.** Only the
+  first window was told where it had been restored to, so a second window that
+  came back maximised had no plain rectangle of its own to record and was written
+  down at 100,100,1280,800 on the next start. Every window is now recorded at the
+  rectangle it opens at, before it is asked what it looks like.
+- **A floating preview never said that its document had changed on disk.** The
+  `Reload` / `Keep` strip belonged to panes and had no row to stand in inside a
+  floating window, so a reader there was looking at stale text with nothing to
+  say so. A floating preview now keeps a strip of its own under its head, the
+  same height as a pane's, and the body moves down for it rather than being
+  covered by it. `Reload` and `×` mean there what they mean in a pane.
+- **A pane dragged into another window was carried by a blank card.** The
+  stand-in card in the other window's card column drew nothing, while every card
+  beside it drew its own contents. It now draws the pane in the hand, fetched
+  from the window the pane came from once a turn — which is what a hand that
+  crosses the border and then stops needs, a still hand sending no events at all.
+  The first frame after the border can still be empty, and fills in on the next.
+- **A drag held at the foot of the card column could not decide what it was
+  doing.** With the pointer still and the list auto-scrolling under it, the
+  landing changed between dropping into a card and becoming a card of its own,
+  once for every card that went past. The drag was the one reader of that column
+  that had never been told a row cropped away is not a row you can point at; it
+  is now, and so is the vertical tab column. Over one auto-scroll run 407 frames
+  out of 470 named a card that was not on screen; none do now.
+
+### Known issues
+
+- **Not signed.** The first run may raise "Windows protected your PC". Click
+  "More info", check the application named there is `folio.exe`, and click "Run
+  anyway".
+- **"Open Folio here" is not on the first page** of the Windows 11 context menu.
+  That page needs a signed, packaged application, so it waits on signing.
+- **A window saved on a monitor that enumerates late** comes back on the primary
+  display. The displays are counted once, before the window is made, and a second
+  monitor can take a few seconds to appear after a cold start.
+- **A window was once reported drawing its top half black** after a move to a
+  second monitor, unreproduced. Attach `%APPDATA%\Folio\diagnostics.log` if you
+  hit it.
+- **`.webm` needs the VP9 or AV1 Video Extension** from the Microsoft Store. A
+  stock Windows has neither, and without one there is no still and no playback.
+  The other six containers play on a stock Windows.
 
 ## 0.1.0-preview (unreleased)
 

@@ -15,7 +15,7 @@ files preview beside the prompt, and an agent that is waiting for you says so.
 [中文说明](README.zh-CN.md) · [Shortcuts](docs/shortcuts.md) ·
 [Security](SECURITY.md) · [Changes](CHANGELOG.md)
 
-> **Preview.** 0.1.0 is the first public build, and it is not code-signed — see
+> **Preview.** 0.1.1 is a preview build, and it is not code-signed — see
 > [SmartScreen](#smartscreen) below.
 
 ---
@@ -165,7 +165,7 @@ be seen at once.
 
 ## Download
 
-Take `folio-0.1.0-windows-x64.zip` from the releases page, unpack it wherever you
+Take `folio-0.1.1-windows-x64.zip` from the releases page, unpack it wherever you
 keep programs, and run `folio.exe`. There is no installer, and nothing is written
 outside that folder until you run it. `SHA256SUMS.txt` is the hash of what you
 downloaded. Needs **Windows 10 1809 or newer, or Windows 11, 64-bit**.
@@ -177,7 +177,7 @@ everything except the web preview works, and the preview says what is missing.
 
 ## SmartScreen
 
-0.1.0 is not code-signed, so the first run may raise **"Windows protected your
+0.1.1 is not code-signed, so the first run may raise **"Windows protected your
 PC"**. Click **"More info"**, check the app named there is `folio.exe`, and click
 **"Run anyway"**. Do not switch SmartScreen off for this.
 
