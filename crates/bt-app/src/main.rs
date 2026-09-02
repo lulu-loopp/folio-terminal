@@ -85,6 +85,7 @@ mod preview_trace;
 mod preview_watch;
 mod profiles;
 mod psreadline;
+mod quake;
 mod quit;
 mod restore;
 mod scheme_watch;
@@ -405,6 +406,20 @@ enum AppEvent {
     /// answering. The row is applied the instant it is pressed and the picture
     /// arrives behind it, which is what this variant carries.
     BackgroundPictureReady,
+    /// **The chord that summons the terminal was pressed** (§7.54).
+    ///
+    /// The same family as everything above it and its own wake for the purest
+    /// version of their reason: the press did not arrive at any window of this
+    /// process at all. It is a **thread** message, delivered by Windows to the
+    /// loop's own queue while some other program had the keyboard, and the
+    /// message hook that notices it does nothing but this — see the hook in
+    /// `main`, and `quake::Quake` for the two bits it sets.
+    ///
+    /// Carries nothing, on `AttentionSpoke`'s footing: what it says is that a
+    /// press happened, and which way the window goes is decided on the turn that
+    /// reads it rather than by the hook, which is running inside Windows'
+    /// message pump with no borrow of anything.
+    QuakeSummoned,
     /// **A desktop notification was clicked** (§7.6).
     ///
     /// Carries nothing, for [`Self::GitChanged`]'s reason: the launch string is
@@ -8656,6 +8671,13 @@ struct App {
     /// What [`Self::window_ring`] was when the windows were last told, so that
     /// the two that changed are the two that repaint.
     window_ring_shown: Option<WindowId>,
+    /// **The summoned terminal, and the claim on the key that calls it up**
+    /// (§7.54).
+    ///
+    /// On the application and not on a window, because the chord is claimed once
+    /// per *process* — one `RegisterHotKey` on the loop's own thread — and
+    /// because the window it names may not exist yet. See [`quake::Quake`].
+    quake: quake::Quake,
 }
 
 /// **One row of `Move to window ▸`**, before it is words (B9).
@@ -8711,6 +8733,15 @@ struct NewWindowPlan {
     /// See [`TearOut`] for what the errand carries and why the seed tab this
     /// window opens holding is scaffolding.
     receives: Option<TearOut>,
+    /// **Whether this is the window a key summons** (§7.54).
+    ///
+    /// A field of the plan and not a fact discovered afterwards, because three
+    /// things about the window are decided while it is being built and all three
+    /// read it: it stays above other windows whatever the `Always on top` row
+    /// says, it is not put on the screen when the door finishes, and it is
+    /// written into the document as the summoned one. A window told about its own
+    /// kind after it was standing would have been an ordinary window for a frame.
+    quake: bool,
 }
 
 /// **A pane on its way out of its window** (multiwindow slice F1c).
@@ -8753,6 +8784,24 @@ impl NewWindowPlan {
             saved: None,
             ask_about_unpinned: false,
             receives: None,
+            quake: false,
+        }
+    }
+
+    /// **The summoned terminal, opened for the first press of the key** (§7.54).
+    ///
+    /// `like` is `None` and not the window that asked, because nothing asked: the
+    /// press arrived while another program had the keyboard, and there is no
+    /// window whose strip and sidebar this one should be copying. It opens
+    /// wearing the resting shape a window with nothing to inherit opens wearing,
+    /// which is the answer a cold launch already gives.
+    const fn summoned() -> Self {
+        Self {
+            like: None,
+            saved: None,
+            ask_about_unpinned: false,
+            receives: None,
+            quake: true,
         }
     }
 
@@ -8780,6 +8829,7 @@ impl NewWindowPlan {
     fn saved(window: SessionWindowV1) -> Self {
         Self {
             like: None,
+            quake: window.quake,
             saved: Some(Box::new(window)),
             ask_about_unpinned: false,
             receives: None,
@@ -8806,6 +8856,7 @@ impl NewWindowPlan {
             })),
             ask_about_unpinned: false,
             receives: None,
+            quake: false,
         }
     }
 }
@@ -26152,6 +26203,20 @@ struct WindowLaunchPlan {
     queued: Vec<SessionWindowV1>,
     /// Windows the launch has no answer about, waiting on the one question.
     pending: Vec<SessionWindowV1>,
+    /// **The summoned terminal, if the document held one** (§7.54).
+    ///
+    /// Out of the election entirely and not merely at the front of it. The
+    /// question the prompt asks is 「reopen your other tabs?」, and it is asked
+    /// about windows the reader is about to be looking at; a window that opens
+    /// hidden and appears only when a key is pressed is a window they cannot see
+    /// to answer about. So it opens whole — whatever it was holding, pinned or
+    /// not — and says nothing to the card.
+    ///
+    /// One, because this process claims one chord. A hand-edited document naming
+    /// two keeps the first and the rest come back as ordinary windows, which is
+    /// §5.4's per-leaf degradation read at this level: a document that cannot be
+    /// honoured exactly is honoured as far as it goes.
+    quake: Option<SessionWindowV1>,
 }
 
 /// **Every window the file describes** — the ones that are open, in the order
@@ -26190,9 +26255,21 @@ fn session_windows<'a>(
 /// and it is the same one the single-window build already had: the first window
 /// is the one there has to be.
 fn plan_windows(saved: &[SessionWindowV1]) -> WindowLaunchPlan {
-    let mut standing = saved.iter().filter(|window| !window.tabs.is_empty());
-    let pinned = |window: &SessionWindowV1| window.tabs.iter().any(|tab| tab.pinned);
     let mut plan = WindowLaunchPlan::default();
+    // **The summoned window leaves before anything is decided** (§7.54). It is
+    // not the window that opens first, it is not queued behind one, and it is not
+    // a question — so taking it out here is the whole of its bypass, and the
+    // election below reads exactly as it did before there was one.
+    let mut quake = saved.iter().filter(|window| window.quake);
+    plan.quake = quake.next().cloned();
+    let ordinary: Vec<SessionWindowV1> = saved
+        .iter()
+        .filter(|window| !window.quake)
+        .cloned()
+        .chain(quake.cloned())
+        .collect();
+    let mut standing = ordinary.iter().filter(|window| !window.tabs.is_empty());
+    let pinned = |window: &SessionWindowV1| window.tabs.iter().any(|tab| tab.pinned);
     // The first window that has an answer of its own leads; failing that, the
     // first window there is.
     let mut before: Vec<SessionWindowV1> = Vec::new();
@@ -31677,6 +31754,7 @@ impl Runtime<'_> {
             windows_open: Vec::new(),
             window_ring: None,
             window_ring_shown: None,
+            quake: quake::Quake::default(),
         };
         // **The rest of the file's windows, queued at the door.** A window that
         // held a pinned tab opens straight away, through the very same door
@@ -31692,6 +31770,12 @@ impl Runtime<'_> {
                 .iter()
                 .cloned()
                 .map(NewWindowPlan::launched)
+                // **And the summoned one, through the same door and hidden**
+                // (§7.54). `NewWindowPlan::saved` and not `launched`: `launched`
+                // hands the unpinned half of a window to the restore prompt, and
+                // this window is not in that election - it opens holding whatever
+                // it held, because nobody is going to be asked about it.
+                .chain(windows.quake.clone().map(NewWindowPlan::saved))
                 .collect();
             app.pending_restore_windows = windows.pending.clone();
             // **The whole question, in the order it will come back** (ruling ①).
@@ -32157,6 +32241,17 @@ impl Runtime<'_> {
         renderer.set_seat_viewport(terminal_seat);
         let maximized = placement.is_some_and(|placement| placement.maximized);
         let id = window.id();
+        // **Before the window is dressed, because dressing reads it** (§7.54).
+        //
+        // The summoned window's posture is not the `Always on top` row's — it is
+        // above every other window because that is what it is for — and
+        // `dress_new_window` two dozen lines below is where that is said to DWM.
+        // One source of truth for "which window is the summoned one", here, so
+        // that the door, the snapshot, the blur and the row all ask the same
+        // field rather than four copies of a flag.
+        if plan.quake {
+            app.quake.adopt(id);
+        }
         // **This window's own rectangle is in the vault before anything can ask it for one.**
         //
         // [`Runtime::window_snapshot`] measures a rectangle only while a window is *normal*; the
@@ -32252,7 +32347,12 @@ impl Runtime<'_> {
         // which is exactly the state `with_visible(false)` opened it in, and a
         // transfer that is *refused* closes it without it ever having been on the
         // glass.
-        if plan.receives.is_none() {
+        // **And a window a key summons is not shown by its door either** (§7.54),
+        // for the receiving door's reason one step further out: this window is
+        // *born hidden* and stays that way until the press that asked for it is
+        // acted on — which on a restore is a press that may never come. See
+        // `FolioApp::settle_quake`.
+        if plan.receives.is_none() && !plan.quake {
             // Maximized only if the file said this window was: a window a verb
             // asked for is one nobody has told to be.
             runtime.show_new_window(maximized)?;
@@ -32284,7 +32384,13 @@ impl Runtime<'_> {
         // today. Both are best-effort — neither is a reason to refuse to open —
         // and the acrylic call is skipped outright on a Windows that has no such
         // attribute, which is also what greys its row.
-        if self.app.settings_store.loaded().always_on_top
+        // **The posture is read off the window and not off the settings file**
+        // (§7.54). A summoned terminal is above every other window because that
+        // is the whole of what summoning it means — a strip that came down
+        // *behind* the editor it was called over would be a strip nobody can see
+        // — so the row does not get a vote on this one window. Every other window
+        // reads the row, exactly as it always did.
+        if (self.is_quake_window() || self.app.settings_store.loaded().always_on_top)
             && let Err(error) = bt_platform::set_window_topmost(hwnd, true)
         {
             eprintln!("recoverable always-on-top failure: {error}");
@@ -32319,6 +32425,108 @@ impl Runtime<'_> {
     /// Put the window on the screen — the other half of
     /// [`Self::dress_new_window`], with the launch trace between them.
     fn show_new_window(&mut self, maximized: bool) -> Result<()> {
+        self.put_the_window_on_the_glass(maximized)
+    }
+
+    /// **Bring the summoned terminal down over whatever is on the screen**
+    /// (§7.54).
+    ///
+    /// The rectangle is computed **here and now**, every time, and that is the
+    /// whole difference between this door and the one above it. A window opened
+    /// by a verb stands where the verb or the file said; this one stands across
+    /// the top of the work area of the monitor **the pointer is on**, because
+    /// that is the only thing on the desk that says which screen the reader is
+    /// working on. A saved rectangle would put it on the screen they were working
+    /// on yesterday, so its saved rectangle is written and never read — see
+    /// [`quake::summoned_rect`].
+    ///
+    /// **The posture is re-stated.** A window that has been hidden and shown
+    /// again has been through `ShowWindow` twice, and `HWND_TOPMOST` is a place
+    /// in a z-order that other programs are entitled to move. Saying it again
+    /// costs one `SetWindowPos` per summon and is the only thing that makes "it
+    /// comes down in front" true on the twentieth press as well as the first.
+    ///
+    /// **Re-entrant, and that is the requirement rather than a nicety**: this
+    /// runs on every press, and the three things showing a window does — two
+    /// presents, the shown flag and the dpi reconciliation — were written for a
+    /// door that runs once. They are re-entrant because each of them is a
+    /// statement of fact rather than a step: present what is composed, say the
+    /// window has been on the glass, ask Win32 which monitor it is actually on.
+    fn show_quake_window(&mut self) -> Result<()> {
+        let hwnd = window_hwnd(&self.window.window)?;
+        // The pointer, and the window's own monitor when Windows will not say
+        // where the pointer is. Not the virtual screen: a rectangle spanning
+        // every display at once is not this window's shape on any of them.
+        let work = bt_platform::pointer_position()
+            .and_then(|(x, y)| bt_platform::work_area_at(x, y).ok())
+            .or_else(|| bt_platform::get_work_area(hwnd).ok())
+            .unwrap_or_else(bt_platform::virtual_screen_rect);
+        let rect = quake::summoned_rect(work, self.app.settings_store.loaded().quake_height);
+        // One line, on `BT_TEAR_OUT`'s own terms: a summon's rectangle is a
+        // function of two things read off the machine at the moment of the press,
+        // and a photograph of a window in the wrong place cannot say which of
+        // them was wrong. Printed once per summon.
+        eprintln!(
+            "BT_QUAKE work={},{} {}x{} rect={},{} {}x{}",
+            work.left,
+            work.top,
+            work.right - work.left,
+            work.bottom - work.top,
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+        );
+        // **`stand_window_at` and not `set_window_outer_rect`** (§7.54, measured
+        // 2026-09-02). Every other caller places a window on the monitor it is
+        // already on; a summon routinely names a different one, and across a dpi
+        // seam a single `SetWindowPos` is not a move but the thing that raises
+        // `WM_DPICHANGED` — after which §7.50's ruling hands the rectangle to
+        // Windows for the length of that message and the summon's own request is
+        // resolved onto the system's suggestion. See that function for the two
+        // measurements and for why saying it again is the fix.
+        //
+        // A rectangle that would not be taken is said out loud and the window is
+        // shown anyway: it is standing somewhere, and a summon a few pixels off is
+        // enormously better than a summon that refused to come down.
+        if let Err(error) = bt_platform::stand_window_at(hwnd, rect) {
+            eprintln!("BT_QUAKE {error}");
+        }
+        if let Err(error) = bt_platform::set_window_topmost(hwnd, true) {
+            eprintln!("recoverable always-on-top failure: {error}");
+        }
+        // Never maximized: this window's shape *is* the rectangle above, and a
+        // maximize would throw it away for the one Windows keeps.
+        let first_time = !self.window.window_shown;
+        self.put_the_window_on_the_glass(false)?;
+        // The pages of whatever tabs it opened holding, on the launch door's own
+        // terms and for its reason — and only on the summon that first put this
+        // window on the glass, because a controller composes against a window
+        // that has been shown and there has now been one.
+        if first_time {
+            self.revive_all_web_pages()?;
+        }
+        Ok(())
+    }
+
+    /// **Send it back up** (§7.54), and say who is owed the keyboard.
+    ///
+    /// `set_visible(false)` and not a close: the window keeps its tabs, its
+    /// shells and its scrollback, which is what makes the next summon instant and
+    /// what lets a build keep running in it while nobody is looking.
+    ///
+    /// `window_shown` is deliberately **not** cleared. It records that this
+    /// window has been on the glass at least once — which is what the first
+    /// visible present's dpi check reads — and a hidden window is not a window
+    /// that was never shown.
+    fn hide_quake_window(&mut self) -> Option<std::num::NonZeroIsize> {
+        self.window.window.set_visible(false);
+        self.app.quake.hidden()
+    }
+
+    /// The three things showing a window does, said once for the two doors that
+    /// do it.
+    fn put_the_window_on_the_glass(&mut self, maximized: bool) -> Result<()> {
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
@@ -32346,6 +32554,17 @@ impl Runtime<'_> {
             source: FrameSource::Expose,
         })?;
         self.redraw()
+    }
+
+    /// **Whether this window is the one a key summons** (§7.54).
+    ///
+    /// Asked of the application rather than answered by a flag of this window's,
+    /// because there is exactly one summoned window per process and the field
+    /// that names it is the same field the door, the press and the row read. Two
+    /// copies of one identity is two chances for a window to disagree about what
+    /// it is.
+    fn is_quake_window(&self) -> bool {
+        self.app.quake.is_quake(self.window.window.id())
     }
 
     /// The `+`'s verb: a tab on the default profile, which is what the button's
@@ -38102,6 +38321,12 @@ impl Runtime<'_> {
             background_opacity: self.app.settings_store.loaded().background_opacity,
             acrylic: self.app.settings_store.loaded().acrylic,
             always_on_top: self.app.settings_store.loaded().always_on_top,
+            quake_height: self.app.settings_store.loaded().quake_height,
+            quake_dismiss_on_blur: self.app.settings_store.loaded().quake_dismiss_on_blur,
+            // A fact about the machine and not about the file, which is why it is
+            // read off the claim rather than out of the settings - see
+            // `quake::Quake::hotkey_taken`.
+            quake_hotkey_taken: self.app.quake.hotkey_taken(),
             // Both asked of the machine once, at startup, and remembered — see
             // `App::acrylic_available` / `translucency_available`. Asking
             // DWM per frame would be a syscall inside a hover repaint.
@@ -40422,6 +40647,9 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::always_on_top_requested(target) {
             self.apply_always_on_top(enabled)?;
         }
+        if let Some(enabled) = settings::quake_dismiss_requested(target) {
+            self.apply_quake_dismiss(enabled)?;
+        }
         if let settings::SettingsTarget::Advanced(category) = target {
             self.toggle_advanced_group(category)?;
         }
@@ -40630,6 +40858,8 @@ impl Runtime<'_> {
             // `Reset to defaults` on a page is not a licence to change another
             // program's menu.
             | Row::ContextMenu
+            | Row::QuakeHeight
+            | Row::QuakeDismiss
             // Not advanced, and it is on a page whose Advanced group it is not
             // in — but it is named here for this arm's own rule: a row swept
             // into a `_` is a row that silently starts resetting the day
@@ -41895,6 +42125,12 @@ impl Runtime<'_> {
             sidebar_mode: session_sidebar_mode(self.window.rail.mode),
             tabs,
             active_tab: self.window.active_tab as u32,
+            // **The one fact about this window that is neither where it is nor
+            // what is in it** (§7.54). Its placement above is written like every
+            // other window's and is deliberately never read back — a summon
+            // computes its rectangle from the monitor the pointer is on, every
+            // time. See `quake::summoned_rect`.
+            quake: self.is_quake_window(),
         };
         // A question that was never answered is not a "no". Tabs still waiting on
         // the restore prompt go back to the file exactly as they came out of it,
@@ -42868,6 +43104,7 @@ impl Runtime<'_> {
         match row {
             settings::SettingsRow::ImageOpacity => settings.background_image_opacity = value,
             settings::SettingsRow::BackgroundOpacity => settings.background_opacity = value,
+            settings::SettingsRow::QuakeHeight => settings.quake_height = value,
             _ => return Ok(false),
         }
         if &settings == self.app.settings_store.loaded() {
@@ -42946,12 +43183,40 @@ impl Runtime<'_> {
     /// must not steal it.
     fn apply_always_on_top(&mut self, enabled: bool) -> Result<bool> {
         let hwnd = window_hwnd(&self.window.window)?;
-        if let Err(error) = bt_platform::set_window_topmost(hwnd, enabled) {
+        // **The one window the row does not reach** (§7.54). The preference is
+        // still written — it is the application's, and every other window of this
+        // process wears it — but the summoned terminal's own posture is not a
+        // preference: a reader who turned the row off from inside the window a key
+        // calls up would have turned off the thing that makes it visible when it
+        // arrives. Said here rather than by greying the row, because the row is
+        // true of the program and this is one window declining to be its example.
+        if !self.is_quake_window()
+            && let Err(error) = bt_platform::set_window_topmost(hwnd, enabled)
+        {
             eprintln!("recoverable always-on-top failure: {error}");
             return Ok(false);
         }
         let mut settings = self.app.settings_store.loaded().clone();
         settings.always_on_top = enabled;
+        if &settings == self.app.settings_store.loaded() {
+            return Ok(false);
+        }
+        Ok(self.app.settings_store.store(settings))
+    }
+
+    /// Whether the summoned terminal goes away when the keyboard leaves it
+    /// (§7.54).
+    ///
+    /// The plainest applier in this file, and deliberately: there is nothing to
+    /// say to the window. The switch is read at the moment a blur is spent
+    /// (`FolioApp::settle_quake`), so turning it off while the window is up
+    /// leaves the window up, and turning it on does not send away a window whose
+    /// keyboard left before the row was pressed. A row that reached back and
+    /// acted on a blur that had already been read would be answering a question
+    /// nobody asked twice.
+    fn apply_quake_dismiss(&mut self, enabled: bool) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.quake_dismiss_on_blur = enabled;
         if &settings == self.app.settings_store.loaded() {
             return Ok(false);
         }
@@ -45935,6 +46200,22 @@ impl Runtime<'_> {
             // in focus mode a jump *is* the stage changing.
             shortcuts::Action::JumpAttention => self.jump_to_attention(),
             shortcuts::Action::CommandPalette | shortcuts::Action::SummonPip(_) => Ok(()),
+            // **The row this window usually never sees** (§7.54). The chord is
+            // claimed from Windows with `RegisterHotKey` and a claimed chord is
+            // taken out of the input stream before any window is handed it, this
+            // one included - so a press that arrives *here* is a press Windows
+            // did not claim, which means the claim was refused. Another program
+            // holds the key, and the reader is inside Folio pressing it anyway.
+            //
+            // Answering it is the honest reading of the row rather than a
+            // fallback: a chord in this table is a chord this window answers, and
+            // where it is read depends on who managed to claim it. It leaves a
+            // bit rather than acting, on `settle_quake`'s own rule - the press
+            // and the window it opens belong to the loop's turn.
+            shortcuts::Action::SummonQuake => {
+                self.app.quake.press();
+                Ok(())
+            }
             // The glyph names the divider it draws, as in Windows Terminal: the
             // minus lays a horizontal rule across the pane and the new shell
             // opens below it; the equals stands a vertical one and the new shell
@@ -87933,6 +88214,90 @@ mod multiwindow_session_tests {
         assert_eq!(names(&plan.pending), [r"D:\two"]);
     }
 
+    /// RED (§7.54) — **the summoned terminal takes no part in the restore
+    /// election.**
+    ///
+    /// It is not the window that opens first, it is not queued behind one, and it
+    /// is not a question: the prompt asks 「reopen your other tabs?」 about windows
+    /// the reader is about to be looking at, and a window that appears only when a
+    /// key is pressed is one they cannot see to answer about. So it comes out of
+    /// `plan.quake` whole — its unpinned tabs included — and the election below it
+    /// reads exactly as it did before there was one.
+    ///
+    /// MUTATION: take the partition out of `plan_windows` and the summoned window
+    /// becomes the first window this process opens — visible, standing across the
+    /// top of the screen at launch, with the reader's actual session queued behind
+    /// it. Leave it in the election but at the back and its unpinned tab joins the
+    /// question, which is a card asking about a window nobody can see.
+    #[test]
+    fn the_summoned_window_takes_no_part_in_the_restore_election() {
+        let summoned = SessionWindowV1 {
+            quake: true,
+            ..window(vec![term(r"D:\summoned", false)])
+        };
+        let plan = plan_windows(&[
+            summoned.clone(),
+            window(vec![term(r"D:\kept", true)]),
+            window(vec![term(r"D:\draft", false)]),
+        ]);
+        assert_eq!(
+            names(&plan.quake.clone().into_iter().collect::<Vec<_>>()),
+            [r"D:\summoned"],
+            "it leaves before anything is decided"
+        );
+        assert_eq!(
+            names(&plan.first.into_iter().collect::<Vec<_>>()),
+            [r"D:\kept"],
+            "and the window that opens is the one that was pinned"
+        );
+        assert!(plan.queued.is_empty());
+        assert_eq!(
+            names(&plan.pending),
+            [r"D:\draft"],
+            "its own unpinned tab is not in the question"
+        );
+
+        // And a document whose only window is the summoned one leaves the launch
+        // with nothing to open, which is the state a first run is already in: the
+        // ordinary door opens a default window and the summon waits for its key.
+        let alone = plan_windows(&[summoned]);
+        assert!(alone.quake.is_some());
+        assert!(alone.first.is_none() && alone.queued.is_empty() && alone.pending.is_empty());
+    }
+
+    /// RED (§7.54) — **a hand-edited document naming two summoned windows keeps
+    /// one, and the rest come back ordinary.**
+    ///
+    /// This process claims one chord, so it has one window to give it to. §5.4's
+    /// per-leaf degradation read at the level of a window: a document that cannot
+    /// be honoured exactly is honoured as far as it goes rather than refused.
+    ///
+    /// MUTATION: collect every `quake` window into `plan.quake` and the second one
+    /// is dropped from the launch entirely — a window with tabs in it that this
+    /// build simply forgets.
+    #[test]
+    fn only_the_first_summoned_window_is_the_summoned_one() {
+        let plan = plan_windows(&[
+            SessionWindowV1 {
+                quake: true,
+                ..window(vec![term(r"D:\first", false)])
+            },
+            SessionWindowV1 {
+                quake: true,
+                ..window(vec![term(r"D:\second", true)])
+            },
+        ]);
+        assert_eq!(
+            names(&plan.quake.into_iter().collect::<Vec<_>>()),
+            [r"D:\first"]
+        );
+        assert_eq!(
+            names(&plan.first.into_iter().collect::<Vec<_>>()),
+            [r"D:\second"],
+            "the one there is no chord for is an ordinary window, not a lost one"
+        );
+    }
+
     /// PIN — **a window with no tabs is not a window**, and a first run has no
     /// windows at all.
     #[test]
@@ -89928,6 +90293,17 @@ impl FolioApp {
         // said out loud by the caller and changes nothing about this window
         // being on its way out.
         runtime.window.leaving = Some(leaving_at);
+        // **And the summoned terminal goes with the run** (§7.54). After this
+        // window's own picture is in the document and before the sentinel below
+        // is spent, because `App::finish` is the last thing that will ever be
+        // written and a paragraph filed after it is a paragraph nobody reads.
+        let closed = closed.and_then(|()| {
+            if ending {
+                self.retire_the_summon_with_the_run(leaving_at)
+            } else {
+                Ok(())
+            }
+        });
         if ending {
             // **The run's sentinel goes with the picture, not with the process**
             // (§7.35). `App::finish` flushes the document, joins the writer and
@@ -89959,15 +90335,65 @@ impl FolioApp {
     /// Not `windows.len()`: the registry also holds the ones that have been
     /// closed and are waiting for their pages, and none of those is a window
     /// anybody can see, move a tab into, or close.
+    ///
+    /// **And the summoned terminal, while it is away, is not one either**
+    /// (§7.54). That is this comment's own criterion applied to the one window
+    /// that can be in the registry and off the screen without leaving: a reader
+    /// who closes the last window they can see has closed the last window there
+    /// is, and a run that stayed alive on the strength of a hidden one would be a
+    /// `folio.exe` in the task list with nothing on any screen and no taskbar
+    /// button — reachable only by a key they may have bound weeks ago.
+    ///
+    /// It goes with the run rather than keeping the run alive, and it loses
+    /// nothing by doing so: its paragraph is written like every other window's,
+    /// so the next launch brings it back holding what it held. See
+    /// [`Self::close`], which is where it is told.
     fn open_window_count(&mut self) -> usize {
+        let summon = self.app.as_ref().and_then(|app| {
+            (!app.quake.is_showing())
+                .then(|| app.quake.window())
+                .flatten()
+        });
         (0..self.windows.len())
             .filter(|index| {
                 self.windows
                     .key_at(*index)
+                    .filter(|id| Some(*id) != summon)
                     .and_then(|id| self.windows.get_mut(id))
                     .is_some_and(|window| window.leaving.is_none())
             })
             .count()
+    }
+
+    /// **The summoned terminal goes with the run** (§7.54).
+    ///
+    /// Told at the moment the last window a reader can see is told, and through
+    /// the very same door, so that its shells are shut and its browsers are given
+    /// the same bounded wait every other window's are. `ending` is `true` because
+    /// it is: the run is over, so its picture stays in the document rather than
+    /// being filed into Recent — a window nobody closed is not a window anybody
+    /// asked to reopen.
+    ///
+    /// A no-op when there is no summoned window, when it is on the screen (then
+    /// it is one of the windows the count above already saw), and when it is
+    /// already leaving.
+    fn retire_the_summon_with_the_run(&mut self, leaving_at: Instant) -> Result<()> {
+        let Some(id) = self.app.as_ref().and_then(|app| {
+            (!app.quake.is_showing())
+                .then(|| app.quake.window())
+                .flatten()
+        }) else {
+            return Ok(());
+        };
+        if self.is_leaving(id) {
+            return Ok(());
+        }
+        let Some(mut runtime) = self.runtime(id) else {
+            return Ok(());
+        };
+        let closed = runtime.close_window(true);
+        runtime.window.leaving = Some(leaving_at);
+        closed
     }
 
     /// **Turn the one clock a closed window still has, and let go of the ones
@@ -90016,6 +90442,13 @@ impl FolioApp {
         }
         for id in done {
             self.windows.remove(id);
+            // **The claim on the chord is deliberately kept** (§7.54). A reader
+            // who closed the summoned terminal said "not this one", not "stop
+            // answering the key": the next press opens a new one, which is the
+            // same sentence the first press said.
+            if let Some(app) = self.app.as_mut() {
+                app.quake.forget(id);
+            }
         }
         if self.windows.is_empty() {
             // **The sentinel again, and it is idempotent** (`App::finish` →
@@ -90198,6 +90631,121 @@ impl FolioApp {
             if let Some(mut runtime) = self.runtime(id) {
                 runtime.mark_session_dirty(Instant::now());
             }
+        }
+        Ok(())
+    }
+
+    /// **The summon's whole turn** (§7.54): make the claim on the chord agree
+    /// with the table, then act on whatever the key and the keyboard said.
+    ///
+    /// Everything about this window that is not ordinary happens here, on the
+    /// loop's own turn, and nothing happens in the two places that hear about it
+    /// — the message hook, which runs inside Windows' message pump with no
+    /// borrow of anything, and the blur arm, which is Windows telling this
+    /// program about the focus and is the worst possible moment to change it.
+    /// Both leave a bit behind; this is where the bits are spent.
+    ///
+    /// **The claim is reconciled every turn and re-asked almost never** - see
+    /// [`quake::Quake::reconcile`]. Three doors can move this chord (the
+    /// recorder, a hand-edited `keybindings.json`, and `Restore all defaults`)
+    /// and a turn that reads the table is one statement that covers all three.
+    fn settle_quake(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        let wanted = app
+            .shortcuts
+            .rows()
+            .iter()
+            .find(|row| row.action == shortcuts::Action::SummonQuake)
+            .and_then(|row| row.chord.clone());
+        app.quake.reconcile(wanted.as_ref());
+        let pressed = app.quake.take_press();
+        let blurred = app.quake.take_dismiss();
+        if !pressed && !blurred {
+            return Ok(());
+        }
+        // **A press is the gesture and a blur is a consequence**, so the press is
+        // read first: a reader who pressed the key while the window was up asked
+        // for it to go, and the blur that follows is the same sentence arriving
+        // twice.
+        if pressed && app.quake.is_showing() {
+            return self.dismiss_quake();
+        }
+        if pressed {
+            if app.quake.window().is_none() {
+                // Queued and spent on the next line, which is
+                // `settle_drag_handover`'s own shape: the press, the window it
+                // needs and the frame it appears in all land in one turn, and no
+                // frame is ever drawn of a summon half way through arriving.
+                app.pending_new_windows.push(NewWindowPlan::summoned());
+                self.open_pending_window(event_loop)?;
+            }
+            return self.summon_quake();
+        }
+        // A blur that arrived after the window had already gone is a blur about
+        // nothing: hiding it is what moved the focus in the first place.
+        let dismiss = self.app.as_ref().is_some_and(|app| {
+            app.quake.is_showing() && app.settings_store.loaded().quake_dismiss_on_blur
+        });
+        if dismiss {
+            return self.dismiss_quake();
+        }
+        Ok(())
+    }
+
+    /// Put the summoned window up, remembering who had the keyboard.
+    ///
+    /// **The foreground is read before the window is shown**, because after it
+    /// there is nothing left to read: the window is the foreground. Taking the
+    /// keyboard is a separate statement from showing the window and is made
+    /// after - a `SetForegroundWindow` on a window that is not on the screen yet
+    /// is a request Windows has no reason to honour.
+    fn summon_quake(&mut self) -> Result<()> {
+        let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
+            return Ok(());
+        };
+        let previous = bt_platform::hotkey::foreground_window();
+        let Some(mut runtime) = self.runtime(id) else {
+            return Ok(());
+        };
+        runtime.show_quake_window()?;
+        let hwnd = window_hwnd(&runtime.window.window).ok();
+        if let Some(app) = self.app.as_mut() {
+            // The window this one came down over is not remembered when it *is*
+            // this one: a summon pressed while the window already had the
+            // keyboard would otherwise record the window it is about to hide as
+            // the window it owes the keyboard to.
+            let previous = previous.filter(|before| Some(*before) != hwnd);
+            app.quake.shown_over(previous);
+        }
+        if let Some(hwnd) = hwnd
+            && !bt_platform::hotkey::give_foreground_to(hwnd)
+        {
+            // Said to the log and never to the reader: there is nothing a person
+            // can do about a foreground lock, and a card over their editor
+            // reporting one would be a worse interruption than the one it reports.
+            eprintln!("BT_QUAKE the summoned window could not take the keyboard");
+        }
+        Ok(())
+    }
+
+    /// Send it back up, and give the keyboard to whoever had it.
+    fn dismiss_quake(&mut self) -> Result<()> {
+        let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
+            return Ok(());
+        };
+        let Some(mut runtime) = self.runtime(id) else {
+            return Ok(());
+        };
+        let owed = runtime.hide_quake_window();
+        // **After the window is off the screen, never before.** Windows gives the
+        // foreground to *something* the moment a foreground window is hidden, and
+        // a handover made first would be undone by that.
+        if let Some(hwnd) = owed
+            && !bt_platform::hotkey::give_foreground_to(hwnd)
+        {
+            eprintln!("BT_QUAKE the keyboard could not be handed back");
         }
         Ok(())
     }
@@ -91035,6 +91583,11 @@ impl FolioApp {
             // ever drawn of a window half way through it.
             .and_then(|()| self.settle_drag_handover())
             .and_then(|()| self.open_pending_window(event_loop))
+            // **After the window door**, because a press with no window yet has
+            // to open one - and it spends the plan it queues on the very next
+            // line, exactly as the drag handover above does, so that the press,
+            // the window and the frame it appears in are all one turn.
+            .and_then(|()| self.settle_quake(event_loop))
             .and_then(|()| self.settle_quit(event_loop))
         {
             self.fail(event_loop, error);
@@ -91382,6 +91935,18 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // frames discarded with this arm draining, against 1 of 765 without
             // it.
             AppEvent::PtyOutput => Ok(()),
+            // **Nothing is done here**, on `GitChanged`'s own reasoning: the
+            // press is already recorded by the message hook that posted this, and
+            // what is owed is the turn that reads it. `about_to_wait` runs
+            // immediately after this arm returns and `settle_quake` is on its
+            // chain, so acting here would be doing the work one statement early
+            // and outside the order every other window verb is settled in.
+            AppEvent::QuakeSummoned => {
+                if let Some(app) = self.app.as_mut() {
+                    app.quake.press();
+                }
+                Ok(())
+            }
             AppEvent::MathReady => {
                 let (mut batch, gone) = self.drain_math_answers();
                 self.for_each_window(|runtime| runtime.apply_math_results(&mut batch, gone))
@@ -91725,6 +92290,22 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 runtime.window.ime_cursor_throttle.reset();
                 runtime.window.ime_system_caret.destroy();
                 runtime.set_cursor_focus(false, Instant::now());
+                // **The summoned terminal goes when the keyboard does** (§7.54),
+                // and it goes on the *next* turn: hiding a window inside the
+                // event that says it lost the focus is asking Windows to move the
+                // focus while it is telling you about the focus. A bit and a turn
+                // — see `FolioApp::settle_quake`, where every other thing this
+                // window does out of the ordinary is also spent.
+                //
+                // The switch is read there and not here for the same reason the
+                // hide is: what this arm knows is that the keyboard left, which
+                // is true whatever the row says. Only a window that is actually
+                // on the screen leaves a bit, because a blur that arrives after
+                // it has gone is a blur about nothing - hiding it is what moved
+                // the focus in the first place.
+                if runtime.is_quake_window() && runtime.app.quake.is_showing() {
+                    runtime.app.quake.note_blur();
+                }
                 committed.and(cancelled.map(|_| ())).and_then(|()| {
                     runtime.publish_frame(FrameTrigger {
                         occurred_at: Instant::now(),
@@ -94267,6 +94848,148 @@ mod floated_page_tests {
         );
     }
 
+    /// RED (§7.54) — **the summoned terminal is not put on the screen by the door
+    /// that opens it, and the door that does put it there states its rectangle
+    /// first.**
+    ///
+    /// Two halves of one sentence, and neither survives without the other. This
+    /// window is born hidden — on a restore that is the whole of it, because the
+    /// key that would show it may never be pressed — so `open_window` must decline
+    /// to show it; and every summon computes its rectangle afresh against the
+    /// monitor the pointer is on, so the door that does show it must place it
+    /// before it does.
+    ///
+    /// A source gate rather than a behavioural one because both facts are about a
+    /// door that needs a GPU, a compositor and a real `HWND` to run at all, and
+    /// the thing that can go wrong is a line moving rather than a value changing.
+    ///
+    /// MUTATIONS: drop `&& !plan.quake` from the show condition and a restored
+    /// summon stands across the top of the screen at every launch, with no key
+    /// pressed. Drop the placement from `show_quake_window` and it comes down at
+    /// whatever rectangle winit gave it — which on a second monitor is the wrong
+    /// screen. Weaken it back to `set_window_outer_rect` and it comes down at
+    /// three quarters or four thirds of the rectangle it asked for whenever the
+    /// pointer is on a screen of a different dpi — measured on this desk
+    /// 2026-09-02, and the whole reason `stand_window_at` exists. Drop the
+    /// `set_window_topmost` beside it and the twentieth summon arrives behind the
+    /// editor it was called over, because `HWND_TOPMOST` is a place in a z-order
+    /// other programs are entitled to move.
+    #[test]
+    fn a_summoned_window_is_not_shown_by_the_door_that_opens_it() {
+        let door = fn_body(concat!("    fn ", "open_window("));
+        assert!(
+            door.contains("if plan.receives.is_none() && !plan.quake {"),
+            "the door that opens a window shows the one a key summons:\n{door}"
+        );
+        let summon = fn_body(concat!("    fn ", "show_quake_window("));
+        assert!(
+            summon.contains("quake::summoned_rect(") && summon.contains("stand_window_at("),
+            "a summon does not state its own rectangle, or states it the one way \
+             that a dpi seam is allowed to overrule:\n{summon}"
+        );
+        assert!(
+            // The call and not the name: the comment above it names the
+            // function it is deliberately *not* using, and a needle that matched
+            // prose would fail on the sentence explaining why.
+            !summon.contains("set_window_outer_rect(hwnd"),
+            "the single-statement placement is back, so a summon onto a screen of \
+             another dpi lands at the ratio of the two:\n{summon}"
+        );
+        assert!(
+            summon.contains("set_window_topmost(hwnd, true)"),
+            "the posture is not re-stated, so a window that has been hidden and \
+             shown again may arrive behind what it was called over:\n{summon}"
+        );
+        let hide = fn_body(concat!("    fn ", "hide_quake_window("));
+        assert!(
+            hide.contains("set_visible(false)") && !hide.contains("window_shown = false"),
+            "a summon that is sent away is closed rather than hidden, or forgets \
+             that it has ever been on the glass:\n{hide}"
+        );
+    }
+
+    /// RED (§7.54) — **the two Win32 orders a summon depends on cannot be
+    /// reversed.**
+    ///
+    /// Showing reads the foreground **before** the window goes up, because after
+    /// it there is nothing left to read — the window *is* the foreground.
+    /// Dismissing hands the keyboard back **after** the window is off the screen,
+    /// because Windows gives the foreground to something the moment a foreground
+    /// window is hidden and a handover made first would be undone by that.
+    ///
+    /// MUTATIONS: move `foreground_window()` below `show_quake_window()` and every
+    /// dismissal hands the keyboard to the summon itself. Move
+    /// `give_foreground_to` above `hide_quake_window()` and the window the reader
+    /// came from never comes back to the front.
+    #[test]
+    fn the_foreground_is_read_before_the_summon_and_handed_back_after_it() {
+        let up = fn_body(concat!("    fn ", "summon_quake("));
+        let read = up
+            .find("foreground_window()")
+            .expect("the summon reads who had the keyboard");
+        let show = up
+            .find("show_quake_window()")
+            .expect("the summon shows the window");
+        assert!(
+            read < show,
+            "the foreground is read after the window is up, by which time it is \
+             the window:\n{up}"
+        );
+        let down = fn_body(concat!("    fn ", "dismiss_quake("));
+        let hide = down
+            .find("hide_quake_window()")
+            .expect("the dismissal hides the window");
+        let hand = down
+            .find("give_foreground_to(")
+            .expect("the dismissal hands the keyboard back");
+        assert!(
+            hide < hand,
+            "the keyboard is handed back before the window is off the screen, so \
+             hiding it undoes the handover:\n{down}"
+        );
+    }
+
+    /// RED (§7.54) — **a window nobody can see does not keep the run alive.**
+    ///
+    /// The hazard the summoned terminal introduces, and it is a real one: it is
+    /// the only window this program can hold that is neither on the screen nor on
+    /// its way out. A reader who closes the last window they can see would
+    /// otherwise be left with a `folio.exe` in the task list, nothing on any
+    /// screen, no taskbar button, and one way back in — a key they may have bound
+    /// weeks ago.
+    ///
+    /// So it does not count toward "windows still on the glass", and it is told to
+    /// go on the turn the last visible window is. It loses nothing by going: its
+    /// paragraph is written like every other window's, so the next launch brings it
+    /// back holding what it held.
+    ///
+    /// MUTATIONS: drop the `filter` from `open_window_count` and the last visible
+    /// window's close stops being the end of the run — it files itself into Recent
+    /// and the process stays. Drop the call in `close` and the count is right while
+    /// the window it excluded is never told anything, so the loop runs on with one
+    /// hidden window in the registry for ever.
+    #[test]
+    fn a_window_nobody_can_see_does_not_keep_the_run_alive() {
+        let count = fn_body(concat!("    fn ", "open_window_count("));
+        assert!(
+            count.contains("app.quake.is_showing()") && count.contains("Some(*id) != summon"),
+            "a summoned window that is away is counted as a window on the glass, \
+             so closing the last visible one is not the end of the run:\n{count}"
+        );
+        let shut = fn_body(concat!("    fn ", "close("));
+        assert!(
+            shut.contains("self.retire_the_summon_with_the_run(leaving_at)"),
+            "nothing tells the summoned window that the run it belongs to has \
+             ended:\n{shut}"
+        );
+        let retire = fn_body(concat!("    fn ", "retire_the_summon_with_the_run("));
+        assert!(
+            retire.contains("runtime.close_window(true)"),
+            "it leaves by some road other than the one every other window leaves \
+             by, or is filed into Recent as though somebody had closed it:\n{retire}"
+        );
+    }
+
     /// RED — **a closed window is not dropped until its engines have let go, and
     /// the wait is bounded** (§7.35, gate 5's clean Windows 11 machine,
     /// 2026-08-28).
@@ -96159,9 +96882,47 @@ fn main() -> Result<()> {
     // The one-time media-session warm-up (§7.23) is paid here, off the first
     // hover: the process-resident session costs ~210ms cold and ~10ms warm.
     bt_platform::video::prewarm();
-    let event_loop = EventLoop::<AppEvent>::with_user_event()
-        .build()
-        .context("create winit event loop")?;
+    // **The one message this program reads before winit dispatches it** (§7.54).
+    //
+    // `WM_HOTKEY` for a registration that named no window is a **thread**
+    // message: Windows posts it to the loop's queue with no window at all, and a
+    // message with no window never reaches a window procedure - so
+    // `ApplicationHandler`, which is entirely about windows, has no arm it could
+    // ever be given to. winit's own pump is the only place it passes through, and
+    // `with_msg_hook` is the door onto that pump. That is the whole reason the
+    // summon is not an ordinary event.
+    //
+    // **The hook does nothing but wake the loop**, which is
+    // `SystemSettingsWatch`'s discipline held at a second door and for a stronger
+    // version of its reason: this closure runs inside winit's own
+    // `PeekMessageW` loop, before anything has been decided about the turn, and
+    // it borrows nothing at all. Which way the window goes is decided on the turn
+    // that reads the bit - see `FolioApp::settle_quake`.
+    //
+    // The proxy is filled after `build`, because there is no proxy until there is
+    // a loop; a press that arrives in the window between the two is a press with
+    // nowhere to go, which is exactly a press made before this program was ready
+    // for one.
+    //
+    // The hook itself is `bt_platform`'s, because reading a raw `MSG` is
+    // `unsafe` and this crate is under the workspace's `unsafe_code = "deny"`.
+    // What is written here is the one thing the hook is allowed to do.
+    static SUMMON_PROXY: std::sync::OnceLock<EventLoopProxy<AppEvent>> = std::sync::OnceLock::new();
+    let mut builder = EventLoop::<AppEvent>::with_user_event();
+    #[cfg(windows)]
+    {
+        use winit::platform::windows::EventLoopBuilderExtWindows;
+        builder.with_msg_hook(bt_platform::hotkey::summon_message_hook(
+            quake::SUMMON_HOTKEY_ID,
+            || {
+                if let Some(proxy) = SUMMON_PROXY.get() {
+                    let _ = proxy.send_event(AppEvent::QuakeSummoned);
+                }
+            },
+        ));
+    }
+    let event_loop = builder.build().context("create winit event loop")?;
+    let _ = SUMMON_PROXY.set(event_loop.create_proxy());
     let mut application = FolioApp::new(event_loop.create_proxy(), request);
     let outcome = event_loop
         .run_app(&mut application)

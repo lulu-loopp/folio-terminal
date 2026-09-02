@@ -2107,6 +2107,23 @@ pub enum Text {
     /// way to fetch. The address is drawn beside it as a link, because opening
     /// it is a thing the reader may well want and this window knows how.
     MarkdownImageRemote,
+
+    // ── the summoned terminal (§7.54) ────────────────────────────────────
+    /// The name of the shortcut row whose chord Windows claims, not this window.
+    ShortcutSummonQuake,
+    RowQuakeHeight,
+    DescQuakeHeight,
+    /// The sentence the height row carries **instead of** its description when
+    /// the chord could not be claimed — [`Self::DescAcrylicUnavailable`]'s
+    /// arrangement, and its reason: there is one muted line under a title, and a
+    /// window nobody can call up has exactly one thing worth saying on it.
+    ///
+    /// It is on the *height* row and not on the switch below it because it is the
+    /// first line of the pair a reader's eye lands on, and because what it
+    /// reports is true of both.
+    DescQuakeHotkeyTaken,
+    RowQuakeDismiss,
+    DescQuakeDismiss,
 }
 
 impl Text {
@@ -3768,6 +3785,26 @@ impl Text {
                 "Where a web preview searches when what you type in its address bar is not an address.",
                 "在网页预览的地址栏里输入的不是地址时，交给哪个搜索引擎去搜。",
             ),
+            // Names what the key does and not what the window is called: a
+            // reader scanning the shortcut list is looking for the verb.
+            Self::ShortcutSummonQuake => pick(lang, "Summon the terminal", "唤出终端"),
+            Self::RowQuakeHeight => pick(lang, "Summoned terminal height", "快捷终端高度"),
+            Self::DescQuakeHeight => pick(
+                lang,
+                "How much of the screen the summoned terminal covers. It spans the width of whichever screen the pointer is on.",
+                "唤出的终端盖住屏幕的多少。它横跨鼠标所在那块屏幕的整个宽度。",
+            ),
+            Self::DescQuakeHotkeyTaken => pick(
+                lang,
+                "Another program is already using the key that summons it.",
+                "唤出它的按键已被另一个程序占用。",
+            ),
+            Self::RowQuakeDismiss => pick(lang, "Hide it when it loses focus", "失去焦点时收起"),
+            Self::DescQuakeDismiss => pick(
+                lang,
+                "The summoned terminal goes away when the keyboard moves to another window.",
+                "键盘转到其他窗口时，唤出的终端随即收起。",
+            ),
         }
     }
 
@@ -3783,7 +3820,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 534] = [
+    pub const ALL: [Self; 540] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4318,6 +4355,12 @@ impl Text {
         Self::HeadPopOut,
         Self::MarkdownImageUnreadable,
         Self::MarkdownImageRemote,
+        Self::ShortcutSummonQuake,
+        Self::RowQuakeHeight,
+        Self::DescQuakeHeight,
+        Self::DescQuakeHotkeyTaken,
+        Self::RowQuakeDismiss,
+        Self::DescQuakeDismiss,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

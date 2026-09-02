@@ -238,6 +238,31 @@ pub(crate) enum Action {
     /// A stub row in the sense §7.1.5e means it: named, in the table, dispatched
     /// to an explicit no-op until the picture-in-picture machine arrives.
     SummonPip(u8),
+    /// **Bring the summoned terminal down over whatever is on the screen, or send
+    /// it back up** (0.2 shortcut terminal, `docs/DESIGN.md` §7.54).
+    ///
+    /// **The one row in this table whose key is usually not read here at all.**
+    /// The window it summons is asked for while some *other* program has the
+    /// keyboard, so the chord is claimed from Windows with `RegisterHotKey`
+    /// rather than matched against the keys this window is handed — and a
+    /// registered global hotkey is taken out of the input stream before any
+    /// window sees it, this one included.
+    ///
+    /// It is a row anyway, and for two reasons that are the same reason. The
+    /// panel that records chords reads this table, so a verb with no row in it is
+    /// a verb nobody can bind; and the claim can be **refused** — another
+    /// program may already hold the chord, and a second copy of this program
+    /// always will — in which case the key arrives at a focused window like any
+    /// other and this row is what answers it. The two paths are one sentence
+    /// about one chord, not a fallback: the row says which keys mean summon, and
+    /// where they are read depends on who managed to claim them.
+    ///
+    /// **It ships with no chord**, on [`Self::SummonPip`]'s ruling: the July 2026
+    /// lesson was that one summon key chosen for the user was one key too many,
+    /// and a key that works while another program is focused is the strongest
+    /// version of that — a default here would be this product taking a chord out
+    /// of somebody's editor.
+    SummonQuake,
 }
 
 /// Where a row is in force.
@@ -527,6 +552,23 @@ impl Binding {
             id,
             title,
             family: Some(family),
+            action,
+            chord: None,
+            scope: Scope::Window,
+        }
+    }
+
+    /// A row that ships with no chord and belongs to no family.
+    ///
+    /// [`Self::unassigned`]'s sibling, and the two are separate for the reason
+    /// every constructor here is longhand: `family` is a `Option<Text>` that a
+    /// `const` cannot reach through struct-update syntax, so "one row, no fold"
+    /// is its own four lines rather than a `None` passed into the one above.
+    const fn unassigned_alone(id: &'static str, title: Text, action: Action) -> Self {
+        Self {
+            id,
+            title,
+            family: None,
             action,
             chord: None,
             scope: Scope::Window,
@@ -1143,6 +1185,18 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutWebDevTools,
         Action::WebDevTools,
         Chord::new(ModifiersState::empty(), ChordKey::Named(NamedKey::F12)),
+    ),
+    // **The row whose key Windows reads and this window usually does not** (0.2
+    // shortcut terminal, §7.54). It ships with nothing in it for the reason the
+    // four below it do, in its strongest form: this chord is claimed
+    // process-wide, so a default here would be a key taken out of whatever
+    // program the reader was in when they installed this one. See
+    // [`Action::SummonQuake`] for where the chord is actually read, and why it is
+    // still a row.
+    Binding::unassigned_alone(
+        "summon-quake",
+        Text::ShortcutSummonQuake,
+        Action::SummonQuake,
     ),
     // **The first rows in this table that exist in order to be configured**
     // (mock-up 6104-6106, §7.1.5e), and the first that ship with nothing in
@@ -3196,7 +3250,10 @@ mod tests {
         // **One fewer on 2026-08-28** (user ruling): `command-palette` is out,
         // which puts the single actions back to 23 and the table at 39. The
         // name survives in [`Action`] and the row does not — see that variant.
-        assert_eq!(BINDINGS.len(), 39);
+        // **One more on 2026-09-02** (0.2 shortcut terminal): `summon-quake`, the
+        // one row whose chord Windows claims rather than this window — 24 single
+        // actions and the table at 40.
+        assert_eq!(BINDINGS.len(), 40);
         assert_eq!(
             BINDINGS
                 .iter()
@@ -3349,6 +3406,7 @@ mod tests {
             Action::WebAddress,
             Action::WebDevTools,
             Action::WindowAddress,
+            Action::SummonQuake,
         ];
         expected.extend((1..=9u8).map(Action::GotoTab));
         expected.extend((1..=4u8).map(Action::SummonPip));
@@ -3370,6 +3428,20 @@ mod tests {
                 "slot {slot} ships unassigned - see Action::SummonPip"
             );
         }
+        // And the summon, on the same footing and for a stronger version of the
+        // same reason — see `Action::SummonQuake`.
+        let summon = BINDINGS
+            .iter()
+            .find(|binding| binding.action == Action::SummonQuake)
+            .expect("the summon is a row");
+        assert!(
+            summon.chord.is_none(),
+            "the summoned terminal ships unassigned - see Action::SummonQuake"
+        );
+        assert!(
+            summon.family.is_none(),
+            "one row, no fold - it is not one of a numbered set"
+        );
         // **And the one name that is deliberately not a row.** Written as an
         // assertion rather than as an omission, so that putting the row back for
         // v0.2 is a change this test asks for out loud.

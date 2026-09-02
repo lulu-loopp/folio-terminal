@@ -61,6 +61,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (23, migrate_settings_v23_to_v24),
     (24, migrate_settings_v24_to_v25),
     (25, migrate_settings_v25_to_v26),
+    (26, migrate_settings_v26_to_v27),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -569,6 +570,34 @@ fn migrate_settings_v25_to_v26(mut value: Value) -> Value {
     value
 }
 
+/// v26 -> v27: the two keys the summoned terminal has — how tall it opens and whether it goes
+/// away when the keyboard leaves it (0.2 shortcut terminal, `docs/DESIGN.md` §7.54).
+///
+/// **Two keys on one rung**, which is a departure from every step above this one and is the honest
+/// shape here: they are two halves of one window's description, they arrive in one release, and a
+/// v26.5 is a version number for a document nobody has ever written. The rule the ladder actually
+/// keeps is that a rung is a *release* of this file's shape, not a key.
+///
+/// **Neither carries a habit forward, and neither starts anything.** v26 above had to argue its
+/// default because the thing it switched on was a network request that had never been made; these
+/// two describe a window that does not exist until a reader binds a key to summon it, and the
+/// summon ships bound to nothing. So a file migrated by this step behaves exactly as it did before
+/// it: the values are what the window *would* open as, written down so that the row in the dialog
+/// has something true to draw before anybody has touched it.
+///
+/// See `SettingsV1::quake_height` and `SettingsV1::quake_dismiss_on_blur`.
+fn migrate_settings_v26_to_v27(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(27));
+        object.insert(
+            "quake_height".to_owned(),
+            Value::from(crate::DEFAULT_QUAKE_HEIGHT),
+        );
+        object.insert("quake_dismiss_on_blur".to_owned(), Value::from(true));
+    }
+    value
+}
+
 /// Migration table for `keybindings.json`. Empty, and it will stay empty for as
 /// long as the file's *shape* holds: a schema step is owed when the document
 /// changes, and adding, renaming or retiring a shortcut row does not change this
@@ -615,6 +644,7 @@ pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (8, migrate_session_v8_to_v9),
     (9, migrate_session_v9_to_v10),
     (10, migrate_session_v10_to_v11),
+    (11, migrate_session_v11_to_v12),
 ];
 
 fn migrate_session_v1_to_v2(mut value: Value) -> Value {
@@ -883,6 +913,27 @@ fn migrate_card_skip_in_leaf(leaf: &mut Value) {
 fn migrate_session_v10_to_v11(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(11));
+    }
+    value
+}
+
+/// **v11 → v12 — a window may be the one a global key summons, and no v11 window is** (0.2
+/// 快捷终端, `docs/DESIGN.md` §7.54).
+///
+/// `v10_to_v11`'s step exactly, and for its sentence: the bump exists for a distinction no v11
+/// document can draw. Every window a v11 build ever wrote was an ordinary one, which is precisely
+/// what [`SessionWindowV1::quake`](crate::SessionWindowV1)'s default says — so the honest step
+/// writes no field and invents no key (rule 3: 迁移函数只做结构升级，不做语义修复).
+///
+/// **The version is still owed**, and here more literally than in v11's case. A v11 build handed a
+/// v12 document would read the quake window as an ordinary one and open it — visible, at the
+/// saved rectangle, with no key to dismiss it and the `always_on_top` posture of whatever the
+/// settings file happened to say. That is not a misreading a person could diagnose; the version
+/// number is what turns it into §5.4's future-version refusal, which is a sentence they can act
+/// on.
+fn migrate_session_v11_to_v12(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(12));
     }
     value
 }
@@ -1552,6 +1603,98 @@ mod tests {
             json!(false),
             "the sibling added one version ago is the one a copy-paste of the \
              step above would most plausibly reset"
+        );
+    }
+
+    /// RED (`docs/DESIGN.md` §7.54) — **v26 -> v27 writes the summoned terminal's two keys and
+    /// touches nothing else** (rule 3, 「迁移函数只做结构升级」).
+    ///
+    /// The numbers are written out as literals for the step above's reason: a constant compared
+    /// with itself proves nothing, and forty and `true` here are the second, independent statement
+    /// of what this step decided.
+    ///
+    /// MUTATION: drop either `insert` and a reader whose file predates the summon opens the dialog
+    /// on a row drawn from `u8::default()` — a window nought percent of the screen tall — or one
+    /// that says the terminal will stay in front of whatever they turn to. Reset a sibling and the
+    /// last three assertions name it.
+    #[test]
+    fn real_settings_v26_to_v27_migration_writes_the_summoned_windows_two_keys() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 26,
+                "theme_mode": "Light",
+                "update_check": false,
+                "copy_on_select": false,
+                "scrollback_lines": 25000
+            }),
+            26,
+            27,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(27));
+        assert_eq!(migrated["quake_height"], json!(40));
+        assert_eq!(migrated["quake_dismiss_on_blur"], json!(true));
+        assert_eq!(
+            migrated["update_check"],
+            json!(false),
+            "the sibling added one version ago is the one a copy-paste of the              step above would most plausibly reset"
+        );
+        assert_eq!(migrated["copy_on_select"], json!(false));
+        assert_eq!(migrated["theme_mode"], json!("Light"));
+    }
+
+    /// RED (`docs/DESIGN.md` §7.54) — **v11 -> v12 takes the version and writes no field**, and
+    /// a v11 window read through it comes back an ordinary window.
+    ///
+    /// The round trip is the point and not the insert: this is the one kind of step that must be
+    /// able to prove it did *nothing* but count. A window the file described is the window the
+    /// build gets, `quake` reads `false` from its own serde default, and the key is not in the
+    /// document — which is what makes a v12 file with no summoned window byte for byte the v11
+    /// file it came from.
+    ///
+    /// MUTATION: insert `"quake": true` in the step and every window in every file that predates
+    /// the summon comes back as a hidden strip nobody can find. Leave the version alone and a v11
+    /// build reads a v12 document as its own, opening the summoned window as an ordinary one.
+    #[test]
+    fn real_session_v11_to_v12_migration_takes_the_number_and_leaves_every_window_ordinary() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 11,
+                "theme": "dark",
+                "windows": [{
+                    "placement": {
+                        "bounds": {"x": 12, "y": 34, "width": 1280, "height": 800},
+                        "dpi": 96,
+                        "maximized": false,
+                        "monitor_id": ""
+                    },
+                    "tabs": [],
+                    "active_tab": 0
+                }],
+                "recent": []
+            }),
+            11,
+            12,
+            SESSION_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(12));
+        assert!(
+            migrated["windows"][0].get("quake").is_none(),
+            "the step invents no key — a window that was ordinary stays ordinary by              saying nothing at all"
+        );
+        let session: crate::SessionV1 =
+            serde_json::from_value(migrated).expect("a migrated document is this build's own");
+        assert_eq!(session.schema_version, crate::SESSION_SCHEMA_VERSION);
+        assert!(
+            !session.windows[0].quake,
+            "and the absent key reads as the ordinary window every v11 document              held"
+        );
+        let written = serde_json::to_string(&session).expect("and it serializes");
+        assert!(
+            !written.contains("quake"),
+            "a document with no summoned window in it writes the bytes it always              wrote: {written}"
         );
     }
 

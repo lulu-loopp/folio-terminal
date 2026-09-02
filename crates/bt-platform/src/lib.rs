@@ -1840,6 +1840,14 @@ pub mod hang;
 #[cfg(windows)]
 pub mod attention_pipe;
 
+/// The global summon key, and the foreground it hands back — the quake
+/// terminal's other half (`docs/DESIGN.md` §7.54).
+///
+/// A fifth unsafe boundary against a fifth thing: Win32 turned on the keyboard
+/// and the foreground **while another program has both**. See the module's own
+/// header for why the chord and the handover are one subject.
+pub mod hotkey;
+
 /// The first frame of a video, out of Media Foundation — see the module's own
 /// note for the apartment it runs in and for why the set of files it can draw is
 /// not the set that could be played.
@@ -5883,6 +5891,25 @@ mod windows_impl {
         }
     }
 
+    /// **Where the pointer is**, in physical screen pixels.
+    ///
+    /// The third of [`work_area_at`] and [`dpi_at`]'s pair and the one that
+    /// supplies their argument. A tear-out already has a point — the hand let go
+    /// somewhere — but a window summoned by a key does not: nothing was
+    /// dragged, no window was clicked, and the only thing on the desk that says
+    /// which display the reader is working on is the pointer.
+    ///
+    /// `None` rather than a guess when Windows will not say, which for this
+    /// caller means falling back to the monitor the window already stood on.
+    #[must_use]
+    pub fn pointer_position() -> Option<(i32, i32)> {
+        let mut point = POINT::default();
+        // SAFETY: `point` stays valid and exclusively borrowed across this
+        // read-only query, which writes two integers and nothing else.
+        unsafe { GetCursorPos(&mut point) }.ok()?;
+        Some((point.x, point.y))
+    }
+
     /// The work area of the monitor **this screen point** is on, in physical
     /// pixels (multiwindow slice F5).
     ///
@@ -5974,6 +6001,68 @@ mod windows_impl {
         }
         .map_err(|error| format!("SetWindowPos(restore window rect) failed: {error}"))
     }
+
+    /// **Stand this window at this rectangle, across a DPI seam as well as
+    /// within one** (§7.54, measured 2026-09-02).
+    ///
+    /// [`set_window_outer_rect`] is one `SetWindowPos` and that is enough for
+    /// every caller that had one until now: a restore, a tear-out and a settle
+    /// all place a window on the monitor it is already on, or on one whose dpi
+    /// matches. A **summon** does not. It is asked for wherever the pointer
+    /// happens to be, so its rectangle routinely names a *different* monitor —
+    /// and if that monitor has a different dpi, the one `SetWindowPos` is not a
+    /// move, it is the thing that raises `WM_DPICHANGED`.
+    ///
+    /// §7.50's ruling then applies to this program's own request: the rectangle
+    /// Windows names in that message is the rectangle this window stands at for
+    /// the whole of the message, and every move inside it is resolved onto that
+    /// one. So the summon's rectangle is replaced by Windows' suggestion, which
+    /// is the request scaled by the ratio of the two dpis. Measured on this desk:
+    /// 1920x432 asked for at 144 dpi from a window standing at 192 landed as
+    /// 1440x324 — exactly three quarters — and 3840x864 asked for at 192 from a
+    /// window standing at 144 landed as 5120x1152, exactly four thirds.
+    ///
+    /// **The fix is to say it again, not to say it differently.** The ruling is
+    /// not being fought: the first statement genuinely is inside a dpi change and
+    /// Windows genuinely is the better authority for the length of it. The second
+    /// statement is made *after* that message has been answered, with the window
+    /// already on the target monitor at the target dpi — so it raises no message,
+    /// nothing hijacks it, and it is honoured verbatim.
+    ///
+    /// **Bounded, and it reads the answer back.** A window that arrives from the
+    /// first statement straddling two displays can raise one more change on the
+    /// second, so the loop asks again — and stops the moment `GetWindowRect`
+    /// agrees, or after [`STANDING_ATTEMPTS`] tries. The read-back is what makes
+    /// this a measurement rather than a hope; three attempts would be a
+    /// superstition without it.
+    ///
+    /// A window that could not be read is reported rather than retried: a
+    /// rectangle nobody can check is one this function has nothing to say about.
+    pub fn stand_window_at(hwnd: NonZeroIsize, rect: WindowRect) -> Result<(), String> {
+        let mut last = None;
+        for _ in 0..STANDING_ATTEMPTS {
+            set_window_outer_rect(hwnd, rect)?;
+            let standing = get_window_rect(hwnd)?;
+            if standing == rect {
+                return Ok(());
+            }
+            last = Some(standing);
+        }
+        // Not an error: the window is standing *somewhere*, and a summon that
+        // came down a few pixels off is enormously better than one that refused
+        // to come down. The caller prints it beside the rectangle it asked for.
+        Err(format!(
+            "the window would not stand at {rect:?}; it is at {last:?}"
+        ))
+    }
+
+    /// How many times the rectangle is stated before the difference is reported.
+    ///
+    /// Three. One is the ordinary case, two is the ordinary case across a seam,
+    /// and the third exists for the window that arrives from the second still
+    /// straddling. A fourth would be a loop that had stopped being an argument
+    /// about dpi and started being a wait.
+    const STANDING_ATTEMPTS: usize = 3;
 
     /// The work area — the monitor minus the taskbar and other appbars — of the
     /// display this window sits on, in physical pixels.
@@ -8591,11 +8680,11 @@ pub use windows_impl::{
     hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
     install_window_class_background, is_window_cloaked, is_window_minimized, leave_process,
     message_box, monospace_font_families, open_local_file, open_local_path, open_system_fonts_page,
-    os_ui_language, read_context_menu, recycle, redirect_std_streams_to_file, remove_context_menu,
-    request_window_close, reveal_in_explorer, set_clipboard_text, set_current_thread_priority,
-    set_system_backdrop, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
-    shell_execute, silence_std_streams, spawn_at_priority, std_error_is_console,
-    system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
+    os_ui_language, pointer_position, read_context_menu, recycle, redirect_std_streams_to_file,
+    remove_context_menu, request_window_close, reveal_in_explorer, set_clipboard_text,
+    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
+    set_window_topmost, shell_execute, silence_std_streams, spawn_at_priority, stand_window_at,
+    std_error_is_console, system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
     taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
     top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
     window_is_exposed, work_area_at, write_to_console,

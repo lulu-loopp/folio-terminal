@@ -880,7 +880,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 26,
+        SETTINGS_SCHEMA_VERSION, 27,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -907,7 +907,16 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          hints the v21-to-v22, and the Terminal page's own Turn finished the \
          v22-to-v23, and the Cards column's own first-arrival hint the v23-to-v24, \
          and the terminal's own silent write to the clipboard on a dragged \
-         selection the v24-to-v25 — one key on one day, fifteen times running \n         and the one key in this file that lets this build ask a server anything, the v25-to-v26: sixteen"
+         selection the v24-to-v25 — one key on one day, fifteen times running \n         and the one key in this file that lets this build ask a server anything, the v25-to-v26: sixteen          — and the summoned terminal's two, how tall it opens and whether it goes away when the          keyboard leaves it, the v26-to-v27: two keys on one rung because they are one window's          description and a rung is a release of this file's shape, not a key"
+    );
+    assert_eq!(
+        defaults.quake_height,
+        bt_persist::DEFAULT_QUAKE_HEIGHT,
+        "the summoned terminal opens as tall as the row says it does, and the row          says forty percent until somebody moves it"
+    );
+    assert!(
+        defaults.quake_dismiss_on_blur,
+        "the summoned window is above every other window by construction, so a          reader who clicks back into the editor they summoned it over has said          what they want; a default of `false` would leave a strip standing in          front of the thing they just asked to look at"
     );
     assert!(
         defaults.copy_on_select,
@@ -2067,7 +2076,7 @@ fn settings_v1_fixture_migrates_to_v2_preserving_theme_and_rendering_formulas() 
 /// different fields and a reader that taught only one of them the word would
 /// pass: a pane's `cur`, a pool row, and a `preview` vault seed.
 ///
-/// Red gate: this fixture says `"schema_version": 11`, so on a build that has
+/// Red gate: this fixture says `"schema_version": 12`, so on a build that has
 /// not taken the version it is refused as a future document and `report` is
 /// `FellBackToDefaults`.
 #[test]
