@@ -46,7 +46,7 @@ Every key here can be changed on the Shortcuts page in Settings. Changing one wr
 | Ctrl+L | Address | On a page | `web-address` |
 | Ctrl+Shift+L | Open address |  | `window-address` |
 | F12 | Developer tools | On a page | `web-devtools` |
-| Not set | Summon the terminal |  | `summon-quake` |
+| Win+` | Summon the terminal |  | `summon-quake` |
 | Not set | Summon picture in picture 1 |  | `summon-pip-1` |
 | Not set | Summon picture in picture 2 |  | `summon-pip-2` |
 | Not set | Summon picture in picture 3 |  | `summon-pip-3` |
@@ -94,7 +94,7 @@ Every key here can be changed on the Shortcuts page in Settings. Changing one wr
 | Ctrl+L | 地址 | 在网页里时 | `web-address` |
 | Ctrl+Shift+L | 打开地址 |  | `window-address` |
 | F12 | 开发者工具 | 在网页里时 | `web-devtools` |
-| 未设置 | 唤出终端 |  | `summon-quake` |
+| Win+` | 唤出终端 |  | `summon-quake` |
 | 未设置 | 唤出画中画 1 |  | `summon-pip-1` |
 | 未设置 | 唤出画中画 2 |  | `summon-pip-2` |
 | 未设置 | 唤出画中画 3 |  | `summon-pip-3` |

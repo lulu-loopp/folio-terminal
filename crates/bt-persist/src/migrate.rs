@@ -63,6 +63,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (25, migrate_settings_v25_to_v26),
     (26, migrate_settings_v26_to_v27),
     (27, migrate_settings_v27_to_v28),
+    (28, migrate_settings_v28_to_v29),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -626,6 +627,21 @@ fn migrate_settings_v27_to_v28(mut value: Value) -> Value {
     value
 }
 
+/// **v29 gives an existing reader the icon**, on the v13–16 shape.
+///
+/// `true` and not `false`, and the choice is the same one the key's own default makes: this is not
+/// a preference being carried forward — nobody could have expressed one — and a reader upgrading
+/// into a build that can stay resident is a reader who should be able to see that it has. The cost
+/// of being wrong is one icon and one row to turn it off; the cost of the other answer is a
+/// program that starts staying resident with nothing on the screen to say so.
+fn migrate_settings_v28_to_v29(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(29));
+        object.insert("tray_icon".to_owned(), Value::from(true));
+    }
+    value
+}
+
 /// Migration table for `keybindings.json`. Empty, and it will stay empty for as
 /// long as the file's *shape* holds: a schema step is owed when the document
 /// changes, and adding, renaming or retiring a shortcut row does not change this
@@ -673,6 +689,7 @@ pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (9, migrate_session_v9_to_v10),
     (10, migrate_session_v10_to_v11),
     (11, migrate_session_v11_to_v12),
+    (12, migrate_session_v12_to_v13),
 ];
 
 fn migrate_session_v1_to_v2(mut value: Value) -> Value {
@@ -962,6 +979,19 @@ fn migrate_session_v10_to_v11(mut value: Value) -> Value {
 fn migrate_session_v11_to_v12(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(12));
+    }
+    value
+}
+
+/// **v13 takes the number and nothing else** (rule 3).
+///
+/// [`crate::SessionWindowV1::quake_placements`] is a list of rectangles a reader's *hand* made,
+/// and no v12 document can contain one: the build that wrote it had no way to record the gesture.
+/// The absent key and the empty list are therefore the same sentence, which is exactly the
+/// condition under which this ladder's steps are allowed to be one line.
+fn migrate_session_v12_to_v13(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(13));
     }
     value
 }
@@ -1754,7 +1784,10 @@ mod tests {
         );
         let session: crate::SessionV1 =
             serde_json::from_value(migrated).expect("a migrated document is this build's own");
-        assert_eq!(session.schema_version, crate::SESSION_SCHEMA_VERSION);
+        assert_eq!(
+            session.schema_version, 12,
+            "this step's own number, not the ladder's top"
+        );
         assert!(
             !session.windows[0].quake,
             "and the absent key reads as the ordinary window every v11 document              held"
@@ -1763,6 +1796,153 @@ mod tests {
         assert!(
             !written.contains("quake"),
             "a document with no summoned window in it writes the bytes it always              wrote: {written}"
+        );
+    }
+
+    /// RED (`docs/DESIGN.md` §7.54b ③) — **v12 -> v13 takes the version and writes no field**,
+    /// and a v12 window read through it has arranged nothing.
+    ///
+    /// The one-line step is allowed here for the reason rule 3 states: no v12 document can hold a
+    /// `quake_placements` row, because the build that wrote it had no way to record the gesture
+    /// that makes one. The absent key and the empty list are the same sentence, and this proves
+    /// they are.
+    ///
+    /// MUTATION: invent a row in the step — even an empty-looking one — and a reader who has never
+    /// dragged the summoned window gets a rectangle out of a file on their next press, which is
+    /// exactly the thing §7.54 ② refused. Leave the version alone and a v12 build reads a v13
+    /// document as its own, silently discarding every arrangement the reader made.
+    #[test]
+    fn real_session_v12_to_v13_migration_takes_the_number_and_arranges_nothing() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 12,
+                "theme": "dark",
+                "windows": [{
+                    "placement": {
+                        "bounds": {"x": 12, "y": 34, "width": 1280, "height": 800},
+                        "dpi": 96,
+                        "maximized": false,
+                        "monitor_id": null
+                    },
+                    "tabs": [],
+                    "active_tab": 0,
+                    "quake": true
+                }],
+                "recent": []
+            }),
+            12,
+            13,
+            SESSION_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(13));
+        assert!(
+            migrated["windows"][0].get("quake_placements").is_none(),
+            "the step invents no rectangle - a reader who has arranged nothing has arranged \
+             nothing"
+        );
+        let session: crate::SessionV1 =
+            serde_json::from_value(migrated).expect("a migrated document is this build's own");
+        assert!(
+            session.windows[0].quake,
+            "and the window it did describe is still the summoned one"
+        );
+        assert!(session.windows[0].quake_placements.is_empty());
+        let written = serde_json::to_string(&session).expect("and it serializes");
+        assert!(
+            !written.contains("quake_placements"),
+            "a document with no arrangement in it writes the bytes it always wrote: {written}"
+        );
+    }
+
+    /// RED (`docs/DESIGN.md` §7.54b ③) — **an arrangement survives the file, one row per
+    /// display.**
+    ///
+    /// The other half of the step: the key the migration deliberately does not write is a key this
+    /// build must nonetheless read and write correctly, and a schema whose only test is its
+    /// migration is a schema nobody has actually round-tripped.
+    ///
+    /// MUTATION: drop `skip_serializing_if` and every document grows an empty array, so a reader
+    /// who never touched the window stops getting the bytes they had. Give the row a `dpi` it does
+    /// not need and the two halves of the pair stop being the two facts that are actually used.
+    #[test]
+    fn a_quake_arrangement_round_trips_one_row_for_each_display() {
+        let session = crate::SessionV1 {
+            windows: vec![crate::SessionWindowV1 {
+                quake: true,
+                quake_placements: vec![
+                    crate::QuakePlacementV1 {
+                        monitor_id: r"\\.\DISPLAY1".to_owned(),
+                        bounds: crate::WindowBoundsV1 {
+                            x: 100,
+                            y: 50,
+                            width: 800,
+                            height: 400,
+                        },
+                    },
+                    crate::QuakePlacementV1 {
+                        monitor_id: r"\\.\DISPLAY2".to_owned(),
+                        bounds: crate::WindowBoundsV1 {
+                            x: -1920,
+                            y: 12,
+                            width: 1280,
+                            height: 600,
+                        },
+                    },
+                ],
+                ..crate::SessionWindowV1::default()
+            }],
+            ..crate::SessionV1::default()
+        };
+        let written = serde_json::to_string(&session).expect("it serializes");
+        let read: crate::SessionV1 = serde_json::from_str(&written).expect("and reads back");
+        assert_eq!(
+            read.windows[0].quake_placements,
+            session.windows[0].quake_placements
+        );
+        assert_eq!(
+            read.windows[0].quake_placements[1].bounds.x, -1920,
+            "a display left of the primary one keeps its negative origin through the file"
+        );
+    }
+
+    /// RED (`docs/DESIGN.md` §7.54b ⑤) — **v28 -> v29 gives an existing reader the icon.**
+    ///
+    /// `true` and not `false`, and it is the same choice the key's own default makes: nobody could
+    /// have expressed a preference about a thing that did not exist, and a reader upgrading into a
+    /// build that can stay resident should be able to see that it has. The cost of being wrong is
+    /// one icon and one row to turn it off; the cost of the other answer is a program that starts
+    /// staying resident with nothing on the screen to say so.
+    ///
+    /// MUTATION: write `false` and an upgrading reader gets the new residency rules with no icon
+    /// to explain them — which is precisely the `folio.exe`-nobody-can-find state §7.54 refused.
+    /// Miss the insert entirely and serde's default rescues it, which is why the assertion is on
+    /// the *document* and not only on the parsed value.
+    #[test]
+    fn real_settings_v28_to_v29_migration_gives_an_existing_reader_the_icon() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 28,
+                "quake_height": 40,
+                "quake_width": 60,
+                "quake_dismiss_on_blur": true
+            }),
+            28,
+            29,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(29));
+        assert_eq!(
+            migrated["tray_icon"],
+            json!(true),
+            "the step writes the key rather than leaving it to a default nobody can see"
+        );
+        assert_eq!(
+            migrated["quake_width"],
+            json!(60),
+            "and the key added one version ago is the one a copy-paste of the step above would \
+             most plausibly reset"
         );
     }
 

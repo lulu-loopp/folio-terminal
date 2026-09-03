@@ -1848,6 +1848,11 @@ pub mod attention_pipe;
 /// header for why the chord and the handover are one subject.
 pub mod hotkey;
 
+/// **The icon in the notification area** — the sixth unsafe boundary, against
+/// the shell's own strip of the taskbar. Not `cfg`-gated for [`hotkey`]'s
+/// reason: the decoding is pure and is held by a test on every host.
+pub mod tray;
+
 /// The first frame of a video, out of Media Foundation — see the module's own
 /// note for the apartment it runs in and for why the set of files it can draw is
 /// not the set that could be played.
@@ -1930,7 +1935,7 @@ mod windows_impl {
         },
         Graphics::Gdi::{
             CreateSolidBrush, DeleteObject, GetMonitorInfoW, HGDIOBJ, MONITOR_DEFAULTTONEAREST,
-            MONITORINFO, MonitorFromPoint, MonitorFromWindow,
+            MONITORINFO, MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED,
@@ -5962,6 +5967,54 @@ mod windows_impl {
         if ok.is_err() { 96 } else { dpi_x.max(1) }
     }
 
+    /// **Which display this screen point is on**, as a name that survives a
+    /// reboot — the third sibling of [`work_area_at`] and [`dpi_at`], asked of
+    /// the same monitor and answered for the same caller.
+    ///
+    /// It is the adapter's `szDevice` name and not the `HMONITOR`, because an
+    /// `HMONITOR` is a handle Windows is free to re-issue differently the next
+    /// time the desktop is enumerated, and what the caller wants to key on
+    /// outlives this run of the program. The persistence plan's §3.1 calls a
+    /// monitor identifier "best-effort", and this string is exactly that promise:
+    /// stable across a reboot, and *not* guaranteed across a driver update or a
+    /// rearrangement — which is why every reader of it degrades to a computed
+    /// answer rather than trusting it.
+    ///
+    /// `None` when Windows will not say, which for a caller keying a remembered
+    /// rectangle means "remember nothing about this display" rather than
+    /// "remember it under a name that might be somebody else's".
+    #[must_use]
+    pub fn monitor_id_at(x: i32, y: i32) -> Option<String> {
+        let mut info = MONITORINFOEXW {
+            monitorInfo: MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // SAFETY: `MonitorFromPoint` with `MONITOR_DEFAULTTONEAREST` always
+        // answers a valid monitor handle. `info` stays valid and exclusively
+        // borrowed across this read-only query; its `cbSize` names the *extended*
+        // structure, which is what tells `GetMonitorInfoW` it may fill `szDevice`
+        // — a plain `MONITORINFO`'s size would leave that array untouched. The
+        // cast is the documented way to pass the extended form.
+        let ok = unsafe {
+            let monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+            GetMonitorInfoW(monitor, std::ptr::from_mut(&mut info).cast::<MONITORINFO>())
+        };
+        if !ok.as_bool() {
+            return None;
+        }
+        let name: String = info
+            .szDevice
+            .iter()
+            .copied()
+            .take_while(|unit| *unit != 0)
+            .filter_map(|unit| char::from_u32(u32::from(unit)))
+            .collect();
+        (!name.is_empty()).then_some(name)
+    }
+
     pub fn get_window_rect(hwnd: NonZeroIsize) -> Result<WindowRect, String> {
         let mut rect = RECT::default();
         // SAFETY: `hwnd` originates from winit's live Win32WindowHandle and `rect` remains valid
@@ -8679,15 +8732,15 @@ pub use windows_impl::{
     file_product_version, flash_window, get_dpi_for_window, get_window_rect, get_work_area,
     hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
     install_window_class_background, is_window_cloaked, is_window_minimized, leave_process,
-    message_box, monospace_font_families, open_local_file, open_local_path, open_system_fonts_page,
-    os_ui_language, pointer_position, read_context_menu, recycle, redirect_std_streams_to_file,
-    remove_context_menu, request_window_close, reveal_in_explorer, set_clipboard_text,
-    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
-    set_window_topmost, shell_execute, silence_std_streams, spawn_at_priority, stand_window_at,
-    std_error_is_console, system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
-    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
-    top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
-    window_is_exposed, work_area_at, write_to_console,
+    message_box, monitor_id_at, monospace_font_families, open_local_file, open_local_path,
+    open_system_fonts_page, os_ui_language, pointer_position, read_context_menu, recycle,
+    redirect_std_streams_to_file, remove_context_menu, request_window_close, reveal_in_explorer,
+    set_clipboard_text, set_current_thread_priority, set_system_backdrop, set_window_dark_mode,
+    set_window_outer_rect, set_window_topmost, shell_execute, silence_std_streams,
+    spawn_at_priority, stand_window_at, std_error_is_console, system_backdrop_available,
+    system_uses_light_apps, take_keyboard_focus, taskbar_auto_hidden_from_state,
+    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
+    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_to_console,
 };
 
 /// **The one decision in the system-preference watch.**

@@ -246,11 +246,24 @@ pub(crate) enum Action {
     /// about one chord, not a fallback: the row says which keys mean summon, and
     /// where they are read depends on who managed to claim them.
     ///
-    /// **It ships with no chord**, on [`Self::SummonPip`]'s ruling: the July 2026
-    /// lesson was that one summon key chosen for the user was one key too many,
-    /// and a key that works while another program is focused is the strongest
-    /// version of that — a default here would be this product taking a chord out
-    /// of somebody's editor.
+    /// **It ships bound to `Win+\``** (user ruling, next29 — `docs/DESIGN.md`
+    /// §7.54b ①), and that overturns this comment's own first answer.
+    ///
+    /// What stood here was "it ships with no chord", on [`Self::SummonPip`]'s
+    /// ruling that one summon key chosen for the user was one key too many — and
+    /// that a key which works while another program is focused is the strongest
+    /// version of it. The real machine answered: **a summon with no key is a
+    /// feature nobody can find.** Reaching it meant knowing the window existed,
+    /// finding this row, and recording a chord, all before the first press.
+    ///
+    /// The old objection is answered by *which* key rather than by having none.
+    /// `Ctrl+\`` is a text editor's terminal and `F12` is every browser's
+    /// developer tools — those really would be taken out of somebody's work. The
+    /// Windows key is the modifier the desktop reserves for itself and for
+    /// resident tools, which is what this window is, and this platform's other
+    /// dropdown terminal already taught people this exact chord. It is still an
+    /// ordinary row: the recorder moves it and `Restore all defaults` brings it
+    /// back.
     SummonQuake,
 }
 
@@ -453,6 +466,13 @@ impl Chord {
 const CTRL: ModifiersState = ModifiersState::CONTROL;
 const CTRL_SHIFT: ModifiersState = ModifiersState::CONTROL.union(ModifiersState::SHIFT);
 const ALT_SHIFT: ModifiersState = ModifiersState::ALT.union(ModifiersState::SHIFT);
+/// **The Windows key**, which exactly one row of this table wears.
+///
+/// It is spelled out here rather than written inline for the reason the three
+/// above it are: the table is read by people looking for which keys this product
+/// takes, and a bare `ModifiersState::SUPER` in the middle of a row is the one
+/// modifier a reader would have to translate.
+const WIN: ModifiersState = ModifiersState::SUPER;
 
 /// One row of the table: what it is called, what it does, what it is pressed
 /// with, and where it is in force.
@@ -541,23 +561,6 @@ impl Binding {
             id,
             title,
             family: Some(family),
-            action,
-            chord: None,
-            scope: Scope::Window,
-        }
-    }
-
-    /// A row that ships with no chord and belongs to no family.
-    ///
-    /// [`Self::unassigned`]'s sibling, and the two are separate for the reason
-    /// every constructor here is longhand: `family` is a `Option<Text>` that a
-    /// `const` cannot reach through struct-update syntax, so "one row, no fold"
-    /// is its own four lines rather than a `None` passed into the one above.
-    const fn unassigned_alone(id: &'static str, title: Text, action: Action) -> Self {
-        Self {
-            id,
-            title,
-            family: None,
             action,
             chord: None,
             scope: Scope::Window,
@@ -681,6 +684,23 @@ impl Action {
     /// by the first door instead, its verb in hand.
     pub(crate) const fn is_pending(self) -> bool {
         matches!(self, Self::SummonPip(_))
+    }
+
+    /// **Whether Windows answers this row's key rather than this window**
+    /// (§7.54 ①).
+    ///
+    /// [`Self::is_pending`]'s neighbour and its opposite in every respect. A
+    /// pending row is one whose *verb* has not arrived, and its key reaches this
+    /// window and does nothing; this is a row whose verb is entirely here and
+    /// whose **key never arrives** — `RegisterHotKey` takes a claimed chord out
+    /// of the input stream before any window is offered it.
+    ///
+    /// One row answers yes, and it is written as a predicate rather than as an
+    /// `if` at the one place that reads it for [`Scope`]'s reason: the fact
+    /// belongs to the row, and the day a second verb is claimed process-wide the
+    /// place to say so is here.
+    pub(crate) const fn is_claimed_from_windows(self) -> bool {
+        matches!(self, Self::SummonQuake)
     }
 }
 
@@ -1180,16 +1200,14 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Chord::new(ModifiersState::empty(), ChordKey::Named(NamedKey::F12)),
     ),
     // **The row whose key Windows reads and this window usually does not** (0.2
-    // shortcut terminal, §7.54). It ships with nothing in it for the reason the
-    // four below it do, in its strongest form: this chord is claimed
-    // process-wide, so a default here would be a key taken out of whatever
-    // program the reader was in when they installed this one. See
-    // [`Action::SummonQuake`] for where the chord is actually read, and why it is
-    // still a row.
-    Binding::unassigned_alone(
+    // shortcut terminal, §7.54). `Win+\`` since next29 — see
+    // [`Action::SummonQuake`] for why the shipped-with-nothing answer was
+    // overturned, and for where the chord is actually read.
+    Binding::window(
         "summon-quake",
         Text::ShortcutSummonQuake,
         Action::SummonQuake,
+        Chord::new(WIN, character("`")),
     ),
     // **The first rows in this table that exist in order to be configured**
     // (mock-up 6104-6106, §7.1.5e), and the first that ship with nothing in
@@ -1769,6 +1787,38 @@ impl Shortcuts {
     }
 }
 
+/// **The name `keybindings.json` and this module both call the summon row.**
+///
+/// Written once because three surfaces ask for it — the table, the claim, and
+/// the line below — and a row found by matching a translated title is a row that
+/// changes with the language the window started in.
+pub(crate) const SUMMON_QUAKE_ID: &str = "summon-quake";
+
+/// **Say on the summon's own row that another program holds its key** (§7.54,
+/// user ruling next29).
+///
+/// The fourth refusal, and now the second place it is said. The other three are
+/// facts about this table — the AltGr zone, the shell's alphabet, a row that
+/// already answers to the chord — and [`chord_verdict`] decides all three. This
+/// one is not a fact about the table at all: the chord is perfectly legal here,
+/// and Windows gave it to somebody else. So it cannot be a `ChordVerdict`, and it
+/// arrives the way the settings dialog's own version of it does (see
+/// `Text::DescQuakeHotkeyTaken` on the height row) — as the muted line under the
+/// title, which is where this page already says why a row might not answer.
+///
+/// **It replaces the note rather than joining it.** There is one line under a
+/// title; a row whose key another program has taken has exactly one thing worth
+/// saying, and the scope tag it displaces is a sentence about where the key
+/// *would* be in force.
+pub(crate) fn note_the_summon_is_taken(rows: &mut [ShortcutRow]) {
+    if let Some(row) = rows
+        .iter_mut()
+        .find(|row| row.ids.contains(&SUMMON_QUAKE_ID))
+    {
+        row.note = Some(Cow::Borrowed(Text::DescQuakeHotkeyTaken.text()));
+    }
+}
+
 /// One line of a hint card: the key to press, and the name of what it does.
 ///
 /// The modifiers are deliberately **not** here — the card's head says them once,
@@ -1793,9 +1843,24 @@ impl Binding {
     /// — which is the whole of what a hint is: everything about the press except
     /// which key finishes it. Stated once here so the card and the dispatch
     /// cannot drift apart.
+    /// **Whether this row belongs on the card a held hand raises.**
+    ///
+    /// Three questions, and the third arrived with the summon's default chord
+    /// (next29). The card is a promise about **keys this window will answer**,
+    /// and the summon's key is not one: it is claimed process-wide with
+    /// `RegisterHotKey` and taken out of the input stream before any window sees
+    /// it, this one included (§7.54 ①). A card that listed it would be a card
+    /// describing somebody else's keyboard.
+    ///
+    /// It is also the row that would do the most damage there. Its default wears
+    /// the Windows key alone, and the Windows key alone is held for `Win+E`,
+    /// `Win+D`, `Win+Tab` and a dozen more that have nothing to do with this
+    /// program — so every one of those would flash a card over the reader's
+    /// terminal on the way past.
     fn answers_a_hand_holding(&self, modifiers: ModifiersState, focus: Focus) -> bool {
         self.scope.holds(focus)
             && !self.action.is_pending()
+            && !self.action.is_claimed_from_windows()
             && self
                 .chord
                 .as_ref()
@@ -2137,6 +2202,14 @@ const REACHABLE_FOCUS: [Focus; 6] = [
 /// The modifiers, in the order Windows itself writes them.
 fn modifier_caps(modifiers: ModifiersState) -> Vec<String> {
     let mut caps = Vec::new();
+    // **First, which is Microsoft's own order** (`Windows logo key + Ctrl + D`
+    // throughout their shortcut documentation). The three below it were in this
+    // order before there was a fourth, and the fourth goes in front of them
+    // rather than at the end because that is where a reader has read it every
+    // other time they have seen it written down.
+    if modifiers.super_key() {
+        caps.push(MODIFIER_WIN.to_owned());
+    }
     if modifiers.control_key() {
         caps.push(MODIFIER_CTRL.to_owned());
     }
@@ -2152,6 +2225,9 @@ fn modifier_caps(modifiers: ModifiersState) -> Vec<String> {
 const MODIFIER_CTRL: &str = "Ctrl";
 const MODIFIER_ALT: &str = "Alt";
 const MODIFIER_SHIFT: &str = "Shift";
+/// **What the Windows key is called**, in the one spelling that is the same word
+/// in both of this window's languages and on the cap of the key itself.
+const MODIFIER_WIN: &str = "Win";
 
 /// A chord as the caps the dialog draws, left to right.
 #[must_use]
@@ -2262,6 +2338,12 @@ const NAMED_KEYS: &[NamedKey] = &[
 #[must_use]
 pub(crate) fn format_chord(chord: &Chord) -> String {
     let mut out = String::new();
+    // The same order [`modifier_caps`] draws, and it has to be the same order:
+    // what this writes is what `parse_chord` reads back, and what the caps show
+    // is what a reader compares against the file.
+    if chord.modifiers.super_key() {
+        out.push_str("Win+");
+    }
     if chord.modifiers.control_key() {
         out.push_str("Ctrl+");
     }
@@ -2291,6 +2373,7 @@ pub(crate) fn parse_chord(text: &str) -> Option<Chord> {
     let mut rest = text;
     loop {
         let candidate = [
+            ("Win+", ModifiersState::SUPER),
             ("Ctrl+", ModifiersState::CONTROL),
             ("Alt+", ModifiersState::ALT),
             ("Shift+", ModifiersState::SHIFT),
@@ -3424,20 +3507,9 @@ mod tests {
                 "slot {slot} ships unassigned - see Action::SummonPip"
             );
         }
-        // And the summon, on the same footing and for a stronger version of the
-        // same reason — see `Action::SummonQuake`.
-        let summon = BINDINGS
-            .iter()
-            .find(|binding| binding.action == Action::SummonQuake)
-            .expect("the summon is a row");
-        assert!(
-            summon.chord.is_none(),
-            "the summoned terminal ships unassigned - see Action::SummonQuake"
-        );
-        assert!(
-            summon.family.is_none(),
-            "one row, no fold - it is not one of a numbered set"
-        );
+        // The summon is **not** on that footing any more (§7.54b ①): it ships
+        // with a key, and what it ships with is asserted on its own row by
+        // `the_summon_ships_with_the_key_this_platform_already_taught`.
     }
 
     // ── the editable table (Settings extension block, slice 2) ─────────────
@@ -4409,13 +4481,151 @@ mod tests {
         );
     }
 
-    /// PIN §7.1.5e′ — **a hold this table claims nothing for says nothing**,
-    /// which is what keeps a card off the glass for a `Shift` held while typing
-    /// and for anything carrying the Windows key.
+    /// RED (§7.54b ①, user ruling 2026-09-03) — **the summon ships bound, and it
+    /// ships bound to the key this platform already taught people.**
     ///
-    /// The `Super` half is not an omission being papered over: no row of this
-    /// table wears it, so exact matching answers it without a special case, and
-    /// this is the line that says the answer is deliberate.
+    /// §7.54 shipped it with nothing, on `SummonPip`'s ruling that choosing a
+    /// summon key for somebody is choosing one key too many. The real machine
+    /// overturned it: a summon with no key is a feature a reader cannot find, and
+    /// finding it means knowing it exists, going to this page, and recording a
+    /// chord — three steps before the first press.
+    ///
+    /// `Win+\`` and not `Ctrl+\`` or `F12`, and the reason is about **other
+    /// people's keyboards**: those two are a text editor's terminal and every
+    /// browser's developer tools, and a chord claimed process-wide really would
+    /// take them away. The Windows key is the one modifier the desktop reserves
+    /// for the system and for exactly this kind of resident tool, and this
+    /// platform's other dropdown terminal is already on this key.
+    ///
+    /// MUTATIONS: unbind the row and a fresh install answers no key at all; move
+    /// it onto `Ctrl` or a bare function key and the claim takes a chord out of
+    /// whatever the reader had open. Either goes red here, and `docs/shortcuts.md`
+    /// goes red beside it.
+    #[test]
+    fn the_summon_ships_with_the_key_this_platform_already_taught() {
+        let row = BINDINGS
+            .iter()
+            .find(|binding| binding.action == Action::SummonQuake)
+            .expect("the summon is a row");
+        let chord = row.chord.as_ref().expect("and it ships with a key");
+        assert_eq!(
+            chord.modifiers,
+            ModifiersState::SUPER,
+            "the Windows key, alone - the one modifier applications do not fight over"
+        );
+        assert_eq!(chord.key, super::character("`"));
+        assert_eq!(
+            format_chord(chord),
+            "Win+`",
+            "and it is spelled the way the file and the caps spell it"
+        );
+        assert!(
+            row.family.is_none(),
+            "one row, no fold - it is not one of a numbered set"
+        );
+        assert!(
+            !BINDINGS
+                .iter()
+                .any(|binding| binding.action != Action::SummonQuake
+                    && binding
+                        .chord
+                        .as_ref()
+                        .is_some_and(|other| other.modifiers.super_key())),
+            "and it is still the only row in the table wearing that key"
+        );
+    }
+
+    /// RED (§7.54b ①) — **a chord wearing the Windows key survives the file it is
+    /// written to, and reaches the glass.**
+    ///
+    /// The bug this closes was real and silent before the summon had a default:
+    /// the recorder accepted `Win+K`, `chord_verdict` allowed it, and
+    /// `quake::hotkey_for` read it — but the three functions that *write* a chord
+    /// down knew only Ctrl, Alt and Shift. So the caps drew `K`, the file said
+    /// `K`, and the next launch bound a different key than the one the reader
+    /// pressed.
+    ///
+    /// MUTATIONS: drop the `Win+` arm from any one of `format_chord`,
+    /// `parse_chord` or `modifier_caps` and one of the three assertions below
+    /// goes red. Put `Win` after `Ctrl` in one of them and not the other and the
+    /// round trip still passes while the caps disagree with the file — which is
+    /// why the order is asserted rather than only the set.
+    #[test]
+    fn a_chord_wearing_the_windows_key_survives_the_file_it_is_written_to() {
+        let chord = Chord::new(
+            ModifiersState::SUPER
+                .union(ModifiersState::CONTROL)
+                .union(ModifiersState::SHIFT),
+            super::character("k"),
+        );
+        let written = format_chord(&chord);
+        assert_eq!(
+            written, "Win+Ctrl+Shift+k",
+            "the Windows key is written first, which is the order Microsoft's own \
+             documentation writes it in - and the key is written as the table              holds it, which is the cap the reader pressed rather than the glyph              Shift would have made of it"
+        );
+        assert_eq!(
+            parse_chord(&written).as_ref(),
+            Some(&chord),
+            "and it comes back off the file as the chord that was written"
+        );
+        assert_eq!(
+            chord_caps(&chord),
+            vec!["Win", "Ctrl", "Shift", "K"],
+            "and the caps read left to right in the same order"
+        );
+        assert_eq!(
+            chord_caps(&Chord::new(ModifiersState::SUPER, super::character("`"))),
+            vec!["Win", "`"],
+            "the summon's own default included"
+        );
+    }
+
+    /// RED (§7.54b ①) — **a hand holding the Windows key raises nothing.**
+    ///
+    /// The card is a promise about keys *this window* answers, and the summon's
+    /// is not one of them: `RegisterHotKey` takes a claimed chord out of the
+    /// input stream before any window is offered it. It is also the row that
+    /// would do the most damage on the card — the Windows key alone is held for
+    /// `Win+E`, `Win+D`, `Win+Tab` and a dozen more that have nothing to do with
+    /// this program, and every one of them would flash a card over the terminal
+    /// on the way past.
+    ///
+    /// **This assertion used to hold for a different reason**, and the reason is
+    /// the whole of what changed: until next29 no row wore the Windows key, so
+    /// exact matching answered it with no special case. Now one does, and the
+    /// answer has to be said out loud.
+    ///
+    /// MUTATION: drop `is_claimed_from_windows` from `answers_a_hand_holding` and
+    /// the first assertion goes red — and on the real machine a card appears over
+    /// the reader's work every time they reach for `Win+E`.
+    #[test]
+    fn a_hand_on_the_windows_key_raises_nothing_even_now_that_a_row_wears_it() {
+        assert!(
+            Shortcuts::defaults()
+                .hint_lines(ModifiersState::SUPER, ON_A_TERMINAL)
+                .is_empty(),
+            "the summon wears this key and is still not on the card: Windows \
+             answers it, not this window"
+        );
+        assert!(
+            Shortcuts::defaults()
+                .hint_lines(
+                    ModifiersState::CONTROL.union(ModifiersState::SUPER),
+                    ON_A_TERMINAL
+                )
+                .is_empty(),
+            "and nothing wears it with Ctrl"
+        );
+    }
+
+    /// PIN §7.1.5e′ — **a hold this table claims nothing for says nothing**,
+    /// which is what keeps a card off the glass for a `Shift` held while typing.
+    ///
+    /// The Windows key used to be asserted here too, on the grounds that no row
+    /// wore it. One does now (§7.54b ①), so that half has moved to
+    /// `a_hand_on_the_windows_key_raises_nothing_even_now_that_a_row_wears_it`,
+    /// where the reason it is still empty can be stated instead of observed.
     #[test]
     fn a_hold_this_table_claims_nothing_for_raises_nothing() {
         assert!(
@@ -4430,15 +4640,6 @@ mod tests {
                 .is_empty(),
             "and bare Alt claims nothing, which is why this card changes nothing \
              about what Windows does with the menu key"
-        );
-        assert!(
-            Shortcuts::defaults()
-                .hint_lines(
-                    ModifiersState::CONTROL.union(ModifiersState::SUPER),
-                    ON_A_TERMINAL
-                )
-                .is_empty(),
-            "and nothing in this table wears the Windows key"
         );
     }
 

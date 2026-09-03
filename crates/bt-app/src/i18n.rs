@@ -2143,6 +2143,22 @@ pub enum Text {
     DescQuakeHotkeyTaken,
     RowQuakeDismiss,
     DescQuakeDismiss,
+    /// The switch for the icon in the notification area, and the sentence that
+    /// says what else it decides — see `bt_persist::SettingsV1::tray_icon` for
+    /// why one row answers two questions.
+    RowTrayIcon,
+    DescTrayIcon,
+    /// The four lines of the icon's own menu.
+    ///
+    /// They are their own strings and not borrowed from the rows that say the
+    /// same verbs elsewhere, because this menu is drawn by Windows and is read by
+    /// somebody who may have no window of this program on the screen: it has to
+    /// name the program as well as the verb, which no row inside the program ever
+    /// has to do.
+    TrayMenuSummon,
+    TrayMenuNewWindow,
+    TrayMenuSettings,
+    TrayMenuQuit,
 }
 
 impl Text {
@@ -3841,6 +3857,16 @@ impl Text {
                 "Another program is already using the key that summons it.",
                 "唤出它的按键已被另一个程序占用。",
             ),
+            Self::RowTrayIcon => pick(lang, "Keep an icon on the taskbar", "在任务栏保留一个图标"),
+            Self::DescTrayIcon => pick(
+                lang,
+                "An icon in the notification area summons the terminal and opens a menu. While it is there, closing the last window leaves the program running behind it.",
+                "通知区里的图标可以唤出终端，也可以打开一个菜单。它在的时候，关掉最后一扇窗不会结束程序。",
+            ),
+            Self::TrayMenuSummon => pick(lang, "Summon the terminal", "唤出终端"),
+            Self::TrayMenuNewWindow => pick(lang, "New window", "新建窗口"),
+            Self::TrayMenuSettings => pick(lang, "Settings", "设置"),
+            Self::TrayMenuQuit => pick(lang, "Quit Folio", "退出 Folio"),
             Self::RowQuakeDismiss => pick(lang, "Hide it when it loses focus", "失去焦点时收起"),
             Self::DescQuakeDismiss => pick(
                 lang,
@@ -3862,7 +3888,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 551] = [
+    pub const ALL: [Self; 557] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4414,6 +4440,12 @@ impl Text {
         Self::DescQuakeHotkeyTaken,
         Self::RowQuakeDismiss,
         Self::DescQuakeDismiss,
+        Self::RowTrayIcon,
+        Self::DescTrayIcon,
+        Self::TrayMenuSummon,
+        Self::TrayMenuNewWindow,
+        Self::TrayMenuSettings,
+        Self::TrayMenuQuit,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

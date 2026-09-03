@@ -36,7 +36,13 @@ use crate::layout::LayoutNodeV1;
 /// paragraph describes the one window a global key summons rather than an ordinary one. It is v7's
 /// and v10's shape at the level above them — a fact about the *window's kind* rather than about
 /// what is in it, and one a reader sets once and expects to find again.
-pub const SESSION_SCHEMA_VERSION: u32 = 12;
+/// **v13 lets the summoned window remember a rectangle per display** (user ruling, next29):
+/// [`SessionWindowV1::quake_placements`]. v12's note above says that window's `placement` is
+/// "written and never read", and that stays true — what is read back is not the one corner the
+/// window happened to be at when the program closed, but the rectangle the reader *arranged with
+/// their own hand*, filed under the display they arranged it on. The two are different facts and
+/// they are stored in different keys for that reason.
+pub const SESSION_SCHEMA_VERSION: u32 = 13;
 
 /// **What a preview row's string names** — schema v11.
 ///
@@ -214,6 +220,50 @@ pub struct SessionWindowV1 {
     /// already meant.
     #[serde(default, skip_serializing_if = "is_not_quake")]
     pub quake: bool,
+    /// **The rectangles the reader put this window at, one per display** — schema v13
+    /// (`docs/DESIGN.md` §7.54).
+    ///
+    /// Only the summoned window ever has any, and only a rectangle a **hand** made goes in: a
+    /// summon computes a rectangle and puts the window there, and recording that would be the
+    /// program remembering its own arithmetic. What is here is the answer to "the reader dragged
+    /// it somewhere and sized it", which is a preference, and a preference that survives the
+    /// program closing is what this file is for.
+    ///
+    /// **Per display, because that is the granularity the question has.** The rectangle above is
+    /// deliberately not read back for this window because a person with two screens summons the
+    /// terminal on the one they are working on now, not the one they were working on yesterday.
+    /// That objection is about *which display*, and it disappears once the answer is filed under
+    /// one: a reader who arranged the window on the wide screen gets their arrangement back on the
+    /// wide screen, and the first summon on a display they have never arranged it on computes the
+    /// default shape, exactly as before.
+    ///
+    /// Empty is the ordinary state and is not written, so a document from a reader who never moved
+    /// the window is byte for byte the document a v12 build wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quake_placements: Vec<QuakePlacementV1>,
+}
+
+/// **One display, and the rectangle the reader arranged the summoned window at on it** — schema
+/// v13.
+///
+/// Two fields, and the absence of the other three is the whole of the design. `maximized` is
+/// absent because this window is never maximized — its shape *is* its rectangle, and a maximize
+/// would throw that away for the one Windows keeps. `monitor_id` is here as the **key** rather
+/// than as a remark, which is the difference between "the display it happened to be on" and "the
+/// display this answer is about". And there is deliberately **no `dpi`**: [`WindowStateV1`] carries
+/// one because a restore reads it to judge whether a layout must be recomputed, and nothing reads
+/// one here — logical pixels are the unit that is already the same number at every scale, so a
+/// rectangle arranged on a display keeps its size when that display's scale changes, which is what
+/// "the size I chose" means.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuakePlacementV1 {
+    /// Which display, by the name the platform layer answers with
+    /// (`bt_platform::monitor_id_at`). Best-effort by that function's own promise: a name that no
+    /// longer matches any display is a row nothing ever reads, and the summon computes its default
+    /// shape as it would for a display it had never seen.
+    pub monitor_id: String,
+    /// Where the window stood on it, in logical pixels — [`WindowBoundsV1`]'s own unit.
+    pub bounds: WindowBoundsV1,
 }
 
 /// Whether this window's kind is the one that is not written down.

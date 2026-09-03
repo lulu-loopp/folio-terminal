@@ -74,8 +74,36 @@ pub(crate) const SUMMON_HOTKEY_ID: i32 = 1;
 /// edge leaves the work area: the left margin is half the remainder rounded down,
 /// which puts the leftover column on the right and keeps `right <= work.right` on
 /// every input rather than only on even ones.
+///
+/// **And it does not touch the top of the work area** (user ruling, next29). It
+/// hangs [`TOP_GAP_LOGICAL_PX`] below it, for a reason that is only visible on a
+/// real screen: this window is drawn with rounded corners, and a rounded window
+/// flush against the top of a display shows two square notches where the corners
+/// stop being the window and the desktop behind is not yet the desktop. The gap
+/// is what makes it read as a panel that has come down over the screen rather
+/// than as a window that has been cropped by it, and it is the same gap the
+/// focused search box floats on.
+///
+/// **The gap is logical pixels and the rectangle is physical ones**, so the dpi
+/// of the monitor being summoned onto is a parameter rather than something this
+/// function could read: it is placing a window on a display that this process
+/// may not have a window on yet, and the scale of the one it *does* have a
+/// window on is the wrong number. [`bt_platform::logical_px_for_dpi`] is the
+/// same converter `tear_out_rect` uses for the same reason.
+///
+/// **The height does not shrink to pay for the gap** — the window is moved down,
+/// not cropped. The reader's percentage answers "how much of this screen", and a
+/// percentage that quietly returned twelve pixels less than it said would be a
+/// number that means something different at every dpi. The consequence is stated
+/// rather than hidden: at a full hundred percent the bottom edge now lands
+/// `TOP_GAP_LOGICAL_PX` below the work area, over whatever is docked there.
 #[must_use]
-pub(crate) fn summoned_rect(work: WindowRect, width_percent: u8, height_percent: u8) -> WindowRect {
+pub(crate) fn summoned_rect(
+    work: WindowRect,
+    width_percent: u8,
+    height_percent: u8,
+    dpi: u32,
+) -> WindowRect {
     let vertical = height_percent.clamp(bt_persist::MINIMUM_QUAKE_HEIGHT, 100);
     let horizontal = width_percent.clamp(bt_persist::MINIMUM_QUAKE_WIDTH, 100);
     let tall = work.bottom.saturating_sub(work.top).max(1);
@@ -88,13 +116,49 @@ pub(crate) fn summoned_rect(work: WindowRect, width_percent: u8, height_percent:
     let width = (i64::from(wide) * i64::from(horizontal) / 100).max(1);
     let width = i32::try_from(width).unwrap_or(wide);
     let left = work.left.saturating_add((wide - width) / 2);
+    let top = work
+        .top
+        .saturating_add(bt_platform::logical_px_for_dpi(TOP_GAP_LOGICAL_PX, dpi));
     WindowRect {
         left,
-        top: work.top,
+        top,
         right: left.saturating_add(width),
-        bottom: work.top.saturating_add(height),
+        bottom: top.saturating_add(height),
     }
 }
+
+/// **A remembered rectangle restated in the pixels a window is placed with.**
+///
+/// The inverse of the snapshot's logical reading, narrowed to this one caller and
+/// pure so a test can hold it without a display: the file stores logical pixels
+/// because that is the unit that means the same thing at every scale, and
+/// `stand_window_at` takes physical ones.
+///
+/// The size floors at one pixel each way. A rectangle of no width is not a
+/// window a reader could find again, and the only way to reach one is a document
+/// somebody edited by hand — which `bt_persist` stores as it was given by
+/// design, leaving the surface that places the window owing the floor, exactly as
+/// [`summoned_rect`]'s own clamps do.
+#[must_use]
+fn physical_rect(bounds: bt_persist::WindowBoundsV1, dpi: u32) -> WindowRect {
+    let physical = |logical: i64| -> i32 {
+        i32::try_from(logical * i64::from(dpi.max(1)) / 96).unwrap_or(i32::MAX)
+    };
+    let left = physical(i64::from(bounds.x));
+    let top = physical(i64::from(bounds.y));
+    let width = physical(i64::from(bounds.width)).max(1);
+    let height = physical(i64::from(bounds.height)).max(1);
+    WindowRect {
+        left,
+        top,
+        right: left.saturating_add(width),
+        bottom: top.saturating_add(height),
+    }
+}
+
+/// **How far below the top of the work area the summoned window hangs**, in
+/// logical pixels — see [`summoned_rect`] for why there is a gap at all.
+pub(crate) const TOP_GAP_LOGICAL_PX: u32 = 12;
 
 /// **A chord as Windows will be asked for it**, or `None` when this layout has no
 /// key for it.
@@ -166,6 +230,16 @@ pub(crate) struct Quake {
     /// and it is the same turn the reader's own press would have been answered
     /// on.
     pending_dismiss: bool,
+    /// **The rectangles the reader arranged this window at, one per display**
+    /// (user ruling, next29 — see [`Self::placement_on`]).
+    ///
+    /// Read from the document at launch and written back to it on every
+    /// snapshot, so it is the same list the file holds rather than a cache of
+    /// one. Held on this struct and not on the window because the window is
+    /// destroyed and reborn: a reader who closed the summoned terminal and
+    /// pressed the key again gets the arrangement they made before they closed
+    /// it, which is what a preference means.
+    placements: Vec<bt_persist::QuakePlacementV1>,
 }
 
 impl Quake {
@@ -252,6 +326,64 @@ impl Quake {
         self.give_back.take()
     }
 
+    /// **The rectangle to summon onto this display**, or `None` when the reader
+    /// has never arranged one there.
+    ///
+    /// This is the one place §7.54's "its rectangle is computed and never
+    /// remembered" is narrowed, and it is narrowed rather than reversed. The
+    /// objection that ruling was built on stands untouched: a corner read out of
+    /// a file would put the window on the screen the reader was working on
+    /// *yesterday*. What answers it is the key — an arrangement filed under the
+    /// display it was made on can only ever come back on that display, and the
+    /// first summon onto a display the reader has never arranged the window on
+    /// computes the default shape exactly as it always did.
+    ///
+    /// **Nothing is remembered without a name for the display.** A machine whose
+    /// monitor Windows will not name gets the computed rectangle every time,
+    /// which is what every build before this one did on every machine.
+    ///
+    /// The stored rectangle is logical, so it is restated at the dpi of the
+    /// display it is being summoned onto: the same window at the same size to the
+    /// eye, on a display whose scale has changed since the reader sized it.
+    #[must_use]
+    pub(crate) fn placement_on(&self, monitor_id: Option<&str>, dpi: u32) -> Option<WindowRect> {
+        let monitor_id = monitor_id?;
+        let placement = self
+            .placements
+            .iter()
+            .find(|placement| placement.monitor_id == monitor_id)?;
+        Some(physical_rect(placement.bounds, dpi))
+    }
+
+    /// **Record that the reader put the window here, with their own hand.**
+    ///
+    /// One row per display, replaced rather than appended: the question a row
+    /// answers is "where does this reader want it on this screen", and that
+    /// question has one current answer.
+    pub(crate) fn remember(&mut self, monitor_id: String, bounds: bt_persist::WindowBoundsV1) {
+        if let Some(placement) = self
+            .placements
+            .iter_mut()
+            .find(|placement| placement.monitor_id == monitor_id)
+        {
+            placement.bounds = bounds;
+            return;
+        }
+        self.placements
+            .push(bt_persist::QuakePlacementV1 { monitor_id, bounds });
+    }
+
+    /// What the document should hold, for the snapshot that writes it.
+    #[must_use]
+    pub(crate) fn placements(&self) -> Vec<bt_persist::QuakePlacementV1> {
+        self.placements.clone()
+    }
+
+    /// What the document held, for the launch that reads it.
+    pub(crate) fn adopt_placements(&mut self, placements: Vec<bt_persist::QuakePlacementV1>) {
+        self.placements = placements;
+    }
+
     /// **Make the claim on the chord agree with the table**, and say nothing when
     /// it already does.
     ///
@@ -298,7 +430,7 @@ impl Quake {
 
 #[cfg(test)]
 mod tests {
-    use super::{Quake, hotkey_for, summoned_rect};
+    use super::{Quake, hotkey_for, physical_rect, summoned_rect};
     use bt_platform::WindowRect;
     use bt_platform::hotkey::HotkeyFault;
 
@@ -323,15 +455,16 @@ mod tests {
     #[test]
     fn a_summon_takes_its_share_of_the_top_of_the_work_area_centred_across_it() {
         let area = work(0, 40, 1920, 1080);
-        let rect = summoned_rect(area, 60, 40);
+        let rect = summoned_rect(area, 60, 40, 96);
         assert_eq!(
-            rect.top, 40,
-            "the top is the work area's, not the monitor's"
+            rect.top,
+            40 + 12,
+            "the work area's top, with the gap hung below it"
         );
         assert_eq!(
             rect.bottom,
-            40 + 416,
-            "forty percent of the 1040 rows the taskbar left"
+            40 + 12 + 416,
+            "forty percent of the 1040 rows the taskbar left, moved down"
         );
         assert_eq!(
             rect.right - rect.left,
@@ -358,7 +491,7 @@ mod tests {
     /// it" — the window comes down a column short of the edge it used to reach.
     #[test]
     fn a_hundred_percent_wide_is_the_full_span_this_window_used_to_be() {
-        let rect = summoned_rect(work(0, 40, 1920, 1080), 100, 40);
+        let rect = summoned_rect(work(0, 40, 1920, 1080), 100, 40, 96);
         assert_eq!(rect.left, 0, "it starts where the work area starts");
         assert_eq!(rect.right, 1920, "and ends where it ends");
     }
@@ -374,12 +507,12 @@ mod tests {
     /// rather than from `work.left` would put the window on the primary one.
     #[test]
     fn a_screen_left_of_the_primary_one_keeps_its_own_negative_origin() {
-        let full = summoned_rect(work(-1920, 0, 0, 1200), 100, 50);
+        let full = summoned_rect(work(-1920, 0, 0, 1200), 100, 50, 96);
         assert_eq!(full.left, -1920);
         assert_eq!(full.right, 0);
-        assert_eq!(full.top, 0);
-        assert_eq!(full.bottom, 600);
-        let centred = summoned_rect(work(-1920, 0, 0, 1200), 60, 50);
+        assert_eq!(full.top, 12);
+        assert_eq!(full.bottom, 12 + 600);
+        let centred = summoned_rect(work(-1920, 0, 0, 1200), 60, 50, 96);
         assert_eq!(
             centred.left, -1536,
             "384 columns in from this screen's edge"
@@ -400,18 +533,22 @@ mod tests {
     /// that owes both ranges.
     #[test]
     fn a_size_no_row_offers_is_clamped_into_the_one_that_is() {
-        let tall = summoned_rect(work(0, 0, 1000, 1000), 60, 250);
-        assert_eq!(tall.bottom, 1000, "nothing taller than the work area");
-        let flat = summoned_rect(work(0, 0, 1000, 1000), 60, 0);
+        let tall = summoned_rect(work(0, 0, 1000, 1000), 60, 250, 96);
         assert_eq!(
-            flat.bottom,
+            tall.bottom - tall.top,
+            1000,
+            "nothing taller than the work area"
+        );
+        let flat = summoned_rect(work(0, 0, 1000, 1000), 60, 0, 96);
+        assert_eq!(
+            flat.bottom - flat.top,
             i32::from(bt_persist::MINIMUM_QUAKE_HEIGHT) * 10,
             "and nothing shorter than the row's own floor"
         );
-        let broad = summoned_rect(work(0, 0, 1000, 1000), 250, 40);
+        let broad = summoned_rect(work(0, 0, 1000, 1000), 250, 40, 96);
         assert_eq!(broad.left, 0, "nothing wider than the work area");
         assert_eq!(broad.right, 1000);
-        let narrow = summoned_rect(work(0, 0, 1000, 1000), 5, 40);
+        let narrow = summoned_rect(work(0, 0, 1000, 1000), 5, 40, 96);
         assert_eq!(
             narrow.right - narrow.left,
             i32::from(bt_persist::MINIMUM_QUAKE_WIDTH) * 10,
@@ -439,7 +576,7 @@ mod tests {
     /// which on a multi-monitor desk is one column on the neighbouring display.
     #[test]
     fn an_odd_remainder_puts_the_leftover_column_inside_the_work_area() {
-        let rect = summoned_rect(work(0, 0, 3441, 1440), 60, 40);
+        let rect = summoned_rect(work(0, 0, 3441, 1440), 60, 40, 96);
         assert_eq!(rect.right - rect.left, 2064, "sixty percent of 3441");
         assert!(rect.left >= 0, "the left edge is on the screen");
         assert!(
@@ -631,6 +768,144 @@ mod tests {
     /// about the focus. The two-step is also what lets a summon that is showing
     /// be dismissed by its own key: the press and the blur it causes land in one
     /// turn and mean one thing.
+    /// RED (§7.54, user ruling next29) — **the summoned window hangs a gap
+    /// below the top of the work area, and the gap is logical pixels.**
+    ///
+    /// The window is drawn with rounded corners; flush against the top of a
+    /// display, the two upper corners show square notches where the rounding
+    /// stops. Twelve logical pixels of desktop above it is what makes it read as
+    /// a panel that came down over the screen rather than one the screen cut off.
+    ///
+    /// **The height is moved, not cropped.** The reader's percentage answers "how
+    /// much of this screen", and a percentage that quietly returned twelve pixels
+    /// less than it said would be a different number at every scale.
+    ///
+    /// MUTATION: leave `top` at `work.top` and the gap is gone — the first
+    /// assertion goes red naming the work area's own top. Scale the gap at the
+    /// window's cached dpi instead of the summoned display's, or not at all, and
+    /// the third assertion goes red: on a 200% display the gap is either half the
+    /// size it should be or a different size on every press, depending on which
+    /// display the window was last summoned onto. Pay for the gap out of the
+    /// height — `bottom` unchanged — and the second goes red.
+    #[test]
+    fn the_summon_hangs_a_scaled_gap_below_the_top_of_the_work_area() {
+        let area = work(0, 100, 1000, 1100);
+        let at_96 = summoned_rect(area, 60, 50, 96);
+        assert_eq!(
+            at_96.top, 112,
+            "twelve logical pixels below the work area's own top"
+        );
+        assert_eq!(
+            at_96.bottom - at_96.top,
+            500,
+            "the height asked for is untouched - moved down, not cut short"
+        );
+        let at_192 = summoned_rect(area, 60, 50, 192);
+        assert_eq!(
+            at_192.top, 124,
+            "the same gap on a 200% display is twice the physical pixels"
+        );
+        assert_eq!(
+            at_192.left, at_96.left,
+            "a fraction of the width answers the same at every scale"
+        );
+    }
+
+    /// RED (§7.54, user ruling next29) — **a rectangle the reader arranged comes
+    /// back on the display they arranged it on, and nowhere else.**
+    ///
+    /// The narrowing of "computed and never remembered", and the whole of what
+    /// makes it safe: the objection to reading a rectangle out of a file was that
+    /// it would open the window on yesterday's screen, and an answer filed under
+    /// a display cannot be given for a different one.
+    ///
+    /// MUTATION: key the placements on nothing — return the first one whatever
+    /// display is asked for — and the second assertion goes red: the arrangement
+    /// made on the wide screen comes back on the laptop panel. Drop the `?` on
+    /// the monitor name and a machine whose display Windows will not name starts
+    /// serving another display's rectangle; the third assertion catches it. Keep
+    /// appending instead of replacing and the fourth goes red — the reader's
+    /// second arrangement is filed behind their first and never read again.
+    #[test]
+    fn an_arranged_rectangle_comes_back_only_on_the_display_it_was_arranged_on() {
+        // The shape Windows answers `monitor_id_at` with, spelled once.
+        const FIRST: &str = r"\\.\DISPLAY1";
+        const SECOND: &str = r"\\.\DISPLAY2";
+        let bounds = |x, y, width, height| bt_persist::WindowBoundsV1 {
+            x,
+            y,
+            width,
+            height,
+        };
+        let mut quake = Quake::default();
+        assert_eq!(
+            quake.placement_on(Some(FIRST), 96),
+            None,
+            "a display nobody has arranged the window on computes its shape"
+        );
+        quake.remember(FIRST.to_owned(), bounds(100, 50, 800, 400));
+        assert_eq!(
+            quake.placement_on(Some(FIRST), 96),
+            Some(work(100, 50, 900, 450)),
+            "the display it was arranged on gives it back"
+        );
+        assert_eq!(
+            quake.placement_on(Some(SECOND), 96),
+            None,
+            "the other display has never been arranged and keeps the default"
+        );
+        assert_eq!(
+            quake.placement_on(None, 96),
+            None,
+            "a display Windows will not name remembers nothing at all"
+        );
+        quake.remember(FIRST.to_owned(), bounds(0, 0, 640, 480));
+        assert_eq!(
+            quake.placements().len(),
+            1,
+            "one display, one answer - the second replaces the first"
+        );
+        assert_eq!(
+            quake.placement_on(Some(FIRST), 96),
+            Some(work(0, 0, 640, 480)),
+            "and it is the second one that comes back"
+        );
+    }
+
+    /// RED (§7.54, user ruling next29) — **an arrangement keeps its size to the
+    /// eye when the display's scale changes.**
+    ///
+    /// The reason the file stores logical pixels: what the reader chose is a
+    /// window of a certain size *on a screen*, not a certain number of the
+    /// pixels that screen happened to have that day.
+    ///
+    /// MUTATION: hand the stored numbers to `stand_window_at` as physical pixels
+    /// and a reader who raises their display's scaling finds the terminal they
+    /// arranged has shrunk to half of it.
+    #[test]
+    fn an_arrangement_is_restated_at_the_scale_the_display_now_has() {
+        let bounds = bt_persist::WindowBoundsV1 {
+            x: 10,
+            y: 20,
+            width: 300,
+            height: 200,
+        };
+        assert_eq!(physical_rect(bounds, 96), work(10, 20, 310, 220));
+        assert_eq!(physical_rect(bounds, 192), work(20, 40, 620, 440));
+        let hairline = bt_persist::WindowBoundsV1 {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
+        let floored = physical_rect(hairline, 96);
+        assert_eq!(
+            (floored.right - floored.left, floored.bottom - floored.top),
+            (1, 1),
+            "a rectangle of no size is floored where the window is placed"
+        );
+    }
+
     #[test]
     fn a_blur_is_taken_once_and_showing_the_window_clears_it() {
         let mut quake = Quake::default();

@@ -486,11 +486,25 @@ pub(crate) struct ClaimedChord {
 /// would work everywhere in this window except over a web seat, silently. The
 /// table has no such row today and `no_shipped_chord_is_a_bare_printable_key`
 /// is what says so tomorrow.
+///
+/// # And the one row whose key never reaches this window either
+///
+/// The summon's chord is claimed process-wide with `RegisterHotKey` and is taken
+/// out of the input stream before **any** window is offered it (§7.54 ①), so a
+/// page cannot be given it back: there is nothing to give. It is excluded by
+/// [`Action::is_claimed_from_windows`] rather than by naming the row, for
+/// [`Scope`]'s reason — the fact belongs to the row.
+///
+/// **Excluding it is not a tidiness.** [`WebChord`] carries three modifier flags
+/// and the Windows key is not one of them, because until next29 no row wore it.
+/// A summon bound to `Win+\`` handed to this table unfiltered would therefore be
+/// claimed as a **bare backtick**, and every page in this window would stop
+/// receiving the one character that opens a code fence.
 pub(crate) fn claimable_chords(shortcuts: &Shortcuts, focus: Focus) -> Vec<ClaimedChord> {
     shortcuts
         .rows()
         .iter()
-        .filter(|row| row.scope.holds(focus))
+        .filter(|row| row.scope.holds(focus) && !row.action.is_claimed_from_windows())
         .filter_map(|row| {
             let chord = row.chord.as_ref()?;
             let virtual_key = chord_virtual_key(&chord.key)?;
@@ -3783,8 +3797,13 @@ mod keyboard_tests {
     /// the web host takes back from a focused page are the same rows.
     #[test]
     fn the_chord_table_the_web_seat_claims_is_the_table_the_window_ships() {
+        // The same two filters `claimable_chords` applies, because the claim is
+        // what this reconciles against: a row with no chord has none to give,
+        // and a row whose chord Windows takes out of the input stream has none
+        // to give back either (§7.54 ①).
         let spelled: Vec<(&str, String)> = BINDINGS
             .iter()
+            .filter(|row| !row.action.is_claimed_from_windows())
             .filter_map(|row| row.chord.as_ref().map(|chord| (row.id, spell(chord))))
             .collect();
         let expected: Vec<(&str, String)> = EXPECTED_CHORDS

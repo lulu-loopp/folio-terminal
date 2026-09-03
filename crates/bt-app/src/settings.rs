@@ -2324,6 +2324,14 @@ pub enum SettingsRow {
     /// Whether the summoned terminal goes away when the keyboard leaves it
     /// (§7.54).
     QuakeDismiss,
+    /// **Whether this program keeps an icon in the notification area** (§7.54).
+    ///
+    /// It sits under the three summon rows because it is the fourth thing to say
+    /// about the same window — how tall, how wide, how long it stays, and how to
+    /// reach it without the keyboard — and because the sentence under it is about
+    /// what happens when the reader closes their last window, which is a thing
+    /// the three above it have just made possible.
+    TrayIcon,
     /// **Which way a split with no direction of its own cuts** (user ruling,
     /// 2026-08-16).
     ///
@@ -2740,7 +2748,8 @@ impl SettingsRow {
             | Self::UpdateCheck
             | Self::QuakeHeight
             | Self::QuakeWidth
-            | Self::QuakeDismiss => SettingsCategory::General,
+            | Self::QuakeDismiss
+            | Self::TrayIcon => SettingsCategory::General,
             // The editor's eight, which are the Profiles page's second view.
             Self::ProfileName
             | Self::ProfileProgram
@@ -2830,6 +2839,7 @@ impl SettingsRow {
             Self::QuakeHeight => Text::RowQuakeHeight.text(),
             Self::QuakeWidth => Text::RowQuakeWidth.text(),
             Self::QuakeDismiss => Text::RowQuakeDismiss.text(),
+            Self::TrayIcon => Text::RowTrayIcon.text(),
         }
     }
 
@@ -3071,6 +3081,7 @@ impl SettingsRow {
             }
             Self::QuakeWidth => Text::DescQuakeWidth.text(),
             Self::QuakeDismiss => Text::DescQuakeDismiss.text(),
+            Self::TrayIcon => Text::DescTrayIcon.text(),
         }
     }
 
@@ -3214,6 +3225,7 @@ impl SettingsRow {
             | Self::QuakeHeight
             | Self::QuakeWidth
             | Self::QuakeDismiss
+            | Self::TrayIcon
             | Self::PsReadLine
             | Self::PowerShellOffer
             // On the row above's test, said again for the reader who has just watched an agent
@@ -3351,7 +3363,9 @@ impl SettingsRow {
             Self::DefaultProfile => profiles::count(),
             Self::BackgroundImage => IMAGE_SOURCE_OPTIONS.len(),
             Self::ImageFit => IMAGE_FIT_OPTIONS.len(),
-            Self::Acrylic | Self::AlwaysOnTop | Self::QuakeDismiss => FORMULA_OPTIONS.len(),
+            Self::Acrylic | Self::AlwaysOnTop | Self::QuakeDismiss | Self::TrayIcon => {
+                FORMULA_OPTIONS.len()
+            }
             // A slider has no items. Zero rather than a refusal, because
             // `option_labels` is what the layout measures the control column
             // against, and the honest measurement of a control that never opens
@@ -3460,7 +3474,7 @@ impl SettingsRow {
                 .copied()
                 .map(image_source_label),
             Self::ImageFit => IMAGE_FIT_OPTIONS.get(index).copied().map(image_fit_label),
-            Self::Acrylic | Self::AlwaysOnTop | Self::QuakeDismiss => {
+            Self::Acrylic | Self::AlwaysOnTop | Self::QuakeDismiss | Self::TrayIcon => {
                 FORMULA_OPTIONS.get(index).copied().map(on_off_label)
             }
             Self::ProfileStartAt => START_AT_OPTIONS.get(index).copied().map(start_at_label),
@@ -3845,6 +3859,9 @@ impl SettingsRow {
             Self::QuakeDismiss => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.quake_dismiss_on_blur),
+            Self::TrayIcon => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.tray_icon),
             Self::ProfileStartAt => values.editor.map(|editor| editor.start_at),
             Self::ProfileColour => values.editor.and_then(|editor| editor.colour),
             Self::ProfileHyperlink => values.editor.map(|editor| editor.hyperlink),
@@ -3981,6 +3998,7 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::QuakeHeight);
     rows.push(SettingsRow::QuakeWidth);
     rows.push(SettingsRow::QuakeDismiss);
+    rows.push(SettingsRow::TrayIcon);
     // Second from last on its page, because it is the only row here that changes
     // something **outside this window**: the three above it say how Folio
     // behaves, and this one says what another program's menu contains.
@@ -4545,6 +4563,9 @@ pub struct SettingsValues {
     /// running one holds the chord, and the row is where that stops being
     /// mysterious.
     pub quake_hotkey_taken: bool,
+    /// Whether the icon in the notification area is wanted — see
+    /// `bt_persist::SettingsV1::tray_icon` for the second thing it decides.
+    pub tray_icon: bool,
 }
 
 #[cfg(test)]
@@ -4610,6 +4631,7 @@ impl SettingsValues {
             quake_width: bt_persist::DEFAULT_QUAKE_WIDTH,
             quake_dismiss_on_blur: true,
             quake_hotkey_taken: false,
+            tray_icon: true,
             // Both capabilities present, for `profile_available`'s reason: a
             // geometry test must not quietly become a test of which Windows the
             // suite is running on. The tests that are *about* the greying inject
@@ -4877,14 +4899,27 @@ impl ProfileEditor {
 /// A capture in progress: which line is listening, what it is showing, and what
 /// it is refusing.
 ///
-/// **The chord is held pending rather than taken on the spot** (S64's shape,
-/// worked through). A recorder that bound the first complete chord it saw would
-/// have no state left in which to *refuse* one — and refusing is the point: the
-/// AltGr zone and the shell's control alphabet are both cases where the user
-/// pressed something real and must be told why it cannot be theirs, without
-/// their old chord having been thrown away in the meantime. So a press produces
-/// a candidate, a refusal replaces the candidate with a reason, and `Enter`
-/// commits whatever is standing.
+/// **A chord that is allowed is taken the moment it is pressed** (user ruling,
+/// next29, and it overturns this comment's own first answer).
+///
+/// What stood here was that a chord is held pending and `Enter` commits it, on
+/// the grounds that a recorder which bound the first complete chord it saw would
+/// have no state left in which to *refuse* one. That reasoning was sound about
+/// refusals and wrong about acceptances, and the real window is what settled it:
+/// every other row of this dialog takes effect the moment it is touched, a
+/// reader who had recorded a key and walked away had recorded nothing, and
+/// nothing on the glass had told them there was a step left to take. A dialog
+/// with one row that needs confirming and thirty that do not is a dialog whose
+/// one exception is invisible.
+///
+/// **Refusing still needs the state, and still has it.** A press this table will
+/// not take does not become a binding and does not throw the old one away: it
+/// replaces the caps with a reason and leaves the box waiting, which is the case
+/// [`Self::hint`] exists for. So does the one refusal that comes with an offer
+/// — [`Self::conflict`] — because taking a chord away from another row is a cost
+/// paid by a row the reader is not looking at, and that ruling (2026-08-26)
+/// printed the cost before it is paid on purpose. **An acceptance costs nothing
+/// and is not asked about; a theft costs a row its key and still is.**
 ///
 /// The cost is written down where it is paid, in `shortcuts::RecordedKey`: bare
 /// `Esc`, `Backspace`, `Delete` and `Enter` are this state's own verbs and
@@ -4897,16 +4932,13 @@ struct Recording {
     /// The caps the box is showing — modifiers alone while the keys are going
     /// down, the whole chord once one has arrived.
     caps: Vec<String>,
-    /// The chord `Enter` would take, if there is one.
-    candidate: Option<crate::shortcuts::Chord>,
     /// **The chord `Enter` would take *off another row*, and which row**
     /// (user ruling 2026-08-26).
     ///
-    /// A second field beside [`Self::candidate`] and not a flag on it, because
-    /// the two are different offers and `Enter` has to be able to tell them
-    /// apart: one costs nothing and the other costs a row its key. They are
-    /// never both set — a chord is free or it is somebody's — and the invariant
-    /// is kept by every arm of [`SettingsPanel::record`] clearing the other.
+    /// The only thing `Enter` can still take, and the only thing this capture
+    /// holds that is not already on disk: an acceptance is written where it is
+    /// pressed, and what is left standing here is an *offer* — the one press
+    /// whose cost lands on a row the reader is not looking at.
     conflict: Option<(String, crate::shortcuts::Chord)>,
     /// Why the last press was refused, if it was.
     hint: Option<String>,
@@ -6173,28 +6205,30 @@ impl SettingsPanel {
         match input {
             RecordInput::Modifier { caps } => {
                 capture.caps = caps;
-                capture.candidate = None;
                 capture.conflict = None;
                 capture.hint = None;
                 RecordVerdict::Moved
             }
+            // **An allowed chord is taken here**, which is what "every row of
+            // this dialog takes effect when it is touched" means on the one page
+            // that used to have an exception. A refusal is the case that still
+            // needs somewhere to stand: the reader pressed something real, it
+            // cannot be theirs, and the row they were editing must still have the
+            // chord it had while they are being told so.
             RecordInput::Candidate {
                 caps,
                 chord,
                 refusal,
             } => {
-                capture.caps = caps;
                 capture.conflict = None;
-                match refusal {
-                    Some(reason) => {
-                        capture.candidate = None;
-                        capture.hint = Some(reason);
-                    }
-                    None => {
-                        capture.candidate = Some(chord);
-                        capture.hint = None;
-                    }
-                }
+                let Some(reason) = refusal else {
+                    let row = capture.row;
+                    self.recording = None;
+                    self.focus = Some(SettingsTarget::Record(row));
+                    return RecordVerdict::Commit(row, Some(chord));
+                };
+                capture.caps = caps;
+                capture.hint = Some(reason);
                 RecordVerdict::Moved
             }
             RecordInput::Conflict {
@@ -6204,13 +6238,11 @@ impl SettingsPanel {
                 hint,
             } => {
                 capture.caps = caps;
-                capture.candidate = None;
                 capture.conflict = Some((holder, chord));
                 capture.hint = Some(hint);
                 RecordVerdict::Moved
             }
             RecordInput::Unusable => {
-                capture.candidate = None;
                 capture.conflict = None;
                 capture.hint = Some(record_unusable_hint().to_owned());
                 RecordVerdict::Moved
@@ -6227,18 +6259,13 @@ impl SettingsPanel {
                 self.focus = Some(SettingsTarget::Record(row));
                 RecordVerdict::Commit(row, None)
             }
-            // **`Enter` takes whatever is standing**, and since 2026-08-26 a
-            // conflict is one of the two things that can stand. It is the same
-            // verb either way — the difference is in what the line said the
-            // press would cost, which was printed before the key came down.
-            RecordInput::Confirm => match (capture.candidate.take(), capture.conflict.take()) {
-                (Some(chord), _) => {
-                    let row = capture.row;
-                    self.recording = None;
-                    self.focus = Some(SettingsTarget::Record(row));
-                    RecordVerdict::Commit(row, Some(chord))
-                }
-                (None, Some((take_from, chord))) => {
+            // **`Enter` takes the one thing that can still be standing**: the
+            // offer to take a chord off another row (2026-08-26). An ordinary
+            // acceptance never reaches here any more — it was written the moment
+            // it was pressed — so what is left is exactly the press whose cost
+            // was printed before the key came down.
+            RecordInput::Confirm => match capture.conflict.take() {
+                Some((take_from, chord)) => {
                     let row = capture.row;
                     self.recording = None;
                     self.focus = Some(SettingsTarget::Record(row));
@@ -6248,10 +6275,10 @@ impl SettingsPanel {
                         take_from,
                     }
                 }
-                // Nothing standing: `Enter` with no candidate is not "bind
-                // Enter" and it is not "give up" either — the box is still
-                // waiting, and saying so costs nothing.
-                (None, None) => RecordVerdict::Moved,
+                // Nothing standing: `Enter` with no offer is not "bind Enter"
+                // and it is not "give up" either — the box is still waiting,
+                // and saying so costs nothing.
+                None => RecordVerdict::Moved,
             },
         }
     }
@@ -7761,6 +7788,15 @@ pub fn quake_dismiss_requested(target: SettingsTarget) -> Option<bool> {
         SettingsTarget::Choice(SettingsRow::QuakeDismiss, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
+        _ => None,
+    }
+}
+
+/// **Whether this press asks for the icon in the notification area** (§7.54).
+#[must_use]
+pub fn tray_icon_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::TrayIcon, index) => FORMULA_OPTIONS.get(index).copied(),
         _ => None,
     }
 }
@@ -13107,20 +13143,46 @@ mod tests {
     }
 
     /// **The cap the build derives** (user ruling 2026-08-18), stated here the
-    /// way a reader would derive it by hand rather than as the 581.5 it comes
+    /// way a reader would derive it by hand rather than as the number it comes
     /// to: the tallest page with every `Advanced` group folded and neither list
-    /// on it is `Appearance`, and it is tallest under the vertical rail, where
-    /// it carries `Sidebar` as well.
+    /// on it, measured under the vertical rail, where `Appearance` carries
+    /// `Sidebar` as well.
+    ///
+    /// **It names no page**, and it stopped naming one when the taskbar icon's
+    /// row (§7.54b ⑤) made `General` the tallest instead of `Appearance`. A
+    /// derivation that hard-codes which page is tallest is a derivation that goes
+    /// red for the right answer whenever a row is added, which is exactly the
+    /// maintenance the ruling above was trying to avoid — the sweep is what has
+    /// to be checked, and the check is that a reader adding up rows by hand gets
+    /// the same number.
     ///
     /// [`the_height_cap_is_the_tallest_everyday_page_and_not_a_number`] is what
     /// binds this hand derivation to [`everyday_cap`]'s sweep; every other claim
     /// below reads it through [`fixed_dialog_height`].
     fn everyday_cap_height() -> f32 {
-        let rows = visible_rows(TabLayoutMode::Vertical)
+        SettingsCategory::ALL
             .into_iter()
-            .filter(|row| row.category() == SettingsCategory::Appearance && !row.advanced())
-            .count();
-        dialog_around(page_height(rows) + DISCLOSURE_HEIGHT)
+            .map(folded_page_height)
+            .fold(0.0_f32, f32::max)
+    }
+
+    /// **One page's height with its `Advanced` group folded**, derived by hand
+    /// the way a reader would: the rows they can see, plus the one line offering
+    /// the rest, inside the dialog's own frame.
+    ///
+    /// Its own helper since §7.54b ⑤, which is the change that made the
+    /// distinction matter: `everyday_cap_height` above is the *tallest* page and
+    /// is what the dialog is built at, while a claim about what a particular page
+    /// scrolls is a claim about that page. They were the same number for as long
+    /// as the page every fixture shows happened to be the tallest one.
+    fn folded_page_height(category: SettingsCategory) -> f32 {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let on_this_page = || rows.iter().filter(|row| row.category() == category);
+        let everyday = on_this_page().filter(|row| !row.advanced()).count();
+        // The disclosure is drawn only where there is something folded behind it,
+        // so a page with no advanced rows is that much shorter.
+        let folded = on_this_page().any(|row| row.advanced());
+        dialog_around(page_height(everyday) + if folded { DISCLOSURE_HEIGHT } else { 0.0 })
     }
 
     /// The derived cap **under the 600 ceiling** — the height the dialog is
@@ -16684,12 +16746,19 @@ mod tests {
         // under the fold.
         let railed = visible_rows(TabLayoutMode::Vertical);
         let overflowing = scrolled_with(&railed, AdvancedOpen::default(), 0.0);
+        // **This page's own height, not the cap.** The two were the same number
+        // for as long as `Appearance` was the tallest everyday page, and §7.54b
+        // ⑤ ended that: `General` is taller now, so a claim written against
+        // `everyday_cap_height` would be measuring one page's scroll against
+        // another page's height. What the ceiling rules is that the *dialog*
+        // stops growing; what each page owes is that its own surplus goes under
+        // the fold, and this is that page's surplus.
         assert_eq!(
             overflowing.max_scroll().round(),
-            (everyday_cap_height() - DIALOG_MAX_HEIGHT_LOGICAL_PX)
+            (folded_page_height(PAGE) - DIALOG_MAX_HEIGHT_LOGICAL_PX)
                 .max(0.0)
                 .round(),
-            "the Appearance page under the rail scrolls by what it stands over the ceiling"
+            "the page on the glass scrolls by exactly what it stands over the ceiling"
         );
         let shoved = shaped_scrolled(
             SettingsCategory::RenderedBlocks,
@@ -18056,7 +18125,7 @@ mod tests {
                 &mut flat(0.0)
             )),
             everyday_cap_height(),
-            "the sweep and the hand derivation are one number: `Appearance` \
+            "the sweep and the hand derivation are one number: the tallest page \
              under the vertical rail, its Advanced folded"
         );
         // **And since §7.1.6b′ it is over the ceiling, so the ceiling answers.**
@@ -20834,6 +20903,7 @@ mod tests {
                 SettingsRow::QuakeHeight,
                 SettingsRow::QuakeWidth,
                 SettingsRow::QuakeDismiss,
+                SettingsRow::TrayIcon,
                 SettingsRow::ContextMenu,
                 // Last on General: the only row in the dialog that reaches off
                 // the machine (§7.51).
@@ -20883,6 +20953,7 @@ mod tests {
                 SettingsRow::QuakeHeight,
                 SettingsRow::QuakeWidth,
                 SettingsRow::QuakeDismiss,
+                SettingsRow::TrayIcon,
                 SettingsRow::ContextMenu,
                 // Last on General: the only row in the dialog that reaches off
                 // the machine (§7.51).
@@ -21907,14 +21978,14 @@ mod tests {
         lacking.default_profile = profiles::fallback_profile();
 
         let mut panel = keyboarded_on(SettingsRow::DefaultProfile.category());
-        // `End` and then five steps back: `Update check` closes this page
-        // (§7.51), `Explorer context menu` stands above it (§7.4), the summoned
-        // terminal's three stand above that (§7.54 — height, width and the
-        // dismissal), and `Default profile` above them. The assertion below is
-        // what keeps the presses honest — a page reordered under this test lands
-        // the ring somewhere else and says so.
+        // `End` and then six steps back: `Update check` closes this page
+        // (§7.51), `Explorer context menu` stands above it (§7.4), the taskbar
+        // icon above that (§7.54b ⑤), the summoned terminal's three above that
+        // (§7.54 — height, width and the dismissal), and `Default profile` above
+        // them. The assertion below is what keeps the presses honest — a page
+        // reordered under this test lands the ring somewhere else and says so.
         panel.key(SettingsKey::End, content(&flat, &lines), &lacking);
-        for _ in 0..5 {
+        for _ in 0..6 {
             panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
         }
         assert_eq!(
@@ -22833,6 +22904,185 @@ mod tests {
         );
     }
 
+    /// RED (§7.54b ②, user ruling 2026-09-03) — **a chord this table allows is
+    /// written where it is pressed, and walking away cannot lose it.**
+    ///
+    /// The report was one sentence long: a reader recorded a key, left the
+    /// settings, and their change was gone. Nothing was broken — the recorder
+    /// held the chord pending and `Enter` committed it, which is what S64 asked
+    /// for. What was wrong is that **every other row of this dialog takes effect
+    /// when it is touched**, and nothing on the glass said this one was different.
+    /// A dialog with one row that needs confirming and thirty that do not is a
+    /// dialog whose exception is invisible.
+    ///
+    /// The verdict is the whole of the fix: `Commit` is what reaches the runtime,
+    /// and the runtime's answer to a `Commit` is `Shortcuts::set` followed by
+    /// `store_keybindings`, which writes the file on the spot. So a chord that
+    /// arrives here as a `Commit` is a chord that is already on disk before the
+    /// next press can be made.
+    ///
+    /// MUTATIONS: hold the chord pending again and the first assertion goes red
+    /// naming `Moved` — and on the real machine the reader's key is lost exactly
+    /// as it was reported. Close the box without a verdict and the second goes
+    /// red: the file would never be told.
+    #[test]
+    fn a_recorded_chord_is_taken_where_it_is_pressed() {
+        let chord = |text: &str| crate::shortcuts::parse_chord(text).expect("a chord");
+        let caps = |text: &str| crate::shortcuts::chord_caps(&chord(text));
+
+        let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
+        panel.begin_recording(0);
+        assert_eq!(
+            panel.record(RecordInput::Candidate {
+                caps: caps("Ctrl+Shift+Y"),
+                chord: chord("Ctrl+Shift+Y"),
+                refusal: None,
+            }),
+            RecordVerdict::Commit(0, Some(chord("Ctrl+Shift+Y"))),
+            "the press is the commit - there is no second step to forget"
+        );
+        assert_eq!(
+            panel.recording_row(),
+            None,
+            "the box closes on the press that filled it"
+        );
+
+        // And leaving the dialog afterwards cannot take it back, because there is
+        // nothing left in the panel to take: the capture is gone and the chord
+        // went out through the verdict above.
+        assert!(panel.close_one_layer(), "Esc still has the dialog to close");
+        assert_eq!(
+            panel.recording_row(),
+            None,
+            "and it closes nothing that was holding a chord"
+        );
+
+        // A Windows-key chord takes the same road, which is the summon's own row
+        // and the reason this half is asserted: it is the chord most likely to be
+        // recorded on the one row whose key Windows claims.
+        let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
+        panel.begin_recording(0);
+        assert_eq!(
+            panel.record(RecordInput::Candidate {
+                caps: caps("Win+`"),
+                chord: chord("Win+`"),
+                refusal: None,
+            }),
+            RecordVerdict::Commit(0, Some(chord("Win+`"))),
+        );
+    }
+
+    /// RED (§7.54b ②) — **the one press that still waits is the one that costs
+    /// another row its key.**
+    ///
+    /// The 2026-08-26 ruling put the cost of a swap on the line before it is
+    /// paid, on purpose: the row that loses its chord is a row the reader is not
+    /// looking at. That reasoning is untouched by ②, which is about acceptances —
+    /// and an acceptance costs nothing. So a conflict still stands, still names
+    /// the row that has the chord, and still needs the key that pays for it.
+    ///
+    /// MUTATION: commit a conflict on arrival as an ordinary chord now is, and
+    /// the first assertion goes red — and a second row is silently unbound behind
+    /// a dialog the reader has already looked away from, which is the objection
+    /// the original ruling was written against.
+    #[test]
+    fn a_conflict_still_waits_for_the_key_that_pays_for_it() {
+        let chord = |text: &str| crate::shortcuts::parse_chord(text).expect("a chord");
+        let caps = |text: &str| crate::shortcuts::chord_caps(&chord(text));
+
+        let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
+        panel.begin_recording(0);
+        assert_eq!(
+            panel.record(RecordInput::Conflict {
+                caps: caps("Ctrl+Shift+W"),
+                chord: chord("Ctrl+Shift+W"),
+                holder: "close-pane".to_owned(),
+                hint: "already used".to_owned(),
+            }),
+            RecordVerdict::Moved,
+            "an offer is not an acceptance and is not taken on arrival"
+        );
+        assert_eq!(
+            panel.recording_row(),
+            Some(0),
+            "the box stays open holding the offer"
+        );
+        assert_eq!(
+            panel.record(RecordInput::Confirm),
+            RecordVerdict::Swap {
+                row: 0,
+                chord: chord("Ctrl+Shift+W"),
+                take_from: "close-pane".to_owned(),
+            },
+            "and Enter is what pays for it"
+        );
+        assert_eq!(panel.recording_row(), None);
+
+        // Esc over a standing offer takes the offer away and nothing else: no row
+        // was changed, so there is nothing to undo.
+        let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
+        panel.begin_recording(0);
+        let _ = panel.record(RecordInput::Conflict {
+            caps: caps("Ctrl+Shift+W"),
+            chord: chord("Ctrl+Shift+W"),
+            holder: "close-pane".to_owned(),
+            hint: "already used".to_owned(),
+        });
+        assert_eq!(panel.record(RecordInput::Cancel), RecordVerdict::Ended);
+        assert_eq!(panel.recording_row(), None);
+    }
+
+    /// RED (§7.54b ①) — **the summon's row says so when another program holds its
+    /// key.**
+    ///
+    /// The fourth refusal, and the second place it is said. The other three are
+    /// facts about this table and `chord_verdict` decides all three; this one is a
+    /// fact about another program on this machine, so it joins the rows outside
+    /// `editor_rows` and lands on the muted line the page already uses to say why
+    /// a row might not answer.
+    ///
+    /// It said so only on the General page's height row until now, which was
+    /// right and half the answer: somebody going to *change* this key is on the
+    /// shortcuts page, and that page said nothing at all.
+    ///
+    /// MUTATION: join the sentence onto the row's scope tag instead of replacing
+    /// it and the narrowest column in the dialog gets two clauses where one fits;
+    /// put it on the wrong row and the reader is told the key is taken beside a
+    /// verb that has nothing to do with it.
+    #[test]
+    fn the_summon_row_says_when_another_program_holds_its_key() {
+        let table = crate::shortcuts::Shortcuts::defaults();
+        let plain = table.editor_rows();
+        let mut taken = table.editor_rows();
+        crate::shortcuts::note_the_summon_is_taken(&mut taken);
+        let summon = |rows: &[crate::shortcuts::ShortcutRow]| {
+            rows.iter()
+                .position(|row| row.ids.contains(&crate::shortcuts::SUMMON_QUAKE_ID))
+                .expect("the summon is a row of the editor")
+        };
+        let index = summon(&plain);
+        assert_eq!(index, summon(&taken), "the same row either way");
+        assert_eq!(
+            taken[index].note.as_deref(),
+            Some(Text::DescQuakeHotkeyTaken.text()),
+            "and it carries the one sentence there is to say"
+        );
+        assert_ne!(
+            plain[index].note, taken[index].note,
+            "which is not what it says when the key is this program's"
+        );
+        for (before, after) in plain.iter().zip(taken.iter()) {
+            if before.ids.contains(&crate::shortcuts::SUMMON_QUAKE_ID) {
+                continue;
+            }
+            assert_eq!(
+                before.note, after.note,
+                "no other row is told anything: {}",
+                before.title
+            );
+        }
+    }
+
     /// PIN (S64) — **the recorder's whole state machine: accept, refuse, cancel,
     /// clear, confirm.**
     ///
@@ -22842,8 +23092,14 @@ mod tests {
     /// refusal that shut the box would make the second attempt cost another
     /// click on the button they are already looking at.
     ///
+    /// **An acceptance no longer waits for `Enter`** (§7.54b ②, user ruling
+    /// 2026-09-03) — see
+    /// `a_recorded_chord_is_taken_where_it_is_pressed`. What is left here is
+    /// everything else the machine does, and all of it is unchanged: the refusal
+    /// arms, the cancel, the unbind, and the press that is not a key at all.
+    ///
     /// MUTATIONS:
-    /// (1) commit the candidate on arrival instead of on `Enter` — the refusal
+    /// (1) let a refusal commit like an acceptance now does — the refusal
     ///     assertions have nowhere left to stand and the "still listening" ones
     ///     go red;
     /// (2) let `Escape` fall through to `close_one_layer`'s dialog rung — the
@@ -22876,15 +23132,10 @@ mod tests {
                 chord: chord("Ctrl+Shift+Y"),
                 refusal: None,
             }),
-            RecordVerdict::Moved,
-            "a chord is held pending, never taken on arrival"
+            RecordVerdict::Commit(0, Some(chord("Ctrl+Shift+Y"))),
+            "a chord this table allows is taken where it is pressed"
         );
-        assert_eq!(panel.recording_row(), Some(0), "and the box is still open");
-        assert_eq!(
-            panel.record(RecordInput::Confirm),
-            RecordVerdict::Commit(0, Some(chord("Ctrl+Shift+Y")))
-        );
-        assert_eq!(panel.recording_row(), None, "confirming closes the box");
+        assert_eq!(panel.recording_row(), None, "and taking it closes the box");
         assert_eq!(panel.focus(), Some(SettingsTarget::Record(0)));
 
         // Refuse, and stay.
