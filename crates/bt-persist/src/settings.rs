@@ -186,13 +186,14 @@ use serde::{Deserialize, Serialize};
 /// Both land the v13-v16 way: a default chosen for a thing that did not exist before. `quake_height`
 /// is 40 percent, which is what the window opens as until somebody moves it; `quake_dismiss_on_blur`
 /// is **on**, because a terminal that hangs across the top of the screen after you have clicked back
-/// into your editor is a terminal covering the thing you clicked into.
+/// into your editor is a terminal covering the thing you clicked into. (That second half was
+/// overturned by v30 below; the paragraph stays as written because v30 is an argument with it.)
 ///
 /// **v28 carries `quake_width`**, the summoned window's third key, added when the shape v27
 /// shipped met a 4K ultrawide (user ruling, 2026-09-02, `docs/DESIGN.md` §7.54). It lands the v25
-/// way and not the v13–v16 way, and it is the only step on this ladder that does: the key does not
-/// name a default for something that never existed, it **replaces a fact that used to be wired
-/// shut**. A migrated file could honestly have been given `100`, which is what every build before
+/// way and not the v13–v16 way, and it is the first step on this ladder that does (v30 below is the
+/// second, on this paragraph's own argument): the key does not name a default for something that
+/// never existed, it **replaces a fact that used to be wired shut**. A migrated file could honestly have been given `100`, which is what every build before
 /// this one did; it is given `60`, because the old width was not a preference anybody expressed —
 /// there was no row to express it on — so carrying it forward would be preserving an accident
 /// rather than a choice.
@@ -204,7 +205,19 @@ use serde::{Deserialize, Serialize};
 /// the icon is the only door to a program that has no window on the screen, and a reader cannot go
 /// looking in the settings of a program they cannot see. It is a switch to turn *off*, not one to
 /// discover.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 29;
+///
+/// **v30 turns `quake_dismiss_on_blur` off** (user ruling, 2026-09-03, `docs/DESIGN.md` §7.54c):
+/// 「点到其他程序不是关闭临时终端的途径」. It lands the **v28 way** and not the v13–v16 way, which
+/// makes it the second step on this ladder to overwrite a value a file already carries, and the
+/// reason is v28's reason word for word. A migrated file could honestly have been left holding
+/// `true`, which is what every build since v27 did; it is written `false`, because dismissal on blur
+/// was never a preference anybody expressed — **the row was born with the feature**, already set,
+/// and a reader who has never touched it has said nothing about it. Carrying `true` forward would
+/// preserve the shape v27 guessed at rather than a choice its owner made, and it would leave the
+/// one group who *did* express something — the readers who turned it off by hand — indistinguishable
+/// from the ones who never saw it. Their `false` is what this step writes anyway, so the only files
+/// this step changes are the ones nobody had an opinion about.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 30;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -340,6 +353,23 @@ pub const DEFAULT_QUAKE_WIDTH: u8 = 60;
 /// whose every line wrapped would read as a window that opened wrong. There is no setting from
 /// which this window can be made useless.
 pub const MINIMUM_QUAKE_WIDTH: u8 = 30;
+
+/// **Whether a summoned terminal goes away when the keyboard leaves it**, when nobody has said
+/// otherwise (v30, user ruling 2026-09-03, `docs/DESIGN.md` §7.54c).
+///
+/// **Off**, and the sentence the ruling turns on is「点到其他程序不是关闭临时终端的途径」: clicking
+/// into another window is how a person *uses* the machine in front of them, not how they put a
+/// terminal away. v27 shipped this on, arguing that a window above every other window is covering
+/// the thing the reader just turned to; what that argument left out is that the reader who turns to
+/// a browser to read an error message, or to a password manager to fetch a token, has not finished
+/// with the terminal at all — and on the way back the command they were half way through typing is
+/// gone, along with everything the summon had on the glass.
+///
+/// The window is still one keystroke from gone: the summon chord dismisses it, which is the gesture
+/// that says so on purpose. This default only stops a *click somewhere else* from being read as
+/// that gesture. The reader who does want the strip to vanish the moment they look away has the row
+/// to say it on, which is why the row exists.
+pub const DEFAULT_QUAKE_DISMISS_ON_BLUR: bool = false;
 
 /// The height cap a `settings.json` that has never named one is read as: **none**.
 ///
@@ -955,13 +985,15 @@ pub struct SettingsV1 {
     /// [`Self::quake_height`]'s own terms: the clamp belongs at the surface that places the window.
     #[serde(default = "default_quake_width")]
     pub quake_width: u8,
-    /// **Whether the summoned terminal goes away when the keyboard leaves it** (v27).
+    /// **Whether the summoned terminal goes away when the keyboard leaves it** (v27; default
+    /// reversed in v30).
     ///
-    /// On, because the window is above every other window by construction: a reader who clicks
-    /// back into the editor they summoned the terminal over has said what they want, and a strip
-    /// that stays in front of it afterwards is covering the thing they just asked to look at. Off
-    /// is for the reader who summons a shell to watch it while they work — a real use, which is
-    /// why the row exists, and not the one the key is usually pressed for.
+    /// **Off** — see [`DEFAULT_QUAKE_DISMISS_ON_BLUR`], which carries the argument. v27 shipped it
+    /// on, reasoning that a window above every other window is covering the thing the reader turned
+    /// to; the ruling that reversed it is that clicking into another program is not a way of closing
+    /// a terminal, and a strip that empties the moment the eye moves is one a person cannot read an
+    /// error message beside. On is for the reader who wants exactly that, which is why the row is
+    /// still here.
     #[serde(default = "default_quake_dismiss_on_blur")]
     pub quake_dismiss_on_blur: bool,
     /// **Whether this program keeps an icon in the notification area** (`docs/DESIGN.md` §7.54).
@@ -1002,9 +1034,8 @@ fn default_quake_width() -> u8 {
     DEFAULT_QUAKE_WIDTH
 }
 
-/// And the v27 dismissal key. A function because the answer is `true` and `bool::default()` is
-/// `false` — a file that had lost this key would come back with a terminal standing in front of
-/// whatever the reader turned to next.
+/// `serde`'s door for the v29 tray key, missing from every file written before it.
+///
 /// **On**, for the reason on [`SETTINGS_SCHEMA_VERSION`]'s v29 paragraph: the icon is the only
 /// door to a program with no window on the screen, and a door that ships closed is a door nobody
 /// finds.
@@ -1012,8 +1043,14 @@ fn default_tray_icon() -> bool {
     true
 }
 
+/// And the v27 dismissal key, whose answer v30 reversed.
+///
+/// Still a named function rather than `#[serde(default)]`, even though the answer is now
+/// `bool::default()`'s own: the two agree today by arithmetic and not by argument, and a key whose
+/// door was deleted the day they happened to line up is a key that would silently flip the next time
+/// [`DEFAULT_QUAKE_DISMISS_ON_BLUR`] moved. The constant is the one place the answer is written.
 fn default_quake_dismiss_on_blur() -> bool {
-    true
+    DEFAULT_QUAKE_DISMISS_ON_BLUR
 }
 
 /// `serde`'s door for a v15 key missing from a file this build is reading.
@@ -1155,9 +1192,8 @@ impl Default for SettingsV1 {
             // Wide enough that nothing an ordinary terminal draws has to wrap, narrow enough that
             // one line of it is read without crossing a 4K desk.
             quake_width: DEFAULT_QUAKE_WIDTH,
-            // A window that is above every other window goes away when the reader turns to one of
-            // them.
-            quake_dismiss_on_blur: true,
+            // Turning to another window is how a person works, not how they put a terminal away.
+            quake_dismiss_on_blur: DEFAULT_QUAKE_DISMISS_ON_BLUR,
             tray_icon: true,
         }
     }

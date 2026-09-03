@@ -880,7 +880,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 29,
+        SETTINGS_SCHEMA_VERSION, 30,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -907,7 +907,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          hints the v21-to-v22, and the Terminal page's own Turn finished the \
          v22-to-v23, and the Cards column's own first-arrival hint the v23-to-v24, \
          and the terminal's own silent write to the clipboard on a dragged \
-         selection the v24-to-v25 — one key on one day, fifteen times running \n         and the one key in this file that lets this build ask a server anything, the v25-to-v26: sixteen          — and the summoned terminal's two, how tall it opens and whether it goes away when the          keyboard leaves it, the v26-to-v27: two keys on one rung because they are one window's          description and a rung is a release of this file's shape, not a key — and how wide it opens the          v27-to-v28, one key on its own day and the only rung here that changes a shape a reader          already had: the full span it replaces was never a preference anybody expressed          — and whether this program keeps an icon on the taskbar the v28-to-v29,          one key on its own day, and the second rung here whose default is not          'what you already had': it ships on, because the icon is the only door to          a program with no window on the screen and a reader cannot go looking in          the settings of a program they cannot see"
+         selection the v24-to-v25 — one key on one day, fifteen times running \n         and the one key in this file that lets this build ask a server anything, the v25-to-v26: sixteen          — and the summoned terminal's two, how tall it opens and whether it goes away when the          keyboard leaves it, the v26-to-v27: two keys on one rung because they are one window's          description and a rung is a release of this file's shape, not a key — and how wide it opens the          v27-to-v28, one key on its own day and the first rung here that changes a shape a reader          already had: the full span it replaces was never a preference anybody expressed          — and whether this program keeps an icon on the taskbar the v28-to-v29,          one key on its own day, and the second rung here whose default is not          'what you already had': it ships on, because the icon is the only door to          a program with no window on the screen and a reader cannot go looking in          the settings of a program they cannot see          — and whether a click somewhere else puts the summoned terminal away the          v29-to-v30, one key on its own day and the second rung here that          overwrites a shape a reader already had, for the v27-to-v28 rung's exact          reason: the row was born with the feature already set, so nobody ever          expressed the preference it would be carrying forward"
     );
     assert_eq!(
         defaults.quake_height,
@@ -923,9 +923,24 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
         defaults.tray_icon,
         "the icon ships on, and the row it is on says what else it decides: while          it is there, closing the last window leaves the program running behind it"
     );
+    // RED (user ruling 2026-09-03, `docs/DESIGN.md` §7.54c) — 「点到其他程序不是关闭临时终端的
+    // 途径」. v27 shipped this on, arguing that a window above every other window covers whatever
+    // the reader turned to; the ruling is that turning to another window is how a person uses the
+    // machine in front of them and not how they put a terminal away. The reader who looks up an
+    // error message in a browser comes back to a command half typed — or would, with a default of
+    // `true`. MUTATION: flip the constant back and this line fails; the summon chord is still the
+    // one gesture that dismisses the window on purpose.
     assert!(
+        !defaults.quake_dismiss_on_blur,
+        "a click into another program is being read as a request to close the \
+         summoned terminal, which is not what it is: the reader who turns to a \
+         browser for an error message comes back to a command half typed"
+    );
+    assert_eq!(
         defaults.quake_dismiss_on_blur,
-        "the summoned window is above every other window by construction, so a          reader who clicks back into the editor they summoned it over has said          what they want; a default of `false` would leave a strip standing in          front of the thing they just asked to look at"
+        bt_persist::DEFAULT_QUAKE_DISMISS_ON_BLUR,
+        "and the answer is the constant's, so the row, the serde default and the \
+         migration cannot drift apart"
     );
     assert!(
         defaults.copy_on_select,

@@ -6534,7 +6534,7 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 
 **schema。** `session.json` 走到 **v12**:`SessionWindowV1` 多一个 `quake`,`#[serde(default)]` 是 `false`——v12 之前每一扇窗都是那个意思,所以没有哪份 v11 文档需要被改写才能表达它本来就在表达的事;`skip_serializing_if` 让一份没有快捷终端的 v12 文档与它来自的那份 v11 文档逐字节相同。迁移函数只升版本号(规则 3)。版本号本身仍然欠着,而且这里比 v11 那次更实:一个 v11 的 build 读到 v12 文档会把这扇窗当普通窗打开——看得见、站在存下来的矩形上、没有键能收起它——那不是人能诊断出来的误读,版本号是把它变成 §5.4 那句「这份文件是更新的 Folio 写的」的东西。
 
-`settings.json` 走到 **v27**,两把钥匙一格:`quake_height`(40)与 `quake_dismiss_on_blur`(on)。一格装两把是这道梯子上的第一次,而它是这里诚实的形状——它们是同一扇窗描述的两半,同一个版本发出去,而 v26.5 是给一份从来没人写过的文档编号。两把都不承接旧习惯、也都不开启任何东西:它们描述的那扇窗在读者绑上一把键之前根本不存在,而召唤出厂不绑。
+`settings.json` 走到 **v27**,两把钥匙一格:`quake_height`(40)与 `quake_dismiss_on_blur`(on)。一格装两把是这道梯子上的第一次,而它是这里诚实的形状——它们是同一扇窗描述的两半,同一个版本发出去,而 v26.5 是给一份从来没人写过的文档编号。两把都不承接旧习惯、也都不开启任何东西:它们描述的那扇窗在读者绑上一把键之前根本不存在,而召唤出厂不绑。(`quake_dismiss_on_blur` 的默认**已被 7.54c ① 推翻**,v30 把它写成 `false`;上面这句留着,因为 7.54c 反驳的正是它。)
 
 **失焦收起默认开**,理由是这扇窗按构造在所有窗之上:点回自己编辑器的读者已经说了他要什么,一条留在它前面的横条盖住的正是他刚要求去看的东西。关掉它是为「叫出一个 shell 盯着它干活」这个真实用法留的门,那不是这把键常被按下的理由。
 
@@ -6635,7 +6635,7 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 
 **⑤ 任务栏上一个图标,而常驻的语义跟着改判。** 7.54 最后那段的明账写着:「想要一个常驻的快捷终端的人会发现它随最后一扇窗一起走,那需要的是一枚托盘图标而不是一扇看不见的窗,本单不做。」这一桩就是那笔账。
 
-**改判的是「可达性」,不是「一扇看不见的窗能不能护着进程」。** `open_window_count` 那段论证一个字都不用改:一个屏上无物、任务栏上无按钮的 `folio.exe`,回去的路只剩一把可能几周前绑的键——那确实不该发生。但那段论证讲的是**能不能回去**,而一枚图标就是那个答案:程序在它的图标说它在的地方,点一下就出来,右键菜单里有一行退出。所以**只有图标**能把「关掉最后一扇窗」变回它字面的意思——关掉一扇窗。开关关着的时候,7.54 那一段逐字有效。
+**改判的是「可达性」,不是「一扇看不见的窗能不能护着进程」。** `open_window_count` 那段论证一个字都不用改:一个屏上无物、任务栏上无按钮的 `folio.exe`,回去的路只剩一把可能几周前绑的键——那确实不该发生。但那段论证讲的是**能不能回去**,而一枚图标就是那个答案:程序在它的图标说它在的地方,点一下就出来,右键菜单里有一行退出。所以**只有图标**能把「关掉最后一扇窗」变回它字面的意思——关掉一扇窗。开关关着的时候,7.54 那一段逐字有效。(**已被 7.54c ② 收窄**:这段论证回答的是「怎么回去」,而它当时被当成了「为什么留着」;现在还要有一扇快捷终端窗。)
 
 一个开关管两件事,而且它们是**一件事**:一个没有窗也没有图标还在跑的程序,是一个悄悄没退干净的程序;一个已经退了而图标还在任务栏上的程序,是一枚说谎的图标。两种状态都不值得能被要求,所以都没有自己的行。
 
@@ -6654,7 +6654,7 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 - `bt-app/src/shortcuts.rs`:`the_summon_ships_with_the_key_windows_terminal_taught_this_platform`(把默认拿掉,或换成 `Ctrl+\`` 那一档)、`a_chord_wearing_the_windows_key_survives_the_file_it_is_written_to`(三个函数里任何一个不认 `Win`,录进去的键下次启动变成另一把)、`a_hand_on_the_windows_key_raises_nothing_even_now_that_a_row_wears_it`(拿掉 `answers_a_hand_holding` 里那一句,每次 `Win+E` 都在终端上闪一张卡)。
 - `bt-app/src/settings.rs`:`a_recorded_chord_is_taken_where_it_is_pressed`(把 `Candidate` 改回挂起,录完走开就什么都没发生)、`a_conflict_still_waits_for_the_key_that_pays_for_it`(把冲突也当场提交,另一行被悄悄解绑)。
 - `bt-app/src/webhost.rs`:`the_chord_table_the_web_seat_claims_is_the_table_the_window_ships` 与 `every_shipped_chord_resolves_to_a_virtual_key_on_this_layout`(拿掉 `claimable_chords` 里的排除,页面上的反引号被抢走)。
-- `bt-app/src/main.rs`:`an_icon_on_the_taskbar_keeps_the_run_alive`(拆掉 `close` 和 `reap_leaving_windows` 两处 `tray_is_standing` 中的任一处,关掉最后一扇窗就退,图标白挂了;或者反过来,开关关着也不退,变成一个悄悄没退干净的程序)。
+- `bt-app/src/main.rs`:`an_icon_on_the_taskbar_keeps_the_run_alive`(拆掉 `close` 和 `reap_leaving_windows` 两处常驻判断中的任一处,关掉最后一扇窗就退,图标白挂了;或者反过来,开关关着也不退,变成一个悄悄没退干净的程序)。**这枚钉子在 7.54c ② 里被收窄并改名为 `an_icon_keeps_the_run_alive_only_while_a_summoned_terminal_is_behind_it`**:上面这一段的变异逐字有效,只是它问的事实从一个变成了两个。
 
 **实机读数(本机,2026-09-03,`target/release/folio.exe`,隔离 `APPDATA`)。**
 
@@ -6675,6 +6675,35 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 **没测到的:③ 的手势那一半。** "拖动/缩放之后再呼出" 需要真的把手放在窗框上,而这个会话注入不了指针。判据都在红门里(`an_arranged_rectangle_comes_back_only_on_the_display_it_was_arranged_on`、`an_arrangement_is_restated_at_the_scale_the_display_now_has`),而 `in_size_move` 这条判据本身是 divider 拖动已经在用的那一位。**这一条也值得人眼走一遍。**
 
 **没做的:触发角。** 用户提过 mac 那种「鼠标撞到屏幕某个角就出来」。主线裁托盘优先,理由是托盘同时回答了「怎么呼出」和「怎么知道它还在」两个问题,而触发角只回答前一个;而且一个会被误触发的角,对一扇盖住整个屏幕上部的窗来说代价很大。留作后续可选项。
+
+#### 7.54c 点到别处不是关掉它的办法,而一枚图标只在有东西可回去的时候才护着进程(用户裁决,2026-09-03;`crates/bt-persist/src/{settings,migrate,lib}.rs`、`crates/bt-persist/tests/round_trip.rs`、`crates/bt-app/src/{quake,settings,main}.rs`)
+
+这一节两桩,一桩推翻 7.54 的一个默认值,一桩把 7.54b ⑤ 的常驻条件收窄。两桩都不是道理错了,是道理管的范围比写的时候以为的宽——第一桩宽在把「窗盖住了别的东西」当成了「读者不要它了」,第二桩宽在把「怎么回去」当成了「为什么留着」。
+
+**① 失焦收起,默认改为关。** 7.54 给这一行的理由是:「这扇窗按构造盖在所有窗之上,读者点回自己的编辑器就是说清了他要什么,一条留在前面的横条就是在盖住他刚要看的那样东西。」用户的裁决是一句话:**「点到其他程序不是关闭临时终端的途径。」**
+
+这句话推翻的不是那段论证的前提,是它的推论。去浏览器上读一条报错、去密码管理器里取一个 token、去看一眼刚才那个文件——这些都是**在用这台机器**,不是**用完了这个终端**。而按原来的默认,回来的时候半条命令没了、屏上的输出也没了,而没有任何一步是读者要求的。收起这扇窗本来就有一个专门的手势:再按一次那把召唤键。那才是「我不要它了」写在脸上的说法,而这个默认值的全部作用,是不再把「看向别处」也读成那句话。
+
+**行没有撤,行的意思一个字没变。** 想要一条看向别处就清空的横条的人,在 General 页上把它打开,得到的就是原来那件事——红门 `the_row_still_means_what_it_says_when_a_reader_turns_it_on` 钉的正是这一半,因为一次「顺手把机制也拆了」的改动会留下一个决定不了任何事的开关。
+
+`settings.json` 走到 **v30**:`quake_dismiss_on_blur` 写成 `false`,**而且是写、不是只改默认**。理由和 7.54a 的宽度那一格逐字相同,只换了一个名词:保持原样的值是 `true`,因为 v27 以来每一版都这么做;而这个值**从来不是谁选的**——**这一行是随功能一起出生的,出生就是开的**,读者从来没有被问过这个问题。把 `true` 带过去,是在「保住读者的选择」的名义下保住 v27 当时的猜测。而真的表达过意见的那批人手里已经是 `false`,`false` 也正是这一格写下去的值——所以这一格只动那些从来没人有过意见的文件。
+
+**② 常驻 = 图标在 **且** 有一扇快捷终端窗。** 7.54b ⑤ 的常驻条件只问了「图标在不在」,而 CI 在 780fb99 上把这件事的代价读了出来:`scripts/release/smoke.ps1` 第 6 关给冷启动开出的那一扇窗发 `WM_CLOSE`、等进程退,结果等到超时,报 `the window did not close when it was asked to`,日志里 `BT_TRAY rect=…` 一行把原因写得清清楚楚。那一次运行**一扇快捷终端窗都没有**。
+
+**7.54b ⑤ 那段可达性论证一个字都不用改,它只是回答了另一个问题。** 「程序在它的图标说它在的地方,点一下就出来,右键菜单里有一行退出」——这回答的是**怎么回去**;它没有回答**回去干什么**。没有那扇快捷终端窗的时候,图标是一扇开向空房间的门,而关掉最后一扇看得见的窗的人,要的是程序结束,不是它在通知区里替一个空房间守着。所以常驻要两个事实,而不是一个。
+
+**藏着的那扇算数,而且必须算数。** 那正是图标要当门的那个状态:一条和弦之外、不在屏上的终端。`open_window_count` 把同一扇窗排除在外,理由是「它不是一扇人看得见的窗」——两处读法不冲突,它们是同一句话的两半:**它不是一扇窗,它是一个理由。**
+
+**关掉自己那扇快捷终端窗的人也退得掉。** `reap_leaving_windows` 里这个判断排在 `quake.forget` 之后,顺序本身就是答案:那扇窗没了之后,这就是一次「有图标、后面什么都没有」的运行,它在这里结束。
+
+**红门(变异证在各自的文档注释里)。**
+
+- `bt-persist/src/migrate.rs`:`real_settings_v29_to_v30_migration_stops_a_click_elsewhere_closing_the_summon`(写 `true`——也就是保持原样的那个值——每一个没打开过 General 页的读者继续在点向浏览器的一刻丢掉那扇窗,而那一行还写着是他自己要的;只升版本不写键,serde 的默认救得回解析,而文档上还写着 `true`,所以断言落在迁移后的**文档**上)、`a_reader_who_had_already_turned_it_off_reads_the_same_after_the_step`(上一条的另一半:真的表达过意见的人不被这一格打扰,这也是允许覆写的前提)。
+- `bt-persist/tests/round_trip.rs`:`settings_defaults_render_formulas_at_the_current_schema_version` 里那两行(把常量翻回 `true`,一次点向别处又变成一次关闭请求;让行、serde 默认与迁移三处各写各的,断言 `defaults.quake_dismiss_on_blur == DEFAULT_QUAKE_DISMISS_ON_BLUR` 就是防这一件事)。
+- `bt-app/src/quake.rs`:`the_row_still_means_what_it_says_when_a_reader_turns_it_on`(从 `blur_dismisses` 的合取里去掉 `row_is_on`,点向浏览器又把每个人的终端带走;去掉 `self.shown`,一条关于早已收起的窗的失焦要求第二次收起,那正是 `the_window_owed_the_keyboard_is_handed_back_exactly_once` 钉的双重交还;直接返回 `false`,开关变成一行决定不了任何事的字)。
+- `bt-app/src/main.rs`:`a_run_outlives_its_last_visible_window_only_with_an_icon_and_a_summon`(`||` 代替 `&&`,关掉图标的读者也被留住;只问图标,第 6 关照旧挂,只是这次挂在测试里;只问快捷终端窗,读者关掉的常驻又回来了;直接 `true`,程序再也不退)、`an_icon_keeps_the_run_alive_only_while_a_summoned_terminal_is_behind_it`(把 `tray_keeps_the_run_alive` 里两个事实中的任一个拆掉,或者把 `close` / `reap_leaving_windows` 任一处的调用拆掉——一扇退了图标还在,或者晚一转由另一条路退,结果一样)。
+
+**这一节替换掉的那枚钉子。** 7.54b 的红门清单里 `an_icon_on_the_taskbar_keeps_the_run_alive` 就是上面那一枚的旧名,它问的是「图标在不在」这一个事实;改名是因为它钉的那件事从「有图标」变成了「有图标而且有东西可回去」。
 
 ### 7.55 一个浮着的意图框:五类内容分段不混排,文件那一段有一张有界的索引(0.2 聚焦搜索,`crates/bt-app/src/{palette.rs,palette_index.rs}`(新)、`crates/bt-app/src/{main,shortcuts,i18n,files,webhost}.rs`)
 
