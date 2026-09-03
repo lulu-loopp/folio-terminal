@@ -91770,11 +91770,12 @@ impl FolioApp {
     /// it is not a window anybody can see — and the two readings agree rather than
     /// conflict: it is not a window, and it is a reason.
     fn tray_keeps_the_run_alive(&self) -> bool {
-        self.tray_is_standing()
-            && self
-                .app
+        a_run_worth_keeping(
+            self.tray_is_standing(),
+            self.app
                 .as_ref()
-                .is_some_and(|app| app.quake.window().is_some())
+                .is_some_and(|app| app.quake.window().is_some()),
+        )
     }
 
     /// **Make the icon agree with the row that says whether there is one**
@@ -96692,6 +96693,11 @@ mod floated_page_tests {
             standing.contains("self.tray_is_standing()"),
             "residency no longer asks whether there is an icon, so a reader who \
              turned the row off gets a program that stays anyway:\n{standing}"
+        );
+        assert!(
+            standing.contains("a_run_worth_keeping("),
+            "the two facts are combined here instead of in the rule both doors              read, so the rule and the doors can drift apart:
+{standing}"
         );
         assert!(
             standing.contains("app.quake.window().is_some()"),
