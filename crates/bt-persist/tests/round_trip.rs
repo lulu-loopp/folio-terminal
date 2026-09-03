@@ -880,7 +880,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 27,
+        SETTINGS_SCHEMA_VERSION, 28,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -907,12 +907,17 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          hints the v21-to-v22, and the Terminal page's own Turn finished the \
          v22-to-v23, and the Cards column's own first-arrival hint the v23-to-v24, \
          and the terminal's own silent write to the clipboard on a dragged \
-         selection the v24-to-v25 — one key on one day, fifteen times running \n         and the one key in this file that lets this build ask a server anything, the v25-to-v26: sixteen          — and the summoned terminal's two, how tall it opens and whether it goes away when the          keyboard leaves it, the v26-to-v27: two keys on one rung because they are one window's          description and a rung is a release of this file's shape, not a key"
+         selection the v24-to-v25 — one key on one day, fifteen times running \n         and the one key in this file that lets this build ask a server anything, the v25-to-v26: sixteen          — and the summoned terminal's two, how tall it opens and whether it goes away when the          keyboard leaves it, the v26-to-v27: two keys on one rung because they are one window's          description and a rung is a release of this file's shape, not a key — and how wide it opens the          v27-to-v28, one key on its own day and the only rung here that changes a shape a reader          already had: the full span it replaces was never a preference anybody expressed"
     );
     assert_eq!(
         defaults.quake_height,
         bt_persist::DEFAULT_QUAKE_HEIGHT,
         "the summoned terminal opens as tall as the row says it does, and the row          says forty percent until somebody moves it"
+    );
+    assert_eq!(
+        defaults.quake_width,
+        bt_persist::DEFAULT_QUAKE_WIDTH,
+        "and as wide as its own row says — sixty percent, centred, which is the answer a 4K          ultrawide gave to the shape that spanned the whole work area"
     );
     assert!(
         defaults.quake_dismiss_on_blur,

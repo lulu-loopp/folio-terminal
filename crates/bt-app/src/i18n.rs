@@ -2126,6 +2126,12 @@ pub enum Text {
     ShortcutSummonQuake,
     RowQuakeHeight,
     DescQuakeHeight,
+    /// The width row (§7.54, user ruling 2026-09-02) and its sentence. It is a
+    /// separate pair from the height's rather than one row saying both, because
+    /// the dialog's sliders each answer one number and the two axes are two
+    /// answers.
+    RowQuakeWidth,
+    DescQuakeWidth,
     /// The sentence the height row carries **instead of** its description when
     /// the chord could not be claimed — [`Self::DescAcrylicUnavailable`]'s
     /// arrangement, and its reason: there is one muted line under a title, and a
@@ -3821,8 +3827,14 @@ impl Text {
             Self::RowQuakeHeight => pick(lang, "Summoned terminal height", "快捷终端高度"),
             Self::DescQuakeHeight => pick(
                 lang,
-                "How much of the screen the summoned terminal covers. It spans the width of whichever screen the pointer is on.",
-                "唤出的终端盖住屏幕的多少。它横跨鼠标所在那块屏幕的整个宽度。",
+                "How much of the height of the screen the pointer is on the summoned terminal covers. It hangs from the top of that screen.",
+                "唤出的终端盖住鼠标所在那块屏幕高度的多少。它从那块屏幕的顶端挂下来。",
+            ),
+            Self::RowQuakeWidth => pick(lang, "Summoned terminal width", "快捷终端宽度"),
+            Self::DescQuakeWidth => pick(
+                lang,
+                "How much of the width of that screen it covers. It is centred in the rest.",
+                "它盖住那块屏幕宽度的多少。剩下的部分左右均分，它居中。",
             ),
             Self::DescQuakeHotkeyTaken => pick(
                 lang,
@@ -3850,7 +3862,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 549] = [
+    pub const ALL: [Self; 551] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4397,6 +4409,8 @@ impl Text {
         Self::ShortcutSummonQuake,
         Self::RowQuakeHeight,
         Self::DescQuakeHeight,
+        Self::RowQuakeWidth,
+        Self::DescQuakeWidth,
         Self::DescQuakeHotkeyTaken,
         Self::RowQuakeDismiss,
         Self::DescQuakeDismiss,

@@ -67,6 +67,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         copy_on_select: false,
         update_check: false,
         quake_height: 65,
+        quake_width: 45,
         quake_dismiss_on_blur: false,
     };
     write_settings_atomic(&path, &settings).unwrap();

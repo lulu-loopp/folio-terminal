@@ -2310,6 +2310,17 @@ pub enum SettingsRow {
     /// percentage, and there is no list of heights a reader would recognise the
     /// way they recognise a scrollback of 50,000 lines.
     QuakeHeight,
+    /// **How much of the screen's width the summoned terminal covers** (§7.54,
+    /// user ruling 2026-09-02).
+    ///
+    /// [`Self::QuakeHeight`]'s twin, and a slider for its reason. It arrived a
+    /// release after its twin because the window shipped spanning the work area
+    /// and the shape was thought settled; a 4K ultrawide settled it the other way.
+    ///
+    /// Directly under the height and not above it, because the height is still
+    /// the fact a reader who has just watched the window come down reaches for
+    /// first — the pair reads "how tall, then how wide, then how long it stays".
+    QuakeWidth,
     /// Whether the summoned terminal goes away when the keyboard leaves it
     /// (§7.54).
     QuakeDismiss,
@@ -2728,6 +2739,7 @@ impl SettingsRow {
             // rather than on it — see the variant.
             | Self::UpdateCheck
             | Self::QuakeHeight
+            | Self::QuakeWidth
             | Self::QuakeDismiss => SettingsCategory::General,
             // The editor's eight, which are the Profiles page's second view.
             Self::ProfileName
@@ -2816,6 +2828,7 @@ impl SettingsRow {
             Self::Acrylic => Text::RowAcrylic.text(),
             Self::AlwaysOnTop => Text::RowAlwaysOnTop.text(),
             Self::QuakeHeight => Text::RowQuakeHeight.text(),
+            Self::QuakeWidth => Text::RowQuakeWidth.text(),
             Self::QuakeDismiss => Text::RowQuakeDismiss.text(),
         }
     }
@@ -3056,6 +3069,7 @@ impl SettingsRow {
                     Text::DescQuakeHeight.text()
                 }
             }
+            Self::QuakeWidth => Text::DescQuakeWidth.text(),
             Self::QuakeDismiss => Text::DescQuakeDismiss.text(),
         }
     }
@@ -3088,6 +3102,17 @@ impl SettingsRow {
                 // tab strip and no room for a shell under it, and a summon that
                 // produced one would read as a window that failed to open.
                 min: bt_persist::MINIMUM_QUAKE_HEIGHT,
+                max: 100,
+            }),
+            Self::QuakeWidth => SettingsControl::Slider(SliderRange {
+                // A floor for the row above's reason turned onto the other axis:
+                // below about a third of a screen the window is narrower than the
+                // lines the shell in it draws, and a summon whose every line
+                // wrapped reads as a window that opened wrong. The ceiling is 100
+                // rather than something smaller because the full span is what this
+                // window shipped as, and a reader who wanted it must keep a value
+                // that says so.
+                min: bt_persist::MINIMUM_QUAKE_WIDTH,
                 max: 100,
             }),
             Self::ProfileName | Self::ProfileArgs => SettingsControl::Field,
@@ -3187,6 +3212,7 @@ impl SettingsRow {
             // editor is looking for exactly these two, and a row behind a
             // disclosure is a row they report as missing.
             | Self::QuakeHeight
+            | Self::QuakeWidth
             | Self::QuakeDismiss
             | Self::PsReadLine
             | Self::PowerShellOffer
@@ -3273,6 +3299,7 @@ impl SettingsRow {
             Self::ImageOpacity => values.background_image_opacity,
             Self::BackgroundOpacity => values.background_opacity,
             Self::QuakeHeight => values.quake_height,
+            Self::QuakeWidth => values.quake_width,
             _ => return None,
         };
         // Clamped on the way out, because a hand-edited `settings.json` is
@@ -3340,6 +3367,7 @@ impl SettingsRow {
             Self::ImageOpacity
             | Self::BackgroundOpacity
             | Self::QuakeHeight
+            | Self::QuakeWidth
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
@@ -3452,6 +3480,7 @@ impl SettingsRow {
             Self::ImageOpacity
             | Self::BackgroundOpacity
             | Self::QuakeHeight
+            | Self::QuakeWidth
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
@@ -3823,6 +3852,7 @@ impl SettingsRow {
             Self::ImageOpacity
             | Self::BackgroundOpacity
             | Self::QuakeHeight
+            | Self::QuakeWidth
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
@@ -3949,6 +3979,7 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // down wants to change, and the dismissal under it, because it is the
     // question the height raises — how big it is, then how long it stays.
     rows.push(SettingsRow::QuakeHeight);
+    rows.push(SettingsRow::QuakeWidth);
     rows.push(SettingsRow::QuakeDismiss);
     // Second from last on its page, because it is the only row here that changes
     // something **outside this window**: the three above it say how Folio
@@ -4496,6 +4527,10 @@ pub struct SettingsValues {
     /// How much of the screen the summoned terminal covers, 20–100 whole
     /// percent (§7.54).
     pub quake_height: u8,
+    /// How much of that work area's width it covers (§7.54, user ruling
+    /// 2026-09-02). The height's twin, and centred in what it does not cover —
+    /// see `quake::summoned_rect`, which is the one place that arithmetic lives.
+    pub quake_width: u8,
     /// Whether it goes away when the keyboard leaves it.
     pub quake_dismiss_on_blur: bool,
     /// **Whether another program already holds the chord that summons it.**
@@ -4572,6 +4607,7 @@ impl SettingsValues {
             acrylic: false,
             always_on_top: false,
             quake_height: bt_persist::DEFAULT_QUAKE_HEIGHT,
+            quake_width: bt_persist::DEFAULT_QUAKE_WIDTH,
             quake_dismiss_on_blur: true,
             quake_hotkey_taken: false,
             // Both capabilities present, for `profile_available`'s reason: a
@@ -20726,6 +20762,30 @@ mod tests {
             SettingsRow::QuakeHeight.slider_value(&hand_edited),
             Some(bt_persist::MINIMUM_QUAKE_HEIGHT)
         );
+        // And the width beside it, whose range is its own (§7.54, user ruling
+        // 2026-09-02). MUTATION: give the width the height's floor and a reader
+        // dragging it to the bottom gets a window a fifth of a screen wide.
+        let width = SettingsRow::QuakeWidth
+            .control()
+            .range()
+            .expect("the width is a percentage too, so it is a slider");
+        assert_eq!(width.min, bt_persist::MINIMUM_QUAKE_WIDTH);
+        assert_eq!(
+            width.max, 100,
+            "the full span this window shipped as stays reachable from the top \
+             of its own row"
+        );
+        hand_edited.quake_width = 3;
+        assert_eq!(
+            SettingsRow::QuakeWidth.slider_value(&hand_edited),
+            Some(bt_persist::MINIMUM_QUAKE_WIDTH)
+        );
+        assert_eq!(
+            SettingsRow::QuakeWidth.description(&values),
+            Text::DescQuakeWidth.text(),
+            "the refusal sentence is the height row's alone — one muted line \
+             under one title, said once"
+        );
     }
 
     /// PIN (Q191, mock-up 5644): `$("row-railmode").style.display =
@@ -20772,6 +20832,7 @@ mod tests {
                 SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
                 SettingsRow::QuakeHeight,
+                SettingsRow::QuakeWidth,
                 SettingsRow::QuakeDismiss,
                 SettingsRow::ContextMenu,
                 // Last on General: the only row in the dialog that reaches off
@@ -20820,6 +20881,7 @@ mod tests {
                 SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
                 SettingsRow::QuakeHeight,
+                SettingsRow::QuakeWidth,
                 SettingsRow::QuakeDismiss,
                 SettingsRow::ContextMenu,
                 // Last on General: the only row in the dialog that reaches off
@@ -21845,13 +21907,14 @@ mod tests {
         lacking.default_profile = profiles::fallback_profile();
 
         let mut panel = keyboarded_on(SettingsRow::DefaultProfile.category());
-        // `End` and then four steps back: `Update check` closes this page
+        // `End` and then five steps back: `Update check` closes this page
         // (§7.51), `Explorer context menu` stands above it (§7.4), the summoned
-        // terminal's two stand above that (§7.54), and `Default profile` above
-        // them. The assertion below is what keeps the presses honest — a page
-        // reordered under this test lands the ring somewhere else and says so.
+        // terminal's three stand above that (§7.54 — height, width and the
+        // dismissal), and `Default profile` above them. The assertion below is
+        // what keeps the presses honest — a page reordered under this test lands
+        // the ring somewhere else and says so.
         panel.key(SettingsKey::End, content(&flat, &lines), &lacking);
-        for _ in 0..4 {
+        for _ in 0..5 {
             panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
         }
         assert_eq!(

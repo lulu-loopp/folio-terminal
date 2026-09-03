@@ -12,8 +12,8 @@
 //! has the keyboard. See [`bt_platform::hotkey`] for that half.
 //!
 //! **Its rectangle is computed and never remembered.** Every summon reads the
-//! work area of the monitor the pointer is on and spans it — see
-//! [`summoned_rect`]. The window's saved placement is written into the document
+//! work area of the monitor the pointer is on and takes its share of the top of
+//! it, centred — see [`summoned_rect`]. The window's saved placement is written into the document
 //! like every other window's and is deliberately not read back: a person with two
 //! screens summons the terminal on whichever one they are working on, and a
 //! rectangle out of a file would put it on the one they were working on
@@ -50,29 +50,48 @@ pub(crate) const SUMMON_HOTKEY_ID: i32 = 1;
 /// that is *also* always in front, and a terminal spanning the top of a display
 /// whose taskbar is docked there would open underneath it.
 ///
-/// Left and right are the work area's own, unclamped, because spanning it is what
-/// makes this window the shape it is — there is no width setting and there is not
-/// going to be one. The height is the reader's percentage of the work area's,
-/// clamped into the range the row offers so that a hand-edited `settings.json`
-/// saying `400` opens a full-height window rather than one four screens tall, and
-/// one saying `0` opens a usable window rather than a line.
+/// **Two percentages of that work area, and the second of them is a ruling**
+/// (user, 2026-09-02). Until v28 the left and right were the work area's own and
+/// this note said there was no width setting and never would be; a 4K ultrawide
+/// answered that, and the shape is now the reader's percentage of the width,
+/// **centred in what it does not cover**. Centred and not left-aligned, because
+/// the window arrives over whatever the reader was already looking at and the
+/// middle of the screen is where they were already looking; a strip pinned to one
+/// edge is a strip they have to find. The height is the reader's percentage of
+/// the work area's height, hung from its top, which is where a key-summoned
+/// terminal has come down since the shape was invented.
 ///
-/// The clamp is here and not at the file's door because `bt_persist` deliberately
-/// stores what it was given (see `SettingsV1::quake_height`), and this is the
-/// surface that has to place the window.
+/// Both percentages are clamped into the range their row offers, so that a
+/// hand-edited `settings.json` saying `400` opens a full-size window rather than
+/// one four screens across, and one saying `0` opens a usable window rather than a
+/// line. The clamp is here and not at the file's door because `bt_persist`
+/// deliberately stores what it was given (see `SettingsV1::quake_height` and
+/// `SettingsV1::quake_width`), and this is the surface that has to place the
+/// window.
+///
+/// **The odd pixel goes to the right.** A centred window inside an odd remainder
+/// cannot have two equal margins, and the whole of the guarantee is that neither
+/// edge leaves the work area: the left margin is half the remainder rounded down,
+/// which puts the leftover column on the right and keeps `right <= work.right` on
+/// every input rather than only on even ones.
 #[must_use]
-pub(crate) fn summoned_rect(work: WindowRect, height_percent: u8) -> WindowRect {
-    let percent = height_percent.clamp(bt_persist::MINIMUM_QUAKE_HEIGHT, 100);
-    let available = work.bottom.saturating_sub(work.top).max(1);
-    // In `i64`, because a work area on a wall of displays is allowed to be tall
-    // enough that `height * 100` is not an `i32` — and a rectangle that wrapped
+pub(crate) fn summoned_rect(work: WindowRect, width_percent: u8, height_percent: u8) -> WindowRect {
+    let vertical = height_percent.clamp(bt_persist::MINIMUM_QUAKE_HEIGHT, 100);
+    let horizontal = width_percent.clamp(bt_persist::MINIMUM_QUAKE_WIDTH, 100);
+    let tall = work.bottom.saturating_sub(work.top).max(1);
+    let wide = work.right.saturating_sub(work.left).max(1);
+    // In `i64`, because a work area on a wall of displays is allowed to be big
+    // enough that `size * 100` is not an `i32` — and a rectangle that wrapped
     // would put the window somewhere no monitor is.
-    let height = (i64::from(available) * i64::from(percent) / 100).max(1);
-    let height = i32::try_from(height).unwrap_or(available);
+    let height = (i64::from(tall) * i64::from(vertical) / 100).max(1);
+    let height = i32::try_from(height).unwrap_or(tall);
+    let width = (i64::from(wide) * i64::from(horizontal) / 100).max(1);
+    let width = i32::try_from(width).unwrap_or(wide);
+    let left = work.left.saturating_add((wide - width) / 2);
     WindowRect {
-        left: work.left,
+        left,
         top: work.top,
-        right: work.right,
+        right: left.saturating_add(width),
         bottom: work.top.saturating_add(height),
     }
 }
@@ -292,18 +311,19 @@ mod tests {
         }
     }
 
-    /// RED (§7.54) — **the summon spans the work area and takes its share of the
-    /// top of it.**
+    /// RED (§7.54) — **the summon takes its share of the top of the work area,
+    /// centred across it** (user ruling, 2026-09-02).
     ///
-    /// MUTATION: measure the percentage against the *monitor* instead of the work
-    /// area and a window on a display with a top-docked taskbar opens underneath
-    /// it. Narrow the rectangle to anything but the work area's full width and it
-    /// stops being the shape this feature is.
+    /// MUTATION: measure either percentage against the *monitor* instead of the
+    /// work area and a window on a display with a top-docked taskbar opens
+    /// underneath it. Drop the centring — leave `left` at `work.left`, which is
+    /// what this function did until v28 — and the last assertion goes red naming
+    /// two margins that are not the same number: the window hangs off the left
+    /// edge of a 4K desk with everything it does not cover piled on the right.
     #[test]
-    fn a_summon_spans_the_work_area_and_takes_its_share_of_the_top() {
-        let rect = summoned_rect(work(0, 40, 1920, 1080), 40);
-        assert_eq!(rect.left, 0, "it starts where the work area starts");
-        assert_eq!(rect.right, 1920, "and ends where it ends");
+    fn a_summon_takes_its_share_of_the_top_of_the_work_area_centred_across_it() {
+        let area = work(0, 40, 1920, 1080);
+        let rect = summoned_rect(area, 60, 40);
         assert_eq!(
             rect.top, 40,
             "the top is the work area's, not the monitor's"
@@ -313,6 +333,34 @@ mod tests {
             40 + 416,
             "forty percent of the 1040 rows the taskbar left"
         );
+        assert_eq!(
+            rect.right - rect.left,
+            1152,
+            "sixty percent of the 1920 columns"
+        );
+        assert_eq!(
+            rect.left - area.left,
+            area.right - rect.right,
+            "and what it does not cover is the same on both sides of it"
+        );
+    }
+
+    /// RED (§7.54) — **a hundred percent is the shape this window shipped as**,
+    /// exactly and with nothing left over.
+    ///
+    /// The old behaviour is still reachable, and it is reachable through the top
+    /// of the row's range rather than through a special case: a reader who really
+    /// did want the full span has a value that says so. That is also what made the
+    /// ruling above safe to make.
+    ///
+    /// MUTATION: round the width the other way, or centre a full-width window by
+    /// halving a remainder that is not zero, and `100` stops meaning "the whole of
+    /// it" — the window comes down a column short of the edge it used to reach.
+    #[test]
+    fn a_hundred_percent_wide_is_the_full_span_this_window_used_to_be() {
+        let rect = summoned_rect(work(0, 40, 1920, 1080), 100, 40);
+        assert_eq!(rect.left, 0, "it starts where the work area starts");
+        assert_eq!(rect.right, 1920, "and ends where it ends");
     }
 
     /// RED (§7.54) — **a second monitor's rectangle is that monitor's.**
@@ -321,32 +369,87 @@ mod tests {
     /// and the window opens spanning every display at once. The negative origin
     /// is the case that catches it: a screen to the left of the primary one has a
     /// `left` below zero, and a rectangle computed from a width would land on the
-    /// wrong display.
+    /// wrong display. The centred half is caught here too — sixty percent of this
+    /// screen is centred on *this* screen, and a centring computed from zero
+    /// rather than from `work.left` would put the window on the primary one.
     #[test]
     fn a_screen_left_of_the_primary_one_keeps_its_own_negative_origin() {
-        let rect = summoned_rect(work(-1920, 0, 0, 1200), 50);
-        assert_eq!(rect.left, -1920);
-        assert_eq!(rect.right, 0);
-        assert_eq!(rect.top, 0);
-        assert_eq!(rect.bottom, 600);
+        let full = summoned_rect(work(-1920, 0, 0, 1200), 100, 50);
+        assert_eq!(full.left, -1920);
+        assert_eq!(full.right, 0);
+        assert_eq!(full.top, 0);
+        assert_eq!(full.bottom, 600);
+        let centred = summoned_rect(work(-1920, 0, 0, 1200), 60, 50);
+        assert_eq!(
+            centred.left, -1536,
+            "384 columns in from this screen's edge"
+        );
+        assert_eq!(centred.right, -384, "and 384 short of its other one");
     }
 
-    /// RED (§7.54) — **a hand-edited height is clamped where the window is
+    /// RED (§7.54) — **a hand-edited size is clamped where the window is
     /// placed, not where the file is read.**
     ///
-    /// MUTATION: drop the clamp and `"quake_height": 400` opens a window four
-    /// screens tall whose tab strip is the only part on the display; `0` opens one
-    /// with no room for a shell at all. `bt_persist` stores what it was given by
-    /// design, so this is the surface that owes the range.
+    /// MUTATION: drop the height clamp and `"quake_height": 400` opens a window
+    /// four screens tall whose tab strip is the only part on the display; `0`
+    /// opens one with no room for a shell at all. Drop the *width* clamp and
+    /// `"quake_width": 5` opens a column too narrow for a prompt — and `250`
+    /// opens one two and a half screens wide whose centring pushes its left edge
+    /// off the display, which is a window a reader cannot even find to close.
+    /// `bt_persist` stores what it was given by design, so this is the surface
+    /// that owes both ranges.
     #[test]
-    fn a_height_no_row_offers_is_clamped_into_the_one_that_is() {
-        let tall = summoned_rect(work(0, 0, 1000, 1000), 250);
+    fn a_size_no_row_offers_is_clamped_into_the_one_that_is() {
+        let tall = summoned_rect(work(0, 0, 1000, 1000), 60, 250);
         assert_eq!(tall.bottom, 1000, "nothing taller than the work area");
-        let flat = summoned_rect(work(0, 0, 1000, 1000), 0);
+        let flat = summoned_rect(work(0, 0, 1000, 1000), 60, 0);
         assert_eq!(
             flat.bottom,
             i32::from(bt_persist::MINIMUM_QUAKE_HEIGHT) * 10,
             "and nothing shorter than the row's own floor"
+        );
+        let broad = summoned_rect(work(0, 0, 1000, 1000), 250, 40);
+        assert_eq!(broad.left, 0, "nothing wider than the work area");
+        assert_eq!(broad.right, 1000);
+        let narrow = summoned_rect(work(0, 0, 1000, 1000), 5, 40);
+        assert_eq!(
+            narrow.right - narrow.left,
+            i32::from(bt_persist::MINIMUM_QUAKE_WIDTH) * 10,
+            "and nothing narrower than the width row's own floor"
+        );
+        assert_eq!(
+            narrow.left,
+            (1000 - i32::from(bt_persist::MINIMUM_QUAKE_WIDTH) * 10) / 2,
+            "clamped and then centred, in that order — a floor applied after the \
+             centring would pin the narrowest window to the left edge"
+        );
+    }
+
+    /// RED (§7.54) — **an odd remainder stays inside the work area**, and the
+    /// leftover column goes to the right.
+    ///
+    /// A centred window inside an odd number of uncovered columns cannot have two
+    /// equal margins, and the guarantee that survives is the one that matters:
+    /// neither edge leaves the screen. 3441 is a real ultrawide's width plus the
+    /// pixel that makes the arithmetic odd — the case that is wrong on a machine
+    /// and right in a spreadsheet.
+    ///
+    /// MUTATION: round the left margin *up* — `(wide - width).div_ceil(2)`, or
+    /// `(wide - width + 1) / 2` — and `right` lands one column past `work.right`,
+    /// which on a multi-monitor desk is one column on the neighbouring display.
+    #[test]
+    fn an_odd_remainder_puts_the_leftover_column_inside_the_work_area() {
+        let rect = summoned_rect(work(0, 0, 3441, 1440), 60, 40);
+        assert_eq!(rect.right - rect.left, 2064, "sixty percent of 3441");
+        assert!(rect.left >= 0, "the left edge is on the screen");
+        assert!(
+            rect.right <= 3441,
+            "and so is the right one: {} is past the work area",
+            rect.right
+        );
+        assert_eq!(
+            rect.left, 688,
+            "the odd column is on the right, where the margins are 688 and 689"
         );
     }
 

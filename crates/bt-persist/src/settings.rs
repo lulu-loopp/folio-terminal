@@ -187,7 +187,16 @@ use serde::{Deserialize, Serialize};
 /// is 40 percent, which is what the window opens as until somebody moves it; `quake_dismiss_on_blur`
 /// is **on**, because a terminal that hangs across the top of the screen after you have clicked back
 /// into your editor is a terminal covering the thing you clicked into.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 27;
+///
+/// **v28 carries `quake_width`**, the summoned window's third key, added when the shape v27
+/// shipped met a 4K ultrawide (user ruling, 2026-09-02, `docs/DESIGN.md` §7.54). It lands the v25
+/// way and not the v13–v16 way, and it is the only step on this ladder that does: the key does not
+/// name a default for something that never existed, it **replaces a fact that used to be wired
+/// shut**. A migrated file could honestly have been given `100`, which is what every build before
+/// this one did; it is given `60`, because the old width was not a preference anybody expressed —
+/// there was no row to express it on — so carrying it forward would be preserving an accident
+/// rather than a choice.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 28;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -305,6 +314,25 @@ pub const DEFAULT_QUAKE_HEIGHT: u8 = 40;
 /// from which this window can be made useless.
 pub const MINIMUM_QUAKE_HEIGHT: u8 = 20;
 
+/// **How much of the monitor's work area a summoned terminal covers**, as a whole percentage of
+/// its *width*, when nobody has said otherwise (v28, `docs/DESIGN.md` §7.54).
+///
+/// Sixty, and it is a number a real machine handed back rather than one this file reasoned to.
+/// The window shipped spanning the whole work area, because spanning it was thought to be the
+/// shape; on a 4K ultrawide the reader who has to work in it reported it as simply too wide — a
+/// line of output starts at one edge of the desk and ends at the other, and the eye crosses the
+/// whole of it to read a prompt. Sixty leaves the window wider than any ordinary terminal a person
+/// opens by hand while keeping the whole of it inside one turn of the head.
+pub const DEFAULT_QUAKE_WIDTH: u8 = 60;
+
+/// The floor under [`DEFAULT_QUAKE_WIDTH`].
+///
+/// Thirty percent, [`MINIMUM_QUAKE_HEIGHT`]'s argument turned onto the other axis: below about a
+/// third of a screen the window is narrower than the lines the shell in it will draw, and a summon
+/// whose every line wrapped would read as a window that opened wrong. There is no setting from
+/// which this window can be made useless.
+pub const MINIMUM_QUAKE_WIDTH: u8 = 30;
+
 /// The height cap a `settings.json` that has never named one is read as: **none**.
 ///
 /// Zero is the value and "no limit" is the sentence, and it is the default because it is what
@@ -372,6 +400,7 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "copy_on_select": true | false,
 ///   "update_check": true | false,
 ///   "quake_height": 20..=100,
+///   "quake_width": 30..=100,
 ///   "quake_dismiss_on_blur": true | false
 /// }
 /// ```
@@ -904,6 +933,19 @@ pub struct SettingsV1 {
     /// answer is to clamp at the surface that has to place the window.
     #[serde(default = "default_quake_height")]
     pub quake_height: u8,
+    /// **How wide the summoned terminal opens**, as a whole percentage of that same work area
+    /// (v28, `docs/DESIGN.md` §7.54).
+    ///
+    /// [`Self::quake_height`]'s twin on the other axis, and it exists because the sentence that
+    /// used to stand in that field's note — "the width is not a setting at all" — turned out to be
+    /// a claim about a 16:9 laptop panel. What the window is *centred* in is not stored anywhere
+    /// and cannot be: a percentage and a work area are the whole of the rectangle, so there is no
+    /// second number here that could ever disagree with them.
+    ///
+    /// Out-of-range values are the reader's problem and not this crate's, on
+    /// [`Self::quake_height`]'s own terms: the clamp belongs at the surface that places the window.
+    #[serde(default = "default_quake_width")]
+    pub quake_width: u8,
     /// **Whether the summoned terminal goes away when the keyboard leaves it** (v27).
     ///
     /// On, because the window is above every other window by construction: a reader who clicks
@@ -931,6 +973,14 @@ fn default_scrollback_lines() -> u32 {
 /// no window at all.
 fn default_quake_height() -> u8 {
     DEFAULT_QUAKE_HEIGHT
+}
+
+/// `serde`'s door for the v28 width key, missing from every file written before it.
+///
+/// [`default_quake_height`]'s twin and for its reason: a `u8`'s own default is `0`, and a window
+/// nought percent of the screen wide is not a narrower window, it is no window at all.
+fn default_quake_width() -> u8 {
+    DEFAULT_QUAKE_WIDTH
 }
 
 /// And the v27 dismissal key. A function because the answer is `true` and `bool::default()` is
@@ -1076,6 +1126,9 @@ impl Default for SettingsV1 {
             // Tall enough to read a command's output, short enough that the window it came down
             // over is still there under it.
             quake_height: DEFAULT_QUAKE_HEIGHT,
+            // Wide enough that nothing an ordinary terminal draws has to wrap, narrow enough that
+            // one line of it is read without crossing a 4K desk.
+            quake_width: DEFAULT_QUAKE_WIDTH,
             // A window that is above every other window goes away when the reader turns to one of
             // them.
             quake_dismiss_on_blur: true,
