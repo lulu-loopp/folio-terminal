@@ -263,6 +263,22 @@ pub const JUMP_FLASH: Duration = Duration::from_millis(950);
 pub const JUMP_FLASH_OPACITY: f32 = 0.22;
 /// `.term > div.cmd-jump { border-radius: 4px }`.
 pub const JUMP_FLASH_RADIUS_LOGICAL_PX: f32 = 4.0;
+/// **The pane ring's opening alpha** — the second shape a jump's flash takes
+/// (DESIGN.md §7.55 ⑨).
+///
+/// Full strength where the band's is [`JUMP_FLASH_OPACITY`], and the difference
+/// is the difference between a wash and a line. The band is a *background*
+/// behind text and has to stay readable through it; the ring is two pixels of
+/// accent on the pane's own edge with nothing behind it, and 22% of the accent
+/// there is a smudge nobody notices. Neither number is a span, so neither is in
+/// the motion archive — both are colour.
+pub const JUMP_FLASH_RING_OPACITY: f32 = 1.0;
+/// How thick that ring is, in logical pixels — the width of the pane border it
+/// is standing in for while it is lit.
+pub const JUMP_FLASH_RING_LOGICAL_PX: f32 = 2.0;
+/// And its corner, which is the pane's own: a ring rounder than the rectangle it
+/// is drawn on would leave four gaps at the corners.
+pub const JUMP_FLASH_RING_RADIUS_LOGICAL_PX: f32 = 4.0;
 /// `term.scrollTo({ top: max(0, line.offsetTop - 8) })` (mock 4686) — the jumped-to
 /// row lands eight pixels below the top of the viewport rather than flush with it,
 /// so it reads as a line *in* a page instead of a page that begins there.
@@ -1750,14 +1766,32 @@ pub fn flash_alpha(
     motion: Motion,
     curve: impl FnOnce(f32) -> f32,
 ) -> Option<f32> {
+    Some(flash_fade(elapsed, motion, curve)? * JUMP_FLASH_OPACITY)
+}
+
+/// **How much of a flash is left**, as a fraction of its own strength: `1.0` on
+/// the frame it started, nothing at all once it is over.
+///
+/// The one clock and the one curve, so that the two *shapes* a jump's flash
+/// takes — the band across a row and the ring around a pane (§7.55 ⑨) — are one
+/// answer to "how long does this stay legible" wearing two peaks, rather than
+/// two answers that drift the day one of them is retuned. Everything the long
+/// comment above says about the span and about reduced motion is said here,
+/// once, for both.
+#[must_use]
+pub fn flash_fade(
+    elapsed: Duration,
+    motion: Motion,
+    curve: impl FnOnce(f32) -> f32,
+) -> Option<f32> {
     if !flash_is_running(elapsed) {
         return None;
     }
     if motion == Motion::Reduced {
-        return Some(JUMP_FLASH_OPACITY);
+        return Some(1.0);
     }
     let progress = elapsed.as_secs_f32() / JUMP_FLASH.as_secs_f32();
-    Some(JUMP_FLASH_OPACITY * (1.0 - curve(progress)))
+    Some(1.0 - curve(progress))
 }
 
 /// Whether a flash that began `elapsed` ago is still owed a frame.
@@ -1793,6 +1827,44 @@ pub fn flash_quads(
     rounded_overlay_fill(
         row,
         JUMP_FLASH_RADIUS_LOGICAL_PX * scale,
+        palette.accent,
+        alpha,
+    )
+}
+
+/// **The ring a jump paints around a whole pane** when there is no row worth
+/// pointing at (DESIGN.md §7.55 ⑨).
+///
+/// Drawn **inside** the pane's rectangle rather than around it, which is
+/// `window_ring_layer`'s own arrangement and for its reason: a pane against the
+/// window's edge has nothing outside it to draw on, and a ring that hung there
+/// would be a ring with one side missing. So the halo is grown outward from a
+/// rectangle inset by its own thickness, and lands exactly on the border.
+///
+/// `rect` is the pane's whole box — head included — because what this says is
+/// "the thing you asked for is *this pane*", and a pane is its head and its body
+/// together.
+#[must_use]
+pub fn flash_ring_quads(
+    rect: [f32; 4],
+    alpha: f32,
+    scale: f32,
+    palette: &ChromePalette,
+) -> Vec<OverlayQuad> {
+    let stroke = (JUMP_FLASH_RING_LOGICAL_PX * scale).round().max(1.0);
+    let inner = [
+        rect[0] + stroke,
+        rect[1] + stroke,
+        rect[2] - stroke,
+        rect[3] - stroke,
+    ];
+    if inner[2] <= inner[0] || inner[3] <= inner[1] {
+        return Vec::new();
+    }
+    bt_render::rounded_overlay_halo(
+        inner,
+        (JUMP_FLASH_RING_RADIUS_LOGICAL_PX * scale - stroke).max(0.0),
+        stroke,
         palette.accent,
         alpha,
     )
@@ -2898,6 +2970,102 @@ mod tests {
                 "the wake-up and the picture disagree at {millis}ms"
             );
         }
+    }
+
+    /// PIN — **the two shapes a jump's flash takes share one clock and one
+    /// curve, and differ only in how strong they start** (DESIGN.md §7.55 ⑨).
+    ///
+    /// The band across a row and the ring around a pane answer the same
+    /// question — "how long does this answer stay legible" — so a retune of the
+    /// span or of the easing must move both or neither. What they are allowed to
+    /// disagree about is the peak, because one is a wash behind text and the
+    /// other is a line on an edge.
+    ///
+    /// MUTATIONS:
+    /// (1) give the ring its own duration — the ends stop lining up and the
+    ///     `is_some` sweep goes red;
+    /// (2) go back to computing the band's alpha from its own copy of the curve
+    ///     — the proportionality assertion goes red the moment either copy is
+    ///     touched.
+    #[test]
+    fn the_pane_ring_and_the_row_band_fade_on_the_same_clock() {
+        let ease = |x: f32| crate::cubic_bezier(x, EASE);
+        for millis in [0, 1, 474, 475, 900, 949, 950, 951, 3_000] {
+            let elapsed = Duration::from_millis(millis);
+            let fade = flash_fade(elapsed, Motion::Full, ease);
+            let band = flash_alpha(elapsed, Motion::Full, ease);
+            assert_eq!(
+                fade.is_some(),
+                band.is_some(),
+                "the two shapes disagree about being alive at {millis}ms"
+            );
+            if let (Some(fade), Some(band)) = (fade, band) {
+                assert!(
+                    (band - fade * JUMP_FLASH_OPACITY).abs() < 1e-6,
+                    "the band is the fade at its own peak: {band} vs {fade} at {millis}ms"
+                );
+            }
+        }
+        assert_eq!(
+            flash_fade(Duration::ZERO, Motion::Full, ease),
+            Some(1.0),
+            "a flash starts whole"
+        );
+        // Reduced motion holds both still for the whole span, on the one branch.
+        for millis in [0, 475, 949] {
+            assert_eq!(
+                flash_fade(Duration::from_millis(millis), Motion::Reduced, ease),
+                Some(1.0)
+            );
+        }
+        assert_eq!(flash_fade(JUMP_FLASH, Motion::Reduced, ease), None);
+    }
+
+    /// PIN — **the pane ring lands on the pane's own border and never outside
+    /// it** (DESIGN.md §7.55 ⑨).
+    ///
+    /// A pane flush against the window edge has nothing outside it to draw on,
+    /// so a ring grown outward from the rectangle would be a ring with a side
+    /// missing on exactly the panes that most need one.
+    ///
+    /// MUTATIONS:
+    /// (1) hand `rect` itself to the halo instead of the inset rectangle — the
+    ///     containment assertion goes red;
+    /// (2) drop the degenerate guard — a pane narrower than two strokes hands
+    ///     back an inverted rectangle and the last assertion goes red.
+    #[test]
+    fn the_pane_ring_is_drawn_inside_the_pane_it_names() {
+        let palette = bt_render::chrome_palette();
+        let rect = [0.0, 0.0, 400.0, 300.0];
+        let quads = flash_ring_quads(rect, JUMP_FLASH_RING_OPACITY, 1.0, &palette);
+        assert!(!quads.is_empty(), "a live flash draws something");
+        assert!(
+            quads.iter().all(|quad| quad.color == palette.accent),
+            "in the accent, like every other thing a jump lights"
+        );
+        for quad in &quads {
+            assert!(
+                quad.rect[0] >= rect[0]
+                    && quad.rect[1] >= rect[1]
+                    && quad.rect[2] <= rect[2]
+                    && quad.rect[3] <= rect[3],
+                "the ring left the pane: {:?}",
+                quad.rect
+            );
+        }
+        // And it is a ring rather than a fill: the middle of the pane is clear.
+        let centre = [200.0_f32, 150.0_f32];
+        assert!(
+            !quads.iter().any(|quad| quad.rect[0] <= centre[0]
+                && quad.rect[2] > centre[0]
+                && quad.rect[1] <= centre[1]
+                && quad.rect[3] > centre[1]),
+            "a pane the reader is being pointed at is not a pane painted over"
+        );
+        assert!(
+            flash_ring_quads([0.0, 0.0, 1.0, 1.0], 1.0, 1.0, &palette).is_empty(),
+            "and a pane with no room for a ring draws none"
+        );
     }
 
     #[test]

@@ -16007,8 +16007,25 @@ impl RenameExit {
 #[derive(Clone, Debug, PartialEq)]
 struct CommandFlash {
     seat: SeatId,
-    anchor: bt_doc::ContentAnchor,
+    band: FlashBand,
     started: Instant,
+}
+
+/// **What a jump lights up when it arrives** — a row, or the pane itself
+/// (DESIGN.md §7.55 ⑨).
+///
+/// Two shapes and one clock, because they answer one question: *where did I just
+/// get sent*. Which of the two a jump uses is not a style choice, it is a fact
+/// about what there is to point at — see [`recall_flash`].
+#[derive(Clone, Debug, PartialEq)]
+enum FlashBand {
+    /// The row a jump landed on, named by the content it is showing rather than
+    /// by a row number, for the reason above.
+    Row(bt_doc::ContentAnchor),
+    /// The whole pane. Drawn when there is no row on the glass worth pointing
+    /// at: a command still running, or a pane whose primary screen is not the
+    /// picture the reader is looking at.
+    Pane,
 }
 
 /// What a search scan was of, so the next one can skip the half that has not moved.
@@ -35654,14 +35671,32 @@ impl Runtime<'_> {
         scale: f32,
     ) -> Option<marks::OverlayLayer> {
         let flash = self.window.command_flash.as_ref()?;
-        let alpha = cmdrail::flash_alpha(
-            Instant::now().saturating_duration_since(flash.started),
-            self.app.motion,
-            |x| cubic_bezier(x, EASE),
-        )?;
+        let elapsed = Instant::now().saturating_duration_since(flash.started);
+        // **The pane's own ring, before the row's body is asked for** (§7.55 ⑨).
+        //
+        // Before, and not inside the row's arm with a fallback, because the two
+        // are alternatives: the ring is drawn for a pane that has no row worth
+        // pointing at, and `command_rail_body` answers `None` for an alternate
+        // screen (§3.2 suspends the rail's *picture* there) — which is exactly
+        // the case the ring exists for. A ring reached through that `?` would
+        // never be drawn at all, which is the report this arm answers.
+        let anchor = match &flash.band {
+            FlashBand::Pane => {
+                let alpha =
+                    cmdrail::flash_fade(elapsed, self.app.motion, |x| cubic_bezier(x, EASE))?
+                        * cmdrail::JUMP_FLASH_RING_OPACITY;
+                let rect = seats::pane_rect(&self.seat_layout, flash.seat)?;
+                return Some(marks::OverlayLayer {
+                    quads: cmdrail::flash_ring_quads(rect, alpha, scale, palette),
+                    ..marks::OverlayLayer::default()
+                });
+            }
+            FlashBand::Row(anchor) => anchor,
+        };
+        let alpha = cmdrail::flash_alpha(elapsed, self.app.motion, |x| cubic_bezier(x, EASE))?;
         let body = self.command_rail_body(flash.seat)?;
         let frame = self.pane_frame(flash.seat)?;
-        let row = frame_row_of_anchor(frame, &flash.anchor)?;
+        let row = frame_row_of_anchor(frame, anchor)?;
         let metrics = self.window.renderer.metrics();
         let top = body[1]
             + metrics.padding_px
@@ -36108,7 +36143,7 @@ impl Runtime<'_> {
             }));
         self.window.command_flash = Some(CommandFlash {
             seat,
-            anchor,
+            band: FlashBand::Row(anchor),
             started: Instant::now(),
         });
         // A jump is a scroll, and the bar says where the jump landed
@@ -36123,6 +36158,34 @@ impl Runtime<'_> {
         // frame. [`Self::command_flash_deadline`] has already asked for the next
         // one, by which time the redraw this line requests has run.
         self.repaint_pane_change(seat)
+    }
+
+    /// **Light the whole pane instead of a row in it** (DESIGN.md §7.55 ⑨).
+    ///
+    /// The other half of [`Self::jump_to_command_mark`], and deliberately
+    /// missing that method's whole first half: **nothing is scrolled**. The two
+    /// cases this is drawn for are a command that is still running and a pane
+    /// showing an alternate screen, and in both of them a scroll is the wrong
+    /// verb — it would take a reader who asked "where is that running" away from
+    /// the very output they were being sent to watch, and on an alternate screen
+    /// there is no scrollback to move at all.
+    ///
+    /// The overlay is rebuilt **here**, which is the opposite of the row band's
+    /// arrangement one method up and for that arrangement's own reason: the ring
+    /// is placed out of the seat layout, which the frame on the glass already
+    /// agrees with, so there is no later frame to wait for. The row band waits
+    /// because its rectangle is read out of a frame that has not been composed
+    /// yet.
+    fn flash_pane(&mut self, seat: SeatId) -> Result<()> {
+        self.window.command_flash = Some(CommandFlash {
+            seat,
+            band: FlashBand::Pane,
+            started: Instant::now(),
+        });
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     /// `Ctrl+Shift+↑/↓` — the command before or after the one the viewport is
@@ -81043,6 +81106,7 @@ impl Runtime<'_> {
                             section: palette::Section::Commands,
                             label: mark.command_text.clone(),
                             hint: Some(i18n::palette_command_hint(
+                                mark.is_running(),
                                 mark.exit_code,
                                 mark.duration(),
                                 &pane,
@@ -81271,6 +81335,53 @@ impl Runtime<'_> {
         Ok(true)
     }
 
+    /// **A wheel notch on the list** (DESIGN.md §7.55 ⑧).
+    ///
+    /// Through [`Runtime::vertical_wheel_travel`], which is the one unit every
+    /// chrome scroller in this window converts a notch into: the system's own
+    /// lines-per-notch measured against this product's line, or a screenful of
+    /// *this* box when the reader's setting says a page. So a notch means the
+    /// same distance on the palette's list as it does on the rail, the settings
+    /// sheet and a files column, and the box does not have to own a number.
+    ///
+    /// **One scroll and one selection, shared with the keyboard.** The offset
+    /// written here is the very field `settle_palette_scroll` writes when `↑`
+    /// and `↓` walk the list, so the two never disagree about where the list is;
+    /// and because the rows moved under a pointer that did not move, what the
+    /// pointer is over changed without the pointer having done anything — the
+    /// rail's and the settings sheet's own sentence, and the reason the hover is
+    /// re-seated against a layout measured *after* the scroll rather than the
+    /// one that was handed in.
+    fn scroll_palette_list(
+        &mut self,
+        layout: &palette::PaletteLayout,
+        delta: MouseScrollDelta,
+    ) -> Result<()> {
+        let travel = self.vertical_wheel_travel(delta, layout.list_height());
+        let Some(state) = self.window.palette.as_ref() else {
+            return Ok(());
+        };
+        // Wheel-up reveals what lies above, which is a smaller offset.
+        let scrolled = (state.scroll() - travel).clamp(0.0, layout.max_scroll());
+        if scrolled == state.scroll() {
+            return Ok(());
+        }
+        if let Some(state) = self.window.palette.as_mut() {
+            state.set_scroll(scrolled);
+        }
+        if let Some(position) = self.window.pointer_position
+            && let Some(moved) = self.palette_layout()
+            && let Some(Some(index)) = palette::hit(&moved, position.x, position.y)
+            && let Some(state) = self.window.palette.as_mut()
+        {
+            state.point_at(index);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// Bring the selected row into the box.
     fn settle_palette_scroll(&mut self) {
         let Some(layout) = self.window.palette_layout.as_ref() else {
@@ -81483,7 +81594,29 @@ impl Runtime<'_> {
                     return Ok(());
                 }
                 self.focus_seat(seat)?;
-                self.jump_to_command_mark(seat, mark)
+                // **What there is to point at is asked when the row runs, not
+                // when it was listed** (§7.55 ⑨). The box stays up for as long
+                // as somebody is typing into it, and a command that was running
+                // when the list was built may have ended by the time Enter is
+                // pressed — the same argument that resolves the `TabId` two
+                // lines up rather than carrying an ordinal.
+                //
+                // A mark that has gone in the meantime has no row to light, so
+                // it takes the pane's ring: the reader was still moved to a
+                // pane, and saying nothing at all after a keypress is the one
+                // answer this whole slice exists to stop giving.
+                let Some(leaf) = self.window.tabs[index].sessions.get(&seat) else {
+                    return Ok(());
+                };
+                let running = leaf
+                    .session
+                    .command_mark(mark)
+                    .is_none_or(bt_term::CommandMark::is_running);
+                let alternate_screen = leaf.session.terminal_modes().alternate_screen;
+                match recall_flash(running, alternate_screen) {
+                    RecallFlash::Row => self.jump_to_command_mark(seat, mark),
+                    RecallFlash::Pane => self.flash_pane(seat),
+                }
             }
             // Both halves, because a file the reader asked for should be both
             // shown and findable: the preview opens it, and the column it came
@@ -82345,6 +82478,33 @@ impl Runtime<'_> {
             .is_some()
         {
             return Ok(());
+        }
+        // **A notch over the palette is the palette's** (DESIGN.md §7.55 ⑧,
+        // user report 2026-09-03: the box was up, the pointer was on its list,
+        // and the *pane behind it* scrolled).
+        //
+        // The box has no scrim, deliberately — the world stays visible because
+        // the reader is aiming rather than answering a dialog. What that must
+        // not buy is a notch falling through the glass, which is the same
+        // violation as a press falling through it, and the press has been
+        // answered since the box was built. So the wheel is asked the same
+        // question on the same two rectangles, by the same module, and the
+        // answer is opaque over the whole frame: `palette::WheelPart`.
+        //
+        // Here, under the card, the scrim and the toast and above everything
+        // else, because that is where the box is drawn: `refresh_overlay` stages
+        // it after the five menus and before the toast, and a surface must take
+        // the notches over exactly the pixels it covers.
+        if let Some(position) = self.window.pointer_position
+            && let Some(layout) = self.window.palette_layout.clone()
+            && let Some(part) = palette::wheel_part(&layout, position.x, position.y)
+        {
+            return match part {
+                palette::WheelPart::List => self.scroll_palette_list(&layout, delta),
+                // The input line is not a scroller, and the box is not
+                // transparent — a toast's own answer, one surface over.
+                palette::WheelPart::Field => Ok(()),
+            };
         }
         // **A notch over a hosted page is the page's** (web preview slice 1).
         //
@@ -93581,6 +93741,46 @@ fn recoverable_clipboard_read(result: Result<String>) -> Option<String> {
             eprintln!("clipboard does not contain readable text; paste ignored: {error:#}");
             None
         }
+    }
+}
+
+/// **Which shape a recalled command's arrival takes** (DESIGN.md §7.55 ⑨).
+///
+/// The user report this answers: a `Commands` row for something that is *still
+/// running* — `claude`, a `vim`, a build with no `D` marker yet — was answered
+/// with the row band, and the reader saw nothing happen. Two independent reasons
+/// it saw nothing, and this one predicate covers both:
+///
+/// * **No `D` yet.** The row band points at a line in a page, and a pane whose
+///   command has not ended is not a page being read, it is a thing in motion.
+///   Scrolling back to the line the command was typed on takes the reader *away*
+///   from the output they asked to be taken to, and lights a line they were not
+///   looking for.
+/// * **The alternate screen.** §3.2 keeps it in an isolated namespace and the
+///   rail's picture is suspended over it (`command_rail_body` answers `None`),
+///   so the band is not merely unhelpful there — it is never drawn at all. That
+///   is the half the screenshot caught: a full-screen program running, Enter
+///   pressed on its row, and the window did nothing visible whatsoever.
+///
+/// Both then want the same thing said instead, and it is a smaller thing: *this
+/// pane*. Which is what a reader who typed the name of a running command was
+/// asking for in the first place.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecallFlash {
+    /// The command has ended and its pane is showing the screen it ended on:
+    /// scroll its row to the top and light the row.
+    Row,
+    /// Light the pane and scroll nothing.
+    Pane,
+}
+
+/// The rule itself, as a function of the two facts and nothing else — so it can
+/// be read, tested and mutated without a window, a GPU and a shell.
+const fn recall_flash(running: bool, alternate_screen: bool) -> RecallFlash {
+    if running || alternate_screen {
+        RecallFlash::Pane
+    } else {
+        RecallFlash::Row
     }
 }
 
@@ -135280,6 +135480,111 @@ mod palette_wiring_tests {
         assert!(
             press.contains("palette.point_at(index);"),
             "and a press seats the selection on the row it landed on before running it"
+        );
+    }
+
+    /// PIN — **the wheel router has a palette arm, and it stands above every
+    /// pane** (DESIGN.md §7.55 ⑧).
+    ///
+    /// The user report: the box was up, the pointer was resting on its list, the
+    /// wheel turned, and the terminal *behind the box* scrolled. There was no
+    /// palette arm in `mouse_wheel` at all — the box has no scrim, so nothing
+    /// stood between a hand on the list and the pane under it.
+    ///
+    /// Read as text for this module's own stated reason: the fact being asserted
+    /// is a position in a ladder, and observing it any other way would take a
+    /// window, a GPU and a shell to watch one early `return` happen.
+    ///
+    /// MUTATIONS:
+    /// (1) delete the arm — the first assertion goes red and the report is back;
+    /// (2) move it below `seats::pane_at` — the ordering assertion goes red, and
+    ///     a notch over the box would be spent on the pane it is standing on;
+    /// (3) let the field arm fall through instead of returning — the third goes
+    ///     red, and the box becomes transparent to the wheel over its input.
+    #[test]
+    fn the_palette_takes_the_notches_over_its_own_box() {
+        let wheel = body("fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {");
+        let arm = wheel
+            .find("palette::wheel_part(&layout, position.x, position.y)")
+            .expect("the wheel asks the box the same question the press asks it");
+        let pane = wheel
+            .find("seats::pane_at(&self.seat_layout, position.x, position.y)")
+            .expect("and the pane router is still down there");
+        assert!(
+            arm < pane,
+            "a notch over the box is answered before the pane under it is even found"
+        );
+        assert!(
+            wheel.contains("palette::WheelPart::List => self.scroll_palette_list(&layout, delta)"),
+            "the list scrolls"
+        );
+        assert!(
+            wheel.contains("palette::WheelPart::Field => Ok(())"),
+            "and the input swallows rather than passing the notch on"
+        );
+
+        // One scroll for the wheel and the keyboard, in the house's own unit.
+        let scroll = body(
+            "fn scroll_palette_list(\n        &mut self,\n        layout: &palette::PaletteLayout,",
+        );
+        assert!(
+            scroll.contains("self.vertical_wheel_travel(delta, layout.list_height())"),
+            "a notch is the same distance here as on every other chrome scroller"
+        );
+        assert!(
+            scroll.contains("state.set_scroll(scrolled)"),
+            "and it writes the very field the arrows' `settle_palette_scroll` writes"
+        );
+        assert!(
+            body("fn settle_palette_scroll(&mut self) {").contains("state.set_scroll(scrolled)"),
+            "which is that field"
+        );
+    }
+
+    /// PIN — **a row for a command that has not ended lights its pane, and never
+    /// scrolls it** (DESIGN.md §7.55 ⑨).
+    ///
+    /// The user report: Enter on a `Commands` row for something still running —
+    /// a full-screen `claude`, a build with no `D` yet — did nothing the reader
+    /// could see. Two causes, one predicate: an alternate screen has the rail's
+    /// picture suspended over it (§3.2), so the row band was never drawn at all;
+    /// and a running command's row is a line the reader was not looking for, at
+    /// the cost of scrolling them off the output they asked to be taken to.
+    ///
+    /// MUTATIONS:
+    /// (1) drop either half of the disjunction in `recall_flash` — the truth
+    ///     table goes red on that column;
+    /// (2) call `jump_to_command_mark` on the `Pane` arm as well — the last
+    ///     assertion goes red, and a live pane is yanked back to a prompt row.
+    #[test]
+    fn a_running_or_full_screen_pane_is_pointed_at_rather_than_scrolled() {
+        use super::{RecallFlash, recall_flash};
+        assert_eq!(recall_flash(false, false), RecallFlash::Row);
+        assert_eq!(recall_flash(true, false), RecallFlash::Pane);
+        assert_eq!(recall_flash(false, true), RecallFlash::Pane);
+        assert_eq!(recall_flash(true, true), RecallFlash::Pane);
+
+        let run = body("fn run_palette_row(&mut self) -> Result<()> {");
+        assert!(
+            run.contains("RecallFlash::Row => self.jump_to_command_mark(seat, mark)")
+                && run.contains("RecallFlash::Pane => self.flash_pane(seat)"),
+            "both shapes are reached from the one decision"
+        );
+        // The facts are read when the row runs, not carried from when it was
+        // listed — the `TabId`'s own argument, two lines up in the same arm.
+        assert!(
+            run.contains("leaf.session.terminal_modes().alternate_screen"),
+            "and the screen is the one the pane is showing now"
+        );
+
+        let flash = body("fn flash_pane(&mut self, seat: SeatId) -> Result<()> {");
+        assert!(
+            !flash.contains("set_scroll_anchor") && !flash.contains("jump_to_command_mark"),
+            "nothing is scrolled: the reader asked to be shown a pane, not moved inside it"
+        );
+        assert!(
+            flash.contains("band: FlashBand::Pane"),
+            "it lights the pane's own shape"
         );
     }
 

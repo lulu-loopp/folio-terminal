@@ -866,7 +866,18 @@ impl PaletteLayout {
     /// How far the list may be scrolled, at most.
     #[must_use]
     pub fn max_scroll(&self) -> f32 {
-        (self.content_height - (self.list[3] - self.list[1])).max(0.0)
+        (self.content_height - self.list_height()).max(0.0)
+    }
+
+    /// How tall the list's own box is — a screenful of it, which is what the
+    /// reader's "one screen at a time" wheel setting means here.
+    ///
+    /// Named rather than subtracted at each call site for [`Self::max_scroll`]'s
+    /// sake as much as the wheel's: the clamp and the page a notch spends have
+    /// to be measuring the same box, or a page scroll can outrun the end.
+    #[must_use]
+    pub fn list_height(&self) -> f32 {
+        self.list[3] - self.list[1]
     }
 
     /// The least scroll that brings `index` wholly into the list, on
@@ -1187,6 +1198,45 @@ pub fn hit(layout: &PaletteLayout, x: f64, y: f64) -> Option<Option<usize>> {
         }
     }
     contains(layout.frame, x, y).then_some(None)
+}
+
+/// **What a wheel notch over the box is for** (DESIGN.md §7.55 ⑧).
+///
+/// The box has no scrim and that is deliberate — the world stays visible behind
+/// it. What a missing scrim must *not* buy is a notch falling through the glass:
+/// a hand resting on the list and turning the wheel was scrolling the pane
+/// behind the box, which is the same violation as clicking through it.
+///
+/// Two answers, because the box is two things stacked: a scroller and a text
+/// field. The list scrolls. The field is not a scroller and does not pass the
+/// notch on either — a toast's own sentence one surface over, for a card that is
+/// opaque to the wheel over its whole frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WheelPart {
+    /// Inside the list's clipped box: the notch scrolls the list.
+    List,
+    /// Inside the frame but outside the list — the input line, the hairline
+    /// under it and the box's own padding. The notch is spent and nothing moves.
+    Field,
+}
+
+/// Which part of the box a notch landed on, or `None` for a notch that missed it
+/// and belongs to whatever is underneath.
+///
+/// Asked on the same two rectangles [`hit`] is asked on, in the same order, so
+/// the surface a notch lands on and the surface a press lands on cannot
+/// disagree: the list is the inner box and it is asked first.
+#[must_use]
+pub fn wheel_part(layout: &PaletteLayout, x: f64, y: f64) -> Option<WheelPart> {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a pointer position is a surface coordinate; the layout is in the same units"
+    )]
+    let (x, y) = (x as f32, y as f32);
+    if contains(layout.list, x, y) {
+        return Some(WheelPart::List);
+    }
+    contains(layout.frame, x, y).then_some(WheelPart::Field)
 }
 
 fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
@@ -2583,6 +2633,67 @@ mod list_tests {
         assert!(
             placed.runs[0].rect[0] < hint_rect[0],
             "and the label still starts to the left of it"
+        );
+    }
+
+    /// PIN — **a notch inside the box is the box's, and a notch outside it is
+    /// nobody the box knows** (DESIGN.md §7.55 ⑧).
+    ///
+    /// The user report this answers: the panel is up, the pointer is on the
+    /// list, the wheel turns, and the *pane behind the box* scrolls. The box has
+    /// no scrim by design, so nothing but this predicate stands between a hand
+    /// resting on the list and the terminal underneath it.
+    ///
+    /// Three answers and they are three different surfaces: the list scrolls,
+    /// the field swallows, and a point off the frame is not answered at all so
+    /// the wheel router goes on down its ladder to whatever is under the
+    /// pointer.
+    ///
+    /// MUTATIONS:
+    /// (1) answer `None` inside the frame — the field assertion goes red, and
+    ///     a notch over the input scrolls whatever is behind it;
+    /// (2) answer `Field` for the list too — the list assertion goes red, and
+    ///     an overflowing list becomes one the wheel cannot move;
+    /// (3) answer `Some(..)` for everything — the last assertion goes red, and
+    ///     the box would eat every notch in the window.
+    #[test]
+    fn a_notch_inside_the_box_never_reaches_what_is_behind_it() {
+        let listing = listing_of((0..60).map(|at| row(&format!("row {at}"), None)).collect());
+        let layout = super::layout(
+            WINDOW,
+            SCALE,
+            &listing,
+            look("", ""),
+            0.0,
+            &mut ten_per_char,
+        );
+        let middle = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
+
+        let (x, y) = middle(layout.list);
+        assert_eq!(
+            super::wheel_part(&layout, f64::from(x), f64::from(y)),
+            Some(super::WheelPart::List),
+            "a notch on the list scrolls the list"
+        );
+
+        let (x, y) = middle(layout.field);
+        assert_eq!(
+            super::wheel_part(&layout, f64::from(x), f64::from(y)),
+            Some(super::WheelPart::Field),
+            "a notch on the input is spent and passes nothing on"
+        );
+
+        // Just above the box — the pane the report photographed.
+        let (x, _) = middle(layout.frame);
+        assert_eq!(
+            super::wheel_part(&layout, f64::from(x), f64::from(layout.frame[1]) - 1.0),
+            None,
+            "and a notch off the frame is still the window's own"
+        );
+        assert_eq!(
+            super::wheel_part(&layout, f64::from(x), f64::from(layout.frame[3]) + 1.0),
+            None,
+            "at either end: the box has no reach beyond its own rectangle"
         );
     }
 }
