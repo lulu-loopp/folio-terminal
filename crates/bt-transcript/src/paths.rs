@@ -437,7 +437,7 @@ pub fn detect_relative_path_candidates(
 /// loosened: `docs/a.md:12:3` reaches this as `docs/a.md`, and `docs/a.md:abc` reaches it whole and
 /// is refused exactly as it always was.
 ///
-/// Four refusals. A candidate with no separator is a single bare name, which is out of scope. One
+/// Five refusals. A candidate with no separator is a single bare name, which is out of scope. One
 /// that *opens* with a separator names a place from the drive root rather than from here —
 /// `/usr/share/x.png` in a log line, or the `//host/x.png` a scheme leaves behind — and joining it
 /// to a working directory would invent a location nobody named. One containing `:` is not relative
@@ -460,8 +460,28 @@ pub fn detect_relative_path_candidates(
 /// The absolute scan is deliberately not given the same clause: there the separator is never the
 /// evidence that something is a reference (the drive prefix is), and `D:\` is a real place whose own
 /// spelling ends in one.
+///
+/// # A leading `~` is somebody else's expansion (scenario 31, restated 2026-09-04)
+///
+/// The fifth refusal is a candidate whose **first character** is `~`. `~\docs\a.md` and
+/// `~/docs/a.md` are what a shell prints before it expands them, and the expansion is the printing
+/// process's to perform, never this window's — joining the text to a working directory would
+/// promise `<cwd>\~\docs\a.md`, a location nobody named, which is the same objection that refuses
+/// `$HOME/docs/a.md`, `${HOME}/docs/a.md`, `%USERPROFILE%\docs\a.md` and `$env:USERPROFILE\docs\a.md`
+/// beside it.
+///
+/// It is written down here because it used to be true by accident. `~` was missing from
+/// [`is_path_tail_char`], so a home expansion was refused as "not a run of path characters" — the
+/// same omission that cut every 8.3 short name in half (user report 2026-09-04, §7.30). Putting `~`
+/// back among the path characters, which is what it is, takes that accident away, so the rule this
+/// window actually holds is stated as itself: **the mark at the front of a name is an expansion, the
+/// one inside it is a name.** `ALICE~1\d\a.html` and `PROGRA~1/tools/a.txt` are names.
+///
+/// Absolute paths are untouched: `C:\x\~\y.txt` is drive-rooted, so nothing about it was ever
+/// waiting to be expanded, and a directory somebody really called `~` is a real place.
 pub fn is_relative_reference(candidate: &str) -> bool {
     !candidate.starts_with(['/', '\\'])
+        && !candidate.starts_with('~')
         && !candidate.ends_with(['/', '\\'])
         && candidate.contains(['/', '\\'])
         && !candidate.contains(':')
@@ -573,7 +593,7 @@ fn is_drive_prefix_at(bytes: &[u8], start: usize) -> bool {
 /// Characters that could legitimately be the tail of a longer token, so a drive prefix that follows
 /// one is a suffix of that token rather than a path of its own: alphanumerics of **any** script
 /// (`prefixXC:\a.png`, `图片D:\a.png`) plus the path-structure characters that continue a path or a
-/// filename stem (`sub\D:\a.png`, `file:///D:/a.png`, `v1.2D:\a.png`, `x-D:\a.png`).
+/// filename stem (`sub\D:\a.png`, `file:///D:/a.png`, `v1.2D:\a.png`, `x-D:\a.png`, `R~1\a.png`).
 ///
 /// `/` and `\` are on this list for one load-bearing reason: it is what keeps the `D:/…` embedded in
 /// a `file:///D:/…` URI from being read as a native path. URIs reach the detector through
@@ -582,11 +602,26 @@ fn is_drive_prefix_at(bytes: &[u8], start: usize) -> bool {
 /// mid-URL opening (`a.b/x.png` inside `https://a.b/x.png` is preceded by `/`), and, read as a class
 /// rather than a boundary, it is the run a bare candidate must consist of.
 ///
+/// `~` is on it for the same kind of reason, and was missing (user report 2026-09-04, §7.30). It is
+/// the mark Windows spells every **8.3 short name** with — `RUNNER~1`, `PROGRA~1`, `DOCUME~1` — and
+/// a short name is not an exotic spelling: a CI runner's `%TEMP%` is one, and so is anything a
+/// program asked the API to shorten. It is legal in an ordinary long name too (`main.rs~`,
+/// the backup an editor left behind). Leaving it out said the opposite of the truth twice over.
+/// Read as a **boundary** it opened a second, spurious candidate one character into every short
+/// name — the line `C:\Users\ALICE~1\d\a.html` also offered the bare relative `1\d\a.html`, which
+/// is a second candidate reaching the row's end and therefore a refusal at gate ① of
+/// [`PrintedPathLinks::rejoin_across_newline`]. Read as a **run** it refused every bare reference
+/// that carries one (`PROGRA~1/d/a.txt` was never a candidate at all).
+///
+/// This restores a class §7.30 already states from its other side: [`is_seam_separator`] is ASCII
+/// punctuation **minus** `/ \ . - _ ~`, so what can never be a seam is exactly what a path is
+/// spelled with. The two readings of that one class are now the same list.
+///
 /// Everything else opens a path — whitespace of any width, opening brackets and quotes of any script
 /// (`(`、`（`、`「`、`“`), separators (`:`、`：`、`=`、`,`), and the rest of punctuation. That
 /// generality is the point: a path is no less a path for sitting in CJK prose.
 pub fn is_path_tail_char(character: char) -> bool {
-    character.is_alphanumeric() || matches!(character, '/' | '\\' | '.' | '-' | '_')
+    character.is_alphanumeric() || matches!(character, '/' | '\\' | '.' | '-' | '_' | '~')
 }
 
 /// Closing delimiters that end an unquoted path token. Unicode General_Category Pe
@@ -2165,12 +2200,17 @@ mod tests {
     /// `std::env::temp_dir` and the process id rather than a crate: this workspace has no tempfile
     /// dependency, and the one thing the hanging-indent cases want from a real disk is that the
     /// name the two halves spell between them is a file somebody could actually open.
+    ///
+    /// **The caller's word comes first** so that the directory's own 8.3 short name is this test's
+    /// and not the next one's: Windows mints that name from the first six characters, and every
+    /// scratch in this module would otherwise be `FOLIO-~n` for some `n` nobody can predict
+    /// (`eight_dot_three_form_of`).
     struct Scratch(PathBuf);
 
     impl Scratch {
         fn named(name: &str) -> Self {
             let directory = std::env::temp_dir()
-                .join(format!("folio-rejoin-indent-{}-{name}", std::process::id()));
+                .join(format!("{name}-folio-rejoin-indent-{}", std::process::id()));
             std::fs::create_dir_all(&directory).expect("a scratch directory");
             Self(directory)
         }
@@ -2275,6 +2315,97 @@ mod tests {
             None,
             "a lower half that opens shallower than the line above it is not that line's \
              continuation either"
+        );
+    }
+
+    /// PIN (CI red 2026-09-04, §7.30) — **`~` is a character a path is spelled with**, so it
+    /// neither closes a name nor opens one.
+    ///
+    /// Windows mints every **8.3 short name** out of it, and those are not an exotic spelling: a CI
+    /// runner's own `%TEMP%` sits under one, and so is anything a program asked the API to
+    /// shorten. It is legal in an ordinary long name too, which is what the third line is.
+    /// RED before this slice: the first line came back as **two** spans, the second as
+    /// `1/tools/a.txt` — a name one character into the short one — and the third as nothing at
+    /// all, because a bare candidate must be a run of path characters and `~` was not one.
+    #[test]
+    fn a_tilde_neither_opens_a_name_nor_closes_one() {
+        assert_eq!(
+            spans("C:\\Users\\ALICE~1\\AppData\\Local\\Temp\\d\\conquest.html"),
+            ["C:\\Users\\ALICE~1\\AppData\\Local\\Temp\\d\\conquest.html"]
+        );
+        assert_eq!(spans("PROGRA~1/tools/a.txt"), ["PROGRA~1/tools/a.txt"]);
+        assert_eq!(spans("src/main.rs~"), ["src/main.rs~"]);
+        assert!(
+            spans("~\\docs\\a.md").is_empty() && spans("~/docs/a.md").is_empty(),
+            "the mark at the front of a name is still the printing process's home expansion \
+             and not this window's (scenario 31) — a refusal `is_relative_reference` now \
+             writes down, rather than one this character class used to make for it by \
+             accident"
+        );
+    }
+
+    /// The 8.3 short name of `directory`, or `None` on a volume where short-name creation is
+    /// switched off.
+    ///
+    /// **Guessed and then proved**, which is what keeps this out of the business of reimplementing
+    /// Windows' generator: the mint's shape is public — the long name's first six characters,
+    /// upper-cased, then `~` and an ordinal that walks up past whatever already holds the shorter
+    /// form — so each ordinal in turn is canonicalized and compared with the long path's own
+    /// canonical form. A guess the disk resolves to the same directory is not a guess any more; one
+    /// nothing resolves is the skip.
+    fn eight_dot_three_form_of(directory: &Path) -> Option<PathBuf> {
+        let parent = directory.parent()?;
+        let long = std::fs::canonicalize(directory).ok()?;
+        let stem = directory
+            .file_name()?
+            .to_string_lossy()
+            .to_uppercase()
+            .chars()
+            .take(6)
+            .collect::<String>();
+        (1..=9)
+            .map(|ordinal| parent.join(format!("{stem}~{ordinal}")))
+            .find(|short| std::fs::canonicalize(short).is_ok_and(|resolved| resolved == long))
+    }
+
+    /// PIN (CI red 2026-09-04, `windows-2025`) — the bullet paragraph above, printed out of a
+    /// directory whose path carries an **8.3 short name**, which is what the runner's `%TEMP%` is
+    /// and what no developer machine's happened to be.
+    ///
+    /// This is the same five gates on the same disk as
+    /// `a_bullet_paragraphs_hanging_indent_is_a_wrap_and_not_a_peer_row`, and the only difference is
+    /// the one character. RED before this slice: `None` — `~` was read as a boundary, a second bare
+    /// candidate opened one character into the short name, two candidates reached the row's end and
+    /// gate ① refused.
+    ///
+    /// **Skipped out loud**, never quietly, when the volume mints no short names (`fsutil 8dot3name
+    /// query`): a run that silently tested the long name instead would be exactly the green this
+    /// test exists to refuse.
+    #[test]
+    fn a_wrap_under_an_8_3_short_name_is_rejoined_like_any_other() {
+        let scratch = Scratch::named("short83");
+        let Some(short) = eight_dot_three_form_of(&scratch.0) else {
+            eprintln!(
+                "skipped: this volume mints no 8.3 short name for {} (`fsutil 8dot3name query`), \
+                 so there is no short name here to test with",
+                scratch.0.display()
+            );
+            return;
+        };
+        let target = short.join("conquest.html");
+        std::fs::write(&target, b"<!doctype html>").expect("a scratch file");
+        let printed = target.to_string_lossy().into_owned();
+        let split = printed.len() - "t.html".len();
+        let (head, tail) = printed.split_at(split);
+        let long_form = format!("{printed},浏览器直接打开");
+        let links = disk_ledger(&short, &[&printed, &long_form]);
+
+        let (upper, lower) = bullet_wrap(head, tail, "  ");
+        assert_eq!(
+            rejoin(&links, &upper, &lower),
+            Some((head, "t.html", local_path_to_file_uri(&target))),
+            "an 8.3 short name is one component of one path, not a boundary a second candidate \
+             opens behind"
         );
     }
 
