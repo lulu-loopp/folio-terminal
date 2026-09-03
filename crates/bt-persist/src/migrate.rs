@@ -62,6 +62,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (24, migrate_settings_v24_to_v25),
     (25, migrate_settings_v25_to_v26),
     (26, migrate_settings_v26_to_v27),
+    (27, migrate_settings_v27_to_v28),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -594,6 +595,33 @@ fn migrate_settings_v26_to_v27(mut value: Value) -> Value {
             Value::from(crate::DEFAULT_QUAKE_HEIGHT),
         );
         object.insert("quake_dismiss_on_blur".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// v27 -> v28: how wide the summoned terminal opens (user ruling, 2026-09-02, `docs/DESIGN.md`
+/// §7.54).
+///
+/// **The one step on this ladder that changes what an existing reader's window looks like**, and
+/// it is deliberate. Every build from v27 spanned the work area, so `100` is the value that would
+/// carry the old behaviour forward — and it is not the value written here. The width was never a
+/// preference anybody expressed, because there was no row to express it on; it was a consequence
+/// of a shape chosen on a 16:9 panel, and the machine that found it out was a 4K ultrawide, where
+/// a summoned window reaches from one edge of the desk to the other. Carrying `100` forward would
+/// be preserving an accident under the name of preserving a choice.
+///
+/// So this lands the v25 way — the step that named a habit rather than inventing one — with the
+/// sign reversed: it names what the window *should* have been, and the reader who really did want
+/// the full span has a row to say so on, which is the thing they did not have before.
+///
+/// See `SettingsV1::quake_width`.
+fn migrate_settings_v27_to_v28(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(28));
+        object.insert(
+            "quake_width".to_owned(),
+            Value::from(crate::DEFAULT_QUAKE_WIDTH),
+        );
     }
     value
 }
@@ -1641,6 +1669,46 @@ mod tests {
             "the sibling added one version ago is the one a copy-paste of the              step above would most plausibly reset"
         );
         assert_eq!(migrated["copy_on_select"], json!(false));
+        assert_eq!(migrated["theme_mode"], json!("Light"));
+    }
+
+    /// RED (`docs/DESIGN.md` §7.54) — **v27 -> v28 writes the summoned terminal's width and
+    /// touches nothing else** (rule 3, 「迁移函数只做结构升级」).
+    ///
+    /// Sixty is written out as a literal for the step above's reason, and here the literal carries
+    /// the whole of the ruling: the *behaviour-preserving* number is `100`, because every v27 build
+    /// spanned the work area, and this step deliberately does not write it. See
+    /// [`migrate_settings_v27_to_v28`] for why.
+    ///
+    /// MUTATION: write `100` and a reader who never asked for a window the width of a 4K desk goes
+    /// on getting one, with the row in the dialog agreeing that they chose it. Drop the `insert`
+    /// altogether and the height key's sibling is missing from a file that names v28 — `serde`
+    /// covers it, but the document then says a version it does not carry. Reset a sibling and the
+    /// last three assertions name it.
+    #[test]
+    fn real_settings_v27_to_v28_migration_writes_the_summoned_windows_width() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 27,
+                "theme_mode": "Light",
+                "quake_height": 65,
+                "quake_dismiss_on_blur": false,
+                "update_check": false
+            }),
+            27,
+            28,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(28));
+        assert_eq!(migrated["quake_width"], json!(60));
+        assert_eq!(
+            migrated["quake_height"],
+            json!(65),
+            "the key added one version ago is the one a copy-paste of the step above would most              plausibly reset"
+        );
+        assert_eq!(migrated["quake_dismiss_on_blur"], json!(false));
+        assert_eq!(migrated["update_check"], json!(false));
         assert_eq!(migrated["theme_mode"], json!("Light"));
     }
 

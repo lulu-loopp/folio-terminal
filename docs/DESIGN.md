@@ -6486,7 +6486,9 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 
 **出厂不绑,而且这是全书里这条规矩最强的一次。** `Action::SummonPip` 的裁决写着「2026 年 7 月的教训是:替用户选一把 summon 键,就是多选了一把」。一把在别的程序里也生效的键把这句话推到极限:一个默认值就是本程序从别人的编辑器里拿走一把键。所以出厂什么都不绑,`summon-quake` 是 `BINDINGS` 里唯一一行「有机器、没钥匙」的行(`is_pending` 不认它——机器在这里了)。
 
-**② 它的矩形是算出来的,从来不是记住的。** 每一次呼出都现读**鼠标所在那块屏**的工作区,横贯它,取工作区高度的那个百分比(`quake::summoned_rect`,纯函数,三枚钉子)。工作区而不是显示器:任务栏是屏幕上唯一一件「也永远在最前」的东西,一扇横在顶栏任务栏那块屏顶部的终端会开在它下面。左右不夹逼,因为横贯就是这扇窗的形状——没有宽度设置,也不会有。
+**② 它的矩形是算出来的,从来不是记住的。** 每一次呼出都现读**鼠标所在那块屏**的工作区,在它上面取两个百分比:高度那个从工作区顶端挂下来,宽度那个**在工作区里居中**(`quake::summoned_rect`,纯函数)。工作区而不是显示器:任务栏是屏幕上唯一一件「也永远在最前」的东西,一扇横在顶栏任务栏那块屏顶部的终端会开在它下面。
+
+> **宽度这条是被实机翻案的**(用户裁决,2026-09-02,见下面「宽度」一段)。这一行原本写的是「左右不夹逼,因为横贯就是这扇窗的形状——没有宽度设置,也不会有」。那句话是在一块 16:9 的笔记本屏上写的。
 
 **它存下来的矩形写了但从不读回。** `window_snapshot` 为每一扇窗写同一段,不为这一扇开特例;而两块屏的人是在自己正干活的那块屏上按键的,从文件里取一个角就是把它开在昨天干活的那块屏上。所以 session 里那个 `placement` 对这扇窗是一份记录,不是一条指令。
 
@@ -6525,7 +6527,7 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 **红门(变异证在各自的文档注释里)。**
 
 - `bt-platform/src/hotkey.rs`:`every_modifier_reaches_its_own_bit`(换掉 `MOD_ALT`/`MOD_CONTROL` 两个字面量,绑 Ctrl 的和弦按 Alt 注册)、`a_hotkey_never_repeats_while_it_is_held`(去掉 `MOD_NOREPEAT`)、`a_chord_with_no_key_is_refused_before_windows_sees_it`(把 0 号虚拟键放过去)、`only_a_thread_wm_hotkey_carrying_our_id_is_ours`(去掉 `hwnd == 0` 或 id 两条中的任一条)、`the_numbers_written_down_are_the_numbers_windows_publishes`(改这个文件里六个字面量中的任何一个)。
-- `bt-app/src/quake.rs`:`a_summon_spans_the_work_area_and_takes_its_share_of_the_top`(改按显示器算,顶栏任务栏那块屏上它开在任务栏底下)、`a_screen_left_of_the_primary_one_keeps_its_own_negative_origin`(改用虚拟屏,窗横跨所有显示器)、`a_height_no_row_offers_is_clamped_into_the_one_that_is`(去掉夹逼)、`only_a_rival_claim_is_a_sentence_the_dialog_carries`(把所有拒绝都报成「被别的程序占了」)、`a_chord_that_has_not_moved_is_left_alone`(去掉 `reconcile` 顶上的相等判断,每转注销重注册)、`the_window_owed_the_keyboard_is_handed_back_exactly_once`(不清 `give_back`,第二次收起把键盘交给第一次呼出前那扇早就关了的窗)、`a_blur_is_taken_once_and_showing_the_window_clears_it`(在事件里直接藏窗)。
+- `bt-app/src/quake.rs`:`a_summon_takes_its_share_of_the_top_of_the_work_area_centred_across_it`(改按显示器算,顶栏任务栏那块屏上它开在任务栏底下;7.54a 之前这枚钉子叫 `a_summon_spans_the_work_area_…`,改名是因为它钉的那件事从「横贯」变成了「居中」)、`a_screen_left_of_the_primary_one_keeps_its_own_negative_origin`(改用虚拟屏,窗横跨所有显示器)、`a_size_no_row_offers_is_clamped_into_the_one_that_is`(去掉夹逼)、`only_a_rival_claim_is_a_sentence_the_dialog_carries`(把所有拒绝都报成「被别的程序占了」)、`a_chord_that_has_not_moved_is_left_alone`(去掉 `reconcile` 顶上的相等判断,每转注销重注册)、`the_window_owed_the_keyboard_is_handed_back_exactly_once`(不清 `give_back`,第二次收起把键盘交给第一次呼出前那扇早就关了的窗)、`a_blur_is_taken_once_and_showing_the_window_clears_it`(在事件里直接藏窗)。
 - `bt-platform/src/lib.rs`:`stand_window_at` 本身需要一扇真窗，所以按的是调用地——把 `show_quake_window` 里的它换回 `set_window_outer_rect(hwnd, rect)`，`a_summoned_window_is_not_shown_by_the_door_that_opens_it` 当场红（已实验）。
 - `bt-app/src/main.rs`:`a_summoned_window_is_not_shown_by_the_door_that_opens_it`(拆掉 `open_window` 里那半个条件,恢复出来的快捷终端一启动就横在屏幕顶上)、`the_summoned_window_takes_no_part_in_the_restore_election`(拆掉 `plan_windows` 的分流,那扇窗成为第一扇打开的窗或进恢复提示)。
 - `bt-persist`:`real_session_v11_to_v12_migration_takes_the_number_and_leaves_every_window_ordinary`(在迁移里插 `"quake": true`,旧文件里每扇窗都变成没人找得到的隐藏条)、`real_settings_v26_to_v27_migration_writes_the_summoned_windows_two_keys`(漏掉任一个 `insert`)。
@@ -6542,6 +6544,30 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 **一扇没人能看见的窗不能把进程护着。** 这是本片自己引入的唯一真风险，写在这里。快捷终端是这个程序能拿在手里的唯一一扇「既不在屏上、也不在退场中」的窗。读者关掉自己看得见的最后一扇窗之后，剩下就是一个留在任务列表里、屏上无物、任务栏上无按钮的 `folio.exe`，而回去的路只剩一把他可能几周前绑的键。所以 `open_window_count` 把它排除在外——那句注释本来就写着「没有一扇是人看得见、移得进 tab、关得掉的窗」，这只是把同一条标准用到了第二种情形上——而它在最后一扇可见窗被告知的那一转跟着走，走的是每一扇窗都走的那扇门（`close_window(true)`）。**它一点东西也不会丢**：它的那一段和每一扇窗一样写进了文档，下一次启动它带着原样回来。红门 `a_window_nobody_can_see_does_not_keep_the_run_alive`（变异：拆掉 `open_window_count` 那个 filter，最后一扇可见窗的关闭不再是一次运行的结束，它把自己归了 Recent 而进程不退；拆掉 `close` 里的那一句，数对了却没人告诉它）。**明账**：想要一个常驻的快捷终端的人会发现它随最后一扇窗一起走，那需要的是一枚托盘图标而不是一扇看不见的窗，本单不做。
 
 **没做的:下拉动画。** 第一刀直切显隐,先量闪帧。理由是量得到:一扇透明、置顶、反复显隐的窗到底有没有黑白帧,是一件用真机看得出来的事,而一条动画会把它盖住。
+
+#### 7.54a 宽度:一句「不会有」被一块 4K 宽屏翻掉(用户裁决,2026-09-02;`crates/bt-app/src/quake.rs`、`crates/bt-app/src/{settings,i18n,main}.rs`、`crates/bt-persist/src/{settings,migrate,lib}.rs`)
+
+**翻案的是实机,不是道理。** ② 里那句「没有宽度设置,也不会有」当时是有理由的:横贯就是这扇窗的形状,而少一个设置就少一处能配坏的地方。用户在自己的 **4K 宽屏**上按了那把键,报回来的一句话是**太宽了**——一行输出从桌子的一头写到另一头,读一句提示要把眼睛横着走完整张桌子。这不是审美,是这扇窗在那台机器上不好用;而那台机器不是特例,它是这个产品的读者今天买的屏。
+
+**新形状:工作区宽度 × `quake_width`,默认 60,在工作区里水平居中,范围 30–100。** 高度那一半一字不改。三个数各有各的理由:
+
+- **60 而不是别的**。比任何人手开的终端都宽,同时整扇窗还在一次转头的范围里。它是一个从实机反馈回来的数,不是从纸上推出来的。
+- **居中而不是靠左**。这扇窗是盖在读者**本来就在看的东西**上面出现的,而人本来就在看屏幕中间;贴着一条边的窗是一条要去找的窗。而且左右两边露出来的东西一样多,这件事本身就在说「下面还有别的窗,它只是暂时压住了中间」。
+- **30 是地板,100 是天花板**。地板和高度那条 20% 同一条道理换一根轴:三分之一屏以下比 shell 自己画的行还窄,每一行都折,读起来就是「窗开坏了」。天花板留在 100 而不是收小,是因为**横贯就是这扇窗此前的形状**——真的想要它的读者必须有一个值能说出这句话,而现在他有一行可以说。
+
+**余数归右。** 露出来的列数是奇数时,两边的边距不可能相等;能守住的那句话是**两条边都不出工作区**,所以左边距取一半向下取整,多出来的那一列落在右边。向上取整会让 `right` 越过 `work.right` 一列——在多屏桌面上,那一列是在隔壁那块屏上。
+
+**settings 走到 v28,一格一把钥匙。** `quake_width`,`#[serde(default)]` 走 `default_quake_width`。这一格是这道梯子上**唯一一次改变读者已有窗口长相**的升级:能保住旧行为的值是 `100`,而迁移函数写的是 `60`。理由写在 `migrate_settings_v27_to_v28` 上,也写在这里:**那个满宽从来不是谁表达过的偏好**——当时根本没有一行能表达它——它是一个在 16:9 屏上定下来的形状的副产品。把 `100` 承接下去,是拿「保住选择」的名义保住一次意外。
+
+**夹逼仍然在摆窗的地方。** 两个百分比都是在 `summoned_rect` 里夹的,理由和高度那条一模一样:`bt_persist` 按设计存它收到的东西,而这里是那个必须把窗放到某个真实矩形上的面。夹在**居中之前**:先夹后中,一个反过来的顺序会把最窄的那扇窗钉在左边缘上。
+
+**设置页。** General 页那一组变成三行——高度、宽度、失焦收起——顺序是「多高、多宽、待多久」。宽度和高度同形:同一种滑杆、同一种百分比、同一种调法。说明句只陈述事实(`DescQuakeWidth`:「它盖住那块屏幕宽度的多少。剩下的部分左右均分,它居中。」);高度那句里原本挂着的「它横跨鼠标所在那块屏幕的整个宽度」现在是假话,改成了从顶端挂下来。**「按键被别的程序占了」那句仍然只落在高度那一行**——一行淡字说一次,而它报告的事对三行都成立。
+
+**红门(变异证在各自的文档注释里)。**
+
+- `bt-app/src/quake.rs`:`a_summon_takes_its_share_of_the_top_of_the_work_area_centred_across_it`(去掉居中、把 `left` 放回 `work.left`,左边距成 0 而右边距成 768)、`a_hundred_percent_wide_is_the_full_span_this_window_used_to_be`(宽度取整取反,100% 差一列到不了边)、`a_size_no_row_offers_is_clamped_into_the_one_that_is`(去掉宽度夹逼,30 以下当场红:5% 出来的是一根比提示还窄的柱子,250% 出来的窗左边缘被居中推出屏幕外)、`an_odd_remainder_puts_the_leftover_column_inside_the_work_area`(左边距改向上取整,`right` 越过工作区一列)、`a_screen_left_of_the_primary_one_keeps_its_own_negative_origin`(居中从 0 而不是从 `work.left` 算,窗跑到主屏上)。
+- `bt-app/src/settings.rs`:`a_summon_no_key_can_reach_says_so_where_the_window_is_described`(把宽度行的地板写成高度的,拖到底出来的是五分之一屏宽的窗)、两处 `visible_rows`(宽度行不在高度行下面)。
+- `bt-persist`:`real_settings_v27_to_v28_migration_writes_the_summoned_windows_width`(写 `100`——那正是「保住旧行为」的那个值,而裁决说不)、`settings_defaults_render_formulas_at_the_current_schema_version`(版本号或默认值任一)。
 
 ### 7.55 一个浮着的意图框:五类内容分段不混排,文件那一段有一张有界的索引(0.2 聚焦搜索,`crates/bt-app/src/{palette.rs,palette_index.rs}`(新)、`crates/bt-app/src/{main,shortcuts,i18n,files,webhost}.rs`)
 

@@ -32563,7 +32563,8 @@ impl Runtime<'_> {
             .and_then(|(x, y)| bt_platform::work_area_at(x, y).ok())
             .or_else(|| bt_platform::get_work_area(hwnd).ok())
             .unwrap_or_else(bt_platform::virtual_screen_rect);
-        let rect = quake::summoned_rect(work, self.app.settings_store.loaded().quake_height);
+        let settings = self.app.settings_store.loaded();
+        let rect = quake::summoned_rect(work, settings.quake_width, settings.quake_height);
         // One line, on `BT_TEAR_OUT`'s own terms: a summon's rectangle is a
         // function of two things read off the machine at the moment of the press,
         // and a photograph of a window in the wrong place cannot say which of
@@ -38424,6 +38425,7 @@ impl Runtime<'_> {
             acrylic: self.app.settings_store.loaded().acrylic,
             always_on_top: self.app.settings_store.loaded().always_on_top,
             quake_height: self.app.settings_store.loaded().quake_height,
+            quake_width: self.app.settings_store.loaded().quake_width,
             quake_dismiss_on_blur: self.app.settings_store.loaded().quake_dismiss_on_blur,
             // A fact about the machine and not about the file, which is why it is
             // read off the claim rather than out of the settings - see
@@ -40972,6 +40974,7 @@ impl Runtime<'_> {
             // program's menu.
             | Row::ContextMenu
             | Row::QuakeHeight
+            | Row::QuakeWidth
             | Row::QuakeDismiss
             // Not advanced, and it is on a page whose Advanced group it is not
             // in — but it is named here for this arm's own rule: a row swept
@@ -43218,6 +43221,7 @@ impl Runtime<'_> {
             settings::SettingsRow::ImageOpacity => settings.background_image_opacity = value,
             settings::SettingsRow::BackgroundOpacity => settings.background_opacity = value,
             settings::SettingsRow::QuakeHeight => settings.quake_height = value,
+            settings::SettingsRow::QuakeWidth => settings.quake_width = value,
             _ => return Ok(false),
         }
         if &settings == self.app.settings_store.loaded() {
