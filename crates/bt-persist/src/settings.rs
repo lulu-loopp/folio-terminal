@@ -196,7 +196,15 @@ use serde::{Deserialize, Serialize};
 /// this one did; it is given `60`, because the old width was not a preference anybody expressed —
 /// there was no row to express it on — so carrying it forward would be preserving an accident
 /// rather than a choice.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 28;
+///
+/// **v29 carries `tray_icon`** (user ruling, next29, `docs/DESIGN.md` §7.54): whether this program
+/// puts an icon in the notification area. It lands the v13–v16 way — a default chosen for a thing
+/// that did not exist before — and the default is **on**, which is the one place this key is not
+/// like its neighbours and is worth saying why. A row that shipped off would be a row nobody found:
+/// the icon is the only door to a program that has no window on the screen, and a reader cannot go
+/// looking in the settings of a program they cannot see. It is a switch to turn *off*, not one to
+/// discover.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 29;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -401,7 +409,8 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "update_check": true | false,
 ///   "quake_height": 20..=100,
 ///   "quake_width": 30..=100,
-///   "quake_dismiss_on_blur": true | false
+///   "quake_dismiss_on_blur": true | false,
+///   "tray_icon": true | false
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -955,6 +964,16 @@ pub struct SettingsV1 {
     /// why the row exists, and not the one the key is usually pressed for.
     #[serde(default = "default_quake_dismiss_on_blur")]
     pub quake_dismiss_on_blur: bool,
+    /// **Whether this program keeps an icon in the notification area** (`docs/DESIGN.md` §7.54).
+    ///
+    /// The switch is about the icon and the icon alone, but it decides a second thing with it, and
+    /// the two are deliberately one row: **while the icon is there, closing the last window does
+    /// not end the run.** They are one question because they are one situation. A program that
+    /// stays with no window and no icon is a program that has silently failed to quit, and a
+    /// program that has quit while its icon is on the taskbar is an icon that lies. Neither is a
+    /// state worth being able to ask for, so neither has a row.
+    #[serde(default = "default_tray_icon")]
+    pub tray_icon: bool,
 }
 
 /// `serde`'s door for a v14 key that is missing from a file this build is reading.
@@ -986,6 +1005,13 @@ fn default_quake_width() -> u8 {
 /// And the v27 dismissal key. A function because the answer is `true` and `bool::default()` is
 /// `false` — a file that had lost this key would come back with a terminal standing in front of
 /// whatever the reader turned to next.
+/// **On**, for the reason on [`SETTINGS_SCHEMA_VERSION`]'s v29 paragraph: the icon is the only
+/// door to a program with no window on the screen, and a door that ships closed is a door nobody
+/// finds.
+fn default_tray_icon() -> bool {
+    true
+}
+
 fn default_quake_dismiss_on_blur() -> bool {
     true
 }
@@ -1132,6 +1158,7 @@ impl Default for SettingsV1 {
             // A window that is above every other window goes away when the reader turns to one of
             // them.
             quake_dismiss_on_blur: true,
+            tray_icon: true,
         }
     }
 }

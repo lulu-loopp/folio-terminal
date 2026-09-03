@@ -132,7 +132,7 @@
 
 param(
   [Parameter(Position = 0, Mandatory = $true)]
-  [ValidateSet("launch", "type", "key", "chord", "hold", "capture", "close", "wheel", "resize", "click", "rightclick", "dblclick", "hover", "drag", "burst")]
+  [ValidateSet("launch", "type", "key", "chord", "hold", "capture", "close", "wheel", "resize", "click", "rightclick", "dblclick", "hover", "drag", "burst", "trayclick", "screenshot")]
   [string]$Cmd,
   [int]$ProcId = 0,
   [string]$Text = "",
@@ -165,6 +165,10 @@ param(
   # drag: the far end of the travel, in the same coordinate system as X/Y.
   [int]$X2 = 0,
   [int]$Y2 = 0,
+  # trayclick: which button. The icon answers both and means two different
+  # things by them, so the verb has to be able to say which one it sent.
+  [ValidateSet("left", "right")]
+  [string]$Button = "left",
   [int]$Steps = 12,
   # drag: how long to REST at the far end with the button still down, before
   # letting go. A gesture whose meaning is "stop here and wait" — the
@@ -306,6 +310,11 @@ public class Probe {
      nobody asked about. (Measured: it named `explorer` for a pixel the screen
      capture proves belongs to the app.) The struct is the signature. */
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(WPOINT p);
+  /* SM_XVIRTUALSCREEN 76, SM_YVIRTUALSCREEN 77, SM_CXVIRTUALSCREEN 78,
+     SM_CYVIRTUALSCREEN 79 -- the whole desk including displays left of and above
+     the primary one, whose origin is negative. A shot framed from (0,0) would
+     miss exactly the monitors this project's own bug reports keep coming from. */
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   public static bool PointBelongsTo(int x, int y, int targetPid) {
     WPOINT p; p.X = x; p.Y = y;
@@ -313,6 +322,19 @@ public class Probe {
     if (under == IntPtr.Zero) return false;
     uint owner; GetWindowThreadProcessId(under, out owner);
     return owner == (uint)targetPid;
+  }
+  /* The same read, answering *which* process instead of "is it that one".
+     A notification-area icon is drawn by the shell and the pixel under it
+     belongs to `explorer.exe`, never to the program the icon stands for -- so
+     the ownership law above cannot be asked with the app's own pid, and the
+     honest version of it is "name the owner and let the caller say which name
+     it expected". Zero when nothing owns the pixel. */
+  public static int PidAt(int x, int y) {
+    WPOINT p; p.X = x; p.Y = y;
+    IntPtr under = WindowFromPoint(p);
+    if (under == IntPtr.Zero) return 0;
+    uint owner; GetWindowThreadProcessId(under, out owner);
+    return (int)owner;
   }
   public const uint KEYEVENTF_UNICODE = 0x0004;
   public const uint KEYEVENTF_KEYUP = 0x0002;
@@ -1085,6 +1107,54 @@ switch ($Cmd) {
     if ($W -le 0 -or $H -le 0) { throw "resize needs -W and -H" }
     [Probe]::SetWindowPos($hwndR, [IntPtr]::Zero, 60, 60, $W, $H, 0x0004) | Out-Null
     "resized pid=$ProcId to ${W}x${H}"
+  }
+  "trayclick" {
+    # **The one gesture whose pixel is not the app's, and must not be**
+    # (DESIGN 7.54b (5)). A notification-area icon is drawn by the shell: the
+    # pixel under it belongs to `explorer.exe`, and `click`'s ownership law asked
+    # with the app's pid refuses it every time -- correctly, because that law is
+    # about not clicking blind and this pixel really is somebody else's.
+    #
+    # So the law is kept and its expectation is changed: name the owner, and
+    # refuse unless it is the shell. That is exactly as strong -- it still proves
+    # the coordinates land where they were meant to -- and it is the only form of
+    # the check this surface can pass.
+    #
+    # -X and -Y are **absolute screen coordinates**, not window-relative: there is
+    # no window of ours to be relative to. Folio prints them itself, on the
+    # `BT_TRAY rect=` line it writes when the icon goes up, because
+    # `Shell_NotifyIconGetRect` needs the window and the id the icon was filed
+    # under and only the program that filed it has both.
+    $owner = [Probe]::PidAt($X, $Y)
+    if ($owner -eq 0) { throw "REFUSED: nothing owns the pixel at ($X, $Y)" }
+    $name = try { (Get-Process -Id $owner -ErrorAction Stop).ProcessName } catch { "<gone>" }
+    if ($name -ne "explorer") {
+      throw "REFUSED: ($X, $Y) belongs to $name (pid=$owner), not to the shell - the icon is not there"
+    }
+    if ($Button -eq "right") { [Probe]::RightClick($X, $Y) } else { [Probe]::Click($X, $Y) }
+    "trayclicked ($X, $Y) button=$Button on the shell (pid=$owner, ownership verified)"
+  }
+  "screenshot" {
+    # **A photograph of the screen rather than of a window.** `capture` frames the
+    # target's own rectangle, which is the right frame for every question about
+    # the app and the wrong one for two: where the shell drew our icon, and
+    # whether a window that is meant to be gone is gone. Both are questions about
+    # what is *on the desk*, so the frame is the desk.
+    #
+    # No `BringToFront`: bringing anything forward is the one thing that would
+    # change the answer. The cursor is not drawn -- `CopyFromScreen` never draws
+    # it -- so a shot meant to show a hover shows the hover's effect, not the
+    # pointer.
+    Add-Type -AssemblyName System.Drawing
+    $sl = if ($X -ne 0 -or $Y -ne 0) { $X } else { [Probe]::GetSystemMetrics(76) }
+    $st = if ($X -ne 0 -or $Y -ne 0) { $Y } else { [Probe]::GetSystemMetrics(77) }
+    $sw = if ($W -gt 0) { $W } else { [Probe]::GetSystemMetrics(78) }
+    $sh = if ($H -gt 0) { $H } else { [Probe]::GetSystemMetrics(79) }
+    $bmp = New-Object System.Drawing.Bitmap($sw, $sh)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($sl, $st, 0, 0, $bmp.Size)
+    $bmp.Save($Out); $g.Dispose(); $bmp.Dispose()
+    "screenshot ${sw}x${sh} at ($sl, $st) -> $Out"
   }
   "close" {
     try { Stop-Process -Id $ProcId -Force -ErrorAction Stop } catch {}

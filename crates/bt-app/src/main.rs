@@ -430,6 +430,15 @@ enum AppEvent {
     /// reads it rather than by the hook, which is running inside Windows'
     /// message pump with no borrow of anything.
     QuakeSummoned,
+    /// **Somebody used the icon in the notification area** (§7.54).
+    ///
+    /// [`Self::QuakeSummoned`]'s twin at the other door, and it carries nothing
+    /// for the same reason and one more. The window procedure that posts this has
+    /// already written down *what* was asked for — it is a list on the icon's own
+    /// state, because a menu can be opened and chosen from in one gesture — so
+    /// what this says is only that there is something to read. Which is also all
+    /// it may say: that procedure runs inside somebody else's `DispatchMessage`.
+    TrayPoked,
     /// **A desktop notification was clicked** (§7.6).
     ///
     /// Carries nothing, for [`Self::GitChanged`]'s reason: the launch string is
@@ -8705,6 +8714,59 @@ struct App {
     /// per *process* — one `RegisterHotKey` on the loop's own thread — and
     /// because the window it names may not exist yet. See [`quake::Quake`].
     quake: quake::Quake,
+    /// **The icon in the notification area, while there is one** (§7.54).
+    ///
+    /// On the application and not on a window for a stronger version of the
+    /// reason above it: the icon exists in order to outlive every window, and it
+    /// owns a window of its own to do it (see [`bt_platform::tray::TrayIcon`]).
+    /// `None` is both "the reader turned it off" and "there has never been a
+    /// window to read this program's module handle from".
+    tray: Option<bt_platform::tray::TrayIcon>,
+}
+
+/// **The way a message from outside every window asks for a turn.**
+///
+/// Set once, immediately after the loop is built, and read from two doors that
+/// are not on the loop's own call stack: the message hook that notices the
+/// summon chord, and the window procedure behind the icon in the notification
+/// area. It is a `static` and not a field for the reason both of those share —
+/// neither of them is handed anything by winit, because neither of them is
+/// winit's to call.
+static SUMMON_PROXY: std::sync::OnceLock<EventLoopProxy<AppEvent>> = std::sync::OnceLock::new();
+
+/// **The words the icon's menu is drawn with**, in the language this window
+/// started in.
+///
+/// Read afresh wherever the icon is stated rather than held anywhere, which is
+/// how every other translated surface in this program works and is what lets the
+/// icon follow a language change without a second mechanism.
+///
+fn tray_labels() -> bt_platform::tray::TrayLabels {
+    bt_platform::tray::TrayLabels {
+        summon: i18n::Text::TrayMenuSummon.text().to_owned(),
+        new_window: i18n::Text::TrayMenuNewWindow.text().to_owned(),
+        settings: i18n::Text::TrayMenuSettings.text().to_owned(),
+        quit: i18n::Text::TrayMenuQuit.text().to_owned(),
+        // **The product's own name, which is the same word in both languages**
+        // and is therefore not a translated string. A tip is read by somebody who
+        // has pointed at one icon in a row of icons and is asking *which program
+        // is this*; anything past the answer is words in the way of it.
+        tip: APP_NAME.to_owned(),
+    }
+}
+
+/// **Ask for a turn, and do nothing else** — what the icon's window procedure is
+/// handed.
+///
+/// A free function and not a closure written at the call site, so that the rule
+/// it obeys can be stated once where it is easy to check: this runs inside
+/// Windows' own message dispatch, with no borrow of anything, and the only thing
+/// it may do is make the loop take a turn. What was actually asked for is written
+/// down on the icon and read by `settle_tray_commands`.
+fn wake_the_loop() {
+    if let Some(proxy) = SUMMON_PROXY.get() {
+        let _ = proxy.send_event(AppEvent::TrayPoked);
+    }
 }
 
 /// **One row of `Move to window ▸`**, before it is words (B9).
@@ -8808,6 +8870,22 @@ impl NewWindowPlan {
     fn fresh(like: WindowId) -> Self {
         Self {
             like: Some(like),
+            saved: None,
+            ask_about_unpinned: false,
+            receives: None,
+            quake: false,
+        }
+    }
+
+    /// **A window nothing in this process asked for** — the icon's `New window`.
+    ///
+    /// [`Self::summoned`] without the summon, and `like` is `None` for that
+    /// constructor's reason said one step further out: the click happened on a
+    /// surface that belongs to the shell, so not only did no window ask — there
+    /// may not be a window at all.
+    const fn unasked_for() -> Self {
+        Self {
+            like: None,
             saved: None,
             ask_about_unpinned: false,
             receives: None,
@@ -31874,6 +31952,11 @@ impl Runtime<'_> {
             window_ring: None,
             window_ring_shown: None,
             quake: quake::Quake::default(),
+            // **Not here.** There is no window yet, and the icon needs one to
+            // read this program's module handle from. `settle_tray` puts it up on
+            // the first turn after the first window opens, which is also the
+            // earliest turn at which there is anything for it to protect.
+            tray: None,
         };
         // **The rest of the file's windows, queued at the door.** A window that
         // held a pinned tab opens straight away, through the very same door
@@ -31896,6 +31979,14 @@ impl Runtime<'_> {
                 // it held, because nobody is going to be asked about it.
                 .chain(windows.quake.clone().map(NewWindowPlan::saved))
                 .collect();
+            // **The arrangements this reader made, back out of the document**
+            // (§7.54). They belong to the process and not to the window — the
+            // window is destroyed and reborn every time it is closed and summoned
+            // again, and a preference that died with it would be a preference
+            // that only lasted until the reader tidied up.
+            if let Some(saved) = windows.quake.as_ref() {
+                app.quake.adopt_placements(saved.quake_placements.clone());
+            }
             app.pending_restore_windows = windows.pending.clone();
             // **The whole question, in the order it will come back** (ruling ①).
             // This window's own unanswered tabs first, then every other window's:
@@ -32576,12 +32667,37 @@ impl Runtime<'_> {
         // The pointer, and the window's own monitor when Windows will not say
         // where the pointer is. Not the virtual screen: a rectangle spanning
         // every display at once is not this window's shape on any of them.
-        let work = bt_platform::pointer_position()
+        //
+        // The point is bound rather than consumed inside the chain, because two
+        // questions are asked of the same monitor and they have to be asked of
+        // the *same* one: the work area the rectangle is measured against, and
+        // the dpi its top gap is scaled at. `tear_out_rect` reads them as a pair
+        // for the same reason.
+        let pointer = bt_platform::pointer_position();
+        let work = pointer
             .and_then(|(x, y)| bt_platform::work_area_at(x, y).ok())
             .or_else(|| bt_platform::get_work_area(hwnd).ok())
             .unwrap_or_else(bt_platform::virtual_screen_rect);
+        // The dpi of the monitor being summoned onto, and **not** this window's
+        // cached scale: between summons the window is parked on whichever display
+        // it last came down on, and a gap scaled at that dpi would be the wrong
+        // size on the display the reader is actually working on.
+        let dpi = pointer.map_or_else(
+            || self.window.renderer.metrics().dpi_milli().get() * 96 / 1000,
+            |(x, y)| bt_platform::dpi_at(x, y),
+        );
+        // **Which display this is**, so that a rectangle the reader arranged with
+        // their own hand comes back on the display they arranged it on and
+        // nowhere else — see `Quake::placement_on` and §7.54.
+        let monitor = pointer.and_then(|(x, y)| bt_platform::monitor_id_at(x, y));
         let settings = self.app.settings_store.loaded();
-        let rect = quake::summoned_rect(work, settings.quake_width, settings.quake_height);
+        let rect = self
+            .app
+            .quake
+            .placement_on(monitor.as_deref(), dpi)
+            .unwrap_or_else(|| {
+                quake::summoned_rect(work, settings.quake_width, settings.quake_height, dpi)
+            });
         // One line, on `BT_TEAR_OUT`'s own terms: a summon's rectangle is a
         // function of two things read off the machine at the moment of the press,
         // and a photograph of a window in the wrong place cannot say which of
@@ -38233,7 +38349,18 @@ impl Runtime<'_> {
     ) {
         (
             settings::visible_rows(self.window.rail.layout),
-            self.app.shortcuts.editor_rows(),
+            {
+                // **The fourth refusal, on the row it is about** (§7.54). The
+                // claim is refused outside this table — by Windows, to a chord
+                // this table considers perfectly legal — so the fact is joined
+                // to the rows here, where both halves are in hand, rather than
+                // inside `editor_rows`, which knows only the table.
+                let mut shortcuts = self.app.shortcuts.editor_rows();
+                if self.app.quake.hotkey_taken() {
+                    shortcuts::note_the_summon_is_taken(&mut shortcuts);
+                }
+                shortcuts
+            },
             // Derived here rather than held on `Runtime`, for the two lists
             // beside it: the page has to show what is true *this frame*, and a
             // copy kept on the struct is a copy that has to be refreshed by
@@ -38490,6 +38617,7 @@ impl Runtime<'_> {
             quake_height: self.app.settings_store.loaded().quake_height,
             quake_width: self.app.settings_store.loaded().quake_width,
             quake_dismiss_on_blur: self.app.settings_store.loaded().quake_dismiss_on_blur,
+            tray_icon: self.app.settings_store.loaded().tray_icon,
             // A fact about the machine and not about the file, which is why it is
             // read off the claim rather than out of the settings - see
             // `quake::Quake::hotkey_taken`.
@@ -40828,6 +40956,9 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::quake_dismiss_requested(target) {
             self.apply_quake_dismiss(enabled)?;
         }
+        if let Some(enabled) = settings::tray_icon_requested(target) {
+            self.apply_tray_icon(enabled)?;
+        }
         if let settings::SettingsTarget::Advanced(category) = target {
             self.toggle_advanced_group(category)?;
         }
@@ -41039,6 +41170,7 @@ impl Runtime<'_> {
             | Row::QuakeHeight
             | Row::QuakeWidth
             | Row::QuakeDismiss
+            | Row::TrayIcon
             // Not advanced, and it is on a page whose Advanced group it is not
             // in — but it is named here for this arm's own rule: a row swept
             // into a `_` is a row that silently starts resetting the day
@@ -42310,6 +42442,15 @@ impl Runtime<'_> {
             // computes its rectangle from the monitor the pointer is on, every
             // time. See `quake::summoned_rect`.
             quake: self.is_quake_window(),
+            // **And the rectangles a hand made**, which are the one thing about
+            // this window that *is* read back — filed under the display they
+            // were made on, so that the objection above stays answered. Empty
+            // for every other window, because only this one has them.
+            quake_placements: if self.is_quake_window() {
+                self.app.quake.placements()
+            } else {
+                Vec::new()
+            },
         };
         // A question that was never answered is not a "no". Tabs still waiting on
         // the restore prompt go back to the file exactly as they came out of it,
@@ -43400,6 +43541,32 @@ impl Runtime<'_> {
         if &settings == self.app.settings_store.loaded() {
             return Ok(false);
         }
+        Ok(self.app.settings_store.store(settings))
+    }
+
+    /// **Put the icon in the notification area, or take it away** (§7.54).
+    ///
+    /// The switch is stored and the icon is reconciled against it on the same
+    /// turn, rather than the store being left to be noticed later: this is the
+    /// one row on the page whose effect is on a surface **outside** this window,
+    /// and a reader who turns it off and watches the taskbar is entitled to see
+    /// the icon go.
+    ///
+    /// Turning it off is also the one place this program can leave itself with no
+    /// way back, and it cannot happen: the reader is looking at a settings dialog,
+    /// which is inside a window, which is a visible window — so the run that this
+    /// press stops protecting is a run that still has something on the screen.
+    fn apply_tray_icon(&mut self, enabled: bool) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.tray_icon = enabled;
+        if &settings == self.app.settings_store.loaded() {
+            return Ok(false);
+        }
+        // The icon itself is not touched here. `settle_tray` reconciles it
+        // against this row once a turn, on `quake::Quake::reconcile`'s
+        // arrangement, and the turn that runs it is the one this press is being
+        // answered on — so the switch and the taskbar move together without a
+        // second door that has to remember to.
         Ok(self.app.settings_store.store(settings))
     }
 
@@ -84046,6 +84213,9 @@ impl Runtime<'_> {
         if !resize_worth_solving(self.window_is_iconic(), physical) {
             return Ok(());
         }
+        // A hand on the frame is a hand on the frame whichever edge it took hold
+        // of, so the same reader runs on the resizes of a drag as on its moves.
+        self.remember_summoned_arrangement();
         // **The first thing done with a rectangle that is the window's, and that is the whole of
         // it** (§7.1.6c-4b, re-judged 2026-08-24; the gate above is the only thing in front of it,
         // and it decides whether there is a rectangle here at all). Everything below this line —
@@ -84158,12 +84328,54 @@ impl Runtime<'_> {
     /// take the notice is a page whose context menu opens in the wrong place,
     /// which is not a reason to fail a window move.
     fn window_moved(&mut self) -> Result<()> {
+        self.remember_summoned_arrangement();
         for web in self.window.web.values() {
             if let Err(error) = web.parent_window_moved() {
                 eprintln!("BT_WEB {error}");
             }
         }
         Ok(())
+    }
+
+    /// **File the summoned window's rectangle under the display it is on, but
+    /// only when a hand put it there** (§7.54, user ruling next29).
+    ///
+    /// The whole of the judgement is `in_size_move`, and it is the same judgement
+    /// the divider drag is read with: Windows sets it between `WM_ENTERSIZEMOVE`
+    /// and `WM_EXITSIZEMOVE`, which is exactly the interval a person is holding
+    /// the frame. Every rectangle this program states for itself — the summon's
+    /// own `stand_window_at`, a restore, a dpi settlement — arrives outside that
+    /// interval, so none of them is mistaken for a preference. That is why there
+    /// is no "we did this ourselves" flag to keep in step: the question is not
+    /// *who called `SetWindowPos`*, it is *whose hand was on the window*, and
+    /// Windows is already answering it.
+    ///
+    /// It runs on the moves and resizes of a drag rather than at its end, so the
+    /// last one to arrive is what is kept. There is no cheaper moment: an
+    /// `WM_EXITSIZEMOVE` is not a winit event, and a rectangle read once a frame
+    /// while a window is being dragged is one `GetWindowRect` against a drag that
+    /// is already repainting the screen.
+    fn remember_summoned_arrangement(&mut self) {
+        if !self.is_quake_window() || !self.window.custom_window_frame.in_size_move() {
+            return;
+        }
+        let Ok(hwnd) = window_hwnd(&self.window.window) else {
+            return;
+        };
+        let Ok(rect) = bt_platform::get_window_rect(hwnd) else {
+            return;
+        };
+        // The display the window is on *now*, asked at its own top-left rather
+        // than at the pointer: a person dragging a window across a seam has the
+        // pointer on the display they are dragging towards while most of the
+        // window is still on the one they are leaving, and the answer wanted is
+        // where the window came to rest.
+        let Some(monitor) = bt_platform::monitor_id_at(rect.left, rect.top) else {
+            return;
+        };
+        let dpi = bt_platform::dpi_at(rect.left, rect.top);
+        let bounds = persisted_window_bounds(rect, f64::from(dpi.max(1)) / 96.0);
+        self.app.quake.remember(monitor, bounds);
     }
 
     fn scale_factor_changed(&mut self) -> Result<()> {
@@ -91388,7 +91600,15 @@ impl FolioApp {
         // last one whenever it is the last one still on the glass — and a shut
         // that read the raw length would file the final window in Recent and
         // leave the session file describing a run that had already ended.
-        let ending = self.open_window_count() == 1;
+        // **Unless there is an icon on the taskbar** (§7.54, user ruling next29).
+        // The paragraph on `open_window_count` argues that a run kept alive by a
+        // window nobody can see is a `folio.exe` with nothing on any screen,
+        // reachable only through a key the reader may have bound weeks ago. That
+        // argument is about *reachability*, and an icon answers it: the program is
+        // where its icon says it is, a click summons it, and its menu has a Quit
+        // in it. So the icon, and only the icon, turns "the last window closing"
+        // back into what it says — one window closing.
+        let ending = self.open_window_count() == 1 && !self.tray_is_standing();
         let leaving_at = Instant::now() + quit::PAGE_TEARDOWN_DEADLINE;
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
@@ -91468,6 +91688,167 @@ impl FolioApp {
                     .is_some_and(|window| window.leaving.is_none())
             })
             .count()
+    }
+
+    /// **Whether there is an icon on the taskbar right now.**
+    ///
+    /// The one question two very different decisions ask — whether closing the
+    /// last window ends the run, and whether an empty registry does — and it is
+    /// one function so that they can never answer it differently. A quit takes
+    /// the icon down first, which is what makes both of them stop protecting the
+    /// run at the same moment.
+    fn tray_is_standing(&self) -> bool {
+        self.app.as_ref().is_some_and(|app| app.tray.is_some())
+    }
+
+    /// **Make the icon agree with the row that says whether there is one**
+    /// (§7.54).
+    ///
+    /// Once a turn, on `quake::Quake::reconcile`'s arrangement and for its
+    /// reason: the switch can move from the settings dialog, and the anchor it
+    /// needs can arrive at any time, and one statement read every turn covers
+    /// both without either door having to remember to call anything.
+    ///
+    /// **The anchor is any live window, and it is spent immediately.** The icon
+    /// owns a window of its own; all it wants from one of ours is the module this
+    /// program was loaded as, which is a fact about the process. That is why this
+    /// can run before there is a window and simply do nothing: there will be one
+    /// on the turn after the first window opens, and there is nothing to protect
+    /// until there is something to close.
+    ///
+    /// A refusal is said once and not retried, on `reconcile`'s terms: a shell
+    /// that will not take an icon will not take it sixty times a second either,
+    /// and the failed attempt leaves `tray` as `None`, which is exactly what
+    /// "there is no icon" means everywhere else this is read.
+    fn settle_tray(&mut self) {
+        // **A quit under way wants no door.** Two facts and not one, because the
+        // switch says whether the reader wants an icon and this says whether
+        // there is still a run for it to be a door to. `begin_quit_if_asked`
+        // takes the icon down; without this clause the very next turn would put
+        // it straight back, and the run could never reach an empty registry.
+        let wanted = self
+            .app
+            .as_ref()
+            .is_some_and(|app| app.quit.is_none() && app.settings_store.loaded().tray_icon);
+        if wanted == self.tray_is_standing() {
+            return;
+        }
+        if !wanted {
+            if let Some(app) = self.app.as_mut() {
+                app.tray = None;
+            }
+            return;
+        }
+        let standing: Vec<WindowId> = (0..self.windows.len())
+            .filter_map(|index| self.windows.key_at(index))
+            .collect();
+        let Some(anchor) = standing.into_iter().find_map(|id| {
+            self.windows
+                .get_mut(id)
+                .and_then(|window| window_hwnd(&window.window).ok())
+        }) else {
+            return;
+        };
+        match bt_platform::tray::TrayIcon::install(anchor, tray_labels(), Box::new(wake_the_loop)) {
+            Ok(tray) => {
+                // One line, on `BT_QUAKE`'s own terms and for its reason: where
+                // the icon landed is a fact about the shell's strip that this
+                // process can read and a photograph cannot, and it is the only
+                // way a probe can find a pixel that belongs to `explorer.exe`.
+                // Printed once, when the icon goes up.
+                match tray.icon_rect() {
+                    Some(rect) => eprintln!(
+                        "BT_TRAY rect={},{} {}x{}",
+                        rect.left,
+                        rect.top,
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                    ),
+                    None => eprintln!("BT_TRAY rect unavailable (the icon is in the overflow)"),
+                }
+                if let Some(app) = self.app.as_mut() {
+                    app.tray = Some(tray);
+                }
+            }
+            Err(error) => eprintln!("BT_TRAY {error}"),
+        }
+    }
+
+    /// **Spend what the icon has been asked for** (§7.54).
+    ///
+    /// Every verb here is a verb some other door already has, reached through
+    /// that door: the left click is the chord's own press, Quit is the same bit
+    /// the quit chord sets, and Settings is the dialog's own opener. An icon that
+    /// had a second way of doing any of them would be a second set of rules about
+    /// the same window.
+    fn settle_tray_commands(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        self.settle_tray();
+        let commands = self
+            .app
+            .as_ref()
+            .and_then(|app| app.tray.as_ref())
+            .map(bt_platform::tray::TrayIcon::take_commands)
+            .unwrap_or_default();
+        for command in commands {
+            match command {
+                // **Not a summon, a press.** What the icon's left button means is
+                // exactly what the chord means, down to the toggle: `settle_quake`
+                // runs on the very next link of this chain and decides which way
+                // it goes, from the same bit and by the same rule.
+                bt_platform::tray::TrayCommand::Summon => {
+                    if let Some(app) = self.app.as_mut() {
+                        app.quake.press();
+                    }
+                }
+                bt_platform::tray::TrayCommand::NewWindow => {
+                    if let Some(app) = self.app.as_mut() {
+                        app.pending_new_windows.push(NewWindowPlan::unasked_for());
+                    }
+                    self.open_pending_window(event_loop)?;
+                }
+                bt_platform::tray::TrayCommand::Settings => {
+                    self.open_settings_from_the_tray(event_loop)?;
+                }
+                // The same bit the quit chord sets, and therefore the same road:
+                // `settle_quit` is the next link on this chain.
+                bt_platform::tray::TrayCommand::Quit => {
+                    if let Some(app) = self.app.as_mut() {
+                        app.quit_requested = true;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// **Settings off the icon's menu**, which has to work when there is no
+    /// window to put a dialog in.
+    ///
+    /// So it makes one, through the door a new window is always made through, and
+    /// then opens the dialog in it exactly as a keystroke would. The row it lands
+    /// on is the icon's own, which is the page the reader was reaching for: they
+    /// clicked an icon, and the first thing that page says is what that icon is.
+    fn open_settings_from_the_tray(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        let standing = (0..self.windows.len()).find_map(|index| self.windows.key_at(index));
+        let id = match standing {
+            Some(id) => id,
+            None => {
+                if let Some(app) = self.app.as_mut() {
+                    app.pending_new_windows.push(NewWindowPlan::unasked_for());
+                }
+                self.open_pending_window(event_loop)?;
+                let Some(opened) =
+                    (0..self.windows.len()).find_map(|index| self.windows.key_at(index))
+                else {
+                    return Ok(());
+                };
+                opened
+            }
+        };
+        let Some(mut runtime) = self.runtime(id) else {
+            return Ok(());
+        };
+        runtime.open_settings_on_row(settings::SettingsRow::TrayIcon)
     }
 
     /// **The summoned terminal goes with the run** (§7.54).
@@ -91554,6 +91935,16 @@ impl FolioApp {
             if let Some(app) = self.app.as_mut() {
                 app.quake.forget(id);
             }
+        }
+        // **An empty registry is not the end of the run while the icon is
+        // standing** (§7.54). This is the other half of `close`'s own answer, at
+        // the door every road to an empty registry passes through: with an icon on
+        // the taskbar the program is a thing a person can see and click, and it
+        // leaves when they ask it to — through the icon's `Quit`, which sets
+        // `quit_requested` and takes `settle_quit`'s road like every other quit,
+        // and which takes the icon down before it gets here.
+        if self.windows.is_empty() && self.tray_is_standing() {
+            return Ok(waking);
         }
         if self.windows.is_empty() {
             // **The sentinel again, and it is idempotent** (`App::finish` →
@@ -92493,6 +92884,18 @@ impl FolioApp {
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
+        // **The icon comes down as the quit's first act** (§7.54b ⑤).
+        //
+        // It is what stops the icon protecting the run it is a door to —
+        // `close` and `reap_leaving_windows` both ask `tray_is_standing`, and a
+        // quit that left the icon up would be a quit that could never reach an
+        // empty registry. It is also the honest order for the reader: the run is
+        // ending, and an icon that stayed on the taskbar for the length of the
+        // teardown would be an icon promising a program that is on its way out.
+        //
+        // `settle_tray` does not put it back, because it asks the same question
+        // this line answers — a quit under way is not a run that wants a door.
+        app.tray = None;
         app.quit = Some(quit::Quit::begin(names));
         // The card, on every window — one question, and no window left taking
         // keys behind it. A quit with nothing to ask about raises none, so this
@@ -92693,6 +93096,12 @@ impl FolioApp {
             // line, exactly as the drag handover above does, so that the press,
             // the window and the frame it appears in are all one turn.
             .and_then(|()| self.settle_quake(event_loop))
+            // **After the summon and before the quit.** After, because the icon's
+            // own left click is the summon's verb and the two must not be settled
+            // in two different orders depending on which door the reader used.
+            // Before, because `Quit` off the icon's menu is a quit like any other
+            // and is owed the same door.
+            .and_then(|()| self.settle_tray_commands(event_loop))
             .and_then(|()| self.settle_quit(event_loop))
         {
             self.fail(event_loop, error);
@@ -93052,6 +93461,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 }
                 Ok(())
             }
+            // Nothing at all, and that is the whole arm: what the icon was asked
+            // for is already written down on it, and `settle_tray` on
+            // `about_to_wait`'s chain is the turn that spends it. This exists to
+            // *produce* that turn, which is the one thing a click on a surface
+            // owned by another program cannot otherwise do.
+            AppEvent::TrayPoked => Ok(()),
             AppEvent::MathReady => {
                 let (mut batch, gone) = self.drain_math_answers();
                 self.for_each_window(|runtime| runtime.apply_math_results(&mut batch, gone))
@@ -96119,6 +96534,12 @@ mod floated_page_tests {
     /// paragraph is written like every other window's, so the next launch brings it
     /// back holding what it held.
     ///
+    /// **Narrowed, not overturned, by §7.54b ⑤**: the argument above is about
+    /// being *reachable*, and an icon on the taskbar answers it. With one
+    /// standing, the last window's close is one window closing — see
+    /// `an_icon_on_the_taskbar_keeps_the_run_alive`. With none, every word here
+    /// holds, and that is the case this test still pins.
+    ///
     /// MUTATIONS: drop the `filter` from `open_window_count` and the last visible
     /// window's close stops being the end of the run — it files itself into Recent
     /// and the process stays. Drop the call in `close` and the count is right while
@@ -96143,6 +96564,77 @@ mod floated_page_tests {
             retire.contains("runtime.close_window(true)"),
             "it leaves by some road other than the one every other window leaves \
              by, or is filed into Recent as though somebody had closed it:\n{retire}"
+        );
+    }
+
+    /// RED (§7.54b ⑤, user ruling 2026-09-03) — **an icon on the taskbar keeps
+    /// the run alive, and it is the only thing that does.**
+    ///
+    /// The test above argues that a run kept alive by a window nobody can see is
+    /// a `folio.exe` reachable only through a key the reader may have bound weeks
+    /// ago. That argument is about *reachability*, and it is left standing: an
+    /// icon answers it. The program is where its icon says it is, a click summons
+    /// it, and its menu has a Quit in it — so with an icon, and only with an icon,
+    /// closing the last window is one window closing.
+    ///
+    /// **Two doors, one question.** `close` decides whether a shut is the end of
+    /// a run; `reap_leaving_windows` decides whether an empty registry is. They
+    /// have to answer the same way at the same moment, so they read the same
+    /// predicate rather than each testing the setting for itself — a run that was
+    /// protected at one door and not the other would either exit with an icon
+    /// standing or hang with none.
+    ///
+    /// MUTATIONS: drop `tray_is_standing` from `close` and closing the last window
+    /// ends the run with an icon still on the taskbar, which is an icon nobody can
+    /// click. Drop it from `reap_leaving_windows` and the run ends one turn later
+    /// by the other road, with the same result. Let either of them read
+    /// `settings_store.loaded().tray_icon` directly and the two can disagree
+    /// during the turn a quit is taking the icon down.
+    #[test]
+    fn an_icon_on_the_taskbar_keeps_the_run_alive() {
+        let shut = fn_body(concat!("    fn ", "close("));
+        assert!(
+            shut.contains("&& !self.tray_is_standing()"),
+            "closing the last window ends the run even with an icon standing, \
+             which leaves an icon nobody can click:\n{shut}"
+        );
+        let reap = fn_body(concat!("    fn ", "reap_leaving_windows("));
+        assert!(
+            reap.contains("self.windows.is_empty() && self.tray_is_standing()"),
+            "an empty registry ends the run by the other road, so the icon only \
+             delays the exit by a turn:\n{reap}"
+        );
+        let standing = fn_body(concat!("    fn ", "tray_is_standing("));
+        assert!(
+            standing.contains("app.tray.is_some()"),
+            "the question is answered from the setting rather than from the icon, \
+             so the two doors can disagree while a quit is taking it down:\n{standing}"
+        );
+        // **And a quit takes it down**, which is what stops the icon protecting
+        // the run it is a door to. Without this the assertions above would be
+        // satisfied by a program that can never finish quitting.
+        let begin = fn_body(concat!("    fn ", "begin_quit_if_asked("));
+        assert!(
+            begin.contains("app.tray = None"),
+            "a quit leaves the icon up and the process never exits: {begin}"
+        );
+        let put_up = fn_body(concat!("    fn ", "settle_tray("));
+        assert!(
+            put_up.contains("app.quit.is_none()"),
+            "the icon goes back up on the turn after a quit takes it down: {put_up}"
+        );
+        // And the icon's own verbs are the verbs that already exist, reached
+        // through the doors that already exist. An icon that summoned by calling
+        // `summon_quake` itself, or quit by running the quit itself, would be a
+        // second set of rules about the same window.
+        let spend = fn_body(concat!("    fn ", "settle_tray_commands("));
+        assert!(
+            spend.contains("app.quake.press()"),
+            "the icon summons by some road other than the chord's own:\n{spend}"
+        );
+        assert!(
+            spend.contains("app.quit_requested = true"),
+            "the icon quits by some road other than the quit chord's own:\n{spend}"
         );
     }
 
@@ -98063,7 +98555,6 @@ fn main() -> Result<()> {
     // The hook itself is `bt_platform`'s, because reading a raw `MSG` is
     // `unsafe` and this crate is under the workspace's `unsafe_code = "deny"`.
     // What is written here is the one thing the hook is allowed to do.
-    static SUMMON_PROXY: std::sync::OnceLock<EventLoopProxy<AppEvent>> = std::sync::OnceLock::new();
     let mut builder = EventLoop::<AppEvent>::with_user_event();
     #[cfg(windows)]
     {
