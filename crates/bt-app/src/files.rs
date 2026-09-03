@@ -681,6 +681,34 @@ pub fn full_path(root: &str, key: &str) -> PathBuf {
     path
 }
 
+/// **[`full_path`] run backwards**: which stable id, if any, names `path` under
+/// `root`.
+///
+/// `None` when the path is not under the root at all, and `None` for the root
+/// itself — the root is the column, not a row in it, and a caller asking to be
+/// taken to it is asking for nothing.
+///
+/// The two directions are written next to each other on purpose. `full_path`
+/// pushes each `/`-separated segment in turn precisely so the platform's own
+/// separator is what reaches the filesystem, and this one takes the components
+/// back apart the same way rather than substituting separators inside a string:
+/// a Windows root and a path under it have to round-trip, and rewriting one
+/// separator into another would be a second and weaker model of the same fact.
+#[must_use]
+pub fn key_under_root(root: &str, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(Path::new(root)).ok()?;
+    // Built with [`child_key`] one segment at a time rather than joined with a
+    // separator, because the id's shape is that function's to decide and it
+    // puts a `/` in front of the first segment as well. A key spelled
+    // `src/main.rs` addresses the same file and matches nothing: `state.open`
+    // and `files_open_chain` compare these as strings.
+    let mut key = String::new();
+    for segment in relative.components() {
+        key = child_key(&key, &segment.as_os_str().to_string_lossy());
+    }
+    (!key.is_empty()).then_some(key)
+}
+
 /// Drop a selection that the tree can prove is gone (C35).
 ///
 /// **Why it is not simply "not in `rows`".** The mock-up could ask that, because
@@ -1469,6 +1497,49 @@ mod tests {
             PathBuf::from("/home/me").join("src").join("main.rs")
         );
         assert_eq!(full_path("/home/me", ""), PathBuf::from("/home/me"));
+    }
+
+    /// PIN — **an absolute path under a root comes back as the id that names
+    /// it**, in the spelling [`child_key`] uses and no other.
+    ///
+    /// The palette hands a files column an absolute path and asks to be taken
+    /// to it, so this is the one place the two directions meet. A key spelled
+    /// without the leading separator addresses the same file through
+    /// [`full_path`] — which filters empty segments — and matches **nothing**
+    /// in `state.open`, which compares these as strings: the reveal would
+    /// quietly do nothing at all.
+    ///
+    /// MUTATIONS:
+    /// (1) join the segments with `/` instead of building with `child_key` —
+    ///     the round trip still resolves and the first assertion goes red on
+    ///     the leading separator;
+    /// (2) drop the `is_empty` guard — the root's own assertion goes red;
+    /// (3) return `Some` for a path that is not under the root — the last
+    ///     assertion goes red.
+    #[test]
+    fn a_path_under_a_root_comes_back_as_the_id_that_names_it() {
+        let root = "/home/me";
+        let nested = full_path(root, "/src/main.rs");
+        assert_eq!(
+            key_under_root(root, &nested).as_deref(),
+            Some("/src/main.rs"),
+            "the very spelling child_key produces"
+        );
+        // And the round trip closes: whatever id comes back names the path it
+        // was asked about.
+        let key = key_under_root(root, &nested).expect("it is under the root");
+        assert_eq!(full_path(root, &key), nested);
+
+        assert_eq!(
+            key_under_root(root, &PathBuf::from(root)),
+            None,
+            "the root is the column, not a row in it"
+        );
+        assert_eq!(
+            key_under_root(root, &PathBuf::from("/elsewhere/main.rs")),
+            None,
+            "and a path outside it has no id here"
+        );
     }
 
     #[test]

@@ -74,6 +74,8 @@ mod marks;
 mod mouse_trace;
 mod notice;
 mod notify;
+mod palette;
+mod palette_index;
 mod pdf;
 mod peek_strip;
 mod persist;
@@ -304,6 +306,14 @@ enum AppEvent {
     /// lane where the answer is allowed to be seconds late without anything else
     /// noticing.
     PreviewReady,
+    /// A files root the palette's index worker was asked to walk has been
+    /// walked (DESIGN.md §7.55 ④).
+    ///
+    /// Its own wake-up, for the reason every lane above has one: an index is
+    /// built once per root and then sits still for as long as nothing on disk
+    /// moves, so a lane that woke the tree or the decorations with it would be
+    /// paying every one of them for an answer none of them asked for.
+    FileIndexReady,
     /// **The kernel says something under a watched repository moved** (R31's
     /// D, `git_watch`).
     ///
@@ -534,7 +544,7 @@ impl BackgroundDecodeMailbox {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct TabId(u64);
+pub(crate) struct TabId(u64);
 
 /// **Every tab this process opens, numbered once — and no number given out
 /// twice** (F1b; `plan.md` 的 v3 增补「身份 A 案」, closed by v4 ①).
@@ -8309,6 +8319,23 @@ struct App {
     files_worker: files::FilesWorker,
     files_worker_running: bool,
     files_worker_notice_pending: bool,
+    /// The thread that walks a files column's root for the palette
+    /// (DESIGN.md §7.55 ④).
+    ///
+    /// Its own lane rather than a share of `files_worker`, on that worker's own
+    /// argument turned up one degree: a bounded walk of thirty thousand entries
+    /// is the longest single disk question this product asks, and a directory a
+    /// reader just unfolded must never be queued behind one.
+    file_index_worker: palette_index::IndexWorker,
+    /// **One index per root, held by the app rather than by a window.**
+    ///
+    /// Two windows standing on the same repository are asking the same
+    /// question, and a per-window register would walk it twice and answer both
+    /// from separate copies. The address on a request is the root itself, which
+    /// is unique across the process by construction — a path is a path — so this
+    /// is the layer that owns the queue and the layer that drains it, which is
+    /// §2.4's rule 1 satisfied without a window in the address.
+    file_indexes: palette_index::FileIndexes,
     /// The thread that reads the heads of files the preview is showing.
     ///
     /// Its own lane rather than a share of `files_worker`, for the reason the
@@ -10277,6 +10304,16 @@ struct WindowRuntime {
     /// **A tab's own context menu** (丙2, the gesture audit of 2026-08-26) — the
     /// ninth popup, and the first one about something in the tab list.
     tab_menu: Option<TabMenuState>,
+    /// **The command palette**, while it is up (DESIGN.md §7.55) — the tenth
+    /// popup, and the first one raised by no press at all.
+    palette: Option<palette::PaletteState>,
+    /// The box that was actually drawn, kept for the press router.
+    ///
+    /// [`Self::search_layout`]'s own arrangement and its reason: the router is
+    /// `&self` and cannot measure text, so it tests the rectangles the last
+    /// frame put on the glass rather than a set it computes for itself and
+    /// hopes matches.
+    palette_layout: Option<palette::PaletteLayout>,
     /// **The seat whose shell is being replaced**, for as long as it is.
     ///
     /// One at a time by construction — a restart is asked for from a menu, and
@@ -14206,6 +14243,18 @@ struct KeyboardOwner {
     search: bool,
     /// A preview holds it — editing, or browsing a read-only body.
     preview: bool,
+    /// **The command palette's own field** (DESIGN.md §7.55).
+    ///
+    /// A flag of its own beside [`Self::menu_or_dialog`] rather than folded
+    /// into it, and the two are true together on purpose: the palette *is* a
+    /// popup, so it takes the keyboard from every shell exactly as a menu does
+    /// — and it is also a text field, which no other popup is. `menu_or_dialog`
+    /// answers "does a shell still have the keys"; this answers "and is the
+    /// thing that took them somewhere a composition can land". Folding them
+    /// would send every composition to [`ImeOwner::Modal`], which swallows —
+    /// and a palette you cannot type Chinese into is a palette that cannot find
+    /// a Chinese file name.
+    palette: bool,
 }
 
 /// Where a **composition** goes — [`KeyboardOwner`] resolved to a destination.
@@ -14265,6 +14314,16 @@ enum ImeOwner {
     /// swallow-everything `Modal` treatment: a query you cannot compose is a
     /// query you cannot type.
     Search,
+    /// **The command palette's field** (DESIGN.md §7.55).
+    ///
+    /// **Above `Modal`**, which is the whole reason this rung exists and the
+    /// only place it can go. The palette is a popup, so `menu_or_dialog` is
+    /// true while it is up, and the rung under it swallows compositions
+    /// outright — which is right for a menu, whose rows are picked and not
+    /// typed, and exactly wrong for a box whose only gesture is typing.
+    /// Searching in Chinese is the reason, one surface along from
+    /// [`Self::Search`]'s.
+    Palette,
     /// The shell — the only owner that has a PTY, and the only one that gets it.
     Shell,
 }
@@ -14278,7 +14337,7 @@ impl ImeOwner {
     /// that has to answer for every rung, checked by walking it. Test-only
     /// because nothing that ships iterates the rungs; the window is always
     /// holding exactly one.
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Rename,
         Self::GraphSearch,
         Self::GitPrompt,
@@ -14286,6 +14345,7 @@ impl ImeOwner {
         Self::FilesTree,
         Self::Preview,
         Self::Search,
+        Self::Palette,
         Self::Shell,
     ];
 }
@@ -14341,7 +14401,8 @@ fn ime_caret_source(owner: ImeOwner) -> ImeCaretSource {
         | ImeOwner::GraphSearch
         | ImeOwner::GitPrompt
         | ImeOwner::Preview
-        | ImeOwner::Search => ImeCaretSource::Field,
+        | ImeOwner::Search
+        | ImeOwner::Palette => ImeCaretSource::Field,
         ImeOwner::Modal | ImeOwner::FilesTree => ImeCaretSource::Nowhere,
         ImeOwner::Shell => ImeCaretSource::TerminalCursor,
     }
@@ -14354,6 +14415,8 @@ fn ime_owner(owner: KeyboardOwner) -> ImeOwner {
         ImeOwner::Rename
     } else if owner.git_prompt {
         ImeOwner::GitPrompt
+    } else if owner.palette {
+        ImeOwner::Palette
     } else if owner.menu_or_dialog {
         ImeOwner::Modal
     } else if owner.files_tree {
@@ -22952,6 +23015,14 @@ struct OverlayStack {
     /// everything it is about — and [`Popup::ALL`] keeps it from ever being up
     /// beside the four above it.
     tab_menu: Vec<marks::OverlayLayer>,
+    /// **The command palette** (DESIGN.md §7.55), on the same level as the
+    /// menus and by a fifth reading of the same argument: it is a surface over
+    /// the stage, and [`Popup::ALL`] keeps it from ever being up beside any of
+    /// the five above it. It is last of the family because it is the one that
+    /// is about the *window* rather than about the thing it was raised on —
+    /// there is nothing under it that it grew out of, so there is nothing under
+    /// it it must not cover.
+    palette: Vec<marks::OverlayLayer>,
     /// The notices (user ruling, 2026-08-16) — **above every menu and below the
     /// tip.**
     ///
@@ -23071,6 +23142,7 @@ impl OverlayStack {
             + self.git_menu.len()
             + self.term_menu.len()
             + self.tab_menu.len()
+            + self.palette.len()
             + self.toast.len()
             + self.key_hint.len()
             + self.card_hint.len()
@@ -23111,6 +23183,7 @@ impl OverlayStack {
             git_menu,
             term_menu,
             tab_menu,
+            palette,
             toast,
             key_hint,
             card_hint,
@@ -23138,6 +23211,7 @@ impl OverlayStack {
             git_menu,
             term_menu,
             tab_menu,
+            palette,
             toast,
             key_hint,
             card_hint,
@@ -27332,10 +27406,20 @@ enum Popup {
     /// menu standing beside it is the 2026-08-25 report with a different list in
     /// it.
     Tab,
+    /// **The command palette** (DESIGN.md §7.55).
+    ///
+    /// The tenth name, and the only one on this list that is not raised by a
+    /// press on something: it comes up on a chord, over the middle of the
+    /// window, with no anchor and nothing under it that it grew out of. It is on
+    /// this list all the same and for the list's own reason — it is a surface
+    /// that takes the keyboard and stands over the stage, so a menu opening
+    /// under it, or it opening under a menu, is exactly the collision the
+    /// register exists to make impossible.
+    Palette,
 }
 
 impl Popup {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Profile,
         Self::Root,
         Self::File,
@@ -27345,6 +27429,7 @@ impl Popup {
         Self::GitMenu,
         Self::TermMenu,
         Self::Tab,
+        Self::Palette,
     ];
 
     /// What one opener has to put away: **every other popup, always.**
@@ -27412,7 +27497,7 @@ impl Layered {
     /// arrangement `GitFilterMenuLayout::rows` keeps, and for its reason: a list
     /// the product walked would be a second way of deciding what is on the glass.
     #[allow(dead_code)]
-    const ALL: [Self; 18] = [
+    const ALL: [Self; 19] = [
         Self::Popup(Popup::Profile),
         Self::Popup(Popup::Root),
         Self::Popup(Popup::File),
@@ -27422,6 +27507,7 @@ impl Layered {
         Self::Popup(Popup::GitMenu),
         Self::Popup(Popup::TermMenu),
         Self::Popup(Popup::Tab),
+        Self::Popup(Popup::Palette),
         Self::Submenu(Popup::Pane),
         Self::Submenu(Popup::TermMenu),
         Self::Submenu(Popup::Tab),
@@ -27746,9 +27832,10 @@ mod arrival_wiring_tests {
         }
         assert_eq!(
             Layered::ALL.len(),
-            18,
-            "nine menus, three submenus, a scrim, a dialog, a notice, a tip, the card a \
-             held modifier raises and the bubble Cards raises on a first visit"
+            19,
+            "nine menus and the command palette, three submenus, a scrim, a dialog, \
+             a notice, a tip, the card a held modifier raises and the bubble Cards \
+             raises on a first visit"
         );
         for band in Layered::MODAL_BANDS {
             assert!(
@@ -28034,11 +28121,12 @@ struct PopupsUp {
     git_menu: bool,
     term_menu: bool,
     tab_menu: bool,
+    palette: bool,
 }
 
 impl PopupsUp {
     /// One popup raised and nothing else — how a test names a variant. The
-    /// window never builds one this way: it reads all eight at once
+    /// window never builds one this way: it reads them all at once
     /// ([`Runtime::popups_up`]), which is the whole point.
     #[cfg(test)]
     fn only(popup: Popup) -> Self {
@@ -28053,6 +28141,7 @@ impl PopupsUp {
             Popup::GitMenu => up.git_menu = true,
             Popup::TermMenu => up.term_menu = true,
             Popup::Tab => up.tab_menu = true,
+            Popup::Palette => up.palette = true,
         }
         up
     }
@@ -28068,6 +28157,7 @@ impl PopupsUp {
             Popup::GitMenu => self.git_menu,
             Popup::TermMenu => self.term_menu,
             Popup::Tab => self.tab_menu,
+            Popup::Palette => self.palette,
         }
     }
 
@@ -28165,13 +28255,20 @@ fn popup_owner(popup: Popup, tabs: TabSurface) -> PopupOwner {
         // column's root button and its rows, a pane head's `⌄`, the commit
         // graph's branch filter, a preview head's switcher, a repository row,
         // and a terminal's own right press.
+        //
+        // **The palette is on this side despite being raised by no press at
+        // all** (DESIGN.md §7.55). It is not an extension of the tab list — it
+        // is a box over the stage that happens to be able to *name* tabs — and
+        // a rail that held itself out because the palette was up would be
+        // holding out for a surface that is nowhere near it.
         Popup::Root
         | Popup::File
         | Popup::Pane
         | Popup::GraphFilter
         | Popup::Preview
         | Popup::GitMenu
-        | Popup::TermMenu => PopupOwner::Stage,
+        | Popup::TermMenu
+        | Popup::Palette => PopupOwner::Stage,
     }
 }
 
@@ -30984,6 +31081,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         git_menu: None,
         term_menu: None,
         tab_menu: None,
+        palette: None,
+        palette_layout: None,
         restarting: None,
         pane_menu: None,
         chevrons: ChevronGates::default(),
@@ -31667,6 +31766,7 @@ impl Runtime<'_> {
         let pty_time = phase_started.elapsed();
         let math_worker = MathWorker::spawn(proxy.clone())?;
         let files_worker = files::FilesWorker::spawn(proxy.clone())?;
+        let file_index_worker = palette_index::IndexWorker::spawn(proxy.clone())?;
         let preview_worker = preview::PreviewWorker::spawn(proxy.clone())?;
         let git_worker = git::GitWorker::spawn(proxy.clone())?;
         let mut app = App {
@@ -31683,6 +31783,8 @@ impl Runtime<'_> {
             files_worker,
             files_worker_running: true,
             files_worker_notice_pending: false,
+            file_index_worker,
+            file_indexes: palette_index::FileIndexes::default(),
             preview_worker,
             preview_worker_running: true,
             preview_worker_notice_pending: false,
@@ -38448,9 +38550,9 @@ impl Runtime<'_> {
     /// **One of the five menus that has a level to itself**, through its own
     /// passage and its child's.
     ///
-    /// Exhaustive on the five rather than taking a closure, because which
-    /// builder draws which menu is the one thing that differs and a sixth menu
-    /// with a band of its own must not be able to reach this without saying so.
+    /// Exhaustive on the six rather than taking a closure, because which
+    /// builder draws which surface is the one thing that differs, and a seventh
+    /// with a band of its own must not reach this without saying so.
     fn stage_menu(&mut self, popup: Popup, now: Instant) -> Vec<marks::OverlayLayer> {
         let paint = match popup {
             Popup::File => self.file_menu_layer(),
@@ -38458,6 +38560,7 @@ impl Runtime<'_> {
             Popup::GitMenu => self.git_menu_layer(),
             Popup::TermMenu => self.term_menu_layer(),
             Popup::Tab => self.tab_menu_layer(),
+            Popup::Palette => self.palette_layer(),
             // The other four are drawn by the modal chain, which passes them
             // itself: see [`ModalBand`].
             Popup::Profile | Popup::Root | Popup::GraphFilter | Popup::Preview => MenuPaint::none(),
@@ -38824,6 +38927,7 @@ impl Runtime<'_> {
         stack.git_menu = self.stage_menu(Popup::GitMenu, now);
         stack.term_menu = self.stage_menu(Popup::TermMenu, now);
         stack.tab_menu = self.stage_menu(Popup::Tab, now);
+        stack.palette = self.stage_menu(Popup::Palette, now);
         stack.toast = self.toast_layer();
         // The card and the tip keep the entrances they were written with — 90ms
         // of their own — and gain only the way out, which neither had.
@@ -40130,7 +40234,7 @@ impl Runtime<'_> {
     /// — E61's whole finding, which was six hand-copied runs of `self.x = None`
     /// and no two of them alike.
     ///
-    /// Exhaustive on [`Popup`] on purpose: a ninth popup does not compile until
+    /// Exhaustive on [`Popup`] on purpose: a tenth popup does not compile until
     /// it says here how it goes away.
     fn close_popup(&mut self, popup: Popup) {
         match popup {
@@ -40152,6 +40256,14 @@ impl Runtime<'_> {
             Popup::Tab => self.window.tab_menu = None,
             Popup::Preview => {
                 self.window.preview_menu.close();
+            }
+            // Its layout goes with it, on `search_layout`'s own reasoning: the
+            // press router is `&self` and cannot lay anything out, so it tests
+            // the box that was actually drawn — and a box that is not up must
+            // not leave one behind for it to test.
+            Popup::Palette => {
+                self.window.palette = None;
+                self.window.palette_layout = None;
             }
         }
         // **And the rail is asked again, because its answer just changed under a
@@ -40247,6 +40359,7 @@ impl Runtime<'_> {
             // the honest state: the reader is still looking at a list, and every
             // verb in it already answers "that tab is gone" by doing nothing.
             tab_menu: self.window.tab_menu.is_some(),
+            palette: self.window.palette.is_some(),
         }
     }
 
@@ -46181,13 +46294,6 @@ impl Runtime<'_> {
             // leaked to the shell in the meantime. Same latitude as the formulas
             // switch: the seat exists before the machine that sits in it.
             //
-            // **The palette gave its chord back on 2026-08-28** (user ruling)
-            // and its row left `BINDINGS`, so nothing dispatches here under that
-            // name any more. The arm stays because the *verb* is scheduled
-            // rather than withdrawn — see `shortcuts::Action::CommandPalette` —
-            // and because a `match` over that enum has to answer for every name
-            // in it however few rows carry one.
-            //
             // The picture-in-picture slots join them (2026-08-17), one rung
             // further out: they are claimed *and* unassigned, so nothing arrives
             // here until a user gives one of them a chord. That is the shape the
@@ -46199,7 +46305,7 @@ impl Runtime<'_> {
             // it lands on — the same `activate_tab` a card's own click makes, so
             // in focus mode a jump *is* the stage changing.
             shortcuts::Action::JumpAttention => self.jump_to_attention(),
-            shortcuts::Action::CommandPalette | shortcuts::Action::SummonPip(_) => Ok(()),
+            shortcuts::Action::SummonPip(_) => Ok(()),
             // **The row this window usually never sees** (§7.54). The chord is
             // claimed from Windows with `RegisterHotKey` and a claimed chord is
             // taken out of the input stream before any window is handed it, this
@@ -46216,6 +46322,12 @@ impl Runtime<'_> {
                 self.app.quake.press();
                 Ok(())
             }
+            // **P1-9 landed too** (DESIGN.md §7.55). The palette gave its chord
+            // back on 2026-08-28 rather than draw a key with nothing behind it,
+            // and took it again in v0.2 with the verb in hand. It is chrome and
+            // not content, so this arm raises a popup over a window that stays
+            // visible underneath rather than opening anything that owns a seat.
+            shortcuts::Action::CommandPalette => self.open_command_palette(),
             // The glyph names the divider it draws, as in Windows Terminal: the
             // minus lays a horizontal rule across the pane and the new shell
             // opens below it; the equals stands a vertical one and the new shell
@@ -51536,6 +51648,7 @@ impl Runtime<'_> {
             preview: self.preview_keyboard_surface().is_some(),
             // The search capsule, and only while the caret is in it.
             search: self.window.search.is_focused(),
+            palette: self.window.palette.is_some(),
         }
     }
 
@@ -51896,6 +52009,10 @@ impl Runtime<'_> {
                 let (_, _, caret_x) = self.search_field_look();
                 capsule.caret_line(caret_x, scale)
             }
+            // The very rectangle the painter struck the caret in — one
+            // derivation, read twice, which is what stops a candidate list from
+            // drifting away from the letters it is offering to finish.
+            ImeOwner::Palette => self.window.palette_layout.as_ref()?.caret_line(),
             // Not a field. `ime_caret_source` sends neither of these here, and a
             // rectangle invented for them would be a candidate list following a
             // caret that is receiving nothing.
@@ -57944,6 +58061,9 @@ impl Runtime<'_> {
             // the eight are raised by a control standing in a head; the other
             // five are raised by a tab, a row, a toolbar or a body.
             HoverFloat::Menu => self.popups_up().any().and_then(|popup| match popup {
+                // The palette is raised by a chord and hangs off nothing, so
+                // there is no head for a hover float to have come out of.
+                Popup::Palette => None,
                 // The head's own `⌄` — 裁4's case, the one this rule started as,
                 // and one of the two doors a lone pane's corner draws.
                 Popup::Pane => self.window.pane_menu.as_ref().map(|menu| seats::PaneLayer {
@@ -58228,6 +58348,27 @@ impl Runtime<'_> {
         }
         for (host, key) in asks {
             self.ask_files_dir(host, &key);
+        }
+        // **And the palette's index of every root those folders are under is
+        // now out of date** (DESIGN.md §7.55 ④).
+        //
+        // Marked from `due` rather than from [`files::DirCache::revision`],
+        // which was the other candidate and is the wrong instrument twice
+        // over: a revision is bumped by `mark_pending` as well, so it says
+        // "this column asked a question" as loudly as it says "the disk
+        // moved" — and it is this same news read one layer further downstream,
+        // so reading it here would be a second mechanism for one fact.
+        //
+        // It marks and does not rebuild. A repository whose files move all day
+        // would otherwise be walked all day for a box nobody has opened; the
+        // walk is asked for by the next `ask_for_file_indexes`, which is to
+        // say by the next time somebody actually raises the palette.
+        for directory in &due {
+            for root in self.palette_files_roots() {
+                if directory.starts_with(&root) {
+                    self.app.file_indexes.mark_dirty(&root);
+                }
+            }
         }
         Ok(())
     }
@@ -74463,6 +74604,14 @@ impl Runtime<'_> {
             self.update_chrome_hover_target(None)?;
             return Ok(());
         }
+        // **And the palette** (DESIGN.md §7.55), which needs none of the above
+        // machinery because it has no child and no safety triangle: the pointer
+        // moves the selection and that is the whole of it.
+        if self.drive_palette_hover(position)? {
+            self.note_tooltip(None)?;
+            self.update_chrome_hover_target(None)?;
+            return Ok(());
+        }
         // A peek's header, pressed and now travelling: the window is kept and the
         // same gesture becomes the carry (user ruling 2026-08-12). Immediately
         // above the drag it turns into, so the promotion and the first step of the
@@ -79192,6 +79341,40 @@ impl Runtime<'_> {
                 }
             }
         }
+        // **The palette** (DESIGN.md §7.55), by the same three rules a fifth
+        // time: a row runs on a left press, the box's own padding swallows, and
+        // a press outside puts it away and then goes on being the press it
+        // always was. The mock-up's `pointerdown` handler outside `.palette` is
+        // exactly this third rule, and its `click` on a row is the first.
+        //
+        // The layout is the one the last frame drew rather than one measured
+        // here, because this router is `&self` — [`WindowRuntime::palette_layout`].
+        if let (Some(layout), Some(position)) = (
+            self.window.palette_layout.clone(),
+            self.window.pointer_position,
+        ) {
+            match palette::hit(&layout, position.x, position.y) {
+                Some(Some(index)) => {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        if let Some(palette) = self.window.palette.as_mut() {
+                            palette.point_at(index);
+                        }
+                        self.run_palette_row()?;
+                    }
+                    return Ok(());
+                }
+                Some(None) => {
+                    if state == ElementState::Pressed {
+                        return Ok(());
+                    }
+                }
+                None => {
+                    if state == ElementState::Pressed {
+                        self.close_command_palette()?;
+                    }
+                }
+            }
+        }
         // The graph's branch filter, by the same three rules, with one change:
         // a row does *not* put it away. It is a list of settings and picking two
         // branches means picking one and then the other — see
@@ -80664,6 +80847,703 @@ impl Runtime<'_> {
                 .lines;
             emit_attention_lines(attention_trace::global(), lines);
         }
+    }
+
+    // ── the command palette (DESIGN.md §7.55) ──────────────────────────────
+
+    /// **Raise the palette.**
+    ///
+    /// It closes every other popup on the way up, which is what every opener in
+    /// this window does (E61), and it takes the focus with it — see
+    /// [`palette::PaletteState::opening`] for why the focus is a photograph
+    /// rather than a live reading.
+    fn open_command_palette(&mut self) -> Result<()> {
+        // A second press of the chord puts it away. The mock-up has no such
+        // gesture because a web page's palette is dismissed by the click that
+        // raised it landing outside; a chord has no outside, so the chord is
+        // the way back out as well as in — `toggle` is what every other
+        // one-key surface in this product does.
+        if self.window.palette.is_some() {
+            self.close_command_palette()?;
+            return Ok(());
+        }
+        self.close_popups_except(Popup::Palette);
+        let focus = self.shortcut_focus();
+        self.window.palette = Some(palette::PaletteState::opening(focus));
+        self.requery_palette()
+    }
+
+    /// Put it away, and report whether there was anything to put away — which
+    /// is what tells Esc and a press elsewhere whether they consumed anything.
+    fn close_command_palette(&mut self) -> Result<bool> {
+        if self.window.palette.is_none() {
+            return Ok(false);
+        }
+        self.close_popup(Popup::Palette);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// The roots the `Files` section is drawn from: every files column standing
+    /// on the tab in front.
+    ///
+    /// **The tab in front and not the window**, on `watched_files_dirs`'s own
+    /// division: a palette raised on a tab is asking about the place that tab
+    /// is standing in, and walking the roots of five other tabs would be five
+    /// walks nobody asked for to answer a question about one folder.
+    fn palette_files_roots(&self) -> BTreeSet<PathBuf> {
+        self.files
+            .values()
+            .filter(|state| files::root_is_addressable(&state.root))
+            .map(|state| PathBuf::from(&state.root))
+            .collect()
+    }
+
+    /// Ask for any index the `Files` section needs and does not have.
+    fn ask_for_file_indexes(&mut self) {
+        // **It asks and it does not forget.** Forgetting is `App`'s
+        // (`retain_file_indexes`), because the register is the app's: a window
+        // that pruned it would be one window deciding, out of its own list of
+        // roots, that another window's repository is not worth keeping — §2.4's
+        // rule 2 with a register in place of a queue.
+        for root in self.palette_files_roots() {
+            if let Some(request) = self.app.file_indexes.claim(&root) {
+                // A lane that has gone is a lane that answers nothing; the
+                // section then simply has no rows, which is the honest picture
+                // of a walk that cannot happen.
+                let _ = self.app.file_index_worker.request(request);
+            }
+        }
+    }
+
+    /// Every row the five suppliers are offering, before a query is asked.
+    fn palette_candidates(&self) -> Vec<palette::Candidate> {
+        let mut candidates = Vec::new();
+        self.push_action_candidates(&mut candidates);
+        self.push_place_candidates(&mut candidates);
+        self.push_command_candidates(&mut candidates);
+        self.push_file_candidates(&mut candidates);
+        self.push_settings_candidates(&mut candidates);
+        candidates
+    }
+
+    /// **The shortcut table, filtered to what this focus can reach.**
+    ///
+    /// Read from [`shortcuts::Shortcuts::rows`] rather than from
+    /// `editor_rows`, and the difference is the one thing worth writing down:
+    /// the editor's projection folds a contiguous family into a single line
+    /// (`Ctrl Shift [1 – 9]`) and carries no [`shortcuts::Action`], because it
+    /// exists to be *read* on a page. A palette row has to be *run*, and
+    /// neither half of that projection survives the trip — a folded family is
+    /// nine verbs printed as one, and a line with no action has nothing for
+    /// `run_shortcut` to be given.
+    fn push_action_candidates(&self, into: &mut Vec<palette::Candidate>) {
+        let Some(state) = self.window.palette.as_ref() else {
+            return;
+        };
+        let focus = state.focus();
+        for binding in self.app.shortcuts.rows() {
+            // A row whose scope does not hold is a verb that would do nothing
+            // if it were pressed, and a row whose machine has not arrived is
+            // the same thing said a different way. Neither belongs in a list of
+            // what this window can do.
+            if !binding.scope.holds(focus) || binding.action.is_pending() {
+                continue;
+            }
+            into.push(palette::Candidate {
+                section: palette::Section::Actions,
+                label: binding.title.text().to_owned(),
+                hint: binding
+                    .chord
+                    .as_ref()
+                    .map(|chord| shortcuts::chord_caps(chord).join("+")),
+                mark: None,
+                awaiting: false,
+                verb: palette::Verb::Run(binding.action),
+            });
+        }
+    }
+
+    /// **Every pane of this window**, tab by tab.
+    ///
+    /// The walk is `jump_to_attention`'s — `tabs × sessions` — because it is
+    /// the same question asked with a different filter, and this window has one
+    /// answer to "where are the panes".
+    ///
+    /// **A tab in another window is not on this list** (DESIGN.md §7.55 ②). A
+    /// window has no name of its own yet, so a row naming a pane in one would
+    /// have to say *which* window with nothing to say it with; the row would be
+    /// a place the reader could not tell from the identically-named place in
+    /// front of them.
+    fn push_place_candidates(&self, into: &mut Vec<palette::Candidate>) {
+        for tab in &self.window.tabs {
+            for (seat, leaf) in &tab.sessions {
+                let label = tab
+                    .terminal_name(*seat)
+                    .unwrap_or_else(|| tab.display_title());
+                let hint = leaf
+                    .session
+                    .working_directory()
+                    .map(|cwd| cwd.display().to_string())
+                    .or_else(|| {
+                        leaf.program
+                            .as_ref()
+                            .and_then(|path| path.file_name())
+                            .map(|name| name.to_string_lossy().into_owned())
+                    });
+                into.push(palette::Candidate {
+                    section: palette::Section::Places,
+                    label,
+                    hint,
+                    mark: Some(profiles::mark(tab.leaf_profile(*seat))),
+                    awaiting: leaf.attention.ticket().is_some(),
+                    verb: palette::Verb::Go {
+                        tab: tab.id,
+                        seat: *seat,
+                    },
+                });
+            }
+        }
+    }
+
+    /// **Every command this window has run, newest first.**
+    ///
+    /// The first aggregation of command marks across panes this product has
+    /// had: the rail is one pane's ledger drawn beside that pane, and reaching
+    /// for its `Stack` here would be a second aggregation of the same facts.
+    /// So the ledgers are read directly (§7.1.6b′'s rule about not writing a
+    /// second fold), and the only thing invented is the order.
+    ///
+    /// The order is the newest end of each ledger interleaved by clock. A
+    /// [`std::time::Instant`] is monotonic and process-wide, so marks from two
+    /// panes are genuinely comparable; a mark that never began has no clock at
+    /// all and sorts last, which is where a command nobody has run belongs.
+    fn push_command_candidates(&self, into: &mut Vec<palette::Candidate>) {
+        let mut found: Vec<(Option<Instant>, palette::Candidate)> = Vec::new();
+        for tab in &self.window.tabs {
+            for (seat, leaf) in &tab.sessions {
+                let pane = tab
+                    .terminal_name(*seat)
+                    .unwrap_or_else(|| tab.display_title());
+                for mark in leaf.session.command_marks() {
+                    // A draft nobody has typed into is not a command that ran.
+                    if mark.command_text.is_empty() {
+                        continue;
+                    }
+                    let when = mark.finished_at.or(mark.executed_at);
+                    found.push((
+                        when,
+                        palette::Candidate {
+                            section: palette::Section::Commands,
+                            label: mark.command_text.clone(),
+                            hint: Some(i18n::palette_command_hint(
+                                mark.exit_code,
+                                mark.duration(),
+                                &pane,
+                            )),
+                            mark: None,
+                            awaiting: false,
+                            verb: palette::Verb::Recall {
+                                tab: tab.id,
+                                seat: *seat,
+                                mark: mark.id,
+                            },
+                        },
+                    ));
+                }
+            }
+        }
+        // Newest first, and a mark with no clock behind every mark that has
+        // one — `None` is smaller than every `Some`, so reversing the key puts
+        // it last without a second comparison to get backwards.
+        found.sort_by(|left, right| right.0.cmp(&left.0));
+        into.extend(found.into_iter().map(|(_, candidate)| candidate));
+    }
+
+    /// **The files under this tab's columns**, out of the bounded index.
+    fn push_file_candidates(&self, into: &mut Vec<palette::Candidate>) {
+        for root in self.palette_files_roots() {
+            let Some(index) = self.app.file_indexes.get(&root) else {
+                continue;
+            };
+            if index.is_empty() {
+                continue;
+            }
+            into.reserve(index.len());
+            for file in index.files() {
+                into.push(palette::Candidate {
+                    section: palette::Section::Files,
+                    label: file.name.clone(),
+                    hint: Some(file.relative.clone()),
+                    mark: Some(icons::ActionIcon::FileObject.mark()),
+                    awaiting: false,
+                    verb: palette::Verb::Open(file.path.clone()),
+                });
+            }
+        }
+    }
+
+    /// **Every row the settings dialog would draw**, on the same list the
+    /// dialog itself is built from — so a row this window cannot show is a row
+    /// the palette cannot offer either.
+    fn push_settings_candidates(&self, into: &mut Vec<palette::Candidate>) {
+        for row in settings::visible_rows(self.window.rail.layout) {
+            into.push(palette::Candidate {
+                section: palette::Section::Settings,
+                label: row.title().to_owned(),
+                hint: Some(row.category().nav_label().to_owned()),
+                mark: Some(icons::ActionIcon::OpenSettings.mark()),
+                awaiting: false,
+                verb: palette::Verb::Adjust(row),
+            });
+        }
+    }
+
+    /// **The note the `Files` section carries when it has no rows to show.**
+    ///
+    /// Two things can be true of a section that came back empty, and they are
+    /// not the same news. The walk may still be running — say so, or the box
+    /// teaches a reader that this product cannot find their files. Or it may
+    /// have finished *and stopped on its own cap* — say that too, because the
+    /// file the reader is looking for may be perfectly real and simply past
+    /// the thirty-thousandth entry, and `Nothing matches` would be this window
+    /// stating as a fact something it does not know.
+    ///
+    /// Building wins when both are true: a walk that is still going may yet
+    /// turn the second answer into rows.
+    fn palette_files_note(&self) -> Option<i18n::Text> {
+        let roots = self.palette_files_roots();
+        if roots
+            .iter()
+            .any(|root| self.app.file_indexes.state(root) == palette_index::IndexState::Building)
+        {
+            return Some(i18n::Text::PaletteIndexing);
+        }
+        roots
+            .iter()
+            .filter_map(|root| self.app.file_indexes.get(root))
+            .any(palette_index::FileIndex::truncated)
+            .then_some(i18n::Text::PaletteFilesTruncated)
+    }
+
+    /// Ask the query again and put the answer in.
+    ///
+    /// `requeried` decides where the selection lands — see
+    /// [`palette::PaletteState::refill`].
+    fn arrange_palette(&mut self, requeried: bool) -> Result<()> {
+        if self.window.palette.is_none() {
+            return Ok(());
+        }
+        self.ask_for_file_indexes();
+        let candidates = self.palette_candidates();
+        let note = self.palette_files_note();
+        let query = self
+            .window
+            .palette
+            .as_ref()
+            .map(|state| state.field().text().to_owned())
+            .unwrap_or_default();
+        let listing = palette::arrange(&candidates, &query, note);
+        if let Some(state) = self.window.palette.as_mut() {
+            state.refill(listing, requeried);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The query changed: a new answer, and the selection back at the top.
+    fn requery_palette(&mut self) -> Result<()> {
+        self.arrange_palette(true)
+    }
+
+    /// A supplier changed under a query that did not: a new answer, and the
+    /// reader's own row kept.
+    fn refresh_palette_listing(&mut self) -> Result<()> {
+        self.arrange_palette(false)
+    }
+
+    /// What the input is showing, and where its caret is.
+    ///
+    /// [`Runtime::search_field_look`]'s own shape and its reason: splicing a
+    /// preedit into the buffer for display is the owner's job, and the caret is
+    /// measured against the very string that will be drawn.
+    fn palette_field_look(&self) -> (String, String, bool) {
+        let Some(state) = self.window.palette.as_ref() else {
+            return (String::new(), String::new(), false);
+        };
+        let field = state.field();
+        let before = format!("{}{}", field.before_caret(), field.preedit());
+        if field.is_empty() && field.preedit().is_empty() {
+            return (
+                i18n::Text::PaletteFieldPlaceholder.text().to_owned(),
+                String::new(),
+                false,
+            );
+        }
+        let text = field.text();
+        let shown = format!(
+            "{}{}{}",
+            field.before_caret(),
+            field.preedit(),
+            &text[field.caret()..]
+        );
+        (shown, before, true)
+    }
+
+    /// Where the box stands this frame.
+    fn palette_layout(&mut self) -> Option<palette::PaletteLayout> {
+        let state = self.window.palette.as_ref()?;
+        let listing = state.listing().clone();
+        let scroll = state.scroll();
+        let (shown, before, typed) = self.palette_field_look();
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
+        Some(palette::layout(
+            (width as f32, height as f32),
+            scale,
+            &listing,
+            palette::FieldLook {
+                shown: &shown,
+                before: &before,
+                typed,
+            },
+            scroll,
+            &mut measure,
+        ))
+    }
+
+    /// The palette as one band of the overlay.
+    fn palette_layer(&mut self) -> MenuPaint {
+        let Some(layout) = self.palette_layout() else {
+            self.window.palette_layout = None;
+            return MenuPaint::none();
+        };
+        let selected = self
+            .window
+            .palette
+            .as_ref()
+            .map_or(0, palette::PaletteState::selected);
+        let layers = palette::build(&layout, &bt_render::chrome_palette(), selected, 1.0);
+        // The very box that was drawn, kept for the `&self` press router.
+        self.window.palette_layout = Some(layout);
+        // It travels down, because it arrives from above the reader's line of
+        // sight and there is nothing it grew out of to travel away from.
+        MenuPaint::plain(layers, Travel::Down)
+    }
+
+    /// **The pointer over the palette.**
+    ///
+    /// Three lines, where the menus with children need thirty: hovering a row
+    /// *selects* it (see [`palette::PaletteState::point_at`]), and a pointer
+    /// inside the box but on no row leaves the selection where it was rather
+    /// than clearing it — a reader whose hand drifted into the gap between two
+    /// rows has not stopped aiming at the row they were aiming at.
+    ///
+    /// Returns whether the pointer was over the box at all, which is what tells
+    /// the caller the move has been answered.
+    fn drive_palette_hover(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(layout) = self.window.palette_layout.clone() else {
+            return Ok(false);
+        };
+        let Some(found) = palette::hit(&layout, position.x, position.y) else {
+            return Ok(false);
+        };
+        if let Some(index) = found
+            && self
+                .window
+                .palette
+                .as_mut()
+                .is_some_and(|state| state.point_at(index))
+            && self.refresh_chrome()
+        {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Bring the selected row into the box.
+    fn settle_palette_scroll(&mut self) {
+        let Some(layout) = self.window.palette_layout.as_ref() else {
+            return;
+        };
+        let Some(state) = self.window.palette.as_ref() else {
+            return;
+        };
+        let scrolled = layout.scroll_to_show(state.selected(), state.scroll());
+        if let Some(state) = self.window.palette.as_mut() {
+            state.set_scroll(scrolled);
+        }
+    }
+
+    /// **Every key the palette is up for.**
+    ///
+    /// Four rules, which are [`Runtime::term_menu_key`]'s four with a field
+    /// added: Esc closes, the arrows walk, Enter runs, and everything else goes
+    /// into the box. Nothing falls through — a palette that let a keystroke
+    /// reach the shell behind it would be a box you cannot type a `p` into.
+    fn palette_key(&mut self, event: &KeyEvent) -> Result<()> {
+        if event.state != ElementState::Pressed {
+            return Ok(());
+        }
+        // **The chord that raised it puts it away**, and which chord that is
+        // is asked of the table rather than written here — so a reader who has
+        // rebound the palette closes it with the key they bound, and there is
+        // one answer to "what opens the palette" rather than two.
+        //
+        // Every *other* chord is swallowed with the rest: this is a popup, and
+        // a popup owns the keyboard entirely (`popup_takes_the_key`). A window
+        // verb firing under a box the reader is typing into would be the box
+        // answering a question nobody asked it.
+        if let Some(focus) = self
+            .window
+            .palette
+            .as_ref()
+            .map(palette::PaletteState::focus)
+            && self.app.shortcuts.lookup(
+                &event.logical_key,
+                &event.key_without_modifiers(),
+                self.window.modifiers,
+                focus,
+            ) == Some(shortcuts::Action::CommandPalette)
+        {
+            self.close_command_palette()?;
+            return Ok(());
+        }
+        let ctrl = self.window.modifiers.control_key();
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.close_command_palette()?;
+                return Ok(());
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.run_palette_row()?;
+                return Ok(());
+            }
+            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
+                let forwards = matches!(&event.logical_key, Key::Named(NamedKey::ArrowDown));
+                if let Some(state) = self.window.palette.as_mut() {
+                    state.step(forwards);
+                }
+                self.settle_palette_scroll();
+                if self.refresh_chrome() {
+                    self.present_chrome_change()?;
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // The field's own keys. `Tab` is deliberately absent: the mock-up
+        // gives it nothing to do, and a completion key in a box whose whole
+        // gesture is "type a few letters and press Enter" would be a second
+        // way to do the one thing Enter already does.
+        let mut typed = false;
+        let mut moved = false;
+        if let Some(state) = self.window.palette.as_mut() {
+            let field = state.field_mut();
+            match &event.logical_key {
+                Key::Named(NamedKey::Backspace) => typed = field.backspace(),
+                Key::Named(NamedKey::Delete) => typed = field.delete(),
+                Key::Named(NamedKey::ArrowLeft) => {
+                    field.step(
+                        if ctrl {
+                            text_field::TextMove::WordLeft
+                        } else {
+                            text_field::TextMove::Left
+                        },
+                        self.window.modifiers.shift_key(),
+                    );
+                    moved = true;
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    field.step(
+                        if ctrl {
+                            text_field::TextMove::WordRight
+                        } else {
+                            text_field::TextMove::Right
+                        },
+                        self.window.modifiers.shift_key(),
+                    );
+                    moved = true;
+                }
+                Key::Named(NamedKey::Home) => {
+                    field.step(
+                        text_field::TextMove::Home,
+                        self.window.modifiers.shift_key(),
+                    );
+                    moved = true;
+                }
+                Key::Named(NamedKey::End) => {
+                    field.step(text_field::TextMove::End, self.window.modifiers.shift_key());
+                    moved = true;
+                }
+                Key::Character(text) if ctrl && text.eq_ignore_ascii_case("a") => {
+                    field.select_all();
+                    moved = true;
+                }
+                // A modified character is a chord somebody meant for something
+                // else, and typing its letter into the box would be the box
+                // answering a question it was not asked.
+                Key::Character(text) if !ctrl && !self.window.modifiers.alt_key() => {
+                    field.insert(text);
+                    typed = true;
+                }
+                Key::Named(NamedKey::Space) if !ctrl && !self.window.modifiers.alt_key() => {
+                    field.insert(" ");
+                    typed = true;
+                }
+                _ => {}
+            }
+        }
+        if typed {
+            self.requery_palette()?;
+        } else if moved && self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Composition in the palette's field.
+    ///
+    /// [`Runtime::git_prompt_ime`]'s three arms, and the one thing that matters
+    /// about them: a preedit goes to `set_preedit` and never to `insert`, so a
+    /// half-composed `ni'hao` is drawn in the box and is **not** a query. The
+    /// list is asked again on the commit, which is the first moment there is a
+    /// word to ask about.
+    fn palette_ime(&mut self, event: &Ime) -> Result<()> {
+        let mut committed = false;
+        if let Some(state) = self.window.palette.as_mut() {
+            match event {
+                Ime::Preedit(text, _) => state.field_mut().set_preedit(text),
+                Ime::Commit(text) => {
+                    state.field_mut().insert(text);
+                    committed = true;
+                }
+                Ime::Enabled | Ime::Disabled => return Ok(()),
+            }
+        }
+        if committed {
+            return self.requery_palette();
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **Carry out the selected row.**
+    ///
+    /// The box closes first, on the mock-up's own note — "close first: the
+    /// action may open its own surface" — and because several of these verbs
+    /// raise something the palette would otherwise be standing on top of.
+    fn run_palette_row(&mut self) -> Result<()> {
+        let Some(row) = self
+            .window
+            .palette
+            .as_ref()
+            .and_then(palette::PaletteState::chosen)
+            .map(|row| row.what.verb.clone())
+        else {
+            return Ok(());
+        };
+        self.close_command_palette()?;
+        match row {
+            // The shortcut table's own dispatch, and not a copy of it: a
+            // palette row and a chord are two doors onto one room.
+            palette::Verb::Run(action) => self.run_shortcut(action),
+            palette::Verb::Go { tab, seat } => {
+                let Some(index) = self.tab_index_of(tab) else {
+                    return Ok(());
+                };
+                self.activate_tab(index, false)?;
+                if self.window.tabs[index].sessions.contains_key(&seat) {
+                    self.focus_seat(seat)?;
+                }
+                if self.refresh_chrome() {
+                    self.present_chrome_change()?;
+                }
+                Ok(())
+            }
+            palette::Verb::Recall { tab, seat, mark } => {
+                let Some(index) = self.tab_index_of(tab) else {
+                    return Ok(());
+                };
+                self.activate_tab(index, false)?;
+                if !self.window.tabs[index].sessions.contains_key(&seat) {
+                    return Ok(());
+                }
+                self.focus_seat(seat)?;
+                self.jump_to_command_mark(seat, mark)
+            }
+            // Both halves, because a file the reader asked for should be both
+            // shown and findable: the preview opens it, and the column it came
+            // out of unfolds to it so the next one is a row away.
+            palette::Verb::Open(path) => {
+                if let Some(surface) = self.preview_landing_surface() {
+                    self.open_preview_onto(surface, path.clone())?;
+                }
+                self.locate_path_in_files_columns(&path)
+            }
+            palette::Verb::Adjust(row) => self.open_settings_on_row(row),
+        }
+    }
+
+    /// **Where a tab is now**, given the id it was named by.
+    ///
+    /// `None` when it has gone, which is an answer and not a failure: a palette
+    /// row naming a tab whose shell exited while the reader was typing should
+    /// do nothing, rather than do something to whichever tab moved up into its
+    /// place.
+    fn tab_index_of(&self, tab: TabId) -> Option<usize> {
+        self.window.tabs.iter().position(|found| found.id == tab)
+    }
+
+    /// Unfold every files column of this tab that has the path under its root.
+    fn locate_path_in_files_columns(&mut self, path: &Path) -> Result<()> {
+        let targets: Vec<(bt_layout::SeatId, String)> = self
+            .files
+            .iter()
+            .filter_map(|(seat, state)| {
+                files::key_under_root(&state.root, path).map(|key| (*seat, key))
+            })
+            .collect();
+        for (seat, key) in targets {
+            self.open_files_path_to(seat, &key)?;
+        }
+        Ok(())
+    }
+
+    /// **Open the settings dialog on one row.**
+    ///
+    /// Three bricks that were all already here — open, choose the page, scroll
+    /// — and the thin wrapper is the whole of what is new. The order matters
+    /// and is the reason this is a function rather than three calls at the call
+    /// site: `SettingsPanel::toggle` always lands on the first page, so the
+    /// page has to be chosen *after* it, and the scroll has to be computed
+    /// against a layout built after both.
+    fn open_settings_on_row(&mut self, row: settings::SettingsRow) -> Result<()> {
+        if !self.window.settings.is_open() {
+            self.toggle_settings_panel()?;
+        }
+        if self.window.settings.select_category(row.category()) {
+            self.window.settings_scroll = 0.0;
+        }
+        let target = settings::SettingsTarget::Field(row);
+        self.window.settings.press(target);
+        if let Some(layout) = self.settings_layout() {
+            self.window.settings_scroll =
+                layout.scroll_to_show(target, self.window.settings_scroll);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     /// `Ctrl+Shift+A` — go to the session that has been waiting longest, and put
@@ -82410,6 +83290,17 @@ impl Runtime<'_> {
             self.tab_menu_key(event)?;
             return Ok(());
         }
+        // **The palette's rung** (DESIGN.md §7.55). Above every other popup's,
+        // and it is the only one of them that has to be: the rest answer four
+        // keys and swallow the remainder, while this one is a text field — a
+        // rung below the blanket swallow would be a box that cannot be typed
+        // into, and a rung below the shortcut registry would be a box in which
+        // `Ctrl+Shift+P` closes and reopens itself while a letter never
+        // arrives.
+        if self.window.palette.is_some() {
+            self.palette_key(event)?;
+            return Ok(());
+        }
         // **The download sheet's rung** (§7.7 ④, W2 slice ④). Above the pane
         // menu and below the modals, which is where the ruling puts it: 「Esc 梯
         // 子里排在 pane 菜单之上,顶层优先」. It is the one failure card with a
@@ -82897,6 +83788,13 @@ impl Runtime<'_> {
                 // character re-asks the search, exactly as a typed one does.
                 ImeOwner::Search => {
                     self.search_ime(event)?;
+                    return Ok(());
+                }
+                // The palette's field, through the same two doors: a pre-edit
+                // is drawn at its caret and is **not** in the query, and a
+                // commit is an ordinary insert that asks the list again.
+                ImeOwner::Palette => {
+                    self.palette_ime(&event)?;
                     return Ok(());
                 }
                 ImeOwner::Shell => {}
@@ -90099,6 +90997,49 @@ impl FolioApp {
     }
 
     /// [`Self::drain_preview_answers`] for the directory lane.
+    /// **File every index the walker has finished.**
+    ///
+    /// Drained by the app and filed by the app, because the app is the layer
+    /// that owns the register: a window draining this queue would be one window
+    /// deciding whether another window's root was worth keeping — §2.4's rule 2,
+    /// which was learned on the files lane and is cheaper to obey here than to
+    /// learn again.
+    fn apply_file_index_results(&mut self) -> Result<()> {
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        let (answers, _gone) = app.file_index_worker.drain();
+        if answers.is_empty() {
+            return Ok(());
+        }
+        for answer in answers {
+            app.file_indexes.accept(answer);
+        }
+        self.retain_file_indexes();
+        // A palette that was showing `Indexing…` is now showing files, and
+        // nothing else on the glass changed — so the windows that have one up
+        // are asked to say the list again, and the rest are not asked anything.
+        self.for_each_window(|runtime| runtime.refresh_palette_listing())
+    }
+
+    /// **Forget the indexes no window is standing on any more.**
+    ///
+    /// Thirty thousand paths for a folder nothing is showing is memory held
+    /// against a question nobody can ask. The union across every window is the
+    /// only honest set: the register is one per process because a root is a
+    /// process-wide address, so the question "does anybody still want this" is
+    /// a process-wide question and cannot be answered from inside one window.
+    fn retain_file_indexes(&mut self) {
+        let mut wanted: BTreeSet<PathBuf> = BTreeSet::new();
+        let _ = self.for_each_window(|runtime| {
+            wanted.extend(runtime.palette_files_roots());
+            Ok(())
+        });
+        if let Some(app) = self.app.as_mut() {
+            app.file_indexes.retain(&wanted);
+        }
+    }
+
     fn drain_files_answers(&mut self) -> (Vec<files::DirResponse>, bool) {
         let mut batch = Vec::new();
         let Some(app) = self.app.as_mut() else {
@@ -91959,6 +92900,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 let (mut batch, gone) = self.drain_preview_answers();
                 self.for_each_window(|runtime| runtime.apply_preview_results(&mut batch, gone))
             }
+            AppEvent::FileIndexReady => self.apply_file_index_results(),
             AppEvent::GitReady => {
                 let (mut batch, gone) = self.drain_git_answers();
                 self.for_each_window(|runtime| runtime.apply_git_results(&mut batch, gone))
@@ -92283,6 +93225,15 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // not `spend` — nothing was pressed, so a hand that comes back
                 // still holding `Ctrl` is answered again.
                 runtime.window.key_hint.hide();
+                // **And the command palette** (DESIGN.md §7.55): 失焦即收. It is
+                // a box for aiming at something *now*, and a window the reader
+                // has left is a window they are not aiming at — coming back to
+                // a half-typed query over a stale list would be this product
+                // holding a question nobody is still asking. It is the one
+                // popup that goes here, and the difference is real: every other
+                // one is anchored to a control the reader can see and come back
+                // to, while this one is anchored to an intent.
+                let _ = runtime.close_command_palette();
                 runtime.window.tab_clicks.interrupt();
                 // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
                 // Commit during this transition, and the product decision is to accept it.
@@ -94691,6 +95642,7 @@ mod floated_page_tests {
             git_menu: mark(0.15),
             term_menu: mark(0.16),
             tab_menu: mark(0.165),
+            palette: mark(0.166),
             toast: mark(0.17),
             key_hint: mark(0.18),
             card_hint: mark(0.185),
@@ -97287,6 +98239,10 @@ mod tests {
             git_menu: mark(12),
             term_menu: mark(15),
             tab_menu: mark(22),
+            // 25 and not 24: 23 and 24 are spoken for by the Cards bubble and
+            // the video bars, and a marker shared by two families would make
+            // this whole assertion pass while the two swapped places.
+            palette: mark(25),
             toast: mark(8),
             key_hint: mark(20),
             // 23 and not 22: the tab menu and the Cards bubble were written on
@@ -97307,13 +98263,13 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                0, 24, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 8, 20, 23, 9, 10,
-                11, 21
+                0, 24, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 25, 8, 20, 23, 9,
+                10, 11, 21
             ],
             "bottom to top: pane bars, video bars, terminal thumbs, command rails, rail, flight, \
              ground, search capsule, integration strips, download sheet, schematic, float, modal, \
-             file menu, pane menu, git menu, terminal menu, tab menu, notices, key hint, Cards \
-             bubble, tip, glance, ghost, window ring"
+             file menu, pane menu, git menu, terminal menu, tab menu, command \
+             palette, notices, key hint, Cards bubble, tip, glance, ghost, window ring"
         );
         let at = |tag: u8| {
             order
@@ -110329,18 +111285,16 @@ mod tests {
                 "{modifiers:?}+P is claimed by nothing, in either focus"
             );
         }
-        // And the chord the scaffold deliberately stood aside from is now free
-        // as well (user ruling 2026-08-28): the command palette's row left
-        // `BINDINGS` for the preview because the verb behind it does not exist
-        // yet, so every spelling of `P` this window can see reaches the shell.
-        // The scaffold wore Alt to keep off that chord; what retired the
-        // scaffold is that Alt was never free either, and that reasoning is
-        // untouched by the row leaving.
+        // And the chord the scaffold deliberately stood aside from belongs to
+        // the command palette again (DESIGN.md §7.55): its row left `BINDINGS`
+        // for the v0.1 preview because the verb behind it did not exist yet, and
+        // returned in v0.2 with the verb in hand. The scaffold wore Alt to keep
+        // off this chord; what retired the scaffold is that Alt was never free
+        // either, and that reasoning is untouched in either direction.
         assert_eq!(
             claimed(ModifiersState::CONTROL | ModifiersState::SHIFT),
-            None,
-            "Ctrl+Shift+P is claimed by nobody until the palette ships - see \
-             shortcuts::Action::CommandPalette"
+            Some(shortcuts::Action::CommandPalette),
+            "Ctrl+Shift+P is the palette's - see shortcuts::Action::CommandPalette"
         );
     }
 
@@ -121288,6 +122242,7 @@ mod tests {
             search: false,
             preview: false,
             menu_or_dialog: false,
+            palette: false,
         }));
     }
 
@@ -121395,6 +122350,25 @@ mod tests {
             }),
             ImeOwner::Modal
         );
+        // **And the palette stands above that rung** (DESIGN.md §7.55). It is a
+        // popup, so `menu_or_dialog` is true the whole time it is up; if it
+        // fell to `Modal` with the rest of them the box would swallow every
+        // composition and a reader could not type a Chinese file name into the
+        // one surface in this product whose entire gesture is typing.
+        assert_eq!(
+            ime_owner(KeyboardOwner {
+                palette: true,
+                menu_or_dialog: true,
+                ..KeyboardOwner::default()
+            }),
+            ImeOwner::Palette,
+            "the palette is a popup and a text field, and the field wins"
+        );
+        assert_eq!(
+            ime_caret_source(ImeOwner::Palette),
+            ImeCaretSource::Field,
+            "so its candidate list hangs off its own caret"
+        );
         assert_eq!(
             ime_owner(KeyboardOwner {
                 rename: true,
@@ -121433,6 +122407,7 @@ mod tests {
                 git_prompt: true,
                 search: true,
                 preview: true,
+                palette: true,
             }),
             ImeOwner::Rename,
             "and the editor is the topmost of all of them"
@@ -121489,7 +122464,7 @@ mod tests {
         // sweep is over every combination there is, so a rung added without a
         // matching arm in `keyboard_owner_is_a_shell` fails here rather than in
         // a screenshot of a query appearing at somebody's prompt.
-        for bits in 0..128u8 {
+        for bits in 0..256u16 {
             let owner = KeyboardOwner {
                 rename: bits & 1 != 0,
                 menu_or_dialog: bits & 2 != 0,
@@ -121498,6 +122473,7 @@ mod tests {
                 graph_search: bits & 16 != 0,
                 git_prompt: bits & 32 != 0,
                 search: bits & 64 != 0,
+                palette: bits & 128 != 0,
             };
             assert_eq!(
                 matches!(ime_owner(owner), ImeOwner::Shell),
@@ -121545,7 +122521,8 @@ mod tests {
                 | ImeOwner::GraphSearch
                 | ImeOwner::GitPrompt
                 | ImeOwner::Preview
-                | ImeOwner::Search => ImeCaretSource::Field,
+                | ImeOwner::Search
+                | ImeOwner::Palette => ImeCaretSource::Field,
             };
             assert_eq!(
                 source, expected,
@@ -121563,7 +122540,7 @@ mod tests {
         // Seven bits, exactly as the sweep above: every rung the ladder can
         // reach has to be in the table this test walks, or the table is proving
         // something about a smaller ladder than the one that ships.
-        for bits in 0..128u8 {
+        for bits in 0..256u16 {
             let owner = ime_owner(KeyboardOwner {
                 rename: bits & 1 != 0,
                 menu_or_dialog: bits & 2 != 0,
@@ -121572,6 +122549,7 @@ mod tests {
                 graph_search: bits & 16 != 0,
                 git_prompt: bits & 32 != 0,
                 search: bits & 64 != 0,
+                palette: bits & 128 != 0,
             });
             assert!(
                 ImeOwner::ALL.contains(&owner),
@@ -128491,8 +129469,8 @@ mod tests {
     fn opening_any_popup_closes_every_other_one() {
         assert_eq!(
             Popup::ALL.len(),
-            9,
-            "nine popups, and this list is the rule"
+            10,
+            "nine popups and the command palette, and this list is the rule"
         );
         for keep in Popup::ALL {
             let closed: Vec<Popup> = keep.others().collect();
@@ -133999,5 +134977,326 @@ mod cross_window_drag_tests {
             "the window holding the pane stops projecting it the moment the hand \
              leaves, or never starts because it draws no cards of its own:\n{pass}"
         );
+    }
+}
+
+/// **The palette's wiring, read as text** (DESIGN.md §7.55).
+///
+/// The palette's own module can be tested on paper — a query in, a list out —
+/// and it is. What that testing cannot reach is the half that lives here: which
+/// of this window's existing verbs each row is attached to, and where the box
+/// stands in the two ladders (keys and compositions) that decide who a
+/// keystroke belongs to. Both are facts about *this file*, and a test that
+/// wanted to observe them any other way would have to build a window, a GPU and
+/// five panes to watch one call happen.
+///
+/// So these read the source. They assert that a named call is inside a named
+/// function, and — where the order is the whole point — that one call comes
+/// before another. They say nothing about what the verbs do; that is each
+/// verb's own gate, which is the entire argument for the palette calling them
+/// rather than reimplementing them.
+#[cfg(test)]
+mod palette_wiring_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// PIN — **every row of the palette runs a verb this window already had.**
+    ///
+    /// The rule the whole surface is built on and the one that keeps it from
+    /// becoming a second product: `run_shortcut`'s own comment says a shortcut
+    /// is "a second door onto the same room, never a second implementation of
+    /// it", and the palette is a third door onto those same rooms.
+    ///
+    /// MUTATIONS: reimplement any arm — spell out what `activate_tab` does,
+    /// open the settings dialog by setting `window.settings` directly, scroll a
+    /// pane by writing its anchor — and the call named here disappears from the
+    /// body, which goes red.
+    #[test]
+    fn every_palette_verb_reaches_a_door_this_window_already_had() {
+        let run = body("fn run_palette_row(&mut self) -> Result<()> {");
+        for door in [
+            // Actions: the shortcut table's own dispatch.
+            "self.run_shortcut(action)",
+            // Places and commands both begin by putting the tab in front —
+            // `jump_to_attention`'s own two steps.
+            "self.activate_tab(index, false)?",
+            "self.focus_seat(seat)?",
+            // Commands: the command rail's own jump.
+            "self.jump_to_command_mark(seat, mark)",
+            // Files: the preview's own open, and the column's own reveal (one
+            // function further along, pinned below).
+            "self.open_preview_onto(surface, path.clone())?",
+            "self.locate_path_in_files_columns(&path)",
+            // Settings: the wrapper, pinned below.
+            "self.open_settings_on_row(row)",
+        ] {
+            assert!(
+                run.contains(door),
+                "run_palette_row reaches `{door}` rather than doing it again"
+            );
+        }
+
+        let locate =
+            body("fn locate_path_in_files_columns(&mut self, path: &Path) -> Result<()> {");
+        assert!(
+            locate.contains("self.open_files_path_to(seat, &key)?"),
+            "and a file is revealed through the column's own reveal"
+        );
+    }
+
+    /// PIN — **the settings wrapper is three bricks in one order**, and the
+    /// order is the content.
+    ///
+    /// `SettingsPanel::toggle` always lands on the dialog's first page, so a
+    /// page chosen before it is a page thrown away; and the scroll has to be
+    /// computed against a layout built after the page changed, or it is the
+    /// scroll for the page the reader was not sent to.
+    ///
+    /// MUTATIONS:
+    /// (1) choose the page before opening — the first ordering assertion goes
+    ///     red and the dialog would open on `General` every time;
+    /// (2) scroll before choosing the page — the second goes red.
+    #[test]
+    fn opening_settings_on_a_row_opens_then_chooses_then_scrolls() {
+        let text =
+            body("fn open_settings_on_row(&mut self, row: settings::SettingsRow) -> Result<()> {");
+        let open = text
+            .find("self.toggle_settings_panel()?")
+            .expect("it opens the dialog through the dialog's own door");
+        let page = text
+            .find("self.window.settings.select_category(row.category())")
+            .expect("it chooses the page the row is on");
+        let scroll = text
+            .find("layout.scroll_to_show(target, self.window.settings_scroll)")
+            .expect("it scrolls the row into view");
+        assert!(open < page, "the page is chosen after the dialog is opened");
+        assert!(page < scroll, "and the scroll is measured after the page");
+    }
+
+    /// PIN — **the box closes before the verb runs.**
+    ///
+    /// The mock-up's own note, kept because it is still true: several of these
+    /// verbs raise a surface of their own — the settings dialog, a preview, a
+    /// menu — and a palette still standing over one of them would be a box the
+    /// reader has to dismiss before they can look at what they asked for.
+    ///
+    /// MUTATION: move the close after the `match` — this goes red, and the
+    /// settings dialog opens underneath the palette.
+    #[test]
+    fn the_palette_closes_before_it_runs_the_row() {
+        let text = body("fn run_palette_row(&mut self) -> Result<()> {");
+        let close = text
+            .find("self.close_command_palette()?;")
+            .expect("it closes itself");
+        let dispatch = text.find("match row {").expect("and then dispatches");
+        assert!(
+            close < dispatch,
+            "close first: the verb may raise a surface"
+        );
+    }
+
+    /// PIN — **the palette's rung stands above the blanket swallow**, or the
+    /// box cannot be typed into at all.
+    ///
+    /// `popup_takes_the_key` answers "a popup is up, so the shell gets nothing"
+    /// and returns; every other popup is content with that because its keys are
+    /// four and it answers them on its own rung. This one is a text field, and
+    /// a rung underneath that line would be a box that draws a caret and never
+    /// receives a letter.
+    ///
+    /// MUTATIONS:
+    /// (1) move the rung below the swallow — the first assertion goes red;
+    /// (2) move it below `Shortcuts::lookup` — the second goes red, and
+    ///     `Ctrl+Shift+P` would toggle the box instead of the box deciding what
+    ///     its own chord means.
+    #[test]
+    fn the_palette_takes_its_keys_above_the_swallow_and_above_the_table() {
+        let text = body("fn keyboard_input(&mut self, event: &KeyEvent) -> Result<()> {");
+        let rung = text
+            .find("self.palette_key(event)?;")
+            .expect("the palette has a rung of its own");
+        let swallow = text
+            .find("if popup_takes_the_key(self.popups_up()).is_some() {")
+            .expect("and the blanket swallow is still there");
+        let table = text
+            .find("self.app.shortcuts.lookup(")
+            .expect("and so is the shortcut registry");
+        assert!(rung < swallow, "a field below the swallow receives nothing");
+        assert!(
+            rung < table,
+            "and a field below the table hands its letters to the window's verbs"
+        );
+    }
+
+    /// PIN — **a composition in progress is drawn and is not the query.**
+    ///
+    /// `set_preedit` for `Ime::Preedit` and `insert` for `Ime::Commit`, which
+    /// is `git_prompt_ime`'s pair and the whole of what keeps a half-composed
+    /// `ni'hao` out of the list. The list is asked again on the commit and not
+    /// before it — a box that re-queried on every keystroke of a composition
+    /// would flicker through five answers to five non-words.
+    ///
+    /// MUTATIONS:
+    /// (1) call `insert` on the `Preedit` arm — the first assertion goes red;
+    /// (2) re-query on the pre-edit — the last goes red.
+    #[test]
+    fn the_palette_ime_keeps_a_preedit_out_of_the_query() {
+        let text = body("fn palette_ime(&mut self, event: &Ime) -> Result<()> {");
+        assert!(
+            text.contains("Ime::Preedit(text, _) => state.field_mut().set_preedit(text)"),
+            "a pre-edit is set, never inserted"
+        );
+        assert!(
+            text.contains("Ime::Commit(text) => {")
+                && text.contains("state.field_mut().insert(text)"),
+            "and a commit is an ordinary insert"
+        );
+        let preedit = text.find("Ime::Preedit").expect("it answers a pre-edit");
+        let commit = text.find("Ime::Commit").expect("and a commit");
+        let requery = text
+            .find("return self.requery_palette();")
+            .expect("and the commit asks the list again");
+        assert!(
+            preedit < commit && commit < requery,
+            "the re-query is behind the commit, not behind the composition"
+        );
+    }
+
+    /// PIN — **Esc puts the box away, and so does a press outside it, and so
+    /// does losing the window.**
+    ///
+    /// Three exits and they are three different gestures: a hand on the
+    /// keyboard, a hand on the pointer, and a hand that has gone somewhere
+    /// else. The mock-up has the first two; the third is what "失焦即收" means
+    /// for a window rather than for an element in a page.
+    ///
+    /// MUTATION: delete any one of the three — its assertion goes red, and the
+    /// box acquires a state a reader cannot get out of by the gesture they
+    /// reached for.
+    #[test]
+    fn the_palette_has_three_ways_out() {
+        let keys = body("fn palette_key(&mut self, event: &KeyEvent) -> Result<()> {");
+        let escape = keys
+            .find("Key::Named(NamedKey::Escape) => {")
+            .expect("Esc is answered");
+        let closed = keys[escape..]
+            .find("self.close_command_palette()?;")
+            .expect("and Esc closes it");
+        assert!(
+            closed
+                < keys[escape..]
+                    .find("Key::Named(NamedKey::Enter)")
+                    .unwrap_or(usize::MAX),
+            "the close belongs to the Esc arm"
+        );
+
+        let press = body("fn chrome_mouse_input(");
+        let router = if press.contains("palette::hit(&layout, position.x, position.y)") {
+            press
+        } else {
+            body(
+                "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+            )
+        };
+        assert!(
+            router.contains("palette::hit(&layout, position.x, position.y)")
+                && router.contains("self.close_command_palette()?;"),
+            "a press outside the box puts it away"
+        );
+
+        let blur = SOURCE
+            .find("WindowEvent::Focused(false) => {")
+            .expect("the window answers losing focus");
+        let end = SOURCE[blur..]
+            .find("WindowEvent::Focused(true) => {")
+            .expect("and getting it back");
+        assert!(
+            SOURCE[blur..blur + end].contains("runtime.close_command_palette()"),
+            "and a window the reader has left is not one they are aiming in"
+        );
+    }
+
+    /// PIN — **a row names its tab by an address that cannot be reused.**
+    ///
+    /// The box stays up for as long as somebody is typing into it, and the list
+    /// under it was built when it opened. A shell that exits in that time takes
+    /// its tab out of `window.tabs` and moves every tab after it up one — an
+    /// ordinal captured before that names a *different* tab afterwards, and
+    /// `activate_tab` would honour it without complaint. That is §2.4's rule 1
+    /// ("the address has to be unique all the way to the layer that reads it")
+    /// met by a list that can shrink under a held answer, and the answer is a
+    /// `TabId` resolved at the moment the verb runs.
+    ///
+    /// MUTATION: carry the ordinal and index `window.tabs` with it — the two
+    /// `tab_index_of` calls go and this goes red.
+    #[test]
+    fn a_palette_row_names_its_tab_by_an_address_that_cannot_be_reused() {
+        let run = body("fn run_palette_row(&mut self) -> Result<()> {");
+        assert_eq!(
+            run.matches("self.tab_index_of(tab)").count(),
+            2,
+            "both the place and the command resolve the id when they run it"
+        );
+        assert!(
+            !run.contains("self.window.tabs[tab]"),
+            "and neither of them indexes the list with something it was told earlier"
+        );
+    }
+
+    /// PIN — **the pointer selects rather than lighting a second highlight.**
+    ///
+    /// One notion of "the current row", because Enter must run what the reader
+    /// is looking at. Two — a hover and a selection — is a box in which the
+    /// pointer says one thing and the keyboard does another.
+    ///
+    /// MUTATION: give the hover its own field and paint it separately — the
+    /// call to `point_at` goes, and this goes red.
+    #[test]
+    fn the_pointer_moves_the_selection_itself() {
+        let hover = body(
+            "fn drive_palette_hover(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {",
+        );
+        assert!(
+            hover.contains("state.point_at(index)"),
+            "hovering a row selects it"
+        );
+        let press = body(
+            "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+        );
+        assert!(
+            press.contains("palette.point_at(index);"),
+            "and a press seats the selection on the row it landed on before running it"
+        );
+    }
+
+    /// PIN — **the palette is chrome and never a seat.**
+    ///
+    /// §7.x 压测补遗 ③: the palette is a way of looking at the model, so it
+    /// does not enter the content matrix. The observable form of that here is
+    /// that its whole state is one `Option` on the window and nothing about it
+    /// is written to the session file — a box that survived a restart would be
+    /// a window that opens mid-question.
+    ///
+    /// MUTATION: persist it — the name appears in the session module's source
+    /// and this goes red.
+    #[test]
+    fn the_palette_is_never_written_to_the_session_file() {
+        const PERSIST: &str = include_str!("persist.rs");
+        for name in ["palette", "PaletteState"] {
+            assert!(
+                !PERSIST.contains(name),
+                "`{name}` has no business in what outlives the process"
+            );
+        }
     }
 }

@@ -1061,27 +1061,40 @@ pub enum Text {
     ShortcutPrevTab,
     ShortcutReopenClosed,
     ShortcutJumpAttention,
-    /// **Kept while the row it names is out of the table** (user ruling
-    /// 2026-08-28).
+    /// **Held for one release while the row it names was out of the table**
+    /// (user ruling 2026-08-28; DESIGN.md §7.55).
     ///
-    /// `command-palette` left `shortcuts::BINDINGS` for the preview because the
-    /// verb behind it does not exist yet, and the table's own gates now assert
-    /// the *absence* of that row rather than its presence — which is what still
-    /// reads this entry. Deleting the string would have made the withdrawal
-    /// invisible in both directions: nothing would say the name had been taken
-    /// out on purpose, and the day v0.2 binds it back somebody would translate
-    /// `Command palette` a second time and get a second wording for one verb.
-    ///
-    /// This is the "keep and say why" half of the unreferenced-string rule, and
-    /// it is the half that applies: the string is not orphaned, it is *early*.
-    /// Nothing outside `cfg(test)` names it while its row is out of the table,
-    /// which is the whole of what the attribute below says — and the shape
-    /// `shortcuts::Action::CommandPalette` is held in one file over.
-    #[allow(
-        dead_code,
-        reason = "the v0.2 palette's name, held while its row is out of BINDINGS"
-    )]
+    /// `command-palette` left `shortcuts::BINDINGS` for the v0.1 preview
+    /// because the verb behind it did not exist yet, and this string stayed
+    /// rather than being deleted and re-added: deleting it would have made the
+    /// withdrawal invisible in both directions, and the day the row came back
+    /// somebody would have translated `Command palette` a second time and got
+    /// a second wording for one verb. That day was 2026-09-02, the row is back
+    /// in the table, and this entry is read from it like any other.
     ShortcutCommandPalette,
+    // ── the command palette (DESIGN.md §7.55) ──────────────────────────
+    /// The empty input's own line, and the whole of what the box explains
+    /// about itself: a reader who has just pressed the chord needs to be told
+    /// what may be typed, not what the box is called.
+    PaletteFieldPlaceholder,
+    /// The five section headings. They are nouns for the kind of thing under
+    /// them rather than instructions, because a heading in a list somebody is
+    /// aiming down is a signpost and not a sentence.
+    PaletteSectionActions,
+    PaletteSectionPlaces,
+    PaletteSectionCommands,
+    PaletteSectionFiles,
+    PaletteSectionSettings,
+    /// Under `Files`, while the walk that answers it is still running — a
+    /// section that is about to have an answer is not the same as one with
+    /// none.
+    PaletteIndexing,
+    /// Under `Files`, when the query found none **and** the walk stopped on
+    /// its own cap. The file may well be there; a reader who is told only
+    /// "nothing matches" would conclude it is not.
+    PaletteFilesTruncated,
+    /// The whole list, when the query matched nothing anywhere.
+    PaletteNoMatches,
     ShortcutSplitHorizontal,
     ShortcutSplitVertical,
     ShortcutDuplicatePaneSplit,
@@ -2900,6 +2913,23 @@ impl Text {
                 "跳到等待最久的窗格",
             ),
             Self::ShortcutCommandPalette => pick(lang, "Command palette", "命令面板"),
+            Self::PaletteFieldPlaceholder => pick(
+                lang,
+                "Type a pane, a command, a file or a setting…",
+                "输入窗格、命令、文件或设置…",
+            ),
+            Self::PaletteSectionActions => pick(lang, "Actions", "动作"),
+            Self::PaletteSectionPlaces => pick(lang, "Tabs and panes", "标签与窗格"),
+            Self::PaletteSectionCommands => pick(lang, "Commands", "命令"),
+            Self::PaletteSectionFiles => pick(lang, "Files", "文件"),
+            Self::PaletteSectionSettings => pick(lang, "Settings", "设置"),
+            Self::PaletteIndexing => pick(lang, "Indexing…", "正在索引…"),
+            Self::PaletteFilesTruncated => pick(
+                lang,
+                "This folder holds more files than are indexed",
+                "这个文件夹的文件多过已索引的数量",
+            ),
+            Self::PaletteNoMatches => pick(lang, "Nothing matches", "没有匹配"),
             Self::ShortcutSplitHorizontal => pick(lang, "Split horizontally", "横向拆分"),
             Self::ShortcutSplitVertical => pick(lang, "Split vertically", "竖向拆分"),
             Self::ShortcutDuplicatePaneSplit => {
@@ -3820,7 +3850,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 540] = [
+    pub const ALL: [Self; 549] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4092,6 +4122,15 @@ impl Text {
         Self::ShortcutReopenClosed,
         Self::ShortcutJumpAttention,
         Self::ShortcutCommandPalette,
+        Self::PaletteFieldPlaceholder,
+        Self::PaletteSectionActions,
+        Self::PaletteSectionPlaces,
+        Self::PaletteSectionCommands,
+        Self::PaletteSectionFiles,
+        Self::PaletteSectionSettings,
+        Self::PaletteIndexing,
+        Self::PaletteFilesTruncated,
+        Self::PaletteNoMatches,
         Self::ShortcutSplitHorizontal,
         Self::ShortcutSplitVertical,
         Self::ShortcutDuplicatePaneSplit,
@@ -5568,6 +5607,68 @@ fn shortcut_take_it_from_in(lang: Lang, title: &str) -> String {
         Lang::English => format!("Enter takes it from {title}"),
         Lang::Chinese => format!("按 Enter 从「{title}」拿过来"),
     }
+}
+
+/// **What the palette prints to the right of a command it already ran**
+/// (DESIGN.md §7.55 ③).
+///
+/// Three facts in the order a reader wants them: whether it failed, how long it
+/// took, and where it ran. A written function rather than a [`Text`] entry
+/// because two of the three are numbers and the third is a name, and a format
+/// string with three holes in it is a sentence one translator cannot see the
+/// shape of — [`key_hint_more`]'s own reason, one hole further along.
+///
+/// An exit code of zero is **not** printed. "It worked" is the ordinary case
+/// and a column that said so on nine rows out of ten would be a column the eye
+/// stops reading, which is exactly when it would miss the tenth.
+#[must_use]
+pub fn palette_command_hint(
+    exit_code: Option<i32>,
+    duration: Option<std::time::Duration>,
+    pane: &str,
+) -> String {
+    palette_command_hint_in(current(), exit_code, duration, pane)
+}
+
+fn palette_command_hint_in(
+    lang: Lang,
+    exit_code: Option<i32>,
+    duration: Option<std::time::Duration>,
+    pane: &str,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(code) = exit_code.filter(|code| *code != 0) {
+        parts.push(match lang {
+            Lang::English => format!("exit {code}"),
+            Lang::Chinese => format!("退出码 {code}"),
+        });
+    }
+    if let Some(spent) = duration {
+        parts.push(spent_words(spent));
+    }
+    if !pane.is_empty() {
+        parts.push(pane.to_owned());
+    }
+    parts.join(" · ")
+}
+
+/// How long a command took, in the coarsest unit that still says something.
+///
+/// Milliseconds under a second, one decimal of a second under a minute, and
+/// whole minutes and seconds above it. The units are the same in both languages
+/// — they are symbols rather than words — so this one is not a `match` on the
+/// language, and saying so here is cheaper than the reader wondering.
+fn spent_words(spent: std::time::Duration) -> String {
+    let millis = spent.as_millis();
+    if millis < 1000 {
+        return format!("{millis}ms");
+    }
+    let seconds = spent.as_secs_f64();
+    if seconds < 60.0 {
+        return format!("{seconds:.1}s");
+    }
+    let whole = spent.as_secs();
+    format!("{}m{:02}s", whole / 60, whole % 60)
 }
 
 /// **The hint card's last cell, when the window could not hold every line**

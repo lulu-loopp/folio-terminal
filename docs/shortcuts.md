@@ -27,6 +27,7 @@ Every key here can be changed on the Shortcuts page in Settings. Changing one wr
 | Ctrl+Shift+9 | Go to tab 9 |  | `goto-tab-9` |
 | Ctrl+Shift+T | Reopen the last closed tab |  | `reopen-closed` |
 | Ctrl+Shift+A | Jump to the longest waiting pane |  | `jump-attention` |
+| Ctrl+Shift+P | Command palette |  | `command-palette` |
 | Ctrl+Shift+Z | Cards |  | `focus-mode` |
 | Alt+Shift+- | Split horizontally |  | `split-horizontal` |
 | Alt+Shift+= | Split vertically |  | `split-vertical` |
@@ -74,6 +75,7 @@ Every key here can be changed on the Shortcuts page in Settings. Changing one wr
 | Ctrl+Shift+9 | 转到标签 9 |  | `goto-tab-9` |
 | Ctrl+Shift+T | 重新打开最近关闭的标签 |  | `reopen-closed` |
 | Ctrl+Shift+A | 跳到等待最久的窗格 |  | `jump-attention` |
+| Ctrl+Shift+P | 命令面板 |  | `command-palette` |
 | Ctrl+Shift+Z | 卡片 |  | `focus-mode` |
 | Alt+Shift+- | 横向拆分 |  | `split-horizontal` |
 | Alt+Shift+= | 竖向拆分 |  | `split-vertical` |

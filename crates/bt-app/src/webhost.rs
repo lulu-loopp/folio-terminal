@@ -3717,11 +3717,12 @@ mod keyboard_tests {
         ("goto-tab-9", "Ctrl+Shift+9"),
         ("reopen-closed", "Ctrl+Shift+t"),
         ("jump-attention", "Ctrl+Shift+a"),
-        // **`command-palette` left the table on 2026-08-28** (user ruling; see
-        // `shortcuts::Action::CommandPalette`), and this list is one shorter for
-        // it. What that means over a page is exactly what it means everywhere
-        // else: `Ctrl+Shift+P` is not claimed, so the page keeps it — which is
-        // the honest state while there is no palette to open.
+        // **`command-palette` is back on the list from 2026-09-02** (DESIGN.md
+        // §7.55). It was off it for one release for the reason it was off the
+        // table: an unclaimed chord is the page's to keep. The window claims it
+        // again, so the page hands it back again — for the reason every window
+        // row is on this list.
+        ("command-palette", "Ctrl+Shift+p"),
         ("focus-mode", "Ctrl+Shift+z"),
         ("split-horizontal", "Alt+Shift+-"),
         ("split-vertical", "Alt+Shift+="),
