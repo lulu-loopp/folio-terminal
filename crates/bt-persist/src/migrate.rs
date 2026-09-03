@@ -64,6 +64,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (26, migrate_settings_v26_to_v27),
     (27, migrate_settings_v27_to_v28),
     (28, migrate_settings_v28_to_v29),
+    (29, migrate_settings_v29_to_v30),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -603,9 +604,10 @@ fn migrate_settings_v26_to_v27(mut value: Value) -> Value {
 /// v27 -> v28: how wide the summoned terminal opens (user ruling, 2026-09-02, `docs/DESIGN.md`
 /// §7.54).
 ///
-/// **The one step on this ladder that changes what an existing reader's window looks like**, and
-/// it is deliberate. Every build from v27 spanned the work area, so `100` is the value that would
-/// carry the old behaviour forward — and it is not the value written here. The width was never a
+/// **The first step on this ladder that changes what an existing reader's window looks like**, and
+/// it is deliberate. (v30 below is the second, and it is this paragraph's argument again.) Every
+/// build from v27 spanned the work area, so `100` is the value that would carry the old behaviour
+/// forward — and it is not the value written here. The width was never a
 /// preference anybody expressed, because there was no row to express it on; it was a consequence
 /// of a shape chosen on a 16:9 panel, and the machine that found it out was a 4K ultrawide, where
 /// a summoned window reaches from one edge of the desk to the other. Carrying `100` forward would
@@ -638,6 +640,39 @@ fn migrate_settings_v28_to_v29(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(29));
         object.insert("tray_icon".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// v29 -> v30: the summoned terminal stops going away when the keyboard leaves it (user ruling,
+/// 2026-09-03, `docs/DESIGN.md` §7.54c).
+///
+/// **The second step on this ladder that overwrites a value an existing file already carries**, and
+/// it is [`migrate_settings_v27_to_v28`]'s argument word for word. Every build since v27 dismissed
+/// the window on blur, so `true` is the value that would carry the old behaviour forward — and it
+/// is not the value written here. **Dismissal on blur was never a preference anybody expressed: the
+/// row was born with the feature, already set.** Nobody chose it, because there was no moment at
+/// which the question was put; a reader who has never opened the General page has said nothing about
+/// it at all. Carrying `true` forward would be preserving the shape v27 guessed at under the name of
+/// preserving a choice — exactly what v28 refused to do with the width that used to be wired shut.
+///
+/// The ruling behind the reversal is 「点到其他程序不是关闭临时终端的途径」: clicking into another
+/// window is how a person uses the machine in front of them, not how they put a terminal away.
+///
+/// **The readers who did express something are not disturbed by this step, which is the other half
+/// of why writing is safe.** Somebody who found the row and turned it off is already holding
+/// `false`, and `false` is what this writes; the only files it changes are the ones whose owner had
+/// no opinion to change. Whoever wants the old behaviour has a row to ask for it on — the thing they
+/// did have before, and still do.
+///
+/// See `SettingsV1::quake_dismiss_on_blur` and [`crate::DEFAULT_QUAKE_DISMISS_ON_BLUR`].
+fn migrate_settings_v29_to_v30(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(30));
+        object.insert(
+            "quake_dismiss_on_blur".to_owned(),
+            Value::from(crate::DEFAULT_QUAKE_DISMISS_ON_BLUR),
+        );
     }
     value
 }
@@ -1944,6 +1979,79 @@ mod tests {
             "and the key added one version ago is the one a copy-paste of the step above would \
              most plausibly reset"
         );
+    }
+
+    /// RED (`docs/DESIGN.md` §7.54c, user ruling 2026-09-03) — **v29 -> v30 writes
+    /// `quake_dismiss_on_blur` false over whatever a file was holding**, and touches nothing else.
+    ///
+    /// `false` is written and not merely defaulted, and the fixture holds `true` on purpose: this
+    /// is one of the two steps on this ladder that overwrites a value an existing file already
+    /// carries, so a test that fed it a file already saying `false` would pass against a step that
+    /// did nothing at all.
+    ///
+    /// **Why overwriting is honest here** — the same argument v28 made about the width, and the
+    /// reason it is repeated in the assertion message rather than left in the step's doc: dismissal
+    /// on blur was never a preference anybody expressed, because **the row was born with the
+    /// feature, already set**. There was no moment at which the question was put, so a `true` in an
+    /// existing file records the shape v27 guessed at and not a choice its owner made. The readers
+    /// who *did* choose are holding `false` already, which is what this writes; the only files it
+    /// changes are the ones nobody had an opinion about.
+    ///
+    /// MUTATION: write `true` — the behaviour-preserving value — and every reader who never opened
+    /// the General page goes on losing the summoned terminal the moment they click into a browser,
+    /// with the row agreeing that they asked for it. Drop the `insert` and keep the version bump and
+    /// serde's default rescues the parse while the document goes on saying `true`, which is why the
+    /// assertion is on the migrated *document*. Reset a sibling and the last two assertions name it.
+    #[test]
+    fn real_settings_v29_to_v30_migration_stops_a_click_elsewhere_closing_the_summon() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 29,
+                "quake_height": 65,
+                "quake_width": 100,
+                "quake_dismiss_on_blur": true,
+                "tray_icon": false
+            }),
+            29,
+            30,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(30));
+        assert_eq!(
+            migrated["quake_dismiss_on_blur"],
+            json!(false),
+            "the step carried the old behaviour forward instead of the ruling: nobody ever chose \
+             dismissal on blur, the row was born with the feature already set"
+        );
+        assert_eq!(
+            migrated["tray_icon"],
+            json!(false),
+            "the key added one version ago is the one a copy-paste of the step above would most \
+             plausibly reset"
+        );
+        assert_eq!(migrated["quake_width"], json!(100));
+        assert_eq!(migrated["quake_height"], json!(65));
+    }
+
+    /// RED — **a reader who had already turned the row off is not disturbed by the step that turns
+    /// it off for everybody else** (user ruling 2026-09-03).
+    ///
+    /// The other half of the paragraph above, and it is worth its own test because it is the half
+    /// that makes the overwrite defensible: the step is only allowed to write over an existing value
+    /// because the value it writes is the one the people with an opinion already hold. A v29 file
+    /// saying `false` comes out of v30 saying `false`, which would also be true of a step that did
+    /// nothing — so this test is not the proof on its own, it is the pair to the one above.
+    #[test]
+    fn a_reader_who_had_already_turned_it_off_reads_the_same_after_the_step() {
+        let migrated = migrate_value(
+            json!({"schema_version": 29, "quake_dismiss_on_blur": false}),
+            29,
+            30,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["quake_dismiss_on_blur"], json!(false));
     }
 
     #[test]

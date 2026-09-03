@@ -312,6 +312,28 @@ impl Quake {
         std::mem::take(&mut self.pending_dismiss)
     }
 
+    /// **Whether a blur that has just been taken is a reason to put the window
+    /// away** (§7.54c, user ruling 2026-09-03).
+    ///
+    /// Two facts and one rule, named here rather than spelled inline at the one
+    /// place it is asked, because the rule is what the ruling moved and the
+    /// window is the thing that knows one half of it.
+    ///
+    /// **The switch is read and not assumed.** Its default is now off —
+    /// [`bt_persist::DEFAULT_QUAKE_DISMISS_ON_BLUR`], 「点到其他程序不是关闭
+    /// 临时终端的途径」 — and the row it is on still means exactly what it says
+    /// when a reader turns it on. Nothing about the mechanism changed with the
+    /// default; a summon that has lost the keyboard while the row is on goes
+    /// away, the way it always did.
+    ///
+    /// **A blur about a window that is already down is a blur about nothing**,
+    /// which is why `shown` is half the answer: hiding the window is itself what
+    /// moved the focus, and the blur that follows arrives after there is nothing
+    /// left to dismiss.
+    pub(crate) const fn blur_dismisses(&self, row_is_on: bool) -> bool {
+        self.shown && row_is_on
+    }
+
     /// Record that the window is up, and who is owed the keyboard back.
     pub(crate) fn shown_over(&mut self, previous: Option<NonZeroIsize>) {
         self.shown = true;
@@ -920,5 +942,47 @@ mod tests {
             "a window that has just been put up is not a window that was just \
              left"
         );
+    }
+
+    /// RED (§7.54c, user ruling 2026-09-03) — **the default moved and the
+    /// mechanism did not: a reader who turns the row on still loses the summon
+    /// the moment the keyboard leaves it.**
+    ///
+    /// The ruling is 「点到其他程序不是关闭临时终端的途径」, and it is a ruling
+    /// about what a fresh `settings.json` says
+    /// ([`bt_persist::DEFAULT_QUAKE_DISMISS_ON_BLUR`]) rather than about what the
+    /// row does. The row is why the row exists: somebody who wants a strip that
+    /// empties the moment they look away asks for it there and gets exactly that.
+    /// A change that quietly took the behaviour away along with the default would
+    /// leave a switch on the General page that decides nothing.
+    ///
+    /// MUTATIONS: drop `row_is_on` from the conjunction and a click into a
+    /// browser takes the terminal away from every reader again, with the row they
+    /// left off saying it should not. Drop `self.shown` and a blur that arrived
+    /// about a window already down asks for a second dismissal, which is the
+    /// double hand-back `the_window_owed_the_keyboard_is_handed_back_exactly_once`
+    /// pins. Return `false` outright and the switch is a row on a page that
+    /// decides nothing.
+    #[test]
+    fn the_row_still_means_what_it_says_when_a_reader_turns_it_on() {
+        let mut quake = Quake::default();
+        // Down: nothing to dismiss, whatever the row says — hiding the window is
+        // itself what moved the focus.
+        assert!(!quake.blur_dismisses(true));
+        assert!(!quake.blur_dismisses(false));
+        quake.shown_over(None);
+        assert!(
+            quake.blur_dismisses(true),
+            "the reader asked for a terminal that goes away when they look \
+             elsewhere, and did not get one"
+        );
+        assert!(
+            !quake.blur_dismisses(false),
+            "a click into another program is being read as a request to close \
+             the summoned terminal"
+        );
+        // And the default the ruling set is what a fresh file hands in here,
+        // which is the whole of what this round changed.
+        assert!(!quake.blur_dismisses(bt_persist::DEFAULT_QUAKE_DISMISS_ON_BLUR));
     }
 }

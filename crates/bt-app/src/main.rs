@@ -8769,6 +8769,41 @@ fn wake_the_loop() {
     }
 }
 
+/// **When a run outlives the last window a person can see** (§7.54c, user ruling
+/// 2026-09-03).
+///
+/// Both facts, in one place, as a rule rather than as a conjunction spelled at
+/// the door that happens to ask first. `FolioApp::tray_keeps_the_run_alive`
+/// gathers the two and this decides; the two doors that care —
+/// `FolioApp::close`, on whether a shut ends a run, and
+/// `FolioApp::reap_leaving_windows`, on whether an empty registry does — go
+/// through that one method so that they can never answer differently.
+///
+/// **The icon, because that is how a resident program is reached.** §7.54's
+/// `open_window_count` paragraph refused a run kept alive by a window nobody can
+/// see: a `folio.exe` with nothing on any screen and no taskbar button, reachable
+/// only through a key its reader may have bound weeks ago. An icon answers that —
+/// the program is where its icon says it is, a click summons it, its menu has a
+/// Quit — and §7.54b ⑤ stopped there.
+///
+/// **And a summoned terminal, because that is what makes residency mean
+/// anything.** Reachability says how the reader gets back; it does not say what
+/// they get back to. With no summoned window the icon is a door onto an empty
+/// room, and the person who closed their last visible window asked for the
+/// program to end, not for it to wait in the notification area for nothing.
+/// `scripts/release/smoke.ps1` gate 6 is where that was first read out loud: it
+/// closes the one window a cold launch opens and waits for the process, and on
+/// 780fb99 it timed out with `the window did not close when it was asked to`.
+///
+/// **A hidden summon counts.** It is exactly the state the icon is a door onto —
+/// a terminal one chord away, off the glass. `FolioApp::open_window_count`
+/// excludes that same window because it is not a window anybody can see; the two
+/// readings are not in tension, they are the two halves of the same sentence: it
+/// is not a window, and it is a reason.
+const fn a_run_worth_keeping(icon_is_up: bool, a_summon_exists: bool) -> bool {
+    icon_is_up && a_summon_exists
+}
+
 /// **One row of `Move to window ▸`**, before it is words (B9).
 ///
 /// The ordinal and the count and not a title: a window in this product has no
@@ -91600,15 +91635,18 @@ impl FolioApp {
         // last one whenever it is the last one still on the glass — and a shut
         // that read the raw length would file the final window in Recent and
         // leave the session file describing a run that had already ended.
-        // **Unless there is an icon on the taskbar** (§7.54, user ruling next29).
-        // The paragraph on `open_window_count` argues that a run kept alive by a
+        // **Unless there is an icon on the taskbar and a summoned terminal behind
+        // it** (§7.54b ⑤, narrowed by §7.54c, user ruling 2026-09-03). The
+        // paragraph on `open_window_count` argues that a run kept alive by a
         // window nobody can see is a `folio.exe` with nothing on any screen,
         // reachable only through a key the reader may have bound weeks ago. That
         // argument is about *reachability*, and an icon answers it: the program is
         // where its icon says it is, a click summons it, and its menu has a Quit
-        // in it. So the icon, and only the icon, turns "the last window closing"
-        // back into what it says — one window closing.
-        let ending = self.open_window_count() == 1 && !self.tray_is_standing();
+        // in it. What it does not answer is what the resident program is *for* —
+        // with no summoned window the icon is a door onto an empty room, and the
+        // reader who closed their last window asked for the program to end. See
+        // `tray_keeps_the_run_alive`, which is where both halves are asked.
+        let ending = self.open_window_count() == 1 && !self.tray_keeps_the_run_alive();
         let leaving_at = Instant::now() + quit::PAGE_TEARDOWN_DEADLINE;
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
@@ -91692,13 +91730,51 @@ impl FolioApp {
 
     /// **Whether there is an icon on the taskbar right now.**
     ///
-    /// The one question two very different decisions ask — whether closing the
-    /// last window ends the run, and whether an empty registry does — and it is
-    /// one function so that they can never answer it differently. A quit takes
-    /// the icon down first, which is what makes both of them stop protecting the
-    /// run at the same moment.
+    /// One fact and nothing more. It is asked by [`Self::settle_tray`], which
+    /// compares it against what the row wants, and it is half of
+    /// [`Self::tray_keeps_the_run_alive`], which is what the two residency doors
+    /// read. A quit takes the icon down first, which is what makes both of those
+    /// doors stop protecting the run at the same moment.
     fn tray_is_standing(&self) -> bool {
         self.app.as_ref().is_some_and(|app| app.tray.is_some())
+    }
+
+    /// **Whether the icon is standing over something worth keeping the run for**
+    /// (§7.54c, user ruling 2026-09-03).
+    ///
+    /// The question the two residency doors ask — whether closing the last window
+    /// ends the run, and whether an empty registry does — and it is one function
+    /// so that they can never answer it differently.
+    ///
+    /// **Two facts, and the second one is what this ruling added.** §7.54b ⑤
+    /// asked only [`Self::tray_is_standing`], which made an icon on its own enough
+    /// to keep a `folio.exe` in the task list after every window it had was gone.
+    /// The reachability argument that justified it is untouched — the program is
+    /// where its icon says it is, a click summons it, its menu has a Quit — but it
+    /// answers *how a resident program is reached*, not *why it is resident*, and
+    /// with no summoned window there is nothing resident to reach. The icon would
+    /// be a door onto an empty room, and the reader who closed their last window
+    /// asked for the program to end.
+    ///
+    /// **It was also wrong in a way a machine could see.** `scripts/release/smoke.ps1`
+    /// gate 6 sends `WM_CLOSE` to the one window a cold launch opens and waits for
+    /// the process; on 780fb99 it waited out its timeout and reported `the window
+    /// did not close when it was asked to`, with `BT_TRAY rect=…` in the log
+    /// saying exactly why. That run had no summoned window, which is the case this
+    /// predicate now excludes.
+    ///
+    /// **A summoned window counts whether or not it is on the screen**, which is
+    /// the whole point: the reader who has one hidden behind their chord has a
+    /// program to come back to, and that is the state the icon is a door onto.
+    /// [`Self::open_window_count`] excludes that same window for its own reason —
+    /// it is not a window anybody can see — and the two readings agree rather than
+    /// conflict: it is not a window, and it is a reason.
+    fn tray_keeps_the_run_alive(&self) -> bool {
+        self.tray_is_standing()
+            && self
+                .app
+                .as_ref()
+                .is_some_and(|app| app.quake.window().is_some())
     }
 
     /// **Make the icon agree with the row that says whether there is one**
@@ -91937,13 +92013,20 @@ impl FolioApp {
             }
         }
         // **An empty registry is not the end of the run while the icon is
-        // standing** (§7.54). This is the other half of `close`'s own answer, at
-        // the door every road to an empty registry passes through: with an icon on
-        // the taskbar the program is a thing a person can see and click, and it
-        // leaves when they ask it to — through the icon's `Quit`, which sets
-        // `quit_requested` and takes `settle_quit`'s road like every other quit,
-        // and which takes the icon down before it gets here.
-        if self.windows.is_empty() && self.tray_is_standing() {
+        // standing over a summoned terminal** (§7.54b ⑤, narrowed by §7.54c).
+        // This is the other half of `close`'s own answer, at the door every road
+        // to an empty registry passes through, and it reads the same predicate so
+        // that the two can never disagree: with an icon on the taskbar the program
+        // is a thing a person can see and click, and it leaves when they ask it to
+        // — through the icon's `Quit`, which sets `quit_requested` and takes
+        // `settle_quit`'s road like every other quit, and which takes the icon down
+        // before it gets here.
+        //
+        // **The summoned window is asked about after `quake.forget` above**, and
+        // the order is the answer rather than an accident: a reader who closed the
+        // summoned window itself has no summoned window left, so this is a run with
+        // an icon and nothing behind it and it ends here.
+        if self.windows.is_empty() && self.tray_keeps_the_run_alive() {
             return Ok(waking);
         }
         if self.windows.is_empty() {
@@ -92182,7 +92265,8 @@ impl FolioApp {
         // A blur that arrived after the window had already gone is a blur about
         // nothing: hiding it is what moved the focus in the first place.
         let dismiss = self.app.as_ref().is_some_and(|app| {
-            app.quake.is_showing() && app.settings_store.loaded().quake_dismiss_on_blur
+            app.quake
+                .blur_dismisses(app.settings_store.loaded().quake_dismiss_on_blur)
         });
         if dismiss {
             return self.dismiss_quake();
@@ -92887,9 +92971,9 @@ impl FolioApp {
         // **The icon comes down as the quit's first act** (§7.54b ⑤).
         //
         // It is what stops the icon protecting the run it is a door to —
-        // `close` and `reap_leaving_windows` both ask `tray_is_standing`, and a
-        // quit that left the icon up would be a quit that could never reach an
-        // empty registry. It is also the honest order for the reader: the run is
+        // `close` and `reap_leaving_windows` both ask `tray_keeps_the_run_alive`,
+        // which reads this field, and a quit that left the icon up would be a
+        // quit that could never reach an empty registry. It is also the honest order for the reader: the run is
         // ending, and an icon that stayed on the taskbar for the length of the
         // teardown would be an icon promising a program that is on its way out.
         //
@@ -95756,7 +95840,7 @@ mod resize_skirt_order_tests {
 /// **A page popped out into a float still has a pane** (§7.14a).
 #[cfg(test)]
 mod floated_page_tests {
-    use super::{a_page_still_has_a_pane, marks};
+    use super::{a_page_still_has_a_pane, a_run_worth_keeping, marks};
 
     const SOURCE: &str = include_str!("main.rs");
 
@@ -96567,50 +96651,73 @@ mod floated_page_tests {
         );
     }
 
-    /// RED (§7.54b ⑤, user ruling 2026-09-03) — **an icon on the taskbar keeps
-    /// the run alive, and it is the only thing that does.**
+    /// RED (§7.54c, user ruling 2026-09-03) — **an icon keeps the run alive only
+    /// while there is a summoned terminal behind it.**
     ///
-    /// The test above argues that a run kept alive by a window nobody can see is
-    /// a `folio.exe` reachable only through a key the reader may have bound weeks
-    /// ago. That argument is about *reachability*, and it is left standing: an
-    /// icon answers it. The program is where its icon says it is, a click summons
-    /// it, and its menu has a Quit in it — so with an icon, and only with an icon,
-    /// closing the last window is one window closing.
+    /// §7.54b ⑤ made the icon enough on its own, on a reachability argument that
+    /// is left standing word for word: the program is where its icon says it is,
+    /// a click summons it, and its menu has a Quit in it. What that argument
+    /// answers is *how a resident program is reached*, and this ruling is about
+    /// *why it is resident*. With no summoned window there is nothing to come back
+    /// to — the icon is a door onto an empty room, and the reader who closed their
+    /// last window asked for the program to end.
     ///
-    /// **Two doors, one question.** `close` decides whether a shut is the end of
-    /// a run; `reap_leaving_windows` decides whether an empty registry is. They
-    /// have to answer the same way at the same moment, so they read the same
-    /// predicate rather than each testing the setting for itself — a run that was
-    /// protected at one door and not the other would either exit with an icon
-    /// standing or hang with none.
+    /// **A machine said so first.** `scripts/release/smoke.ps1` gate 6 sends
+    /// `WM_CLOSE` to the one window a cold launch opens and waits for the process
+    /// to leave; on 780fb99 it waited out its timeout and reported `the window did
+    /// not close when it was asked to`, with `BT_TRAY rect=…` in the log naming
+    /// the reason. That run had no summoned window, which is precisely the case
+    /// the narrowed predicate excludes.
     ///
-    /// MUTATIONS: drop `tray_is_standing` from `close` and closing the last window
-    /// ends the run with an icon still on the taskbar, which is an icon nobody can
-    /// click. Drop it from `reap_leaving_windows` and the run ends one turn later
-    /// by the other road, with the same result. Let either of them read
-    /// `settings_store.loaded().tray_icon` directly and the two can disagree
-    /// during the turn a quit is taking the icon down.
+    /// **Two doors, one question.** `close` decides whether a shut is the end of a
+    /// run; `reap_leaving_windows` decides whether an empty registry is. They have
+    /// to answer the same way at the same moment, so they read the same predicate
+    /// rather than each assembling the facts for itself — a run protected at one
+    /// door and not the other would either exit with an icon standing or hang with
+    /// none.
+    ///
+    /// MUTATIONS: let `tray_keeps_the_run_alive` ask only `tray_is_standing` and
+    /// gate 6 hangs again, this time in a test rather than in CI. Let it ask only
+    /// for the summoned window and a reader who turned the icon off gets residency
+    /// they switched off. Drop the predicate from `close` and closing the last
+    /// window ends a run with an icon still on the taskbar, which is an icon nobody
+    /// can click; drop it from `reap_leaving_windows` and the run ends one turn
+    /// later by the other road, with the same result. Let either door read
+    /// `settings_store.loaded().tray_icon` directly and the two can disagree during
+    /// the turn a quit is taking the icon down.
     #[test]
-    fn an_icon_on_the_taskbar_keeps_the_run_alive() {
+    fn an_icon_keeps_the_run_alive_only_while_a_summoned_terminal_is_behind_it() {
+        let standing = fn_body(concat!("    fn ", "tray_keeps_the_run_alive("));
+        assert!(
+            standing.contains("self.tray_is_standing()"),
+            "residency no longer asks whether there is an icon, so a reader who \
+             turned the row off gets a program that stays anyway:\n{standing}"
+        );
+        assert!(
+            standing.contains("app.quake.window().is_some()"),
+            "an icon alone keeps the run alive, which is the state \
+             scripts/release/smoke.ps1 gate 6 hung on at 780fb99: a door onto an \
+             empty room:\n{standing}"
+        );
+        let icon = fn_body(concat!("    fn ", "tray_is_standing("));
+        assert!(
+            icon.contains("app.tray.is_some()"),
+            "the question is answered from the setting rather than from the icon, \
+             so the two doors can disagree while a quit is taking it down:\n{icon}"
+        );
         let shut = fn_body(concat!("    fn ", "close("));
         assert!(
-            shut.contains("&& !self.tray_is_standing()"),
-            "closing the last window ends the run even with an icon standing, \
-             which leaves an icon nobody can click:\n{shut}"
+            shut.contains("&& !self.tray_keeps_the_run_alive()"),
+            "closing the last window ends the run even with a summoned terminal \
+             behind a standing icon, which leaves an icon nobody can click:\n{shut}"
         );
         let reap = fn_body(concat!("    fn ", "reap_leaving_windows("));
         assert!(
-            reap.contains("self.windows.is_empty() && self.tray_is_standing()"),
+            reap.contains("self.windows.is_empty() && self.tray_keeps_the_run_alive()"),
             "an empty registry ends the run by the other road, so the icon only \
              delays the exit by a turn:\n{reap}"
         );
-        let standing = fn_body(concat!("    fn ", "tray_is_standing("));
-        assert!(
-            standing.contains("app.tray.is_some()"),
-            "the question is answered from the setting rather than from the icon, \
-             so the two doors can disagree while a quit is taking it down:\n{standing}"
-        );
-        // **And a quit takes it down**, which is what stops the icon protecting
+        // **And a quit takes the icon down**, which is what stops it protecting
         // the run it is a door to. Without this the assertions above would be
         // satisfied by a program that can never finish quitting.
         let begin = fn_body(concat!("    fn ", "begin_quit_if_asked("));
@@ -96635,6 +96742,53 @@ mod floated_page_tests {
         assert!(
             spend.contains("app.quit_requested = true"),
             "the icon quits by some road other than the quit chord's own:\n{spend}"
+        );
+    }
+
+    /// RED (§7.54c, user ruling 2026-09-03) — **the three cases the ruling names,
+    /// written out.**
+    ///
+    /// The test above pins that both doors read the rule and that the rule is
+    /// assembled from the right two facts; this one is the rule itself, so that
+    /// the answer to each case is a line somebody can read rather than something
+    /// inferred from a conjunction.
+    ///
+    /// - **No summoned terminal, icon up** — closing the last visible window ends
+    ///   the run. This is `scripts/release/smoke.ps1` gate 6's case, and the one
+    ///   that hung CI at 780fb99.
+    /// - **A summoned terminal hidden behind its chord, icon up** — the run stays.
+    ///   That window is exactly what the icon is a door onto.
+    /// - **Icon off** — the run ends either way. A reader who turned the row off
+    ///   asked for a program that leaves when its windows do, and a hidden summon
+    ///   is not a reason to overrule them: with no icon there is nothing on any
+    ///   screen to say the program is still there, which is §7.54's own refusal.
+    ///
+    /// MUTATIONS: `icon_is_up || a_summon_exists` and case three keeps a run alive
+    /// that nothing on the screen accounts for. `icon_is_up` alone and case one
+    /// hangs, which is CI's own failure. `a_summon_exists` alone and case three's
+    /// second row keeps a run the reader switched residency off for. `true` and
+    /// the program never exits at all.
+    #[test]
+    fn a_run_outlives_its_last_visible_window_only_with_an_icon_and_a_summon() {
+        assert!(
+            !a_run_worth_keeping(true, false),
+            "an icon with nothing behind it kept the run alive, which is the \
+             hang scripts/release/smoke.ps1 gate 6 reported as `the window did \
+             not close when it was asked to`"
+        );
+        assert!(
+            a_run_worth_keeping(true, true),
+            "a reader with a summoned terminal one chord away lost it to the \
+             close of an unrelated window"
+        );
+        assert!(
+            !a_run_worth_keeping(false, false),
+            "a run with no icon and no summon outlived its last window"
+        );
+        assert!(
+            !a_run_worth_keeping(false, true),
+            "residency the reader switched off was kept anyway, on the strength \
+             of a window nobody can see and no icon accounts for"
         );
     }
 

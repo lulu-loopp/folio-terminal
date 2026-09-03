@@ -4629,7 +4629,7 @@ impl SettingsValues {
             always_on_top: false,
             quake_height: bt_persist::DEFAULT_QUAKE_HEIGHT,
             quake_width: bt_persist::DEFAULT_QUAKE_WIDTH,
-            quake_dismiss_on_blur: true,
+            quake_dismiss_on_blur: bt_persist::DEFAULT_QUAKE_DISMISS_ON_BLUR,
             quake_hotkey_taken: false,
             tray_icon: true,
             // Both capabilities present, for `profile_available`'s reason: a
