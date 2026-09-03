@@ -2616,6 +2616,18 @@ mod tests {
             vec!["图片/日落.png".to_owned()],
             "one candidate, opened after the full-width colon and not at 路"
         );
+        // §7.30 ⑩ (user report 2026-09-03, on next29): the **half-width** colon a Chinese writer
+        // types on an ASCII keyboard introduces the name every bit as much. A colon binds leftward
+        // to what it made absolute or schemed, and a drive, a scheme and a host are all spelled in
+        // ASCII — so a colon with another script in front of it made nothing and closes nothing.
+        assert_eq!(
+            detect_relative_image_path_candidates("路径:图片/日落.png")
+                .into_iter()
+                .map(|candidate| candidate.path)
+                .collect::<Vec<_>>(),
+            vec!["图片/日落.png".to_owned()],
+            "the sentence's colon is not the port colon of `host:8080/img/x.png`"
+        );
         // §7.30, and it costs this scan nothing because the allowlist is a **parameter** of it: a
         // half-width separator with a word of another script glued onto it is a seam, and the
         // shorter reading is the one whose name ends in an extension a picture may be found under.

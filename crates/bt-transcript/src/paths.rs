@@ -471,21 +471,43 @@ pub fn is_relative_reference(candidate: &str) -> bool {
 ///
 /// An anchored reference declares where it begins — `./` and `../` are marks, not prose. A bare one
 /// declares nothing, so the character class must speak for it: the candidate is a run of path
-/// characters and nothing else, and the character before it is not `:`.
+/// characters and nothing else, and no **binding** colon stands in front of it.
 ///
 /// Both halves are what keep a bare reference out of a URL without anyone sniffing for URLs. The
 /// run rule is why `路径：local-images/sunset.svg` is read as the reference after the colon rather
 /// than as one long candidate starting at `路` — and why `x(dir/a.png` is not read from `x`. The
-/// preceding-`:` rule is why `https://host:8080/img/x.png` offers nothing: `//host` opens with a
+/// binding-colon rule is why `https://host:8080/img/x.png` offers nothing: `//host` opens with a
 /// separator, and the `8080/img/x.png` behind the port colon would otherwise be a perfectly
 /// well-formed relative name. A colon binds leftward; what follows it belongs to whatever the colon
 /// already made absolute or schemed.
 fn bare_candidate_opens_at(text: &str, start: usize, candidate: &str) -> bool {
-    candidate.chars().all(is_path_tail_char)
-        && text[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|character| character != ':')
+    candidate.chars().all(is_path_tail_char) && !a_binding_colon_stands_before(text, start)
+}
+
+/// Whether the text behind `start` ends in a colon that has **made something absolute or schemed**
+/// — §7.30 (user report 2026-09-03, on next29).
+///
+/// The colon that closes a bare opening is the drive's, the scheme's or the host's, and a drive
+/// letter, a scheme ([RFC 3986] `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`) and a host are
+/// **spelled in ASCII, every one of them**. So a colon with another script in front of it has made
+/// nothing absolute and nothing schemed: it is the sentence's punctuation, and the name behind it
+/// opens like any other.
+///
+/// This is [`prose_seam_ends`] read from the other side, and it is the same single character-class
+/// transition. A seam is an ASCII separator with a non-ASCII character glued **after** it, which
+/// says the name ended there; this is an ASCII separator with a non-ASCII character glued
+/// **before** it, which says the name may begin there. `早就在:dist\\folio.exe` and
+/// `docs/a.md,这里` are one person's habit seen from its two ends — half-width punctuation,
+/// no space after it — and it was only ever read from one of them.
+///
+/// **A colon with nothing in front of it stays binding.** Absence of a witness is not a witness,
+/// and a bare reference is admitted on evidence throughout this scan (a separator it carries, an
+/// anchor it opens with) rather than on the lack of it.
+///
+/// [RFC 3986]: https://www.rfc-editor.org/rfc/rfc3986#section-3.1
+fn a_binding_colon_stands_before(text: &str, start: usize) -> bool {
+    let mut behind = text[..start].chars().rev();
+    behind.next() == Some(':') && behind.next().is_none_or(|character| character.is_ascii())
 }
 
 /// A `.` or `..` component followed by a separator, and nothing else.
@@ -3573,6 +3595,76 @@ mod tests {
             linked(&whole, "见 D:\\x\\a(1", None),
             [("D:\\x\\a(1", "file:///D:/x/a%281".to_owned())]
         );
+    }
+
+    /// §7.30, boundary table row 54 (user report 2026-09-03, on next29): **a colon another script
+    /// stands in front of has made nothing absolute or schemed**, so the name behind it opens like
+    /// any other bare reference.
+    ///
+    /// The line that proved it is an agent's, printed full-screen into a pane standing in the
+    /// directory it names: `早就在:dist\\folio-next29.exe(73.9MB,…)`. Every other rule on this
+    /// line already worked — the opening bracket seams (row 50), the bold run is not part of the
+    /// text a line is recognized from — and the reference still went dark, because
+    /// [`bare_candidate_opens_at`] refuses any opening a colon stands in front of.
+    ///
+    /// That refusal is the mirror of the seam and it was written with only one side of the
+    /// transition read. A colon binds leftward to what it made absolute or schemed — a drive
+    /// letter, a scheme, a host — and **every one of those is spelled in ASCII**. A colon with
+    /// another script in front of it has made nothing: it is the sentence's punctuation, exactly as
+    /// the separator in `docs/a.md,这里` is, and the only difference is which side of it the name
+    /// is on.
+    #[test]
+    fn a_colon_behind_another_script_is_prose_and_not_a_scheme() {
+        let cwd = Some("D:\\case");
+        // The user's line, whole, with the half-width colon a Chinese writer types on an ASCII
+        // keyboard. The bracket's seam is the only reading (`(` is not a path character), and the
+        // colon in front of `dist` is the sentence's.
+        let printed = "● 好了,早就在:dist\\folio-next29.exe(73.9MB,--version 报 0.1.1 (c11b72e1f0),CI 全绿)。直接开它验:";
+        assert_eq!(spans(printed), ["dist\\folio-next29.exe"]);
+        assert_eq!(
+            linked_on_a_full_disk(cwd, printed),
+            [(
+                "dist\\folio-next29.exe",
+                "file:///D:/case/dist/folio-next29.exe".to_owned()
+            )]
+        );
+        // The full-width twin reads the same name: the colon's width was never the question, the
+        // script of the character in front of it is.
+        assert_eq!(
+            spans("早就在：dist\\folio-next29.exe(73.9MB"),
+            ["dist\\folio-next29.exe"]
+        );
+        // Every script, and the image scan that shares this lexer.
+        for line in [
+            "路径:local-images/日落.png",
+            "パス:local-images/日落.png",
+            "경로:local-images/日落.png",
+        ] {
+            assert_eq!(
+                spans(line),
+                ["local-images/日落.png"],
+                "{line} opens behind its own sentence's colon"
+            );
+        }
+        // What the colon still refuses, and why the ASCII half of the transition is load-bearing:
+        // a scheme, a host and a port are ASCII, so a colon with ASCII in front of it binds
+        // leftward exactly as it always did.
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "https://host:8080/img/x.png"),
+            []
+        );
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "node:internal/modules/cjs/loader:123:4"),
+            []
+        );
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "webpack://app/src/main.ts:7:2"),
+            []
+        );
+        // No witness is not a witness: a colon with nothing in front of it has proved nothing
+        // about the script it belongs to, and this line's discipline is that a bare reference
+        // opens on evidence rather than on the absence of it.
+        assert!(spans(":8080/img/x.png").is_empty());
     }
 
     /// §7.30, boundary table row 52 (user ruling 2026-08-28, evening): **a reading must end on a
