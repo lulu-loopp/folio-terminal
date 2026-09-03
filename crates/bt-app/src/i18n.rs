@@ -5635,17 +5635,27 @@ fn shortcut_take_it_from_in(lang: Lang, title: &str) -> String {
 /// An exit code of zero is **not** printed. "It worked" is the ordinary case
 /// and a column that said so on nine rows out of ten would be a column the eye
 /// stops reading, which is exactly when it would miss the tenth.
+///
+/// **A command with no `D` yet says so first** (DESIGN.md §7.55 ⑨), in the
+/// rail's own words — [`rail_glance_running`], which is where this product
+/// already had a phrase for it. Saying it *first* is the point: a running
+/// command is the one row on this list whose two other facts are both missing —
+/// no exit code, and no duration, because there is no end to measure to — so a
+/// row that only said which pane it was in would look like a row whose command
+/// had simply left no trace.
 #[must_use]
 pub fn palette_command_hint(
+    running: bool,
     exit_code: Option<i32>,
     duration: Option<std::time::Duration>,
     pane: &str,
 ) -> String {
-    palette_command_hint_in(current(), exit_code, duration, pane)
+    palette_command_hint_in(current(), running, exit_code, duration, pane)
 }
 
 fn palette_command_hint_in(
     lang: Lang,
+    running: bool,
     exit_code: Option<i32>,
     duration: Option<std::time::Duration>,
     pane: &str,
@@ -5663,7 +5673,11 @@ fn palette_command_hint_in(
     if !pane.is_empty() {
         parts.push(pane.to_owned());
     }
-    parts.join(" · ")
+    let said = parts.join(" · ");
+    if running {
+        return rail_glance_running_in(lang, &said);
+    }
+    said
 }
 
 /// How long a command took, in the coarsest unit that still says something.
@@ -6401,6 +6415,57 @@ fn move_refusal_notice_in(lang: Lang, said: &str, pane_is_now_a_tab: bool) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PIN — **a command that has not ended says so, in both languages, in the
+    /// words the rail already uses** (DESIGN.md §7.55 ⑨).
+    ///
+    /// A running row is the one row on the `Commands` list whose other two facts
+    /// are both absent by construction: no exit code, and no duration, because
+    /// `duration()` needs both ends. Without this the row reads as a command
+    /// that ran and left nothing behind, and the reader has no way to tell the
+    /// live one from the forgotten one.
+    ///
+    /// MUTATIONS:
+    /// (1) drop the wrap — the first two assertions go red;
+    /// (2) invent a second phrase here instead of calling the rail's — the
+    ///     `rail_glance_running` comparison goes red, and the product would say
+    ///     two different things about one state;
+    /// (3) wrap the finished row too — the last assertion goes red.
+    #[test]
+    fn a_running_command_says_so_before_it_says_anything_else() {
+        for lang in [Lang::English, Lang::Chinese] {
+            // The word this state is called, taken out of the rail's own phrase
+            // rather than written a second time here.
+            let word = rail_glance_running_in(lang, "x")
+                .strip_suffix(" · x")
+                .expect("the rail joins its own word to the body with the house separator")
+                .to_owned();
+
+            let live = palette_command_hint_in(lang, true, None, None, "build");
+            assert_eq!(
+                live,
+                rail_glance_running_in(lang, "build"),
+                "the palette and the rail say one thing about one state"
+            );
+            assert!(
+                live.starts_with(&word) && live.ends_with("build"),
+                "and it is said before the pane, not after it: {live}"
+            );
+
+            // A finished row keeps the three facts it always had, in their old
+            // order, and says nothing about running.
+            let spent = std::time::Duration::from_millis(120);
+            let done = palette_command_hint_in(lang, false, Some(1), Some(spent), "build");
+            assert!(
+                !done.contains(&word),
+                "a command that ended is not running: {done}"
+            );
+            assert!(
+                done.ends_with("build") && done.contains("120ms"),
+                "and it still reports what it always did: {done}"
+            );
+        }
+    }
 
     /// PIN — `System` resolves against the Windows UI language, and every
     /// spelling of Chinese is Chinese.

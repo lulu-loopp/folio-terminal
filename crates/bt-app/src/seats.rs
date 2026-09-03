@@ -16094,6 +16094,34 @@ pub fn push_corner_tag(
     });
 }
 
+/// **One seat's whole rectangle in physical pixels** — head, body and border
+/// box together — or `None` when that seat is not standing as a full pane.
+///
+/// The same four numbers [`search_capsule_host`] and [`pane_chevron_box`] read,
+/// asked without their second question: those two want the placement's *kind* as
+/// well as its box and so keep the placement itself, while a caller that only
+/// wants "where is this pane" has no business knowing that a seat has a kind at
+/// all. `device_rect` is `None` for a seat the solver has published no box for,
+/// which is the honest answer for a collapsed one — a ring around a pane that is
+/// not on screen is a ring around nothing.
+///
+/// **The whole box and not the body**, on [`search_capsule_host`]'s own
+/// argument: the head is part of the pane, and a rectangle that stopped under it
+/// would be a picture of the body pretending to be a picture of the pane.
+#[must_use]
+pub fn pane_rect(layout: &SeatLayout, seat: SeatId) -> Option<[f32; 4]> {
+    let placement = layout.rects.iter().find(|placement| {
+        placement.id == seat && matches!(placement.presentation, Presentation::Full)
+    })?;
+    let device = placement.device_rect?;
+    Some([
+        device.left as f32,
+        device.top as f32,
+        device.right as f32,
+        device.bottom as f32,
+    ])
+}
+
 /// The border box of one named files column, or `None` when it is not a full
 /// column.
 #[must_use]
