@@ -6677,6 +6677,55 @@ mod tests {
         }
     }
 
+    /// PIN (user report 2026-09-04) — the §7.1.5k ② gate ② relaxation seen from the glass: a
+    /// reference cut inside an agent's **bullet paragraph**, whose continuation stands at the
+    /// paragraph's hanging indent rather than at column 0, lights up whole under the pointer.
+    ///
+    /// It is here as well as in `bt-transcript` because this is the layer that consumes the two
+    /// halves: [`claim_cells`] maps the lower half's byte range onto cells and
+    /// [`ViewportFrame::rejoined_by_record`] walks the seam between the rows. Neither reads a
+    /// column, and this is the case that would have caught either of them if one did — the lower
+    /// half now opens at column 2.
+    ///
+    /// RED before the ruling: recognition refused the pair, so both rows stayed unlinked.
+    #[test]
+    fn a_reference_cut_inside_a_hanging_indent_lights_up_whole_on_hover() {
+        const COLUMNS: usize = 30;
+        // (row text, does the terminal wrap this row, which columns are the reference).
+        let rows = [
+            ("> ok D:\\src\\deep\\name-abcdefg.", false, 5..30),
+            ("  rs done                     ", false, 2..4),
+        ];
+        let (mut frame, _) = live_frame_of_paths(
+            rows.iter()
+                .map(|(text, continues, _)| CapturedRow::plain(text, *continues))
+                .collect(),
+            verified(&["D:\\src\\deep\\name-abcdefg.rs"]),
+        );
+
+        let hit = frame
+            .hyperlink_at(1, 2)
+            .expect("the continuation at the hanging indent is a link");
+        assert_eq!(hit.uri, "file:///D:/src/deep/name-abcdefg.rs");
+        assert_eq!(
+            frame.hyperlink_at(0, 6).unwrap(),
+            hit,
+            "the upper half is the same reference"
+        );
+
+        assert!(frame.underline_hyperlink(&hit));
+        for (row, (_, _, reference)) in rows.iter().enumerate() {
+            for column in 0..COLUMNS {
+                assert_eq!(
+                    solid_at(&frame, row, column),
+                    reference.contains(&column),
+                    "row {row}, column {column}: the promise covers the reference and neither the \
+                     bullet's indent in front of it nor the prose behind it"
+                );
+            }
+        }
+    }
+
     /// §7.1.5k ①, the provenance dimension (scenario 62): **a DEC soft wrap is not an application
     /// newline**, so a reference that crosses one has not been cut by anybody and the gate must
     /// never see it.

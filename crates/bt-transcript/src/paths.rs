@@ -639,6 +639,17 @@ pub fn is_path_terminator_char(character: char) -> bool {
     character.is_whitespace() || is_closing_delimiter(character) || character == '`'
 }
 
+/// Where a row's ink starts: the byte offset of its first non-blank character, and the visual
+/// column that character stands in.
+///
+/// The column is measured through the product's one cell-width oracle rather than by counting
+/// characters, because the only use a column number has here is comparing two rows' openings and a
+/// row is a run of cells. A row with no ink at all has no opening to compare.
+fn first_ink(text: &str) -> Option<(usize, usize)> {
+    let start = text.find(|character: char| !character.is_whitespace())?;
+    Some((start, bt_unicode::text_width(&text[..start])))
+}
+
 /// End of the unquoted token starting at `start` (a byte offset on a character boundary).
 fn token_end(text: &str, start: usize) -> usize {
     text[start..]
@@ -1482,9 +1493,15 @@ impl PrintedPathLinks {
     ///
     /// 1. the upper half reaches its physical line's last visual cell — otherwise the application
     ///    had room and chose to stop, which is not a cut;
-    /// 2. the lower half opens at visual column 0. *Not* "at the same indent as the line above":
-    ///    two stack frames, two diagnostics and two directory entries all share an indent, and a
-    ///    shared indent is what peer lines look like rather than what a wrap looks like;
+    /// 2. the lower half opens at visual column 0, **or strictly deeper than the upper half's own
+    ///    indent**. *Not* "at the same indent as the line above": two stack frames, two diagnostics
+    ///    and two directory entries all share an indent, and a shared indent is what peer lines look
+    ///    like rather than what a wrap looks like. A **hanging** indent is the opposite picture
+    ///    (2026-09-04): an agent's bullet paragraph opens its first row with `●` at column 0 and
+    ///    aligns every continuation under the bullet's text, so the continuation stands *deeper*
+    ///    than the row it continues, which no pair of peers ever does. A row's own indent is the
+    ///    visual width of its leading blanks, so a non-blank opening mark like `●` is ink and
+    ///    counts as content;
     /// 3. the joined text, handed back to **this same lexer**, is exactly one candidate covering
     ///    all of it. Not "contains a candidate" — a query string, a tail of prose or a second
     ///    reference would then be silently dropped and the promise would cover text it did not
@@ -1519,6 +1536,22 @@ impl PrintedPathLinks {
         let head = reaching.pop().filter(|_| reaching.is_empty())?;
         let upper_tail = upper.get(head.byte_start..upper_edge.byte_end)?;
 
+        // Gate 2, asked first because it is the cheapest and it decides where the lower half even
+        // begins. A continuation opens either at visual column 0 or **strictly deeper than the
+        // upper half's own indent**; a shared indent — equal and non-zero — is refused as it always
+        // was, and so is an opening shallower than the line above.
+        //
+        // The two shapes this tells apart (user report 2026-09-04): peer lines are laid out by one
+        // rule and therefore open at the *same* column, while a hanging indent belongs to a single
+        // paragraph whose continuations are pushed past the marker its first row carries. `●` is
+        // ink, not blank, so that first row's indent is 0 and the two-space continuation under it is
+        // deeper.
+        let (lower_start, lower_column) = first_ink(lower)?;
+        let (_, upper_indent) = first_ink(upper)?;
+        if lower_column != 0 && lower_column <= upper_indent {
+            return None;
+        }
+
         // Gate 5, asked before the disk so a refusal costs nothing: a half that already names a
         // file of its own is that file's reference and not the front of somebody else's. **Any of
         // its forms counts** — a seam that has already earned the upper half a link is that link's
@@ -1529,15 +1562,13 @@ impl PrintedPathLinks {
         }) {
             return None;
         }
-        if self
-            .candidates_in(lower)
-            .into_iter()
-            .any(|candidate| candidate.byte_start == 0 && self.is_verified(&candidate, lower))
-        {
+        if self.candidates_in(lower).into_iter().any(|candidate| {
+            candidate.byte_start == lower_start && self.is_verified(&candidate, lower)
+        }) {
             return None;
         }
 
-        // Gate 2. The lower line's first cell is the continuation, so its first token opens at 0.
+        // The readings gate 2 admitted, longest first.
         //
         // §7.30 coexisting with the rejoin (user note 2026-08-28): the continuation may carry a
         // seam of its own — `5.exe(反斜杠)`, an agent's prose glued to the tail of the name it just
@@ -1547,11 +1578,18 @@ impl PrintedPathLinks {
         // they are there. That ordering is what keeps an opening bracket a seam and not a
         // terminator across a wrap too: `a(1` + `).txt` is asked whole before `a` is asked at all.
         // When the token carries no seam this is the whole of it, byte for byte as before.
-        let raw_lower_end = token_end(lower, 0);
-        let readings = std::iter::once(raw_lower_end)
-            .chain(prose_seam_ends(&lower[..raw_lower_end], raw_lower_end));
+        let raw_lower_end = token_end(lower, lower_start);
+        let token = &lower[lower_start..raw_lower_end];
+        let readings = std::iter::once(raw_lower_end).chain(
+            prose_seam_ends(token, token.len())
+                .into_iter()
+                .map(|end| lower_start + end),
+        );
         for lower_end in readings {
-            let Some(lower_head) = lower.get(..lower_end).filter(|head| !head.is_empty()) else {
+            let Some(lower_head) = lower
+                .get(lower_start..lower_end)
+                .filter(|head| !head.is_empty())
+            else {
                 continue;
             };
 
@@ -1595,7 +1633,7 @@ impl PrintedPathLinks {
                     byte_end: upper_edge.byte_end,
                 },
                 lower: HyperlinkRange {
-                    byte_start: 0,
+                    byte_start: lower_start,
                     byte_end: lower_end,
                 },
                 target,
@@ -2119,6 +2157,124 @@ mod tests {
         assert_eq!(
             linked(&links, "fix/main.rs", None),
             [("fix/main.rs", "file:///D:/case/fix/main.rs".to_owned())]
+        );
+    }
+
+    /// A scratch directory of this test's own, removed when the test that made it ends.
+    ///
+    /// `std::env::temp_dir` and the process id rather than a crate: this workspace has no tempfile
+    /// dependency, and the one thing the hanging-indent cases want from a real disk is that the
+    /// name the two halves spell between them is a file somebody could actually open.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn named(name: &str) -> Self {
+            let directory = std::env::temp_dir()
+                .join(format!("folio-rejoin-indent-{}-{name}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("a scratch directory");
+            Self(directory)
+        }
+
+        fn holding(&self, name: &str) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, b"<!doctype html>").expect("a scratch file");
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The ledger a worker comes back with after asking **this machine's disk** about every name
+    /// the lexer offered it — the ordinary fixture, told the truth rather than a table.
+    fn disk_ledger(working_directory: &Path, asked: &[&str]) -> PrintedPathLinks {
+        PrintedPathLinks::new(
+            Some(working_directory.to_path_buf()),
+            asked
+                .iter()
+                .map(|name| (PathBuf::from(name), Path::new(name).exists()))
+                .collect(),
+        )
+    }
+
+    /// The two halves of the user's 2026-09-04 line, as an agent's bullet paragraph prints them.
+    fn bullet_wrap(head: &str, tail: &str, indent: &str) -> (String, String) {
+        (
+            format!("● 城池占领 v2 交了(提交 a9352d3,{head}"),
+            format!("{indent}{tail},浏览器直接打开)。截图里看:…"),
+        )
+    }
+
+    /// PIN (user report 2026-09-04, Claude Code running inside Folio) — **a hanging indent is not
+    /// a shared indent**, and §7.1.5k ② gate ② now says so.
+    ///
+    /// The picture: a bullet paragraph whose first row opens with `●` at visual column 0 and whose
+    /// continuation rows align under the bullet's text at column 2. The application cut
+    /// `…\prototypes\conquest.html` inside the name, the file exists, and every other gate passes —
+    /// yet the whole reference went undrawn because gate ② demanded column 0 of the lower half.
+    ///
+    /// The distinction the gate is actually about is untouched: peer lines (stack frames,
+    /// diagnostics, directory entries) share **the same** indent, while a continuation opens
+    /// **strictly deeper** than the line it continues. The `●` is ink and not blank, so this
+    /// paragraph's upper indent is 0 and 2 is deeper.
+    ///
+    /// §7.30 rides along on the shifted opening: the continuation's token is
+    /// `t.html,浏览器直接打开`, its seam sits at the comma before `浏`, and the readings are tried
+    /// longest first — so the whole form is asked about (and denied by the disk) before `t.html`
+    /// wins. RED before this slice: `None`.
+    #[test]
+    fn a_bullet_paragraphs_hanging_indent_is_a_wrap_and_not_a_peer_row() {
+        let scratch = Scratch::named("bullet");
+        let target = scratch.holding("conquest.html");
+        let printed = target.to_string_lossy().into_owned();
+        let split = printed.len() - "t.html".len();
+        let (head, tail) = printed.split_at(split);
+        let long_form = format!("{printed},浏览器直接打开");
+        let links = disk_ledger(&scratch.0, &[&printed, &long_form]);
+
+        let (upper, lower) = bullet_wrap(head, tail, "  ");
+        assert_eq!(
+            rejoin(&links, &upper, &lower),
+            Some((head, "t.html", local_path_to_file_uri(&target))),
+            "the continuation opens strictly deeper than the bullet row's own indent, which is \
+             what a wrap looks like"
+        );
+    }
+
+    /// The other side of the 2026-09-04 ruling, on the same disk fixture: **equal is still a peer
+    /// row, and shallower is still not a continuation.**
+    ///
+    /// Scenario 58's synthetic pair already pinned the equal case; this one pins it on the shape
+    /// that motivated the relaxation, so the relaxation cannot quietly grow into "any indent at
+    /// all". The joined name exists, so gate ② is the only gate that can be answering.
+    #[test]
+    fn a_shared_or_shallower_indent_still_refuses_the_rejoin() {
+        let scratch = Scratch::named("peers");
+        let target = scratch.holding("conquest.html");
+        let printed = target.to_string_lossy().into_owned();
+        let split = printed.len() - "t.html".len();
+        let (head, tail) = printed.split_at(split);
+        let long_form = format!("{printed},浏览器直接打开");
+        let links = disk_ledger(&scratch.0, &[&printed, &long_form]);
+
+        let (upper, lower) = bullet_wrap(head, tail, "    ");
+        let shared = (format!("    {upper}"), lower);
+        assert_eq!(
+            rejoin(&links, &shared.0, &shared.1),
+            None,
+            "four spaces under four spaces is what two peer lines look like"
+        );
+
+        let (upper, lower) = bullet_wrap(head, tail, "   ");
+        let outdented = (format!("      {upper}"), lower);
+        assert_eq!(
+            rejoin(&links, &outdented.0, &outdented.1),
+            None,
+            "a lower half that opens shallower than the line above it is not that line's \
+             continuation either"
         );
     }
 

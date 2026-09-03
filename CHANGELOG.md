@@ -41,6 +41,14 @@ programs running inside it.
 
 ### Fixed
 
+- **A file name an agent wrapped inside its own bullet paragraph went
+  unmarked.** A name cut at the right edge of the window and continued on the
+  next line was only put back together when the continuation began at the very
+  first column. An agent writing a bullet paragraph aligns its continuations
+  under the bullet's text instead, so a real file printed that way was left with
+  no mark on either line. A continuation opening deeper than the line it
+  continues is now read as one, while two lines opening at the same column are
+  still two lines.
 - **A picture pane went on showing the file it first read.** An image opened in a
   pane is now watched on disk like every other kind of file a tab stands on:
   writing a different file over the same name is a change, and so is deleting it
