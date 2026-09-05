@@ -4,50 +4,30 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.2.0-preview (unreleased)
 
-### Changed
-
-- **The summoned terminal lives and dies with Folio.** The notification-area
-  icon is gone, along with the `Keep an icon on the taskbar` row and the
-  residency it decided: closing the last window you can see ends the run, and a
-  summoned terminal hidden behind its key goes with it. It loses nothing by
-  going — what comes back next launch is the new **What comes back** row's
-  answer. Existing `settings.json` files have `tray_icon` taken out of them
-  the first time Folio reads them.
-- **One `×` on the summoned terminal, and it means hide.** The window keeps the
-  gear and one `×`; the minimise and maximise buttons are gone. Pressing the `×`
-  is the summon key pressed again, down to the bit it sets — the window goes
-  away, the keyboard goes back to whatever it came down over, and the tabs,
-  shells and scrollback are all still there at the next press. Minimise used to
-  put the window away without going through that door, which left the next press
-  of the key doing nothing at all. End the session with `exit` in the shell, or
-  by closing the tab.
-- **A settings page of its own.** Everything about the summoned terminal is now
-  under **Settings > Summoned terminal**: the summon key (recorded in place),
-  which profile it opens on, a command to run on the first summon of each run,
-  its height, width and the gap above it, whether it hides when it loses focus,
-  and what comes back. The gear on the summoned terminal's own title bar opens
-  that page; every other window's gear opens General as before. The four rows
-  that used to stand on General have moved here.
-- **The summon's rectangle is decided in one place.** Which display it comes
-  down on, how big it is there, and whether you have arranged it on that display
-  by hand are one question with one answer, whichever door asked for the summon.
+Two surfaces that were not there before — a terminal that comes down on a key
+from anywhere, and one box that searches everything this window knows about —
+and the first release that carries a signature.
 
 ### Added
 
-- **The folder menu remembers where you have been.** The list under a files
-  column's folder button now has a third group, between the folders your shells
-  are standing in and the folder above: the last five folders you pointed a
-  column at, newest first, each marked `recent`. Picking one from the menu,
-  choosing one through `Browse…`, dropping one on a column, walking into one,
-  and starting Folio on one with `--cwd` or `Open Folio here` all count; a shell
-  running `cd` does not, so the list stays the places you meant to go. A folder
-  already offered above keeps its place and picks up the extra note rather than
-  appearing twice. Every window reads the one list, which is kept in
-  `session.json` and is still there after a restart. A folder that is no longer on
-  the disk is greyed rather than removed, and picking it says so where the tree
-  would be.
+- **A terminal on a hotkey.** ``Win+` `` brings a terminal down across the top of
+  whichever screen the pointer is on, over whatever was standing there, and the
+  same key takes it away again and hands the keyboard back to the program it came
+  down over. It is the same Folio — tabs, panes, the files column, the preview,
+  every shortcut — and it keeps its shells and its scrollback between summons. It
+  lives and dies with the run: there is no icon of its own and no process left
+  behind, so closing the last window you can see ends it. The window keeps one
+  `×`, and pressing it is the summon key pressed again. The key is on the
+  Shortcuts page as **Summon the terminal** and can be changed or cleared there.
+- **Settings > Summoned terminal.** A page of its own for the summon key
+  (recorded in place), which profile a new tab opens on, a command to run on the
+  first summon of each run, the window's height and width as a share of the
+  screen, the gap it hangs below the top, whether it hides when the keyboard
+  leaves it — off as it ships — and what comes back. The gear on the summoned
+  terminal's own title bar opens that page; every other window's gear opens
+  General as before.
 - **What comes back (Settings > Summoned terminal).** Three answers for what a
   new run puts back into the summoned terminal: nothing, the tabs and their
   folders, or the tabs, their folders **and** the last command a pinned tab ran
@@ -60,24 +40,102 @@ All notable changes to Folio are recorded here. The format follows
   once each time Folio starts, on the first summon. This is the one thing the
   summoned terminal runs on your behalf, and it runs because you wrote it into
   that row. Empty by default.
-- **Profile and Gap above it (Settings > Summoned terminal).** Which shell a new
-  tab in the summoned terminal starts — the default profile unless you say
-  otherwise — and how far below the top of the screen the window hangs, which
-  was a fixed twelve pixels until now.
+- **Search everything: `Ctrl+Shift+P`.** One box over the top of the window,
+  answering five questions at once and never mixing their answers: what Folio
+  can do, the panes and tabs this window already has open, the commands it has
+  run, the files under the folder its column is standing in, and the settings.
+  Typing narrows all five together, the arrow keys walk them, and `Enter` goes
+  straight to the highlighted row — a pane is raised, a file opens in the
+  preview pane, a setting opens at its own row, and a command still running is
+  pointed at with a ring around the pane it is running in. `Esc`, or a click
+  outside, puts the box away.
+- **The folder menu remembers where you have been.** The list under a files
+  column's folder button now has a third group, between the folders your shells
+  are standing in and the folder above: the last five folders you pointed a
+  column at, newest first, each marked `recent`. Picking one from the menu,
+  choosing one through `Browse…`, dropping one on a column, walking into one,
+  and starting Folio on one with `--cwd` or `Open Folio here` all count; a shell
+  running `cd` does not, so the list stays the places you meant to go. A folder
+  already offered above keeps its place and picks up the extra note rather than
+  appearing twice. Every window reads the one list, which is kept in
+  `session.json` and is still there after a restart. A folder that is no longer on
+  the disk is greyed rather than removed, and picking it says so where the tree
+  would be.
+- **`folio-here.cmd` ships beside `folio.exe`.** One line, `folio.exe --cwd`
+  with the directory it was started in, for a program that opens an external
+  terminal by running a command and gives it no arguments. Visual Studio Code's
+  `terminal.external.windowsExec` is the setting it was written for; Folio
+  cannot be embedded in VS Code's own panel, and this is the other half of that
+  answer.
+
+### Changed
+
+- **The release is signed.** From 0.2.0 the `folio.exe` in the published archive
+  carries a signature made under **Weiyi Shi** with a certificate from
+  Microsoft's Artifact Signing service, countersigned by Microsoft's time
+  stamping service so that it keeps verifying long after the three-day
+  certificate that made it has expired. `conpty.dll` and `OpenConsole.exe` are
+  Microsoft's and keep Microsoft's own signature. SmartScreen can still stop a
+  download until a new signature has a reputation, but **More info** now names
+  the publisher instead of saying there is none.
+- **`settings.json` and `session.json` are read and written forward.** The
+  summoned terminal's rows and the folders the folder menu remembers are new
+  keys; a file written by 0.1.1 is migrated the first time 0.2.0 reads it, and
+  nothing has to be deleted or re-entered.
 
 ### Fixed
 
+- **The summon key no longer types itself.** ``Win+` `` used to leave a
+  `` ` `` sitting at the prompt of the terminal it had just called up, because
+  the window reports every key that is physically down at the moment it takes
+  the keyboard, and that report was being read as somebody typing. A key that
+  was already down when a window took the keyboard is not a key that was pressed
+  at it, and no chord's own characters reach a shell now.
 - **A file path an application wrapped over several indented rows is one link
   again.** When an agent prints a block of indented text holding a single path
   and breaks it at the window's width, the rows are read back as the one file
   they spell between them — as many as eight rows, where only two were ever put
   together before, and at the block's own indent, which used to be read as a
-  column of separate lines. The whole path underlines and opens as one. Rows
-  that really are a column of separate lines are untouched: a listing whose rows
-  are each a file of their own, and any row with other text in front of the
-  path, are left exactly as they were.
+  column of separate lines. A path continued under the text of a bullet, where
+  the second row starts further in than the first, is put back together for the
+  same reason. The whole path underlines and opens as one. Rows that really are a
+  column of separate lines are untouched: a listing whose rows are each a file of
+  their own, and any row with other text in front of the path, are left exactly
+  as they were.
+- **A path after a full-width colon is found.** A line such as
+  `早就在:dist\folio.exe` left the file unmarked, because the colon was read as
+  the one that makes a drive letter or a URL scheme — and nothing before a
+  colon that is spelled outside ASCII can be either. The name after it opens as
+  the name it is.
+- **A path holding an 8.3 short name is one path.** `~` is what Windows builds
+  every short name out of, and it was not among the characters a path is spelled
+  with, so `PROGRA~1\tools\a.txt` was never recognised and a short name inside a
+  wrapped path broke the rejoin. Only a `~` a name opens with is still the
+  home directory it has always been.
 
-## 0.1.1-preview (unreleased)
+### Known issues
+
+- **A new signature has no reputation yet.** SmartScreen can still raise "Windows
+  protected your PC" on the first run of a freshly signed build. **More info**
+  names Weiyi Shi as the publisher and `folio.exe` as the application; **Run
+  anyway** is the way through, and switching SmartScreen off is not.
+- **"Open Folio here" is not on the first page** of the Windows 11 context menu.
+  That page needs a packaged application as well as a signed one, and it is
+  planned for 0.2.1.
+- **Folio cannot be a panel inside Visual Studio Code.** That panel takes a
+  process speaking a protocol, not a terminal; `folio-here.cmd` in the archive
+  makes Folio the external terminal VS Code opens instead.
+- **A window saved on a monitor that enumerates late** comes back on the primary
+  display. The displays are counted once, before the window is made, and a second
+  monitor can take a few seconds to appear after a cold start.
+- **A window was once reported drawing its top half black** after a move to a
+  second monitor, unreproduced. Attach `%APPDATA%\Folio\diagnostics.log` if you
+  hit it.
+- **`.webm` needs the VP9 or AV1 Video Extension** from the Microsoft Store. A
+  stock Windows has neither, and without one there is no still and no playback.
+  The other six containers play on a stock Windows.
+
+## 0.1.1-preview — 2026-09-02
 
 A fixes-and-polish release for 0.1.0-preview. Nothing below changes how anything
 is driven; what changes is what the window tells you, and what it tells the
@@ -213,7 +271,7 @@ programs running inside it.
   stock Windows has neither, and without one there is no still and no playback.
   The other six containers play on a stock Windows.
 
-## 0.1.0-preview (unreleased)
+## 0.1.0-preview — 2026-08-31
 
 The first public build. Everything below is new, so it is grouped by what part of
 the window it belongs to rather than by added and changed. The last two sections

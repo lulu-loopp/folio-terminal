@@ -90,6 +90,12 @@ in them:
 - **Timestamps** on recently closed tabs.
 - **The last five folders you pointed a files column at**, and when you last
   opened each of them.
+- **The last command a pinned tab of the summoned terminal ran** — the line
+  itself, so a command with a token in it puts that token in the file. Only that
+  kind of tab, and only where shell integration is installed to say which line
+  was a command. Settings > Summoned terminal > **What comes back** decides
+  whether it is kept; the other two answers keep no command at all. What is
+  restored is typed at the prompt and never run.
 - **Git branch names** you filtered a commit graph by.
 - **Window geometry, per-monitor DPI, and a monitor identifier.**
 
@@ -186,6 +192,10 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
 - 预览过的**页面标题**。
 - 最近关闭标签的**时间戳**。
 - **你最近用文件列打开过的五个目录**，以及每个目录最后一次打开的时间。
+- **快捷终端中被钉住的标签最后运行过的命令**——存的是那一行本身，命令里带 token，token
+  就在文件里。只有这一种标签会写，且只在装了 shell 整合、有东西说明哪一行是命令时才有。
+  是否保留由 设置 > 快捷终端 > **恢复内容** 决定，另外两个选项一条命令也不
+  存。恢复出来的内容只填在提示符处，不执行。
 - 你在提交图里筛选用的 **git 分支名**。
 - **窗口几何、每显示器 DPI，以及一个显示器标识。**
 

@@ -10,7 +10,8 @@ exactly the picture JPEG is worst at.
 
 ## What every shot has in common
 
-- **1600 × 1000 logical pixels at 200%, so 3200 × 2000 in the file.** The window
+- **1600 × 1000 logical pixels at 200%, so 3200 × 2000 in the file** — every
+  shot but `quake-*`, whose own two lines are below. The window
   is sized to 1600 × 1000 logical and photographed on a 3840 × 2160 display the
   machine already keeps at 200%, and the file is what came off the glass — two
   device pixels to the logical one, nothing resampled. A README is read on a
@@ -26,7 +27,23 @@ exactly the picture JPEG is worst at.
   a throwaway. `scripts/check-machine-paths.ps1` reads text, not pixels — this one
   is on you.
 - **The window is the whole picture.** No desktop, no wallpaper, no taskbar.
-  Include the window's own shadow only if it is a clean edge.
+  Include the window's own shadow only if it is a clean edge. **`quake-*` is the
+  one exception, and it is the exception the rule is for**: the whole subject of
+  the summoned terminal is that it comes down *over* something, so its frame is a
+  rectangle of the screen rather than of a window. What is under it is a window
+  of ours, opened on the same throwaway project for the purpose, so that the
+  picture is of this program and a File Explorer and of nothing else that
+  happened to be on the desk.
+- **`quake-*` is 1920 × 1200 and not 3200 × 2000, and the scale is the same.**
+  It is the one shot framed on the 2880 × 1800 panel rather than the 3840 × 2160
+  one, because the wide panel had a page on it that raises itself over anything
+  put underneath and nothing this rig may do reorders it —
+  `SetWindowPos(HWND_TOPMOST)` on another process's shell window returns true and
+  sets nothing. On the panel that was free, the backdrop's navigation pane holds
+  the first 445 pixels and will not be moved off the screen, so the widest frame
+  that is centred on the summon and clear of that pane is 1990; 1920 × 1200 is
+  that, rounded, and 8:5 like the rest. Still two device pixels to the logical
+  one: a smaller rectangle of desk, not a smaller scale.
 - **Every file goes through `oxipng -o 4 --strip safe` before it is committed.**
   Lossless, and it takes about a fifth off. Doubling the pixels quadrupled what
   every reader has to fetch, so the cheapest bytes are the ones nobody had to
@@ -50,6 +67,10 @@ exactly the picture JPEG is worst at.
 | `preview-web-dark.png` | The same, dark. |
 | `settings-agents-light.png` | The Agents page in Settings, showing the three installer rows for Claude Code, Codex and Copilot CLI with their sentences readable. Leave them switched off — that is what a reader's own machine looks like. |
 | `settings-agents-dark.png` | The same, dark. |
+| `quake-light.png` | The summoned terminal across the top of a screen, with another program filling the screen under it. A rectangle of the desk, not of a window — see the note above. The terminal has run something, so the picture is of a shell and not of an empty prompt. |
+| `quake-dark.png` | The same, dark. |
+| `palette-light.png` | The palette (`Ctrl+Shift+P`) open over a three-column window, with all five of its sections carrying rows: actions, panes and tabs, commands, files and settings. Five is the point of the picture, so a shot missing one of them is the wrong shot. |
+| `palette-dark.png` | The same, dark. |
 
 ## What is committed
 
@@ -73,13 +94,17 @@ can be told from one that was retaken on purpose.
 | `preview-web-dark.png` | 3200 x 2000 | 2026-08-27 | `f9849ed8813c683d5ff94c434527b46de6878d6a2d8503b87f305263c4615810` |
 | `settings-agents-light.png` | 3200 x 2000 | 2026-08-27 | `12a9d1968d7a979f6d8796cf7a8054c68f4a640c916ac6402c0c774b482768bd` |
 | `settings-agents-dark.png` | 3200 x 2000 | 2026-08-27 | `ceba5a7e1f8d3b4040b5fcb4a97cc958102bd03dcfe023b705b316952c2ed01d` |
+| `quake-light.png` | 1920 x 1200 | 2026-09-05 | `aa5096fafe014a4868aa836f503619a88e41fe778a945a80c5063d798bf4257a` |
+| `quake-dark.png` | 1920 x 1200 | 2026-09-05 | `9a1a2f4025da3797a919d387566fd91fe7bc7c37ad83ccb5ea99432e73053307` |
+| `palette-light.png` | 3200 x 2000 | 2026-09-05 | `a79617f8ec4bde9d5f1a4778c44be21f06a973f8015b13ac7aac23f94e9b98d0` |
+| `palette-dark.png` | 3200 x 2000 | 2026-09-05 | `61eafe6499d825d3ab46f125b6049b7482c42575dbe9c89c51d8c2aa5ed13e6a` |
 
-The fourteen come to 2.57 MiB after `oxipng`; `docs/plans/release/large-files.md`
+The eighteen come to 3.26 MiB after `oxipng`; `docs/plans/release/large-files.md`
 carries that number beside everything else a clone has to fetch.
 
 ## What was in front of the camera
 
-The fourteen committed here were taken from `target\release\folio.exe` against a
+The eighteen committed here were taken from `target\release\folio.exe` against a
 throwaway project — `C:\Projects\aurora`, a small library with a five-commit
 history, a README with a table and a display formula in it, a PDF and a page —
 and through an `%APPDATA%` and `%LOCALAPPDATA%` of their own, so the machine's
@@ -87,6 +112,21 @@ real settings, session and profiles were neither read nor written. Each pane is
 a shell profile whose command line runs one command and then leaves an ordinary
 prompt; `-NoProfile` is deliberate, because a machine's own PowerShell profile
 prints a machine's own directories.
+
+**`quake-*` and `palette-*` dot-source the integration script the way
+`terminal-math-*` does**, and for a related reason: the palette's third section
+is every command the window has run, and a command is a command because
+`OSC 133` said where it began and ended. A pane whose profile runs its line
+before the interactive loop has run nothing the palette can name, so those lines
+are submitted at a real prompt — through the clipboard and `Ctrl+V`, which is
+the one key a loaded IME does not take.
+
+**What the summon comes down over is a window of ours.** The desk it is
+photographed on belongs to somebody who is using it, so a File Explorer on the
+same throwaway project is put over the whole panel first and three points under
+the summoned window are checked to belong to it before the shutter opens. A
+picture of this program over whatever happened to be on the screen is not a
+picture anybody can publish.
 
 **`terminal-math-*` is the one whose command is not run by its profile**, and it
 is worth saying why, because the next person to retake it will otherwise take a

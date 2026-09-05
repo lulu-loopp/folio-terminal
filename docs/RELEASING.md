@@ -29,8 +29,9 @@ Azure says may use the certificate profile.
 they arrive from Microsoft's own package already signed by Microsoft; putting our
 signature over theirs would replace a statement Windows already trusts with a
 newer and weaker one. `package.ps1 -Sign` checks that the signature they came
-with is still valid and still time stamped, and signs neither. The four text
-files in the archive carry no signature because no text file can.
+with is still valid and still time stamped, and signs neither. The five text
+files in the archive — the two licences, the notices, the trademark note and
+`folio-here.cmd` — carry no signature because no text file can.
 
 ### One-time preparation
 
