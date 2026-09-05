@@ -341,6 +341,9 @@ pub enum Text {
     // ── the settings dialog ────────────────────────────────────────────────
     CategoryGeneral,
     CategoryAppearance,
+    /// The summoned terminal's own page, which is a page because what it describes is one window
+    /// (§7.54e ⑤, user ruling 2026-09-05).
+    CategorySummonedTerminal,
     CategoryTerminal,
     CategoryRenderedBlocks,
     CategoryShortcuts,
@@ -349,6 +352,7 @@ pub enum Text {
     /// to be unlearned rather than read.
     NavGeneral,
     NavAppearance,
+    NavSummonedTerminal,
     NavTerminal,
     NavRenderedBlocks,
     NavShortcuts,
@@ -2143,22 +2147,34 @@ pub enum Text {
     DescQuakeHotkeyTaken,
     RowQuakeDismiss,
     DescQuakeDismiss,
-    /// The switch for the icon in the notification area, and the sentence that
-    /// says what else it decides — see `bt_persist::SettingsV1::tray_icon` for
-    /// why one row answers two questions.
-    RowTrayIcon,
-    DescTrayIcon,
-    /// The four lines of the icon's own menu.
+    /// The key row and its sentence (§7.54e ⑤). The sentence says where the key is answered from,
+    /// because that is the one fact about this row a reader cannot see: the chord is claimed from
+    /// Windows, so it works while another program has the keyboard.
+    RowQuakeHotkey,
+    DescQuakeHotkey,
+    /// The profile row and its sentence, and the word its first item wears.
+    RowQuakeProfile,
+    DescQuakeProfile,
+    OptionQuakeProfileDefault,
+    /// The startup-command row and its sentence.
     ///
-    /// They are their own strings and not borrowed from the rows that say the
-    /// same verbs elsewhere, because this menu is drawn by Windows and is read by
-    /// somebody who may have no window of this program on the screen: it has to
-    /// name the program as well as the verb, which no row inside the program ever
-    /// has to do.
-    TrayMenuSummon,
-    TrayMenuNewWindow,
-    TrayMenuSettings,
-    TrayMenuQuit,
+    /// **The sentence is where "this is run" is said**, and it is the only sentence in this dialog
+    /// that has to say it. Stated as a fact and not as a warning, on the house rule that a literal
+    /// states and does not editorialise.
+    RowQuakeCommand,
+    DescQuakeCommand,
+    /// The gap row and its sentence (§7.54e ⑤) — the constant next29 wired shut, given a number.
+    RowQuakeTopGap,
+    DescQuakeTopGap,
+    /// The restore row, its sentence, and the three rungs (§7.54e ④).
+    ///
+    /// The third rung's word says **typed**, because that is the whole of what makes it safe to
+    /// ship as the default: what comes back is standing at the prompt, unsubmitted.
+    RowQuakeRestore,
+    DescQuakeRestore,
+    OptionQuakeRestoreNothing,
+    OptionQuakeRestoreFolders,
+    OptionQuakeRestoreFoldersAndCommands,
 }
 
 impl Text {
@@ -2223,11 +2239,13 @@ impl Text {
             // ── the settings dialog ────────────────────────────────────────
             Self::CategoryGeneral => pick(lang, "GENERAL", "常规"),
             Self::CategoryAppearance => pick(lang, "APPEARANCE", "外观"),
+            Self::CategorySummonedTerminal => pick(lang, "SUMMONED TERMINAL", "快捷终端"),
             Self::CategoryTerminal => pick(lang, "TERMINAL", "终端"),
             Self::CategoryRenderedBlocks => pick(lang, "RENDERED BLOCKS", "渲染块"),
             Self::CategoryShortcuts => pick(lang, "SHORTCUTS", "快捷键"),
             Self::NavGeneral => pick(lang, "General", "常规"),
             Self::NavAppearance => pick(lang, "Appearance", "外观"),
+            Self::NavSummonedTerminal => pick(lang, "Summoned terminal", "快捷终端"),
             Self::NavTerminal => pick(lang, "Terminal", "终端"),
             Self::NavRenderedBlocks => pick(lang, "Rendered blocks", "渲染块"),
             Self::NavShortcuts => pick(lang, "Shortcuts", "快捷键"),
@@ -3857,16 +3875,44 @@ impl Text {
                 "Another program is already using the key that summons it.",
                 "唤出它的按键已被另一个程序占用。",
             ),
-            Self::RowTrayIcon => pick(lang, "Keep an icon on the taskbar", "在任务栏保留一个图标"),
-            Self::DescTrayIcon => pick(
+            Self::RowQuakeHotkey => pick(lang, "Summon key", "唤出按键"),
+            Self::DescQuakeHotkey => pick(
                 lang,
-                "An icon in the notification area summons the terminal and opens a menu. While it is there, closing the last window leaves the program running behind it.",
-                "通知区里的图标可以唤出终端，也可以打开一个菜单。它在的时候，关掉最后一扇窗不会结束程序。",
+                "The key that calls the terminal down. It is claimed from Windows, so it works while another program has the keyboard.",
+                "把终端叫下来的按键。它向 Windows 认领，所以在别的程序拿着键盘时也生效。",
             ),
-            Self::TrayMenuSummon => pick(lang, "Summon the terminal", "唤出终端"),
-            Self::TrayMenuNewWindow => pick(lang, "New window", "新建窗口"),
-            Self::TrayMenuSettings => pick(lang, "Settings", "设置"),
-            Self::TrayMenuQuit => pick(lang, "Quit Folio", "退出 Folio"),
+            Self::RowQuakeProfile => pick(lang, "Profile", "使用的 profile"),
+            Self::DescQuakeProfile => pick(
+                lang,
+                "Which shell a new tab in the summoned terminal starts.",
+                "唤出的终端里新开的 tab 用哪个 shell 启动。",
+            ),
+            Self::OptionQuakeProfileDefault => pick(lang, "Default profile", "默认 profile"),
+            Self::RowQuakeCommand => pick(lang, "Command on first summon", "首次唤出时运行"),
+            Self::DescQuakeCommand => pick(
+                lang,
+                "This command is run once each time Folio starts, on the first summon. Nothing else the summoned terminal restores is run.",
+                "每次启动 Folio 后，第一次唤出时运行这条命令一次。唤出的终端恢复的其它内容都不会被运行。",
+            ),
+            Self::RowQuakeTopGap => pick(lang, "Gap above it", "顶端留距"),
+            Self::DescQuakeTopGap => pick(
+                lang,
+                "How far below the top of that screen it hangs, in pixels.",
+                "它从那块屏幕的顶端往下留多少像素。",
+            ),
+            Self::RowQuakeRestore => pick(lang, "What comes back", "恢复内容"),
+            Self::DescQuakeRestore => pick(
+                lang,
+                "What a new run of Folio puts back into the summoned terminal. A restored command is typed at the prompt and not run, and only a shell that reports its commands has one to restore.",
+                "重新启动 Folio 后，唤出的终端里放回什么。恢复的命令只填在提示符后，不会运行；只有会上报命令的 shell 才有命令可恢复。",
+            ),
+            Self::OptionQuakeRestoreNothing => pick(lang, "Nothing", "不恢复"),
+            Self::OptionQuakeRestoreFolders => pick(lang, "Tabs and folders", "tab 与目录"),
+            Self::OptionQuakeRestoreFoldersAndCommands => pick(
+                lang,
+                "Tabs, folders, and a pinned tab's last command typed at its prompt",
+                "tab、目录，以及 pin 的 tab 上一条命令填在提示符后",
+            ),
             Self::RowQuakeDismiss => pick(lang, "Hide it when it loses focus", "失去焦点时收起"),
             Self::DescQuakeDismiss => pick(
                 lang,
@@ -3888,7 +3934,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 557] = [
+    pub const ALL: [Self; 567] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3912,11 +3958,13 @@ impl Text {
         Self::PlaceholderSeatNotice,
         Self::CategoryGeneral,
         Self::CategoryAppearance,
+        Self::CategorySummonedTerminal,
         Self::CategoryTerminal,
         Self::CategoryRenderedBlocks,
         Self::CategoryShortcuts,
         Self::NavGeneral,
         Self::NavAppearance,
+        Self::NavSummonedTerminal,
         Self::NavTerminal,
         Self::NavRenderedBlocks,
         Self::NavShortcuts,
@@ -4440,12 +4488,20 @@ impl Text {
         Self::DescQuakeHotkeyTaken,
         Self::RowQuakeDismiss,
         Self::DescQuakeDismiss,
-        Self::RowTrayIcon,
-        Self::DescTrayIcon,
-        Self::TrayMenuSummon,
-        Self::TrayMenuNewWindow,
-        Self::TrayMenuSettings,
-        Self::TrayMenuQuit,
+        Self::RowQuakeHotkey,
+        Self::DescQuakeHotkey,
+        Self::RowQuakeProfile,
+        Self::DescQuakeProfile,
+        Self::OptionQuakeProfileDefault,
+        Self::RowQuakeCommand,
+        Self::DescQuakeCommand,
+        Self::RowQuakeTopGap,
+        Self::DescQuakeTopGap,
+        Self::RowQuakeRestore,
+        Self::DescQuakeRestore,
+        Self::OptionQuakeRestoreNothing,
+        Self::OptionQuakeRestoreFolders,
+        Self::OptionQuakeRestoreFoldersAndCommands,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

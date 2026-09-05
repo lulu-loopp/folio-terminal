@@ -5919,22 +5919,24 @@ pub fn hit_window_chrome(
     width: f32,
     scale: f32,
     rail: RailState,
+    summoned: bool,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
-    window_chrome_boxes(width, scale, rail)
+    window_chrome_boxes(width, scale, rail, summoned)
         .into_iter()
         .find(|(_, rect)| contains(*rect, x, y))
         .map(|(target, _)| target)
 }
 
-/// The four boxes of the caption run, in the order they stand: the gear, then
-/// minimize, maximize and close.
+/// The boxes of the caption run, in the order they stand: the gear, then
+/// minimize, maximize and close — or, on the summoned terminal, the gear and the
+/// `×` alone (see [`caption_targets`]).
 ///
 /// The gear is one of them despite the mock-up giving it its own element outside
 /// `.caption` (line 2243): it is the same 46px square in the same row, and the
-/// run's arithmetic is simplest when it counts four.
+/// run's arithmetic is simplest when it counts it.
 ///
 /// One function rather than two, because [`hit_window_chrome`] now reads its
 /// answer from here. A tooltip has to know where these buttons *are* and not
@@ -5955,50 +5957,99 @@ pub fn window_chrome_boxes(
     width: f32,
     scale: f32,
     rail: RailState,
+    summoned: bool,
 ) -> Vec<(ChromeTarget, [f32; 4])> {
     let mut boxes = Vec::with_capacity(5);
     if let Some(rect) = panel_toggle_box(scale, rail) {
         boxes.push((ChromeTarget::PanelToggle, rect));
     }
-    boxes.extend(window_caption_boxes(width, scale));
+    boxes.extend(window_caption_boxes(width, scale, summoned));
     boxes
 }
 
-/// The caption run alone — the four boxes anchored to the window's right edge,
+/// **What stands in the caption run**, which is not the same run on every window
+/// (§7.54e ②, user ruling 2026-09-05).
+///
+/// An ordinary window carries the four the mock-up drew. **The summoned terminal
+/// carries two**, and dropping the other two is the ruling rather than a
+/// tidying-up:
+///
+/// * **Minimise is a bug on this window and always was.** It is a second way of
+///   putting the window away that does not go through the summon's own door — the
+///   `shown` flag stays set, the keyboard is not handed back, and the very next
+///   press of the chord reads the window as up and asks for it to be *dismissed*.
+///   The reader presses the key and nothing comes down. That is exactly the
+///   「隐藏按钮与热键行为不一致」 the ruling names.
+/// * **Maximise throws away the only shape this window has.** Its rectangle *is*
+///   `quake::Quake::placement`'s answer, restated at every summon; a maximised
+///   summon is a window whose next appearance silently undoes what the button did.
+///
+/// What is left is the gear — which opens this window's own settings page — and
+/// one `×`, whose verb is `hide` and is the chord's verb through the chord's own
+/// door. See `FolioApp::close`'s caller in `main.rs`.
+#[must_use]
+pub fn caption_targets(summoned: bool) -> &'static [ChromeTarget] {
+    if summoned {
+        &[ChromeTarget::Settings, ChromeTarget::CloseWindow]
+    } else {
+        &[
+            ChromeTarget::Settings,
+            ChromeTarget::Minimize,
+            ChromeTarget::Maximize,
+            ChromeTarget::CloseWindow,
+        ]
+    }
+}
+
+/// **Where the drawn caption run begins**, which is not where the *reserved* one does.
+///
+/// The strip goes on reserving four slots on every window ([`tab_strip_geometry`]), and the
+/// summoned terminal draws two of them — so on that window there are two slots of title bar
+/// between the tab strip's own end and the gear. That is deliberate and it is the cheap half of
+/// the trade: those pixels are drag handle, which every short strip already leaves, and the
+/// alternative is a tab-strip geometry that answers differently on one window — one more thing
+/// that can disagree between the paint and the hit test, over 92 logical pixels.
+#[must_use]
+pub fn caption_run_left(width: f32, scale: f32, summoned: bool) -> f32 {
+    let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
+    (width - caption_targets(summoned).len() as f32 * button).max(0.0)
+}
+
+/// The caption run alone — the boxes anchored to the window's right edge,
 /// which stand in the same place whatever the tabs are doing.
 #[must_use]
-pub fn window_caption_boxes(width: f32, scale: f32) -> [(ChromeTarget, [f32; 4]); 4] {
+pub fn window_caption_boxes(
+    width: f32,
+    scale: f32,
+    summoned: bool,
+) -> Vec<(ChromeTarget, [f32; 4])> {
     let title = WINDOW_TITLE_BAR_LOGICAL_PX * scale;
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
-    let run_left = (width - 4.0 * button).max(0.0);
+    let targets = caption_targets(summoned);
+    let last = targets.len() as f32;
+    let run_left = caption_run_left(width, scale, summoned);
     // The last button ends at the window's own edge rather than at
-    // `run_left + 4 * button`, so a fractional scale cannot leave a seam of
+    // `run_left + n * button`, so a fractional scale cannot leave a seam of
     // unclaimed pixels in the corner where "close" is supposed to be.
     let edge = |index: f32| {
-        if index == 4.0 {
+        if index == last {
             width
         } else {
             run_left + index * button
         }
     };
-    [
-        ChromeTarget::Settings,
-        ChromeTarget::Minimize,
-        ChromeTarget::Maximize,
-        ChromeTarget::CloseWindow,
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, target)| {
-        let index = index as f32;
-        (
-            target,
-            [edge(index).max(0.0), 0.0, edge(index + 1.0).max(0.0), title],
-        )
-    })
-    .collect::<Vec<_>>()
-    .try_into()
-    .expect("four targets make four boxes")
+    targets
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, target)| {
+            let index = index as f32;
+            (
+                target,
+                [edge(index).max(0.0), 0.0, edge(index + 1.0).max(0.0), title],
+            )
+        })
+        .collect()
 }
 
 /// Whether this device point lands inside a rectangle, half-open on the far
@@ -7528,6 +7579,7 @@ pub fn build_chrome_with_preview(
         pointer,
         ChromeContent {
             update_mark: false,
+            summoned: false,
             head_ink: HeadInk::default(),
             active_ink: TabInk::default(),
             card_ink: TabInk::default(),
@@ -7790,6 +7842,12 @@ pub struct ChromeContent<'a> {
     /// dot's box is asserted by handing this a `true`, not by writing a JSON
     /// document into a temporary directory.
     pub update_mark: bool,
+    /// **Whether this is the window a key summons** (§7.54e ②).
+    ///
+    /// Beside `update_mark` and for its reason: `main.rs` says what is true, this says what to
+    /// draw. What it decides is the caption run — see [`caption_targets`], which is where the
+    /// ruling is written down.
+    pub summoned: bool,
     pub tabs: &'a [TabContent],
     /// How far each pane's hover-revealed head furniture has come up — see
     /// [`HeadInk`], which is also where the rule about the hit test is written.
@@ -8387,6 +8445,7 @@ pub fn build_chrome_for_tabs(
 ) -> WindowChrome {
     let ChromeContent {
         update_mark,
+        summoned,
         tabs,
         head_ink,
         active_ink,
@@ -8490,6 +8549,7 @@ pub fn build_chrome_for_tabs(
             rail,
         },
         update_mark,
+        summoned,
         (&mut quads, &mut labels, &mut sprites),
         &mut flight_group,
     );
@@ -10170,6 +10230,7 @@ struct TabStrip<'a> {
     rail: RailState,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn window_chrome(
     width: f32,
     scale: f32,
@@ -10182,6 +10243,9 @@ fn window_chrome(
     // through a struct that is then handed on to a function which must ignore
     // it is a field that will eventually be read by the wrong reader.
     update_mark: bool,
+    // Which run the caption is — see `caption_targets`. Beside `update_mark` and
+    // for its reason: it is a fact about the window rather than about the tabs.
+    summoned: bool,
     output: (
         &mut Vec<ChromeQuad>,
         &mut Vec<ChromeLabel>,
@@ -10206,6 +10270,10 @@ fn window_chrome(
     ));
 
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
+    // **Where the app's own content stops** is still four slots in from the edge on
+    // every window, because that is what the strip reserves — see
+    // `caption_run_left`, which is where the two runs differ and why they are
+    // allowed to.
     let run_left = (width - 4.0 * button).max(0.0);
     // The two layouts share this bar and split what stands in it. `.tabs-inline`
     // lives here only in the horizontal one; in the vertical one the tab list is
@@ -10304,30 +10372,31 @@ fn window_chrome(
     // which the user's 2026-08-26 ruling keeps as it is), so it keeps the box
     // the mock-up measured it at rather than taking a slot cut for the house's
     // own line marks.
-    let buttons = [
-        (
-            ChromeTarget::Settings,
-            crate::icons::ActionIcon::OpenSettings.mark(),
-            WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
-        ),
-        (
-            ChromeTarget::Minimize,
-            crate::icons::ActionIcon::MinimiseWindow.mark(),
-            caption_glyph_logical_px(crate::icons::ActionIcon::MinimiseWindow.mark()),
-        ),
-        (
-            ChromeTarget::Maximize,
-            crate::icons::ActionIcon::MaximiseWindow.mark(),
-            caption_glyph_logical_px(crate::icons::ActionIcon::MaximiseWindow.mark()),
-        ),
-        (
-            ChromeTarget::CloseWindow,
-            crate::icons::ActionIcon::CloseWindow.mark(),
-            caption_glyph_logical_px(crate::icons::ActionIcon::CloseWindow.mark()),
-        ),
-    ];
-    for (index, (target, mark, glyph_logical_px)) in buttons.into_iter().enumerate() {
-        let left = run_left + index as f32 * button;
+    // **The run is `caption_targets`' and so is its left edge** (§7.54e ②), which
+    // is what keeps the paint and the hit test one derivation: `window_caption_boxes`
+    // walks the same list from the same origin, so a window that draws two buttons
+    // cannot be a window that answers presses on four.
+    let caption_left = caption_run_left(width, scale, summoned);
+    for (index, target) in caption_targets(summoned).iter().copied().enumerate() {
+        let (mark, glyph_logical_px) = match target {
+            ChromeTarget::Settings => (
+                crate::icons::ActionIcon::OpenSettings.mark(),
+                WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
+            ),
+            ChromeTarget::Minimize => (
+                crate::icons::ActionIcon::MinimiseWindow.mark(),
+                caption_glyph_logical_px(crate::icons::ActionIcon::MinimiseWindow.mark()),
+            ),
+            ChromeTarget::Maximize => (
+                crate::icons::ActionIcon::MaximiseWindow.mark(),
+                caption_glyph_logical_px(crate::icons::ActionIcon::MaximiseWindow.mark()),
+            ),
+            _ => (
+                crate::icons::ActionIcon::CloseWindow.mark(),
+                caption_glyph_logical_px(crate::icons::ActionIcon::CloseWindow.mark()),
+            ),
+        };
+        let left = caption_left + index as f32 * button;
         let rect = [left, 0.0, (left + button).min(width), title];
         let hovered = hover == Some(target);
         if hovered {
@@ -20593,6 +20662,7 @@ mod tests {
                 rail: RailState::default(),
             },
             update_mark,
+            false,
             (&mut quads, &mut labels, &mut sprites),
             &mut flight,
         );
@@ -21452,6 +21522,7 @@ mod tests {
             pointer,
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -21539,6 +21610,7 @@ mod tests {
                 ChromePointer::default(),
                 ChromeContent {
                     update_mark: false,
+                    summoned: false,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -21671,6 +21743,7 @@ mod tests {
                 ChromePointer::default(),
                 ChromeContent {
                     update_mark: false,
+                    summoned: false,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -24174,6 +24247,7 @@ mod tests {",
                     cwd: String::new(),
                     manual_name: None,
                     card_skip: 0,
+                    last_command: String::new(),
                 }))),
             ],
         }));
@@ -24232,6 +24306,7 @@ mod tests {",
                             cwd: String::new(),
                             manual_name: None,
                             card_skip: 0,
+                            last_command: String::new(),
                         },
                         &|_| FilesLeafState::default(),
                     ),
@@ -24553,6 +24628,7 @@ mod tests {",
                     cwd: String::new(),
                     manual_name: None,
                     card_skip: 0,
+                    last_command: String::new(),
                 }))),
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Unknown)),
             ],
@@ -24714,7 +24790,7 @@ mod tests {",
             let width = 960.0 * scale;
             let toggle = panel_toggle_box(scale, expanded).expect("the expanded bar carries one");
             assert_eq!(
-                window_chrome_boxes(width, scale, expanded).first(),
+                window_chrome_boxes(width, scale, expanded, false).first(),
                 Some(&(ChromeTarget::PanelToggle, toggle)),
                 "it leads the run: `.drag`'s first child, at the far left"
             );
@@ -24724,6 +24800,7 @@ mod tests {",
                     width,
                     scale,
                     expanded,
+                    false,
                     f64::from((toggle[0] + toggle[2]) / 2.0),
                     f64::from((toggle[1] + toggle[3]) / 2.0),
                 ),
@@ -24736,6 +24813,7 @@ mod tests {",
                     width,
                     scale,
                     horizontal,
+                    false,
                     f64::from((toggle[0] + toggle[2]) / 2.0),
                     f64::from((toggle[1] + toggle[3]) / 2.0),
                 ),
@@ -24743,7 +24821,7 @@ mod tests {",
                 "a horizontal bar draws no toggle, so it cannot be hit at {scale}x"
             );
             assert!(
-                !window_chrome_boxes(width, scale, icons)
+                !window_chrome_boxes(width, scale, icons, false)
                     .iter()
                     .any(|(target, _)| *target == ChromeTarget::PanelToggle),
                 "nor does an icon rail at {scale}x"
@@ -24837,29 +24915,47 @@ mod tests {",
         let rail = RailState::default();
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let width = 960.0 * scale;
-            let boxes = window_caption_boxes(width, scale);
+            let boxes = window_caption_boxes(width, scale, false);
             assert_eq!(
-                window_chrome_boxes(width, scale, rail),
-                boxes.to_vec(),
+                window_chrome_boxes(width, scale, rail, false),
+                boxes.clone(),
                 "a horizontal bar carries no panel toggle, so the run is the \
                  caption run and nothing else"
             );
             assert_eq!(
-                boxes.map(|(target, _)| target),
-                [
-                    ChromeTarget::Settings,
-                    ChromeTarget::Minimize,
-                    ChromeTarget::Maximize,
-                    ChromeTarget::CloseWindow,
-                ],
+                boxes.iter().map(|(target, _)| *target).collect::<Vec<_>>(),
+                caption_targets(false).to_vec(),
                 "the gear leads the run"
             );
-            for (target, rect) in boxes {
+            // **And the summoned terminal's run is the two the ruling leaves it**
+            // (§7.54e ②), measured from the same origin so the paint and this
+            // hit test cannot disagree about where the `×` is.
+            let summoned = window_caption_boxes(width, scale, true);
+            assert_eq!(
+                summoned
+                    .iter()
+                    .map(|(target, _)| *target)
+                    .collect::<Vec<_>>(),
+                vec![ChromeTarget::Settings, ChromeTarget::CloseWindow],
+                "the summoned terminal grew back a button that means what its × means"
+            );
+            assert_eq!(
+                summoned.last().map(|(_, rect)| rect[2]),
+                Some(width),
+                "and the × still ends at the corner of the window"
+            );
+            assert_eq!(
+                summoned.first().map(|(_, rect)| rect[0]),
+                Some(caption_run_left(width, scale, true)),
+                "and the run starts where `caption_run_left` says it does"
+            );
+            for (target, rect) in boxes.iter().copied() {
                 assert_eq!(
                     hit_window_chrome(
                         width,
                         scale,
                         rail,
+                        false,
                         f64::from((rect[0] + rect[2]) / 2.0),
                         f64::from((rect[1] + rect[3]) / 2.0),
                     ),
@@ -24875,12 +24971,19 @@ mod tests {",
             }
             assert!((boxes[3].1[2] - width).abs() < 1e-4);
             assert_eq!(
-                hit_window_chrome(width, scale, rail, f64::from(width) - 0.5, 1.0),
+                hit_window_chrome(width, scale, rail, false, f64::from(width) - 0.5, 1.0),
                 Some(ChromeTarget::CloseWindow)
             );
             // And nothing to the left of the run is the run's.
             assert_eq!(
-                hit_window_chrome(width, scale, rail, f64::from(boxes[0].1[0]) - 1.0, 1.0),
+                hit_window_chrome(
+                    width,
+                    scale,
+                    rail,
+                    false,
+                    f64::from(boxes[0].1[0]) - 1.0,
+                    1.0
+                ),
                 None
             );
         }
@@ -24993,6 +25096,7 @@ mod tests {",
                 },
                 ChromeContent {
                     update_mark: false,
+                    summoned: false,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -25221,6 +25325,7 @@ mod tests {",
             },
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -25331,6 +25436,7 @@ mod tests {",
             },
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -27065,6 +27171,7 @@ mod tests {",
             ChromePointer::default(),
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -29511,6 +29618,7 @@ mod tests {",
             },
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -29721,6 +29829,7 @@ mod tests {",
                 },
                 ChromeContent {
                     update_mark: false,
+                    summoned: false,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -29836,6 +29945,7 @@ mod tests {",
                 },
                 ChromeContent {
                     update_mark: false,
+                    summoned: false,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -29957,6 +30067,7 @@ mod tests {",
                     cwd: String::new(),
                     manual_name: None,
                     card_skip: 0,
+                    last_command: String::new(),
                 }))),
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
                     bt_persist::FilesLeafV1 {
@@ -29978,6 +30089,7 @@ mod tests {",
             cwd: String::new(),
             manual_name: None,
             card_skip: 0,
+            last_command: String::new(),
         })))
     }
 
@@ -30070,6 +30182,7 @@ mod tests {",
             pointer,
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -33617,6 +33730,7 @@ mod tests {",
             ChromePointer::default(),
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -33689,6 +33803,7 @@ mod tests {",
             pointer,
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -34220,6 +34335,7 @@ mod tests {",
                     cwd: String::new(),
                     manual_name: None,
                     card_skip: 0,
+                    last_command: String::new(),
                 }))),
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Unknown)),
             ],
@@ -34496,6 +34612,7 @@ mod tests {",
             ChromePointer::default(),
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -34776,6 +34893,7 @@ mod tests {",
             },
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -35040,6 +35158,7 @@ mod tests {",
             ChromePointer::default(),
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -35209,6 +35328,7 @@ mod tests {",
             ChromePointer::default(),
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -36659,6 +36779,7 @@ mod tests {",
             },
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::new(card_ink),
@@ -41094,6 +41215,7 @@ mod tests {",
             ChromePointer::default(),
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -42336,6 +42458,7 @@ mod tests {",
                 cwd: String::new(),
                 manual_name: None,
                 card_skip: 0,
+                last_command: String::new(),
             },
             &|seat| FilesLeafState {
                 root: r"D:\repo".to_owned(),
@@ -42453,6 +42576,7 @@ mod tests {",
                         cwd: r"D:\work".to_owned(),
                         manual_name: None,
                         card_skip: 0,
+                        last_command: String::new(),
                     },
                 ))),
             ],
@@ -42854,6 +42978,7 @@ mod tests {",
                 ChromePointer::default(),
                 ChromeContent {
                     update_mark: false,
+                    summoned: false,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -42996,6 +43121,7 @@ mod tests {",
             pointer,
             ChromeContent {
                 update_mark: false,
+                summoned: false,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -45018,6 +45144,7 @@ mod drop_plan_tests {
             cwd: r"C:\Users".to_owned(),
             manual_name: None,
             card_skip: 0,
+            last_command: String::new(),
         };
         let mut revived = Seats::from_persisted(
             &seats.to_persisted(&|_| seed.clone(), &|_| FilesLeafState::default()),

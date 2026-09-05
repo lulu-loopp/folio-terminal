@@ -903,6 +903,31 @@ pub const SIDEBAR_OPTIONS: [RailMode; 2] = [RailMode::Expanded, RailMode::Icons]
 /// (`data-combo="wrap"`, `data-combo="attnchip"`) and the order a reader expects
 /// when the affirmative is the default.
 pub const FORMULA_OPTIONS: [bool; 2] = [true, false];
+
+/// The three rungs of `Summoned terminal ▸ What comes back`, in the order they are drawn
+/// (§7.54e ④).
+///
+/// **Least first**, which is every ladder-shaped picker in this dialog and is the reading order the
+/// rungs themselves have: nothing, then the folders, then the folders and what a pinned tab last
+/// ran. The default is the last of the three, and a picker whose default is at the bottom is not a
+/// problem — `BLOCK_MAX_HEIGHT_OPTIONS` puts `None` first for the same reason and defaults to it.
+pub const QUAKE_RESTORE_OPTIONS: [bt_persist::QuakeRestoreV1; 3] = [
+    bt_persist::QuakeRestoreV1::Nothing,
+    bt_persist::QuakeRestoreV1::Folders,
+    bt_persist::QuakeRestoreV1::FoldersAndPinnedCommands,
+];
+
+/// The word one rung wears.
+#[must_use]
+fn quake_restore_label(rung: bt_persist::QuakeRestoreV1) -> &'static str {
+    match rung {
+        bt_persist::QuakeRestoreV1::Nothing => Text::OptionQuakeRestoreNothing.text(),
+        bt_persist::QuakeRestoreV1::Folders => Text::OptionQuakeRestoreFolders.text(),
+        bt_persist::QuakeRestoreV1::FoldersAndPinnedCommands => {
+            Text::OptionQuakeRestoreFoldersAndCommands.text()
+        }
+    }
+}
 /// **The `Maximum height` row's four answers**, in logical pixels, with `0` for
 /// no cap at all — the mock-up's own list (4373), taken as it stands.
 ///
@@ -1628,6 +1653,22 @@ pub enum SettingsCategory {
     #[default]
     General,
     Appearance,
+    /// **The window a key calls down over whatever is on the screen** (§7.54e ⑤, user ruling
+    /// 2026-09-05).
+    ///
+    /// A page of its own and not four rows on `General`, and the ruling is the reason but not the
+    /// whole of it: what the rows on this page describe is **one window**, and every other page in
+    /// this rail is about a class of thing rather than about a single one of them. `Appearance`
+    /// answers "what does a window look like" for every window; this answers eight questions about
+    /// the one window this product opens for you, from the key that calls it up to what is standing
+    /// in it when it arrives.
+    ///
+    /// **Directly under `Appearance`**, which is the rail's own 从看到用 rule read literally: the
+    /// pages narrow from the product to the window to the sessions that window can hold, and this is
+    /// a window. Its `Profile` row names the table `Profiles` is, one rail word below it — the same
+    /// adjacency `General`'s `Default profile` row has, and the same ruling applies: being next to
+    /// the table you point at is worth less than the rail being read down.
+    SummonedTerminal,
     /// Mock-up 2555. **Born with the PSReadLine row** (§7.1.6c-3b): the variant
     /// and its heading existed for two slices with nothing to put under them,
     /// and `nav_items` derives the rail from what has content, so the page
@@ -1713,9 +1754,12 @@ impl SettingsCategory {
     /// `nav_items`, `first_category`, the arrow walk and Home/End all read it;
     /// nothing on disk does ([`Self::key`] says why), so a reorder is this
     /// literal and the two pins that quote it.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::General,
         Self::Appearance,
+        // — the one window a key calls up, which is a window and so stands in the
+        // window band rather than beside the table its profile row names
+        Self::SummonedTerminal,
         Self::Profiles,
         Self::Terminal,
         // — the program running inside that pane, which is one step in from it
@@ -1758,6 +1802,7 @@ impl SettingsCategory {
             Self::General => "general",
             Self::Profiles => "profiles",
             Self::Appearance => "appearance",
+            Self::SummonedTerminal => "summoned-terminal",
             Self::Terminal => "terminal",
             Self::Agents => "agents",
             Self::RenderedBlocks => "rendered-blocks",
@@ -1790,6 +1835,7 @@ impl SettingsCategory {
             Self::General => Text::CategoryGeneral.text(),
             Self::Profiles => Text::CategoryProfiles.text(),
             Self::Appearance => Text::CategoryAppearance.text(),
+            Self::SummonedTerminal => Text::CategorySummonedTerminal.text(),
             Self::Terminal => Text::CategoryTerminal.text(),
             Self::Agents => Text::CategoryAgents.text(),
             Self::RenderedBlocks => Text::CategoryRenderedBlocks.text(),
@@ -1812,6 +1858,7 @@ impl SettingsCategory {
             Self::General => Text::NavGeneral.text(),
             Self::Profiles => Text::NavProfiles.text(),
             Self::Appearance => Text::NavAppearance.text(),
+            Self::SummonedTerminal => Text::NavSummonedTerminal.text(),
             Self::Terminal => Text::NavTerminal.text(),
             Self::Agents => Text::NavAgents.text(),
             Self::RenderedBlocks => Text::NavRenderedBlocks.text(),
@@ -1957,6 +2004,13 @@ pub enum SettingsControl {
     /// is a picker. A profile's name and its arguments are neither, and a combo
     /// of "every path on this machine" is not a control.
     Field,
+    /// **A chord, recorded where it is pressed** — the `Summon the terminal` row (§7.54e ⑤).
+    ///
+    /// The caps box the Shortcuts page draws, standing in a row's control column and pressable:
+    /// a press begins a capture on the `summon-quake` line of the shortcut table, and every key
+    /// after it goes through the recorder that page already owns. There is one recorder, one table
+    /// and one file — what is different here is only where the reader is standing when they use it.
+    Chord,
     /// A field with a verb beside it — `.field-pair`, the `Program` row's
     /// `Browse…`.
     ///
@@ -2324,14 +2378,49 @@ pub enum SettingsRow {
     /// Whether the summoned terminal goes away when the keyboard leaves it
     /// (§7.54).
     QuakeDismiss,
-    /// **Whether this program keeps an icon in the notification area** (§7.54).
+    /// **The key that calls the summoned terminal down** (§7.54e ⑤, user ruling 2026-09-05).
     ///
-    /// It sits under the three summon rows because it is the fourth thing to say
-    /// about the same window — how tall, how wide, how long it stays, and how to
-    /// reach it without the keyboard — and because the sentence under it is about
-    /// what happens when the reader closes their last window, which is a thing
-    /// the three above it have just made possible.
-    TrayIcon,
+    /// The one row in this dialog outside the Shortcuts page whose control is a chord, and it is
+    /// the same recorder: pressing it starts a capture on the `summon-quake` line of the shortcut
+    /// table, so what is written is written once, to `keybindings.json`, through
+    /// `Shortcuts::set` — and the global claim follows on the same turn, because `settle_quake`
+    /// reconciles against that table every turn (§7.54b ②).
+    ///
+    /// **First on the page**, because a window nobody can call up is not a window: every row under
+    /// this one describes something the reader has not seen yet unless this one works.
+    QuakeHotkey,
+    /// **Which profile the summoned terminal opens on** (§7.54e ⑤).
+    ///
+    /// Its first item is not a profile — it is *the default profile*, which is what
+    /// `bt_persist::SettingsV1::quake_profile_id`'s empty string means and what a reader who has
+    /// never thought about this row already has. Choosing a named profile is the reader saying
+    /// this one window does not follow the row on `General`.
+    QuakeProfile,
+    /// **A command run once per launch, on the first summon** (§7.54e ⑤).
+    ///
+    /// The one field in this dialog whose contents this product **executes**, and the row's own
+    /// sentence is where that is said. It is a `Field` for [`Self::ProfileArgs`]'s reason: a
+    /// command line is not a small named set of answers, so it cannot be a picker.
+    ///
+    /// The distinction it stands on is the one §7.54e draws: this is a command the reader asked to
+    /// have run, every launch, in a row that says so — while a command restored out of
+    /// `session.json` is a command they ran once, and is typed at the prompt and left there.
+    QuakeCommand,
+    /// **How far below the top of the screen the summoned terminal hangs**, in logical pixels
+    /// (§7.54e ⑤).
+    ///
+    /// A slider for [`Self::QuakeHeight`]'s reason, and third of the three shape rows because it is
+    /// the one a reader reaches for last: how tall, how wide, and then how far down.
+    QuakeTopGap,
+    /// **How much of the summoned terminal a new run puts back** (§7.54e ④).
+    ///
+    /// Three items rather than a switch, because the third costs something the second does not —
+    /// see [`bt_persist::QuakeRestoreV1`], which carries the argument and the promise that none of
+    /// the three ever runs anything.
+    ///
+    /// Last on the page, because it is the only row here about a window that is not on the screen:
+    /// everything above it is what the summon does now, and this is what the next launch does.
+    QuakeRestore,
     /// **Which way a split with no direction of its own cuts** (user ruling,
     /// 2026-08-16).
     ///
@@ -2745,11 +2834,20 @@ impl SettingsRow {
             | Self::ContextMenu
             // And the row that is about what this product does off this machine
             // rather than on it — see the variant.
-            | Self::UpdateCheck
+            | Self::UpdateCheck => SettingsCategory::General,
+            // **The eight rows of one window** (§7.54e ⑤, user ruling 2026-09-05). Four of them
+            // stood on `General` until that ruling, under `Default profile`, on the argument that
+            // the row above said what a new terminal starts as; what the page they are on now says
+            // instead is that all eight are about the *same window*, which is a thing no other page
+            // in this rail is about.
+            Self::QuakeHotkey
+            | Self::QuakeProfile
+            | Self::QuakeCommand
             | Self::QuakeHeight
             | Self::QuakeWidth
+            | Self::QuakeTopGap
             | Self::QuakeDismiss
-            | Self::TrayIcon => SettingsCategory::General,
+            | Self::QuakeRestore => SettingsCategory::SummonedTerminal,
             // The editor's eight, which are the Profiles page's second view.
             Self::ProfileName
             | Self::ProfileProgram
@@ -2778,7 +2876,16 @@ impl SettingsRow {
     pub fn stacked(self) -> bool {
         matches!(
             self,
-            Self::ProfileProgram | Self::ProfileArgs | Self::ProfileEnv
+            Self::ProfileProgram
+                | Self::ProfileArgs
+                // **And the summoned terminal's startup command** (§7.54e ⑤), on
+                // `ProfileArgs`' own argument said about the same kind of string:
+                // a command line pressed into a 200px column ellipsises, and a
+                // control that cannot say its own value is the bug that ruling
+                // was written against. The column above and below it is
+                // undisturbed, because it was never in it.
+                | Self::QuakeCommand
+                | Self::ProfileEnv
         )
     }
 
@@ -2839,7 +2946,11 @@ impl SettingsRow {
             Self::QuakeHeight => Text::RowQuakeHeight.text(),
             Self::QuakeWidth => Text::RowQuakeWidth.text(),
             Self::QuakeDismiss => Text::RowQuakeDismiss.text(),
-            Self::TrayIcon => Text::RowTrayIcon.text(),
+            Self::QuakeHotkey => Text::RowQuakeHotkey.text(),
+            Self::QuakeProfile => Text::RowQuakeProfile.text(),
+            Self::QuakeCommand => Text::RowQuakeCommand.text(),
+            Self::QuakeTopGap => Text::RowQuakeTopGap.text(),
+            Self::QuakeRestore => Text::RowQuakeRestore.text(),
         }
     }
 
@@ -3081,7 +3192,21 @@ impl SettingsRow {
             }
             Self::QuakeWidth => Text::DescQuakeWidth.text(),
             Self::QuakeDismiss => Text::DescQuakeDismiss.text(),
-            Self::TrayIcon => Text::DescTrayIcon.text(),
+            // **The refusal is said on this row too, and it is said here first.** §7.54b put it on
+            // the height row because that was the row a reader's eye reached first on a page that
+            // had no key on it; this page has the key on it, and a chord another program is holding
+            // is a fact about *that row*.
+            Self::QuakeHotkey => {
+                if values.quake_hotkey_taken {
+                    Text::DescQuakeHotkeyTaken.text()
+                } else {
+                    Text::DescQuakeHotkey.text()
+                }
+            }
+            Self::QuakeProfile => Text::DescQuakeProfile.text(),
+            Self::QuakeCommand => Text::DescQuakeCommand.text(),
+            Self::QuakeTopGap => Text::DescQuakeTopGap.text(),
+            Self::QuakeRestore => Text::DescQuakeRestore.text(),
         }
     }
 
@@ -3126,6 +3251,16 @@ impl SettingsRow {
                 min: bt_persist::MINIMUM_QUAKE_WIDTH,
                 max: 100,
             }),
+            Self::QuakeTopGap => SettingsControl::Slider(SliderRange {
+                // No floor: flush against the top of the screen is a shape a reader may want, and
+                // it is the shape this window had before the gap was invented. The ceiling is
+                // about a title bar and a half — past it the gap stops reading as a seam under the
+                // edge of the screen and starts reading as a window that failed to reach it.
+                min: 0,
+                max: u8::try_from(bt_persist::MAXIMUM_QUAKE_TOP_GAP).unwrap_or(u8::MAX),
+            }),
+            Self::QuakeHotkey => SettingsControl::Chord,
+            Self::QuakeCommand => SettingsControl::Field,
             Self::ProfileName | Self::ProfileArgs => SettingsControl::Field,
             Self::ProfileProgram => SettingsControl::FieldPair,
             Self::ProfileEnv => SettingsControl::EnvTable,
@@ -3222,10 +3357,14 @@ impl SettingsRow {
             // has just bound a key and watched a terminal come down over their
             // editor is looking for exactly these two, and a row behind a
             // disclosure is a row they report as missing.
+            | Self::QuakeHotkey
+            | Self::QuakeProfile
+            | Self::QuakeCommand
             | Self::QuakeHeight
             | Self::QuakeWidth
+            | Self::QuakeTopGap
             | Self::QuakeDismiss
-            | Self::TrayIcon
+            | Self::QuakeRestore
             | Self::PsReadLine
             | Self::PowerShellOffer
             // On the row above's test, said again for the reader who has just watched an agent
@@ -3291,6 +3430,7 @@ impl SettingsRow {
             SettingsControl::Slider(_) => SettingsTarget::Slider(self),
             // A field is focused as a field: the caret goes into it, and the
             // ring is drawn round the same box a press lands in.
+            SettingsControl::Chord => SettingsTarget::QuakeChord,
             SettingsControl::Field | SettingsControl::FieldPair => SettingsTarget::Field(self),
             // **Neither of these rows has *a* control.** The table's stops are
             // its cells, its `✕`s and its `Add`, which `page_order` lists one by
@@ -3312,6 +3452,7 @@ impl SettingsRow {
             Self::BackgroundOpacity => values.background_opacity,
             Self::QuakeHeight => values.quake_height,
             Self::QuakeWidth => values.quake_width,
+            Self::QuakeTopGap => u8::try_from(values.quake_top_gap).unwrap_or(u8::MAX),
             _ => return None,
         };
         // Clamped on the way out, because a hand-edited `settings.json` is
@@ -3363,9 +3504,12 @@ impl SettingsRow {
             Self::DefaultProfile => profiles::count(),
             Self::BackgroundImage => IMAGE_SOURCE_OPTIONS.len(),
             Self::ImageFit => IMAGE_FIT_OPTIONS.len(),
-            Self::Acrylic | Self::AlwaysOnTop | Self::QuakeDismiss | Self::TrayIcon => {
-                FORMULA_OPTIONS.len()
-            }
+            Self::Acrylic | Self::AlwaysOnTop | Self::QuakeDismiss => FORMULA_OPTIONS.len(),
+            Self::QuakeRestore => QUAKE_RESTORE_OPTIONS.len(),
+            // The default and then every profile, which is what the row's first item means — see
+            // the variant. Built from `profiles::count()` and not from a copy of the table, on
+            // `DefaultProfile`'s own ruling.
+            Self::QuakeProfile => profiles::count() + 1,
             // A slider has no items. Zero rather than a refusal, because
             // `option_labels` is what the layout measures the control column
             // against, and the honest measurement of a control that never opens
@@ -3382,6 +3526,9 @@ impl SettingsRow {
             | Self::BackgroundOpacity
             | Self::QuakeHeight
             | Self::QuakeWidth
+            | Self::QuakeTopGap
+            | Self::QuakeHotkey
+            | Self::QuakeCommand
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
@@ -3474,9 +3621,19 @@ impl SettingsRow {
                 .copied()
                 .map(image_source_label),
             Self::ImageFit => IMAGE_FIT_OPTIONS.get(index).copied().map(image_fit_label),
-            Self::Acrylic | Self::AlwaysOnTop | Self::QuakeDismiss | Self::TrayIcon => {
+            Self::Acrylic | Self::AlwaysOnTop | Self::QuakeDismiss => {
                 FORMULA_OPTIONS.get(index).copied().map(on_off_label)
             }
+            Self::QuakeRestore => QUAKE_RESTORE_OPTIONS
+                .get(index)
+                .copied()
+                .map(quake_restore_label),
+            // Item zero is the sentence "whatever the default profile is" and is not a profile;
+            // everything after it is the table, in the table's own order.
+            Self::QuakeProfile => match index.checked_sub(1) {
+                None => Some(Text::OptionQuakeProfileDefault.text()),
+                Some(profile) => (profile < profiles::count()).then(|| profiles::title(profile)),
+            },
             Self::ProfileStartAt => START_AT_OPTIONS.get(index).copied().map(start_at_label),
             Self::ProfileColour => MarkColour::ALL
                 .get(index)
@@ -3495,6 +3652,9 @@ impl SettingsRow {
             | Self::BackgroundOpacity
             | Self::QuakeHeight
             | Self::QuakeWidth
+            | Self::QuakeTopGap
+            | Self::QuakeHotkey
+            | Self::QuakeCommand
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
@@ -3684,6 +3844,18 @@ impl SettingsRow {
                 .get(index)
                 .copied()
                 .unwrap_or(false),
+            // **The same question one page down** (§7.54e ⑤). Its first item is not
+            // a profile — it is the sentence "whatever the default profile is" —
+            // and that one is always available, because the row it defers to has
+            // already refused every shell this machine cannot start.
+            Self::QuakeProfile => match index.checked_sub(1) {
+                None => true,
+                Some(profile) => values
+                    .profile_available
+                    .get(profile)
+                    .copied()
+                    .unwrap_or(false),
+            },
             // The second row whose items can be unavailable, and the only one
             // where choosing an unavailable item would *do* something: `On`
             // under a refusing execution policy writes files no shell will load,
@@ -3859,9 +4031,10 @@ impl SettingsRow {
             Self::QuakeDismiss => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.quake_dismiss_on_blur),
-            Self::TrayIcon => FORMULA_OPTIONS
+            Self::QuakeRestore => QUAKE_RESTORE_OPTIONS
                 .iter()
-                .position(|it| *it == values.tray_icon),
+                .position(|it| *it == values.quake_restore),
+            Self::QuakeProfile => Some(values.quake_profile),
             Self::ProfileStartAt => values.editor.map(|editor| editor.start_at),
             Self::ProfileColour => values.editor.and_then(|editor| editor.colour),
             Self::ProfileHyperlink => values.editor.map(|editor| editor.hyperlink),
@@ -3870,6 +4043,9 @@ impl SettingsRow {
             | Self::BackgroundOpacity
             | Self::QuakeHeight
             | Self::QuakeWidth
+            | Self::QuakeTopGap
+            | Self::QuakeHotkey
+            | Self::QuakeCommand
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
@@ -3989,16 +4165,6 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // this machine, before the table of things it can start.
     rows.push(SettingsRow::SearchEngine);
     rows.push(SettingsRow::DefaultProfile);
-    // **The pair the summon key needs**, directly under `Default profile`
-    // (§7.54): the row above says what a new terminal starts as, and these two
-    // say what the one a key calls up looks like when it arrives. The height
-    // first, because it is the fact a reader who has just watched the window come
-    // down wants to change, and the dismissal under it, because it is the
-    // question the height raises — how big it is, then how long it stays.
-    rows.push(SettingsRow::QuakeHeight);
-    rows.push(SettingsRow::QuakeWidth);
-    rows.push(SettingsRow::QuakeDismiss);
-    rows.push(SettingsRow::TrayIcon);
     // Second from last on its page, because it is the only row here that changes
     // something **outside this window**: the three above it say how Folio
     // behaves, and this one says what another program's menu contains.
@@ -4009,6 +4175,23 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // out what Folio talks to should find that row where a page ends rather than
     // among the rows about what the window says and does.
     rows.push(SettingsRow::UpdateCheck);
+    // ── the summoned terminal's own page (§7.54e ⑤) ──
+    //
+    // **The key first**, because a window nobody can call up is not a window and
+    // every row under it describes something the reader has not seen. Then what
+    // it opens holding — which shell, and what is standing in it. Then its shape,
+    // in the order §7.54a settled and this ruling did not reopen: how tall, how
+    // wide, and how far down. Then how long it stays. And last, what the *next*
+    // launch puts back, which is the only row here about a window that is not on
+    // the screen.
+    rows.push(SettingsRow::QuakeHotkey);
+    rows.push(SettingsRow::QuakeProfile);
+    rows.push(SettingsRow::QuakeCommand);
+    rows.push(SettingsRow::QuakeHeight);
+    rows.push(SettingsRow::QuakeWidth);
+    rows.push(SettingsRow::QuakeTopGap);
+    rows.push(SettingsRow::QuakeDismiss);
+    rows.push(SettingsRow::QuakeRestore);
     rows.push(SettingsRow::PsReadLine);
     // **Beside it**, because the two are this page's two PowerShell rows and
     // they answer one reader's two questions in the order they arrive: what is
@@ -4563,9 +4746,17 @@ pub struct SettingsValues {
     /// running one holds the chord, and the row is where that stops being
     /// mysterious.
     pub quake_hotkey_taken: bool,
-    /// Whether the icon in the notification area is wanted — see
-    /// `bt_persist::SettingsV1::tray_icon` for the second thing it decides.
-    pub tray_icon: bool,
+    /// **How far below the top of the work area it hangs**, in logical pixels (§7.54e ⑤).
+    pub quake_top_gap: u32,
+    /// **How much of it a new run puts back** — see `bt_persist::QuakeRestoreV1` (§7.54e ④).
+    pub quake_restore: bt_persist::QuakeRestoreV1,
+    /// **Which item of the profile picker is ticked**: `0` is "the default profile", and every
+    /// index after it is that profile's row in the table.
+    ///
+    /// An index and not the stored id, on `SettingsValues::default_profile`'s ruling: the dialog
+    /// shows what will actually happen, so an id this machine no longer has ticks the first item —
+    /// which is where a summoned terminal on an unknown profile really does open.
+    pub quake_profile: usize,
 }
 
 #[cfg(test)]
@@ -4631,7 +4822,9 @@ impl SettingsValues {
             quake_width: bt_persist::DEFAULT_QUAKE_WIDTH,
             quake_dismiss_on_blur: bt_persist::DEFAULT_QUAKE_DISMISS_ON_BLUR,
             quake_hotkey_taken: false,
-            tray_icon: true,
+            quake_top_gap: bt_persist::DEFAULT_QUAKE_TOP_GAP,
+            quake_restore: bt_persist::DEFAULT_QUAKE_RESTORE,
+            quake_profile: 0,
             // Both capabilities present, for `profile_available`'s reason: a
             // geometry test must not quietly become a test of which Windows the
             // suite is running on. The tests that are *about* the greying inject
@@ -4810,6 +5003,13 @@ pub struct SettingsPanel {
     /// it is standing on. §7.1.5's rungs gain one here and it is booked as one:
     /// editor → list → dialog closed.
     editor: Option<ProfileEditor>,
+    /// **What the summoned terminal's startup command row is holding** (§7.54e ⑤).
+    ///
+    /// Always present, unlike [`Self::editor`], and that is the difference between a *page* and a
+    /// *sub-page*: the editor is a view the dialog steps into and this is one row on a page like
+    /// any other. Seeded from `settings.json` when the dialog opens and pushed back to it on every
+    /// keystroke, which is this dialog's own rule — there is no commit and nothing to save.
+    quake_command: TextField,
     /// Which row's `⋯` is open, by its index in the profile table.
     row_menu: Option<usize>,
 }
@@ -4958,6 +5158,61 @@ impl SettingsPanel {
 
     pub fn menu(&self) -> Option<SettingsRow> {
         self.menu
+    }
+
+    /// **The text field one target names, wherever it lives** (§7.54e ⑤).
+    ///
+    /// One reader for the profile editor's three fields and the summoned terminal's one, so that
+    /// `Runtime::settings_field_key` stays one function: what a typed key does to a field does not
+    /// depend on which page the field is on, and a second key handler for one row would be a
+    /// second set of rules about `Home`, `Ctrl+A` and a paste with a newline in it.
+    #[must_use]
+    pub fn text_field(&self, target: SettingsTarget) -> Option<&TextField> {
+        if target == SettingsTarget::Field(SettingsRow::QuakeCommand) {
+            return Some(&self.quake_command);
+        }
+        self.editor.as_ref()?.field_of(target)
+    }
+
+    /// The same field, to type into.
+    #[must_use]
+    pub fn text_field_mut(&mut self, target: SettingsTarget) -> Option<&mut TextField> {
+        if target == SettingsTarget::Field(SettingsRow::QuakeCommand) {
+            return Some(&mut self.quake_command);
+        }
+        self.editor.as_mut()?.field_mut(target)
+    }
+
+    /// **Put the stored command in the row**, which is what opening the dialog does.
+    ///
+    /// Seeded rather than read live, because a field is what somebody is halfway through typing:
+    /// re-reading the file every frame would drop a caret on the frame after a keystroke. The
+    /// keystroke's own write is what keeps the two the same (`Runtime::write_editor_field`), and
+    /// this is the one moment they are re-joined.
+    pub fn seed_quake_command(&mut self, command: &str) {
+        self.quake_command = TextField::holding(command);
+    }
+
+    /// What the row is holding, for the frame that draws it and the keystroke that stores it.
+    #[must_use]
+    pub fn quake_command(&self) -> &str {
+        self.quake_command.text()
+    }
+
+    /// **Which control the caret is in and what it is holding**, over both the editor's fields and
+    /// the summoned terminal's one.
+    ///
+    /// Derived from the focus rather than stored, on [`ProfileEditor::caret_of`]'s ruling and for
+    /// its reason: there is one keyboard, so the field with the caret is the field with the focus.
+    #[must_use]
+    pub fn caret_of(
+        &self,
+        focus: Option<SettingsTarget>,
+    ) -> Option<(SettingsTarget, usize, usize)> {
+        let focus = focus?;
+        let field = self.text_field(focus)?;
+        let selection = field.selection();
+        Some((focus, selection.start, selection.end))
     }
 
     /// How far the open picker's list has been pushed up inside its body.
@@ -5306,6 +5561,7 @@ impl SettingsPanel {
             | SettingsTarget::Slider(_)
             | SettingsTarget::Nav(_)
             | SettingsTarget::Record(_)
+            | SettingsTarget::QuakeChord
             | SettingsTarget::RestoreRow(_)
             | SettingsTarget::RestoreAll
             | SettingsTarget::Advanced(_)
@@ -6548,6 +6804,15 @@ pub enum SettingsTarget {
     /// PSReadLine row now does, and which is the whole of the 2026-08-29
     /// defect. A row with nothing to say ignores it, exactly as before.
     ChoiceRefused(SettingsRow, usize),
+    /// **The caps box on the `Summon the terminal` row** (§7.54e ⑤).
+    ///
+    /// Its own target and not [`Self::Record`], because `Record` is an index into the shortcut
+    /// page's lines and this row is on a different page: the index it would need is a fact about
+    /// `SettingsContent::shortcuts`, which the panel does not hold. So the press is resolved where
+    /// both halves are in hand — `Runtime::press_settings`, which has the content — and turns into
+    /// `SettingsPanel::begin_recording` on the summon line, after which every key goes down exactly
+    /// the road the Shortcuts page's own capture goes down.
+    QuakeChord,
     /// The `Record` button on one line of the shortcut page, by that line's
     /// index in [`SettingsContent::shortcuts`].
     ///
@@ -6727,6 +6992,7 @@ pub fn target_popup(target: SettingsTarget) -> Option<DialogPopup> {
         | SettingsTarget::Combo(_)
         | SettingsTarget::Slider(_)
         | SettingsTarget::Record(_)
+        | SettingsTarget::QuakeChord
         | SettingsTarget::RestoreRow(_)
         | SettingsTarget::RestoreAll
         | SettingsTarget::ProfileUp(_)
@@ -6805,6 +7071,7 @@ pub fn target_is_ground(target: SettingsTarget) -> bool {
         | SettingsTarget::MenuItemEdit(..)
         | SettingsTarget::MenuItemDelete(..)
         | SettingsTarget::Record(_)
+        | SettingsTarget::QuakeChord
         | SettingsTarget::RestoreRow(_)
         | SettingsTarget::RestoreAll
         | SettingsTarget::ProfileUp(_)
@@ -7388,6 +7655,12 @@ impl SettingsLayout {
                 .iter()
                 .find(|line| line.index == index)
                 .map(|line| line.band),
+            // On its own page it is a row like any other, and it is the row's band
+            // that has to come into view: the caps box alone would leave its title
+            // cut off above it, which is `Field`'s own ruling two arms down.
+            SettingsTarget::QuakeChord => {
+                self.row(SettingsRow::QuakeHotkey).map(|placed| placed.band)
+            }
             SettingsTarget::RestoreAll => self.restore_all,
             SettingsTarget::ProfileUp(index)
             | SettingsTarget::ProfileDown(index)
@@ -7792,11 +8065,28 @@ pub fn quake_dismiss_requested(target: SettingsTarget) -> Option<bool> {
     }
 }
 
-/// **Whether this press asks for the icon in the notification area** (§7.54).
+/// **How much of the summoned terminal a new run puts back, as a press on its picker**
+/// (§7.54e ④).
 #[must_use]
-pub fn tray_icon_requested(target: SettingsTarget) -> Option<bool> {
+pub fn quake_restore_requested(target: SettingsTarget) -> Option<bt_persist::QuakeRestoreV1> {
     match target {
-        SettingsTarget::Choice(SettingsRow::TrayIcon, index) => FORMULA_OPTIONS.get(index).copied(),
+        SettingsTarget::Choice(SettingsRow::QuakeRestore, index) => {
+            QUAKE_RESTORE_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// **Which profile the summoned terminal opens on, as a press on its picker** (§7.54e ⑤).
+///
+/// `Some(None)` is the first item, which is not a profile but the sentence "whatever the default
+/// profile is"; `Some(Some(index))` names a row of the table.
+#[must_use]
+pub fn quake_profile_requested(target: SettingsTarget) -> Option<Option<usize>> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::QuakeProfile, index) => {
+            Some(index.checked_sub(1).filter(|it| *it < profiles::count()))
+        }
         _ => None,
     }
 }
@@ -10640,6 +10930,11 @@ pub fn build(
     // up. Beside `background_image` and for its reason: these are `String`s the
     // reader is typing, and `SettingsValues` holds no strings.
     editor: Option<EditorInk<'_>>,
+    // And what the summoned terminal's own two string-shaped rows are holding,
+    // beside `background_image` and `editor` and for their reason: these are
+    // `String`s owned by the panel and by the shortcut table, and
+    // [`SettingsValues`] holds none.
+    summon: SummonInk<'_>,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
     // The same memo the layout runs on, for the same reason one step later: this
@@ -10970,12 +11265,37 @@ pub fn build(
                     palette,
                 );
             }
+            // **The chord, in the caps the Shortcuts page draws** (§7.54e ⑤). The
+            // same box, because it is the same fact: what a reader has to
+            // recognise is the key on their own board, and a second way of
+            // drawing one would be a second thing to learn. It is pressable,
+            // which the shortcut page's caps are not — there the `Record` button
+            // beside them is the control and here the caps *are* the control,
+            // because a settings row has one.
+            SettingsControl::Chord => {
+                let target = SettingsTarget::QuakeChord;
+                push_caps(
+                    &mut content_stack,
+                    placed.combo,
+                    summon.caps,
+                    false,
+                    summon.listening || hover == Some(target),
+                    scale,
+                    border,
+                    palette,
+                    measure,
+                );
+            }
             SettingsControl::Field | SettingsControl::FieldPair => {
                 let target = SettingsTarget::Field(placed.row);
                 push_field(
                     &mut content_stack,
                     placed.combo,
-                    editor.map_or("", |ink| ink.text_of(placed.row)),
+                    if placed.row == SettingsRow::QuakeCommand {
+                        summon.command
+                    } else {
+                        editor.map_or("", |ink| ink.text_of(placed.row))
+                    },
                     None,
                     false,
                     // A path and an argument line are read character by
@@ -10983,7 +11303,11 @@ pub fn build(
                     // and why a name — a word — is not in it.
                     placed.row != SettingsRow::ProfileName,
                     hover == Some(target),
-                    editor.and_then(|ink| ink.caret_in(target)),
+                    if placed.row == SettingsRow::QuakeCommand {
+                        summon.command_caret
+                    } else {
+                        editor.and_then(|ink| ink.caret_in(target))
+                    },
                     scale,
                     border,
                     palette,
@@ -11861,6 +12185,29 @@ fn push_profile_page(
                 .extend(focus_ring(new_profile, scale, palette.accent));
         }
     }
+}
+
+/// **What the summoned terminal's page is holding this frame** (§7.54e ⑤).
+///
+/// [`EditorInk`]'s neighbour and its reason word for word: the dialog's geometry is solved from
+/// [`SettingsValues`], which holds no strings because it is compared for equality every frame, and
+/// these are strings — a chord's caps, and a command line somebody is halfway through typing.
+///
+/// **`listening` and `caps` are resolved before they get here**, in `Runtime::settings_dialog`,
+/// which is the one place that holds both the panel's capture and the shortcut table it indexes
+/// into. That is §7.54b's own arrangement for the sentence about a chord another program is
+/// holding, said again about the caps themselves: two halves in hand, joined once.
+#[derive(Clone, Copy, Debug)]
+pub struct SummonInk<'a> {
+    /// The caps to draw — the bound chord's, or the live ones while this row is listening. Empty
+    /// is a chord nobody has bound, which the caps box draws as its own empty shape.
+    pub caps: &'a [String],
+    /// Whether the capture is open on this row, which is the caps box's own lit state.
+    pub listening: bool,
+    /// What the startup-command row is holding.
+    pub command: &'a str,
+    /// The selection the caret is holding in it, when the caret is in it.
+    pub command_caret: Option<(usize, usize)>,
 }
 
 /// What the profile editor's fields are holding this frame (§7.1.6c-6b).
@@ -16298,6 +16645,7 @@ mod tests {
                 surface_width,
                 scale,
                 crate::seats::RailState::default(),
+                false,
                 gear,
                 y,
             ),
@@ -16825,7 +17173,12 @@ mod tests {
     /// two pins that read a drawn value skip it rather than inventing a claim
     /// about a control that cannot overflow.
     fn shown_value(row: SettingsRow) -> Option<&'static str> {
-        if row.control().range().is_some() {
+        // **Pickers only**, which the slider already said and the summoned
+        // terminal's key and command rows now say again: a chord box and a text
+        // field have no ticked item either, so the two pins that read a drawn
+        // value skip them rather than inventing a claim about a control that has
+        // no list to overflow.
+        if !matches!(row.control(), SettingsControl::Combo) {
             return None;
         }
         Some(
@@ -17109,8 +17462,21 @@ mod tests {
         ellipsised.sort_by_key(|row| format!("{row:?}"));
         assert_eq!(
             ellipsised,
-            vec![SettingsRow::DefaultProfile, SettingsRow::SplitDirection],
-            "the long profile title and `Auto (longer edge)` are the two \
+            vec![
+                SettingsRow::DefaultProfile,
+                // Two of the summoned terminal's own (§7.54e ⑤): its first
+                // profile item is the sentence "whatever the default profile
+                // is", and the third rung of `What comes back` names two things
+                // and a condition. Both are values a picker button has to carry
+                // and neither fits 118px, which is exactly the case this pin
+                // exists for — the button says as much of it as fits and the
+                // row's sentence underneath carries the rest.
+                SettingsRow::QuakeProfile,
+                SettingsRow::QuakeRestore,
+                SettingsRow::SplitDirection,
+            ],
+            "the long profile title, the summoned terminal's two and `Auto \
+             (longer edge)` are the two \
              values this build's own tables can produce that cannot fit the \
              118px button, and every other row's option is one short word that \
              must be left alone"
@@ -17344,6 +17710,12 @@ mod tests {
             "",
             recording,
             None,
+            SummonInk {
+                caps: &[],
+                listening: false,
+                command: "",
+                command_caret: None,
+            },
             &mut measure,
         )
     }
@@ -18547,6 +18919,9 @@ mod tests {
                     SettingsCategory::Appearance,
                     SettingsCategory::RenderedBlocks,
                     SettingsCategory::General,
+                    // The summoned terminal's eight, together, between the rows
+                    // about the product and the rows about one pane (§7.54e ⑤).
+                    SettingsCategory::SummonedTerminal,
                     SettingsCategory::Terminal,
                     SettingsCategory::Agents,
                 ],
@@ -18605,6 +18980,7 @@ mod tests {
                 vec![
                     SettingsCategory::General,
                     SettingsCategory::Appearance,
+                    SettingsCategory::SummonedTerminal,
                     SettingsCategory::Terminal,
                     SettingsCategory::Agents,
                     SettingsCategory::RenderedBlocks,
@@ -20631,6 +21007,12 @@ mod tests {
             "ridge.jpg",
             None,
             None,
+            SummonInk {
+                caps: &[],
+                listening: false,
+                command: "",
+                command_caret: None,
+            },
             &mut measure,
         )
         .into_iter()
@@ -20900,14 +21282,19 @@ mod tests {
                 SettingsRow::GitPanel,
                 SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
-                SettingsRow::QuakeHeight,
-                SettingsRow::QuakeWidth,
-                SettingsRow::QuakeDismiss,
-                SettingsRow::TrayIcon,
                 SettingsRow::ContextMenu,
                 // Last on General: the only row in the dialog that reaches off
                 // the machine (§7.51).
                 SettingsRow::UpdateCheck,
+                // ── the summoned terminal's own page (§7.54e ⑤) ──
+                SettingsRow::QuakeHotkey,
+                SettingsRow::QuakeProfile,
+                SettingsRow::QuakeCommand,
+                SettingsRow::QuakeHeight,
+                SettingsRow::QuakeWidth,
+                SettingsRow::QuakeTopGap,
+                SettingsRow::QuakeDismiss,
+                SettingsRow::QuakeRestore,
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
                 SettingsRow::Scrollback,
@@ -20950,14 +21337,19 @@ mod tests {
                 SettingsRow::GitPanel,
                 SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
-                SettingsRow::QuakeHeight,
-                SettingsRow::QuakeWidth,
-                SettingsRow::QuakeDismiss,
-                SettingsRow::TrayIcon,
                 SettingsRow::ContextMenu,
                 // Last on General: the only row in the dialog that reaches off
                 // the machine (§7.51).
                 SettingsRow::UpdateCheck,
+                // ── the summoned terminal's own page (§7.54e ⑤) ──
+                SettingsRow::QuakeHotkey,
+                SettingsRow::QuakeProfile,
+                SettingsRow::QuakeCommand,
+                SettingsRow::QuakeHeight,
+                SettingsRow::QuakeWidth,
+                SettingsRow::QuakeTopGap,
+                SettingsRow::QuakeDismiss,
+                SettingsRow::QuakeRestore,
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
                 SettingsRow::Scrollback,
@@ -21083,6 +21475,24 @@ mod tests {
                     } else {
                         ROW_HEIGHT
                     };
+                    // **A stacked row breaks the rhythm on purpose** (§7.1.6c-6b):
+                    // its control stands *under* its sentence rather than beside
+                    // it, so neither its own band nor its `combo`'s top is one row
+                    // height from its neighbour's. Until 2026-09-05 no page outside
+                    // the profile editor held one and this loop never met the case;
+                    // `Command on first summon` is the first (§7.54e ⑤). What is
+                    // still true of the pair — and what a rhythm is for — is that
+                    // the row below starts below the row above, which is asserted
+                    // here rather than skipped.
+                    if above.row.stacked() || below.row.stacked() {
+                        assert!(
+                            below.title[1] - above.title[1] >= step,
+                            "{:?} follows {:?} and overlaps it",
+                            below.row,
+                            above.row
+                        );
+                        continue;
+                    }
                     assert_eq!(
                         below.combo[1] - above.combo[1],
                         step,
@@ -21978,14 +22388,15 @@ mod tests {
         lacking.default_profile = profiles::fallback_profile();
 
         let mut panel = keyboarded_on(SettingsRow::DefaultProfile.category());
-        // `End` and then six steps back: `Update check` closes this page
-        // (§7.51), `Explorer context menu` stands above it (§7.4), the taskbar
-        // icon above that (§7.54b ⑤), the summoned terminal's three above that
-        // (§7.54 — height, width and the dismissal), and `Default profile` above
-        // them. The assertion below is what keeps the presses honest — a page
+        // `End` and then two steps back: `Update check` closes this page
+        // (§7.51), `Explorer context menu` stands above it (§7.4), and
+        // `Default profile` above that. The summoned terminal's rows used to
+        // stand between them and moved to a page of their own on 2026-09-05
+        // (§7.54e ⑤), which is why this walk is four presses shorter than it
+        // was. The assertion below is what keeps the presses honest — a page
         // reordered under this test lands the ring somewhere else and says so.
         panel.key(SettingsKey::End, content(&flat, &lines), &lacking);
-        for _ in 0..6 {
+        for _ in 0..2 {
             panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
         }
         assert_eq!(
@@ -22854,6 +23265,12 @@ mod tests {
                 "",
                 None,
                 None,
+                SummonInk {
+                    caps: &[],
+                    listening: false,
+                    command: "",
+                    command_caret: None,
+                },
                 &mut measure,
             )
             .iter()
@@ -23344,6 +23761,12 @@ mod tests {
             "",
             Some((0, &waiting, None)),
             None,
+            SummonInk {
+                caps: &[],
+                listening: false,
+                command: "",
+                command_caret: None,
+            },
             &mut measure,
         );
         let labels: Vec<ChromeLabel> = drawn
@@ -23385,6 +23808,12 @@ mod tests {
             "",
             Some((0, &waiting, Some(crate::shortcuts::hint_altgr_zone()))),
             None,
+            SummonInk {
+                caps: &[],
+                listening: false,
+                command: "",
+                command_caret: None,
+            },
             &mut measure,
         );
         let hint = refused
@@ -23408,6 +23837,12 @@ mod tests {
             "",
             Some((0, &waiting, None)),
             None,
+            SummonInk {
+                caps: &[],
+                listening: false,
+                command: "",
+                command_caret: None,
+            },
             &mut measure,
         );
         assert!(
@@ -23527,6 +23962,12 @@ mod tests {
                 "",
                 recording,
                 None,
+                SummonInk {
+                    caps: &[],
+                    listening: false,
+                    command: "",
+                    command_caret: None,
+                },
                 &mut measure,
             )
             .iter()
@@ -23886,6 +24327,12 @@ mod tests {
             "",
             None,
             None,
+            SummonInk {
+                caps: &[],
+                listening: false,
+                command: "",
+                command_caret: None,
+            },
             &mut measure,
         )
     }
@@ -23921,6 +24368,7 @@ mod tests {
             [
                 SettingsCategory::General,
                 SettingsCategory::Appearance,
+                SettingsCategory::SummonedTerminal,
                 SettingsCategory::Profiles,
                 SettingsCategory::Terminal,
                 SettingsCategory::Agents,
@@ -24888,9 +25336,17 @@ mod tests {
             .into_iter()
             .flat_map(|layer| layer.labels)
             .collect();
+        // **Inside the row's band and inside the row's own column.** The vertical
+        // test alone used to be enough and stopped being so the day the rail grew
+        // an eighth word (§7.54e ⑤): a rail word standing at this height is not a
+        // line of this row, and the whole claim here is about what the *row* says.
         let inside: Vec<&str> = drawn_labels
             .iter()
-            .filter(|label| label.rect[1] >= claude.band[1] && label.rect[3] <= claude.band[3])
+            .filter(|label| {
+                label.rect[1] >= claude.band[1]
+                    && label.rect[3] <= claude.band[3]
+                    && label.rect[0] >= claude.band[0]
+            })
             .map(|label| label.text.as_str())
             .collect();
         assert_eq!(

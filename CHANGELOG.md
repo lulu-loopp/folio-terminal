@@ -4,6 +4,55 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- **The summoned terminal lives and dies with Folio.** The notification-area
+  icon is gone, along with the `Keep an icon on the taskbar` row and the
+  residency it decided: closing the last window you can see ends the run, and a
+  summoned terminal hidden behind its key goes with it. It loses nothing by
+  going — what comes back next launch is the new **What comes back** row's
+  answer. Existing `settings.json` files have `tray_icon` taken out of them
+  the first time Folio reads them.
+- **One `×` on the summoned terminal, and it means hide.** The window keeps the
+  gear and one `×`; the minimise and maximise buttons are gone. Pressing the `×`
+  is the summon key pressed again, down to the bit it sets — the window goes
+  away, the keyboard goes back to whatever it came down over, and the tabs,
+  shells and scrollback are all still there at the next press. Minimise used to
+  put the window away without going through that door, which left the next press
+  of the key doing nothing at all. End the session with `exit` in the shell, or
+  by closing the tab.
+- **A settings page of its own.** Everything about the summoned terminal is now
+  under **Settings > Summoned terminal**: the summon key (recorded in place),
+  which profile it opens on, a command to run on the first summon of each run,
+  its height, width and the gap above it, whether it hides when it loses focus,
+  and what comes back. The gear on the summoned terminal's own title bar opens
+  that page; every other window's gear opens General as before. The four rows
+  that used to stand on General have moved here.
+- **The summon's rectangle is decided in one place.** Which display it comes
+  down on, how big it is there, and whether you have arranged it on that display
+  by hand are one question with one answer, whichever door asked for the summon.
+
+### Added
+
+- **What comes back (Settings > Summoned terminal).** Three answers for what a
+  new run puts back into the summoned terminal: nothing, the tabs and their
+  folders, or the tabs, their folders **and** the last command a pinned tab ran
+  — typed at its prompt and **not** run. Nothing on this row ever runs anything;
+  the restored line stands there for you to press `Enter` on or edit. It ships
+  on the third answer. Restoring a command needs shell integration, because that
+  is what tells Folio which line was a command; without it the tabs and folders
+  come back and nothing is typed.
+- **Command on first summon (Settings > Summoned terminal).** One command, run
+  once each time Folio starts, on the first summon. This is the one thing the
+  summoned terminal runs on your behalf, and it runs because you wrote it into
+  that row. Empty by default.
+- **Profile and Gap above it (Settings > Summoned terminal).** Which shell a new
+  tab in the summoned terminal starts — the default profile unless you say
+  otherwise — and how far below the top of the screen the window hangs, which
+  was a fixed twelve pixels until now.
+
 ## 0.1.1-preview (unreleased)
 
 A fixes-and-polish release for 0.1.0-preview. Nothing below changes how anything

@@ -124,6 +124,26 @@ pub struct TermLeafV1 {
     /// save produces.
     #[serde(default)]
     pub card_skip: u32,
+    /// **The last line this pane's shell was told to run** — session schema v14, and the third
+    /// rung of `SettingsV1::quake_restore` (`docs/DESIGN.md` §7.54e).
+    ///
+    /// Read off the pane's command marks, which means it exists only where shell integration is
+    /// installed: a shell that never sends `OSC 133` leaves this empty, and empty is the honest
+    /// answer rather than a guess scraped off the screen.
+    ///
+    /// **Written by exactly one kind of pane and read by exactly one**: a pinned tab of the
+    /// summoned terminal. That is narrower than "every pane that ran something", and deliberately —
+    /// this is a line a person typed, and a document that collected one for every pane in every
+    /// window would be keeping a command history nobody asked it to keep. The pin is the request:
+    /// a pinned summoned tab is a standing thing, and what it last ran is part of what it is.
+    ///
+    /// **What comes back is typed, never submitted.** The restore writes these bytes to the pty
+    /// with no newline of any kind; see `bt_persist::QuakeRestoreV1`.
+    ///
+    /// Additive and absent when empty, so every document written before v14 still reads and every
+    /// pane without one writes exactly the bytes it used to.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_command: String,
 }
 
 /// `preview { "kind": "preview", "pinned": bool }` — see [`LeafNodeV1::Preview`]
@@ -237,6 +257,7 @@ mod tests {
             cwd: "C:\\Users\\test".to_string(),
             manual_name: None,
             card_skip: 0,
+            last_command: String::new(),
         })
     }
 

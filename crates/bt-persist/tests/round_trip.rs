@@ -554,6 +554,7 @@ fn a_tab_with_no_preview_writes_no_content_section() {
                     cwd: r"C:\work".to_owned(),
                     manual_name: None,
                     card_skip: 0,
+                    last_command: String::new(),
                 })),
                 pinned: false,
                 focused_leaf: "leaf-0".to_owned(),
@@ -789,6 +790,7 @@ fn multi_tab_trees_and_active_index_round_trip_together() {
                 cwd: format!(r"C:\work\tab-{index}"),
                 manual_name: Some(format!("tab {index}")),
                 card_skip: 0,
+                last_command: String::new(),
             })),
             pinned: index == 0,
             focused_leaf: "leaf-0".to_owned(),
@@ -880,7 +882,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 30,
+        SETTINGS_SCHEMA_VERSION, 31,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -907,7 +909,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          hints the v21-to-v22, and the Terminal page's own Turn finished the \
          v22-to-v23, and the Cards column's own first-arrival hint the v23-to-v24, \
          and the terminal's own silent write to the clipboard on a dragged \
-         selection the v24-to-v25 — one key on one day, fifteen times running \n         and the one key in this file that lets this build ask a server anything, the v25-to-v26: sixteen          — and the summoned terminal's two, how tall it opens and whether it goes away when the          keyboard leaves it, the v26-to-v27: two keys on one rung because they are one window's          description and a rung is a release of this file's shape, not a key — and how wide it opens the          v27-to-v28, one key on its own day and the first rung here that changes a shape a reader          already had: the full span it replaces was never a preference anybody expressed          — and whether this program keeps an icon on the taskbar the v28-to-v29,          one key on its own day, and the second rung here whose default is not          'what you already had': it ships on, because the icon is the only door to          a program with no window on the screen and a reader cannot go looking in          the settings of a program they cannot see          — and whether a click somewhere else puts the summoned terminal away the          v29-to-v30, one key on its own day and the second rung here that          overwrites a shape a reader already had, for the v27-to-v28 rung's exact          reason: the row was born with the feature already set, so nobody ever          expressed the preference it would be carrying forward"
+         selection the v24-to-v25 — one key on one day, fifteen times running \n         and the one key in this file that lets this build ask a server anything, the v25-to-v26: sixteen          — and the summoned terminal's two, how tall it opens and whether it goes away when the          keyboard leaves it, the v26-to-v27: two keys on one rung because they are one window's          description and a rung is a release of this file's shape, not a key — and how wide it opens the          v27-to-v28, one key on its own day and the first rung here that changes a shape a reader          already had: the full span it replaces was never a preference anybody expressed          — and whether this program keeps an icon on the taskbar the v28-to-v29,          one key on its own day, and the second rung here whose default is not          'what you already had': it ships on, because the icon is the only door to          a program with no window on the screen and a reader cannot go looking in          the settings of a program they cannot see          — and whether a click somewhere else puts the summoned terminal away the          v29-to-v30, one key on its own day and the second rung here that          overwrites a shape a reader already had, for the v27-to-v28 rung's exact          reason: the row was born with the feature already set, so nobody ever          expressed the preference it would be carrying forward          — and the v30-to-v31, which is the first rung on this ladder to take a key          *away*: the notification-area icon is withdrawn (the summoned terminal lives          and dies with Folio), and the four keys the summoned terminal's own settings          section is made of arrive with it — which profile it opens on, the one          command it may be asked to run once a run, how far below the top of the          screen it hangs, and how much of it a new run puts back"
     );
     assert_eq!(
         defaults.quake_height,
@@ -919,9 +921,40 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
         bt_persist::DEFAULT_QUAKE_WIDTH,
         "and as wide as its own row says — sixty percent, centred, which is the answer a 4K          ultrawide gave to the shape that spanned the whole work area"
     );
+    // RED (user ruling 2026-09-05, `docs/DESIGN.md` §7.54e) — **the summoned terminal comes back
+    // standing where it stood, with what a pinned tab last ran typed and not pressed.** MUTATION:
+    // ship `Nothing` or `Folders` as the default and this line fails; a reader who keeps three
+    // pinned tabs in the summoned terminal is being told every morning that the product did not
+    // notice. The half this line cannot state is the half that matters most and is stated in
+    // `bt_app::quake`: no rung of this ladder ever presses `Enter`.
+    assert_eq!(
+        defaults.quake_restore,
+        bt_persist::DEFAULT_QUAKE_RESTORE,
+        "the summoned terminal puts back what it had, and the answer is the constant's, so the \
+         row, the serde default and the migration cannot drift apart"
+    );
+    assert_eq!(
+        defaults.quake_restore,
+        bt_persist::QuakeRestoreV1::FoldersAndPinnedCommands,
+        "and the rung is the third one: every tab in the folder it stood in, and a pinned tab \
+         additionally holding the line it last ran, typed at its prompt and not submitted"
+    );
+    assert_eq!(
+        defaults.quake_top_gap,
+        bt_persist::DEFAULT_QUAKE_TOP_GAP,
+        "the panel hangs twelve logical pixels below the top of the work area, which is the \
+         constant next29 wired shut now that it has a row"
+    );
+    assert_eq!(
+        defaults.quake_profile_id,
+        bt_persist::DEFAULT_PROFILE_UNSET,
+        "and it opens on whatever the default profile is, which is what the empty string means \
+         on the row above it too"
+    );
     assert!(
-        defaults.tray_icon,
-        "the icon ships on, and the row it is on says what else it decides: while          it is there, closing the last window leaves the program running behind it"
+        defaults.quake_startup_command.is_empty(),
+        "nothing is run on the first summon until somebody writes a command into the row that \
+         says it will be"
     );
     // RED (user ruling 2026-09-03, `docs/DESIGN.md` §7.54c) — 「点到其他程序不是关闭临时终端的
     // 途径」. v27 shipped this on, arguing that a window above every other window covers whatever
