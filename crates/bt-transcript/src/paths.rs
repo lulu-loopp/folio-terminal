@@ -2501,40 +2501,111 @@ mod tests {
         );
     }
 
-    /// One printed path as an application hard-wraps it into an indented block: `rows` rows of
-    /// equal width, each one indented two spaces, every row but the last filled to its own end.
+    /// One printed path as an application hard-wraps it into an indented block: exactly `rows`
+    /// rows, each one indented two spaces, each filled to its own end.
     ///
     /// This is the user's 2026-09-05 picture reproduced rather than transcribed — the path is this
     /// machine's own scratch file, so the disk really does hold what the rows spell between them.
+    ///
+    /// **The cut is made by row count, and the width follows from it** (CI red 2026-09-06). It used
+    /// to divide by a width the path's own length implied and then check how many rows fell out,
+    /// which made the number of rows — the one thing these cases are about — a property of whatever
+    /// length this machine's temp directory happens to have. Widths differ by at most one
+    /// character, which is what an application wrapping at a fixed width produces anyway.
     fn block_rows(printed: &str, rows: usize) -> Vec<String> {
         let characters = printed.chars().collect::<Vec<_>>();
-        let width = characters.len().div_ceil(rows);
-        let wrapped = characters
-            .chunks(width)
-            .map(|chunk| format!("  {}", chunk.iter().collect::<String>()))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            wrapped.len(),
-            rows,
-            "the fixture is meant to be {rows} rows wide: {wrapped:?}"
+        assert!(
+            characters.len() >= rows * 4,
+            "{rows} rows want a longer name than {printed}"
         );
+        let (width, wider) = (characters.len() / rows, characters.len() % rows);
+        let mut wrapped = Vec::with_capacity(rows);
+        let mut cut = 0;
+        for row in 0..rows {
+            let end = cut + width + usize::from(row < wider);
+            wrapped.push(format!(
+                "  {}",
+                characters[cut..end].iter().collect::<String>()
+            ));
+            cut = end;
+        }
         wrapped
     }
 
-    /// The ledger the worker comes back with once the chain walk has asked its way down: every
-    /// prefix a chain of some length spells, answered by this machine's disk.
+    /// A scratch file whose printed path an application would hard-wrap into exactly `rows` rows,
+    /// and those rows — built **from the rows outwards**.
+    ///
+    /// The head row carries this machine's own scratch directory, whatever length that is, and every
+    /// row under it is a slice of one long name this test owns, cut where this function says and
+    /// nowhere else. So no cut can land on a name the machine already has, which is what a case that
+    /// asserts a **refusal** needs: [`block_rows`]' even division is honest about what a wrap looks
+    /// like, but where its cuts fall is this machine's business, and a cut that happens to land on a
+    /// real directory would put a name on the disk that the refusal was claiming is not there.
+    fn wrapped_file(scratch: &Scratch, rows: usize) -> (PathBuf, Vec<String>) {
+        const SEGMENT: usize = 16;
+        let segments = (0..rows - 1)
+            .map(|index| {
+                let letter = char::from(b'a' + u8::try_from(index).expect("a short chain"));
+                let mut segment = letter.to_string().repeat(SEGMENT);
+                if index == rows - 2 {
+                    segment.push_str(".exe");
+                }
+                segment
+            })
+            .collect::<Vec<_>>();
+        let target = scratch.holding(&segments.concat());
+
+        let mut wrapped = vec![format!(
+            "  {}{}",
+            scratch.0.to_string_lossy(),
+            std::path::MAIN_SEPARATOR
+        )];
+        wrapped.extend(segments.iter().map(|segment| format!("  {segment}")));
+        assert_eq!(
+            wrapped.iter().map(|row| &row[2..]).collect::<String>(),
+            target.to_string_lossy(),
+            "the rows are the name, cut"
+        );
+        (target, wrapped)
+    }
+
+    /// Nothing shorter than the whole name is on this disk — the precondition every refusal case
+    /// stands on, asserted rather than assumed.
+    fn assert_only_the_whole_name_exists(rows: &[String]) {
+        let mut join = rows[0].trim_start().to_owned();
+        for row in &rows[1..rows.len() - 1] {
+            join.push_str(row.trim_start());
+            assert!(
+                !Path::new(&join).exists(),
+                "a cut landed on a name this machine already has, so the refusal would not be the \
+                 one this case is about: {join}"
+            );
+        }
+    }
+
+    /// The ledger the worker comes back with once the chain walk has asked its way down: the name
+    /// **every chain length spells**, answered by this machine's disk.
     ///
     /// The walk asks one length per frame — a name nobody has looked at ends the search — and it
     /// asks the **longest** first, so on these fixtures it is answered on the first question. The
-    /// shorter prefixes are in the ledger as the "no" the disk really gives them, which is what
-    /// makes a green run mean "the long one won" rather than "the short one was never asked".
+    /// shorter joins are in the ledger as the "no" the disk really gives them, which is what makes a
+    /// green run mean "the long one won" rather than "the short one was never asked".
+    ///
+    /// **A single row's own name is not in here, and that is the fixture telling the truth** (CI red
+    /// 2026-09-06). A hard-wrapped row reaches its row's last cell by construction, and §7.1.5k ①
+    /// stands in front of the question as well as in front of the link: `links_in` neither draws
+    /// such a candidate nor records it as an unknown, so no frame ever learns a verdict for it and
+    /// no worker ever brings one back. Putting one in was inventing a fact — and on the CI runner,
+    /// whose `%TEMP%` sits under an 8.3 short name, the fact it invented was that
+    /// `C:\Users\<short>` — seventeen characters, exactly where an eight-way cut of that machine's
+    /// path fell — is a verified reference, which gate ⑤ then quite correctly refused a chain over.
     fn block_ledger(working_directory: &Path, rows: &[String]) -> PrintedPathLinks {
-        let mut prefix = String::new();
-        let asked = rows
+        let mut join = rows[0].trim_start().to_owned();
+        let asked = rows[1..]
             .iter()
             .map(|row| {
-                prefix.push_str(row.trim_start());
-                prefix.clone()
+                join.push_str(row.trim_start());
+                join.clone()
             })
             .collect::<Vec<_>>();
         disk_ledger(
@@ -2648,18 +2719,15 @@ mod tests {
     /// §7.1.5k ② (2026-09-05): the chain is **bounded at [`MAX_REJOIN_ROWS`]**, and the bound is a
     /// refusal rather than a slower search.
     ///
-    /// Both halves of the case run on the same real file, so the only thing that differs is how
-    /// many rows the application cut it into: eight rejoin, nine do not. The ledger holds every
-    /// prefix the walk asks about **and the whole name**, so the nine-row refusal cannot be a
-    /// question nobody answered — which is what the empty `unknown` asserts.
+    /// Both halves of the case are cut from a name of their own by row count, so the only thing
+    /// that differs is how many rows the application cut it into: eight rejoin, nine do not. The
+    /// ledger holds the name every chain length spells **and the whole name**, so the nine-row
+    /// refusal cannot be a question nobody answered — which is what the empty `unknown` asserts.
     #[test]
     fn a_chain_is_refused_past_eight_rows() {
         let scratch = Scratch::named("cap");
-        let target = scratch
-            .holding_deep("ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/signed/next31.exe");
-        let printed = target.to_string_lossy().into_owned();
 
-        let eight = block_rows(&printed, MAX_REJOIN_ROWS);
+        let (_, eight) = wrapped_file(&scratch, MAX_REJOIN_ROWS);
         let links = block_ledger(&scratch.0, &eight);
         let borrowed = eight.iter().map(String::as_str).collect::<Vec<_>>();
         assert!(
@@ -2667,7 +2735,8 @@ mod tests {
             "eight rows is the longest chain there is, and it is a chain"
         );
 
-        let nine = block_rows(&printed, MAX_REJOIN_ROWS + 1);
+        let (_, nine) = wrapped_file(&scratch, MAX_REJOIN_ROWS + 1);
+        assert_only_the_whole_name_exists(&nine);
         let links = block_ledger(&scratch.0, &nine);
         let borrowed = nine.iter().map(String::as_str).collect::<Vec<_>>();
         let mut unknown = BTreeSet::new();
@@ -2699,17 +2768,21 @@ mod tests {
     #[test]
     fn a_chain_is_not_threaded_through_a_row_the_application_left_room_in() {
         let scratch = Scratch::named("stopped");
-        let target =
-            scratch.holding_deep("ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/next31.exe");
-        let printed = target.to_string_lossy().into_owned();
-        let rows = block_rows(&printed, 3);
+        let (_, rows) = wrapped_file(&scratch, 3);
+        assert_only_the_whole_name_exists(&rows);
         let links = block_ledger(&scratch.0, &rows);
 
         let stopped = format!("{}  ", rows[1]);
+        let mut unknown = BTreeSet::new();
         assert_eq!(
-            rejoin_rows(&links, &[&rows[0], &stopped, &rows[2]]),
+            rejoined_rows(&links, &[&rows[0], &stopped, &rows[2]], &mut unknown),
             None,
             "the middle row stopped short of its own row's end, so the chain cannot pass through it"
+        );
+        assert!(
+            unknown.is_empty(),
+            "and the two rows it was left with were answered, so this is the gate refusing and not \
+             a question waiting: {unknown:?}"
         );
     }
 
