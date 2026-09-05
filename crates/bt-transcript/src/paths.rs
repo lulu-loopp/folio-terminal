@@ -1389,21 +1389,22 @@ pub struct PrintedPathLinks {
     verdicts: BTreeMap<PathBuf, bool>,
 }
 
-/// A reference an application cut across a real newline, put back together — and the receipt that
-/// says exactly what it was put back together **from**.
+/// A reference an application cut across one or more real newlines, put back together — and the
+/// receipt that says exactly what it was put back together **from**.
 ///
-/// Everything in it is part of the promise, not decoration. The two spans are the text the two
-/// halves occupy on their own physical lines; the target is the file the lexer split out of the
-/// joined text; the base is the directory a relative half was measured from. A projection rebuilds
-/// this from the current geometry on every pass, so a resize, a reflow, a scroll that changes which
-/// rows are neighbours, or a working directory that moved does not leave a stale receipt behind —
-/// the next pass produces a different one, or none at all.
+/// Everything in it is part of the promise, not decoration. The spans are the text each physical
+/// line contributes, in reading order; the target is the file the lexer split out of the joined
+/// text; the base is the directory a relative half was measured from. A projection rebuilds this
+/// from the current geometry on every pass, so a resize, a reflow, a scroll that changes which rows
+/// are neighbours, or a working directory that moved does not leave a stale receipt behind — the
+/// next pass produces a different one, or none at all.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RejoinedReference {
-    /// Byte range inside the upper physical line.
-    pub upper: HyperlinkRange,
-    /// Byte range inside the lower physical line, always opening at 0.
-    pub lower: HyperlinkRange,
+    /// Byte range inside each physical line the reference stands on, first row first.
+    ///
+    /// Always at least two long: one row is not a rejoin. Every entry after the first opens at that
+    /// row's first ink, which is column 0 or the continuation column gate ② admitted.
+    pub rows: Vec<HyperlinkRange>,
     /// The disk target, with any `:line[:col]` already taken off.
     pub target: PathBuf,
     /// The directory a relative half was measured from, and `None` for a drive-rooted one.
@@ -1411,6 +1412,29 @@ pub struct RejoinedReference {
     /// The `file:` target, location carried in the fragment exactly as a single-line reference
     /// carries it.
     pub uri: String,
+}
+
+/// How many physical rows one rejoined reference may stand on (§7.1.5k ②, user ruling 2026-09-05).
+///
+/// A ceiling and not a shape. An application that hard-wraps a name at its own width puts as many
+/// rows under it as the name is wide, and a path long enough to fill eight rows of a pane is longer
+/// than anything this product has been shown; what the ceiling actually buys is a **bounded walk** —
+/// without one, a screen of peer rows would be walked from each row to the bottom of the screen in
+/// turn, and the cost of recognition would stop being linear in the screen.
+pub const MAX_REJOIN_ROWS: usize = 8;
+
+/// One row offered to [`PrintedPathLinks::rejoin_across_newline`] as a possible continuation: its
+/// text, and the last visual cell of that text.
+///
+/// The edge travels with the text because every row of a chain except the last has to answer
+/// §7.1.5k ① for **itself**: a middle row that stopped short of its own row's end is a row the
+/// application had room in and chose to stop in, which is not a cut, so no chain may be threaded
+/// through it. `None` means the caller has no cell geometry for that row, and a chain can then end
+/// there but never pass through it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContinuationRow<'a> {
+    pub text: &'a str,
+    pub edge: Option<LineEndCell>,
 }
 
 impl PrintedPathLinks {
@@ -1518,35 +1542,57 @@ impl PrintedPathLinks {
         links
     }
 
-    /// Put back together a reference the application itself cut across a real newline — §7.1.5k ②,
-    /// and the debt §7.1.5j left as #16.
+    /// Put back together a reference the application itself cut across one or more real newlines —
+    /// §7.1.5k ②, and the debt §7.1.5j left as #16.
     ///
-    /// **Five gates, and the first version keeps every one of them shut as far as it goes.** A
-    /// soft wrap is rejoined by the terminal's own `continues` record and never reaches here; an
-    /// application newline leaves no record at all, so nothing here is read from provenance and
-    /// everything is read from evidence:
+    /// **Five gates, and every one of them is kept shut as far as it goes.** A soft wrap is
+    /// rejoined by the terminal's own `continues` record and never reaches here; an application
+    /// newline leaves no record at all, so nothing here is read from provenance and everything is
+    /// read from evidence:
     ///
-    /// 1. the upper half reaches its physical line's last visual cell — otherwise the application
-    ///    had room and chose to stop, which is not a cut;
-    /// 2. the lower half opens at visual column 0, **or strictly deeper than the upper half's own
-    ///    indent**. *Not* "at the same indent as the line above": two stack frames, two diagnostics
-    ///    and two directory entries all share an indent, and a shared indent is what peer lines look
-    ///    like rather than what a wrap looks like. A **hanging** indent is the opposite picture
-    ///    (2026-09-04): an agent's bullet paragraph opens its first row with `●` at column 0 and
-    ///    aligns every continuation under the bullet's text, so the continuation stands *deeper*
-    ///    than the row it continues, which no pair of peers ever does. A row's own indent is the
-    ///    visual width of its leading blanks, so a non-blank opening mark like `●` is ink and
-    ///    counts as content;
+    /// 1. the first row's candidate reaches its physical line's last visual cell — otherwise the
+    ///    application had room and chose to stop, which is not a cut. **Every middle row of a chain
+    ///    answers this for itself too** (2026-09-05): a row a chain passes *through* is a row the
+    ///    application filled, and one that stopped short ends the chain where it stands;
+    /// 2. a continuation opens at visual column 0, **or strictly deeper than the first row's own
+    ///    indent**, **or at exactly that indent when the first row is nothing but the candidate**
+    ///    (2026-09-05). The first two heads are the 2026-09-04 ruling: two stack frames, two
+    ///    diagnostics and two directory entries all share an indent, and a shared indent is what
+    ///    peer lines look like rather than what a wrap looks like, while an agent's bullet paragraph
+    ///    opens its first row with `●` at column 0 and aligns every continuation under the bullet's
+    ///    text, so the continuation stands *deeper* than the row it continues. The third head is the
+    ///    block: an indented markdown code block holding **one path and nothing else** is not a
+    ///    column of peers, because a column of peers is a column of *things* and this column has one
+    ///    thing in it. What keeps that head from swallowing the peers it was carved out of is the
+    ///    other two gates, and they are asked of each row: a directory listing's rows are each a
+    ///    verified reference of their own (gate 5), and a stack frame's rows carry other ink before
+    ///    the path (so the first row is not "nothing but the candidate"). A row's own indent is the
+    ///    visual width of its leading blanks, so a non-blank opening mark like `●` is ink and counts
+    ///    as content;
     /// 3. the joined text, handed back to **this same lexer**, is exactly one candidate covering
     ///    all of it. Not "contains a candidate" — a query string, a tail of prose or a second
     ///    reference would then be silently dropped and the promise would cover text it did not
     ///    read;
     /// 4. the disk holds the target the lexer split out — the file's own name, never the printed
     ///    string with `:line:col` welded to it;
-    /// 5. neither half is a verified reference on its own. This is the gate that keeps two real
-    ///    neighbouring log lines from being spliced into a third real path, and it is deliberately
-    ///    **not** relaxed for the case that started this slice: `D:\WINDOWS\system` +
+    /// 5. no row of the chain is a verified reference on its own. This is the gate that keeps two
+    ///    real neighbouring log lines from being spliced into a third real path, and it is
+    ///    deliberately **not** relaxed for the case that started this slice: `D:\WINDOWS\system` +
     ///    `32\…\Modules` ends as a blank, and a blank is the honest answer.
+    ///
+    /// # The chain (user ruling 2026-09-05)
+    ///
+    /// A reference is not cut into halves, it is cut into **rows**: an agent that renders a fenced
+    /// block hard-wraps the path inside it at the pane's width, and a path long enough gets four
+    /// rows, or six. So this reads a first row and *some number of* continuations, at most
+    /// [`MAX_REJOIN_ROWS`] rows in all, and it grows the chain one row at a time: at each length
+    /// gates 3, 4 and 5 are asked once, and **the first length that holds wins**. The walk stops
+    /// when a row fails gate 2 or gate 5, when the row a chain would have to pass through did not
+    /// reach its own row's end, or at the ceiling.
+    ///
+    /// An **unanswered** target ends the search exactly as it does for a single line: it is written
+    /// into `unknown` and this frame draws nothing, because a promise nobody has been to the disk
+    /// for is not a promise. The next frame, holding the answer, asks the next length.
     ///
     /// A bare **web address** is never rejoined here, and cannot be: gate 4 is a witness on this
     /// machine's disk, and no such witness exists for a host. Its cut upper half is pressed down by
@@ -1555,7 +1601,7 @@ impl PrintedPathLinks {
         &self,
         upper: &str,
         upper_edge: LineEndCell,
-        lower: &str,
+        lowers: &[ContinuationRow<'_>],
         unknown: &mut BTreeSet<PathBuf>,
     ) -> Option<RejoinedReference> {
         // Gate 1. Exactly one candidate may reach the row's end: two would mean the lexer cannot
@@ -1569,114 +1615,142 @@ impl PrintedPathLinks {
             })
             .collect::<Vec<_>>();
         let head = reaching.pop().filter(|_| reaching.is_empty())?;
-        let upper_tail = upper.get(head.byte_start..upper_edge.byte_end)?;
 
-        // Gate 2, asked first because it is the cheapest and it decides where the lower half even
-        // begins. A continuation opens either at visual column 0 or **strictly deeper than the
-        // upper half's own indent**; a shared indent — equal and non-zero — is refused as it always
-        // was, and so is an opening shallower than the line above.
-        //
-        // The two shapes this tells apart (user report 2026-09-04): peer lines are laid out by one
-        // rule and therefore open at the *same* column, while a hanging indent belongs to a single
-        // paragraph whose continuations are pushed past the marker its first row carries. `●` is
-        // ink, not blank, so that first row's indent is 0 and the two-space continuation under it is
-        // deeper.
-        let (lower_start, lower_column) = first_ink(lower)?;
-        let (_, upper_indent) = first_ink(upper)?;
-        if lower_column != 0 && lower_column <= upper_indent {
-            return None;
-        }
+        // What gate 2 measures every continuation against: the first row's own indent, and whether
+        // that row holds **anything but** this candidate. Both are properties of the first row and
+        // not of the row before each continuation, because a wrapped block is laid out by one rule
+        // from its first row down — a hanging indent's third row stands as deep as its second, and
+        // asking each row about its predecessor would call that pair peers.
+        let (upper_ink, upper_indent) = first_ink(upper)?;
+        let candidate_is_the_whole_row = head.byte_start == upper_ink;
 
-        // Gate 5, asked before the disk so a refusal costs nothing: a half that already names a
-        // file of its own is that file's reference and not the front of somebody else's. **Any of
-        // its forms counts** — a seam that has already earned the upper half a link is that link's
-        // evidence, and rejoining would lay a second promise over text the first one covers. It is
-        // asked of the halves rather than of the join, so it is asked once, ahead of the readings.
+        // Gate 5 on the first row, asked before the disk so a refusal costs nothing: a row that
+        // already names a file of its own is that file's reference and not the front of somebody
+        // else's. **Any of its forms counts** — a seam that has already earned this row a link is
+        // that link's evidence, and rejoining would lay a second promise over text the first one
+        // covers.
         if upper_candidates.iter().any(|candidate| {
             candidate.byte_start == head.byte_start && self.is_verified(candidate, upper)
         }) {
             return None;
         }
-        if self.candidates_in(lower).into_iter().any(|candidate| {
-            candidate.byte_start == lower_start && self.is_verified(&candidate, lower)
-        }) {
-            return None;
-        }
 
-        // The readings gate 2 admitted, longest first.
-        //
-        // §7.30 coexisting with the rejoin (user note 2026-08-28): the continuation may carry a
-        // seam of its own — `5.exe(反斜杠)`, an agent's prose glued to the tail of the name it just
-        // wrapped — and that seam is the sentence's, not the name's. So the continuation offers the
-        // same **several readings of one token** the single-line scan offers, its whole self first
-        // and then one per seam, and they are tried **longest first against the disk** exactly as
-        // they are there. That ordering is what keeps an opening bracket a seam and not a
-        // terminator across a wrap too: `a(1` + `).txt` is asked whole before `a` is asked at all.
-        // When the token carries no seam this is the whole of it, byte for byte as before.
-        let raw_lower_end = token_end(lower, lower_start);
-        let token = &lower[lower_start..raw_lower_end];
-        let readings = std::iter::once(raw_lower_end).chain(
-            prose_seam_ends(token, token.len())
-                .into_iter()
-                .map(|end| lower_start + end),
-        );
-        for lower_end in readings {
-            let Some(lower_head) = lower
-                .get(lower_start..lower_end)
-                .filter(|head| !head.is_empty())
-            else {
-                continue;
+        let mut joined_prefix = upper.get(head.byte_start..upper_edge.byte_end)?.to_owned();
+        let mut spans = vec![HyperlinkRange {
+            byte_start: head.byte_start,
+            byte_end: upper_edge.byte_end,
+        }];
+
+        for row in lowers.iter().take(MAX_REJOIN_ROWS - 1) {
+            let Some((start, column)) = first_ink(row.text) else {
+                break;
             };
 
-            // Gate 3. One candidate, covering all of it — one *token*, that is: the shorter forms a
-            // seam offers (§7.30) are readings of the same token and not a second reference, so what
-            // this gate refuses is a second **start**, exactly as it always did. A reading that does
-            // not spell one whole reference is not a question about the disk; the next one may be.
-            let joined = format!("{upper_tail}{lower_head}");
-            let spelled = self.candidates_in(&joined);
-            let Some(whole) = spelled.first().copied().filter(|candidate| {
-                candidate.byte_start == 0
-                    && candidate.byte_end == joined.len()
-                    && spelled.iter().all(|form| form.byte_start == 0)
-            }) else {
-                continue;
-            };
+            // Gate 2.
+            let admitted = column == 0
+                || column > upper_indent
+                || (column == upper_indent && candidate_is_the_whole_row);
+            if !admitted {
+                break;
+            }
 
-            // Gate 4. The witness, asked about the file's own name. A denial hands the question to
-            // the next shorter reading; a name **nobody has looked at yet** ends the search instead,
-            // because a shorter reading may never be promised while a longer one is still unanswered
-            // (§7.30 ②) — the answer arrives and the next frame decides.
-            let Some(target) = self.resolve(whole.path_text(&joined), whole.spelling) else {
-                continue;
-            };
-            match self.verdicts.get(&target) {
-                Some(true) => {}
-                Some(false) => continue,
-                None => {
-                    unknown.insert(target);
-                    return None;
+            // Gate 5, this row.
+            if self.candidates_in(row.text).into_iter().any(|candidate| {
+                candidate.byte_start == start && self.is_verified(&candidate, row.text)
+            }) {
+                break;
+            }
+
+            // The readings this row offers as the **last** row of the chain, longest first.
+            //
+            // §7.30 coexisting with the rejoin (user note 2026-08-28): a continuation may carry a
+            // seam of its own — `5.exe(反斜杠)`, an agent's prose glued to the tail of the name it
+            // just wrapped — and that seam is the sentence's, not the name's. So it offers the same
+            // **several readings of one token** the single-line scan offers, its whole self first
+            // and then one per seam, and they are tried **longest first against the disk** exactly
+            // as they are there. That ordering is what keeps an opening bracket a seam and not a
+            // terminator across a wrap too: `a(1` + `).txt` is asked whole before `a` is asked at
+            // all. When the token carries no seam this is the whole of it, byte for byte as before.
+            let raw_end = token_end(row.text, start);
+            let token = &row.text[start..raw_end];
+            let readings = std::iter::once(raw_end).chain(
+                prose_seam_ends(token, token.len())
+                    .into_iter()
+                    .map(|end| start + end),
+            );
+            for end in readings {
+                let Some(tail) = row.text.get(start..end).filter(|text| !text.is_empty()) else {
+                    continue;
+                };
+
+                // Gate 3. One candidate, covering all of it — one *token*, that is: the shorter
+                // forms a seam offers (§7.30) are readings of the same token and not a second
+                // reference, so what this gate refuses is a second **start**, exactly as it always
+                // did. A reading that does not spell one whole reference is not a question about
+                // the disk; the next one may be.
+                let joined = format!("{joined_prefix}{tail}");
+                let spelled = self.candidates_in(&joined);
+                let Some(whole) = spelled.first().copied().filter(|candidate| {
+                    candidate.byte_start == 0
+                        && candidate.byte_end == joined.len()
+                        && spelled.iter().all(|form| form.byte_start == 0)
+                }) else {
+                    continue;
+                };
+
+                // Gate 4. The witness, asked about the file's own name. A denial hands the question
+                // to the next shorter reading, and when this row's readings are spent, to the next
+                // row; a name **nobody has looked at yet** ends the search instead, because a
+                // reading may never be promised while another is still unanswered (§7.30 ②) — the
+                // answer arrives and the next frame decides.
+                let Some(target) = self.resolve(whole.path_text(&joined), whole.spelling) else {
+                    continue;
+                };
+                match self.verdicts.get(&target) {
+                    Some(true) => {}
+                    Some(false) => continue,
+                    None => {
+                        unknown.insert(target);
+                        return None;
+                    }
                 }
+                let mut uri = local_path_to_file_uri(&target);
+                if let Some(location) = whole.location {
+                    uri.push('#');
+                    uri.push_str(&location.uri_fragment());
+                }
+                spans.push(HyperlinkRange {
+                    byte_start: start,
+                    byte_end: end,
+                });
+                return Some(RejoinedReference {
+                    rows: spans,
+                    target,
+                    resolution_base: match whole.spelling {
+                        PrintedPathSpelling::Relative => self.working_directory.clone(),
+                        _ => None,
+                    },
+                    uri,
+                });
             }
-            let mut uri = local_path_to_file_uri(&target);
-            if let Some(location) = whole.location {
-                uri.push('#');
-                uri.push_str(&location.uri_fragment());
-            }
-            return Some(RejoinedReference {
-                upper: HyperlinkRange {
-                    byte_start: head.byte_start,
-                    byte_end: upper_edge.byte_end,
-                },
-                lower: HyperlinkRange {
-                    byte_start: lower_start,
-                    byte_end: lower_end,
-                },
-                target,
-                resolution_base: match whole.spelling {
-                    PrintedPathSpelling::Relative => self.working_directory.clone(),
-                    _ => None,
-                },
-                uri,
+
+            // Nothing this row can end; the chain may only grow **through** it if the application
+            // filled it — gate 1 asked of a middle row (2026-09-05). A row with room left in it is
+            // a row the application chose to stop in, and what follows such a row is the next
+            // thing, not the rest of this one.
+            let Some(edge) = row
+                .edge
+                .filter(|edge| touches_line_end(start, raw_end, Some(*edge)))
+            else {
+                break;
+            };
+            let Some(through) = row.text.get(start..edge.byte_end) else {
+                break;
+            };
+            joined_prefix.push_str(through);
+            spans.push(HyperlinkRange {
+                byte_start: start,
+                byte_end: edge.byte_end,
             });
         }
         None
@@ -2104,13 +2178,60 @@ mod tests {
         upper: &'a str,
         lower: &'a str,
     ) -> Option<(&'a str, &'a str, String)> {
+        let (spans, uri) = rejoin_rows(links, &[upper, lower])?;
+        let [upper, lower] = spans[..] else {
+            panic!("a two-row rejoin stands on two rows, not {}", spans.len())
+        };
+        Some((upper, lower, uri))
+    }
+
+    /// The rejoin of a chain of physical rows, as the five gates answer it: the text each row
+    /// contributes, and the target.
+    ///
+    /// Every row is as wide as its own text (`last_cell_of`), which is what an application that
+    /// hard-wraps at the pane's width prints — so a row that is *not* meant to reach its row's end
+    /// is written with the ink that stands behind the name, exactly as the screen shows it.
+    fn rejoin_rows<'a>(
+        links: &PrintedPathLinks,
+        rows: &[&'a str],
+    ) -> Option<(Vec<&'a str>, String)> {
         let mut unknown = BTreeSet::new();
+        rejoined_rows(links, rows, &mut unknown)
+    }
+
+    /// One continuation row as wide as its own text, for the cases that call the rejoin directly.
+    fn continuation(text: &str) -> [ContinuationRow<'_>; 1] {
+        [ContinuationRow {
+            text,
+            edge: last_cell_of(text),
+        }]
+    }
+
+    /// [`rejoin_rows`] with the questions it asked kept, for the cases that assert about them.
+    fn rejoined_rows<'a>(
+        links: &PrintedPathLinks,
+        rows: &[&'a str],
+        unknown: &mut BTreeSet<PathBuf>,
+    ) -> Option<(Vec<&'a str>, String)> {
+        let (upper, lowers) = rows.split_first()?;
+        let continuations = lowers
+            .iter()
+            .copied()
+            .map(|text| ContinuationRow {
+                text,
+                edge: last_cell_of(text),
+            })
+            .collect::<Vec<_>>();
         links
-            .rejoin_across_newline(upper, last_cell_of(upper)?, lower, &mut unknown)
+            .rejoin_across_newline(upper, last_cell_of(upper)?, &continuations, unknown)
             .map(|joined| {
                 (
-                    &upper[joined.upper.byte_start..joined.upper.byte_end],
-                    &lower[joined.lower.byte_start..joined.lower.byte_end],
+                    joined
+                        .rows
+                        .iter()
+                        .zip(rows)
+                        .map(|(span, row)| &row[span.byte_start..span.byte_end])
+                        .collect(),
                     joined.uri,
                 )
             })
@@ -2163,11 +2284,21 @@ mod tests {
         );
     }
 
-    /// §7.1.5k ② gates ② and ⑤ from the other side (scenarios 58 and 60): a lower half that does
-    /// not start at column 0 is not a continuation, and a lower half that is already a verified
-    /// reference of its own is left to be that reference.
+    /// §7.1.5k ② gates ② and ⑤ from the other side (scenarios 58 and 60): what a shared indent
+    /// proves and what it does not, and a lower half that is already a verified reference of its
+    /// own is left to be that reference.
+    ///
+    /// **Scenario 58 is overturned here, 2026-09-05.** It read a shared indent as proof of peers on
+    /// its own, and the shape that disproved it is the one the user photographed: an indented block
+    /// holding **one path and nothing else**, cut into rows that all open at the block's indent. A
+    /// column of peers is a column of *things*, and this column has one thing in it — so the shared
+    /// indent is admitted when the first row is nothing but the candidate, and the peers scenario 58
+    /// was protecting are still refused by the gates that actually know them apart: a directory
+    /// listing's rows are each a verified reference (gate ⑤), and a stack frame or a diagnostic
+    /// carries other ink in front of its path (so its first row is not nothing but the candidate,
+    /// which `a_shared_or_shallower_indent_still_refuses_the_rejoin` pins).
     #[test]
-    fn an_indented_or_already_verified_lower_half_refuses_the_rejoin() {
+    fn a_shared_indent_is_a_block_when_the_row_holds_nothing_else() {
         let links = ledger(
             "D:\\case",
             &[
@@ -2180,8 +2311,12 @@ mod tests {
         );
         assert_eq!(
             rejoin(&links, "    D:\\case\\very\\long\\pa", "    th\\file.rs"),
-            None,
-            "scenario 58: a shared indent is what peer lines look like, not what a wrap looks like"
+            Some((
+                "D:\\case\\very\\long\\pa",
+                "th\\file.rs",
+                "file:///D:/case/very/long/path/file.rs".to_owned()
+            )),
+            "2026-09-05: four spaces holding one path and nothing else is a block, not a column"
         );
         assert_eq!(
             rejoin(&links, "D:\\case\\pre", "fix/main.rs"),
@@ -2218,6 +2353,16 @@ mod tests {
         fn holding(&self, name: &str) -> PathBuf {
             let path = self.0.join(name);
             std::fs::write(&path, b"<!doctype html>").expect("a scratch file");
+            path
+        }
+
+        /// A file under a directory tree of its own, so that the name is long enough for an
+        /// application to cut it into several rows.
+        fn holding_deep(&self, route: &str) -> PathBuf {
+            let path = self.0.join(route);
+            std::fs::create_dir_all(path.parent().expect("a route with a parent"))
+                .expect("a scratch tree");
+            std::fs::write(&path, b"MZ").expect("a scratch file");
             path
         }
     }
@@ -2290,6 +2435,11 @@ mod tests {
     /// Scenario 58's synthetic pair already pinned the equal case; this one pins it on the shape
     /// that motivated the relaxation, so the relaxation cannot quietly grow into "any indent at
     /// all". The joined name exists, so gate ② is the only gate that can be answering.
+    ///
+    /// **Untouched by the 2026-09-05 reversal**, and it is the case that says where that reversal
+    /// stops: the bullet paragraph's first row carries `● 城池占领 v2 交了…` in front of the path,
+    /// so the row is not nothing but the candidate and the shared indent stays what it always was —
+    /// the look of two peer lines.
     #[test]
     fn a_shared_or_shallower_indent_still_refuses_the_rejoin() {
         let scratch = Scratch::named("peers");
@@ -2315,6 +2465,246 @@ mod tests {
             None,
             "a lower half that opens shallower than the line above it is not that line's \
              continuation either"
+        );
+    }
+
+    /// One printed path as an application hard-wraps it into an indented block: `rows` rows of
+    /// equal width, each one indented two spaces, every row but the last filled to its own end.
+    ///
+    /// This is the user's 2026-09-05 picture reproduced rather than transcribed — the path is this
+    /// machine's own scratch file, so the disk really does hold what the rows spell between them.
+    fn block_rows(printed: &str, rows: usize) -> Vec<String> {
+        let characters = printed.chars().collect::<Vec<_>>();
+        let width = characters.len().div_ceil(rows);
+        let wrapped = characters
+            .chunks(width)
+            .map(|chunk| format!("  {}", chunk.iter().collect::<String>()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            wrapped.len(),
+            rows,
+            "the fixture is meant to be {rows} rows wide: {wrapped:?}"
+        );
+        wrapped
+    }
+
+    /// The ledger the worker comes back with once the chain walk has asked its way up: every
+    /// prefix a growing chain spells, answered by this machine's disk.
+    ///
+    /// The walk asks one length per frame — a name nobody has looked at ends the search — so this
+    /// is what the ledger holds by the frame the last question is answered, and every intermediate
+    /// join is in it as the "no" the disk really gives it.
+    fn block_ledger(working_directory: &Path, rows: &[String]) -> PrintedPathLinks {
+        let mut prefix = String::new();
+        let asked = rows
+            .iter()
+            .map(|row| {
+                prefix.push_str(row.trim_start());
+                prefix.clone()
+            })
+            .collect::<Vec<_>>();
+        disk_ledger(
+            working_directory,
+            &asked.iter().map(String::as_str).collect::<Vec<_>>(),
+        )
+    }
+
+    /// PIN (user report 2026-09-05, Claude Code running inside Folio) — **a path an application cut
+    /// into four rows of an indented block is one reference.**
+    ///
+    /// The picture: an agent renders a fenced block as two-space-indented text, the block holds one
+    /// path and nothing else, and the path is wider than the pane, so it arrives as four rows that
+    /// each fill their own row but the last. The file exists and nothing was drawn.
+    ///
+    /// RED before this slice, twice over: gate ② read the shared two-space indent as a column of
+    /// peers, and the rejoin had only ever been asked about **two** rows, so even with gate ②
+    /// relaxed the four fragments had no length at which they could be put together.
+    ///
+    /// MUTATIONS, both run: cap [`MAX_REJOIN_ROWS`] at 2 and this is `None` again — the chain is
+    /// what puts four fragments together, and nothing else in the module does; take the equal-indent
+    /// head back out of gate ② (`column == 0 || column > upper_indent`) and it is `None` again as
+    /// well, which is the state the user photographed.
+    #[test]
+    fn a_path_cut_into_four_indented_rows_is_one_reference() {
+        let scratch = Scratch::named("block");
+        let target = scratch.holding_deep(
+            "D--Developer-BetterTerminal/ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/signed/\
+             folio-next31.exe",
+        );
+        let printed = target.to_string_lossy().into_owned();
+        let rows = block_rows(&printed, 4);
+        let links = block_ledger(&scratch.0, &rows);
+
+        let borrowed = rows.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            rejoin_rows(&links, &borrowed),
+            Some((
+                rows.iter().map(|row| &row[2..]).collect(),
+                local_path_to_file_uri(&target)
+            )),
+            "the promise covers all four rows and neither of the two indents in front of them"
+        );
+    }
+
+    /// The same block in three rows: the chain is a chain at every length, not a special case
+    /// written for the length of one photograph.
+    #[test]
+    fn a_path_cut_into_three_indented_rows_is_one_reference() {
+        let scratch = Scratch::named("block3");
+        let target =
+            scratch.holding_deep("ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/next31.exe");
+        let printed = target.to_string_lossy().into_owned();
+        let rows = block_rows(&printed, 3);
+        let links = block_ledger(&scratch.0, &rows);
+
+        let borrowed = rows.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            rejoin_rows(&links, &borrowed),
+            Some((
+                rows.iter().map(|row| &row[2..]).collect(),
+                local_path_to_file_uri(&target)
+            ))
+        );
+    }
+
+    /// §7.1.5k ② (2026-09-05): the chain is **bounded at [`MAX_REJOIN_ROWS`]**, and the bound is a
+    /// refusal rather than a slower search.
+    ///
+    /// Both halves of the case run on the same real file, so the only thing that differs is how
+    /// many rows the application cut it into: eight rejoin, nine do not. The ledger holds every
+    /// prefix the walk asks about **and the whole name**, so the nine-row refusal cannot be a
+    /// question nobody answered — which is what the empty `unknown` asserts.
+    #[test]
+    fn a_chain_is_refused_past_eight_rows() {
+        let scratch = Scratch::named("cap");
+        let target = scratch
+            .holding_deep("ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/signed/next31.exe");
+        let printed = target.to_string_lossy().into_owned();
+
+        let eight = block_rows(&printed, MAX_REJOIN_ROWS);
+        let links = block_ledger(&scratch.0, &eight);
+        let borrowed = eight.iter().map(String::as_str).collect::<Vec<_>>();
+        assert!(
+            rejoin_rows(&links, &borrowed).is_some(),
+            "eight rows is the longest chain there is, and it is a chain"
+        );
+
+        let nine = block_rows(&printed, MAX_REJOIN_ROWS + 1);
+        let links = block_ledger(&scratch.0, &nine);
+        let borrowed = nine.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut unknown = BTreeSet::new();
+        assert_eq!(
+            rejoined_rows(&links, &borrowed, &mut unknown),
+            None,
+            "the ninth row is past the ceiling, and the ceiling refuses rather than reaching"
+        );
+        assert!(
+            unknown.is_empty(),
+            "and it refused without asking anything new: {unknown:?}"
+        );
+    }
+
+    /// §7.1.5k ① asked of a **middle** row (2026-09-05): a chain may only be threaded through a row
+    /// the application filled.
+    ///
+    /// The fixture is the three-row block with two trailing blanks left on its middle row — the
+    /// shape of an application that had room on that row and stopped anyway, which is not a cut.
+    /// The chain therefore ends at two rows, those two do not spell a file, and nothing is drawn.
+    /// The disk holds the whole name, so it is not gate ④ that is refusing.
+    ///
+    /// **This gate has a second lock behind it, deliberately.** What a chain grows through is the
+    /// row's text up to its last cell, and the gate is exactly the condition under which that slice
+    /// *is* the row's token — so with the gate removed the blanks the application stopped in would
+    /// land inside the joined text and gate ③ would refuse the same rows for spelling more than one
+    /// candidate. The gate is kept in front of it because it refuses in the terms the evidence is
+    /// actually in, before a string is built and before the lexer is asked.
+    #[test]
+    fn a_chain_is_not_threaded_through_a_row_the_application_left_room_in() {
+        let scratch = Scratch::named("stopped");
+        let target =
+            scratch.holding_deep("ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/next31.exe");
+        let printed = target.to_string_lossy().into_owned();
+        let rows = block_rows(&printed, 3);
+        let links = block_ledger(&scratch.0, &rows);
+
+        let stopped = format!("{}  ", rows[1]);
+        assert_eq!(
+            rejoin_rows(&links, &[&rows[0], &stopped, &rows[2]]),
+            None,
+            "the middle row stopped short of its own row's end, so the chain cannot pass through it"
+        );
+    }
+
+    /// §7.1.5k ② gate ② (2026-09-05), the line the block head is carved along: the shared indent is
+    /// admitted **only** when the first row holds nothing but the candidate.
+    ///
+    /// Same four rows, same disk, one difference — a bullet in front of the path on the first row,
+    /// at the block's own indent. That is what a diagnostic, a stack frame and a listing all look
+    /// like, and the 2026-09-04 rule stands over it unchanged: a continuation must open at column 0
+    /// or strictly deeper than the row it continues.
+    #[test]
+    fn a_shared_indent_behind_other_ink_still_refuses_the_chain() {
+        let scratch = Scratch::named("marked");
+        let target =
+            scratch.holding_deep("ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/next31.exe");
+        let printed = target.to_string_lossy().into_owned();
+        let rows = block_rows(&printed, 4);
+        let links = block_ledger(&scratch.0, &rows);
+
+        let marked = format!("  ● {}", &rows[0][2..]);
+        assert_eq!(
+            rejoin_rows(&links, &[&marked, &rows[1], &rows[2], &rows[3]]),
+            None,
+            "the first row carries ink of its own, so the rows under it are peers at its indent"
+        );
+    }
+
+    /// §7.1.5k ② gate ⑤ in a chain (2026-09-05): **every** row is asked whether it is already a
+    /// reference of its own, and one that is ends the chain where it stands.
+    ///
+    /// This is what holds a directory listing out of the block head: its rows share an indent and
+    /// each is nothing but a path, so gate ② would admit them — and each of them is a file this
+    /// window has already been to the disk for. Both fixtures below hold the **joined** name as
+    /// well, so gate ④ says yes to it and only gate ⑤ can be the one refusing.
+    #[test]
+    fn a_row_that_is_already_a_reference_ends_the_chain() {
+        let listing = ledger(
+            "D:\\case",
+            &[
+                ("D:\\case\\src\\main.rs", true),
+                ("D:\\case\\src\\lib.rs", true),
+                ("D:\\case\\src\\main.rssrc\\lib.rs", true),
+            ],
+        );
+        assert_eq!(
+            rejoin_rows(&listing, &["  src\\main.rs", "  src\\lib.rs"]),
+            None,
+            "two entries of a listing are two references, not the two halves of a third"
+        );
+
+        // And in the middle of a chain, where the head is nobody's reference and the walk has
+        // already grown through one row: `ee\ff.rs` is a file of its own, so the chain stops in
+        // front of it rather than swallowing it.
+        let mut fixture = vec![
+            ("D:\\case\\a\\bbcc\\dd", false),
+            ("D:\\case\\a\\bbcc\\ddee\\ff.rs", true),
+            ("D:\\case\\ee\\ff.rs", true),
+        ];
+        let rows = ["  a\\bb", "  cc\\dd", "  ee\\ff.rs"];
+        assert_eq!(
+            rejoin_rows(&ledger("D:\\case", &fixture), &rows),
+            None,
+            "the gate is asked of the row the chain is about to grow through, not only of its head"
+        );
+        // The control, which is the same walk with that one fact taken away.
+        fixture.pop();
+        assert_eq!(
+            rejoin_rows(&ledger("D:\\case", &fixture), &rows),
+            Some((
+                vec!["a\\bb", "cc\\dd", "ee\\ff.rs"],
+                "file:///D:/case/a/bbcc/ddee/ff.rs".to_owned()
+            )),
+            "a row nobody has verified is a row the chain grows through"
         );
     }
 
@@ -2478,7 +2868,7 @@ mod tests {
             links.rejoin_across_newline(
                 &joined_size,
                 last_cell_of(&joined_size).unwrap(),
-                CHIP_TAIL,
+                &continuation(CHIP_TAIL),
                 &mut asked
             ),
             None,
@@ -2504,20 +2894,31 @@ mod tests {
         );
     }
 
-    /// PIN (user report 2026-08-25, case C) — boundary table row 27 met in the wild: the same path,
-    /// cut by the application over two rows that share an indent, is **not** rejoined even when the
-    /// disk holds the joined target.
+    /// PIN (user report 2026-08-25, case C; **overturned 2026-09-05**) — boundary table row 27 met
+    /// in the wild: the same path, cut by the application over two rows that share an indent.
     ///
-    /// Recorded separately from scenario 58's synthetic pair because this is the shape a reader
-    /// will photograph and ask about: a real, existing file, spelled correctly across two rows, and
-    /// a deliberate blank underneath it. The ledger holds the joined target, so gate ④ would say
-    /// yes and gate ② is the gate that answers — the refusal is the design's answer, not a gap.
+    /// It was recorded in 2026-08-25 as a deliberate blank — "a real, existing file, spelled
+    /// correctly across two rows, and nothing drawn under it" — on the strength of scenario 58's
+    /// rule that a shared indent is what peer lines look like. The user photographed the same
+    /// picture again on 2026-09-05, in four rows instead of two, and ruled the other way: **an
+    /// indented block holding one path and nothing else is not a column of peers**, because a column
+    /// of peers is a column of things and this one holds a single thing. So this case is the
+    /// positive it always looked like, and what still holds the peers out is the pair of gates that
+    /// can tell them apart one row at a time — ⑤ for a listing, "nothing but the candidate" for a
+    /// frame or a diagnostic.
+    ///
+    /// Two of this file's chip cases are untouched by the reversal and say why: the gutter and the
+    /// size column in `an_application_column_layout_infers_no_reference_from_its_fragments` are
+    /// other ink on the row, and other ink is what a column of peers actually looks like.
     #[test]
-    fn a_real_path_cut_over_two_equally_indented_rows_stays_two_rows() {
+    fn a_real_path_cut_over_two_equally_indented_rows_is_one_reference() {
         let upper = format!("  {CHIP_HEAD}");
         let lower = format!("  {CHIP_TAIL}");
         let links = ledger("D:\\case", &[(CHIP_TARGET, true)]);
-        assert_eq!(rejoin(&links, &upper, &lower), None);
+        assert_eq!(
+            rejoin(&links, &upper, &lower),
+            Some((CHIP_HEAD, CHIP_TAIL, CHIP_URI.to_owned()))
+        );
     }
 
     /// §7.1.5k ② gate ③, written as the precise assertion the ruling asks for: the two halves must
@@ -2564,7 +2965,7 @@ mod tests {
             links.rejoin_across_newline(
                 upper,
                 last_cell_of(upper).unwrap(),
-                "th\\file.rs:12:3",
+                &continuation("th\\file.rs:12:3"),
                 &mut unknown
             ),
             None
@@ -3605,7 +4006,7 @@ mod tests {
             .rejoin_across_newline(
                 upper,
                 last_cell_of(upper).unwrap(),
-                "th/file.rs:12:3",
+                &continuation("th/file.rs:12:3"),
                 &mut unknown,
             )
             .expect("the five gates pass on the relative spelling too");

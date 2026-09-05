@@ -20,8 +20,8 @@ use bt_transcript::{
     CapturedCell, CapturedRow, CellFlags, CellHyperlink, FrozenLine, GraphemeOffset,
     HyperlinkRange, SourceGeneration, StagedRow, StagingId, TranscriptId,
     paths::{
-        LineEndCell, PrintedPathLinks, RejoinedReference, inferred_bare_domain_ranges,
-        inferred_url_ranges,
+        ContinuationRow, LineEndCell, MAX_REJOIN_ROWS, PrintedPathLinks, RejoinedReference,
+        inferred_bare_domain_ranges, inferred_url_ranges,
     },
 };
 use bt_unicode::{cluster_width, graphemes};
@@ -1781,19 +1781,19 @@ impl PrintedPathPass<'_> {
         links
     }
 
-    /// The one reference two neighbouring **physical** lines spell between them, if the five gates
-    /// of §7.1.5k ② all pass — with the file it names recorded as a question when nobody has been
-    /// to the disk for it yet.
+    /// The one reference a row and the **physical** rows under it spell between them, if the five
+    /// gates of §7.1.5k ② all pass — with the file it names recorded as a question when nobody has
+    /// been to the disk for it yet.
     fn rejoin(
         &mut self,
         upper: &str,
         upper_edge: LineEndCell,
-        lower: &str,
+        lowers: &[ContinuationRow<'_>],
     ) -> Option<RejoinedReference> {
         let mut unknown = BTreeSet::new();
         let joined = self
             .links
-            .rejoin_across_newline(upper, upper_edge, lower, &mut unknown);
+            .rejoin_across_newline(upper, upper_edge, lowers, &mut unknown);
         self.record(unknown);
         joined
     }
@@ -4500,25 +4500,51 @@ fn implicit_hyperlinks(
             );
         }
     }
-    // §7.1.5k ②. A pair of neighbouring logical lines is a pair of **physical** lines by
-    // construction — the run above ends only where `continues` says the terminal did not wrap — so
-    // the seam between any two of them is an application newline, the one break no record covers.
+    // §7.1.5k ②. A run of neighbouring logical lines is a run of **physical** lines by
+    // construction — each run above ends only where `continues` says the terminal did not wrap — so
+    // every seam between two of them is an application newline, the one break no record covers.
+    //
+    // The walk starts a chain at each line in turn and skips past whatever a chain claimed: a row
+    // already inside one promise is not the front of a second one, and the ceiling on a chain's
+    // length keeps this linear in the screen (2026-09-05).
     if let Some(paths) = paths {
-        for index in 1..lines.len() {
-            let (upper, lower) = (&lines[index - 1], &lines[index]);
-            let Some(edge) = upper.edge else { continue };
-            let Some(joined) = paths.rejoin(&upper.text, edge, &lower.text) else {
+        let mut index = 0;
+        // One buffer for the whole screen: the rows a chain may reach are a window that slides, and
+        // a fresh allocation per line would be a per-line cost on every frame of every pane.
+        let mut continuations = Vec::with_capacity(MAX_REJOIN_ROWS - 1);
+        while index + 1 < lines.len() {
+            let Some(edge) = lines[index].edge else {
+                index += 1;
                 continue;
             };
-            // The two halves are marked as one reference **here**, where the five gates have just
-            // proved it, rather than left for the frame to prove again off the printed text — see
+            let end = lines.len().min(index + MAX_REJOIN_ROWS);
+            continuations.clear();
+            continuations.extend(lines[index + 1..end].iter().map(|line| ContinuationRow {
+                text: &line.text,
+                edge: line.edge,
+            }));
+            let Some(joined) = paths.rejoin(&lines[index].text, edge, &continuations) else {
+                index += 1;
+                continue;
+            };
+            // The rows are marked as one reference **here**, where the five gates have just proved
+            // it, rather than left for the frame to prove again off the printed text — see
             // [`rejoined_reference_mark`] and [`ViewportFrame::rejoined_by_record`].
             let link = CellHyperlink {
                 id: Some(rejoined_reference_mark(index)),
                 uri: joined.uri,
             };
-            claim_cells(rows, upper, joined.upper, &link, true, &mut claims);
-            claim_cells(rows, lower, joined.lower, &link, true, &mut claims);
+            for (offset, span) in joined.rows.iter().enumerate() {
+                claim_cells(
+                    rows,
+                    &lines[index + offset],
+                    *span,
+                    &link,
+                    true,
+                    &mut claims,
+                );
+            }
+            index += joined.rows.len();
         }
     }
     claims
@@ -6721,6 +6747,85 @@ mod tests {
                     reference.contains(&column),
                     "row {row}, column {column}: the promise covers the reference and neither the \
                      bullet's indent in front of it nor the prose behind it"
+                );
+            }
+        }
+    }
+
+    /// PIN (user report 2026-09-05) — **four rows, all of them cut by the application**, light up
+    /// as the one reference they are.
+    ///
+    /// `a_reference_the_application_broke_across_rows_lights_up_whole_on_hover` already stands on
+    /// three rows, but two of its seams are of different kinds: one application newline and one
+    /// terminal soft wrap, which the projection had already folded into a single logical line
+    /// before recognition saw it. So the row walk in [`ViewportFrame::rejoined_by_record`] had
+    /// never been asked to cross **two** application newlines, and neither had `claim_cells`.
+    /// This is that case: an agent's indented block, one path in it and nothing else, hard-wrapped
+    /// at the pane's width into four rows that no `continues` joins.
+    ///
+    /// The ledger answers the two intermediate joins with the "no" the disk really gives them, so
+    /// the chain arrives at its full length the way it does on a live screen — one length per
+    /// frame, each one answered before the next is asked.
+    ///
+    /// MUTATIONS: cap `MAX_REJOIN_ROWS` at 2 and recognition offers only the first two rows, which
+    /// spell nothing; let [`ViewportFrame::rejoined_by_record`]'s forward walk take one hop instead
+    /// of walking (`break` after the first) and the fourth row rests while the other three light —
+    /// neither mutation is caught by the three-row case above, whose forward walk is one hop.
+    #[test]
+    fn a_reference_the_application_cut_into_four_rows_lights_up_whole_on_hover() {
+        const COLUMNS: usize = 30;
+        let (a, b, c) = ("a".repeat(16), "b".repeat(28), "c".repeat(28));
+        let target = format!("D:\\src\\deep\\{a}{b}{c}ddd.rs");
+        let rows = [
+            format!("  D:\\src\\deep\\{a}"),
+            format!("  {b}"),
+            format!("  {c}"),
+            format!("  ddd.rs{}", " ".repeat(COLUMNS - 8)),
+        ];
+        assert!(rows.iter().all(|row| row.chars().count() == COLUMNS));
+
+        let ledger = PrintedPathLinks::new(
+            Some(PathBuf::from("D:\\src")),
+            [
+                (PathBuf::from(format!("D:\\src\\deep\\{a}{b}")), false),
+                (PathBuf::from(format!("D:\\src\\deep\\{a}{b}{c}")), false),
+                (PathBuf::from(&target), true),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let (mut frame, _) = live_frame_of_paths(
+            rows.iter()
+                .map(|text| CapturedRow::plain(text, false))
+                .collect(),
+            ledger,
+        );
+
+        let hit = frame
+            .hyperlink_at(2, 4)
+            .expect("the third row of four is a link");
+        assert_eq!(
+            hit.uri,
+            format!("file:///D:/src/deep/{a}{b}{c}ddd.rs"),
+            "the target is the file all four rows spell between them"
+        );
+        for row in [0u32, 1, 3] {
+            assert_eq!(
+                frame.hyperlink_at(row, 3).unwrap(),
+                hit,
+                "the fragment on row {row} is the same reference as the one under the pointer"
+            );
+        }
+
+        assert!(frame.underline_hyperlink(&hit));
+        for row in 0..rows.len() {
+            let reference = if row == 3 { 2..8 } else { 2..COLUMNS };
+            for column in 0..COLUMNS {
+                assert_eq!(
+                    solid_at(&frame, row, column),
+                    reference.contains(&column),
+                    "row {row}, column {column}: the promise covers the path and neither the \
+                     block's indent in front of it nor the blanks behind it"
                 );
             }
         }

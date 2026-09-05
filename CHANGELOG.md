@@ -53,6 +53,18 @@ All notable changes to Folio are recorded here. The format follows
   otherwise — and how far below the top of the screen the window hangs, which
   was a fixed twelve pixels until now.
 
+### Fixed
+
+- **A file path an application wrapped over several indented rows is one link
+  again.** When an agent prints a block of indented text holding a single path
+  and breaks it at the window's width, the rows are read back as the one file
+  they spell between them — as many as eight rows, where only two were ever put
+  together before, and at the block's own indent, which used to be read as a
+  column of separate lines. The whole path underlines and opens as one. Rows
+  that really are a column of separate lines are untouched: a listing whose rows
+  are each a file of their own, and any row with other text in front of the
+  path, are left exactly as they were.
+
 ## 0.1.1-preview (unreleased)
 
 A fixes-and-polish release for 0.1.0-preview. Nothing below changes how anything
