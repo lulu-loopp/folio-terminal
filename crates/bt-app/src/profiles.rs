@@ -3408,6 +3408,18 @@ pub fn index_of_id(id: &str) -> usize {
     with_table(|table| index_of_id_in(table, id))
 }
 
+/// **Which row of the table this id names, or `None` when it names none** (§7.54e ⑤).
+///
+/// [`index_of_id`]'s neighbour and its opposite about one thing: that function must answer with a
+/// profile because a *pane* has to start something, and this one must be able to answer "nothing in
+/// this table", because its caller's first picker item is not a profile at all — it is the sentence
+/// "whatever the default profile is", which is where the empty id and an id this machine no longer
+/// has both belong.
+#[must_use]
+pub fn position_of(id: &str) -> Option<usize> {
+    with_table(|table| table.position_of_id(id))
+}
+
 /// The same rule over a table handed in — see [`fallback_profile_in`].
 ///
 /// **A seat that is already running reaches for this when the file moves under

@@ -60,6 +60,22 @@
     `target/release-package`. Anything already there is hashed into
     `SHA256SUMS.txt` alongside the archive, which is how the SBOM written by
     `sbom.ps1` before this runs ends up covered.
+
+.PARAMETER Sign
+    Sign `folio.exe` with the Artifact Signing certificate profile before it goes
+    into the archive, and check that the two ConPTY files still carry
+    Microsoft's own signature.
+
+    **Off by default, and the archive is a real archive without it.** Signing
+    needs somebody signed in to Azure, and the two places this script runs — a
+    release workflow on a runner and a checkout on a laptop — mostly have nobody
+    signed in. A packaging script that refused to package without a credential
+    would be a packaging script that could not be exercised, which is the thing
+    the note at the top of this file exists to prevent.
+
+    Everything downstream sees the signed bytes: `folio.exe` is signed where the
+    build left it, so the archive, `SHA256SUMS.txt` and whatever `smoke.ps1` is
+    pointed at afterwards are all the same file. See `sign.ps1`.
 #>
 
 [CmdletBinding()]
@@ -67,7 +83,8 @@ param(
     [string] $Version,
     [string] $Binaries,
     [string] $Documents,
-    [string] $Output
+    [string] $Output,
+    [switch] $Sign
 )
 
 $ErrorActionPreference = 'Stop'
@@ -115,12 +132,7 @@ $manifest = @(
 $missing = @()
 foreach ($item in $manifest) {
     $item.Path = Join-Path $item.From $item.Name
-    if (Test-Path -LiteralPath $item.Path -PathType Leaf) {
-        $item.Length = (Get-Item -LiteralPath $item.Path).Length
-    }
-    else {
-        $missing += $item.Path
-    }
+    if (-not (Test-Path -LiteralPath $item.Path -PathType Leaf)) { $missing += $item.Path }
 }
 if ($missing.Count -gt 0) {
     Write-Host 'the archive cannot be built; these are not there:'
@@ -142,6 +154,33 @@ if ($stamped -ne $core) {
 }
 if ($info.ProductVersion.Trim() -ne $Version) {
     throw "folio.exe's ProductVersion string is '$($info.ProductVersion)'; expected '$Version'"
+}
+
+# **Signing, before anything is measured or copied.** A signature is appended to
+# the file, so it changes both the length and the hash: everything below this
+# line — the lengths the archive is checked against, the archive itself,
+# `SHA256SUMS.txt` — has to be taken from the signed bytes, and the only way to
+# be sure of that is to sign first.
+#
+# `folio.exe` alone. `conpty.dll` and `OpenConsole.exe` are Microsoft's, and they
+# arrive signed by Microsoft; putting our signature over that would replace a
+# statement Windows already trusts with a newer and weaker one. What is checked
+# about them is that the signature they came with is still valid and still time
+# stamped — an unsigned ConPTY in the archive means the build pulled it from
+# somewhere other than the package it is supposed to come from.
+if ($Sign) {
+    $signScript = Join-Path $PSScriptRoot 'sign.ps1'
+    & $signScript -Files @(Join-Path $Binaries 'folio.exe')
+    Write-Host ''
+    Write-Host 'the two ConPTY files, which are Microsoft-signed and not re-signed here:'
+    & $signScript -VerifyOnly -Files @(
+        (Join-Path $Binaries 'conpty.dll'),
+        (Join-Path $Binaries 'OpenConsole.exe'))
+    Write-Host ''
+}
+
+foreach ($item in $manifest) {
+    $item.Length = (Get-Item -LiteralPath $item.Path).Length
 }
 
 $folder = "folio-$Version"

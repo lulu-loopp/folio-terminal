@@ -2575,7 +2575,7 @@ else                           { Flash }    // 被压住了,但任务栏还在,�
 
 **再次打开只更新时间。** 与 `SeedVault::record` 同一条规矩、同一个理由：这是一份**地方**的列表，而一个地方是你可以去不止一次的。选中当前 root 那一行同样记——换根没发生，而读者说了「这一个」，列表听的是手势不是赋值，所以 `note_folder_opened` 站在 `reroot_files_column` 的提前 return **之前**。
 
-**存储：`session.json` schema v13→v14。** 顶层新键 `recent_folders: [{path, opened_at}]`，与 `recent`（那份 seed 金库）并排，理由也和它一样：这是关于**进程**的事实而不是关于某一扇窗的，两扇窗不各有一份「我去过哪儿」，一扇窗里打开的文件夹下一帧就出现在另一扇窗的菜单上，一次原子写写的是一份。迁移只取版本号、列表留空——没有任何 v13 的构建观察过产生这一行的手势，能从 `windows[]` 的 cwd 里「推」出来的东西是程序在替读者编他没做过的事。`opened_at` 存**瞬间**（ISO 8601 UTC），不存「3 分钟前」那句话，与 `RecentEntryV1::timestamp` 同一条。
+**存储：`session.json` schema v14→v15。** 顶层新键 `recent_folders: [{path, opened_at}]`，与 `recent`（那份 seed 金库）并排，理由也和它一样：这是关于**进程**的事实而不是关于某一扇窗的，两扇窗不各有一份「我去过哪儿」，一扇窗里打开的文件夹下一帧就出现在另一扇窗的菜单上，一次原子写写的是一份。迁移只取版本号、列表留空——没有任何 v14 的构建观察过产生这一行的手势，能从 `windows[]` 的 cwd 里「推」出来的东西是程序在替读者编他没做过的事。`opened_at` 存**瞬间**（ISO 8601 UTC），不存「3 分钟前」那句话，与 `RecentEntryV1::timestamp` 同一条。
 
 **磁盘上没有了的目录：灰显、可按、不删。** 灰用的就是 `Row::available == false` 那套墨与灰掉的标记；**没有**跟着借的是 picker 的那条「灰行不接受按下」——那里灰的意思是「这台机器起不动它」，按下去是窗口做不到的承诺；这里灰的意思是「刚才看的时候它不在」，而 files 列本来就有一句话说这件事：它在树的位置上印 `Could not read folder`。拒掉这次按下，读者得到的是一条灰线、一个问不出为什么、和一扇不肯关的菜单。**一行都不悄悄删**：一行自己消失等于列表在替读者改他的历史，而「我删了那个」和「那块盘没插」只有读者分得清。
 
@@ -6609,7 +6609,7 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 - `bt-app/src/settings.rs`:`a_summon_no_key_can_reach_says_so_where_the_window_is_described`(把宽度行的地板写成高度的,拖到底出来的是五分之一屏宽的窗)、两处 `visible_rows`(宽度行不在高度行下面)。
 - `bt-persist`:`real_settings_v27_to_v28_migration_writes_the_summoned_windows_width`(写 `100`——那正是「保住旧行为」的那个值,而裁决说不)、`settings_defaults_render_formulas_at_the_current_schema_version`(版本号或默认值任一)。
 
-#### 7.54b next29 的五桩:出厂给一把键、录了就算数、记住手摆过的样子、顶上留一道缝、任务栏上留一个图标(用户裁决,2026-09-03;`crates/bt-platform/src/tray.rs`(新)、`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/{quake,shortcuts,settings,i18n,main}.rs`、`crates/bt-persist/src/{session,settings,migrate,lib}.rs`)
+#### 7.54b next29 的五桩:出厂给一把键、录了就算数、记住手摆过的样子、顶上留一道缝、~~任务栏上留一个图标~~(用户裁决,2026-09-03;**⑤ 已于 2026-09-05 撤销,见 §7.54e ①**;`crates/bt-platform/src/tray.rs`(新)、`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/{quake,shortcuts,settings,i18n,main}.rs`、`crates/bt-persist/src/{session,settings,migrate,lib}.rs`)
 
 **这一节推翻了 7.54 的两句话,而两次推翻的都是实机。** 一句是「出厂不绑」,一句是「它的矩形是算出来的,从来不是记住的」。两句当时都有理由,下面各写各的;都不是道理错了,是道理管的范围比写的时候以为的窄。
 
@@ -6657,6 +6657,8 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 
 缝是逻辑像素而矩形是物理像素,所以要被召唤上去的那块屏的 dpi 是一个**参数**而不是这个函数能自己读的东西——它正在往一块本进程可能还没有窗的屏上摆窗,而它**有**窗的那块屏的缩放是错的那个数。`tear_out_rect` 因为同一件事读同一对(`dpi_at(鼠标)`)。**记住的矩形不吃这道缝**:那是读者自己摆的,他摆哪就是哪。
 
+> **【已撤,2026-09-05】** 这一桩整个撤销:托盘图标、它的菜单、`tray_icon` 那一格、以及它带来的常驻规则,全部没有了。撤的理由不是这段论证错了,是**它回答的那个问题不再存在**——用户裁决「快捷终端与 Folio 同生同死」,快捷终端是伴随物而不是第二个程序,所以没有「一个没有窗的 Folio」这个状态需要一扇门。原文一字未删,因为 §7.54e ① 反驳的正是它。`crates/bt-platform/src/tray.rs` 已删除,`bt-app` 里所有读它的地方已撤。
+
 **⑤ 任务栏上一个图标,而常驻的语义跟着改判。** 7.54 最后那段的明账写着:「想要一个常驻的快捷终端的人会发现它随最后一扇窗一起走,那需要的是一枚托盘图标而不是一扇看不见的窗,本单不做。」这一桩就是那笔账。
 
 **改判的是「可达性」,不是「一扇看不见的窗能不能护着进程」。** `open_window_count` 那段论证一个字都不用改:一个屏上无物、任务栏上无按钮的 `folio.exe`,回去的路只剩一把可能几周前绑的键——那确实不该发生。但那段论证讲的是**能不能回去**,而一枚图标就是那个答案:程序在它的图标说它在的地方,点一下就出来,右键菜单里有一行退出。所以**只有图标**能把「关掉最后一扇窗」变回它字面的意思——关掉一扇窗。开关关着的时候,7.54 那一段逐字有效。(**已被 7.54c ② 收窄**:这段论证回答的是「怎么回去」,而它当时被当成了「为什么留着」;现在还要有一扇快捷终端窗。)
@@ -6700,7 +6702,7 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 
 **没做的:触发角。** 用户提过 mac 那种「鼠标撞到屏幕某个角就出来」。主线裁托盘优先,理由是托盘同时回答了「怎么呼出」和「怎么知道它还在」两个问题,而触发角只回答前一个;而且一个会被误触发的角,对一扇盖住整个屏幕上部的窗来说代价很大。留作后续可选项。
 
-#### 7.54c 点到别处不是关掉它的办法,而一枚图标只在有东西可回去的时候才护着进程(用户裁决,2026-09-03;`crates/bt-persist/src/{settings,migrate,lib}.rs`、`crates/bt-persist/tests/round_trip.rs`、`crates/bt-app/src/{quake,settings,main}.rs`)
+#### 7.54c 点到别处不是关掉它的办法,~~而一枚图标只在有东西可回去的时候才护着进程~~(用户裁决,2026-09-03;**② 已于 2026-09-05 撤销,见 §7.54e ①**;`crates/bt-persist/src/{settings,migrate,lib}.rs`、`crates/bt-persist/tests/round_trip.rs`、`crates/bt-app/src/{quake,settings,main}.rs`)
 
 这一节两桩,一桩推翻 7.54 的一个默认值,一桩把 7.54b ⑤ 的常驻条件收窄。两桩都不是道理错了,是道理管的范围比写的时候以为的宽——第一桩宽在把「窗盖住了别的东西」当成了「读者不要它了」,第二桩宽在把「怎么回去」当成了「为什么留着」。
 
@@ -6711,6 +6713,8 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 **行没有撤,行的意思一个字没变。** 想要一条看向别处就清空的横条的人,在 General 页上把它打开,得到的就是原来那件事——红门 `the_row_still_means_what_it_says_when_a_reader_turns_it_on` 钉的正是这一半,因为一次「顺手把机制也拆了」的改动会留下一个决定不了任何事的开关。
 
 `settings.json` 走到 **v30**:`quake_dismiss_on_blur` 写成 `false`,**而且是写、不是只改默认**。理由和 7.54a 的宽度那一格逐字相同,只换了一个名词:保持原样的值是 `true`,因为 v27 以来每一版都这么做;而这个值**从来不是谁选的**——**这一行是随功能一起出生的,出生就是开的**,读者从来没有被问过这个问题。把 `true` 带过去,是在「保住读者的选择」的名义下保住 v27 当时的猜测。而真的表达过意见的那批人手里已经是 `false`,`false` 也正是这一格写下去的值——所以这一格只动那些从来没人有过意见的文件。
+
+> **【已撤,2026-09-05】** 这一桩连同它收窄的那一桩一起撤销(见 §7.54e ①)。它把常驻的条件从一个事实收窄到两个,而 2026-09-05 把第一个事实本身拿掉了:没有图标,常驻就没有任何条件可谈,剩下的是 §7.54 自己那句「一扇没人能看见的窗不能把进程护着」——它当初是对的,只因为图标存在才被收窄。红门 `a_run_outlives_its_last_visible_window_only_with_an_icon_and_a_summon` 与 `an_icon_keeps_the_run_alive_only_while_a_summoned_terminal_is_behind_it` 由 `a_run_ends_with_its_last_visible_window_even_with_a_summon_hidden_behind_it` 取代。**① 失焦收起默认关**不受影响,逐字有效。
 
 **② 常驻 = 图标在 **且** 有一扇快捷终端窗。** 7.54b ⑤ 的常驻条件只问了「图标在不在」,而 CI 在 780fb99 上把这件事的代价读了出来:`scripts/release/smoke.ps1` 第 6 关给冷启动开出的那一扇窗发 `WM_CLOSE`、等进程退,结果等到超时,报 `the window did not close when it was asked to`,日志里 `BT_TRAY rect=…` 一行把原因写得清清楚楚。那一次运行**一扇快捷终端窗都没有**。
 
@@ -6762,6 +6766,76 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 
 - `bt-app/src/input.rs`:`a_chord_held_under_the_window_it_summons_types_nothing_into_it`(上面那六个事件逐行照抄进测试;把 `is_a_keystroke` 里的 `!is_synthetic` 拆掉,第 4 行就被编码,缺陷原样重现)、`the_same_key_pressed_by_a_hand_still_reaches_the_child`(它的对照:一道写宽了的闸门——比如按键名而不是按信封判断——能靠让键盘失灵来通过上一条,这一条会红)、`the_windows_key_is_not_a_modifier_that_spells_anything`(拆掉两处 `!modifiers.super_key()` 中的任一处,对应那一行红;这个修饰键在这个编码器里此外一处也读不到,它没有 xterm 位)。
 - `bt-app/src/main.rs`:`the_synthetic_bit_reaches_the_gate_and_the_gate_stands_first`(把分发臂改回 `KeyboardInput { event, .. }`,第一条断言红——那一位再也到不了写着规矩的地方;把闸门从 `keyboard_input` 拿掉,或者让任何一条语句站到它上面,第二条红)。
+
+#### 7.54e 行为模型重整:它是 Folio 的伴随物,一个 × 就是那把键,一栏设置说完它的全部(用户裁决,2026-09-05;`crates/bt-platform/src/tray.rs`(删)、`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/{quake,main,settings,seats,i18n,profiles}.rs`、`crates/bt-persist/src/{settings,migrate,layout,session,lib}.rs`)
+
+这一节五桩,而它们是**同一句话的五个面**:快捷终端不是第二个程序,是 Folio 手里的一扇窗。托盘之所以撤,是因为它把这扇窗说成了一个可以独立活着的东西;一个 × 之所以够,是因为「收起」是这扇窗唯一的告别方式;呼出规则之所以要写成一个函数,是因为一扇窗只该有一个位置的答案;恢复之所以有三档,是因为它是一扇**常驻**的窗而不是一次性的;设置之所以独立一栏,是因为一扇窗值得一页而不是别人页脚上的四行。
+
+**① 托盘取消,常驻回到 §7.54 的第一个答案。** 用户裁决:「快捷终端与 Folio 同生同死;Folio 在跑热键就有效;普通窗全关即进程退出,隐藏着的快捷终端随之消失(它是伴随物不是独立窗)。」
+
+7.54b ⑤ 把托盘图标立起来的理由是**可达性**——「一个屏上无物、任务栏上无按钮的 `folio.exe`,回去的路只剩一把可能几周前绑的键」——那段论证一个字都不用改,而它现在没有主语了:没有图标,就没有「一个没有窗还在跑的 Folio」这个状态。§7.54 自己那句「一扇没人能看见的窗不能把进程护着」于是**恢复为全部答案**,`a_run_ends_with_its_last_visible_window` 是它写成的一行规则,`close` 与 `reap_leaving_windows` 两扇门读同一行。
+
+**藏着的快捷终端跟着走,而它一样也不丢。** 它的那一段和每一扇窗一样写进文档,下一次启动按 ④ 的档位回来。`retire_the_summon_with_the_run` 是它走的那扇门,`windows_left_after` 把它排除在外——这两处读法是一句话的两半:**它不是一扇窗,它是一个理由**,而现在连理由也不留了。
+
+**「普通窗」这个词是逐字实现的,而这一句在落地时抓出了一个真状态。** 那个数(next29 起叫 `open_window_count`,本节起叫 `windows_left_after`)从一开始就把快捷终端排除在外,但**只在它藏着的时候**;那个条件留下一条路:在快捷终端**露着**的时候把所有普通窗关掉(数到 1,不退),再按一次键(数到 0,而两次之间没有任何人重新问过)——剩下的正是 §7.54 整节要拒绝的那个东西:一个屏上无物、只剩一把可能几周前绑的键的 `folio.exe`。所以这一节把排除改成**无条件**的:它不是一扇读者要来的窗,露着也不是。`windows_left_after` 是那个数(减掉正在关的那一扇是一个过滤而不是一个 `- 1`——快捷终端根本不在这个数里,一个 `- 1` 会在读者关掉快捷终端、而普通窗还开着的时候把整个运行结束掉),`retire_the_summon_with_the_run` 也跟着去掉了「只在它藏着时」那一半,因为现在**没有任何一处**会替一扇露着的快捷终端关门。
+
+**代价明写。** 想要一个「关掉所有窗、快捷终端还在」的读者,得到的答案是:没有这个状态。想在快捷终端里干活、同时把别的窗都关掉的读者,得到的答案是:那一刻运行就结束了,而快捷终端连同它的 tab 一起写进文档,下次按键按 ④ 的档位回来。这两条都正是裁决的内容,不是这一节的疏漏。
+
+**② 窗上只留一个 ×,语义 = 隐藏,和热键完全同一条代码路径。** 用户裁决:「结束会话靠 shell 内 `exit` 或 tab 右键关闭,下次呼出新起。」
+
+**这一桩修的是一个真 bug,而 bug 在最小化钮上。** 最小化把这扇窗放走,却不走召唤自己那扇门:`Quake::shown` 留着,归还前台没有发生,于是**下一次按键把这扇窗读成「开着」并请求收起**——读者按了键,什么也没下来。这就是裁决里那句「隐藏按钮与热键行为不一致是 bug」的机器形状。最大化则是另一种:这扇窗的矩形**就是** `Quake::placement` 的答案,一次最大化会被下一次呼出无声地撤销。
+
+所以召唤窗的标题栏只剩两枚:齿轮(见 ⑤)和一个 ×。`seats::caption_targets` 是这条规矩写下来的地方,`window_caption_boxes` 与画的那一段读同一份清单,所以「画了两枚」和「答两枚」不可能分家。
+
+**「同一条路径」写成了「同一位」,这是它能有的最强形式。** `WM_CLOSE` 到这扇窗时,`CloseRequested` 那一臂置的是 `quake.press()`——`WM_HOTKEY` 留下的**同一位**——下一转 `settle_quake` 看到窗开着,于是收起、归还键盘。没有第二条路可以让两者漂移。脏页闸门不抬,而这是正确而不是省略:闸门③ 讲的是一次**关闭**会丢掉未存的预览缓冲,而这扇窗没有在关闭。
+
+**只在它露着的时候。** 一条送给藏着的快捷终端的 `WM_CLOSE` 不是读者在按 ×(没有 × 可按),那是运行在结束,照旧关闭——`scripts/release/smoke.ps1` 第 6 关走的正是这条路。
+
+**保留的那三档几何(顶距、宽、高)不因为按钮变少而变。** 标签页条照旧按四格预留 caption 宽度,召唤窗只画右边两格;差出来的两格是标题栏拖动区,而它本来就是。换来的是 `tab_strip_geometry` 不必多一个参数——一个能在画与命中之间说不同话的参数,换 92 逻辑像素,不划算。
+
+**③ 呼出位置写成一个函数,所有入口调它。** 机器在 `quake::SummonScreen::under_the_pointer` 里读一次(哪块屏、它的工作区、它的 dpi、它的名字,四问一答,因为它们必须问的是**同一块屏**),规则在 `quake::Quake::placement` 里应用一次(手摆过的矩形优先,否则现算)。`main.rs` 里**一次也不出现** `summoned_rect` 或 `placement_on`,这由源码门 `a_summon_is_placed_by_one_function_and_main_does_not_do_the_geometry` 钉住——一个只测函数本身的测试,会对一个在别处偷偷算了第二个矩形的 build 放行。
+
+**④ 恢复三档,而没有一档会运行任何东西。** 用户裁决:「不恢复 / 恢复目录 / 恢复目录 + pin 的命令,默认第三档;绝不自动执行任何命令;不弹恢复窗。」
+
+`settings.json` 走到 **v31**,`quake_restore` 三值(`QuakeRestoreV1`)。三档而不是一个开关,因为第三档比第二档多花一样东西:恢复一个**目录**是恢复一件关于地方的事实,而恢复一条**命令**意味着这份文档里躺着读者亲手打过的一行字,那是另一个决定。
+
+**档位在一个地方读,而且读在文档上。** `plan_windows` 是那个地方:不恢复就把这扇窗在门口丢掉,恢复目录就把每条记住的命令从树里擦掉,第三档只在 **pin 的 tab** 上留下它们。往下走的是一份**文档**,而一份没有命令的文档不可能恢复出一条命令,不管它之后经过几扇门。反过来做——在 pane 那一层再读一次档位——是一个问题两个答案,而答错的那个会往别人的 shell 里打字。
+
+**预填是打上去而不是按下去。** `quake::typed_into_a_prompt` 是唯一造字节的地方,`submit` 那个参数就是这条裁决本身:恢复出来的命令 `false`,启动命令(⑤)`true`。**所有控制字符都被滤掉,`\r` 和 `\n` 首当其冲**——这不是整洁,是要害:一份被手改过、命令里带着换行的 `session.json`,不滤就会恢复出一条**自己执行自己**的命令,那样这条裁决就只对本 build 写出来的文档成立,也就不成其为裁决。换行不是文本可以包含的东西,是这个函数在被要求时自己加的那一个字节。
+
+**它等一个提示符。** ConPTY 后面的 shell 在画出任何东西之前就会收字节,那样读者看到的是自己的命令被夹在登录横幅中间,或者干脆被一个还在读 profile 的 shell 吞掉。`OSC 133;B` 是 shell 说「我现在在读一行」——这正是要的那一刻,也正是第三档需要 PowerShell 整合的原因。`drain_leaf_pty` 是每一个 leaf 每一转都经过的那一处,所以没人在看的 pane 也照样被服务。
+
+`session.json` 走到 **v14**:`TermLeafV1.last_command`,只由**召唤窗的 pin tab** 写,只被同一种 tab 读。比「每个跑过命令的 pane」窄,而且是故意的:这是读者打过的一行字,一份为每扇窗每个 pane 都收一条的文档,是在替读者记一份他没要求的命令史。pin 是那个请求。写的时候取**最后一条带文字的标记**而不是最后一条标记:刚画出提示符的 shell 有一条空的开着的标记,记下它会用一个空行盖掉读者真正留着的那条命令。
+
+**⑤ 设置独立一栏「快捷终端」,窗上的齿轮直接开到它。** 八行,一扇窗:唤出按键、profile、首次唤出时运行、高度、宽度、顶端留距、失去焦点时收起、恢复内容。
+
+**为什么是一页而不是 General 上的四行。** 这一栏描述的是**一扇窗**,而这条导航里其它每一页描述的都是一类东西:`Appearance` 回答「每一扇窗长什么样」,这一页回答关于**这一扇**窗的八个问题。位置在 `Appearance` 之下,是导航「从看到用」那条规矩逐字读下来的结果——页从产品收到窗、再收到那扇窗能装的会话;它的 `profile` 行指的正是下面一页那张表,和 General 的 `Default profile` 指向 `Profiles` 是同一种相邻,而那条裁决说得很清楚:**挨着你指的那张表,比不上导航能从上往下读**。
+
+**行内顺序是「按键、装什么、什么形状、待多久、下次带回什么」。** 按键第一,因为一扇叫不出来的窗不是窗,它下面每一行描述的东西读者都还没见过。形状那三行保留 §7.54a 定下的「多高、多宽」,顶距接在后面——它是读者最后才会去动的那个数。恢复放最后,因为它是这一页上唯一一行谈一扇**不在屏上**的窗的行。
+
+**按键行就是快捷键页那个录制器,而不是第二个。** 按下去在 `summon-quake` 那一行上开一次录制,之后每一个键走的都是 `record_settings_key` → `Shortcuts::set` → `store_keybindings` 那条老路,全局认领在同一转由 `settle_quake` 跟上(§7.54b ②)。行索引是快捷键页的事实,面板拿不到,所以按下去在**两半都在手上**的地方解析(`Runtime::press_settings`),这正是 §7.54b 给「这把键被别人占了」那句话安排的位置。**「被占了」那句话现在也说在这一行上**,而且先说在这里:一把被别的程序拿走的键,是关于**这一行**的事实。
+
+**「首次唤出时运行」是这份文件里唯一被执行的字符串**,而它被执行的全部理由是读者把它写进了一行说它会被执行的行里,每次启动一次。`Quake::take_startup_command` 让「一次」是一个事实而不是一个习惯;它走的是 ④ 的同一扇门,`submit: true` 就是全部差别。
+
+**`quake_top_gap` 把 §7.54b ④ 那个常量给了一行。** 那一桩的论证一个字没改——圆角窗贴着屏幕顶边会露出两块直角缺口——变的只是想要贴边(或者更往下)的读者现在有个数可以说。上限 64 逻辑像素,下限是 0 并且不需要常量:贴边是一种读者可能要的形状,而且是这道缝发明之前这扇窗本来的形状。
+
+**`quake_profile_id` 空串 = 跟着默认 profile**,和 `default_profile` 那一格同一个词表达同一句话,所以两者不会开始意味着不同的事。
+
+**`settings.json` v30 → v31 是这道梯子上第一次拿走一格。** `tray_icon` 被 `remove` 而不是被无视:规则 4 让一个不认识的键在解析时就掉了,所以只升版本号的一步**也**会让下一次保存不写它;买到的是中间那份文件——一份本 build 读过、还没重写的文档,交到一个仍然认识这个键的 build 手里,就是一个屏上无物却还在跑的程序。这道梯子是唯一能把「撤销」**说出来**而不是让它自己发生的地方,所以它被说了出来。四个新键按 v13–v16 的样子落地。
+
+**红门(变异证在各自的文档注释里)。**
+
+- `bt-app/src/main.rs`:`a_run_ends_with_its_last_visible_window_even_with_a_summon_hidden_behind_it`(给任一扇门加第二个条件,smoke 第 6 关照旧挂;拆掉 `close` 那一处,最后一扇窗的关闭把 tab 归了 Recent;源码门那一段会指出还留在文件里的托盘残件)、`the_summoned_terminals_close_button_is_the_chords_own_bit`(× 直接调 `dismiss_quake`,两条路;去掉 `is_showing` 那一半,送给藏着那扇窗的 `WM_CLOSE` 反而把它召唤出来;把最小化钮还给它)、`the_gear_on_the_summoned_terminal_opens_the_page_about_it`(两扇窗都走 `toggle_settings_panel`,读者落在 General)、`the_three_rungs_of_what_comes_back_are_decided_on_the_document`(`Nothing` 还给窗、第二档留下命令、第三档把命令留在没 pin 的 tab 上)。
+- `bt-app/src/quake.rs`:`a_summon_is_placed_by_one_function_and_main_does_not_do_the_geometry`(在 `main` 里算矩形,源码门当场指出文件名)、`a_restored_command_is_typed_at_the_prompt_and_never_submitted`(去掉控制字符过滤,一份手改的文档恢复出一条自己跑的命令;`\n` 代替 `\r`;空命令也发一个回车)、`a_startup_command_is_taken_once_a_launch_and_an_empty_row_is_not_one`(不置位就每次呼出都跑一遍)、`the_gap_over_the_summon_is_the_row_and_is_clamped_where_the_window_is_placed`(继续读常量、去掉上限、加一个下限)。
+- `bt-app/src/seats.rs`:`the_caption_boxes_are_the_boxes_the_caption_hit_test_answers_from`(召唤窗的两枚从别的原点画起,画与命中分家)。
+- `bt-persist/src/migrate.rs`:`real_settings_v30_to_v31_migration_drops_the_icon_and_names_the_summoned_terminals_own_keys`(不 `remove`,键还在文档里;四个新键写成别的值,升级的读者悄悄丢掉他留在那扇窗里的 tab)。
+- `bt-persist/tests/round_trip.rs`:`settings_defaults_render_formulas_at_the_current_schema_version` 里那几行(默认档位翻回前两档;顶距、profile、启动命令三格的常量与行漂移)。
+
+**没做的、以及为什么。**
+
+- **不弹恢复窗**,这是裁决明写的:这扇窗按键才出现,读者看不见,也就无从回答——`plan_windows` 早在选举开始之前就把它拎出去(§7.54 ③),这一节没有改动那一段。
+- **`--version` / CLI 一字未动。**
+- **无标记的 profile 上把 pin 钮灰掉——这一条没有照做,理由写在这里,等复议。** 裁决写的是「无标记的 profile pin 钮灰掉并写明原因」。没做的原因是 pin 在这扇窗上**不只**决定恢不恢复命令:它同时决定 tab 在条上的分区(pin 的靠左),而那件事在一台 `cmd.exe` 的机器上照样有意义。灰掉它会为了一句解释拿走一个还在工作的动词。**改成写在说明句上**:`What comes back` 那一行现在说「只有会上报命令的 shell 才有命令可恢复」,而没有整合的 pane 写进文档的是空字符串——那是诚实的答案,不是从屏幕上刮来的猜测。如果用户要的就是灰掉,这一条一句话就能加回来:判据是 `profiles::integration(index)` 落在 `CmdPrompt | None`(`PowerShellOptIn` 静态上说不了,因为它是 opt-in 的)。
 
 ### 7.55 一个浮着的意图框:五类内容分段不混排,文件那一段有一张有界的索引(0.2 聚焦搜索,`crates/bt-app/src/{palette.rs,palette_index.rs}`(新)、`crates/bt-app/src/{main,shortcuts,i18n,files,webhost}.rs`)
 

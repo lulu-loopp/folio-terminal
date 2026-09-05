@@ -56,3 +56,10 @@ __pycache__/
 *.p12
 *.pem
 *.key
+
+# The Artifact Signing client, when it is fetched into the checkout rather than
+# into `%LOCALAPPDATA%`, which is where `scripts/release/sign.ps1` puts it by
+# default. It is 14 MB of Microsoft's bytes carrying Microsoft's own version
+# number, and the script fetches the version it names; a copy committed here
+# would be a second answer to the question of which one signed a release.
+/tools/

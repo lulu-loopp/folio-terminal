@@ -217,7 +217,33 @@ use serde::{Deserialize, Serialize};
 /// one group who *did* express something — the readers who turned it off by hand — indistinguishable
 /// from the ones who never saw it. Their `false` is what this step writes anyway, so the only files
 /// this step changes are the ones nobody had an opinion about.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 30;
+/// **v31 takes `tray_icon` away and gives the summoned terminal the four keys its own settings
+/// section is made of** (user ruling, 2026-09-05, `docs/DESIGN.md` §7.54e).
+///
+/// **The removal comes first because it is the ruling.** The summoned terminal lives and dies with
+/// Folio, so there is no icon, no residency and no row — see §7.54e, and [`crate::migrate`]'s
+/// `migrate_settings_v30_to_v31`, which *deletes* the key rather than leaving it to be ignored. A
+/// key left in a document is a key a later build can read back and act on, and this one governed
+/// whether the program went on running with nothing on the screen.
+///
+/// **The four that arrive land the v13-v16 way** — defaults chosen for things that did not exist
+/// before, so nothing anybody ever expressed is overwritten:
+///
+/// * `quake_profile_id`, which profile the summoned terminal opens on. The empty string is
+///   [`DEFAULT_PROFILE_UNSET`]'s own sentence, "whatever the default profile is", so a reader who
+///   changes their default profile takes this window with them without having answered twice.
+/// * `quake_startup_command`, a command run **once per run**, on the first summon. Empty, because a
+///   command nobody wrote is a command nobody wants run; it is the one string in this file this
+///   product ever executes, and it is executed because the reader typed it into a row that says so.
+/// * `quake_top_gap`, how far below the top of the work area the window hangs, in logical pixels.
+///   Twelve, which is the constant next29 wired shut given the row it never had.
+/// * `quake_restore`, what comes back when a run that had a summoned terminal starts again — see
+///   [`QuakeRestoreV1`], whose default is the whole of the third rung.
+///
+/// One bump for five changes, on v27's own argument: they arrive together as one ruling, and
+/// `SETTINGS_MIGRATIONS` is the map of the road from an old file to this one — five version numbers
+/// for one release would name four documents nobody ever wrote.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 31;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -371,6 +397,33 @@ pub const MINIMUM_QUAKE_WIDTH: u8 = 30;
 /// to say it on, which is why the row exists.
 pub const DEFAULT_QUAKE_DISMISS_ON_BLUR: bool = false;
 
+/// **How far below the top of the work area a summoned terminal hangs**, in logical pixels, when
+/// nobody has said otherwise (v31, user ruling 2026-09-05, `docs/DESIGN.md` §7.54e).
+///
+/// Twelve, and the number is not new — next29 wired it into `bt_app::quake` as a constant for the
+/// reason §7.54b gives: this window is drawn with rounded corners, and a rounded window flush
+/// against the top of a display shows two square notches where the corners stop being the window
+/// and the desktop behind is not yet the desktop. What is new is that it has a row, so a reader who
+/// wants the panel flush against the edge, or further down it, has a number to say so with.
+pub const DEFAULT_QUAKE_TOP_GAP: u32 = 12;
+
+/// The ceiling over [`DEFAULT_QUAKE_TOP_GAP`].
+///
+/// Sixty-four logical pixels, which is about a title bar and a half: past it the gap stops reading
+/// as a seam under the top of the screen and starts reading as a window that failed to reach it.
+/// The floor is zero and needs no constant — flush against the edge is a shape a reader may want,
+/// and it is the shape this window had before the gap was invented.
+pub const MAXIMUM_QUAKE_TOP_GAP: u32 = 64;
+
+/// **What comes back when a run that had a summoned terminal starts again**, when nobody has said
+/// otherwise (v31, user ruling 2026-09-05, `docs/DESIGN.md` §7.54e).
+///
+/// The third rung, and the ruling is that a summoned terminal is a **standing** thing: the tabs a
+/// reader keeps in it are the ones they keep, and coming back to an empty prompt in the wrong folder
+/// every morning is the product forgetting what it was told. Nothing on this ladder ever runs
+/// anything — see [`QuakeRestoreV1`].
+pub const DEFAULT_QUAKE_RESTORE: QuakeRestoreV1 = QuakeRestoreV1::FoldersAndPinnedCommands;
+
 /// The height cap a `settings.json` that has never named one is read as: **none**.
 ///
 /// Zero is the value and "no limit" is the sentence, and it is the default because it is what
@@ -440,7 +493,10 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "quake_height": 20..=100,
 ///   "quake_width": 30..=100,
 ///   "quake_dismiss_on_blur": true | false,
-///   "tray_icon": true | false
+///   "quake_profile_id": "pwsh" | "wsl" | ... | "",
+///   "quake_startup_command": "fastfetch" | "",
+///   "quake_top_gap": 0..=64,
+///   "quake_restore": "Nothing" | "Folders" | "FoldersAndPinnedCommands"
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -996,16 +1052,71 @@ pub struct SettingsV1 {
     /// still here.
     #[serde(default = "default_quake_dismiss_on_blur")]
     pub quake_dismiss_on_blur: bool,
-    /// **Whether this program keeps an icon in the notification area** (`docs/DESIGN.md` §7.54).
+    /// **Which profile the summoned terminal opens on** (v31, `docs/DESIGN.md` §7.54e).
     ///
-    /// The switch is about the icon and the icon alone, but it decides a second thing with it, and
-    /// the two are deliberately one row: **while the icon is there, closing the last window does
-    /// not end the run.** They are one question because they are one situation. A program that
-    /// stays with no window and no icon is a program that has silently failed to quit, and a
-    /// program that has quit while its icon is on the taskbar is an icon that lies. Neither is a
-    /// state worth being able to ask for, so neither has a row.
-    #[serde(default = "default_tray_icon")]
-    pub tray_icon: bool,
+    /// [`Self::default_profile`]'s own vocabulary, and the empty string means the same thing here
+    /// that it means there: *whatever the default profile is*. That is the shipped value, so a
+    /// reader who changes their default profile takes this window with them without having been
+    /// asked the same question twice; a reader who wants the summoned terminal to be the one shell
+    /// that is always `pwsh` writes an id here and it stops following.
+    ///
+    /// An id this build has never heard of degrades exactly as [`Self::default_profile`]'s does —
+    /// this crate has no profile registry to validate against, and §5.4 is per leaf.
+    #[serde(default)]
+    pub quake_profile_id: String,
+    /// **A command the summoned terminal runs once per run, on the first summon** (v31,
+    /// `docs/DESIGN.md` §7.54e).
+    ///
+    /// **The one string in this file this product ever executes**, and it is executed because the
+    /// reader wrote it into a row whose own sentence says so. Everything else the summoned terminal
+    /// puts in front of a shell is *typed and left unpressed* — see [`QuakeRestoreV1`] — and the
+    /// difference is not a matter of degree: a command restored out of a document is a command
+    /// somebody ran once, and a command in this key is a command somebody asked for every time.
+    ///
+    /// Empty ships, because a command nobody wrote is a command nobody wants run.
+    #[serde(default)]
+    pub quake_startup_command: String,
+    /// **How far below the top of the work area the summoned window hangs**, in logical pixels
+    /// (v31, `docs/DESIGN.md` §7.54e).
+    ///
+    /// Logical and not physical, for [`QuakePlacementV1`]'s reason one file over: this is a distance
+    /// a person judged by eye, and the unit that means the same thing at every scale is the one it
+    /// has to be stored in.
+    ///
+    /// Out-of-range values are the reader's problem and not this crate's, on [`Self::quake_height`]'s
+    /// own terms: the clamp belongs at the surface that places the window.
+    #[serde(default = "default_quake_top_gap")]
+    pub quake_top_gap: u32,
+    /// **What comes back when a run that had a summoned terminal starts again** (v31,
+    /// `docs/DESIGN.md` §7.54e) — see [`QuakeRestoreV1`] for the three answers and why there are
+    /// three of them.
+    #[serde(default = "default_quake_restore")]
+    pub quake_restore: QuakeRestoreV1,
+}
+
+/// How much of a summoned terminal a new run puts back — `docs/DESIGN.md` §7.54e.
+///
+/// **Three rungs and not a `bool`, because the third one costs something the second does not.**
+/// Restoring where each tab stood is free: a folder is a fact about a place, and a shell opened in
+/// it has done nothing. Restoring what a pinned tab last *ran* means this document holds a line the
+/// reader typed, and holding one is a decision separate from holding the folder it was typed in.
+///
+/// **No rung of this ladder ever runs anything.** The third one writes the remembered line to the
+/// pty **without a newline**, so it stands at the prompt exactly as if it had been typed and not
+/// yet submitted; `Enter` is the reader's. That is the whole of the ruling and it is why the third
+/// rung can ship as the default at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum QuakeRestoreV1 {
+    /// Nothing. The document's summoned window is dropped at the door, and the next summon opens a
+    /// new one on [`SettingsV1::quake_profile_id`] — which is what a reader who treats this window
+    /// as scratch space is asking for.
+    Nothing,
+    /// Every tab, each on the profile and in the folder it stood in.
+    Folders,
+    /// The same, and a pinned tab additionally arrives with the last command it ran typed at its
+    /// prompt and **not** submitted.
+    #[default]
+    FoldersAndPinnedCommands,
 }
 
 /// `serde`'s door for a v14 key that is missing from a file this build is reading.
@@ -1034,13 +1145,22 @@ fn default_quake_width() -> u8 {
     DEFAULT_QUAKE_WIDTH
 }
 
-/// `serde`'s door for the v29 tray key, missing from every file written before it.
+/// `serde`'s door for the v31 gap key, missing from every file written before it.
 ///
-/// **On**, for the reason on [`SETTINGS_SCHEMA_VERSION`]'s v29 paragraph: the icon is the only
-/// door to a program with no window on the screen, and a door that ships closed is a door nobody
-/// finds.
-fn default_tray_icon() -> bool {
-    true
+/// A function and not `#[serde(default)]`, for [`default_scrollback_lines`]'s reason: a `u32`'s own
+/// default is `0`, and zero is a real answer on this row — flush against the top of the screen —
+/// so a file that had lost the key would come back holding a shape somebody could have chosen.
+fn default_quake_top_gap() -> u32 {
+    DEFAULT_QUAKE_TOP_GAP
+}
+
+/// `serde`'s door for the v31 restore key.
+///
+/// A function for [`default_quake_top_gap`]'s reason turned round: the enum's own `Default` happens
+/// to be the same rung today, and a key whose door was deleted the day they lined up is a key that
+/// would flip silently the next time [`DEFAULT_QUAKE_RESTORE`] moved.
+fn default_quake_restore() -> QuakeRestoreV1 {
+    DEFAULT_QUAKE_RESTORE
 }
 
 /// And the v27 dismissal key, whose answer v30 reversed.
@@ -1194,7 +1314,10 @@ impl Default for SettingsV1 {
             quake_width: DEFAULT_QUAKE_WIDTH,
             // Turning to another window is how a person works, not how they put a terminal away.
             quake_dismiss_on_blur: DEFAULT_QUAKE_DISMISS_ON_BLUR,
-            tray_icon: true,
+            quake_profile_id: DEFAULT_PROFILE_UNSET.to_owned(),
+            quake_startup_command: String::new(),
+            quake_top_gap: DEFAULT_QUAKE_TOP_GAP,
+            quake_restore: DEFAULT_QUAKE_RESTORE,
         }
     }
 }

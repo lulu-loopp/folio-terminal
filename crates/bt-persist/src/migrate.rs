@@ -65,6 +65,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (27, migrate_settings_v27_to_v28),
     (28, migrate_settings_v28_to_v29),
     (29, migrate_settings_v29_to_v30),
+    (30, migrate_settings_v30_to_v31),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -677,6 +678,47 @@ fn migrate_settings_v29_to_v30(mut value: Value) -> Value {
     value
 }
 
+/// v30 -> v31: the notification-area icon is withdrawn, and the summoned terminal gets the four
+/// keys its own settings section is made of (user ruling, 2026-09-05, `docs/DESIGN.md` §7.54e).
+///
+/// **The removal is a `remove` and not an omission, and that is the whole of this step's care.**
+/// Rule 4 of this module says an unrecognised key is dropped by `serde` on the way in and never
+/// written back, so a step that only bumped the number would *also* leave `tray_icon` out of the
+/// next file this build saves. The difference is what the document says in between: a file this
+/// build has read and not yet rewritten still holds the key, and a build that still knows it would
+/// read it back and stay resident with nothing on the screen. This ladder is the one place a
+/// withdrawal can be stated rather than merely happening, so it is stated.
+///
+/// **The four that arrive are v13-v16 defaults**: nobody could have expressed a preference about a
+/// row that did not exist, so writing the shipped value is writing what the reader already has.
+/// `quake_profile_id` is the empty string, which is `default_profile`'s own word for "whatever the
+/// default profile is"; `quake_startup_command` is empty, because a command nobody wrote is a
+/// command nobody wants run; `quake_top_gap` is the twelve logical pixels next29 wired shut; and
+/// `quake_restore` is the third rung, which is the ruling.
+///
+/// See `SettingsV1::quake_restore` and [`crate::QuakeRestoreV1`].
+fn migrate_settings_v30_to_v31(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(31));
+        object.remove("tray_icon");
+        object.insert(
+            "quake_profile_id".to_owned(),
+            Value::from(crate::DEFAULT_PROFILE_UNSET),
+        );
+        object.insert("quake_startup_command".to_owned(), Value::from(""));
+        object.insert(
+            "quake_top_gap".to_owned(),
+            Value::from(crate::DEFAULT_QUAKE_TOP_GAP),
+        );
+        object.insert(
+            "quake_restore".to_owned(),
+            serde_json::to_value(crate::DEFAULT_QUAKE_RESTORE)
+                .unwrap_or_else(|_| Value::from("FoldersAndPinnedCommands")),
+        );
+    }
+    value
+}
+
 /// Migration table for `keybindings.json`. Empty, and it will stay empty for as
 /// long as the file's *shape* holds: a schema step is owed when the document
 /// changes, and adding, renaming or retiring a shortcut row does not change this
@@ -726,6 +768,7 @@ pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (11, migrate_session_v11_to_v12),
     (12, migrate_session_v12_to_v13),
     (13, migrate_session_v13_to_v14),
+    (14, migrate_session_v14_to_v15),
 ];
 
 fn migrate_session_v1_to_v2(mut value: Value) -> Value {
@@ -1032,17 +1075,30 @@ fn migrate_session_v12_to_v13(mut value: Value) -> Value {
     value
 }
 
-/// **v14 takes the number and nothing else** (rule 3), and the empty list is the whole of what a
-/// v13 document can honestly say.
+/// **v14 takes the number and nothing else** (rule 3), on v13's own argument.
+///
+/// [`crate::TermLeafV1::last_command`] is the line a shell was last told to run, and no v12 or v13
+/// document can carry one: the builds that wrote them never read a command mark into the file. The
+/// absent key and the empty string are therefore the same sentence — "this pane has no remembered
+/// line" — which is the condition under which a step on this ladder is allowed to be one line.
+fn migrate_session_v13_to_v14(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(14));
+    }
+    value
+}
+
+/// **v15 takes the number and nothing else** (rule 3), and the empty list is the whole of what a
+/// v14 document can honestly say.
 ///
 /// [`crate::SessionV1::recent_folders`] records a gesture — a reader pointing a files column at a
 /// folder — and no build before this one watched for it, so there is no older key to read the
 /// answer out of and nothing to reconstruct it from. A step that invented rows here would be
 /// filling the reader's list with places it had guessed at; the absent key and the empty list are
 /// the same sentence, which is the condition under which a step of this ladder is one line.
-fn migrate_session_v13_to_v14(mut value: Value) -> Value {
+fn migrate_session_v14_to_v15(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
-        object.insert("schema_version".to_owned(), Value::from(14));
+        object.insert("schema_version".to_owned(), Value::from(15));
     }
     value
 }
@@ -1906,34 +1962,34 @@ mod tests {
         );
     }
 
-    /// RED (`docs/DESIGN.md` §7.5, user ruling 2026-09-05) — **v13 -> v14 takes the version and
-    /// leaves the list empty**, and a v13 document read through it has opened nothing.
+    /// RED (`docs/DESIGN.md` §7.5, user ruling 2026-09-05) — **v14 -> v15 takes the version and
+    /// leaves the list empty**, and a v14 document read through it has opened nothing.
     ///
-    /// The one-line step is allowed for rule 3's reason: no v13 build watched for the gesture that
+    /// The one-line step is allowed for rule 3's reason: no v14 build watched for the gesture that
     /// makes a row here, so there is no older key holding the answer and nothing honest to
     /// reconstruct one from.
     ///
     /// MUTATION: have the step seed the list from the working directories in `windows[]` and a
     /// reader's first look at the menu offers them places they never opened, which is the list
-    /// claiming to be a history of a gesture it did not witness. Leave the version alone and a v13
-    /// build reads a v14 document as its own, dropping every folder the reader opened.
+    /// claiming to be a history of a gesture it did not witness. Leave the version alone and a v14
+    /// build reads a v15 document as its own, dropping every folder the reader opened.
     #[test]
-    fn real_session_v13_to_v14_migration_takes_the_number_and_opens_nothing() {
+    fn real_session_v14_to_v15_migration_takes_the_number_and_opens_nothing() {
         let migrated = migrate_value(
             json!({
-                "schema_version": 13,
+                "schema_version": 14,
                 "windows": [{
                     "tabs": [],
                     "active_tab": 0
                 }],
                 "recent": []
             }),
-            13,
             14,
+            15,
             SESSION_MIGRATIONS,
         )
         .unwrap();
-        assert_eq!(migrated["schema_version"], json!(14));
+        assert_eq!(migrated["schema_version"], json!(15));
         assert!(
             migrated.get("recent_folders").is_none(),
             "the step invents no folder - a reader who has opened nothing has opened nothing"
@@ -2147,6 +2203,75 @@ mod tests {
         )
         .unwrap();
         assert_eq!(migrated["quake_dismiss_on_blur"], json!(false));
+    }
+
+    /// RED (`docs/DESIGN.md` §7.54e, user ruling 2026-09-05) — **v30 -> v31 takes `tray_icon` out
+    /// of the document**, and gives the summoned terminal the four keys its section is made of.
+    ///
+    /// **The removal is the assertion, and it has to be on the document.** Rule 4 of this module
+    /// means an unrecognised key never survives a parse, so a step that merely bumped the number
+    /// would also produce a `SettingsV1` with no icon in it — and this test would pass against a
+    /// step that had done nothing about the withdrawal at all. What the removal buys is the file in
+    /// between: a document this build has read and not yet rewritten, handed to a build that still
+    /// knows the key, is a program that stays resident with nothing on the screen. So the fixture
+    /// carries `true` and the assertion is that the key is *gone*.
+    ///
+    /// MUTATION: drop the `remove` and the first assertion names the key that is still there. Write
+    /// any of the four with a value that is not its constant — `Nothing` for the restore rung, say —
+    /// and an upgrading reader silently loses the tabs they kept in that window. Miss an insert
+    /// entirely and serde's default rescues the parse while the document stays silent, which is the
+    /// second reason every assertion here is on the migrated document.
+    #[test]
+    fn real_settings_v30_to_v31_migration_drops_the_icon_and_names_the_summoned_terminals_own_keys()
+    {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 30,
+                "quake_height": 65,
+                "quake_width": 100,
+                "quake_dismiss_on_blur": false,
+                "tray_icon": true
+            }),
+            30,
+            31,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(31));
+        assert_eq!(
+            migrated.get("tray_icon"),
+            None,
+            "the withdrawn key is still in the document, where a build that knows it would read it \
+             back and go on running with nothing on the screen"
+        );
+        assert_eq!(
+            migrated["quake_restore"],
+            json!("FoldersAndPinnedCommands"),
+            "an upgrading reader loses the tabs they kept in the summoned terminal"
+        );
+        assert_eq!(
+            migrated["quake_top_gap"],
+            json!(crate::DEFAULT_QUAKE_TOP_GAP),
+            "the gap next29 wired shut is the value the row it finally has starts on"
+        );
+        assert_eq!(
+            migrated["quake_profile_id"],
+            json!(""),
+            "the summoned terminal follows the default profile until somebody says otherwise"
+        );
+        assert_eq!(
+            migrated["quake_startup_command"],
+            json!(""),
+            "and it runs nothing on the first summon until somebody writes a command"
+        );
+        assert_eq!(
+            migrated["quake_dismiss_on_blur"],
+            json!(false),
+            "the key added one version ago is the one a copy-paste of the step above would most \
+             plausibly reset"
+        );
+        assert_eq!(migrated["quake_width"], json!(100));
+        assert_eq!(migrated["quake_height"], json!(65));
     }
 
     #[test]

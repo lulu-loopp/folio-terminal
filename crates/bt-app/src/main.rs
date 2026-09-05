@@ -126,9 +126,9 @@ use bt_layout::{
 };
 use bt_math::{MathEngine, MathMode, MathRaster, MathRenderError};
 use bt_persist::{
-    LayoutNodeV1, LeafNodeV1, SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1,
-    SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1, TabV1, TermLeafV1, ThemeModeV1,
-    WindowBoundsV1, WindowStateV1,
+    LayoutNodeV1, LeafNodeV1, QuakeRestoreV1, SESSION_SCHEMA_VERSION, SessionCursorStyleV1,
+    SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1, TabV1,
+    TermLeafV1, ThemeModeV1, WindowBoundsV1, WindowStateV1,
 };
 use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtyError, PtySession, PtySize};
 use bt_render::{
@@ -431,15 +431,6 @@ enum AppEvent {
     /// reads it rather than by the hook, which is running inside Windows'
     /// message pump with no borrow of anything.
     QuakeSummoned,
-    /// **Somebody used the icon in the notification area** (§7.54).
-    ///
-    /// [`Self::QuakeSummoned`]'s twin at the other door, and it carries nothing
-    /// for the same reason and one more. The window procedure that posts this has
-    /// already written down *what* was asked for — it is a list on the icon's own
-    /// state, because a menu can be opened and chosen from in one gesture — so
-    /// what this says is only that there is something to read. Which is also all
-    /// it may say: that procedure runs inside somebody else's `DispatchMessage`.
-    TrayPoked,
     /// **A desktop notification was clicked** (§7.6).
     ///
     /// Carries nothing, for [`Self::GitChanged`]'s reason: the launch string is
@@ -6067,6 +6058,8 @@ fn restart_seed(profile: usize, last_reported_cwd: Option<&Path>) -> LeafSeed {
         unknown_profile_id: None,
         // A restart keeps the pane, so it keeps the pane's aim.
         card_skip: 0,
+        // A restart is a new shell in the same place; nothing is owed to its prompt.
+        prefill: None,
     }
 }
 
@@ -7605,6 +7598,22 @@ struct LeafSession {
     /// row carry is the *string* this helps compute, in the field that already
     /// held one, so no schema moves.
     spawn_place: Option<PathBuf>,
+    /// **Something to be typed into this shell as soon as it has a prompt**, and whether it is to
+    /// be submitted (§7.54e ④ and ⑤).
+    ///
+    /// Two arrivals and one field, because they are one act at two settings of one switch: a
+    /// pinned summoned tab's remembered command, which is typed and left standing, and the startup
+    /// command, which is typed and run. See `quake::typed_into_a_prompt`, which is where that
+    /// switch lives and is the only place bytes are made out of either.
+    ///
+    /// **It waits for a prompt rather than being written at birth.** A shell behind a ConPTY will
+    /// take bytes before it has drawn anything, and what a reader would then see is their command
+    /// echoed into the middle of a login banner — or swallowed by a shell that was still reading
+    /// its profile. `OSC 133;B` is the shell saying *I am reading a line now*, which is exactly the
+    /// moment this is for, and it is why the third rung needs shell integration at all.
+    ///
+    /// Spent once, by [`drain_leaf_pty`]: a second write would be a second copy of the command.
+    pending_typing: Option<(String, bool)>,
     session: DualPlaneSession,
     /// **This pane's attention account, and with it the place it holds in this window's queue**
     /// (`attention` plan §11.1; §7.1.5b P1-8).
@@ -8723,94 +8732,43 @@ struct App {
     /// per *process* — one `RegisterHotKey` on the loop's own thread — and
     /// because the window it names may not exist yet. See [`quake::Quake`].
     quake: quake::Quake,
-    /// **The icon in the notification area, while there is one** (§7.54).
-    ///
-    /// On the application and not on a window for a stronger version of the
-    /// reason above it: the icon exists in order to outlive every window, and it
-    /// owns a window of its own to do it (see [`bt_platform::tray::TrayIcon`]).
-    /// `None` is both "the reader turned it off" and "there has never been a
-    /// window to read this program's module handle from".
-    tray: Option<bt_platform::tray::TrayIcon>,
 }
 
 /// **The way a message from outside every window asks for a turn.**
 ///
-/// Set once, immediately after the loop is built, and read from two doors that
-/// are not on the loop's own call stack: the message hook that notices the
-/// summon chord, and the window procedure behind the icon in the notification
-/// area. It is a `static` and not a field for the reason both of those share —
-/// neither of them is handed anything by winit, because neither of them is
-/// winit's to call.
+/// Set once, immediately after the loop is built, and read from the one door that
+/// is not on the loop's own call stack: the message hook that notices the summon
+/// chord. It is a `static` and not a field for that door's own reason — it is not
+/// handed anything by winit, because it is not winit's to call.
+///
+/// **It had a second reader until 2026-09-05** — the window procedure behind an
+/// icon in the notification area — and the plural in this note is worth keeping
+/// as a singular that was once true: the shape is "a thing outside every window
+/// asks for a turn", and the summon chord is now the only such thing there is.
 static SUMMON_PROXY: std::sync::OnceLock<EventLoopProxy<AppEvent>> = std::sync::OnceLock::new();
 
-/// **The words the icon's menu is drawn with**, in the language this window
-/// started in.
+/// **A run ends with the last window a person can see** (§7.54e ①, user ruling
+/// 2026-09-05).
 ///
-/// Read afresh wherever the icon is stated rather than held anywhere, which is
-/// how every other translated surface in this program works and is what lets the
-/// icon follow a language change without a second mechanism.
+/// One fact, and it is written here as a named rule rather than inlined at the two doors that ask
+/// it — `FolioApp::close`, on whether a shut ends a run, and `FolioApp::reap_leaving_windows`, on
+/// whether an empty registry does — for the reason the two-fact version was: they must never be
+/// able to answer differently.
 ///
-fn tray_labels() -> bt_platform::tray::TrayLabels {
-    bt_platform::tray::TrayLabels {
-        summon: i18n::Text::TrayMenuSummon.text().to_owned(),
-        new_window: i18n::Text::TrayMenuNewWindow.text().to_owned(),
-        settings: i18n::Text::TrayMenuSettings.text().to_owned(),
-        quit: i18n::Text::TrayMenuQuit.text().to_owned(),
-        // **The product's own name, which is the same word in both languages**
-        // and is therefore not a translated string. A tip is read by somebody who
-        // has pointed at one icon in a row of icons and is asking *which program
-        // is this*; anything past the answer is words in the way of it.
-        tip: APP_NAME.to_owned(),
-    }
-}
-
-/// **Ask for a turn, and do nothing else** — what the icon's window procedure is
-/// handed.
+/// **This overturns §7.54b ⑤ and §7.54c ② by withdrawing what they were about.** Those rulings
+/// gave residency two conditions, an icon in the notification area and a summoned terminal behind
+/// it, and 2026-09-05 took the icon away: 「快捷终端与 Folio 同生同死」. What is left is §7.54's own
+/// first answer, which was right all along and was narrowed only because the icon existed — a
+/// `folio.exe` in the task list with nothing on any screen and no taskbar button is not a program a
+/// person can get back to, and a hidden summoned terminal is not a reason to be one.
 ///
-/// A free function and not a closure written at the call site, so that the rule
-/// it obeys can be stated once where it is easy to check: this runs inside
-/// Windows' own message dispatch, with no borrow of anything, and the only thing
-/// it may do is make the loop take a turn. What was actually asked for is written
-/// down on the icon and read by `settle_tray_commands`.
-fn wake_the_loop() {
-    if let Some(proxy) = SUMMON_PROXY.get() {
-        let _ = proxy.send_event(AppEvent::TrayPoked);
-    }
-}
-
-/// **When a run outlives the last window a person can see** (§7.54c, user ruling
-/// 2026-09-03).
-///
-/// Both facts, in one place, as a rule rather than as a conjunction spelled at
-/// the door that happens to ask first. `FolioApp::tray_keeps_the_run_alive`
-/// gathers the two and this decides; the two doors that care —
-/// `FolioApp::close`, on whether a shut ends a run, and
-/// `FolioApp::reap_leaving_windows`, on whether an empty registry does — go
-/// through that one method so that they can never answer differently.
-///
-/// **The icon, because that is how a resident program is reached.** §7.54's
-/// `open_window_count` paragraph refused a run kept alive by a window nobody can
-/// see: a `folio.exe` with nothing on any screen and no taskbar button, reachable
-/// only through a key its reader may have bound weeks ago. An icon answers that —
-/// the program is where its icon says it is, a click summons it, its menu has a
-/// Quit — and §7.54b ⑤ stopped there.
-///
-/// **And a summoned terminal, because that is what makes residency mean
-/// anything.** Reachability says how the reader gets back; it does not say what
-/// they get back to. With no summoned window the icon is a door onto an empty
-/// room, and the person who closed their last visible window asked for the
-/// program to end, not for it to wait in the notification area for nothing.
-/// `scripts/release/smoke.ps1` gate 6 is where that was first read out loud: it
-/// closes the one window a cold launch opens and waits for the process, and on
-/// 780fb99 it timed out with `the window did not close when it was asked to`.
-///
-/// **A hidden summon counts.** It is exactly the state the icon is a door onto —
-/// a terminal one chord away, off the glass. `FolioApp::open_window_count`
-/// excludes that same window because it is not a window anybody can see; the two
-/// readings are not in tension, they are the two halves of the same sentence: it
-/// is not a window, and it is a reason.
-const fn a_run_worth_keeping(icon_is_up: bool, a_summon_exists: bool) -> bool {
-    icon_is_up && a_summon_exists
+/// **A hidden summon is carried out with the run and loses nothing.** Its paragraph is written into
+/// the document like every other window's, so the next launch brings back exactly what
+/// `SettingsV1::quake_restore` says it should — see `FolioApp::retire_the_summon_with_the_run`,
+/// which is the door it goes through, and `FolioApp::windows_left_after`, which is why it was
+/// never counted as a window in the first place.
+const fn a_run_ends_with_its_last_visible_window(visible_windows: usize) -> bool {
+    visible_windows == 0
 }
 
 /// **One row of `Move to window ▸`**, before it is words (B9).
@@ -8914,22 +8872,6 @@ impl NewWindowPlan {
     fn fresh(like: WindowId) -> Self {
         Self {
             like: Some(like),
-            saved: None,
-            ask_about_unpinned: false,
-            receives: None,
-            quake: false,
-        }
-    }
-
-    /// **A window nothing in this process asked for** — the icon's `New window`.
-    ///
-    /// [`Self::summoned`] without the summon, and `like` is `None` for that
-    /// constructor's reason said one step further out: the click happened on a
-    /// surface that belongs to the shell, so not only did no window ask — there
-    /// may not be a window at all.
-    const fn unasked_for() -> Self {
-        Self {
-            like: None,
             saved: None,
             ask_about_unpinned: false,
             receives: None,
@@ -13007,7 +12949,7 @@ impl TabState {
     ///
     /// The program's title is deliberately not in here (mock-up 4009-4010):
     /// it left with the program. Your name for the tab did not.
-    fn term_leaf(&self, seat: SeatId) -> TermLeafV1 {
+    fn term_leaf(&self, seat: SeatId, remember_the_command: bool) -> TermLeafV1 {
         TermLeafV1 {
             profile_id: profiles::id(self.leaf_profile(seat)),
             cwd: self
@@ -13029,6 +12971,32 @@ impl TabState {
                 .sessions
                 .get(&seat)
                 .map_or(0, |leaf| leaf.card_skip as u32),
+            // **The line this pane's shell was last told to run**, or nothing at all
+            // (§7.54e ④). Read off the command marks, so a shell with no integration
+            // writes an empty string — which is the honest answer rather than a guess
+            // scraped off the screen. The narrowing to a pinned tab of the summoned
+            // terminal is the caller's (`Runtime::window_snapshot`), because it is the
+            // *tab* and the *window* that decide it and neither is a fact a pane holds.
+            //
+            // **The last mark that carries text**, and not simply the last mark: a
+            // shell that has just drawn a prompt has an open mark with nothing typed
+            // in it yet, and a document that recorded that would restore an empty
+            // line over the command the reader actually left standing.
+            last_command: if remember_the_command {
+                self.sessions
+                    .get(&seat)
+                    .and_then(|leaf| {
+                        leaf.session
+                            .command_marks()
+                            .iter()
+                            .rev()
+                            .find(|mark| !mark.command_text.is_empty())
+                            .map(|mark| mark.command_text.clone())
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            },
         }
     }
 
@@ -13157,7 +13125,10 @@ impl TabState {
         let seat = self.seats.identity();
         match self.seats.tree().find_seat(seat)?.kind {
             bt_layout::SeatKind::Terminal => {
-                let leaf = self.term_leaf(seat);
+                // **No remembered command line**: a vault row is a *place*, and
+                // §7.54e ④'s prefill belongs to a pinned tab of the summoned
+                // terminal — which is not a thing a Recent row ever reopens.
+                let leaf = self.term_leaf(seat, false);
                 Some(seed::Seed::Term {
                     profile_id: leaf.profile_id,
                     cwd: leaf.cwd,
@@ -26467,14 +26438,39 @@ fn session_windows<'a>(
 /// in — so the first saved window opens and the rest wait. The asymmetry is real
 /// and it is the same one the single-window build already had: the first window
 /// is the one there has to be.
-fn plan_windows(saved: &[SessionWindowV1]) -> WindowLaunchPlan {
+fn plan_windows(saved: &[SessionWindowV1], restore: QuakeRestoreV1) -> WindowLaunchPlan {
     let mut plan = WindowLaunchPlan::default();
     // **The summoned window leaves before anything is decided** (§7.54). It is
     // not the window that opens first, it is not queued behind one, and it is not
     // a question — so taking it out here is the whole of its bypass, and the
     // election below reads exactly as it did before there was one.
     let mut quake = saved.iter().filter(|window| window.quake);
-    plan.quake = quake.next().cloned();
+    // **And how much of it comes back is decided here and nowhere else**
+    // (§7.54e ④, user ruling 2026-09-05). One place, because the rung is one
+    // question with three answers and a second reader of it is a second answer:
+    // the door that revives a tab asks only what the leaf in front of it says, so
+    // "this rung does not restore commands" and "this shell never reported one"
+    // are the same fact all the way down (`LeafSeed::prefill`).
+    //
+    // **Nothing** drops the window at the door: the next summon opens a new one
+    // on `SettingsV1::quake_profile_id`, which is what a reader who treats this
+    // window as scratch space asked for. **Folders** keeps every tab where it
+    // stood and strips the remembered lines, so nothing can be typed anywhere.
+    // **Folders and pinned commands** keeps them, and keeps them on the pinned
+    // tabs alone — an unpinned tab of a document written by some other build is
+    // stripped here rather than trusted, because the pin is the request and this
+    // is the level that can see it.
+    plan.quake = match restore {
+        QuakeRestoreV1::Nothing => None,
+        QuakeRestoreV1::Folders => quake
+            .next()
+            .cloned()
+            .map(|window| forget_commands(window, false)),
+        QuakeRestoreV1::FoldersAndPinnedCommands => quake
+            .next()
+            .cloned()
+            .map(|window| forget_commands(window, true)),
+    };
     let ordinary: Vec<SessionWindowV1> = saved
         .iter()
         .filter(|window| !window.quake)
@@ -26514,6 +26510,44 @@ fn plan_windows(saved: &[SessionWindowV1]) -> WindowLaunchPlan {
         }
     }
     plan
+}
+
+/// **Take the remembered command lines off every tab this rung does not restore them for**
+/// (§7.54e ④).
+///
+/// A rewrite of the plan rather than a flag carried alongside it, and that is the design: what
+/// travels on from here is a document, and a document with no remembered line in it cannot restore
+/// one however many doors it passes through. The alternative — a rung read again at the pane — is
+/// two answers to one question, and the one that gets it wrong types a command into somebody's
+/// shell.
+///
+/// `keep_pinned` is the third rung. Even then it is only the *pinned* tabs: the pin is the reader
+/// saying this tab is a standing thing, and `Runtime::window_snapshot` writes a line for no other
+/// kind of tab — so this strips what a differently-built document might be carrying rather than
+/// trusting it.
+fn forget_commands(mut window: SessionWindowV1, keep_pinned: bool) -> SessionWindowV1 {
+    for tab in &mut window.tabs {
+        if keep_pinned && tab.pinned {
+            continue;
+        }
+        forget_commands_in_tree(&mut tab.root);
+    }
+    window
+}
+
+/// The same, walked over one saved tree — structurally recursive for
+/// `migrate_files_views_in_tree`'s reason: a node shape this build does not recognise is a node
+/// whose children it must still reach.
+fn forget_commands_in_tree(node: &mut LayoutNodeV1) {
+    match node {
+        LayoutNodeV1::Leaf(LeafNodeV1::Term(leaf)) => leaf.last_command.clear(),
+        LayoutNodeV1::Leaf(_) => {}
+        LayoutNodeV1::Split(split) => {
+            for child in &mut split.children {
+                forget_commands_in_tree(child);
+            }
+        }
+    }
 }
 
 fn plan_launch(saved: &[TabV1], active: usize, cli_wants_pane: bool) -> LaunchPlan {
@@ -26647,6 +26681,11 @@ fn revive_plan(
                     // with somebody else's aim is a card pointed at the wrong
                     // part of the wrong shell.
                     card_skip: leaf.card_skip as usize,
+                    // The fourth fact read out of the same saved leaf in the same pass, on the
+                    // three above it's own terms. Empty is `None` rather than an empty command,
+                    // so "this shell never reported one" and "this rung does not restore them"
+                    // arrive as one case (§7.54e ④).
+                    prefill: Some(leaf.last_command.clone()).filter(|it| !it.is_empty()),
                 },
             )
         })
@@ -27347,6 +27386,7 @@ fn seeded_tab(seed: &seed::Seed) -> TabV1 {
                 cwd: cwd.clone(),
                 manual_name: manual_name.clone(),
                 card_skip: 0,
+                last_command: String::new(),
             })),
             None,
         ),
@@ -27495,6 +27535,14 @@ struct LeafSeed {
     /// (§7.1.6b′, user ruling 2026-08-21). `0` for every seed that was not
     /// revived from disk, which is what a shell born now is aimed at.
     card_skip: usize,
+    /// **The line to stand at this pane's first prompt, unsubmitted** (§7.54e ④).
+    ///
+    /// `None` everywhere but one place: a pinned tab of a summoned terminal being restored while
+    /// `SettingsV1::quake_restore` is on its third rung. The narrowing is not done here — by the
+    /// time a seed is built the document has already been filtered by `plan_windows`, which is the
+    /// one place the rung is read, so an empty `last_command` on the leaf and "this rung does not
+    /// restore commands" are the same fact and cannot disagree.
+    prefill: Option<String>,
 }
 
 /// **Every popup this window can raise** — E61's "one at a time" written as a
@@ -28663,12 +28711,15 @@ impl SplitSeed {
                 // ways it was made. Inheriting the neighbour's aim would be a
                 // pane born looking somewhere its own shell has never printed.
                 card_skip: 0,
+                // A split is not a restore; nothing is owed to its prompt.
+                prefill: None,
             },
             Self::Profile(profile) => LeafSeed {
                 profile: *profile,
                 cwd: profiles::cwd_for_spawn(source_profile, *profile, source_cwd),
                 unknown_profile_id: None,
                 card_skip: 0,
+                prefill: None,
             },
             // The chooser answers with a Windows path, because
             // `FOS_FORCEFILESYSTEM` is what makes it answer with a path at all —
@@ -28684,6 +28735,7 @@ impl SplitSeed {
                 ),
                 unknown_profile_id: None,
                 card_skip: 0,
+                prefill: None,
             },
         }
     }
@@ -29070,6 +29122,9 @@ fn create_leaf_session(
         profile,
         program: resolved_program,
         spawn_place,
+        // **What this pane is owed at its first prompt** (§7.54e ④). `None` for every pane in the
+        // product except a pinned tab of a restored summoned terminal — see `LeafSeed::prefill`.
+        pending_typing: seed.prefill.clone().map(|command| (command, false)),
         session,
         // Nobody has asked for anything yet.
         attention: attention::AttentionLedger::default(),
@@ -29202,6 +29257,7 @@ fn create_tab_state(
                 cwd: None,
                 unknown_profile_id: None,
                 card_skip: 0,
+                prefill: None,
             }),
             programs,
             formulas,
@@ -30598,6 +30654,34 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
         changed,
         leaf.session.resize_finish_deadline().is_some(),
     );
+    // **And the one line a restored pane is owed, typed at the moment there is a
+    // prompt to type it at** (§7.54e ④ and ⑤).
+    //
+    // Here for the reason the command ledger below is here: this is the one place
+    // every leaf of every tab passes through on every turn, so a pane nobody is
+    // looking at is served too — and the fact this waits on is read off that very
+    // ledger. **An open mark with nothing executed is a shell reading a line**
+    // (`OSC 133;B` seen, no `C`), which is precisely "there is a prompt and the
+    // cursor is on it"; writing before that would put the command inside a login
+    // banner, or hand it to a shell still sourcing its profile.
+    //
+    // Taken rather than read, so one prompt receives it once.
+    if leaf
+        .session
+        .command_marks()
+        .last()
+        .is_some_and(|mark| mark.executed.is_none() && mark.finished.is_none())
+        && let Some((command, submit)) = leaf.pending_typing.take()
+    {
+        let bytes = quake::typed_into_a_prompt(&command, submit);
+        if !bytes.is_empty() {
+            write_pty_input(
+                leaf.pty.as_ref(),
+                &bytes,
+                "type a restored command at the prompt",
+            )?;
+        }
+    }
     // **A command ending is heard here or nowhere.** The ledger is the shell's
     // own account of itself (`OSC 133;D`), and this is the one place every leaf's
     // bytes pass through — so a `git commit` finished in a pane behind a Git page
@@ -31539,7 +31623,10 @@ impl Runtime<'_> {
         // (multiwindow slice D). Everything below reads `opening` where it used
         // to read the document's own top level, because that is exactly what
         // schema v9 moved.
-        let windows = plan_windows(&session_store.loaded().windows);
+        let windows = plan_windows(
+            &session_store.loaded().windows,
+            settings_store.loaded().quake_restore,
+        );
         let opening = windows.first.clone().unwrap_or_default();
         // Through the same constructor the two live routes take, so a restored
         // rail is byte for byte the rail the user left rather than one assembled
@@ -31787,6 +31874,7 @@ impl Runtime<'_> {
                             // reader standing right there.
                             unknown_profile_id: None,
                             card_skip: 0,
+                            prefill: None,
                         },
                     )
                 })
@@ -32008,11 +32096,6 @@ impl Runtime<'_> {
             window_ring: None,
             window_ring_shown: None,
             quake: quake::Quake::default(),
-            // **Not here.** There is no window yet, and the icon needs one to
-            // read this program's module handle from. `settle_tray` puts it up on
-            // the first turn after the first window opens, which is also the
-            // earliest turn at which there is anything for it to protect.
-            tray: None,
         };
         // **The rest of the file's windows, queued at the door.** A window that
         // held a pinned tab opens straight away, through the very same door
@@ -32703,8 +32786,9 @@ impl Runtime<'_> {
     /// the top of the work area of the monitor **the pointer is on**, because
     /// that is the only thing on the desk that says which screen the reader is
     /// working on. A saved rectangle would put it on the screen they were working
-    /// on yesterday, so its saved rectangle is written and never read — see
-    /// [`quake::summoned_rect`].
+    /// on yesterday — narrowed since next29 to the one rectangle a *hand* made on
+    /// this very display, which is [`quake::Quake::placement`]'s own note and the
+    /// one door this function asks.
     ///
     /// **The posture is re-stated.** A window that has been hidden and shown
     /// again has been through `ShowWindow` twice, and `HWND_TOPMOST` is a place
@@ -32720,40 +32804,21 @@ impl Runtime<'_> {
     /// window has been on the glass, ask Win32 which monitor it is actually on.
     fn show_quake_window(&mut self) -> Result<()> {
         let hwnd = window_hwnd(&self.window.window)?;
-        // The pointer, and the window's own monitor when Windows will not say
-        // where the pointer is. Not the virtual screen: a rectangle spanning
-        // every display at once is not this window's shape on any of them.
-        //
-        // The point is bound rather than consumed inside the chain, because two
-        // questions are asked of the same monitor and they have to be asked of
-        // the *same* one: the work area the rectangle is measured against, and
-        // the dpi its top gap is scaled at. `tear_out_rect` reads them as a pair
-        // for the same reason.
-        let pointer = bt_platform::pointer_position();
-        let work = pointer
-            .and_then(|(x, y)| bt_platform::work_area_at(x, y).ok())
-            .or_else(|| bt_platform::get_work_area(hwnd).ok())
-            .unwrap_or_else(bt_platform::virtual_screen_rect);
-        // The dpi of the monitor being summoned onto, and **not** this window's
-        // cached scale: between summons the window is parked on whichever display
-        // it last came down on, and a gap scaled at that dpi would be the wrong
-        // size on the display the reader is actually working on.
-        let dpi = pointer.map_or_else(
-            || self.window.renderer.metrics().dpi_milli().get() * 96 / 1000,
-            |(x, y)| bt_platform::dpi_at(x, y),
+        // **The machine is read in one place and the rules are applied in one
+        // place** (§7.54e ③, user ruling 2026-09-05: 「呼出规则唯一…写成一个函数,
+        // 所有入口调它」). Which display, how big on it, and whether the reader has
+        // arranged this window there with their own hand are all one question, and
+        // this door does not answer any part of it — it asks
+        // `quake::SummonScreen::under_the_pointer` and `quake::Quake::placement`,
+        // which are the whole of the answer and are pinned by the source gate
+        // `a_summon_is_placed_by_one_function_and_main_does_not_do_the_geometry`.
+        let screen = quake::SummonScreen::under_the_pointer(
+            hwnd,
+            self.window.renderer.metrics().dpi_milli().get() * 96 / 1000,
         );
-        // **Which display this is**, so that a rectangle the reader arranged with
-        // their own hand comes back on the display they arranged it on and
-        // nowhere else — see `Quake::placement_on` and §7.54.
-        let monitor = pointer.and_then(|(x, y)| bt_platform::monitor_id_at(x, y));
         let settings = self.app.settings_store.loaded();
-        let rect = self
-            .app
-            .quake
-            .placement_on(monitor.as_deref(), dpi)
-            .unwrap_or_else(|| {
-                quake::summoned_rect(work, settings.quake_width, settings.quake_height, dpi)
-            });
+        let rect = self.app.quake.placement(&screen, settings);
+        let work = screen.work;
         // One line, on `BT_TEAR_OUT`'s own terms: a summon's rectangle is a
         // function of two things read off the machine at the moment of the press,
         // and a photograph of a window in the wrong place cannot say which of
@@ -32799,6 +32864,26 @@ impl Runtime<'_> {
             self.revive_all_web_pages()?;
         }
         Ok(())
+    }
+
+    /// **Put something in front of this window's focused shell**, to be typed when it next has a
+    /// prompt (§7.54e ⑤).
+    ///
+    /// The focused pane, because that is the one the reader is about to look at, and one pane
+    /// because a startup command is one command — a window restored holding four tabs is not a
+    /// window that asked for its command four times.
+    ///
+    /// Queued and not written: see [`LeafSession::pending_typing`] for why a shell behind a ConPTY
+    /// is not ready for bytes at the moment it is created, and `drain_leaf_pty` for the moment it
+    /// is.
+    fn queue_typing_in_the_focused_pane(&mut self, text: String, submit: bool) {
+        let Some(tab) = self.window.tabs.get_mut(self.window.active_tab) else {
+            return;
+        };
+        let focused = tab.focused_leaf;
+        if let Some(leaf) = tab.sessions.get_mut(&focused) {
+            leaf.pending_typing = Some((text, submit));
+        }
     }
 
     /// **Send it back up** (§7.54), and say who is owed the keyboard.
@@ -32961,6 +33046,7 @@ impl Runtime<'_> {
                 cwd,
                 unknown_profile_id: None,
                 card_skip: 0,
+                prefill: None,
             },
         )]);
         let (tab, _) = create_tab_state(
@@ -33168,6 +33254,7 @@ impl Runtime<'_> {
                         unknown_profile_id: (!profiles::has_id(&profile_id))
                             .then(|| profile_id.clone()),
                         card_skip: 0,
+                        prefill: None,
                     },
                 )]);
                 (seats, manual_name, leaves, BTreeMap::new())
@@ -34684,6 +34771,10 @@ impl Runtime<'_> {
                 // reason `i18n::current()` is, and like that one it answers the
                 // same thing all frame.
                 update_mark: update::mark_is_lit(&update::known(), version::VERSION),
+                // **Which caption run this window wears** (§7.54e ②) — the one
+                // window whose `×` hides rather than closes, and which therefore
+                // has no second button that means the same thing.
+                summoned: self.is_quake_window(),
                 tabs: &tabs,
                 head_ink: seats::HeadInk::new(&head_ink),
                 active_ink: seats::TabInk::new(&active_ink),
@@ -34870,7 +34961,12 @@ impl Runtime<'_> {
             // The posture and not the preference, for `panel_covers`'s reason:
             // the sidebar toggle is not drawn while the column is up, and a tip
             // on a button nobody drew is a tip on the drag strip.
-            for (target, rect) in seats::window_chrome_boxes(width, scale, self.rail_posture()) {
+            for (target, rect) in seats::window_chrome_boxes(
+                width,
+                scale,
+                self.rail_posture(),
+                self.is_quake_window(),
+            ) {
                 let text = match target {
                     // The gear, silenced while the dialog it opens is up — the
                     // chevron's rule, for the same reason.
@@ -38673,7 +38769,15 @@ impl Runtime<'_> {
             quake_height: self.app.settings_store.loaded().quake_height,
             quake_width: self.app.settings_store.loaded().quake_width,
             quake_dismiss_on_blur: self.app.settings_store.loaded().quake_dismiss_on_blur,
-            tray_icon: self.app.settings_store.loaded().tray_icon,
+            quake_top_gap: self.app.settings_store.loaded().quake_top_gap,
+            quake_restore: self.app.settings_store.loaded().quake_restore,
+            // **The resolved item and not the stored id**, on `default_profile`'s ruling one field
+            // above: item zero is "whatever the default profile is", and an id this machine no
+            // longer has ticks it — which is where a summon on an unknown profile really does open.
+            quake_profile: profiles::position_of(
+                &self.app.settings_store.loaded().quake_profile_id,
+            )
+            .map_or(0, |index| index + 1),
             // A fact about the machine and not about the file, which is why it is
             // read off the claim rather than out of the settings - see
             // `quake::Quake::hotkey_taken`.
@@ -38996,6 +39100,38 @@ impl Runtime<'_> {
                 env: &editor_env,
                 caret: editor_caret,
             });
+            // **The summoned terminal's two strings, joined where both halves are
+            // in hand** (§7.54e ⑤ — §7.54b's own arrangement for the sentence
+            // about a chord another program is holding, said again about the caps
+            // themselves). The panel holds a capture indexed into the shortcut
+            // table and the table holds the bound chord; neither knows on its own
+            // whether *this* row is the one listening, and this is the one place
+            // that does.
+            let summon_line = self.summon_shortcut_line();
+            let summon_listening =
+                summon_line.is_some() && self.window.settings.recording_row() == summon_line;
+            let summon_caps: Vec<String> = match (summon_listening, recording) {
+                (true, Some((_, caps, _))) => caps.to_vec(),
+                _ => summon_line
+                    .and_then(|index| shortcuts.get(index))
+                    .map(|line| line.caps.clone())
+                    .unwrap_or_default(),
+            };
+            let summon_command = self.window.settings.quake_command().to_owned();
+            let summon_command_caret = self
+                .window
+                .settings
+                .caret_of(focus_for_caret)
+                .filter(|(held, _, _)| {
+                    *held == settings::SettingsTarget::Field(settings::SettingsRow::QuakeCommand)
+                })
+                .map(|(_, from, to)| (from, to));
+            let summon = settings::SummonInk {
+                caps: &summon_caps,
+                listening: summon_listening,
+                command: &summon_command,
+                command_caret: summon_command_caret,
+            };
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             (
@@ -39009,6 +39145,7 @@ impl Runtime<'_> {
                     &background_image,
                     recording,
                     editor,
+                    summon,
                     &mut measure,
                 ),
                 ModalBand::Settings,
@@ -40841,6 +40978,18 @@ impl Runtime<'_> {
         // outlive the dialog being shut.
         self.window.settings_scroll = 0.0;
         if self.window.settings.is_open() {
+            // **And the one row that holds text rather than a choice is filled in
+            // from the file** (§7.54e ⑤). Here and not every frame, for
+            // `SettingsPanel::seed_quake_command`'s own reason: a field is what
+            // somebody is halfway through typing, and re-reading the file under a
+            // caret would drop it on the frame after every keystroke.
+            let command = self
+                .app
+                .settings_store
+                .loaded()
+                .quake_startup_command
+                .clone();
+            self.window.settings.seed_quake_command(&command);
             self.window.seat_pointer.hover = None;
             self.apply_pointer_cursor();
         } else if let Some(position) = self.window.pointer_position {
@@ -41012,8 +41161,11 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::quake_dismiss_requested(target) {
             self.apply_quake_dismiss(enabled)?;
         }
-        if let Some(enabled) = settings::tray_icon_requested(target) {
-            self.apply_tray_icon(enabled)?;
+        if let Some(rung) = settings::quake_restore_requested(target) {
+            self.apply_quake_restore(rung)?;
+        }
+        if let Some(profile) = settings::quake_profile_requested(target) {
+            self.apply_quake_profile(profile)?;
         }
         if let settings::SettingsTarget::Advanced(category) = target {
             self.toggle_advanced_group(category)?;
@@ -41223,10 +41375,14 @@ impl Runtime<'_> {
             // `Reset to defaults` on a page is not a licence to change another
             // program's menu.
             | Row::ContextMenu
+            | Row::QuakeHotkey
+            | Row::QuakeProfile
+            | Row::QuakeCommand
             | Row::QuakeHeight
             | Row::QuakeWidth
+            | Row::QuakeTopGap
             | Row::QuakeDismiss
-            | Row::TrayIcon
+            | Row::QuakeRestore
             // Not advanced, and it is on a page whose Advanced group it is not
             // in — but it is named here for this arm's own rule: a row swept
             // into a `_` is a row that silently starts resetting the day
@@ -41407,13 +41563,12 @@ impl Runtime<'_> {
         if self.window.settings.menu().is_some() || self.window.settings.row_menu().is_some() {
             return Ok(false);
         }
-        if self
-            .window
-            .settings
-            .editor()
-            .and_then(|editor| editor.field_of(target))
-            .is_none()
-        {
+        // **Asked of the panel and not of the editor** (§7.54e ⑤): the summoned
+        // terminal's startup command is a field on an ordinary page, and what a
+        // typed key does to a field must not depend on which page it is on. One
+        // handler, one set of rules about `Home`, `Ctrl+A` and a paste with a
+        // newline in it.
+        if self.window.settings.text_field(target).is_none() {
             return Ok(false);
         }
         let shift = self.window.modifiers.shift_key();
@@ -41426,10 +41581,7 @@ impl Runtime<'_> {
                 .and_then(|hwnd| bt_platform::clipboard_text(hwnd).ok())
                 .unwrap_or_default()
         });
-        let Some(editor) = self.window.settings.editor_mut() else {
-            return Ok(false);
-        };
-        let Some(field) = editor.field_mut(target) else {
+        let Some(field) = self.window.settings.text_field_mut(target) else {
             return Ok(false);
         };
         let mut edited = false;
@@ -41957,6 +42109,18 @@ impl Runtime<'_> {
     /// field keeps what they typed and the row says why it is not the table's
     /// answer yet.
     fn write_editor_field(&mut self, target: settings::SettingsTarget) -> Result<()> {
+        // **The one field on this dialog that is not the editor's** (§7.54e ⑤), and
+        // it is answered before the editor is asked for: there is no profile under
+        // the summoned terminal's page, and a guard that demanded one would make
+        // this row a field that quietly stores nothing.
+        if target == settings::SettingsTarget::Field(settings::SettingsRow::QuakeCommand) {
+            let command = self.window.settings.quake_command().to_owned();
+            self.apply_quake_command(command)?;
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+            return Ok(());
+        }
         let Some(editor) = self.window.settings.editor() else {
             return Ok(());
         };
@@ -42288,6 +42452,22 @@ impl Runtime<'_> {
                 }
             }
             settings::SettingsTarget::Record(index) => self.window.settings.begin_recording(index),
+            // **The same capture, started from the other page** (§7.54e ⑤). The
+            // recorder is indexed by a line of the shortcut table and this row is
+            // not on that page, so the index is resolved here — the one place
+            // that holds both the press and the table — and everything after it
+            // is the road the Shortcuts page's own `Record` goes down:
+            // `record_settings_key`, `Shortcuts::set`, `store_keybindings`, and
+            // `settle_quake`'s reconciliation on the very next turn.
+            //
+            // A build with no summon row is a build with nothing to record, and
+            // the press does nothing rather than opening a capture on whatever
+            // line happened to be first.
+            settings::SettingsTarget::QuakeChord => {
+                if let Some(index) = self.summon_shortcut_line() {
+                    self.window.settings.begin_recording(index);
+                }
+            }
             target @ (settings::SettingsTarget::RestoreRow(_)
             | settings::SettingsTarget::RestoreAll) => self.apply_shortcut_edit(target)?,
             // Both leave through the same door the keyboard's Enter leaves
@@ -42350,6 +42530,21 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **Which line of the shortcut table is the summon** (§7.54e ⑤).
+    ///
+    /// By the row's id and not by ordinal, for `SettingsTarget::Record`'s own reason read the other
+    /// way: the index is a fact about the list drawn this frame, so it has to be derived from that
+    /// list rather than written down anywhere. `None` on a build whose table has no such row, which
+    /// is the honest answer for a press that then does nothing — and it is the same lookup the
+    /// dialog's own caps come through, so the box a press opens is the box it was drawn on.
+    fn summon_shortcut_line(&self) -> Option<usize> {
+        self.app
+            .shortcuts
+            .editor_rows()
+            .iter()
+            .position(|line| line.ids.contains(&shortcuts::SUMMON_QUAKE_ID))
     }
 
     /// Ask the OS for the work area of the display this window is on.
@@ -42423,6 +42618,12 @@ impl Runtime<'_> {
     /// The theme, the cursor and the vault are the *process's* and are written by
     /// [`App::session_document`], once, over every window's answer to this.
     fn window_snapshot(&self) -> SessionWindowV1 {
+        // **Asked once for the paragraph**, because three things below read it and
+        // one of them is a per-tab decision: which caption run this window wears is
+        // not the question here, but which *kind* of window this is decides its
+        // `quake` flag, its arranged rectangles, and whether a pinned tab writes
+        // down the line it last ran (§7.54e ④).
+        let is_quake = self.is_quake_window();
         let previous = self.app.window_picture(self.window.window.id());
         let scale = self
             .window
@@ -42469,9 +42670,15 @@ impl Runtime<'_> {
                 // files leaf likewise, so a column that was rooted somewhere
                 // writes *there* instead of the empty string it used to be
                 // flattened to on the way past.
-                root: tab
-                    .seats
-                    .to_persisted(&|seat| tab.term_leaf(seat), &|seat| tab.files_state(seat)),
+                // **A remembered command line is written for one kind of tab and no
+                // other** (§7.54e ④): a pinned tab of the summoned terminal. The
+                // pin is the reader saying this tab is a standing thing, and a
+                // document that collected the last line every pane in every window
+                // ran would be keeping a command history nobody asked it to keep.
+                root: tab.seats.to_persisted(
+                    &|seat| tab.term_leaf(seat, is_quake && tab.pinned),
+                    &|seat| tab.files_state(seat),
+                ),
                 pinned: tab.pinned,
                 // Positional rather than a stable id: the in-order index is a function of the
                 // same tree shape the file carries, so it cannot point outside that tree.
@@ -42496,13 +42703,13 @@ impl Runtime<'_> {
             // what is in it** (§7.54). Its placement above is written like every
             // other window's and is deliberately never read back — a summon
             // computes its rectangle from the monitor the pointer is on, every
-            // time. See `quake::summoned_rect`.
-            quake: self.is_quake_window(),
+            // time. See `quake::Quake::placement`.
+            quake: is_quake,
             // **And the rectangles a hand made**, which are the one thing about
             // this window that *is* read back — filed under the display they
             // were made on, so that the objection above stays answered. Empty
             // for every other window, because only this one has them.
-            quake_placements: if self.is_quake_window() {
+            quake_placements: if is_quake {
                 self.app.quake.placements()
             } else {
                 Vec::new()
@@ -43600,29 +43807,54 @@ impl Runtime<'_> {
         Ok(self.app.settings_store.store(settings))
     }
 
-    /// **Put the icon in the notification area, or take it away** (§7.54).
+    /// **How much of the summoned terminal a new run puts back** (§7.54e ④).
     ///
-    /// The switch is stored and the icon is reconciled against it on the same
-    /// turn, rather than the store being left to be noticed later: this is the
-    /// one row on the page whose effect is on a surface **outside** this window,
-    /// and a reader who turns it off and watches the taskbar is entitled to see
-    /// the icon go.
-    ///
-    /// Turning it off is also the one place this program can leave itself with no
-    /// way back, and it cannot happen: the reader is looking at a settings dialog,
-    /// which is inside a window, which is a visible window — so the run that this
-    /// press stops protecting is a run that still has something on the screen.
-    fn apply_tray_icon(&mut self, enabled: bool) -> Result<bool> {
+    /// [`Self::apply_quake_dismiss`]'s shape and its reason: there is nothing to say to a window.
+    /// What this row governs happens at the *next* launch, in `plan_windows`, which reads the
+    /// stored rung — so a reader who changes it is changing what tomorrow looks like and this turn
+    /// has nothing to do but write it down.
+    fn apply_quake_restore(&mut self, rung: bt_persist::QuakeRestoreV1) -> Result<bool> {
         let mut settings = self.app.settings_store.loaded().clone();
-        settings.tray_icon = enabled;
+        settings.quake_restore = rung;
         if &settings == self.app.settings_store.loaded() {
             return Ok(false);
         }
-        // The icon itself is not touched here. `settle_tray` reconciles it
-        // against this row once a turn, on `quake::Quake::reconcile`'s
-        // arrangement, and the turn that runs it is the one this press is being
-        // answered on — so the switch and the taskbar move together without a
-        // second door that has to remember to.
+        Ok(self.app.settings_store.store(settings))
+    }
+
+    /// **Which profile the summoned terminal opens on** (§7.54e ⑤).
+    ///
+    /// `None` is the picker's first item and is stored as the empty string, which is
+    /// `bt_persist`'s own word for "whatever the default profile is" — the same value the row on
+    /// `General` uses for the same sentence, so the two cannot come to mean different things.
+    ///
+    /// **Nothing is said to a window that is already open**: a profile is what a *new* tab starts
+    /// as, which is exactly what the `Default profile` row above it does and does not do.
+    fn apply_quake_profile(&mut self, profile: Option<usize>) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.quake_profile_id = profile.map_or_else(
+            || bt_persist::DEFAULT_PROFILE_UNSET.to_owned(),
+            profiles::id,
+        );
+        if &settings == self.app.settings_store.loaded() {
+            return Ok(false);
+        }
+        Ok(self.app.settings_store.store(settings))
+    }
+
+    /// **The command the first summon of a run writes into the window** (§7.54e ⑤).
+    ///
+    /// Stored on the keystroke, which is this dialog's own rule (§7.1.6c-4a: there is no commit and
+    /// nothing to save) — and it is safe to store on the keystroke precisely because storing is all
+    /// this does. The command is spent by `FolioApp::summon_quake`, once a launch, through
+    /// `quake::Quake::take_startup_command`; a half-typed row is a row that has not been summoned
+    /// against yet.
+    fn apply_quake_command(&mut self, command: String) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.quake_startup_command = command;
+        if &settings == self.app.settings_store.loaded() {
+            return Ok(false);
+        }
         Ok(self.app.settings_store.store(settings))
     }
 
@@ -75468,7 +75700,16 @@ impl Runtime<'_> {
         let width = width as f32;
         let rail = self.sampled_rail(Instant::now());
         self.tab_list_target_at(position)
-            .or_else(|| seats::hit_window_chrome(width, scale, rail, position.x, position.y))
+            .or_else(|| {
+                seats::hit_window_chrome(
+                    width,
+                    scale,
+                    rail,
+                    self.is_quake_window(),
+                    position.x,
+                    position.y,
+                )
+            })
             // Before the pane heads, because the root button lives *inside* one:
             // B17's judgement that a single element can be both a drag handle and a
             // button only holds if the button answers first.
@@ -79309,7 +79550,25 @@ impl Runtime<'_> {
                 self.new_tab()?;
             }
             seats::ChromeTarget::NewTabMenu => self.toggle_profile_menu()?,
-            seats::ChromeTarget::Settings => self.toggle_settings_panel()?,
+            // **The gear on the summoned terminal opens its own page** (§7.54e ⑤,
+            // user ruling 2026-09-05: 「快捷终端窗上的齿轮直接打开这一栏」). Every
+            // other window's gear opens `General`, which is the dialog's own
+            // resting page; this window is the one surface in the product whose
+            // reader is *inside the thing the page is about*, and a gear that
+            // landed them on `General` would be asking them to go and find it.
+            //
+            // Through `open_settings_on_row`, which is the door the icon's menu
+            // used and the door a keyboard walk uses: it opens the dialog if it is
+            // shut, turns to the row's own category and scrolls the row into view.
+            // A second way of opening this dialog on a page would be a second set
+            // of rules about what "open the settings" means.
+            seats::ChromeTarget::Settings => {
+                if self.is_quake_window() {
+                    self.open_settings_on_row(settings::SettingsRow::QuakeHotkey)?;
+                } else {
+                    self.toggle_settings_panel()?;
+                }
+            }
             seats::ChromeTarget::PanelToggle => self.toggle_rail_collapsed()?,
             seats::ChromeTarget::Minimize => self.window.window.set_minimized(true),
             seats::ChromeTarget::Maximize => {
@@ -89607,9 +89866,14 @@ mod window_registry_tests {
 #[cfg(test)]
 mod multiwindow_session_tests {
     use super::{
-        LayoutNodeV1, LeafNodeV1, NewWindowPlan, SessionWindowV1, TabV1, TermLeafV1, plan_windows,
-        restore_row_seed, seed, seeded_tab,
+        LayoutNodeV1, LeafNodeV1, NewWindowPlan, QuakeRestoreV1, SessionWindowV1, TabV1,
+        TermLeafV1, plan_windows, restore_row_seed, seed, seeded_tab,
     };
+
+    /// The rung a fresh `settings.json` carries, which is what every test here that is not *about*
+    /// the rung is asking for. Named once rather than spelled at each call, so the day the shipped
+    /// answer moves these tests move with it.
+    const SHIPPED: QuakeRestoreV1 = bt_persist::DEFAULT_QUAKE_RESTORE;
 
     /// This file, read as text — the witness for the one claim below that is
     /// about *where* something is not written.
@@ -89622,6 +89886,7 @@ mod multiwindow_session_tests {
                 cwd: cwd.to_owned(),
                 manual_name: None,
                 card_skip: 0,
+                last_command: String::new(),
             })),
             pinned,
             focused_leaf: "leaf-0".to_owned(),
@@ -89657,10 +89922,13 @@ mod multiwindow_session_tests {
     /// what schema v9 exists to end.
     #[test]
     fn a_second_saved_window_opens_beside_the_first() {
-        let plan = plan_windows(&[
-            window(vec![term(r"D:\a", true)]),
-            window(vec![term(r"D:\b", true)]),
-        ]);
+        let plan = plan_windows(
+            &[
+                window(vec![term(r"D:\a", true)]),
+                window(vec![term(r"D:\b", true)]),
+            ],
+            SHIPPED,
+        );
         assert_eq!(
             names(&plan.first.into_iter().collect::<Vec<_>>()),
             [r"D:\a"]
@@ -89678,10 +89946,13 @@ mod multiwindow_session_tests {
     /// question would be the prompt answering itself.
     #[test]
     fn a_window_with_nothing_pinned_waits_for_the_one_question() {
-        let plan = plan_windows(&[
-            window(vec![term(r"D:\draft", false)]),
-            window(vec![term(r"D:\kept", true)]),
-        ]);
+        let plan = plan_windows(
+            &[
+                window(vec![term(r"D:\draft", false)]),
+                window(vec![term(r"D:\kept", true)]),
+            ],
+            SHIPPED,
+        );
         assert_eq!(
             names(&plan.first.into_iter().collect::<Vec<_>>()),
             [r"D:\kept"],
@@ -89698,16 +89969,121 @@ mod multiwindow_session_tests {
     /// ask the question. The first saved window leads and the rest wait.
     #[test]
     fn something_opens_even_when_the_whole_session_was_a_question() {
-        let plan = plan_windows(&[
-            window(vec![term(r"D:\one", false)]),
-            window(vec![term(r"D:\two", false)]),
-        ]);
+        let plan = plan_windows(
+            &[
+                window(vec![term(r"D:\one", false)]),
+                window(vec![term(r"D:\two", false)]),
+            ],
+            SHIPPED,
+        );
         assert_eq!(
             names(&plan.first.into_iter().collect::<Vec<_>>()),
             [r"D:\one"]
         );
         assert!(plan.queued.is_empty());
         assert_eq!(names(&plan.pending), [r"D:\two"]);
+    }
+
+    /// A summoned terminal holding one pinned tab that ran something and one unpinned tab that
+    /// ran something, which is the fixture the three rungs are told apart on.
+    fn summoned_terminal_that_ran_things() -> SessionWindowV1 {
+        let with_command = |cwd: &str, pinned: bool, command: &str| TabV1 {
+            root: LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                profile_id: "pwsh".to_owned(),
+                cwd: cwd.to_owned(),
+                manual_name: None,
+                card_skip: 0,
+                last_command: command.to_owned(),
+            })),
+            pinned,
+            focused_leaf: "leaf-0".to_owned(),
+            preview: None,
+        };
+        SessionWindowV1 {
+            quake: true,
+            ..window(vec![
+                with_command(r"D:\kept", true, "cargo build"),
+                with_command(r"D:\scratch", false, "git status"),
+            ])
+        }
+    }
+
+    /// Every remembered line in one saved window, in tree order.
+    fn remembered(window: &SessionWindowV1) -> Vec<String> {
+        window
+            .tabs
+            .iter()
+            .flat_map(|tab| super::persisted_term_leaves(&tab.root))
+            .map(|leaf| leaf.last_command.clone())
+            .collect()
+    }
+
+    /// RED (§7.54e ④, user ruling 2026-09-05) — **three rungs, and the rung is read in exactly one
+    /// place.**
+    ///
+    /// 「不恢复 / 恢复目录 / 恢复目录 + pin 的命令,默认第三档」. The rung decides two things and it
+    /// decides both of them here, on the document, before anything downstream has seen it: whether
+    /// there is a summoned window at all, and which tabs of it carry a line to be typed. That is
+    /// why the assertions are about `plan.quake` and about the *leaves* rather than about a flag —
+    /// what travels on is a document, and a document with no remembered line in it cannot restore
+    /// one however many doors it passes through.
+    ///
+    /// **The folders come back on both of the rungs that come back at all**, which is the half a
+    /// test of the third rung alone would not catch: the second rung is not "restore less of the
+    /// window", it is "restore the window and none of the lines".
+    ///
+    /// MUTATIONS: answer `Some(window)` for `Nothing` and a reader who asked for scratch space
+    /// gets yesterday's tabs. Keep the lines on the second rung and a reader who asked for folders
+    /// only finds commands standing at their prompts. Keep them on the *unpinned* tabs of the third
+    /// and a tab nobody pinned comes back holding a command — the pin is the request, and this is
+    /// the level that can see it. Read the rung again at the pane instead and there are two answers
+    /// to one question, of which the wrong one types into somebody's shell.
+    #[test]
+    fn the_three_rungs_of_what_comes_back_are_decided_on_the_document() {
+        let saved = [summoned_terminal_that_ran_things()];
+
+        let nothing = plan_windows(&saved, QuakeRestoreV1::Nothing);
+        assert!(
+            nothing.quake.is_none(),
+            "the reader asked for a summoned terminal that starts fresh and got yesterday's tabs"
+        );
+
+        let folders = plan_windows(&saved, QuakeRestoreV1::Folders)
+            .quake
+            .expect("the second rung brings the window back");
+        assert_eq!(
+            names(std::slice::from_ref(&folders)),
+            [r"D:\kept"],
+            "the tabs come back standing where they stood"
+        );
+        assert_eq!(
+            folders.tabs.len(),
+            2,
+            "both of them, pinned and not: this rung is about the lines and not about the tabs"
+        );
+        assert_eq!(
+            remembered(&folders),
+            ["", ""],
+            "a reader who asked for folders only found commands standing at their prompts"
+        );
+
+        let with_commands = plan_windows(&saved, QuakeRestoreV1::FoldersAndPinnedCommands)
+            .quake
+            .expect("the third rung brings the window back too");
+        assert_eq!(
+            remembered(&with_commands),
+            ["cargo build", ""],
+            "the pinned tab keeps the line it last ran and the unpinned one does not: the pin is \
+             the request"
+        );
+        assert_eq!(
+            names(std::slice::from_ref(&with_commands)),
+            [r"D:\kept"],
+            "and the folders are the same folders the rung below restores"
+        );
+
+        // And the shipped rung is the third one, which is where the ruling put it.
+        assert_eq!(SHIPPED, QuakeRestoreV1::FoldersAndPinnedCommands);
     }
 
     /// RED (§7.54) — **the summoned terminal takes no part in the restore
@@ -89731,11 +90107,14 @@ mod multiwindow_session_tests {
             quake: true,
             ..window(vec![term(r"D:\summoned", false)])
         };
-        let plan = plan_windows(&[
-            summoned.clone(),
-            window(vec![term(r"D:\kept", true)]),
-            window(vec![term(r"D:\draft", false)]),
-        ]);
+        let plan = plan_windows(
+            &[
+                summoned.clone(),
+                window(vec![term(r"D:\kept", true)]),
+                window(vec![term(r"D:\draft", false)]),
+            ],
+            SHIPPED,
+        );
         assert_eq!(
             names(&plan.quake.clone().into_iter().collect::<Vec<_>>()),
             [r"D:\summoned"],
@@ -89756,7 +90135,7 @@ mod multiwindow_session_tests {
         // And a document whose only window is the summoned one leaves the launch
         // with nothing to open, which is the state a first run is already in: the
         // ordinary door opens a default window and the summon waits for its key.
-        let alone = plan_windows(&[summoned]);
+        let alone = plan_windows(&[summoned], SHIPPED);
         assert!(alone.quake.is_some());
         assert!(alone.first.is_none() && alone.queued.is_empty() && alone.pending.is_empty());
     }
@@ -89773,16 +90152,19 @@ mod multiwindow_session_tests {
     /// build simply forgets.
     #[test]
     fn only_the_first_summoned_window_is_the_summoned_one() {
-        let plan = plan_windows(&[
-            SessionWindowV1 {
-                quake: true,
-                ..window(vec![term(r"D:\first", false)])
-            },
-            SessionWindowV1 {
-                quake: true,
-                ..window(vec![term(r"D:\second", true)])
-            },
-        ]);
+        let plan = plan_windows(
+            &[
+                SessionWindowV1 {
+                    quake: true,
+                    ..window(vec![term(r"D:\first", false)])
+                },
+                SessionWindowV1 {
+                    quake: true,
+                    ..window(vec![term(r"D:\second", true)])
+                },
+            ],
+            SHIPPED,
+        );
         assert_eq!(
             names(&plan.quake.into_iter().collect::<Vec<_>>()),
             [r"D:\first"]
@@ -89798,14 +90180,17 @@ mod multiwindow_session_tests {
     /// windows at all.
     #[test]
     fn an_empty_entry_is_dropped_and_an_empty_file_opens_nothing_saved() {
-        let plan = plan_windows(&[window(Vec::new()), window(vec![term(r"D:\real", true)])]);
+        let plan = plan_windows(
+            &[window(Vec::new()), window(vec![term(r"D:\real", true)])],
+            SHIPPED,
+        );
         assert_eq!(
             names(&plan.first.into_iter().collect::<Vec<_>>()),
             [r"D:\real"]
         );
         assert!(plan.queued.is_empty() && plan.pending.is_empty());
 
-        let nothing = plan_windows(&[]);
+        let nothing = plan_windows(&[], SHIPPED);
         assert!(nothing.first.is_none());
         assert!(nothing.queued.is_empty() && nothing.pending.is_empty());
     }
@@ -91822,18 +92207,14 @@ impl FolioApp {
         // last one whenever it is the last one still on the glass — and a shut
         // that read the raw length would file the final window in Recent and
         // leave the session file describing a run that had already ended.
-        // **Unless there is an icon on the taskbar and a summoned terminal behind
-        // it** (§7.54b ⑤, narrowed by §7.54c, user ruling 2026-09-03). The
-        // paragraph on `open_window_count` argues that a run kept alive by a
-        // window nobody can see is a `folio.exe` with nothing on any screen,
-        // reachable only through a key the reader may have bound weeks ago. That
-        // argument is about *reachability*, and an icon answers it: the program is
-        // where its icon says it is, a click summons it, and its menu has a Quit
-        // in it. What it does not answer is what the resident program is *for* —
-        // with no summoned window the icon is a door onto an empty room, and the
-        // reader who closed their last window asked for the program to end. See
-        // `tray_keeps_the_run_alive`, which is where both halves are asked.
-        let ending = self.open_window_count() == 1 && !self.tray_keeps_the_run_alive();
+        // **And nothing keeps the run past that** (§7.54e ①, user ruling
+        // 2026-09-05). Between next29 and this ruling an icon in the notification
+        // area could, with a summoned terminal behind it; the icon is withdrawn,
+        // so what is left is the sentence `windows_left_after` was always written
+        // to answer. The summoned terminal is a companion and not a second
+        // program: it goes when the windows go, and comes back holding what the
+        // restore row says — see `retire_the_summon_with_the_run` below.
+        let ending = a_run_ends_with_its_last_visible_window(self.windows_left_after(id));
         let leaving_at = Instant::now() + quit::PAGE_TEARDOWN_DEADLINE;
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
@@ -91879,240 +92260,49 @@ impl FolioApp {
             .get_mut(id)
             .is_some_and(|window| window.leaving.is_some())
     }
-
-    /// How many windows are still on the glass.
+    /// **How many windows a reader would still have after this one goes** — the
+    /// number both residency doors are decided on (§7.54, §7.54e ①).
     ///
     /// Not `windows.len()`: the registry also holds the ones that have been
     /// closed and are waiting for their pages, and none of those is a window
     /// anybody can see, move a tab into, or close.
     ///
-    /// **And the summoned terminal, while it is away, is not one either**
-    /// (§7.54). That is this comment's own criterion applied to the one window
-    /// that can be in the registry and off the screen without leaving: a reader
-    /// who closes the last window they can see has closed the last window there
-    /// is, and a run that stayed alive on the strength of a hidden one would be a
-    /// `folio.exe` in the task list with nothing on any screen and no taskbar
-    /// button — reachable only by a key they may have bound weeks ago.
+    /// **And the summoned terminal is not one of them, on the screen or off it**
+    /// (§7.54, narrowed by §7.54e ① to drop the "off it"). That is this comment's
+    /// own criterion applied to the one window this process opens that is not a
+    /// window a reader asked for: 「普通窗全关即进程退出」, and the summoned
+    /// terminal is a companion of this program rather than one of its windows.
     ///
-    /// It goes with the run rather than keeping the run alive, and it loses
-    /// nothing by doing so: its paragraph is written like every other window's,
-    /// so the next launch brings it back holding what it held. See
-    /// [`Self::close`], which is where it is told.
-    fn open_window_count(&mut self) -> usize {
-        let summon = self.app.as_ref().and_then(|app| {
-            (!app.quake.is_showing())
-                .then(|| app.quake.window())
-                .flatten()
-        });
+    /// **The "while it is away" the ruling removed was reachable and wrong.** Until
+    /// 2026-09-05 the exclusion was conditional on the window being hidden, which
+    /// left one state the whole of §7.54 exists to refuse: close every ordinary
+    /// window while the summon is *up*, then press the key. The count was 1 at the
+    /// close and 0 at the press, nothing re-asked in between, and what was left was
+    /// a `folio.exe` in the task list with nothing on any screen — reachable only
+    /// by a key the reader may have bound weeks ago. Unconditional, there is no
+    /// such gap: the run ends the moment the last ordinary window does.
+    ///
+    /// **The window going is a filter and not a `- 1`.** It is not in the count
+    /// when it *is* the summoned terminal, and a bare subtraction would then end
+    /// the run the moment a reader closed the summoned window with an ordinary one
+    /// still on the glass.
+    ///
+    /// The summoned terminal goes with the run rather than keeping it alive, and it
+    /// loses nothing by doing so: its paragraph is written like every other
+    /// window's, so the next launch brings it back holding what it held. See
+    /// [`Self::close`], which is where it is told, and
+    /// [`Self::retire_the_summon_with_the_run`], which is the door it leaves by.
+    fn windows_left_after(&mut self, going: WindowId) -> usize {
+        let summon = self.app.as_ref().and_then(|app| app.quake.window());
         (0..self.windows.len())
             .filter(|index| {
                 self.windows
                     .key_at(*index)
-                    .filter(|id| Some(*id) != summon)
+                    .filter(|id| Some(*id) != summon && *id != going)
                     .and_then(|id| self.windows.get_mut(id))
                     .is_some_and(|window| window.leaving.is_none())
             })
             .count()
-    }
-
-    /// **Whether there is an icon on the taskbar right now.**
-    ///
-    /// One fact and nothing more. It is asked by [`Self::settle_tray`], which
-    /// compares it against what the row wants, and it is half of
-    /// [`Self::tray_keeps_the_run_alive`], which is what the two residency doors
-    /// read. A quit takes the icon down first, which is what makes both of those
-    /// doors stop protecting the run at the same moment.
-    fn tray_is_standing(&self) -> bool {
-        self.app.as_ref().is_some_and(|app| app.tray.is_some())
-    }
-
-    /// **Whether the icon is standing over something worth keeping the run for**
-    /// (§7.54c, user ruling 2026-09-03).
-    ///
-    /// The question the two residency doors ask — whether closing the last window
-    /// ends the run, and whether an empty registry does — and it is one function
-    /// so that they can never answer it differently.
-    ///
-    /// **Two facts, and the second one is what this ruling added.** §7.54b ⑤
-    /// asked only [`Self::tray_is_standing`], which made an icon on its own enough
-    /// to keep a `folio.exe` in the task list after every window it had was gone.
-    /// The reachability argument that justified it is untouched — the program is
-    /// where its icon says it is, a click summons it, its menu has a Quit — but it
-    /// answers *how a resident program is reached*, not *why it is resident*, and
-    /// with no summoned window there is nothing resident to reach. The icon would
-    /// be a door onto an empty room, and the reader who closed their last window
-    /// asked for the program to end.
-    ///
-    /// **It was also wrong in a way a machine could see.** `scripts/release/smoke.ps1`
-    /// gate 6 sends `WM_CLOSE` to the one window a cold launch opens and waits for
-    /// the process; on 780fb99 it waited out its timeout and reported `the window
-    /// did not close when it was asked to`, with `BT_TRAY rect=…` in the log
-    /// saying exactly why. That run had no summoned window, which is the case this
-    /// predicate now excludes.
-    ///
-    /// **A summoned window counts whether or not it is on the screen**, which is
-    /// the whole point: the reader who has one hidden behind their chord has a
-    /// program to come back to, and that is the state the icon is a door onto.
-    /// [`Self::open_window_count`] excludes that same window for its own reason —
-    /// it is not a window anybody can see — and the two readings agree rather than
-    /// conflict: it is not a window, and it is a reason.
-    fn tray_keeps_the_run_alive(&self) -> bool {
-        a_run_worth_keeping(
-            self.tray_is_standing(),
-            self.app
-                .as_ref()
-                .is_some_and(|app| app.quake.window().is_some()),
-        )
-    }
-
-    /// **Make the icon agree with the row that says whether there is one**
-    /// (§7.54).
-    ///
-    /// Once a turn, on `quake::Quake::reconcile`'s arrangement and for its
-    /// reason: the switch can move from the settings dialog, and the anchor it
-    /// needs can arrive at any time, and one statement read every turn covers
-    /// both without either door having to remember to call anything.
-    ///
-    /// **The anchor is any live window, and it is spent immediately.** The icon
-    /// owns a window of its own; all it wants from one of ours is the module this
-    /// program was loaded as, which is a fact about the process. That is why this
-    /// can run before there is a window and simply do nothing: there will be one
-    /// on the turn after the first window opens, and there is nothing to protect
-    /// until there is something to close.
-    ///
-    /// A refusal is said once and not retried, on `reconcile`'s terms: a shell
-    /// that will not take an icon will not take it sixty times a second either,
-    /// and the failed attempt leaves `tray` as `None`, which is exactly what
-    /// "there is no icon" means everywhere else this is read.
-    fn settle_tray(&mut self) {
-        // **A quit under way wants no door.** Two facts and not one, because the
-        // switch says whether the reader wants an icon and this says whether
-        // there is still a run for it to be a door to. `begin_quit_if_asked`
-        // takes the icon down; without this clause the very next turn would put
-        // it straight back, and the run could never reach an empty registry.
-        let wanted = self
-            .app
-            .as_ref()
-            .is_some_and(|app| app.quit.is_none() && app.settings_store.loaded().tray_icon);
-        if wanted == self.tray_is_standing() {
-            return;
-        }
-        if !wanted {
-            if let Some(app) = self.app.as_mut() {
-                app.tray = None;
-            }
-            return;
-        }
-        let standing: Vec<WindowId> = (0..self.windows.len())
-            .filter_map(|index| self.windows.key_at(index))
-            .collect();
-        let Some(anchor) = standing.into_iter().find_map(|id| {
-            self.windows
-                .get_mut(id)
-                .and_then(|window| window_hwnd(&window.window).ok())
-        }) else {
-            return;
-        };
-        match bt_platform::tray::TrayIcon::install(anchor, tray_labels(), Box::new(wake_the_loop)) {
-            Ok(tray) => {
-                // One line, on `BT_QUAKE`'s own terms and for its reason: where
-                // the icon landed is a fact about the shell's strip that this
-                // process can read and a photograph cannot, and it is the only
-                // way a probe can find a pixel that belongs to `explorer.exe`.
-                // Printed once, when the icon goes up.
-                match tray.icon_rect() {
-                    Some(rect) => eprintln!(
-                        "BT_TRAY rect={},{} {}x{}",
-                        rect.left,
-                        rect.top,
-                        rect.right - rect.left,
-                        rect.bottom - rect.top,
-                    ),
-                    None => eprintln!("BT_TRAY rect unavailable (the icon is in the overflow)"),
-                }
-                if let Some(app) = self.app.as_mut() {
-                    app.tray = Some(tray);
-                }
-            }
-            Err(error) => eprintln!("BT_TRAY {error}"),
-        }
-    }
-
-    /// **Spend what the icon has been asked for** (§7.54).
-    ///
-    /// Every verb here is a verb some other door already has, reached through
-    /// that door: the left click is the chord's own press, Quit is the same bit
-    /// the quit chord sets, and Settings is the dialog's own opener. An icon that
-    /// had a second way of doing any of them would be a second set of rules about
-    /// the same window.
-    fn settle_tray_commands(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
-        self.settle_tray();
-        let commands = self
-            .app
-            .as_ref()
-            .and_then(|app| app.tray.as_ref())
-            .map(bt_platform::tray::TrayIcon::take_commands)
-            .unwrap_or_default();
-        for command in commands {
-            match command {
-                // **Not a summon, a press.** What the icon's left button means is
-                // exactly what the chord means, down to the toggle: `settle_quake`
-                // runs on the very next link of this chain and decides which way
-                // it goes, from the same bit and by the same rule.
-                bt_platform::tray::TrayCommand::Summon => {
-                    if let Some(app) = self.app.as_mut() {
-                        app.quake.press();
-                    }
-                }
-                bt_platform::tray::TrayCommand::NewWindow => {
-                    if let Some(app) = self.app.as_mut() {
-                        app.pending_new_windows.push(NewWindowPlan::unasked_for());
-                    }
-                    self.open_pending_window(event_loop)?;
-                }
-                bt_platform::tray::TrayCommand::Settings => {
-                    self.open_settings_from_the_tray(event_loop)?;
-                }
-                // The same bit the quit chord sets, and therefore the same road:
-                // `settle_quit` is the next link on this chain.
-                bt_platform::tray::TrayCommand::Quit => {
-                    if let Some(app) = self.app.as_mut() {
-                        app.quit_requested = true;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// **Settings off the icon's menu**, which has to work when there is no
-    /// window to put a dialog in.
-    ///
-    /// So it makes one, through the door a new window is always made through, and
-    /// then opens the dialog in it exactly as a keystroke would. The row it lands
-    /// on is the icon's own, which is the page the reader was reaching for: they
-    /// clicked an icon, and the first thing that page says is what that icon is.
-    fn open_settings_from_the_tray(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
-        let standing = (0..self.windows.len()).find_map(|index| self.windows.key_at(index));
-        let id = match standing {
-            Some(id) => id,
-            None => {
-                if let Some(app) = self.app.as_mut() {
-                    app.pending_new_windows.push(NewWindowPlan::unasked_for());
-                }
-                self.open_pending_window(event_loop)?;
-                let Some(opened) =
-                    (0..self.windows.len()).find_map(|index| self.windows.key_at(index))
-                else {
-                    return Ok(());
-                };
-                opened
-            }
-        };
-        let Some(mut runtime) = self.runtime(id) else {
-            return Ok(());
-        };
-        runtime.open_settings_on_row(settings::SettingsRow::TrayIcon)
     }
 
     /// **The summoned terminal goes with the run** (§7.54).
@@ -92124,15 +92314,17 @@ impl FolioApp {
     /// being filed into Recent — a window nobody closed is not a window anybody
     /// asked to reopen.
     ///
-    /// A no-op when there is no summoned window, when it is on the screen (then
-    /// it is one of the windows the count above already saw), and when it is
-    /// already leaving.
+    /// **On the screen or off it** (§7.54e ①). It used to be a no-op for a summon
+    /// that was showing, on the argument that the count above had already seen it;
+    /// that count no longer sees it at all, so this is the one door it leaves by
+    /// either way — and the state the old pair left reachable (every ordinary
+    /// window closed while the summon was up) had no door at all.
+    ///
+    /// A no-op when there is no summoned window, and when it is already leaving —
+    /// which is what the window being closed right now is, so a reader closing the
+    /// summoned terminal itself does not close it twice.
     fn retire_the_summon_with_the_run(&mut self, leaving_at: Instant) -> Result<()> {
-        let Some(id) = self.app.as_ref().and_then(|app| {
-            (!app.quake.is_showing())
-                .then(|| app.quake.window())
-                .flatten()
-        }) else {
+        let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
             return Ok(());
         };
         if self.is_leaving(id) {
@@ -92200,24 +92392,11 @@ impl FolioApp {
                 app.quake.forget(id);
             }
         }
-        // **An empty registry is not the end of the run while the icon is
-        // standing over a summoned terminal** (§7.54b ⑤, narrowed by §7.54c).
-        // This is the other half of `close`'s own answer, at the door every road
-        // to an empty registry passes through, and it reads the same predicate so
-        // that the two can never disagree: with an icon on the taskbar the program
-        // is a thing a person can see and click, and it leaves when they ask it to
-        // — through the icon's `Quit`, which sets `quit_requested` and takes
-        // `settle_quit`'s road like every other quit, and which takes the icon down
-        // before it gets here.
-        //
-        // **The summoned window is asked about after `quake.forget` above**, and
-        // the order is the answer rather than an accident: a reader who closed the
-        // summoned window itself has no summoned window left, so this is a run with
-        // an icon and nothing behind it and it ends here.
-        if self.windows.is_empty() && self.tray_keeps_the_run_alive() {
-            return Ok(waking);
-        }
-        if self.windows.is_empty() {
+        // **An empty registry is the end of the run** (§7.54e ①, user ruling
+        // 2026-09-05). This is the other half of `close`'s own answer, at the door
+        // every road to an empty registry passes through, and it reads the same
+        // rule so that the two can never disagree.
+        if a_run_ends_with_its_last_visible_window(self.windows.len()) {
             // **The sentinel again, and it is idempotent** (`App::finish` →
             // `SessionStore::close`, which takes its writer and says so). The
             // ordinary shut has already spent it, at the moment the last window
@@ -92494,6 +92673,25 @@ impl FolioApp {
             // can do about a foreground lock, and a card over their editor
             // reporting one would be a worse interruption than the one it reports.
             eprintln!("BT_QUAKE the summoned window could not take the keyboard");
+        }
+        // **And the one command the reader asked to have run, on the first summon
+        // of this launch** (§7.54e ⑤). Taken here rather than at the door that
+        // opens the window, because the row's own sentence is 「首次唤出时」 and a
+        // launch that restored a summoned terminal has a window before it has a
+        // summon; taken through `Quake::take_startup_command`, which is what makes
+        // "once" a fact rather than a habit.
+        //
+        // It is *queued* on the pane and written at that pane's first prompt, down
+        // the very road a restored command takes — one door, and the `true` is the
+        // whole of the difference. See `quake::typed_into_a_prompt`.
+        let command = self.app.as_mut().and_then(|app| {
+            let row = app.settings_store.loaded().quake_startup_command.clone();
+            app.quake.take_startup_command(&row)
+        });
+        if let Some(command) = command
+            && let Some(mut runtime) = self.runtime(id)
+        {
+            runtime.queue_typing_in_the_focused_pane(command, true);
         }
         Ok(())
     }
@@ -93156,18 +93354,6 @@ impl FolioApp {
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
-        // **The icon comes down as the quit's first act** (§7.54b ⑤).
-        //
-        // It is what stops the icon protecting the run it is a door to —
-        // `close` and `reap_leaving_windows` both ask `tray_keeps_the_run_alive`,
-        // which reads this field, and a quit that left the icon up would be a
-        // quit that could never reach an empty registry. It is also the honest order for the reader: the run is
-        // ending, and an icon that stayed on the taskbar for the length of the
-        // teardown would be an icon promising a program that is on its way out.
-        //
-        // `settle_tray` does not put it back, because it asks the same question
-        // this line answers — a quit under way is not a run that wants a door.
-        app.tray = None;
         app.quit = Some(quit::Quit::begin(names));
         // The card, on every window — one question, and no window left taking
         // keys behind it. A quit with nothing to ask about raises none, so this
@@ -93368,12 +93554,6 @@ impl FolioApp {
             // line, exactly as the drag handover above does, so that the press,
             // the window and the frame it appears in are all one turn.
             .and_then(|()| self.settle_quake(event_loop))
-            // **After the summon and before the quit.** After, because the icon's
-            // own left click is the summon's verb and the two must not be settled
-            // in two different orders depending on which door the reader used.
-            // Before, because `Quit` off the icon's menu is a quit like any other
-            // and is owed the same door.
-            .and_then(|()| self.settle_tray_commands(event_loop))
             .and_then(|()| self.settle_quit(event_loop))
         {
             self.fail(event_loop, error);
@@ -93733,12 +93913,6 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 }
                 Ok(())
             }
-            // Nothing at all, and that is the whole arm: what the icon was asked
-            // for is already written down on it, and `settle_tray` on
-            // `about_to_wait`'s chain is the turn that spends it. This exists to
-            // *produce* that turn, which is the one thing a click on a surface
-            // owned by another program cannot otherwise do.
-            AppEvent::TrayPoked => Ok(()),
             AppEvent::MathReady => {
                 let (mut batch, gone) = self.drain_math_answers();
                 self.for_each_window(|runtime| runtime.apply_math_results(&mut batch, gone))
@@ -93991,6 +94165,34 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // asked after the answer is worthless.
         let mut shutting = false;
         let result = match event {
+            // **The summoned terminal's `×` means hide, and it means it by
+            // setting the chord's own bit** (§7.54e ②, user ruling 2026-09-05:
+            // 「窗上只留一个 ×,语义 = 隐藏,和热键完全一致…合并后必须同一条代码
+            // 路径」).
+            //
+            // Not "the same behaviour" and not "a call to the same function":
+            // **the same bit**. `quake.press()` is what a `WM_HOTKEY` leaves
+            // behind, and `settle_quake` on the next turn reads it, sees the
+            // window is up, and dismisses — hiding it, handing the keyboard back
+            // to whatever it came down over. There is no second road for the two
+            // to drift apart on, which is the whole of what the ruling asks for.
+            //
+            // **The dirty gate is not raised, and that is correct rather than
+            // skipped**: gate ③ exists because a *shut* loses unsaved preview
+            // buffers, and this window is not shutting. Its tabs, its shells and
+            // its buffers are all still there a chord away. Ending the session is
+            // `exit` in the shell or `Close tab` on the tab, and both of those
+            // raise every gate they always did.
+            //
+            // **Only while it is on the screen.** A `WM_CLOSE` delivered to the
+            // hidden summon is not a reader pressing its `×` — there is no `×` to
+            // press — it is the run ending, and it closes exactly as it did.
+            WindowEvent::CloseRequested
+                if runtime.is_quake_window() && runtime.app.quake.is_showing() =>
+            {
+                runtime.app.quake.press();
+                Ok(())
+            }
             WindowEvent::CloseRequested => {
                 // **Gate ③ (P125).** "Dirty preview buffers do not survive a shut
                 // — plans carry paths, never content — so shutting asks, the same
@@ -96038,7 +96240,7 @@ mod resize_skirt_order_tests {
 /// **A page popped out into a float still has a pane** (§7.14a).
 #[cfg(test)]
 mod floated_page_tests {
-    use super::{a_page_still_has_a_pane, a_run_worth_keeping, marks};
+    use super::{a_page_still_has_a_pane, a_run_ends_with_its_last_visible_window, marks};
 
     const SOURCE: &str = include_str!("main.rs");
 
@@ -96735,8 +96937,14 @@ mod floated_page_tests {
             "the door that opens a window shows the one a key summons:\n{door}"
         );
         let summon = fn_body(concat!("    fn ", "show_quake_window("));
+        // **Through the one door and not by doing the arithmetic here** (§7.54e ③).
+        // `quake::Quake::placement` is where the rules are and
+        // `quake::SummonScreen::under_the_pointer` is where the machine is read; what
+        // is left to this function is stating the rectangle, the one way a dpi seam is
+        // not allowed to overrule.
         assert!(
-            summon.contains("quake::summoned_rect(") && summon.contains("stand_window_at("),
+            summon.contains("self.app.quake.placement(&screen, settings)")
+                && summon.contains("stand_window_at("),
             "a summon does not state its own rectangle, or states it the one way \
              that a dpi seam is allowed to overrule:\n{summon}"
         );
@@ -96816,24 +97024,29 @@ mod floated_page_tests {
     /// paragraph is written like every other window's, so the next launch brings it
     /// back holding what it held.
     ///
-    /// **Narrowed, not overturned, by §7.54b ⑤**: the argument above is about
-    /// being *reachable*, and an icon on the taskbar answers it. With one
-    /// standing, the last window's close is one window closing — see
-    /// `an_icon_on_the_taskbar_keeps_the_run_alive`. With none, every word here
-    /// holds, and that is the case this test still pins.
+    /// **Narrowed by §7.54b ⑤ and un-narrowed by §7.54e ①**, which is the whole
+    /// of this note's history: an icon on the taskbar answered the reachability
+    /// argument for two releases, and the icon is withdrawn — so every word above
+    /// holds unconditionally again, which is the case this test pins.
     ///
-    /// MUTATIONS: drop the `filter` from `open_window_count` and the last visible
+    /// **And "while it is away" went with it.** The exclusion used to be
+    /// conditional on the summon being hidden, which left the state this test
+    /// exists to refuse reachable by another road: close every ordinary window
+    /// while the summon is *up*, then press the key. See
+    /// `a_run_ends_with_its_last_visible_window_even_with_a_summon_hidden_behind_it`.
+    ///
+    /// MUTATIONS: drop the `filter` from `windows_left_after` and the last visible
     /// window's close stops being the end of the run — it files itself into Recent
     /// and the process stays. Drop the call in `close` and the count is right while
     /// the window it excluded is never told anything, so the loop runs on with one
     /// hidden window in the registry for ever.
     #[test]
     fn a_window_nobody_can_see_does_not_keep_the_run_alive() {
-        let count = fn_body(concat!("    fn ", "open_window_count("));
+        let count = fn_body(concat!("    fn ", "windows_left_after("));
         assert!(
-            count.contains("app.quake.is_showing()") && count.contains("Some(*id) != summon"),
-            "a summoned window that is away is counted as a window on the glass, \
-             so closing the last visible one is not the end of the run:\n{count}"
+            count.contains("app.quake.window()") && count.contains("Some(*id) != summon"),
+            "a summoned window is counted as a window on the glass, so closing the last visible \
+             one is not the end of the run:\n{count}"
         );
         let shut = fn_body(concat!("    fn ", "close("));
         assert!(
@@ -96849,150 +97062,218 @@ mod floated_page_tests {
         );
     }
 
-    /// RED (§7.54c, user ruling 2026-09-03) — **an icon keeps the run alive only
-    /// while there is a summoned terminal behind it.**
+    /// RED (§7.54e ②, user ruling 2026-09-05) — **the summoned terminal's `×` and its chord are
+    /// one code path, and the path is the chord's own bit.**
     ///
-    /// §7.54b ⑤ made the icon enough on its own, on a reachability argument that
-    /// is left standing word for word: the program is where its icon says it is,
-    /// a click summons it, and its menu has a Quit in it. What that argument
-    /// answers is *how a resident program is reached*, and this ruling is about
-    /// *why it is resident*. With no summoned window there is nothing to come back
-    /// to — the icon is a door onto an empty room, and the reader who closed their
-    /// last window asked for the program to end.
+    /// 「窗上只留一个 ×,语义 = 隐藏,和热键完全一致…合并后必须同一条代码路径」. The bug the ruling
+    /// names is a real one and it was on the *minimise* button: it put the window away without
+    /// going through the summon's door, so `Quake::shown` stayed set and the very next press of
+    /// the chord read the window as up and asked for it to be dismissed — the reader pressed the
+    /// key and nothing came down.
     ///
-    /// **A machine said so first.** `scripts/release/smoke.ps1` gate 6 sends
-    /// `WM_CLOSE` to the one window a cold launch opens and waits for the process
-    /// to leave; on 780fb99 it waited out its timeout and reported `the window did
-    /// not close when it was asked to`, with `BT_TRAY rect=…` in the log naming
-    /// the reason. That run had no summoned window, which is precisely the case
-    /// the narrowed predicate excludes.
+    /// **"The same path" is asserted as "the same bit"**, which is the strongest form of it
+    /// available: `quake.press()` is exactly what a `WM_HOTKEY` leaves behind, so there is no
+    /// second road for the two to drift apart on. Everything after it — the ordering of the hide
+    /// and the hand-back, the `give_back` that is spent once — is `settle_quake`'s, tested where it
+    /// lives.
     ///
-    /// **Two doors, one question.** `close` decides whether a shut is the end of a
-    /// run; `reap_leaving_windows` decides whether an empty registry is. They have
-    /// to answer the same way at the same moment, so they read the same predicate
-    /// rather than each assembling the facts for itself — a run protected at one
-    /// door and not the other would either exit with an icon standing or hang with
-    /// none.
-    ///
-    /// MUTATIONS: let `tray_keeps_the_run_alive` ask only `tray_is_standing` and
-    /// gate 6 hangs again, this time in a test rather than in CI. Let it ask only
-    /// for the summoned window and a reader who turned the icon off gets residency
-    /// they switched off. Drop the predicate from `close` and closing the last
-    /// window ends a run with an icon still on the taskbar, which is an icon nobody
-    /// can click; drop it from `reap_leaving_windows` and the run ends one turn
-    /// later by the other road, with the same result. Let either door read
-    /// `settings_store.loaded().tray_icon` directly and the two can disagree during
-    /// the turn a quit is taking the icon down.
+    /// MUTATIONS: call `hide_quake_window` or `dismiss_quake` from the close arm and the first
+    /// assertion goes red naming the second road. Raise the dirty gate on it and a hide starts
+    /// asking about buffers that are not going anywhere. Drop the `is_showing` guard and a
+    /// `WM_CLOSE` delivered to the hidden summon — which is how a run ends, and how
+    /// `scripts/release/smoke.ps1` gate 6 ends one — *summons* it instead of closing it. Give the
+    /// summoned window back its minimise or maximise button and the last assertion names it.
     #[test]
-    fn an_icon_keeps_the_run_alive_only_while_a_summoned_terminal_is_behind_it() {
-        let standing = fn_body(concat!("    fn ", "tray_keeps_the_run_alive("));
+    fn the_summoned_terminals_close_button_is_the_chords_own_bit() {
+        let arm = SOURCE
+            .split("WindowEvent::CloseRequested")
+            .nth(1)
+            .expect("the close arm is in this file");
+        let arm = &arm[..arm.find("WindowEvent::KeyboardInput").unwrap_or(arm.len())];
         assert!(
-            standing.contains("self.tray_is_standing()"),
-            "residency no longer asks whether there is an icon, so a reader who \
-             turned the row off gets a program that stays anyway:\n{standing}"
+            arm.contains("runtime.app.quake.press()"),
+            "the summoned terminal's × puts the window away by some road other than the chord's \
+             own bit, so the two can answer differently:\n{arm}"
         );
         assert!(
-            standing.contains("a_run_worth_keeping("),
-            "the two facts are combined here instead of in the rule both doors              read, so the rule and the doors can drift apart:
-{standing}"
+            arm.contains("runtime.is_quake_window() && runtime.app.quake.is_showing()"),
+            "a WM_CLOSE delivered to the hidden summoned terminal is being read as a press on a \
+             × nobody can see, so the run cannot end:\n{arm}"
         );
         assert!(
-            standing.contains("app.quake.window().is_some()"),
-            "an icon alone keeps the run alive, which is the state \
-             scripts/release/smoke.ps1 gate 6 hung on at 780fb99: a door onto an \
-             empty room:\n{standing}"
+            !arm.contains("hide_quake_window") && !arm.contains("dismiss_quake"),
+            "the × reaches the hide directly instead of through the bit the chord sets:\n{arm}"
         );
-        let icon = fn_body(concat!("    fn ", "tray_is_standing("));
-        assert!(
-            icon.contains("app.tray.is_some()"),
-            "the question is answered from the setting rather than from the icon, \
-             so the two doors can disagree while a quit is taking it down:\n{icon}"
+        // And there is one button on that window that can mean it, which is the
+        // other half of 「窗上只留一个 ×」 — see `seats::caption_targets`.
+        assert_eq!(
+            crate::seats::caption_targets(true),
+            [
+                crate::seats::ChromeTarget::Settings,
+                crate::seats::ChromeTarget::CloseWindow
+            ],
+            "the summoned terminal carries a second button that puts it away, and that button \
+             does not go through the chord's door"
         );
-        let shut = fn_body(concat!("    fn ", "close("));
-        assert!(
-            shut.contains("&& !self.tray_keeps_the_run_alive()"),
-            "closing the last window ends the run even with a summoned terminal \
-             behind a standing icon, which leaves an icon nobody can click:\n{shut}"
-        );
-        let reap = fn_body(concat!("    fn ", "reap_leaving_windows("));
-        assert!(
-            reap.contains("self.windows.is_empty() && self.tray_keeps_the_run_alive()"),
-            "an empty registry ends the run by the other road, so the icon only \
-             delays the exit by a turn:\n{reap}"
-        );
-        // **And a quit takes the icon down**, which is what stops it protecting
-        // the run it is a door to. Without this the assertions above would be
-        // satisfied by a program that can never finish quitting.
-        let begin = fn_body(concat!("    fn ", "begin_quit_if_asked("));
-        assert!(
-            begin.contains("app.tray = None"),
-            "a quit leaves the icon up and the process never exits: {begin}"
-        );
-        let put_up = fn_body(concat!("    fn ", "settle_tray("));
-        assert!(
-            put_up.contains("app.quit.is_none()"),
-            "the icon goes back up on the turn after a quit takes it down: {put_up}"
-        );
-        // And the icon's own verbs are the verbs that already exist, reached
-        // through the doors that already exist. An icon that summoned by calling
-        // `summon_quake` itself, or quit by running the quit itself, would be a
-        // second set of rules about the same window.
-        let spend = fn_body(concat!("    fn ", "settle_tray_commands("));
-        assert!(
-            spend.contains("app.quake.press()"),
-            "the icon summons by some road other than the chord's own:\n{spend}"
-        );
-        assert!(
-            spend.contains("app.quit_requested = true"),
-            "the icon quits by some road other than the quit chord's own:\n{spend}"
+        assert_eq!(
+            crate::seats::caption_targets(false).len(),
+            4,
+            "and every other window keeps the four the mock-up drew"
         );
     }
 
-    /// RED (§7.54c, user ruling 2026-09-03) — **the three cases the ruling names,
-    /// written out.**
+    /// RED (§7.54e ⑤, user ruling 2026-09-05) — **the gear on the summoned terminal opens the
+    /// summoned terminal's own page.**
     ///
-    /// The test above pins that both doors read the rule and that the rule is
-    /// assembled from the right two facts; this one is the rule itself, so that
-    /// the answer to each case is a line somebody can read rather than something
-    /// inferred from a conjunction.
+    /// 「快捷终端窗上的齿轮直接打开这一栏;主窗齿轮仍开 General」. Two assertions and they are two
+    /// different claims: that the gear routes through `open_settings_on_row` — which is the door
+    /// that turns to a row's own category and scrolls it into view — and that the row it names is
+    /// on the summoned terminal's page rather than on `General`, where four of these rows stood
+    /// until this ruling.
     ///
-    /// - **No summoned terminal, icon up** — closing the last visible window ends
-    ///   the run. This is `scripts/release/smoke.ps1` gate 6's case, and the one
-    ///   that hung CI at 780fb99.
-    /// - **A summoned terminal hidden behind its chord, icon up** — the run stays.
-    ///   That window is exactly what the icon is a door onto.
-    /// - **Icon off** — the run ends either way. A reader who turned the row off
-    ///   asked for a program that leaves when its windows do, and a hidden summon
-    ///   is not a reason to overrule them: with no icon there is nothing on any
-    ///   screen to say the program is still there, which is §7.54's own refusal.
-    ///
-    /// MUTATIONS: `icon_is_up || a_summon_exists` and case three keeps a run alive
-    /// that nothing on the screen accounts for. `icon_is_up` alone and case one
-    /// hangs, which is CI's own failure. `a_summon_exists` alone and case three's
-    /// second row keeps a run the reader switched residency off for. `true` and
-    /// the program never exits at all.
+    /// MUTATIONS: call `toggle_settings_panel` for both windows and the reader who presses the
+    /// gear inside the thing the page is about lands on `General` and has to go and find it. Name
+    /// a row on another page and the dialog turns to that page instead. File the summoned
+    /// terminal's rows back under `General` and the second assertion names the page.
     #[test]
-    fn a_run_outlives_its_last_visible_window_only_with_an_icon_and_a_summon() {
+    fn the_gear_on_the_summoned_terminal_opens_the_page_about_it() {
+        let arm = SOURCE
+            .split("seats::ChromeTarget::Settings => {")
+            .nth(1)
+            .expect("the gear's arm is in this file");
+        let arm = &arm[..arm
+            .find("seats::ChromeTarget::PanelToggle")
+            .unwrap_or(arm.len())];
         assert!(
-            !a_run_worth_keeping(true, false),
-            "an icon with nothing behind it kept the run alive, which is the \
-             hang scripts/release/smoke.ps1 gate 6 reported as `the window did \
-             not close when it was asked to`"
+            arm.contains("if self.is_quake_window()")
+                && arm.contains("open_settings_on_row(settings::SettingsRow::QuakeHotkey)"),
+            "the gear on the summoned terminal opens the dialog on whatever page it was last on, \
+             which is `General` on a fresh run:\n{arm}"
         );
         assert!(
-            a_run_worth_keeping(true, true),
-            "a reader with a summoned terminal one chord away lost it to the \
-             close of an unrelated window"
+            arm.contains("self.toggle_settings_panel()?"),
+            "every other window's gear stopped going through the dialog's own door:\n{arm}"
+        );
+        assert_eq!(
+            crate::settings::SettingsRow::QuakeHotkey.category(),
+            crate::settings::SettingsCategory::SummonedTerminal,
+            "the row the gear names is not on the summoned terminal's page"
+        );
+        for row in [
+            crate::settings::SettingsRow::QuakeProfile,
+            crate::settings::SettingsRow::QuakeCommand,
+            crate::settings::SettingsRow::QuakeHeight,
+            crate::settings::SettingsRow::QuakeWidth,
+            crate::settings::SettingsRow::QuakeTopGap,
+            crate::settings::SettingsRow::QuakeDismiss,
+            crate::settings::SettingsRow::QuakeRestore,
+        ] {
+            assert_eq!(
+                row.category(),
+                crate::settings::SettingsCategory::SummonedTerminal,
+                "{row:?} is not on the page the gear opens, so the reader lands one row short of \
+                 what they came for"
+            );
+        }
+    }
+
+    /// RED (§7.54e ①, user ruling 2026-09-05) — **a run ends with the last window a person can
+    /// see, and a summoned terminal hidden behind its chord does not hold it open.**
+    ///
+    /// This replaces `an_icon_keeps_the_run_alive_only_while_a_summoned_terminal_is_behind_it` and
+    /// `a_run_outlives_its_last_visible_window_only_with_an_icon_and_a_summon`, and it replaces
+    /// them by withdrawing what they were about rather than by disagreeing with them. The ruling is
+    /// 「托盘取消…普通窗全关即进程退出」: the summoned terminal is a companion of this program and
+    /// not a second one, so there is no icon, and with no icon §7.54's own first answer is the
+    /// whole answer — a `folio.exe` in the task list with nothing on any screen and no taskbar
+    /// button is not a program a person can get back to.
+    ///
+    /// **Two doors, one question**, which is the half of the old pair that survives verbatim:
+    /// `close` decides whether a shut is the end of a run and `reap_leaving_windows` decides
+    /// whether an empty registry is, and they must answer the same way at the same moment. So they
+    /// read one named rule rather than each spelling a condition of its own.
+    ///
+    /// **The hidden summon loses nothing by going**, which is what makes the ruling cheap: its
+    /// paragraph is written into the document like every other window's, and the restore row says
+    /// what comes back.
+    ///
+    /// MUTATIONS: give either door a second condition — `|| self.app.…quake.window().is_some()`,
+    /// which is what the withdrawn rulings did through an icon — and `scripts/release/smoke.ps1`
+    /// gate 6 hangs exactly as it did at 780fb99, with a reader left holding a process no window
+    /// accounts for. Drop the rule from `close` and the last window's shut files its tabs into
+    /// Recent as though it were an ordinary window going. Drop it from `reap_leaving_windows` and
+    /// the exit depends on which road emptied the registry. Have `close` ask
+    /// a count that does not take the closing window out and a run never ends at all.
+    #[test]
+    fn a_run_ends_with_its_last_visible_window_even_with_a_summon_hidden_behind_it() {
+        assert!(
+            a_run_ends_with_its_last_visible_window(0),
+            "the last window a person can see has gone and the process is still in the task list, \
+             reachable only by a chord the reader may have bound weeks ago"
         );
         assert!(
-            !a_run_worth_keeping(false, false),
-            "a run with no icon and no summon outlived its last window"
+            !a_run_ends_with_its_last_visible_window(1),
+            "a run with a window still on the glass ended anyway"
+        );
+        assert!(!a_run_ends_with_its_last_visible_window(4));
+
+        // And the summoned terminal is not one of the windows that number counts,
+        // which is the half of this that decides the ruling: `windows_left_after`
+        // takes the summon out, so "no visible windows" is true on exactly the
+        // turn the reader closed the last thing they could see.
+        let counted = fn_body(concat!("    fn ", "windows_left_after("));
+        assert!(
+            counted.contains("Some(*id) != summon && *id != going"),
+            "the summoned terminal is being counted as a window the reader asked for, so a run \
+             outlives the last ordinary window — or the window being closed is not taken out of \
+             the count, and a run never ends at all:\n{counted}"
         );
         assert!(
-            !a_run_worth_keeping(false, true),
-            "residency the reader switched off was kept anyway, on the strength \
-             of a window nobody can see and no icon accounts for"
+            !counted.contains("is_showing"),
+            "the count is conditional on the summon being off the screen again, which leaves the \
+             state §7.54 refuses reachable: close every ordinary window while it is up, then \
+             press the key:\n{counted}"
         );
+        let retire = fn_body(concat!("    fn ", "retire_the_summon_with_the_run("));
+        assert!(
+            !retire.contains("is_showing"),
+            "a summoned terminal that was on the screen when the run ended is left behind, \
+             unclosed and holding the registry open:\n{retire}"
+        );
+        let shut = fn_body(concat!("    fn ", "close("));
+        assert!(
+            shut.contains("a_run_ends_with_its_last_visible_window(self.windows_left_after(id))"),
+            "the shut door decides residency for itself instead of reading the one rule, so it \
+             can answer differently from the reap:\n{shut}"
+        );
+        assert!(
+            shut.contains("self.retire_the_summon_with_the_run(leaving_at)"),
+            "the run ends and the hidden summoned terminal is left behind it, unclosed and \
+             unwritten:\n{shut}"
+        );
+        let reap = fn_body(concat!("    fn ", "reap_leaving_windows("));
+        assert!(
+            reap.contains("a_run_ends_with_its_last_visible_window(self.windows.len())"),
+            "the other road to an empty registry decides residency for itself:\n{reap}"
+        );
+        // **And no door reads an icon any more**, because there is not one. A
+        // source gate rather than an assertion about behaviour: what the ruling
+        // withdrew is a mechanism, and a mechanism that is merely unreachable is
+        // one somebody re-reaches.
+        const MAIN: &str = include_str!("main.rs");
+        // Spelled in halves, because this file reads itself: a gate written as one
+        // literal is a gate that always trips on its own text.
+        for withdrawn in [
+            concat!("tray_keeps", "_the_run_alive"),
+            concat!("Tray", "Icon"),
+            concat!("a_run_worth", "_keeping"),
+            concat!("bt_platform::", "tray"),
+        ] {
+            assert!(
+                !MAIN.contains(withdrawn),
+                "`{withdrawn}` is the withdrawn notification-area icon, and it is still here"
+            );
+        }
     }
 
     /// RED — **a closed window is not dropped until its engines have let go, and
@@ -100782,6 +101063,7 @@ mod tests {
                 cwd: cwd.to_owned(),
                 manual_name: name.map(str::to_owned),
                 card_skip: 0,
+                last_command: String::new(),
             })),
             pinned,
             focused_leaf: "leaf-0".to_owned(),
@@ -101070,6 +101352,7 @@ mod tests {
                     cwd: "C:\\repo\\src".to_owned(),
                     manual_name: Some("build".to_owned()),
                     card_skip: 0,
+                    last_command: String::new(),
                 }))),
             ],
         });
@@ -101120,6 +101403,7 @@ mod tests {
                 cwd: cwd.to_owned(),
                 manual_name: None,
                 card_skip: 0,
+                last_command: String::new(),
             })))
         };
         let here = std::env::current_dir().expect("a test runs somewhere");
@@ -101143,6 +101427,7 @@ mod tests {
                 cwd: Some(here),
                 unknown_profile_id: None,
                 card_skip: 0,
+                prefill: None,
             }
         );
         assert_eq!(
@@ -101152,6 +101437,7 @@ mod tests {
                 cwd: None,
                 unknown_profile_id: None,
                 card_skip: 0,
+                prefill: None,
             }
         );
         assert_ne!(
@@ -101168,6 +101454,7 @@ mod tests {
                 cwd: cwd.to_owned(),
                 manual_name: None,
                 card_skip: 0,
+                last_command: String::new(),
             })))
         };
         TabV1 {
@@ -101236,6 +101523,7 @@ mod tests {
                 },
                 manual_name: None,
                 card_skip: 0,
+                last_command: String::new(),
             },
             &|seat| panic!("a tree of two terminals has no files leaf to ask about ({seat:?})"),
         );
@@ -101293,6 +101581,7 @@ mod tests {
                         cwd: String::new(),
                         manual_name: None,
                         card_skip: 0,
+                        last_command: String::new(),
                     }))),
                 ],
             }),
@@ -101376,6 +101665,7 @@ mod tests {
                 cwd: String::new(),
                 manual_name: None,
                 card_skip: 0,
+                last_command: String::new(),
             },
             &|seat| files.get(&seat).cloned().unwrap_or_default(),
         );
@@ -101416,6 +101706,7 @@ mod tests {
                 cwd: String::new(),
                 manual_name: None,
                 card_skip: 0,
+                last_command: String::new(),
             },
             &|seat| files.get(&seat).cloned().unwrap_or_default(),
         );
@@ -101469,6 +101760,7 @@ mod tests {
                                 cwd: String::new(),
                                 manual_name: None,
                                 card_skip: 0,
+                                last_command: String::new(),
                             }))),
                             files(r"D:\right", 300),
                         ],
@@ -105829,6 +106121,7 @@ mod tests {
                     cwd: String::new(),
                     manual_name: None,
                     card_skip: 0,
+                    last_command: String::new(),
                 })),
                 pinned: false,
                 focused_leaf: "leaf-0".to_owned(),
@@ -113847,6 +114140,7 @@ mod tests {
                         cwd: String::new(),
                         manual_name: None,
                         card_skip: 0,
+                        last_command: String::new(),
                     }),
                 )),
                 Box::new(bt_persist::LayoutNodeV1::Leaf(
@@ -113943,6 +114237,7 @@ mod tests {
                     cwd: String::new(),
                     manual_name: None,
                     card_skip: 0,
+                    last_command: String::new(),
                 }),
             ))
         };
@@ -125376,6 +125671,7 @@ mod tests {
                     cwd: r"C:\repo\crates".to_owned(),
                     manual_name: None,
                     card_skip: 0,
+                    last_command: String::new(),
                 }))),
             ],
         });
@@ -126189,7 +126485,9 @@ mod tests {
         }
         let saved = tab
             .seats
-            .to_persisted(&|seat| tab.term_leaf(seat), &|seat| tab.files_state(seat));
+            .to_persisted(&|seat| tab.term_leaf(seat, false), &|seat| {
+                tab.files_state(seat)
+            });
         let leaf = persisted_files_leaves(&saved)
             .into_iter()
             .next()
@@ -127980,7 +128278,7 @@ mod tests {
         let saved = TabV1 {
             root: folder
                 .seats
-                .to_persisted(&|seat| folder.term_leaf(seat), &|seat| {
+                .to_persisted(&|seat| folder.term_leaf(seat, false), &|seat| {
                     folder.files_state(seat)
                 }),
             pinned: folder.pinned,
@@ -128034,7 +128332,9 @@ mod tests {
         let saved = TabV1 {
             root: file
                 .seats
-                .to_persisted(&|seat| file.term_leaf(seat), &|seat| file.files_state(seat)),
+                .to_persisted(&|seat| file.term_leaf(seat, false), &|seat| {
+                    file.files_state(seat)
+                }),
             pinned: file.pinned,
             focused_leaf: format!("leaf-{}", focus_leaf_index(&file.seats)),
             preview: file.preview_content(),
@@ -128199,6 +128499,8 @@ mod tests {
             // Nothing was started, so there is no `$PROFILE` this fixture could
             // be owed an answer about.
             integration_offer: Some(shell_integration::Offer::Silent),
+            // A fixture is not a restore, so nothing is owed to its prompt.
+            pending_typing: None,
         }
     }
 

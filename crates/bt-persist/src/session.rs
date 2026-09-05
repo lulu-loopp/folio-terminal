@@ -42,11 +42,13 @@ use crate::layout::LayoutNodeV1;
 /// window happened to be at when the program closed, but the rectangle the reader *arranged with
 /// their own hand*, filed under the display they arranged it on. The two are different facts and
 /// they are stored in different keys for that reason.
-/// **v14 adds `recent_folders`** (0.2 files column, user ruling 2026-09-05): the folders a reader
+/// **v14 lets a pinned tab's shell bring back the last thing that was typed at it**
+/// ([`crate::TermLeafV1::last_command`], `docs/DESIGN.md` §7.54).
+/// **v15 adds `recent_folders`** (0.2 files column, user ruling 2026-09-05): the folders a reader
 /// pointed a files column at, newest first, so the root menu can offer them back. It is a fact
 /// about the *process* and not about one window — every window's root menu reads the one list — so
 /// it sits beside [`SessionV1::recent`] at the top level, on that field's own argument.
-pub const SESSION_SCHEMA_VERSION: u32 = 14;
+pub const SESSION_SCHEMA_VERSION: u32 = 15;
 
 /// **What a preview row's string names** — schema v11.
 ///
@@ -159,7 +161,7 @@ pub struct SessionV1 {
     /// window, so nothing that is open writes an empty entry here.
     pub windows: Vec<SessionWindowV1>,
     pub recent: Vec<RecentEntryV1>,
-    /// **The folders a files column was pointed at, newest first** — schema v14
+    /// **The folders a files column was pointed at, newest first** — schema v15
     /// (`docs/DESIGN.md` §7.5, user ruling 2026-09-05).
     ///
     /// At this level rather than inside a window for [`Self::recent`]'s reason said about a
@@ -168,7 +170,7 @@ pub struct SessionV1 {
     /// been".
     ///
     /// Empty is the ordinary first-run state and is not written, so a document from a reader who
-    /// has opened no folder is byte for byte the document a v13 build wrote.
+    /// has opened no folder is byte for byte the document a v14 build wrote.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_folders: Vec<RecentFolderV1>,
 }
@@ -186,7 +188,7 @@ impl Default for SessionV1 {
     }
 }
 
-/// **One folder a files column was pointed at, and when** — schema v14.
+/// **One folder a files column was pointed at, and when** — schema v15.
 ///
 /// Two fields, and the absence of everything else is the design. There is no display name, because
 /// the menu draws the last segment of the path and the path is here; there is no note about *how*
@@ -776,6 +778,7 @@ mod tests {
                         cwd: "C:\\".to_string(),
                         manual_name: None,
                         card_skip: 0,
+                        last_command: String::new(),
                     },
                 )),
                 pinned: false,
