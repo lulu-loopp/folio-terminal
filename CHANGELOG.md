@@ -91,6 +91,15 @@ and the first release that carries a signature.
   the keyboard, and that report was being read as somebody typing. A key that
   was already down when a window took the keyboard is not a key that was pressed
   at it, and no chord's own characters reach a shell now.
+- **The command palette's input takes a paste, and narrows while you
+  compose.** With the palette open, `Ctrl+V` — and `Ctrl+Shift+V` and
+  `Shift+Insert`, which mean the same thing here — puts the clipboard into the
+  input; before, the key was taken and nothing happened. What goes in is the
+  first line of what was copied, with control characters taken out, because the
+  input holds one line. `Ctrl+A` selects what is in it and `Ctrl+Backspace` takes the word
+  behind the caret. And a query typed through an input method now narrows the
+  list as it is being composed rather than only once it is committed; pressing
+  Escape part-way through a composition puts the list back where it was.
 - **A file path an application wrapped over several indented rows is one link
   again.** When an agent prints a block of indented text holding a single path
   and breaks it at the window's width, the rows are read back as the one file

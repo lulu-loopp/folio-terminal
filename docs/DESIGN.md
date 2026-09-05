@@ -6908,7 +6908,7 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 
 - **键梯**:面板这一格在 `keyboard_input` 里既高于 `popup_takes_the_key` 的通吃行,也高于快捷键表。别的 popup 只答四个键、剩下的吞掉,所以待在通吃行下面无所谓;这一个是**文本框**,待在下面就是一个画着光标却收不到字母的框,待在快捷键表下面则是一个 `Ctrl+Shift+P` 反复开关自己而字母永远进不来的框。**它自己的和弦向表要答案**(`lookup` 得到 `Action::CommandPalette` 就关),所以改过键位的人用他绑的键关它,而「什么打开面板」只有一个答案。门 `the_palette_takes_its_keys_above_the_swallow_and_above_the_table`。
 - **指针**:悬停即选、点击即执行。**只有一个「当前行」**,因为 Enter 必须跑读者正在看的那一行;两个(一个 hover 一个 selection)就是指针说一句话、键盘做另一件事。指针落在框里但不在任何行上时选择留在原地——手飘进两行之间的空隙不代表他不再瞄着刚才那行。
-- **输入法**:`ImeOwner::Palette` 排在 `Modal` **上面**,这是这一格存在的全部理由。面板是 popup,所以它一上来 `menu_or_dialog` 就是真;掉进 `Modal` 那一格会被整个吞掉——对菜单是对的(行是挑的不是打的),对一个全部手势就是打字的框恰好完全错。预编辑走 `set_preedit` 永不 `insert`,查询在 **commit** 时才重问:一个每敲一下就重问一次的框会在五个非词的五个答案之间闪五次。候选窗吊在 `PaletteLayout::caret_line` 上,画笔和 IME 读的是同一个推导(2026-08-17 那份报告的教训)。
+- **输入法**:`ImeOwner::Palette` 排在 `Modal` **上面**,这是这一格存在的全部理由。面板是 popup,所以它一上来 `menu_or_dialog` 就是真;掉进 `Modal` 那一格会被整个吞掉——对菜单是对的(行是挑的不是打的),对一个全部手势就是打字的框恰好完全错。预编辑走 `set_preedit` 永不 `insert`,但**查询串算上它**,列表边打边窄——见 ⑩。候选窗吊在 `PaletteLayout::caret_line` 上,画笔和 IME 读的是同一个推导(2026-08-17 那份报告的教训)。
 
 三条出路,三个不同的手势:**Esc**(手在键盘上)、**框外一按**(手在指针上)、**窗失焦**(手已经去了别处)。前两条是小样的;第三条是「失焦即收」这句话对一扇窗而非对页面里一个元素的读法——它是唯一一个进 `WindowEvent::Focused(false)` 的 popup,差别是真的:别的每一个都吊在读者看得见、回得来的控件上,这一个吊在一个意图上。门 `the_palette_has_three_ways_out`。
 
@@ -6951,7 +6951,17 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 
 门:`a_running_or_full_screen_pane_is_pointed_at_rather_than_scrolled`(真值表 + `flash_pane` 不滚任何东西)、`the_pane_ring_and_the_row_band_fade_on_the_same_clock`、`the_pane_ring_is_drawn_inside_the_pane_it_names`、`a_running_command_says_so_before_it_says_anything_else`。
 
-#### ⑩ 挂账
+#### ⑩ 面板开着时,剪贴板进的是框,预编辑算的是查询,而下面那个壳什么也听不到(2026-09-05)
+
+三条,来自发布准备线上实测到的两个现象:框不收 `Ctrl+V`,中文边打边筛不动。
+
+- **`Ctrl+V` 归框。** 面板开着时 `Ctrl+V`、`Ctrl+Shift+V` 与 `Shift+Insert` 是同一件事,都把剪贴板贴进查询。终端把前两个分开,是因为 `Ctrl+V` 是一个程序可能想要的控制码;一个文本框没有这个读法要护,也就没有分的理由。所以问的是终端那一格问的同一个谓词 `input::is_paste_shortcut`,不另拼一遍。进框的是 `text_field::one_line`:**只取第一行,再去掉控制字符**。一行的框无论如何都要丢掉一些东西,丢掉第一行之后的行是读者看得见、也改得掉的丢;把它们接成一行,则是在玻璃上放一个什么都匹配不上、看起来却像他亲手打的串。`Ctrl+A` 全选沿用旧例(搜索胶囊、设置页的输入框都是它),`Ctrl+Backspace` 删词是新增的,删到的边界就是 `Ctrl+←` 走到的那一个(`TextField::delete_word_back` 与 `word_boundary` 同源),否则走一个词和删一个词会对「词从哪里开始」给出两个答案。
+- **预编辑参与过滤。** 查询 = 已提交文本 + 当前预编辑串(`TextField::composed`,插在光标处——就是它被画的位置,所以量出来的串和筛出来的串是同一个串);`PaletteState::query` 读它,`arrange_palette` 问它,所以 `palette_ime` 的重问挂在整个 `match` 下面而不是 `Commit` 那一支里面。**取消恢复是构造出来的,不是一个分支**:输入法把取消报为一个空预编辑,同一句 `set_preedit` 把读数退回已提交文本,同一次重问把列表退回去。这是本框与终端搜索胶囊(§7.1.5d)分开的唯一一处,差别在筛的是什么:胶囊扫的是十万行回滚,向它问一个半拼的 `ni'hao` 是为一个没人打过的串真干活;这里筛的是几百条已经在内存里的标签,而读者向一个过滤框要的就是边打边窄——用他正在打的那种语言。提交仍然只走 `insert`,预编辑永不进缓冲区:缓冲区里不能有一次 Esc 需要反打回去的字。
+- **总闸。** 面板开着时,任何本该落到终端的键盘/输入法事件都不许漏下去。这不是一句口号:`keyboard_input` 里每一扇最终会在管子上写出字节的门——粘贴、复制、快捷键表、按键编码器——都必须站在面板那一格**之下**,`ime_input` 里 `ImeOwner::Palette` 必须在 `ImeOwner::Shell` 之上并且自己 `return`。一个和弦漏下去不比一个字母漏下去小,它们是同一个缺陷,所以这四扇门连同输入法那一格枚举在同一道门里。
+
+门:`nothing_leaks_past_the_palette_to_the_shell`、`the_palette_ime_filters_on_the_preedit_without_committing_it`、`the_palette_asks_its_list_about_the_composed_reading`、`the_palette_field_pastes_and_deletes_a_word`(以上 `main.rs`);`a_composition_narrows_the_list_and_cancelling_it_restores_the_list` 与 `a_composition_of_characters_that_are_not_typed_narrows_the_same_way`(`palette.rs`,纯函数层:已提交+预编辑 → 查询串 → `fuzzy_score` → 列表);`the_composed_reading_is_the_buffer_with_the_composition_in_it`、`ctrl_backspace_takes_the_word_the_word_walk_would_have_crossed` 与 `a_pasted_clipboard_is_cut_to_its_first_line_and_stripped`(`text_field.rs`)。
+
+#### ⑪ 挂账
 
 - **和弦按下时快捷键表读的是活焦点,面板列表读的是快照。** 两者在同一帧里可能不同(面板一开,`terminal_primary` 就掉了)。这是有意的(见 ③),但意味着面板列出的一条终端作用域的动作,是「刚才那只手能按的」而不是「此刻按下去会生效的」——它执行时面板已经先关了,所以焦点已经回来,今天这两件事对得上。窗层焦点若在面板开着的时候被别的东西改掉,这条对不上;那需要一条「重新拍照」的账,现在没有。
 - **忘只在有答案落地的那一刻发生。** `retain_file_indexes` 挂在 `apply_file_index_results` 上,所以一个「开过面板、随后关掉文件列、再也没开过面板」的根,它那份索引会一直留到下一份索引落地为止。留着的量是有界的(一个根至多三万条),而且它本来就是在那一列开着的时候付过的;要做得更干净,得给「谁还想要这个根」找一个不依赖答案到达的时刻。记明账。
