@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  Folio's package identity, and the one thing it exists to buy: a verb on the
+  FIRST page of the Windows 11 right-click menu.
+
+  This is a **sparse** package. It carries no program: `folio.exe` and the two
+  ConPTY files stay in whatever folder the user extracted the archive into, and
+  `uap10:AllowExternalContent` below is what lets a package name an executable
+  it does not contain. What is registered is an identity and a COM class, and
+  Explorer reads the menu item off this file rather than out of the registry.
+  See `docs/DESIGN.md` §7.4a for why the classic `HKCU\Software\Classes` verb
+  stays where it is rather than being replaced by this.
+
+  **`Publisher` must be the certificate's subject, spelled character for
+  character.** Windows checks the two against each other when the package is
+  registered, and the failure it gives for a mismatch names neither string.
+  `scripts/release/smoke.ps1` compares them on the artefact, and
+  `bt_platform::package_publisher_matches_certificate` is the same comparison as
+  a function so that it can be tested without a certificate.
+
+  **`Version` is `0.0.0.0` here on purpose.** The workspace manifest's
+  `[workspace.package] version` is the one place this product's version is
+  written (`Cargo.toml`'s own note), and `scripts/release/package.ps1` injects it
+  into a copy of this file at packaging time. A real version number in this file
+  would be a second one, free to disagree with the binary it ships beside — which
+  is the exact failure the single-source rule exists to prevent.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  IgnorableNamespaces="uap uap10 rescap desktop4 desktop5 com">
+
+  <Identity
+    Name="WeiyiShi.Folio"
+    Publisher="CN=Weiyi Shi, O=Weiyi Shi, L=Ann Arbor, S=mi, C=US"
+    Version="0.0.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Folio</DisplayName>
+    <PublisherDisplayName>Weiyi Shi</PublisherDisplayName>
+    <Logo>images\StoreLogo.png</Logo>
+    <!-- The whole reason this package can be one file and still name a program:
+         the content lives at the external location given when it is registered,
+         which is `folio.exe`'s own folder. -->
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+
+  <Resources>
+    <!-- One entry, and it is not a claim about what language Folio speaks. The
+         words in the menu are chosen at the moment Explorer asks for them
+         (`IExplorerCommand::GetTitle`), out of the same string table the window
+         uses, so a package resource index would be a second and staler answer
+         to a question this code already answers per call. -->
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Dependencies>
+    <!-- 22000 is Windows 11's first build, and it is the build at which the
+         primary context menu exists at all. A package that could be registered
+         on Windows 10 would register there and change nothing a user could
+         see. `bt_platform::supports_primary_context_menu` is the same number on
+         the other side of the decision, so the row is never offered where the
+         registration would be pointless. -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <!-- The declaration a package makes when the program it names is an
+         ordinary desktop program rather than a sandboxed one. It is what
+         `EntryPoint="Windows.FullTrustApplication"` below requires; nothing in
+         this package asks for a capability of its own. -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+  <Applications>
+    <Application Id="Folio" Executable="folio.exe" EntryPoint="Windows.FullTrustApplication">
+      <!-- `AppListEntry="none"`: the user already has Folio wherever they put
+           it, and a package that added a second Start-menu entry pointing at the
+           same executable would be offering them a copy that is not one. This
+           package is identity for a menu item, and nothing else. -->
+      <uap:VisualElements
+        AppListEntry="none"
+        DisplayName="Folio"
+        Description="A terminal that reads what it prints."
+        BackgroundColor="transparent"
+        Square150x150Logo="images\Square150x150Logo.png"
+        Square44x44Logo="images\Square44x44Logo.png" />
+
+      <Extensions>
+        <!-- The class Explorer creates when the item is drawn and when it is
+             clicked. **An out-of-process server**, not a DLL in a surrogate:
+             the code that answers is `folio.exe` itself under
+             the `explorer-command` switch, which is the same binary, the
+             same string table and the same launch path as the verb it starts.
+             COM appends an `-Embedding` word to this command line;
+             `cli::explorer_command` reads both. -->
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:ExeServer Executable="folio.exe" Arguments="--explorer-command" DisplayName="Folio Explorer command">
+              <com:Class Id="E129F337-6C7E-4AC7-9C02-58FCB8940AF1" DisplayName="Open in Folio" />
+            </com:ExeServer>
+          </com:ComServer>
+        </com:Extension>
+
+        <!-- The two item types the classic registration already writes two
+             registry trees for, and for that section's reason: a folder's own
+             icon in a listing, and the empty space inside a folder that is
+             already open, are two different things to right-click and one of
+             them is invisible from the other. The same CLSID answers both,
+             because "where was this clicked" is a question `Invoke` asks of what
+             it is handed rather than of which item type sent it. -->
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="Directory">
+              <desktop5:Verb Id="FolioOpenHere" Clsid="E129F337-6C7E-4AC7-9C02-58FCB8940AF1" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory\Background">
+              <desktop5:Verb Id="FolioOpenHere" Clsid="E129F337-6C7E-4AC7-9C02-58FCB8940AF1" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>

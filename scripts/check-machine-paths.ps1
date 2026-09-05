@@ -63,7 +63,7 @@ try {
     $mail_re = [regex]"[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.([A-Za-z]{2,24}))"
     $checkout_re = [regex]"(?i)Developer[\\/]{1,2}BetterTerminal"
     $author_re = [regex]"(?i)weiyi|umich\.edu"
-    # The two sentences the name above may appear in — see the loop below.
+    # The three sentences the name above may appear in — see the loop below.
     $copyright_re = [regex]"(?i)copyright\b.*\bweiyi shi\b"
     # **A Chinese word, written the way this scan will meet it.** Every file is
     # read as Latin1 so that a recording of arbitrary bytes cannot throw on a
@@ -79,6 +79,16 @@ try {
     # The name and a word about signing, in either order and on one line: "signed
     # by Weiyi Shi", and "names Weiyi Shi as the publisher".
     $signed_re = [regex]("(?i)(?:\bweiyi shi\b.*(?:$signWords)|(?:$signWords).*\bweiyi shi\b)")
+    # **A signed package's identity, which the sentence above does not reach**
+    # (§7.4a): the `Publisher` of `packaging/msix/AppxManifest.xml`, the
+    # publisher-scoped package name, and the two relative distinguished names the
+    # holder appears as inside a certificate subject. Each is missed by
+    # `$signed_re` for its own reason and none of them is an oversight there:
+    # `PublisherDisplayName` gives `publisher` no word boundary to end on,
+    # `WeiyiShi.Folio` has no space in it for `weiyi shi` to match, and a test
+    # that names a *different* holder beside this one to prove the comparison
+    # refuses it carries no word about signing at all.
+    $publisher_re = [regex]"(?i)\b(?:CN|O)=Weiyi Shi\b|PublisherDisplayName|\bWeiyiShi\.Folio"
 
     $problems = New-Object System.Collections.Generic.List[string]
 
@@ -102,8 +112,19 @@ try {
         # SmartScreen dialog names has to be able to read that name here — and
         # refused on every other line in the tree. The address is never allowed —
         # a mailbox is not a holder, and no licence asks for one.
+        #
+        # **A package's publisher is a third sentence of the same kind** (§7.4a).
+        # Windows compares the `Publisher` in `packaging/msix/AppxManifest.xml`
+        # against the subject of the certificate that signed the package and
+        # refuses a mismatch, so that string is not this project's to choose or to
+        # abbreviate: it is the certificate authority's rendering of the holder,
+        # character for character, and `bt_platform::msix` has to carry the same
+        # one in order to check it. Like a copyright notice and like the line that
+        # names who signed a release, it says who published this and nothing
+        # whatever about the machine it was built on.
         foreach ($line in ($text -split "`n")) {
-            $notice = $copyright_re.IsMatch($line) -or $signed_re.IsMatch($line)
+            $notice = $copyright_re.IsMatch($line) -or $signed_re.IsMatch($line) -or
+                      $publisher_re.IsMatch($line)
             foreach ($m in $author_re.Matches($line)) {
                 if ($notice -and $m.Value -notmatch "(?i)umich") { continue }
                 $problems.Add("$rel names the author: $($m.Value)")

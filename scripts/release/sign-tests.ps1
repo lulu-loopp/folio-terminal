@@ -151,6 +151,15 @@ $stubDlib = Join-Path $scratch 'dlib'
 $notAnImage = Join-Path $scratch 'notes.md'
 [IO.File]::WriteAllText($notAnImage, "not a program`n")
 
+# A zip that is not a package, and a package that is not a zip's worth of
+# anything: the two halves of what `Test-Signable` has to tell apart now that
+# `package.ps1 -Sign` hands it `folio.msix`. Both open with `PK`, so the only
+# thing between them is the name.
+$notAPackage = Join-Path $scratch 'archive.zip'
+[IO.File]::WriteAllBytes($notAPackage, [byte[]] (0x50, 0x4B, 0x05, 0x06))
+$aPackage = Join-Path $scratch 'folio.msix'
+[IO.File]::WriteAllBytes($aPackage, [byte[]] (0x50, 0x4B, 0x05, 0x06))
+
 Write-Host 'sign.ps1'
 
 Test-Case 'a file that is not there is refused, and the exit code says so' {
@@ -163,6 +172,18 @@ Test-Case 'a file that is not a PE image is refused before any tool is asked' {
     $result = Invoke-Sign @{ DlibDir = $stubDlib; Files = $notAnImage }
     if ($result.ExitCode -eq 0) { throw 'it exited 0' }
     if ($result.Flat -notmatch 'is not a PE image') { throw "the refusal did not say what was wrong: $($result.Text)" }
+}
+
+Test-Case 'a zip that is not a package is refused too, on its name' {
+    $result = Invoke-Sign @{ DlibDir = $stubDlib; Files = $notAPackage }
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    if ($result.Flat -notmatch 'not an MSIX package') { throw "the refusal did not say what was wrong: $($result.Text)" }
+}
+
+Test-Case 'an .msix gets past the guard that only executables used to pass' {
+    $result = Invoke-Sign @{ DryRun = $true; DlibDir = $stubDlib; Files = $aPackage }
+    if ($result.ExitCode -ne 0) { throw "a dry run over a package exited $($result.ExitCode): $($result.Text)" }
+    if ($result.Flat -match 'is not a PE image') { throw "the package was refused by the PE guard: $($result.Text)" }
 }
 
 # The signtool `sign.ps1` chose, read out of its own output. The verification

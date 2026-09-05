@@ -51,6 +51,7 @@ mod cmdrail;
 mod context_menu;
 mod diagnostics;
 mod dir_news;
+mod explorer_menu;
 mod favicon;
 mod file_peek;
 mod files;
@@ -370,6 +371,20 @@ enum AppEvent {
     /// `update::known()` by the time this is sent, and this says only that there
     /// is one.
     UpdateChecked,
+    /// **The deployment database answered, or a registration finished** (§7.4a).
+    ///
+    /// The ninth of the same family. It is owed a wake for `CopilotProbed`'s
+    /// reason in its purest form — the row it changes is only reachable through a
+    /// modal, and a modal is exactly the state in which no output, no hover and
+    /// no keystroke is coming — and for one this family has not had before: the
+    /// answer can take **seconds**, because registering a package is a service
+    /// call, so the frame that shows the result is separated from the press that
+    /// asked for it by long enough that a reader has stopped expecting one.
+    ///
+    /// Carries nothing, on `UpdateChecked`'s footing: what happened is in
+    /// `explorer_menu::state()` and `explorer_menu::take_outcome()` by the time
+    /// this is sent, and this says only that something did.
+    ExplorerPackageChanged,
     /// **Something spoke into this process's attention endpoint** (`attention_wire`).
     ///
     /// The same family again and the same reason for a wake of its own, in its strongest form: the
@@ -8480,6 +8495,18 @@ struct App {
     /// entry that opens nothing, and the launch is the only moment this product
     /// has to notice.
     context_menu_installed: bool,
+    /// **Which window pressed the first-page switch**, until the deployment it
+    /// started answers (§7.4a).
+    ///
+    /// A registration takes seconds, and in those seconds the reader can have
+    /// moved to another window of this process or closed the one they pressed in.
+    /// The card belongs on the window where the press happened, because that is
+    /// the only window where somebody is waiting for it — so the address is held
+    /// here rather than derived later from whichever window happens to be in
+    /// front. Gone when it is spent, and a press in a window that has since
+    /// closed simply raises no card: the row it would have reported to is not
+    /// there any more.
+    explorer_package_asked_by: Option<WindowId>,
     /// **Whether the user's own Claude Code configuration calls this program.**
     ///
     /// The same shape as the field above and for its reason: the state lives in a file, the row
@@ -31527,6 +31554,19 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::UpdateChecked);
             });
         }
+        // **And the fifth's** (§7.4a), which is the only one of them that can
+        // also *write*: the probe repairs a package registration that names a
+        // folder `folio.exe` has since been dragged out of. Its wake is owed for
+        // the update check's reason and the PSReadLine probe's at once — the row
+        // it draws lives behind a modal, and the answer takes long enough that
+        // nothing else is going to ask for a frame by the time it lands.
+        {
+            let proxy = proxy.clone();
+            explorer_menu::install_wake(move || {
+                let _ = proxy.send_event(AppEvent::ExplorerPackageChanged);
+            });
+        }
+        explorer_menu::begin_probe();
         update::load(&persist::storage_dir());
         update::begin(persist::storage_dir(), settings_store.loaded().update_check);
         // **The attention endpoint, before the first shell exists to be told about it.**
@@ -32046,6 +32086,7 @@ impl Runtime<'_> {
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
+            explorer_package_asked_by: None,
             // Read once, and *only* read: see the field for why this one is not repaired.
             claude_hooks_installed: attention_hooks::state() == attention_hooks::State::Installed,
             // The same, over codex's own file — see the field above's note, which holds word for
@@ -38716,6 +38757,13 @@ impl Runtime<'_> {
             // The machine's own answer, cached at the three moments it can
             // change — see `App::context_menu_installed`.
             context_menu: self.app.context_menu_installed,
+            // **Not cached on `App`**, unlike the row above, and the difference
+            // is which thread writes it: this answer is produced on a worker and
+            // already lives behind one lock in `explorer_menu`, so a second copy
+            // here would be a copy that a window which happened not to be redrawn
+            // could hold a stale version of. One `Mutex` read per frame the
+            // dialog is up is not a cost worth a second store.
+            explorer_first_page: explorer_menu::state().registered(),
             // The same, over a file instead of the registry.
             claude_hooks: self.app.claude_hooks_installed,
             // And the same again, over codex's own file.
@@ -41071,6 +41119,9 @@ impl Runtime<'_> {
         if let Some(install) = settings::context_menu_requested(target) {
             self.apply_context_menu(install)?;
         }
+        if let Some(install) = settings::explorer_first_page_requested(target) {
+            self.apply_explorer_first_page(install);
+        }
         if let Some(install) = settings::claude_hooks_requested(target) {
             self.apply_claude_hooks(install)?;
         }
@@ -41375,6 +41426,11 @@ impl Runtime<'_> {
             // `Reset to defaults` on a page is not a licence to change another
             // program's menu.
             | Row::ContextMenu
+            // And for a third store, on the same rule: what a reset would be
+            // putting back is a package registered in this user's own deployment
+            // database, which is not a line in this file and not this verb's to
+            // undo.
+            | Row::ExplorerFirstPage
             | Row::QuakeHotkey
             | Row::QuakeProfile
             | Row::QuakeCommand
@@ -45829,6 +45885,59 @@ impl Runtime<'_> {
                 )?;
                 Ok(false)
             }
+        }
+    }
+
+    /// Register the package that puts Folio on the first page of Explorer's
+    /// menu, or take it back off (§7.4a).
+    ///
+    /// **The only row in this dialog whose press is not answered on this turn.**
+    /// A deployment is a service call of a second or three, and running it here
+    /// would freeze every window in this process for that long — so what this
+    /// does is start it. The row is redrawn from the machine when it lands, which
+    /// is `apply_context_menu`'s discipline over a store that is slower to ask
+    /// rather than a weaker version of it: there is still exactly one copy of
+    /// this truth and it is still not in `settings.json`.
+    ///
+    /// Nothing is said here. A card raised now would be a card about what was
+    /// asked for rather than about what happened, and the thing that happened
+    /// arrives on `AppEvent::ExplorerPackageChanged`.
+    fn apply_explorer_first_page(&mut self, install: bool) {
+        self.app.explorer_package_asked_by = Some(self.window_id());
+        if !explorer_menu::request(install) {
+            // A press while the last one is still running. The machine is
+            // already going where this press wanted it, or it is going the other
+            // way and will be asked again by whoever is watching.
+            eprintln!("BT_EXPLORER_PACKAGE busy; press ignored install={install}");
+        }
+    }
+
+    /// Put the finished registration's answer on the window in front of the
+    /// person who asked for it.
+    ///
+    /// A failure carries Windows' own sentence, `apply_context_menu`'s rule: on
+    /// the machine where a deployment is refused nobody else can see it, and the
+    /// refusal names a condition — a certificate the machine will not trust, a
+    /// package already registered by another user — that no words of ours could
+    /// guess.
+    fn report_explorer_package(&mut self, outcome: Result<bool, String>) -> Result<()> {
+        match outcome {
+            Ok(registered) => self.toast(
+                toast::ToastKind::Ok,
+                toast::ToastAnchor::Window,
+                None,
+                if registered {
+                    i18n::Text::ExplorerFirstPageAddedToast.text().to_owned()
+                } else {
+                    i18n::Text::ExplorerFirstPageRemovedToast.text().to_owned()
+                },
+            ),
+            Err(error) => self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                i18n::explorer_first_page_failed(&error),
+            ),
         }
     }
 
@@ -94019,6 +94128,34 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // on `App` so that a page redrawn on hover does not re-ask a question that costs a
             // process. Every window, because the row is a fact about the machine and any of them
             // may be showing it.
+            // The state is already in `explorer_menu::state()` and the report of
+            // a press, if there was one, in `take_outcome()`. Unlike the four
+            // above it this one may owe a **card**: a registration is the one row
+            // in the dialog whose press is answered seconds later, and a press
+            // that produced no visible answer is a press somebody makes again.
+            // The card goes on the focused window only — it reports what *this*
+            // reader just did — while the redraw goes to all of them, because the
+            // row is a fact about the machine.
+            AppEvent::ExplorerPackageChanged => {
+                let outcome = explorer_menu::take_outcome();
+                let asked_by = outcome.as_ref().and_then(|_| {
+                    self.app
+                        .as_mut()
+                        .and_then(|app| app.explorer_package_asked_by.take())
+                });
+                self.for_each_window(|runtime| {
+                    if Some(runtime.window_id()) == asked_by
+                        && let Some(outcome) = outcome.clone()
+                    {
+                        runtime.report_explorer_package(outcome)?;
+                    }
+                    if runtime.refresh_chrome() {
+                        runtime.present_chrome_change()
+                    } else {
+                        Ok(())
+                    }
+                })
+            }
             AppEvent::CopilotProbed => {
                 if let Some(app) = self.app.as_mut() {
                     app.copilot_readiness = attention_copilot::readiness();
@@ -99163,6 +99300,16 @@ fn main() -> Result<()> {
     // somebody else's program.
     if let Some(call) = cli::attention(std::env::args_os().skip(1)) {
         std::process::exit(attention_wire::run_verb(call));
+    }
+    // **And the second doorbell, beside it** (§7.4a). `folio --explorer-command`
+    // is Explorer starting this executable as a COM server because somebody
+    // right-clicked a folder, and what it owes that caller is an apartment with a
+    // message pump before the menu is drawn. Above the panic log's siblings for
+    // the doorbell's reason and one of its own: this process is never going to
+    // have a window, so every line below that builds one would be work done to
+    // answer a question about a menu item's title.
+    if cli::explorer_command(std::env::args_os().skip(1)) {
+        std::process::exit(explorer_menu::serve());
     }
     // **The command line, before there is anything for it to be wrong about.**
     // `spike-win-landing.md` §8 puts slice 0 exactly here, between the panic hook

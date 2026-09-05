@@ -1859,6 +1859,27 @@ pub mod video;
 #[cfg(windows)]
 pub mod http;
 
+/// **Folio's package identity** — the strings `packaging/msix/AppxManifest.xml`
+/// declares, and the deployment calls that register them (DESIGN §7.4a).
+///
+/// Not a boundary of its own in the sense the five modules above are: what is
+/// impure in it is three WinRT deployment calls through the `windows` crate's
+/// own wrappers and one `RtlGetVersion` that writes into a struct on this
+/// stack. What is worth testing in it is pure — whether a manifest's publisher
+/// is the certificate's subject, which is the one thing about a package that can
+/// be wrong in a way nothing at build time would notice.
+pub mod msix;
+
+/// The class Explorer creates for the first-page right-click item (DESIGN §7.4a).
+///
+/// A sixth unsafe boundary against a sixth thing: this is the only part of this
+/// crate where **another program is the caller**, and the module's own header is
+/// about the three things that follow from that — the apartment it must be
+/// called on, the lifetime somebody else controls, and the allocator its strings
+/// have to come out of.
+#[cfg(windows)]
+pub mod explorer_command;
+
 #[cfg(windows)]
 mod webview;
 

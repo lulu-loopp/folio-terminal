@@ -461,6 +461,35 @@ where
     Some(attention_arguments(args))
 }
 
+/// The switch `packaging/msix/AppxManifest.xml` puts on the `ExeServer`'s
+/// command line, spelled once.
+pub const EXPLORER_COMMAND_FLAG: &str = "--explorer-command";
+
+/// Whether this launch is Explorer asking for a COM class rather than a person
+/// asking for a window (§7.4a).
+///
+/// **The first argument and only the first.** The manifest writes this switch
+/// and COM appends its own `-Embedding` after it, so first is where it always
+/// is; anything after it belongs to COM and is deliberately not parsed —
+/// refusing a word COM invented would be this process refusing its own caller.
+/// Reading it anywhere on the line would let `folio --cwd D:\x
+/// --explorer-command` become a server, which is a window somebody asked for
+/// that never appears.
+///
+/// A third door beside [`attention`] and [`parse`], for [`attention`]'s reason
+/// taken one step further: this launch is not opening a window and is not
+/// ringing a doorbell either — it is answering questions until another program
+/// stops asking, and it must reach that loop before anything in this process
+/// builds a swap chain.
+pub fn explorer_command<I>(args: I) -> bool
+where
+    I: IntoIterator<Item = OsString>,
+{
+    args.into_iter()
+        .next()
+        .is_some_and(|first| first.to_str() == Some(EXPLORER_COMMAND_FLAG))
+}
+
 /// `--json`, spelled once.
 const JSON_FLAG: &str = "--json";
 
@@ -646,6 +675,49 @@ mod tests {
 
     fn refused(list: &[&str]) -> CliFault {
         parse(args(list)).expect_err("this command line was meant to be refused")
+    }
+
+    /// PIN (§7.4a) — **the COM server's door opens on the first word and on
+    /// nothing else, and COM's own words do not close it.**
+    ///
+    /// Three things at once, and each is a different failure. COM appends
+    /// `-Embedding` to what the manifest wrote, so a door that wanted the switch
+    /// alone would never open and the first-page menu item would silently never
+    /// appear. An ordinary launch must pay one comparison and go on, so an empty
+    /// command line and `--cwd` are both `false`. And the switch must **not** be
+    /// read anywhere on the line: `folio --cwd D:\x --explorer-command` is a
+    /// person asking for a window, and answering it with a server is a window
+    /// that never opens.
+    ///
+    /// MUTATION: search the whole line instead of the first word and the last
+    /// assertion goes red.
+    #[test]
+    fn explorer_starts_this_process_by_its_first_word() {
+        assert!(explorer_command(args(&["--explorer-command"])));
+        assert!(explorer_command(args(&[
+            "--explorer-command",
+            "-Embedding"
+        ])));
+        assert!(explorer_command(args(&[
+            "--explorer-command",
+            "-Embedding",
+            "/whatever"
+        ])));
+        assert!(!explorer_command(args(&[])));
+        assert!(!explorer_command(args(&["--cwd", r"D:\x"])));
+        assert!(!explorer_command(args(&["-Embedding"])));
+        assert!(!explorer_command(args(&[
+            "--cwd",
+            r"D:\x",
+            "--explorer-command"
+        ])));
+        // And it is not a flag `parse` knows: a command line that reached the
+        // window's grammar carrying it is one this process should refuse rather
+        // than open a window for.
+        assert_eq!(
+            refused(&["--explorer-command"]),
+            CliFault::UnknownFlag(EXPLORER_COMMAND_FLAG.to_owned())
+        );
     }
 
     /// PIN — **the empty command line asks for nothing**, which is the launch

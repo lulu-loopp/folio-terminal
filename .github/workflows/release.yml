@@ -97,6 +97,18 @@ jobs:
             Write-Host "building $tag"
           }
 
+      # **Before the build, because that is the only thing this step buys.**
+      # `package.ps1` packs `folio.msix` with `makeappx.exe`, which comes out of
+      # the Windows SDK on the runner image rather than out of this repository.
+      # An image that stopped carrying it would otherwise be found out at the
+      # `archive` step, after a ten-minute release build and a `cargo install` —
+      # so the question is asked first, and it is asked of the same
+      # `Find-MakeAppx` the pack itself calls rather than of a second copy of
+      # the search written into this file.
+      - name: the runner's Windows SDK has makeappx
+        shell: pwsh
+        run: ./scripts/release/package.ps1 -ToolsOnly
+
       - name: build
         run: cargo build --release --locked
 

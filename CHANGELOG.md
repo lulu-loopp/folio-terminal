@@ -4,6 +4,32 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **Open in Folio, on the first page of the Windows 11 right-click menu.**
+  `Settings > General > First page of that menu` puts it there. Windows 11 shows
+  only entries declared by a signed package on the page that opens first, so
+  switching this on registers `folio.msix` — the file that now ships beside
+  `folio.exe` in the archive — for your account alone, with no elevation and
+  nothing written outside it. Right-clicking a folder, or the empty space inside
+  an open one, then gives you `Open in Folio` without pressing `Show more
+  options` first. It takes a second or two and the switch says so when it is
+  done.
+  - The old entry stays exactly where it was. `Open Folio here` under
+    `Show more options` is still its own switch, still just two registry keys,
+    and is what Windows 10 and any machine without the package have. Neither
+    switch touches the other.
+  - The row is not there at all below Windows 11, which has no such page.
+  - Move `folio.exe` to another folder and the entry follows it: the next launch
+    notices that the registration names the old one and re-registers it where the
+    program actually is. That needs `folio.msix` to have come along; where it did
+    not, the row says so.
+  - Removing it is the same switch. It also comes off in
+    `Settings > Apps > Installed apps`, and the row reads the machine rather than
+    a remembered answer, so it agrees with whatever you did there.
+
 ## 0.2.0-preview (unreleased)
 
 Two surfaces that were not there before — a terminal that comes down on a key
