@@ -83184,8 +83184,18 @@ impl Runtime<'_> {
         self.repaint_pane_change(seat)
     }
 
-    fn keyboard_input(&mut self, event: &KeyEvent) -> Result<()> {
-        if event.state != ElementState::Pressed {
+    /// **Every key this window is told about, and the one gate above the
+    /// ladder** (§7.1.5, §7.54d).
+    ///
+    /// `is_synthetic` is winit's, and it is taken here rather than at the door
+    /// so that there is one place in this window that says what a keystroke is.
+    /// See [`input::is_a_keystroke`] for the two facts it answers with and for
+    /// the summon that made the second of them visible: everything below this
+    /// line — the hint card, the dialogs, the menus, the shortcut table and the
+    /// child — is written for a key a hand pressed *at this window*, and a
+    /// report of a key that was already down when the window arrived is not one.
+    fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {
+        if !input::is_a_keystroke(event.state, is_synthetic) {
             return Ok(());
         }
         let now = Instant::now();
@@ -93817,7 +93827,17 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     Err(error) => Err(error),
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => runtime.keyboard_input(&event),
+            // **`is_synthetic` is read and not discarded** (§7.54d). It is the
+            // one bit that separates a key the reader pressed at this window
+            // from winit's report of what their hand was already holding when
+            // the window took the keyboard, and a window this program can summon
+            // *under a hand still on the chord* is a window that receives the
+            // second kind.
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => runtime.keyboard_input(&event, is_synthetic),
             WindowEvent::Ime(event) => runtime.ime_input(event),
             WindowEvent::ModifiersChanged(modifiers) => {
                 runtime.window.modifiers = modifiers.state();
@@ -135976,7 +135996,9 @@ mod palette_wiring_tests {
     ///     its own chord means.
     #[test]
     fn the_palette_takes_its_keys_above_the_swallow_and_above_the_table() {
-        let text = body("fn keyboard_input(&mut self, event: &KeyEvent) -> Result<()> {");
+        let text = body(
+            "fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {",
+        );
         let rung = text
             .find("self.palette_key(event)?;")
             .expect("the palette has a rung of its own");
@@ -136258,5 +136280,72 @@ mod palette_wiring_tests {
                 "`{name}` has no business in what outlives the process"
             );
         }
+    }
+}
+
+/// **The one bit that says a key event is a keystroke**, read as text because
+/// the two lines that carry it are wiring and nothing about them returns a
+/// value (`docs/DESIGN.md` §7.54d).
+#[cfg(test)]
+mod summon_key_wiring_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// RED (§7.54d) — **`is_synthetic` is carried from winit's event to the
+    /// gate, and the gate is the first statement in the ladder.**
+    ///
+    /// `input::is_a_keystroke` is where the rule is written and where a unit
+    /// test can hold it; what cannot be held by a value is that the bit ever
+    /// reaches it. The dispatch arm was spelled `KeyboardInput { event, .. }`
+    /// from the day this window first had a keyboard, which reads as "everything
+    /// else about this event is uninteresting" and threw away the only thing
+    /// that told a press from a report of what a hand was already holding. It
+    /// cost nothing for as long as no window of this program could arrive under
+    /// a hand still on a key, and the summon (§7.54, 2026-09-02) is the window
+    /// that can.
+    ///
+    /// MUTATIONS: put the `..` back in the arm and the first assertion goes red;
+    /// take the gate out of `keyboard_input`, or let one statement stand above
+    /// it, and the second does — and a summon types its own chord into the
+    /// terminal it calls up.
+    #[test]
+    fn the_synthetic_bit_reaches_the_gate_and_the_gate_stands_first() {
+        let dispatch = body("fn window_event(");
+        assert!(
+            dispatch.contains("runtime.keyboard_input(&event, is_synthetic)"),
+            "the dispatch arm drops the bit that says whether this was a keystroke"
+        );
+        let ladder = body(
+            "fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {",
+        );
+        let gate = ladder
+            .find("if !input::is_a_keystroke(event.state, is_synthetic) {")
+            .expect("the ladder opens with the gate");
+        let first = ladder
+            .lines()
+            .map(str::trim)
+            .position(|line| !line.is_empty() && !line.starts_with("//"))
+            .expect("the ladder has statements");
+        assert_eq!(
+            ladder[..gate]
+                .lines()
+                .filter(|line| {
+                    let line = line.trim();
+                    !line.is_empty() && !line.starts_with("//")
+                })
+                .count(),
+            0,
+            "no statement may stand above the gate (the first one is line {first})"
+        );
     }
 }
