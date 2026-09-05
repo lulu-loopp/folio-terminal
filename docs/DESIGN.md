@@ -6707,6 +6707,40 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 
 **这一节替换掉的那枚钉子。** 7.54b 的红门清单里 `an_icon_on_the_taskbar_keeps_the_run_alive` 就是上面那一枚的旧名,它问的是「图标在不在」这一个事实;改名是因为它钉的那件事从「有图标」变成了「有图标而且有东西可回去」。
 
+#### 7.54d 召唤键把自己敲进了它召唤出来的那扇窗:一个事件不是一次敲击(缺陷单,2026-09-05;`crates/bt-app/src/input.rs`、`crates/bt-app/src/main.rs`)
+
+用户实机截图,2026-09-05:按下 `Win+\`` 呼出快捷终端,PowerShell 提示符后面多了一个 `` ` ``,光标停在它后面。一把召唤键把自己敲进了它召唤出来的那扇窗。
+
+**先说不是什么。** 不是热键路径。`RegisterHotKey` 文档说匹配到的按键不再投递给任何窗口,而它说到做到——取证里那一次按下的 `WM_KEYDOWN` 一次也没有到过任何一扇窗的窗口过程,`summon_message_hook`、`is_our_hotkey`、`give_foreground_to` 三处一个字都不用改。也不是松键被当成了字符:那一半从这扇窗有键盘的第一天起就丢掉了。
+
+**取证。** `BT_PTY_DUMP` 开一扇隔离 `APPDATA` 的测试窗,`SendInput` 按人手的顺序发四个事件。**按住 300ms 才复现,四个事件一批发出去不复现**——这是这一节最该记下来的一件事:一次注入得太快的和弦,键早在窗出来之前就松了,于是随手写的那一版探针给出了一份干净的假账。测到的六个事件,按到达顺序:
+
+1. `Super` 按下,`synthetic=false`,到的是当时握着键盘的那扇窗。
+2. `Super` 松开,`synthetic=true` —— winit 在 `WM_KILLFOCUS` 上补发的那一串。
+3. `Super` 按下,`synthetic=true` —— 同一串,在新窗的 `WM_SETFOCUS` 上。
+4. **`Character("'")` 按下,`synthetic=true`,`text=Some("'")`,`mods` 是空的。**
+5. 那个键真正的松开,`synthetic=false`。
+6. `Super` 真正的松开。
+
+第 4 行就是进了 shell 的那个字节。`pty.dump.2`(快捷终端那一格的那扇窗)在提示符后面多出 `<ESC>[2;27H … '`,而同一次运行改后是 368 字节、提示符干净。
+
+**真因:winit 的 `is_synthetic` 被 `..` 吃掉了。** 一扇窗拿到键盘的那一刻,winit 会把此刻**物理上按着**的每一个键各补一条按下事件——那是它回答「手里正握着什么」的唯一形状,因为除了按下它没有别的事件形状可用。那不是读者在这扇窗上按的键,那是**发给新窗的一份状态报告**,两者之间只差 `WindowEvent::KeyboardInput` 的一个 `is_synthetic` 位。
+
+这个差别在别的程序里看不见,因为别的窗不会**从一只还按在键上的手底下冒出来**。这个产品有一扇:快捷终端就是在和弦还按着的时候升上来的(§7.54)。于是和弦的那个字符键——它自己的 `WM_KEYDOWN` 已经被 Windows 吞了——以一份状态报告的身份,带着它的 `text`,到了它刚刚召唤出来的那扇窗上。`mods` 是空的,因为随这一串到的修饰键状态是**新窗的**,而新窗还什么都没见过;所以连「按着 Win 呢」这条线索都没有。
+
+**这条规矩不只管召唤。** 手按着字母 alt-tab 进一扇窗、收起快捷终端时把键盘交还给本进程的另一扇窗——同一个形。所以修的是「什么算一次敲击」,不是「召唤之后的一段时间里怎么办」。
+
+**修法:一个位,不是一只钟。** `input::is_a_keystroke(state, is_synthetic)` 两个事实:松开不是敲击,补发的报告也不是。它是 `keyboard_input` 的第一条语句,在整架梯子之上——底下每一层(提示卡、对话框、菜单、快捷键表、子进程)写的都是「读者在这扇窗上按了一个键」,一份关于窗到之前手里握着什么的报告不是。
+
+**「呼出后 100ms 内丢掉反引号」这类写法是错的,而且错两次**:手快的人会被吞掉真的一次按键,机器慢的时候照旧漏。事件的毛病不在它什么时候到,在它从来就不是一次敲击。
+
+**第二半:Windows 键不是拼字的修饰键。** 同一句话在这条路的另一头。`Shift` 和 AltGr 参与组字,`Ctrl` 和 `Alt` 各有自己的终端编码,Windows 键两样都没有——它是按着去够**别的程序**的动词的,这个平台上没有任何一种键盘布局把一个字符放在它后面。所以戴着它的和弦不产生文本,而不是产生它那个键单独按下时的文本;否则一把没人认领的 `Win+j` 会把 `j` 打进 shell,而读者的手明明是奔着别处去的。空格单写一次,因为 winit 把它报成 `Named` 而不是 `Character`,只写 `Character` 那一条会漏掉 `Win+Space`。
+
+**红门(变异证在各自的文档注释里)。**
+
+- `bt-app/src/input.rs`:`a_chord_held_under_the_window_it_summons_types_nothing_into_it`(上面那六个事件逐行照抄进测试;把 `is_a_keystroke` 里的 `!is_synthetic` 拆掉,第 4 行就被编码,缺陷原样重现)、`the_same_key_pressed_by_a_hand_still_reaches_the_child`(它的对照:一道写宽了的闸门——比如按键名而不是按信封判断——能靠让键盘失灵来通过上一条,这一条会红)、`the_windows_key_is_not_a_modifier_that_spells_anything`(拆掉两处 `!modifiers.super_key()` 中的任一处,对应那一行红;这个修饰键在这个编码器里此外一处也读不到,它没有 xterm 位)。
+- `bt-app/src/main.rs`:`the_synthetic_bit_reaches_the_gate_and_the_gate_stands_first`(把分发臂改回 `KeyboardInput { event, .. }`,第一条断言红——那一位再也到不了写着规矩的地方;把闸门从 `keyboard_input` 拿掉,或者让任何一条语句站到它上面,第二条红)。
+
 ### 7.55 一个浮着的意图框:五类内容分段不混排,文件那一段有一张有界的索引(0.2 聚焦搜索,`crates/bt-app/src/{palette.rs,palette_index.rs}`(新)、`crates/bt-app/src/{main,shortcuts,i18n,files,webhost}.rs`)
 
 命令面板从 2026-08-10 的快捷键审计起就有座位,2026-08-28 为了 v0.1 preview 把行从 `BINDINGS` 里撤掉(§7.41 ①),名字留在 `Action` 里。0.2 把它建出来,行回到它离开的那个和弦——**期间没有任何一行搬进 `Ctrl+Shift+P`,所以也没有任何一行要从谁的手指底下搬出来**,这正是当初「不给别人占」那句话买到的东西。

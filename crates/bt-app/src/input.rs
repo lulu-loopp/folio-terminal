@@ -1,3 +1,4 @@
+use winit::event::ElementState;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 const CSI: &[u8] = b"\x1b[";
@@ -186,6 +187,42 @@ pub(crate) fn is_ime_owned_key(key: &Key, modifiers: ModifiersState) -> bool {
         )
 }
 
+/// **Whether a key event is a keystroke at all**, or only a report of what was
+/// already held down when this window took the keyboard (`docs/DESIGN.md`
+/// §7.54d).
+///
+/// Two facts, and the second one is the whole of why this function exists.
+///
+/// A **release** is not a keystroke: what a terminal encodes is the press, and
+/// the up half of every key in this window has always been dropped.
+///
+/// A **synthetic** event is not a keystroke either. winit reports one for every
+/// key that is physically down at the moment a window gains the keyboard — its
+/// answer to "what is the hand holding right now", posted as a press because
+/// there is no other event shape to post it in. It is a *state report addressed
+/// to the new window*, not a press the reader made at that window, and the two
+/// are told apart by exactly one bit: `WindowEvent::KeyboardInput`'s
+/// `is_synthetic`.
+///
+/// The difference is invisible until a window can arrive **under a hand that is
+/// still on a key**, and this product has one: the summoned terminal comes up
+/// while the summon chord is held (§7.54). The chord's own `WM_KEYDOWN` never
+/// reaches any window — `RegisterHotKey` swallows it, which is documented and
+/// was measured — but the *character key of that chord is still down* when the
+/// window it summoned takes focus, so winit dutifully reports it as a press with
+/// its text attached, and a terminal that read it typed the summon key into the
+/// shell.
+///
+/// **A bit and not a clock.** The same sentence could be spelled as "ignore a
+/// character for a moment after a summon", and that spelling is wrong twice: it
+/// would swallow a real key from a fast hand, and it would still leak on a slow
+/// machine. What is wrong with the event is not when it arrived; it is that it
+/// was never a keystroke.
+#[must_use]
+pub(crate) fn is_a_keystroke(state: ElementState, is_synthetic: bool) -> bool {
+    state == ElementState::Pressed && !is_synthetic
+}
+
 pub(crate) fn keyboard_bytes(
     key: &Key,
     modifiers: ModifiersState,
@@ -240,10 +277,19 @@ pub(crate) fn keyboard_bytes(
         Key::Named(NamedKey::PageUp) => Some(tilde_key(5, modifier)),
         Key::Named(NamedKey::PageDown) => Some(tilde_key(6, modifier)),
         Key::Named(NamedKey::Tab) if modifiers.shift_key() => Some(b"\x1b[Z".to_vec()),
+        // **The Windows key is not a text modifier** (§7.54d, the second half).
+        // `Shift` and `AltGr` compose characters and `Ctrl` and `Alt` have
+        // terminal encodings of their own; the Windows key has neither. It is
+        // held to reach *another program's* verb, and no layout on this platform
+        // puts a character behind it — so a chord wearing it produces no text,
+        // rather than the text its key would have produced alone. Without this
+        // an unclaimed `Win+j` types `j` into the shell, which is a keystroke
+        // the reader aimed somewhere else entirely.
         Key::Character(text)
             if (text.is_ascii() || modifiers.alt_key())
                 && text.chars().all(|character| !character.is_control())
-                && !modifiers.control_key() =>
+                && !modifiers.control_key()
+                && !modifiers.super_key() =>
         {
             Some(meta_prefix(text.as_bytes(), modifiers.alt_key()))
         }
@@ -251,8 +297,10 @@ pub(crate) fn keyboard_bytes(
         Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
         Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
         Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
-        // winit reports the text-producing space key as Named rather than Character.
-        Key::Named(NamedKey::Space) if !modifiers.control_key() => {
+        // winit reports the text-producing space key as Named rather than
+        // Character. It is text, so it answers to the same rule one arm up: the
+        // Windows key produces no character here either.
+        Key::Named(NamedKey::Space) if !modifiers.control_key() && !modifiers.super_key() => {
             Some(meta_prefix(b" ", modifiers.alt_key()))
         }
         _ => None,
@@ -708,6 +756,176 @@ mod tests {
             keyboard_bytes(&insert, ModifiersState::CONTROL, false),
             Some(b"\x1b[2;5~".to_vec()),
             "with nothing selected the key is still the child's"
+        );
+    }
+
+    /// One key event as winit hands it over: the two bits of the envelope
+    /// (`state`, `is_synthetic`) and the two of the letter (the key, and what was
+    /// held with it).
+    type Event = (ElementState, bool, Key, ModifiersState);
+
+    fn character(text: &str) -> Key {
+        Key::Character(text.into())
+    }
+
+    /// **The whole path from a run of key events to the bytes the child reads**,
+    /// which is the two lines `Runtime::keyboard_input` opens with and the
+    /// encoder it ends at. Everything between them is the ladder of surfaces,
+    /// and none of it is reachable by the events these tests are about — a
+    /// terminal with nothing open over it is what is being modelled.
+    fn typed_into_the_child(events: &[Event]) -> Vec<u8> {
+        let mut written = Vec::new();
+        for (state, is_synthetic, key, modifiers) in events {
+            if !is_a_keystroke(*state, *is_synthetic) {
+                continue;
+            }
+            if let Some(bytes) = keyboard_bytes(key, *modifiers, false) {
+                written.extend_from_slice(&bytes);
+            }
+        }
+        written
+    }
+
+    /// RED (§7.54d) — **the chord that summons a terminal types nothing into
+    /// it.**
+    ///
+    /// The run is transcribed from a real one, measured 2026-09-05 with
+    /// `BT_PTY_DUMP` and `SendInput` against a window summoned by `Win+'`: six
+    /// events, in this order, with these flags. Read it downwards and the defect
+    /// is legible without a keyboard —
+    ///
+    /// 1. `Super` goes down at the window that had the keyboard.
+    /// 2. That window loses it: winit's synthetic release burst.
+    /// 3. The summoned one takes it: winit's synthetic press burst.
+    /// 4. **The character key of the chord, still physically down, reported to
+    ///    the new window as a press with its text attached** — and with no
+    ///    modifiers at all, because the modifier state that arrives with a
+    ///    synthetic burst is the new window's, which has seen nothing yet. This
+    ///    is the byte that reached the shell.
+    /// 5. The real release of that key.
+    /// 6. The real release of `Super`.
+    ///
+    /// The chord's own `WM_KEYDOWN` is **not in the list**, and that is not an
+    /// omission: `RegisterHotKey` swallowed it, exactly as documented. Nothing
+    /// about the hotkey path was ever wrong.
+    ///
+    /// MUTATION: drop `!is_synthetic` from [`is_a_keystroke`] and event 4 is
+    /// encoded — `'` lands at the prompt of the window the reader has only just
+    /// called up, which is the defect verbatim.
+    #[test]
+    fn a_chord_held_under_the_window_it_summons_types_nothing_into_it() {
+        let run: [Event; 6] = [
+            (
+                ElementState::Pressed,
+                false,
+                Key::Named(NamedKey::Super),
+                ModifiersState::SUPER,
+            ),
+            (
+                ElementState::Released,
+                true,
+                Key::Named(NamedKey::Super),
+                ModifiersState::empty(),
+            ),
+            (
+                ElementState::Pressed,
+                true,
+                Key::Named(NamedKey::Super),
+                ModifiersState::empty(),
+            ),
+            (
+                ElementState::Pressed,
+                true,
+                character("'"),
+                ModifiersState::empty(),
+            ),
+            (
+                ElementState::Released,
+                false,
+                character("'"),
+                ModifiersState::SUPER,
+            ),
+            (
+                ElementState::Released,
+                false,
+                Key::Named(NamedKey::Super),
+                ModifiersState::empty(),
+            ),
+        ];
+        assert_eq!(
+            typed_into_the_child(&run),
+            Vec::<u8>::new(),
+            "a summon put a character into the terminal it summoned"
+        );
+    }
+
+    /// RED (§7.54d) — **and the key still works when it is pressed.**
+    ///
+    /// The companion the rule above needs: a gate written one notch too wide —
+    /// dropping every press that arrives near a focus change, say, or every
+    /// press of a key that a chord also names — would pass the test above by
+    /// making the keyboard stop working. What separates the two runs is one bit
+    /// of the envelope and nothing about the letter.
+    ///
+    /// MUTATION: return `false` from [`is_a_keystroke`] for anything but a real
+    /// press *and* a real release, or gate it on the key rather than the
+    /// envelope, and this goes red while the one above stays green.
+    #[test]
+    fn the_same_key_pressed_by_a_hand_still_reaches_the_child() {
+        let run: [Event; 2] = [
+            (
+                ElementState::Pressed,
+                false,
+                character("'"),
+                ModifiersState::empty(),
+            ),
+            (
+                ElementState::Released,
+                false,
+                character("'"),
+                ModifiersState::empty(),
+            ),
+        ];
+        assert_eq!(typed_into_the_child(&run), b"'".to_vec());
+    }
+
+    /// RED (§7.54d) — **a chord wearing the Windows key produces no text.**
+    ///
+    /// The other half of the same sentence, at the other end of the path: the
+    /// gate above throws away an event that was never a keystroke, and this
+    /// throws away the text of a keystroke that was never text. `Win+j` is held
+    /// to reach some other program's verb; a terminal that encoded the letter
+    /// under it would type into the shell whatever the reader's hand was aiming
+    /// past it.
+    ///
+    /// Space is asserted beside the letter because winit reports it as a
+    /// `Named` key and it takes its own arm — a rule written once for
+    /// `Character` would leave `Win+Space` spelling a space into the child.
+    ///
+    /// MUTATION: drop either `!modifiers.super_key()` and the matching line goes
+    /// red; the modifier is otherwise invisible to this encoder, which has no
+    /// xterm bit for it.
+    #[test]
+    fn the_windows_key_is_not_a_modifier_that_spells_anything() {
+        let win = ModifiersState::SUPER;
+        assert_eq!(keyboard_bytes(&character("j"), win, false), None);
+        assert_eq!(
+            keyboard_bytes(&Key::Named(NamedKey::Space), win, false),
+            None
+        );
+        assert_eq!(
+            keyboard_bytes(&character("j"), win.union(ModifiersState::SHIFT), false),
+            None,
+            "and it is not talked out of it by a second modifier"
+        );
+        // The same two keys with the Windows key up are the child's, unchanged.
+        assert_eq!(
+            keyboard_bytes(&character("j"), ModifiersState::empty(), false),
+            Some(b"j".to_vec())
+        );
+        assert_eq!(
+            keyboard_bytes(&Key::Named(NamedKey::Space), ModifiersState::empty(), false),
+            Some(b" ".to_vec())
         );
     }
 }
