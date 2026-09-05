@@ -38,6 +38,15 @@ jobs:
       # over a tree that says `0.1.1` would produce an archive whose name, whose
       # `folio.exe --version` and whose Properties page disagree — and the first
       # two are the only ones most people ever read.
+      #
+      # **`-preview` is a release channel and not a different claim.** Every
+      # release so far has been tagged `v<version>-preview` over a manifest that
+      # says `<version>`: `v0.1.0-preview` over `0.1.0`, `v0.1.1-preview` over
+      # `0.1.1`. The suffix says who the build is for, not what it is — the
+      # archive is still `folio-<version>-windows-x64.zip` and the executable
+      # still answers `<version>`, so the tag and the manifest still say the one
+      # thing. Both spellings are accepted and nothing else is; a tag naming a
+      # version the tree does not carry is still where this stops.
       - name: the tag names the version in the manifest
         shell: pwsh
         run: |
@@ -50,8 +59,9 @@ jobs:
           }
           $version = $Matches[1]
           $tag = "${{ github.ref_name }}"
-          if ($tag -ne "v$version") {
-            throw "the tag is $tag and the workspace version is $version"
+          $accepted = @("v$version", "v$version-preview")
+          if ($accepted -notcontains $tag) {
+            throw "the tag is $tag and the workspace version is $version; the tag has to be $($accepted -join ' or ')"
           }
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "building $tag"

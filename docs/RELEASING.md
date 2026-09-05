@@ -1,5 +1,21 @@
 # Releasing
 
+## The tag
+
+`v<version>` or `v<version>-preview`, and the version is the one in
+`[workspace.package]`. The workflow refuses anything else, because the tag and
+the manifest are one claim: the archive is `folio-<version>-windows-x64.zip` and
+`folio.exe --version` answers `<version>`, so a tag naming a version the tree
+does not carry would put three different numbers in front of the same reader.
+
+**`-preview` is a release channel and not a second claim.** Every release so far
+has been tagged that way over a manifest with no suffix — `v0.1.0-preview` over
+`0.1.0`, `v0.1.1-preview` over `0.1.1` — and the suffix says who the build is
+for, not what it is. The manifest does not carry it; nothing in the archive
+carries it; only the tag and the release page do.
+
+## The three scripts
+
 The release workflow (`.github/workflows/release.yml`) runs three scripts in this
 order, and each of them can be run by hand exactly as it runs there:
 
