@@ -753,10 +753,14 @@ fn split_printed_location(reference: &str) -> (usize, Option<PrintedPathLocation
 /// the class already said. The class is "not ASCII, and not a character a path is spelled with".
 ///
 /// Two things it deliberately does not touch. **ASCII punctuation stays**, so the trailing `.` of
-/// `见 D:\x\a.md.` is still part of the reference — Windows eats a name's trailing dots, so that is
-/// the same file and the link stands (boundary table row 16). And only the **tail** is released, so
-/// a filename that really carries CJK punctuation in the middle of it (`D:\资料\A、B.md`) is read
-/// whole; what sits at the very end of a token is prose, what sits inside it is somebody's name.
+/// `见 D:\x\a.md.` is still part of the token and of the reference's longest reading (boundary table
+/// row 16). What that dot is *not* is the token's only reading: since 2026-09-05 an
+/// [`is_sentence_stop`] at the end of a token is a seam, so `D:\x\a.md` is offered behind it and
+/// the disk chooses. Releasing it here instead would be the other thing entirely — a trimming
+/// nobody may appeal, on a mark that is legal in the middle of every filename. And only the **tail**
+/// is released, so a filename that really carries CJK punctuation in the middle of it
+/// (`D:\资料\A、B.md`) is read whole; what sits at the very end of a token is prose, what sits
+/// inside it is somebody's name.
 fn release_prose_tail(text: &str, start: usize, end: usize) -> usize {
     let mut end = end;
     while let Some(character) = text[start..end].chars().next_back() {
@@ -810,17 +814,57 @@ fn is_ascii_opening_bracket(character: char) -> bool {
     matches!(character, '(' | '[' | '{' | '<')
 }
 
+/// The ASCII marks that end a **sentence** rather than a name, read only where a token ends —
+/// §7.30 (user ruling 2026-09-05, rehearsing the demo).
+///
+/// This is [`is_seam_separator`] plus the ASCII full stop, and the full stop is the whole of the
+/// difference. A separator in the *middle* of a token needs a witness behind it because a comma
+/// there may be part of a name; at the **end** of a token there is no name left for the mark to be
+/// part of. [`token_end`] has already said so: what stands behind the last character of a token is
+/// whitespace, a closing delimiter, a backtick or the end of the row, and every one of those is a
+/// place where a name has stopped. **The end of the token is the witness**, which is why this is
+/// the same single rule read at its other end and not a second rule beside it.
+///
+/// **`.` is on the list here and nowhere else, and boundary table row 16 is what that reverses.** A
+/// dot is a path character — `a.md` is spelled with one, and [`is_seam_separator`] is right to hold
+/// it out — but a *trailing* dot spells nothing at all: no Win32 filesystem can hold a name whose
+/// last component ends in a dot or a space, because the normalizer takes them off before the
+/// filesystem is ever asked. Row 16 read that same fact the other way round — "Windows eats the
+/// dot, so it is the same file, so the link stands, only the underline covers one extra cell" — and
+/// the demo rehearsal photographed what it cost: `see docs/notes.md.` opened `notes.md.`, and
+/// everything downstream that reads a name for what it *is* rather than for what it opens (an
+/// extension, a preview format) was handed a name with a full stop welded to it.
+///
+/// The path-structure characters `- _ ~` stay off the list: they end real names — an editor's
+/// `main.rs~`, an 8.3 short name — and none of them ends a sentence. `/` and `\` stay off it for a
+/// second reason as well: a reading ending on a separator is refused outright
+/// ([`is_relative_reference`], row 53), so a stop there would only ever offer a name nobody wrote.
+///
+/// **The double quote comes off it too, and that is §7.30 ⑤ rather than an exception to it.** A `"`
+/// is the one mark this scan reads as a *declaration of extent*: both scans open a quoted token on
+/// it and close on its twin, and nothing inside a declared extent is prose to be cut at. Peeling it
+/// as a stop would cut inside one — `"D:\a b\c.md"` would offer the bare `b\c.md` the space in the
+/// middle of it opens, a second reference lying across the quoted one's own span. A `'` is not that
+/// mark here (it doubles as an apostrophe inside filenames and closes nothing), so it peels like
+/// any other.
+fn is_sentence_stop(character: char) -> bool {
+    (is_seam_separator(character) || character == '.') && character != '"'
+}
+
 /// Whether a token can carry a seam at all — the cheap per-token test that keeps an ordinary
 /// screenful free (§7.30 ④).
 ///
-/// A seam is either a transition into another script or an opening bracket, so a token holding
-/// neither offers no shorter form and needs no search. Read over bytes rather than characters
-/// because the two questions agree byte for byte: every byte of a multi-byte character is non-ASCII,
-/// and no bracket byte can appear inside one.
+/// A seam is a transition into another script, an opening bracket, or the sentence's own
+/// punctuation at the token's end, so a token holding none of the three offers no shorter form and
+/// needs no search. The first two are read over bytes rather than characters because those two
+/// questions agree byte for byte: every byte of a multi-byte character is non-ASCII, and no bracket
+/// byte can appear inside one. The third is one character at one place — the token's last — so it
+/// costs a look and not a walk, and it is asked first for exactly that reason.
 fn token_may_carry_a_seam(token: &str) -> bool {
-    token
-        .bytes()
-        .any(|byte| !byte.is_ascii() || is_ascii_opening_bracket(char::from(byte)))
+    token.ends_with(is_sentence_stop)
+        || token
+            .bytes()
+            .any(|byte| !byte.is_ascii() || is_ascii_opening_bracket(char::from(byte)))
 }
 
 /// Where one unquoted token offers a **shorter form** of itself, longest first — §7.30.
@@ -841,18 +885,32 @@ fn token_may_carry_a_seam(token: &str) -> bool {
 /// witness behind it. It is found in this same pass and not a second one: a seam search is one walk
 /// over the token, and the two questions are asked of each character where it stands.
 ///
+/// **The end of the token is a witness of its own** (user ruling 2026-09-05), and it is the same
+/// character-class transition seen at the one place where the other class is empty: an
+/// [`is_sentence_stop`] with nothing but the end of a name behind it. `see docs/notes.md.` is that
+/// line, and the run is peeled a mark at a time, so `'docs/a.md'.` offers three readings and not
+/// two.
+///
 /// The offsets are the separator's own, so the form ends **before** it, and they come back
 /// descending so a caller reads the longest form first. `limit` is the last offset a seam may sit
 /// on; a caller that can prove no longer form could ever be admitted passes it to keep this scan
 /// inside the bound its loop is read under.
 fn prose_seam_ends(token: &str, limit: usize) -> Vec<usize> {
     let mut seams = Vec::new();
+    // Where the token's trailing run of sentence punctuation begins — its own length when it has
+    // none. Every mark from there to the end is a seam without a witness behind it
+    // ([`is_sentence_stop`], user ruling 2026-09-05): the end of a token is the end of a name, so
+    // nothing standing between that end and the last character of the name is part of it. Peeling
+    // the run mark by mark rather than in one bite is what keeps this a set of **readings** — the
+    // disk is still asked longest first, and `'docs/a.md'.` offers `docs/a.md'` before `docs/a.md`.
+    let stops_from = token.trim_end_matches(is_sentence_stop).len();
     for (offset, character) in token.char_indices() {
         if offset > limit {
             break;
         }
         // `offset + 1` is a character boundary: every separator is one ASCII byte.
-        let seams_here = is_ascii_opening_bracket(character)
+        let seams_here = offset >= stops_from
+            || is_ascii_opening_bracket(character)
             || (is_seam_separator(character)
                 && token[offset + 1..]
                     .chars()
@@ -1497,7 +1555,31 @@ impl PrintedPathLinks {
                 // The gate is asked **per form**: a shorter form stops before the seam's own
                 // punctuation and the prose behind it, so it never touches the row's last cell, and
                 // that punctuation is itself the evidence that the name ended before any cut.
-                if touches_line_end(candidate.byte_start, candidate.byte_end, edge) {
+                //
+                // **A form is asked about together with the stops standing behind it** (user ruling
+                // 2026-09-05, boundary table row 58). A seam in the middle of a token carries its
+                // own witness — a separator with another script behind it says the name ended
+                // there whether or not the row was cut — and that witness is in the visible text.
+                // A stop at the **end** of a token has no witness but the end of the token, and the
+                // row's last cell is exactly where a cut counterfeits one: `D:\x\a.md.` filling a
+                // row is what `D:\x\a.md.bak` looks like when the application broke it in two. So
+                // the run of sentence stops behind a form is read as part of it for this one
+                // question and for no other — which presses the shorter reading down on that row
+                // and leaves it standing on every row that has something else behind the stop.
+                //
+                // The run stops where the **token** does, which is why a closing delimiter is not
+                // part of it (scenario 55, row 6): `(D:\case\src\main.rs)` ending a row is a name
+                // whose end the application itself wrote down — a bracket is not legal in a path,
+                // so no cut could have put one there — and that row has been drawn since the gate
+                // was written.
+                let behind = &text[candidate.byte_end..];
+                let stops = behind.len()
+                    - behind
+                        .trim_start_matches(|character| {
+                            is_sentence_stop(character) && !is_path_terminator_char(character)
+                        })
+                        .len();
+                if touches_line_end(candidate.byte_start, candidate.byte_end + stops, edge) {
                     continue;
                 }
                 let Some(path) = self.resolve(candidate.path_text(text), candidate.spelling) else {
@@ -4297,12 +4379,17 @@ mod tests {
         assert_eq!(spans("见 D:\\x\\a.md，然后"), ["D:\\x\\a.md，然后"]);
     }
 
-    /// Boundary table row 16, nailed down so the row above cannot break it: Windows eats a trailing
-    /// ASCII `.`, so the dot names the same file and stays inside the reference.
+    /// Boundary table row 16 as the 2026-09-05 ruling leaves it, nailed down so the row above
+    /// cannot break it: an ASCII stop at the end of a token is still **inside** the reference — the
+    /// whole printed string is a reading of its own and the first one asked about — and the name
+    /// without it is now offered behind it.
+    ///
+    /// The release above is untouched: `release_prose_tail` still lets every ASCII mark stand, so
+    /// what changed is the number of readings and not the extent of the token.
     #[test]
-    fn an_ascii_full_stop_stays_inside_the_reference() {
-        assert_eq!(spans("见 D:\\x\\a.md."), ["D:\\x\\a.md."]);
-        assert_eq!(spans("see docs/a.md."), ["docs/a.md."]);
+    fn an_ascii_full_stop_offers_the_name_behind_it_as_well() {
+        assert_eq!(spans("见 D:\\x\\a.md."), ["D:\\x\\a.md.", "D:\\x\\a.md"]);
+        assert_eq!(spans("see docs/a.md."), ["docs/a.md.", "docs/a.md"]);
     }
 
     /// §7.30, boundary table rows 40 and 41 — the seam, read at the lexer: one ASCII separator with
@@ -4670,6 +4757,133 @@ mod tests {
         assert_eq!(linked(&half, "见 D:\\x\\a.md,然后", None), []);
     }
 
+    /// §7.30, boundary table rows 55–58 (user ruling 2026-09-05, rehearsing the demo) — **the
+    /// sentence's own punctuation at the **end** of a token is a seam too, and the ASCII full stop
+    /// is on that list.**
+    ///
+    /// The photographed line is `see docs/notes.md.` with the stop at the row's end: the click
+    /// opened `notes.md.`, a name the preview pane could make nothing of. A seam in the middle of a
+    /// token needs another script glued behind the separator, because a comma there may be part of
+    /// a name; at the end of a token there is no name left for the mark to be part of, so the end
+    /// of the token is the witness. Everything else is unchanged — the readings are asked longest
+    /// first and the disk settles it.
+    #[test]
+    fn a_sentence_stop_at_the_end_of_a_token_is_a_seam_too() {
+        let links = ledger(
+            "D:\\case",
+            &[
+                ("D:\\case\\docs\\notes.md", true),
+                ("D:\\case\\docs\\notes.md.", false),
+                ("D:\\x\\a.md", true),
+                ("D:\\x\\a.md.", false),
+                ("D:\\case\\docs\\a.md", true),
+            ],
+        );
+        // The rehearsal's own line, in both spellings: a stop with the row's end behind it.
+        assert_eq!(
+            linked(&links, "see docs/notes.md.", None),
+            [("docs/notes.md", "file:///D:/case/docs/notes.md".to_owned())]
+        );
+        assert_eq!(
+            linked(&links, "见 D:\\x\\a.md.", None),
+            [("D:\\x\\a.md", "file:///D:/x/a.md".to_owned())]
+        );
+        // The rest of the marks the ruling names, each with whitespace behind it instead of the
+        // row's end: the end of a token is the end of a token whether the row stops there or the
+        // sentence goes on.
+        for line in [
+            "see docs/a.md, then run it",
+            "see docs/a.md; then run it",
+            "see docs/a.md: then run it",
+            "see docs/a.md! it is there",
+        ] {
+            assert_eq!(
+                linked(&links, line, None),
+                [("docs/a.md", "file:///D:/case/docs/a.md".to_owned())],
+                "{line} ends its name at the mark the sentence ends on"
+            );
+        }
+        // Two layers, peeled longest first — the quote is one reading and the stop behind it
+        // another, and both are peeled before the name is reached.
+        assert_eq!(
+            linked(&links, "see 'docs/a.md'.", None),
+            [("docs/a.md", "file:///D:/case/docs/a.md".to_owned())]
+        );
+        assert_eq!(
+            linked(&links, "see docs/a.md?!", None),
+            [("docs/a.md", "file:///D:/case/docs/a.md".to_owned())]
+        );
+        // The closing bracket of the ruling's own example never reaches a reading at all: it ends
+        // the token where it stands (row 6), and only the stop behind it is this ruling's work.
+        assert_eq!(
+            linked(&links, "see (docs/a.md).", None),
+            [("docs/a.md", "file:///D:/case/docs/a.md".to_owned())]
+        );
+        assert_eq!(
+            linked(&links, "see (docs/notes.md.)", None),
+            [("docs/notes.md", "file:///D:/case/docs/notes.md".to_owned())]
+        );
+    }
+
+    /// §7.30 row 58 — a stop is a **reading**, never a trimming. The whole printed string is asked
+    /// about first, nothing shorter is drawn while it is unanswered, and a filesystem that really
+    /// holds a name ending in a stop keeps it.
+    ///
+    /// Win32 cannot be such a filesystem — its normalizer takes a trailing dot off before the disk
+    /// ever sees the name, which is what `bt_term::session::path_exists` answers for. This is the
+    /// lexical half, and it is the half that must stay platform-blind: the disk arbitrates.
+    #[test]
+    fn a_name_that_really_ends_in_a_stop_still_wins() {
+        // Frame one: neither reading has an answer, so nothing is promised and both are asked.
+        let mut unknown = BTreeSet::new();
+        let asking = ledger("D:\\case", &[]);
+        assert_eq!(
+            asking.links_in("see docs/notes.md.", None, &mut unknown),
+            []
+        );
+        assert_eq!(
+            unknown.into_iter().collect::<Vec<_>>(),
+            [
+                PathBuf::from("D:\\case\\docs\\notes.md"),
+                PathBuf::from("D:\\case\\docs\\notes.md.")
+            ]
+        );
+        // A shorter reading that exists is still not drawn while the longer one is unanswered.
+        let half = ledger("D:\\case", &[("D:\\case\\docs\\notes.md", true)]);
+        assert_eq!(linked(&half, "see docs/notes.md.", None), []);
+        // And the whole string wins wherever a disk really holds it.
+        let whole = ledger(
+            "D:\\case",
+            &[
+                ("D:\\case\\docs\\notes.md", true),
+                ("D:\\case\\docs\\notes.md.", true),
+            ],
+        );
+        assert_eq!(
+            linked(&whole, "see docs/notes.md.", None),
+            [(
+                "docs/notes.md.",
+                "file:///D:/case/docs/notes.md.".to_owned()
+            )]
+        );
+    }
+
+    /// The boundary the stop does not cross: only the run at the very **end** of a token is the
+    /// sentence's, and only the marks a path is never spelled with are on it.
+    #[test]
+    fn a_stop_inside_a_name_is_still_spelling() {
+        // Row 42's discipline unmoved: a dot with more name behind it is spelling.
+        assert_eq!(spans("见 D:\\x\\a.md.b"), ["D:\\x\\a.md.b"]);
+        assert_eq!(spans("see docs/a.md.b"), ["docs/a.md.b"]);
+        // `~` and `-` end real names — an editor's backup, an 8.3 short name — and are not
+        // sentence punctuation, so no shorter reading is offered behind them.
+        assert_eq!(spans("see docs/main.rs~"), ["docs/main.rs~"]);
+        assert_eq!(spans("see docs/a.md-"), ["docs/a.md-"]);
+        // And a reading may still not end on a separator (row 53), so the stop does not hand
+        // anybody `docs/`.
+        assert!(!spans("see docs/.").contains(&"docs/"));
+    }
+
     /// §7.30 and §7.1.5j ⑨ share one colon without fighting over it: `:` opens a seam only when
     /// what follows it is not a decimal line number, and a located reference keeps its location
     /// through the cut.
@@ -4712,7 +4926,15 @@ mod tests {
     /// punctuation standing between the two is the evidence that the name ended before the cut.
     #[test]
     fn the_truncation_gate_presses_the_whole_token_and_leaves_the_shorter_form_standing() {
-        let links = ledger("D:\\case", &[("D:\\case\\docs\\a.md", true)]);
+        // The stop's own longest reading is answered "no" here, because a shorter reading is never
+        // reached while a longer one is unanswered (§7.30 ②) and this test is about the gate.
+        let links = ledger(
+            "D:\\case",
+            &[
+                ("D:\\case\\docs\\a.md", true),
+                ("D:\\case\\docs\\a.md.", false),
+            ],
+        );
         let line = "docs/a.md,这里";
         assert_eq!(
             linked(&links, line, last_cell_of(line)),
@@ -4720,6 +4942,20 @@ mod tests {
         );
         // The same name with nothing behind it does reach the last cell, and is pressed down.
         assert_eq!(linked(&links, "docs/a.md", last_cell_of("docs/a.md")), []);
+        // And the boundary the 2026-09-05 stop draws inside this very gate (row 58): a stop
+        // standing in the row's own last cell is not a witness, because that is exactly what a cut
+        // through `docs/a.md.bak` would leave behind. Every other row keeps the shorter reading.
+        let stopped = "docs/a.md.";
+        assert_eq!(linked(&links, stopped, last_cell_of(stopped)), []);
+        assert_eq!(
+            linked(&links, stopped, None),
+            [("docs/a.md", "file:///D:/case/docs/a.md".to_owned())]
+        );
+        let sentence = "docs/a.md. run it";
+        assert_eq!(
+            linked(&links, sentence, last_cell_of(sentence)),
+            [("docs/a.md", "file:///D:/case/docs/a.md".to_owned())]
+        );
     }
 
     /// §7.30's whole cost: one extra question, and only on a token that carries a seam.
@@ -4736,6 +4972,13 @@ mod tests {
         assert_eq!(asked("D:\\x\\a.md,然后"), 2);
         // The bare spelling costs nothing extra at all: the whole token was never a candidate.
         assert_eq!(asked("docs/a.md,这里"), 1);
+        // A stop at the end of a token costs the same one extra question, and only when the whole
+        // string is a candidate in its own right — `docs/a.md,` never was (a comma is not a path
+        // character), so that line asks about one name exactly as it did before this ruling.
+        assert_eq!(asked("see docs/a.md."), 2);
+        assert_eq!(asked("see D:\\x\\a.md."), 2);
+        assert_eq!(asked("see docs/a.md,"), 1);
+        assert_eq!(asked("see docs/a.md.b"), 1);
     }
 
     /// §7.30 does not reach the two shapes that are ASCII by construction, **because they have

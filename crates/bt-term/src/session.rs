@@ -76,8 +76,36 @@ const MAX_OFFSCREEN_RECORDS: usize = 128;
 ///
 /// `metadata` follows links, so a symlink pointing at nothing answers `false` — a name whose target
 /// cannot be opened is not a name this window may promise to open.
+///
+/// **A name Win32 cannot hold is not there, and asking about one answers about a different name**
+/// (user ruling 2026-09-05, §7.30 row 58). Windows normalizes a path before the filesystem ever
+/// sees it, and part of that normalization is taking the trailing dots and spaces off its last
+/// component: `…\notes.md.` arrives at the disk as `…\notes.md` and comes back "yes" on the
+/// strength of a file with another name. §7.30 has the disk arbitrate between a token's readings,
+/// longest first — so an answer that is really about the *shorter* reading must never be allowed to
+/// settle the longer one, which is precisely what let a sentence's full stop into the reference the
+/// demo rehearsal photographed. The honest answer is the one below: no Win32 filesystem holds a
+/// name whose last component ends in a dot or a space, so no such name is there.
+///
+/// It is a statement about what this platform can name and not a spelling rule, which is why it is
+/// asked of `cfg!(windows)` rather than of the string alone: on a filesystem that really can hold
+/// `notes.md.`, `notes.md.` is a file and §7.30's longest reading wins it.
 pub fn path_exists(path: &Path) -> bool {
+    if cfg!(windows) && win32_would_trim_the_name(path) {
+        return false;
+    }
     std::fs::metadata(path).is_ok()
+}
+
+/// Whether Windows' path normalizer would take characters off the end of this path's last component
+/// — the trailing dots and spaces no Win32 filesystem can hold.
+///
+/// A component that *is* `.` or `..` is not a name at all and never reaches here as one:
+/// [`Path::file_name`] reads the last **normal** component, so `D:\x\.` answers about `x`.
+fn win32_would_trim_the_name(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(['.', ' ']))
 }
 
 /// Whether a `BT_…` diagnostic variable is switched on.
@@ -19817,6 +19845,90 @@ mod tests {
             "and wears no mark either"
         );
 
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN (user report 2026-09-05, the demo rehearsal) — **the sentence's own full stop is not
+    /// part of the name it ends**, walked from the printed row to the target across the real disk.
+    ///
+    /// The line was `see docs/notes.md.` with the stop at the row's end, and the click opened
+    /// `notes.md.`: a name the preview pane could make nothing of. Two facts made it, and either
+    /// one alone still makes it, which is why this pin lives here and not only among
+    /// `bt_transcript::paths`' own tests. The lexer offered a single reading, because an ASCII dot
+    /// was never a seam (boundary table row 16). And Win32 answered **yes** for that reading,
+    /// because its normalizer takes a trailing dot off a component before the filesystem is ever
+    /// asked — so "longest reading first" was settled by a file that was not the longest reading.
+    /// The readings are `bt-transcript`'s; the disk's answer is this crate's.
+    ///
+    /// MUTATION ①: drop the trailing-stop arm from `prose_seam_ends` and the row offers one
+    /// reading again — the worker is never even asked about the name the sentence ends on.
+    /// MUTATION ②: let `path_exists` pass Win32's own yes on and the second assertion below goes
+    /// red where it stands, on this disk, with `notes.md.` reported as a file — which is the
+    /// answer that would then settle the longest reading and put the stop back in the link.
+    #[test]
+    fn a_name_a_sentence_ends_on_is_linked_without_the_stop() {
+        let (directory, path) = temporary_ordinary_file();
+        let nested = directory.join("sub");
+        std::fs::create_dir(&nested).unwrap();
+        let real = nested.join("notes.md");
+        std::fs::write(&real, b"# notes\n").unwrap();
+
+        // The boundary itself, in one line: the disk holds `notes.md`, and `notes.md.` is a name
+        // this filesystem cannot hold — not the same file wearing a spare dot.
+        assert!(path_exists(&real), "the file the sentence names is there");
+        assert!(
+            !path_exists(&nested.join("notes.md.")),
+            "and no Win32 filesystem holds a name whose last component ends in a dot, however \
+             willingly the normalizer opens one"
+        );
+
+        // A relative reference so the row's geometry is the sentence's and never the length of
+        // whatever directory the runner calls `%TEMP%`.
+        let mut session = DualPlaneSession::new(nz(120), nz(6));
+        enable_path_detection(&mut session);
+        session
+            .feed(
+                format!(
+                    "\x1b]7;file:///{}\x07",
+                    directory.to_string_lossy().replace('\\', "/")
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        session.feed(b"see sub/notes.md. \r\n").unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        assert!(
+            session.path_is_verified(&real),
+            "the worker read the file the sentence names"
+        );
+        assert!(
+            !session.path_is_verified(&nested.join("notes.md.")),
+            "and denied the reading that carries the stop"
+        );
+        let hit = frame
+            .hyperlink_at(0, 4)
+            .expect("the name inside the sentence is a link");
+        assert_eq!(
+            hit.uri,
+            bt_transcript::paths::local_path_to_file_uri(&real),
+            "the target is the file, with no full stop welded to its name"
+        );
+        assert!(
+            frame.hyperlink_at(0, 16).is_none(),
+            "and the stop itself is not part of the link"
+        );
+        let (dotted, _) = underlined_columns(&frame, 0);
+        assert_eq!(
+            dotted,
+            (4..16).collect::<Vec<u32>>(),
+            "the resting mark covers `sub/notes.md` and stops where the name stops"
+        );
+
+        std::fs::remove_file(&real).unwrap();
+        std::fs::remove_dir(&nested).unwrap();
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
     }
