@@ -5603,9 +5603,10 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
     /// all; this is the test that the recordings are of the right thing. It asks
     /// the real `git.exe` about the real repository these lines are in, and
     /// asserts only what is true of any checkout of it — that it has a history,
-    /// that it has branches, that `HEAD` is on one of them, and that the status
-    /// parses. It deliberately does not assert a clean tree: the repository is
-    /// dirty exactly when somebody is working in it, which is whenever this runs.
+    /// that the status parses, and that the status and the refs tell the same
+    /// story about where `HEAD` is standing. It deliberately does not assert a
+    /// clean tree: the repository is dirty exactly when somebody is working in
+    /// it, which is whenever this runs.
     ///
     /// **And "any checkout" includes the shallow ones.** This used to ask this
     /// workspace for a full first page and for `has_more`, which is not a fact
@@ -5616,6 +5617,24 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
     /// a repository that was answering perfectly. They are put to
     /// [`a_repository_deep_enough_to_have_a_page_boundary_pages_at_fifty`]
     /// instead, which builds the history it measures.
+    ///
+    /// **And "any checkout" includes the ones standing on no branch.** This used
+    /// to assert `!branches.is_empty()` under the words "a repository with commits
+    /// has a branch", and that is a fact about a clone rather than about a
+    /// repository: `actions/checkout` handed a tag writes one ref — the tag — and
+    /// checks it out detached, so `refs/heads` is empty and the very commit that
+    /// was green on the branch was red on the tag of the same tree. A checkout has
+    /// a local branch exactly as often as somebody made one there, which is not a
+    /// property of this code.
+    ///
+    /// What *is* true of every checkout is that the two answers agree about where
+    /// `HEAD` is: a branch the status names is a local branch flying `%(HEAD)`,
+    /// and a detached `HEAD` flies it over nothing. That is asserted in both
+    /// directions, and then the page's own answer is asked for on top of it — the
+    /// masthead says [`crate::git_panel::git_detached`] rather than a name, and
+    /// the way back out ([`crate::git_graph::leave_detached_branch`]) either names
+    /// a branch this repository really has or is not offered at all, which is what
+    /// a checkout with no local branches gets.
     #[test]
     fn this_workspace_answers_all_three_page_questions() {
         let git = real_git();
@@ -5637,14 +5656,27 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         };
         let refs = outcome.expect("this workspace's refs read");
         let branches: Vec<&GitRefEntry> = local_branches(&refs).collect();
-        assert!(
-            !branches.is_empty(),
-            "a repository with commits has a branch"
-        );
-        assert!(
-            branches.iter().filter(|branch| branch.is_head).count() <= 1,
-            "HEAD is on at most one local branch"
-        );
+        let flying: Vec<&str> = branches
+            .iter()
+            .filter(|branch| branch.is_head)
+            .map(|branch| branch.name.as_str())
+            .collect();
+        // A named `HEAD` is a ref that exists, so the unborn case is not one of
+        // the shapes this repository can be in: these lines arrived in a commit.
+        match &status.branch {
+            Some(name) => assert_eq!(
+                flying,
+                vec![name.as_str()],
+                "the branch the status names is the one local branch flying %(HEAD)"
+            ),
+            None => {
+                assert!(status.detached, "a HEAD with no name is a detached one");
+                assert!(
+                    flying.is_empty(),
+                    "and no local branch is flying %(HEAD) on its behalf"
+                );
+            }
+        }
         assert!(
             refs.iter().all(|entry| !entry.name.starts_with("refs/")),
             "every name arrived short, whichever tree it came out of"
@@ -5673,6 +5705,39 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
                 .all(|commit| commit.hash.len() == 40 && !commit.short.is_empty()),
             "every commit has a full hash and an abbreviation"
         );
+
+        // And what the page makes of those two answers, which is the half of the
+        // branch question a `HEAD` standing on nothing is the one to get wrong.
+        let mut cache = GitCache::at_root(root.clone(), GitRole::Graph);
+        assert!(cache.accept(GitAnswer::Status {
+            root: root.clone(),
+            outcome: Ok(status.clone()),
+        }));
+        assert!(cache.accept(GitAnswer::Refs {
+            root,
+            outcome: Ok(refs.clone()),
+        }));
+        let mut measure = |_: &str, _: f32, _: crate::git_panel::MeasureFace| 30.0;
+        let head = crate::git_panel::head_of(&cache, 1.0, &mut measure);
+        let back = crate::git_graph::leave_detached_branch(&cache);
+        if status.detached {
+            assert!(head.detached, "the badge is the whole of what says so");
+            assert!(!head.named, "and there is no name to be at 600 *for*");
+            assert_eq!(head.branch, crate::git_panel::git_detached());
+            // The door is offered only where it can name somewhere real, so a
+            // checkout with no local branches at all — a tag, fetched and checked
+            // out by a runner — gets the badge and no door.
+            if let Some(branch) = back.as_deref() {
+                assert!(
+                    branches.iter().any(|entry| entry.name == branch),
+                    "the way back names a branch this repository has"
+                );
+            }
+        } else {
+            assert!(head.named && !head.detached);
+            assert_eq!(Some(head.branch.as_str()), status.branch.as_deref());
+            assert_eq!(back, None, "a HEAD on a branch is not offered a way off it");
+        }
     }
 
     /// PIN — **a page is fifty, and the fifty-first is behind `has_more`.**
