@@ -1,12 +1,29 @@
 name: Release
 
-# A tag, and nothing else. The archive a person downloads has to be traceable to
-# one commit that somebody named, which a workflow that also ran on pushes could
-# not promise.
+# A tag, and nothing else, is what *publishes*. The archive a person downloads has
+# to be traceable to one commit that somebody named, which a workflow that also
+# ran on every push could not promise.
+#
+# A manual run is the same job with nothing at the end of it. Several of these
+# steps exist nowhere else, so before this trigger the only way to find out
+# whether the workflow still worked was to tag a release and watch — which is how
+# it stayed broken across three tags. A manual run builds, gates, packs and
+# starts the executable exactly as a tag does, and drafts nothing: the draft step
+# asks for a tag ref, not for an event name.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >
+          The tag this rehearsal is for, e.g. v0.2.0-preview. Given, it is
+          checked against the manifest exactly as a real tag is, which is how a
+          tag that would be refused is found out about before it is pushed. Left
+          empty, nothing is claimed and what is built is the branch as it stands.
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -28,18 +45,37 @@ jobs:
       # another run that nothing here verifies.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, read 2026-08-27
+      # `.github/actions/toolchain`, the same one every CI job uses, and that is
+      # the point: this file installed the compiler its own way, that way stopped
+      # working, and nothing said so until a tag was pushed. `cache: false` is
+      # the one difference and it is the paragraph above.
+      - uses: ./.github/actions/toolchain
         with:
-          # rust-toolchain.toml is the single source of truth for the compiler,
-          # exactly as in CI.
-          toolchain: none
+          cache: false
 
       # **The tag and the manifest are one claim or this stops here.** `v0.1.0`
       # over a tree that says `0.1.1` would produce an archive whose name, whose
       # `folio.exe --version` and whose Properties page disagree — and the first
       # two are the only ones most people ever read.
+      #
+      # **`-preview` is a release channel and not a different claim.** Every
+      # release so far has been tagged `v<version>-preview` over a manifest that
+      # says `<version>`: `v0.1.0-preview` over `0.1.0`, `v0.1.1-preview` over
+      # `0.1.1`. The suffix says who the build is for, not what it is — the
+      # archive is still `folio-<version>-windows-x64.zip` and the executable
+      # still answers `<version>`, so the tag and the manifest still say the one
+      # thing. Both spellings are accepted and nothing else is; a tag naming a
+      # version the tree does not carry is still where this stops.
+      #
+      # What is being claimed comes from the ref when a tag was pushed, and from
+      # the input when a person started the run by hand. A manual run with the
+      # input left empty claims nothing, and the version is simply read out of
+      # the manifest so the rest of the job has one; nothing downstream drafts a
+      # release, so there is no claim for it to be wrong about.
       - name: the tag names the version in the manifest
         shell: pwsh
+        env:
+          CLAIMED_TAG: ${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag }}
         run: |
           $manifest = Get-Content -LiteralPath Cargo.toml -Raw
           if ($manifest -notmatch '(?ms)^\[workspace\.package\](.*?)^\[') {
@@ -49,12 +85,29 @@ jobs:
             throw "[workspace.package] declares no version"
           }
           $version = $Matches[1]
-          $tag = "${{ github.ref_name }}"
-          if ($tag -ne "v$version") {
-            throw "the tag is $tag and the workspace version is $version"
-          }
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "building $tag"
+          $tag = $env:CLAIMED_TAG
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            Write-Host "no tag is claimed: this is a rehearsal of $version from ${{ github.ref_name }}, and it will draft nothing"
+          } else {
+            $accepted = @("v$version", "v$version-preview")
+            if ($accepted -notcontains $tag) {
+              throw "the tag is $tag and the workspace version is $version; the tag has to be $($accepted -join ' or ')"
+            }
+            Write-Host "building $tag"
+          }
+
+      # **Before the build, because that is the only thing this step buys.**
+      # `package.ps1` packs `folio.msix` with `makeappx.exe`, which comes out of
+      # the Windows SDK on the runner image rather than out of this repository.
+      # An image that stopped carrying it would otherwise be found out at the
+      # `archive` step, after a ten-minute release build and a `cargo install` —
+      # so the question is asked first, and it is asked of the same
+      # `Find-MakeAppx` the pack itself calls rather than of a second copy of
+      # the search written into this file.
+      - name: the runner's Windows SDK has makeappx
+        shell: pwsh
+        run: ./scripts/release/package.ps1 -ToolsOnly
 
       - name: build
         run: cargo build --release --locked
@@ -135,7 +188,11 @@ jobs:
       # `gh` and not a third-party action: it is on the image, it takes the
       # job's own token, and it is one fewer piece of code with write access to
       # this repository's releases.
+      # `github.ref_type`, not the event name: what decides whether anything is
+      # published is whether this run is *of a tag*. A manual run has no tag to
+      # publish under and never reaches this step, however it was started.
       - name: draft the release
+        if: github.ref_type == 'tag'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}

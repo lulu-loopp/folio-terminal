@@ -15,7 +15,7 @@ files preview beside the prompt, and an agent that is waiting for you says so.
 [中文说明](README.zh-CN.md) · [Shortcuts](docs/shortcuts.md) ·
 [Security](SECURITY.md) · [Changes](CHANGELOG.md)
 
-> **Preview.** 0.1.1 is a preview build, and it is not code-signed — see
+> **Preview.** 0.2.0 is a preview build, signed by Weiyi Shi — see
 > [SmartScreen](#smartscreen) below.
 
 ---
@@ -142,6 +142,66 @@ be seen at once.
   preview.
 - `Ctrl+Shift+↑` and `Ctrl+Shift+↓` step between commands in the scrollback, and
   a command that failed is marked as having failed.
+- The folder button over the files column lists the folders your shells are
+  standing in, then the last five folders you pointed a column at, each marked
+  `recent`.
+
+### A terminal on a hotkey
+
+One key brings a terminal down over whatever is on the screen, and the same key
+takes it away again.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/quake-dark.png">
+  <img src="docs/screenshots/quake-light.png" width="100%"
+       alt="A terminal window hanging from the top of a screen, a little below the
+       edge and centred, over a File Explorer window showing a small project's
+       files. The terminal has one tab, a gear and a close button, and its shell
+       has printed four commits and a directory listing above an empty prompt.">
+</picture>
+
+- ``Win+` `` drops a terminal across the top of whichever screen the pointer is
+  on, over whatever was standing there. Pressing it again puts the window away
+  and hands the keyboard back to the program it came down over.
+- It is the same Folio — tabs, panes, the files column, the preview, every
+  shortcut — and it keeps its shells and its scrollback between summons.
+- A rectangle you move or resize by hand is remembered for the display it is on,
+  so the summon comes down where you last put it on that screen.
+- It lives and dies with Folio: no icon of its own, and nothing left running
+  behind the key. Closing the last window you can see ends the run.
+- **Settings > Summoned terminal** holds the key, which profile a new tab opens
+  on, the height, width and the gap below the top of the screen, whether the
+  window hides when the keyboard leaves it, and a command to run on the first
+  summon of each run.
+- At the next launch a pinned tab's last command can come back typed at its
+  prompt — typed, and not run.
+
+### Search everything
+
+One box answers five questions at once, and `Enter` goes straight there.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/palette-dark.png">
+  <img src="docs/screenshots/palette-light.png" width="100%"
+       alt="A box floating over the top of the window, a query typed into its
+       field and its results under five headings that do not mix: an action, a
+       pane, a command the window has run, a file, and a setting. The first row
+       is highlighted, and the letters that matched are marked in each row.">
+</picture>
+
+- `Ctrl+Shift+P` raises a box over the top of the window with five sections that
+  never mix: what Folio can do, the panes and tabs this window has open, the
+  commands it has run, the files under the folder its column is standing in, and
+  the settings.
+- Typing narrows all five together and the arrow keys walk them. `Enter` on a
+  pane raises it, on a file opens it in the preview pane, on a setting opens
+  Settings at that row, and on an action does it.
+- A command still running is pointed at with a ring around the pane it is running
+  in, rather than a scroll to a line that has gone past.
+- The files come from an index of the folder the column is standing in, built off
+  the window's own thread, so a deep tree does not make the box wait.
 
 ### Windows integration
 
@@ -161,11 +221,34 @@ be seen at once.
   stock `Restricted`, the switch says so and hands you the `Set-ExecutionPolicy`
   command that lets the module load.
 
+### Visual Studio Code
+
+Folio cannot be a panel inside VS Code. That panel runs a process speaking VS
+Code's own protocol and draws the terminal itself; a terminal that draws its own
+window has nothing to hand it. What Folio can be is the terminal VS Code opens
+beside itself.
+
+`folio-here.cmd` ships in the archive, beside `folio.exe`, and is one line:
+
+```bat
+@"%~dp0folio.exe" --cwd "%CD%"
+```
+
+Point VS Code's external terminal at it — Settings, or `settings.json`:
+
+```json
+"terminal.external.windowsExec": "C:\\Tools\\folio\\folio-here.cmd"
+```
+
+**Terminal > Open in External Terminal** (`Ctrl+Shift+C`) then opens Folio on the
+folder the editor is standing in. The `.cmd` exists because that setting runs a
+command with no arguments, and `--cwd` is how Folio is told where to start.
+
 ---
 
 ## Download
 
-Take `folio-0.1.1-windows-x64.zip` from the releases page, unpack it wherever you
+Take `folio-0.2.0-windows-x64.zip` from the releases page, unpack it wherever you
 keep programs, and run `folio.exe`. There is no installer, and nothing is written
 outside that folder until you run it. `SHA256SUMS.txt` is the hash of what you
 downloaded. Needs **Windows 10 1809 or newer, or Windows 11, 64-bit**.
@@ -177,8 +260,13 @@ everything except the web preview works, and the preview says what is missing.
 
 ## SmartScreen
 
-0.1.1 is not code-signed, so the first run may raise **"Windows protected your
-PC"**. Click **"More info"**, check the app named there is `folio.exe`, and click
+From 0.2.0, `folio.exe` is signed by **Weiyi Shi**, with a certificate from
+Microsoft's Artifact Signing service and a Microsoft time stamp.
+
+A signature is not a reputation, and SmartScreen goes on the second: until enough
+people have run a build carrying this one, the first run may still raise
+**"Windows protected your PC"**. Click **"More info"**, check that the
+publisher named there is **Weiyi Shi** and the app is `folio.exe`, and click
 **"Run anyway"**. Do not switch SmartScreen off for this.
 
 ## First run
@@ -233,12 +321,12 @@ What is in each file, and why a full address ends up in `session.json`, is in
 
 ## Known issues
 
-- **Not signed.** See [SmartScreen](#smartscreen) above.
 - **A window was once reported drawing its top half black** after a move to a
   second monitor, unreproduced. Attach `%APPDATA%\Folio\diagnostics.log` if you
   hit it.
 - **"Open Folio here" is not on the first page** of the Windows 11 context menu.
-  That page needs a signed, packaged application, so it waits on signing.
+  That page needs a packaged application as well as a signed one; it is planned
+  for 0.2.1.
 - **`.webm` needs the VP9 or AV1 Video Extension** from the Microsoft Store. A
   stock Windows has neither, and without one there is no still and no playback.
 - The rest are in [`CHANGELOG.md`](CHANGELOG.md).
@@ -260,7 +348,6 @@ go through the private channel in [`SECURITY.md`](SECURITY.md), not an issue.
 
 ## What's next
 
-- A terminal on a hotkey.
 - Markdown editing in the preview pane.
 - macOS and Linux.
 - The terminal from a phone.

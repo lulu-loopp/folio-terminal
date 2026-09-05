@@ -134,6 +134,36 @@ impl TextField {
         &self.preedit
     }
 
+    /// **What the field reads as right now** — the committed text with the
+    /// composition spliced in where it is drawn.
+    ///
+    /// This is the string a reader is looking at, and it is deliberately *not*
+    /// [`Self::text`]: the buffer is what survives an Escape, and what is on
+    /// the glass is the buffer with the pre-edit standing at the caret. A
+    /// surface that filters a list as you type has to filter against what is on
+    /// the glass, or a Chinese query narrows nothing until the moment it is
+    /// committed — which is a box that appears to ignore half of what was typed
+    /// into it.
+    ///
+    /// Spliced at the caret rather than over the selection, on the painter's own
+    /// arithmetic: a composition pushes the caret along and does not consume the
+    /// selection until it commits, and one reading is what keeps the string that
+    /// is measured and the string that is queried the same string.
+    ///
+    /// Borrowed when there is no composition, which is the ordinary case and
+    /// every keystroke of it.
+    #[must_use]
+    pub fn composed(&self) -> std::borrow::Cow<'_, str> {
+        if self.preedit.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.text);
+        }
+        let mut composed = String::with_capacity(self.text.len() + self.preedit.len());
+        composed.push_str(&self.text[..self.caret]);
+        composed.push_str(&self.preedit);
+        composed.push_str(&self.text[self.caret..]);
+        std::borrow::Cow::Owned(composed)
+    }
+
     /// What the IME is composing right now, or nothing when it has finished.
     pub fn set_preedit(&mut self, text: &str) {
         self.preedit.clear();
@@ -174,6 +204,20 @@ impl TextField {
                 return false;
             };
             self.anchor = at;
+        }
+        self.delete_selection()
+    }
+
+    /// `Ctrl+Backspace`: the selection if there is one, otherwise the word
+    /// behind the caret.
+    ///
+    /// The word is [`Self::word_boundary`]'s, which is the same edge `Ctrl+←`
+    /// stops at — so "delete a word" and "walk a word" cannot disagree about
+    /// where a word starts, which is the way a hand-rolled pair of these ends up
+    /// eating a hyphen in one direction and not the other.
+    pub fn delete_word_back(&mut self) -> bool {
+        if self.selection().is_empty() {
+            self.anchor = self.word_boundary(false);
         }
         self.delete_selection()
     }
@@ -303,6 +347,34 @@ impl TextField {
 /// beside it.
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// **What a clipboard can put into a field that holds one line.**
+///
+/// The first line and nothing after it, with the control characters taken out
+/// of what is left. Two decisions, and each has an alternative worth naming:
+///
+/// * **The first line, not every line joined.** A field with one row can only
+///   show one, so a multi-line paste has to lose something either way; losing
+///   the rows after the first is a loss the reader can see and undo, while
+///   joining them puts a query on the glass that matches nothing and looks like
+///   one thing they typed.
+/// * **Control characters removed, not escaped or kept.** A tab, a NUL or the
+///   `\u{1b}` at the head of an escape sequence are not characters anybody meant
+///   to search for; kept, they are invisible glyphs that make a query fail for a
+///   reason nothing on the glass explains.
+///
+/// A free function because it is a fact about the clipboard and a one-line
+/// field, not about any particular one — the caller inserts the answer through
+/// the same [`TextField::insert`] a keystroke goes through.
+#[must_use]
+pub fn one_line(text: &str) -> String {
+    text.split(['\r', '\n'])
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect()
 }
 
 #[cfg(test)]
@@ -467,5 +539,111 @@ mod tests {
         }
         assert_eq!(field.caret(), 0);
         assert_eq!(field.before_caret(), "");
+    }
+
+    /// PIN — **what the field reads as is the buffer with the composition
+    /// standing in it** (user ruling 2026-09-05).
+    ///
+    /// The half of the palette's live narrowing that is a fact about a field
+    /// rather than about a list: `composed` is the string on the glass, `text`
+    /// is the string that survives an Escape, and they are two different
+    /// questions with two different answers.
+    ///
+    /// MUTATIONS:
+    /// (1) return `text` from `composed` — the second assertion goes red, and a
+    ///     composed query narrows nothing until it commits;
+    /// (2) splice the pre-edit at the end instead of the caret — the third goes
+    ///     red, and the string that is filtered stops being the string that is
+    ///     drawn;
+    /// (3) fold the pre-edit into `text` — the fourth goes red, and cancelling
+    ///     a composition would have to un-type it.
+    #[test]
+    fn the_composed_reading_is_the_buffer_with_the_composition_in_it() {
+        let mut field = TextField::holding("git");
+        assert_eq!(
+            field.composed(),
+            "git",
+            "with nothing composing, it is the text"
+        );
+
+        field.set_preedit("ni");
+        assert_eq!(
+            field.composed(),
+            "gitni",
+            "a composition is part of the reading"
+        );
+
+        field.step(TextMove::Home, false);
+        assert_eq!(
+            field.composed(),
+            "nigit",
+            "and it stands where the caret is, which is where it is drawn"
+        );
+
+        assert_eq!(field.text(), "git", "the buffer never saw it");
+        field.set_preedit("");
+        assert_eq!(
+            field.composed(),
+            "git",
+            "so cancelling restores the reading"
+        );
+    }
+
+    /// PIN — **`Ctrl+Backspace` deletes to the same edge `Ctrl+←` walks to.**
+    ///
+    /// MUTATIONS:
+    /// (1) delete to the previous whitespace instead — the second case keeps
+    ///     `(` and this goes red;
+    /// (2) ignore the selection and always eat a word — the last case goes red,
+    ///     and a selected line loses a word beyond it.
+    #[test]
+    fn ctrl_backspace_takes_the_word_the_word_walk_would_have_crossed() {
+        let mut field = TextField::holding("fix the thing");
+        assert!(field.delete_word_back());
+        assert_eq!(field.text(), "fix the ");
+
+        let mut punctuated = TextField::holding("fix(git");
+        assert!(punctuated.delete_word_back());
+        assert_eq!(punctuated.text(), "fix(", "punctuation is its own run");
+        assert!(punctuated.delete_word_back());
+        assert_eq!(punctuated.text(), "fix");
+
+        let mut empty = TextField::default();
+        assert!(!empty.delete_word_back(), "nothing behind, nothing deleted");
+
+        let mut selected = TextField::holding("fix the thing");
+        selected.select_all();
+        assert!(selected.delete_word_back());
+        assert_eq!(selected.text(), "", "a selection is what a delete takes");
+    }
+
+    /// PIN — **a clipboard reaches a one-line field as one line of printable
+    /// text** (user ruling 2026-09-05).
+    ///
+    /// MUTATIONS:
+    /// (1) join the lines with a space instead of cutting — the second
+    ///     assertion goes red;
+    /// (2) keep the control characters — the third goes red, and a query holds
+    ///     glyphs nothing on the glass explains.
+    #[test]
+    fn a_pasted_clipboard_is_cut_to_its_first_line_and_stripped() {
+        assert_eq!(one_line("settings"), "settings");
+        assert_eq!(
+            one_line("first\r\nsecond\r\nthird"),
+            "first",
+            "the rows after the first are not this field's to show"
+        );
+        assert_eq!(
+            one_line("a\tb\u{0}c\u{1b}d"),
+            "abcd",
+            "and a control character is not a character anybody searched for"
+        );
+        assert_eq!(one_line(""), "");
+        assert_eq!(one_line("\nsecond"), "", "the first line is the first line");
+        assert_eq!(
+            one_line("\u{4f60}\u{597d}\nthere"),
+            "\u{4f60}\u{597d}",
+            "the cut is by line and not by byte"
+        );
     }
 }

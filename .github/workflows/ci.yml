@@ -47,14 +47,11 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # rust-toolchain.toml is the single source of truth: rustup reads it when
-      # the channel is read out of the file and named explicitly: the runner's
-      # bare install rejects a channel carrying a target triple; the explicit
-      # form takes the full toolchain name.
-      - run: |
-          $c = (Select-String -Path rust-toolchain.toml -Pattern 'channel = "(.+)"').Matches[0].Groups[1].Value
-          rustup toolchain install $c --component rustfmt --component clippy --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # The compiler and the shared cache both come from
+      # `.github/actions/toolchain`, which is the one place in this repository
+      # that decides what Rust a job is built with. `release.yml` calls the same
+      # action, so the two files cannot drift apart again.
+      - uses: ./.github/actions/toolchain
 
       # adapter.rs/cell_capture.rs are the vendor compatibility seam. Their job is to report
       # terminal facts; importing document, detection, or viewport policy here recreates the
@@ -130,14 +127,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # rust-toolchain.toml is the single source of truth: rustup reads it when
-      # the channel is read out of the file and named explicitly: the runner's
-      # bare install rejects a channel carrying a target triple; the explicit
-      # form takes the full toolchain name.
-      - run: |
-          $c = (Select-String -Path rust-toolchain.toml -Pattern 'channel = "(.+)"').Matches[0].Groups[1].Value
-          rustup toolchain install $c --component rustfmt --component clippy --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # The compiler and the shared cache both come from
+      # `.github/actions/toolchain`, which is the one place in this repository
+      # that decides what Rust a job is built with. `release.yml` calls the same
+      # action, so the two files cannot drift apart again.
+      - uses: ./.github/actions/toolchain
 
       - name: adapter modules do not import policy crates
         shell: pwsh
@@ -246,14 +240,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # rust-toolchain.toml is the single source of truth: rustup reads it when
-      # the channel is read out of the file and named explicitly: the runner's
-      # bare install rejects a channel carrying a target triple; the explicit
-      # form takes the full toolchain name.
-      - run: |
-          $c = (Select-String -Path rust-toolchain.toml -Pattern 'channel = "(.+)"').Matches[0].Groups[1].Value
-          rustup toolchain install $c --component rustfmt --component clippy --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # The compiler and the shared cache both come from
+      # `.github/actions/toolchain`, which is the one place in this repository
+      # that decides what Rust a job is built with. `release.yml` calls the same
+      # action, so the two files cannot drift apart again.
+      - uses: ./.github/actions/toolchain
 
       # These spawn cmd.exe and powershell.exe through the sidecar ConPTY that
       # `crates/bt-pty/build.rs` extracts, and read what comes back. They are
@@ -287,14 +278,11 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # rust-toolchain.toml is the single source of truth: rustup reads it when
-      # the channel is read out of the file and named explicitly: the runner's
-      # bare install rejects a channel carrying a target triple; the explicit
-      # form takes the full toolchain name.
-      - run: |
-          $c = (Select-String -Path rust-toolchain.toml -Pattern 'channel = "(.+)"').Matches[0].Groups[1].Value
-          rustup toolchain install $c --component rustfmt --component clippy --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # The compiler and the shared cache both come from
+      # `.github/actions/toolchain`, which is the one place in this repository
+      # that decides what Rust a job is built with. `release.yml` calls the same
+      # action, so the two files cannot drift apart again.
+      - uses: ./.github/actions/toolchain
 
       # The test binaries have to exist before WARP can be put beside them:
       # DXGI prefers a `d3d10warp.dll` in the loading binary's own directory,
@@ -321,14 +309,11 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # rust-toolchain.toml is the single source of truth: rustup reads it when
-      # the channel is read out of the file and named explicitly: the runner's
-      # bare install rejects a channel carrying a target triple; the explicit
-      # form takes the full toolchain name.
-      - run: |
-          $c = (Select-String -Path rust-toolchain.toml -Pattern 'channel = "(.+)"').Matches[0].Groups[1].Value
-          rustup toolchain install $c --component rustfmt --component clippy --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # The compiler and the shared cache both come from
+      # `.github/actions/toolchain`, which is the one place in this repository
+      # that decides what Rust a job is built with. `release.yml` calls the same
+      # action, so the two files cannot drift apart again.
+      - uses: ./.github/actions/toolchain
 
       - name: build folio.exe
         run: cargo build -p bt-app --locked

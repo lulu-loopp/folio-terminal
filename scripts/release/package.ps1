@@ -4,8 +4,8 @@
     exactly the list.
 
 .DESCRIPTION
-    The archive is eight files and the list of them is the point. Two of the
-    eight are a runtime contract rather than a convenience:
+    The archive is nine files and the list of them is the point. Two of the
+    nine are a runtime contract rather than a convenience:
 
       * `conpty.dll` and `OpenConsole.exe` must sit in `folio.exe`'s OWN
         directory. `vendor/conpty/portable-pty/src/win/psuedocon.rs` looks for
@@ -16,7 +16,7 @@
         subdirectory, and this loader never reads it — carrying it would be 1.7
         MiB of a second copy nothing opens.
 
-    One of the eight is not copied from anywhere: `folio.msix` is packed here,
+    One of the nine is not copied from anywhere: `folio.msix` is packed here,
     out of `packaging/msix/`. It is a **sparse** package and there is no program
     inside it — it is the identity and the COM class that put "Open in Folio" on
     the first page of the Windows 11 right-click menu, and the program it names
@@ -76,11 +76,27 @@
     Where the two licences, the third-party notices and the trademark notice
     are. Defaults to the repository root.
 
+.PARAMETER Packaging
+    Where the files that exist only to be shipped are. Defaults to
+    `packaging/`. Today that is `folio-here.cmd`.
+
 .PARAMETER Output
     Where the archive and `SHA256SUMS.txt` are written. Defaults to
     `target/release-package`. Anything already there is hashed into
     `SHA256SUMS.txt` alongside the archive, which is how the SBOM written by
     `sbom.ps1` before this runs ends up covered.
+
+.PARAMETER ToolsOnly
+    Find `makeappx.exe`, say which one, and stop. Nothing is read, built,
+    packed or written.
+
+    It exists for the release workflow, and for one reason: `makeappx` comes
+    out of the Windows SDK, the SDK is on the runner image rather than in this
+    repository, and an image that stopped carrying it would be found out
+    **after** a ten-minute build and a `cargo install`. Asked first, it is found
+    out in seconds. It is deliberately not a second copy of the search — it is
+    the same `Find-MakeAppx` the pack below calls, which is the only thing that
+    makes the answer worth anything.
 
 .PARAMETER Sign
     Sign `folio.exe` and `folio.msix` with the Artifact Signing certificate
@@ -112,8 +128,10 @@ param(
     [string] $Version,
     [string] $Binaries,
     [string] $Documents,
+    [string] $Packaging,
     [string] $Output,
-    [switch] $Sign
+    [switch] $Sign,
+    [switch] $ToolsOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -122,6 +140,7 @@ Set-StrictMode -Version Latest
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
 if (-not $Binaries) { $Binaries = Join-Path $root 'target\release' }
 if (-not $Documents) { $Documents = $root }
+if (-not $Packaging) { $Packaging = Join-Path $root 'packaging' }
 if (-not $Output) { $Output = Join-Path $root 'target\release-package' }
 
 function Get-WorkspaceVersion {
@@ -133,6 +152,51 @@ function Get-WorkspaceVersion {
         throw '[workspace.package] declares no version'
     }
     return $Matches[1]
+}
+
+# **`makeappx.exe`, found the way `sign.ps1` finds `signtool.exe`.** They come
+# out of the same Windows SDK install and neither is on anybody's PATH: the SDK
+# puts its tools under `Windows Kits\10\bin\<sdk version>\<arch>\` and adds
+# nothing to the environment. The newest is taken because a kit left behind by an
+# older Visual Studio is still on most machines that have a new one, and the
+# question "which one" has to have an answer that does not depend on the order
+# `Get-ChildItem` returns directories in.
+function Get-FileVersionNumber {
+    param([string] $Path)
+
+    $info = (Get-Item -LiteralPath $Path).VersionInfo
+    return [version] ('{0}.{1}.{2}.{3}' -f
+        $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart)
+}
+
+function Find-MakeAppx {
+    # x64, for the same reason `sign.ps1` takes the x64 signtool: it is the
+    # architecture this release is built and packaged on, and a kit that has an
+    # arm64 directory has an x64 one beside it.
+    $roots = @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "$env:ProgramFiles\Windows Kits\10\bin")
+    $candidates = @()
+    foreach ($root in $roots) {
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        foreach ($sdk in (Get-ChildItem -LiteralPath $root -Directory)) {
+            $exe = Join-Path (Join-Path $sdk.FullName 'x64') 'makeappx.exe'
+            if (Test-Path -LiteralPath $exe -PathType Leaf) { $candidates += $exe }
+        }
+    }
+    if ($candidates.Count -eq 0) {
+        throw ('no x64 makeappx.exe under any Windows Kit. Install the Windows SDK — the same ' +
+               'install sign.ps1 takes signtool.exe from, and the signing tools feature is enough.')
+    }
+
+    $newest = $candidates |
+        Sort-Object -Property @{ Expression = { Get-FileVersionNumber -Path $_ } } -Descending |
+        Select-Object -First 1
+    Write-Host "makeappx: $newest ($(Get-FileVersionNumber -Path $newest))"
+    return $newest
+}
+
+if ($ToolsOnly) {
+    Find-MakeAppx | Out-Null
+    return
 }
 
 if (-not $Version) { $Version = Get-WorkspaceVersion }
@@ -148,6 +212,14 @@ if (-not $Version) { $Version = Get-WorkspaceVersion }
 # images, which is worse than no page at all. It is read where it works - the
 # repository and the releases page - and what ships here is what the licences
 # require to ship.
+#
+# `folio-here.cmd` is here because it only works from here. It is one line —
+# `folio.exe --cwd` on the directory it was started in — and `%~dp0` is what
+# makes it a sibling reference rather than a path somebody has to edit: a
+# program that opens an external terminal by running a command with no
+# arguments (VS Code's `terminal.external.windowsExec` is the one it was
+# written for) has nowhere to say which folder it means, and this says it for
+# them. Outside the folder `folio.exe` was unpacked into it names nothing.
 $manifest = @(
     @{ Name = 'folio.exe';                From = $Binaries },
     # The sparse package that puts "Open in Folio" on the first page of the
@@ -159,6 +231,7 @@ $manifest = @(
     @{ Name = 'folio.msix';               From = $Output; Packed = $true },
     @{ Name = 'conpty.dll';               From = $Binaries },
     @{ Name = 'OpenConsole.exe';          From = $Binaries },
+    @{ Name = 'folio-here.cmd';           From = $Packaging },
     @{ Name = 'LICENSE-MIT';              From = $Documents },
     @{ Name = 'LICENSE-APACHE';           From = $Documents },
     @{ Name = 'THIRD-PARTY-NOTICES.md';   From = $Documents },
@@ -213,46 +286,6 @@ if ($info.ProductVersion.Trim() -ne $Version) {
 #     invalidate the other. Were the exe a payload of the package, it would have
 #     to be signed first and this sequence would be a requirement rather than a
 #     preference.
-
-# **`makeappx.exe`, found the way `sign.ps1` finds `signtool.exe`.** They come
-# out of the same Windows SDK install and neither is on anybody's PATH: the SDK
-# puts its tools under `Windows Kits\10\bin\<sdk version>\<arch>\` and adds
-# nothing to the environment. The newest is taken because a kit left behind by an
-# older Visual Studio is still on most machines that have a new one, and the
-# question "which one" has to have an answer that does not depend on the order
-# `Get-ChildItem` returns directories in.
-function Get-FileVersionNumber {
-    param([string] $Path)
-
-    $info = (Get-Item -LiteralPath $Path).VersionInfo
-    return [version] ('{0}.{1}.{2}.{3}' -f
-        $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart)
-}
-
-function Find-MakeAppx {
-    # x64, for the same reason `sign.ps1` takes the x64 signtool: it is the
-    # architecture this release is built and packaged on, and a kit that has an
-    # arm64 directory has an x64 one beside it.
-    $roots = @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "$env:ProgramFiles\Windows Kits\10\bin")
-    $candidates = @()
-    foreach ($root in $roots) {
-        if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
-        foreach ($sdk in (Get-ChildItem -LiteralPath $root -Directory)) {
-            $exe = Join-Path (Join-Path $sdk.FullName 'x64') 'makeappx.exe'
-            if (Test-Path -LiteralPath $exe -PathType Leaf) { $candidates += $exe }
-        }
-    }
-    if ($candidates.Count -eq 0) {
-        throw ('no x64 makeappx.exe under any Windows Kit. Install the Windows SDK — the same ' +
-               'install sign.ps1 takes signtool.exe from, and the signing tools feature is enough.')
-    }
-
-    $newest = $candidates |
-        Sort-Object -Property @{ Expression = { Get-FileVersionNumber -Path $_ } } -Descending |
-        Select-Object -First 1
-    Write-Host "makeappx: $newest ($(Get-FileVersionNumber -Path $newest))"
-    return $newest
-}
 
 $packaging = Join-Path $root 'packaging\msix'
 $layout = Join-Path $Output 'msix-layout'
@@ -393,8 +426,9 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive,
     [System.IO.Compression.CompressionLevel]::Optimal,
     # The folder goes in, so that extracting into a downloads directory produces
-    # one folder and not seven loose files — three of which only work while they
-    # are beside each other.
+    # one folder and not nine loose files — four of which only work while they
+    # are beside each other, and a fifth (`folio.msix`) which names the folder
+    # the other four are in.
     $true)
 Remove-Item -LiteralPath $staging -Recurse -Force
 

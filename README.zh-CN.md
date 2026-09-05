@@ -9,7 +9,7 @@ Folio 是一款 Windows 终端：命令输出的公式在其打印位置排版�
 
 [English](README.md) · [快捷键](docs/shortcuts.md) · [安全](SECURITY.md) · [更新记录](CHANGELOG.md)
 
-> **预览版。** 0.1.1 为预览版本，未进行代码签名，详见下方 [SmartScreen](#smartscreen)。
+> **预览版。** 0.2.0 为预览版本，已由 Weiyi Shi 签名，详见下方 [SmartScreen](#smartscreen)。
 
 ---
 
@@ -92,6 +92,41 @@ Folio 是一款 Windows 终端：命令输出的公式在其打印位置排版�
 - `Ctrl+Shift+Z` 将标签条切换为一列卡片，一张卡片对应一个标签页，卡片内按该标签页自身的布局绘出全部窗格。
 - `Ctrl+Shift+G` 将文件列切换为 git 面板：显示分支、工作区、暂存与未暂存文件、提交图；选中文件后，其差异显示于预览窗格。
 - `Ctrl+Shift+↑` 与 `Ctrl+Shift+↓` 可在历史输出的命令之间跳转，执行失败的命令标记为失败。
+- 文件列上方的文件夹按钮列出各 shell 所在的目录，其后是最近指向过的五个文件夹，每个标记 `recent`。
+
+### 快捷键呼出的终端
+
+一个快捷键将终端呼出至当前画面之上，再按一次将其收起。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/quake-dark.png">
+  <img src="docs/screenshots/quake-light.png" width="100%"
+       alt="终端窗口自屏幕顶部下拉、略低于上沿并居中，覆盖在一扇显示某个小项目文件的资源管理器窗口之上。该终端只有一个标签页、一个齿轮与一个关闭按钮，其 shell 已打印四条提交记录与一份目录列表，下方是空提示符。">
+</picture>
+
+- ``Win+` `` 将终端下拉至指针所在显示器的顶部，覆盖其下原有的画面；再按一次收起窗口，键盘交还给它覆盖前的程序。
+- 它就是同一个 Folio：标签页、窗格、文件列、预览与全部快捷键均在，两次呼出之间 shell 与历史输出保持不变。
+- 用户手动移动或调整后的矩形按显示器分别记录，下次在该显示器上呼出时落在上次的位置。
+- 它与 Folio 同生同死：没有独立图标，键后也不留驻留进程；关闭最后一扇可见窗口即结束本次运行。
+- **设置 > 快捷终端** 中可设置呼出键、新标签页使用的配置、窗口高度与宽度、距屏幕上沿的间距、失去键盘焦点时是否收起，以及每次运行首次呼出时执行的命令。
+- 下次启动时，钉住的标签页可将上次运行的命令填回提示符——只填入，不执行。
+
+### 一处搜索全部内容
+
+一个面板同时回答五个问题，回车直达目标。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/palette-dark.png">
+  <img src="docs/screenshots/palette-light.png" width="100%"
+       alt="面板浮于窗口上方，输入框中已键入查询词，结果分列于互不混排的五个标题之下：一个动作、一个窗格、本窗运行过的一条命令、一个文件、一个设置项。首行处于选中状态，各行中匹配到的字母均有标记。">
+</picture>
+
+- `Ctrl+Shift+P` 在窗口上方弹出面板，分五段且互不混排：Folio 可执行的动作、本窗已打开的窗格与标签页、本窗运行过的命令、文件列所在目录下的文件，以及设置项。
+- 输入内容同时收窄五段，方向键在其中移动。回车落在窗格上即切至该窗格，落在文件上即在预览窗格中打开，落在设置项上即打开设置并定位到该行，落在动作上即执行该动作。
+- 命令仍在运行时，Folio 在其所在窗格周围画出一圈提示，而非滚动到一条已经翻过去的行。
+- 文件一段取自文件列所在目录的索引，该索引在窗口线程之外建立，目录层级较深时面板不必等待。
 
 ### 与 Windows 的集成
 
@@ -105,17 +140,37 @@ Folio 是一款 Windows 终端：命令输出的公式在其打印位置排版�
 - 「在此处打开 Folio」位于资源管理器右键菜单的「显示更多选项」之下。
 - Windows PowerShell 5.1 自带 PSReadLine 2.0.0，该版本在窗口改变大小后会错放输入行。Folio 内置一份已修补的 2.4.6 版本，用户可按需将其安装至模块目录。当机器的执行策略仍为出厂默认的 `Restricted` 时，开关会说明原因，并提供 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 命令。
 
+### 与 Visual Studio Code 的配合
+
+Folio 不能作为 VS Code 内嵌的终端面板。该面板运行的是一个使用 VS Code 自有协议的进程，终端画面由 VS Code 自己绘制；自行绘制窗口的终端无法向其交付内容。Folio 可以作为 VS Code 在旁边打开的外部终端。
+
+压缩包内 `folio.exe` 旁附带 `folio-here.cmd`，内容为一行：
+
+```bat
+@"%~dp0folio.exe" --cwd "%CD%"
+```
+
+在 VS Code 的设置界面或 `settings.json` 中将外部终端指向该文件：
+
+```json
+"terminal.external.windowsExec": "C:\\Tools\\folio\\folio-here.cmd"
+```
+
+此后 **终端 > 在外部终端中打开**（`Ctrl+Shift+C`）即在编辑器当前所在目录打开 Folio。之所以需要这个 `.cmd`，是因为该设置执行命令时不附带参数，而 Folio 由 `--cwd` 得知起始目录。
+
 ---
 
 ## 下载
 
-从 releases 页面获取 `folio-0.1.1-windows-x64.zip`，解压至存放程序的目录，运行 `folio.exe`。无安装程序；运行之前，解压目录之外不会写入任何内容。`SHA256SUMS.txt` 为所下载文件的哈希值。需 **Windows 10 1809 或更高版本，或 Windows 11，64 位**。
+从 releases 页面获取 `folio-0.2.0-windows-x64.zip`，解压至存放程序的目录，运行 `folio.exe`。无安装程序；运行之前，解压目录之外不会写入任何内容。`SHA256SUMS.txt` 为所下载文件的哈希值。需 **Windows 10 1809 或更高版本，或 Windows 11，64 位**。
 
 网页预览需 **WebView2 运行时**。Windows 11 自带该运行时；Windows 10 通常亦已安装，若未安装，可从此处获取 [Evergreen 运行时](https://developer.microsoft.com/microsoft-edge/webview2/)。缺少该运行时，除网页预览外的所有功能均正常，预览窗格会说明缺失项。
 
 ## SmartScreen
 
-0.1.1 未进行代码签名，首次运行时可能出现「Windows 已保护你的电脑」提示。请点击「更多信息」，确认所列程序名为 `folio.exe`，再点击「仍要运行」。请勿为此关闭 SmartScreen。
+自 0.2.0 起，`folio.exe` 由 **Weiyi Shi** 签名，证书来自微软 Artifact Signing 服务，并带有微软时间戳。
+
+签名不等于信誉，而 SmartScreen 依据的是信誉：在携带此签名的版本积累到足够的运行量之前，首次运行时仍可能出现「Windows 已保护你的电脑」提示。请点击「更多信息」——其中所列发布者为 **Weiyi Shi**，程序名为 `folio.exe`——再点击「仍要运行」。请勿为此关闭 SmartScreen。
 
 ## 第一次运行
 
@@ -144,9 +199,8 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
 
 ## 已知问题
 
-- **未签名。** 见上方 [SmartScreen](#smartscreen)。
 - **曾有窗口移至第二显示器后上半部分显示为黑色的报告，未能复现。** 如遇此问题，请附上 `%APPDATA%\Folio\diagnostics.log`。
-- **「在此处打开 Folio」不在 Windows 11 右键菜单的首层。** 首层菜单要求程序已完成签名并打包，该功能待签名后实现。
+- **「在此处打开 Folio」不在 Windows 11 右键菜单的首层。** 首层菜单除签名外还要求程序已打包，该功能计划于 0.2.1 实现。
 - **`.webm` 需要 Microsoft Store 的 VP9 或 AV1 视频扩展。** 出厂 Windows 两者均未安装；缺少扩展时，首帧与播放均不可用。
 - 其余问题见 [`CHANGELOG.md`](CHANGELOG.md)。
 
@@ -162,7 +216,6 @@ MIT 或 Apache-2.0，任选其一。各依赖项的许可及其要求的声明�
 
 ## 后续方向
 
-- 快捷键呼出的临时终端
 - 预览窗格中的 markdown 编辑
 - macOS 与 Linux
 - 在手机上远程使用终端

@@ -208,8 +208,12 @@ checked against the source by a test.
 ## What Folio does not do
 
 - No telemetry, no analytics, no crash reporting to anyone.
-- No network client of its own. The only thing that reaches the network is a page
-  you asked the preview to open, fetched by WebView2.
-- No update check.
+- One network request of its own: the update check, a single `GET` of the
+  releases list at most once a day across every window, carrying a `User-Agent`
+  of `Folio` and nothing else. What it can do with the answer is draw a mark on
+  the settings gear; it downloads nothing. Settings > General > **Update check**,
+  or `"update_check": false` in `settings.json`, switches it off. The only other
+  thing that reaches the network is a page you asked the preview to open, fetched
+  by WebView2.
 - Nothing is read from, or written to, a working directory or a repository as
   configuration.

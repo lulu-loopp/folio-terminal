@@ -11,9 +11,12 @@
 #     directory. The placeholder list below is the whole permitted vocabulary.
 #   * an e-mail address outside the reserved example domains (RFC 2606/6761).
 #   * the checkout path this product was developed in.
-#   * the author's account name, in any case — except on a line that is a
-#     copyright notice naming them as the holder, which is the one place the
-#     name is the attribution rather than a leak of it.
+#   * the author's account name, in any case — except on a line that names them
+#     as the holder of something: a copyright notice, or, since 0.2.0, the
+#     sentence that says who signed the release. Both are the attribution rather
+#     than a leak of it, and a reader who is asked to check a publisher's name in
+#     a SmartScreen dialog has to be told it somewhere. Every other line in the
+#     tree still refuses the name, and the e-mail address is refused everywhere.
 #
 # Excluded, deliberately, and each for its own reason:
 #   * `vendor/`, `licenses/` and `THIRD-PARTY-NOTICES.md` — third-party code and
@@ -60,11 +63,31 @@ try {
     $mail_re = [regex]"[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.([A-Za-z]{2,24}))"
     $checkout_re = [regex]"(?i)Developer[\\/]{1,2}BetterTerminal"
     $author_re = [regex]"(?i)weiyi|umich\.edu"
-    # The two sentences the name above may appear in — see the loop below.
+    # The three sentences the name above may appear in — see the loop below.
     $copyright_re = [regex]"(?i)copyright\b.*\bweiyi shi\b"
-    # A signed package's identity: the `Publisher` of `packaging/msix/`, the
+    # **A Chinese word, written the way this scan will meet it.** Every file is
+    # read as Latin1 so that a recording of arbitrary bytes cannot throw on a
+    # sequence that is not valid UTF-8; a Chinese word therefore arrives as the
+    # Latin1 view of its UTF-8 bytes, and is searched for in exactly that form
+    # rather than pasted here as the mojibake nobody could check.
+    $asScanned = {
+        param([string] $word)
+        [regex]::Escape([Text.Encoding]::Latin1.GetString([Text.Encoding]::UTF8.GetBytes($word)))
+    }
+    $signWords = (@("签名", "发布者", "署名") | ForEach-Object { & $asScanned $_ }) -join "|"
+    $signWords = "\b(?:sign|signed|signer|signing|signature|publisher)\b|$signWords"
+    # The name and a word about signing, in either order and on one line: "signed
+    # by Weiyi Shi", and "names Weiyi Shi as the publisher".
+    $signed_re = [regex]("(?i)(?:\bweiyi shi\b.*(?:$signWords)|(?:$signWords).*\bweiyi shi\b)")
+    # **A signed package's identity, which the sentence above does not reach**
+    # (§7.4a): the `Publisher` of `packaging/msix/AppxManifest.xml`, the
     # publisher-scoped package name, and the two relative distinguished names the
-    # holder appears as inside a certificate subject.
+    # holder appears as inside a certificate subject. Each is missed by
+    # `$signed_re` for its own reason and none of them is an oversight there:
+    # `PublisherDisplayName` gives `publisher` no word boundary to end on,
+    # `WeiyiShi.Folio` has no space in it for `weiyi shi` to match, and a test
+    # that names a *different* holder beside this one to prove the comparison
+    # refuses it carries no word about signing at all.
     $publisher_re = [regex]"(?i)\b(?:CN|O)=Weiyi Shi\b|PublisherDisplayName|\bWeiyiShi\.Folio"
 
     $problems = New-Object System.Collections.Generic.List[string]
@@ -84,23 +107,24 @@ try {
         # `LICENSE-APACHE` and in the binary's own `LegalCopyright` as the
         # attribution the two licences are granted by. The difference is the
         # sentence the name stands in, so that is what is asked: the name is
-        # allowed on a line that is a copyright notice for it, and refused on
-        # every other line in the tree. The address is never allowed — a mailbox
-        # is not a holder, and no licence asks for one.
+        # allowed on a line that is a copyright notice for it, or on one that
+        # says who signed the release — a reader told to check the publisher a
+        # SmartScreen dialog names has to be able to read that name here — and
+        # refused on every other line in the tree. The address is never allowed —
+        # a mailbox is not a holder, and no licence asks for one.
         #
-        # **A package's publisher is the same kind of sentence** (§7.4a). Windows
-        # compares the `Publisher` in `packaging/msix/AppxManifest.xml` against
-        # the subject of the certificate that signed the package and refuses a
-        # mismatch, so that string is not this project's to choose or to
+        # **A package's publisher is a third sentence of the same kind** (§7.4a).
+        # Windows compares the `Publisher` in `packaging/msix/AppxManifest.xml`
+        # against the subject of the certificate that signed the package and
+        # refuses a mismatch, so that string is not this project's to choose or to
         # abbreviate: it is the certificate authority's rendering of the holder,
         # character for character, and `bt_platform::msix` has to carry the same
-        # one in order to check it. It is already public on every release — the
-        # SmartScreen prompt names it, and so does the Properties page of every
-        # signed file — and, like a copyright notice, it says who published this
-        # and nothing whatever about the machine it was built on. The package
-        # name is scoped by publisher for the same reason and is the same fact.
+        # one in order to check it. Like a copyright notice and like the line that
+        # names who signed a release, it says who published this and nothing
+        # whatever about the machine it was built on.
         foreach ($line in ($text -split "`n")) {
-            $notice = $copyright_re.IsMatch($line) -or $publisher_re.IsMatch($line)
+            $notice = $copyright_re.IsMatch($line) -or $signed_re.IsMatch($line) -or
+                      $publisher_re.IsMatch($line)
             foreach ($m in $author_re.Matches($line)) {
                 if ($notice -and $m.Value -notmatch "(?i)umich") { continue }
                 $problems.Add("$rel names the author: $($m.Value)")
