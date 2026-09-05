@@ -81745,11 +81745,15 @@ impl Runtime<'_> {
         self.ask_for_file_indexes();
         let candidates = self.palette_candidates();
         let note = self.palette_files_note();
+        // **The composed reading and not the buffer** (user ruling 2026-09-05):
+        // a composition in progress is part of what the box is asking, so a
+        // Chinese query narrows the list while it is being typed rather than
+        // only at the moment it commits. See [`palette::PaletteState::query`].
         let query = self
             .window
             .palette
             .as_ref()
-            .map(|state| state.field().text().to_owned())
+            .map(|state| state.query().into_owned())
             .unwrap_or_default();
         let listing = palette::arrange(&candidates, &query, note);
         if let Some(state) = self.window.palette.as_mut() {
@@ -81790,14 +81794,9 @@ impl Runtime<'_> {
                 false,
             );
         }
-        let text = field.text();
-        let shown = format!(
-            "{}{}{}",
-            field.before_caret(),
-            field.preedit(),
-            &text[field.caret()..]
-        );
-        (shown, before, true)
+        // The same splice the query is made of, so the string that is measured
+        // and the string that is filtered cannot drift apart.
+        (field.composed().into_owned(), before, true)
     }
 
     /// Where the box stands this frame.
@@ -81996,11 +81995,38 @@ impl Runtime<'_> {
         // gives it nothing to do, and a completion key in a box whose whole
         // gesture is "type a few letters and press Enter" would be a second
         // way to do the one thing Enter already does.
+        //
+        // **The clipboard is read before the field is borrowed**, and only for
+        // the chord that wants it: reading it costs a window handle and a trip
+        // to the platform, and doing that on every keystroke would be a box
+        // that opens the clipboard to find out whether you pressed `k`.
         let mut typed = false;
         let mut moved = false;
+        let pasted = input::is_paste_shortcut(&event.logical_key, self.window.modifiers)
+            .then(|| self.clipboard_line());
         if let Some(state) = self.window.palette.as_mut() {
             let field = state.field_mut();
             match &event.logical_key {
+                // **The clipboard's chord lands in the box, not in the shell
+                // behind it** (user ruling 2026-09-05). `Ctrl+V` and
+                // `Ctrl+Shift+V` are one verb here: the terminal tells them
+                // apart because `Ctrl+V` is a control code a program may want,
+                // and a text field has no such reading to protect.
+                //
+                // Above the `Ctrl+A` arm and above the ordinary character arm,
+                // both of which would otherwise answer for `v`.
+                _ if pasted.is_some() => {
+                    if let Some(line) = pasted.as_deref()
+                        && !line.is_empty()
+                    {
+                        field.insert(line);
+                        typed = true;
+                    }
+                }
+                // `Ctrl+Backspace` takes the word behind the caret, which is
+                // the edge `Ctrl+←` walks to — one answer to "where does a word
+                // start" for the two keys that ask.
+                Key::Named(NamedKey::Backspace) if ctrl => typed = field.delete_word_back(),
                 Key::Named(NamedKey::Backspace) => typed = field.backspace(),
                 Key::Named(NamedKey::Delete) => typed = field.delete(),
                 Key::Named(NamedKey::ArrowLeft) => {
@@ -82062,32 +82088,45 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// **What the clipboard can put into a one-line field**, or nothing when
+    /// there is no window handle or the platform will not hand it over.
+    ///
+    /// A failure is silent on [`Self::paste_into_preview`]'s own terms: a
+    /// clipboard another process is holding open is a condition that clears
+    /// itself, and a box that raised a card about it would be interrupting a
+    /// reader mid-query to report an event they can simply repeat.
+    fn clipboard_line(&self) -> String {
+        window_hwnd(&self.window.window)
+            .ok()
+            .and_then(|hwnd| bt_platform::clipboard_text(hwnd).ok())
+            .as_deref()
+            .map(text_field::one_line)
+            .unwrap_or_default()
+    }
+
     /// Composition in the palette's field.
     ///
-    /// [`Runtime::git_prompt_ime`]'s three arms, and the one thing that matters
-    /// about them: a preedit goes to `set_preedit` and never to `insert`, so a
-    /// half-composed `ni'hao` is drawn in the box and is **not** a query. The
-    /// list is asked again on the commit, which is the first moment there is a
-    /// word to ask about.
+    /// [`Runtime::git_prompt_ime`]'s three arms, with **one difference, and it
+    /// is the ruling of 2026-09-05**: a pre-edit still goes to `set_preedit`
+    /// and never to `insert` — the buffer must not hold text an Escape would
+    /// have to un-type — but the list is asked again on the pre-edit as well as
+    /// on the commit, because [`palette::PaletteState::query`] reads the
+    /// composition as part of the query. A half-composed `ni'hao` narrows the
+    /// box while it is being typed, which is what a filter box does.
+    ///
+    /// **Cancelling restores by construction and not by a branch**: the IME
+    /// announces a cancel as an empty pre-edit, so the same `set_preedit` puts
+    /// the reading back to the committed text and the same re-query answers it.
     fn palette_ime(&mut self, event: &Ime) -> Result<()> {
-        let mut committed = false;
-        if let Some(state) = self.window.palette.as_mut() {
-            match event {
-                Ime::Preedit(text, _) => state.field_mut().set_preedit(text),
-                Ime::Commit(text) => {
-                    state.field_mut().insert(text);
-                    committed = true;
-                }
-                Ime::Enabled | Ime::Disabled => return Ok(()),
-            }
+        let Some(state) = self.window.palette.as_mut() else {
+            return Ok(());
+        };
+        match event {
+            Ime::Preedit(text, _) => state.field_mut().set_preedit(text),
+            Ime::Commit(text) => state.field_mut().insert(text),
+            Ime::Enabled | Ime::Disabled => return Ok(()),
         }
-        if committed {
-            return self.requery_palette();
-        }
-        if self.refresh_chrome() {
-            self.present_chrome_change()?;
-        }
-        Ok(())
+        self.requery_palette()
     }
 
     /// **Carry out the selected row.**
@@ -136494,37 +136533,176 @@ mod palette_wiring_tests {
         );
     }
 
-    /// PIN — **a composition in progress is drawn and is not the query.**
+    /// PIN — **a composition in progress is part of the query, and is still not
+    /// part of the buffer** (user ruling 2026-09-05).
     ///
-    /// `set_preedit` for `Ime::Preedit` and `insert` for `Ime::Commit`, which
-    /// is `git_prompt_ime`'s pair and the whole of what keeps a half-composed
-    /// `ni'hao` out of the list. The list is asked again on the commit and not
-    /// before it — a box that re-queried on every keystroke of a composition
-    /// would flicker through five answers to five non-words.
+    /// Two rules that read like one and are not. `set_preedit` for
+    /// `Ime::Preedit` and `insert` for `Ime::Commit` is `git_prompt_ime`'s pair
+    /// and is unchanged: the buffer must never hold text an Escape would have
+    /// to un-type. What changed is what the *list* is asked about — the query
+    /// is [`palette::PaletteState::query`]'s composed reading, so the box
+    /// narrows while a Chinese word is being typed instead of standing still
+    /// until the moment it commits. The re-query therefore sits below the whole
+    /// `match` and answers every arm, which is also what makes a cancelled
+    /// composition restore the old list without a branch of its own.
     ///
     /// MUTATIONS:
-    /// (1) call `insert` on the `Preedit` arm — the first assertion goes red;
-    /// (2) re-query on the pre-edit — the last goes red.
+    /// (1) call `insert` on the `Preedit` arm — the first assertion goes red,
+    ///     and Escape would have to un-type the composition;
+    /// (2) move the re-query inside the `Commit` arm — the last goes red, and
+    ///     the list stops narrowing mid-composition.
     #[test]
-    fn the_palette_ime_keeps_a_preedit_out_of_the_query() {
+    fn the_palette_ime_filters_on_the_preedit_without_committing_it() {
         let text = body("fn palette_ime(&mut self, event: &Ime) -> Result<()> {");
         assert!(
             text.contains("Ime::Preedit(text, _) => state.field_mut().set_preedit(text)"),
             "a pre-edit is set, never inserted"
         );
         assert!(
-            text.contains("Ime::Commit(text) => {")
-                && text.contains("state.field_mut().insert(text)"),
+            text.contains("Ime::Commit(text) => state.field_mut().insert(text)"),
             "and a commit is an ordinary insert"
         );
-        let preedit = text.find("Ime::Preedit").expect("it answers a pre-edit");
-        let commit = text.find("Ime::Commit").expect("and a commit");
-        let requery = text
-            .find("return self.requery_palette();")
-            .expect("and the commit asks the list again");
+        // **The re-query is unconditional and below the whole `match`.** Asked
+        // as "there is exactly one of them, and nothing between the last arm and
+        // it is a condition" rather than by position alone: a re-query moved
+        // back inside the `Commit` arm is still *after* the other arms in the
+        // file, so an ordering assertion would pass over the very mutation this
+        // pins.
+        assert_eq!(
+            text.matches("requery_palette").count(),
+            1,
+            "one re-query, so there is no second one hiding behind a commit"
+        );
+        let (_, after_last_arm) = text
+            .split_once("Ime::Enabled | Ime::Disabled => return Ok(()),")
+            .expect("the last arm is the IME's own bookkeeping");
+        let (between, _) = after_last_arm
+            .split_once("self.requery_palette()")
+            .expect("and the re-query stands below it");
         assert!(
-            preedit < commit && commit < requery,
-            "the re-query is behind the commit, not behind the composition"
+            !between.contains("if "),
+            "nothing decides whether the list is asked again — a pre-edit asks it \
+             exactly as a commit does"
+        );
+    }
+
+    /// PIN — **the palette's query is the field's composed reading**, so the
+    /// list narrows on a composition and goes back when one is cancelled.
+    ///
+    /// The other half of the same ruling, on the side the IME never touches:
+    /// `arrange_palette` is what turns a query into a listing, and a version of
+    /// it that read `field().text()` would leave `palette_ime`'s re-query asking
+    /// the same question it asked before.
+    ///
+    /// MUTATION: read `state.field().text()` — this goes red, and every
+    /// re-query fired on a pre-edit returns the list unchanged.
+    #[test]
+    fn the_palette_asks_its_list_about_the_composed_reading() {
+        let text = body("fn arrange_palette(&mut self, requeried: bool) -> Result<()> {");
+        assert!(
+            text.contains("state.query()"),
+            "the query is the composed reading"
+        );
+        assert!(
+            !text.contains("field().text()"),
+            "and not the committed buffer, which is what an Escape would restore"
+        );
+    }
+
+    /// PIN — **the clipboard's chord lands in the box, and `Ctrl+Backspace`
+    /// takes a word** (user ruling 2026-09-05).
+    ///
+    /// `is_paste_shortcut` is the same predicate the terminal's own paste rung
+    /// asks, so `Ctrl+V`, `Ctrl+Shift+V` and `Shift+Insert` mean one thing in
+    /// this box rather than three; `one_line` is what cuts a multi-row
+    /// clipboard down to what a one-line field can hold.
+    ///
+    /// MUTATIONS:
+    /// (1) insert the clipboard verbatim — the second assertion goes red, and a
+    ///     three-row paste becomes a query nothing matches;
+    /// (2) drop the `ctrl` guard from the `Backspace` arm — the third goes red.
+    #[test]
+    fn the_palette_field_pastes_and_deletes_a_word() {
+        let keys = body("fn palette_key(&mut self, event: &KeyEvent) -> Result<()> {");
+        assert!(
+            keys.contains("input::is_paste_shortcut(&event.logical_key, self.window.modifiers)"),
+            "the paste chord is the window's own predicate, not a second spelling"
+        );
+        assert!(
+            body("fn clipboard_line(&self) -> String {").contains("text_field::one_line"),
+            "and what it hands the field is one line of printable text"
+        );
+        assert!(
+            keys.contains(
+                "Key::Named(NamedKey::Backspace) if ctrl => typed = field.delete_word_back()"
+            ),
+            "Ctrl+Backspace takes the word the word walk would have crossed"
+        );
+        assert!(
+            keys.contains("Key::Character(text) if ctrl && text.eq_ignore_ascii_case(\"a\")"),
+            "and Ctrl+A still selects everything"
+        );
+    }
+
+    /// PIN — **the master gate: with the palette up, nothing a shell could hear
+    /// gets past it** (user ruling 2026-09-05 ③).
+    ///
+    /// The box is a text field standing over a running program, so every door
+    /// that ends in a byte on a pipe has to be *below* the palette's rung —
+    /// the clipboard paste, the copy, the shortcut table and the encoder that
+    /// writes the keystroke — and the composition ladder has to answer
+    /// `ImeOwner::Palette` before it reaches the shell's arm. Written as one
+    /// test because it is one rule: a chord that leaks is not a smaller bug
+    /// than a letter that leaks, it is the same bug, and this list is the
+    /// enumeration of the ways out of `keyboard_input`.
+    ///
+    /// MUTATIONS: move the palette's rung below any one of the four names
+    /// below — that name's assertion goes red, and `Ctrl+V` typed into the box
+    /// pastes into the shell behind it.
+    #[test]
+    fn nothing_leaks_past_the_palette_to_the_shell() {
+        let text = body(
+            "fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {",
+        );
+        let rung = text
+            .find("self.palette_key(event)?;")
+            .expect("the palette has a rung of its own");
+        for door in [
+            "self.paste_from_clipboard()?;",
+            "self.copy_selection()?;",
+            "self.app.shortcuts.lookup(",
+            "self.send_user_input(",
+        ] {
+            let at = text
+                .find(door)
+                .unwrap_or_else(|| panic!("`{door}` is still a way out of this function"));
+            assert!(
+                rung < at,
+                "`{door}` stands below the palette's rung, or the box leaks it to the shell"
+            );
+        }
+
+        // And the composition ladder, which is a second function and the same
+        // rule: the palette's arm returns, so no pre-edit and no commit reaches
+        // the `write_pty_input` at the bottom of `ime_input`.
+        let ime = body("fn ime_input(&mut self, event: Ime) -> Result<()> {");
+        let palette = ime
+            .find("ImeOwner::Palette => {")
+            .expect("a composition has a palette arm");
+        let shell = ime
+            .find("ImeOwner::Shell => {}")
+            .expect("and a shell arm below it");
+        let write = ime
+            .find("write_pty_input(")
+            .expect("and the write that arm falls through to");
+        assert!(
+            palette < shell && shell < write,
+            "the palette answers before the shell does, and returns"
+        );
+        assert!(
+            ime[palette..shell].contains("self.palette_ime(&event)?;")
+                && ime[palette..shell].contains("return Ok(());"),
+            "and it returns rather than falling through"
         );
     }
 

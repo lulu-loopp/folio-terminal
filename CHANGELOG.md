@@ -67,6 +67,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **The command palette's input takes a paste, and narrows while you
+  compose.** With the palette open, `Ctrl+V` — and `Ctrl+Shift+V` and
+  `Shift+Insert`, which mean the same thing here — puts the clipboard into the
+  input instead of into the shell behind it. What goes in is the first line of
+  what was copied, with control characters taken out, because the input holds
+  one line. `Ctrl+A` selects what is in it and `Ctrl+Backspace` takes the word
+  behind the caret. And a query typed through an input method now narrows the
+  list as it is being composed rather than only once it is committed; pressing
+  Escape part-way through a composition puts the list back where it was.
+
 - **A file path an application wrapped over several indented rows is one link
   again.** When an agent prints a block of indented text holding a single path
   and breaks it at the window's width, the rows are read back as the one file

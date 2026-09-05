@@ -1538,6 +1538,28 @@ impl PaletteState {
         &mut self.field
     }
 
+    /// **What the box is asking** — the field's composed reading, which is the
+    /// committed text with a composition in progress standing at the caret
+    /// (user ruling 2026-09-05).
+    ///
+    /// The pre-edit is part of the query and not merely drawn beside it, which
+    /// is the one place this box parts company with the terminal's search
+    /// capsule ([`crate::search`]) — and the difference is what the two are
+    /// filtering. The capsule scans a scrollback of a hundred thousand lines,
+    /// so asking it about a half-composed `ni'hao` is real work spent on a
+    /// string nobody typed; this list is a few hundred labels already in
+    /// memory, and the answer a reader wants from it is the one every other
+    /// filter box gives: it narrows while you type, in whichever language you
+    /// are typing.
+    ///
+    /// Nothing about "cancel restores" is written here: a cancelled composition
+    /// is an empty pre-edit, so the reading goes back to the committed text on
+    /// its own.
+    #[must_use]
+    pub fn query(&self) -> std::borrow::Cow<'_, str> {
+        self.field.composed()
+    }
+
     #[must_use]
     pub fn listing(&self) -> &Listing {
         &self.listing
@@ -2694,6 +2716,126 @@ mod list_tests {
             super::wheel_part(&layout, f64::from(x), f64::from(layout.frame[3]) + 1.0),
             None,
             "at either end: the box has no reach beyond its own rectangle"
+        );
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::{Candidate, PaletteState, Section, Verb, arrange, fuzzy_score};
+    use crate::shortcuts::{Action, Focus};
+
+    fn candidate(label: &str) -> Candidate {
+        Candidate {
+            section: Section::Actions,
+            label: label.to_owned(),
+            hint: None,
+            mark: None,
+            awaiting: false,
+            verb: Verb::Run(Action::NewTab),
+        }
+    }
+
+    fn shown(candidates: &[Candidate], state: &PaletteState) -> Vec<String> {
+        arrange(candidates, &state.query(), None)
+            .rows()
+            .map(|row| row.what.label.clone())
+            .collect()
+    }
+
+    /// PIN — **a composition narrows the list while it is being composed, and a
+    /// cancelled one puts the list back** (user ruling 2026-09-05 ②).
+    ///
+    /// The whole rule as three pure steps and no window: committed text plus a
+    /// pre-edit make a query string, the query string is what `fuzzy_score`
+    /// scores, and the scores are the listing. Every one of those is a function
+    /// of its arguments, so the behaviour a reader sees is provable here rather
+    /// than only in front of an IME.
+    ///
+    /// MUTATIONS:
+    /// (1) read `field().text()` in `query` — the composed step stops narrowing
+    ///     and the second assertion goes red;
+    /// (2) fold the pre-edit into the buffer on `set_preedit` — the cancel stops
+    ///     restoring and the third goes red.
+    #[test]
+    fn a_composition_narrows_the_list_and_cancelling_it_restores_the_list() {
+        let candidates = vec![candidate("Split right"), candidate("Settings")];
+        let mut state = PaletteState::opening(Focus::default());
+
+        state.field_mut().insert("s");
+        assert_eq!(state.query(), "s");
+        assert_eq!(
+            shown(&candidates, &state),
+            vec!["Split right".to_owned(), "Settings".to_owned()],
+            "one committed letter is in both labels"
+        );
+
+        // The IME is composing `pl`, which nothing has committed.
+        state.field_mut().set_preedit("pl");
+        assert_eq!(state.query(), "spl", "committed text, then the composition");
+        assert!(fuzzy_score("spl", "Settings").is_none());
+        assert!(fuzzy_score("spl", "Split right").is_some());
+        assert_eq!(
+            shown(&candidates, &state),
+            vec!["Split right".to_owned()],
+            "and the list is narrowed by a composition nobody has committed"
+        );
+        assert_eq!(
+            state.field().text(),
+            "s",
+            "while the buffer still holds only what was committed"
+        );
+
+        // Escape during a composition arrives as an empty pre-edit.
+        state.field_mut().set_preedit("");
+        assert_eq!(state.query(), "s");
+        assert_eq!(
+            shown(&candidates, &state),
+            vec!["Split right".to_owned(), "Settings".to_owned()],
+            "a cancelled composition un-narrows exactly what it narrowed"
+        );
+
+        // And a commit folds the same characters into the buffer, which leaves
+        // the query where the composition already had it.
+        state.field_mut().set_preedit("pl");
+        state.field_mut().insert("pl");
+        assert_eq!(
+            state.field().text(),
+            "spl",
+            "the commit is an ordinary insert"
+        );
+        assert!(state.field().preedit().is_empty());
+        assert_eq!(state.query(), "spl", "and the query does not move under it");
+        assert_eq!(shown(&candidates, &state), vec!["Split right".to_owned()]);
+    }
+
+    /// PIN — the same three steps with the characters the ruling was written
+    /// for: a composition whose glyphs are not on the keyboard.
+    ///
+    /// MUTATION: splice the pre-edit by bytes rather than at the caret's
+    /// boundary — this panics rather than merely going red, which is the point
+    /// of running the rule over multi-byte text at all.
+    #[test]
+    fn a_composition_of_characters_that_are_not_typed_narrows_the_same_way() {
+        let candidates = vec![
+            candidate("\u{6253}\u{5f00}\u{6587}\u{4ef6}"),
+            candidate("\u{5173}\u{95ed}\u{6807}\u{7b7e}"),
+        ];
+        let mut state = PaletteState::opening(Focus::default());
+        state.field_mut().set_preedit("\u{6253}");
+        assert_eq!(state.query(), "\u{6253}");
+        assert_eq!(
+            shown(&candidates, &state),
+            vec!["\u{6253}\u{5f00}\u{6587}\u{4ef6}".to_owned()],
+            "one composed character is a query"
+        );
+        state.field_mut().insert("\u{6253}");
+        state.field_mut().set_preedit("\u{6587}");
+        assert_eq!(state.query(), "\u{6253}\u{6587}");
+        assert_eq!(
+            shown(&candidates, &state),
+            vec!["\u{6253}\u{5f00}\u{6587}\u{4ef6}".to_owned()],
+            "and a committed character with a composed one after it is one query"
         );
     }
 }
