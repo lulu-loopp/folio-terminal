@@ -1928,9 +1928,14 @@ mod tests {
         };
         assert_eq!(spans("见 D:\\shots\\a.png。"), ["D:\\shots\\a.png"]);
         assert_eq!(spans("D:\\shots\\a.png:12"), ["D:\\shots\\a.png"]);
-        // The ASCII full stop is still part of the name (boundary table row 16), and it still has
-        // to clear the extension list — which `png.` does not.
-        assert!(spans("D:\\shots\\a.png.").is_empty());
+        // The **sentence's** full stop, learned here the same way and on the same day it was ruled
+        // on (2026-09-05, boundary table rows 57–61; row 16 overturned). A stop at the end of a
+        // token is a seam, so the token offers `a.png` behind `a.png.` — and the extension question
+        // is asked of every reading, so the picture at the end of an English sentence is a picture
+        // exactly as the one at the end of a Chinese sentence became one above. The whole string
+        // still goes first and still fails the extension list, which is why only one span comes
+        // back.
+        assert_eq!(spans("D:\\shots\\a.png."), ["D:\\shots\\a.png"]);
     }
 
     #[test]

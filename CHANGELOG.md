@@ -30,6 +30,15 @@ All notable changes to Folio are recorded here. The format follows
     `Settings > Apps > Installed apps`, and the row reads the machine rather than
     a remembered answer, so it agrees with whatever you did there.
 
+### Fixed
+
+- **A sentence's own punctuation is no longer part of the file it names.** A line
+  ending `see docs/notes.md.` opened `notes.md.` — a name nothing on the disk
+  holds and the preview could make nothing of. An ASCII stop, comma, semicolon,
+  colon or quote at the end of a name is now read as the sentence's: the printed
+  string is still asked about first and a file that really carries one still
+  wins, but where it does not, the name without it does.
+
 ## 0.2.0-preview (unreleased)
 
 Two surfaces that were not there before — a terminal that comes down on a key
