@@ -42,13 +42,27 @@
 
 .PARAMETER TimeoutSeconds
     How long the cold launch has to reach its last phase.
+
+.PARAMETER ExpectSigned
+    Also check, before starting anything, that this executable carries a valid,
+    time-stamped Authenticode signature naming the holder it says it is
+    copyright of. Pass it when the exe under test came out of
+    `package.ps1 -Sign`; leave it off otherwise, because an unsigned build is
+    what an ordinary `cargo build` produces and this script has to keep working
+    on one.
+
+.PARAMETER SignerSubject
+    Who the certificate has to name, if not the holder named in the executable's
+    own `LegalCopyright`. Only read when `-ExpectSigned` is given.
 #>
 
 [CmdletBinding()]
 param(
     [string] $Exe,
     [string] $Artifacts,
-    [int] $TimeoutSeconds = 90
+    [int] $TimeoutSeconds = 90,
+    [switch] $ExpectSigned,
+    [string] $SignerSubject
 )
 
 $ErrorActionPreference = 'Stop'
@@ -136,9 +150,46 @@ function Invoke-Folio {
     }
 }
 
-# ── 1 and 2: the front door ──────────────────────────────────────────────────
-
 $expectedVersion = (Get-Item -LiteralPath $Exe).VersionInfo.ProductVersion.Trim()
+
+# ── 0: it is signed, and signed by whoever it says it belongs to ─────────────
+#
+# **Asked of the file rather than of a script's memory of what it signed.** The
+# name to expect is read out of the executable's own `LegalCopyright` — the
+# holder the two licences and `crates/bt-app/build.rs` already agree on — so this
+# check has no second copy of that name to drift away from, and a certificate
+# issued to somebody else fails it whatever the signing script believed.
+#
+# The time stamp is checked as hard as the signature: an Artifact Signing
+# certificate is valid for three days, and a signature made without `/tr` passes
+# every check for three days and then stops passing them on a machine nobody here
+# is sitting at.
+if ($ExpectSigned) {
+    $signature = Get-AuthenticodeSignature -LiteralPath $Exe
+    if ($signature.Status -ne 'Valid') {
+        throw "the signature on $Exe is $($signature.Status): $($signature.StatusMessage)"
+    }
+    if (-not $signature.TimeStamperCertificate) {
+        throw 'the signature carries no time stamp, so it expires with the certificate that made it'
+    }
+
+    $holder = $SignerSubject
+    if (-not $holder) {
+        $copyright = (Get-Item -LiteralPath $Exe).VersionInfo.LegalCopyright
+        if ($copyright -notmatch '(?i)copyright\s*\(c\)\s*\d{4}\s+(.+?)\s+and\b') {
+            throw "the executable's LegalCopyright is '$copyright'; no holder can be read out of it"
+        }
+        $holder = $Matches[1]
+    }
+    $subject = $signature.SignerCertificate.Subject
+    if ($subject -notlike "*$holder*") {
+        throw "the certificate says $subject; the executable says it is copyright $holder"
+    }
+    Write-Host "signed by: $subject"
+    Write-Host "stamped by: $($signature.TimeStamperCertificate.Subject)"
+}
+
+# ── 1 and 2: the front door ──────────────────────────────────────────────────
 
 $version = Invoke-Folio @('--version')
 if ($version.ExitCode -ne 0) { throw "--version exited $($version.ExitCode)" }

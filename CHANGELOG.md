@@ -32,6 +32,14 @@ programs running inside it.
 
 ### Changed
 
+- **The release archive can be signed.** `scripts/release/sign.ps1` signs
+  `folio.exe` with a certificate Microsoft's Artifact Signing service issues, and
+  `scripts/release/package.ps1 -Sign` puts the signed file into the archive
+  before the hashes are written. It is off by default, so a build with nobody
+  signed in still packages exactly as it did. Nothing published so far is signed;
+  the first release that is will say so here, and the note about "Windows
+  protected your PC" will go when it does. How it is set up is in
+  `docs/RELEASING.md`.
 - **A window you can see is not interrupted.** When the window holding a waiting
   agent is somewhere you can see it, a second monitor included, the wait is
   marked inside that window and nowhere else: no taskbar flash and no message on

@@ -71,6 +71,10 @@ its licence text.
 the executable, the two ConPTY files, `README.md`, both licence texts and
 `THIRD-PARTY-NOTICES.md`, with `SHA256SUMS.txt` beside it.
 
+Signing is a step of its own, because it is the one step that needs a person
+signed in to Azure rather than a machine: `docs/RELEASING.md` has how it is set
+up, how a release is signed, and why the time stamp is not optional.
+
 ## Where the decisions are written down
 
 - `docs/DESIGN.md` — what the program is supposed to do.
