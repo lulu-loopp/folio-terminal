@@ -1,0 +1,36 @@
+name: toolchain
+description: >
+  Install the compiler rust-toolchain.toml names, and — for the jobs that want
+  one — the shared build cache. Every job in every workflow of this repository
+  comes through here, so that "which compiler is this project built with" has one
+  answer and not one answer per file. The release workflow spent three tags red
+  because it did not: it still carried a third-party action asked for a toolchain
+  called `none`, months after CI had stopped doing that.
+
+inputs:
+  cache:
+    description: >
+      "true" restores and saves the shared build cache; "false" leaves the job
+      with an empty target directory. A job that produces the archive people
+      download passes "false", because a cache is a set of files from another run
+      that nothing in that job verifies.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    # rust-toolchain.toml is the single source of truth, and the channel is read
+    # out of it and named explicitly rather than left for rustup to find: the
+    # runner's bare `rustup toolchain install` rejects a channel that carries a
+    # host triple, and this project's channel carries one on purpose.
+    - shell: pwsh
+      run: |
+        $c = (Select-String -Path rust-toolchain.toml -Pattern 'channel = "(.+)"').Matches[0].Groups[1].Value
+        rustup toolchain install $c --component rustfmt --component clippy --no-self-update
+
+    # Third-party, so pinned to a commit rather than to a tag its owner can
+    # repoint. This action itself is referenced by path, which is this
+    # repository's own file at the same commit as the workflow calling it.
+    - if: ${{ inputs.cache == 'true' }}
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
