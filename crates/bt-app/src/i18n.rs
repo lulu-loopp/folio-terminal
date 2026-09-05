@@ -489,6 +489,8 @@ pub enum Text {
     RootNoteHome,
     /// **Length-sensitive**: `min-width: 190px`, shared with a folder name.
     RootNoteTerminal,
+    /// **A folder a files column was pointed at** (user ruling 2026-09-05).
+    RootNoteRecent,
     RootNoteParent,
 
     // ── what the user said to keep (`pins.json`) ───────────────────────────
@@ -2506,6 +2508,7 @@ impl Text {
             Self::RootBrowse => pick(lang, "Browse…", "浏览…"),
             Self::RootNoteHome => pick(lang, "home", "主目录"),
             Self::RootNoteTerminal => pick(lang, "a terminal is here", "终端在这里"),
+            Self::RootNoteRecent => pick(lang, "recent", "最近打开"),
             Self::RootNoteParent => pick(lang, "parent", "上一级"),
 
             // ── what the user said to keep ─────────────────────────────────
@@ -3888,7 +3891,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 557] = [
+    pub const ALL: [Self; 558] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3984,6 +3987,7 @@ impl Text {
         Self::RootBrowse,
         Self::RootNoteHome,
         Self::RootNoteTerminal,
+        Self::RootNoteRecent,
         Self::RootNoteParent,
         Self::PinnedSection,
         Self::FileMenuOpenPreview,

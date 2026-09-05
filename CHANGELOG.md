@@ -4,6 +4,23 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **The folder menu remembers where you have been.** The list under a files
+  column's folder button now has a third group, between the folders your shells
+  are standing in and the folder above: the last five folders you pointed a
+  column at, newest first, each marked `recent`. Picking one from the menu,
+  choosing one through `Browse…`, dropping one on a column, walking into one,
+  and starting Folio on one with `--cwd` or `Open Folio here` all count; a shell
+  running `cd` does not, so the list stays the places you meant to go. A folder
+  already offered above keeps its place and picks up the extra note rather than
+  appearing twice. Every window reads the one list, which is kept in
+  `session.json` and is still there after a restart. A folder that is no longer on
+  the disk is greyed rather than removed, and picking it says so where the tree
+  would be.
+
 ## 0.1.1-preview (unreleased)
 
 A fixes-and-polish release for 0.1.0-preview. Nothing below changes how anything

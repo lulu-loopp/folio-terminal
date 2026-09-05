@@ -5410,6 +5410,14 @@ pub enum RootNote {
     Home,
     /// One of this window's shells is standing in it.
     Terminal,
+    /// **A folder a files column was pointed at** (user ruling 2026-09-05) — see
+    /// [`crate::recent_folders`] for what counts as pointing one.
+    ///
+    /// The one reason on this list that is a *memory*. The other three are read off the machine as
+    /// it stands now: a home directory is an environment variable, a shell's folder is that
+    /// shell's own answer, and the folder above the root is arithmetic on the root. This one is
+    /// something that happened, so it is the only reason with a file behind it.
+    Recent,
     /// The folder this column's root is in.
     Parent,
 }
@@ -5419,6 +5427,7 @@ impl RootNote {
         match self {
             Self::Home => crate::i18n::Text::RootNoteHome.text(),
             Self::Terminal => crate::i18n::Text::RootNoteTerminal.text(),
+            Self::Recent => crate::i18n::Text::RootNoteRecent.text(),
             Self::Parent => crate::i18n::Text::RootNoteParent.text(),
         }
     }
@@ -5441,13 +5450,14 @@ const ROOT_NOTE_JOIN: &str = " · ";
 /// dropped. The way *up* was on the menu and unrecognisable, which is
 /// indistinguishable from not being there.
 ///
-/// A set and not a second `Option`: three reasons make seven badges, and "which
+/// A set and not a second `Option`: four reasons make fifteen badges, and "which
 /// one wins" is a question with no honest answer, because both sentences are
 /// true of the folder at the same time.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RootNotes {
     home: bool,
     terminal: bool,
+    recent: bool,
     parent: bool,
 }
 
@@ -5455,7 +5465,12 @@ impl RootNotes {
     /// The reasons in the order the list itself runs — most permanent address
     /// first, most local last — so a row's badge reads the same way round as the
     /// menu it is on.
-    const ORDER: [RootNote; 3] = [RootNote::Home, RootNote::Terminal, RootNote::Parent];
+    const ORDER: [RootNote; 4] = [
+        RootNote::Home,
+        RootNote::Terminal,
+        RootNote::Recent,
+        RootNote::Parent,
+    ];
 
     #[must_use]
     pub fn of(note: RootNote) -> Self {
@@ -5472,6 +5487,7 @@ impl RootNotes {
         match note {
             RootNote::Home => self.home = true,
             RootNote::Terminal => self.terminal = true,
+            RootNote::Recent => self.recent = true,
             RootNote::Parent => self.parent = true,
         }
     }
@@ -5481,6 +5497,7 @@ impl RootNotes {
         match note {
             RootNote::Home => self.home,
             RootNote::Terminal => self.terminal,
+            RootNote::Recent => self.recent,
             RootNote::Parent => self.parent,
         }
     }
@@ -5501,12 +5518,14 @@ impl RootNotes {
     /// Enumerated rather than reasoned about, because the width reserved for the
     /// note column has to cover the widest badge *possible* and not the widest
     /// badge present — a menu that changed width because a shell moved would
-    /// move under the pointer. Seven, because the empty set is not a row.
+    /// move under the pointer. Fifteen since the fourth reason (user ruling
+    /// 2026-09-05), because the empty set is not a row.
     pub fn every() -> impl Iterator<Item = Self> {
-        (1u8..8).map(|bits| Self {
+        (1u8..16).map(|bits| Self {
             home: bits & 1 != 0,
             terminal: bits & 2 != 0,
-            parent: bits & 4 != 0,
+            recent: bits & 4 != 0,
+            parent: bits & 8 != 0,
         })
     }
 }
@@ -5523,6 +5542,20 @@ pub struct RootChoice {
     /// this is what tells the layout where the heading and the hairline go, and
     /// what tells the painter which pins are filled.
     pub pinned: bool,
+    /// **Whether the folder is on the disk** (user ruling 2026-09-05).
+    ///
+    /// `true` for every row this window derived from something living — a home directory, a shell's
+    /// own folder, the folder above a root a column is standing in — because each of those was read
+    /// off a thing that exists. The one section that can say `false` is the remembered one, and it
+    /// says so rather than dropping the row: see [`crate::recent_folders::RecentFolders::refresh`].
+    ///
+    /// **A grey row is still a row you can press**, which is the one place this menu parts company
+    /// with the picker above it. There, grey means "this machine cannot start that", and pressing
+    /// it would be a promise the window cannot keep. Here it means "it was not there a moment ago",
+    /// and the column already has a sentence for a folder it cannot read — it prints
+    /// `Could not read folder` where the tree would be. Refusing the press would leave the reader
+    /// with a grey row, no way to ask why, and a menu that will not shut.
+    pub on_disk: bool,
 }
 
 /// **The kept folders first, then everything this window found** (user ruling
@@ -5552,6 +5585,10 @@ pub fn apply_pins(choices: Vec<RootChoice>, pinned: &[String]) -> Vec<RootChoice
                 path: path.clone(),
                 notes: RootNotes::default(),
                 pinned: false,
+                // Nothing has asked the disk about a kept folder this window did not
+                // otherwise find, and a row this function greyed on a guess would be
+                // this function inventing an observation.
+                on_disk: true,
             },
         };
         row.pinned = true;
@@ -5571,19 +5608,31 @@ fn pinned_run(choices: &[RootChoice]) -> usize {
 
 /// The places worth offering, in the mock-up's own order (E54).
 ///
-/// **Home, then wherever the shells are standing, then one level up.** The order
-/// is not alphabetical and is not most-recent-first: it runs from the most
-/// permanent address this machine has to the most local one, so the list reads
-/// the same on every window whatever the shells happen to be doing.
+/// **Home, then wherever the shells are standing, then where you have been, then
+/// one level up.** The order is not alphabetical: it runs from the most permanent
+/// address this machine has to the most local one, so the list reads the same on
+/// every window whatever the shells happen to be doing. The remembered folders
+/// sit third (user ruling 2026-09-05) because that is where they fall on that one
+/// scale — a folder you opened is more yours than a folder a build script
+/// happened to `cd` into, and less local than the folder immediately above the one
+/// you are looking at. **Within** that stretch the rows are newest first, which is
+/// the store's own order and the only order a memory has.
 ///
 /// De-duplicated on the path, and a folder that arrives twice keeps its place
 /// and **collects the second reason** rather than dropping it (user report,
 /// 2026-08-19): a home directory a terminal is standing in is offered once, at
-/// home's own position, saying both things.
+/// home's own position, saying both things. That is also the whole of "the
+/// remembered folders do not repeat what is already above them": home stays where
+/// home goes and picks up a second badge, and the reader sees one row.
 #[must_use]
-pub fn root_choices(root: &str, home: Option<&str>, cwds: &[String]) -> Vec<RootChoice> {
+pub fn root_choices(
+    root: &str,
+    home: Option<&str>,
+    cwds: &[String],
+    recent: &[crate::recent_folders::RecentFolder],
+) -> Vec<RootChoice> {
     let mut list: Vec<RootChoice> = Vec::new();
-    let mut add = |path: &str, note: RootNote| {
+    let mut add = |path: &str, note: RootNote, on_disk: bool| {
         let path = path.trim();
         if path.is_empty() {
             return;
@@ -5594,19 +5643,27 @@ pub fn root_choices(root: &str, home: Option<&str>, cwds: &[String]) -> Vec<Root
         // permanent-to-local order exists to prevent.
         if let Some(seen) = list.iter_mut().find(|choice| choice.path == path) {
             seen.notes.add(note);
+            // One row, and the grimmest thing said about the folder wins: two
+            // reasons cannot disagree about whether a directory exists, and if
+            // one of them has actually looked, that is the one that knows.
+            seen.on_disk &= on_disk;
             return;
         }
         list.push(RootChoice {
             path: path.to_owned(),
             notes: RootNotes::of(note),
             pinned: false,
+            on_disk,
         });
     };
     if let Some(home) = home {
-        add(home, RootNote::Home);
+        add(home, RootNote::Home, true);
     }
     for cwd in cwds {
-        add(cwd, RootNote::Terminal);
+        add(cwd, RootNote::Terminal, true);
+    }
+    for folder in recent {
+        add(&folder.path, RootNote::Recent, folder.on_disk);
     }
     // The parent of the root, which the mock-up computes by trimming trailing
     // separators and then one segment. `Path::parent` is that, done by a
@@ -5618,7 +5675,7 @@ pub fn root_choices(root: &str, home: Option<&str>, cwds: &[String]) -> Vec<Root
         .map(Path::to_string_lossy)
         .filter(|parent| !parent.is_empty())
     {
-        add(&parent, RootNote::Parent);
+        add(&parent, RootNote::Parent, true);
     }
     list
 }
@@ -6001,7 +6058,13 @@ pub fn root_menu_build(
                 accel: None,
                 dirty: false,
                 hovered: hover.map(RootMenuHit::row) == Some(row),
-                available: true,
+                // **Grey says "it was not there", and the press still works**
+                // (user ruling 2026-09-05). This is the quiet ink and the
+                // greyed mark, borrowed from the row that cannot do what it
+                // says; what is *not* borrowed is the refusal, because a folder
+                // that has gone is a thing this column can report and the
+                // picker's missing program is not. See [`RootChoice::on_disk`].
+                available: choice.on_disk,
                 pin: Some(RowPin {
                     filled: choice.pinned,
                     hovered: hover == Some(RootMenuHit::Pin(row)),
@@ -12560,6 +12623,7 @@ mod tests {
             r"C:\work\project",
             Some(r"C:\Users\dev"),
             &[r"D:\repos\api".to_owned(), r"C:\work".to_owned()],
+            &[],
         );
         assert_eq!(
             choices,
@@ -12567,24 +12631,27 @@ mod tests {
                 RootChoice {
                     path: r"C:\Users\dev".to_owned(),
                     notes: RootNotes::of(RootNote::Home),
-                    pinned: false
+                    pinned: false,
+                    on_disk: true
                 },
                 RootChoice {
                     path: r"D:\repos\api".to_owned(),
                     notes: RootNotes::of(RootNote::Terminal),
-                    pinned: false
+                    pinned: false,
+                    on_disk: true
                 },
                 RootChoice {
                     path: r"C:\work".to_owned(),
                     notes: RootNotes::of(RootNote::Terminal).and(RootNote::Parent),
-                    pinned: false
+                    pinned: false,
+                    on_disk: true
                 },
             ],
             "the parent is already on the list as a terminal, and wears both badges"
         );
 
         // With no shell standing in it, the parent is offered as the parent.
-        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]);
+        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[], &[]);
         assert_eq!(choices.len(), 2);
         assert_eq!(choices[1].path, r"C:\work");
         assert_eq!(choices[1].notes, RootNotes::of(RootNote::Parent));
@@ -12603,6 +12670,7 @@ mod tests {
             r"C:\Users\dev\work",
             Some(r"C:\Users\dev"),
             &[r"C:\Users\dev".to_owned()],
+            &[],
         );
         assert_eq!(choices.len(), 1);
         // Home, a shell is standing in it, *and* it is the folder above — all
@@ -12630,6 +12698,7 @@ mod tests {
             r"C:\work\project",
             None,
             &[r"D:\repos\api".to_owned(), r"C:\work".to_owned()],
+            &[],
         );
         assert_eq!(
             choices
@@ -12662,7 +12731,7 @@ mod tests {
         // reserved for, which is what keeps the popup from moving under the
         // pointer when a shell moves.
         let every: Vec<RootNotes> = RootNotes::every().collect();
-        assert_eq!(every.len(), 7, "three reasons, every non-empty combination");
+        assert_eq!(every.len(), 15, "four reasons, every non-empty combination");
         for notes in every {
             assert!(!notes.text().is_empty());
         }
@@ -12672,23 +12741,172 @@ mod tests {
     /// list of its own to be at the top of.
     #[test]
     fn a_root_at_the_top_of_its_drive_offers_no_step_up() {
-        let choices = root_choices(r"C:\", None, &[]);
+        let choices = root_choices(r"C:\", None, &[], &[]);
         assert!(
             choices.is_empty(),
             "`C:\\` has no parent, and there is nothing else to offer: {choices:?}"
         );
-        assert!(root_choices("", None, &[]).is_empty());
+        assert!(root_choices("", None, &[], &[]).is_empty());
         assert!(
-            root_choices(r"C:\work\", None, &[])
+            root_choices(r"C:\work\", None, &[], &[])
                 .iter()
                 .any(|choice| choice.path == r"C:\"),
             "a trailing separator does not hide the folder above"
         );
     }
 
+    /// RED (user ruling 2026-09-05) — **the remembered folders stand after the
+    /// shells and before the folder above**, newest first, and none of them
+    /// repeats a row that is already up there.
+    ///
+    /// MUTATION: put the section above the shells and the list stops running
+    /// from the most permanent address to the most local, so the row a reader
+    /// looks for by position moves whenever they open a folder. Put it after the
+    /// parent and the way *up* is no longer the last row, which is the one place
+    /// on this menu a hand goes without reading. Add the folders without going
+    /// through the same de-duplicating door and home appears twice, once as home
+    /// and once as somewhere you have been.
+    #[test]
+    fn the_folders_you_opened_stand_between_the_shells_and_the_way_up() {
+        let recent = |paths: &[&str]| -> Vec<crate::recent_folders::RecentFolder> {
+            paths
+                .iter()
+                .enumerate()
+                .map(|(index, path)| crate::recent_folders::RecentFolder {
+                    path: (*path).to_owned(),
+                    at: std::time::SystemTime::UNIX_EPOCH
+                        + std::time::Duration::from_secs(index as u64),
+                    on_disk: true,
+                })
+                .collect()
+        };
+        let choices = root_choices(
+            r"C:\work\project",
+            Some(r"C:\Users\dev"),
+            &[r"D:\repos\api".to_owned()],
+            &recent(&[r"E:\notes", r"E:\photos"]),
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                r"C:\Users\dev",
+                r"D:\repos\api",
+                r"E:\notes",
+                r"E:\photos",
+                r"C:\work",
+            ],
+            "home, the shell, what was opened in the store's own order, then the folder above"
+        );
+        assert_eq!(choices[2].notes, RootNotes::of(RootNote::Recent));
+        assert_eq!(choices[2].notes.text(), RootNote::Recent.text());
+
+        // A folder already on the list for another reason keeps its place and
+        // collects the badge, which is how "it does not repeat what is above it"
+        // is spelled on a menu whose rows carry every reason they have.
+        let choices = root_choices(
+            r"C:\work\project",
+            Some(r"C:\Users\dev"),
+            &[r"D:\repos\api".to_owned()],
+            &recent(&[r"C:\Users\dev", r"D:\repos\api", r"C:\work"]),
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![r"C:\Users\dev", r"D:\repos\api", r"C:\work"],
+            "three folders, three rows - nothing is listed twice"
+        );
+        assert!(choices[0].notes.has(RootNote::Home));
+        assert!(choices[0].notes.has(RootNote::Recent));
+        assert!(choices[1].notes.has(RootNote::Terminal));
+        assert!(choices[1].notes.has(RootNote::Recent));
+        assert!(
+            choices[2].notes.has(RootNote::Recent) && choices[2].notes.has(RootNote::Parent),
+            "and the folder above wears both when it is also one you opened"
+        );
+    }
+
+    /// RED (user ruling 2026-09-05) — **a folder that is not on the disk is
+    /// drawn in the quiet ink and is still a row you can press.**
+    ///
+    /// Both halves, because each fails on its own: a row drawn like the others
+    /// offers a place that is not there in the same breath as four that are, and
+    /// a row the hit test refuses leaves the reader with a grey line, no way to
+    /// ask why, and a menu that will not shut.
+    ///
+    /// MUTATION: drop `on_disk` on the way to `available` and the grey goes;
+    /// make `root_menu_hit` consult it and the press goes.
+    #[test]
+    fn a_folder_that_has_gone_is_grey_and_is_still_a_row_you_can_press() {
+        let choices = root_choices(
+            r"C:\work\project",
+            None,
+            &[],
+            &[crate::recent_folders::RecentFolder {
+                path: r"E:\unplugged".to_owned(),
+                at: std::time::SystemTime::UNIX_EPOCH,
+                on_disk: false,
+            }],
+        );
+        let gone = choices
+            .iter()
+            .position(|choice| choice.path == r"E:\unplugged")
+            .expect("the folder is still offered");
+        assert!(!choices[gone].on_disk);
+        let layout = root_menu_layout(
+            [40.0, 8.0, 140.0, 27.0],
+            (960.0, 600.0),
+            1.0,
+            &choices,
+            &mut fake_measure,
+        );
+        let layer = one_layer(root_menu_build(
+            &layout,
+            &choices,
+            r"C:\work\project",
+            None,
+            &mut fake_measure,
+        ));
+        let palette = chrome_palette();
+        let ink = |name: &str| {
+            layer
+                .labels
+                .iter()
+                .find(|label| label.text == name)
+                .unwrap_or_else(|| panic!("the menu draws a row named {name}"))
+                .color
+        };
+        assert_eq!(
+            ink("unplugged"),
+            palette.menu_item_hint_text,
+            "the folder that is not there wears the menu's quietest ink"
+        );
+        assert_eq!(
+            ink("work"),
+            palette.menu_item_text,
+            "and the folder that is there is unchanged"
+        );
+
+        let rect = layout
+            .tips(&choices)
+            .find(|(row, _, _)| *row == RootMenuRow::Choice(gone))
+            .expect("the grey row has a rectangle")
+            .1;
+        let y = (rect[1] + rect[3]) / 2.0;
+        assert_eq!(
+            root_menu_hit(&layout, f64::from(rect[0] + 4.0), f64::from(y)),
+            Some(Some(RootMenuHit::Row(RootMenuRow::Choice(gone)))),
+            "grey says it was not there a moment ago, not that you may not ask"
+        );
+    }
+
     #[test]
     fn the_menu_hangs_under_the_root_button_and_stays_inside_the_window() {
-        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]);
+        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[], &[]);
         let button = [40.0, 8.0, 140.0, 27.0];
         let layout = root_menu_layout(button, (960.0, 600.0), 1.0, &choices, &mut fake_measure);
         let frame = layout.frame;
@@ -12707,7 +12925,7 @@ mod tests {
     /// outside a popup has to reach what it was aimed at.
     #[test]
     fn a_root_row_answers_the_press_and_the_body_swallows_it() {
-        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]);
+        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[], &[]);
         let layout = root_menu_layout(
             [40.0, 8.0, 140.0, 27.0],
             (960.0, 600.0),
@@ -12760,7 +12978,7 @@ mod tests {
     /// where it would read as one of them.
     #[test]
     fn browse_is_the_last_row_of_the_root_menu_and_answers_a_press() {
-        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]);
+        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[], &[]);
         let layout = root_menu_layout(
             [40.0, 8.0, 140.0, 27.0],
             (960.0, 600.0),
@@ -12886,7 +13104,7 @@ mod tests {
         );
 
         // And the menu that holds both kinds of row.
-        let choices = root_choices(r"C:\work\project", None, &[]);
+        let choices = root_choices(r"C:\work\project", None, &[], &[]);
         let root = root_menu_layout(
             [40.0, 8.0, 140.0, 27.0],
             (960.0, 600.0),
@@ -12930,7 +13148,7 @@ mod tests {
     /// pointer around.
     #[test]
     fn the_folder_a_column_is_already_in_is_the_one_drawn_open() {
-        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]);
+        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[], &[]);
         let layout = root_menu_layout(
             [40.0, 8.0, 140.0, 27.0],
             (960.0, 600.0),
@@ -12986,6 +13204,7 @@ mod tests {
             r"C:\work\project",
             Some(r"C:\Users\dev"),
             &[r"D:\repos\api".to_owned()],
+            &[],
         );
         // One kept folder this window also found, and one it did not.
         let choices = apply_pins(
@@ -13051,7 +13270,7 @@ mod tests {
         // rule read for the other one: pinning every place this window found
         // leaves `OPEN FOLDER` standing over a hairline.
         let all_kept = apply_pins(
-            root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]),
+            root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[], &[]),
             &[r"C:\Users\dev".to_owned(), r"C:\work".to_owned()],
         );
         let all_kept_layout = root_menu_layout(
@@ -13119,7 +13338,7 @@ mod tests {
 
         // Nothing kept is the menu exactly as it was: no heading, no rule.
         let plain = apply_pins(
-            root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]),
+            root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[], &[]),
             &[],
         );
         let plain_layout = root_menu_layout(
@@ -13138,7 +13357,7 @@ mod tests {
     #[test]
     fn a_root_row_carries_a_pin_that_answers_for_its_own_box() {
         let choices = apply_pins(
-            root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]),
+            root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[], &[]),
             &[],
         );
         let layout = root_menu_layout(
