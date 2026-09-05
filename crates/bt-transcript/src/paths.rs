@@ -1580,19 +1580,32 @@ impl PrintedPathLinks {
     ///    deliberately **not** relaxed for the case that started this slice: `D:\WINDOWS\system` +
     ///    `32\…\Modules` ends as a blank, and a blank is the honest answer.
     ///
-    /// # The chain (user ruling 2026-09-05)
+    /// # The chain, longest first (user ruling 2026-09-05)
     ///
     /// A reference is not cut into halves, it is cut into **rows**: an agent that renders a fenced
     /// block hard-wraps the path inside it at the pane's width, and a path long enough gets four
     /// rows, or six. So this reads a first row and *some number of* continuations, at most
-    /// [`MAX_REJOIN_ROWS`] rows in all, and it grows the chain one row at a time: at each length
-    /// gates 3, 4 and 5 are asked once, and **the first length that holds wins**. The walk stops
-    /// when a row fails gate 2 or gate 5, when the row a chain would have to pass through did not
-    /// reach its own row's end, or at the ceiling.
+    /// [`MAX_REJOIN_ROWS`] rows in all, in two movements:
+    ///
+    /// 1. **how far the chain can reach** is settled by geometry alone — gates 1, 2 and 5, which
+    ///    read the rows and never the disk. The walk stops at the first row that opens at a column
+    ///    gate 2 refuses, that is already a reference of its own, or that the chain would have to
+    ///    pass *through* without that row having reached its own row's end; and at the ceiling.
+    /// 2. **which length is the reference** is then asked of the disk **from the longest down**,
+    ///    gates 3 and 4 once per length, and the first one the disk holds wins.
+    ///
+    /// The order is the whole of the second movement, and it is the same order §7.30 reads one
+    /// token's several forms in. A path's own parent directory is a real name that a hard wrap can
+    /// land the row's end exactly on — `…\scratchpad` on row two, `\folio.exe` on row three — and
+    /// asking short-first would answer with the directory, which is a promise pointing at a place
+    /// nobody named while the name the reader is looking at goes dark. Longest-first cannot make
+    /// that mistake: the longer reading is asked first and, when the disk holds it, no shorter one
+    /// is ever offered.
     ///
     /// An **unanswered** target ends the search exactly as it does for a single line: it is written
-    /// into `unknown` and this frame draws nothing, because a promise nobody has been to the disk
-    /// for is not a promise. The next frame, holding the answer, asks the next length.
+    /// into `unknown` and this frame draws nothing, because a shorter reading may never be promised
+    /// while a longer one is still unanswered (§7.30 ②). The next frame, holding the answer, asks
+    /// the next length down.
     ///
     /// A bare **web address** is never rejoined here, and cannot be: gate 4 is a witness on this
     /// machine's disk, and no such witness exists for a host. Its cut upper half is pressed down by
@@ -1635,11 +1648,16 @@ impl PrintedPathLinks {
             return None;
         }
 
-        let mut joined_prefix = upper.get(head.byte_start..upper_edge.byte_end)?.to_owned();
-        let mut spans = vec![HyperlinkRange {
+        // Movement one: how far the chain can reach, which is a question about rows and not about
+        // the disk. `reach` is the text of everything a chain passes through, in order, and
+        // `through` the span each passed-through row contributes; `admitted` is one entry per row
+        // that may **end** a chain, carrying how much of `reach` stands in front of it.
+        let mut reach = upper.get(head.byte_start..upper_edge.byte_end)?.to_owned();
+        let mut through = vec![HyperlinkRange {
             byte_start: head.byte_start,
             byte_end: upper_edge.byte_end,
         }];
+        let mut admitted = Vec::new();
 
         for row in lowers.iter().take(MAX_REJOIN_ROWS - 1) {
             let Some((start, column)) = first_ink(row.text) else {
@@ -1647,10 +1665,10 @@ impl PrintedPathLinks {
             };
 
             // Gate 2.
-            let admitted = column == 0
+            let opens_a_continuation = column == 0
                 || column > upper_indent
                 || (column == upper_indent && candidate_is_the_whole_row);
-            if !admitted {
+            if !opens_a_continuation {
                 break;
             }
 
@@ -1660,6 +1678,38 @@ impl PrintedPathLinks {
             }) {
                 break;
             }
+
+            let raw_end = token_end(row.text, start);
+            admitted.push((start, raw_end, reach.len()));
+
+            // The chain may only grow **through** this row if the application filled it — gate 1
+            // asked of a middle row (2026-09-05). A row with room left in it is a row the
+            // application chose to stop in, and what follows such a row is the next thing, not the
+            // rest of this one. The gate is also exactly the condition under which the text a chain
+            // passes through *is* this row's token.
+            let Some(edge) = row
+                .edge
+                .filter(|edge| touches_line_end(start, raw_end, Some(*edge)))
+            else {
+                break;
+            };
+            let Some(filled) = row.text.get(start..edge.byte_end) else {
+                break;
+            };
+            reach.push_str(filled);
+            through.push(HyperlinkRange {
+                byte_start: start,
+                byte_end: edge.byte_end,
+            });
+        }
+
+        // Movement two: which of those lengths is the reference, asked of the disk **from the
+        // longest down** (user ruling 2026-09-05). A parent directory is a real name a hard wrap
+        // can land a row's end exactly on, so the short answer is the one that points somewhere
+        // nobody named; the long one is asked first and, once the disk holds it, no shorter one is
+        // ever offered.
+        for (index, &(start, raw_end, prefix)) in admitted.iter().enumerate().rev() {
+            let row = &lowers[index];
 
             // The readings this row offers as the **last** row of the chain, longest first.
             //
@@ -1671,7 +1721,8 @@ impl PrintedPathLinks {
             // as they are there. That ordering is what keeps an opening bracket a seam and not a
             // terminator across a wrap too: `a(1` + `).txt` is asked whole before `a` is asked at
             // all. When the token carries no seam this is the whole of it, byte for byte as before.
-            let raw_end = token_end(row.text, start);
+            // One length's readings are spent before the next length down is asked, because they
+            // are all longer than anything the shorter chain can spell.
             let token = &row.text[start..raw_end];
             let readings = std::iter::once(raw_end).chain(
                 prose_seam_ends(token, token.len())
@@ -1688,7 +1739,7 @@ impl PrintedPathLinks {
                 // reference, so what this gate refuses is a second **start**, exactly as it always
                 // did. A reading that does not spell one whole reference is not a question about
                 // the disk; the next one may be.
-                let joined = format!("{joined_prefix}{tail}");
+                let joined = format!("{}{tail}", &reach[..prefix]);
                 let spelled = self.candidates_in(&joined);
                 let Some(whole) = spelled.first().copied().filter(|candidate| {
                     candidate.byte_start == 0
@@ -1700,9 +1751,9 @@ impl PrintedPathLinks {
 
                 // Gate 4. The witness, asked about the file's own name. A denial hands the question
                 // to the next shorter reading, and when this row's readings are spent, to the next
-                // row; a name **nobody has looked at yet** ends the search instead, because a
-                // reading may never be promised while another is still unanswered (§7.30 ②) — the
-                // answer arrives and the next frame decides.
+                // length down; a name **nobody has looked at yet** ends the search instead, because
+                // a shorter reading may never be promised while a longer one is still unanswered
+                // (§7.30 ②) — the answer arrives and the next frame decides.
                 let Some(target) = self.resolve(whole.path_text(&joined), whole.spelling) else {
                     continue;
                 };
@@ -1719,12 +1770,13 @@ impl PrintedPathLinks {
                     uri.push('#');
                     uri.push_str(&location.uri_fragment());
                 }
-                spans.push(HyperlinkRange {
+                let mut rows = through[..=index].to_vec();
+                rows.push(HyperlinkRange {
                     byte_start: start,
                     byte_end: end,
                 });
                 return Some(RejoinedReference {
-                    rows: spans,
+                    rows,
                     target,
                     resolution_base: match whole.spelling {
                         PrintedPathSpelling::Relative => self.working_directory.clone(),
@@ -1733,25 +1785,6 @@ impl PrintedPathLinks {
                     uri,
                 });
             }
-
-            // Nothing this row can end; the chain may only grow **through** it if the application
-            // filled it — gate 1 asked of a middle row (2026-09-05). A row with room left in it is
-            // a row the application chose to stop in, and what follows such a row is the next
-            // thing, not the rest of this one.
-            let Some(edge) = row
-                .edge
-                .filter(|edge| touches_line_end(start, raw_end, Some(*edge)))
-            else {
-                break;
-            };
-            let Some(through) = row.text.get(start..edge.byte_end) else {
-                break;
-            };
-            joined_prefix.push_str(through);
-            spans.push(HyperlinkRange {
-                byte_start: start,
-                byte_end: edge.byte_end,
-            });
         }
         None
     }
@@ -2488,12 +2521,13 @@ mod tests {
         wrapped
     }
 
-    /// The ledger the worker comes back with once the chain walk has asked its way up: every
-    /// prefix a growing chain spells, answered by this machine's disk.
+    /// The ledger the worker comes back with once the chain walk has asked its way down: every
+    /// prefix a chain of some length spells, answered by this machine's disk.
     ///
-    /// The walk asks one length per frame — a name nobody has looked at ends the search — so this
-    /// is what the ledger holds by the frame the last question is answered, and every intermediate
-    /// join is in it as the "no" the disk really gives it.
+    /// The walk asks one length per frame — a name nobody has looked at ends the search — and it
+    /// asks the **longest** first, so on these fixtures it is answered on the first question. The
+    /// shorter prefixes are in the ledger as the "no" the disk really gives them, which is what
+    /// makes a green run mean "the long one won" rather than "the short one was never asked".
     fn block_ledger(working_directory: &Path, rows: &[String]) -> PrintedPathLinks {
         let mut prefix = String::new();
         let asked = rows
@@ -2564,6 +2598,50 @@ mod tests {
                 rows.iter().map(|row| &row[2..]).collect(),
                 local_path_to_file_uri(&target)
             ))
+        );
+    }
+
+    /// PIN (user ruling 2026-09-05) — **the chain is asked of the disk longest first**, because a
+    /// path's own parent directory is a real name a hard wrap can land a row's end exactly on.
+    ///
+    /// The picture is the one that closes the window the first version of this slice left open: the
+    /// application cut the path at the end of `…\scratchpad\signed`, which **is** a directory on
+    /// this machine, and the row under it carries the file's own name. Both are on the disk, both
+    /// are spelled by a chain the gates admit, and only the order decides which one the reader is
+    /// promised. The longer one is the one they are looking at; the shorter one is a place nobody
+    /// named, with the name they can see left dark underneath it.
+    ///
+    /// MUTATION, run: walk `admitted` forwards instead of `.rev()` — shortest chain first — and
+    /// this comes back as two rows pointing at the directory.
+    #[test]
+    fn a_chain_that_could_stop_at_a_real_directory_is_asked_about_the_file_first() {
+        let scratch = Scratch::named("parent");
+        let target = scratch.holding_deep("scratchpad/signed/folio-next31.exe");
+        let directory = target.parent().expect("the file's own directory");
+        let printed_directory = directory.to_string_lossy().into_owned();
+        let printed = target.to_string_lossy().into_owned();
+        let name = &printed[printed_directory.len()..];
+
+        // The application's cut falls exactly on the directory's last character.
+        let characters = printed_directory.chars().collect::<Vec<_>>();
+        let cut = characters.len() / 2;
+        let head = characters[..cut].iter().collect::<String>();
+        let tail = characters[cut..].iter().collect::<String>();
+        let rows = [
+            format!("  {head}"),
+            format!("  {tail}"),
+            format!("  {name}"),
+        ];
+        let links = disk_ledger(&scratch.0, &[&printed_directory, &printed]);
+
+        let borrowed = rows.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            rejoin_rows(&links, &borrowed),
+            Some((
+                vec![head.as_str(), tail.as_str(), name],
+                local_path_to_file_uri(&target)
+            )),
+            "the disk holds the directory too, and the reference is still the file"
         );
     }
 
