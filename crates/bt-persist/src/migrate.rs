@@ -768,6 +768,7 @@ pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (11, migrate_session_v11_to_v12),
     (12, migrate_session_v12_to_v13),
     (13, migrate_session_v13_to_v14),
+    (14, migrate_session_v14_to_v15),
 ];
 
 fn migrate_session_v1_to_v2(mut value: Value) -> Value {
@@ -1083,6 +1084,21 @@ fn migrate_session_v12_to_v13(mut value: Value) -> Value {
 fn migrate_session_v13_to_v14(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(14));
+    }
+    value
+}
+
+/// **v15 takes the number and nothing else** (rule 3), and the empty list is the whole of what a
+/// v14 document can honestly say.
+///
+/// [`crate::SessionV1::recent_folders`] records a gesture — a reader pointing a files column at a
+/// folder — and no build before this one watched for it, so there is no older key to read the
+/// answer out of and nothing to reconstruct it from. A step that invented rows here would be
+/// filling the reader's list with places it had guessed at; the absent key and the empty list are
+/// the same sentence, which is the condition under which a step of this ladder is one line.
+fn migrate_session_v14_to_v15(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(15));
     }
     value
 }
@@ -1943,6 +1959,85 @@ mod tests {
         assert!(
             !written.contains("quake_placements"),
             "a document with no arrangement in it writes the bytes it always wrote: {written}"
+        );
+    }
+
+    /// RED (`docs/DESIGN.md` §7.5, user ruling 2026-09-05) — **v14 -> v15 takes the version and
+    /// leaves the list empty**, and a v14 document read through it has opened nothing.
+    ///
+    /// The one-line step is allowed for rule 3's reason: no v14 build watched for the gesture that
+    /// makes a row here, so there is no older key holding the answer and nothing honest to
+    /// reconstruct one from.
+    ///
+    /// MUTATION: have the step seed the list from the working directories in `windows[]` and a
+    /// reader's first look at the menu offers them places they never opened, which is the list
+    /// claiming to be a history of a gesture it did not witness. Leave the version alone and a v14
+    /// build reads a v15 document as its own, dropping every folder the reader opened.
+    #[test]
+    fn real_session_v14_to_v15_migration_takes_the_number_and_opens_nothing() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 14,
+                "windows": [{
+                    "tabs": [],
+                    "active_tab": 0
+                }],
+                "recent": []
+            }),
+            14,
+            15,
+            SESSION_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(15));
+        assert!(
+            migrated.get("recent_folders").is_none(),
+            "the step invents no folder - a reader who has opened nothing has opened nothing"
+        );
+        let session: crate::SessionV1 =
+            serde_json::from_value(migrated).expect("a migrated document is this build's own");
+        assert!(
+            session.recent_folders.is_empty(),
+            "and this build reads the absent key as the empty list"
+        );
+        let written = serde_json::to_string(&session).expect("and it serializes");
+        assert!(
+            !written.contains("recent_folders"),
+            "a document with no folder in it writes the bytes it always wrote: {written}"
+        );
+    }
+
+    /// RED (`docs/DESIGN.md` §7.5) — **a folder and the moment it was opened survive the file.**
+    ///
+    /// The other half of the step above, on the same argument the arrangement's pair make: the key
+    /// a migration deliberately does not write is still the key this build has to read and write
+    /// correctly, and a shape whose only test is its migration is a shape nobody round-tripped.
+    ///
+    /// MUTATION: drop `skip_serializing_if` and every document grows an empty array; write the
+    /// moment as anything but the instant and "3m ago" starts being a phrase stored on disk rather
+    /// than one computed when it is drawn.
+    #[test]
+    fn an_opened_folder_round_trips_with_the_moment_it_was_opened() {
+        let session = crate::SessionV1 {
+            recent_folders: vec![
+                crate::RecentFolderV1 {
+                    path: r"D:\Developer\folio".to_owned(),
+                    opened_at: "2026-09-05T10:11:12Z".to_owned(),
+                },
+                crate::RecentFolderV1 {
+                    path: r"C:\Users\dev\Documents".to_owned(),
+                    opened_at: "2026-09-05T09:00:00Z".to_owned(),
+                },
+            ],
+            ..crate::SessionV1::default()
+        };
+        let written = serde_json::to_string(&session).expect("a session serializes");
+        let read: crate::SessionV1 =
+            serde_json::from_str(&written).expect("and reads back as itself");
+        assert_eq!(read.recent_folders, session.recent_folders);
+        assert_eq!(
+            read.recent_folders[0].path, r"D:\Developer\folio",
+            "newest first is the order the file keeps, not one the reader recomputes"
         );
     }
 

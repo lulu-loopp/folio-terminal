@@ -89,6 +89,7 @@ mod profiles;
 mod psreadline;
 mod quake;
 mod quit;
+mod recent_folders;
 mod restore;
 mod scheme_watch;
 mod schemes;
@@ -8579,6 +8580,14 @@ struct App {
     /// the tabs rather than inside the session file's mirror so the three doors
     /// read live state, not the last thing that happened to be flushed.
     recent: seed::SeedVault,
+    /// **The folders a files column was pointed at** (§7.5, user ruling
+    /// 2026-09-05) — the third section of every column's root menu.
+    ///
+    /// Beside the vault above and for its reason: one process, one list. Two
+    /// windows do not each have their own idea of where the reader has been, so
+    /// a folder opened in one is offered by the other's menu on the next frame,
+    /// and the one document written for the process carries one copy of it.
+    recent_folders: recent_folders::RecentFolders,
     /// **Every open window's picture of itself, in the order they opened**
     /// (multiwindow slice D).
     ///
@@ -31959,6 +31968,17 @@ impl Runtime<'_> {
         // the command line asked for.
         let active_tab = launch_active_tab(cli_slot, plan.active_open, tabs.len());
         let recent = seed::SeedVault::from_persisted(&session_store.loaded().recent);
+        // **What the command line named is a folder the reader opened** (user
+        // ruling 2026-09-05). `--cwd` is what Explorer's `Open Folio here` sends,
+        // and a reader who right-clicked a folder and asked for a terminal in it
+        // has said "this one" as plainly as a reader who picked it off the menu.
+        // Recorded before the window exists, which is the only place it can be:
+        // the launch is over by the time there is a column to point anywhere.
+        let mut recent_folders =
+            recent_folders::RecentFolders::from_persisted(&session_store.loaded().recent_folders);
+        if let Some(cwd) = cli_plan.cwd.as_deref() {
+            recent_folders.record(&cwd.display().to_string(), SystemTime::now());
+        }
         let pending_restore = plan.ask.clone();
         // Only a shell we opened *because we had no answer* is scaffolding. A
         // lone restored tab is a tab, and must never be swept away by a later
@@ -32055,6 +32075,7 @@ impl Runtime<'_> {
             pins_fault,
             pins_file_broken: false,
             recent,
+            recent_folders,
             // **The document is assembled from these, and the first window's
             // paragraph is the only one that exists yet** (multiwindow slice D).
             // It is seeded with what this window was *built from* rather than
@@ -46599,9 +46620,19 @@ impl Runtime<'_> {
                 self.reroot_files_column(seat, &root)?;
                 self.mouse_trace(|| format!("show_folder_in_files_column leave=rerooted {seat:?}"));
             }
-            None => match self.seat_a_files_column(root)? {
-                Some(seat) => self
-                    .mouse_trace(|| format!("show_folder_in_files_column leave=seated {seat:?}")),
+            None => match self.seat_a_files_column(root.clone())? {
+                Some(seat) => {
+                    // The other door of the two, and the same gesture behind it:
+                    // a reader pointed at a folder and got it. The re-rooting
+                    // half is recorded inside `reroot_files_column`; this half
+                    // has to say so itself, because `seat_a_files_column`'s
+                    // other caller is the chord, and the chord's folder is
+                    // whichever one a shell happens to have `cd`'d into.
+                    self.note_folder_opened(&root);
+                    self.mouse_trace(|| {
+                        format!("show_folder_in_files_column leave=seated {seat:?}")
+                    });
+                }
                 None => self.mouse_trace(|| {
                     "show_folder_in_files_column leave=no-room-for-a-pane".to_owned()
                 }),
@@ -61300,7 +61331,15 @@ impl Runtime<'_> {
             .collect();
         let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
             .map(|home| home.display().to_string());
-        let found = profiles::root_choices(&tab.files_state(seat).root, home.as_deref(), &cwds);
+        // The remembered folders come from the application and not from this
+        // window, which is the whole of "every window offers the same list":
+        // there is one store, and a window's root menu is a view of it.
+        let found = profiles::root_choices(
+            &tab.files_state(seat).root,
+            home.as_deref(),
+            &cwds,
+            self.app.recent_folders.entries(),
+        );
         // **What the user said to keep goes on top** (user ruling 2026-08-19).
         // Applied here rather than inside `root_choices` because that function
         // answers "what did this window find", which is a question about shells
@@ -61332,7 +61371,13 @@ impl Runtime<'_> {
         let Some(state) = self.window.tabs[active].files.get_mut(&seat) else {
             return Ok(());
         };
-        if !reroot_files_state(state, root) {
+        let moved = reroot_files_state(state, root);
+        // **Before the early return, because choosing is the event** (user
+        // ruling 2026-09-05). Picking the folder the column is already rooted at
+        // moves nothing, and it is still a reader saying "this one" — the list
+        // is a list of gestures, so it hears that one and re-dates the row.
+        self.note_folder_opened(root);
+        if !moved {
             return Ok(());
         }
         self.window.tabs[active].file_trees.remove(&seat);
@@ -61344,6 +61389,27 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **A reader pointed a files column at a folder** (§7.5, user ruling
+    /// 2026-09-05) — the one door into [`recent_folders::RecentFolders`].
+    ///
+    /// One door and a handful of callers, rather than one caller derived from
+    /// the column's root changing, because the difference this list is *about*
+    /// is invisible from there: a column rooted somewhere new because a hand
+    /// chose it and a column rooted somewhere new because a chord read a shell's
+    /// folder are the same assignment and two different events. Deriving would
+    /// record both, and the list would fill with wherever a build script last
+    /// stepped.
+    ///
+    /// The write goes through the session's own debounce, so the folder is on
+    /// the disk within a second or two of being opened and every window's menu
+    /// sees it on the next frame.
+    fn note_folder_opened(&mut self, folder: &str) {
+        if !self.app.recent_folders.record(folder, SystemTime::now()) {
+            return;
+        }
+        self.mark_session_dirty(Instant::now());
     }
 
     /// `Browse…` — ask the system for a folder the quick list could not name
@@ -61443,6 +61509,17 @@ impl Runtime<'_> {
         // press from travelling.
         self.close_popups_except(Popup::Root);
         self.window.root_menu.toggle(seat);
+        // **The disk is asked once per look** (user ruling 2026-09-05). The
+        // remembered folders are the only rows on this list that can name
+        // somewhere that has gone, and "has it gone" is a question about the
+        // machine now rather than about what happened — so it is asked here,
+        // where the reader is about to read the answer, and not in the store,
+        // which would then be a memory that changed by itself. Once per gesture
+        // and not once per frame: a menu that stat'ed a dead network share
+        // sixty times a second would hang the window it is drawn on.
+        self.app
+            .recent_folders
+            .refresh(&|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_dir()));
         // Pressing the head is also how you say "type here", and the column is
         // somewhere you can type — so the button lends the keyboard exactly as
         // the tree below it does, ringless for the same reason: it is a press.
@@ -87975,6 +88052,7 @@ impl App {
                 &self.pending_restore_windows,
             ),
             recent: self.recent.to_persisted(),
+            recent_folders: self.recent_folders.to_persisted(),
         }
     }
 
@@ -88327,6 +88405,105 @@ mod mouse_trace_station_tests {
             assert!(
                 text.contains(label),
                 "the folder door has an outcome that does not say `{label}`"
+            );
+        }
+    }
+}
+
+/// **What counts as opening a folder is a list of doors, not a state to watch**
+/// (§7.5, user ruling 2026-09-05).
+///
+/// The `RECENT` section of the root menu is a list of gestures, and the whole of
+/// the ruling behind it is a *distinction between two ways a column comes to be
+/// rooted somewhere*: a hand chose the folder, or a chord read whichever folder
+/// a shell had `cd`'d into. Those two produce the same assignment, so no value
+/// anywhere in this program tells them apart — what tells them apart is which
+/// function ran, and that is a fact about the source and nothing else.
+///
+/// So this reads the file as text, for [`mouse_trace_station_tests`]' reason
+/// exactly: the failure it exists to prevent is a door added later that quietly
+/// records, or the recording quietly moving into `seat_a_files_column` where the
+/// chord would drag every `cd` in with it, and neither is a value any assertion
+/// could read.
+#[cfg(test)]
+mod recent_folder_door_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's —
+    /// [`super::mouse_trace_station_tests`]' own reader.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// The call, as a line begins it. Matched against a **trimmed line's start**
+    /// rather than anywhere in the text, so the mentions inside this module — and
+    /// inside the doc comments that explain the door — are not counted as doors.
+    const CALL: &str = "self.note_folder_opened(";
+
+    fn calls(text: &str) -> usize {
+        text.lines()
+            .filter(|line| line.trim_start().starts_with(CALL))
+            .count()
+    }
+
+    /// RED (user ruling 2026-09-05) — **the two doors a hand goes through record,
+    /// and there are two of them.**
+    ///
+    /// MUTATION: add a third caller without counting it here and the list starts
+    /// filling from somewhere nobody ruled on; delete either call and the folders
+    /// a reader reaches by that route stop being remembered, silently, because a
+    /// list that is merely shorter than it should be looks exactly like a list of
+    /// somebody who has not opened much.
+    #[test]
+    fn the_doors_that_remember_a_folder_are_the_two_a_hand_goes_through() {
+        assert_eq!(
+            calls(body("    fn reroot_files_column(")),
+            1,
+            "pointing a column somewhere else is the door the menu, `Browse…`, a \
+             drop and a walk into a folder all come through"
+        );
+        assert_eq!(
+            calls(body("    fn show_folder_in_files_column(")),
+            1,
+            "and a tab with no column at all gets one, which is the same gesture \
+             with nothing to re-root"
+        );
+        assert_eq!(
+            calls(SOURCE),
+            2,
+            "two doors, counted here on purpose - a third is a ruling and not an edit"
+        );
+    }
+
+    /// RED (user ruling 2026-09-05) — **a shell's own folder is not a folder you
+    /// opened.**
+    ///
+    /// `Ctrl+Shift+B` roots a new column at whatever the focused shell's working
+    /// directory happens to be, which is the one route into a files column whose
+    /// *place* nobody chose. Recording it would fill five slots with wherever a
+    /// build script last stepped, and the section would stop being a list of
+    /// anywhere the reader meant to go.
+    ///
+    /// MUTATION: move the call down into `seat_a_files_column` — where it would
+    /// look like a tidy single door — and the chord starts writing to the list on
+    /// every `cd` the reader happens to open a column after.
+    #[test]
+    fn a_column_opened_onto_a_shells_own_folder_remembers_nothing() {
+        for signature in [
+            "    fn toggle_files_pane(",
+            "    fn seat_a_files_column(",
+            "    fn files_root_for_new_pane(",
+        ] {
+            assert_eq!(
+                calls(body(signature)),
+                0,
+                "{signature} takes its folder from a shell and not from a hand"
             );
         }
     }

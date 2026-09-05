@@ -88,6 +88,8 @@ in them:
 - **Names you typed for panes.**
 - **Page titles** of previewed pages.
 - **Timestamps** on recently closed tabs.
+- **The last five folders you pointed a files column at**, and when you last
+  opened each of them.
 - **Git branch names** you filtered a commit graph by.
 - **Window geometry, per-monitor DPI, and a monitor identifier.**
 
@@ -183,6 +185,7 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
 - **你手动给窗格起的名字。**
 - 预览过的**页面标题**。
 - 最近关闭标签的**时间戳**。
+- **你最近用文件列打开过的五个目录**，以及每个目录最后一次打开的时间。
 - 你在提交图里筛选用的 **git 分支名**。
 - **窗口几何、每显示器 DPI，以及一个显示器标识。**
 

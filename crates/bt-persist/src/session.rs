@@ -42,7 +42,13 @@ use crate::layout::LayoutNodeV1;
 /// window happened to be at when the program closed, but the rectangle the reader *arranged with
 /// their own hand*, filed under the display they arranged it on. The two are different facts and
 /// they are stored in different keys for that reason.
-pub const SESSION_SCHEMA_VERSION: u32 = 14;
+/// **v14 lets a pinned tab's shell bring back the last thing that was typed at it**
+/// ([`crate::TermLeafV1::last_command`], `docs/DESIGN.md` §7.54).
+/// **v15 adds `recent_folders`** (0.2 files column, user ruling 2026-09-05): the folders a reader
+/// pointed a files column at, newest first, so the root menu can offer them back. It is a fact
+/// about the *process* and not about one window — every window's root menu reads the one list — so
+/// it sits beside [`SessionV1::recent`] at the top level, on that field's own argument.
+pub const SESSION_SCHEMA_VERSION: u32 = 15;
 
 /// **What a preview row's string names** — schema v11.
 ///
@@ -155,6 +161,18 @@ pub struct SessionV1 {
     /// window, so nothing that is open writes an empty entry here.
     pub windows: Vec<SessionWindowV1>,
     pub recent: Vec<RecentEntryV1>,
+    /// **The folders a files column was pointed at, newest first** — schema v15
+    /// (`docs/DESIGN.md` §7.5, user ruling 2026-09-05).
+    ///
+    /// At this level rather than inside a window for [`Self::recent`]'s reason said about a
+    /// different list: the root menu of every column in every window offers the same folders, so a
+    /// copy per window would be as many answers as there are windows to the question "where have I
+    /// been".
+    ///
+    /// Empty is the ordinary first-run state and is not written, so a document from a reader who
+    /// has opened no folder is byte for byte the document a v14 build wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_folders: Vec<RecentFolderV1>,
 }
 
 impl Default for SessionV1 {
@@ -165,8 +183,27 @@ impl Default for SessionV1 {
             cursor_style: SessionCursorStyleV1::Bar,
             windows: Vec::new(),
             recent: Vec::new(),
+            recent_folders: Vec::new(),
         }
     }
+}
+
+/// **One folder a files column was pointed at, and when** — schema v15.
+///
+/// Two fields, and the absence of everything else is the design. There is no display name, because
+/// the menu draws the last segment of the path and the path is here; there is no note about *how*
+/// the folder was reached, because the list answers "where have I been" and a row reached by
+/// `Browse…` is not a different place from the same row reached by a drop; and there is no flag
+/// saying whether the folder is still on the disk, because that is a question about the disk now
+/// rather than a fact about what happened, and the answer would be stale by the time it was read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentFolderV1 {
+    /// The folder, spelled the way the column was given it.
+    pub path: String,
+    /// When it was last opened, ISO 8601 UTC — [`RecentEntryV1::timestamp`]'s own format and its
+    /// own argument: "3m ago" is computed when it is drawn, so what is stored is an instant and
+    /// not a phrase about one.
+    pub opened_at: String,
 }
 
 /// **One window** — schema v9's whole reason for existing.

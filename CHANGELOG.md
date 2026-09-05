@@ -36,6 +36,18 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- **The folder menu remembers where you have been.** The list under a files
+  column's folder button now has a third group, between the folders your shells
+  are standing in and the folder above: the last five folders you pointed a
+  column at, newest first, each marked `recent`. Picking one from the menu,
+  choosing one through `Browse…`, dropping one on a column, walking into one,
+  and starting Folio on one with `--cwd` or `Open Folio here` all count; a shell
+  running `cd` does not, so the list stays the places you meant to go. A folder
+  already offered above keeps its place and picks up the extra note rather than
+  appearing twice. Every window reads the one list, which is kept in
+  `session.json` and is still there after a restart. A folder that is no longer on
+  the disk is greyed rather than removed, and picking it says so where the tree
+  would be.
 - **What comes back (Settings > Summoned terminal).** Three answers for what a
   new run puts back into the summoned terminal: nothing, the tabs and their
   folders, or the tabs, their folders **and** the last command a pinned tab ran
