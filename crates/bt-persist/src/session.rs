@@ -42,7 +42,7 @@ use crate::layout::LayoutNodeV1;
 /// window happened to be at when the program closed, but the rectangle the reader *arranged with
 /// their own hand*, filed under the display they arranged it on. The two are different facts and
 /// they are stored in different keys for that reason.
-pub const SESSION_SCHEMA_VERSION: u32 = 13;
+pub const SESSION_SCHEMA_VERSION: u32 = 14;
 
 /// **What a preview row's string names** — schema v11.
 ///
@@ -741,6 +741,7 @@ mod tests {
                         cwd: "C:\\".to_string(),
                         manual_name: None,
                         card_skip: 0,
+                        last_command: String::new(),
                     },
                 )),
                 pinned: false,

@@ -69,7 +69,10 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         quake_height: 65,
         quake_width: 45,
         quake_dismiss_on_blur: false,
-        tray_icon: false,
+        quake_profile_id: "wsl".to_owned(),
+        quake_startup_command: "fastfetch".to_owned(),
+        quake_top_gap: 0,
+        quake_restore: bt_persist::QuakeRestoreV1::Folders,
     };
     write_settings_atomic(&path, &settings).unwrap();
 

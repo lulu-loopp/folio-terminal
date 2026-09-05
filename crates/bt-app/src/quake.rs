@@ -76,7 +76,7 @@ pub(crate) const SUMMON_HOTKEY_ID: i32 = 1;
 /// every input rather than only on even ones.
 ///
 /// **And it does not touch the top of the work area** (user ruling, next29). It
-/// hangs [`TOP_GAP_LOGICAL_PX`] below it, for a reason that is only visible on a
+/// hangs `top_gap` logical pixels below it, for a reason that is only visible on a
 /// real screen: this window is drawn with rounded corners, and a rounded window
 /// flush against the top of a display shows two square notches where the corners
 /// stop being the window and the desktop behind is not yet the desktop. The gap
@@ -96,16 +96,25 @@ pub(crate) const SUMMON_HOTKEY_ID: i32 = 1;
 /// percentage that quietly returned twelve pixels less than it said would be a
 /// number that means something different at every dpi. The consequence is stated
 /// rather than hidden: at a full hundred percent the bottom edge now lands
-/// `TOP_GAP_LOGICAL_PX` below the work area, over whatever is docked there.
+/// `top_gap` below the work area, over whatever is docked there.
+///
+/// **The gap is a row and no longer a constant** (user ruling, 2026-09-05, §7.54e): next29 wired
+/// twelve into this file, and the reader who wants the panel flush against the edge of the screen —
+/// or further down it — now has a number to say so with. It is clamped here for the reason both
+/// percentages are: `bt_persist` stores what it was given, and this is the surface that has to
+/// place the window. There is no floor, because zero is a shape somebody may want and is the shape
+/// this window had before the gap was invented.
 #[must_use]
 pub(crate) fn summoned_rect(
     work: WindowRect,
     width_percent: u8,
     height_percent: u8,
+    top_gap: u32,
     dpi: u32,
 ) -> WindowRect {
     let vertical = height_percent.clamp(bt_persist::MINIMUM_QUAKE_HEIGHT, 100);
     let horizontal = width_percent.clamp(bt_persist::MINIMUM_QUAKE_WIDTH, 100);
+    let gap = top_gap.min(bt_persist::MAXIMUM_QUAKE_TOP_GAP);
     let tall = work.bottom.saturating_sub(work.top).max(1);
     let wide = work.right.saturating_sub(work.left).max(1);
     // In `i64`, because a work area on a wall of displays is allowed to be big
@@ -118,7 +127,7 @@ pub(crate) fn summoned_rect(
     let left = work.left.saturating_add((wide - width) / 2);
     let top = work
         .top
-        .saturating_add(bt_platform::logical_px_for_dpi(TOP_GAP_LOGICAL_PX, dpi));
+        .saturating_add(bt_platform::logical_px_for_dpi(gap, dpi));
     WindowRect {
         left,
         top,
@@ -156,9 +165,88 @@ fn physical_rect(bounds: bt_persist::WindowBoundsV1, dpi: u32) -> WindowRect {
     }
 }
 
-/// **How far below the top of the work area the summoned window hangs**, in
-/// logical pixels — see [`summoned_rect`] for why there is a gap at all.
-pub(crate) const TOP_GAP_LOGICAL_PX: u32 = 12;
+/// **What a remembered or configured command becomes on the way to a shell** (§7.54e ④ and ⑤).
+///
+/// Two callers, one function, and the parameter is the whole of the difference between them — which
+/// is the ruling itself made into a type rather than into two similar functions somebody can copy
+/// wrong:
+///
+/// * **A restored command is typed and never submitted** (`submit: false`). 「绝不自动执行任何
+///   命令」: what a pinned tab last ran came out of a document, and a document is a record of
+///   something that happened once. It arrives standing at the prompt, and `Enter` is the reader's.
+/// * **The startup command is run** (`submit: true`). It came out of a settings row whose own
+///   sentence says it will be, every launch, and the reader wrote it there.
+///
+/// **Every control character goes, `\r` and `\n` first**, and that is not tidying: a submission is
+/// exactly one byte, and a remembered command that arrived out of a hand-edited `session.json`
+/// carrying a newline would submit itself — turning the whole of the ruling above into a rule that
+/// holds only for well-formed documents. So the newline is not something the text may contain; it
+/// is something this function adds, once, when it was asked to.
+///
+/// Nothing at all for a command with no characters left in it, so an empty row and a document field
+/// full of control bytes are the same case: there was nothing to type.
+#[must_use]
+pub(crate) fn typed_into_a_prompt(command: &str, submit: bool) -> Vec<u8> {
+    let typed: String = command
+        .chars()
+        .filter(|glyph| !glyph.is_control())
+        .collect();
+    if typed.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut bytes = typed.into_bytes();
+    if submit {
+        // `\r` and not `\n`, which is what a keyboard sends and what every shell
+        // behind a ConPTY reads as "the line is finished".
+        bytes.push(b'\r');
+    }
+    bytes
+}
+
+/// **The screen a summon is about to happen on**, read off the machine at the moment of the press.
+///
+/// Three facts and one question each, and they are one struct because they must all be answered
+/// about the **same** display: the work area the rectangle is measured against, the dpi its gap is
+/// scaled at, and the name the reader's own arrangement is filed under. Asked separately they can
+/// disagree — the pointer moves between two reads — and a summon that measured one display and
+/// filed under another would hand back somebody else's rectangle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SummonScreen {
+    /// The work area, and not the monitor: the taskbar is the one thing on the screen that is
+    /// *also* always in front.
+    pub(crate) work: WindowRect,
+    /// What Windows calls this display, or `None` on a machine that will not say. Nothing is
+    /// remembered without a name — see [`Quake::placement_on`].
+    pub(crate) monitor_id: Option<String>,
+    /// The dpi of **this** display, which is not the window's cached scale: between summons the
+    /// window is parked on whichever display it last came down on.
+    pub(crate) dpi: u32,
+}
+
+impl SummonScreen {
+    /// **The display the reader is working on**, which is the display the pointer is on.
+    ///
+    /// The pointer and not the window, because the pointer is the only thing on the desk that says
+    /// which screen the person is at. When Windows will not say where the pointer is, the window's
+    /// own display answers, and when it will not say that either the virtual screen does — in that
+    /// order, because each fallback is one step further from the question actually asked.
+    ///
+    /// This is the machine-reading half of the one summon door; the deciding half is
+    /// [`Quake::placement`], which is pure and is where the rules live.
+    #[must_use]
+    pub(crate) fn under_the_pointer(window: NonZeroIsize, cached_dpi: u32) -> Self {
+        let pointer = bt_platform::pointer_position();
+        let work = pointer
+            .and_then(|(x, y)| bt_platform::work_area_at(x, y).ok())
+            .or_else(|| bt_platform::get_work_area(window).ok())
+            .unwrap_or_else(bt_platform::virtual_screen_rect);
+        Self {
+            work,
+            monitor_id: pointer.and_then(|(x, y)| bt_platform::monitor_id_at(x, y)),
+            dpi: pointer.map_or(cached_dpi, |(x, y)| bt_platform::dpi_at(x, y)),
+        }
+    }
+}
 
 /// **A chord as Windows will be asked for it**, or `None` when this layout has no
 /// key for it.
@@ -230,6 +318,17 @@ pub(crate) struct Quake {
     /// and it is the same turn the reader's own press would have been answered
     /// on.
     pending_dismiss: bool,
+    /// **Whether the startup command has been run on this launch** (user ruling, 2026-09-05,
+    /// §7.54e ⑤).
+    ///
+    /// The row's own word is "once": the command is the reader's answer to *what should be waiting
+    /// in this window when I first reach for it today*, and a command that ran again on the fourth
+    /// summon would be answering a different question. Held on the process rather than on the
+    /// window because a reader who closes the summoned terminal and presses the key again has said
+    /// "not this one" and not "run my startup command a second time" — which is
+    /// [`Self::forget`]'s own ruling about the claim, said about the other thing that outlives the
+    /// window.
+    startup_command_spent: bool,
     /// **The rectangles the reader arranged this window at, one per display**
     /// (user ruling, next29 — see [`Self::placement_on`]).
     ///
@@ -406,6 +505,60 @@ impl Quake {
         self.placements = placements;
     }
 
+    /// **Where this summon puts the window** — the one door, and every entry calls it.
+    ///
+    /// There is exactly one gesture behind this window — the chord, whether it arrived from
+    /// Windows' own claim or from the shortcut table when that claim was refused — and after the
+    /// 2026-09-05 ruling exactly one function decides where the window lands when it does. That
+    /// ruling is stated as a *shape* rather than as a habit: the machine is read in one place
+    /// ([`SummonScreen::under_the_pointer`]) and the rules are applied in this one, so a second
+    /// entry point cannot arrive with its own idea of the rectangle. `bt_app::main` never names
+    /// [`summoned_rect`] or [`Self::placement_on`] at all, which is pinned by the source gate
+    /// `a_summon_is_placed_by_one_function_and_main_does_not_do_the_geometry`.
+    ///
+    /// Two rules, in this order, and the order is the whole of it:
+    ///
+    /// * **A rectangle the reader arranged on this display wins**, restated at the scale that
+    ///   display has now — see [`Self::placement_on`], which carries why remembering is narrow
+    ///   enough to be safe.
+    /// * **Otherwise it is computed**, which is what every summon did before next29 and what a
+    ///   display nobody has arranged the window on still does — see [`summoned_rect`].
+    #[must_use]
+    pub(crate) fn placement(
+        &self,
+        screen: &SummonScreen,
+        settings: &bt_persist::SettingsV1,
+    ) -> WindowRect {
+        self.placement_on(screen.monitor_id.as_deref(), screen.dpi)
+            .unwrap_or_else(|| {
+                summoned_rect(
+                    screen.work,
+                    settings.quake_width,
+                    settings.quake_height,
+                    settings.quake_top_gap,
+                    screen.dpi,
+                )
+            })
+    }
+
+    /// **Take the one run of the startup command, if it has not been taken** (§7.54e ⑤).
+    ///
+    /// Named as a take rather than as a question with a setter beside it, for
+    /// [`Self::take_press`]'s reason: a bit that is read in one place and cleared in another is a
+    /// bit two turns can both believe they have, and this one runs a command.
+    ///
+    /// The empty row is not a command, and answering `None` for it here rather than at the call
+    /// site is what keeps "did this run" and "was there anything to run" from being two facts that
+    /// can disagree: a launch whose row was empty has spent nothing, so a reader who writes a
+    /// command into the row mid-run gets it on their next summon.
+    pub(crate) fn take_startup_command(&mut self, row: &str) -> Option<String> {
+        if self.startup_command_spent || row.trim().is_empty() {
+            return None;
+        }
+        self.startup_command_spent = true;
+        Some(row.to_owned())
+    }
+
     /// **Make the claim on the chord agree with the table**, and say nothing when
     /// it already does.
     ///
@@ -452,7 +605,9 @@ impl Quake {
 
 #[cfg(test)]
 mod tests {
-    use super::{Quake, hotkey_for, physical_rect, summoned_rect};
+    use super::{
+        Quake, SummonScreen, hotkey_for, physical_rect, summoned_rect, typed_into_a_prompt,
+    };
     use bt_platform::WindowRect;
     use bt_platform::hotkey::HotkeyFault;
 
@@ -477,7 +632,7 @@ mod tests {
     #[test]
     fn a_summon_takes_its_share_of_the_top_of_the_work_area_centred_across_it() {
         let area = work(0, 40, 1920, 1080);
-        let rect = summoned_rect(area, 60, 40, 96);
+        let rect = summoned_rect(area, 60, 40, 12, 96);
         assert_eq!(
             rect.top,
             40 + 12,
@@ -513,7 +668,7 @@ mod tests {
     /// it" — the window comes down a column short of the edge it used to reach.
     #[test]
     fn a_hundred_percent_wide_is_the_full_span_this_window_used_to_be() {
-        let rect = summoned_rect(work(0, 40, 1920, 1080), 100, 40, 96);
+        let rect = summoned_rect(work(0, 40, 1920, 1080), 100, 40, 12, 96);
         assert_eq!(rect.left, 0, "it starts where the work area starts");
         assert_eq!(rect.right, 1920, "and ends where it ends");
     }
@@ -529,12 +684,12 @@ mod tests {
     /// rather than from `work.left` would put the window on the primary one.
     #[test]
     fn a_screen_left_of_the_primary_one_keeps_its_own_negative_origin() {
-        let full = summoned_rect(work(-1920, 0, 0, 1200), 100, 50, 96);
+        let full = summoned_rect(work(-1920, 0, 0, 1200), 100, 50, 12, 96);
         assert_eq!(full.left, -1920);
         assert_eq!(full.right, 0);
         assert_eq!(full.top, 12);
         assert_eq!(full.bottom, 12 + 600);
-        let centred = summoned_rect(work(-1920, 0, 0, 1200), 60, 50, 96);
+        let centred = summoned_rect(work(-1920, 0, 0, 1200), 60, 50, 12, 96);
         assert_eq!(
             centred.left, -1536,
             "384 columns in from this screen's edge"
@@ -555,22 +710,22 @@ mod tests {
     /// that owes both ranges.
     #[test]
     fn a_size_no_row_offers_is_clamped_into_the_one_that_is() {
-        let tall = summoned_rect(work(0, 0, 1000, 1000), 60, 250, 96);
+        let tall = summoned_rect(work(0, 0, 1000, 1000), 60, 250, 12, 96);
         assert_eq!(
             tall.bottom - tall.top,
             1000,
             "nothing taller than the work area"
         );
-        let flat = summoned_rect(work(0, 0, 1000, 1000), 60, 0, 96);
+        let flat = summoned_rect(work(0, 0, 1000, 1000), 60, 0, 12, 96);
         assert_eq!(
             flat.bottom - flat.top,
             i32::from(bt_persist::MINIMUM_QUAKE_HEIGHT) * 10,
             "and nothing shorter than the row's own floor"
         );
-        let broad = summoned_rect(work(0, 0, 1000, 1000), 250, 40, 96);
+        let broad = summoned_rect(work(0, 0, 1000, 1000), 250, 40, 12, 96);
         assert_eq!(broad.left, 0, "nothing wider than the work area");
         assert_eq!(broad.right, 1000);
-        let narrow = summoned_rect(work(0, 0, 1000, 1000), 5, 40, 96);
+        let narrow = summoned_rect(work(0, 0, 1000, 1000), 5, 40, 12, 96);
         assert_eq!(
             narrow.right - narrow.left,
             i32::from(bt_persist::MINIMUM_QUAKE_WIDTH) * 10,
@@ -598,7 +753,7 @@ mod tests {
     /// which on a multi-monitor desk is one column on the neighbouring display.
     #[test]
     fn an_odd_remainder_puts_the_leftover_column_inside_the_work_area() {
-        let rect = summoned_rect(work(0, 0, 3441, 1440), 60, 40, 96);
+        let rect = summoned_rect(work(0, 0, 3441, 1440), 60, 40, 12, 96);
         assert_eq!(rect.right - rect.left, 2064, "sixty percent of 3441");
         assert!(rect.left >= 0, "the left edge is on the screen");
         assert!(
@@ -812,7 +967,7 @@ mod tests {
     #[test]
     fn the_summon_hangs_a_scaled_gap_below_the_top_of_the_work_area() {
         let area = work(0, 100, 1000, 1100);
-        let at_96 = summoned_rect(area, 60, 50, 96);
+        let at_96 = summoned_rect(area, 60, 50, 12, 96);
         assert_eq!(
             at_96.top, 112,
             "twelve logical pixels below the work area's own top"
@@ -822,7 +977,7 @@ mod tests {
             500,
             "the height asked for is untouched - moved down, not cut short"
         );
-        let at_192 = summoned_rect(area, 60, 50, 192);
+        let at_192 = summoned_rect(area, 60, 50, 12, 192);
         assert_eq!(
             at_192.top, 124,
             "the same gap on a 200% display is twice the physical pixels"
@@ -984,5 +1139,199 @@ mod tests {
         // And the default the ruling set is what a fresh file hands in here,
         // which is the whole of what this round changed.
         assert!(!quake.blur_dismisses(bt_persist::DEFAULT_QUAKE_DISMISS_ON_BLUR));
+    }
+
+    /// RED (§7.54e, user ruling 2026-09-05) — **one function decides where a summon lands, and
+    /// `main` does not do the geometry.**
+    ///
+    /// The ruling is 「呼出规则唯一…写成一个函数,所有入口调它」, and a test that only exercised
+    /// [`Quake::placement`] would pass against a build with a second, quieter rectangle computed at
+    /// some other door. So half of this is a source gate: the two functions that *are* the geometry
+    /// are named nowhere but this file, and the one place `main` may say is `placement`.
+    ///
+    /// MUTATION: compute a rectangle at any call site in `main` — inline `summoned_rect`, or ask
+    /// `placement_on` and fall back by hand, which is exactly what `show_quake_window` used to do —
+    /// and the first assertion names the file it was written in. Take the remembered rectangle out
+    /// of `placement` and the third goes red: a reader's own arrangement stops coming back. Ask
+    /// `placement_on` with the *window's* dpi rather than the summoned display's and the fourth
+    /// goes red, which is the same seam `an_arrangement_is_restated_at_the_scale_the_display_now_has`
+    /// pins one layer down.
+    #[test]
+    fn a_summon_is_placed_by_one_function_and_main_does_not_do_the_geometry() {
+        const MAIN: &str = include_str!("main.rs");
+        for name in ["summoned_rect", "placement_on"] {
+            assert!(
+                !MAIN.contains(name),
+                "`{name}` is the summon's geometry and it is being done outside \
+                 `quake::Quake::placement`, which is the one door the ruling asks for"
+            );
+        }
+        assert!(
+            MAIN.contains("self.app.quake.placement(&screen, settings)"),
+            "the one door is not being called from the one place that shows the window"
+        );
+
+        let settings = bt_persist::SettingsV1::default();
+        let screen = SummonScreen {
+            work: work(0, 0, 1920, 1080),
+            monitor_id: Some(r"\\.\DISPLAY1".to_owned()),
+            dpi: 96,
+        };
+        let mut quake = Quake::default();
+        assert_eq!(
+            quake.placement(&screen, &settings),
+            summoned_rect(
+                screen.work,
+                settings.quake_width,
+                settings.quake_height,
+                settings.quake_top_gap,
+                screen.dpi,
+            ),
+            "a display nobody has arranged the window on computes its shape, as it always did"
+        );
+        quake.remember(
+            r"\\.\DISPLAY1".to_owned(),
+            bt_persist::WindowBoundsV1 {
+                x: 30,
+                y: 40,
+                width: 500,
+                height: 300,
+            },
+        );
+        assert_eq!(
+            quake.placement(&screen, &settings),
+            work(30, 40, 530, 340),
+            "and a rectangle the reader arranged with their own hand wins over the computed one"
+        );
+        let doubled = SummonScreen {
+            dpi: 192,
+            ..screen.clone()
+        };
+        assert_eq!(
+            quake.placement(&doubled, &settings),
+            work(60, 80, 1060, 680),
+            "restated at the scale the display has now, so it is the same size to the eye"
+        );
+    }
+
+    /// RED (§7.54e ⑤, user ruling 2026-09-05) — **the startup command runs once per launch, and an
+    /// empty row is not a command.**
+    ///
+    /// The one string this product executes on the reader's behalf, and the whole of what makes
+    /// that acceptable is that they wrote it into a row whose sentence says it will be run — once.
+    ///
+    /// MUTATION: leave the bit unset and every summon re-runs it, so a reader whose row says
+    /// `git pull` finds one running every time they reach for the terminal. Set the bit for an
+    /// empty row and a reader who fills the row in mid-run never gets their command at all. Read
+    /// the bit somewhere and clear it somewhere else and two turns can both believe they hold it,
+    /// which is `take_press`'s own ruling about a bit that is spent.
+    #[test]
+    fn a_startup_command_is_taken_once_a_launch_and_an_empty_row_is_not_one() {
+        let mut quake = Quake::default();
+        assert_eq!(quake.take_startup_command(""), None, "no row, no command");
+        assert_eq!(
+            quake.take_startup_command("   "),
+            None,
+            "and whitespace is not a command either"
+        );
+        assert_eq!(
+            quake.take_startup_command("fastfetch"),
+            Some("fastfetch".to_owned()),
+            "the first summon of a launch runs what the row says"
+        );
+        assert_eq!(
+            quake.take_startup_command("fastfetch"),
+            None,
+            "and no summon after it does"
+        );
+        assert_eq!(
+            quake.take_startup_command("git pull"),
+            None,
+            "including one made after the row was edited: once is once"
+        );
+    }
+
+    /// RED (§7.54e ④, user ruling 2026-09-05) — **a restored command is typed at the prompt and
+    /// never submitted**, and a submitted one is submitted with exactly one byte.
+    ///
+    /// 「绝不自动执行任何命令」 is the ruling, and the assertion that carries it is the one about
+    /// bytes: what reaches the pty for a restored command contains no `\r` and no `\n`, so there
+    /// is nothing in it a shell can read as the end of a line.
+    ///
+    /// **The hand-edited document is the case that matters.** A `session.json` somebody typed a
+    /// `\r` into would, without the filter, restore a command that ran itself — the ruling would
+    /// then hold only for documents this build wrote, which is not a ruling at all.
+    ///
+    /// MUTATION: drop the control-character filter and the third assertion goes red carrying a
+    /// carriage return into a shell. Push `\n` instead of `\r` for the submitted half and a
+    /// ConPTY-hosted shell is handed a byte it does not read as a submission. Return the bytes for
+    /// an empty command and the first summon of a run sends a bare `Enter` into a fresh prompt.
+    #[test]
+    fn a_restored_command_is_typed_at_the_prompt_and_never_submitted() {
+        assert_eq!(
+            typed_into_a_prompt("cargo build", false),
+            b"cargo build".to_vec(),
+            "a restored command arrives standing at the prompt, with nothing to end its line"
+        );
+        assert_eq!(
+            typed_into_a_prompt("cargo build", true),
+            b"cargo build\r".to_vec(),
+            "and the one command the reader asked to have run is ended with the byte a keyboard \
+             sends"
+        );
+        let hand_edited = typed_into_a_prompt("cargo build\r\nrm -rf /", false);
+        assert!(
+            !hand_edited.contains(&b'\r') && !hand_edited.contains(&b'\n'),
+            "a document with a newline in it restored a command that ran itself: {hand_edited:?}"
+        );
+        assert_eq!(
+            hand_edited,
+            b"cargo buildrm -rf /".to_vec(),
+            "what is left is text, and text at a prompt is a thing the reader can read and edit"
+        );
+        assert!(
+            typed_into_a_prompt("", true).is_empty(),
+            "an empty row is not a command, and a bare Enter into a fresh prompt is not nothing"
+        );
+        assert!(
+            typed_into_a_prompt("\r\n\t", true).is_empty(),
+            "and neither is a field with nothing but control bytes in it"
+        );
+    }
+
+    /// RED (§7.54e ⑤, user ruling 2026-09-05) — **the gap under the top of the screen is the
+    /// reader's number now**, clamped where the window is placed.
+    ///
+    /// next29 wired twelve logical pixels into this file with a real argument behind it
+    /// (§7.54b ④); the row does not overturn the argument, it gives the reader who wants the panel
+    /// flush against the edge — or further down it — a way to say so.
+    ///
+    /// MUTATION: go on reading a constant and the first two assertions collapse onto each other,
+    /// so a row that decides nothing ships. Drop the ceiling and a hand-edited `1000` opens the
+    /// window below the bottom of the screen. Put a floor under it and zero — the shape this
+    /// window had before the gap existed — becomes unreachable.
+    #[test]
+    fn the_gap_over_the_summon_is_the_row_and_is_clamped_where_the_window_is_placed() {
+        let area = work(0, 100, 1000, 1100);
+        assert_eq!(
+            summoned_rect(area, 60, 50, 0, 96).top,
+            100,
+            "flush, if that is what the row says"
+        );
+        assert_eq!(
+            summoned_rect(area, 60, 50, 40, 96).top,
+            140,
+            "and forty if it says forty"
+        );
+        assert_eq!(
+            summoned_rect(area, 60, 50, 4_000, 96).top,
+            100 + i32::try_from(bt_persist::MAXIMUM_QUAKE_TOP_GAP).unwrap(),
+            "a hand-edited file cannot push the window off the bottom of the screen"
+        );
+        assert_eq!(
+            summoned_rect(area, 60, 50, 40, 192).top,
+            180,
+            "and the row is logical pixels, so it is the same seam at every scale"
+        );
     }
 }

@@ -1848,11 +1848,6 @@ pub mod attention_pipe;
 /// header for why the chord and the handover are one subject.
 pub mod hotkey;
 
-/// **The icon in the notification area** — the sixth unsafe boundary, against
-/// the shell's own strip of the taskbar. Not `cfg`-gated for [`hotkey`]'s
-/// reason: the decoding is pure and is held by a test on every host.
-pub mod tray;
-
 /// The first frame of a video, out of Media Foundation — see the module's own
 /// note for the apartment it runs in and for why the set of files it can draw is
 /// not the set that could be played.
